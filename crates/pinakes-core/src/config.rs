@@ -380,6 +380,13 @@ pub struct EventConfig {
     pub geocode_score: f64,
     #[serde(skip)]
     pub held_retry_secs: u64,
+    /// The most events that may name one event in the same-event hint
+    /// (`limits.same_event_incoming_kept`).
+    #[serde(skip)]
+    pub hint_incoming_kept: i64,
+    /// Events the same-event sweep drops per transaction (`limits.same_event_drop_batch`).
+    #[serde(skip)]
+    pub hint_drop_batch: i64,
 }
 impl Default for EventConfig {
     fn default() -> Self {
@@ -407,6 +414,8 @@ impl Default for EventConfig {
             default_timezone: None,
             geocode_score: 0.8,
             held_retry_secs: 60,
+            hint_incoming_kept: 40,
+            hint_drop_batch: 500,
         }
     }
 }
@@ -980,6 +989,8 @@ impl Config {
             || !e.geocode_score.is_finite()
             || !(0.0..=1.0).contains(&e.geocode_score)
             || !(1..=604800).contains(&e.held_retry_secs)
+            || !(1..=10_000).contains(&e.hint_incoming_kept)
+            || !(1..=100_000).contains(&e.hint_drop_batch)
             || e.default_timezone
                 .as_deref()
                 .is_some_and(|s| crate::event::time::zone(s).is_none())
@@ -1768,6 +1779,10 @@ limits! {
     geocode_score: f64 = |c| c.event.geocode_score => [|c, v| c.event.geocode_score = v],
     /// Retry interval of a held feed snapshot (seconds).
     held_retry_secs: u64 = |c| c.event.held_retry_secs => [|c, v| c.event.held_retry_secs = v],
+    /// The most events that may name one event in the same-event hint (each keeps its best twenty).
+    same_event_incoming_kept: i64 = |c| c.event.hint_incoming_kept => [|c, v| c.event.hint_incoming_kept = v],
+    /// Events the same-event sweep drops per transaction.
+    same_event_drop_batch: i64 = |c| c.event.hint_drop_batch => [|c, v| c.event.hint_drop_batch = v],
     /// Occurrence changes per snapshot before they become one summary line.
     feed_max_changes: usize = |c| c.event.container.max_changes => [|c, v| c.event.container.max_changes = v],
     /// Most stored rows of one feed.

@@ -80,6 +80,8 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `event_months_forward` | `12` | Months of future occurrences kept in the horizon. |
 | `geocode_score` | `0.8` | Lowest accepted geocoding score. |
 | `held_retry_secs` | `60` | Retry interval of a held feed snapshot (seconds). |
+| `same_event_incoming_kept` | `40` | The most events that may name one event in the same-event hint (each keeps its best twenty). |
+| `same_event_drop_batch` | `500` | Events the same-event sweep drops per transaction. |
 | `feed_max_changes` | `100` | Occurrence changes per snapshot before they become one summary line. |
 | `feed_max_rows` | `10000` | Most stored rows of one feed. |
 | `feed_max_new_keys` | `1000` | New keys one snapshot may add before it is held. |
@@ -531,11 +533,13 @@ resource (or a feed) when an event's start, place, name or document changes. Eac
 25 queued resources and up to 200 of their new or changed events, and the next pass follows at once
 while there was work, else after five seconds. An event's normalised name, place and identifiers
 are stored once read, and its pairs are matched among the events already read through their start
-and geography indexes. An event keeps its best twenty pairs and is named by at most forty, and
-never names one whose forty all rank above it; one that changes or goes (out of the window, or
+and geography indexes. An event keeps its best twenty pairs and is named by at most forty
+(`limits.same_event_incoming_kept`), and never names one whose forty all rank above it; a read
+examines at most a hundred candidates, with room or not, and one that runs out with room left
+goes on from where it stopped in a later read; one that changes or goes (out of the window, or
 deleted as an orphan) takes its pairs from the events that named it, and those are queued to
 refill their lists, as is one whose pair the caps pushed out. An hourly sweep drops events that
-started over a day ago, 500 a transaction, and queues those that entered the window, changed
+started over a day ago, `limits.same_event_drop_batch` (500) a transaction, and queues those that entered the window, changed
 unseen, or are no longer events (an alias, a missing feed, a gone occurrence). Each change to the
 pairs moves the search revision in its own transaction, so a search page's `ETag` covers the
 hints it shows. Requests only read the stored pairs. `"off"` stops the pass and removes the field from
@@ -690,7 +694,9 @@ fact of it is read or expires; each pass takes up to 25 queued resources, and th
 once while there was work, else after five seconds. A recording's normalised title and artist and
 its length are stored once read, and its pairs are matched among the recordings already read. A
 recording keeps its best twenty pairs and is named by at most forty, and never names one whose
-forty all rank above it; one that changes or goes (no longer a recording, or deleted as an orphan)
+forty all rank above it; a read examines at most a hundred candidates, with room or not, and one
+that runs out with room left goes on from the position it stopped at in a later read; one that
+changes or goes (no longer a recording, or deleted as an orphan)
 takes its pairs from the recordings that named it, and those are queued to refill their lists, as
 is one whose pair the caps pushed out. Each change to the pairs moves the search revision in its
 own transaction, so a search page's `ETag` covers the hints it shows. An hourly sweep, which also

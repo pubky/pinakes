@@ -473,7 +473,7 @@ async fn a_change_or_the_window_moves_the_hint(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    same_event::sweep(&pool).await.unwrap();
+    same_event::sweep(&pool, &Config::default()).await.unwrap();
     assert!(named(&card(&pool, &a).await).is_empty());
     // The sweep marks the event it no longer holds (b, still in the window), and the pass reads
     // it again.
@@ -674,7 +674,7 @@ async fn an_event_that_becomes_an_alias_leaves_the_hint(pool: PgPool) {
         .await
         .unwrap();
     assert!(!named(&card(&pool, &c).await).contains(&b.as_str()));
-    same_event::sweep(&pool).await.unwrap();
+    same_event::sweep(&pool, &Config::default()).await.unwrap();
     pass(&pool, &Config::default()).await;
     let held: i64 = sqlx::query_scalar("SELECT count(*) FROM same_event_unit WHERE resource_id=$1")
         .bind(&b)
@@ -728,7 +728,10 @@ async fn events_stored_before_the_hint_are_read_at_once(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    assert_eq!(same_event::sweep(&pool).await.unwrap(), 3);
+    assert_eq!(
+        same_event::sweep(&pool, &Config::default()).await.unwrap(),
+        3
+    );
     pass(&pool, &Config::default()).await;
     assert_eq!(named(&card(&pool, &ids[0]).await).len(), 2);
 }
@@ -1334,7 +1337,7 @@ async fn paired_units_that_expire_together_are_dropped_by_the_sweep(pool: PgPool
     .execute(&pool)
     .await
     .unwrap();
-    same_event::sweep(&pool).await.unwrap();
+    same_event::sweep(&pool, &Config::default()).await.unwrap();
     let left: Vec<String> = sqlx::query_scalar("SELECT resource_id FROM same_event_unit")
         .fetch_all(&pool)
         .await
@@ -1524,5 +1527,111 @@ async fn an_orphan_deleted_while_a_pass_pairs_with_it_leaves_the_partner_to_refi
     assert!(
         stored(&pool, &live).await.is_empty(),
         "the pair went with the orphan"
+    );
+}
+
+/// A dense crowd read as it arrives (each event read when only those before it are units, in id
+/// order: the worst case, the ring wraps to the full ones first): a read examines at most `SCAN`
+/// candidates, with room or not, so its work is bounded however large the crowd. A read that ran
+/// out with room left stopped at the unit it examined last and is due again; the later read
+/// keeps the pairs it has and goes on from there, until every event names twenty.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_read_in_a_dense_crowd_examines_a_bounded_number_of_candidates(pool: PgPool) {
+    let mut ids = crowd(&pool, "Bitcoin Meetup Wattwil", soon(), &WATTWIL, 301).await;
+    ids.sort();
+    let mut most_examined = 0;
+    let mut stopped = vec![];
+    let mut partial: Option<(String, Vec<String>)> = None;
+    for id in &ids {
+        let (_, examined) = same_event::read_examined(&pool, id).await.unwrap();
+        assert!(
+            examined as i64 <= same_event::SCAN,
+            "{id}: examined {examined}"
+        );
+        most_examined = most_examined.max(examined);
+        let pairs = stored(&pool, id).await;
+        let stopped_at: Option<String> =
+            sqlx::query_scalar("SELECT scan_after FROM same_event_unit WHERE resource_id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        if examined as i64 == same_event::SCAN && pairs.len() < 20 {
+            assert!(stopped_at.is_some(), "{id}: ran out and did not stop");
+            stopped.push(id.clone());
+            if !pairs.is_empty() && partial.is_none() {
+                partial = Some((id.clone(), pairs));
+            }
+        } else {
+            assert!(
+                stopped_at.is_none(),
+                "{id}: stopped with {} pairs after {examined}",
+                pairs.len()
+            );
+        }
+    }
+    assert_eq!(
+        most_examined as i64,
+        same_event::SCAN,
+        "the late reads ran out"
+    );
+    assert!(stopped.len() > 100, "{} stopped", stopped.len());
+    let marked: Vec<String> = sqlx::query_scalar(
+        "SELECT resource_id FROM same_event_unit WHERE scan_after IS NOT NULL AND fingerprint LIKE 'refill:%' ORDER BY resource_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        marked, stopped,
+        "the reads that stopped are marked, no other"
+    );
+    let (id, kept) = partial.expect("a read took some pairs before it ran out");
+    pass(&pool, &Config::default()).await;
+    for id in &ids {
+        assert!(!stored(&pool, id).await.is_empty(), "{id} has no hint");
+    }
+    assert_eq!(most(&pool, "unit_id").await, 20);
+    assert!(most(&pool, "other_id").await <= 40);
+    let now = stored(&pool, &id).await;
+    assert!(
+        kept.iter().all(|k| now.contains(k)),
+        "{id} kept {kept:?}, has {now:?}"
+    );
+    let (due, stopped): (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM same_event_dirty),(SELECT count(*) FROM same_event_unit WHERE scan_after IS NOT NULL)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((due, stopped), (0, 0), "every read ended");
+}
+
+/// The caps are the operator's: with `limits.same_event_incoming_kept = 3`, the pass leaves no
+/// unit named by more than three (so in a crowd of twelve the units read after the first three
+/// find every other full and name none: a cap that small is the operator's choice), and
+/// `limits.same_event_drop_batch` is the sweep's step.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn the_caps_come_from_the_limits(pool: PgPool) {
+    let config = Config::from_value(
+        serde_json::json!({"limits": {"same_event_incoming_kept": 3, "same_event_drop_batch": 2}}),
+    )
+    .unwrap();
+    assert_eq!(config.event.hint_incoming_kept, 3);
+    assert_eq!(config.event.hint_drop_batch, 2);
+    let mut ids = crowd(&pool, "Bitcoin Meetup Wattwil", soon(), &WATTWIL, 12).await;
+    ids.sort();
+    pass(&pool, &config).await;
+    assert_eq!(most(&pool, "other_id").await, 3, "named by at most three");
+    let mut with = 0;
+    for id in &ids {
+        if !stored(&pool, id).await.is_empty() {
+            with += 1;
+        }
+    }
+    assert!((3..12).contains(&with), "{with} units with a hint");
+    assert_eq!(same_event::sweep(&pool, &config).await.unwrap(), 0);
+    assert!(
+        Config::from_value(serde_json::json!({"limits": {"same_event_incoming_kept": 0}})).is_err()
     );
 }

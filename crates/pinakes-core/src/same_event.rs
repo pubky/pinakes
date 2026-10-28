@@ -32,12 +32,34 @@ pub const METRES: f64 = 500.0;
 pub const SIMILARITY: f64 = 0.5;
 /// Pairs kept per unit, best first (a card shows three, its details ten).
 const KEPT: i64 = 20;
-/// The most units that may name one unit, so a change to it marks at most this many for a refill.
-const INCOMING_KEPT: i64 = 2 * KEPT;
+/// Candidates examined per read at most (`hints::SCAN`): those passed over for having no room
+/// count, so a read in a crowd of one event's pages is bounded however dense it is. A read that
+/// runs out with room left goes on from the unit it stopped at in a later one (`scan_after`).
+pub const SCAN: i64 = crate::hints::SCAN;
 /// Resources claimed per pass.
 const CLAIMED: i64 = 25;
-/// Units dropped per transaction (`drop_units`): a long backlog goes in bounded steps.
-const DROP_BATCH: i64 = 500;
+
+/// The caps an operator sets (`[limits]`): the most units that may name one unit, so a change to
+/// it marks at most this many for a refill (`same_event_incoming_kept`, 40), and the units
+/// dropped per transaction (`same_event_drop_batch`, 500), so a long backlog goes in bounded steps.
+#[derive(Clone, Copy, Debug)]
+pub struct Caps {
+    pub incoming_kept: i64,
+    pub drop_batch: i64,
+}
+impl Caps {
+    pub fn of(config: &Config) -> Self {
+        Self {
+            incoming_kept: config.event.hint_incoming_kept,
+            drop_batch: config.event.hint_drop_batch,
+        }
+    }
+}
+impl Default for Caps {
+    fn default() -> Self {
+        Self::of(&Config::default())
+    }
+}
 /// The window of starts: from a day ago to a year ahead.
 const WINDOW: &str = "s.start_at BETWEEN now()-interval '1 day' AND now()+interval '1 year'";
 /// An event unit the hint reads: it has a start (in the window) and a name.
@@ -57,7 +79,7 @@ pub async fn run(pool: PgPool, config: Config, mut shutdown: watch::Receiver<boo
     let mut swept: Option<tokio::time::Instant> = None;
     loop {
         if swept.is_none_or(|at| at.elapsed() >= Duration::from_secs(3600)) {
-            match sweep(&pool).await {
+            match sweep(&pool, &config).await {
                 Ok(_) => swept = Some(tokio::time::Instant::now()),
                 Err(error) => {
                     tracing::warn!(error = %crate::resolver::log_error(&error), "same-event sweep will retry")
@@ -81,11 +103,12 @@ pub async fn run(pool: PgPool, config: Config, mut shutdown: watch::Receiver<boo
 }
 
 /// Drops the units that left the window (their pairs go with them, and the units that named them
-/// refill), `DROP_BATCH` a transaction, and marks the resources whose units entered it or changed
-/// without a mark (a unit still marked for a refill among them), and those of stored units that
-/// are no longer events: an alias, a missing feed, a gone occurrence. Returns the resources marked.
-pub async fn sweep(pool: &PgPool) -> Result<u64> {
-    drop_expired(pool, DROP_BATCH).await?;
+/// refill), `limits.same_event_drop_batch` a transaction, and marks the resources whose units
+/// entered it or changed without a mark (a unit still marked for a refill among them), and those
+/// of stored units that are no longer events: an alias, a missing feed, a gone occurrence.
+/// Returns the resources marked.
+pub async fn sweep(pool: &PgPool, config: &Config) -> Result<u64> {
+    drop_expired(pool, Caps::of(config).drop_batch).await?;
     let entered = sqlx::query(&format!(
         "INSERT INTO same_event_dirty(resource_id) SELECT DISTINCT s.id FROM search_unit s \
          WHERE {EVENT} AND {WINDOW} AND NOT EXISTS(SELECT 1 FROM same_event_unit x WHERE x.unit_id=s.unit_id AND x.fingerprint={FINGERPRINT}) \
@@ -140,14 +163,15 @@ pub async fn drain(pool: &PgPool, config: &Config, budget: i64) -> Result<usize>
         return Ok(0);
     }
     let due = claim(pool, CLAIMED, LEASE).await?;
+    let caps = Caps::of(config);
     let mut read = 0;
     for (id, claimed) in &due {
         if read as i64 >= budget {
             release(pool, id, claimed, 0).await?;
             continue;
         }
-        match resource(pool, id, budget - read as i64).await {
-            Ok((n, more)) => {
+        match resource(pool, id, budget - read as i64, caps).await {
+            Ok((n, more, _)) => {
                 read += n;
                 if more {
                     release(pool, id, claimed, 0).await?;
@@ -304,8 +328,14 @@ pub async fn drop_expired(pool: &PgPool, batch: i64) -> Result<u64> {
 }
 
 /// One resource: drops its units that are gone or out of the window, then pairs up to `budget`
-/// of its new, changed or refilled units. Returns the units paired and whether more are left.
-async fn resource(pool: &PgPool, id: &str, budget: i64) -> Result<(usize, bool)> {
+/// of its new, changed or refilled units. Returns the units paired, whether more are left, and
+/// how many candidates the reads examined (`SCAN` each at most).
+async fn resource(
+    pool: &PgPool,
+    id: &str,
+    budget: i64,
+    caps: Caps,
+) -> Result<(usize, bool, usize)> {
     drop_units(
         pool,
         &format!(
@@ -313,7 +343,7 @@ async fn resource(pool: &PgPool, id: &str, budget: i64) -> Result<(usize, bool)>
              (SELECT s.unit_id FROM search_unit s WHERE s.id=$1 AND {EVENT} AND {WINDOW})"
         ),
         Some(id),
-        DROP_BATCH,
+        caps.drop_batch,
     )
     .await?;
     // Each unit with what pairs are matched on: its normalised name and the numbers it keeps, its
@@ -323,6 +353,7 @@ async fn resource(pool: &PgPool, id: &str, budget: i64) -> Result<(usize, bool)>
          same_event_name(s.name) AS name_key,same_event_numbers(s.name) AS numbers,ST_AsEWKT(s.point) AS point,s.venue_id,s.doc#>>'{{venue,osm_id}}' AS osm_venue,\
          lower(rtrim(s.doc#>>'{{organizer,url}}','/')) AS organizer,coalesce(s.doc->>'all_day','false')='true' AS all_day,s.doc->>'tz' AS tz \
          ,(SELECT x.fingerprint FROM same_event_unit x WHERE x.unit_id=s.unit_id) AS stored \
+         ,(SELECT x.scan_after FROM same_event_unit x WHERE x.unit_id=s.unit_id) AS stopped_at \
          FROM search_unit s WHERE s.id=$1 AND {EVENT} AND {WINDOW}) u \
          WHERE stored IS DISTINCT FROM fingerprint ORDER BY start_at,unit_id LIMIT $2"
     ))
@@ -332,6 +363,7 @@ async fn resource(pool: &PgPool, id: &str, budget: i64) -> Result<(usize, bool)>
     .await?;
     let more = units.len() as i64 > budget;
     let mut paired = 0;
+    let mut examined_total = 0usize;
     for u in units.iter().take(budget as usize) {
         let unit: String = u.try_get("unit_id")?;
         // A refill (marked `refill:{fingerprint}` because a unit it named changed or went) whose
@@ -343,70 +375,121 @@ async fn resource(pool: &PgPool, id: &str, budget: i64) -> Result<(usize, bool)>
         let values_changed = stored
             .as_deref()
             .is_some_and(|f| f.strip_prefix("refill:").unwrap_or(f) != fingerprint);
+        // A read examines at most `SCAN` candidates (a dense crowd's full ones are examined and
+        // passed over, so a read of it is bounded all the same). One that ran out with room left
+        // stored the unit it stopped at (`scan_after`) and marked itself to be read again: that
+        // read keeps the pairs it has and goes on round the ring from there, while the values
+        // are the same.
+        let stopped_at: Option<String> = u.try_get("stopped_at")?;
+        let resumed = !values_changed && stopped_at.is_some();
         let mut tx = pool.begin().await?;
-        sqlx::query("INSERT INTO same_event_unit(unit_id,resource_id,uid,recurrence_id,fingerprint,start_at,name_key,numbers,point,venue_id,osm_venue,organizer,all_day,tz) \
-            SELECT unit_id,$2,uid,CASE WHEN uid IS NULL THEN NULL ELSE rid END,fingerprint,start_at,name_key,numbers,ST_GeomFromEWKT(point),venue_id,osm_venue,organizer,all_day,tz \
+        sqlx::query("INSERT INTO same_event_unit(unit_id,resource_id,uid,recurrence_id,fingerprint,start_at,name_key,numbers,point,venue_id,osm_venue,organizer,all_day,tz,scan_after) \
+            SELECT unit_id,$2,uid,CASE WHEN uid IS NULL THEN NULL ELSE rid END,fingerprint,start_at,name_key,numbers,ST_GeomFromEWKT(point),venue_id,osm_venue,organizer,all_day,tz,NULL \
             FROM jsonb_to_record($1) AS u(unit_id text,uid text,rid text,fingerprint text,start_at timestamptz,name_key text,numbers text[],point text,venue_id text,osm_venue text,organizer text,all_day boolean,tz text) \
             ON CONFLICT(unit_id) DO UPDATE SET fingerprint=excluded.fingerprint,start_at=excluded.start_at,name_key=excluded.name_key,numbers=excluded.numbers,point=excluded.point,\
-            venue_id=excluded.venue_id,osm_venue=excluded.osm_venue,organizer=excluded.organizer,all_day=excluded.all_day,tz=excluded.tz")
+            venue_id=excluded.venue_id,osm_venue=excluded.osm_venue,organizer=excluded.organizer,all_day=excluded.all_day,tz=excluded.tz,scan_after=NULL")
             .bind(row(u)?)
             .bind(id)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("DELETE FROM same_event WHERE unit_id=$1")
-            .bind(&unit)
-            .execute(&mut *tx)
-            .await?;
-        if values_changed {
-            // The pairs naming it go, and their units refill their lists (at most INCOMING_KEPT
-            // of them, the cap below).
-            let owners: Vec<String> =
-                sqlx::query_scalar("DELETE FROM same_event WHERE other_id=$1 RETURNING unit_id")
-                    .bind(&unit)
-                    .fetch_all(&mut *tx)
-                    .await?;
-            refill(&mut tx, &owners).await?;
+        // The pairs a resumed read keeps (left out of the candidates, so they take no place
+        // among those a read may still take); any other read starts from none.
+        let mut existing: Vec<String> = vec![];
+        if resumed {
+            existing = sqlx::query_scalar("SELECT other_id FROM same_event WHERE unit_id=$1")
+                .bind(&unit)
+                .fetch_all(&mut *tx)
+                .await?;
+        } else {
+            sqlx::query("DELETE FROM same_event WHERE unit_id=$1")
+                .bind(&unit)
+                .execute(&mut *tx)
+                .await?;
+            if values_changed {
+                // The pairs naming it go, and their units refill their lists (at most
+                // `incoming_kept` of them, the cap below).
+                let owners: Vec<String> = sqlx::query_scalar(
+                    "DELETE FROM same_event WHERE other_id=$1 RETURNING unit_id",
+                )
+                .bind(&unit)
+                .fetch_all(&mut *tx)
+                .await?;
+                refill(&mut tx, &owners).await?;
+            }
         }
         // The other units already read, on the values they were read with (a change marks a unit
         // to be read again); a unit read later finds this one in turn. Two located units must be
-        // near each other; a venue or organizer counts only when one has no place. Equal scores
-        // are taken round the units in ID order, starting just after this one, so a crowd of
-        // one event's pages spreads its pairs instead of all naming its first twenty; and a unit
-        // already named by INCOMING_KEPT that all rank above this one has no room and is passed
-        // over (`has_room`), so the cap below pushes out only a pair this one displaces. A
-        // candidate another transaction holds (an orphan delete) is skipped, never waited for.
-        let room = crate::hints::has_room(
-            "same_event",
-            "unit_id",
-            "x.unit_id",
-            "me.unit_id",
-            "similarity(me.name_key,x.name_key)",
-            "$6",
-        );
-        let others: Vec<String> = sqlx::query_scalar(&format!(
-            "WITH me AS (SELECT * FROM same_event_unit WHERE unit_id=$1), best AS (SELECT x.unit_id,similarity(me.name_key,x.name_key) AS score FROM me,same_event_unit x \
-             WHERE x.resource_id<>me.resource_id AND me.name_key<>'' AND x.name_key<>'' \
-             AND x.start_at BETWEEN me.start_at-interval '36 hours' AND me.start_at+interval '36 hours' \
-             AND CASE WHEN me.all_day OR x.all_day THEN same_event_day(me.start_at,me.tz)=same_event_day(x.start_at,x.tz) \
-              ELSE abs(extract(epoch FROM x.start_at-me.start_at))<=$2 END \
-             AND ((x.point IS NOT NULL AND me.point IS NOT NULL AND ST_DWithin(x.point::geography,me.point::geography,$3)) \
-              OR ((x.point IS NULL OR me.point IS NULL) AND (x.venue_id=me.venue_id OR x.osm_venue=me.osm_venue OR x.organizer=me.organizer))) \
-             AND similarity(me.name_key,x.name_key)>=$4 \
-             AND (cardinality(me.numbers)=0 OR cardinality(x.numbers)=0 OR x.numbers=me.numbers) \
-             AND {room} \
-             ORDER BY score DESC,x.unit_id<=me.unit_id,x.unit_id LIMIT $5 FOR KEY SHARE OF x SKIP LOCKED), \
-             added AS (INSERT INTO same_event(unit_id,other_id,score) SELECT $1,unit_id,score FROM best UNION ALL SELECT unit_id,$1,score FROM best \
-             ON CONFLICT(unit_id,other_id) DO UPDATE SET score=excluded.score) \
-             SELECT unit_id FROM best"
-        ))
-        .bind(&unit)
-        .bind(SECONDS as f64)
-        .bind(METRES)
-        .bind(SIMILARITY as f32)
-        .bind(KEPT)
-        .bind(INCOMING_KEPT)
-        .fetch_all(&mut *tx)
-        .await?;
+        // near each other; a venue or organizer counts only when one has no place. The candidates
+        // are examined round the units in ID order, starting just after this one (or after the
+        // unit a stopped read stopped at), `SCAN` of them at most, so a crowd of one event's
+        // pages spreads its pairs instead of all naming its first twenty; of those examined, the
+        // best by score with room are taken: a unit already named by `incoming_kept` that all
+        // rank above this one has no room and is passed over (`has_room`), so the cap below
+        // pushes out only a pair this one displaces. A candidate another transaction holds (an
+        // orphan delete) is skipped, never waited for.
+        let room = KEPT - existing.len() as i64;
+        let has_room =
+            crate::hints::has_room("same_event", "unit_id", "c.unit_id", "$1", "c.score", "$6");
+        let rows = if room > 0 {
+            sqlx::query(&format!(
+                "WITH me AS (SELECT * FROM same_event_unit WHERE unit_id=$1), \
+                 cands AS (SELECT x.unit_id,similarity(me.name_key,x.name_key) AS score,x.unit_id<=me.unit_id AS wrapped FROM me,same_event_unit x \
+                 WHERE x.resource_id<>me.resource_id AND me.name_key<>'' AND x.name_key<>'' \
+                 AND x.start_at BETWEEN me.start_at-interval '36 hours' AND me.start_at+interval '36 hours' \
+                 AND CASE WHEN me.all_day OR x.all_day THEN same_event_day(me.start_at,me.tz)=same_event_day(x.start_at,x.tz) \
+                  ELSE abs(extract(epoch FROM x.start_at-me.start_at))<=$2 END \
+                 AND ((x.point IS NOT NULL AND me.point IS NOT NULL AND ST_DWithin(x.point::geography,me.point::geography,$3)) \
+                  OR ((x.point IS NULL OR me.point IS NULL) AND (x.venue_id=me.venue_id OR x.osm_venue=me.osm_venue OR x.organizer=me.organizer))) \
+                 AND similarity(me.name_key,x.name_key)>=$4 \
+                 AND (cardinality(me.numbers)=0 OR cardinality(x.numbers)=0 OR x.numbers=me.numbers) \
+                 AND NOT x.unit_id=ANY($7) \
+                 AND ($8::text IS NULL OR CASE WHEN $8>me.unit_id THEN x.unit_id>$8 OR x.unit_id<me.unit_id ELSE x.unit_id>$8 AND x.unit_id<me.unit_id END) \
+                 ORDER BY x.unit_id<=me.unit_id,x.unit_id LIMIT $9 FOR KEY SHARE OF x SKIP LOCKED), \
+                 best AS (SELECT c.unit_id,c.score FROM cands c WHERE {has_room} ORDER BY c.score DESC,c.wrapped,c.unit_id LIMIT $5), \
+                 added AS (INSERT INTO same_event(unit_id,other_id,score) SELECT $1,unit_id,score FROM best UNION ALL SELECT unit_id,$1,score FROM best \
+                 ON CONFLICT(unit_id,other_id) DO UPDATE SET score=excluded.score) \
+                 SELECT c.unit_id,c.wrapped,EXISTS(SELECT 1 FROM best b WHERE b.unit_id=c.unit_id) AS taken FROM cands c"
+            ))
+            .bind(&unit)
+            .bind(SECONDS as f64)
+            .bind(METRES)
+            .bind(SIMILARITY as f32)
+            .bind(room)
+            .bind(caps.incoming_kept)
+            .bind(&existing)
+            .bind(&stopped_at)
+            .bind(SCAN)
+            .fetch_all(&mut *tx)
+            .await?
+        } else {
+            vec![]
+        };
+        let examined = rows.len();
+        examined_total += examined;
+        let mut others: Vec<String> = vec![];
+        let mut last_examined: Option<(bool, String)> = None;
+        for r in &rows {
+            let candidate: String = r.try_get("unit_id")?;
+            let pos = (r.try_get::<bool, _>("wrapped")?, candidate.clone());
+            if last_examined.as_ref().is_none_or(|l| pos > *l) {
+                last_examined = Some(pos);
+            }
+            if r.try_get::<bool, _>("taken")? {
+                others.push(candidate);
+            }
+        }
+        // Out of candidates to examine with room left: this read stops here and is read again
+        // from the unit it stopped at (due now, after what is due already).
+        if examined as i64 == SCAN && (others.len() as i64) < room {
+            if let Some((_, at)) = &last_examined {
+                sqlx::query("UPDATE same_event_unit SET scan_after=$2 WHERE unit_id=$1")
+                    .bind(&unit)
+                    .bind(at)
+                    .execute(&mut *tx)
+                    .await?;
+                refill(&mut tx, std::slice::from_ref(&unit)).await?;
+            }
+        }
         // Each other unit keeps its best `KEPT` too: this one may push its last one out.
         sqlx::query(
             "DELETE FROM same_event p USING (SELECT unit_id,other_id,\
@@ -418,9 +501,9 @@ async fn resource(pool: &PgPool, id: &str, budget: i64) -> Result<(usize, bool)>
         .bind(KEPT)
         .execute(&mut *tx)
         .await?;
-        // And no unit is named by more than INCOMING_KEPT others, so a change to it marks at most
-        // that many for a refill. A unit whose pair is pushed out refills its list (never this
-        // one: it took only places it had room for).
+        // And no unit is named by more than `incoming_kept` others, so a change to it marks at
+        // most that many for a refill. A unit whose pair is pushed out refills its list (never
+        // this one: it took only places it had room for).
         let mut named = others;
         named.push(unit.clone());
         let pushed_out: Vec<String> = sqlx::query_scalar(
@@ -430,7 +513,7 @@ async fn resource(pool: &PgPool, id: &str, budget: i64) -> Result<(usize, bool)>
              WHERE p.unit_id=r.unit_id AND p.other_id=r.other_id AND r.n>$2 RETURNING p.unit_id",
         )
         .bind(&named)
-        .bind(INCOMING_KEPT)
+        .bind(caps.incoming_kept)
         .fetch_all(&mut *tx)
         .await?;
         let pushed_out: Vec<String> = pushed_out.into_iter().filter(|u| *u != unit).collect();
@@ -438,13 +521,22 @@ async fn resource(pool: &PgPool, id: &str, budget: i64) -> Result<(usize, bool)>
         commit_changed(tx).await?;
         paired += 1;
     }
-    Ok((paired, more))
+    Ok((paired, more, examined_total))
 }
 
-/// Reads one resource's units now, as a pass does (without its claim or budget). Returns the
-/// units paired. Exposed for tests.
+/// Reads one resource's units now, as a pass does (without its claim or budget, with the
+/// default caps). Returns the units paired. Exposed for tests.
 pub async fn read(pool: &PgPool, id: &str) -> Result<usize> {
-    Ok(resource(pool, id, i64::from(i32::MAX)).await?.0)
+    Ok(resource(pool, id, i64::from(i32::MAX), Caps::default())
+        .await?
+        .0)
+}
+
+/// As `read`, returning the units paired and the candidates the reads examined. Exposed for
+/// the bound's test.
+pub async fn read_examined(pool: &PgPool, id: &str) -> Result<(usize, usize)> {
+    let (paired, _, examined) = resource(pool, id, i64::from(i32::MAX), Caps::default()).await?;
+    Ok((paired, examined))
 }
 
 /// A unit row as JSON for `jsonb_to_record` (its point as EWKT).
