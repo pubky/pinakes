@@ -491,6 +491,9 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
     if fetched.content_type.ends_with("json") {
         if let Ok(v) = serde_json::from_str::<Value>(&text) {
             apply_jsonld(&mut out.doc, &v, &fetched.url, true, true);
+            if own_products(&v, &fetched.url, true, true) > 1 {
+                crate::kinds::products::drop_identity(&mut out.doc);
+            }
         }
         out.doc.event.read_from(fetched);
         return Ok(out);
@@ -552,16 +555,23 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
             has_own_node(v, &fetched.url),
         )
     };
+    let claims = |entity: &Value, head: bool| {
+        head || entity_urls(entity)
+            .filter_map(|u| origin_url(&fetched.url, u).and_then(|u| entity_identity(&u)))
+            .any(|id| page.contains(&id))
+    };
     if let Some(best) = (1..scripts.len()).fold((!scripts.is_empty()).then_some(0), |best, i| {
         best.filter(|b| rank(&scripts[i].0) <= rank(&scripts[*b].0))
             .or(Some(i))
     }) {
         let (entity, head) = &scripts[best];
-        let named = entity_urls(entity)
-            .filter_map(|u| origin_url(&fetched.url, u).and_then(|u| entity_identity(&u)))
-            .collect::<Vec<_>>();
-        let claims = *head || named.iter().any(|id| page.contains(id));
-        apply_jsonld(&mut out.doc, entity, &fetched.url, claims, *head);
+        apply_jsonld(
+            &mut out.doc,
+            entity,
+            &fetched.url,
+            claims(entity, *head),
+            *head,
+        );
         // A plugin's body Article can outrank the head's WebPage for the card; the head's
         // identity claims still apply.
         if !head {
@@ -580,6 +590,15 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
                 jsonld_claims(&mut out.doc, v, &fetched.url);
             }
         }
+    }
+    // A page with several products of its own (a category page's head list) states the
+    // barcode of none: any one would join the page to that product.
+    let own: usize = scripts
+        .iter()
+        .map(|(v, head)| own_products(v, &fetched.url, claims(v, *head), *head))
+        .sum();
+    if own > 1 {
+        crate::kinds::products::drop_identity(&mut out.doc);
     }
     for (class, kind) in [
         ("h-event", "Event"),
@@ -1228,6 +1247,28 @@ fn jsonld_claims(doc: &mut ResourceMeta, v: &Value, base: &Url) -> bool {
     true
 }
 /// Whether `v` holds a node whose url (else @id) is the page (`event::page::owns_page`).
+/// How many `Product` nodes in `v` could give the page their identity, as `apply_jsonld`
+/// reads them (with `claims`, and the page's own: naming it, or `vouched`); 2 at most.
+fn own_products(v: &Value, base: &Url, claims: bool, vouched: bool) -> usize {
+    if !claims {
+        return 0;
+    }
+    if let Some(values) = v.as_array() {
+        return values
+            .iter()
+            .map(|v| own_products(v, base, claims, vouched))
+            .fold(0, |n, more| (n + more).min(2));
+    }
+    let own = crate::event::page::names_page(v, base).unwrap_or(vouched);
+    let product =
+        schema_type(v).is_some_and(|k| crate::model::type_path(k).iter().any(|t| t == "Product"));
+    let nested = v
+        .get("mainEntity")
+        .map_or(0, |m| own_products(m, base, claims, own))
+        + v.get("@graph")
+            .map_or(0, |g| own_products(g, base, claims, vouched));
+    (usize::from(product && own) + nested).min(2)
+}
 fn has_own_node(v: &Value, base: &Url) -> bool {
     if let Some(values) = v.as_array() {
         return values.iter().take(16).any(|v| has_own_node(v, base));

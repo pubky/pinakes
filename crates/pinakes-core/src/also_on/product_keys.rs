@@ -20,6 +20,9 @@ impl Source for ProductKeys {
     fn single_namespaces(&self) -> &'static [&'static str] {
         &["gtin"]
     }
+    fn key_forms(&self) -> &'static [(&'static str, &'static str)] {
+        &[("gtin", "3017620422003")]
+    }
     async fn lookup(&self, _cx: &Context, subject: &Subject) -> Result<Found> {
         let mut found = Found::default();
         let Some(code) = own_gtin(subject) else {

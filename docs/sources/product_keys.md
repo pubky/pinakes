@@ -6,8 +6,8 @@ An [also on](../api.md#also-on) source.
 its page's JSON-LD, its shop's own product record or a product database's record) and makes it
 the key `gtin:{GTIN-13}`: two shops' pages of one product join one group, a hint like every
 group. `via` names the record that stated it: an official source by name, else `page`. A page
-that names several products, or a barcode with a wrong check digit, states none. It asks no
-service.
+that names several products of its own (in its head, or naming the page), or a barcode with a
+wrong check digit, states none. It asks no service.
 
 `key=gtin:{barcode}` searches every link with the barcode, in any of its lengths (UPC-A, EAN-8,
 EAN-13, GTIN-14).

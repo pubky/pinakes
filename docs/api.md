@@ -899,11 +899,12 @@ anything. Sources read a resource after it is saved and again when their results
 source's lifetime: 30 days, `btcmap` 7); a source's links and keys live twice that, so one
 failed refresh keeps them, and they go when the source stops returning them. The sources run in this order, each
 seeing the keys the ones before it found: `service`, `tidal`, `musicbrainz`,
-`musicbrainz_entity`, `wikidata`, `discogs`, `deezer`, `itunes`, `wikipedia`, `wikidata_item`,
-`books`, `films`, `podcasts`, `titles`, `osm_wikidata`, `wikidata_osm`, `wikidata_places`, `btcmap`,
-`federal_register`, `unpaywall`, `ncbi`, `datacite`, `huggingface`, `crates`, `npm`, `pypi`,
-`software_heritage`, `steam`, `wikidata_stores`, `app_stores`, `wayback`; `[also_on.sources.<id>] enabled =
-false` turns one off. A MusicBrainz or Wikidata answer over 8 MB is no answer: the source
+`musicbrainz_entity`, `performers`, `wikidata`, `discogs`, `deezer`, `itunes`, `wikipedia`,
+`wikidata_item`, `books`, `films`, `podcasts`, `product_keys`, `open_food_facts`,
+`stack_exchange`, `titles`, `federal_register`, `osm_wikidata`, `wikidata_osm`,
+`wikidata_places`, `btcmap`, `unpaywall`, `ncbi`, `datacite`, `huggingface`, `crates`, `npm`,
+`pypi`, `software_heritage`, `steam`, `wikidata_stores`, `app_stores`, `wayback`;
+`[also_on.sources.<id>] enabled = false` turns one off. A MusicBrainz or Wikidata answer over 8 MB is no answer: the source
 records only what the link's URL proves (a MusicBrainz page's MBID or ISRC, a Wikidata item
 link's Q-id, the Q-id an article's own Wikipedia names), else nothing, until its next run. A
 source's exact keys
@@ -1021,7 +1022,9 @@ record or a product database (their pages say which).
 - Its barcode, `facts.gtin`, is the product's own GTIN as GTIN-13: from its `gtin13`,
   `gtin`, `gtin12`, `gtin14`, `gtin8` or `isbn` (a book's), or its one offer's, with the check
   digit verified. The barcode, `sku` and `mpn` come only from the page's own product (in the
-  page's head, or naming the page), never from another product a page lists. A `ProductGroup`
+  page's head, or naming the page), never from another product a page lists; a page with
+  several products of its own (a category page's head list) states the barcode of none. A
+  `ProductGroup`
   names the barcode, article numbers and offers of the variant its address picks (its `url`, or
   `?variant=`), else of its only variant, never the group's. A product's barcode is the key `gtin:`, so
   the same product on several shops is [one group](#groups), and `key=gtin:{barcode}` finds them
@@ -1032,8 +1035,9 @@ record or a product database (their pages say which).
 - Open product databases ([sources](sources/README.md)) answer for a barcode with a derived link
   and their facts, under the ODbL: show `facts.attribution` (or the card's
   `attribution`) with them.
-- Amazon pages are never fetched, also where another link redirects to one (refused, class
-  `policy`): an Amazon product link (`/dp/{ASIN}`, `/gp/product/{ASIN}`) is a
+- Amazon pages are never fetched, on any of its shops (`amazon.com`, `amazon.ie`,
+  `amazon.co.za`, …) or short links (`amzn.to`, `a.co`, …), also where another link redirects
+  to one (refused, class `policy`): an Amazon product link (`/dp/{ASIN}`, `/gp/product/{ASIN}`) is a
   `Product` from the link alone, with its `asin` (and `isbn`, for a book's ISBN-10), and any other
   Amazon link a `WebPage`.
 
