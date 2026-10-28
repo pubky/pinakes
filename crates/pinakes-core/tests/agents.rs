@@ -799,3 +799,46 @@ async fn refs_count_each_link_only_up_to_a_bound(pool: PgPool) {
     let card: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(card["refs"], json!([OPENLIBRARY, BOOK]));
 }
+
+/// `refs` counts the references of a card's most recently referenced aliases only, so a card
+/// with many referenced spellings costs a read a bounded number of counts. The book gets 40
+/// referenced spellings; the 9 least recently referenced have the most references (3 each, the
+/// others 2), and its Open Library page (2, last referenced before any spelling) is older still.
+/// Counted over every alias, those would lead; examined are the 31 most recent alone.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn refs_count_only_a_cards_most_recently_referenced_aliases(pool: PgPool) {
+    let ids = seed_typed(&pool).await;
+    let mut recent = vec![];
+    for k in 0..40i32 {
+        let (id, uri, _) = identity(&format!("{OPENLIBRARY}?edition={k:02}")).unwrap();
+        sqlx::query("INSERT INTO resource(id,uri) VALUES($1,$2)")
+            .bind(&id)
+            .bind(&uri)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'canonical')")
+            .bind(&id)
+            .bind(&ids[2])
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) SELECT $1,$2,'tag','edition','/pub/app/tags/edition-'||$1||'-'||n,now()-$3*interval '1 minute' FROM generate_series(1,$4) n")
+            .bind(&id)
+            .bind(AUTHOR)
+            .bind(k)
+            .bind(if k < 31 { 2 } else { 3 })
+            .execute(&pool)
+            .await
+            .unwrap();
+        if k < 31 {
+            recent.push(uri);
+        }
+    }
+    recent.sort();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let (code, _, body) = raw(&app, "GET", &format!("/v1/resources/{}", ids[2]), &[], None).await;
+    assert_eq!(code, 200);
+    let card: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(card["refs"], json!(recent[..5]));
+}
