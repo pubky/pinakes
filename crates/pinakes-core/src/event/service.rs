@@ -714,14 +714,21 @@ impl EventService {
         let other_region = address
             .get("region")
             .is_some_and(|r| !regions.is_empty() && !regions.contains(&normalize(r)));
-        // In one line, a region code contradicts a settlement in none of its countries
-        // ("London, ON" in England), or one in its country with another code ("Springfield,
-        // IL" in US-MO). A code that is the settlement's country is its country ("Toronto, CA",
-        // "Berlin, DE"); other words after a town ("UK", "EU", "HQ", a region in full) are left
-        // to Nominatim, which reads the whole line.
+        // In one line, a region code that is the settlement's own ISO 3166-2 code agrees,
+        // whatever country the table gives it ("Chennai, TN" in IN-TN). Another contradicts a
+        // settlement in none of its countries ("London, ON" in England), or one in its
+        // country with another code ("Springfield, IL" in US-MO). A code that is the
+        // settlement's country is its country ("Toronto, CA", "Berlin, DE"); other words after
+        // a town ("UK", "EU", "HQ", a region in full) are left to Nominatim, which reads the
+        // whole line.
         let country_code = found["country_code"].as_str().map(str::to_ascii_lowercase);
+        let own_code = |code: &str| {
+            codes
+                .iter()
+                .any(|c| normalize(c.rsplit('-').next().unwrap_or(c)) == normalize(code))
+        };
         let other_code = held_codes.iter().any(|code| match &country_code {
-            _ if countries.contains(&normalize(code)) => false,
+            _ if own_code(code) || countries.contains(&normalize(code)) => false,
             None => false,
             Some(cc) if !REGION_CODES.iter().any(|(c, land)| c == code && land == cc) => true,
             Some(_) => !codes.is_empty() && !regions.contains(&normalize(code)),
