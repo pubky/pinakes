@@ -967,16 +967,20 @@ $$;
 -- A recording the pass has read, with what pairs are matched on: its title and artist keys and
 -- its length; and the `fingerprint` of the values they came from, so a change is read again.
 -- `refill:{fingerprint}` marks one whose list lost a pair to another's change: it is read again
--- to refill its list.
+-- to refill its list. `scan_after` is where a read that examined its most candidates
+-- (same_recording::SCAN) with room left stopped: the candidate it examined last, so the next read
+-- goes on from there (NULL once a read ends with its list full or the candidates run out).
 CREATE TABLE same_recording_unit (
     resource_id text PRIMARY KEY REFERENCES resource(id) ON DELETE CASCADE,
     fingerprint text NOT NULL,
     title_key text NOT NULL,
     artist_key text NOT NULL,
-    length_secs integer
+    length_secs integer,
+    scan_after text
 );
 -- In (title, artist, length, id) order, so a recording's candidates are read from the length
--- window (or the lengths unknown) and the read stops at the pairs kept.
+-- window (or the lengths unknown) and the read stops at the pairs kept, or at the candidates it
+-- may examine.
 CREATE INDEX same_recording_unit_name_idx ON same_recording_unit USING btree (title_key, artist_key, length_secs, resource_id);
 
 -- One row per direction of a pair: `score` is 1 when both lengths are known and within 3 s,

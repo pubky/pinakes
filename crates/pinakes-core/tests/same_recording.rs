@@ -575,14 +575,14 @@ async fn each_read_that_changes_pairs_moves_the_revision(pool: PgPool) {
     let before = revision().await;
     // The first track is now 3:20 and is read alone, as by a pass stopped right after it.
     take_five(&pool, "https://tidal.com/track/1", "PT3M20S").await;
-    assert!(same_recording::read(&pool, &a).await.unwrap());
+    assert!(same_recording::read(&pool, &a).await.unwrap().changed);
     assert!(revision().await > before);
     assert!(named(&card(&config, &pool, &b).await).is_empty());
     let (_, after) = response(&config, &pool, "/v1/search?q=take+five").await;
     assert_ne!(etag, after);
     // A read that changes nothing leaves it.
     let still = revision().await;
-    assert!(!same_recording::read(&pool, &a).await.unwrap());
+    assert!(!same_recording::read(&pool, &a).await.unwrap().changed);
     assert_eq!(revision().await, still);
 }
 
@@ -704,7 +704,7 @@ async fn a_page_reads_the_pairs_and_the_revision_from_one_snapshot(pool: PgPool)
     assert_eq!(before.0, 2);
     // The first track is now 3:20 and is read: its pairs go, the revision moves.
     take_five("https://tidal.com/track/1", "PT3M20S").await;
-    assert!(same_recording::read(&pool, &a).await.unwrap());
+    assert!(same_recording::read(&pool, &a).await.unwrap().changed);
     let again: (i64, Value) = sqlx::query_as(&seen).fetch_one(&mut *page).await.unwrap();
     assert_eq!(again, before, "the old pairs come with the old revision");
     page.commit().await.unwrap();
@@ -786,6 +786,88 @@ async fn a_crowd_without_lengths_read_in_any_order_leaves_none_without_a_hint(po
         .await
         .unwrap();
     assert_eq!(left, 0, "the refills settled");
+}
+
+/// A dense crowd read as it arrives (each recording read when only those before it are units,
+/// in id order: the worst case, the ring wraps to the full ones first): a read examines at most
+/// `SCAN` candidates, with room or not, so its work is bounded however large the crowd. A read
+/// that ran out with room left stopped at the candidate it examined last and is due again; the
+/// later read keeps the pairs it has and goes on from there, until every recording names twenty.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_read_in_a_dense_crowd_examines_a_bounded_number_of_candidates(pool: PgPool) {
+    let config = Config::default();
+    let mut ids = crowd(&pool, "Take Five", None, 301).await;
+    ids.sort();
+    let mut most = 0;
+    let mut stopped = vec![];
+    let mut partial: Option<(String, Vec<String>)> = None;
+    for id in &ids {
+        let read = same_recording::read(&pool, id).await.unwrap();
+        assert!(
+            read.examined as i64 <= same_recording::SCAN,
+            "{id}: examined {}",
+            read.examined
+        );
+        most = most.max(read.examined);
+        let (pairs, stopped_at): (Vec<String>, Option<String>) = sqlx::query_as(
+            "SELECT coalesce((SELECT array_agg(p.other_id) FROM same_recording p WHERE p.resource_id=u.resource_id),'{}'),u.scan_after \
+             FROM same_recording_unit u WHERE u.resource_id=$1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if read.examined as i64 == same_recording::SCAN && pairs.len() < 20 {
+            assert!(stopped_at.is_some(), "{id}: ran out and did not stop");
+            stopped.push(id.clone());
+            if !pairs.is_empty() && partial.is_none() {
+                partial = Some((id.clone(), pairs));
+            }
+        } else {
+            assert!(
+                stopped_at.is_none(),
+                "{id}: stopped with {} pairs after {}",
+                pairs.len(),
+                read.examined
+            );
+        }
+    }
+    assert_eq!(most as i64, same_recording::SCAN, "the late reads ran out");
+    assert!(stopped.len() > 100, "{} stopped", stopped.len());
+    // (Every recording is due from its save here; the pass below reads them all once more.)
+    let marked: Vec<String> = sqlx::query_scalar(
+        "SELECT resource_id FROM same_recording_unit WHERE scan_after IS NOT NULL AND fingerprint LIKE 'refill:%' ORDER BY resource_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        marked, stopped,
+        "the reads that stopped are marked, no other"
+    );
+    let (id, kept) = partial.expect("a read took some pairs before it ran out");
+    // The later reads go on from where the first stopped, keeping their pairs.
+    pass(&pool, &config).await;
+    assert!(without_a_hint(&pool, &ids).await.is_empty());
+    assert_eq!(spread(&pool, "resource_id").await, (20, 20));
+    assert!(spread(&pool, "other_id").await.0 <= 40);
+    let now: Vec<String> =
+        sqlx::query_scalar("SELECT other_id FROM same_recording WHERE resource_id=$1")
+            .bind(&id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert!(
+        kept.iter().all(|k| now.contains(k)),
+        "{id} kept {kept:?}, has {now:?}"
+    );
+    let (due, stopped): (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM same_recording_dirty),(SELECT count(*) FROM same_recording_unit WHERE scan_after IS NOT NULL)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((due, stopped), (0, 0), "every read ended");
 }
 
 /// Resources deleted as orphans take their units and pairs with them (the cascade); the

@@ -35,6 +35,10 @@ const KEPT: i64 = 20;
 /// The most recordings that may name one recording, so a change to it marks at most this many
 /// for a refill.
 const INCOMING_KEPT: i64 = 2 * KEPT;
+/// Candidates examined per read at most: those passed over for having no room count, so a read
+/// in a crowd of recordings with one title is bounded however dense it is. A read that runs out
+/// with room left goes on from where it stopped in a later one (`scan_after`).
+pub const SCAN: i64 = 5 * KEPT;
 /// Resources claimed per pass.
 const CLAIMED: i64 = 25;
 
@@ -197,23 +201,31 @@ impl Unit {
     }
 }
 
+/// What one read did: whether any pair or unit changed, and how many candidates it examined
+/// (`SCAN` at most).
+#[derive(Debug, Default, PartialEq)]
+pub struct Read {
+    pub changed: bool,
+    pub examined: usize,
+}
+
 /// One resource: its unit is dropped (with its pairs) when it is no longer a recording root
-/// with a title, else written when its values changed, and its pairs computed anew. Returns
-/// whether any pair or unit changed.
-async fn resource(pool: &PgPool, id: &str) -> Result<bool> {
+/// with a title, else written when its values changed, and its pairs computed anew (or, for a
+/// read that stopped short, from where it stopped).
+async fn resource(pool: &PgPool, id: &str) -> Result<Read> {
     let row = sqlx::query(
         "SELECT r.name,(r.type_path @> ARRAY['MusicRecording'] AND r.status='ok' AND NOT EXISTS(SELECT 1 FROM resource_alias a WHERE a.alias_id=r.id)) AS recording,\
          r.doc#>>'{attributes,artist}' AS page_artist,r.doc#>>'{attributes,duration}' AS page_duration,\
          (SELECT min(f.value) FROM resource_fact f WHERE f.resource_id=r.id AND f.name='artist' AND f.expires_at>now()) AS artist,\
          (SELECT min(f.value) FROM resource_fact f WHERE f.resource_id=r.id AND f.name='duration' AND f.expires_at>now()) AS duration,\
-         (SELECT u.fingerprint FROM same_recording_unit u WHERE u.resource_id=r.id) AS fingerprint \
-         FROM resource r WHERE r.id=$1",
+         u.fingerprint,c.resource_id AS stopped_at,c.length_secs AS stopped_at_length \
+         FROM resource r LEFT JOIN same_recording_unit u ON u.resource_id=r.id LEFT JOIN same_recording_unit c ON c.resource_id=u.scan_after WHERE r.id=$1",
     )
     .bind(id)
     .fetch_optional(pool)
     .await?;
     let Some(row) = row else {
-        return Ok(false);
+        return Ok(Read::default());
     };
     let name: Option<String> = row.try_get("name")?;
     let recording: bool = row.try_get("recording")?;
@@ -242,7 +254,7 @@ async fn resource(pool: &PgPool, id: &str) -> Result<bool> {
             // No longer a recording: its unit goes, its pairs with it (on both sides), and the
             // recordings that named it are read again to refill their lists.
             if stored.is_none() {
-                return Ok(false);
+                return Ok(Read::default());
             }
             let mut tx = pool.begin().await?;
             before_delete(&mut tx, id).await?;
@@ -251,12 +263,15 @@ async fn resource(pool: &PgPool, id: &str) -> Result<bool> {
                 .execute(&mut *tx)
                 .await?;
             commit_changed(tx).await?;
-            return Ok(true);
+            return Ok(Read {
+                changed: true,
+                examined: 0,
+            });
         }
     };
     let fingerprint = unit.fingerprint();
     if stored.as_deref() == Some(fingerprint.as_str()) {
-        return Ok(false);
+        return Ok(Read::default());
     }
     // A refill (marked `refill:{fingerprint}` because a recording it named changed) whose values
     // are still those replaces its own list only: what names it stays right, and nothing else is
@@ -266,9 +281,32 @@ async fn resource(pool: &PgPool, id: &str) -> Result<bool> {
         .as_deref()
         .map(|f| f.strip_prefix("refill:").unwrap_or(f));
     let values_changed = previous.is_some_and(|f| f != fingerprint);
+    // The other recordings already read, on the values they were read with (a change marks a
+    // recording to be read again); a recording read later finds this one in turn. The best
+    // `KEPT`, from the ring of candidates (`Ring`): those whose lengths agree (score 1), then
+    // those with a length unknown (0.7), each segment read in index order from just after this
+    // recording and wrapping round, so a crowd of recordings with one title spreads its pairs
+    // over the crowd instead of all naming its first twenty. A recording already named by
+    // INCOMING_KEPT that all rank above this one has no room and is passed over (`has_room`),
+    // so the cap below pushes out only a pair this one displaces.
+    let mut ring = Ring::of(&unit, id);
+    // A read examines at most `SCAN` candidates (a dense crowd's full ones are examined and
+    // passed over, so a read of it is bounded all the same). One that ran out with room left
+    // stored the candidate it stopped at (`scan_after`) and marked itself to be read again: that
+    // read keeps the pairs it has and goes on from there, while the values are the same and the
+    // recording it stopped at is still in the ring (one that went, or whose length moved it,
+    // starts the read over).
+    let stopped_at = match row.try_get::<Option<String>, _>("stopped_at")? {
+        Some(id) => Some(Pos {
+            length: row.try_get("stopped_at_length")?,
+            id,
+        }),
+        None => None,
+    };
+    let resumed = !values_changed && stopped_at.is_some_and(|at| ring.resume_after(at));
     let mut tx = pool.begin().await?;
-    sqlx::query("INSERT INTO same_recording_unit(resource_id,fingerprint,title_key,artist_key,length_secs) VALUES($1,$2,$3,$4,$5) \
-        ON CONFLICT(resource_id) DO UPDATE SET fingerprint=excluded.fingerprint,title_key=excluded.title_key,artist_key=excluded.artist_key,length_secs=excluded.length_secs")
+    sqlx::query("INSERT INTO same_recording_unit(resource_id,fingerprint,title_key,artist_key,length_secs,scan_after) VALUES($1,$2,$3,$4,$5,NULL) \
+        ON CONFLICT(resource_id) DO UPDATE SET fingerprint=excluded.fingerprint,title_key=excluded.title_key,artist_key=excluded.artist_key,length_secs=excluded.length_secs,scan_after=NULL")
         .bind(id)
         .bind(&fingerprint)
         .bind(&unit.title_key)
@@ -276,99 +314,102 @@ async fn resource(pool: &PgPool, id: &str) -> Result<bool> {
         .bind(unit.length_secs.map(|s| s as i32))
         .execute(&mut *tx)
         .await?;
-    sqlx::query("DELETE FROM same_recording WHERE resource_id=$1")
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
-    if values_changed {
-        // The pairs naming it go, and their recordings refill their lists (at most
-        // INCOMING_KEPT of them, the cap below).
-        let owners: Vec<String> = sqlx::query_scalar(
-            "DELETE FROM same_recording WHERE other_id=$1 RETURNING resource_id",
-        )
-        .bind(id)
-        .fetch_all(&mut *tx)
-        .await?;
-        refill(&mut tx, &owners).await?;
-    }
-    // The other recordings already read, on the values they were read with (a change marks a
-    // recording to be read again); a recording read later finds this one in turn. The best
-    // `KEPT`: those whose lengths agree (score 1), then those with a length unknown (0.7). Each
-    // half reads the index in order, starting just after this recording and wrapping round, and
-    // stops at `KEPT`: a crowd of recordings with one title costs no more than twenty each, and
-    // its pairs spread over the crowd instead of all naming its first twenty. A recording already
-    // named by INCOMING_KEPT that all rank above this one has no room and is passed over
-    // (`has_room`), so the cap below pushes out only a pair this one displaces.
-    let candidates = |score: &str, cap: &str| {
-        format!(
-            "SELECT u.resource_id FROM same_recording_unit u WHERE u.title_key=$2 AND u.artist_key=$3 AND u.resource_id<>$1 AND {}",
-            crate::hints::has_room("same_recording", "resource_id", "u.resource_id", "$1", score, cap)
-        )
-    };
-    let mut best: Vec<(String, f32)> = vec![];
-    if !unit.artist_key.is_empty() {
-        if let Some(len) = unit.length_secs {
-            for half in [
-                "(u.length_secs,u.resource_id)>($6,$1)",
-                "(u.length_secs,u.resource_id)<($6,$1)",
-            ] {
-                let room = KEPT - best.len() as i64;
-                if room <= 0 {
-                    break;
-                }
-                let agree: Vec<String> = sqlx::query_scalar(&format!(
-                    "{} AND u.length_secs BETWEEN $4 AND $5 AND {half} ORDER BY u.length_secs,u.resource_id LIMIT $7",
-                    candidates("$8", "$9")
-                ))
-                .bind(id)
-                .bind(&unit.title_key)
-                .bind(&unit.artist_key)
-                .bind((len - LENGTH_WINDOW_SECS) as i32)
-                .bind((len + LENGTH_WINDOW_SECS) as i32)
-                .bind(len as i32)
-                .bind(room)
-                .bind(SCORE_LENGTHS_AGREE)
-                .bind(INCOMING_KEPT)
-                .fetch_all(&mut *tx)
-                .await?;
-                best.extend(agree.into_iter().map(|r| (r, SCORE_LENGTHS_AGREE)));
-            }
-        }
-        // Lengths unknown: the ring by id where this one has a length (they all sit at the
-        // index's end). Where it has none, every candidate scores the same, so the ring runs
-        // through the whole index from just after this one: the lengths unknown after it, every
-        // length known, then the lengths unknown before it; a crowd without lengths spreads its
-        // pairs instead of all naming the index's first twenty.
-        let unknown_halves: &[&str] = if unit.length_secs.is_some() {
-            &[
-                " AND u.length_secs IS NULL AND u.resource_id>$1",
-                " AND u.length_secs IS NULL AND u.resource_id<$1",
-            ]
-        } else {
-            &[
-                " AND u.length_secs IS NULL AND u.resource_id>$1",
-                " AND u.length_secs IS NOT NULL",
-                " AND u.length_secs IS NULL AND u.resource_id<$1",
-            ]
-        };
-        for half in unknown_halves {
-            let room = KEPT - best.len() as i64;
-            if room <= 0 {
-                break;
-            }
-            let unknown: Vec<String> = sqlx::query_scalar(&format!(
-                "{}{half} ORDER BY u.length_secs,u.resource_id LIMIT $4",
-                candidates("$5", "$6")
-            ))
+    // The pairs a resumed read keeps; any other read starts from none.
+    let mut existing: Vec<String> = vec![];
+    if resumed {
+        existing = sqlx::query_scalar("SELECT other_id FROM same_recording WHERE resource_id=$1")
             .bind(id)
-            .bind(&unit.title_key)
-            .bind(&unit.artist_key)
-            .bind(room)
-            .bind(SCORE_LENGTH_UNKNOWN)
-            .bind(INCOMING_KEPT)
             .fetch_all(&mut *tx)
             .await?;
-            best.extend(unknown.into_iter().map(|r| (r, SCORE_LENGTH_UNKNOWN)));
+    } else {
+        sqlx::query("DELETE FROM same_recording WHERE resource_id=$1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        if values_changed {
+            // The pairs naming it go, and their recordings refill their lists (at most
+            // INCOMING_KEPT of them, the cap below).
+            let owners: Vec<String> = sqlx::query_scalar(
+                "DELETE FROM same_recording WHERE other_id=$1 RETURNING resource_id",
+            )
+            .bind(id)
+            .fetch_all(&mut *tx)
+            .await?;
+            refill(&mut tx, &owners).await?;
+        }
+    }
+    let mut best: Vec<(String, f32)> = vec![];
+    let mut scan_left = SCAN;
+    let mut examined = 0usize;
+    let mut last_examined: Option<String> = None;
+    if !unit.artist_key.is_empty() {
+        for segment in &ring.segments {
+            let room = KEPT - (existing.len() + best.len()) as i64;
+            if room <= 0 || scan_left <= 0 {
+                break;
+            }
+            let mut args = vec![
+                Arg::Text(id.to_owned()),
+                Arg::Text(unit.title_key.clone()),
+                Arg::Text(unit.artist_key.clone()),
+            ];
+            // The segment's next candidates, as many as may still be examined, in index order.
+            let slice_sql = format!(
+                "SELECT u.resource_id,u.length_secs FROM same_recording_unit u WHERE u.title_key=$2 AND u.artist_key=$3 AND u.resource_id<>$1 AND {} \
+                 ORDER BY u.length_secs,u.resource_id LIMIT {scan_left}",
+                segment.predicate(&mut args)
+            );
+            let slice: Vec<String> = bind_all(sqlx::query(&slice_sql), &args)
+                .fetch_all(&mut *tx)
+                .await?
+                .iter()
+                .map(|r| r.try_get(0))
+                .collect::<Result<_, _>>()?;
+            if slice.is_empty() {
+                continue;
+            }
+            // Of those, the first with room, up to the room left: the check stops at the last one
+            // taken, so what it examined is the slice up to that one, or all of it.
+            let score = arg(&mut args, Arg::Real(segment.score()));
+            let cap = arg(&mut args, Arg::Int8(INCOMING_KEPT));
+            let room_sql = format!(
+                "SELECT c.resource_id FROM ({slice_sql}) c WHERE {} ORDER BY c.length_secs,c.resource_id LIMIT {room}",
+                crate::hints::has_room("same_recording", "resource_id", "c.resource_id", "$1", &score, &cap)
+            );
+            let taken: Vec<String> = bind_all(sqlx::query(&room_sql), &args)
+                .fetch_all(&mut *tx)
+                .await?
+                .iter()
+                .map(|r| r.try_get(0))
+                .collect::<Result<_, _>>()?;
+            let up_to = match taken.last() {
+                Some(last) if taken.len() as i64 == room => slice
+                    .iter()
+                    .position(|r| r == last)
+                    .map_or(slice.len(), |i| i + 1),
+                _ => slice.len(),
+            };
+            scan_left -= up_to as i64;
+            examined += up_to;
+            last_examined = Some(slice[up_to - 1].clone());
+            best.extend(
+                taken
+                    .into_iter()
+                    .filter(|r| !existing.contains(r))
+                    .map(|r| (r, segment.score())),
+            );
+        }
+    }
+    // Out of candidates to examine with room left: this read stops here and is read again from
+    // here (due now, after what is due already).
+    if KEPT - (existing.len() + best.len()) as i64 > 0 && scan_left <= 0 {
+        if let Some(at) = &last_examined {
+            sqlx::query("UPDATE same_recording_unit SET scan_after=$2 WHERE resource_id=$1")
+                .bind(id)
+                .bind(at)
+                .execute(&mut *tx)
+                .await?;
+            refill(&mut tx, std::slice::from_ref(&id.to_owned())).await?;
         }
     }
     let (others, scores): (Vec<String>, Vec<f32>) = best.into_iter().unzip();
@@ -412,7 +453,218 @@ async fn resource(pool: &PgPool, id: &str) -> Result<bool> {
     let pushed_out: Vec<String> = pushed_out.into_iter().filter(|r| r != id).collect();
     refill(&mut tx, &pushed_out).await?;
     commit_changed(tx).await?;
-    Ok(true)
+    Ok(Read {
+        changed: true,
+        examined,
+    })
+}
+
+/// A place in the index's (length, id) order: a candidate examined last, where a read stopped.
+struct Pos {
+    length: Option<i32>,
+    id: String,
+}
+
+/// The ring of a recording's candidates, in segments read in turn, each in index order from a
+/// start (exclusive) to an end (exclusive). With a length: the window of agreeing lengths after
+/// this recording, then the window before it, then the lengths unknown after its id, then those
+/// before it. Without one, every candidate scores the same, so the ring runs through the whole
+/// index from just after it: the lengths unknown after it, every length known, the lengths
+/// unknown before it.
+struct Ring {
+    segments: Vec<Segment>,
+}
+
+enum Segment {
+    /// Lengths within `lo..=hi`, in (length, id) order.
+    Agree {
+        lo: i32,
+        hi: i32,
+        after: Option<(i32, String)>,
+        before: Option<(i32, String)>,
+    },
+    /// Lengths unknown, in id order.
+    Unknown {
+        after: Option<String>,
+        before: Option<String>,
+    },
+    /// Every length known, in (length, id) order.
+    Known { after: Option<(i32, String)> },
+}
+
+impl Ring {
+    fn of(unit: &Unit, me: &str) -> Self {
+        let me = me.to_owned();
+        let segments = match unit.length_secs {
+            Some(len) => {
+                let lo = (len - LENGTH_WINDOW_SECS) as i32;
+                let hi = (len + LENGTH_WINDOW_SECS) as i32;
+                let at = (len as i32, me.clone());
+                vec![
+                    Segment::Agree {
+                        lo,
+                        hi,
+                        after: Some(at.clone()),
+                        before: None,
+                    },
+                    Segment::Agree {
+                        lo,
+                        hi,
+                        after: None,
+                        before: Some(at),
+                    },
+                    Segment::Unknown {
+                        after: Some(me.clone()),
+                        before: None,
+                    },
+                    Segment::Unknown {
+                        after: None,
+                        before: Some(me),
+                    },
+                ]
+            }
+            None => vec![
+                Segment::Unknown {
+                    after: Some(me.clone()),
+                    before: None,
+                },
+                Segment::Known { after: None },
+                Segment::Unknown {
+                    after: None,
+                    before: Some(me),
+                },
+            ],
+        };
+        Self { segments }
+    }
+
+    /// Goes on from just after `at`: the segments before the one holding it go. False (the ring
+    /// unchanged) when no segment holds it.
+    fn resume_after(&mut self, at: Pos) -> bool {
+        let Some(i) = self.segments.iter().position(|s| s.holds(&at)) else {
+            return false;
+        };
+        self.segments.drain(..i);
+        self.segments[0].start_after(at);
+        true
+    }
+}
+
+impl Segment {
+    fn holds(&self, at: &Pos) -> bool {
+        match self {
+            Segment::Agree {
+                lo,
+                hi,
+                after,
+                before,
+            } => at.length.is_some_and(|l| {
+                let pos = (l, at.id.as_str());
+                (*lo..=*hi).contains(&l)
+                    && after.as_ref().is_none_or(|a| pos > (a.0, a.1.as_str()))
+                    && before.as_ref().is_none_or(|b| pos < (b.0, b.1.as_str()))
+            }),
+            Segment::Unknown { after, before } => {
+                at.length.is_none()
+                    && after.as_ref().is_none_or(|a| at.id > *a)
+                    && before.as_ref().is_none_or(|b| at.id < *b)
+            }
+            Segment::Known { after } => at.length.is_some_and(|l| {
+                after
+                    .as_ref()
+                    .is_none_or(|a| (l, at.id.as_str()) > (a.0, a.1.as_str()))
+            }),
+        }
+    }
+
+    fn start_after(&mut self, at: Pos) {
+        match self {
+            Segment::Agree { after, .. } | Segment::Known { after } => {
+                *after = at.length.map(|l| (l, at.id));
+            }
+            Segment::Unknown { after, .. } => *after = Some(at.id),
+        }
+    }
+
+    fn score(&self) -> f32 {
+        match self {
+            Segment::Agree { .. } => SCORE_LENGTHS_AGREE,
+            _ => SCORE_LENGTH_UNKNOWN,
+        }
+    }
+
+    /// The segment as a condition on `u`, its bounds added to `args`.
+    fn predicate(&self, args: &mut Vec<Arg>) -> String {
+        let mut sql = match self {
+            Segment::Agree { lo, hi, .. } => format!(
+                "u.length_secs BETWEEN {} AND {}",
+                arg(args, Arg::Int(*lo)),
+                arg(args, Arg::Int(*hi))
+            ),
+            Segment::Unknown { .. } => "u.length_secs IS NULL".to_owned(),
+            Segment::Known { .. } => "u.length_secs IS NOT NULL".to_owned(),
+        };
+        match self {
+            Segment::Agree { after, before, .. } => {
+                for (bound, op) in [(after, '>'), (before, '<')] {
+                    if let Some((length, id)) = bound {
+                        sql += &format!(
+                            " AND (u.length_secs,u.resource_id){op}({},{})",
+                            arg(args, Arg::Int(*length)),
+                            arg(args, Arg::Text(id.clone()))
+                        );
+                    }
+                }
+            }
+            Segment::Unknown { after, before } => {
+                for (bound, op) in [(after, '>'), (before, '<')] {
+                    if let Some(id) = bound {
+                        sql +=
+                            &format!(" AND u.resource_id{op}{}", arg(args, Arg::Text(id.clone())));
+                    }
+                }
+            }
+            Segment::Known { after } => {
+                if let Some((length, id)) = after {
+                    sql += &format!(
+                        " AND (u.length_secs,u.resource_id)>({},{})",
+                        arg(args, Arg::Int(*length)),
+                        arg(args, Arg::Text(id.clone()))
+                    );
+                }
+            }
+        }
+        sql
+    }
+}
+
+/// A bound value of a query built from segments, in the order the placeholders number them.
+enum Arg {
+    Text(String),
+    Int(i32),
+    Int8(i64),
+    Real(f32),
+}
+
+/// Adds a value and returns its placeholder.
+fn arg(args: &mut Vec<Arg>, value: Arg) -> String {
+    args.push(value);
+    format!("${}", args.len())
+}
+
+fn bind_all<'q>(
+    mut query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+    args: &'q [Arg],
+) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+    for value in args {
+        query = match value {
+            Arg::Text(s) => query.bind(s.as_str()),
+            Arg::Int(i) => query.bind(*i),
+            Arg::Int8(i) => query.bind(*i),
+            Arg::Real(f) => query.bind(*f),
+        };
+    }
+    query
 }
 
 /// Before a recording's unit goes, with its resource (an orphan, `changes::delete_orphans`) or
@@ -461,7 +713,7 @@ async fn refill(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, ids: &[String]) 
 }
 
 /// Reads one resource's recording now, as a pass does (without its claim). Exposed for tests.
-pub async fn read(pool: &PgPool, id: &str) -> Result<bool> {
+pub async fn read(pool: &PgPool, id: &str) -> Result<Read> {
     resource(pool, id).await
 }
 
