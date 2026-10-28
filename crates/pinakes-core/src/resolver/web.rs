@@ -1024,21 +1024,26 @@ fn entity_priority(v: &Value, base: &Url) -> u8 {
     type_priority(v, base).max(nested)
 }
 /// A node's own priority, ignoring nested entities: 110 for the page's own recipe, 100 for other
-/// content, 80 for WebPage, 20 for publisher and navigation helpers.
+/// content, 90 for a recipe of another page, 80 for WebPage, 20 for publisher and navigation
+/// helpers.
 fn type_priority(v: &Value, base: &Url) -> u8 {
     let path = schema_type(v)
         .map(crate::model::type_path)
         .unwrap_or_default();
     // A recipe page's article or video wraps its recipe, never the other way round; a recipe
-    // about another page (one an article recommends) is content like the article, so it never
-    // displaces the page's own node. The page's own: it names the page (url, else @id), or it
-    // names none and wraps nothing else.
+    // naming another page (one an article recommends) ranks below the page's content, so it
+    // never displaces the page's own node, named or not. The page's own: it names the page
+    // (url, else @id), or it names none and wraps nothing else.
     let recipe = path.iter().any(|s| s == "Recipe");
+    let names = recipe
+        .then(|| crate::event::page::names_page(v, base))
+        .flatten();
     let own = if recipe
-        && crate::event::page::names_page(v, base)
-            .unwrap_or_else(|| v.get("mainEntity").is_none() && v.get("@graph").is_none())
+        && names.unwrap_or_else(|| v.get("mainEntity").is_none() && v.get("@graph").is_none())
     {
         110
+    } else if names == Some(false) {
+        90
     } else if recipe
         || path.iter().any(|s| {
             matches!(

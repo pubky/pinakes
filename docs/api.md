@@ -1063,7 +1063,8 @@ every group is), where its site's source says so.
 
 A page whose JSON-LD is a `Recipe` is a recipe card; on a recipe page the recipe outranks the
 article or video that wraps it. Only the page's own recipe does (it names the page, or names
-none): a recipe of another page that an article recommends never displaces the article.
+none): a recipe of another page that an article recommends never displaces the article,
+whichever comes first and whether or not the article names its URL.
 
 | Fact | Meaning |
 | --- | --- |
