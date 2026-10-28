@@ -156,7 +156,9 @@ queued too: a card that comes back unchanged would not run them again, so result
 older version would stay until they expire. `reextract also-on` queues every resource's also-on
 lookups without re-reading any card; it can be combined with routes. Every run first scrubs
 what rows stored before a scrub ran still keep of a social post that is gone or whose author
-opted out, even when its refetch keeps failing. A gone post's card keeps nothing of the post
+opted out, even when its refetch keeps failing. A post is gone when its stored card says
+`missing`, whatever status a failed refresh gave its row since, and a gone post is treated as
+gone even when its author had opted out. A gone post's card keeps nothing of the post
 (only its link, type, source, status and times), its change lines and also-on results are
 deleted, and it is regrouped. An opted-out post's lines lose their documents. The aliases of
 either keep only their `aliased` line: their cards, other lines and also-on results are deleted.

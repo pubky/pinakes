@@ -428,3 +428,81 @@ async fn the_repair_scrubs_posts_stored_before_their_scrub(pool: sqlx::PgPool) {
     assert_eq!(name.as_deref(), Some("A page that is gone"));
     assert_eq!(pinakes_core::changes::scrub_stored(&pool).await.unwrap(), 0);
 }
+
+/// A refresh that fails sets the row's status to `error` (`queue::failed`), its stored card
+/// unchanged.
+async fn fail(pool: &sqlx::PgPool, id: &str) {
+    let generation: i64 = sqlx::query_scalar("SELECT generation FROM resource WHERE id=$1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let job = pinakes_core::queue::Job {
+        id: id.into(),
+        uri: POST.into(),
+        attempts: 0,
+        generation,
+    };
+    pinakes_core::queue::failed(pool, &job, &Default::default(), "http_5xx")
+        .await
+        .unwrap();
+    let status: String = sqlx::query_scalar("SELECT status FROM resource WHERE id=$1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "error");
+}
+
+/// A deleted post as an earlier build stored it, whose refresh then failed (Reddit's 500): its
+/// row says `error`, its stored card still `missing`. The repair finds it by that card and scrubs
+/// it and its spelling.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn the_repair_finds_a_gone_post_whose_refresh_failed(pool: sqlx::PgPool) {
+    if pinakes_core::sources::by_name("reddit").is_none() {
+        return;
+    }
+    let (_, _, id, at) = post(&pool).await;
+    let alias_id = spelling(&pool, SUBREDDIT_SPELLING, at - 1).await;
+    sqlx::query("UPDATE resource SET status='missing',doc=jsonb_set(doc,'{status}','\"missing\"') WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    fail(&pool, &id).await;
+    assert!(texts(&pool, &[&id, &alias_id]).await > 2);
+
+    assert_eq!(pinakes_core::changes::scrub_stored(&pool).await.unwrap(), 1);
+    assert_eq!(texts(&pool, &[&id, &alias_id]).await, 0);
+    assert_eq!(
+        left_of_alias(&pool, &alias_id).await,
+        (vec!["aliased".to_owned()], json!({}))
+    );
+    assert_eq!(pinakes_core::changes::scrub_stored(&pool).await.unwrap(), 0);
+}
+
+/// A post this build deleted keeps nothing through a failed refresh: nothing comes back, and the
+/// repair finds nothing to do.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_failed_refresh_of_a_gone_post_brings_nothing_back(pool: sqlx::PgPool) {
+    if pinakes_core::sources::by_name("reddit").is_none() {
+        return;
+    }
+    let (reddit, resolver, id, at) = post(&pool).await;
+    let alias_id = spelling(&pool, SUBREDDIT_SPELLING, at - 1).await;
+    delete(&pool, &reddit, &resolver, &id, at).await;
+    let card: Value = sqlx::query_scalar("SELECT doc FROM resource WHERE id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    fail(&pool, &id).await;
+    let after: Value = sqlx::query_scalar("SELECT doc FROM resource WHERE id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(after, card);
+    assert_eq!(texts(&pool, &[&id, &alias_id]).await, 0);
+    assert_eq!(pinakes_core::changes::scrub_stored(&pool).await.unwrap(), 0);
+}

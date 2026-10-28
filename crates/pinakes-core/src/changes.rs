@@ -40,10 +40,15 @@ pub struct Diff {
 fn opted_out(doc: &ResourceMeta) -> bool {
     doc.attributes.get("opted_out").is_some_and(|v| v == "true")
 }
+/// Whether a stored card is a social post found gone. Its document says so, whatever a failed
+/// refresh set the row's status to since; gone wins over an opt-out the post had.
+pub(crate) fn gone_social(doc: &ResourceMeta) -> bool {
+    doc.status == Status::Missing && crate::resolver::cards::social(doc)
+}
 /// Whether a stored card keeps none of its post's text, nor do its spellings: a social post
 /// found gone, or one whose author opted out of indexing.
 pub(crate) fn scrubbed(doc: &ResourceMeta) -> bool {
-    opted_out(doc) || (doc.status == Status::Missing && crate::resolver::cards::social(doc))
+    opted_out(doc) || gone_social(doc)
 }
 /// What a gone social post's card keeps: nothing of the post. Only its link (URL, site, the
 /// service the URL names), the source that read it, its type, its status and when it was last
@@ -470,12 +475,14 @@ pub async fn save(
 /// (`scrubbed`), in batches of 500 roots, as a save would have: a gone post's change lines and
 /// also-on results are deleted, its card becomes `gone_card` and it is regrouped; an opted-out
 /// post's lines lose their documents (its card stays, as a save leaves it); either one's aliases
-/// keep nothing of it (`scrub_spellings`). Run by `pinakesd reextract`, as a post whose refetch
-/// fails never reaches `save`. The posts it changed.
+/// keep nothing of it (`scrub_spellings`). A post both opted out and gone is gone. A gone post is
+/// found by its stored card, also when a failed refresh set its row's status since. Run by
+/// `pinakesd reextract`, as a post whose refetch fails never reaches `save`. The posts it
+/// changed.
 pub async fn scrub_stored(pool: &PgPool) -> Result<u64> {
     let (mut last, mut scrubbed_posts) = (String::new(), 0u64);
     loop {
-        let rows: Vec<(String, Value)> = sqlx::query_as("SELECT r.id,r.doc FROM resource r WHERE r.id>$1 AND (r.status='missing' OR r.doc->'attributes'->>'opted_out'='true') AND NOT EXISTS(SELECT 1 FROM resource_alias a WHERE a.alias_id=r.id) ORDER BY r.id LIMIT 500")
+        let rows: Vec<(String, Value)> = sqlx::query_as("SELECT r.id,r.doc FROM resource r WHERE r.id>$1 AND (r.status='missing' OR r.doc->>'status'='missing' OR r.doc->'attributes'->>'opted_out'='true') AND NOT EXISTS(SELECT 1 FROM resource_alias a WHERE a.alias_id=r.id) ORDER BY r.id LIMIT 500")
             .bind(&last)
             .fetch_all(pool)
             .await?;
@@ -505,7 +512,7 @@ pub async fn scrub_stored(pool: &PgPool) -> Result<u64> {
                 continue;
             };
             let ids = [id.clone()];
-            let mut changed = if opted_out(&doc) {
+            let mut changed = if !gone_social(&doc) {
                 sqlx::query("UPDATE resource_change SET before=NULL,after=NULL WHERE resource_id=$1 AND (before IS NOT NULL OR after IS NOT NULL)")
                     .bind(&id)
                     .execute(&mut *tx)

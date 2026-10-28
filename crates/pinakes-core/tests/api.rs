@@ -2533,6 +2533,59 @@ async fn a_spelling_that_joins_an_opted_out_post_keeps_none_of_its_text(pool: Pg
     assert_eq!(texts().await.unwrap(), 0);
 }
 
+/// A post whose author opted out and that an earlier build then stored as gone kept its facts
+/// (the author, the content warning) and its also-on results: gone wins over the opt-out, so the
+/// repair leaves it the gone card, nothing derived, and a second run changes nothing.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn the_repair_scrubs_a_gone_post_that_had_opted_out(pool: PgPool) {
+    let uri = "https://mastodon.social/@Gargron/1";
+    let api = "https://mastodon.social/api/v1/statuses/1";
+    let Some(mut opted) = common::source_card(
+        "mastodon",
+        uri,
+        &[(api, 200, "application/json", "status-1-opted-out.json")],
+    )
+    .await
+    else {
+        return;
+    };
+    opted.fetched_at = 2000;
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    store::save_document(&pool, &id, 0, &opted).await.unwrap();
+    // Its deletion as an earlier build stored it: the opted-out card, missing.
+    sqlx::query("UPDATE resource SET status='missing',doc=jsonb_set(doc,'{status}','\"missing\"') WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO resource_fact(resource_id,name,value,source,expires_at) VALUES($1,'title','Hello world','titles',now()+interval '1 day')")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO derived_link(resource_id,link_id,uri,site,source,via,kind,expires_at) VALUES($1,repeat('a',32),'https://web.archive.org/web/2016/https://mastodon.social/@Gargron/1','web.archive.org','wayback','wayback','archived',now()+interval '1 day')")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let attributes = || {
+        sqlx::query_scalar::<_, Value>("SELECT doc->'attributes' FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+    };
+    assert!(attributes().await.unwrap()["opted_out"] == "true");
+
+    assert_eq!(pinakes_core::changes::scrub_stored(&pool).await.unwrap(), 1);
+    assert_eq!(attributes().await.unwrap(), json!({}));
+    let derived: i64 = sqlx::query_scalar("SELECT (SELECT count(*) FROM resource_fact WHERE resource_id=$1)+(SELECT count(*) FROM derived_link WHERE resource_id=$1)")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(derived, 0);
+    assert_eq!(pinakes_core::changes::scrub_stored(&pool).await.unwrap(), 0);
+}
+
 /// One viewer's sets on the fixture graph: friends are author `friend`, the reach set
 /// (`wot_2`) is author `wot`, following is everyone.
 async fn graph_nexus(friend: usize, wot: usize) -> (String, tokio::task::JoinHandle<()>) {
