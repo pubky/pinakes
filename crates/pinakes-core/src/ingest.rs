@@ -18,7 +18,7 @@ pub const REJECT_REASONS: &[&str] = &[
     "object_path",
     "timestamp",
     "uri",
-    "social",
+    "never_fetched",
     "panic",
 ];
 fn rejection_reason(line: &Change, limits: &IngestConfig) -> Option<&'static str> {
@@ -262,8 +262,10 @@ async fn apply_line(
 }
 /// Why a `post` line is rejected: its URI must be a post in its author's storage
 /// (`pubky://<author>/pub/<namespace>/v1/posts/{id}`), its object path a version file directly in
-/// that post (`…/{id}/{editId}.json`). A social specs' post (`/pub/social/…`: an event, an rsvp)
-/// is Nexus's: Pinakes neither fetches nor indexes it (`social`).
+/// that post (`…/{id}/{editId}.json`). A post in a namespace Pinakes never fetches
+/// (`pubky_apps::never_fetched`: the social specs' events and rsvps are Nexus's, `pubky.app`'s too,
+/// and the old Mapky and Eventky layouts are disregarded) is neither fetched nor indexed
+/// (`never_fetched`), however its namespace is spelt.
 fn post_rejection(line: &Change, uri: &str) -> Option<&'static str> {
     let Some(path) = uri
         .strip_prefix("pubky://")
@@ -275,8 +277,16 @@ fn post_rejection(line: &Change, uri: &str) -> Option<&'static str> {
     else {
         return Some("uri");
     };
-    if path.starts_with("/pub/social/") {
-        return Some("social");
+    // The namespace as the resolver reads it, decoded: `%73ocial` is `social`.
+    let segments = url::Url::parse(uri)
+        .ok()
+        .and_then(|url| crate::resolver::path_segments(&url));
+    match segments.as_deref() {
+        Some([_, namespace, ..]) if crate::resolver::pubky_apps::never_fetched(namespace) => {
+            return Some("never_fetched")
+        }
+        Some(_) => {}
+        None => return Some("uri"),
     }
     let file = line
         .object_path

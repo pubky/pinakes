@@ -293,18 +293,24 @@ fn app_kinds_by_namespace() {
         (doc.end, doc.name.as_deref(), fact(&doc, "author")),
         (None, Some("Listening session"), Some(AUTHOR))
     );
-    // A name it could not store is no name: the generic one; the card stays.
-    let mut unstorable = session.clone();
-    unstorable["content"] = json!({
-        "started_at": 1_792_152_000_000_000_i64, "host": host, "name": "Late\0jam",
-    })
-    .to_string()
-    .into();
-    let doc = card(&post("music", &id()), &unstorable);
-    assert_eq!(
-        (doc.status, doc.name.as_deref()),
-        (Status::Ok, Some("Listening session"))
-    );
+    // A name it could not store (a NUL, over 100 characters) is no name: the generic one; the
+    // card stays. A hundred characters, two bytes each, are kept.
+    let long = "é".repeat(101);
+    let longest = "é".repeat(100);
+    for (name, title) in [
+        ("Late\0jam", "Listening session"),
+        (long.as_str(), "Listening session"),
+        (longest.as_str(), longest.as_str()),
+    ] {
+        let mut unstorable = session.clone();
+        unstorable["content"] = json!({
+            "started_at": 1_792_152_000_000_000_i64, "host": host, "name": name,
+        })
+        .to_string()
+        .into();
+        let doc = card(&post("music", &id()), &unstorable);
+        assert_eq!((doc.status, doc.name.as_deref()), (Status::Ok, Some(title)));
+    }
     let mut trackless = session.clone();
     trackless["embed"] = Value::Null;
     let mut unstarted = session.clone();
@@ -393,6 +399,22 @@ fn app_kinds_by_namespace() {
         card(&post("music", &id()), &named).name.as_deref(),
         Some("Sunday records")
     );
+    // A name over 100 characters, or with a NUL, gets the generic title, as a session's.
+    for (name, title) in [
+        (long.as_str(), "Now playing"),
+        ("Sunday\0records", "Now playing"),
+        (longest.as_str(), longest.as_str()),
+    ] {
+        let mut unstorable = listening.clone();
+        unstorable["content"] = json!({
+            "started_at": 1_792_151_000_000_000_i64, "expires_at": 1_792_153_800_000_000_i64,
+            "name": name,
+        })
+        .to_string()
+        .into();
+        let doc = card(&post("music", &id()), &unstorable);
+        assert_eq!((doc.status, doc.name.as_deref()), (Status::Ok, Some(title)));
+    }
 
     // A listen counts on its track: no card of its own, one per play.
     let mut listen = envelope("listen", json!({"played_at": 1_792_152_000_000_000_i64}));
@@ -636,35 +658,97 @@ async fn a_read_in_flight_never_undoes_a_newer_version(pool: PgPool) {
     assert!(!due(&pool, &route).await);
 }
 
-/// A social specs' post (an event, an rsvp) is Nexus's: its feed line is rejected and counted
-/// (`social`), and it queues nothing, so nothing fetches it.
+/// A post in a namespace Pinakes never fetches (a social specs' event or rsvp, Nexus's; pubky.app's;
+/// the old Mapky and Eventky layouts), however its namespace is spelt: its feed line is rejected
+/// and counted (`never_fetched`), and it creates no resource or reference, so nothing fetches it.
+/// A post of another app in the same batch is indexed.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
-async fn a_social_post_line_queues_nothing_and_fetches_nothing(pool: PgPool) {
+async fn a_post_line_of_a_never_fetched_namespace_creates_nothing(pool: PgPool) {
     let metrics = Metrics::new().unwrap();
-    let event = post("social", &id());
-    batch(
-        &pool,
-        vec![
-            line(Op::Put, &event, "0034A", Utc::now()),
-            line(Op::Del, &event, "0034A", Utc::now()),
-        ],
-        &metrics,
-    )
-    .await;
+    let never: Vec<String> = [
+        "social",
+        "pubky.app",
+        "mapky.app",
+        "eventky.app",
+        "%73ocial",
+        "%73%6F%63%69%61%6C",
+        "pubky%2Eapp",
+        "mapky.ap%70",
+        "eventky%2eapp",
+    ]
+    .iter()
+    .map(|namespace| post(namespace, &id()))
+    .collect();
+    let mut lines = vec![];
+    for uri in &never {
+        lines.push(line(Op::Put, uri, "0034A", Utc::now()));
+        lines.push(line(Op::Del, uri, "0034A", Utc::now()));
+    }
+    let chess = post("chess", &id());
+    lines.push(line(Op::Put, &chess, "0034A", Utc::now()));
+    batch(&pool, lines, &metrics).await;
     assert_eq!(
-        metrics.ingest_rejected.with_label_values(&["social"]).get(),
-        2
+        metrics
+            .ingest_rejected
+            .with_label_values(&["never_fetched"])
+            .get(),
+        2 * never.len() as u64
     );
-    let (id, _, _) = identity(&event).unwrap();
-    let rows: (i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM resource WHERE id=$1),(SELECT count(*) FROM reference)",
+    let (chess_id, _, _) = identity(&chess).unwrap();
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT r.id,(SELECT count(*) FROM reference f WHERE f.resource_id=r.id) FROM resource r",
     )
-    .bind(&id)
-    .fetch_one(&pool)
+    .fetch_all(&pool)
     .await
     .unwrap();
-    assert_eq!(rows, (0, 0));
-    assert_eq!(classify(&event), None);
+    assert_eq!(rows, [(chess_id, 1)]);
+    let refs: i64 = sqlx::query_scalar("SELECT count(*) FROM reference")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(refs, 1);
+    for uri in &never {
+        assert_eq!(classify(uri), None, "{uri}");
+    }
+}
+
+/// A post whose namespace is not one plain path segment once decoded (not UTF-8, an encoded `/`,
+/// an encoded `.` or `..`) is refused as `uri` and creates no resource or reference: no spelling
+/// gets past the post-path check. Letter case is kept: `Social` is not `social` but another app's
+/// namespace, read as the resolver reads it (the general card), so it is indexed.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_post_line_whose_namespace_is_not_one_segment_creates_nothing(pool: PgPool) {
+    let metrics = Metrics::new().unwrap();
+    let malformed: Vec<String> = ["%FF", "ch%2Fess", "%2E", "%2e", "%2E%2E", ".%2E"]
+        .iter()
+        .map(|namespace| post(namespace, &id()))
+        .collect();
+    let social = post("Social", &id());
+    let mut lines: Vec<Change> = malformed
+        .iter()
+        .map(|uri| line(Op::Put, uri, "0034A", Utc::now()))
+        .collect();
+    lines.push(line(Op::Put, &social, "0034A", Utc::now()));
+    batch(&pool, lines, &metrics).await;
+    let rejected = |reason| metrics.ingest_rejected.with_label_values(&[reason]).get();
+    assert_eq!(
+        (rejected("uri"), rejected("never_fetched")),
+        (malformed.len() as u64, 0)
+    );
+    let (social_id, _, _) = identity(&social).unwrap();
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT r.id,(SELECT count(*) FROM reference f WHERE f.resource_id=r.id) FROM resource r",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows, [(social_id, 1)]);
+    let refs: i64 = sqlx::query_scalar("SELECT count(*) FROM reference")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(refs, 1);
+    assert_eq!(classify(&social), Some("pubky"));
 }
 
 /// A Pubky resolver standing in for the homeserver that reads the post's version `body` as the

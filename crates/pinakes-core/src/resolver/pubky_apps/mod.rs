@@ -127,6 +127,11 @@ pub enum Route {
 /// (`mapky.app`, `eventky.app`), whose data the owner disregards: Maps writes posts now
 /// (`posts`), and events and availability are social posts.
 const NEVER_FETCHED: &[&str] = &["pubky.app", "social", "mapky.app", "eventky.app"];
+/// Whether Pinakes never fetches the objects of this namespace (decoded): ingest drops their post
+/// lines, so they create no resource.
+pub fn never_fetched(namespace: &str) -> bool {
+    NEVER_FETCHED.contains(&namespace)
+}
 /// The route of a `pubky://` object of another app, from its decoded path segments below
 /// `/pub/` (`resolver::pubky_app`'s reading). `None` for the objects Nexus describes
 /// (`NEVER_FETCHED`) and for any path inside a post of a namespace no profile reads, whose post
@@ -147,10 +152,7 @@ pub fn route(segments: &[String]) -> Option<Route> {
             return Some(Route::Excluded);
         }
     }
-    if segments
-        .first()
-        .is_some_and(|app| NEVER_FETCHED.contains(&app.as_str()))
-    {
+    if segments.first().is_some_and(|app| never_fetched(app)) {
         return None;
     }
     // A post in a namespace no profile reads (`/pub/<ns>/v1/posts/{id}`) has the general card,
