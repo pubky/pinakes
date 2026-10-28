@@ -1188,6 +1188,16 @@
       "expect": "items"
     },
     {
+      "name": "type-recipe",
+      "summary": "type=Recipe",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "type": "Recipe"
+      },
+      "expect": "items"
+    },
+    {
       "name": "type-jobposting",
       "summary": "type=JobPosting",
       "method": "GET",
@@ -1240,6 +1250,21 @@
       "labels": {
         "type": "JobPosting, closed=true",
         "closed": "true, type=JobPosting"
+      }
+    },
+    {
+      "name": "recipe-ingredient",
+      "summary": "type=Recipe&ingredient=mozzarella",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "type": "Recipe",
+        "ingredient": "mozzarella"
+      },
+      "expect": "items",
+      "labels": {
+        "type": "Recipe, ingredient=mozzarella",
+        "ingredient": "mozzarella, type=Recipe"
       }
     },
     {

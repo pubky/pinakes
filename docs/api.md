@@ -310,10 +310,12 @@ GET /v1/search?type=DataFeed
 GET /v1/search?type=CreativeWork
 GET /v1/search?type=Product
 GET /v1/search?type=Question
+GET /v1/search?type=Recipe
 GET /v1/search?type=JobPosting
 GET /v1/search?remote=true&type=JobPosting
 GET /v1/search?remote=false&type=JobPosting
 GET /v1/search?closed=true&type=JobPosting
+GET /v1/search?ingredient=mozzarella&type=Recipe
 GET /v1/search?q=lugano
 GET /v1/search?q=bitcoin
 GET /v1/search?q=berlin
@@ -433,6 +435,7 @@ POST /v1/changes/lookup {"resource_ids":["81cefcae5a6a468cfc27ff1c1b420fce","5bc
 | `venue` | Events at this venue resource ID |
 | `remote` | `true`: [job postings](#jobs) that may be done remotely; `false`: job postings that may not |
 | `closed` | `true`: list [job postings](#jobs) past their closing date too; they are left out otherwise |
+| `ingredient` | [Recipes](#recipes) with these ingredients: up to 3, comma-separated, each of letters, digits, spaces and hyphens, matching whole words of an ingredient's name as the card records it (`flour` matches "all-purpose flour", `mozz` matches nothing); all must match |
 | `sort` | `activity` (default), `recent`, `distance` (requires `near`), `start` or `trending` (by the references made inside `window`; only links referenced in it; with `collapse=group` one song across services is one row, ranked by the references all its links got in the window) |
 | `window` | With `sort=trending` or `related`: `{n}h` or `{n}d`, from `1h` to `90d` (default `7d` for trending, `limits.related_window_days` for related), counted back from the first page's instant |
 | `limit` | 1–500, default 50 |
@@ -1055,6 +1058,24 @@ characters, as a quoted post is), with its asker as `author` and when it was ask
 
 A question closed as a duplicate of one other question is in that question's group (a hint, as
 every group is), where its site's source says so.
+
+## Recipes
+
+A page whose JSON-LD is a `Recipe` is a recipe card; on a recipe page the recipe outranks the
+article or video that wraps it. Only the page's own recipe does (it names the page, or names
+none): a recipe of another page that an article recommends never displaces the article.
+
+| Fact | Meaning |
+| --- | --- |
+| `total_minutes` | From `totalTime`, else `prepTime` plus `cookTime` |
+| `recipe_yield` | As the recipe gives it (`4`, `6 servings`) |
+| `ingredients` | Each `recipeIngredient` without its amount, unit (a unit word that ends the line is the ingredient: `2 cloves`), notes in parentheses, preparation after a comma (`beaten`, `chopped`, …) and alternatives (`plus …`, `or …`), lower case, joined with `; `, as many whole ones as 256 bytes hold |
+| `cuisine`, `recipe_category` | As the recipe names them, joined with `; ` |
+| `diet` | `gluten_free`, `vegan`, `vegetarian`, … (schema.org's `RestrictedDiet` in snake case) |
+| `rating`, `rating_count` | Its aggregate rating |
+
+Search by ingredient is `ingredient=` over that list, by whole words, not a full-text search:
+`ingredient=chickpeas,lemon` lists the recipes that have both.
 
 ## Sources
 
