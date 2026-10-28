@@ -34,8 +34,12 @@ pub const SIMILARITY: f64 = 0.5;
 const KEPT: i64 = 20;
 /// Candidates examined per read at most (`hints::SCAN`): those passed over for having no room
 /// count, so a read in a crowd of one event's pages is bounded however dense it is. A read that
-/// runs out with room left goes on from the unit it stopped at in a later one (`scan_after`).
+/// runs out with room left goes on from the position it stopped at in a later one (`scan_after`,
+/// `scan_after_start`).
 pub const SCAN: i64 = crate::hints::SCAN;
+/// How far round a unit its ring of candidates reaches, in hours, either way: any two units that
+/// may pair start within it (two starts on one local date are at most 26 hours apart).
+const RING_HOURS: i64 = 36;
 /// Resources claimed per pass.
 const CLAIMED: i64 = 25;
 
@@ -354,6 +358,7 @@ async fn resource(
          lower(rtrim(s.doc#>>'{{organizer,url}}','/')) AS organizer,coalesce(s.doc->>'all_day','false')='true' AS all_day,s.doc->>'tz' AS tz \
          ,(SELECT x.fingerprint FROM same_event_unit x WHERE x.unit_id=s.unit_id) AS stored \
          ,(SELECT x.scan_after FROM same_event_unit x WHERE x.unit_id=s.unit_id) AS stopped_at \
+         ,(SELECT x.scan_after_start FROM same_event_unit x WHERE x.unit_id=s.unit_id) AS stopped_at_start \
          FROM search_unit s WHERE s.id=$1 AND {EVENT} AND {WINDOW}) u \
          WHERE stored IS DISTINCT FROM fingerprint ORDER BY start_at,unit_id LIMIT $2"
     ))
@@ -377,17 +382,27 @@ async fn resource(
             .is_some_and(|f| f.strip_prefix("refill:").unwrap_or(f) != fingerprint);
         // A read examines at most `SCAN` candidates (a dense crowd's full ones are examined and
         // passed over, so a read of it is bounded all the same). One that ran out with room left
-        // stored the unit it stopped at (`scan_after`) and marked itself to be read again: that
-        // read keeps the pairs it has and goes on round the ring from there, while the values
-        // are the same.
-        let stopped_at: Option<String> = u.try_get("stopped_at")?;
-        let resumed = !values_changed && stopped_at.is_some();
+        // stored the position it stopped at (`scan_after`, `scan_after_start`) and marked itself
+        // to be read again: that read keeps the pairs it has and goes on round the ring from
+        // there, while the values are the same. One whose values changed starts over (its ring
+        // untouched, the position cleared with the upsert): a start that moved changes the ring,
+        // and a candidate that moved with it may now lie before the position.
+        let start: chrono::DateTime<chrono::Utc> = u.try_get("start_at")?;
+        let mut ring = Ring::of(&unit, start);
+        let stopped_at = match (
+            u.try_get::<Option<String>, _>("stopped_at")?,
+            u.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("stopped_at_start")?,
+        ) {
+            (Some(id), Some(start)) => Some(Pos { start, id }),
+            _ => None,
+        };
+        let resumed = !values_changed && stopped_at.is_some_and(|at| ring.resume_after(at));
         let mut tx = pool.begin().await?;
-        sqlx::query("INSERT INTO same_event_unit(unit_id,resource_id,uid,recurrence_id,fingerprint,start_at,name_key,numbers,point,venue_id,osm_venue,organizer,all_day,tz,scan_after) \
-            SELECT unit_id,$2,uid,CASE WHEN uid IS NULL THEN NULL ELSE rid END,fingerprint,start_at,name_key,numbers,ST_GeomFromEWKT(point),venue_id,osm_venue,organizer,all_day,tz,NULL \
+        sqlx::query("INSERT INTO same_event_unit(unit_id,resource_id,uid,recurrence_id,fingerprint,start_at,name_key,numbers,point,venue_id,osm_venue,organizer,all_day,tz,scan_after,scan_after_start) \
+            SELECT unit_id,$2,uid,CASE WHEN uid IS NULL THEN NULL ELSE rid END,fingerprint,start_at,name_key,numbers,ST_GeomFromEWKT(point),venue_id,osm_venue,organizer,all_day,tz,NULL,NULL \
             FROM jsonb_to_record($1) AS u(unit_id text,uid text,rid text,fingerprint text,start_at timestamptz,name_key text,numbers text[],point text,venue_id text,osm_venue text,organizer text,all_day boolean,tz text) \
             ON CONFLICT(unit_id) DO UPDATE SET fingerprint=excluded.fingerprint,start_at=excluded.start_at,name_key=excluded.name_key,numbers=excluded.numbers,point=excluded.point,\
-            venue_id=excluded.venue_id,osm_venue=excluded.osm_venue,organizer=excluded.organizer,all_day=excluded.all_day,tz=excluded.tz,scan_after=NULL")
+            venue_id=excluded.venue_id,osm_venue=excluded.osm_venue,organizer=excluded.organizer,all_day=excluded.all_day,tz=excluded.tz,scan_after=NULL,scan_after_start=NULL")
             .bind(row(u)?)
             .bind(id)
             .execute(&mut *tx)
@@ -418,75 +433,91 @@ async fn resource(
             }
         }
         // The other units already read, on the values they were read with (a change marks a unit
-        // to be read again); a unit read later finds this one in turn. Two located units must be
-        // near each other; a venue or organizer counts only when one has no place. The candidates
-        // are examined round the units in ID order, starting just after this one (or after the
-        // unit a stopped read stopped at), `SCAN` of them at most, so a crowd of one event's
-        // pages spreads its pairs instead of all naming its first twenty; of those examined, the
-        // best by score with room are taken: a unit already named by `incoming_kept` that all
-        // rank above this one has no room and is passed over (`has_room`), so the cap below
-        // pushes out only a pair this one displaces. A candidate another transaction holds (an
-        // orphan delete) is skipped, never waited for.
+        // to be read again); a unit read later finds this one in turn. The candidates are
+        // examined round the ring (`Ring`): the units starting within `RING_HOURS` of this one in
+        // (start, id) order, from just after it (or after the position a stopped read stopped
+        // at) to the end of that window and from its start back to this one. Each segment is a
+        // cursor over the walk of the start index (`RING`), fetched as far as may still be
+        // examined: a read visits the rows up to its last candidate and sorts none, so a crowd
+        // of one event's pages costs each read a hundred rows however large it is, and spreads
+        // its pairs instead of all naming its first twenty. Two located units must be near each
+        // other; a venue or organizer counts only when one has no place.
         let room = KEPT - existing.len() as i64;
+        let mut cands: Vec<(String, f32)> = vec![];
+        let mut scan_left = if room > 0 { SCAN } else { 0 };
+        let mut last_examined: Option<Pos> = None;
+        for segment in &ring.segments {
+            if scan_left <= 0 {
+                break;
+            }
+            sqlx::query(&format!("DECLARE ring NO SCROLL CURSOR FOR {RING}"))
+                .bind(&unit)
+                .bind(SECONDS as f64)
+                .bind(METRES)
+                .bind(SIMILARITY as f32)
+                .bind(&existing)
+                .bind(segment.after.start)
+                .bind(&segment.after.id)
+                .bind(segment.before.start)
+                .bind(&segment.before.id)
+                .execute(&mut *tx)
+                .await?;
+            let rows = sqlx::query(&format!("FETCH FORWARD {scan_left} FROM ring"))
+                .persistent(false)
+                .fetch_all(&mut *tx)
+                .await?;
+            sqlx::query("CLOSE ring").execute(&mut *tx).await?;
+            for r in &rows {
+                let at = Pos {
+                    start: r.try_get("start_at")?,
+                    id: r.try_get("unit_id")?,
+                };
+                cands.push((at.id.clone(), r.try_get("score")?));
+                last_examined = Some(at);
+            }
+            scan_left -= rows.len() as i64;
+        }
+        examined_total += cands.len();
+        // Of the candidates examined, the best by score with room are taken (on a tie, the
+        // nearer round the ring): a unit already named by `incoming_kept` that all rank above
+        // this one has no room and is passed over (`has_room`), so the cap below pushes out only
+        // a pair this one displaces. A candidate another transaction holds (an orphan delete) is
+        // skipped, never waited for: each candidate's row is held through a lateral subquery, by
+        // its key (joined instead, the planner hashes the whole table for them on a small one).
+        let (ids, scores): (Vec<String>, Vec<f32>) = cands.into_iter().unzip();
         let has_room =
-            crate::hints::has_room("same_event", "unit_id", "c.unit_id", "$1", "c.score", "$6");
-        let rows = if room > 0 {
-            sqlx::query(&format!(
-                "WITH me AS (SELECT * FROM same_event_unit WHERE unit_id=$1), \
-                 cands AS (SELECT x.unit_id,similarity(me.name_key,x.name_key) AS score,x.unit_id<=me.unit_id AS wrapped FROM me,same_event_unit x \
-                 WHERE x.resource_id<>me.resource_id AND me.name_key<>'' AND x.name_key<>'' \
-                 AND x.start_at BETWEEN me.start_at-interval '36 hours' AND me.start_at+interval '36 hours' \
-                 AND CASE WHEN me.all_day OR x.all_day THEN same_event_day(me.start_at,me.tz)=same_event_day(x.start_at,x.tz) \
-                  ELSE abs(extract(epoch FROM x.start_at-me.start_at))<=$2 END \
-                 AND ((x.point IS NOT NULL AND me.point IS NOT NULL AND ST_DWithin(x.point::geography,me.point::geography,$3)) \
-                  OR ((x.point IS NULL OR me.point IS NULL) AND (x.venue_id=me.venue_id OR x.osm_venue=me.osm_venue OR x.organizer=me.organizer))) \
-                 AND similarity(me.name_key,x.name_key)>=$4 \
-                 AND (cardinality(me.numbers)=0 OR cardinality(x.numbers)=0 OR x.numbers=me.numbers) \
-                 AND NOT x.unit_id=ANY($7) \
-                 AND ($8::text IS NULL OR CASE WHEN $8>me.unit_id THEN x.unit_id>$8 OR x.unit_id<me.unit_id ELSE x.unit_id>$8 AND x.unit_id<me.unit_id END) \
-                 ORDER BY x.unit_id<=me.unit_id,x.unit_id LIMIT $9 FOR KEY SHARE OF x SKIP LOCKED), \
-                 best AS (SELECT c.unit_id,c.score FROM cands c WHERE {has_room} ORDER BY c.score DESC,c.wrapped,c.unit_id LIMIT $5), \
+            crate::hints::has_room("same_event", "unit_id", "c.unit_id", "$1", "c.score", "$5");
+        let others: Vec<String> = if ids.is_empty() {
+            vec![]
+        } else {
+            sqlx::query_scalar(&format!(
+                "WITH c AS (SELECT * FROM unnest($2::text[],$3::real[]) WITH ORDINALITY AS c(unit_id,score,n)), \
+                 best AS (SELECT c.unit_id,c.score FROM c,LATERAL (SELECT 1 FROM same_event_unit x WHERE x.unit_id=c.unit_id FOR KEY SHARE SKIP LOCKED) l \
+                 WHERE {has_room} ORDER BY c.score DESC,c.n LIMIT $4), \
                  added AS (INSERT INTO same_event(unit_id,other_id,score) SELECT $1,unit_id,score FROM best UNION ALL SELECT unit_id,$1,score FROM best \
                  ON CONFLICT(unit_id,other_id) DO UPDATE SET score=excluded.score) \
-                 SELECT c.unit_id,c.wrapped,EXISTS(SELECT 1 FROM best b WHERE b.unit_id=c.unit_id) AS taken FROM cands c"
+                 SELECT unit_id FROM best"
             ))
             .bind(&unit)
-            .bind(SECONDS as f64)
-            .bind(METRES)
-            .bind(SIMILARITY as f32)
+            .bind(&ids)
+            .bind(&scores)
             .bind(room)
             .bind(caps.incoming_kept)
-            .bind(&existing)
-            .bind(&stopped_at)
-            .bind(SCAN)
             .fetch_all(&mut *tx)
             .await?
-        } else {
-            vec![]
         };
-        let examined = rows.len();
-        examined_total += examined;
-        let mut others: Vec<String> = vec![];
-        let mut last_examined: Option<(bool, String)> = None;
-        for r in &rows {
-            let candidate: String = r.try_get("unit_id")?;
-            let pos = (r.try_get::<bool, _>("wrapped")?, candidate.clone());
-            if last_examined.as_ref().is_none_or(|l| pos > *l) {
-                last_examined = Some(pos);
-            }
-            if r.try_get::<bool, _>("taken")? {
-                others.push(candidate);
-            }
-        }
         // Out of candidates to examine with room left: this read stops here and is read again
-        // from the unit it stopped at (due now, after what is due already).
-        if examined as i64 == SCAN && (others.len() as i64) < room {
-            if let Some((_, at)) = &last_examined {
-                sqlx::query("UPDATE same_event_unit SET scan_after=$2 WHERE unit_id=$1")
-                    .bind(&unit)
-                    .bind(at)
-                    .execute(&mut *tx)
-                    .await?;
+        // from the position it stopped at (due now, after what is due already).
+        if room > 0 && scan_left <= 0 && (others.len() as i64) < room {
+            if let Some(at) = &last_examined {
+                sqlx::query(
+                    "UPDATE same_event_unit SET scan_after=$2,scan_after_start=$3 WHERE unit_id=$1",
+                )
+                .bind(&unit)
+                .bind(&at.id)
+                .bind(at.start)
+                .execute(&mut *tx)
+                .await?;
                 refill(&mut tx, std::slice::from_ref(&unit)).await?;
             }
         }
@@ -537,6 +568,88 @@ pub async fn read(pool: &PgPool, id: &str) -> Result<usize> {
 pub async fn read_examined(pool: &PgPool, id: &str) -> Result<(usize, usize)> {
     let (paired, _, examined) = resource(pool, id, i64::from(i32::MAX), Caps::default()).await?;
     Ok((paired, examined))
+}
+
+/// A segment of the ring, as a cursor's query: the units from just after `$6,$7` to just before
+/// `$8,$9` in (start, id) order, the candidates of the unit `$1` among them with their scores.
+/// Planned for a cursor (fetched a little at a time), it is the walk of the start index with the
+/// conditions on each unit as it comes, whatever the planner's estimate of the rows in range
+/// (one it would sort and cut for a `LIMIT` whenever that estimate is near the limit). A candidate
+/// starts within `$2` seconds (an all-day unit: on the same local date), within `$3` metres or
+/// else at the same venue or organizer, with a name at least `$4` alike and its numbers agreeing,
+/// and is not among the pairs `$5` kept.
+const RING: &str = "WITH me AS MATERIALIZED (SELECT * FROM same_event_unit WHERE unit_id=$1) \
+    SELECT x.unit_id,x.start_at,similarity(me.name_key,x.name_key)::real AS score FROM me,same_event_unit x \
+    WHERE (x.start_at,x.unit_id)>($6,$7) AND (x.start_at,x.unit_id)<($8,$9) \
+    AND x.resource_id<>me.resource_id AND me.name_key<>'' AND x.name_key<>'' \
+    AND CASE WHEN me.all_day OR x.all_day THEN same_event_day(me.start_at,me.tz)=same_event_day(x.start_at,x.tz) \
+     ELSE abs(extract(epoch FROM x.start_at-me.start_at))<=$2 END \
+    AND ((x.point IS NOT NULL AND me.point IS NOT NULL AND ST_DWithin(x.point::geography,me.point::geography,$3)) \
+     OR ((x.point IS NULL OR me.point IS NULL) AND (x.venue_id=me.venue_id OR x.osm_venue=me.osm_venue OR x.organizer=me.organizer))) \
+    AND similarity(me.name_key,x.name_key)>=$4 \
+    AND (cardinality(me.numbers)=0 OR cardinality(x.numbers)=0 OR x.numbers=me.numbers) \
+    AND NOT x.unit_id=ANY($5) \
+    ORDER BY x.start_at,x.unit_id";
+
+/// A place in the start index's (start, id) order: a candidate examined last, where a read stopped.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Pos {
+    start: chrono::DateTime<chrono::Utc>,
+    id: String,
+}
+
+/// The ring of a unit's candidates: the units starting within `RING_HOURS` of it, in (start, id)
+/// order from just after it to the end of that window, then from the window's start to just
+/// before it; each segment runs from `after` to `before`, both exclusive (an edge of the window is
+/// the position before every id at that start).
+struct Ring {
+    segments: Vec<Segment>,
+}
+
+struct Segment {
+    after: Pos,
+    before: Pos,
+}
+
+impl Ring {
+    fn of(me: &str, start: chrono::DateTime<chrono::Utc>) -> Self {
+        let me = Pos {
+            start,
+            id: me.to_owned(),
+        };
+        let edge = |start| Pos {
+            start,
+            id: String::new(),
+        };
+        let reach = chrono::Duration::hours(RING_HOURS);
+        Self {
+            segments: vec![
+                Segment {
+                    after: me.clone(),
+                    before: edge(start + reach),
+                },
+                Segment {
+                    after: edge(start - reach),
+                    before: me,
+                },
+            ],
+        }
+    }
+
+    /// Goes on from just after `at`: the segments before the one holding it go. False (the ring
+    /// unchanged) when no segment holds it.
+    fn resume_after(&mut self, at: Pos) -> bool {
+        let Some(i) = self
+            .segments
+            .iter()
+            .position(|s| at > s.after && at < s.before)
+        else {
+            return false;
+        };
+        self.segments.drain(..i);
+        self.segments[0].after = at;
+        true
+    }
 }
 
 /// A unit row as JSON for `jsonb_to_record` (its point as EWKT).

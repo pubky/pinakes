@@ -1635,3 +1635,169 @@ async fn the_caps_come_from_the_limits(pool: PgPool) {
         Config::from_value(serde_json::json!({"limits": {"same_event_incoming_kept": 0}})).is_err()
     );
 }
+
+/// `n` units of one event at `start` and `at`, as reads of `n` pages would store them, written
+/// straight to the table (a crowd of thousands in a moment), their ids `prefix` repeated and a
+/// number, so where they stand in the ring (after or before an event's own id) is chosen.
+async fn units(
+    pool: &PgPool,
+    prefix: char,
+    n: usize,
+    start: DateTime<Utc>,
+    at: &Point,
+) -> Vec<String> {
+    let ids: Vec<String> = (0..n)
+        .map(|i| format!("{}{i:04x}", prefix.to_string().repeat(28)))
+        .collect();
+    sqlx::query("INSERT INTO resource(id,uri) SELECT id,'https://example.org/'||id FROM unnest($1::text[]) AS t(id)")
+        .bind(&ids)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO same_event_unit(unit_id,resource_id,fingerprint,start_at,name_key,numbers,point,all_day) \
+         SELECT id,id,'stored',$2,same_event_name('Bitcoin Meetup Wattwil'),same_event_numbers('Bitcoin Meetup Wattwil'),ST_SetSRID(ST_MakePoint($3,$4),4326),false \
+         FROM unnest($1::text[]) AS t(id)",
+    )
+    .bind(&ids)
+    .bind(start)
+    .bind(at.lon)
+    .bind(at.lat)
+    .execute(pool)
+    .await
+    .unwrap();
+    ids
+}
+
+/// The position a read stopped at.
+async fn stopped_at(pool: &PgPool, id: &str) -> Option<(String, DateTime<Utc>)> {
+    sqlx::query_as("SELECT scan_after,scan_after_start FROM same_event_unit WHERE unit_id=$1 AND scan_after IS NOT NULL")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+}
+
+/// A read that stopped in a crowd (every candidate full) goes on from its position while the
+/// event's values hold; once the event changes, the read starts over: the position was taken
+/// round the old start, and a candidate that moved with the event may now lie before it. Here the
+/// event and one of the crowd move three hours later, and the next read pairs them. (Gone on from
+/// the stale position, the read would look between it and the event's new place only, find
+/// nothing, and never look again, its fingerprint current.)
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_changed_event_starts_its_read_over_not_from_where_it_stopped(pool: PgPool) {
+    let start = soon();
+    let me = event(
+        &pool,
+        "https://example.org/mine",
+        "Bitcoin Meetup Wattwil",
+        start,
+        Some(WATTWIL),
+    )
+    .await;
+    // A crowd of a hundred after the event in the ring, each named by forty that rank above it
+    // (the namers are ten days off: no candidates themselves).
+    let crowd = units(&pool, 'f', 100, start, &WATTWIL).await;
+    let namers = units(&pool, '0', 40, start + Duration::days(10), &WATTWIL).await;
+    sqlx::query("INSERT INTO same_event(unit_id,other_id,score) SELECT n,c,1 FROM unnest($1::text[]) AS a(n),unnest($2::text[]) AS b(c)")
+        .bind(&namers)
+        .bind(&crowd)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (_, examined) = same_event::read_examined(&pool, &me).await.unwrap();
+    assert_eq!(examined as i64, same_event::SCAN);
+    assert!(stored(&pool, &me).await.is_empty(), "the crowd is full");
+    assert_eq!(
+        stopped_at(&pool, &me).await,
+        Some((crowd[99].clone(), start)),
+        "stopped at the crowd's last"
+    );
+    // The event and one of the crowd move three hours later (the crowd's one as a read of its
+    // page would leave it: at the new start, the pairs naming it gone).
+    let moved = &crowd[10];
+    sqlx::query("UPDATE same_event_unit SET start_at=start_at+interval '3 hours',fingerprint='moved' WHERE unit_id=$1")
+        .bind(moved)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM same_event WHERE other_id=$1")
+        .bind(moved)
+        .execute(&pool)
+        .await
+        .unwrap();
+    event(
+        &pool,
+        "https://example.org/mine",
+        "Bitcoin Meetup Wattwil",
+        start + Duration::hours(3),
+        Some(WATTWIL),
+    )
+    .await;
+    let (_, examined) = same_event::read_examined(&pool, &me).await.unwrap();
+    assert_eq!(stored(&pool, &me).await, vec![moved.clone()]);
+    assert_eq!(
+        examined, 1,
+        "the one at the new start; the crowd is three hours off"
+    );
+    assert_eq!(stopped_at(&pool, &me).await, None, "the read ended");
+}
+
+/// The rows of `same_event_unit` read so far by any scan, and the entries its start index
+/// returned, on `one` connection's statistics.
+async fn visited(one: &PgPool) -> (i64, i64) {
+    sqlx::query("SELECT pg_stat_force_next_flush()")
+        .execute(one)
+        .await
+        .unwrap();
+    sqlx::query_as(
+        "SELECT (SELECT coalesce(seq_tup_read,0)+coalesce(idx_tup_fetch,0) FROM pg_stat_user_tables WHERE relname='same_event_unit'),\
+         (SELECT coalesce(idx_tup_read,0) FROM pg_stat_user_indexes WHERE indexrelname='same_event_unit_start_idx')",
+    )
+    .fetch_one(one)
+    .await
+    .unwrap()
+}
+
+/// A read in a dense crowd does as much work in the database as it examines: each segment of the
+/// ring is a cursor over the start index, fetched as far as may still be examined, so a read
+/// among three thousand pages of one event (two thousand after it in the ring, a thousand
+/// before) takes a hundred entries from the start index and visits those hundred candidates a
+/// few times each by their keys (walked, held, and the pairs' checks), its own row, and none of
+/// the rest of the crowd. (Taken from the crowd ordered round the ring and cut to a hundred
+/// after, it would visit and sort every one of them.) Counted on one connection's statistics.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_read_in_a_dense_crowd_visits_its_candidates_and_none_of_the_rest(pool: PgPool) {
+    let start = soon();
+    let me = event(
+        &pool,
+        "https://example.org/mine",
+        "Bitcoin Meetup Wattwil",
+        start,
+        Some(WATTWIL),
+    )
+    .await;
+    units(&pool, 'f', 2000, start, &WATTWIL).await;
+    units(&pool, '0', 1000, start, &WATTWIL).await;
+    let one = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    let (rows_before, walked_before) = visited(&one).await;
+    let (_, examined) = same_event::read_examined(&one, &me).await.unwrap();
+    let (rows_after, walked_after) = visited(&one).await;
+    let (rows, walked) = (rows_after - rows_before, walked_after - walked_before);
+    assert_eq!(examined as i64, same_event::SCAN);
+    assert_eq!(stored(&pool, &me).await.len(), 20);
+    assert_eq!(stopped_at(&pool, &me).await, None, "its list full");
+    assert_eq!(
+        walked,
+        same_event::SCAN,
+        "entries of the start index for a hundred examined"
+    );
+    assert!(
+        rows <= 3 * same_event::SCAN,
+        "{rows} rows of same_event_unit visited for a hundred examined"
+    );
+}
