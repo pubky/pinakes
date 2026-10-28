@@ -7,7 +7,10 @@ or artist; several are ambiguous and give nothing), that entity's current links 
 services, and its MBIDs, the recording's ISRCs (up to eight) and the release's barcode as keys
 (`mb:recording:…`, `mb:release:…`, `mb:release-group:…`, `mb:artist:…`, `isrc:…`,
 `upc:…`). A track MusicBrainz does not relate by URL takes the recording its page's own ISRC
-is on when that ISRC is a key (TIDAL's, `service`) and MusicBrainz knows exactly one. An
+is on when the page's service vouches for the ISRC (TIDAL's) and
+MusicBrainz knows exactly one recording with it, or the one of several the page's duration picks
+(within 3 s of its length, no other: [an ISRC on several
+recordings](README.md#an-isrc-on-several-recordings)). An
 album it does not relate by URL takes the releases carrying the album's barcode keys (TIDAL's
 own record, or a service's or Discogs' from an earlier run; at most two, never one a
 MusicBrainz source found), by a search on the barcode field alone (a 12-digit UPC in both
@@ -32,4 +35,6 @@ Each music link costs one MusicBrainz request for its entity (up to four when th
 several releases; one more for a track found by its ISRC, up to two barcode searches for an album
 found by its barcode keys (only those another source found) and up to four release reads for what
 they name, and one for a track's original album). The worker asks MusicBrainz about a batch's
-links' URLs together ([operations](../operations.md#also-on)).
+links' URLs together ([operations](../operations.md#also-on)); an Apple Music link, which
+MusicBrainz stores under the storefront an editor browsed, is asked under twenty storefronts'
+spellings in one request.

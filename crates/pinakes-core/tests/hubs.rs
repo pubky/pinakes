@@ -238,6 +238,28 @@ impl Transport for Recorded {
                 }
             }
             "/ws/2/release" => (200, br#"{"release-count":0,"releases":[]}"#.to_vec()),
+            // An ISRC on two recordings of different lengths ("Never Gonna Give You Up": the
+            // album version and a shorter edit), and those recordings.
+            "/ws/2/isrc/GBARL9300135" => (
+                200,
+                br#"{"isrc":"GBARL9300135","recordings":[{"id":"8f3471b5-7e6a-48da-86a9-c1c07a0f47ae","length":212946,"title":"Never Gonna Give You Up"},{"id":"e00ebb77-541e-41f3-86ba-a90530414922","length":178933,"title":"Never Gonna Give You Up"}]}"#.to_vec(),
+            ),
+            "/ws/2/recording/8f3471b5-7e6a-48da-86a9-c1c07a0f47ae"
+            | "/ws/2/recording/e00ebb77-541e-41f3-86ba-a90530414922" => {
+                let album = url.path().ends_with("8f3471b5-7e6a-48da-86a9-c1c07a0f47ae");
+                (
+                    200,
+                    serde_json::to_vec(&serde_json::json!({
+                        "id": url.path().trim_start_matches("/ws/2/recording/"),
+                        "title": "Never Gonna Give You Up",
+                        "length": if album { 212946 } else { 178933 },
+                        "isrcs": ["GBARL9300135"],
+                        "artist-credit": [{"name": "Rick Astley", "joinphrase": ""}],
+                        "relations": [],
+                    }))
+                    .unwrap(),
+                )
+            }
             "/ws/2/isrc/GBUM71029604" => (200, fixture("mb-isrc-GBUM71029604.json")),
             "/ws/2/isrc/GBCEE0100112" => (200, fixture("mb-isrc-GBCEE0100112.json")),
             "/ws/2/isrc/GBUM72103841" => (404, fixture("mb-isrc-GBUM72103841.json")),
@@ -525,10 +547,10 @@ async fn music_links_join_through_the_hubs_and_list_each_other(pool: sqlx::PgPoo
         })
         .collect();
     // Both editions' derived links, each URL once (the same Apple album came through
-    // iTunes for the first and through Wikidata for the second).
+    // iTunes for the first, in the US storefront, and through Wikidata for the second: one
+    // link, as the storefront is no part of it).
     for expected in [
-        ("Apple Music", "https://music.apple.com/us/album/1097861387"),
-        ("Apple Music", "https://music.apple.com/gb/album/1097861387"),
+        ("Apple Music", "https://music.apple.com/album/1097861387"),
         (
             "Bandcamp",
             "https://radiohead.bandcamp.com/album/ok-computer",
@@ -547,17 +569,28 @@ async fn music_links_join_through_the_hubs_and_list_each_other(pool: sqlx::PgPoo
     let mut once = uris.clone();
     once.dedup();
     assert_eq!(uris.len(), once.len());
-    // iTunes answers the barcode MusicBrainz named: one album, keyed by the barcode.
-    let itunes: String = sqlx::query_scalar(
-        "SELECT uri||' '||key FROM derived_link WHERE resource_id=$1 AND via='itunes'",
+    // iTunes answers the barcode MusicBrainz named with the one album MusicBrainz itself
+    // relates to the release: one link, kept by the source that found it first (`musicbrainz`,
+    // keyed by the release), and iTunes was asked.
+    let apple: Vec<String> = sqlx::query_scalar(
+        "SELECT via||' '||key FROM derived_link WHERE resource_id=$1 AND uri='https://music.apple.com/album/1097861387'",
     )
     .bind(&ids[0])
-    .fetch_one(&pool)
+    .fetch_all(&pool)
     .await
     .unwrap();
     assert_eq!(
-        itunes,
-        "https://music.apple.com/us/album/1097861387 upc:0634904078164"
+        apple,
+        ["musicbrainz mb:release:30702389-5c67-4438-9ea0-2351c8de0f1d"]
+    );
+    assert!(
+        t.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| s.contains("/lookup?upc=0634904078164")),
+        "{:?}",
+        t.seen.lock().unwrap()
     );
     // Album level only: no track, no artist, and never a non-music page.
     for (_, uri, _) in &derived {
@@ -808,7 +841,7 @@ async fn editions_of_one_release_group_take_the_group(pool: sqlx::PgPool) {
     assert_eq!(
         rows("SELECT site||' '||uri FROM derived_link WHERE resource_id=$1 AND source='musicbrainz' ORDER BY site COLLATE \"C\"").await,
         [
-            "Apple Music https://music.apple.com/au/album/1874125260",
+            "Apple Music https://music.apple.com/album/1874125260",
             "Deezer https://www.deezer.com/album/910510411",
             "Qobuz https://open.qobuz.com/album/l048fnzy555c8",
             "Spotify https://open.spotify.com/album/6KFq3hJB6JnNvDbEHRvPoK",
@@ -1029,7 +1062,8 @@ async fn a_deezer_barcode_names_the_apple_album_that_joins(pool: sqlx::PgPool) {
         return;
     }
     let deezer = "https://www.deezer.com/album/41839661";
-    let apple = "https://music.apple.com/us/album/1445304934";
+    // Tagged in any storefront, the album's resource is its storefront-less root.
+    let apple = "https://music.apple.com/album/1445304934";
     let tidal = "https://tidal.com/track/534050211";
     let mut ids = vec![];
     for (uri, kind) in [
@@ -1113,7 +1147,7 @@ async fn a_deezer_barcode_names_the_apple_album_that_joins(pool: sqlx::PgPool) {
             ids[0].clone()
         )
         .await,
-        ["https://music.apple.com/us/album/1445304934 itunes upc:0602557656527"]
+        ["https://music.apple.com/album/1445304934 itunes upc:0602557656527"]
     );
     let group = "SELECT coalesce(group_id,'-') FROM group_unit WHERE resource_id=$1";
     let album = rows(group, ids[0].clone()).await;
@@ -2137,7 +2171,7 @@ async fn discogs_joins_at_its_level(pool: sqlx::PgPool) {
     assert_eq!(
         rows(album_pages, ids[0].clone()).await,
         [
-            "Apple Music https://music.apple.com/us/album/1097861387",
+            "Apple Music https://music.apple.com/album/1097861387",
             "Deezer https://www.deezer.com/album/14879699",
             "Qobuz https://open.qobuz.com/album/0634904078164",
             "Spotify https://open.spotify.com/album/2fGCAYUMssLKiUAoNdxGLx",
@@ -2208,4 +2242,123 @@ async fn a_discogs_release_of_two_release_groups_joins_nothing(pool: sqlx::PgPoo
         seen.iter().any(|s| s.contains("/ws/2/release/132919b9")),
         "{seen:?}"
     );
+}
+
+/// An ISRC MusicBrainz gives to two recordings names the one the track's length picks. A TIDAL
+/// page of 3:34 keys the 3:33 recording and one of 3:00 the 2:59 recording (each by its MBID,
+/// the ISRC a fact); one of 3:16 keys neither; Deezer's own record of a 214 s track decides the
+/// same way. The `musicbrainz` source follows the page's pick too.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_shared_isrc_names_the_recording_the_tracks_length_picks(pool: sqlx::PgPool) {
+    if !has(&["service", "musicbrainz", "deezer"]) {
+        return;
+    }
+    let album = "mb:recording:8f3471b5-7e6a-48da-86a9-c1c07a0f47ae";
+    let edit = "mb:recording:e00ebb77-541e-41f3-86ba-a90530414922";
+    let mut ids = vec![];
+    for (uri, duration) in [
+        ("https://tidal.com/track/491206012", "PT3M34S"),
+        ("https://tidal.com/track/491206013", "PT3M"),
+        ("https://tidal.com/track/491206014", "PT3M16S"),
+    ] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut d = ResourceMeta::new(uri, "jsonld", 86400);
+        d.set_type("MusicRecording");
+        d.name = Some("Never Gonna Give You Up".into());
+        d.attributes.insert("isrc".into(), "GBARL9300135".into());
+        d.attributes.insert("artist".into(), "Rick Astley".into());
+        d.attributes.insert("duration".into(), duration.into());
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        ids.push(id);
+    }
+    let deezer = "https://www.deezer.com/track/3750996073";
+    let deezer_id = store::ensure_resource(&pool, deezer).await.unwrap();
+    let mut d = ResourceMeta::new(deezer, "jsonld", 86400);
+    d.set_type("MusicRecording");
+    store::save_document(&pool, &deezer_id, 0, &d)
+        .await
+        .unwrap();
+    let t = Arc::new(Recorded {
+        seen: Mutex::default(),
+    });
+    let mut config = Config::default();
+    config.also_on.sources.insert(
+        "deezer".into(),
+        also_on::SourceOptions {
+            enabled: Some(true),
+            ..Default::default()
+        },
+    );
+    let cx = also_on::Context {
+        egress: egress(t.clone()),
+        config: Arc::new(config),
+    };
+    sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    also_on::drain(&pool, &cx, &also_on::registry(), 100)
+        .await
+        .unwrap();
+    let rows = |sql: &'static str, id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, String>(sql)
+                .bind(id)
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let keys = "SELECT key||' '||source||' '||via FROM resource_key WHERE resource_id=$1 ORDER BY key COLLATE \"C\",source";
+    let facts = "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 AND name='isrc'";
+    // The page's pick is the key (one row per key: the `service` source records it first); the
+    // `musicbrainz` source followed the same pick, and the shared ISRC stays a fact there too.
+    let long = rows(keys, ids[0].clone()).await;
+    assert_eq!(long, [format!("{album} service tidal")]);
+    let short = rows(keys, ids[1].clone()).await;
+    assert_eq!(short, [format!("{edit} service tidal")]);
+    // So Deezer is never asked for the shared ISRC on the 3:00 track's behalf: it would answer
+    // with its 3:34 track (the album recording's).
+    let deezer_links = "SELECT uri FROM derived_link WHERE resource_id=$1 AND source='deezer'";
+    assert!(rows(deezer_links, ids[1].clone()).await.is_empty());
+    // Neither recording is within 3 s of 3:16: the ISRC stays a fact, and MusicBrainz relates
+    // the URL to nothing.
+    let between = rows(keys, ids[2].clone()).await;
+    assert!(
+        !between
+            .iter()
+            .any(|k| k.ends_with("service tidal") || k.ends_with("musicbrainz musicbrainz")),
+        "{between:?}"
+    );
+    for id in &ids {
+        assert_eq!(rows(facts, id.clone()).await, ["isrc GBARL9300135"]);
+    }
+    let own = rows(keys, deezer_id.clone()).await;
+    assert!(own.contains(&format!("{album} deezer deezer")), "{own:?}");
+    assert!(!own.iter().any(|k| k.starts_with("isrc:")), "{own:?}");
+    assert_eq!(rows(facts, deezer_id).await, ["isrc GBARL9300135"]);
+    // The pick is a unit rule too: one within the window, every other known and outside.
+    let r = |mbid: &str, ms: Option<u64>| musicbrainz::IsrcRecording {
+        mbid: mbid.into(),
+        length_ms: ms,
+    };
+    let (a, b) = (r("a", Some(212_946)), r("b", Some(178_933)));
+    let pick = |rs: &[musicbrainz::IsrcRecording], secs: Option<i64>| {
+        pinakes_core::music_sources::picked(rs, secs)
+    };
+    assert_eq!(
+        pick(&[a.clone(), b.clone()], Some(214)).as_deref(),
+        Some("a")
+    );
+    assert_eq!(
+        pick(&[a.clone(), b.clone()], Some(180)).as_deref(),
+        Some("b")
+    );
+    assert_eq!(pick(&[a.clone(), b.clone()], Some(196)), None);
+    assert_eq!(pick(&[a.clone(), b.clone()], None), None);
+    // A recording without a length could be the one: no decision.
+    assert_eq!(pick(&[a.clone(), r("c", None)], Some(214)), None);
+    // Two within the window: no decision.
+    assert_eq!(pick(&[a.clone(), r("d", Some(211_000))], Some(213)), None);
 }

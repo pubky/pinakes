@@ -134,6 +134,11 @@ async fn serve(config: Option<PathBuf>, command: Command) -> Result<()> {
         config.clone(),
         shutdown_rx.clone(),
     ));
+    let same_recording_task = tokio::spawn(pinakes_core::same_recording::run(
+        pool.clone(),
+        config.clone(),
+        shutdown_rx.clone(),
+    ));
     let maintenance_task = tokio::spawn(pinakes_core::maintenance::run(
         pool.clone(),
         config.grace_days,
@@ -181,6 +186,7 @@ async fn serve(config: Option<PathBuf>, command: Command) -> Result<()> {
     dump_task.await?;
     group_task.await?;
     same_event_task.await?;
+    same_recording_task.await?;
     while let Some(result) = workers.join_next().await {
         result?;
     }

@@ -326,8 +326,9 @@ pub enum UtcSeriesWallClock {
     /// Never: UTC series always expand in UTC.
     Never,
 }
-/// The same-event hint (`maybe_same` on event cards): `on` or `off`.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+/// A "possibly the same" hint (`maybe_same` on event cards, `[event] same_event_hint`; on
+/// recording cards, `[groups] same_recording_hint`): `on` or `off`.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SameEventHint {
     #[default]

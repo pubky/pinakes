@@ -233,6 +233,7 @@ deny_hosts = []
 [groups]
 enabled = true
 cross_container_occurrences = "off" # Or "corroborated": the cross-feed ICS UID mode.
+same_recording_hint = "on" # Recording cards name recordings that are possibly the same one (maybe_same).
 
 # "Also on": the same thing on other services, from hubs and exact lookups (docs/api.md).
 [also_on]

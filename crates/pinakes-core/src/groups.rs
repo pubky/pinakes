@@ -9,6 +9,9 @@ use utoipa::ToSchema;
 pub struct GroupConfig {
     pub enabled: bool,
     pub cross_container_occurrences: CrossContainerOccurrences,
+    /// Recording cards name other recordings that are possibly the same one (`maybe_same`,
+    /// `same_recording`): `on` or `off`. Not a grouping setting (`policy`).
+    pub same_recording_hint: crate::config::SameEventHint,
     #[serde(skip)]
     pub max_members: usize,
     #[serde(skip)]
@@ -31,6 +34,7 @@ impl Default for GroupConfig {
         Self {
             enabled: true,
             cross_container_occurrences: CrossContainerOccurrences::Off,
+            same_recording_hint: crate::config::SameEventHint::On,
             max_members: 256,
             max_distance_m: 500.0,
             max_graph_units: 20000,

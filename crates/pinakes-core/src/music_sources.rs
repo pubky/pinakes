@@ -67,14 +67,75 @@ pub(crate) fn own_isrc(subject: &Subject) -> Option<String> {
         .map(|(_, isrc)| isrc)
 }
 
-/// Whether MusicBrainz gives `isrc` to several recordings: such an ISRC names none of them, so
-/// it is a fact, never a key.
-pub(crate) async fn shared_isrc(cx: &Context, isrc: &str) -> Result<bool> {
-    Ok(
-        musicbrainz::isrc(&cx.egress, cx.config.also_on.musicbrainz_base(), isrc)
-            .await?
-            .is_some_and(|recordings| recordings.len() > 1),
-    )
+/// The length of a track as its service's page or record states it, in seconds (`duration`,
+/// an ISO 8601 duration in the document's attributes).
+pub(crate) fn page_duration(subject: &Subject) -> Option<i64> {
+    duration_secs(subject.doc.as_ref()?.attributes.get("duration")?)
+}
+/// An ISO 8601 duration as seconds, when it is a track's length (a second to a day).
+pub(crate) fn duration_secs(iso: &str) -> Option<i64> {
+    crate::event::time::duration(iso)
+        .map(|d| d.num_seconds())
+        .filter(|s| (1..=86_400).contains(s))
+}
+/// How far a service's duration may be from a recording's length for the recording to be the
+/// track's, in seconds.
+pub const LENGTH_WINDOW_SECS: u64 = 3;
+/// What an ISRC a service states for its own track names on MusicBrainz.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IsrcMatch {
+    /// MusicBrainz knows no recording with it: the ISRC is the track's own key.
+    Unknown,
+    /// Exactly one recording has it: the ISRC is a key, and names that recording.
+    One(String),
+    /// Several recordings have it, and the service's duration picks one: the recording whose
+    /// length is within [`LENGTH_WINDOW_SECS`] of it while every other's is known and is not.
+    /// The recording's MBID is the key; the ISRC stays a fact.
+    Picked(String),
+    /// Several recordings have it and nothing tells them apart: the ISRC is a fact only, as a
+    /// key would join whichever of their groups took it first.
+    Shared,
+}
+/// Which recording `isrc`, a service's own record of its track, names: see [`IsrcMatch`].
+/// `duration` is the track's length by the service, in seconds.
+pub(crate) async fn isrc_match(
+    cx: &Context,
+    isrc: &str,
+    duration: Option<i64>,
+) -> Result<IsrcMatch> {
+    let recordings =
+        musicbrainz::isrc(&cx.egress, cx.config.also_on.musicbrainz_base(), isrc).await?;
+    Ok(match recordings.as_deref() {
+        None | Some([]) => IsrcMatch::Unknown,
+        Some([one]) => IsrcMatch::One(one.mbid.clone()),
+        Some(several) => picked(several, duration).map_or(IsrcMatch::Shared, IsrcMatch::Picked),
+    })
+}
+/// Of several recordings, the one a track's `duration` picks: its length is within
+/// [`LENGTH_WINDOW_SECS`] of it, and every other recording's length is known and is not.
+pub fn picked(recordings: &[musicbrainz::IsrcRecording], duration: Option<i64>) -> Option<String> {
+    let secs = u64::try_from(duration?).ok()?;
+    let close = |r: &musicbrainz::IsrcRecording| {
+        r.length_ms
+            .map(|ms| ms.abs_diff(secs * 1000) <= LENGTH_WINDOW_SECS * 1000)
+    };
+    let mut near = recordings.iter().filter(|r| close(r) == Some(true));
+    let one = near.next()?;
+    (near.next().is_none() && recordings.iter().all(|r| close(r).is_some()))
+        .then(|| one.mbid.clone())
+}
+/// The key a service's own ISRC gives its track (`via` the service): the ISRC itself, or the
+/// recording a shared ISRC's duration picked; none for a shared ISRC nothing tells apart.
+pub(crate) fn isrc_key(isrc: &str, found: &IsrcMatch, via: &str) -> Option<crate::also_on::Key> {
+    let key = match found {
+        IsrcMatch::Unknown | IsrcMatch::One(_) => format!("isrc:{isrc}"),
+        IsrcMatch::Picked(mbid) => hubs::key::mb(MbKind::Recording, mbid)?,
+        IsrcMatch::Shared => return None,
+    };
+    Some(crate::also_on::Key {
+        key,
+        via: via.into(),
+    })
 }
 
 /// A MusicBrainz page's card, from the entity MusicBrainz serves (`musicbrainz_entity` reads the
@@ -171,7 +232,9 @@ pub fn artist_link(url: &str) -> Option<ArtistLink> {
 /// (`kind`, `ids`): their MBIDs (the release group's alone for several releases), the recording's
 /// ISRCs and the release's barcode as keys, their facts, and their current links on music
 /// services at `level`, each keyed by the entity MusicBrainz names it on. Nothing when an entity
-/// is unknown, or when several releases are of different release groups.
+/// is unknown, or when several releases are of different release groups. `shared` are ISRCs
+/// known to be on several recordings (the one a track's length picked among them): they stay
+/// facts, never keys, as a key would join whichever recording's group took it first.
 pub(crate) async fn entities_found(
     cx: &Context,
     base: &str,
@@ -179,6 +242,7 @@ pub(crate) async fn entities_found(
     ids: &[String],
     level: Level,
     edition: bool,
+    shared: &[String],
 ) -> Result<Found> {
     let mut entities = vec![];
     for id in ids {
@@ -216,7 +280,12 @@ pub(crate) async fn entities_found(
         _ if entities.len() > 1 => return Ok(Found::default()),
         _ => {}
     }
-    for isrc in entity.isrcs.iter().take(MAX_ISRC_KEYS) {
+    for isrc in entity
+        .isrcs
+        .iter()
+        .filter(|i| !shared.contains(i))
+        .take(MAX_ISRC_KEYS)
+    {
         found.keys.push(Key {
             key: format!("isrc:{isrc}"),
             via: "musicbrainz".into(),
@@ -316,7 +385,7 @@ pub(crate) fn facts(entity: &musicbrainz::Entity) -> Vec<crate::also_on::Fact> {
 }
 
 /// The Wikidata properties of music services, by service and level, and how each value makes
-/// a URL (`{sf}` is the Apple storefront).
+/// a URL (an Apple Music link has no storefront).
 pub(crate) const PROPERTIES: &[(&str, Service, Level, &str)] = &[
     (
         "P2207",
@@ -340,19 +409,19 @@ pub(crate) const PROPERTIES: &[(&str, Service, Level, &str)] = &[
         "P10110",
         Service::AppleMusic,
         Level::Track,
-        "https://music.apple.com/{sf}/song/{}",
+        "https://music.apple.com/song/{}",
     ),
     (
         "P2281",
         Service::AppleMusic,
         Level::Album,
-        "https://music.apple.com/{sf}/album/{}",
+        "https://music.apple.com/album/{}",
     ),
     (
         "P2850",
         Service::AppleMusic,
         Level::Artist,
-        "https://music.apple.com/{sf}/artist/{}",
+        "https://music.apple.com/artist/{}",
     ),
     (
         "P2724",
@@ -590,7 +659,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             (link.uri.as_str(), link.site.as_str()),
-            ("https://music.apple.com/gb/album/1097861387", "Apple Music")
+            ("https://music.apple.com/album/1097861387", "Apple Music")
         );
     }
 
@@ -667,10 +736,14 @@ mod tests {
         assert!(super::found(&item(&[spotify, work]), Level::Track, "us")
             .links
             .is_empty());
-        // Property values become valid URLs: the Apple storefront fills its place.
+        // Property values become valid URLs: a storefront fills its place where a template has one.
         assert_eq!(
-            property_url("https://music.apple.com/{sf}/album/{}", "1097861387", "gb"),
-            "https://music.apple.com/gb/album/1097861387"
+            property_url("https://books.apple.com/{sf}/book/id{}", "721429965", "gb"),
+            "https://books.apple.com/gb/book/id721429965"
+        );
+        assert_eq!(
+            property_url("https://music.apple.com/album/{}", "1097861387", "gb"),
+            "https://music.apple.com/album/1097861387"
         );
     }
     /// A performer's links name the artist only where a hub or MusicBrainz can: a MusicBrainz

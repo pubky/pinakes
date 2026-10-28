@@ -1,7 +1,8 @@
 //! TIDAL's own record of its own album or track, from TIDAL's developer API: an album's barcode
 //! (`barcodeId`) as the key `upc:…` and a track's ISRC (`isrc`) as `isrc:…`, so the lookups by
 //! barcode and ISRC after it (Deezer, iTunes) join the rest. An ISRC MusicBrainz gives to several
-//! recordings is a fact only, as a track page's own ISRC is (`music_sources::shared_isrc`).
+//! recordings keys the one the track's duration picks, else is a fact only, as a track page's
+//! own ISRC is (`music_sources::isrc_match`).
 //!
 //! Asked only with an operator's client ID and secret (`[tidal]`, or `PINAKES_TIDAL_CLIENT_ID`
 //! and `PINAKES_TIDAL_CLIENT_SECRET`), through the client-credentials grant. A batch of links asks
@@ -204,11 +205,21 @@ impl Source for Tidal {
             return Ok(found);
         };
         let namespace = kind.namespace();
-        if kind == Kind::Album || !crate::music_sources::shared_isrc(cx, &value).await? {
-            found.keys.push(Key {
+        match kind {
+            Kind::Album => found.keys.push(Key {
                 key: format!("{namespace}:{value}"),
                 via: "tidal".into(),
-            });
+            }),
+            // A track's ISRC names its recording as the track's length tells (`isrc_match`).
+            Kind::Track => {
+                let duration = attributes["duration"]
+                    .as_str()
+                    .and_then(crate::music_sources::duration_secs);
+                let named = crate::music_sources::isrc_match(cx, &value, duration).await?;
+                found
+                    .keys
+                    .extend(crate::music_sources::isrc_key(&value, &named, "tidal"));
+            }
         }
         found.facts.push(Fact::new(namespace, value));
         Ok(found)

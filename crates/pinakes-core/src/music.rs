@@ -2,9 +2,9 @@
 //! canonical URL each object has, read from the URL alone (no network).
 //!
 //! Every spelling of one object on one service (a country or language path, `intl-xx`, the
-//! `spotify:` URI, `youtu.be`, `music.youtube.com`, `listen.tidal.com`, an Apple Music album
-//! URL with `?i=` for one of its tracks, tracking parameters) folds into its canonical URL, an
-//! alias (`alias::root`). Short links that need a request to expand (`spotify.link`,
+//! `spotify:` URI, `youtu.be`, `music.youtube.com`, `listen.tidal.com`, an Apple Music
+//! storefront or an album URL with `?i=` for one of its tracks, tracking parameters) folds into
+//! its canonical URL, an alias (`alias::root`). Short links that need a request to expand (`spotify.link`,
 //! `deezer.page.link`, `on.soundcloud.com`) are not folded.
 use url::Url;
 
@@ -548,14 +548,59 @@ fn youtube_video(id: &str) -> Option<Link> {
         format!("https://www.youtube.com/watch?v={id}"),
     )
 }
-/// Apple Music: `/{country}/{kind}/{slug?}/{id}`, and an album URL with `?i=` names one track.
-fn apple(segments: &[&str], track: Option<String>) -> Option<Link> {
-    let [country, kind, rest @ ..] = segments else {
-        return None;
-    };
-    if country.len() != 2 || !country.bytes().all(|b| b.is_ascii_lowercase()) {
+/// The storefronts a hub may store an Apple Music link under (MusicBrainz keeps the storefront
+/// an editor browsed), asked together ([`hub_spellings`]).
+pub const APPLE_STOREFRONTS: &[&str] = &[
+    "us", "gb", "de", "fr", "jp", "au", "ca", "es", "it", "nl", "se", "ch", "at", "br", "mx", "kr",
+    "pl", "ie", "nz", "be",
+];
+/// An Apple Music link as a storefront spells it (`https://music.apple.com/{storefront}/{kind}/{id}`);
+/// `None` for another service or a video.
+pub fn apple_spelling(link: &Link, storefront: &str) -> Option<String> {
+    if link.service != Service::AppleMusic {
         return None;
     }
+    let kind = match link.level {
+        Level::Track => "song",
+        Level::Album => "album",
+        Level::Artist => "artist",
+        Level::Playlist => "playlist",
+        Level::Video => return None,
+    };
+    Some(format!(
+        "https://music.apple.com/{storefront}/{kind}/{}",
+        link.id
+    ))
+}
+/// The URL forms a hub may store for `uri`: an Apple Music link's storefront spellings
+/// ([`APPLE_STOREFRONTS`]), any other URL itself.
+pub fn hub_spellings(uri: &str) -> Vec<String> {
+    parse(uri)
+        .filter(|l| l.service == Service::AppleMusic)
+        .map(|l| {
+            APPLE_STOREFRONTS
+                .iter()
+                .filter_map(|sf| apple_spelling(&l, sf))
+                .collect()
+        })
+        .filter(|s: &Vec<String>| !s.is_empty())
+        .unwrap_or_else(|| vec![uri.to_owned()])
+}
+/// Apple Music: `/{storefront}/{kind}/{slug?}/{id}` or `/{kind}/{slug?}/{id}`, and an album URL
+/// with `?i=` names one track. The catalogue ID is global, so every storefront's page is one
+/// object: the canonical URL has no storefront (Apple answers it with the viewer's).
+fn apple(segments: &[&str], track: Option<String>) -> Option<Link> {
+    let segments = match segments {
+        [country, rest @ ..]
+            if country.len() == 2 && country.bytes().all(|b| b.is_ascii_lowercase()) =>
+        {
+            rest
+        }
+        rest => rest,
+    };
+    let [kind, rest @ ..] = segments else {
+        return None;
+    };
     let id = *rest.last()?;
     let id_ok = |id: &str| {
         if *kind == "playlist" {
@@ -575,7 +620,7 @@ fn apple(segments: &[&str], track: Option<String>) -> Option<Link> {
             Service::AppleMusic,
             Level::Track,
             track,
-            format!("https://music.apple.com/{country}/song/{track}"),
+            format!("https://music.apple.com/song/{track}"),
         );
     }
     let level = match *kind {
@@ -589,7 +634,7 @@ fn apple(segments: &[&str], track: Option<String>) -> Option<Link> {
         Service::AppleMusic,
         level,
         id,
-        format!("https://music.apple.com/{country}/{kind}/{id}"),
+        format!("https://music.apple.com/{kind}/{id}"),
     )
 }
 
@@ -719,23 +764,39 @@ mod tests {
             ),
             (
                 "https://music.apple.com/gb/album/ok-computer/1097861387?i=1097861770&ls=1",
-                "https://music.apple.com/gb/song/1097861770",
+                "https://music.apple.com/song/1097861770",
                 Level::Track,
             ),
             (
                 "https://music.apple.com/gb/album/ok-computer/1097861387",
-                "https://music.apple.com/gb/album/1097861387",
+                "https://music.apple.com/album/1097861387",
                 Level::Album,
             ),
             (
                 "https://music.apple.com/us/song/paranoid-android/1097861770",
-                "https://music.apple.com/us/song/1097861770",
+                "https://music.apple.com/song/1097861770",
                 Level::Track,
             ),
             (
                 "https://music.apple.com/us/artist/radiohead/657515",
-                "https://music.apple.com/us/artist/657515",
+                "https://music.apple.com/artist/657515",
                 Level::Artist,
+            ),
+            // Any storefront, and none: one object.
+            (
+                "https://music.apple.com/ch/song/bohemian-rhapsody/6781024437",
+                "https://music.apple.com/song/6781024437",
+                Level::Track,
+            ),
+            (
+                "https://music.apple.com/album/1097861387?i=1097861770",
+                "https://music.apple.com/song/1097861770",
+                Level::Track,
+            ),
+            (
+                "https://music.apple.com/playlist/pl.u-8aAVZaJcb3Lvj8",
+                "https://music.apple.com/playlist/pl.u-8aAVZaJcb3Lvj8",
+                Level::Playlist,
             ),
             (
                 "https://youtu.be/dQw4w9WgXcQ?si=x",
@@ -794,12 +855,12 @@ mod tests {
             ),
             (
                 "https://itunes.apple.com/gb/album/id1237917085",
-                "https://music.apple.com/gb/album/1237917085",
+                "https://music.apple.com/album/1237917085",
                 Level::Album,
             ),
             (
                 "https://itunes.apple.com/us/album/cut-to-the-feeling/id1237917085?i=1237917090&uo=4",
-                "https://music.apple.com/us/song/1237917090",
+                "https://music.apple.com/song/1237917090",
                 Level::Track,
             ),
             (
@@ -852,6 +913,31 @@ mod tests {
                 "{expected}"
             );
         }
+    }
+
+    /// A hub stores an Apple Music link under a storefront: the spellings asked are one per
+    /// storefront, each a spelling of the one object; any other link is asked as it is.
+    #[test]
+    fn an_apple_link_has_a_spelling_per_storefront() {
+        let spellings = hub_spellings("https://music.apple.com/song/1097861770");
+        assert_eq!(spellings.len(), APPLE_STOREFRONTS.len());
+        assert!(spellings.contains(&"https://music.apple.com/gb/song/1097861770".to_owned()));
+        assert!(spellings.contains(&"https://music.apple.com/us/song/1097861770".to_owned()));
+        assert!(spellings
+            .iter()
+            .all(|s| canonical(s).as_deref() == Some("https://music.apple.com/song/1097861770")));
+        assert_eq!(
+            hub_spellings("https://music.apple.com/ch/album/x/1097861387"),
+            hub_spellings("https://music.apple.com/album/1097861387")
+        );
+        assert_eq!(
+            hub_spellings("https://tidal.com/track/58990512"),
+            ["https://tidal.com/track/58990512"]
+        );
+        assert_eq!(
+            hub_spellings("https://example.org/x"),
+            ["https://example.org/x"]
+        );
     }
 
     #[test]
@@ -963,6 +1049,7 @@ mod tests {
             "https://spotify.link/abc",
             "https://music.apple.com/gb/browse",
             "https://music.apple.com/gbr/album/x/1",
+            "https://music.apple.com/album/x/1/2/3",
             "https://www.youtube.com/watch?v=short",
             "https://www.youtube.com/@radiohead",
             "https://www.deezer.com/en/track/abc",

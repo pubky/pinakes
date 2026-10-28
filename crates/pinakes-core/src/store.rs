@@ -406,6 +406,19 @@ pub(crate) async fn lock_writers(
     .await?;
     Ok(())
 }
+/// Notes a write that search pages must see but no trigger counts (the hint passes' pairs): one
+/// `search_write` row for this transaction, as `bump_search_revision` leaves for the indexed
+/// tables. A page reads the revision and the pairs in one snapshot, so a page that has not seen
+/// the pairs is never answered 304 (a sequence would move outside the snapshot).
+pub async fn note_search_write(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
+    sqlx::query("INSERT INTO search_write(writes) SELECT 1 WHERE current_setting('pinakes.search_write',true) IS DISTINCT FROM 'on'")
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("SELECT set_config('pinakes.search_write','on',true)")
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
 /// Fold the counted write transactions into one row, so reading the revision stays one short
 /// sum. Readers see either the rows or their sum, never both, so their revisions do not change.
 pub async fn compact_search_writes(pool: &PgPool) -> Result<u64> {

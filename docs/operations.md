@@ -181,6 +181,14 @@ UPDATE same_event_unit SET fingerprint='';
 INSERT INTO same_event_dirty(resource_id) SELECT DISTINCT resource_id FROM same_event_unit ON CONFLICT DO NOTHING;
 ```
 
+**Same-recording hint rebuild** (after a change of the title normaliser, `matching.rs`), the
+same way:
+
+```sql
+UPDATE same_recording_unit SET fingerprint='';
+INSERT INTO same_recording_dirty(resource_id) SELECT resource_id FROM same_recording_unit ON CONFLICT DO NOTHING;
+```
+
 ## Deployment and egress
 
 Web fetches bypass environment proxies, validate every DNS answer, pin the checked addresses and
@@ -614,8 +622,8 @@ service keeps failing, or the wait the service named when longer. A run in which
 answers resets it.
 The sources run in the order [docs/sources](sources/README.md#also-on) lists them (each page says
 what its source reads and costs); `[also_on] apple_storefront` (`us`, a
-two-letter country code) is the Apple Music, Apple Books and Apple Podcasts storefront of the
-Apple links they build. `[also_on.sources.musicbrainz] base_url`
+two-letter country code) is the storefront the iTunes lookups ask and the Apple Books and Apple
+Podcasts links carry (Apple Music links carry none). `[also_on.sources.musicbrainz] base_url`
 (`https://musicbrainz.org/ws/2`) points every MusicBrainz read at a mirror's web service instead
 (every source that reads MusicBrainz, and the cards of MusicBrainz pages), an http(s) URL without a
 trailing slash and reached through the egress policy;
@@ -663,6 +671,25 @@ at once. Writer lock contention retries after one to three seconds; curation wai
 seconds and answers 503 with Retry-After. `groups.cross_container_occurrences = "corroborated"`
 also joins one UID across feeds when the instances are within 500 m, 300 s and a name similarity
 of 0.5; a determined publisher can copy that, so it is off by default.
+
+`groups.same_recording_hint` (default `"on"`; `"off"`) puts `maybe_same` on `MusicRecording`
+cards: other recordings that are possibly the same one ([the
+rule](api.md#possibly-the-same-recording): the same normalised title and first artist, a length
+within 3 s), which no key joins. A background pass in the daemon computes it: triggers queue a
+recording when its name, type, status, page artist or duration changes, or an artist or duration
+fact of it is read or expires; each pass takes up to 25 queued resources, and the next follows at
+once while there was work, else after five seconds. A recording's normalised title and artist and
+its length are stored once read, and its pairs are matched among the recordings already read. A
+recording keeps its best twenty pairs and is named by at most forty, and never names one whose
+forty all rank above it; one that changes or goes (no longer a recording, or deleted as an orphan)
+takes its pairs from the recordings that named it, and those are queued to refill their lists, as
+is one whose pair the caps pushed out. Each change to the pairs moves the search revision in its
+own transaction, so a search page's `ETag` covers the hints it shows. An hourly sweep, which also
+runs at startup, queues recordings never read (a database from before the
+hint) and drops the units of resources that are no longer recordings. Requests only read the
+stored pairs, leaving out the card's own group members. `"off"` stops the pass and removes the
+field from recording cards (and from `/v1/openapi.json` when the event hint is off
+too); the stored pairs stay.
 
 Tenant rules (`data/multi-tenant-hosts.json`) say which part of a multi-tenant host is one
 publisher; the canonical [alias](api.md#aliases) rule needs the same tenant. A rule is
