@@ -3157,6 +3157,61 @@ async fn a_gone_social_post_gets_no_also_on_results(pool: PgPool) {
     assert!(!queued(id).await);
 }
 
+/// A gone post queued again (a failed refresh moves its row's status, which queues it) gets no
+/// lookups: the worker skips every source and drops its queue row.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_gone_post_queued_again_gets_no_lookups(pool: PgPool) {
+    let uri = "https://example.social/@alice/1";
+    let id = social_post(&pool, uri).await;
+    delete_post(&pool, &id, uri).await;
+    let generation: i64 = sqlx::query_scalar("SELECT generation FROM resource WHERE id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let job = pinakes_core::queue::Job {
+        id: id.clone(),
+        uri: uri.into(),
+        attempts: 0,
+        generation,
+    };
+    pinakes_core::queue::failed(&pool, &job, &Default::default(), "http_5xx")
+        .await
+        .unwrap();
+    let queued = || async {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM also_on_dirty WHERE resource_id=$1)",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    assert!(queued().await);
+    let any = Arc::new(Any::default());
+    let sources: Vec<Arc<dyn Source>> = vec![any.clone()];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    assert_eq!(*any.0.lock().unwrap(), 0);
+    assert!(!queued().await);
+    assert_eq!(derived(&pool, &id).await, 0);
+}
+/// A source that applies to every resource, counting its lookups.
+#[derive(Default)]
+struct Any(Mutex<usize>);
+#[async_trait]
+impl Source for Any {
+    fn id(&self) -> &'static str {
+        "any"
+    }
+    fn applies(&self, _: &Subject) -> bool {
+        true
+    }
+    async fn lookup(&self, _: &Context, subject: &Subject) -> anyhow::Result<Found> {
+        *self.0.lock().unwrap() += 1;
+        Ok(archived(&subject.uri))
+    }
+}
+
 /// A lookup whose resource became another link's alias while it ran writes nothing: an alias
 /// runs no lookups, its root's do.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
