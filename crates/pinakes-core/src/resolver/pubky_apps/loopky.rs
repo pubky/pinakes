@@ -9,6 +9,7 @@ pub static PROFILE: Profile = Profile {
     kinds: &[Kind {
         path: "decks/{deck}/manifest.json",
         read: deck,
+        versions: false,
         open_in: &[Client {
             client: "Loopky",
             url: "https://loopky.app/deck/?author={owner}&id={deck}",

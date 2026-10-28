@@ -117,11 +117,12 @@ CREATE TABLE resource_alias (
 );
 CREATE INDEX resource_alias_root ON resource_alias USING btree (root_id);
 
--- One reference from the Nexus feed (a tag, reply, embed, collection entry or event), keyed by
--- the object that makes it; an event reference carries its own times and status.
+-- One reference from the Nexus feed (a tag, reply, embed, collection entry, event, or a post
+-- naming itself), keyed by the object that makes it; an event reference carries its own times
+-- and status.
 CREATE TABLE reference (
     resource_id text NOT NULL REFERENCES resource(id) ON DELETE CASCADE,
-    kind text NOT NULL CONSTRAINT reference_kind_check CHECK (kind IN ('tag', 'reply', 'embed', 'collection', 'event')),
+    kind text NOT NULL CONSTRAINT reference_kind_check CHECK (kind IN ('tag', 'reply', 'embed', 'collection', 'event', 'post')),
     author text NOT NULL,
     label text,
     object_path text NOT NULL,
@@ -152,10 +153,12 @@ CREATE INDEX reference_resource_created_idx ON reference USING btree (resource_i
 CREATE INDEX reference_resource_tag_idx ON reference USING btree (resource_id, created_at) WHERE kind = 'tag';
 CREATE INDEX reference_start_idx ON reference USING btree (start_at);
 
--- References as they count: an alias's count for its root.
+-- References as they count: an alias's count for its root, posts' own rows left out.
 CREATE VIEW effective_reference AS
     SELECT coalesce(a.root_id, f.resource_id) AS resource_id, f.author, f.object_path, f.kind, f.label, f.created_at
-    FROM reference f LEFT JOIN resource_alias a ON a.alias_id = f.resource_id;
+    FROM reference f LEFT JOIN resource_alias a ON a.alias_id = f.resource_id
+    -- A post's own row keeps its card alive; it references nothing else, so it does not count.
+    WHERE f.kind <> 'post';
 
 -- Resources a page derives (an event adapter's entries), each with its adapter and when the
 -- link lapses.

@@ -352,10 +352,13 @@ the guide stays.
 `uri`, normalized and hashed into its own ID (Nexus's `resource_id` is not read); a URI that does
 not normalize is rejected (`uri`). A line's author must be 52
 lowercase z-base-32 characters; labels and object paths must be non-empty, NUL-free and within
-`limits.max_label_bytes` and `limits.max_object_path_bytes`. A bad line is skipped and counted in
-`pinakes_ingest_rejected_total{reason}` (`author`, `label`, `object_path`, `uri`, `timestamp`,
-`event`, `panic`) after the batch commits; the cursor still advances. Each line runs in a
-savepoint: a line whose processing panics is rolled back alone and skipped (`panic`; the log
+`limits.max_label_bytes` and `limits.max_object_path_bytes`. A page is parsed line by line: a line
+of a kind this build does not read (`unknown_kind`, a newer Nexus's) or one it cannot parse
+(`malformed`) is skipped without its content in any log, and only the page's envelope (`lines`,
+`next_cursor`) must be well formed. A bad line is skipped and counted in
+`pinakes_ingest_rejected_total{reason}` (`unknown_kind`, `malformed`, `author`, `label`,
+`object_path`, `uri`, `timestamp`, `social`, `panic`) after the batch commits; the cursor still advances
+past it. Each line runs in a savepoint: a line whose processing panics is rolled back alone and skipped (`panic`; the log
 line names its feed position only, never its content). A panic anywhere else in a poll (the
 batch's score update or cursor write, say) is an error: the batch rolls back, the cursor holds,
 `pinakes_ingest_panics_total` counts it and the poll is retried. A feed epoch change, or a
@@ -363,6 +366,20 @@ cursor beyond the feed's length, clears the reference projection and scores and 
 zero; resource documents stay through the grace period. A resource without references is
 deleted `limits.grace_days` after it became orphaned, previews included. A Nexus outage leaves
 cached data served and polling retries.
+
+### Posts
+
+Apps' posts come on the same feed as `post` lines: the line's `uri` is the post itself,
+versionless (`pubky://<author>/pub/<namespace>/v1/posts/{id}`), and its `object_path` the version
+file written (`…/{id}/{editId}.json`). The URI must be a post in its author's own storage (else
+`uri`) and the object path a version file directly in it (else `object_path`). Social events and
+rsvps are Nexus's (owner decision, 2026-10-26): Nexus indexes them, and a `post` line for a
+social specs' post (`/pub/social/…`) is rejected (`social`), queuing and fetching nothing. A post line is a reference of the post to itself, keyed by its version file like
+any reference: it keeps the post's card alive and counts nowhere (scores, trending, reference
+filters). The post is queued as any `pubky://` object; a new version, or a deleted one, makes its
+card due at once whatever its TTL. The Pubky resolver lists the post's folder newest first and reads
+the latest version by its namespace and kind ([Pubky apps](pubky-apps.md#posts)); a post without
+a version left is `missing`. A `kind:event` line, which Nexus reserves, is `unknown_kind`.
 
 Search's `reach` and `boost` read the viewer's `following` and `friends` lists from the same
 Nexus. `nexus_reach_set` (default `false`) says that Nexus also serves the reach-set route

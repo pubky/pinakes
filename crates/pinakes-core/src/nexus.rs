@@ -21,7 +21,10 @@ pub enum Kind {
     Reply,
     Embed,
     Collection,
-    Event,
+    /// An app's post, which names itself (a social specs' post is rejected: Nexus's): `uri` is the post
+    /// (`pubky://<author>/pub/<namespace>/v1/posts/{id}`), `object_path` its version file
+    /// (`…/{id}/{editId}.json`).
+    Post,
 }
 impl Kind {
     pub fn as_str(&self) -> &'static str {
@@ -30,7 +33,7 @@ impl Kind {
             Self::Reply => "reply",
             Self::Embed => "embed",
             Self::Collection => "collection",
-            Self::Event => "event",
+            Self::Post => "post",
         }
     }
 }
@@ -45,16 +48,58 @@ pub struct Change {
     pub object_path: String,
     pub label: Option<String>,
     pub at: i64,
-    pub recurrence_id: Option<String>,
-    #[serde(default)]
-    pub status: Option<String>,
-    pub start: Option<i64>,
-    pub end: Option<i64>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Changes {
     pub lines: Vec<Change>,
     pub next_cursor: i64,
+    /// The lines of the page this build cannot read, skipped, by reason (`unknown_kind`: a kind
+    /// this build does not know, `malformed`: anything else), never their content: the cursor
+    /// moves past them (`ingest::apply` counts them with the lines it read).
+    #[serde(skip)]
+    pub skipped: std::collections::BTreeMap<&'static str, u64>,
+}
+/// The reasons a feed line is skipped while parsing a page (`Changes::skipped`).
+pub const SKIP_REASONS: &[&str] = &["unknown_kind", "malformed"];
+/// The kinds of the reference feed this build reads. A `kind:event` line, which Nexus reserves,
+/// is `unknown_kind`: social events are Nexus's.
+const KINDS: &[&str] = &["tag", "reply", "embed", "collection", "post"];
+impl Changes {
+    /// The lines the page held: those read and those skipped. The cursor moves by this many.
+    pub fn read(&self) -> usize {
+        self.lines.len() + self.skipped.values().sum::<u64>() as usize
+    }
+    /// A page parsed line by line: the envelope (`lines`, `next_cursor`) must be well formed, but
+    /// a line of a kind this build does not know, or one it cannot parse, is skipped and counted
+    /// rather than failing the page, so one line never stops the feed.
+    pub fn parse(bytes: &[u8]) -> Result<Self> {
+        #[derive(Deserialize)]
+        struct Raw {
+            lines: Vec<serde_json::Value>,
+            next_cursor: i64,
+        }
+        let raw: Raw = serde_json::from_slice(bytes)?;
+        let mut page = Self {
+            lines: Vec::with_capacity(raw.lines.len()),
+            next_cursor: raw.next_cursor,
+            skipped: Default::default(),
+        };
+        for line in raw.lines {
+            let unknown_kind = line["kind"].as_str().is_some_and(|k| !KINDS.contains(&k));
+            match serde_json::from_value::<Change>(line) {
+                Ok(change) => page.lines.push(change),
+                Err(_) => {
+                    let reason = if unknown_kind {
+                        "unknown_kind"
+                    } else {
+                        "malformed"
+                    };
+                    *page.skipped.entry(reason).or_default() += 1;
+                }
+            }
+        }
+        Ok(page)
+    }
 }
 #[derive(Clone, Debug)]
 pub struct FeedPage {
@@ -130,7 +175,7 @@ impl Nexus {
             bail!("negative Nexus feed length");
         }
         Ok(FeedPage {
-            page: bounded_json(response).await?,
+            page: Changes::parse(&bounded_bytes(response).await?)?,
             epoch,
             length,
         })
@@ -298,7 +343,11 @@ pub fn valid_author(id: &str) -> bool {
             .bytes()
             .all(|c| b"ybndrfg8ejkmcpqxot1uwisza345h769".contains(&c))
 }
-async fn bounded_json<T: DeserializeOwned>(mut response: reqwest::Response) -> Result<T> {
+async fn bounded_json<T: DeserializeOwned>(response: reqwest::Response) -> Result<T> {
+    Ok(serde_json::from_slice(&bounded_bytes(response).await?)?)
+}
+/// A Nexus response's body, at most 8 MB.
+async fn bounded_bytes(mut response: reqwest::Response) -> Result<Vec<u8>> {
     let mut bytes = vec![];
     while let Some(chunk) = response
         .chunk()
@@ -310,7 +359,7 @@ async fn bounded_json<T: DeserializeOwned>(mut response: reqwest::Response) -> R
         }
         bytes.extend_from_slice(&chunk);
     }
-    Ok(serde_json::from_slice(&bytes)?)
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -325,6 +374,49 @@ mod tests {
         let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         (url, task)
     }
+    /// A page parses line by line: a line of a kind this build does not know, and one it cannot
+    /// parse (a missing field, a wrong type, not an object), is skipped and counted by reason,
+    /// and the page still counts every line it held. A malformed envelope fails the page.
+    #[test]
+    fn a_page_skips_and_counts_the_lines_it_cannot_read() {
+        let good = serde_json::json!({"op":"put","uri":"https://example.org/","kind":"tag",
+            "author":"y".repeat(52),"object_path":"/pub/pubky.app/tags/1","label":"rust","at":1});
+        let mut unknown = good.clone();
+        unknown["kind"] = "listen".into();
+        // Nexus reserves `kind:event`; social events are Nexus's.
+        let mut event = good.clone();
+        event["kind"] = "event".into();
+        let post = serde_json::json!({"op":"put","kind":"post","author":"y".repeat(52),
+            "uri":format!("pubky://{}/pub/maps/v1/posts/0034A", "y".repeat(52)),
+            "object_path":"/pub/maps/v1/posts/0034A/0034B.json","at":1});
+        let mut missing = good.clone();
+        missing.as_object_mut().unwrap().remove("uri");
+        let mut wrong = good.clone();
+        wrong["at"] = "yesterday".into();
+        let page = serde_json::json!({"lines":[good, unknown, missing, 7, wrong, event, post, good],"next_cursor":12});
+        let parsed = Changes::parse(page.to_string().as_bytes()).unwrap();
+        assert_eq!(parsed.lines.len(), 3);
+        assert!(matches!(parsed.lines[1].kind, Kind::Post));
+        assert_eq!(parsed.read(), 8);
+        assert_eq!(parsed.next_cursor, 12);
+        assert_eq!(
+            parsed.skipped,
+            std::collections::BTreeMap::from([("malformed", 3), ("unknown_kind", 2)])
+        );
+        // Every reason is one the rejection metric counts.
+        assert!(SKIP_REASONS
+            .iter()
+            .all(|r| crate::ingest::REJECT_REASONS.contains(r)));
+        for envelope in [
+            r#"{"lines":"x","next_cursor":1}"#,
+            r#"{"lines":[]}"#,
+            "[]",
+            "{",
+        ] {
+            assert!(Changes::parse(envelope.as_bytes()).is_err(), "{envelope}");
+        }
+    }
+
     /// A failed Nexus request names no URL: not the base's user info, not the feed's query,
     /// not the viewer a reach request asks for. Refused, and answered 500.
     #[tokio::test]

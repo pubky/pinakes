@@ -220,10 +220,6 @@ async fn write(State(f): State<Fixture>, Json(w): Json<Write>) -> axum::http::St
         object_path: w.path.clone(),
         label: w.tag["label"].as_str().map(str::to_owned),
         at: chrono::Utc::now().timestamp_millis(),
-        recurrence_id: None,
-        status: None,
-        start: None,
-        end: None,
     };
     let mut b = f.boundary.lock().unwrap();
     b.tags.insert(w.path, w.tag);
@@ -305,6 +301,7 @@ async fn feed(
         Json(Changes {
             lines: b.lines[start..end].to_vec(),
             next_cursor: end as i64,
+            skipped: Default::default(),
         }),
     )
 }

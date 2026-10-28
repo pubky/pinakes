@@ -231,10 +231,6 @@ async fn concurrent_writers_never_wait_on_the_search_revision(pool: PgPool) {
                     object_path: format!("/pub/app/tags/load-{r}-{i}"),
                     label: Some(format!("load{r}")),
                     at: 1_790_000_000_000,
-                    recurrence_id: None,
-                    status: None,
-                    start: None,
-                    end: None,
                 };
                 let mut lines: Vec<Change> = uris
                     .iter()
@@ -257,6 +253,7 @@ async fn concurrent_writers_never_wait_on_the_search_revision(pool: PgPool) {
                         page: Changes {
                             lines,
                             next_cursor: next,
+                            skipped: Default::default(),
                         },
                         epoch: Some("load".into()),
                         length: next,

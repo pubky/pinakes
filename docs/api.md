@@ -88,18 +88,18 @@ An IMDb title keeps the type its page gives (it can be either).
 | `status` | Fetch health: `ok`, `pending`, `missing`, `unreachable` or `error` |
 | `type`, `type_path` | schema.org type (`MusicEvent`, `Book`, `Place`, …), or one of Pinakes's own types for what schema.org has no class for: `BitcoinBlock`, `BitcoinTransaction`, `BitcoinAddress`, `LightningNode` and `LightningChannel` (not schema.org; each a child of `Thing`); `type_path` is the type's ancestors, root first (`["Thing", "Event", "MusicEvent"]`), the types a `type=` search matches it by |
 | `name`, `description`, `image` | Display metadata; images point to the origin and are never proxied |
-| `site` | The publishing site: the page's own site name (`og:site_name`), else its host; for `pubky://` objects the app path segment (`mapky.app`), not the public key; for a link whose URL names a known service (a music service, a Wikipedia edition, MusicBrainz, Wikidata, a service the also-on lookups know), that service's name (`Apple Music`, `Wikipedia (de)`, `OpenStreetMap`), whatever the page calls itself and even before its card is read; for a card read from an official API without a host of its own, the service's name (`Federal Register`) |
+| `site` | The publishing site: the page's own site name (`og:site_name`), else its host; for `pubky://` objects the app path segment (`loopky`), not the public key; for a link whose URL names a known service (a music service, a Wikipedia edition, MusicBrainz, Wikidata, a service the also-on lookups know), that service's name (`Apple Music`, `Wikipedia (de)`, `OpenStreetMap`), whatever the page calls itself and even before its card is read; for a card read from an official API without a host of its own, the service's name (`Federal Register`) |
 | `point` | `{lat, lon}` |
 | `start`, `end` | RFC 3339 instants for events and occurrences |
 | `group` | `{id, size}` when the resource or occurrence is in a [group](#groups), else `null` |
 | `also_on` | The same thing elsewhere ([Also on](#also-on)): the other members of its group as `{id, uri, site}` (other resources first, one entry each by ID, then other occurrences of its own feed), then derived links nobody tagged as `{uri, site, derived: true, via, kind?, at?}`, by service name; one per service, at most 8 on a search, lookup or group card; on a resource read every link, several of one service too, up to 256. A hint only: every member keeps its own card |
-| `open_in` | The clients that open a Pubky app's object, `[{client, url}]` (`url` is `https:`): from the app's profile ([Pubky apps](pubky-apps.md)), e.g. Loopky for a deck, Mapky for a route or for a review's place; on a Pubky event reference's card, those of the event object. `[]` on every other card |
+| `open_in` | The clients that open a Pubky app's object, `[{client, url}]` (`url` is `https:`): from the app's profile ([Pubky apps](pubky-apps.md)), e.g. Loopky for a deck; on a Pubky event reference's card, those of the event object. `[]` on every other card |
 | `attribution` | Present on OSM cards, events placed at an OSM venue and events whose zone came from coordinates; display it with the card |
 | `occurrence` | Occurrence cards only: `{feed_id, feed_uri, uid, recurrence_id, status}`; `feed_uri` is the feed's URI, the link people tagged |
-| `event` | Pubky event references only: `{author, object_path, recurrence_id, start, end, status}` |
+| `event` | Pubky event references only (an event post's occurrence at a place; no feed writes them today: social events are Nexus's, see [Pubky events](#calendars-and-occurrences)): `{author, object_path, recurrence_id, start, end, status}`; `object_path` is the post's versionless path, `recurrence_id` the occurrence's local start (`YYYY-MM-DDTHH:MM:SS`) or null for a one-off |
 | `maybe_same` | Event and occurrence cards: other events that are [possibly the same event](#possibly-the-same-event), best first, each `{id, uri, site, start, score}` (`[]` when there are none). An app's store card: store cards that are [possibly the same app](#possibly-the-same-app). Up to three on a search, lookup or group card, up to ten on a resource read. A hint only, like `group`. Absent on other cards, and on every card with `[event] same_event_hint = "off"` |
 
-A `pubky://` object of an app Pinakes has a profile for (Loopky, Mapky, Eventky, Pubky Rooms,
+A `pubky://` object of an app Pinakes has a profile for (Loopky, Pubky Rooms,
 the Pubky marketplace) gets that app's card; any other app's object gets a general one. Each is
 in [Pubky apps](pubky-apps.md). An object without a name, title or description takes its
 description from a content-like member (`content`, `text`): such a card is a
@@ -218,7 +218,6 @@ of the same URIs and checks that this list matches.
 | `POST /v1/resolve {"uri":"https://www.ticketino.com/en/Event/TICKETINO-BBQ/192364"}` | Event |
 | `POST /v1/resolve {"uri":"https://api.btcmap.org/v4/events/1"}` | Event |
 | `POST /v1/resolve {"uri":"nostr:naddr1qqjrvvp3vycxye33956nycec956x2ery94snqvfk95ergefnx9snqdeh8yekyq3qxfx8p5gzdyv0kgakc365pag8ej2p6g7l72k0hszt0g5m0k0wyymsxpqqqp7txuf3y56"}` | Event |
-| `POST /v1/resolve {"uri":"pubky://51da3n5m8s6oaq38uqs7jznp6ezbc3qbtmic8oy6fj3g6mokdyco/pub/eventky.app/events/0034FED2YCDKG"}` | Event |
 | `POST /v1/resolve {"uri":"nostr:naddr1qqjx2dryvcmn2c3395enwce4956rxeny943x2c35943kvetrvf3xycmyvvcrjq3qs0mv35668yg7t4jk49zdltkezn0em0s3jpt2qn8mkneurnw2edwsxpqqqp7tgmysyuc"}` | Collection |
 | `POST /v1/resolve {"uri":"https://calendar.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics"}` | DataFeed |
 | `POST /v1/resolve {"uri":"webcal://calendar.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics"}` | DataFeed |
@@ -276,10 +275,6 @@ of the same URIs and checks that this list matches.
 | `POST /v1/resolve {"uri":"https://www.nature.com/articles/nature12373"}` | ScholarlyArticle |
 | `POST /v1/resolve {"uri":"doi:10.1038/nphys1170"}` | ScholarlyArticle |
 | `POST /v1/resolve {"uri":"nostr:note1qqqdltcknk9rq52w5xq5srdx3znx4cvr4nmst5xz2rtwkm87ay9qeuwqtd"}` | SocialMediaPosting |
-| `POST /v1/resolve {"uri":"pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G"}` | Review |
-| `POST /v1/resolve {"uri":"pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/reviews/00355XPM88EHG"}` | Review |
-| `POST /v1/resolve {"uri":"pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/collections/00351MVGE211G"}` | Collection |
-| `POST /v1/resolve {"uri":"pubky://9g3zsjpwijn3gsh7ibghjxxadpjidceos5rw4387a6hhziqi8aoy/pub/mapky.app/geo_captures/0035C4V0GVX90"}` | Photograph |
 | `POST /v1/resolve {"uri":"pubky://3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo/pub/loopky/decks/medeng2026a/manifest.json"}` | LearningResource |
 | `POST /v1/resolve {"uri":"pubky://47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e9or3fy76ohqao/pub/pubky-rooms/rooms/0035SFYCGVBV2"}` | Conversation |
 | `POST /v1/resolve {"uri":"https://www.mexc.com/"}` | `unreachable` |
@@ -291,7 +286,7 @@ of the same URIs and checks that this list matches.
 ```text
 POST /v1/resources/lookup {"uris":["https://luma.com/376whqyw","https://www.meetup.com/bitcoin-meetup-switzerland/events/316899925/","nostr:naddr1qqjrvvp3vycxye33956nycec956x2ery94snqvfk95ergefnx9snqdeh8yekyq3qxfx8p5gzdyv0kgakc365pag8ej2p6g7l72k0hszt0g5m0k0wyymsxpqqqp7txuf3y56"]}
 POST /v1/resources/lookup {"uris":["https://www.openstreetmap.org/node/240109189","geo:47.3769,8.5417"]}
-POST /v1/resources/lookup {"uris":["pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G","pubky://3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo/pub/loopky/decks/medeng2026a/manifest.json","pubky://47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e9or3fy76ohqao/pub/pubky-rooms/rooms/0035SFYCGVBV2"]}
+POST /v1/resources/lookup {"uris":["pubky://3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo/pub/loopky/decks/medeng2026a/manifest.json","pubky://47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e9or3fy76ohqao/pub/pubky-rooms/rooms/0035SFYCGVBV2"]}
 POST /v1/resources/lookup {"uris":["https://www.youtube.com/watch?v=dQw4w9WgXcQ","https://vimeo.com/76979871","https://www.youtube.com/watch?v=Up2i2Z4m-Kg"]}
 POST /v1/resources/lookup {"uris":["isbn:9780140328721","doi:10.1038/nature12373","https://doi.org/10.1038/nature12373"]}
 POST /v1/resources/lookup {"ids":["81cefcae5a6a468cfc27ff1c1b420fce","5bccc93f427b6fd44115fdd02618392f"]}
@@ -366,7 +361,7 @@ GET /v1/resources/7f8f0e5f5b301b55a06d51df5d54281c
 GET /v1/resources/2dea92aa8c3cf8ae1cffad92cf3ca718
 GET /v1/resources/5bccc93f427b6fd44115fdd02618392f
 GET /v1/resources/0f3820de1c3532e8805674cc996978f9
-GET /v1/resources/fe358c60c13f6a97b50899c4240f27bf
+GET /v1/resources/9ed32f6665c475119517739f13a7d404
 GET /v1/resources/586d741bd42f9a0dde1c946b58db20ae
 GET /v1/resources/448cc746b24c989629ff12bff641f5ac
 GET /v1/resources/4de689cf91b85eee5e7a5b6a16d719cb
@@ -379,7 +374,6 @@ GET /v1/resources/by-uri?uri=https:%2F%2Fwww.openstreetmap.org%2Fnode%2F24010918
 GET /v1/resources/by-uri?uri=https:%2F%2Fdoi.org%2F10.1038%2Fnature12373
 GET /v1/resources/by-uri?uri=https:%2F%2Fluma.com%2F376whqyw
 GET /v1/resources/by-uri?uri=isbn:9780140328721
-GET /v1/resources/by-uri?uri=pubky:%2F%2Fc5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey%2Fpub%2Fmapky.app%2Fposts%2F00351MT54YS9G
 GET /v1/resources/by-uri?uri=pubky:%2F%2F47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e9or3fy76ohqao%2Fpub%2Fpubky-rooms%2Frooms%2F0035SFYCGVBV2
 ```
 
@@ -412,7 +406,7 @@ POST /v1/occurrences/lookup {"limit":5,"resource_ids":["2dea92aa8c3cf8ae1cffad92
 ```text
 POST /v1/changes/lookup {"uris":["https://luma.com/376whqyw","https://www.meetup.com/bitcoin-meetup-switzerland/events/316899925/","nostr:naddr1qqjrvvp3vycxye33956nycec956x2ery94snqvfk95ergefnx9snqdeh8yekyq3qxfx8p5gzdyv0kgakc365pag8ej2p6g7l72k0hszt0g5m0k0wyymsxpqqqp7txuf3y56"]}
 POST /v1/changes/lookup {"since":"now-30d","uris":["https://www.openstreetmap.org/node/240109189","geo:47.3769,8.5417"]}
-POST /v1/changes/lookup {"since":"now-30d","uris":["pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G","pubky://3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo/pub/loopky/decks/medeng2026a/manifest.json","pubky://47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e9or3fy76ohqao/pub/pubky-rooms/rooms/0035SFYCGVBV2"]}
+POST /v1/changes/lookup {"since":"now-30d","uris":["pubky://3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo/pub/loopky/decks/medeng2026a/manifest.json","pubky://47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e9or3fy76ohqao/pub/pubky-rooms/rooms/0035SFYCGVBV2"]}
 POST /v1/changes/lookup {"since":"now-30d","uris":["https://www.youtube.com/watch?v=dQw4w9WgXcQ","https://vimeo.com/76979871","https://www.youtube.com/watch?v=Up2i2Z4m-Kg"]}
 POST /v1/changes/lookup {"since":"now-30d","uris":["isbn:9780140328721","doi:10.1038/nature12373","https://doi.org/10.1038/nature12373"]}
 POST /v1/changes/lookup {"resource_ids":["81cefcae5a6a468cfc27ff1c1b420fce","5bccc93f427b6fd44115fdd02618392f"],"since":"now-7d"}
@@ -453,8 +447,9 @@ Search lists only resources with at least one public reference.
 **Events.** `type=Event` with `from`/`to` and `sort=start` covers Event pages with a start,
 calendar occurrences and located Pubky event references. Each of these is one result unit, so
 a calendar with three matching dates counts three times. `start` sorts exclude units without a
-start. A Pubky event result carries `event` for Nexus post hydration and no name: Pinakes does
-not fetch the post. Author and reach filters also constrain that post's author.
+start. A Pubky event result carries `event` for Nexus post hydration and no name: Pinakes keeps
+the post's time, status and place, not its text. Author and reach filters also constrain that
+post's author.
 
 **Jobs.** `type=JobPosting` with `near` or `bbox` finds postings by their workplace,
 `remote=true` the remote ones, and `from`/`to` select by the date posted (a posting's `start`).
@@ -727,11 +722,13 @@ held or pending and more than half the forward window left; otherwise an uncondi
 fetches a body. A 304 renews the TTL but neither confirms a disappearance nor extends the
 horizon. Mixed dated and undated RSS, Atom and JSON feeds keep their dated items.
 
-**Pubky event references.** Nexus `kind:event` references carry `recurrence_id`, start and end
-(Unix milliseconds) and an optional lifecycle. The reference key includes the author, object
-path, venue and recurrence, so deleting one instance leaves the others. Invalid keys or
-timestamps and an end before the start are skipped and counted in
-`pinakes_ingest_rejected_total{reason="event"}`.
+**Pubky events.** Social events and rsvps (pubky-social-specs v1.1,
+`pubky://<author>/pub/social/v1/posts/{id}`) are Nexus's: Nexus indexes their time, occurrences,
+rsvps and counts, and a client reads them there. Pinakes never fetches or indexes them; it
+indexes external events (pages, calendar feeds, NIP-52), and a client merges both. The resource
+feed carries no event lines: a `kind:event` line is skipped as `unknown_kind`, a `post` line for
+a social post is rejected. Event references (one per occurrence and place, the `event` field)
+remain in the schema and the search, but nothing writes them today.
 
 **NIP-52 calendars.** A calendar waits (`calendar_members_pending`) for members not yet
 resolved, at most `limits.calendar_member_wait_hours` (48) after it first listed them. A member

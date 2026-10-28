@@ -395,15 +395,44 @@ async fn send(app: &Router, method: &str, path: &str, body: Option<Value>) -> (u
         parsed.unwrap_or(json!(String::from_utf8_lossy(&bytes))),
     )
 }
-async fn reference(
+/// A post's event occurrences at a venue, as event references: each an hour long, scheduled; its
+/// previous occurrences replaced. Written directly: no feed writes event references today.
+async fn occurrences_at(
     pool: &PgPool,
-    uri: &str,
+    venue: &str,
     path: &str,
-    kind: Kind,
-    rid: Option<&str>,
-    start: Option<DateTime<Utc>>,
-    op: Op,
+    occurrences: &[(Option<&str>, DateTime<Utc>)],
 ) {
+    let (id, uri, _) = identity(venue).unwrap();
+    let author = "y".repeat(52);
+    let mut tx = pool.begin().await.unwrap();
+    let mut affected: Vec<String> = sqlx::query_scalar(
+        "DELETE FROM reference WHERE author=$1 AND object_path=$2 RETURNING resource_id",
+    )
+    .bind(&author)
+    .bind(path)
+    .fetch_all(&mut *tx)
+    .await
+    .unwrap();
+    let aliased = pinakes_core::store::insert_resource(&mut tx, &id, &uri)
+        .await
+        .unwrap();
+    for (rid, start) in occurrences {
+        sqlx::query(r#"INSERT INTO reference(resource_id,kind,author,object_path,recurrence_id,start_at,end_at,created_at,unit_key,event_status)
+            VALUES($1,'event',$2,$3,$4,$5,$6,now(),$7,'scheduled')"#)
+            .bind(&id).bind(&author).bind(path).bind(rid).bind(start).bind(*start + Duration::hours(1))
+            .bind(format!("{id}:{}", rid.unwrap_or(""))).execute(&mut *tx).await.unwrap();
+    }
+    affected.push(id);
+    pinakes_core::store::recompute_scores(&mut tx, &affected)
+        .await
+        .unwrap();
+    pinakes_core::alias::record(&mut tx, aliased.into_iter().collect())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+}
+async fn reference(pool: &PgPool, uri: &str, path: &str, kind: Kind, op: Op) {
     let (_, uri, _) = identity(uri).unwrap();
     let cursor = ingest::cursor(pool, "events").await.unwrap();
     let line = Change {
@@ -414,10 +443,6 @@ async fn reference(
         object_path: path.into(),
         label: Some("bitcoin".into()),
         at: Utc::now().timestamp_millis(),
-        recurrence_id: rid.map(str::to_owned),
-        start: start.map(|s| s.timestamp_millis()),
-        end: start.map(|s| (s + Duration::hours(1)).timestamp_millis()),
-        status: None,
     };
     ingest::apply(
         pool,
@@ -427,6 +452,7 @@ async fn reference(
             page: Changes {
                 lines: vec![line],
                 next_cursor: cursor.cursor + 1,
+                skipped: Default::default(),
             },
             epoch: Some("1".into()),
             length: cursor.cursor + 1,
@@ -566,16 +592,7 @@ async fn single_key_loss_requires_two_and_regenerated_uid_links_supersedes(pool:
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn event_units_pagination_occurrence_route_pubky_recurrences_and_venue(pool: PgPool) {
     let feed = "https://example.org/events.ics";
-    reference(
-        &pool,
-        feed,
-        "/pub/social/tags/calendar",
-        Kind::Tag,
-        None,
-        None,
-        Op::Put,
-    )
-    .await;
+    reference(&pool, feed, "/pub/social/tags/calendar", Kind::Tag, Op::Put).await;
     let id = identity(feed).unwrap().0;
     store::save_document(&pool, &id, 0, &dynamic_parse(feed, &future_calendar(3)))
         .await
@@ -589,18 +606,17 @@ async fn event_units_pagination_occurrence_route_pubky_recurrences_and_venue(poo
     store::save_document(&pool, &venue_id, 0, &place)
         .await
         .unwrap();
-    for (i, rid) in ["2026-10-21", "2026-10-28"].into_iter().enumerate() {
-        reference(
-            &pool,
-            venue,
-            "/pub/social/v1/posts/event1",
-            Kind::Event,
-            Some(rid),
-            Some(Utc::now() + Duration::days(2 + i as i64)),
-            Op::Put,
-        )
-        .await;
-    }
+    let second = Utc::now() + Duration::days(3);
+    occurrences_at(
+        &pool,
+        venue,
+        "/pub/social/v1/posts/event1",
+        &[
+            (Some("2026-10-21"), Utc::now() + Duration::days(2)),
+            (Some("2026-10-28"), second),
+        ],
+    )
+    .await;
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM reference WHERE kind='event'")
             .fetch_one(&pool)
@@ -614,8 +630,6 @@ async fn event_units_pagination_occurrence_route_pubky_recurrences_and_venue(poo
         page_uri,
         "/pub/social/tags/event",
         Kind::Tag,
-        None,
-        None,
         Op::Put,
     )
     .await;
@@ -691,14 +705,12 @@ async fn event_units_pagination_occurrence_route_pubky_recurrences_and_venue(poo
         3
     );
 
-    reference(
+    // A new version of the post with one occurrence fewer.
+    occurrences_at(
         &pool,
         venue,
         "/pub/social/v1/posts/event1",
-        Kind::Event,
-        Some("2026-10-21"),
-        None,
-        Op::Del,
+        &[(Some("2026-10-28"), second)],
     )
     .await;
     assert_eq!(
@@ -1237,24 +1249,6 @@ async fn ended_occurrences_freeze_and_horizon_rolloff_is_not_cancellation(pool: 
         .await
         .unwrap(),
         1
-    );
-    let bad = "geo:47,8";
-    reference(
-        &pool,
-        bad,
-        "/pub/social/v1/posts/invalid",
-        Kind::Event,
-        Some(&"x".repeat(129)),
-        Some(Utc::now()),
-        Op::Put,
-    )
-    .await;
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM reference")
-            .fetch_one(&pool)
-            .await
-            .unwrap(),
-        0
     );
 }
 
@@ -3829,7 +3823,7 @@ async fn occurrence_cards_report_their_lifecycle_beside_the_feed_status(pool: Pg
     store::save_document(&pool, &id, 0, &dynamic_parse(uri, &text))
         .await
         .unwrap();
-    reference(&pool, uri, "/pub/x/tags/1", Kind::Tag, None, None, Op::Put).await;
+    reference(&pool, uri, "/pub/x/tags/1", Kind::Tag, Op::Put).await;
     let app = api::router(api::AppState::new(pool.clone(), Config::default()).unwrap());
     let lifecycle = |items: &Value| {
         let mut seen: Vec<(String, String, String)> = items
@@ -3938,16 +3932,7 @@ async fn retention_waits_for_a_writer_holding_nothing_else(pool: PgPool) {
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn related_lists_a_feed_and_a_venue_once(pool: PgPool) {
     let feed = "https://example.org/events.ics";
-    reference(
-        &pool,
-        feed,
-        "/pub/social/tags/calendar",
-        Kind::Tag,
-        None,
-        None,
-        Op::Put,
-    )
-    .await;
+    reference(&pool, feed, "/pub/social/tags/calendar", Kind::Tag, Op::Put).await;
     let feed_id = identity(feed).unwrap().0;
     store::save_document(
         &pool,
@@ -3967,28 +3952,16 @@ async fn related_lists_a_feed_and_a_venue_once(pool: PgPool) {
         .await
         .unwrap();
     for i in 0..50 {
-        reference(
+        occurrences_at(
             &pool,
             venue,
             &format!("/pub/social/v1/posts/event{i}"),
-            Kind::Event,
-            None,
-            Some(Utc::now() + Duration::days(2 + i)),
-            Op::Put,
+            &[(None, Utc::now() + Duration::days(2 + i))],
         )
         .await;
     }
     let seed = "https://example.org/seed";
-    reference(
-        &pool,
-        seed,
-        "/pub/social/tags/seed",
-        Kind::Tag,
-        None,
-        None,
-        Op::Put,
-    )
-    .await;
+    reference(&pool, seed, "/pub/social/tags/seed", Kind::Tag, Op::Put).await;
     let seed_id = identity(seed).unwrap().0;
     // A second tagger of the seed, the feed and the venue: two shared taggers each.
     for (i, id) in [&seed_id, &feed_id, &venue_id].into_iter().enumerate() {
@@ -4407,14 +4380,11 @@ fn an_unexpanded_rule_keeps_its_date_lists_and_the_horizon() {
 
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_one_off_event_reference_has_a_null_recurrence_id(pool: PgPool) {
-    reference(
+    occurrences_at(
         &pool,
         "geo:47.37,8.54",
         "/pub/social/v1/posts/once",
-        Kind::Event,
-        None,
-        Some(Utc::now() + Duration::days(2)),
-        Op::Put,
+        &[(None, Utc::now() + Duration::days(2))],
     )
     .await;
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());

@@ -33,10 +33,6 @@ fn change(uri: &str, author_seed: &str, path: &str) -> Change {
         object_path: path.into(),
         label: Some("rust".into()),
         at: Utc::now().timestamp_millis(),
-        recurrence_id: None,
-        status: None,
-        start: None,
-        end: None,
     }
 }
 async fn batch(pool: &PgPool, lines: Vec<Change>, epoch: Option<&str>) -> bool {
@@ -50,6 +46,7 @@ async fn batch(pool: &PgPool, lines: Vec<Change>, epoch: Option<&str>) -> bool {
             page: Changes {
                 lines,
                 next_cursor: next,
+                skipped: Default::default(),
             },
             epoch: epoch.map(str::to_owned),
             length: next,
@@ -129,6 +126,7 @@ async fn epoch_headers_length_reset_and_transaction_rollback(pool: PgPool) {
         page: Changes {
             lines: vec![],
             next_cursor: saved.cursor,
+            skipped: Default::default(),
         },
         epoch: None,
         length: 0,
@@ -160,6 +158,7 @@ async fn epoch_headers_length_reset_and_transaction_rollback(pool: PgPool) {
         page: Changes {
             lines: vec![a.clone(), foreign, bad_uri],
             next_cursor: 3,
+            skipped: Default::default(),
         },
         epoch: None,
         length: 3,
@@ -193,6 +192,7 @@ async fn concurrent_pollers_only_commit_a_batch_once(pool: PgPool) {
         page: Changes {
             lines: vec![change("https://example.org", "a", "/pub/a")],
             next_cursor: 1,
+            skipped: Default::default(),
         },
         epoch: Some("a".into()),
         length: 1,
@@ -250,6 +250,7 @@ async fn rejects_oversized_feed_fields_without_stalling_or_truncating_keys(pool:
         page: Changes {
             lines,
             next_cursor: end,
+            skipped: Default::default(),
         },
         epoch: None,
         length: end,
@@ -303,6 +304,7 @@ async fn rejected_counts_follow_commit_and_concurrent_cursor_fencing(pool: PgPoo
         page: Changes {
             lines: vec![rejected, invalid],
             next_cursor: 2,
+            skipped: Default::default(),
         },
         epoch: None,
         length: 2,
@@ -1030,30 +1032,6 @@ async fn epoch_replay_does_not_reopen_final_resource(pool: PgPool) {
         .unwrap());
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
-async fn invalid_event_dates_do_not_stall_feed_and_unknown_status_is_accepted(pool: PgPool) {
-    let mut good = change("geo:47,8", "event-author", "/pub/events/1");
-    good.kind = Kind::Event;
-    good.start = Some(Utc::now().timestamp_millis());
-    good.end = good.start;
-    good.status = Some("upstream-new-status".into());
-    let mut huge = good.clone();
-    huge.object_path = "/pub/events/2".into();
-    huge.start = Some(i64::MAX);
-    let mut reversed = good.clone();
-    reversed.object_path = "/pub/events/3".into();
-    reversed.end = Some(good.start.unwrap() - 1);
-    assert!(batch(&pool, vec![huge, reversed, good], Some("events")).await);
-    assert_eq!(refs(&pool).await, 1);
-    assert_eq!(ingest::cursor(&pool, "fixture").await.unwrap().cursor, 3);
-    assert!(
-        sqlx::query_scalar::<_, Option<String>>("SELECT event_status FROM reference")
-            .fetch_one(&pool)
-            .await
-            .unwrap()
-            .is_none()
-    );
-}
 struct PanicOnce(std::sync::atomic::AtomicBool);
 #[async_trait::async_trait]
 impl Resolver for PanicOnce {
@@ -1240,6 +1218,7 @@ async fn invalid_non_event_feed_clock_has_its_own_rejection_reason(pool: PgPool)
         page: pinakes_core::nexus::Changes {
             lines: vec![line],
             next_cursor: 1,
+            skipped: Default::default(),
         },
         length: 1,
         epoch: Some("one".into()),

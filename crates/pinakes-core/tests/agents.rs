@@ -45,10 +45,6 @@ async fn seed(pool: &PgPool) -> Vec<String> {
             object_path: format!("/pub/app/tags/{i}"),
             label: Some(if i == 0 { "music" } else { "reading" }.into()),
             at: 1_790_000_000_000,
-            recurrence_id: None,
-            status: None,
-            start: None,
-            end: None,
         });
     }
     let next = lines.len() as i64;
@@ -60,6 +56,7 @@ async fn seed(pool: &PgPool) -> Vec<String> {
             page: Changes {
                 lines,
                 next_cursor: next,
+                skipped: Default::default(),
             },
             epoch: Some("fixture".into()),
             length: next,

@@ -8,15 +8,17 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use futures_util::FutureExt;
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 pub const REJECT_REASONS: &[&str] = &[
+    "unknown_kind",
+    "malformed",
     "author",
     "label",
     "object_path",
     "timestamp",
-    "event",
     "uri",
+    "social",
     "panic",
 ];
 fn rejection_reason(line: &Change, limits: &IngestConfig) -> Option<&'static str> {
@@ -33,18 +35,6 @@ fn rejection_reason(line: &Change, limits: &IngestConfig) -> Option<&'static str
         Some("object_path")
     } else if invalid_timestamp(line.at) {
         Some("timestamp")
-    } else if line
-        .recurrence_id
-        .as_ref()
-        .is_some_and(|s| s.len() > 128 || s.contains('\0'))
-        || line
-            .start
-            .into_iter()
-            .chain(line.end)
-            .any(invalid_timestamp)
-        || line.start.zip(line.end).is_some_and(|(a, b)| b < a)
-    {
-        Some("event")
     } else {
         None
     }
@@ -127,15 +117,17 @@ pub async fn apply(
         tracing::warn!(nexus, "Nexus feed reset; rebuilding references");
         return Ok(false);
     }
-    if feed.page.lines.len() > 1000
-        || feed.page.next_cursor != requested.cursor + feed.page.lines.len() as i64
+    // The page's lines, those skipped while parsing included: the cursor moves past them all.
+    let read = feed.page.read();
+    if read > 1000
+        || feed.page.next_cursor != requested.cursor + read as i64
         || feed.page.next_cursor > feed.length
     {
         bail!("invalid Nexus cursor progression");
     }
     let mut affected = BTreeSet::new();
     let mut aliased = vec![];
-    let mut rejected = BTreeMap::<&'static str, u64>::new();
+    let mut rejected = feed.page.skipped.clone();
     for (i, line) in feed.page.lines.iter().enumerate() {
         let mut savepoint = sqlx::Connection::begin(&mut *tx).await?;
         let mut touched = BTreeSet::new();
@@ -210,11 +202,14 @@ async fn apply_line(
     let Ok((id, uri, _)) = crate::model::identity(&line.uri) else {
         return Ok(Some("uri"));
     };
-    let unit_key = if matches!(line.kind, crate::nexus::Kind::Event) {
-        format!("{}:{}", id, line.recurrence_id.as_deref().unwrap_or(""))
-    } else {
-        String::new()
-    };
+    let post = matches!(line.kind, crate::nexus::Kind::Post);
+    if post {
+        if let Some(reason) = post_rejection(line, &uri) {
+            return Ok(Some(reason));
+        }
+    }
+    // One reference per object: the resource feed's lines carry no occurrences.
+    let unit_key = String::new();
     let old: Option<String> = sqlx::query_scalar(
         "SELECT resource_id FROM reference WHERE author=$1 AND object_path=$2 AND unit_key=$3",
     )
@@ -234,13 +229,15 @@ async fn apply_line(
             if old.as_deref() != Some(&id) {
                 sqlx::query("UPDATE resource SET final=false,refresh_at=now(),next_attempt_at=now(),dead_letter=false,attempts=0 WHERE id=$1 AND final AND resolver<>'geo' AND $2>resolved_at").bind(&id).bind(timestamp(Some(line.at))?).execute(&mut **tx).await?;
             }
-            sqlx::query(r#"INSERT INTO reference(resource_id,kind,author,label,object_path,recurrence_id,start_at,end_at,created_at,unit_key,event_status)
-                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+            if post {
+                expedite(tx, &id, line.at).await?;
+            }
+            sqlx::query(r#"INSERT INTO reference(resource_id,kind,author,label,object_path,created_at,unit_key)
+                VALUES($1,$2,$3,$4,$5,$6,$7)
                 ON CONFLICT(author,object_path,unit_key) DO UPDATE SET resource_id=excluded.resource_id, kind=excluded.kind,
-                label=excluded.label, recurrence_id=excluded.recurrence_id, start_at=excluded.start_at,
-                end_at=excluded.end_at, created_at=excluded.created_at,event_status=excluded.event_status"#)
-                .bind(&id).bind(line.kind.as_str()).bind(&line.author).bind(&line.label).bind(&line.object_path).bind(&line.recurrence_id)
-                .bind(timestamp(line.start)?).bind(timestamp(line.end)?).bind(timestamp(Some(line.at))?).bind(&unit_key).bind(line.status.as_deref().and_then(crate::event::EventStatus::parse).map(|s|s.as_str()))
+                label=excluded.label, created_at=excluded.created_at"#)
+                .bind(&id).bind(line.kind.as_str()).bind(&line.author).bind(&line.label).bind(&line.object_path)
+                .bind(timestamp(Some(line.at))?).bind(&unit_key)
                 .execute(&mut **tx).await?;
             affected.insert(id.clone());
         }
@@ -251,9 +248,57 @@ async fn apply_line(
                 .bind(&unit_key)
                 .execute(&mut **tx)
                 .await?;
+            // The post's card is read again: in its latest remaining version, or gone.
+            if post {
+                expedite(tx, &id, line.at).await?;
+            }
         }
     }
     Ok(None)
+}
+/// Why a `post` line is rejected: its URI must be a post in its author's storage
+/// (`pubky://<author>/pub/<namespace>/v1/posts/{id}`), its object path a version file directly in
+/// that post (`…/{id}/{editId}.json`). A social specs' post (`/pub/social/…`: an event, an rsvp)
+/// is Nexus's: Pinakes neither fetches nor indexes it (`social`).
+fn post_rejection(line: &Change, uri: &str) -> Option<&'static str> {
+    let Some(path) = uri
+        .strip_prefix("pubky://")
+        .and_then(|rest| rest.strip_prefix(line.author.as_str()))
+        .filter(|path| {
+            matches!(path.split('/').collect::<Vec<_>>()[..],
+                ["", "pub", namespace, "v1", "posts", id] if !namespace.is_empty() && !id.is_empty())
+        })
+    else {
+        return Some("uri");
+    };
+    if path.starts_with("/pub/social/") {
+        return Some("social");
+    }
+    let file = line
+        .object_path
+        .strip_prefix(path)
+        .and_then(|rest| rest.strip_prefix('/'));
+    match file {
+        Some(file)
+            if file.len() > ".json".len() && file.ends_with(".json") && !file.contains('/') =>
+        {
+            None
+        }
+        _ => Some("object_path"),
+    }
+}
+/// A post's card is due now: a new version, or one deleted, changes it whatever its TTL, and
+/// whatever its earlier reads did (a post never read, dead-lettered after its homeserver failed,
+/// is read again too). A read in flight is fenced as `reextract` fences it (the generation bump):
+/// its answer, which may be the older version, is never saved over the newer one's due time. A
+/// line older than the card's last read changes nothing.
+async fn expedite(tx: &mut Transaction<'_, Postgres>, id: &str, at: i64) -> Result<()> {
+    sqlx::query("UPDATE resource SET final=false,refresh_at=now(),next_attempt_at=now(),dead_letter=false,attempts=0,timeout_streak=0,lease_until=NULL,priority_at=NULL,generation=generation+1 WHERE id=$1 AND (resolved_at IS NULL OR $2>resolved_at)")
+        .bind(id)
+        .bind(timestamp(Some(at))?)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 fn timestamp(ms: Option<i64>) -> Result<Option<DateTime<Utc>>> {
     ms.map(|ms| DateTime::from_timestamp_millis(ms).context("invalid feed timestamp"))
@@ -302,10 +347,6 @@ mod tests {
             object_path: path.into(),
             label: Some("rust".into()),
             at: Utc::now().timestamp_millis(),
-            recurrence_id: None,
-            status: None,
-            start: None,
-            end: None,
         }
     }
 
@@ -327,6 +368,7 @@ mod tests {
             page: Changes {
                 next_cursor: lines.len() as i64,
                 lines,
+                skipped: Default::default(),
             },
             epoch: None,
             length: 4,
@@ -353,6 +395,67 @@ mod tests {
         assert_eq!(panics, 2);
     }
 
+    /// A page that mixes lines this build reads with a line of an unknown kind and malformed ones
+    /// is applied: the good lines land, the others are skipped and counted, and the cursor moves
+    /// past them all, so one line never stops the feed. Through the real client and parser.
+    #[sqlx::test(
+        migrations = "../../migrations",
+        fixtures("../tests/fixtures/require_h3.sql")
+    )]
+    async fn a_page_with_unknown_and_malformed_lines_moves_the_cursor_past_them(pool: PgPool) {
+        use axum::{routing::get, Router};
+        let good = |uri: &str, path: &str| serde_json::to_value(line(uri, path)).unwrap();
+        let mut unknown = good("https://example.org/listen", "/pub/music/v1/posts/1");
+        unknown["kind"] = "listen".into();
+        let mut no_author = good("https://example.org/no-author", "/x");
+        no_author.as_object_mut().unwrap().remove("author");
+        let mut bad_op = good("https://example.org/bad-op", "/y");
+        bad_op["op"] = "upsert".into();
+        let page = serde_json::json!({
+            "lines": [
+                good("https://example.org/first", "/a"),
+                unknown,
+                no_author,
+                "not an object",
+                bad_op,
+                good("https://example.org/last", "/b"),
+            ],
+            "next_cursor": 6,
+        });
+        let app = Router::new().route(
+            "/v0/resources/changes",
+            get(move || {
+                let page = page.clone();
+                async move {
+                    (
+                        [("x-events-epoch", "e1"), ("x-events-length", "6")],
+                        axum::Json(page),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let nexus = Nexus::new(&url).unwrap();
+        let metrics = Metrics::new().unwrap();
+        let limits = IngestConfig::default();
+        let applied = poll_once(&pool, &url, &nexus, &limits, &metrics)
+            .await
+            .unwrap();
+        assert_eq!(applied, 2);
+        let paths: Vec<String> =
+            sqlx::query_scalar("SELECT object_path FROM reference ORDER BY object_path")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(paths, ["/a", "/b"]);
+        assert_eq!(cursor(&pool, &url).await.unwrap().cursor, 6);
+        let skipped = |reason| metrics.ingest_rejected.with_label_values(&[reason]).get();
+        assert_eq!((skipped("unknown_kind"), skipped("malformed")), (1, 3));
+        server.abort();
+    }
+
     /// A panic in the batch's work after its lines is an error: counted, the batch rolled back
     /// and the cursor held, so the operator sees a stalled feed instead of a silent retry loop.
     #[sqlx::test(
@@ -369,6 +472,7 @@ mod tests {
             page: Changes {
                 next_cursor: lines.len() as i64,
                 lines,
+                skipped: Default::default(),
             },
             epoch: None,
             length: 2,

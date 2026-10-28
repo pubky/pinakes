@@ -18,7 +18,7 @@ not yet in pubky/pubky-nexus ([design §4](docs/design.md#nexus)).
 ## How it works
 
 ```
-Nexus  GET /v0/resources/changes          reference feed: tag, reply, embed, collection
+Nexus  GET /v0/resources/changes          reference feed: tag, reply, embed, collection, post
   │
   ▼
 ingest     resource row per URI, reference row per Pubky object    ingest.rs, identity.rs

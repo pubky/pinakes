@@ -59,6 +59,10 @@ rmcp = { version = "=3.7.0", default-features = false, features = ["server", "tr
 # An MCP tool's request to the public routes (`agents::mcp`).
 tower = { version = "0.5", features = ["util"] }
 
+# The post envelope app posts are written on (`resolver::pubky_apps::posts`): the pin Nexus and
+# the music node use.
+pubky-social-specs = "=1.0.0-rc.1"
+
 [[example]]
 name = "e2e_stack"
 # Its unit tests (the live sample selection) run with the workspace's tests.

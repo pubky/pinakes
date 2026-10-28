@@ -9,6 +9,7 @@ pub static PROFILE: Profile = Profile {
     kinds: &[Kind {
         path: "rooms/{room}",
         read: room,
+        versions: false,
         open_in: &[],
     }],
     facts: &[],

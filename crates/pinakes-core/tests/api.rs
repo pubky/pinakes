@@ -57,10 +57,6 @@ async fn seed(pool: &PgPool) -> Vec<String> {
                 object_path: format!("/pub/app/tags/{i}-{label}"),
                 label: Some(label.into()),
                 at: 1_790_000_000_000,
-                recurrence_id: None,
-                status: None,
-                start: None,
-                end: None,
             });
         }
     }
@@ -73,6 +69,7 @@ async fn seed(pool: &PgPool) -> Vec<String> {
             page: Changes {
                 lines,
                 next_cursor: next,
+                skipped: Default::default(),
             },
             epoch: Some("fixture".into()),
             length: next,
@@ -479,7 +476,14 @@ async fn changes(
         "x-events-length",
         state.lines.len().to_string().parse().unwrap(),
     );
-    (headers, Json(Changes { lines, next_cursor }))
+    (
+        headers,
+        Json(Changes {
+            lines,
+            next_cursor,
+            skipped: Default::default(),
+        }),
+    )
 }
 async fn mock_nexus(lines: Vec<Change>) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -558,10 +562,6 @@ async fn polls_the_http_feed_and_replays_without_duplicates(pool: PgPool) {
         object_path: "/pub/app/tags/one".into(),
         label: None,
         at: Utc::now().timestamp_millis(),
-        recurrence_id: None,
-        status: None,
-        start: None,
-        end: None,
     };
     let (url, _, task) = mock_nexus(vec![line.clone(), line]).await;
     let nexus = Nexus::new(&url).unwrap();
