@@ -947,7 +947,9 @@ counts by status.
   SocialMediaPosting cards only when the fetched URL and the object ID share a registrable
   domain (on a multi-tenant host, the same tenant). Note and Article excerpts are capped at 200
   characters; unlisted content is omitted.
-- **Media**: oEmbed (`media.oembed`) and page JSON-LD, which wins when healthy. An oEmbed answer
+- **Media**: oEmbed (`media.oembed`) and page JSON-LD, which wins when healthy, except over a
+  provider whose scheme names the link exactly (YouTube's `watch` and `shorts`) or any matching
+  provider under `"always"`: their title, author and thumbnail come first. An oEmbed answer
   survives a failed or truncated page. Podcast types need a namespace or an audio/video
   enclosure; plain RSS is a DataFeed. Direct podcast feeds are PodcastSeries; `?guid=` or the
   episode page's RSS link selects an episode. A feed longer than the page cap is read up to its
