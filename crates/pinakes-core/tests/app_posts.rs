@@ -712,6 +712,45 @@ async fn a_post_line_of_a_never_fetched_namespace_creates_nothing(pool: PgPool) 
     }
 }
 
+/// A post whose namespace is not one plain path segment once decoded (not UTF-8, an encoded `/`,
+/// an encoded `.` or `..`) is refused as `uri` and creates no resource or reference: no spelling
+/// gets past the post-path check. Letter case is kept: `Social` is not `social` but another app's
+/// namespace, read as the resolver reads it (the general card), so it is indexed.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_post_line_whose_namespace_is_not_one_segment_creates_nothing(pool: PgPool) {
+    let metrics = Metrics::new().unwrap();
+    let malformed: Vec<String> = ["%FF", "ch%2Fess", "%2E", "%2e", "%2E%2E", ".%2E"]
+        .iter()
+        .map(|namespace| post(namespace, &id()))
+        .collect();
+    let social = post("Social", &id());
+    let mut lines: Vec<Change> = malformed
+        .iter()
+        .map(|uri| line(Op::Put, uri, "0034A", Utc::now()))
+        .collect();
+    lines.push(line(Op::Put, &social, "0034A", Utc::now()));
+    batch(&pool, lines, &metrics).await;
+    let rejected = |reason| metrics.ingest_rejected.with_label_values(&[reason]).get();
+    assert_eq!(
+        (rejected("uri"), rejected("never_fetched")),
+        (malformed.len() as u64, 0)
+    );
+    let (social_id, _, _) = identity(&social).unwrap();
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT r.id,(SELECT count(*) FROM reference f WHERE f.resource_id=r.id) FROM resource r",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows, [(social_id, 1)]);
+    let refs: i64 = sqlx::query_scalar("SELECT count(*) FROM reference")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(refs, 1);
+    assert_eq!(classify(&social), Some("pubky"));
+}
+
 /// A Pubky resolver standing in for the homeserver that reads the post's version `body` as the
 /// Pubky resolver does, now, with its usual TTL (a week).
 struct Version(Value);

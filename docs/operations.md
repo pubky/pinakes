@@ -387,7 +387,9 @@ file written (`…/{id}/{editId}.json`). The URI must be a post in its author's 
 rsvps are Nexus's (owner decision, 2026-10-26): Nexus indexes them. A `post` line in a namespace
 Pinakes never fetches (`social`, `pubky.app`, and the old `mapky.app` and `eventky.app`, read
 decoded, so `%73ocial` is `social`) is rejected (`never_fetched`), creating no resource or
-reference and fetching nothing. A post line is a reference of the post to itself, keyed by its version file like
+reference and fetching nothing. Letter case is kept, as the resolver keeps it: `Social` is another
+app's namespace. A namespace that is not one path segment once decoded (not UTF-8, an encoded `/`,
+`.` or `..`) is `uri`. A post line is a reference of the post to itself, keyed by its version file like
 any reference: it keeps the post's card alive and counts nowhere (scores, trending, reference
 filters). The post is queued as any `pubky://` object; a new version, or a deleted one, makes its
 card due at once whatever its TTL. The Pubky resolver lists the post's folder newest first and reads

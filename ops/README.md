@@ -28,7 +28,7 @@ No messages are sent or contact points provisioned by these files.
 | `pinakes_ingest_last_success_timestamp_seconds` | Last applied Nexus poll |
 | `pinakes_ingest_epoch_resets_total` | Persistent epoch/truncation rebuild count |
 | `pinakes_ingest_panics_total` | Polls whose batch work panicked outside a feed line; the cursor holds until it is fixed |
-| `pinakes_ingest_rejected_total{reason}` | Skipped feed lines from committed batches; fixed reasons `unknown_kind`, `malformed`, `author`, `label`, `object_path`, `timestamp`, `uri`, `social` (a social specs' post: Nexus's), `panic`; resets on daemon restart |
+| `pinakes_ingest_rejected_total{reason}` | Skipped feed lines from committed batches; fixed reasons `unknown_kind`, `malformed`, `author`, `label`, `object_path`, `timestamp`, `uri`, `never_fetched` (a post in a namespace Pinakes never fetches: `social`, `pubky.app`, `mapky.app`, `eventky.app`, decoded), `panic`; resets on daemon restart |
 | `pinakes_fetch_total{source,mode,outcome}` | Actual upstream requests; outcomes ok, not_modified, missing, unreachable, blocked, rate_limited, error, drift |
 | `pinakes_fetch_duration_seconds{source}` | Network/body duration histogram, excluding worker rate waits |
 | `pinakes_changes_total{source,class}` | Persistent accepted change counts, unaffected by retention |
