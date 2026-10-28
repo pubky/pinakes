@@ -223,11 +223,13 @@ pub async fn assign(
         None
     };
     // Aliases of the alias follow it to the root.
-    sqlx::query("UPDATE resource_alias SET root_id=$2 WHERE root_id=$1")
-        .bind(id)
-        .bind(&root_id)
-        .execute(&mut **tx)
-        .await?;
+    let followers: Vec<String> = sqlx::query_scalar(
+        "UPDATE resource_alias SET root_id=$2 WHERE root_id=$1 RETURNING alias_id",
+    )
+    .bind(id)
+    .bind(&root_id)
+    .fetch_all(&mut **tx)
+    .await?;
     // An OSM spelling drops its OSM envelope: only the root holds the object. The generation
     // bump fences any job still running on the alias. This statement must keep naming a column
     // of the `group_resource_revision` trigger (`doc`, `osm_version`): the trigger fires on the
@@ -241,6 +243,21 @@ pub async fn assign(
         .bind(vec![id.to_owned()])
         .execute(&mut **tx)
         .await?;
+    // A spelling that joins a post already gone or opted out keeps none of its text, as the
+    // post's own aliases kept none when it was scrubbed.
+    let root_doc: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT doc FROM resource WHERE id=$1 AND doc IS NOT NULL")
+            .bind(&root_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+    if root_doc
+        .and_then(|doc| serde_json::from_value::<crate::model::ResourceMeta>(doc).ok())
+        .is_some_and(|doc| crate::changes::scrubbed(&doc))
+    {
+        let mut spellings = followers;
+        spellings.push(id.to_owned());
+        crate::changes::scrub_spellings(tx, &spellings).await?;
+    }
     // The root is wanted now; its own schedule continues after its first fetch.
     sqlx::query("UPDATE resource SET priority_at=coalesce(priority_at,now()) WHERE id=$1 AND resolved_at IS NULL")
         .bind(&root_id)

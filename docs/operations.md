@@ -154,7 +154,16 @@ classify to several routes (a Reddit comment's link to `media`, a LinkedIn post'
 `official`). The selected rows' [also-on](#also-on) lookups are
 queued too: a card that comes back unchanged would not run them again, so results read by an
 older version would stay until they expire. `reextract also-on` queues every resource's also-on
-lookups without re-reading any card; it can be combined with routes.
+lookups without re-reading any card; it can be combined with routes. Every run first scrubs
+what rows stored before a scrub ran still keep of a social post that is gone or whose author
+opted out, even when its refetch keeps failing. A post is gone when its stored card says
+`missing`, whatever status a failed refresh gave its row since, and a gone post is treated as
+gone even when its author had opted out. A gone post's card keeps nothing of the post
+(only its link, source, status and times, and the one type every gone post has,
+`SocialMediaPosting`), its change lines and also-on results are
+deleted, and it is regrouped. An opted-out post's lines lose their documents. The aliases of
+either keep only their `aliased` line: their cards, other lines and also-on results are deleted.
+It prints `scrubbed N posts gone or opted out`, then the re-queued count.
 
 **Dead letters.** To retry one by hand:
 
@@ -621,6 +630,9 @@ cards, so a tagged link an exact derivation names no longer joins by it either;
 that is off by default (an unknown ID stops startup). Sources run in a fixed order, and each
 sees the keys the ones before it found in the same run (a barcode MusicBrainz names, then the
 services looked up by it); a source that no longer applies (its key is gone) drops its rows. A
+social post found gone is never queued and gets no lookups, and its rows are dropped: nothing is
+derived from it, an archived copy included, and a lookup that ran while it was found gone writes
+nothing, nor does one whose link became an alias meanwhile. A
 source that fails or panics keeps its earlier rows and retries with backoff; the others' results
 stand and the worker goes on (a panic is logged as an error). A source that asks a secondary
 service besides its own (its page names which) keeps what the link and the other services gave

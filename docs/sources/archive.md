@@ -4,7 +4,8 @@ A lookup family of [also on](../api.md#also-on) (`lookups/archive.rs`).
 
 `wayback`: a page that is `missing` or `unreachable` gets its Wayback
 Machine capture closest to when it was first referenced (captures that answered 200 only), with
-`kind: "archived"` and the capture time in `at`. archive.today is never used.
+`kind: "archived"` and the capture time in `at`. archive.today is never used. A social post found
+gone gets none: nothing is derived from it.
 
 ## Operations
 

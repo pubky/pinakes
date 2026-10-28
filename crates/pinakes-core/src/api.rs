@@ -674,6 +674,7 @@ pub struct Card {
     /// (counted up to 1,000 each, then by URI), at most 5, normalized as every URI is. A typed
     /// card's `uri` is often not a link anyone wrote (`btc:block/…`, `isbn:…`): ask Nexus by
     /// these to find the tags (docs/api.md, Joining with Nexus). An occurrence's are its feed's.
+    /// A gone social post's are its own link's alone.
     /// Empty when nothing references the card.
     pub refs: Vec<String>,
     /// The clients that open a Pubky app's object, from the app's profile (docs/pubky-apps.md);
@@ -803,6 +804,7 @@ pub struct Details {
     /// Other spellings of this link that resolve to it (its aliases), by URI, at most 50. A
     /// page's own claims (`url`, `@id`, `sameAs`, canonical links) are not aliases and are not
     /// listed. The card's `uri` is the canonical one: an alias is answered with its root's card.
+    /// A gone social post lists none: a spelling's link can carry the post's title.
     pub aliases: Vec<String>,
     pub updated_at: Option<DateTime<Utc>>,
 }
@@ -1061,7 +1063,9 @@ const REFS_COUNTED: i64 = 1000;
 const REFS_ALIASES: i64 = 31;
 /// Fills each card's `refs`: the referenced links among its own and its aliases' (the
 /// [`REFS_ALIASES`] most recently referenced), most referenced first (counted up to
-/// [`REFS_COUNTED`], then by URI), at most [`REFS`]. One query for every card of a response.
+/// [`REFS_COUNTED`], then by URI), at most [`REFS`]. A gone social post's are its own link's
+/// alone: a spelling's link can carry the post's title. One query for every card of a response,
+/// and one for the missing cards among them.
 pub(crate) async fn with_refs<'a>(
     pool: &PgPool,
     cards: impl IntoIterator<Item = &'a mut Card>,
@@ -1071,13 +1075,26 @@ pub(crate) async fn with_refs<'a>(
     if ids.is_empty() {
         return Ok(());
     }
+    let missing: Vec<(String, Value)> =
+        sqlx::query_as("SELECT id,doc FROM resource WHERE id=ANY($1) AND doc->>'status'='missing'")
+            .bind(&ids)
+            .fetch_all(pool)
+            .await?;
+    let gone: Vec<String> = missing
+        .into_iter()
+        .filter(|(_, doc)| {
+            serde_json::from_value::<ResourceMeta>(doc.clone())
+                .is_ok_and(|doc| crate::changes::gone_social(&doc))
+        })
+        .map(|(id, _)| id)
+        .collect();
     let rows: Vec<(String, String)> = sqlx::query_as(
         "WITH cards AS (SELECT DISTINCT id AS card FROM unnest($1::text[]) id), \
          links AS (SELECT card, card AS id FROM cards \
          UNION ALL SELECT c.card, s.alias_id FROM cards c CROSS JOIN LATERAL \
            (SELECT a.alias_id FROM resource_alias a CROSS JOIN LATERAL \
              (SELECT max(f.created_at) AS newest FROM reference f WHERE f.resource_id = a.alias_id) r \
-            WHERE a.root_id = c.card AND r.newest IS NOT NULL ORDER BY r.newest DESC, a.alias_id LIMIT $4) s), \
+            WHERE a.root_id = c.card AND c.card <> ALL($5) AND r.newest IS NOT NULL ORDER BY r.newest DESC, a.alias_id LIMIT $4) s), \
          counted AS (SELECT l.card, x.uri, c.n FROM links l JOIN resource x ON x.id = l.id \
            CROSS JOIN LATERAL (SELECT count(*) AS n FROM \
              (SELECT 1 FROM reference f WHERE f.resource_id = l.id LIMIT $3) f) c WHERE c.n > 0) \
@@ -1088,6 +1105,7 @@ pub(crate) async fn with_refs<'a>(
     .bind(REFS as i64)
     .bind(REFS_COUNTED)
     .bind(REFS_ALIASES)
+    .bind(&gone)
     .fetch_all(pool)
     .await?;
     let mut by_card: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -1257,7 +1275,11 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
         None
     };
     // The alias rows `read` joins in, not the document's claims; the keys its sources vouch for.
-    let aliases: Vec<String> = serde_json::from_value(row["aliases"].clone()).unwrap_or_default();
+    // A gone social post names none: a spelling's link can carry the post's title.
+    let aliases: Vec<String> = serde_json::from_value(row["aliases"].clone())
+        .ok()
+        .filter(|_| !doc.as_ref().is_some_and(crate::changes::gone_social))
+        .unwrap_or_default();
     let keys: Vec<String> = serde_json::from_value(row["keys"].clone()).unwrap_or_default();
     let facts: Option<std::collections::BTreeMap<String, String>> =
         serde_json::from_value(row["facts"].clone()).ok().flatten();

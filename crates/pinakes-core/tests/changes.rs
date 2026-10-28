@@ -978,9 +978,15 @@ async fn retention_and_an_opted_out_save_of_the_same_post_never_deadlock(pool: P
     };
     let id = store::ensure_resource(&pool, uri).await.unwrap();
     store::save_document(&pool, &id, 0, &first).await.unwrap();
-    // A spelling that became an alias of the post: the opted-out save clears its row too.
+    // A spelling saved with the post's card before it became its alias: the opted-out save
+    // clears its row too.
     let spelling = "https://mastodon.social/@Gargron/1/";
     let alias_id = store::ensure_resource(&pool, spelling).await.unwrap();
+    let mut early = card("status-1.json", 900).await.unwrap();
+    early.url = spelling.into();
+    store::save_document(&pool, &alias_id, 0, &early)
+        .await
+        .unwrap();
     let mut tx = pool.begin().await.unwrap();
     let line = pinakes_core::alias::assign(
         &mut tx,
@@ -996,11 +1002,6 @@ async fn retention_and_an_opted_out_save_of_the_same_post_never_deadlock(pool: P
         .await
         .unwrap();
     tx.commit().await.unwrap();
-    sqlx::query("UPDATE resource SET doc='{}'::jsonb WHERE id=$1")
-        .bind(&alias_id)
-        .execute(&pool)
-        .await
-        .unwrap();
     // The post's lines are past retention.
     sqlx::query("UPDATE resource_change SET at=now()-interval '200 days' WHERE resource_id=$1")
         .bind(&id)

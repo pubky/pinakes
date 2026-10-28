@@ -36,6 +36,98 @@ pub struct Diff {
     pub class: &'static str,
     pub fields: Vec<String>,
 }
+/// Whether the author of a post opted out of indexing (its `opted_out` fact).
+fn opted_out(doc: &ResourceMeta) -> bool {
+    doc.attributes.get("opted_out").is_some_and(|v| v == "true")
+}
+/// Whether a stored card is a social post found gone. Its document says so, whatever a failed
+/// refresh set the row's status to since; gone wins over an opt-out the post had.
+pub(crate) fn gone_social(doc: &ResourceMeta) -> bool {
+    doc.status == Status::Missing && crate::resolver::cards::social(doc)
+}
+/// Whether a stored card keeps none of its post's text, nor do its spellings: a social post
+/// found gone, or one whose author opted out of indexing.
+pub(crate) fn scrubbed(doc: &ResourceMeta) -> bool {
+    opted_out(doc) || gone_social(doc)
+}
+/// The one type of every gone social post's card, whatever the post was (owner decision,
+/// 2026-10-28): its type was the post's read too.
+pub const GONE_POST_TYPE: &str = "SocialMediaPosting";
+/// Whether `doc` has a gone social post's own type (`gone_card`): each source's social rule
+/// accepts it, so the card stays known as a gone social post.
+pub(crate) fn gone_post_type(doc: &ResourceMeta) -> bool {
+    doc.status == Status::Missing && doc.type_name == GONE_POST_TYPE
+}
+/// What a gone social post's card keeps: nothing of the post. Only its link (URL, site, the
+/// service the URL names), the source that read it, its status and when it was last read, with
+/// the one type every gone post has (`GONE_POST_TYPE`). The source and that type are what keep
+/// it known as a gone social post (`cards::social` reads only those), so a spelling that joins
+/// it later is scrubbed too (`alias::assign`).
+pub(crate) fn gone_card(doc: &ResourceMeta) -> ResourceMeta {
+    let mut card = ResourceMeta {
+        url: doc.url.clone(),
+        site: doc.site.clone(),
+        service: doc.service.clone(),
+        source: doc.source.clone(),
+        fetched_at: doc.fetched_at,
+        ttl_secs: doc.ttl_secs,
+        status: doc.status.clone(),
+        ..Default::default()
+    };
+    card.set_type(GONE_POST_TYPE);
+    card
+}
+/// Delete what the also-on lookups of `ids` found from their cards: facts, keys and links. The
+/// rows deleted.
+async fn forget_derived(tx: &mut Transaction<'_, Postgres>, ids: &[String]) -> Result<u64> {
+    let mut deleted = 0;
+    for table in ["resource_fact", "resource_key", "derived_link"] {
+        deleted += sqlx::query(&format!("DELETE FROM {table} WHERE resource_id=ANY($1)"))
+            .bind(ids)
+            .execute(&mut **tx)
+            .await?
+            .rows_affected();
+    }
+    Ok(deleted)
+}
+/// Drop a gone social post's also-on mark, which the write of its card just set: it runs no
+/// lookups (`also_on`), so it is never queued.
+async fn unqueue_also_on(tx: &mut Transaction<'_, Postgres>, id: &str) -> Result<()> {
+    sqlx::query("DELETE FROM also_on_dirty WHERE resource_id=$1")
+        .bind(id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+/// The most spellings one statement of `scrub_spellings` names.
+const SPELLINGS_PER_STATEMENT: usize = 500;
+/// Delete what spellings of a scrubbed post (`scrubbed`) kept of it, as when they were saved
+/// before they became its aliases: every change line but the `aliased` one naming its root,
+/// their stored cards (`{}`, as an OSM spelling's; an alias's card is never served, its root's
+/// is) and what was derived from them (`forget_derived`). The caller holds the alias lock. The
+/// rows changed.
+pub(crate) async fn scrub_spellings(
+    tx: &mut Transaction<'_, Postgres>,
+    ids: &[String],
+) -> Result<u64> {
+    let mut changed = 0;
+    for ids in ids.chunks(SPELLINGS_PER_STATEMENT) {
+        changed += sqlx::query(
+            "DELETE FROM resource_change WHERE class<>'aliased' AND resource_id=ANY($1)",
+        )
+        .bind(ids)
+        .execute(&mut **tx)
+        .await?
+        .rows_affected();
+        changed += sqlx::query("UPDATE resource SET name=NULL,category=NULL,point=NULL,doc='{}'::jsonb WHERE id=ANY($1) AND (doc<>'{}'::jsonb OR name IS NOT NULL)")
+            .bind(ids)
+            .execute(&mut **tx)
+            .await?
+            .rows_affected();
+        changed += forget_derived(tx, ids).await?;
+    }
+    Ok(changed)
+}
 fn cancelled(v: &Value) -> bool {
     v["status"] == "missing" || v["event_status"] == "cancelled"
 }
@@ -193,7 +285,7 @@ pub async fn save(
     }
     // A post whose author opted out of indexing keeps no text in its history: what was kept
     // before goes now, and its lines carry only their kind, fields and time.
-    let opted_out = doc.attributes.get("opted_out").is_some_and(|v| v == "true");
+    let opted_out = opted_out(doc);
     let mut tx = pool.begin().await?;
     crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
     if opted_out || doc.status == Status::Missing {
@@ -264,17 +356,16 @@ pub async fn save(
             .await?;
     }
     if social_missing || opted_out {
-        // Spellings saved before they became aliases of this post kept its text too: their
-        // lines lose their documents (the `aliased` line keeps its root) and their stored cards
-        // their text.
-        sqlx::query("UPDATE resource_change SET before=NULL,after=NULL WHERE class<>'aliased' AND resource_id IN (SELECT alias_id FROM resource_alias WHERE root_id=$1) AND (before IS NOT NULL OR after IS NOT NULL)")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("UPDATE resource SET name=NULL,doc=doc||jsonb_build_object('name',NULL,'description',NULL,'image',NULL,'attributes','{}'::jsonb) WHERE doc IS NOT NULL AND id IN (SELECT alias_id FROM resource_alias WHERE root_id=$1)")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
+        // Spellings saved before they became aliases of this post kept its text too.
+        let aliases: Vec<String> =
+            sqlx::query_scalar("SELECT alias_id FROM resource_alias WHERE root_id=$1")
+                .bind(id)
+                .fetch_all(&mut *tx)
+                .await?;
+        scrub_spellings(&mut tx, &aliases).await?;
+    }
+    if social_missing {
+        forget_derived(&mut tx, &[id.to_owned()]).await?;
     }
     if doc.status == Status::Missing {
         let fetched = chrono::DateTime::from_timestamp_millis(doc.fetched_at)
@@ -328,12 +419,11 @@ pub async fn save(
             retained["fetched_at"] = json!(doc.fetched_at);
             retained["ttl_secs"] = json!(doc.ttl_secs);
             retained["status"] = json!("missing");
-            if social_missing {
-                for field in ["name", "description", "image"] {
-                    retained.as_object_mut().unwrap().remove(field);
-                }
-            }
             doc = serde_json::from_value(retained)?;
+            // A gone social post keeps nothing of the post (`gone_card`).
+            if social_missing {
+                doc = gone_card(&doc);
+            }
         }
     } else {
         sqlx::query("UPDATE resource SET missing_streak=0,last_missing_at=NULL,timeout_streak=0 WHERE id=$1")
@@ -378,6 +468,9 @@ pub async fn save(
         .transpose()?;
     let after = normalize(&doc);
     crate::store::write_document(&mut tx, id, generation, &doc).await?;
+    if social_missing {
+        unqueue_also_on(&mut tx, id).await?;
+    }
     let diff = diff(before.as_ref(), Some(&after))
         .filter(|_| !social_missing && (before.is_some() || doc.status != Status::Missing));
     if let Some(plan) = prepared
@@ -402,6 +495,93 @@ pub async fn save(
     // Grouping is derived work. Its failure must never roll back accepted facts or charge the resolver.
     crate::groups::reconcile(pool, id, &cfg.groups).await;
     Ok(())
+}
+/// Scrub what rows stored before a scrub ran still keep of posts gone or opted out
+/// (`scrubbed`), in batches of 500 roots, as a save would have: a gone post's change lines and
+/// also-on results are deleted, its card becomes `gone_card` and it is regrouped; an opted-out
+/// post's lines lose their documents (its card stays, as a save leaves it); either one's aliases
+/// keep nothing of it (`scrub_spellings`). A post both opted out and gone is gone. A gone post is
+/// found by its stored card, also when a failed refresh set its row's status since. Run by
+/// `pinakesd reextract`, as a post whose refetch fails never reaches `save`. The posts it
+/// changed.
+pub async fn scrub_stored(pool: &PgPool) -> Result<u64> {
+    let (mut last, mut scrubbed_posts) = (String::new(), 0u64);
+    loop {
+        let rows: Vec<(String, Value)> = sqlx::query_as("SELECT r.id,r.doc FROM resource r WHERE r.id>$1 AND (r.status='missing' OR r.doc->>'status'='missing' OR r.doc->'attributes'->>'opted_out'='true') AND NOT EXISTS(SELECT 1 FROM resource_alias a WHERE a.alias_id=r.id) ORDER BY r.id LIMIT 500")
+            .bind(&last)
+            .fetch_all(pool)
+            .await?;
+        let Some((end, _)) = rows.last() else {
+            return Ok(scrubbed_posts);
+        };
+        last = end.clone();
+        let scrubbed_doc = |doc: Value| {
+            serde_json::from_value::<ResourceMeta>(doc)
+                .ok()
+                .filter(scrubbed)
+        };
+        for (id, doc) in rows {
+            if scrubbed_doc(doc).is_none() {
+                continue;
+            }
+            let mut tx = pool.begin().await?;
+            crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
+            crate::alias::lock(&mut tx).await?;
+            // Read again under its lock: a save may have revived it since.
+            let doc: Option<Value> =
+                sqlx::query_scalar("SELECT doc FROM resource WHERE id=$1 FOR UPDATE")
+                    .bind(&id)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            let Some(doc) = doc.and_then(scrubbed_doc) else {
+                continue;
+            };
+            let ids = [id.clone()];
+            let mut changed = if !gone_social(&doc) {
+                sqlx::query("UPDATE resource_change SET before=NULL,after=NULL WHERE resource_id=$1 AND (before IS NOT NULL OR after IS NOT NULL)")
+                    .bind(&id)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected()
+            } else {
+                let lines = sqlx::query("DELETE FROM resource_change WHERE resource_id=$1")
+                    .bind(&id)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected();
+                let card = gone_card(&doc);
+                let kept = serde_json::to_value(&card)?;
+                let card = sqlx::query("UPDATE resource SET type=$3,type_path=$4,name=NULL,category=NULL,point=NULL,start_at=NULL,end_at=NULL,venue_id=NULL,doc=$2 WHERE id=$1 AND (doc IS DISTINCT FROM $2 OR name IS NOT NULL OR type IS DISTINCT FROM $3)")
+                    .bind(&id)
+                    .bind(&kept)
+                    .bind(&card.type_name)
+                    .bind(&card.type_path)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected();
+                let derived = forget_derived(&mut tx, &ids).await?;
+                unqueue_also_on(&mut tx, &id).await?;
+                if card + derived > 0 {
+                    // Its group was formed from the card it no longer has.
+                    sqlx::query(
+                        "INSERT INTO group_dirty(resource_id) VALUES($1) ON CONFLICT DO NOTHING",
+                    )
+                    .bind(&id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                lines + card + derived
+            };
+            let aliases: Vec<String> =
+                sqlx::query_scalar("SELECT alias_id FROM resource_alias WHERE root_id=$1")
+                    .bind(&id)
+                    .fetch_all(&mut *tx)
+                    .await?;
+            changed += scrub_spellings(&mut tx, &aliases).await?;
+            tx.commit().await?;
+            scrubbed_posts += u64::from(changed > 0);
+        }
+    }
 }
 /// Delete resources orphaned for `grace_days`. A derived child's grace counts from its link's
 /// expiry, not from its creation: a lapsed link (a calendar that failed for a day, an event link
@@ -518,6 +698,50 @@ async fn retain_occurrences(pool: &PgPool) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Every social card, of every type its source gives, has the one gone type once gone and
+    /// stays known as a gone social post, so a spelling that joins it later is scrubbed.
+    #[test]
+    fn a_gone_social_card_has_one_type_and_stays_social() {
+        let mut cards: Vec<ResourceMeta> = crate::sources::REGISTRY
+            .iter()
+            .flat_map(|source| {
+                source.examples().iter().map(|example| {
+                    let mut doc = ResourceMeta::new(example.uri, source.name(), 3600);
+                    doc.set_type(example.card_type);
+                    doc
+                })
+            })
+            .collect();
+        for (source, type_name) in [
+            ("nostr", "Article"),
+            ("activitypub", "CreativeWork"),
+            ("pubky", "SocialMediaPosting"),
+        ] {
+            let mut doc = ResourceMeta::new("https://example.social/1", source, 3600);
+            doc.set_type(type_name);
+            cards.push(doc);
+        }
+        let mut social = Vec::new();
+        for mut doc in cards.into_iter().filter(crate::resolver::cards::social) {
+            doc.name = Some("A post".into());
+            doc.status = Status::Missing;
+            let gone = gone_card(&doc);
+            assert_eq!(
+                (gone.type_name.as_str(), gone.name.as_deref()),
+                (GONE_POST_TYPE, None),
+                "{}",
+                doc.url
+            );
+            assert!(
+                gone_social(&gone),
+                "{} {} once gone",
+                doc.source,
+                doc.type_name
+            );
+            social.push(doc.type_name);
+        }
+        assert!(social.iter().any(|t| t == "VideoObject"), "{social:?}");
+    }
     #[test]
     fn normalized_diff_classes_and_fetch_noise() {
         let mut before = ResourceMeta::new("https://example.org", "web", 10);

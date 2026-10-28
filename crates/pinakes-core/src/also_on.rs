@@ -583,7 +583,7 @@ pub async fn record(
     cfg: &AlsoOnConfig,
 ) -> Result<()> {
     anyhow::ensure!(token(source), "invalid source id {source}");
-    let (keys, links, facts) = checked(resource_id, found, cfg);
+    let (mut keys, mut links, mut facts) = checked(resource_id, found, cfg);
     let expires = Utc::now()
         + chrono::Duration::from_std(ttl.saturating_mul(2)).unwrap_or(chrono::Duration::days(60));
     let mut tx = pool.begin().await?;
@@ -605,6 +605,22 @@ pub async fn record(
         .bind(source)
         .execute(&mut *tx)
         .await?;
+    // Read again under the locks, for a lookup that ran while its resource changed. One that
+    // became an alias meanwhile gets nothing: an alias is read as its root and runs no lookups
+    // (`subject`). A social post found gone meanwhile writes nothing, and its rows go.
+    let now: Option<(Value, bool)> = sqlx::query_as("SELECT doc,EXISTS(SELECT 1 FROM resource_alias WHERE alias_id=$1) FROM resource WHERE id=$1")
+        .bind(resource_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    if now.as_ref().is_some_and(|(_, alias)| *alias) {
+        return Ok(());
+    }
+    if now
+        .and_then(|(doc, _)| serde_json::from_value::<ResourceMeta>(doc).ok())
+        .is_some_and(|doc| crate::changes::gone_social(&doc))
+    {
+        (keys, links, facts) = Default::default();
+    }
     let key_rows: Vec<Value> = keys
         .iter()
         .map(|k| serde_json::json!({"key": k.key, "via": k.via}))
@@ -846,6 +862,12 @@ async fn one(
         return Ok(None);
     };
     let cfg = &cx.config.also_on;
+    // A social post found gone gets no lookups: nothing is derived from it (an archived copy
+    // included), and what was is deleted.
+    let gone = subject
+        .doc
+        .as_ref()
+        .is_some_and(crate::changes::gone_social);
     let mut next: Option<Duration> = None;
     let mut partial: Option<Duration> = None;
     let mut failed = None;
@@ -856,7 +878,7 @@ async fn one(
         .iter()
         .filter(|s| cfg.source_enabled(s.as_ref()) && s.ready(&cx.config))
     {
-        if !source.applies(&subject) {
+        if gone || !source.applies(&subject) {
             // It read the resource before (a key it starts from is gone): its rows go too.
             let had: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource_key WHERE resource_id=$1 AND source=$2) OR EXISTS(SELECT 1 FROM derived_link WHERE resource_id=$1 AND source=$2) OR EXISTS(SELECT 1 FROM resource_fact WHERE resource_id=$1 AND source=$2)")
                 .bind(id)
