@@ -15,6 +15,7 @@
 use crate::{config::Config, model::ResourceMeta, resolver::egress::Egress};
 
 pub mod books;
+pub mod client_credentials;
 pub mod deezer;
 pub mod films;
 pub mod itunes;
@@ -25,6 +26,7 @@ pub mod performers;
 pub mod podcasts;
 pub mod product_keys;
 pub mod service;
+pub mod spotify;
 pub mod tidal;
 pub mod wikidata;
 pub mod wikidata_item;
@@ -104,6 +106,10 @@ pub struct SourceOptions {
     /// A service's personal token, for a source that takes one (`Source::takes_token`); never
     /// shown or logged.
     pub token: Option<crate::event::adapters::SecretKey>,
+    /// An app's consumer key and secret, for a source that takes them
+    /// (`Source::app_key_variables`); never shown or logged.
+    pub key: Option<crate::event::adapters::SecretKey>,
+    pub secret: Option<crate::event::adapters::SecretKey>,
 }
 
 /// One resource as a source sees it.
@@ -291,6 +297,12 @@ pub trait Source: Send + Sync {
     fn takes_token(&self) -> bool {
         false
     }
+    /// The variables of its own (`PINAKES_NAME`) that fill `[also_on.sources.<id>] key` and
+    /// `secret`, an app's consumer pair, when the file leaves them unset; `None` for a source
+    /// that takes no such pair.
+    fn app_key_variables(&self) -> Option<(&'static str, &'static str)> {
+        None
+    }
 }
 
 /// A top-level section of the config file that one source owns and alone reads (`[tidal]`):
@@ -350,6 +362,7 @@ pub fn registry() -> Vec<Arc<dyn Source>> {
     let own: Vec<Arc<dyn Source>> = vec![
         Arc::new(service::ServiceSource),
         Arc::new(tidal::Tidal),
+        Arc::new(spotify::Spotify),
         Arc::new(musicbrainz::MusicBrainzSource),
         Arc::new(musicbrainz_entity::MusicBrainzEntitySource),
         Arc::new(performers::PerformersSource),

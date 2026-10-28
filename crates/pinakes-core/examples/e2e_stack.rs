@@ -743,7 +743,8 @@ fn live_selection(
     ensure!(
         unmet.is_empty(),
         "live samples need an also-on source this stack cannot run ({}); for tidal, set \
-         PINAKES_TIDAL_CLIENT_ID and PINAKES_TIDAL_CLIENT_SECRET",
+         PINAKES_TIDAL_CLIENT_ID and PINAKES_TIDAL_CLIENT_SECRET; for spotify, \
+         PINAKES_SPOTIFY_CLIENT_ID and PINAKES_SPOTIFY_CLIENT_SECRET",
         unmet.join(", ")
     );
     Ok((kept, skipped))

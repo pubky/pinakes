@@ -110,6 +110,37 @@ impl Transport for Recorded {
                 body: b"<html><head><title>Big Band</title></head><body></body></html>".to_vec(),
             });
         }
+        // Spotify's token and Web API (`spotify`): the track REPORT-matching names, written by
+        // hand in the API's shape (Spotify refused to answer the owner's app; tests/spotify.rs).
+        if let Some(host @ ("accounts.spotify.com" | "api.spotify.com")) = url.host_str() {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(format!("{host}{}", url.path()));
+            assert!(options.sensitive);
+            let body = match url.path() {
+                "/api/token" => {
+                    serde_json::json!({"access_token": "hubs-token", "expires_in": 3600})
+                }
+                "/v1/tracks/7tFiyTwD0nx5a1eklYtX2J" => serde_json::json!({
+                    "id": "7tFiyTwD0nx5a1eklYtX2J", "type": "track",
+                    "name": "Bohemian Rhapsody - Remastered 2011", "duration_ms": 354_320,
+                    "external_ids": {"isrc": "GBUM71029604"},
+                }),
+                other => panic!("unexpected Spotify request {other}"),
+            };
+            return Ok(Fetched {
+                permanent_redirect: false,
+                truncated: false,
+                validators: Default::default(),
+                url: url.clone(),
+                status: 200,
+                retry_after_secs: 60,
+                location: None,
+                content_type: "application/json".into(),
+                body: serde_json::to_vec(&body)?,
+            });
+        }
         assert_eq!(options.accept.as_deref(), Some("application/json"));
         // Much-edited Wikidata items and MusicBrainz entities with many links exceed the default
         // cap; their reads may be larger.
@@ -1055,6 +1086,80 @@ async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
 /// With Deezer's API on: a Deezer album's own barcode is a key, iTunes names the one Apple album
 /// for it, and the tagged Apple link joins (Cut to the Feeling). A TIDAL track's own ISRC names
 /// the one Deezer track. Off by default, nothing asks Deezer.
+/// Spotify's own record of a track (`spotify`): its ISRC, which MusicBrainz gives to one
+/// recording, joins the track to that recording's page (REPORT-matching P1).
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_spotify_track_joins_the_musicbrainz_recording(pool: sqlx::PgPool) {
+    if !has(&["spotify", "musicbrainz", "musicbrainz_entity"]) {
+        return;
+    }
+    let mut ids = vec![];
+    for (uri, ty) in [
+        (
+            "https://open.spotify.com/track/7tFiyTwD0nx5a1eklYtX2J",
+            "MusicRecording",
+        ),
+        (
+            "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69",
+            "MusicRecording",
+        ),
+    ] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut d = ResourceMeta::new(uri, "jsonld", 86400);
+        d.set_type(ty);
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        ids.push(id);
+    }
+    let mut config = Config::default();
+    config.sections.set(
+        "spotify",
+        serde_json::json!({"client_id": "hubs-id", "client_secret": "hubs-secret"}),
+    );
+    let t = Arc::new(Recorded {
+        seen: Mutex::default(),
+    });
+    let cx = also_on::Context {
+        egress: egress(t.clone()),
+        config: Arc::new(config),
+    };
+    sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    also_on::drain(&pool, &cx, &also_on::registry(), 100)
+        .await
+        .unwrap();
+    groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    let keys: Vec<String> = sqlx::query_scalar(
+        "SELECT key||' '||source FROM resource_key WHERE resource_id=$1 ORDER BY key COLLATE \"C\"",
+    )
+    .bind(&ids[0])
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(
+        keys.contains(&"isrc:GBUM71029604 spotify".to_owned()),
+        "{keys:?}"
+    );
+    let group = |id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT group_id FROM group_unit WHERE resource_id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let track = group(ids[0].clone()).await;
+    assert!(track.is_some(), "{keys:?}");
+    assert_eq!(group(ids[1].clone()).await, track);
+}
+
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_deezer_barcode_names_the_apple_album_that_joins(pool: sqlx::PgPool) {
     // Deezer's barcode and iTunes' album for it are the two sources' work.

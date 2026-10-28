@@ -245,12 +245,21 @@ derive_links = true # Off: keys and facts only; no derived links on cards, nor j
 # PINAKES__PODCAST_INDEX__KEY and PINAKES__PODCAST_INDEX__SECRET (see .env.example).
 # [also_on.sources.discogs]
 # token = "" # A Discogs personal access token: images on Discogs cards.
+# key = "" # Or a Discogs app's consumer key and secret (PINAKES_DISCOGS_CONSUMER_KEY and
+# secret = "" # PINAKES_DISCOGS_CONSUMER_SECRET): the same. The token wins when both are set.
 
 # The tidal source asks TIDAL only with a client ID and secret: supply them through
 # PINAKES_TIDAL_CLIENT_ID and PINAKES_TIDAL_CLIENT_SECRET (see .env.example).
 
 [tidal]
 country = "US" # The TIDAL catalogue's country (ISO 3166-1 alpha-2, upper case).
+
+# The spotify source asks Spotify only with an app's client ID and secret: supply them through
+# PINAKES_SPOTIFY_CLIENT_ID and PINAKES_SPOTIFY_CLIENT_SECRET (see .env.example), or here.
+
+[spotify]
+# client_id = ""
+# client_secret = ""
 
 [api]
 # Applied to every public route (/v1, the agents' guide and /mcp) using the direct peer IP.

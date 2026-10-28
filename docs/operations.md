@@ -245,7 +245,7 @@ cache (10,000 entries, 32 MiB), and concurrent readers of one request share one 
 is kept for the lifetime the reader asks for, raised to at least an hour; a failure for five
 minutes, or, when the service named its wait (a 429's `Retry-After`), for that wait held between 1
 and 300 seconds. Eviction of the least recently used entries can end any entry sooner. An
-authentication failure (TIDAL's 401 and 403) is never kept, so a new token asks again, and a wait
+authentication failure (TIDAL's and Spotify's 401 and 403) is never kept, so a new token asks again, and a wait
 for Pinakes's own host budget is not a failure.
 
 Every request introduces itself as `pinakes/<version> (+https://pubky.app; <contact>)`, with
