@@ -1526,7 +1526,7 @@ async fn a_tagged_btc_map_link_joins_its_osm_object(pool: PgPool) {
 /// names takes that service's place; a tagged member of another site still shows.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_tagged_member_and_a_derived_link_of_one_service_show_once(pool: PgPool) {
-    if !families(&["games"]) {
+    if !families(&["games", "apps"]) {
         return;
     }
     named(&[
@@ -1751,7 +1751,7 @@ async fn two_tagged_spellings_of_a_derived_link_show_once(pool: PgPool) {
 /// place: the derived link to the real service still shows.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_page_naming_itself_after_a_service_takes_no_slot(pool: PgPool) {
-    if !families(&["games"]) {
+    if !families(&["apps"]) {
         return;
     }
     named(&[
