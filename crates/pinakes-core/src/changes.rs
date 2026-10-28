@@ -36,6 +36,71 @@ pub struct Diff {
     pub class: &'static str,
     pub fields: Vec<String>,
 }
+/// Whether the author of a post opted out of indexing (its `opted_out` fact).
+fn opted_out(doc: &ResourceMeta) -> bool {
+    doc.attributes.get("opted_out").is_some_and(|v| v == "true")
+}
+/// Whether a stored card keeps none of its post's text, nor do its spellings: a social post
+/// found gone, or one whose author opted out of indexing.
+pub(crate) fn scrubbed(doc: &ResourceMeta) -> bool {
+    opted_out(doc) || (doc.status == Status::Missing && crate::resolver::cards::social(doc))
+}
+/// What a gone social post's card keeps: nothing of the post. Only its link (URL, site, the
+/// service the URL names), the source that read it, its type, its status and when it was last
+/// read. The type and source are what keep it known as a gone social post (`cards::social`
+/// reads only those), so a spelling that joins it later is scrubbed too (`alias::assign`).
+pub(crate) fn gone_card(doc: &ResourceMeta) -> ResourceMeta {
+    ResourceMeta {
+        type_name: doc.type_name.clone(),
+        type_path: doc.type_path.clone(),
+        url: doc.url.clone(),
+        site: doc.site.clone(),
+        service: doc.service.clone(),
+        source: doc.source.clone(),
+        fetched_at: doc.fetched_at,
+        ttl_secs: doc.ttl_secs,
+        status: doc.status.clone(),
+        ..Default::default()
+    }
+}
+/// Delete what the also-on lookups of `ids` found from their cards: facts, keys and links. The
+/// rows deleted.
+async fn forget_derived(tx: &mut Transaction<'_, Postgres>, ids: &[String]) -> Result<u64> {
+    let mut deleted = 0;
+    for table in ["resource_fact", "resource_key", "derived_link"] {
+        deleted += sqlx::query(&format!("DELETE FROM {table} WHERE resource_id=ANY($1)"))
+            .bind(ids)
+            .execute(&mut **tx)
+            .await?
+            .rows_affected();
+    }
+    Ok(deleted)
+}
+/// Delete what spellings of a scrubbed post (`scrubbed`) kept of it, as when they were saved
+/// before they became its aliases: every change line but the `aliased` one naming its root,
+/// their stored cards (`{}`, as an OSM spelling's; an alias's card is never served, its root's
+/// is) and what was derived from them (`forget_derived`). The caller holds the alias lock. The
+/// rows changed.
+pub(crate) async fn scrub_spellings(
+    tx: &mut Transaction<'_, Postgres>,
+    ids: &[String],
+) -> Result<u64> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let lines =
+        sqlx::query("DELETE FROM resource_change WHERE class<>'aliased' AND resource_id=ANY($1)")
+            .bind(ids)
+            .execute(&mut **tx)
+            .await?
+            .rows_affected();
+    let cards = sqlx::query("UPDATE resource SET name=NULL,category=NULL,point=NULL,doc='{}'::jsonb WHERE id=ANY($1) AND (doc<>'{}'::jsonb OR name IS NOT NULL)")
+        .bind(ids)
+        .execute(&mut **tx)
+        .await?
+        .rows_affected();
+    Ok(lines + cards + forget_derived(tx, ids).await?)
+}
 fn cancelled(v: &Value) -> bool {
     v["status"] == "missing" || v["event_status"] == "cancelled"
 }
@@ -193,7 +258,7 @@ pub async fn save(
     }
     // A post whose author opted out of indexing keeps no text in its history: what was kept
     // before goes now, and its lines carry only their kind, fields and time.
-    let opted_out = doc.attributes.get("opted_out").is_some_and(|v| v == "true");
+    let opted_out = opted_out(doc);
     let mut tx = pool.begin().await?;
     crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
     if opted_out || doc.status == Status::Missing {
@@ -264,17 +329,16 @@ pub async fn save(
             .await?;
     }
     if social_missing || opted_out {
-        // Spellings saved before they became aliases of this post kept its text too: their
-        // lines lose their documents (the `aliased` line keeps its root) and their stored cards
-        // their text.
-        sqlx::query("UPDATE resource_change SET before=NULL,after=NULL WHERE class<>'aliased' AND resource_id IN (SELECT alias_id FROM resource_alias WHERE root_id=$1) AND (before IS NOT NULL OR after IS NOT NULL)")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("UPDATE resource SET name=NULL,doc=doc||jsonb_build_object('name',NULL,'description',NULL,'image',NULL,'attributes','{}'::jsonb) WHERE doc IS NOT NULL AND id IN (SELECT alias_id FROM resource_alias WHERE root_id=$1)")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
+        // Spellings saved before they became aliases of this post kept its text too.
+        let aliases: Vec<String> =
+            sqlx::query_scalar("SELECT alias_id FROM resource_alias WHERE root_id=$1")
+                .bind(id)
+                .fetch_all(&mut *tx)
+                .await?;
+        scrub_spellings(&mut tx, &aliases).await?;
+    }
+    if social_missing {
+        forget_derived(&mut tx, &[id.to_owned()]).await?;
     }
     if doc.status == Status::Missing {
         let fetched = chrono::DateTime::from_timestamp_millis(doc.fetched_at)
@@ -328,12 +392,11 @@ pub async fn save(
             retained["fetched_at"] = json!(doc.fetched_at);
             retained["ttl_secs"] = json!(doc.ttl_secs);
             retained["status"] = json!("missing");
-            if social_missing {
-                for field in ["name", "description", "image"] {
-                    retained.as_object_mut().unwrap().remove(field);
-                }
-            }
             doc = serde_json::from_value(retained)?;
+            // A gone social post keeps nothing of the post (`gone_card`).
+            if social_missing {
+                doc = gone_card(&doc);
+            }
         }
     } else {
         sqlx::query("UPDATE resource SET missing_streak=0,last_missing_at=NULL,timeout_streak=0 WHERE id=$1")

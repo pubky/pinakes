@@ -2484,6 +2484,55 @@ async fn an_opted_out_post_is_not_searched_and_keeps_no_history_text(pool: PgPoo
     assert_eq!(read["name"], "Hello world", "{read}");
 }
 
+/// A spelling with its own full card that becomes an alias of a Mastodon post after its author
+/// opted out keeps none of the post's text, at once: not in its card, its search text or its
+/// history.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_spelling_that_joins_an_opted_out_post_keeps_none_of_its_text(pool: PgPool) {
+    let uri = "https://mastodon.social/@Gargron/1";
+    let card = |file: &'static str, at: i64| async move {
+        let api = "https://mastodon.social/api/v1/statuses/1";
+        let mut doc =
+            common::source_card("mastodon", uri, &[(api, 200, "application/json", file)]).await?;
+        doc.fetched_at = at;
+        Some(doc)
+    };
+    let Some(opted) = card("status-1-opted-out.json", 2000).await else {
+        return;
+    };
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    store::save_document(&pool, &id, 0, &opted).await.unwrap();
+    let spelling = "https://mastodon.social/@Gargron/1/";
+    let alias_id = store::ensure_resource(&pool, spelling).await.unwrap();
+    let mut full = card("status-1.json", 2100).await.unwrap();
+    full.url = spelling.into();
+    store::save_document(&pool, &alias_id, 0, &full)
+        .await
+        .unwrap();
+    let texts = || {
+        sqlx::query_scalar::<_, i64>("SELECT (SELECT count(*) FROM resource_change WHERE resource_id=$1 AND (coalesce(before::text,'')||coalesce(after::text,'')) ~* 'hello|Rochko') + (SELECT count(*) FROM resource WHERE id=$1 AND ((coalesce(doc::text,'')||coalesce(name,'')) ~* 'hello|Rochko' OR coalesce(search_text::text,'') ~* 'hello|rochko'))")
+            .bind(&alias_id)
+            .fetch_one(&pool)
+    };
+    assert!(texts().await.unwrap() > 1);
+    let mut tx = pool.begin().await.unwrap();
+    let line = pinakes_core::alias::assign(
+        &mut tx,
+        &alias_id,
+        &pinakes_core::alias::Alias {
+            root: uri.into(),
+            basis: "identifier",
+        },
+    )
+    .await
+    .unwrap();
+    pinakes_core::alias::record(&mut tx, line.into_iter().collect())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(texts().await.unwrap(), 0);
+}
+
 /// One viewer's sets on the fixture graph: friends are author `friend`, the reach set
 /// (`wot_2`) is author `wot`, following is everyone.
 async fn graph_nexus(friend: usize, wot: usize) -> (String, tokio::task::JoinHandle<()>) {
