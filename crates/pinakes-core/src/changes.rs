@@ -196,8 +196,9 @@ pub async fn save(
     let opted_out = doc.attributes.get("opted_out").is_some_and(|v| v == "true");
     let mut tx = pool.begin().await?;
     crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
-    if opted_out {
-        // It also clears its aliases' rows, after its own.
+    if opted_out || doc.status == Status::Missing {
+        // It, or a social post found gone (known only from the stored card, read below), also
+        // clears its aliases' rows, after its own.
         crate::alias::lock(&mut tx).await?;
     }
     let row=sqlx::query("SELECT r.*,CASE WHEN r.osm_id IS NULL THEN r.doc ELSE o.versions->r.osm_version END AS accepted FROM resource r LEFT JOIN osm_place o ON r.osm_type=o.osm_type AND r.osm_id=o.osm_id WHERE r.id=$1 AND r.generation=$2 FOR UPDATE OF r")
@@ -262,7 +263,7 @@ pub async fn save(
             .execute(&mut *tx)
             .await?;
     }
-    if opted_out {
+    if social_missing || opted_out {
         // Spellings saved before they became aliases of this post kept its text too: their
         // lines lose their documents (the `aliased` line keeps its root) and their stored cards
         // their text.
