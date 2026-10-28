@@ -78,6 +78,8 @@ enabled = true
 enabled = true
 [sources.eur_lex]
 enabled = true
+[sources.facebook]
+enabled = true
 [sources.fdroid]
 enabled = true
 [sources.federal_register]
@@ -117,9 +119,13 @@ enabled = true
 enabled = true
 [sources.inaturalist]
 enabled = true
+[sources.instagram]
+enabled = true
 [sources.internet_archive]
 enabled = true
 [sources.legislation_gov_uk]
+enabled = true
+[sources.linkedin]
 enabled = true
 [sources.lobsters]
 enabled = true
@@ -133,11 +139,15 @@ enabled = true
 enabled = true
 [sources.pdb]
 enabled = true
+[sources.pinterest]
+enabled = true
 [sources.podcast_index]
 enabled = true
 [sources.pubchem]
 enabled = true
 [sources.public_inbox]
+enabled = true
+[sources.reddit]
 enabled = true
 [sources.ror]
 enabled = true
@@ -147,7 +157,17 @@ enabled = true
 enabled = true
 [sources.stacker_news]
 enabled = true
+[sources.substack]
+enabled = true
 [sources.swiss_parliament]
+enabled = true
+[sources.telegram]
+enabled = true
+[sources.threads]
+enabled = true
+[sources.tiktok]
+enabled = true
+[sources.twitch]
 enabled = true
 [sources.uk_parliament_bills]
 enabled = true
@@ -156,6 +176,8 @@ enabled = true
 [sources.usgs]
 enabled = true
 [sources.wordpress]
+enabled = true
+[sources.x]
 enabled = true
 [sources.zefix]
 enabled = true

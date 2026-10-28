@@ -1,0 +1,12 @@
+[
+  {
+    "kind": "tiktok",
+    "uri": "https://www.tiktok.com/@scout2015/video/6718335390845095173",
+    "type": "VideoObject"
+  },
+  {
+    "kind": "tiktok_profile",
+    "uri": "https://www.tiktok.com/@tiktok",
+    "type": "Person"
+  }
+]

@@ -1,0 +1,12 @@
+[
+  {
+    "kind": "linkedin",
+    "uri": "https://www.linkedin.com/company/linkedin",
+    "type": "Organization"
+  },
+  {
+    "kind": "linkedin_person",
+    "uri": "https://www.linkedin.com/in/williamhgates",
+    "type": "Person"
+  }
+]

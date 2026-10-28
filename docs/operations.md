@@ -140,7 +140,18 @@ becomes pending, as does an OSM-host URL moving to web. Leases are fenced by a g
 Aliases have no route and are not re-queued; one that still holds a failure (an error, a dead
 letter, a retry count) gets an alias's state, `pending` (or `ok` if it was read) with none, since
 its root answers for it. A row whose URI now has a static alias root (a new tracking parameter,
-say) becomes an alias of it. The selected rows' [also-on](#also-on) lookups are
+say) becomes an alias of it. A selected alias (by the route its URI classifies to) whose URI a
+rule now gives another root moves to that root. One that no rule names any more (a source that
+read it as another object's spelling now reads it at its own address) answers for itself again:
+it is re-queued on its route, regrouped and rescored with its old root, and its `aliased` change
+line names its own ID. Every release comes before any move, so a spelling whose rule names a
+released link moves to that link, never to the root the link had. An alias a page's canonical made
+(basis `canonical`) or an official API's answer made (basis `source`) is no rule of its URI and
+stays, as does the alias of a link whose source is switched off (`[sources.x] enabled = false`
+silences its rule; what it merged before stays merged). To fix the aliases an earlier build made,
+run `reextract all`: the links concerned
+classify to several routes (a Reddit comment's link to `media`, a LinkedIn post's to
+`official`). The selected rows' [also-on](#also-on) lookups are
 queued too: a card that comes back unchanged would not run them again, so results read by an
 older version would stay until they expire. `reextract also-on` queues every resource's also-on
 lookups without re-reading any card; it can be combined with routes.

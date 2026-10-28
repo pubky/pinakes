@@ -24,7 +24,8 @@ const PLATFORM_TRACKING: &[(&[&str], &[&str])] = &[
 pub struct Alias {
     pub root: String,
     /// `cursor`, `osm`, `identifier`, `service` (a music service's, Wikipedia's or a Wikidata
-    /// item's URL forms), `tracking` or `canonical`.
+    /// item's URL forms), `tracking`, `canonical` (the page's own canonical) or `source` (an
+    /// official API's answer). The last two are no rule of the URI.
     pub basis: &'static str,
 }
 /// The root of a URI known from the URI alone, when it differs from the URI itself.
@@ -118,13 +119,14 @@ pub fn canonical(uri: &str, canonical: &str) -> Option<Alias> {
     })
 }
 /// The root an official API named for `uri` (`ResourceMeta::source_root`), when it is another
-/// URI. The API's own record is the evidence, as an identifier is.
+/// URI. The API's own record is the evidence, as an identifier is; its basis is `source`, since
+/// no rule of the URI names it (`reextract` keeps it).
 pub fn source(uri: &str, root: &str) -> Option<Alias> {
     let (_, uri, _) = crate::model::identity(uri).ok()?;
     let (_, root, _) = crate::model::identity(root).ok()?;
     (root != uri).then_some(Alias {
         root,
-        basis: "identifier",
+        basis: "source",
     })
 }
 /// The lock every alias assignment takes, so an alias never commits against a root that has
@@ -260,8 +262,49 @@ pub async fn assign(
         .bind(id)
         .execute(&mut **tx)
         .await?;
-    crate::store::recompute_scores(tx, &[id.to_owned(), root_id]).await?;
+    // The root it left (when it moved) no longer counts its references either.
+    let mut rescored: Vec<String> = [Some(id.to_owned()), Some(root_id), previous]
+        .into_iter()
+        .flatten()
+        .collect();
+    rescored.sort_unstable();
+    rescored.dedup();
+    crate::store::recompute_scores(tx, &rescored).await?;
     Ok(line)
+}
+/// Make an alias answer for itself again, when no rule names its root any more (a source that
+/// read its URI as another object's spelling now reads it at its own address): its row and its
+/// old root are regrouped and rescored, and its line names its own ID as the root that answers
+/// for it. `None` when it was no alias. It takes `lock`; the caller re-queues it on its route and
+/// passes the line to `record` before committing.
+pub async fn release(tx: &mut Transaction<'_, Postgres>, id: &str) -> Result<Option<Line>> {
+    lock(tx).await?;
+    let root: Option<String> =
+        sqlx::query_scalar("DELETE FROM resource_alias WHERE alias_id=$1 RETURNING root_id")
+            .bind(id)
+            .fetch_optional(&mut **tx)
+            .await?;
+    let Some(root) = root else {
+        return Ok(None);
+    };
+    let both = vec![id.to_owned(), root];
+    sqlx::query(
+        "INSERT INTO group_dirty(resource_id) SELECT unnest($1::text[]) ON CONFLICT DO NOTHING",
+    )
+    .bind(&both)
+    .execute(&mut **tx)
+    .await?;
+    crate::store::recompute_scores(tx, &both).await?;
+    let type_path: Vec<String> =
+        sqlx::query_scalar("SELECT coalesce(type_path,'{}') FROM resource WHERE id=$1")
+            .bind(id)
+            .fetch_one(&mut **tx)
+            .await?;
+    Ok(Some(Line {
+        id: id.to_owned(),
+        root: id.to_owned(),
+        type_path,
+    }))
 }
 /// The root of a resource ID, or the ID itself.
 pub async fn resolve_id(pool: &PgPool, id: &str) -> Result<String> {
@@ -290,7 +333,7 @@ mod tests {
         let named = source("https://example.org/a/", "https://example.org/b/").unwrap();
         assert_eq!(
             (named.root.as_str(), named.basis),
-            ("https://example.org/b/", "identifier")
+            ("https://example.org/b/", "source")
         );
         assert_eq!(
             source("https://example.org/a", "HTTPS://EXAMPLE.ORG/a"),

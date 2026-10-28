@@ -1,0 +1,12 @@
+[
+  {
+    "kind": "x",
+    "uri": "https://x.com/jack/status/20",
+    "type": "SocialMediaPosting"
+  },
+  {
+    "kind": "x_profile",
+    "uri": "https://x.com/X",
+    "type": "Person"
+  }
+]

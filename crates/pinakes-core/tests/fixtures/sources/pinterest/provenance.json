@@ -1,0 +1,38 @@
+{
+  "oembed-missing": {
+    "bytes": 63,
+    "content_type": "application/json; charset=utf-8",
+    "file": "oembed-missing.json",
+    "recorded_at": "2026-10-26T00:21:48+00:00",
+    "sha256": "a045ea1080cb9ffb4c1a78047e84f24888a14111dceadf7d7ff9d5a7f6128ed0",
+    "status": 400,
+    "url": "https://www.pinterest.com/oembed.json?url=https://www.pinterest.com/pin/1/"
+  },
+  "oembed-pin-99360735500167749": {
+    "bytes": 551,
+    "content_type": "application/json; charset=utf-8",
+    "file": "oembed-pin-99360735500167749.json",
+    "recorded_at": "2026-10-26T00:21:48+00:00",
+    "sha256": "847baf58dae7e1253fd44c2d241f58f8cbc7dc0f8e433123f81aae61c36bfe3b",
+    "status": 200,
+    "url": "https://www.pinterest.com/oembed.json?url=https://www.pinterest.com/pin/99360735500167749/"
+  },
+  "profile-missing": {
+    "bytes": 1333652,
+    "content_type": "text/html; charset=utf-8",
+    "file": "profile-missing.html.gz",
+    "recorded_at": "2026-10-26T00:21:50+00:00",
+    "sha256": "b07cfc3e369d05bdae2f9355a24096d7cf4466b8643e66a8c3fef708e24396e5",
+    "status": 200,
+    "url": "https://www.pinterest.com/thisuserdoesnotexist12345x/"
+  },
+  "profile-pinterest": {
+    "bytes": 1802042,
+    "content_type": "text/html; charset=utf-8",
+    "file": "profile-pinterest.html.gz",
+    "recorded_at": "2026-10-26T00:21:49+00:00",
+    "sha256": "ff235e08f657626a27e792094ae91aca7e311ec219aec3f9b2bb528b3d669e3d",
+    "status": 200,
+    "url": "https://www.pinterest.com/pinterest/"
+  }
+}

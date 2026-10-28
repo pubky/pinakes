@@ -1,0 +1,38 @@
+{
+  "channel-missing": {
+    "bytes": 9883,
+    "content_type": "text/html; charset=utf-8",
+    "file": "channel-missing.html",
+    "recorded_at": "2026-10-26T00:02:41+00:00",
+    "sha256": "c96e3569218b9e95a30bf7571632fec72905650db599fbc91dd1e0ed6a21e4d9",
+    "status": 200,
+    "url": "https://t.me/thischanneldoesnotexist12345"
+  },
+  "channel-telegram": {
+    "bytes": 11141,
+    "content_type": "text/html; charset=utf-8",
+    "file": "channel-telegram.html",
+    "recorded_at": "2026-10-26T00:02:41+00:00",
+    "sha256": "4c49bdd2ef657f630e8d55a00917794271deefdcb1ad6e93efaabb6e274719fd",
+    "status": 200,
+    "url": "https://t.me/telegram"
+  },
+  "post-missing": {
+    "bytes": 12818,
+    "content_type": "text/html; charset=utf-8",
+    "file": "post-missing.html",
+    "recorded_at": "2026-10-26T00:02:41+00:00",
+    "sha256": "7d46fa018c836f7d1ddaf765aa8686825beb4edd75469014af025f03d4bdf4e1",
+    "status": 200,
+    "url": "https://t.me/telegram/999999999?embed=1"
+  },
+  "post-telegram-300": {
+    "bytes": 17224,
+    "content_type": "text/html; charset=utf-8",
+    "file": "post-telegram-300.html",
+    "recorded_at": "2026-10-26T00:02:41+00:00",
+    "sha256": "5c1c5b1deb4318e68e27f7673f91b14b4fe74013c4d588d74e56cef6360bbc21",
+    "status": 200,
+    "url": "https://t.me/telegram/300?embed=1"
+  }
+}

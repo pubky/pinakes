@@ -113,7 +113,7 @@ CREATE TABLE resource_alias (
     root_id text NOT NULL REFERENCES resource(id) ON DELETE CASCADE,
     basis text NOT NULL,
     CONSTRAINT resource_alias_check CHECK (alias_id <> root_id),
-    CONSTRAINT resource_alias_basis CHECK (basis IN ('cursor', 'osm', 'identifier', 'service', 'tracking', 'canonical'))
+    CONSTRAINT resource_alias_basis CHECK (basis IN ('cursor', 'osm', 'identifier', 'service', 'tracking', 'canonical', 'source'))
 );
 CREATE INDEX resource_alias_root ON resource_alias USING btree (root_id);
 
