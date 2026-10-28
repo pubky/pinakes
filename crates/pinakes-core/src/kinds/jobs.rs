@@ -241,19 +241,12 @@ pub fn workplace(address: &Value, place: &Value) -> Option<Venue> {
 /// When a place's text says the work is remote ("Remote", "Remote - US", "Remote, Europe"),
 /// the regions it names after that word.
 pub fn remote_place(text: &str) -> Option<Vec<String>> {
-    let text = text.trim();
     let mut end = text.len().min(PLACE_TEXT);
     while !text.is_char_boundary(end) {
         end -= 1;
     }
-    // A cut text ends at its last separator, so no region is cut short.
-    let text = if end < text.len() {
-        text[..end]
-            .rsplit_once([',', '/', ';', '|', '(', ')'])
-            .map_or(&text[..end], |(head, _)| head)
-    } else {
-        text
-    };
+    let cut = end < text.len();
+    let text = text[..end].trim();
     let head = text.get(..6)?;
     if !head.eq_ignore_ascii_case("remote") {
         return None;
@@ -275,6 +268,12 @@ pub fn remote_place(text: &str) -> Option<Vec<String>> {
         {
             rest = &after[word.len()..];
         }
+    }
+    // A cut text ends at its last separator, so no region is cut short.
+    if cut {
+        rest = rest
+            .rsplit_once([',', '/', ';', '|', '(', ')'])
+            .map_or("", |(head, _)| head);
     }
     Some(
         rest.split([',', '/', ';', '|', '(', ')'])
@@ -634,6 +633,15 @@ mod tests {
         );
         let words = format!("Remote, {}", "Somewhere ".repeat(200));
         assert_eq!(remote_place(&words), Some(vec![]));
+        // The region the cut falls in is dropped, also when no separator comes before it.
+        let token = format!("Remote-{}", "A".repeat(2000));
+        assert_eq!(remote_place(&token), Some(vec![]));
+        // A text is cut before it is trimmed, so its trailing spaces are not read to the end:
+        // the cut falls in them, and the region they follow goes with it.
+        let spaced = format!("Remote, Europe{}", " ".repeat(2000));
+        assert_eq!(remote_place(&spaced), Some(vec![]));
+        let short = format!("Remote, Europe{}", " ".repeat(500));
+        assert_eq!(remote_place(&short), Some(vec!["Europe".to_owned()]));
         // The dedup keeps the first of each value, ignoring case, and stops at 32.
         let values: Vec<String> = (0..40_000).map(|i| format!("v{}", i % 50)).collect();
         let kept = dedup([vec!["V1".to_owned()], values].concat());

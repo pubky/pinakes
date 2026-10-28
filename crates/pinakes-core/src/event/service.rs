@@ -596,7 +596,8 @@ impl EventService {
     /// A job posting's workplace (`kinds::jobs`), placed as an event's venue is when it names a
     /// street, else at its town: the one settlement Nominatim finds for it whose name (and
     /// country, when the posting names one) is the posting's, at `geocode_score` or above, and
-    /// whose region and postal region contradict none the posting names.
+    /// whose region and postal region contradict none the posting names, in its address or in
+    /// its one-line place ("Springfield, IL", "Springfield, 90210").
     pub async fn workplace(&self, doc: &mut ResourceMeta) -> Result<()> {
         if !self.config.geocoding || doc.location.is_some() {
             return Ok(());
@@ -630,10 +631,10 @@ impl EventService {
             .append_pair("accept-language", "en")
             .append_pair("featureType", "settlement");
         // "Singapore, Singapore", "San Francisco, CA": a town and what holds it, in one line.
-        let (town, country) = match line.split_once(',') {
-            Some((town, _)) if !address.contains_key("country") => {
+        let (town, country, held) = match line.split_once(',') {
+            Some((town, held)) if !address.contains_key("country") => {
                 url.query_pairs_mut().append_pair("q", &line);
-                (town.trim().to_owned(), None)
+                (town.trim().to_owned(), None, held)
             }
             _ => {
                 for (k, param) in [
@@ -646,9 +647,24 @@ impl EventService {
                         url.query_pairs_mut().append_pair(param, v);
                     }
                 }
-                (line.clone(), address.get("country").cloned())
+                (line.clone(), address.get("country").cloned(), "")
             }
         };
+        // What holds the town in one line: in each part, the words before one that starts
+        // with a digit are a region ("IL", "CA"), that word a postcode ("CA 94105", "90210").
+        let mut held_regions = Vec::new();
+        let mut held_postcode = None;
+        for part in held.split(',') {
+            let words: Vec<&str> = part.split_whitespace().collect();
+            let at = words
+                .iter()
+                .position(|w| w.starts_with(|c: char| c.is_ascii_digit()))
+                .unwrap_or(words.len());
+            if at > 0 {
+                held_regions.push(words[..at].join(" "));
+            }
+            held_postcode = held_postcode.or(words.get(at).copied());
+        }
         let Some(value) = self.osm.request(url).await? else {
             return Ok(());
         };
@@ -667,38 +683,60 @@ impl EventService {
             .filter_map(|k| found[k].as_str())
             .chain(hit["name"].as_str())
             .any(|name| normalize(name) == normalize(&town));
-        let same_country = country.as_deref().map(|country| {
-            ["country_code", "country"]
-                .iter()
-                .filter_map(|k| found[k].as_str())
-                .any(|v| normalize(v) == normalize(country))
-        });
-        // The region the posting names is one of the settlement's regions, by name or by its
-        // ISO 3166-2 code ("Illinois", "IL", "US-IL"); a settlement whose address names no
-        // region cannot contradict it.
-        let regions: Vec<String> = ["state", "province", "region", "state_district", "county"]
+        let countries: Vec<String> = ["country_code", "country"]
             .iter()
             .filter_map(|k| found[k].as_str())
             .map(normalize)
-            .chain(
-                found
-                    .as_object()
-                    .into_iter()
-                    .flatten()
-                    .filter(|(k, _)| k.starts_with("ISO3166-2"))
-                    .filter_map(|(_, v)| v.as_str())
-                    .flat_map(|code| [code, code.rsplit('-').next().unwrap_or(code)])
-                    .map(normalize),
-            )
             .collect();
+        let same_country = country
+            .as_deref()
+            .map(|country| countries.contains(&normalize(country)));
+        // The region the posting names is one of the settlement's regions, by name or by its
+        // ISO 3166-2 code ("Illinois", "IL", "US-IL"); a settlement whose address names no
+        // region cannot contradict it.
+        let codes: Vec<&str> = found
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(k, _)| k.starts_with("ISO3166-2"))
+            .filter_map(|(_, v)| v.as_str())
+            .collect();
+        let regions: Vec<String> = ["state", "province", "region", "state_district", "county"]
+            .iter()
+            .filter_map(|k| found[k].as_str())
+            .chain(
+                codes
+                    .iter()
+                    .flat_map(|code| [*code, code.rsplit('-').next().unwrap_or(code)]),
+            )
+            .map(normalize)
+            .collect();
+        // In one line a region is compared only when it is written like the settlement's own
+        // code ("IL" beside "US-MO") and is not its country ("Berlin, DE"): there "UK", "USA"
+        // or "Europe" may follow a town too. A region in full is left to Nominatim, which
+        // reads the whole line.
+        let coded = |r: &str| {
+            r.chars().all(|c| c.is_ascii_alphabetic())
+                && codes.iter().any(|code| {
+                    code.rsplit_once('-').is_some_and(|(_, own)| {
+                        own.len() == r.len() && own.chars().all(|c| c.is_ascii_alphabetic())
+                    })
+                })
+                && !countries.contains(&normalize(r))
+        };
         let other_region = address
             .get("region")
-            .is_some_and(|r| !regions.is_empty() && !regions.contains(&normalize(r)));
+            .map(String::as_str)
+            .into_iter()
+            .chain(held_regions.iter().map(String::as_str).filter(|r| coded(r)))
+            .any(|r| !regions.is_empty() && !regions.contains(&normalize(r)));
         // A numeric postcode's first digit is its postal region (US, DE, FR, CH, …); more
         // digits are not compared, as a city's one postcode in Nominatim stands for many
         // (Berlin's run from 10 to 14).
         let other_postcode = address
             .get("postalcode")
+            .map(String::as_str)
+            .or(held_postcode)
             .zip(found["postcode"].as_str())
             .is_some_and(|(ours, theirs)| {
                 let first = |s: &str| s.trim().chars().next().filter(char::is_ascii_digit);

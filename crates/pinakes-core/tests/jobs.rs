@@ -416,15 +416,19 @@ async fn a_workplace_is_never_an_ambiguous_or_other_settlement(pool: PgPool) {
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_workplace_is_never_in_another_region_or_postal_region(pool: PgPool) {
     // Nominatim's sole Springfield is Springfield, Missouri: a posting in Springfield, Illinois
-    // (by name or code) or with a postcode of another postal region is not placed there, even
-    // at a lenient score; one in Missouri is.
+    // (by name or code, in its address or in its one-line place) or with a postcode of another
+    // postal region is not placed there, even at a lenient score; one in Missouri is.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let app = Router::new().route(
         "/search",
         get(|Query(q): Query<HashMap<String, String>>| async move {
             assert_eq!(q["featureType"], "settlement");
-            assert_eq!(q["city"], "Springfield");
+            assert!(
+                q.get("city").is_some_and(|c| c == "Springfield")
+                    || q.get("q").is_some_and(|q| q.starts_with("Springfield,")),
+                "{q:?}"
+            );
             let mut hit = settlement(5, "Springfield", "United States", "us");
             hit["address"]["state"] = "Missouri".into();
             hit["address"]["ISO3166-2-lvl4"] = "US-MO".into();
@@ -470,6 +474,10 @@ async fn a_workplace_is_never_in_another_region_or_postal_region(pool: PgPool) {
         json!({"addressLocality": "Springfield", "addressRegion": "Illinois", "addressCountry": "US"}),
         json!({"addressLocality": "Springfield", "addressRegion": "IL", "addressCountry": "US"}),
         json!({"addressLocality": "Springfield", "postalCode": "90210", "addressCountry": "US"}),
+        json!({"addressLocality": "Springfield, IL"}),
+        json!({"addressLocality": "Springfield, IL, US"}),
+        json!({"addressLocality": "Springfield, 90210"}),
+        json!({"addressLocality": "Springfield, MO 90210"}),
     ] {
         assert_eq!(placed(address.clone()).await, None, "{address}");
     }
@@ -482,6 +490,12 @@ async fn a_workplace_is_never_in_another_region_or_postal_region(pool: PgPool) {
         json!({"addressLocality": "Springfield", "addressRegion": "Missouri", "addressCountry": "US"}),
         json!({"addressLocality": "Springfield", "addressRegion": "MO", "postalCode": "65806", "addressCountry": "US"}),
         json!({"addressLocality": "Springfield", "addressCountry": "US"}),
+        json!({"addressLocality": "Springfield, MO"}),
+        json!({"addressLocality": "Springfield, MO 65806, US"}),
+        // Not written like the settlement's code, or its country: not compared.
+        json!({"addressLocality": "Springfield, Missouri"}),
+        json!({"addressLocality": "Springfield, USA"}),
+        json!({"addressLocality": "Springfield, US"}),
     ] {
         assert_eq!(
             placed(address.clone()).await.as_deref(),

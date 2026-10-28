@@ -314,4 +314,40 @@ mod tests {
         .unwrap();
         assert!(!doc.attributes.keys().any(|k| k.starts_with("salary_")));
     }
+
+    #[test]
+    fn a_location_is_read_for_its_first_32_places() {
+        let with = |name: String| {
+            let mut v: Value =
+                serde_json::from_slice(&read("greenhouse-figma-5783812004.json")).unwrap();
+            v["location"]["name"] = name.into();
+            card(
+                base("figma", 5783812004),
+                5783812004,
+                200,
+                &serde_json::to_vec(&v).unwrap(),
+            )
+            .unwrap()
+            .unwrap()
+        };
+        let remote = |n: usize| (0..n).map(|i| format!("Remote, R{i}")).collect::<Vec<_>>();
+        // 5,000 remote places: the first 32 are read, each for its region.
+        let doc = with(remote(5000).join("; "));
+        let regions: Vec<String> = (0..jobs::LISTED).map(|i| format!("R{i}")).collect();
+        assert_eq!(doc.attributes["remote_regions"], regions.join("; "));
+        // The workplace as the 32nd place is read; as the 33rd it is not.
+        let doc = with(
+            [remote(31), vec!["Berlin, Germany".into()]]
+                .concat()
+                .join("; "),
+        );
+        assert_eq!(doc.event.venue.as_ref().unwrap().text, "Berlin, Germany");
+        let doc = with(
+            [remote(32), vec!["Berlin, Germany".into()]]
+                .concat()
+                .join("; "),
+        );
+        assert!(doc.event.venue.is_none());
+        assert_eq!(doc.attributes["remote_regions"], regions.join("; "));
+    }
 }
