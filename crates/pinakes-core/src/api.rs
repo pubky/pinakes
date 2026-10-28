@@ -665,10 +665,11 @@ pub struct Card {
     /// up to 256. A hint: every member keeps its own card.
     pub also_on: Vec<AlsoOn>,
     /// The links people referenced on Pubky that resolve to this card: its own `uri` and its
-    /// `aliases` that carry references, most referenced first (counted up to
-    /// 1,000 each, then by URI), at most 5, normalized as every URI is. A typed card's `uri` is often not a link anyone wrote
-    /// (`btc:block/…`, `isbn:…`): ask Nexus by these to find the tags (docs/api.md, Joining
-    /// with Nexus). An occurrence's are its feed's. Empty when nothing references the card.
+    /// `aliases` that carry references (the 31 most recently referenced), most referenced first
+    /// (counted up to 1,000 each, then by URI), at most 5, normalized as every URI is. A typed
+    /// card's `uri` is often not a link anyone wrote (`btc:block/…`, `isbn:…`): ask Nexus by
+    /// these to find the tags (docs/api.md, Joining with Nexus). An occurrence's are its feed's.
+    /// Empty when nothing references the card.
     pub refs: Vec<String>,
     /// The clients that open a Pubky app's object, from the app's profile (docs/pubky-apps.md);
     /// on an event card, those of the event object it names. Empty for every other card.
@@ -1043,9 +1044,13 @@ const REFS: usize = 5;
 /// The most references counted for one link when ranking `refs`: a link past it ranks with the
 /// others past it, by URI, and a read never scans a link's every reference.
 const REFS_COUNTED: i64 = 1000;
-/// Fills each card's `refs`: the referenced links among its own and its aliases', most
-/// referenced first (counted up to [`REFS_COUNTED`], then by URI), at most [`REFS`]. One query
-/// for every card of a response.
+/// The most aliases of one card whose references are counted for `refs`: those most recently
+/// referenced, each found by its newest reference alone. A card with many referenced spellings
+/// costs a read at most this many counts besides its own link's.
+const REFS_ALIASES: i64 = 31;
+/// Fills each card's `refs`: the referenced links among its own and its aliases' (the
+/// [`REFS_ALIASES`] most recently referenced), most referenced first (counted up to
+/// [`REFS_COUNTED`], then by URI), at most [`REFS`]. One query for every card of a response.
 pub(crate) async fn with_refs<'a>(
     pool: &PgPool,
     cards: impl IntoIterator<Item = &'a mut Card>,
@@ -1056,8 +1061,12 @@ pub(crate) async fn with_refs<'a>(
         return Ok(());
     }
     let rows: Vec<(String, String)> = sqlx::query_as(
-        "WITH links AS (SELECT id AS card, id FROM unnest($1::text[]) id \
-         UNION SELECT a.root_id, a.alias_id FROM resource_alias a WHERE a.root_id = ANY($1)), \
+        "WITH cards AS (SELECT DISTINCT id AS card FROM unnest($1::text[]) id), \
+         links AS (SELECT card, card AS id FROM cards \
+         UNION ALL SELECT c.card, s.alias_id FROM cards c CROSS JOIN LATERAL \
+           (SELECT a.alias_id FROM resource_alias a CROSS JOIN LATERAL \
+             (SELECT max(f.created_at) AS newest FROM reference f WHERE f.resource_id = a.alias_id) r \
+            WHERE a.root_id = c.card AND r.newest IS NOT NULL ORDER BY r.newest DESC, a.alias_id LIMIT $4) s), \
          counted AS (SELECT l.card, x.uri, c.n FROM links l JOIN resource x ON x.id = l.id \
            CROSS JOIN LATERAL (SELECT count(*) AS n FROM \
              (SELECT 1 FROM reference f WHERE f.resource_id = l.id LIMIT $3) f) c WHERE c.n > 0) \
@@ -1067,6 +1076,7 @@ pub(crate) async fn with_refs<'a>(
     .bind(&ids)
     .bind(REFS as i64)
     .bind(REFS_COUNTED)
+    .bind(REFS_ALIASES)
     .fetch_all(pool)
     .await?;
     let mut by_card: BTreeMap<String, Vec<String>> = BTreeMap::new();

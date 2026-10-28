@@ -85,7 +85,7 @@ An IMDb title keeps the type its page gives (it can be either).
 | --- | --- |
 | `id` | Resource ID; for an occurrence, the feed's ID |
 | `uri` | The resource URI; for an occurrence, its own URL when it has one, else the feed's. To combine with Nexus, send `uri` and `refs`, and for an occurrence `occurrence.feed_uri` (its own URL was never tagged) |
-| `refs` | The links people referenced on Pubky that resolve to this card, most referenced first (counted up to 1,000 each, then by URI), at most 5: its own `uri` and its aliases that carry references, normalized as every URI is. A typed card's `uri` is often a link nobody wrote (`btc:block/…`, `uniprot:…`, `isbn:…`) while people tagged the mempool.space, UniProt or Open Library page: ask Nexus about each of `refs` too and add up the card's tags over them. An occurrence's are its feed's. `[]` when nothing references the card |
+| `refs` | The links people referenced on Pubky that resolve to this card, most referenced first (counted up to 1,000 each, then by URI), at most 5: its own `uri` and its aliases that carry references (the 31 most recently referenced), normalized as every URI is. A typed card's `uri` is often a link nobody wrote (`btc:block/…`, `uniprot:…`, `isbn:…`) while people tagged the mempool.space, UniProt or Open Library page: ask Nexus about each of `refs` too and add up the card's tags over them. An occurrence's are its feed's. `[]` when nothing references the card |
 | `status` | Fetch health: `ok`, `pending`, `missing`, `unreachable` or `error` |
 | `type`, `type_path` | schema.org type (`MusicEvent`, `Book`, `Place`, …), or one of Pinakes's own types for what schema.org has no class for: `BitcoinBlock`, `BitcoinTransaction`, `BitcoinAddress`, `LightningNode` and `LightningChannel` (not schema.org; each a child of `Thing`); `type_path` is the type's ancestors, root first (`["Thing", "Event", "MusicEvent"]`), the types a `type=` search matches it by |
 | `name`, `description`, `image` | Display metadata; images point to the origin and are never proxied |
@@ -947,7 +947,9 @@ counts by status.
   SocialMediaPosting cards only when the fetched URL and the object ID share a registrable
   domain (on a multi-tenant host, the same tenant). Note and Article excerpts are capped at 200
   characters; unlisted content is omitted.
-- **Media**: oEmbed (`media.oembed`) and page JSON-LD, which wins when healthy. An oEmbed answer
+- **Media**: oEmbed (`media.oembed`) and page JSON-LD, which wins when healthy, except over a
+  provider whose scheme names the link exactly (YouTube's `watch` and `shorts`) or any matching
+  provider under `"always"`: their title, author and thumbnail come first. An oEmbed answer
   survives a failed or truncated page. Podcast types need a namespace or an audio/video
   enclosure; plain RSS is a DataFeed. Direct podcast feeds are PodcastSeries; `?guid=` or the
   episode page's RSS link selects an episode. A feed longer than the page cap is read up to its

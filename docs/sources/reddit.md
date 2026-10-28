@@ -30,7 +30,8 @@ account's post stays up under `[deleted]`, and its card names no author. An answ
 object is an error. Reddit refuses many requests without a browser with its network-security page
 (403): the card of the link's shape alone, "Post on reddit.com" or "Profile on reddit.com", with the
 `blocked` fact. The link still resolves, groups and counts. A refused post keeps the post's type, so
-it stays social content: once the post is gone, its text leaves the change history.
+it stays social content: once the post is gone, its text leaves the change history, also from the
+spellings of the post saved before they became its aliases, and from their stored cards.
 
 The recorded fixtures hold Reddit's refusals; the JSON fixtures are written by hand after
 Reddit's public JSON, as their provenance says.

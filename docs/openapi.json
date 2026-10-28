@@ -160,7 +160,7 @@
             ]
           },
           "refs": {
-            "description": "The links people referenced on Pubky that resolve to this card: its own `uri` and its\n`aliases` that carry references, most referenced first (counted up to\n1,000 each, then by URI), at most 5, normalized as every URI is. A typed card's `uri` is often not a link anyone wrote\n(`btc:block/…`, `isbn:…`): ask Nexus by these to find the tags (docs/api.md, Joining\nwith Nexus). An occurrence's are its feed's. Empty when nothing references the card.",
+            "description": "The links people referenced on Pubky that resolve to this card: its own `uri` and its\n`aliases` that carry references (the 31 most recently referenced), most referenced first\n(counted up to 1,000 each, then by URI), at most 5, normalized as every URI is. A typed\ncard's `uri` is often not a link anyone wrote (`btc:block/…`, `isbn:…`): ask Nexus by\nthese to find the tags (docs/api.md, Joining with Nexus). An occurrence's are its feed's.\nEmpty when nothing references the card.",
             "items": {
               "type": "string"
             },
