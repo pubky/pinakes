@@ -32,6 +32,19 @@ pub const ATTRIBUTES: &[&str] = &[
     "isrc",
     "artist",
     "album",
+    // A job posting's facts (`kinds::jobs::FACTS`).
+    "hiring_organization",
+    "hiring_organization_url",
+    "employment_type",
+    "remote",
+    "remote_regions",
+    "salary_min",
+    "salary_max",
+    "salary_currency",
+    "salary_unit",
+    "date_posted",
+    "valid_through",
+    "apply_url",
 ];
 pub struct WebResolver {
     pub oembed_policy: super::cards::OembedPolicy,
@@ -84,6 +97,30 @@ impl Resolver for WebResolver {
     }
 }
 impl WebResolver {
+    /// A job posting's workplace on the map (`EventService::workplace`), before `deadline`; a
+    /// slow or unavailable geocoder leaves the posting's own facts.
+    pub(crate) async fn place_workplace(
+        &self,
+        doc: &mut ResourceMeta,
+        deadline: tokio::time::Instant,
+    ) {
+        let Some(events) = self
+            .events
+            .as_ref()
+            .filter(|_| crate::kinds::jobs::is_posting(doc))
+        else {
+            return;
+        };
+        let remaining = deadline
+            .saturating_duration_since(tokio::time::Instant::now())
+            .saturating_sub(Duration::from_millis(25));
+        if !matches!(
+            tokio::time::timeout(remaining, events.workplace(doc)).await,
+            Ok(Ok(()))
+        ) {
+            doc.event.warnings.push("venue_unavailable".into());
+        }
+    }
     /// A Wikipedia article's card from its REST summary; `None` falls back to the page (a
     /// missing article, a page outside the article namespace, a failed request).
     async fn wikipedia_card(
@@ -254,6 +291,7 @@ impl WebResolver {
                 extracted.doc.end = None;
                 extracted.doc.event = Default::default();
             }
+            self.place_workplace(&mut extracted.doc, deadline).await;
 
             if self
                 .events
@@ -952,7 +990,7 @@ fn type_priority(v: &Value) -> u8 {
     let own = if path.iter().any(|s| {
         matches!(
             s.as_str(),
-            "Article" | "Event" | "Product" | "Place" | "MediaObject"
+            "Article" | "Event" | "Product" | "Place" | "MediaObject" | "JobPosting"
         )
     }) {
         100
@@ -1202,6 +1240,11 @@ fn apply_jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url, claims: bool, vou
                 add_alias(doc, url);
             }
         }
+    }
+    // A job posting's own facts, title and plain-text description.
+    if schema_type(v).is_some_and(|k| crate::model::type_path(k).iter().any(|t| t == "JobPosting"))
+    {
+        crate::kinds::jobs::from_jsonld(v, base).apply(doc);
     }
     for (field, attribute) in [("duration", "duration"), ("isrcCode", "isrc")] {
         if let Some(value) = v.get(field).and_then(Value::as_str) {

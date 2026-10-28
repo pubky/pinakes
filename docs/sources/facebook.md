@@ -1,0 +1,42 @@
+# Facebook
+
+Facebook pages, posts and videos, from what their public pages carry. No key and no account.
+Facebook shows posts and videos to accounts only: such a link gets a plain card rather than a
+failure (below). Event links (`https://www.facebook.com/events/{id}`) are not this source's:
+the event module's Facebook adapter reads them (an event page that carries JSON-LD is an event
+there, with its dates).
+
+## Links
+
+A page is named by its name, a post by its page and id, a video by its id:
+`https://www.facebook.com/{name}`, `https://www.facebook.com/{name}/posts/{id}` and
+`https://www.facebook.com/watch/?v={id}` are the roots. m., web. and mbasic.facebook.com,
+fb.com, a capitalised name and a reel's address (`/reel/{id}`) are aliases of them. Groups,
+photos, share links and `profile.php` links are not read.
+
+## What it reads
+
+- A page: `GET https://www.facebook.com/{name}`, its Open Graph tags (the name, and a
+  description of its counts and about text in the page's language). A page that does not
+  exist, like anything shown to accounts only, redirects to the sign-in page.
+- A post or video: `GET` of its root; what comes back without an account is the sign-in
+  redirect, so the card is the plain one, "Post on facebook.com" (with its page) or "Video on
+  facebook.com".
+
+A request Facebook refuses (the sign-in redirect, a challenge, 401 or 403) gives the card of
+the link's shape alone with the `blocked` fact: the link still resolves, groups and counts.
+
+## Card
+
+A page is an `Organization` named by its name, with its about text and its picture. A post is
+a `SocialMediaPosting`, a video a `VideoObject`.
+
+| Fact | Meaning |
+| --- | --- |
+| `author` | A post's page |
+| `handle` | A page's name |
+| `blocked` | `true` when Facebook refused the request |
+
+## Examples
+
+- `https://www.facebook.com/facebook` (a page)

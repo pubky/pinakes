@@ -10,19 +10,18 @@ use crate::model::{OpenIn, ResourceMeta, Status};
 use serde_json::Value;
 use url::Url;
 
-pub mod eventky;
 pub mod loopky;
-pub mod mapky;
 pub mod marketplace;
+pub mod posts;
 pub mod rooms;
 
 /// Every app profile, one line each, in alphabetical order of module.
 #[rustfmt::skip]
 pub static REGISTRY: &[&Profile] = &[
-    &eventky::PROFILE,
     &loopky::PROFILE,
-    &mapky::PROFILE,
     &marketplace::PROFILE,
+    &posts::MAPS,
+    &posts::MUSIC,
     &rooms::PROFILE,
 ];
 
@@ -56,6 +55,9 @@ pub struct Kind {
     pub read: fn(&Object, &Value, &mut ResourceMeta) -> Read,
     /// The clients that open it: `url` is a template filled with `{owner}` and the path's names.
     pub open_in: &'static [Client],
+    /// Whether the path is a folder of versions (a post, `{id}/{editId}.json`) read in its
+    /// latest one, rather than the object itself.
+    pub versions: bool,
 }
 pub struct Client {
     pub client: &'static str,
@@ -119,9 +121,16 @@ pub enum Route {
     /// An app no profile knows: the general card.
     General,
 }
+/// The namespaces whose objects Pinakes never fetches: those Nexus describes (pubky.app's own, and
+/// the social specs', `/pub/social/…` in any version, their posts, events and rsvps included:
+/// social events are Nexus's, owner decision 2026-10-26), and the old Mapky and Eventky layouts
+/// (`mapky.app`, `eventky.app`), whose data the owner disregards: Maps writes posts now
+/// (`posts`), and events and availability are social posts.
+const NEVER_FETCHED: &[&str] = &["pubky.app", "social", "mapky.app", "eventky.app"];
 /// The route of a `pubky://` object of another app, from its decoded path segments below
-/// `/pub/` (`resolver::pubky_app`'s reading). `None` for pubky.app's own objects, which Nexus
-/// describes.
+/// `/pub/` (`resolver::pubky_app`'s reading). `None` for the objects Nexus describes
+/// (`NEVER_FETCHED`) and for any path inside a post of a namespace no profile reads, whose post
+/// itself is `posts::ANY`'s.
 pub fn route(segments: &[String]) -> Option<Route> {
     for profile in REGISTRY {
         for namespace in profile.namespaces {
@@ -138,8 +147,20 @@ pub fn route(segments: &[String]) -> Option<Route> {
             return Some(Route::Excluded);
         }
     }
+    if segments
+        .first()
+        .is_some_and(|app| NEVER_FETCHED.contains(&app.as_str()))
+    {
+        return None;
+    }
+    // A post in a namespace no profile reads (`/pub/<ns>/v1/posts/{id}`) has the general card,
+    // with its namespace and kind (owner decision, 2026-10-27); a path inside one (a version
+    // file) is the resolver's to fetch, never an object of its own.
+    if matches!(segments, [_, version, posts, ..] if version == "v1" && posts == "posts") {
+        let any = &posts::ANY.kinds[0];
+        return matches(any.path, segments).map(|vars| Route::Kind(&posts::ANY, any, vars));
+    }
     match segments.first() {
-        Some(app) if app == "pubky.app" => None,
         Some(app) if !app.is_empty() => Some(Route::General),
         _ => None,
     }
@@ -247,24 +268,30 @@ pub fn card_with(
     doc
 }
 /// The general card of an app no profile knows: the common names for a title, a text and an
-/// image; a text-only object is a post.
+/// image; a text-only object is a post. A field no stored text may hold (a NUL) or longer than
+/// its cap is left out, not the card.
 pub fn general(uri: &str, v: &Value, doc: &mut ResourceMeta) {
-    let text = |keys: &[&str]| {
+    let text = |keys: &[&str], max: usize| {
         keys.iter()
             .find_map(|k| v.get(*k).and_then(Value::as_str))
             .map(str::trim)
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.is_empty() && s.chars().count() <= max && !s.contains('\0'))
             .map(str::to_owned)
     };
-    doc.name = text(&["name", "title", "summary", "topic", "caption"]);
-    doc.description = text(&["description", "bio"]);
-    doc.image =
-        text(&["image", "image_uri", "imageUrl", "cover", "avatarUrl"]).and_then(|s| link(uri, &s));
+    doc.name = text(&["name", "title", "summary", "topic", "caption"], 200);
+    doc.description = text(&["description", "bio"], 2000);
+    doc.image = text(
+        &["image", "image_uri", "imageUrl", "cover", "avatarUrl"],
+        2048,
+    )
+    .and_then(|s| link(uri, &s))
+    .filter(|l| l.len() <= 2048);
     // An object without a title or description (a post, a note) is described by its content:
     // social content (`cards::social`), so a short excerpt that refreshes within the hour and is
     // purged with its history once the object is gone.
     if doc.name.is_none() && doc.description.is_none() {
-        doc.description = text(&["content", "text"]).map(|s| s.chars().take(200).collect());
+        doc.description =
+            text(&["content", "text"], usize::MAX).map(|s| s.chars().take(200).collect());
         if doc.description.is_some() {
             doc.set_type("SocialMediaPosting");
         }
@@ -329,6 +356,11 @@ pub fn open_in(uri: &str) -> Vec<OpenIn> {
 /// Whether a `pubky://` object is in a known app's namespace, of a kind its profile reads or not.
 pub fn known(uri: &str) -> bool {
     segments(uri).is_some_and(|(_, s)| matches!(route(&s), Some(Route::Kind(..) | Route::Excluded)))
+}
+/// Whether a `pubky://` object is a folder of versions (`Kind::versions`).
+pub fn versioned(uri: &str) -> bool {
+    segments(uri)
+        .is_some_and(|(_, s)| matches!(route(&s), Some(Route::Kind(_, kind, _)) if kind.versions))
 }
 /// Whether a `pubky://` object is in a known app's namespace but of no kind its profile reads.
 pub fn excluded(uri: &str) -> bool {

@@ -167,7 +167,7 @@
             "type": "array"
           },
           "site": {
-            "description": "The publishing site: the app for `pubky://` objects (e.g. `mapky.app`); the service a\nlink's URL names (`Apple Music`, `Wikipedia (de)`, `MusicBrainz`, `Wikidata`,\n`OpenStreetMap`); else the site name the document gives, else the host. Plain text, like\nevery text field.",
+            "description": "The publishing site: the app for `pubky://` objects (e.g. `loopky`); the service a\nlink's URL names (`Apple Music`, `Wikipedia (de)`, `MusicBrainz`, `Wikidata`,\n`OpenStreetMap`); else the site name the document gives, else the host. Plain text, like\nevery text field.",
             "type": [
               "string",
               "null"
@@ -960,7 +960,7 @@
         "description": "A client that opens an object, and the object's address there.",
         "properties": {
           "client": {
-            "description": "The client's name (\"Loopky\", \"Mapky\").",
+            "description": "The client's name (\"Loopky\", \"Pubky Rooms\").",
             "type": "string"
           },
           "url": {
@@ -1515,11 +1515,10 @@
                   }
                 },
                 "changes-of-pubky": {
-                  "summary": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G, pubky://3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo/pub/loopky/decks/medeng2026a/manifest.json, pubky://47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e9or3fy76ohqao/pub/pubky-rooms/rooms/0035SFYCGVBV2 since now-30d",
+                  "summary": "pubky://3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo/pub/loopky/decks/medeng2026a/manifest.json, pubky://47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e9or3fy76ohqao/pub/pubky-rooms/rooms/0035SFYCGVBV2 since now-30d",
                   "value": {
                     "since": "now-30d",
                     "uris": [
-                      "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G",
                       "pubky://3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo/pub/loopky/decks/medeng2026a/manifest.json",
                       "pubky://47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e9or3fy76ohqao/pub/pubky-rooms/rooms/0035SFYCGVBV2"
                     ]
@@ -1832,12 +1831,6 @@
                     "uri": "pubky://47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e9or3fy76ohqao/pub/pubky-rooms/rooms/0035SFYCGVBV2"
                   }
                 },
-                "resolve-51da3n5m8s6oaq38uqs7jznp6ezbc3qbtmic8oy6fj3g6mokdyco-pub-eve": {
-                  "summary": "pubky://51da3n5m8s6oaq38uqs7jznp6ezbc3qbtmic8oy6fj3g6mokdyco/pub/eventky.app/events/0034FED2YCDKG",
-                  "value": {
-                    "uri": "pubky://51da3n5m8s6oaq38uqs7jznp6ezbc3qbtmic8oy6fj3g6mokdyco/pub/eventky.app/events/0034FED2YCDKG"
-                  }
-                },
                 "resolve-978-0-14-032872-1": {
                   "summary": "isbn:978-0-14-032872-1",
                   "value": {
@@ -1854,12 +1847,6 @@
                   "summary": "isbn:9780262033848",
                   "value": {
                     "uri": "isbn:9780262033848"
-                  }
-                },
-                "resolve-9g3zsjpwijn3gsh7ibghjxxadpjidceos5rw4387a6hhziqi8aoy-pub-map": {
-                  "summary": "pubky://9g3zsjpwijn3gsh7ibghjxxadpjidceos5rw4387a6hhziqi8aoy/pub/mapky.app/geo_captures/0035C4V0GVX90",
-                  "value": {
-                    "uri": "pubky://9g3zsjpwijn3gsh7ibghjxxadpjidceos5rw4387a6hhziqi8aoy/pub/mapky.app/geo_captures/0035C4V0GVX90"
                   }
                 },
                 "resolve-allevents-in-zurich-200029487725505": {
@@ -1884,24 +1871,6 @@
                   "summary": "https://bitcoinops.org/feed.xml",
                   "value": {
                     "uri": "https://bitcoinops.org/feed.xml"
-                  }
-                },
-                "resolve-c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey-pub-map": {
-                  "summary": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G",
-                  "value": {
-                    "uri": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G"
-                  }
-                },
-                "resolve-c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey-pub-map-2": {
-                  "summary": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/reviews/00355XPM88EHG",
-                  "value": {
-                    "uri": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/reviews/00355XPM88EHG"
-                  }
-                },
-                "resolve-c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey-pub-map-3": {
-                  "summary": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/collections/00351MVGE211G",
-                  "value": {
-                    "uri": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/collections/00351MVGE211G"
                   }
                 },
                 "resolve-calendar-google-com-calendar-ical-en-ch-23holiday-40group-v": {
@@ -2419,10 +2388,6 @@
                 "summary": "isbn:9780140328721",
                 "value": "isbn:9780140328721"
               },
-              "by-uri-c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey-pub-map": {
-                "summary": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G",
-                "value": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G"
-              },
               "by-uri-doi-org-10-1038-nature12373": {
                 "summary": "https://doi.org/10.1038/nature12373",
                 "value": "https://doi.org/10.1038/nature12373"
@@ -2527,10 +2492,9 @@
                   }
                 },
                 "lookup-pubky": {
-                  "summary": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G, pubky://3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo/pub/loopky/decks/medeng2026a/manifest.json, pubky://47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e9or3fy76ohqao/pub/pubky-rooms/rooms/0035SFYCGVBV2",
+                  "summary": "pubky://3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo/pub/loopky/decks/medeng2026a/manifest.json, pubky://47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e9or3fy76ohqao/pub/pubky-rooms/rooms/0035SFYCGVBV2",
                   "value": {
                     "uris": [
-                      "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G",
                       "pubky://3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo/pub/loopky/decks/medeng2026a/manifest.json",
                       "pubky://47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e9or3fy76ohqao/pub/pubky-rooms/rooms/0035SFYCGVBV2"
                     ]
@@ -2583,13 +2547,13 @@
           {
             "description": "32 lowercase hex resource ID",
             "examples": {
+              "read-3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo-pub-loo": {
+                "summary": "pubky://3jubjyq4fkh4dq38exrpuo8we6xta8a6rhxnjjzyoo7j4r3f4rjo/pub/loopky/decks/medeng2026a/manifest.json",
+                "value": "9ed32f6665c475119517739f13a7d404"
+              },
               "read-9780140328721": {
                 "summary": "isbn:9780140328721",
                 "value": "5bccc93f427b6fd44115fdd02618392f"
-              },
-              "read-c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey-pub-map": {
-                "summary": "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G",
-                "value": "fe358c60c13f6a97b50899c4240f27bf"
               },
               "read-calendar-google-com-calendar-ical-en-ch-23holiday-40group-v": {
                 "summary": "https://calendar.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics",
@@ -2810,6 +2774,18 @@
                 "summary": "ScholarlyArticle, collapse=group",
                 "value": "ScholarlyArticle"
               },
+              "jobposting-closed-too": {
+                "summary": "JobPosting, closed=true",
+                "value": "JobPosting"
+              },
+              "jobposting-on-site": {
+                "summary": "JobPosting, remote=false",
+                "value": "JobPosting"
+              },
+              "jobposting-remote": {
+                "summary": "JobPosting, remote=true",
+                "value": "JobPosting"
+              },
               "type-article": {
                 "summary": "Article",
                 "value": "Article"
@@ -2829,6 +2805,10 @@
               "type-event": {
                 "summary": "Event",
                 "value": "Event"
+              },
+              "type-jobposting": {
+                "summary": "JobPosting",
+                "value": "JobPosting"
               },
               "type-musicevent": {
                 "summary": "MusicEvent",
@@ -3395,6 +3375,54 @@
             "schema": {
               "type": [
                 "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "`true`: job postings that may be done remotely; `false`: job postings that may not.",
+            "examples": {
+              "(none)": {
+                "summary": "(none)",
+                "value": ""
+              },
+              "jobposting-on-site": {
+                "summary": "false, type=JobPosting",
+                "value": false
+              },
+              "jobposting-remote": {
+                "summary": "true, type=JobPosting",
+                "value": true
+              }
+            },
+            "in": "query",
+            "name": "remote",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "`true`: job postings past their `validThrough` (closed) are listed too; they are left out\notherwise.",
+            "examples": {
+              "(none)": {
+                "summary": "(none)",
+                "value": ""
+              },
+              "jobposting-closed-too": {
+                "summary": "true, type=JobPosting",
+                "value": true
+              }
+            },
+            "in": "query",
+            "name": "closed",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
                 "null"
               ]
             }

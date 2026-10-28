@@ -583,6 +583,11 @@ pub struct SearchQuery {
     pub cluster: Option<String>,
     /// Resource ID of the accepted event venue; filters event units.
     pub venue: Option<String>,
+    /// `true`: job postings that may be done remotely; `false`: job postings that may not.
+    pub remote: Option<bool>,
+    /// `true`: job postings past their `validThrough` (closed) are listed too; they are left out
+    /// otherwise.
+    pub closed: Option<bool>,
     /// A list view with one row per group: the matching member with the most references, as its
     /// own card; links in no group stay rows of their own. Not with `cluster`.
     #[param(value_type = Option<CollapseMode>)]
@@ -644,7 +649,7 @@ pub struct Card {
     /// Plain text, entity-decoded: escape it before rendering it as HTML.
     pub description: Option<String>,
     pub image: Option<String>,
-    /// The publishing site: the app for `pubky://` objects (e.g. `mapky.app`); the service a
+    /// The publishing site: the app for `pubky://` objects (e.g. `loopky`); the service a
     /// link's URL names (`Apple Music`, `Wikipedia (de)`, `MusicBrainz`, `Wikidata`,
     /// `OpenStreetMap`); else the site name the document gives, else the host. Plain text, like
     /// every text field.
@@ -1237,7 +1242,11 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
             }),
             from: crate::sources::from(d).map(str::to_owned),
             facts: merge_facts(
-                crate::sources::facts(d).or_else(|| crate::resolver::pubky_apps::facts(d)),
+                crate::kinds::facts(
+                    crate::sources::facts(d).or_else(|| crate::resolver::pubky_apps::facts(d)),
+                    d,
+                    Utc::now(),
+                ),
                 facts.clone(),
             ),
             keys: keys.clone(),
@@ -1640,7 +1649,7 @@ pub async fn search(
         scope(&mut sql, &q, &reach);
         sql.push(" GROUP BY f.author ORDER BY at DESC,f.author LIMIT ")
             .push_bind(search.related_taggers as i64)
-            .push("), related_refs AS (SELECT a.root AS resource_id,t.author,max(x.created_at) AS at FROM related_taggers t CROSS JOIN LATERAL (SELECT f.resource_id,f.created_at FROM reference f WHERE f.author=t.author AND f.created_at>=")
+            .push("), related_refs AS (SELECT a.root AS resource_id,t.author,max(x.created_at) AS at FROM related_taggers t CROSS JOIN LATERAL (SELECT f.resource_id,f.created_at FROM reference f WHERE f.author=t.author AND f.kind<>'post' AND f.created_at>=")
             .push_bind(since)
             .push(" AND f.created_at<=")
             .push_bind(at)
@@ -1782,6 +1791,16 @@ pub async fn search(
         sql.push(" AND r.type_path && ")
             .push_bind(search_types(types)?);
     }
+    if let Some(remote) = q.remote {
+        sql.push(" AND r.type_path @> ARRAY['JobPosting'] AND (coalesce(r.doc->'attributes'->>'remote','')='true')=")
+            .push_bind(remote);
+    }
+    if q.closed != Some(true) {
+        // A job posting past its end is closed: listed only on request.
+        sql.push(" AND NOT coalesce(r.type_path @> ARRAY['JobPosting'] AND r.end_at<=")
+            .push_bind(at)
+            .push(",false)");
+    }
     for (column, value) in [("r.category", &q.category), ("r.host", &q.host)] {
         if let Some(value) = value {
             sql.push(" AND ")
@@ -1868,7 +1887,7 @@ pub async fn search(
         let cap = state.config.search.collapse_refs_per_member as i64;
         sql.push("), grouped AS (SELECT DISTINCT x.id FROM eligible x JOIN group_unit g ON g.unit_id=x.unit_id AND g.group_id IS NOT NULL), grouped_ids AS (SELECT id AS root,id AS base FROM grouped UNION ALL SELECT a.root_id,a.alias_id FROM resource_alias a WHERE a.root_id IN (SELECT id FROM grouped)), grouped_refs AS (SELECT gi.root AS resource_id,least(sum(c.n),")
             .push_bind(cap)
-            .push(") AS refs FROM grouped_ids gi CROSS JOIN LATERAL (SELECT count(*) AS n FROM (SELECT 1 FROM reference f WHERE f.resource_id=gi.base LIMIT ")
+            .push(") AS refs FROM grouped_ids gi CROSS JOIN LATERAL (SELECT count(*) AS n FROM (SELECT 1 FROM reference f WHERE f.resource_id=gi.base AND f.kind<>'post' LIMIT ")
             .push_bind(cap)
             .push(") x) c GROUP BY gi.root), filtered AS (SELECT DISTINCT ON(coalesce(u.group_id,e.unit_id)) e.* FROM eligible e LEFT JOIN group_unit u ON u.unit_id=e.unit_id AND u.group_id IS NOT NULL LEFT JOIN grouped_refs c ON c.resource_id=e.id ORDER BY coalesce(u.group_id,e.unit_id),coalesce(c.refs,0) DESC,e.id,e.unit_id");
     }

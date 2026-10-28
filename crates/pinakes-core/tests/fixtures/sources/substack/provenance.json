@@ -1,0 +1,60 @@
+{
+  "post-missing": {
+    "bytes": 0,
+    "content_type": "text/html; charset=utf-8",
+    "file": null,
+    "location": "/this-post-does-not-exist-12345x",
+    "note": "Status and Location only.",
+    "recorded_at": "2026-10-26T00:25:52+00:00",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "status": 302,
+    "url": "https://on.substack.com/p/this-post-does-not-exist-12345x"
+  },
+  "post-model-behavior-rick-rubin": {
+    "bytes": 335498,
+    "content_type": "text/html; charset=utf-8",
+    "file": "post-model-behavior-rick-rubin.html.gz",
+    "recorded_at": "2026-10-26T00:25:52+00:00",
+    "sha256": "575da3e23a9e2636c12cb7ef0f41d6bfa9d96535c9524c9445c784acbd5add59",
+    "status": 200,
+    "url": "https://on.substack.com/p/model-behavior-rick-rubin"
+  },
+  "profile-missing": {
+    "bytes": 0,
+    "content_type": "text/html; charset=utf-8",
+    "file": null,
+    "location": "https://substack.com/search/thisuserdoesnotexist12345x?searching=profile",
+    "note": "Status and Location only.",
+    "recorded_at": "2026-10-26T00:25:52+00:00",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "status": 302,
+    "url": "https://substack.com/@thisuserdoesnotexist12345x"
+  },
+  "profile-substack": {
+    "bytes": 116993,
+    "content_type": "text/html; charset=utf-8",
+    "file": "profile-substack.html.gz",
+    "recorded_at": "2026-10-26T00:25:52+00:00",
+    "sha256": "dcd2e572c1cf1a67940ea78c9fa2ae29add319c6b30d91b12db5f15d7d2b0588",
+    "status": 200,
+    "url": "https://substack.com/@substack"
+  },
+  "publication-missing": {
+    "bytes": 56041,
+    "content_type": "text/html; charset=utf-8",
+    "file": "publication-missing.html",
+    "recorded_at": "2026-10-26T00:25:52+00:00",
+    "sha256": "7183e6da623a0f73a61cfeaa94d06d79c5725a2e04a750c0045c250d42b88d48",
+    "status": 404,
+    "url": "https://thispubdoesnotexist12345x.substack.com/"
+  },
+  "publication-on": {
+    "bytes": 114443,
+    "content_type": "text/html; charset=utf-8",
+    "file": "publication-on.html.gz",
+    "recorded_at": "2026-10-26T00:25:52+00:00",
+    "sha256": "a75a06361aeb6d45f82c9f8e18271c870aaa42867f14cdd5ddd6d3f4e6565719",
+    "status": 200,
+    "url": "https://on.substack.com/"
+  }
+}

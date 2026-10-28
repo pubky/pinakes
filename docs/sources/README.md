@@ -66,6 +66,7 @@ or got plain web cards before are read by their source.
 - [`docker_hub`](docker_hub.md): Docker Hub image repositories by namespace and name.
 - [`ecfr`](ecfr.md): sections and parts of the Code of Federal Regulations.
 - [`eur_lex`](eur_lex.md): EU law by CELEX number, ELI or Official Journal id.
+- [`facebook`](facebook.md): Facebook pages, posts and videos (events are the event module's).
 - [`fdroid`](fdroid.md): F-Droid apps by package, from its package API and page.
 - [`federal_register`](federal_register.md): Federal Register documents by document number.
 - [`fedlex`](fedlex.md): Swiss federal law in the classified compilation, by ELI.
@@ -81,11 +82,14 @@ or got plain web cards before are read by their source.
 - [`gleif`](gleif.md): Legal Entity Identifier records.
 - [`google_play`](google_play.md): page hook: a Google Play app's name, icon, developer and category from its page.
 - [`govinfo`](govinfo.md): US public laws, bills, US Code sections and the Statutes at Large.
+- [`greenhouse`](greenhouse.md): Greenhouse job board postings by board and job id.
 - [`hacker_news`](hacker_news.md): Hacker News items by id (and hnsignals.com pages).
 - [`huggingface`](huggingface.md): Hugging Face models, datasets and Spaces by repo id.
 - [`inaturalist`](inaturalist.md): iNaturalist observations and taxa by id.
+- [`instagram`](instagram.md): Instagram posts, reels and profiles.
 - [`internet_archive`](internet_archive.md): Internet Archive items (books, films, audio, software…) by identifier.
 - [`legislation_gov_uk`](legislation_gov_uk.md): UK Acts, statutory instruments and retained EU law.
+- [`linkedin`](linkedin.md): LinkedIn profiles, company pages and posts.
 - [`lobsters`](lobsters.md): Lobsters stories by short id.
 - [`mastodon`](mastodon.md): Mastodon posts on any server.
 - [`media_records`](media_records.md): page and wall hook: a film's, series', book's or podcast's page named after its object, from its exact record (Wikidata by the page's ID, Open Library, TVmaze, iTunes)
@@ -93,18 +97,26 @@ or got plain web cards before are read by their source.
   channels, from mempool.space (Esplora as fallback).
 - [`met`](met.md): The Metropolitan Museum of Art's works by object id.
 - [`pdb`](pdb.md): Protein Data Bank structures by PDB id.
+- [`pinterest`](pinterest.md): Pinterest pins and profiles.
 - [`podcast_index`](podcast_index.md): Podcast Index shows and episodes by feed and episode id (needs the Podcast Index key).
 - [`pubchem`](pubchem.md): PubChem compounds by compound id.
 - [`public_inbox`](public_inbox.md): mailing-list messages in public-inbox archives (gnusha.org, lore.kernel.org, others), and old bitcoin-dev pipermail addresses
+- [`reddit`](reddit.md): Reddit posts, subreddits and users.
 - [`ror`](ror.md): research organizations by ROR id.
 - [`sec`](sec.md): SEC EDGAR filings, their documents and companies.
 - [`snap_store`](snap_store.md): Snap Store apps by snap name, from the snapcraft.io info API.
 - [`stacker_news`](stacker_news.md): Stacker News posts and comments by item id.
+- [`substack`](substack.md): Substack publications, posts and profiles.
 - [`swiss_parliament`](swiss_parliament.md): Swiss Parliament business items (Curia Vista) by affair id.
+- [`telegram`](telegram.md): Telegram public channels and their posts.
+- [`threads`](threads.md): Threads posts and profiles.
+- [`tiktok`](tiktok.md): TikTok videos and profiles.
+- [`twitch`](twitch.md): Twitch channels, videos and clips.
 - [`uk_parliament_bills`](uk_parliament_bills.md): UK Parliament bills and Acts by bill id.
 - [`uniprot`](uniprot.md): UniProtKB proteins by accession.
 - [`usgs`](usgs.md): USGS earthquakes and other seismic events by event id.
 - [`wordpress`](wordpress.md): page hook: a WordPress post's editorial title, excerpt, dates and featured image from its REST record
+- [`x`](x.md): X (Twitter) posts and profiles.
 - [`zefix`](zefix.md): Swiss companies in the commercial register, by register id.
 - [`zenodo`](zenodo.md): Zenodo records (datasets, software, papers) by record id.
 

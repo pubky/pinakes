@@ -88,6 +88,19 @@ curl -s '{{BASE}}/v1/search?type=Event&near=47.3769,8.5417&radius=15000&from=now
 string write `+` as `%2B` (a bare `+` is read as a space, which Pinakes also accepts as `+`).
 `type=Event` includes `MusicEvent` and every other event type, and calendar dates.
 
+**Remote jobs posted this month.**
+
+```sh
+curl -s '{{BASE}}/v1/search?type=JobPosting&remote=true&from=now-30d'
+```
+
+A job posting's `start` is the date it was posted and its `end` its closing date; `from` and
+`to` select by the date posted. `remote=false` keeps the postings that may not be done
+remotely, with or without a workplace; `near` or `bbox` find those with one on the map. A closed
+posting is left out unless you add `closed=true`.
+`facts` holds the employer, employment type, salary, remote regions, apply link and
+`job_status` (`open` or `closed`).
+
 **Everything with one identifier.**
 
 ```sh
@@ -158,7 +171,7 @@ the full result:
 
 | tool | does |
 | --- | --- |
-| `search` | `GET /v1/search`: `q`, `type` (one or several), `tags`, `match`, `near` + `radius`, `bbox`, `from`, `to`, `key`, `sort`, `collapse`, `reach` or `boost` + `viewer`, `limit`, `cursor` |
+| `search` | `GET /v1/search`: `q`, `type` (one or several), `tags`, `match`, `near` + `radius`, `bbox`, `from`, `to`, `key`, `remote`, `closed`, `sort`, `collapse`, `reach` or `boost` + `viewer`, `limit`, `cursor` |
 | `card` | One link's card by URI (`GET /v1/resources/by-uri`); `resolve: true` asks `POST /v1/resolve` for an unknown link |
 | `lookup` | Every card with one identifier (`isbn:…`, `doi:…`, `isrc:…`, `osm:…`, …) |
 | `group` | A group's members by group id |

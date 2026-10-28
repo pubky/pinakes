@@ -37,6 +37,7 @@ pub mod discourse;
 pub mod docker_hub;
 pub mod ecfr;
 pub mod eur_lex;
+pub mod facebook;
 pub mod fdroid;
 pub mod federal_register;
 pub mod fedlex;
@@ -52,30 +53,42 @@ pub mod gitlab;
 pub mod gleif;
 pub mod google_play;
 pub mod govinfo;
+pub mod greenhouse;
 pub mod hacker_news;
 pub mod huggingface;
 pub mod inaturalist;
+pub mod instagram;
 pub mod internet_archive;
 pub mod kit;
 pub mod legislation_gov_uk;
+pub mod linkedin;
 pub mod lobsters;
 pub mod mastodon;
 pub mod media_records;
 pub mod mempool;
 pub mod met;
 pub mod pdb;
+pub mod pinterest;
 pub mod podcast_index;
 pub mod pubchem;
 pub mod public_inbox;
+pub mod reddit;
 pub mod ror;
 pub mod sec;
 pub mod snap_store;
+pub mod social;
 pub mod stacker_news;
+pub mod substack;
 pub mod swiss_parliament;
+pub mod telegram;
+pub mod threads;
+pub mod tiktok;
+pub mod twitch;
 pub mod uk_parliament_bills;
 pub mod uniprot;
 pub mod usgs;
 pub mod wordpress;
+pub mod x;
 pub mod zefix;
 pub mod zenodo;
 
@@ -94,6 +107,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &docker_hub::DockerHub,
     &ecfr::Ecfr,
     &eur_lex::EurLex,
+    &facebook::Facebook,
     &fdroid::FDroid,
     &federal_register::FederalRegister,
     &fedlex::Fedlex,
@@ -109,29 +123,40 @@ pub static REGISTRY: &[&dyn Source] = &[
     &gleif::Gleif,
     &google_play::GooglePlay,
     &govinfo::Govinfo,
+    &greenhouse::Greenhouse,
     &hacker_news::HackerNews,
     &huggingface::HuggingFace,
     &inaturalist::Inaturalist,
+    &instagram::Instagram,
     &internet_archive::InternetArchive,
     &legislation_gov_uk::LegislationGovUk,
+    &linkedin::LinkedIn,
     &lobsters::Lobsters,
     &mastodon::Mastodon,
     &media_records::MediaRecords,
     &mempool::Mempool,
     &met::Met,
     &pdb::Pdb,
+    &pinterest::Pinterest,
     &podcast_index::PodcastIndex,
     &pubchem::Pubchem,
     &public_inbox::PublicInbox,
+    &reddit::Reddit,
     &ror::Ror,
     &sec::Sec,
     &snap_store::SnapStore,
     &stacker_news::StackerNews,
+    &substack::Substack,
     &swiss_parliament::SwissParliament,
+    &telegram::Telegram,
+    &threads::Threads,
+    &tiktok::TikTok,
+    &twitch::Twitch,
     &uk_parliament_bills::UkParliamentBills,
     &uniprot::Uniprot,
     &usgs::Usgs,
     &wordpress::Wordpress,
+    &x::X,
     &zefix::Zefix,
     &zenodo::Zenodo,
 ];
@@ -589,6 +614,12 @@ pub fn by_name(name: &str) -> Option<&'static dyn Source> {
 /// The source that reads `uri`, switched on or not.
 pub fn reading(uri: &str) -> Option<&'static dyn Source> {
     REGISTRY.iter().copied().find(|s| s.reads(uri))
+}
+/// Whether the source that reads `uri` is registered but switched off: what it merged before
+/// stays merged.
+pub fn switched_off(uri: &str) -> bool {
+    let switches = SWITCHES.read().unwrap_or_else(|e| e.into_inner());
+    reading(uri).is_some_and(|s| switches.as_ref().is_some_and(|c| !c.enabled(s.name())))
 }
 /// The switched-on source that reads `uri`.
 pub fn enabled_source(uri: &str, config: &Config) -> Option<&'static dyn Source> {

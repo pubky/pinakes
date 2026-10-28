@@ -1,0 +1,38 @@
+{
+  "channel-missing": {
+    "bytes": 216864,
+    "content_type": "text/html",
+    "file": "channel-missing.html.gz",
+    "recorded_at": "2026-10-26T00:13:24+00:00",
+    "sha256": "eabd5335faa36f9b08219daf476ee6bfb151b9f0471f349e8c1db58f9d1e43b0",
+    "status": 200,
+    "url": "https://www.twitch.tv/thisuserdoesnotexist12345"
+  },
+  "channel-twitch": {
+    "bytes": 232660,
+    "content_type": "text/html",
+    "file": "channel-twitch.html.gz",
+    "recorded_at": "2026-10-26T00:13:23+00:00",
+    "sha256": "bf51ba19a5430b4d9c614274ec2b219a70f3a8ea67e6f49b7baa6a27418e4c11",
+    "status": 200,
+    "url": "https://www.twitch.tv/twitch"
+  },
+  "clip-BoldRelievedElephantTwitchRPG": {
+    "bytes": 216864,
+    "content_type": "text/html",
+    "file": "clip-BoldRelievedElephantTwitchRPG.html.gz",
+    "recorded_at": "2026-10-26T00:13:24+00:00",
+    "sha256": "eabd5335faa36f9b08219daf476ee6bfb151b9f0471f349e8c1db58f9d1e43b0",
+    "status": 200,
+    "url": "https://www.twitch.tv/twitch/clip/BoldRelievedElephantTwitchRPG-LcSvPfVEjpg_OTrK"
+  },
+  "video-2896433713": {
+    "bytes": 222479,
+    "content_type": "text/html",
+    "file": "video-2896433713.html.gz",
+    "recorded_at": "2026-10-26T00:13:23+00:00",
+    "sha256": "8759443928caa1de9a3748f5145b46edfc6ba96bcc5450976382b2ce5704cc3a",
+    "status": 200,
+    "url": "https://www.twitch.tv/videos/2896433713"
+  }
+}

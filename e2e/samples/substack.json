@@ -1,0 +1,12 @@
+[
+  {
+    "kind": "substack",
+    "uri": "https://on.substack.com/p/model-behavior-rick-rubin",
+    "type": "NewsArticle"
+  },
+  {
+    "kind": "substack_publication",
+    "uri": "https://on.substack.com/",
+    "type": "Blog"
+  }
+]

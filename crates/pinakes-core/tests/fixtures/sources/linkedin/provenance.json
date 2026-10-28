@@ -1,0 +1,47 @@
+{
+  "company-linkedin": {
+    "bytes": 454637,
+    "content_type": "text/html; charset=utf-8",
+    "file": "company-linkedin.html.gz",
+    "recorded_at": "2026-10-26T00:28:44+00:00",
+    "sha256": "de475317e68d2989ec5c83c6dfbaf892fa614dafc83c8814b8f866bcfb9b6a58",
+    "status": 200,
+    "url": "https://www.linkedin.com/company/linkedin"
+  },
+  "company-missing": {
+    "bytes": 319687,
+    "content_type": "text/html",
+    "file": "company-missing.html.gz",
+    "recorded_at": "2026-10-26T00:28:47+00:00",
+    "sha256": "8f447ee2be2aa3e41252dfe0a24a87385e659fecc33970a39dc952dd767f6fba",
+    "status": 404,
+    "url": "https://www.linkedin.com/company/thiscompanydoesnotexist12345x"
+  },
+  "person-missing": {
+    "bytes": 1530,
+    "content_type": "text/html",
+    "file": "person-missing.html",
+    "recorded_at": "2026-10-26T00:28:47+00:00",
+    "sha256": "644031a68bde879af85bcc9cb3e6fa1e9a6b0f61d49307581974b5dbc09d3de8",
+    "status": 999,
+    "url": "https://www.linkedin.com/in/thispersondoesnotexist12345x"
+  },
+  "person-williamhgates": {
+    "bytes": 740268,
+    "content_type": "text/html; charset=utf-8",
+    "file": "person-williamhgates.html.gz",
+    "recorded_at": "2026-10-26T00:28:45+00:00",
+    "sha256": "131e23361d9bd44a1a45146e55f74daffd92aa98f6f41f06af622fe8772ca9e2",
+    "status": 200,
+    "url": "https://www.linkedin.com/in/williamhgates"
+  },
+  "post-linkedin-7517918134654218241": {
+    "bytes": 182079,
+    "content_type": "text/html; charset=utf-8",
+    "file": "post-linkedin-7517918134654218241.html.gz",
+    "recorded_at": "2026-10-26T00:28:46+00:00",
+    "sha256": "5128dd0293b2f4d7e4abfe9b2aad40c51e7a23f4b2482fe1ee515a896c6c3a50",
+    "status": 200,
+    "url": "https://www.linkedin.com/posts/linkedin_activity-7517918134654218241-7OWA"
+  }
+}

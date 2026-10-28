@@ -1,0 +1,12 @@
+[
+  {
+    "kind": "telegram",
+    "uri": "https://t.me/telegram/300",
+    "type": "SocialMediaPosting"
+  },
+  {
+    "kind": "telegram_channel",
+    "uri": "https://t.me/s/telegram",
+    "type": "Person"
+  }
+]

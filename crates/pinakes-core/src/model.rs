@@ -39,7 +39,7 @@ pub struct Point {
 /// A client that opens an object, and the object's address there.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, ToSchema)]
 pub struct OpenIn {
-    /// The client's name ("Loopky", "Mapky").
+    /// The client's name ("Loopky", "Pubky Rooms").
     pub client: String,
     /// An `https:` URL.
     pub url: String,

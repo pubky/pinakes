@@ -1,0 +1,38 @@
+{
+  "oembed-profile": {
+    "bytes": 684,
+    "content_type": "application/json; charset=utf-8",
+    "file": "oembed-profile.json",
+    "recorded_at": "2026-10-26T00:39:34+00:00",
+    "sha256": "175a2f1c45426a47cffb0780c9561d7732c8754cfae86989449b9b6660a99521",
+    "status": 200,
+    "url": "https://www.tiktok.com/oembed?url=https://www.tiktok.com/@tiktok"
+  },
+  "oembed-video-1": {
+    "bytes": 506,
+    "content_type": "application/json; charset=utf-8",
+    "file": "oembed-video-1.json",
+    "recorded_at": "2026-10-26T00:39:33+00:00",
+    "sha256": "c5399a0dacde53f719fd02f15a442f53473e663a0f0fc8c8cdf16c3678aae73b",
+    "status": 200,
+    "url": "https://www.tiktok.com/oembed?url=https://www.tiktok.com/@scout2015/video/1"
+  },
+  "oembed-video-6718335390845095173": {
+    "bytes": 542,
+    "content_type": "application/json; charset=utf-8",
+    "file": "oembed-video-6718335390845095173.json",
+    "recorded_at": "2026-10-26T00:39:33+00:00",
+    "sha256": "7d3572b0222e128ada7ca43771975206cb82c6553439ead7aaf144d06ae80395",
+    "status": 200,
+    "url": "https://www.tiktok.com/oembed?url=https://www.tiktok.com/@scout2015/video/6718335390845095173"
+  },
+  "profile-tiktok": {
+    "bytes": 402278,
+    "content_type": "text/html; charset=utf-8",
+    "file": "profile-tiktok.html.gz",
+    "recorded_at": "2026-10-26T00:39:33+00:00",
+    "sha256": "204f9c09f92417f87ea99c71e2f23f3bdb4be398d8546bc5318524207d6624c9",
+    "status": 200,
+    "url": "https://www.tiktok.com/@tiktok"
+  }
+}

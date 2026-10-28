@@ -1,0 +1,31 @@
+{
+  "post-C2vXx0yPvYq": {
+    "bytes": 502210,
+    "content_type": "text/html; charset=\"utf-8\"",
+    "file": "post-C2vXx0yPvYq.html.gz",
+    "recorded_at": "2026-10-26T00:37:18+00:00",
+    "sha256": "3588026fc0c03c888baca8f78de7394a912c09592c46a612932df8acfa731682",
+    "status": 200,
+    "url": "https://www.instagram.com/p/C2vXx0yPvYq/"
+  },
+  "profile-instagram": {
+    "bytes": 0,
+    "content_type": "text/html; charset=\"utf-8\"",
+    "file": null,
+    "location": "https://www.instagram.com/accounts/login/?next=https%3A%2F%2Fwww.instagram.com%2Finstagram%2F&is_from_rle",
+    "note": "Status and Location only.",
+    "recorded_at": "2026-10-26T00:37:18+00:00",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "status": 302,
+    "url": "https://www.instagram.com/instagram/"
+  },
+  "reel-missing": {
+    "bytes": 502214,
+    "content_type": "text/html; charset=\"utf-8\"",
+    "file": "reel-missing.html.gz",
+    "recorded_at": "2026-10-26T00:37:19+00:00",
+    "sha256": "8b0d4cca5410e6232ff2f01f0049c48e3477241fd3009e9a34a3b5493ec0e3a1",
+    "status": 200,
+    "url": "https://www.instagram.com/reel/AAAAAAAAAAA/"
+  }
+}

@@ -1,0 +1,61 @@
+{
+  "post-1k3d0pk": {
+    "bytes": 950,
+    "content_type": "application/json; charset=UTF-8",
+    "file": "post-1k3d0pk.json",
+    "note": "Written by hand after Reddit's public JSON (the shape of a listing, a subreddit's and a user's about), not recorded: Reddit answered 403 to this recorder (see the -refused entries).",
+    "recorded_at": "2026-10-26T00:43:18+00:00",
+    "sha256": "259cd23ea6540aabab88b4a861a8908a003b59c9cc41c3e69cc3cbffaed4fe08",
+    "status": 200,
+    "url": "https://www.reddit.com/comments/1k3d0pk.json?raw_json=1"
+  },
+  "post-1k3d0pk-deleted": {
+    "bytes": 825,
+    "content_type": "application/json; charset=UTF-8",
+    "file": "post-1k3d0pk-deleted.json",
+    "note": "Written by hand after Reddit's public JSON of a post its author deleted (text and author replaced by [deleted], removed_by_category set), not recorded: Reddit answered 403 to this recorder (see the -refused entries).",
+    "recorded_at": "2026-10-27T19:00:00+00:00",
+    "sha256": "c4c5dab414fa6ac0b358597a52c6e0900c779d1a1185f69d122d6bbeefeb620b",
+    "status": 200,
+    "url": "https://www.reddit.com/comments/1k3d0pk.json?raw_json=1"
+  },
+  "post-1k3d0pk-refused": {
+    "bytes": 190240,
+    "content_type": "text/html",
+    "file": "post-1k3d0pk-refused.html.gz",
+    "note": "Reddit refuses this recorder's requests with its network-security page; the JSON fixtures beside it are written by hand after Reddit's public JSON.",
+    "recorded_at": "2026-10-26T00:43:17+00:00",
+    "sha256": "dc131f91303300301ab1b23a7e3b0a084b9e325b318b2722d00fc637247b8b7a",
+    "status": 403,
+    "url": "https://www.reddit.com/comments/1k3d0pk.json?raw_json=1"
+  },
+  "subreddit-announcements": {
+    "bytes": 540,
+    "content_type": "application/json; charset=UTF-8",
+    "file": "subreddit-announcements.json",
+    "note": "Written by hand after Reddit's public JSON (the shape of a listing, a subreddit's and a user's about), not recorded: Reddit answered 403 to this recorder (see the -refused entries).",
+    "recorded_at": "2026-10-26T00:43:18+00:00",
+    "sha256": "b16325605f0a288395a877dfc3b13a1d530457d2186e1f63244dc695ebd36049",
+    "status": 200,
+    "url": "https://www.reddit.com/r/announcements/about.json?raw_json=1"
+  },
+  "subreddit-announcements-refused": {
+    "bytes": 190240,
+    "content_type": "text/html",
+    "file": "subreddit-announcements-refused.html.gz",
+    "recorded_at": "2026-10-26T00:43:18+00:00",
+    "sha256": "dc131f91303300301ab1b23a7e3b0a084b9e325b318b2722d00fc637247b8b7a",
+    "status": 403,
+    "url": "https://www.reddit.com/r/announcements/about.json?raw_json=1"
+  },
+  "user-spez": {
+    "bytes": 331,
+    "content_type": "application/json; charset=UTF-8",
+    "file": "user-spez.json",
+    "note": "Written by hand after Reddit's public JSON (the shape of a listing, a subreddit's and a user's about), not recorded: Reddit answered 403 to this recorder (see the -refused entries).",
+    "recorded_at": "2026-10-26T00:43:18+00:00",
+    "sha256": "c36a3b36cc9b8864d8df318d4a1126d6dd162b0910a4a628921692cbec688db1",
+    "status": 200,
+    "url": "https://www.reddit.com/user/spez/about.json?raw_json=1"
+  }
+}
