@@ -629,6 +629,8 @@ cards, so a tagged link an exact derivation names no longer joins by it either;
 that is off by default (an unknown ID stops startup). Sources run in a fixed order, and each
 sees the keys the ones before it found in the same run (a barcode MusicBrainz names, then the
 services looked up by it); a source that no longer applies (its key is gone) drops its rows. A
+social post found gone gets no lookups, and its rows are dropped: nothing is derived from it, an
+archived copy included, and a lookup that ran while it was found gone writes nothing. A
 source that fails or panics keeps its earlier rows and retries with backoff; the others' results
 stand and the worker goes on (a panic is logged as an error). A source that asks a secondary
 service besides its own (its page names which) keeps what the link and the other services gave

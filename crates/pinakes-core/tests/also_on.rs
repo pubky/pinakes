@@ -2972,3 +2972,118 @@ async fn the_longest_wait_among_failing_sources_sets_the_retry(pool: PgPool) {
         assert!((3500.0..=3600.0).contains(&seconds), "{order:?}: {seconds}");
     }
 }
+
+/// A source that reads gone links, as the archive lookup does: an archived copy and a fact. It
+/// counts its calls.
+#[derive(Default)]
+struct Archives(Mutex<usize>);
+#[async_trait]
+impl Source for Archives {
+    fn id(&self) -> &'static str {
+        "archives"
+    }
+    fn applies(&self, subject: &Subject) -> bool {
+        matches!(subject.status.as_str(), "missing" | "unreachable")
+    }
+    async fn lookup(&self, _: &Context, subject: &Subject) -> anyhow::Result<Found> {
+        *self.0.lock().unwrap() += 1;
+        Ok(archived(&subject.uri))
+    }
+}
+fn archived(uri: &str) -> Found {
+    let mut link = Link::new(
+        format!("https://web.archive.org/web/2016/{uri}"),
+        "web.archive.org",
+        "archives",
+    );
+    link.kind = Some("archived".into());
+    Found {
+        links: vec![link],
+        facts: vec![also_on::Fact {
+            name: "title".into(),
+            value: "Hello world".into(),
+        }],
+        ..Default::default()
+    }
+}
+/// A source whose lookup runs while the post it reads is found gone.
+struct GoneMeanwhile(PgPool);
+#[async_trait]
+impl Source for GoneMeanwhile {
+    fn id(&self) -> &'static str {
+        "meanwhile"
+    }
+    fn applies(&self, subject: &Subject) -> bool {
+        subject.status == "ok"
+    }
+    async fn lookup(&self, _: &Context, subject: &Subject) -> anyhow::Result<Found> {
+        delete_post(&self.0, &subject.id, &subject.uri).await;
+        Ok(archived(&subject.uri))
+    }
+}
+/// A social post (an ActivityPub note) read and saved. Its ID.
+async fn social_post(pool: &PgPool, uri: &str) -> String {
+    let id = store::ensure_resource(pool, uri).await.unwrap();
+    let mut d = ResourceMeta::new(uri, "activitypub", 3600);
+    d.set_type("SocialMediaPosting");
+    d.name = Some("Hello world".into());
+    d.fetched_at = 1000;
+    store::save_document(pool, &id, 0, &d).await.unwrap();
+    id
+}
+/// Two missing observations: the post is confirmed gone.
+async fn delete_post(pool: &PgPool, id: &str, uri: &str) {
+    for n in 1..3 {
+        let mut gone = ResourceMeta::new(uri, "activitypub", 3600);
+        gone.status = pinakes_core::model::Status::Missing;
+        gone.fetched_at = 1000 + n;
+        store::save_document(pool, id, 0, &gone).await.unwrap();
+    }
+}
+async fn derived(pool: &PgPool, id: &str) -> i64 {
+    sqlx::query_scalar("SELECT (SELECT count(*) FROM resource_fact WHERE resource_id=$1)+(SELECT count(*) FROM derived_link WHERE resource_id=$1)+(SELECT count(*) FROM resource_key WHERE resource_id=$1)")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Nothing is derived from a social post found gone: the worker runs no lookup for it (an
+/// archived copy included), as for a gone page it does; a lookup that ran while the post was
+/// found gone writes nothing.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_gone_social_post_gets_no_also_on_results(pool: PgPool) {
+    let uri = "https://example.social/@alice/1";
+    let id = social_post(&pool, uri).await;
+    delete_post(&pool, &id, uri).await;
+    let page = store::ensure_resource(&pool, "https://example.org/gone-page")
+        .await
+        .unwrap();
+    let mut gone_page = ResourceMeta::new("https://example.org/gone-page", "web", 3600);
+    gone_page.set_type("WebPage");
+    gone_page.status = pinakes_core::model::Status::Missing;
+    sqlx::query("UPDATE resource SET status='missing',doc=$2 WHERE id=$1")
+        .bind(&page)
+        .bind(serde_json::to_value(&gone_page).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let archives = Arc::new(Archives::default());
+    let sources: Vec<Arc<dyn Source>> = vec![archives.clone()];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    assert_eq!(*archives.0.lock().unwrap(), 1, "the gone page only");
+    assert_eq!(derived(&pool, &page).await, 2);
+    assert_eq!(derived(&pool, &id).await, 0);
+
+    let uri = "https://example.social/@alice/2";
+    let id = social_post(&pool, uri).await;
+    let sources: Vec<Arc<dyn Source>> = vec![Arc::new(GoneMeanwhile(pool.clone()))];
+    drain(&pool, &cx(Config::default()), &sources).await;
+    let status: String = sqlx::query_scalar("SELECT doc->>'status' FROM resource WHERE id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "missing");
+    assert_eq!(derived(&pool, &id).await, 0);
+}
