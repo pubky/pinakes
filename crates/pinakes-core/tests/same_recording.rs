@@ -1062,13 +1062,13 @@ async fn an_orphan_deleted_while_a_pass_pairs_with_it_leaves_the_partner_to_refi
     );
 }
 
-/// A crowd of `n` recordings of one length, every one of them full: named by forty others at
+/// A crowd of `n` recordings of one length (or without one), every one of them full: named by forty others at
 /// score 1, so a recording of a lower score (one without a length) finds no room in any of them.
 /// The namers are forty recordings of the same title by another artist, so they are candidates
 /// for nobody in the crowd and their lists are never trimmed (their own reads find no candidate);
 /// the pairs are written as the pass would leave them, with the crowd's own lists empty.
-async fn full_crowd(pool: &PgPool, title: &str, length: &str, n: usize) -> Vec<String> {
-    let mut ids = crowd(pool, title, Some(length), n).await;
+async fn full_crowd(pool: &PgPool, title: &str, length: Option<&str>, n: usize) -> Vec<String> {
+    let mut ids = crowd(pool, title, length, n).await;
     ids.sort();
     let mut namers = vec![];
     for i in 0..40 {
@@ -1078,7 +1078,7 @@ async fn full_crowd(pool: &PgPool, title: &str, length: &str, n: usize) -> Vec<S
                 &format!("https://tidal.com/track/88{i:04}"),
                 title,
                 Some("Another Quartet"),
-                Some(length),
+                length,
             )
             .await,
         );
@@ -1139,7 +1139,7 @@ async fn pairs_of(pool: &PgPool, id: &str) -> Vec<String> {
 /// look again, its fingerprint current.)
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_resumed_read_goes_on_from_the_position_it_stopped_at(pool: PgPool) {
-    let full = full_crowd(&pool, "Take Five", "PT1M41S", 120).await;
+    let full = full_crowd(&pool, "Take Five", Some("PT1M41S"), 120).await;
     let me = recording(
         &pool,
         "https://tidal.com/track/999999",
@@ -1197,7 +1197,7 @@ async fn a_resumed_read_goes_on_from_the_position_it_stopped_at(pool: PgPool) {
 /// recording ends with twenty, not nineteen.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_pair_kept_from_before_takes_no_place_from_a_resumed_read(pool: PgPool) {
-    let full = full_crowd(&pool, "Take Five", "PT1M41S", 120).await;
+    let full = full_crowd(&pool, "Take Five", Some("PT1M41S"), 120).await;
     let me = recording(
         &pool,
         "https://tidal.com/track/999999",
@@ -1315,5 +1315,63 @@ async fn a_pass_and_an_orphan_delete_holding_each_others_unit_never_deadlock(poo
     assert!(
         pairs_of(&pool, &a).await.is_empty(),
         "nothing left to pair with"
+    );
+}
+
+/// A stopped read goes on from its position while the recording's values hold; once they change,
+/// it starts over. A recording without a length stops in a full crowd of 120 without lengths,
+/// among the lengths unknown. Then a duration is read for it and for one of the crowd, 101 s
+/// both, and the next read pairs them: in its new ring the lengths that agree come first. (Gone
+/// on from the stale position, the read would take up among the lengths unknown, past them.)
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_changed_recording_starts_its_read_over_not_from_where_it_stopped(pool: PgPool) {
+    let full = full_crowd(&pool, "Take Five", None, 120).await;
+    let me = recording(
+        &pool,
+        "https://tidal.com/track/999999",
+        "Take Five",
+        Some("The Dave Brubeck Quartet"),
+        None,
+    )
+    .await;
+    let read = same_recording::read(&pool, &me).await.unwrap();
+    assert_eq!(read.examined as i64, same_recording::SCAN);
+    assert!(pairs_of(&pool, &me).await.is_empty(), "the crowd is full");
+    let (stopped_at, length): (Option<String>, Option<i32>) = sqlx::query_as(
+        "SELECT scan_after,scan_after_length FROM same_recording_unit WHERE resource_id=$1",
+    )
+    .bind(&me)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(stopped_at.is_some_and(|at| full.contains(&at)) && length.is_none());
+    // A duration for one of the crowd (as a fact read later would leave it; its namers gone, so
+    // it has room) and for the recording.
+    let moved = &full[0];
+    sqlx::query("UPDATE same_recording_unit SET length_secs=101 WHERE resource_id=$1")
+        .bind(moved)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM same_recording WHERE other_id=$1")
+        .bind(moved)
+        .execute(&pool)
+        .await
+        .unwrap();
+    recording(
+        &pool,
+        "https://tidal.com/track/999999",
+        "Take Five",
+        Some("The Dave Brubeck Quartet"),
+        Some("PT1M41S"),
+    )
+    .await;
+    let read = same_recording::read(&pool, &me).await.unwrap();
+    assert!(read.changed);
+    assert_eq!(pairs_of(&pool, &me).await, vec![moved.clone()]);
+    assert_eq!(
+        read.examined as i64,
+        same_recording::SCAN,
+        "the one at 101 s, then the crowd without lengths, full"
     );
 }

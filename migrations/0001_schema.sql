@@ -834,10 +834,11 @@ $$;
 -- (`same_event_name`) and the numbers it keeps, place, venue (resource or OSM object), organizer
 -- URL and zone; and the `fingerprint` of the values they came from, so a change is read again.
 -- `refill:{fingerprint}` marks one whose list lost a pair to another's change: it is read again
--- to refill its list. `scan_after` is where a read that examined its most candidates
--- (hints::SCAN) with room left stopped: the unit it examined last, round the units in id order,
--- so the next read goes on from there (NULL once a read ends with its list full or the candidates
--- run out). Pairs are matched in this table, through its start and geography indexes.
+-- to refill its list. `scan_after` and `scan_after_start` are the position where a read that
+-- examined its most candidates (hints::SCAN) with room left stopped: the id and the start, as the
+-- start index orders the units, round those starting within 36 hours of it, so the next read goes
+-- on from there (NULL once a read ends with its list full or the candidates run out). Pairs are
+-- matched in this table, through its start index (`same_event_unit_start_idx`, in that order).
 CREATE TABLE same_event_unit (
     unit_id text PRIMARY KEY,
     resource_id text NOT NULL REFERENCES resource(id) ON DELETE CASCADE,
@@ -853,11 +854,11 @@ CREATE TABLE same_event_unit (
     organizer text,
     all_day boolean NOT NULL,
     tz text,
-    scan_after text
+    scan_after text,
+    scan_after_start timestamp with time zone
 );
 CREATE INDEX same_event_unit_resource_idx ON same_event_unit USING btree (resource_id);
-CREATE INDEX same_event_unit_start_idx ON same_event_unit USING btree (start_at);
-CREATE INDEX same_event_unit_geography_idx ON same_event_unit USING gist (((point)::geography));
+CREATE INDEX same_event_unit_start_idx ON same_event_unit USING btree (start_at, unit_id);
 
 -- One row per direction of a pair: `score` is the similarity of the two normalised names. A unit
 -- names at most 20 and is named by at most 40.
