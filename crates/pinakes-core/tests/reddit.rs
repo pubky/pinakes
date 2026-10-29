@@ -544,17 +544,19 @@ async fn a_failed_refresh_of_a_gone_post_brings_nothing_back(pool: sqlx::PgPool)
     assert_eq!(pinakes_core::changes::scrub_stored(&pool).await.unwrap(), 0);
 }
 
-/// 1,201 spellings of the post with its full card, as a build before the scrub left them: more
-/// than two pages of the 500 a scrub reads and names at a time.
-async fn many_spellings(pool: &sqlx::PgPool, id: &str) -> Vec<String> {
-    sqlx::query("INSERT INTO resource(id,uri,name,doc) SELECT md5('spelling'||n),$2||'?n='||n,r.name,r.doc FROM resource r, generate_series(1,1201) n WHERE r.id=$1")
+/// `n` spellings of the post with its full card, as a build before the scrub left them; 1,201 is
+/// more than two pages of the 500 a scrub reads and names at a time.
+async fn many_spellings(pool: &sqlx::PgPool, id: &str, n: i32) -> Vec<String> {
+    sqlx::query("INSERT INTO resource(id,uri,name,doc) SELECT md5('spelling'||n),$2||'?n='||n,r.name,r.doc FROM resource r, generate_series(1,$3) n WHERE r.id=$1")
         .bind(id)
         .bind(POST)
+        .bind(n)
         .execute(pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) SELECT md5('spelling'||n),$1,'identifier' FROM generate_series(1,1201) n")
+    sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) SELECT md5('spelling'||n),$1,'identifier' FROM generate_series(1,$2) n")
         .bind(id)
+        .bind(n)
         .execute(pool)
         .await
         .unwrap();
@@ -565,7 +567,7 @@ async fn many_spellings(pool: &sqlx::PgPool, id: &str) -> Vec<String> {
             .await
             .unwrap();
     let ids: Vec<&str> = spellings.iter().map(String::as_str).collect();
-    assert!(texts(pool, &ids).await >= 1201);
+    assert!(texts(pool, &ids).await >= n as i64);
     spellings
 }
 /// None of `spellings` keeps any of the post: no text and no card.
@@ -594,7 +596,7 @@ async fn the_repair_scrubs_every_spelling_of_a_post_with_many(pool: sqlx::PgPool
         .execute(&pool)
         .await
         .unwrap();
-    let spellings = many_spellings(&pool, &id).await;
+    let spellings = many_spellings(&pool, &id, 1201).await;
     assert_eq!(pinakes_core::changes::scrub_stored(&pool).await.unwrap(), 1);
     assert_scrubbed(&pool, &spellings).await;
 }
@@ -606,7 +608,68 @@ async fn a_deleted_post_scrubs_every_spelling_of_many(pool: sqlx::PgPool) {
         return;
     }
     let (reddit, resolver, id, at) = post(&pool).await;
-    let spellings = many_spellings(&pool, &id).await;
+    let spellings = many_spellings(&pool, &id, 1201).await;
     delete(&pool, &reddit, &resolver, &id, at).await;
     assert_scrubbed(&pool, &spellings).await;
+}
+
+/// The entries of `resource_alias` read so far by any scan, by its root index or the whole
+/// table, on `one` connection's statistics.
+async fn alias_entries_read(one: &sqlx::PgPool) -> i64 {
+    sqlx::query("SELECT pg_stat_force_next_flush()")
+        .execute(one)
+        .await
+        .unwrap();
+    sqlx::query_scalar(
+        "SELECT (SELECT coalesce(seq_tup_read,0) FROM pg_stat_user_tables WHERE relname='resource_alias')\
+         +(SELECT coalesce(idx_tup_read,0) FROM pg_stat_user_indexes WHERE indexrelname='resource_alias_root')",
+    )
+    .fetch_one(one)
+    .await
+    .unwrap()
+}
+
+/// The repair reads each of a post's 3,000 spellings from the alias index once, however many
+/// pages it scrubs them in (six), and no other post's: not every spelling again for each page.
+/// Counted on one connection's statistics.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn the_repair_reads_each_spelling_once(pool: sqlx::PgPool) {
+    if pinakes_core::sources::by_name("reddit").is_none() {
+        return;
+    }
+    // Every statement on the one connection, so no other's statistics land in the count.
+    let one = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    let (_, _, id, _) = post(&one).await;
+    sqlx::query("UPDATE resource SET status='missing',doc=jsonb_set(doc,'{status}','\"missing\"') WHERE id=$1")
+        .bind(&id)
+        .execute(&one)
+        .await
+        .unwrap();
+    let spellings = many_spellings(&one, &id, 3000).await;
+    // And 2,000 other posts with 30 spellings each: the post's are a small share of the table, so
+    // its entries are read by the root index, not by a scan of the whole table.
+    sqlx::query("INSERT INTO resource(id,uri) SELECT md5('other'||n),'https://example.org/other/'||n FROM generate_series(1,62000) n")
+        .execute(&one)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) SELECT md5('other'||n),md5('other'||(n%2000+1)),'identifier' FROM generate_series(2001,62000) n")
+        .execute(&one)
+        .await
+        .unwrap();
+    sqlx::query("ANALYZE resource_alias")
+        .execute(&one)
+        .await
+        .unwrap();
+    let before = alias_entries_read(&one).await;
+    assert_eq!(pinakes_core::changes::scrub_stored(&one).await.unwrap(), 1);
+    let read = alias_entries_read(&one).await - before;
+    assert_scrubbed(&one, &spellings).await;
+    assert!(
+        (3000..=3100).contains(&read),
+        "{read} alias entries read for 3,000 spellings"
+    );
 }
