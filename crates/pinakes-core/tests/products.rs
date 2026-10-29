@@ -145,12 +145,24 @@ fn only_the_pages_own_product_gives_its_barcode() {
     );
     let doc = extract(page, head(&[format!("[{a}, {other}]")]));
     assert_eq!(doc.attributes["gtin"], "3017620422003");
-    // Listed after it, in one array or as an earlier script: still the own one's.
+    // Listed after it, in one array or as an earlier script (bare, or wrapped in a graph, an
+    // array or a page's main entity): still the own one's.
     for scripts in [
         vec![format!("[{other}, {a}]")],
         vec![other.clone(), a.clone()],
+        vec![format!(r#"{{"@graph": [{other}]}}"#), a.clone()],
+        vec![format!("[{other}]"), a.clone()],
+        vec![
+            format!(r#"{{"@type": "WebPage", "mainEntity": {other}}}"#),
+            a.clone(),
+        ],
     ] {
         let doc = extract(page, head(&scripts));
+        assert_eq!(
+            doc.name.as_deref(),
+            Some("Spread 3017620422003"),
+            "{scripts:?}"
+        );
         assert_eq!(doc.attributes["gtin"], "3017620422003", "{scripts:?}");
         assert_eq!(doc.attributes["sku"], "S-3017620422003", "{scripts:?}");
         assert_eq!(doc.attributes["price"], "4.95", "{scripts:?}");
@@ -189,8 +201,8 @@ fn scripts(head: &[&str], body: &[&str]) -> String {
 #[test]
 fn one_product_described_twice_keeps_its_barcode() {
     // A shop's theme and a plugin both describe the page's product: one product, so its
-    // barcode stays. Two products naming the page by other fragments, or one naming none
-    // beside it, are two.
+    // barcode stays. Two products of other `@id`s (sharing the page's `url` or not), or one
+    // naming none beside it, are two.
     let page = "https://shop.example/p/nutella";
     let product = |id: &str, url: Option<&str>, gtin: &str| {
         let url = url
@@ -202,10 +214,18 @@ fn one_product_described_twice_keeps_its_barcode() {
     };
     let nutella = product(&format!("{page}#product"), Some(page), "3017620422003");
     let relative = product("#product", None, "3017620422003");
+    // The same `@id`, one description with the page's `url` and one without; under a head
+    // declaring a collection too, as one description names the page by its `url`.
+    let with_url = product("#product", Some(page), "3017620422003");
+    let collection = r#"{"@type": "CollectionPage", "name": "Spreads"}"#;
     for (head, body) in [
         (vec![nutella.as_str(), nutella.as_str()], vec![]),
         (vec![nutella.as_str()], vec![nutella.as_str()]),
         (vec![relative.as_str()], vec![relative.as_str()]),
+        (vec![with_url.as_str(), relative.as_str()], vec![]),
+        (vec![relative.as_str(), with_url.as_str()], vec![]),
+        (vec![collection], vec![relative.as_str(), with_url.as_str()]),
+        (vec![collection], vec![with_url.as_str(), relative.as_str()]),
     ] {
         let doc = extracted(page, &scripts(&head, &body));
         assert_eq!(doc.attributes["gtin"], "3017620422003", "{head:?} {body:?}");
@@ -219,7 +239,14 @@ fn one_product_described_twice_keeps_its_barcode() {
         product("#b", None, "4006381333931"),
     );
     let unnamed = r#"{"@type": "Product", "name": "Pen", "gtin13": "4006381333931"}"#;
+    // Two `@id`s sharing the page's `url` are two products.
+    let (a_url, b_url) = (
+        product("#a", Some(page), "3017620422003"),
+        product("#b", Some(page), "4006381333931"),
+    );
     for (head, body) in [
+        (vec![a_url.as_str(), b_url.as_str()], vec![]),
+        (vec![], vec![a_url.as_str(), b_url.as_str()]),
         (vec![a.as_str(), b.as_str()], vec![]),
         (vec![], vec![a.as_str(), b.as_str()]),
         (vec![nutella.as_str(), unnamed], vec![]),
