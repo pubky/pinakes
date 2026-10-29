@@ -553,16 +553,17 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
         }
     };
     // A site's own node (its WebSite, its publisher) ranks below any other: it never names the
-    // page. Among equals, the script holding the page's own node (an event whose url is the
-    // page over another event the page lists), then a script whose card would be the page's
-    // own (a head node naming no page) over one whose card names another page, however the
-    // script wraps it.
+    // page. Among equals, a script whose card would be the page's own (the node `apply_jsonld`
+    // takes names the page, or names none in the head) over one whose card names another page,
+    // however the script wraps it and whatever page metadata (a `WebPage`, breadcrumbs) sits
+    // beside it; then the script holding a node naming the page (an event whose url is the
+    // page over one naming none).
     let rank = |(v, head): &(Value, bool)| {
         (
             !site_script(v, &fetched.url),
             subject(v),
-            has_own_node(v, &fetched.url),
             selected(v, &fetched.url, *head).is_some_and(|(_, own)| own),
+            has_own_node(v, &fetched.url),
         )
     };
     let claims = |entity: &Value, head: bool| {
@@ -1322,18 +1323,16 @@ fn node_key(v: &Value, base: &Url) -> Option<String> {
     let id = entity_identity(&named)?;
     Some(fragment.map_or_else(|| id.clone(), |f| format!("{id}#{f}")))
 }
-/// Whether a node names the page only by a fragment of it: no `url`, and an `@id` with a
-/// fragment (`#nutella`).
+/// Whether a node names the page only by a fragment of it: the page it names (its `url`, else
+/// its `@id`, as `names_page` reads it) has a fragment (`#nutella`, or the page's own URL with
+/// one). `{"url": page, "@id": "#product"}` names the page itself.
 fn by_fragment(v: &Value, base: &Url) -> bool {
-    let url = |f: &str| {
-        v.get(f)
-            .and_then(Value::as_str)
-            .and_then(|u| origin_url(base, u))
-    };
-    url("url").is_none()
-        && url("@id")
-            .and_then(|u| Url::parse(&u).ok())
-            .is_some_and(|u| u.fragment().is_some_and(|f| !f.is_empty()))
+    ["url", "@id"]
+        .into_iter()
+        .filter_map(|f| v.get(f).and_then(Value::as_str))
+        .find_map(|u| origin_url(base, u))
+        .and_then(|u| Url::parse(&u).ok())
+        .is_some_and(|u| u.fragment().is_some_and(|f| !f.is_empty()))
 }
 /// The node `apply_jsonld` takes the card from in `v`, and whether it is the page's own (it
 /// names the page, or names none and is `vouched` for); `None` when no node would type the
