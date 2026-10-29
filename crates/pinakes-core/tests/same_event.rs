@@ -383,6 +383,71 @@ async fn all_day_events_match_on_their_local_date(pool: PgPool) {
     assert!(!named(&card(&pool, &a).await).contains(&next.as_str()));
 }
 
+/// An all-day listing in Auckland and a timed one at 21:00 in Los Angeles on one local date,
+/// same name and organizer: their starts are 40 to 42 hours apart (UTC+12 or +13 against UTC-7
+/// or -8), beyond the old reach of 36 hours. Whichever is read first, the one read later finds it.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn listings_on_one_local_date_in_far_zones_pair_whichever_is_read_first(pool: PgPool) {
+    use chrono::TimeZone;
+    let day = (Utc::now() + Duration::days(20)).date_naive();
+    let listing = |uri: &str, name: &str, tz: &str, hour: u32, all_day: bool| {
+        let zone: chrono_tz::Tz = tz.parse().unwrap();
+        let mut doc = ResourceMeta::new(uri, "event_platform", 86400);
+        doc.set_type("Event");
+        doc.name = Some(name.into());
+        doc.start = Some(
+            zone.from_local_datetime(&day.and_hms_opt(hour, 0, 0).unwrap())
+                .unwrap()
+                .with_timezone(&Utc),
+        );
+        doc.event.all_day = all_day.then_some(true);
+        doc.event.tz = Some(tz.into());
+        doc.event.organizer = Some(Organizer {
+            name: name.into(),
+            url: Some(format!("https://example.org/{}", name.to_lowercase())),
+        });
+        doc
+    };
+    let pair = |name: &str| {
+        let nz = listing(
+            &format!("https://luma.com/{name}-nz"),
+            name,
+            "Pacific/Auckland",
+            0,
+            true,
+        );
+        let la = listing(
+            &format!("https://meetup.com/{name}-la"),
+            name,
+            "America/Los_Angeles",
+            21,
+            false,
+        );
+        let apart = la.start.unwrap() - nz.start.unwrap();
+        assert!(
+            apart > Duration::hours(36) && apart < Duration::hours(50),
+            "{apart}"
+        );
+        (nz, la)
+    };
+    // The later listing read first, then the earlier: its ring reaches forward to the later.
+    let (nz, la) = pair("summit");
+    let b = save(&pool, &la).await;
+    pass(&pool, &Config::default()).await;
+    let a = save(&pool, &nz).await;
+    pass(&pool, &Config::default()).await;
+    assert_eq!(named(&card(&pool, &a).await), [b.as_str()]);
+    assert_eq!(named(&card(&pool, &b).await), [a.as_str()]);
+    // The earlier read first, then the later: its ring reaches back to the earlier.
+    let (nz, la) = pair("workshop");
+    let a = save(&pool, &nz).await;
+    pass(&pool, &Config::default()).await;
+    let b = save(&pool, &la).await;
+    pass(&pool, &Config::default()).await;
+    assert_eq!(named(&card(&pool, &a).await), [b.as_str()]);
+    assert_eq!(named(&card(&pool, &b).await), [a.as_str()]);
+}
+
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn the_same_organizer_or_venue_counts_without_a_place(pool: PgPool) {
     let start = soon();

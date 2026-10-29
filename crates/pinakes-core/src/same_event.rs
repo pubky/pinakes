@@ -37,9 +37,12 @@ const KEPT: i64 = 20;
 /// runs out with room left goes on from the position it stopped at in a later one (`scan_after`,
 /// `scan_after_start`).
 pub const SCAN: i64 = crate::hints::SCAN;
-/// How far round a unit its ring of candidates reaches, in hours, either way: any two units that
-/// may pair start within it (two starts on one local date are at most 26 hours apart).
-const RING_HOURS: i64 = 36;
+/// How far round a unit its ring of candidates reaches, in hours, either way (both edges
+/// inclusive): any two units that may pair start within it. Two timed units start within
+/// `SECONDS`; with an all-day one the two are on one local date, each in its own zone: the two
+/// midnights are at most 26 hours apart (the zones run from UTC-12 to UTC+14), and a timed start
+/// is under 24 hours after its own midnight, so under 50 hours after the other's.
+const RING_HOURS: i64 = 50;
 /// Resources claimed per pass.
 const CLAIMED: i64 = 25;
 
@@ -600,8 +603,9 @@ struct Pos {
 
 /// The ring of a unit's candidates: the units starting within `RING_HOURS` of it, in (start, id)
 /// order from just after it to the end of that window, then from the window's start to just
-/// before it; each segment runs from `after` to `before`, both exclusive (an edge of the window is
-/// the position before every id at that start).
+/// before it; each segment runs from `after` to `before`, both exclusive. The window's edges are
+/// inclusive: its first position is the one before every id at the first start, its last the one
+/// before every id at the microsecond (a timestamp's resolution) after the last start.
 struct Ring {
     segments: Vec<Segment>,
 }
@@ -626,7 +630,7 @@ impl Ring {
             segments: vec![
                 Segment {
                     after: me.clone(),
-                    before: edge(start + reach),
+                    before: edge(start + reach + chrono::Duration::microseconds(1)),
                 },
                 Segment {
                     after: edge(start - reach),
@@ -669,4 +673,36 @@ fn row(u: &sqlx::postgres::PgRow) -> Result<serde_json::Value> {
         "all_day": u.try_get::<bool, _>("all_day")?,
         "tz": u.try_get::<Option<String>, _>("tz")?,
     }))
+}
+
+#[cfg(test)]
+mod ring {
+    use super::*;
+    use chrono::{Duration, TimeZone, Utc};
+
+    /// A unit starting exactly `RING_HOURS` from the read one, either way, is in its ring
+    /// whatever its id; one a microsecond further is not.
+    #[test]
+    fn the_edges_of_the_window_are_inclusive() {
+        let start = Utc.with_ymd_and_hms(2026, 11, 2, 0, 0, 0).unwrap();
+        let at = |from: Duration, id: &str| Pos {
+            start: start + from,
+            id: id.to_owned(),
+        };
+        let reach = Duration::hours(RING_HOURS);
+        let held = |at: Pos| Ring::of("me", start).resume_after(at);
+        assert!(held(at(reach, "0")));
+        assert!(held(at(reach, "\u{10ffff}")));
+        assert!(held(at(-reach, "0")));
+        assert!(!held(at(reach + Duration::microseconds(1), "")));
+        assert!(!held(at(-reach - Duration::microseconds(1), "\u{10ffff}")));
+        // The segment holding the position is kept from it on; those before it go.
+        let mut ring = Ring::of("me", start);
+        assert!(ring.resume_after(at(reach, "0")));
+        assert_eq!(ring.segments.len(), 2);
+        let mut ring = Ring::of("me", start);
+        assert!(ring.resume_after(at(-reach, "0")));
+        assert_eq!(ring.segments.len(), 1);
+        assert_eq!(ring.segments[0].after, at(-reach, "0"));
+    }
 }

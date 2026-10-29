@@ -836,7 +836,7 @@ $$;
 -- `refill:{fingerprint}` marks one whose list lost a pair to another's change: it is read again
 -- to refill its list. `scan_after` and `scan_after_start` are the position where a read that
 -- examined its most candidates (hints::SCAN) with room left stopped: the id and the start, as the
--- start index orders the units, round those starting within 36 hours of it, so the next read goes
+-- start index orders the units, round those starting within 50 hours of it, so the next read goes
 -- on from there (NULL once a read ends with its list full or the candidates run out). Pairs are
 -- matched in this table, through its start index (`same_event_unit_start_idx`, in that order).
 CREATE TABLE same_event_unit (
