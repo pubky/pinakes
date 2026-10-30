@@ -518,6 +518,16 @@ struct DiscoveryEntry {
     too_large: Option<BodyTooLarge>,
 }
 type DiscoveryCache = Arc<Mutex<HashMap<String, DiscoveryEntry>>>;
+tokio::task_local! {
+    /// Set while the queue confirms a missing answer ([`confirming`]).
+    static CONFIRMING: ();
+}
+/// Run `work` as the fetch that confirms a missing answer, which must be a fresh request: an
+/// HTTP answer the discovery cache holds that is no success (a 404 kept five minutes) is asked
+/// again, not replayed. A failure that named its wait (`RetryLater`) still waits it out.
+pub async fn confirming<F: std::future::Future>(work: F) -> F::Output {
+    CONFIRMING.scope((), work).await
+}
 #[derive(Clone)]
 pub struct Egress {
     cfg: EgressConfig,
@@ -794,6 +804,16 @@ impl Egress {
             let mut cache = self.discovered.lock().await;
             let now = Instant::now();
             cache.retain(|_, entry| entry.expires > now);
+            let stale = CONFIRMING.try_with(|_| ()).is_ok()
+                && cache.get(&key).is_some_and(|entry| {
+                    entry
+                        .value
+                        .as_ref()
+                        .is_some_and(|f| !(200..400).contains(&f.status))
+                });
+            if stale {
+                cache.remove(&key);
+            }
             if let Some(entry) = cache.get_mut(&key) {
                 entry.accessed = now;
                 if let Some(too_large) = entry.too_large {
@@ -1924,6 +1944,78 @@ mod tests {
             .await
             .is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 4);
+    }
+    /// The fetch that confirms a missing answer asks again: a cached HTTP answer that is no
+    /// success is not replayed to it, and its new answer is kept. A success is replayed, and a
+    /// failure that named its wait is still waited out.
+    #[tokio::test(start_paused = true)]
+    async fn a_confirmation_asks_again_for_a_cached_failure() {
+        let egress = Egress::new(Default::default());
+        let answer = |status| Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            validators: Default::default(),
+            url: Url::parse("https://example.org/gone").unwrap(),
+            content_type: "text/html".into(),
+            status,
+            retry_after_secs: 60,
+            location: None,
+            body: vec![],
+        };
+        let status = |r: Result<Fetched>| r.unwrap().status;
+        egress
+            .cached("gone".into(), 3600, &[], async { Ok(answer(404)) })
+            .await
+            .unwrap();
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert_eq!(
+            status(
+                egress
+                    .cached("gone".into(), 3600, &[], async { panic!("replayed") })
+                    .await
+            ),
+            404
+        );
+        assert_eq!(
+            status(
+                confirming(egress.cached("gone".into(), 3600, &[], async { Ok(answer(200)) }))
+                    .await
+            ),
+            200
+        );
+        assert_eq!(
+            status(
+                egress
+                    .cached("gone".into(), 3600, &[], async { panic!("kept") })
+                    .await
+            ),
+            200
+        );
+        assert_eq!(
+            status(
+                confirming(egress.cached("gone".into(), 3600, &[], async {
+                    panic!("a success is replayed")
+                }))
+                .await
+            ),
+            200
+        );
+        egress
+            .cached("busy".into(), 3600, &[], async {
+                Err(super::super::RetryLater {
+                    class: "http_5xx",
+                    seconds: 120,
+                }
+                .into())
+            })
+            .await
+            .unwrap_err();
+        let error = confirming(egress.cached("busy".into(), 3600, &[], async {
+            panic!("the named wait holds")
+        }))
+        .await
+        .unwrap_err();
+        assert!(error.downcast_ref::<super::super::RetryLater>().is_some());
     }
     #[tokio::test(start_paused = true)]
     async fn discovery_capacity_evicts_lru_and_failures_expire_after_five_minutes() {

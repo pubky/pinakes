@@ -737,6 +737,127 @@ async fn a_new_link_s_first_missing_answer_is_confirmed_soon(pool: PgPool) {
     let (status, _, _, error, _) = parked(&pool).await;
     assert_eq!((status.as_str(), error), ("missing", None));
 }
+/// An upstream that answers each request with the next status, and counts the requests.
+struct Upstream {
+    answers: std::sync::Mutex<Vec<u16>>,
+    asked: std::sync::atomic::AtomicUsize,
+}
+#[async_trait::async_trait]
+impl pinakes_core::resolver::egress::Transport for Upstream {
+    async fn get(
+        &self,
+        url: &url::Url,
+        addresses: &[std::net::SocketAddr],
+    ) -> anyhow::Result<pinakes_core::resolver::egress::Fetched> {
+        self.get_with(url, addresses, &Default::default()).await
+    }
+    async fn get_with(
+        &self,
+        url: &url::Url,
+        _: &[std::net::SocketAddr],
+        _: &pinakes_core::resolver::egress::FetchOptions,
+    ) -> anyhow::Result<pinakes_core::resolver::egress::Fetched> {
+        self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let status = self.answers.lock().unwrap().remove(0);
+        Ok(pinakes_core::resolver::egress::Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            validators: Default::default(),
+            url: url.clone(),
+            status,
+            retry_after_secs: 60,
+            location: None,
+            content_type: "application/json".into(),
+            body: b"{}".to_vec(),
+        })
+    }
+}
+struct PublicDns;
+#[async_trait::async_trait]
+impl pinakes_core::resolver::egress::Dns for PublicDns {
+    async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<std::net::SocketAddr>> {
+        Ok(vec![std::net::SocketAddr::new("8.8.8.8".parse()?, port)])
+    }
+}
+/// A resolver that reads its link through Egress's discovery cache, as the official sources do
+/// (GitHub's, say): a 404 is missing, anything else a page.
+struct Discovering(pinakes_core::resolver::egress::Egress);
+#[async_trait::async_trait]
+impl Resolver for Discovering {
+    fn name(&self) -> &'static str {
+        "web"
+    }
+    fn matches(&self, _: &str) -> bool {
+        true
+    }
+    async fn resolve(&self, uri: &str) -> anyhow::Result<ResourceMeta> {
+        let fetched = self.0.discover(uri, &Default::default(), 3600).await?;
+        let mut doc = ResourceMeta::new(uri, "web", 86400);
+        if fetched.status == 404 {
+            doc.status = Status::Missing;
+        } else {
+            doc.set_type("WebPage");
+            doc.name = Some("Here after all".into());
+        }
+        Ok(doc)
+    }
+    fn refresh_after(&self, _: &ResourceMeta) -> Duration {
+        Duration::from_secs(86400)
+    }
+}
+/// The fetch that confirms a missing answer asks the upstream again, whatever Egress cached
+/// (a 404 for five minutes, past the 30-second retry): a cached 404 never confirms `missing`
+/// after one upstream request (Codex's review of preview-park-1). A link back meanwhile is
+/// read; two real 404s make it missing.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_confirmation_asks_the_upstream_again(pool: PgPool) {
+    let cfg = QueueConfig::default();
+    for (n, answers, status) in [(0, [404, 200], "ok"), (1, [404, 404], "missing")] {
+        let uri = format!("https://example.org/repo/{n}");
+        batch(
+            &pool,
+            vec![change(&uri, "a", "/pub/app/tags/a")],
+            Some("one"),
+        )
+        .await;
+        let upstream = std::sync::Arc::new(Upstream {
+            answers: std::sync::Mutex::new(answers.to_vec()),
+            asked: Default::default(),
+        });
+        let resolver = Discovering(pinakes_core::resolver::egress::Egress::with_backends(
+            Default::default(),
+            std::sync::Arc::new(PublicDns),
+            upstream.clone(),
+        ));
+        let row = |pool: PgPool, uri: String| async move {
+            sqlx::query_as::<_, (String, i32)>(
+                "SELECT status,missing_streak FROM resource WHERE uri=$1",
+            )
+            .bind(uri)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+        let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+        queue::run_job(&pool, &resolver, &cfg, &job).await.unwrap();
+        assert_eq!(row(pool.clone(), uri.clone()).await, ("pending".into(), 1));
+        // The retry, within the five minutes Egress keeps the 404.
+        sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE uri=$1")
+            .bind(&uri)
+            .execute(&pool)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+        queue::run_job(&pool, &resolver, &cfg, &job).await.unwrap();
+        assert_eq!(
+            upstream.asked.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "{uri}"
+        );
+        assert_eq!(row(pool.clone(), uri.clone()).await.0, status, "{uri}");
+    }
+}
 /// A link with an accepted card keeps it through one missing answer, for an hour, as before.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_card_s_first_missing_answer_keeps_it_for_an_hour(pool: PgPool) {
