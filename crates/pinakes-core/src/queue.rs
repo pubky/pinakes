@@ -483,10 +483,11 @@ async fn guarded_finish_job(
             // What the also-on sources said about the artist (a person or a group), if anything.
             let artist = crate::also_on::media::artist_type(pool, &job.id).await?;
             crate::music::type_card(&job.uri, artist.as_ref().map(|(t, _)| t.as_str()), &mut doc);
-            if let Some((_, source)) =
+            if let Some((t, source)) =
                 artist.filter(|(t, _)| t == "Person" && doc.type_name == "Person")
             {
-                crate::also_on::media::hinted(&mut doc, &source);
+                let fingerprint = crate::also_on::media::fingerprint(&[&t]);
+                crate::also_on::media::hinted(&mut doc, &source, fingerprint);
             }
             Ok(doc)
         }

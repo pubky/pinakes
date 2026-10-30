@@ -131,18 +131,38 @@ pub struct ResourceMeta {
     #[serde(skip)]
     pub source_root: Option<String>,
     pub source: String,
-    /// The also-on sources whose findings the queue wrote into this card itself (a title's name
-    /// from `titles`, a type from `films`, `podcasts` or an artist's source:
-    /// `media::type_card`, `music::type_card`). A 304 reuses the card only while each of them is
-    /// on and still finds it (`media::outdated`); else the page is read again in full.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// The also-on sources whose findings the queue wrote into this card itself, each with a
+    /// fingerprint of every value it wrote (`titles`: the name and description; `films`,
+    /// `podcasts` or an artist's source: the type; `media::type_card`, `music::type_card`). A
+    /// 304 reuses the card only while each of them is on and finds exactly that now
+    /// (`media::outdated`); else the page is read again in full. Read from the list of sources
+    /// an earlier build stored, as unknown fingerprints.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "hinted_by"
+    )]
     #[schema(ignore)]
-    pub hinted_by: Vec<String>,
+    pub hinted_by: BTreeMap<String, String>,
     #[serde(default)]
     pub fetched_at: i64,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub ttl_secs: u64,
     pub status: Status,
+}
+/// `ResourceMeta::hinted_by`, as stored now (source to fingerprint) or as a list of sources (an
+/// earlier build's), whose fingerprints are unknown: such a card is read again at its next 304.
+fn hinted_by<'de, D: serde::Deserializer<'de>>(d: D) -> Result<BTreeMap<String, String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Stored {
+        Fingerprints(BTreeMap<String, String>),
+        Sources(Vec<String>),
+    }
+    Ok(match Stored::deserialize(d)? {
+        Stored::Fingerprints(map) => map,
+        Stored::Sources(list) => list.into_iter().map(|s| (s, String::new())).collect(),
+    })
 }
 fn is_zero(value: &u64) -> bool {
     *value == 0

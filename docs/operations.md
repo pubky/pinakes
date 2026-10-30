@@ -674,10 +674,11 @@ recordings' same-recording pairs are read again. What a source gave a card itsel
 document when the link was read (a title's name and description from `titles`, a title's or an
 episode's type, an artist's type), goes with the link's next read: switching a source makes
 every card holding its keys or facts due at once, so the change shows as the queue reaches them,
-and a 304 never keeps it. A card records which sources' findings it carries (`hinted_by` in its
-stored document); an unchanged page whose card carries one from a source that is off, or that no
-longer finds it (its row expired or gone), is read again in full, without its validators,
-whatever the fact said before. `[also_on] enabled = false` hides nothing: it
+and a 304 never keeps it. A card records which sources' findings it carries, each with a fingerprint of every value it
+wrote (`hinted_by` in its stored document: a title's name and description, a type); an unchanged
+page whose card carries one that its source no longer gives as it is (the source is off, its row
+expired or gone, or any of those values changed or dropped) is read again in full, without its
+validators. `[also_on] enabled = false` hides nothing: it
 only stops the worker. Sources run in a fixed order, and each
 sees the keys the ones before it found in the same run (a barcode MusicBrainz names, then the
 services looked up by it); a source that no longer applies (its key is gone) drops its rows. A

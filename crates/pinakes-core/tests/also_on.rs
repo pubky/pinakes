@@ -3503,11 +3503,12 @@ async fn a_switched_off_source_s_name_leaves_the_card_even_on_a_304(pool: PgPool
     fact("value='The Crown (2016)'").await;
     switch(false).await;
     assert_eq!(read(&[true, false]).await, (Some("Netflix".into()), 2));
-    // On, a changed value is written over the old one on a 304.
+    // On, a card that carries none of it takes the source's value on a 304; one that carries an
+    // older value is read again in full.
     switch(true).await;
     assert_eq!(read(&[true]).await, (Some("The Crown (2016)".into()), 1));
     fact("value='The Crown'").await;
-    assert_eq!(read(&[true]).await, (Some("The Crown".into()), 1));
+    assert_eq!(read(&[true, false]).await, (Some("The Crown".into()), 2));
     // Expired, then off.
     fact("expires_at=now()-interval '1 second'").await;
     switch(false).await;
@@ -3518,4 +3519,85 @@ async fn a_switched_off_source_s_name_leaves_the_card_even_on_a_304(pool: PgPool
     assert_eq!(read(&[true]).await, (Some("The Crown".into()), 1));
     fact("expires_at=now()-interval '1 second'").await;
     assert_eq!(read(&[true, false]).await, (Some("Netflix".into()), 2));
+
+    // Every value the source wrote counts, not only the name: a description it no longer gives,
+    // or gives changed, under the same title, is read again in full.
+    let description = || {
+        let (pool, id) = (pool.clone(), id.clone());
+        async move {
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT doc->>'description' FROM resource WHERE id=$1",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let describe = |text: Option<&'static str>| {
+        let (pool, id) = (pool.clone(), id.clone());
+        async move {
+            sqlx::query("DELETE FROM resource_fact WHERE resource_id=$1 AND source='titles' AND name='title_description'")
+                .bind(&id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            if let Some(text) = text {
+                sqlx::query("INSERT INTO resource_fact(resource_id,name,value,source,expires_at) VALUES($1,'title_description',$2,'titles',now()+interval '1 day')")
+                    .bind(&id)
+                    .bind(text)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+        }
+    };
+    fact("expires_at=now()+interval '1 day'").await;
+    describe(Some("A royal drama")).await;
+    assert_eq!(read(&[true]).await, (Some("The Crown".into()), 1));
+    assert_eq!(description().await.as_deref(), Some("A royal drama"));
+    // Unchanged: the 304 stands.
+    assert_eq!(read(&[true]).await, (Some("The Crown".into()), 1));
+    assert_eq!(description().await.as_deref(), Some("A royal drama"));
+    // Removed, the title unchanged.
+    describe(None).await;
+    assert_eq!(read(&[true, false]).await, (Some("The Crown".into()), 2));
+    assert_eq!(description().await, None);
+    // Changed, the title unchanged.
+    describe(Some("A royal drama")).await;
+    assert_eq!(read(&[true, false]).await, (Some("The Crown".into()), 2));
+    assert_eq!(description().await.as_deref(), Some("A royal drama"));
+    describe(Some("A drama in six seasons")).await;
+    assert_eq!(read(&[true, false]).await, (Some("The Crown".into()), 2));
+    assert_eq!(
+        description().await.as_deref(),
+        Some("A drama in six seasons")
+    );
+    assert_eq!(read(&[true]).await, (Some("The Crown".into()), 1));
+}
+
+/// A card stored by an earlier build lists its sources without fingerprints: it reads, each
+/// fingerprint unknown, so its next 304 reads the page again; a card that names none has none.
+#[test]
+fn an_earlier_list_of_sources_reads_as_unknown_fingerprints() {
+    let mut stored =
+        serde_json::to_value(ResourceMeta::new("https://example.org/", "web", 60)).unwrap();
+    assert!(stored.get("hinted_by").is_none());
+    let doc: ResourceMeta = serde_json::from_value(stored.clone()).unwrap();
+    assert!(doc.hinted_by.is_empty());
+    stored["hinted_by"] = json!(["films", "titles"]);
+    let doc: ResourceMeta = serde_json::from_value(stored.clone()).unwrap();
+    assert_eq!(
+        doc.hinted_by,
+        BTreeMap::from([
+            ("films".into(), String::new()),
+            ("titles".into(), String::new())
+        ])
+    );
+    stored["hinted_by"] = json!({"titles": "0123456789abcdef"});
+    let doc: ResourceMeta = serde_json::from_value(stored).unwrap();
+    assert_eq!(
+        serde_json::to_value(&doc).unwrap()["hinted_by"],
+        json!({"titles": "0123456789abcdef"})
+    );
 }
