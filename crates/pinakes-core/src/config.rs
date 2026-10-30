@@ -1172,32 +1172,21 @@ fn merge(dst: &mut serde_json::Value, src: serde_json::Value) {
 
 /// An upstream service's URL is a web URL with a host, and holds no secret: no user info, query
 /// or fragment, which logs and errors would otherwise carry.
-/// An egress host rule as the hosts it is compared with are written (`Url::host_str`, its
-/// trailing dot dropped as `Egress::allows_host` drops it): trimmed, lower case and IDNA ASCII
-/// (`faß.de` is `xn--fa-hia.de`), a leading `*.` kept, without trailing dots (`.`, and the
-/// full stops IDNA maps to one: `。`, `．`, `｡`, `%2e`); an IP address in its canonical form
-/// (`[::1]`, and `8.8.8..` is `8.8.0.8`, as a URL reads `8.8.8`). `None` for what names no host.
-/// Idempotent: a canonical rule is its own canonical form.
+/// An egress host rule as the policy compares hosts (`egress::canonical_host`, the one reading
+/// for rules and the hosts asked alike: `faß.de。` is `xn--fa-hia.de`, `8.8.8..` is `8.8.0.8`),
+/// a leading `*.` kept for a name. `None` for what names no host, a name with a `*` inside it, or
+/// a wildcard on an address. Idempotent: a canonical rule is its own canonical form.
 fn host_rule(rule: &str) -> Option<String> {
     let rule = rule.trim();
     let (wild, name) = match rule.strip_prefix("*.") {
         Some(name) => (true, name),
         None => (false, rule),
     };
-    // Trailing dots go only after the mapping (a full stop is a dot once IDNA has read it), and
-    // what is left is parsed again, until nothing changes: without its dots, a name may be an
-    // address (`8.8.8..` is `8.8.0.8`).
-    let mut host = url::Host::parse(name).ok()?;
-    while let url::Host::Domain(d) = &host {
-        let trimmed = d.trim_end_matches('.');
-        if trimmed.len() == d.len() {
-            break;
+    match crate::resolver::egress::canonical_host(name)? {
+        url::Host::Domain(d) => {
+            (!d.contains('*') && !d.starts_with('.'))
+                .then(|| if wild { format!("*.{d}") } else { d })
         }
-        host = url::Host::parse(trimmed).ok()?;
-    }
-    match host {
-        url::Host::Domain(d) => (!d.is_empty() && !d.contains('*') && !d.starts_with('.'))
-            .then(|| if wild { format!("*.{d}") } else { d }),
         ip if !wild => Some(ip.to_string()),
         _ => None,
     }
@@ -1739,6 +1728,66 @@ mod tests {
                 refused.contains("egress.deny_hosts") && refused.contains(&format!("{bad:?}")),
                 "{bad}: {refused}"
             );
+        }
+    }
+    /// A rule written as any spelling of a host denies a URL whose host is written as any
+    /// spelling of it (Unicode or punycode, any case, trailing dots and full stops, an address
+    /// written short): rule and host are read by one function (`egress::canonical_host`).
+    #[test]
+    fn a_rule_denies_its_host_however_either_is_written() {
+        let hosts: [&[&str]; 4] = [
+            &[
+                "faß.de",
+                "FAß.DE",
+                "xn--fa-hia.de",
+                "XN--FA-HIA.DE",
+                "faß.de.",
+                "faß.de..",
+                "faß.de。",
+                "faß.de．",
+                "faß.de｡",
+                "faß.de%2e",
+                "faß.de.。",
+            ],
+            &[
+                "8.8.0.8",
+                "8.8.8",
+                "8.8.8.",
+                "8.8.8..",
+                "8.8.8。",
+                "8.8.8%2e",
+                "0x8.8.8",
+                "8.8.0.8..",
+            ],
+            &[
+                "127.0.0.1",
+                "127.1",
+                "0x7f.1",
+                "0177.0.0.1",
+                "127.1..",
+                "127.1。",
+            ],
+            &[
+                "Example.ORG",
+                "example.org",
+                "example.org.",
+                "example.org..",
+                "example.org。",
+            ],
+        ];
+        for (n, spellings) in hosts.iter().enumerate() {
+            for rule in *spellings {
+                let cfg = with(serde_json::json!({"egress": {"deny_hosts": [rule]}}))
+                    .unwrap_or_else(|e| panic!("{rule}: {e:#}"));
+                let egress = crate::resolver::egress::Egress::new(cfg.egress.clone());
+                for (m, others) in hosts.iter().enumerate() {
+                    for host in *others {
+                        let url = format!("http://{host}/");
+                        assert!(url::Url::parse(&url).is_ok(), "{url}");
+                        assert_eq!(egress.allows(&url), n != m, "rule {rule:?}, {url}");
+                    }
+                }
+            }
         }
     }
     /// Every rule `host_rule` accepts is its own canonical form, whatever it was written as: a
