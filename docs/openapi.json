@@ -183,6 +183,17 @@
           "status": {
             "type": "string"
           },
+          "stream": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Stream",
+                "description": "Audio a client can play with one player for every kind: a podcast episode's enclosure,\nor a recording's public preview (`preview: true`). Only public, direct links, never\nsigned, expiring or behind a login (docs/api.md, Stream). Absent when the card has none."
+              }
+            ]
+          },
           "type": {
             "type": [
               "string",
@@ -1325,6 +1336,34 @@
             "$ref": "#/components/schemas/ClusterResponse"
           }
         ]
+      },
+      "Stream": {
+        "description": "Audio a client can play: an episode's enclosure, or a recording's public preview (docs/api.md,\nStream).",
+        "properties": {
+          "duration_s": {
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "preview": {
+            "type": "boolean"
+          },
+          "type": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "type",
+          "preview"
+        ],
+        "type": "object"
       },
       "TagFacet": {
         "properties": {

@@ -651,6 +651,11 @@ pub struct Card {
     /// Plain text, entity-decoded: escape it before rendering it as HTML.
     pub description: Option<String>,
     pub image: Option<String>,
+    /// Audio a client can play with one player for every kind: a podcast episode's enclosure,
+    /// or a recording's public preview (`preview: true`). Only public, direct links, never
+    /// signed, expiring or behind a login (docs/api.md, Stream). Absent when the card has none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream: Option<model::Stream>,
     /// The publishing site: the app for `pubky://` objects (e.g. `loopky`); the service a
     /// link's URL names (`Apple Music`, `Wikipedia (de)`, `MusicBrainz`, `Wikidata`,
     /// `OpenStreetMap`); else the site name the document gives, else the host. Plain text, like
@@ -1022,6 +1027,7 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
             .or_else(|| doc.as_ref().and_then(|d| present(d.name.as_deref()))),
         description: doc.as_ref().and_then(|d| present(d.description.as_deref())),
         image: doc.as_ref().and_then(|d| present(d.image.as_deref())),
+        stream: doc.as_ref().and_then(|d| d.stream.clone()),
         point: doc.as_ref().and_then(|d| d.location.clone()),
         start: doc.as_ref().and_then(|d| d.start),
         end: doc.as_ref().and_then(|d| d.end),

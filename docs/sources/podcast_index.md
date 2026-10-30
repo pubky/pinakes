@@ -25,7 +25,8 @@ signed headers (`X-Auth-Key`, `X-Auth-Date`, `Authorization`).
 
 A show is a `PodcastSeries`, an episode a `PodcastEpisode`; `site` is "Podcast Index". `name` is
 the title, `description` its text without markup, `image` the artwork (an episode's own image,
-else its show's).
+else its show's). An episode's [`stream`](../api.md#stream) is its enclosure (`enclosureUrl`,
+`enclosureType`, `duration`), when that is a public link.
 
 | Fact | Meaning |
 | --- | --- |

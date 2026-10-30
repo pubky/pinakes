@@ -12,7 +12,7 @@ use super::{
 };
 use crate::{
     event::adapters::SecretKey,
-    model::ResourceMeta,
+    model::{ResourceMeta, Stream},
     podcast_index_api::{
         index_page, pi_episode_request, pi_headers, pi_request, Ask, PodcastIndexConfig,
     },
@@ -113,11 +113,22 @@ pub fn parse_episode(status: u16, raw: &[u8], feed: u64, episode: u64) -> Result
     card.name = text(&e["title"]);
     card.description = text(&e["description"]).and_then(|d| html_text(&d));
     card.image = text(&e["image"]).or_else(|| text(&e["feedImage"]));
+    card.stream = stream(e);
     card.detail("published", date(&e["datePublished"]));
     card.detail("duration", int(&e["duration"]).filter(|d| *d > 0));
     card.detail("website", text(&e["link"]));
     card.detail("show", show_page(feed));
     Ok(Some(card))
+}
+
+/// An episode's enclosure as Podcast Index records it, when it is a public stream.
+pub fn stream(e: &Value) -> Option<Stream> {
+    Stream::public(
+        e["enclosureUrl"].as_str()?,
+        e["enclosureType"].as_str()?,
+        int(&e["duration"]).and_then(|d| u64::try_from(d).ok()),
+        false,
+    )
 }
 
 /// The source: Podcast Index's API.
@@ -262,6 +273,12 @@ mod tests {
             Some("Why AI Needs Bitcoin to Survive | Dhruv Bansal")
         );
         assert_eq!(card.details["duration"], 5213);
+        // Its enclosure, as Podcast Index records it: the audio a client plays.
+        let stream = card.stream.as_ref().unwrap();
+        assert_eq!(stream.url, "https://feeds.fountain.fm/UZSKQcrOnhqYS1JopxGg/items/GArmh0J4JEN85eVHqLQh/files/VIDEO---DEFAULT---84e6ddd8-fe98-4fa9-bb94-8f80543d1848.mp4/ORIGINAL.mp3");
+        assert_eq!(stream.media_type, "audio/mpeg");
+        assert_eq!(stream.duration_s, Some(5213));
+        assert!(!stream.preview);
         assert_eq!(
             card.details["show"],
             "https://podcastindex.org/podcast/255500"

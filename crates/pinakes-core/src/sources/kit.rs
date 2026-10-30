@@ -152,6 +152,8 @@ pub struct Card {
     pub description: Option<String>,
     /// An image the licence lets us show.
     pub image: Option<String>,
+    /// The audio a client can play (`model::Stream`): an episode's enclosure.
+    pub stream: Option<crate::model::Stream>,
     pub start: Option<DateTime<Utc>>,
     pub end: Option<DateTime<Utc>>,
     pub point: Option<Point>,
@@ -173,6 +175,7 @@ impl Card {
             name: None,
             description: None,
             image: None,
+            stream: None,
             start: None,
             end: None,
             point: None,
@@ -218,6 +221,7 @@ impl Card {
         doc.name = self.name;
         doc.description = self.description;
         doc.image = self.image;
+        doc.stream = self.stream;
         doc.start = self.start;
         doc.end = self.end;
         if let Some(p) = self.point {

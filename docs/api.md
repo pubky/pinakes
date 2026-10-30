@@ -95,6 +95,7 @@ An IMDb title keeps the type its page gives (it can be either).
 | `status` | Fetch health: `ok`, `pending`, `missing`, `unreachable` or `error` |
 | `type`, `type_path` | schema.org type (`MusicEvent`, `Book`, `Place`, …), or one of Pinakes's own types for what schema.org has no class for: `BitcoinBlock`, `BitcoinTransaction`, `BitcoinAddress`, `LightningNode` and `LightningChannel` (not schema.org; each a child of `Thing`); `type_path` is the type's ancestors, root first (`["Thing", "Event", "MusicEvent"]`), the types a `type=` search matches it by |
 | `name`, `description`, `image` | Display metadata; images point to the origin and are never proxied |
+| `stream` | Audio a client can play, `{url, type, duration_s, preview}` ([Stream](#stream)): a podcast episode's enclosure, a recording's public preview. Absent when the card has none |
 | `site` | The publishing site: the page's own site name (`og:site_name`), else its host; for `pubky://` objects the app path segment (`loopky`), not the public key; for a link whose URL names a known service (a music service, a Wikipedia edition, MusicBrainz, Wikidata, a service the also-on lookups know), that service's name (`Apple Music`, `Wikipedia (de)`, `OpenStreetMap`), whatever the page calls itself and even before its card is read; for a card read from an official API without a host of its own, the service's name (`Federal Register`) |
 | `point` | `{lat, lon}` |
 | `start`, `end` | RFC 3339 instants for events and occurrences |
@@ -119,6 +120,40 @@ type every gone post has, `SocialMediaPosting`, whatever the post was (a Reddit 
 video): no name, description, image or facts, no also-on links and no change history. Its read
 lists no `aliases`, and its `refs` name its own link alone: a spelling's link can carry the post's
 title.
+
+### Stream
+
+One field for everything playable, so a client needs one player for episodes and recordings:
+
+```json
+"stream": {"url": "https://…/ep180.mp3", "type": "audio/mpeg", "duration_s": 3557, "preview": false}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `url` | The audio itself, for an `<audio>` element: never a player page. Pinakes never fetches or proxies it |
+| `type` | Its MIME type, always `audio/…` or `video/…` |
+| `duration_s` | Its length in whole seconds when its source states it, else `null`. A preview's is usually `null`; the recording's own length is the fact `duration` |
+| `preview` | `true` for a short sample of a longer recording (a music service's 30-second preview), `false` for the whole of it (an episode) |
+
+Only public, direct links are a stream:
+- `https` or `http` on a named host: no IP address, `localhost` or single-label name, and no
+  user or password;
+- no query parameter that signs the link or makes it expire (`sig`, `hdnea`, `hmac`, `auth`,
+  `expires`, `exp`, `policy`, `Key-Pair-Id`, any `X-Amz-…` or `X-Goog-…`, any name with `token`
+  or `signature` in it), so a link that stops working, or works only for whom it was made, is
+  never one;
+- at most 2,048 bytes, and at most a week long.
+
+A feed or page behind a login is never read, so nothing behind one is a stream. A publisher's
+tracking redirect (`podtrac.com`, `pdst.fm`) is its public link and stays. No DRM service's audio
+is one: Spotify's, Apple Music's and TIDAL's own players are not streams.
+
+Which cards carry one:
+- a podcast feed's episode (`{feed}?guid={item}`, or the show's own episode page whose feed item
+  links back to it): the item's first audio or video `<enclosure>`, with its `itunes:duration`;
+- a Podcast Index episode: the enclosure Podcast Index records
+  ([podcast_index](sources/podcast_index.md)).
 
 ### Resource read
 
