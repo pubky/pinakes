@@ -75,6 +75,8 @@ fn options(token: &str) -> FetchOptions {
         // Errors and cache keys never carry the header; a redirect is answered, not followed.
         sensitive: true,
         keep_redirect: true,
+        // Its rate limit answers 403 (`read`): a wait, which a confirmation replays.
+        waits: &[403],
         ..Default::default()
     }
 }
@@ -368,6 +370,12 @@ mod tests {
                     b"{}".to_vec(),
                     Some("https://elsewhere.example/repos/new/name".to_owned()),
                 ),
+                // GitHub's rate limit.
+                ("/repos/busy/repo", _) => (
+                    403,
+                    br#"{"message":"API rate limit exceeded"}"#.to_vec(),
+                    None,
+                ),
                 _ => (404, fixture::read("github", "repo-missing.json"), None),
             };
             Ok(crate::resolver::egress::Fetched {
@@ -441,6 +449,51 @@ mod tests {
             .discovered(&format!("{API}/repos/BurntSushi/ripgrep"), &options)
             .await
             .unwrap());
+    }
+
+    /// The fetch that confirms a missing answer asks GitHub again for a cached 404, but replays a
+    /// cached 403: GitHub's rate limit, a wait (`FetchOptions::waits`) it must not cut short.
+    #[tokio::test(start_paused = true)]
+    async fn a_confirmation_keeps_github_s_rate_limit() {
+        use crate::resolver::egress::confirming;
+        let api = std::sync::Arc::new(Api {
+            seen: Default::default(),
+        });
+        let egress = crate::resolver::egress::Egress::with_backends(
+            Default::default(),
+            std::sync::Arc::new(fixture::PublicDns),
+            api.clone(),
+        );
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let asked = |path: &str| {
+            api.seen
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(url, _)| url.ends_with(path))
+                .count()
+        };
+        for (owner, repo) in [("busy", "repo"), ("a", "missing")] {
+            let doc = || cx.card(&format!("https://github.com/{owner}/{repo}"), &Github);
+            let first = read(&cx, doc(), owner, repo, "good-token").await;
+            let again = confirming(read(&cx, doc(), owner, repo, "good-token")).await;
+            if owner == "busy" {
+                for answer in [first, again] {
+                    assert!(answer
+                        .err()
+                        .and_then(|e| e.downcast::<crate::resolver::RetryLater>().ok())
+                        .is_some());
+                }
+            } else {
+                assert!(matches!(first.unwrap(), Answer::Missing));
+                assert!(matches!(again.unwrap(), Answer::Missing));
+            }
+        }
+        assert_eq!(asked("/repos/busy/repo"), 1, "the rate limit was cut short");
+        assert_eq!(asked("/repos/a/missing"), 2);
     }
 
     #[tokio::test(start_paused = true)]

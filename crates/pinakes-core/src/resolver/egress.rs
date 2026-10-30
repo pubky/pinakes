@@ -2,7 +2,7 @@ use crate::config::EgressConfig;
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::{IpAddr, SocketAddr},
     sync::{Arc, OnceLock},
     time::Duration,
@@ -158,6 +158,9 @@ pub struct FetchOptions {
     /// Statuses the discovery cache never keeps: an authentication failure belongs to the
     /// credentials sent, not to the URL, and a later request may carry others.
     pub uncached: &'static [u16],
+    /// Client errors this caller reads as a wait (GitHub's rate limit answers 403): a
+    /// confirmation replays them as it does a 408, a 429 or a 5xx ([`confirming`]).
+    pub waits: &'static [u16],
     pub sensitive: bool,
     pub accept: Option<String>,
     pub user_agent: Option<String>,
@@ -519,14 +522,24 @@ struct DiscoveryEntry {
 }
 type DiscoveryCache = Arc<Mutex<HashMap<String, DiscoveryEntry>>>;
 tokio::task_local! {
-    /// Set while the queue confirms a missing answer ([`confirming`]).
-    static CONFIRMING: ();
+    /// Set while the queue confirms a missing answer ([`confirming`]): the discovery keys this
+    /// confirmation has already met.
+    static CONFIRMING: std::cell::RefCell<HashSet<String>>;
 }
-/// Run `work` as the fetch that confirms a missing answer, which must be a fresh request: an
-/// HTTP answer the discovery cache holds that is no success (a 404 kept five minutes) is asked
-/// again, not replayed. A failure that named its wait (`RetryLater`) still waits it out.
+/// Run `work` as the fetch that confirms a missing answer, which must be a fresh request. What
+/// answer a resolver reads as "not there" is its own (a portal's 401, a 400 for an unknown ID, a
+/// 200 with no rows), so the first time the confirmation meets a discovery key, the cache's
+/// answer for it is asked again, not replayed, unless it names a wait ([`names_a_wait`]): that
+/// is replayed, so a wait the upstream named is never cut short. Later reads of the key in the
+/// same confirmation replay its new answer, so a batch asks a shared endpoint once.
 pub async fn confirming<F: std::future::Future>(work: F) -> F::Output {
-    CONFIRMING.scope((), work).await
+    CONFIRMING.scope(Default::default(), work).await
+}
+/// Whether a cached HTTP answer is a wait a resolver keeps: a 408, a 429 or a 5xx (each read as
+/// `RetryLater` with its `Retry-After`), or a client error the caller names in
+/// [`FetchOptions::waits`].
+pub fn names_a_wait(status: u16, waits: &[u16]) -> bool {
+    matches!(status, 408 | 429) || status >= 500 || waits.contains(&status)
 }
 #[derive(Clone)]
 pub struct Egress {
@@ -551,7 +564,7 @@ impl Egress {
             blake3::hash(&serde_json::to_vec(&filter)?).to_hex()
         );
         let fetched = self
-            .cached(key, 3600, &[], async {
+            .cached(key, 3600, &[], &[], async {
                 let values = self.nostr_request_inner(uri, filter, deadline_ms).await?;
                 Ok(Fetched {
                     permanent_redirect: false,
@@ -705,6 +718,7 @@ impl Egress {
             Self::discovery_key(uri, options)?,
             ttl,
             options.uncached,
+            options.waits,
             self.fetch_with(uri, options),
         )
         .await
@@ -753,9 +767,15 @@ impl Egress {
         fetched: Fetched,
     ) -> Result<()> {
         let key = Self::discovery_key(uri, options)?;
-        self.cached(key, ttl, &[], std::future::ready(Ok(fetched)))
-            .await
-            .map(|_| ())
+        self.cached(
+            key,
+            ttl,
+            &[],
+            options.waits,
+            std::future::ready(Ok(fetched)),
+        )
+        .await
+        .map(|_| ())
     }
     /// Whether the discovery cache holds a live answer for `uri` (a batch may skip what its
     /// items already have).
@@ -797,6 +817,7 @@ impl Egress {
         key: String,
         ttl: u64,
         uncached: &[u16],
+        waits: &[u16],
         fetch: impl std::future::Future<Output = Result<Fetched>>,
     ) -> Result<Fetched> {
         let lock = {
@@ -809,12 +830,13 @@ impl Egress {
             let mut cache = self.discovered.lock().await;
             let now = Instant::now();
             cache.retain(|_, entry| entry.expires > now);
-            let stale = CONFIRMING.try_with(|_| ()).is_ok()
-                && cache.get(&key).is_some_and(|entry| {
-                    entry
-                        .value
-                        .as_ref()
-                        .is_some_and(|f| !(200..400).contains(&f.status))
+            // A cached failure with no answer (a `RetryLater`, a transport error) is a wait too.
+            let stale = CONFIRMING
+                .try_with(|met| met.borrow_mut().insert(key.clone()))
+                .unwrap_or(false)
+                && cache.get(&key).is_some_and(|entry| match &entry.value {
+                    Some(f) => !names_a_wait(f.status, waits),
+                    None => entry.too_large.is_some(),
                 });
             if stale {
                 cache.remove(&key);
@@ -1939,11 +1961,11 @@ mod tests {
         };
         // A 429 that asked for a minute: replayed within it, asked again after it.
         assert!(egress
-            .cached("busy".into(), 3600, &[], ask(60))
+            .cached("busy".into(), 3600, &[], &[], ask(60))
             .await
             .is_err());
         let replay = egress
-            .cached("busy".into(), 3600, &[], async { panic!("replayed") })
+            .cached("busy".into(), 3600, &[], &[], async { panic!("replayed") })
             .await
             .unwrap_err();
         assert_eq!(
@@ -1954,25 +1976,27 @@ mod tests {
         );
         tokio::time::advance(Duration::from_secs(61)).await;
         assert!(egress
-            .cached("busy".into(), 3600, &[], ask(60))
+            .cached("busy".into(), 3600, &[], &[], ask(60))
             .await
             .is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         // One that asked for an hour is still held to five minutes.
         assert!(egress
-            .cached("long".into(), 3600, &[], ask(3600))
+            .cached("long".into(), 3600, &[], &[], ask(3600))
             .await
             .is_err());
         tokio::time::advance(Duration::from_secs(301)).await;
         assert!(egress
-            .cached("long".into(), 3600, &[], ask(3600))
+            .cached("long".into(), 3600, &[], &[], ask(3600))
             .await
             .is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 4);
     }
-    /// The fetch that confirms a missing answer asks again: a cached HTTP answer that is no
-    /// success is not replayed to it, and its new answer is kept. A success is replayed, and a
-    /// failure that named its wait is still waited out.
+    /// The fetch that confirms a missing answer asks again: whatever its resolver reads as "not
+    /// there" (a 404, a portal's 401 or 403, a 400, a 200 with nothing in it), the cached answer is
+    /// not replayed to it, and its new answer is kept and replayed for the rest of that
+    /// confirmation. An answer that names a wait (a 408, 429 or 5xx, a status the caller names in
+    /// `waits`, a `RetryLater`) is replayed.
     #[tokio::test(start_paused = true)]
     async fn a_confirmation_asks_again_for_a_cached_failure() {
         let egress = Egress::new(Default::default());
@@ -1989,44 +2013,88 @@ mod tests {
         };
         let status = |r: Result<Fetched>| r.unwrap().status;
         egress
-            .cached("gone".into(), 3600, &[], async { Ok(answer(404)) })
+            .cached("gone".into(), 3600, &[], &[], async { Ok(answer(404)) })
             .await
             .unwrap();
         tokio::time::advance(Duration::from_secs(30)).await;
         assert_eq!(
             status(
                 egress
-                    .cached("gone".into(), 3600, &[], async { panic!("replayed") })
+                    .cached("gone".into(), 3600, &[], &[], async { panic!("replayed") })
                     .await
             ),
             404
         );
-        assert_eq!(
-            status(
-                confirming(egress.cached("gone".into(), 3600, &[], async { Ok(answer(200)) }))
-                    .await
-            ),
-            200
-        );
+        // One confirmation asks once, and replays its new answer to its later reads.
+        let (first, again) = confirming(async {
+            (
+                egress
+                    .cached("gone".into(), 3600, &[], &[], async { Ok(answer(200)) })
+                    .await,
+                egress
+                    .cached("gone".into(), 3600, &[], &[], async {
+                        panic!("asked twice in one confirmation")
+                    })
+                    .await,
+            )
+        })
+        .await;
+        assert_eq!((status(first), status(again)), (200, 200));
         assert_eq!(
             status(
                 egress
-                    .cached("gone".into(), 3600, &[], async { panic!("kept") })
+                    .cached("gone".into(), 3600, &[], &[], async { panic!("kept") })
                     .await
             ),
             200
         );
-        assert_eq!(
-            status(
-                confirming(egress.cached("gone".into(), 3600, &[], async {
-                    panic!("a success is replayed")
-                }))
+        // Any other answer is asked again by the next confirmation, a success too: a resolver
+        // may read a page or a feed with nothing in it as gone.
+        for code in [200, 400, 401, 403, 410, 451] {
+            let key = format!("answered-{code}");
+            egress
+                .cached(key.clone(), 3600, &[], &[], async move { Ok(answer(code)) })
                 .await
-            ),
-            200
-        );
+                .unwrap();
+            assert_eq!(
+                status(
+                    confirming(egress.cached(key, 3600, &[], &[], async { Ok(answer(299)) })).await
+                ),
+                299,
+                "a cached {code} was replayed to a confirmation"
+            );
+        }
+        // A cached answer that names a wait (a 408, 429 or 503 with `Retry-After`, or a 403 its
+        // caller reads as a rate limit) is replayed to a confirmation: its resolver turns it into
+        // the wait.
+        for (key, code, waits) in [
+            ("timeout", 408, &[][..]),
+            ("limited", 429, &[]),
+            ("unavailable", 503, &[]),
+            ("rate-limited", 403, &[403]),
+        ] {
+            egress
+                .cached(
+                    key.into(),
+                    3600,
+                    &[],
+                    waits,
+                    async move { Ok(answer(code)) },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                status(
+                    confirming(egress.cached(key.into(), 3600, &[], waits, async {
+                        panic!("a named wait is cut short")
+                    }))
+                    .await
+                ),
+                code
+            );
+        }
         egress
-            .cached("busy".into(), 3600, &[], async {
+            .cached("busy".into(), 3600, &[], &[], async {
                 Err(super::super::RetryLater {
                     class: "http_5xx",
                     seconds: 120,
@@ -2035,7 +2103,7 @@ mod tests {
             })
             .await
             .unwrap_err();
-        let error = confirming(egress.cached("busy".into(), 3600, &[], async {
+        let error = confirming(egress.cached("busy".into(), 3600, &[], &[], async {
             panic!("the named wait holds")
         }))
         .await
@@ -2061,7 +2129,7 @@ mod tests {
             }
         }
         assert!(egress
-            .cached("0".into(), 86400, &[], async { panic!("cached") })
+            .cached("0".into(), 86400, &[], &[], async { panic!("cached") })
             .await
             .is_err());
         let response = Fetched {
@@ -2076,7 +2144,9 @@ mod tests {
             body: vec![1],
         };
         egress
-            .cached("fresh".into(), 86400, &[], async { Ok(response.clone()) })
+            .cached("fresh".into(), 86400, &[], &[], async {
+                Ok(response.clone())
+            })
             .await
             .unwrap();
         {
@@ -2086,12 +2156,14 @@ mod tests {
             assert!(!cache.contains_key("1"));
         }
         egress
-            .cached("failure".into(), 86400, &[], async { bail!("transport") })
+            .cached("failure".into(), 86400, &[], &[], async {
+                bail!("transport")
+            })
             .await
             .unwrap_err();
         tokio::time::advance(Duration::from_secs(299)).await;
         let error = egress
-            .cached("failure".into(), 86400, &[], async {
+            .cached("failure".into(), 86400, &[], &[], async {
                 panic!("negative cache")
             })
             .await
@@ -2105,11 +2177,13 @@ mod tests {
         );
         tokio::time::advance(Duration::from_secs(2)).await;
         egress
-            .cached("failure".into(), 86400, &[], async { Ok(response.clone()) })
+            .cached("failure".into(), 86400, &[], &[], async {
+                Ok(response.clone())
+            })
             .await
             .unwrap();
         egress
-            .cached("fresh".into(), 86400, &[], async {
+            .cached("fresh".into(), 86400, &[], &[], async {
                 panic!("positive TTL remains")
             })
             .await
@@ -2118,17 +2192,17 @@ mod tests {
         let mut failure = response.clone();
         failure.status = 503;
         egress
-            .cached("http-error".into(), 86400, &[], async { Ok(failure) })
+            .cached("http-error".into(), 86400, &[], &[], async { Ok(failure) })
             .await
             .unwrap();
         tokio::time::advance(Duration::from_secs(301)).await;
         egress
-            .cached("http-error".into(), 86400, &[], async { Ok(response) })
+            .cached("http-error".into(), 86400, &[], &[], async { Ok(response) })
             .await
             .unwrap();
         for key in ["large-a", "large-b"] {
             egress
-                .cached(key.into(), 3600, &[], async {
+                .cached(key.into(), 3600, &[], &[], async {
                     Ok(Fetched {
                         permanent_redirect: false,
                         truncated: false,
