@@ -441,6 +441,56 @@ mod tests {
             assert_eq!(root(uri), None, "{uri}");
         }
     }
+    /// Every spelling of a Spotify link is the one `https://open.spotify.com/{kind}/{id}`
+    /// MusicBrainz stores (its URL lookup knows no other: docs/sources/spotify.md), so the
+    /// `musicbrainz` source asks for that one.
+    #[test]
+    fn every_spotify_spelling_is_the_one_musicbrainz_stores() {
+        // The resource a spelling is: its root, else itself as identity writes it (a host's
+        // case is no alias).
+        let resolved = |uri: &str| {
+            root(uri)
+                .map(|a| a.root)
+                .or_else(|| crate::model::identity(uri).ok().map(|(_, uri, _)| uri))
+        };
+        let track = "https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq";
+        for uri in [
+            "https://open.spotify.com/intl-de/track/6LgJvl0Xdtc73RJ1mmpotq",
+            "https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq?si=4f1e2d3c4b5a6978",
+            "https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq?si=a&context=spotify%3Aalbum%3Ax",
+            "https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq/",
+            "https://play.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq",
+            "http://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq",
+            "https://OPEN.SPOTIFY.COM/track/6LgJvl0Xdtc73RJ1mmpotq",
+            "https://open.spotify.com/embed/track/6LgJvl0Xdtc73RJ1mmpotq?utm_source=generator",
+            "spotify:track:6LgJvl0Xdtc73RJ1mmpotq",
+            // The retired player's form, which MusicBrainz' URL cleanup still folds.
+            "https://embed.spotify.com/?uri=spotify:track:6LgJvl0Xdtc73RJ1mmpotq",
+        ] {
+            assert_eq!(resolved(uri), Some(track.into()), "{uri}");
+        }
+        assert_eq!(root(track), None);
+        for (uri, canonical) in [
+            (
+                "https://open.spotify.com/intl-fr/album/6dVIqQ8qmQ5GBnJ9shOYGE?si=x",
+                "https://open.spotify.com/album/6dVIqQ8qmQ5GBnJ9shOYGE",
+            ),
+            (
+                "https://open.spotify.com/embed/album/6dVIqQ8qmQ5GBnJ9shOYGE",
+                "https://open.spotify.com/album/6dVIqQ8qmQ5GBnJ9shOYGE",
+            ),
+            (
+                "spotify:artist:4Z8W4fKeB5YxbusRsdQVPb",
+                "https://open.spotify.com/artist/4Z8W4fKeB5YxbusRsdQVPb",
+            ),
+            (
+                "https://open.spotify.com/artist/4Z8W4fKeB5YxbusRsdQVPb/",
+                "https://open.spotify.com/artist/4Z8W4fKeB5YxbusRsdQVPb",
+            ),
+        ] {
+            assert_eq!(resolved(uri), Some(canonical.into()), "{uri}");
+        }
+    }
     #[test]
     fn only_a_same_path_canonical_is_an_alias() {
         let c = |u: &str, c: &str| canonical(u, c).map(|a| a.root);

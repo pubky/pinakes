@@ -118,15 +118,24 @@ impl Transport for Recorded {
                 .unwrap()
                 .push(format!("{host}{}", url.path()));
             assert!(options.sensitive);
-            let body = match url.path() {
-                "/api/token" => {
-                    serde_json::json!({"access_token": "hubs-token", "expires_in": 3600})
-                }
-                "/v1/tracks/7tFiyTwD0nx5a1eklYtX2J" => serde_json::json!({
-                    "id": "7tFiyTwD0nx5a1eklYtX2J", "type": "track",
-                    "name": "Bohemian Rhapsody - Remastered 2011", "duration_ms": 354_320,
-                    "external_ids": {"isrc": "GBUM71029604"},
-                }),
+            let (status, body) = match url.path() {
+                "/api/token" => (
+                    200,
+                    serde_json::json!({"access_token": "hubs-token", "expires_in": 3600}),
+                ),
+                "/v1/tracks/7tFiyTwD0nx5a1eklYtX2J" => (
+                    200,
+                    serde_json::json!({
+                        "id": "7tFiyTwD0nx5a1eklYtX2J", "type": "track",
+                        "name": "Bohemian Rhapsody - Remastered 2011", "duration_ms": 354_320,
+                        "external_ids": {"isrc": "GBUM71029604"},
+                    }),
+                ),
+                // The app's owner has no Premium: what Spotify answered the owner's app.
+                "/v1/tracks/6LgJvl0Xdtc73RJ1mmpotq" => (
+                    403,
+                    "Active premium subscription required for the owner of the app.".into(),
+                ),
                 other => panic!("unexpected Spotify request {other}"),
             };
             return Ok(Fetched {
@@ -134,11 +143,19 @@ impl Transport for Recorded {
                 truncated: false,
                 validators: Default::default(),
                 url: url.clone(),
-                status: 200,
+                status,
                 retry_after_secs: 60,
                 location: None,
-                content_type: "application/json".into(),
-                body: serde_json::to_vec(&body)?,
+                content_type: if status == 200 {
+                    "application/json"
+                } else {
+                    "text/plain"
+                }
+                .into(),
+                body: match body {
+                    serde_json::Value::String(text) => text.into_bytes(),
+                    json => serde_json::to_vec(&json)?,
+                },
             });
         }
         assert_eq!(options.accept.as_deref(), Some("application/json"));
@@ -1158,6 +1175,121 @@ async fn a_spotify_track_joins_the_musicbrainz_recording(pool: sqlx::PgPool) {
     let track = group(ids[0].clone()).await;
     assert!(track.is_some(), "{keys:?}");
     assert_eq!(group(ids[1].clone()).await, track);
+}
+
+/// A Spotify track while Spotify answers nothing: MusicBrainz relates its URL to a recording
+/// (Paranoid Android), and the track joins that recording's TIDAL and Apple Music tracks.
+/// Spotify refusing the app (403, its owner without Premium) or having no credentials at all,
+/// the lookup by URL is the same: it starts from no Spotify key.
+async fn spotify_falls_back_to_musicbrainz(pool: sqlx::PgPool, spotify: Option<&str>) {
+    if !has(&["spotify", "musicbrainz"]) {
+        return;
+    }
+    let mut ids = vec![];
+    for uri in [
+        "https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq",
+        "https://tidal.com/track/58990512",
+        "https://music.apple.com/song/1097861770",
+    ] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut d = ResourceMeta::new(uri, "jsonld", 86400);
+        d.set_type("MusicRecording");
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        ids.push(id);
+    }
+    let mut config = Config::default();
+    if let Some(pair) = spotify {
+        config.sections.set(
+            "spotify",
+            serde_json::json!({"client_id": pair, "client_secret": pair}),
+        );
+    }
+    let t = Arc::new(Recorded {
+        seen: Mutex::default(),
+    });
+    let cx = also_on::Context {
+        egress: egress(t.clone()),
+        config: Arc::new(config),
+    };
+    sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    also_on::drain(&pool, &cx, &also_on::registry(), 100)
+        .await
+        .unwrap();
+    let seen = t.seen.lock().unwrap().clone();
+    let asked: Vec<&String> = seen.iter().filter(|s| s.contains("spotify.com/")).collect();
+    let (expected, error): (&[&str], _) = match spotify {
+        Some(_) => (
+            &[
+                "accounts.spotify.com/api/token",
+                "api.spotify.com/v1/tracks/6LgJvl0Xdtc73RJ1mmpotq",
+            ],
+            Some("spotify_auth".to_owned()),
+        ),
+        None => (&[], None),
+    };
+    assert_eq!(asked, expected, "{seen:?}");
+    // MusicBrainz was asked for the URL as it stores it (in the batch of the run's links).
+    assert!(
+        seen.iter()
+            .any(|s| s.starts_with("musicbrainz.org/ws/2/url?")
+                && s.contains(
+                    "resource=https%3A%2F%2Fopen.spotify.com%2Ftrack%2F6LgJvl0Xdtc73RJ1mmpotq&"
+                )),
+        "{seen:?}"
+    );
+    let keys: Vec<String> = sqlx::query_scalar(
+        "SELECT key||' '||source FROM resource_key WHERE resource_id=$1 ORDER BY key COLLATE \"C\"",
+    )
+    .bind(&ids[0])
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        keys,
+        [
+            "isrc:GBAYE9701376 musicbrainz",
+            "isrc:GBBKS1700108 musicbrainz",
+            "mb:recording:9f9cf187-d6f9-437f-9d98-d59cdbd52757 musicbrainz",
+        ]
+    );
+    // The refusal waits out its hold; what MusicBrainz gave stands meanwhile.
+    let last_error: Option<String> =
+        sqlx::query_scalar("SELECT last_error FROM also_on_dirty WHERE resource_id=$1")
+            .bind(&ids[0])
+            .fetch_optional(&pool)
+            .await
+            .unwrap()
+            .flatten();
+    assert_eq!(last_error, error);
+    groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    let mut groups = vec![];
+    for id in &ids {
+        let group: Option<String> =
+            sqlx::query_scalar("SELECT group_id FROM group_unit WHERE resource_id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        groups.push(group);
+    }
+    assert!(groups[0].is_some(), "{keys:?}");
+    assert_eq!(
+        groups,
+        [groups[0].clone(), groups[0].clone(), groups[0].clone()]
+    );
+}
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_spotify_track_spotify_refuses_joins_by_its_musicbrainz_url(pool: sqlx::PgPool) {
+    spotify_falls_back_to_musicbrainz(pool, Some("premium-hold")).await;
+}
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_spotify_track_without_credentials_joins_by_its_musicbrainz_url(pool: sqlx::PgPool) {
+    spotify_falls_back_to_musicbrainz(pool, None).await;
 }
 
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]

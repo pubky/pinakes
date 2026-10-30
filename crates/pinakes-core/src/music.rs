@@ -151,17 +151,25 @@ pub fn parse(uri: &str) -> Option<Link> {
             )
         }
         "open.spotify.com" | "play.spotify.com" => {
-            // `intl-xx` and the old `user/{name}/playlist/{id}` forms.
+            // `intl-xx`, the embedded player's `embed/{kind}/{id}` and the old
+            // `user/{name}/playlist/{id}` forms.
             let s: Vec<&str> = segments
                 .iter()
                 .copied()
                 .skip_while(|p| p.starts_with("intl-"))
+                .skip_while(|p| *p == "embed")
                 .collect();
             match s.as_slice() {
                 [kind, id] => spotify(kind, id),
                 ["user", _, "playlist", id] => spotify("playlist", id),
                 _ => None,
             }
+        }
+        // The retired player's `embed.spotify.com/?uri=spotify:{kind}:{id}`.
+        "embed.spotify.com" => {
+            let uri = query("uri")?;
+            let (kind, id) = uri.strip_prefix("spotify:")?.split_once(':')?;
+            spotify(kind, id)
         }
         "music.apple.com" => apple(&segments, query("i")),
         // The iTunes Store's URLs for the same catalogue (`…/album/{slug}/id{N}`).
