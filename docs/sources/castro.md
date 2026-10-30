@@ -23,7 +23,7 @@ Nothing beyond the page the web route fetched.
 ## Card
 
 The page's card, typed `PodcastEpisode`, with the file as its [`stream`](../api.md#stream) and
-the show's Apple ID as `podcast_apple`. The also-on [`podcasts`](podcasts.md) source then finds
+the show's Apple ID as `podcast_apple`. The also-on `podcasts` source then finds
 the episode on Apple Podcasts. It takes the one episode among the show's latest that iTunes
 lists with that very file, and from there the episode's keys. Castro's word alone is no key: a
 page joins by what Apple confirms. `details.from` is `castro`.

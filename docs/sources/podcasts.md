@@ -48,7 +48,7 @@ Podcast Index page
   whether or not the show's GUID is vouched, just as its track is: Apple is the authority for
   its own episodes. iTunes may know an item by another GUID than the show's feed does (Darknet
   Diaries' "Conti"). Then the file is what joins Apple's episode to the show's own page.
-- **A player's episode page.** A Castro episode page ([castro](castro.md)) plays a file and
+- **A player's episode page.** A Castro episode page (the `castro` source) plays a file and
   names its show's Apple ID. The episode is the one among the show's latest 200 that iTunes
   lists with that very file. It gets that episode's keys, and the item key when the show is
   vouched. Castro's word alone is no key. Pocket Casts' and Overcast's episode pages are never

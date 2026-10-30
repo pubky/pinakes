@@ -149,17 +149,16 @@ A feed or page behind a login is never read, so nothing behind one is a stream. 
 tracking redirect (`podtrac.com`, `pdst.fm`) is its public link and stays. No DRM service's audio
 is one: Spotify's, Apple Music's and TIDAL's own players are not streams.
 
-Which cards carry one:
+Which cards carry one (each source's page in [docs/sources](sources/README.md) says how):
 - a podcast feed's episode (`{feed}?guid={item}`, or the show's own episode page whose feed item
   links back to it): the item's first audio or video `<enclosure>`, with its `itunes:duration`;
-- a Podcast Index episode: the enclosure Podcast Index records
-  ([podcast_index](sources/podcast_index.md));
-- a Castro episode: the file its page plays ([castro](sources/castro.md));
-- any other episode the also-on [`podcasts`](sources/podcasts.md) source reads (an Apple Podcasts
+- a Podcast Index episode: the enclosure Podcast Index records (the `podcast_index` source);
+- a Castro episode: the file its page plays (the `castro` source);
+- any other episode the also-on `podcasts` source reads (an Apple Podcasts
   or Fountain episode, a page its feed's item links back to): the enclosure it hears of, from
   the card's next read (the source asks for one at once);
-- an Apple Music track: iTunes' 30-second preview, `preview: true` ([itunes](sources/itunes.md)),
-  from the card's next read. Deezer's previews are signed and expire, so they are never one;
+- an Apple Music track: iTunes' 30-second preview, `preview: true` (the `itunes` source), from
+  the card's next read. Deezer's previews are signed and expire, so they are never one;
   Spotify's are not used.
 
 ### Resource read
