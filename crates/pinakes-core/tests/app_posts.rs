@@ -712,6 +712,46 @@ async fn a_post_line_of_a_never_fetched_namespace_creates_nothing(pool: PgPool) 
     }
 }
 
+/// A tag on an object of a namespace Pinakes never fetches (the old Mapky and Eventky layouts)
+/// is a reference like any other, but its object gets no route: it is never queued for a fetch
+/// and stores no card.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_tag_on_an_object_never_fetched_stores_nothing(pool: PgPool) {
+    let metrics = Metrics::new().unwrap();
+    let uris = [
+        format!("pubky://{AUTHOR}/pub/mapky.app/posts/{}", id()),
+        format!("pubky://{AUTHOR}/pub/eventky.app/events/{}", id()),
+    ];
+    let lines = uris
+        .iter()
+        .map(|uri| Change {
+            op: Op::Put,
+            uri: uri.clone(),
+            kind: Kind::Tag,
+            author: AUTHOR.into(),
+            object_path: format!("/pub/pubky.app/tags/{}", id()),
+            label: Some("coffee".into()),
+            at: Utc::now().timestamp_millis(),
+        })
+        .collect();
+    batch(&pool, lines, &metrics).await;
+    for uri in &uris {
+        let (id, _, _) = identity(uri).unwrap();
+        let row: (Option<String>, Option<String>, Option<String>, Value, i64) = sqlx::query_as(
+            "SELECT resolver,name,type,doc,(SELECT count(*) FROM reference f WHERE f.resource_id=r.id) FROM resource r WHERE id=$1",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row, (None, None, None, json!({}), 1), "{uri}");
+    }
+    assert!(queue::claim(&pool, "pubky", &QueueConfig::default())
+        .await
+        .unwrap()
+        .is_none());
+}
+
 /// A post whose namespace is not one plain path segment once decoded (not UTF-8, an encoded `/`,
 /// an encoded `.` or `..`) is refused as `uri` and creates no resource or reference: no spelling
 /// gets past the post-path check. Letter case is kept: `Social` is not `social` but another app's
