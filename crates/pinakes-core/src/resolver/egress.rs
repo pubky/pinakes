@@ -620,7 +620,12 @@ impl Egress {
             .is_some_and(|host| self.allows_host(&host))
     }
     fn allows_host(&self, host: &str) -> bool {
-        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        // Read as the operator's rules are (`canonical_host`), so a rule and a host written
+        // alike always meet; what names no host is refused.
+        let Some(host) = canonical_host(host) else {
+            return false;
+        };
+        let host = host.to_string();
         !super::osm::osm_host(&host)
             && !self.cfg.deny_hosts.iter().any(|h| host_matches(&host, h))
             && (self.cfg.allow_hosts.is_empty()
@@ -1135,6 +1140,26 @@ pub fn published_rate(host: &str) -> Option<f64> {
         .filter(|(rule, _)| host_matches(host, rule))
         .max_by_key(|(rule, _)| rule.len())
         .map(|(_, rate)| *rate)
+}
+/// A host as the egress policy compares it, the operator's rules (`config`) and the hosts it
+/// asks alike: lower case and IDNA ASCII (`faß.de` is `xn--fa-hia.de`), without trailing dots
+/// (`.`, and the full stops IDNA maps to one: `。`, `．`, `｡`, `%2e`), an IP address in its
+/// canonical form. What is left once the dots go is parsed again, until nothing changes: without
+/// them a name may be an address (`8.8.8..` is `8.8.0.8`, as a URL reads `8.8.8`). `None` for
+/// what names no host. Idempotent.
+pub fn canonical_host(name: &str) -> Option<url::Host> {
+    let mut host = url::Host::parse(name.trim()).ok()?;
+    while let url::Host::Domain(d) = &host {
+        let trimmed = d.trim_end_matches('.');
+        if trimmed.len() == d.len() {
+            break;
+        }
+        host = url::Host::parse(trimmed).ok()?;
+    }
+    match host {
+        url::Host::Domain(d) if d.is_empty() => None,
+        host => Some(host),
+    }
 }
 fn host_matches(host: &str, rule: &str) -> bool {
     let rule = rule.to_ascii_lowercase();
