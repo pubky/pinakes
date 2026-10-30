@@ -909,7 +909,7 @@
     ],
     "canary": "https://infomaniak.events/en-ch",
     "canary_link": "/*/*/*/*/events/*",
-    "canary_note": "The listing's first event page: a current event, never one gone stale.",
+    "canary_note": "The listing's first event page, picked by its path alone: as current as Infomaniak keeps its listing.",
     "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,

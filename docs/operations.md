@@ -810,10 +810,12 @@ write documents, the OSM cache or changes. A successful result missing a declare
 as neither a failure nor a success. Any other refusal of a canary's request (a content type, a
 redirect) is a failure. An over-budget sample is inconclusive. A platform whose canary names a
 listing page (`canary_link` in the table: Infomaniak) reads that listing's first event link of
-the declared form, so its canary never reads an event gone stale; any other reads its fixed
-sample, which its `canary_note` says when to rotate. See [ops/README.md](../ops/README.md) for
-alert rules, the dashboard and scrape setup; `scripts/check-ops` checks every alert and dashboard
-metric against the registry (and runs `promtool check rules` when installed).
+the declared form. The link is picked by its host and path alone, so the canary is only as
+current as the provider keeps its listing: an expired event listed first is still the one read.
+Any other platform reads its fixed sample, which its `canary_note` says when to rotate. See
+[ops/README.md](../ops/README.md) for alert rules, the dashboard and scrape setup;
+`scripts/check-ops` checks every alert and dashboard metric against the registry (and runs
+`promtool check rules` when installed).
 
 The capability-URL guard (`scripts/verify-no-capability-urls`, run by the tests) scans every
 tracked and new source file for capability URLs; synthetic fixture URLs are allowed only in
