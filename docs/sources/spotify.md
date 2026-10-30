@@ -17,6 +17,41 @@ For example, the track `https://open.spotify.com/track/7tFiyTwD0nx5a1eklYtX2J` (
 Rhapsody - Remastered 2011") has the ISRC `GBUM71029604`, which MusicBrainz gives to one
 recording: the track gets `isrc:GBUM71029604` and joins that recording's group.
 
+## Without Spotify's API
+
+A Spotify link can still join when this source gives nothing: no credentials, a refusal (an
+app owner without Premium, [below](#an-app-owner-without-premium)), or an outage. Two sources
+look its URL up exactly, never by title or artist, and neither needs this one.
+- **`musicbrainz`** asks MusicBrainz what it relates the link's URL to, and
+  that lookup starts from no Spotify key. Sources run in a fixed order and see the keys the ones
+  before them found, but a URL relation needs none of them, and a failing source
+  costs only its own rows: the others' run and are kept.
+  - **What MusicBrainz stores:** the one spelling `https://open.spotify.com/{kind}/{id}` (its
+    URL cleanup folds the others), for a track (a recording, or an episode), an album (a
+    release), an artist, and a show (a series). It takes no playlists. Every spelling Pinakes
+    folds is that URL ([aliases](../api.md#aliases)), and that is the URL asked.
+  - **Coverage is partial:** only links an editor added. For example, `…/track/6LgJvl0Xdtc73RJ1mmpotq` is
+    related to the recording "Paranoid Android" (9f9cf187-d6f9-437f-9d98-d59cdbd52757), and
+    `…/album/6dVIqQ8qmQ5GBnJ9shOYGE` to the release "OK Computer"; but
+    `…/track/7tFiyTwD0nx5a1eklYtX2J` (the example above) is related to nothing (all three
+    checked on 30 October 2026).
+  - **What it gives:** a related link takes that recording's, release's or artist's keys
+    (`mb:recording:…`, its ISRCs, …) and joins its group as any music link does. An album
+    MusicBrainz does not relate by URL finds no release by barcode: only Spotify's own record
+    has the barcode.
+- **`wikidata`** asks for the one Wikidata item that carries the link's Spotify ID
+  (P2207 for a track, P2205 for an album, P1902 for an artist). That is exact too, also needs no
+  Spotify key, and covers only what Wikidata's editors entered.
+- **Episodes and shows** are not music links here: this source reads none, so nothing falls
+  back. A show's Spotify link can join its podcast through the show's Wikidata item
+  (`podcasts`).
+- **No Odesli (song.link).** Its API documentation says: "The entire v1-alpha.1 API namespace
+  is deprecated and will be retired on July 31, 2026", and "We have stopped giving out API keys"
+  (access only by allowlisting). Asked without a key on 30 October 2026, it answers 401
+  `{"code":"PUBLIC_API_ACCESS_DEPRECATED"}`. Its API terms (song.link/api-terms) are a Google
+  Drive file that needs a sign-in to read. So there is no API whose terms allow an open indexer
+  to store its answers, and Pinakes asks it nothing.
+
 ## Operations
 
 `spotify` costs a token request when its token expires (a minute before Spotify's
