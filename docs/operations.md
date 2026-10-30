@@ -428,8 +428,10 @@ to the Nexus: the feed, the reach lists and reach-set route, and the batch resou
 the `social` tool reads. Every one goes through one client. It is sent to no other host: the
 Nexus client follows no redirect, and Nominatim, sources and the egress have clients of their
 own. The value is never logged or shown (errors, metrics, `/v1/info` public or admin, the
-agents' texts), and the configuration's `Debug` redacts it. Empty means none; a value that is no
-valid header value stops startup, without being named.
+agents' texts), and the configuration's `Debug` redacts it. Empty means none: the variable set
+empty clears a value the file (`nexus_authorization`) holds, unlike a source's variables, which
+an empty value leaves to the file. A value that is no valid header value stops startup, without
+being named.
 
 ## Queue and refresh
 

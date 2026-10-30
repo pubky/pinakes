@@ -187,7 +187,7 @@ fn named_variables() -> Vec<(&'static str, Vec<&'static str>, Named)> {
     let nexus = std::iter::once((
         NEXUS_AUTHORIZATION,
         vec!["nexus_authorization"],
-        Named::Sets,
+        Named::Owns,
     ));
     sections
         .chain(tokens)
@@ -203,8 +203,12 @@ enum Named {
     /// It fills the value only when the file and the `PINAKES__…` form leave it unset (a source's
     /// entry is created for it).
     Fills,
+    /// As `Sets`, and set empty it clears the value: the credential is the variable's
+    /// (`PINAKES_NEXUS_AUTHORIZATION`), so an operator takes it away by emptying it.
+    Owns,
 }
-/// Apply the named variables that are set (and not empty) onto the file form.
+/// Apply the named variables that are set onto the file form: an empty one is skipped, unless
+/// it clears its value (`Named::Owns`).
 pub(crate) fn apply_named_env(
     value: &mut serde_json::Value,
     vars: impl IntoIterator<Item = (String, String)>,
@@ -215,7 +219,7 @@ pub(crate) fn apply_named_env(
         else {
             continue;
         };
-        if val.trim().is_empty() {
+        if val.trim().is_empty() && *named != Named::Owns {
             continue;
         }
         let (last, sections) = path.split_last().expect("a path");
@@ -240,7 +244,12 @@ pub(crate) fn apply_named_env(
         if *named == Named::Fills && node.get(*last).is_some_and(|v| !v.is_null()) {
             continue;
         }
-        node.insert(last.to_string(), serde_json::Value::String(val));
+        let val = if val.trim().is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::String(val)
+        };
+        node.insert(last.to_string(), val);
     }
     Ok(())
 }
@@ -1551,6 +1560,37 @@ mod tests {
                 "{empty:?}"
             );
         }
+        // Set empty over a credential the file holds, either form clears it; unset, the file's
+        // stands, and a value replaces it.
+        let over_file = |vars: &[(&str, &str)]| {
+            let mut value = Config::defaults().unwrap();
+            value["nexus_authorization"] = "Bearer ABCDEFFILE".into();
+            let vars = vars.iter().map(|(k, v)| (k.to_string(), v.to_string()));
+            apply_env(&mut value, vars.clone())?;
+            apply_named_env(&mut value, vars)?;
+            Config::from_value(value)
+        };
+        for empty in [
+            ("PINAKES_NEXUS_AUTHORIZATION", ""),
+            ("PINAKES_NEXUS_AUTHORIZATION", "  "),
+            ("PINAKES__NEXUS_AUTHORIZATION", ""),
+        ] {
+            assert!(
+                over_file(&[empty]).unwrap().nexus_authorization.is_none(),
+                "{empty:?}"
+            );
+        }
+        assert_eq!(
+            over_file(&[]).unwrap().nexus_authorization.as_deref(),
+            Some("Bearer ABCDEFFILE")
+        );
+        assert_eq!(
+            over_file(&[("PINAKES_NEXUS_AUTHORIZATION", "Bearer ABCDEFNEW")])
+                .unwrap()
+                .nexus_authorization
+                .as_deref(),
+            Some("Bearer ABCDEFNEW")
+        );
         let refused = read(&[("PINAKES_NEXUS_AUTHORIZATION", "Bearer ABCDEF\u{7f}")])
             .unwrap_err()
             .to_string();
