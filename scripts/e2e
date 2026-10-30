@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 if [[ ! -d e2e/node_modules ]]; then npm ci --prefix e2e; fi
-if [[ "${1:-}" == "--mock" || "${1:-}" == "--isolated-live" ]]; then
+if [[ "${1:-}" == "--mock" || "${1:-}" == "--isolated-live" || "${1:-}" == "--live-recipes" ]]; then
   cargo build -p pinakes-core --example e2e_stack
 fi
 exec node e2e/run.mjs "$@"

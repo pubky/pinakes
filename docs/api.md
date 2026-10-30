@@ -200,7 +200,9 @@ Three caveats:
   group formed differently has another ID (take `group.id` from either member's card).
 
 The examples live in `data/api-recipes.json`; `tests/recipes.rs` runs every one against a fixture
-of the same URIs and checks that this list matches.
+of the same URIs and checks that this list matches. `scripts/e2e --live-recipes` (also run by
+`--isolated-live`) resolves each `/v1/resolve` example live and checks its card's type, so an
+example whose page has gone stale fails there.
 
 ### POST /v1/resolve: a card per link
 

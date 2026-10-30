@@ -1,6 +1,7 @@
 //! Isolated e2e stack with the real schema, ingestion, resolver parsers, storage and API.
 //! Default mode mocks external boundaries with no public network; --live scopes real fetches
-//! to the sample IDs (at most `MAX_LIVE_SAMPLES`).
+//! to the sample IDs (at most `MAX_LIVE_SAMPLES`); --live-recipes fetches the public
+//! `/v1/resolve` examples once each and reports their cards.
 // The mock's sample list is one `json!` literal, deeper than the default macro recursion limit.
 #![recursion_limit = "256"]
 use anyhow::{bail, ensure, Result};
@@ -17,7 +18,10 @@ use pinakes_core::{
     model::identity,
     nexus::{Change, Changes, Kind, Nexus, Op},
     queue,
-    resolver::egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+    resolver::{
+        egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+        Resolver,
+    },
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -380,7 +384,9 @@ async fn stack(args: Vec<String>) -> Result<()> {
         .max_connections(16)
         .connect_with(options)
         .await?;
-    let result = if let Some(samples) = live {
+    let result = if args.get(1).is_some_and(|s| s == "--live-recipes") {
+        run_recipes(pool.clone()).await
+    } else if let Some(samples) = live {
         run_live(pool.clone(), samples).await
     } else {
         run(pool.clone(), fixture).await
@@ -512,20 +518,22 @@ async fn run(pool: sqlx::PgPool, f: Fixture) -> Result<()> {
     Ok(())
 }
 
-// A scoped live driver keeps a private copy of the real Nexus feed, but claims only
-// the selected sample IDs. It uses the same leases, completion fences and resolvers.
-// No canaries, refresh sweep or unrelated backlog is sent to public upstreams.
-async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
+/// The live settings and resolvers, as the daemon builds them.
+struct Live {
+    cfg: Arc<Config>,
+    egress: Egress,
+    resolvers: Vec<Arc<dyn Resolver>>,
+}
+
+fn live(pool: &sqlx::PgPool) -> Result<Live> {
     use pinakes_core::event::{
         adapters::service::PlatformResolver,
         service::{CalendarResolver, EventService},
     };
     use pinakes_core::resolver::{
         cards::CardResolver, geo::GeoResolver, osm::OsmResolver, pubky::PubkyResolver,
-        web::WebResolver, Resolver,
+        web::WebResolver,
     };
-    pinakes_core::migrate(&pool).await?;
-    let _instance = pinakes_core::locks::own_database(&pool).await?;
     // Settings and secrets come from the environment as the daemon reads them (the TIDAL
     // credentials, `PINAKES__…`); there is no file.
     let mut cfg = Config::load(None)?;
@@ -570,6 +578,153 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
             web: web(),
         }));
     }
+    Ok(Live {
+        cfg,
+        egress,
+        resolvers,
+    })
+}
+
+/// Claims `id`'s job when it is due and runs it through the production path (batched
+/// completion, leases), by `resolver`. A fetch can show a sample to be a spelling of another URI
+/// (a Bluesky handle's post under its DID): the sample becomes that root's alias, and its card
+/// is the root's, so the root is fetched in its place, by the root's own resolver. Whether a job
+/// ran.
+async fn run_due(pool: &sqlx::PgPool, live: &Live, id: &str, resolver: &Arc<dyn Resolver>) -> bool {
+    let job=sqlx::query_as::<_,queue::Job>("UPDATE resource SET lease_until=now()+interval '60 seconds',generation=generation+1 WHERE id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1) AND NOT dead_letter AND NOT final AND next_attempt_at<=now() AND (lease_until IS NULL OR lease_until<now()) RETURNING id,uri,attempts,generation").bind(id).fetch_optional(pool).await;
+    let resolver = match &job {
+        Ok(Some(job)) if job.id != id => {
+            let Some(root) = pinakes_core::resolver::classify(&job.uri)
+                .and_then(|kind| live.resolvers.iter().find(|r| r.name() == kind))
+            else {
+                eprintln!("live sample root: no resolver for {}", job.uri);
+                return false;
+            };
+            root
+        }
+        _ => resolver,
+    };
+    match job {
+        Ok(Some(job)) => {
+            // The production path: the workers finish every job through a batch.
+            if let Err(e) = queue::run_batch(
+                pool,
+                resolver.as_ref(),
+                &live.cfg.queue,
+                std::slice::from_ref(&job),
+            )
+            .await
+            {
+                eprintln!("live sample completion: {e}");
+            }
+            true
+        }
+        Err(e) => {
+            eprintln!("live sample claim: {e}");
+            false
+        }
+        _ => false,
+    }
+}
+
+/// The public `/v1/resolve` examples that promise a card (`data/api-recipes.json` and the
+/// sources' own), each fetched once through the live resolvers, one at a time, as the endpoint
+/// would: from its root when the URI is a spelling. Prints one JSON line with each recipe's
+/// card: its status, type and the type's ancestors, and the last error's class;
+/// `judgeRecipes` (`e2e/harness.mjs`) decides which pass.
+async fn run_recipes(pool: sqlx::PgPool) -> Result<()> {
+    pinakes_core::migrate(&pool).await?;
+    let _instance = pinakes_core::locks::own_database(&pool).await?;
+    let live = live(&pool)?;
+    let mut results = vec![];
+    for recipe in pinakes_core::recipes::recipes() {
+        let (Some(want), Some(uri)) = (
+            &recipe.card_type,
+            recipe.body.as_ref().and_then(|b| b["uri"].as_str()),
+        ) else {
+            continue;
+        };
+        if recipe.path != "/v1/resolve" || recipe.expect != "card" {
+            continue;
+        }
+        let (id, uri, _) = identity(uri)?;
+        let target = pinakes_core::alias::root(&uri).map_or_else(|| uri.clone(), |a| a.root);
+        let Some(resolver) = pinakes_core::resolver::classify_config(&target, &live.cfg)
+            .and_then(|kind| live.resolvers.iter().find(|r| r.name() == kind))
+        else {
+            results.push(json!({"name":recipe.name,"uri":uri,"want":want,"status":"unrouted"}));
+            continue;
+        };
+        pinakes_core::store::ensure_resource(&pool, &uri).await?;
+        let id = pinakes_core::alias::resolve_id(&pool, &id).await?;
+        // A fetch that leaves the card pending with no error (it showed the URI to be a spelling,
+        // whose root comes next) runs again; a failure, or a job put off, is the answer.
+        for _ in 0..3 {
+            let ran = run_due(&pool, &live, &id, resolver).await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let again: bool = sqlx::query_scalar("SELECT status='pending' AND last_error IS NULL FROM resource WHERE id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1)")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await?;
+            if !ran || !again {
+                break;
+            }
+        }
+        // A calendar waiting for its members (a Nostr calendar's events) has them fetched, then
+        // is fetched again at once. A member's first missing answer waits for the fetch that
+        // confirms it, which a second pass makes at once, so the calendar can leave it out.
+        let waiting: bool = sqlx::query_scalar("SELECT status='pending' AND last_error='calendar_members_pending' FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await?;
+        if waiting {
+            let members: Vec<(String, String)> = sqlx::query_as("SELECT r.id,r.uri FROM resource_derivation l JOIN resource r ON r.id=l.child_id WHERE l.parent_id=$1 ORDER BY r.id")
+                .bind(&id)
+                .fetch_all(&pool)
+                .await?;
+            for confirm in [false, true] {
+                for (member, member_uri) in &members {
+                    let Some(member_resolver) =
+                        pinakes_core::resolver::classify_config(member_uri, &live.cfg)
+                            .and_then(|kind| live.resolvers.iter().find(|r| r.name() == kind))
+                    else {
+                        continue;
+                    };
+                    if confirm {
+                        sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE id=$1 AND status='pending' AND last_error='missing_unconfirmed'")
+                            .bind(member)
+                            .execute(&pool)
+                            .await?;
+                    }
+                    if run_due(&pool, &live, member, member_resolver).await {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }
+            }
+            sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE id=$1")
+                .bind(&id)
+                .execute(&pool)
+                .await?;
+            run_due(&pool, &live, &id, resolver).await;
+        }
+        let (status, kind, path, error): (String, Option<String>, Option<Vec<String>>, Option<String>) = sqlx::query_as("SELECT d.status,d.type,d.type_path,r.last_error FROM resource r JOIN resource_document d ON d.id=r.id WHERE r.id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1)")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await?;
+        results.push(json!({"name":recipe.name,"uri":uri,"want":want,"status":status,"type":kind,"type_path":path,"error":error}));
+    }
+    println!("{}", json!({ "recipes": results }));
+    Ok(())
+}
+
+// A scoped live driver keeps a private copy of the real Nexus feed, but claims only
+// the selected sample IDs. It uses the same leases, completion fences and resolvers.
+// No canaries, refresh sweep or unrelated backlog is sent to public upstreams.
+async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
+    pinakes_core::migrate(&pool).await?;
+    let _instance = pinakes_core::locks::own_database(&pool).await?;
+    let live = live(&pool)?;
+    let (cfg, egress) = (live.cfg.clone(), live.egress.clone());
     // A sample whose expectations come from one also-on source (`needs`: a TIDAL album's own
     // barcode) runs only in a build that has the source, as in the mock stack: without it the
     // sample is left out and named in the ready line. A build that has the source but cannot run
@@ -601,7 +756,8 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
         let (id, uri, _) = identity(&root)?;
         let kind = pinakes_core::resolver::classify(&uri)
             .ok_or_else(|| anyhow::anyhow!("unclassified sample"))?;
-        let resolver = resolvers
+        let resolver = live
+            .resolvers
             .iter()
             .find(|r| r.name() == kind)
             .ok_or_else(|| anyhow::anyhow!("missing sample resolver"))?
@@ -636,39 +792,8 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
                 eprintln!("live ingestion: {e}");
             }
             for (id, resolver) in &selected {
-                // A fetch can show a sample to be a spelling of another URI (a Bluesky handle's
-                // post under its DID): the sample becomes that root's alias, and its card is the
-                // root's, so the root is fetched in its place, by the root's own resolver.
-                let job=sqlx::query_as::<_,queue::Job>("UPDATE resource SET lease_until=now()+interval '60 seconds',generation=generation+1 WHERE id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1) AND NOT dead_letter AND NOT final AND next_attempt_at<=now() AND (lease_until IS NULL OR lease_until<now()) RETURNING id,uri,attempts,generation").bind(id).fetch_optional(&pool).await;
-                let resolver = match &job {
-                    Ok(Some(job)) if job.id != *id => {
-                        let Some(root) = pinakes_core::resolver::classify(&job.uri)
-                            .and_then(|kind| resolvers.iter().find(|r| r.name() == kind))
-                        else {
-                            eprintln!("live sample root: no resolver for {}", job.uri);
-                            continue;
-                        };
-                        root
-                    }
-                    _ => resolver,
-                };
-                match job {
-                    Ok(Some(job)) => {
-                        // The production path: the workers finish every job through a batch.
-                        if let Err(e) = queue::run_batch(
-                            &pool,
-                            resolver.as_ref(),
-                            &cfg.queue,
-                            std::slice::from_ref(&job),
-                        )
-                        .await
-                        {
-                            eprintln!("live sample completion: {e}");
-                        }
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                    }
-                    Err(e) => eprintln!("live sample claim: {e}"),
-                    _ => {}
+                if run_due(&pool, &live, id, resolver).await {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }
             if let Err(e) = pinakes_core::groups::drain(&pool, &cfg.queue.groups, 25).await {

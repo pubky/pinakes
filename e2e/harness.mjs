@@ -38,6 +38,28 @@ export function withoutStackSkipped(samples, skipped, stackSkipped = []) {
   const left = new Set(stackSkipped.map(s => s.kind));
   return { samples: samples.filter(s => !left.has(s.kind)), skipped: [...skipped, ...stackSkipped] };
 }
+/** Why a recipe is left out rather than failed, by its failure class (`resolver::error_class`):
+ * this host could not check it, which says nothing of the recipe. */
+const LEFT_OUT = {
+  dns: host => `${host} could not be reached from this host (dns)`,
+  connect: host => `${host} could not be reached from this host (connect)`,
+  timeout: host => `${host} could not be reached from this host (timeout)`,
+  wall: host => `${host} answers this host with a bot wall`,
+  rate_limited: host => `${host} asked this host to wait (rate limited)`,
+};
+/** The public `/v1/resolve` recipes as `e2e_stack --live-recipes` resolved them: each must be a
+ * card of the type it promises, or of a type under it (a City is a Place), or is left out with
+ * the reason when this host could not check it. */
+export function judgeRecipes(results) {
+  const failed = [], skipped = [];
+  for (const r of results) {
+    if (r.status === 'ok' && (r.type === r.want || r.type_path?.includes(r.want))) continue;
+    const host = /^[a-z]+:\/\/([^/?#]+)/i.exec(r.uri)?.[1] ?? r.uri.split(':')[0];
+    if (LEFT_OUT[r.error]) skipped.push({ name: r.name, uri: r.uri, reason: LEFT_OUT[r.error](host) });
+    else failed.push({ name: r.name, uri: r.uri, reason: r.status === 'unrouted' ? `no resolver takes it, the recipe promises ${r.want}` : `card ${r.status}${r.type ? ` ${r.type}` : ''}${r.error ? ` (${r.error})` : ''}, the recipe promises ${r.want}` });
+  }
+  return { checked: results.length, failed, skipped };
+}
 /** The newest item's link in an RSS feed: the first `<item>`'s `<link>`. */
 export function newestLink(rss) {
   const item = /<item\b[\s\S]*?<\/item>/.exec(rss)?.[0];

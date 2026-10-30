@@ -20,7 +20,8 @@ export DATABASE_URL='postgresql:///postgres?host=/var/run/postgresql'
 | `scripts/check-ops` | `promtool check rules ops/alerts.yml` when promtool is installed; otherwise the test that checks every metric in `ops/alerts.yml` and `ops/grafana/pinakes.json` against the registry (`telemetry.rs`), which `cargo test` also runs. |
 | `npm ci --prefix e2e && npm test --prefix e2e` | The e2e harness's own unit tests. |
 | `scripts/e2e --mock` | The whole flow against fixtures, offline: migrations, ingest, queue, resolvers, groups, API. |
-| `scripts/e2e --isolated-live` | The same against a real homeserver, Nexus and public services. Needs a test identity ([e2e/README.md](e2e/README.md)). |
+| `scripts/e2e --isolated-live` | The same against a real homeserver, Nexus and public services. Needs a test identity ([e2e/README.md](e2e/README.md)). Then runs `--live-recipes`. |
+| `scripts/e2e --live-recipes` | Resolves each public `/v1/resolve` example (`data/api-recipes.json`, the sources') live, once, and checks its card's type; a recipe this host could not check (host out of reach, a bot wall, rate limited) is left out with the reason. Needs no identity. |
 | `scripts/demo-lookup [--base URL]` | Resolves the curated links in `e2e/samples.lookup.json` against a running daemon. Writes nothing to Pubky or Nexus; creates and queues the links in that Pinakes (`POST /v1/resolve`). |
 | `scripts/openapi` | Regenerates `docs/openapi.json`. A test fails while the snapshot differs from the code. |
 | `scripts/verify-osm-boundary [out.sql]` | OSM-derived facts are only in `osm_place` (run by the tests; needs `psql`, `pg_dump`, `rg`). |

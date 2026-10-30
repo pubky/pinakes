@@ -128,3 +128,21 @@ may produce zero matches. Facet counts, each bbox/window row, fixture recurrence
 count and created-change classes are checked. Tagged search waits for reference
 ingestion even when a sample document is already cached; collapse waits for reconciliation. Reports contain public IDs/URIs and cleanup
 paths, never the secret. Journals stay under ignored `.runtime/` with mode 0600.
+
+## The public recipes, live
+
+```sh
+CARGO_PROFILE_DEV_DEBUG=0 scripts/e2e --live-recipes
+```
+
+The public `/v1/resolve` examples that promise a card (`data/api-recipes.json` and each official
+source's own) are fixed public links, which `tests/recipes.rs` runs offline against synthetic
+cards only. This mode resolves each one live, once, one at a time, through the live driver's
+resolvers (settings and secrets from the environment, as above) in a database of its own. The run
+fails when a card is not the type its recipe promises: an event page gone stale, a feed taken
+down (`recipes.failed` in the report, and `recipe failed: …`). A card of a type under the
+promised one passes (a City is a Place). A recipe this host could not check is left out with the
+reason (`recipes.skipped`, and `recipe left out: …`): its host could not be reached (DNS,
+connection or timeout), answered with a bot wall, or asked this host to wait. It needs no test identity and writes nothing to
+Pubky or Nexus. `--isolated-live` runs it too, after its own flow. Replace a failed recipe with a
+current link of the same kind, then update docs/api.md and run `scripts/openapi`.
