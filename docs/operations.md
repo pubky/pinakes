@@ -655,7 +655,12 @@ that are off to `also_on_source_off`, and no card, `also_on` list, search, group
 source reads their keys, facts or links. Those rows stay in the database and expire as before;
 nothing is deleted, and a source switched on again shows its unexpired rows at once. The
 resources its keys and keyed links name are regrouped in the background (`group_dirty`), and its
-recordings' same-recording pairs are read again. `[also_on] enabled = false` hides nothing: it
+recordings' same-recording pairs are read again. What a source gave a card itself, written into its stored
+document when the link was read (a title's name and description from `titles`, a title's or an
+episode's type, an artist's type), goes with the link's next read: switching a source makes
+every card holding its keys or facts due at once, so the change shows as the queue reaches them,
+and a 304 never keeps it. An unchanged page whose stored card still carries what a source that is
+off would write is read again in full, without its validators. `[also_on] enabled = false` hides nothing: it
 only stops the worker. Sources run in a fixed order, and each
 sees the keys the ones before it found in the same run (a barcode MusicBrainz names, then the
 services looked up by it); a source that no longer applies (its key is gone) drops its rows. A

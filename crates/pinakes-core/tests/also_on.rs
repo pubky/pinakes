@@ -3348,3 +3348,135 @@ async fn a_switched_off_source_shows_nothing_until_it_is_on_again(pool: PgPool) 
         }
     }
 }
+
+/// A page's reader for the queue: each read answers a 304 or the page's own card, as the test
+/// scripts them, and counts.
+struct Scripted {
+    answers: Mutex<std::collections::VecDeque<bool>>,
+    reads: Mutex<usize>,
+}
+impl Scripted {
+    fn new(not_modified: &[bool]) -> Self {
+        Self {
+            answers: Mutex::new(not_modified.iter().copied().collect()),
+            reads: Mutex::new(0),
+        }
+    }
+}
+#[async_trait]
+impl pinakes_core::resolver::Resolver for Scripted {
+    fn name(&self) -> &'static str {
+        "web"
+    }
+    fn matches(&self, _: &str) -> bool {
+        true
+    }
+    async fn resolve(&self, uri: &str) -> anyhow::Result<ResourceMeta> {
+        *self.reads.lock().unwrap() += 1;
+        if self.answers.lock().unwrap().pop_front().unwrap_or(false) {
+            return Err(pinakes_core::resolver::NotModified.into());
+        }
+        let mut doc = ResourceMeta::new(uri, "web", 86400);
+        doc.name = Some("Netflix".into());
+        doc.set_type("CreativeWork");
+        Ok(doc)
+    }
+    fn refresh_after(&self, _: &ResourceMeta) -> Duration {
+        Duration::from_secs(86400)
+    }
+}
+
+/// What a switched-off source gave a card itself (here the `titles` source's name for a Netflix
+/// title, which the queue writes into the card) leaves at its next read, which switching it
+/// makes due at once, and a 304 does not keep it: the page is read again in full. Switched on
+/// again, the name comes back the same way.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_switched_off_source_s_name_leaves_the_card_even_on_a_304(pool: PgPool) {
+    use pinakes_core::{also_on::Fact, also_on::SourceOptions, config::QueueConfig, queue};
+    if !also_on::registered().iter().any(|s| s.id() == "titles") {
+        return;
+    }
+    let uri = "https://www.netflix.com/title/80025678";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let titles = Fake::new("titles");
+    titles.answer(
+        uri,
+        Ok(Found {
+            facts: vec![Fact::new("title", "The Crown")],
+            ..Default::default()
+        }),
+    );
+    let config = |on: bool| {
+        let mut config = Config::default();
+        config.also_on.sources.insert(
+            "titles".into(),
+            SourceOptions {
+                enabled: Some(on),
+                ..Default::default()
+            },
+        );
+        config
+    };
+    let cfg = QueueConfig::default();
+    // Read once as the queue reads it: the card's own name, then the source's.
+    let read = |answers: &'static [bool]| {
+        let (pool, cfg, id) = (pool.clone(), cfg.clone(), id.clone());
+        async move {
+            sqlx::query("UPDATE resource SET resolver='web',next_attempt_at=now() WHERE id=$1")
+                .bind(&id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+            let reader = Scripted::new(answers);
+            queue::run_job(&pool, &reader, &cfg, &job).await.unwrap();
+            let name: Option<String> = sqlx::query_scalar("SELECT name FROM resource WHERE id=$1")
+                .bind(&job.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            let reads = *reader.reads.lock().unwrap();
+            (name, reads)
+        }
+    };
+    also_on::configure(&pool, &config(true).also_on)
+        .await
+        .unwrap();
+    read(&[false]).await;
+    let sources: Vec<Arc<dyn Source>> = vec![titles];
+    drain(&pool, &cx(config(true)), &sources).await;
+    assert_eq!(read(&[false]).await, (Some("The Crown".into()), 1));
+    // On, a 304 keeps the card as it is.
+    assert_eq!(read(&[true]).await, (Some("The Crown".into()), 1));
+    let due = || async {
+        sqlx::query_scalar::<_, bool>("SELECT next_attempt_at<=now() FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    sqlx::query("UPDATE resource SET next_attempt_at=now()+interval '1 day' WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Off: due at once, and a 304 is followed by a full read without the name.
+    also_on::configure(&pool, &config(false).also_on)
+        .await
+        .unwrap();
+    assert!(due().await);
+    assert_eq!(read(&[true, false]).await, (Some("Netflix".into()), 2));
+    // Once read without it, a 304 is the card's again.
+    assert_eq!(read(&[true]).await, (Some("Netflix".into()), 1));
+    // On again: due, and read with the name.
+    sqlx::query("UPDATE resource SET next_attempt_at=now()+interval '1 day' WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    also_on::configure(&pool, &config(true).also_on)
+        .await
+        .unwrap();
+    assert!(due().await);
+    assert_eq!(read(&[true]).await, (Some("The Crown".into()), 1));
+}
