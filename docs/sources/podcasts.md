@@ -53,6 +53,16 @@ Podcast Index page
   lists with that very file. It gets that episode's keys, and the item key when the show is
   vouched. Castro's word alone is no key. Pocket Casts' and Overcast's episode pages are never
   read: Pocket Casts refuses Pinakes, and Overcast asks a reader to sign in.
+- **What joins no episode yet.** These episode links name no item GUID or file Pinakes can
+  read, so they join only when they are an episode's own `<link>`:
+  - a Spotify episode;
+  - a Pocket Casts or Overcast episode page;
+  - a Podchaser page;
+  - a YouTube video.
+
+  Title and date within one show would only ever be a hint (`maybe_same`), never a key. That
+  hint is not built: a Spotify episode's show and date need Spotify's episode record, and the
+  Spotify source answers only once the app owner has Premium.
 - A Podcast Index page links the show's feed and its Apple, Pocket Casts and Castro pages.
 - The show's Wikidata item (by its Apple ID) gives its Q-id as a key and its Spotify, Podcast
   Index, Podchaser, Pocket Casts and Castbox pages.

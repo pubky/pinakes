@@ -1,5 +1,5 @@
-//! Podcasts: a show or an episode, by its Apple Podcasts, Podcast Index, Pocket Casts or Castro
-//! link or its feed, and where else it is.
+//! Podcasts: a show or an episode, by its Apple Podcasts, Podcast Index, Pocket Casts, Castro or
+//! Overcast link, a player's episode page that plays a file, or its feed, and where else it is.
 //!
 //! - **Apple Podcasts** (iTunes lookup) confirms an Apple ID is a show, and finds an episode by
 //!   its track ID or by its feed item's GUID (among the latest 200 episodes).
@@ -14,8 +14,15 @@
 //!   Casts and Castbox.
 //!
 //! Keys: `podcast:apple:{id}` and `podcast:guid:{uuid}` for a show; for an episode
-//! `podcast:apple_episode:{id}` and `podcast:item:{show GUID}:{SHA-256 of the item GUID}`, which
-//! every link to the episode shares; and the show's `wikidata:Q…`.
+//! `podcast:apple_episode:{id}`, `podcast:item:{show GUID}:{SHA-256 of the item GUID}`, which
+//! every link to the episode shares, and `podcast:enclosure:{SHA-256 of a file's URL}` for each
+//! file it plays; and the show's `wikidata:Q…`.
+//!
+//! TODO(spotify-episodes): Spotify names no item GUID or file for an episode, so its episode
+//! links join only through derived links today. Once the Spotify source answers (it needs
+//! Premium on the app owner's account, `also_on::spotify`), `episodes/{id}` gives an episode's
+//! show, title and release date: the input of a same-episode `maybe_same` hint (title and date
+//! within one show, never a key), which is not built yet. Never depend on it answering.
 use super::{
     media::{self, digits, guid, property, slug, Deferred, Property},
     Context, Fact, Found, Key, Link, Source, Subject,
