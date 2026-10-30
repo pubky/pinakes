@@ -1176,25 +1176,28 @@ fn merge(dst: &mut serde_json::Value, src: serde_json::Value) {
 /// trailing dot dropped as `Egress::allows_host` drops it): trimmed, lower case and IDNA ASCII
 /// (`faß.de` is `xn--fa-hia.de`), a leading `*.` kept, without trailing dots (`.`, and the
 /// full stops IDNA maps to one: `。`, `．`, `｡`, `%2e`); an IP address in its canonical form
-/// (`[::1]`). `None` for what names no host.
+/// (`[::1]`, and `8.8.8..` is `8.8.0.8`, as a URL reads `8.8.8`). `None` for what names no host.
+/// Idempotent: a canonical rule is its own canonical form.
 fn host_rule(rule: &str) -> Option<String> {
     let rule = rule.trim();
     let (wild, name) = match rule.strip_prefix("*.") {
         Some(name) => (true, name),
         None => (false, rule),
     };
-    match url::Host::parse(name).ok()? {
-        url::Host::Domain(d) => {
-            // Only after the mapping: a full stop is a dot once IDNA has read it.
-            let d = d.trim_end_matches('.');
-            (!d.is_empty() && !d.contains('*') && !d.starts_with('.')).then(|| {
-                if wild {
-                    format!("*.{d}")
-                } else {
-                    d.to_owned()
-                }
-            })
+    // Trailing dots go only after the mapping (a full stop is a dot once IDNA has read it), and
+    // what is left is parsed again, until nothing changes: without its dots, a name may be an
+    // address (`8.8.8..` is `8.8.0.8`).
+    let mut host = url::Host::parse(name).ok()?;
+    while let url::Host::Domain(d) = &host {
+        let trimmed = d.trim_end_matches('.');
+        if trimmed.len() == d.len() {
+            break;
         }
+        host = url::Host::parse(trimmed).ok()?;
+    }
+    match host {
+        url::Host::Domain(d) => (!d.is_empty() && !d.contains('*') && !d.starts_with('.'))
+            .then(|| if wild { format!("*.{d}") } else { d }),
         ip if !wild => Some(ip.to_string()),
         _ => None,
     }
@@ -1677,6 +1680,28 @@ mod tests {
         for allowed in ["https://fass.de/", "https://buecher.de/", "https://de/"] {
             assert!(egress.allows(allowed), "{allowed}");
         }
+        // An address written short, or with trailing dots, is read as a URL reads it.
+        let cfg = rules(&[
+            "8.8.8..",
+            "8.8.8。",
+            "127.1.",
+            "0x7f.0.0.2..",
+            "10.0.0.1%2e%2e",
+        ])
+        .unwrap();
+        assert_eq!(
+            cfg.egress.deny_hosts,
+            ["8.8.0.8", "8.8.0.8", "127.0.0.1", "127.0.0.2", "10.0.0.1"]
+        );
+        let egress = crate::resolver::egress::Egress::new(cfg.egress.clone());
+        for denied in [
+            "https://8.8.8/",
+            "https://8.8.0.8/",
+            "http://127.1/",
+            "http://10.0.0.1./",
+        ] {
+            assert!(!egress.allows(denied), "{denied}");
+        }
         let allow = with(serde_json::json!({"egress": {"allow_hosts": ["*.bücher.de"]}})).unwrap();
         assert_eq!(allow.egress.allow_hosts, ["*.xn--bcher-kva.de"]);
         // A trailing full stop, in any of the forms IDNA maps to a dot, goes like a dot.
@@ -1705,6 +1730,9 @@ mod tests {
             "%2e",
             "*.。",
             "..example",
+            "*.8.8.8..",
+            "*.8.8.8。",
+            "*.[::1]",
         ] {
             let refused = rules(&[bad]).unwrap_err().to_string();
             assert!(
@@ -1712,6 +1740,51 @@ mod tests {
                 "{bad}: {refused}"
             );
         }
+    }
+    /// Every rule `host_rule` accepts is its own canonical form, whatever it was written as: a
+    /// rule loaded twice is the same rule.
+    #[test]
+    fn a_canonical_host_rule_is_a_fixed_point() {
+        let names = [
+            "faß.de",
+            "Bücher.DE",
+            "example.org",
+            "xn--fa-hia.de",
+            "a.b.example",
+            "8.8.8",
+            "8.8.0.8",
+            "10.0.0.1",
+            "127.1",
+            "0x7f.1",
+            "0177.0.0.1",
+            "1.2.3.4.5",
+            "[::1]",
+            "[2001:DB8::1]",
+            "localhost",
+        ];
+        let suffixes = ["", ".", "..", "。", "．", "｡", "%2e", ".。", " ", ". "];
+        let mut accepted = 0;
+        for prefix in ["", "*.", " "] {
+            for name in names {
+                for suffix in suffixes {
+                    let rule = format!("{prefix}{name}{suffix}");
+                    let Some(canonical) = host_rule(&rule) else {
+                        continue;
+                    };
+                    accepted += 1;
+                    assert_eq!(
+                        host_rule(&canonical).as_deref(),
+                        Some(canonical.as_str()),
+                        "{rule:?}"
+                    );
+                    // And it is written as a URL writes the host it names.
+                    let host = canonical.strip_prefix("*.").unwrap_or(&canonical);
+                    let url = url::Url::parse(&format!("https://{host}/")).unwrap();
+                    assert_eq!(url.host_str(), Some(host), "{rule:?}");
+                }
+            }
+        }
+        assert!(accepted > 300, "{accepted}");
     }
     /// The facts cap has a floor: a recording's single-valued facts fit beside its ISRCs.
     #[test]
