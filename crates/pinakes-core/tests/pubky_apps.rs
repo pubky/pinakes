@@ -522,3 +522,190 @@ async fn an_object_that_loses_its_card_keeps_nothing_of_it(pool: PgPool) {
         assert!(!journal.contains(&name_text), "{name}: {journal}");
     }
 }
+
+/// The card an object of `uri` had before Pinakes stopped fetching its path: the general card of
+/// its JSON `object`, typed `type_name` (`None`: as the general card types it).
+fn stored_before(uri: &str, object: Value, type_name: Option<&str>) -> ResourceMeta {
+    let mut doc = ResourceMeta::new(uri, "pubky", 86400);
+    doc.set_type("CreativeWork");
+    pubky_apps::general(uri, &object, &mut doc);
+    if let Some(type_name) = type_name {
+        doc.set_type(type_name);
+    }
+    doc
+}
+/// A tag on `id`, so its card is a search result.
+async fn tagged(pool: &PgPool, id: &str) {
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','place',$3,now())")
+        .bind(id)
+        .bind("a".repeat(52))
+        .bind(format!("/pub/app/tags/{id}"))
+        .execute(pool)
+        .await
+        .unwrap();
+}
+/// The URIs a search lists.
+async fn found(app: &axum::Router, query: &str) -> Vec<String> {
+    get(app, &format!("/v1/search?{query}")).await["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["uri"].as_str().unwrap().to_owned())
+        .collect()
+}
+/// What a resource still keeps of a card: its name, type, description and search text, and the
+/// lines of its history that keep a document.
+async fn kept(
+    pool: &PgPool,
+    id: &str,
+) -> (Option<String>, Option<String>, Option<String>, i32, i64) {
+    sqlx::query_as(
+        "SELECT name,type,doc->>'description',length(search_text),\
+         (SELECT count(*) FROM resource_change c WHERE c.resource_id=r.id AND (c.before IS NOT NULL OR c.after IS NOT NULL)) \
+         FROM resource r WHERE id=$1",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// Objects of the old Mapky and Eventky layouts, and a path a profile leaves out, stored with
+/// their cards before Pinakes stopped fetching them, then refused (`policy`) and dead-lettered
+/// with those cards, as stable held them: the reextract repair leaves each the card it gets now
+/// (a missing `CreativeWork` with nothing of the object) and a history without documents, so none
+/// is found by its text or its old type. One read again after the rule gets the same card from
+/// its save. Another app's object keeps its card. A second repair changes nothing.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn objects_stored_before_their_paths_were_never_fetched_keep_nothing(pool: PgPool) {
+    let owner = "ybndrfg8ejkmcpqxot1uwisza345h769ybndrfg8ejkmcpqxot1uwi";
+    let at = |path: &str| format!("pubky://{owner}/pub/{path}");
+    let legacy = [
+        stored_before(
+            &at("mapky.app/posts/00358SJCCNK1G"),
+            json!({"content": "Excited to check out this place one day!"}),
+            None,
+        ),
+        stored_before(
+            &at("eventky.app/events/0034FED2YCDKG"),
+            json!({"summary": "Lakeside meetup", "description": "Bring a lantern to the pier"}),
+            Some("Event"),
+        ),
+        stored_before(
+            &at("mapky.app/routes/0034FED2YCDKH"),
+            json!({"name": "Old town loop", "description": "Cobbles and fountains"}),
+            Some("Trip"),
+        ),
+        stored_before(
+            &at("mapky.app/collections/0034FED2YCDKJ"),
+            json!({"name": "Quiet cafés"}),
+            None,
+        ),
+        stored_before(
+            &at("loopky/settings.json"),
+            json!({"name": "Night owl settings"}),
+            None,
+        ),
+    ];
+    let read_again = stored_before(
+        &at("mapky.app/reviews/0034FED2YCDKK"),
+        json!({"content": "Lovely terrace, slow service."}),
+        None,
+    );
+    let other = stored_before(
+        &at("chess/games/0034FED2YCDKM"),
+        json!({"content": "A quiet opening, then fireworks."}),
+        None,
+    );
+    let mut ids = vec![];
+    for doc in legacy.iter().chain([&read_again, &other]) {
+        let id = store::ensure_resource(&pool, &doc.url).await.unwrap();
+        store::save_document(&pool, &id, 0, doc).await.unwrap();
+        tagged(&pool, &id).await;
+        ids.push(id);
+    }
+    let other_id = ids.pop().unwrap();
+    let read_again_id = ids.pop().unwrap();
+    sqlx::query(
+        "UPDATE resource SET status='error',last_error='policy',dead_letter=true WHERE id=ANY($1)",
+    )
+    .bind(&ids)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let posting = found(&app, "type=SocialMediaPosting").await;
+    assert!(posting.contains(&legacy[0].url), "{posting:?}");
+    assert_eq!(
+        found(&app, "q=fountains").await,
+        std::slice::from_ref(&legacy[2].url)
+    );
+    for id in &ids {
+        let (name, _, description, _, lines) = kept(&pool, id).await;
+        assert!(name.is_some() || description.is_some(), "{id}");
+        assert_eq!(lines, 1, "{id}");
+    }
+
+    // Read again after the rule: the resolver gives it no card, without a request, and its save
+    // keeps nothing of the card it had.
+    let fetched = pubky_apps::no_card(&read_again.url, 86400);
+    store::save_document(&pool, &read_again_id, 0, &fetched)
+        .await
+        .unwrap();
+    assert_eq!(
+        kept(&pool, &read_again_id).await,
+        (None, Some("CreativeWork".into()), None, 0, 0)
+    );
+
+    assert_eq!(
+        pinakes_core::changes::scrub_never_fetched(&pool)
+            .await
+            .unwrap(),
+        legacy.len() as u64
+    );
+    for (id, doc) in ids.iter().zip(&legacy) {
+        assert_eq!(
+            kept(&pool, id).await,
+            (None, Some("CreativeWork".into()), None, 0, 0),
+            "{}",
+            doc.url
+        );
+        let shown = get(&app, &format!("/v1/resources/{id}")).await;
+        for field in ["name", "description", "image", "point", "facts"] {
+            assert!(shown[field].is_null(), "{field} in {shown}");
+        }
+        let text: String = sqlx::query_scalar(
+            "SELECT r.doc::text||coalesce((SELECT string_agg(c::text,' ') FROM resource_change c WHERE c.resource_id=r.id),'') FROM resource r WHERE id=$1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        for word in [
+            "Excited",
+            "lantern",
+            "Lakeside",
+            "Cobbles",
+            "Quiet",
+            "Night owl",
+        ] {
+            assert!(!text.contains(word), "{word} in {text}");
+        }
+    }
+    assert!(!found(&app, "type=SocialMediaPosting")
+        .await
+        .contains(&legacy[0].url));
+    assert!(found(&app, "q=fountains").await.is_empty());
+    // Another app's object keeps its card and stays a search result.
+    assert_eq!(
+        found(&app, "q=fireworks").await,
+        std::slice::from_ref(&other.url),
+        "{other_id}"
+    );
+    assert_eq!(
+        pinakes_core::changes::scrub_never_fetched(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+}
