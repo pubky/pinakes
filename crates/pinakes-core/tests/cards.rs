@@ -319,42 +319,36 @@ async fn registry_identifiers_negotiation_discovery_and_switches() {
     );
     assert!(cards::doi("doi:10.1/no").is_none());
 }
-/// A feed item's card carries its enclosure as its `stream`: the recorded Darknet Diaries feed's
-/// latest episode, with its `itunes:duration`. The show's card has none.
+/// A feed item's card carries its enclosure as its `stream`, with its `itunes:duration`. The
+/// show's card has none.
 #[test]
 fn a_feed_item_carries_its_enclosure() {
-    use std::io::Read;
-    let mut body = Vec::new();
-    flate2::read::GzDecoder::new(
-        include_bytes!("fixtures/media/podcasts/feed-darknetdiaries.xml.gz").as_slice(),
-    )
-    .read_to_end(&mut body)
-    .unwrap();
+    let body = r#"<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel><title>Show</title><itunes:author>Host</itunes:author><item><title>Latest</title><guid isPermaLink="false">ep-2</guid><enclosure url="https://cdn.example/pts/redirect.mp3/media.example/ep-2.mp3" length="57000000" type="audio/mpeg"/><itunes:duration>59:17</itunes:duration></item><item><title>First</title><guid isPermaLink="false">ep-1</guid><enclosure url="https://cdn.example/ep-1.mp3" length="1000" type="audio/mpeg"/><itunes:duration>61</itunes:duration></item></channel></rss>"#;
     let f = Fetched {
         permanent_redirect: false,
         truncated: false,
-        url: "https://podcast.darknetdiaries.com/".parse().unwrap(),
-        body,
+        url: "https://show.example/".parse().unwrap(),
+        body: body.as_bytes().to_vec(),
         content_type: "application/rss+xml".into(),
         status: 200,
         location: None,
         retry_after_secs: 60,
         validators: Default::default(),
     };
-    let item =
-        "https://podcast.darknetdiaries.com/?guid=prx_7057_141e0c43-f935-41de-be94-708448052c4d";
-    let d = cards::podcast(item, &f, 3600, 1000).unwrap().unwrap();
+    let d = cards::podcast("https://show.example/?guid=ep-2", &f, 3600, 1000)
+        .unwrap()
+        .unwrap();
     assert_eq!(d.type_name, "PodcastEpisode");
     assert_eq!(
         d.stream,
         Some(pinakes_core::model::Stream {
-            url: "https://www.podtrac.com/pts/redirect.mp3/dovetail.prxu.org/7057/141e0c43-f935-41de-be94-708448052c4d/darknet-diaries-ep180-conti.mp3".into(),
+            url: "https://cdn.example/pts/redirect.mp3/media.example/ep-2.mp3".into(),
             media_type: "audio/mpeg".into(),
             duration_s: Some(59 * 60 + 17),
             preview: false,
         })
     );
-    let show = cards::podcast("https://podcast.darknetdiaries.com/", &f, 3600, 1000)
+    let show = cards::podcast("https://show.example/", &f, 3600, 1000)
         .unwrap()
         .unwrap();
     assert_eq!(show.type_name, "PodcastSeries");
