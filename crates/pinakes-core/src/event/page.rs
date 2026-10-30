@@ -120,12 +120,16 @@ type Listed<'a> = (
     Vec<String>,
     std::collections::BTreeSet<&'static str>,
 );
-fn events_listed<'a>(values: &[&'a Value], base: &Url) -> Listed<'a> {
+fn events_listed<'a>(values: &[&'a Value], base: &Url, pages: &[String]) -> Listed<'a> {
     let mut nodes = vec![];
     for v in values {
         event_nodes(v, &mut nodes, false);
     }
-    let pages: Vec<String> = page_identity(base.as_str()).into_iter().collect();
+    let pages: Vec<String> = if pages.is_empty() {
+        page_identity(base.as_str()).into_iter().collect()
+    } else {
+        pages.to_vec()
+    };
     let entries: Vec<&Value> = nodes
         .iter()
         .filter(|(n, in_list)| entry(n, base, &pages, *in_list))
@@ -136,22 +140,42 @@ fn events_listed<'a>(values: &[&'a Value], base: &Url) -> Listed<'a> {
 }
 /// Whether a page's structured data lists several events (an artist's or a venue's concerts,
 /// each naming its own page): such a page is a list, and no reading of it (its JSON-LD, a
-/// platform's embedded state) yields an event.
-pub fn lists_events(values: &[&Value], base: &Url) -> bool {
-    events_listed(values, base).2.contains("Event")
+/// platform's embedded state) yields an event. `pages`: the page's addresses
+/// (`page_addresses`; empty, the base alone).
+pub fn lists_events(values: &[&Value], base: &Url, pages: &[String]) -> bool {
+    events_listed(values, base, pages).2.contains("Event")
+}
+/// The page's addresses, as what names the page is judged by (`page_identity`): the one asked
+/// for, the one fetched, its head canonical links and its `og:url` (an AMP page's event names
+/// the canonical).
+pub fn page_addresses(uri: &str, fetched: &Url, html: &Html) -> Vec<String> {
+    let select = |s: &str| Selector::parse(s).unwrap();
+    [uri.to_owned(), fetched.to_string()]
+        .into_iter()
+        .chain(
+            html.select(&select("head link[rel~=canonical][href]"))
+                .filter_map(|l| origin_url(fetched, l.value().attr("href")?)),
+        )
+        .chain(
+            html.select(&select("head meta[property='og:url'][content]"))
+                .filter_map(|m| origin_url(fetched, m.value().attr("content")?)),
+        )
+        .filter_map(|u| page_identity(&u))
+        .collect()
 }
 pub fn jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url) {
-    jsonld_all(doc, &[v], base);
+    jsonld_all(doc, &[v], base, &[]);
 }
 /// The event of a page's structured data (`values`: its scripts, read together): the page's own
-/// event (its url is the page) over another the page lists, else its one event; a page listing
-/// several events and none its own (an artist's or a venue's concerts: `listed_kinds`) is a
-/// list, not its first entry, and yields no event.
-pub fn jsonld_all(doc: &mut ResourceMeta, values: &[&Value], base: &Url) {
-    let (nodes, pages, kinds) = events_listed(values, base);
+/// event (its url is one of the page's addresses, `pages`: `page_addresses`, or the base alone
+/// when empty) over another the page lists, else its one event; a page listing several events
+/// and none its own (an artist's or a venue's concerts: `listed_kinds`) is a list, not its first
+/// entry, and yields no event.
+pub fn jsonld_all(doc: &mut ResourceMeta, values: &[&Value], base: &Url, pages: &[String]) {
+    let (nodes, pages, kinds) = events_listed(values, base, pages);
     let Some(v) = nodes
         .iter()
-        .find(|(n, _)| owns_page(n, base))
+        .find(|(n, _)| names_page_in(n, base, &pages) == Some(true))
         .or_else(|| {
             nodes.iter().find(|(n, in_list)| {
                 !(entry(n, base, &pages, *in_list) && listed(n, base, &pages, &kinds))
@@ -177,11 +201,11 @@ pub fn jsonld_all(doc: &mut ResourceMeta, values: &[&Value], base: &Url) {
     }
     fields(doc, v, base, false);
     // The same event in other scripts (a theme's and a plugin's node, one naming it, one dating
-    // it): what the chosen node lacks comes from them, in order, as reading each script in turn
-    // once did.
-    let key = entry_key(v);
+    // it, whatever `@id` each gives it): what the chosen node lacks comes from them, in order,
+    // as reading each script in turn once did.
+    let key = entry_key(v, base);
     for (other, _) in nodes.iter().filter(|(n, _)| !std::ptr::eq(*n, v)) {
-        if key.is_some() && entry_key(other) == key {
+        if key.is_some() && entry_key(other, base) == key {
             fields(doc, other, base, false);
         }
     }
@@ -437,15 +461,24 @@ pub fn kind_of(v: &Value) -> Option<&'static str> {
             .any(|n| crate::model::type_path(n).iter().any(|t| t == k))
     })
 }
-/// What tells one entry from another of its kind: its `@id`, else its `url`, else its name,
-/// lowercased. Two nodes with the same (a theme's and a plugin's node for one event) are one
-/// entry; a node with none is its own.
-fn entry_key(v: &Value) -> Option<String> {
-    ["@id", "url", "name"]
-        .into_iter()
-        .find_map(|f| v.get(f).and_then(Value::as_str))
-        .map(|s| s.trim().to_lowercase())
-        .filter(|s| !s.is_empty())
+/// What tells one entry from another of its kind, and makes two nodes one entity: the identity
+/// of its `url` (`page_identity`, as the web route identifies a node), else its `@id` (a
+/// fragment such as `#event` or `#pen`, kept), else its name, lowercased. Two nodes with the
+/// same (a theme's and a plugin's node for one event, one with an `@id` and one without) are
+/// one entry; a node with none is its own.
+fn entry_key(v: &Value, base: &Url) -> Option<String> {
+    v.get("url")
+        .and_then(Value::as_str)
+        .and_then(|u| origin_url(base, u))
+        .and_then(|u| page_identity(&u))
+        .map(|id| format!("url:{id}"))
+        .or_else(|| {
+            ["@id", "name"]
+                .into_iter()
+                .find_map(|f| v.get(f).and_then(Value::as_str))
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty())
+        })
 }
 /// Whether a node may be an entry of a list the page holds (`LISTED`): it names another page
 /// (none of the page's addresses, `pages`), or sits in a list of several main entities
@@ -466,7 +499,7 @@ pub fn listed_kinds(
             by_kind
                 .entry(kind)
                 .or_default()
-                .insert(entry_key(v).unwrap_or_else(|| format!("#{i}")));
+                .insert(entry_key(v, base).unwrap_or_else(|| format!("#{i}")));
         }
     }
     by_kind
@@ -970,7 +1003,7 @@ mod performer_tests {
         let listed = |n: u32| concert(n, &format!("https://gigs.example/concerts/{n}"));
         let read = |values: &[&Value]| {
             let mut doc = ResourceMeta::new(base.as_str(), "web", 100);
-            jsonld_all(&mut doc, values, &base);
+            jsonld_all(&mut doc, values, &base, &[]);
             doc
         };
         // An artist's concerts, none the page: a list, no event.
@@ -995,6 +1028,28 @@ mod performer_tests {
         assert_eq!(doc.name.as_deref(), Some("Radiohead @ Arena 1"));
         assert!(doc.start.is_some(), "{doc:?}");
         assert_eq!(doc.description.as_deref(), Some("Doors at seven."));
+        // The same with an `@id` on one of them (`#event`) and none on the other, and the url
+        // spelt with a tracking parameter on one: one event still.
+        let with_id = serde_json::json!({"@type":"MusicEvent","@id":"#event","name":"Radiohead @ Arena 1","url":"https://gigs.example/concerts/1?utm_source=share"});
+        let doc = read(&[&with_id, &dated]);
+        assert_eq!(doc.name.as_deref(), Some("Radiohead @ Arena 1"));
+        assert!(doc.start.is_some(), "{doc:?}");
+        assert_eq!(doc.description.as_deref(), Some("Doors at seven."));
+        let doc = read(&[&dated, &with_id]);
+        assert_eq!(doc.name.as_deref(), Some("Radiohead @ Arena 1"));
+        assert!(doc.start.is_some());
+        // The event under the page's canonical address: its own, not a listing, with another
+        // event beside it.
+        let amp = Url::parse("https://gigs.example/concerts/1/amp").unwrap();
+        let other = serde_json::json!({"@type":"MusicEvent","name":"Other night","url":"https://gigs.example/concerts/2","startDate":"2027-05-02T19:30:00"});
+        let mut doc = ResourceMeta::new(amp.as_str(), "web", 100);
+        let pages = vec![
+            page_identity(amp.as_str()).unwrap(),
+            page_identity("https://gigs.example/concerts/1").unwrap(),
+        ];
+        jsonld_all(&mut doc, &[&named, &other], &amp, &pages);
+        assert_eq!(doc.name.as_deref(), Some("Radiohead @ Arena 1"));
+        assert!(doc.type_path.contains(&"Event".into()));
         // Events naming no page are the page's own (a theme's and a plugin's, or two
         // listings of one night): the first, as before; several as a page's main entity list
         // are a list.

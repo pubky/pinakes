@@ -55,6 +55,13 @@ pub struct EventFields {
     pub categories: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub join_mode: Option<String>,
+    /// The extractor's decision that the page is no event, recorded with its reason: it lists
+    /// several events (`lists_events`: an artist's or a venue's concerts) or is a creative work
+    /// (`creative_work`: a Wikidata series with run dates). A refresh that re-reads a stored
+    /// event as no event is accepted on this decision; without it, a stored event that lost
+    /// its start keeps its card (`changes::save`'s drift guard).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_event: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

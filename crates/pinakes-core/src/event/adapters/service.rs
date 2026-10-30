@@ -944,6 +944,7 @@ pub fn wiki_value(uri: &str, v: &Value) -> Result<ResourceMeta> {
     });
     if let Some(kind) = work {
         doc.set_type(kind);
+        doc.event.not_event = Some("creative_work".into());
     }
     for (p, end) in [("P580", false), ("P585", false), ("P582", true)] {
         if work.is_some() || (!end && doc.start.is_some()) {

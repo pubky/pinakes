@@ -340,14 +340,20 @@ pub async fn save(
     // A never-observed object can be missing without having been created or cancelled.
     let before = accepted.filter(|v| v.get("type").is_some() && row.get::<bool, _>("ever_existed"));
     // Both drift guards read the stored row's type path, so a page cannot shed `Event` in the
-    // same refresh to slip past either one.
+    // same refresh to slip past either one: a page that lost its start for a fetch (a consent
+    // wall, a date that failed to parse) keeps its card. A reading that decided the page is no
+    // event, and says why (`not_event`: it lists several events, it is a creative work), is a
+    // re-interpretation, not a loss: it replaces the card, type and all.
     let stored_event = row
         .try_get::<Option<Vec<String>>, _>("type_path")?
         .is_some_and(|path| path.iter().any(|t| t == "Event"));
+    let decided_no_event =
+        doc.event.not_event.is_some() && !doc.type_path.iter().any(|t| t == "Event");
     if doc.status == Status::Ok
         && doc.start.is_none()
         && before.as_ref().is_some_and(|old| old["start"].is_string())
         && stored_event
+        && !decided_no_event
     {
         crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "drift");
         return Err(crate::resolver::RetryLater {
@@ -491,6 +497,7 @@ pub async fn save(
             && doc.start.is_none()
             && old.start.and_then(crate::event::time::bounded).is_some()
             && stored_event
+            && !decided_no_event
         {
             crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "drift");
             return Err(crate::resolver::RetryLater {
