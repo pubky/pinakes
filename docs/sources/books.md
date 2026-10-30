@@ -24,7 +24,9 @@ exactly, never by title:
 - A book's page on another service is a starting point too: a Goodreads book
   (`goodreads.com/book/show/{id}`, an edition, Wikidata's P2969) and any page the work's item
   lists (Goodreads' `work/editions/{id}`, LibraryThing, Google Books, Project Gutenberg,
-  BookBrainz). Each finds the one Wikidata item carrying its value (read back and compared
+  BookBrainz). Such a page is on its service: its card is named after it (`site`: `Goodreads`
+  for a book and for a work's editions alike), as its links are, whatever the page calls
+  itself. Each finds the one Wikidata item carrying its value (read back and compared
   exactly; an ID two items carry is ambiguous and gives nothing). The item's Open Library work or
   edition ID (P648) is then looked up as above, or, for an edition's item without one, the ID of
   the work it is an edition of (P629). The Open Library page is a link, and its key joins the

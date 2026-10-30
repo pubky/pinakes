@@ -90,27 +90,74 @@ pub fn lenient_json(text: &str) -> Option<Value> {
     serde_json::from_str(&out).ok()
 }
 /// Every event node in `v`, in document order (an event's own nested entities aside).
-fn event_nodes<'a>(v: &'a Value, out: &mut Vec<&'a Value>) {
+/// The event nodes of a value, each with whether it sits in a list of several main entities.
+fn event_nodes<'a>(v: &'a Value, out: &mut Vec<(&'a Value, bool)>, in_list: bool) {
     if let Some(values) = v.as_array() {
-        values.iter().for_each(|v| event_nodes(v, out));
+        values.iter().for_each(|v| event_nodes(v, out, in_list));
     } else if is_event(v) {
-        out.push(v);
+        out.push((v, in_list));
     } else {
-        ["@graph", "mainEntity"]
-            .iter()
-            .filter_map(|k| v.get(k))
-            .for_each(|v| event_nodes(v, out));
+        for key in ["@graph", "mainEntity"] {
+            if let Some(nested) = v.get(key) {
+                event_nodes(
+                    nested,
+                    out,
+                    in_list || (key == "mainEntity" && main_list(nested)),
+                );
+            }
+        }
     }
 }
-pub fn jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url) {
-    // The page's own event (its url is the page) over another the page lists, else the first.
+/// Whether a `mainEntity` value lists several entities.
+pub fn main_list(main: &Value) -> bool {
+    main.as_array().is_some_and(|a| a.len() > 1)
+}
+/// The event nodes of a page's structured data (`values`), each with whether it sits in a list
+/// of several main entities; the page's addresses; and the kinds the page lists among them
+/// (`listed_kinds`: "Event" when it lists several events, an artist's concerts).
+type Listed<'a> = (
+    Vec<(&'a Value, bool)>,
+    Vec<String>,
+    std::collections::BTreeSet<&'static str>,
+);
+fn events_listed<'a>(values: &[&'a Value], base: &Url) -> Listed<'a> {
     let mut nodes = vec![];
-    event_nodes(v, &mut nodes);
+    for v in values {
+        event_nodes(v, &mut nodes, false);
+    }
+    let pages: Vec<String> = page_identity(base.as_str()).into_iter().collect();
+    let entries: Vec<&Value> = nodes
+        .iter()
+        .filter(|(n, in_list)| entry(n, base, &pages, *in_list))
+        .map(|(n, _)| *n)
+        .collect();
+    let kinds = listed_kinds(&entries, base, &pages);
+    (nodes, pages, kinds)
+}
+/// Whether a page's structured data lists several events (an artist's or a venue's concerts,
+/// each naming its own page): such a page is a list, and no reading of it (its JSON-LD, a
+/// platform's embedded state) yields an event.
+pub fn lists_events(values: &[&Value], base: &Url) -> bool {
+    events_listed(values, base).2.contains("Event")
+}
+pub fn jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url) {
+    jsonld_all(doc, &[v], base);
+}
+/// The event of a page's structured data (`values`: its scripts, read together): the page's own
+/// event (its url is the page) over another the page lists, else its one event; a page listing
+/// several events and none its own (an artist's or a venue's concerts: `listed_kinds`) is a
+/// list, not its first entry, and yields no event.
+pub fn jsonld_all(doc: &mut ResourceMeta, values: &[&Value], base: &Url) {
+    let (nodes, pages, kinds) = events_listed(values, base);
     let Some(v) = nodes
         .iter()
-        .find(|n| owns_page(n, base))
-        .or(nodes.first())
-        .copied()
+        .find(|(n, _)| owns_page(n, base))
+        .or_else(|| {
+            nodes.iter().find(|(n, in_list)| {
+                !(entry(n, base, &pages, *in_list) && listed(n, base, &pages, &kinds))
+            })
+        })
+        .map(|(n, _)| *n)
     else {
         return;
     };
@@ -129,6 +176,15 @@ pub fn jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url) {
         doc.source = "jsonld".into();
     }
     fields(doc, v, base, false);
+    // The same event in other scripts (a theme's and a plugin's node, one naming it, one dating
+    // it): what the chosen node lacks comes from them, in order, as reading each script in turn
+    // once did.
+    let key = entry_key(v);
+    for (other, _) in nodes.iter().filter(|(n, _)| !std::ptr::eq(*n, v)) {
+        if key.is_some() && entry_key(other) == key {
+            fields(doc, other, base, false);
+        }
+    }
 }
 pub fn activity(doc: &mut ResourceMeta, v: &Value, base: &Url) -> bool {
     if v["type"] != "Event" {
@@ -345,23 +401,131 @@ fn fields(doc: &mut ResourceMeta, v: &Value, base: &Url, ap: bool) {
 pub fn owns_page(v: &Value, base: &Url) -> bool {
     names_page(v, base) == Some(true)
 }
+/// The kinds of content a page may list several of: a page whose structured data holds more
+/// than one entry of one of these lists them (an artist's concerts, a FAQ's questions, a
+/// category's products, a blog's posts). An entry (`entry`) is an entity naming another page
+/// (its `url`, else `@id`, is another address), or one among several listed as a page's main
+/// entity; an entity naming no page is the page's own, as a product page's variants or a
+/// theme's and a plugin's node for one event are. The entries are parts of the page, never its
+/// subject: the card is the page's own entity, else the page.
+pub const LISTED: [&str; 8] = [
+    "Event",
+    "Question",
+    "Product",
+    "Article",
+    "Place",
+    "MediaObject",
+    "JobPosting",
+    "Recipe",
+];
+/// The kind (`LISTED`) a node is of, by its type's path.
+pub fn kind_of(v: &Value) -> Option<&'static str> {
+    let kind = v.get("@type")?;
+    let names: Vec<&str> = kind
+        .as_str()
+        .into_iter()
+        .chain(
+            kind.as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str),
+        )
+        .collect();
+    LISTED.iter().copied().find(|k| {
+        names
+            .iter()
+            .any(|n| crate::model::type_path(n).iter().any(|t| t == k))
+    })
+}
+/// What tells one entry from another of its kind: its `@id`, else its `url`, else its name,
+/// lowercased. Two nodes with the same (a theme's and a plugin's node for one event) are one
+/// entry; a node with none is its own.
+fn entry_key(v: &Value) -> Option<String> {
+    ["@id", "url", "name"]
+        .into_iter()
+        .find_map(|f| v.get(f).and_then(Value::as_str))
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+}
+/// Whether a node may be an entry of a list the page holds (`LISTED`): it names another page
+/// (none of the page's addresses, `pages`), or sits in a list of several main entities
+/// (`in_list`), and is not the page's own.
+pub fn entry(v: &Value, base: &Url, pages: &[String], in_list: bool) -> bool {
+    (in_list || names_page_in(v, base, pages) == Some(false)) && !names_this_page(v, base, pages)
+}
+/// The kinds `entries` (nodes `entry` admits) list: those with more than one distinct entry.
+pub fn listed_kinds(
+    entries: &[&Value],
+    base: &Url,
+    pages: &[String],
+) -> std::collections::BTreeSet<&'static str> {
+    let mut by_kind: std::collections::BTreeMap<&str, std::collections::BTreeSet<String>> =
+        Default::default();
+    for (i, v) in entries.iter().enumerate() {
+        if let Some(kind) = kind_of(v).filter(|_| !names_this_page(v, base, pages)) {
+            by_kind
+                .entry(kind)
+                .or_default()
+                .insert(entry_key(v).unwrap_or_else(|| format!("#{i}")));
+        }
+    }
+    by_kind
+        .into_iter()
+        .filter(|(_, e)| e.len() > 1)
+        .map(|(k, _)| k)
+        .collect()
+}
+/// Whether an entry (`entry`) is of a kind the page lists (`listed_kinds`).
+pub fn listed(
+    v: &Value,
+    base: &Url,
+    pages: &[String],
+    kinds: &std::collections::BTreeSet<&'static str>,
+) -> bool {
+    kind_of(v).is_some_and(|k| kinds.contains(k)) && !names_this_page(v, base, pages)
+}
+/// Whether a node is the page's own for a list: its url (else @id) is one of the page's
+/// addresses (`pages`), or its `mainEntityOfPage` (a URL, a page node, or an array of either) is.
+fn names_this_page(v: &Value, base: &Url, pages: &[String]) -> bool {
+    if names_page_in(v, base, pages) == Some(true) {
+        return true;
+    }
+    let Some(main) = v.get("mainEntityOfPage") else {
+        return false;
+    };
+    main.as_array()
+        .map_or_else(|| vec![main], |a| a.iter().take(16).collect())
+        .into_iter()
+        .any(|p| match p {
+            Value::String(u) => names_page_in(&serde_json::json!({ "url": u }), base, pages),
+            Value::Object(_) => names_page_in(p, base, pages),
+            _ => None,
+        } == Some(true))
+}
 /// Whether the page an event node names (its `url`, else its `@id`) is this page; `None` when
 /// it names none. An explicit `url` decides: a local `@id` such as `#next-week` resolves to
 /// this page whatever event it is, so it never outweighs a `url` naming another.
 pub fn names_page(v: &Value, base: &Url) -> Option<bool> {
-    fn identity(u: &str) -> Option<String> {
-        let mut u = Url::parse(u).ok()?;
-        u.set_fragment(None);
-        let u = crate::alias::root(u.as_str()).map_or_else(|| u.to_string(), |a| a.root);
-        crate::model::identity(&u).ok().map(|v| v.0)
-    }
-    let page = identity(base.as_str())?;
+    let page = page_identity(base.as_str())?;
+    names_page_in(v, base, std::slice::from_ref(&page))
+}
+/// The identity of a page's address (its alias root, without a fragment), as `names_page`
+/// compares addresses.
+pub fn page_identity(u: &str) -> Option<String> {
+    let mut u = Url::parse(u).ok()?;
+    u.set_fragment(None);
+    let u = crate::alias::root(u.as_str()).map_or_else(|| u.to_string(), |a| a.root);
+    crate::model::identity(&u).ok().map(|v| v.0)
+}
+/// `names_page` over a page's several addresses (`pages`: identities, `page_identity`, of the
+/// address asked for, the one fetched and its head canonical).
+pub fn names_page_in(v: &Value, base: &Url, pages: &[String]) -> Option<bool> {
     ["url", "@id"]
         .into_iter()
         .filter_map(|f| v.get(f).and_then(Value::as_str))
         .filter_map(|u| origin_url(base, u))
-        .find_map(|u| identity(&u))
-        .map(|id| id == page)
+        .find_map(|u| page_identity(&u))
+        .map(|id| pages.contains(&id))
 }
 /// How much of a line-up a page's parse looks at, so a hostile one costs little: the first 64
 /// entries, of which 17 performers with a name, and of each the first 256 link values, of which
@@ -797,5 +961,48 @@ mod performer_tests {
             back.event.performers_from(),
             Some("https://www.songkick.com/concerts/11-stored")
         );
+    }
+
+    #[test]
+    fn a_page_listing_several_events_yields_none_but_its_own() {
+        let base = Url::parse("https://gigs.example/artists/radiohead").unwrap();
+        let concert = |n: u32, url: &str| serde_json::json!({"@type":"MusicEvent","name":format!("Radiohead @ Arena {n}"),"url":url,"startDate":"2027-05-01T19:30:00"});
+        let listed = |n: u32| concert(n, &format!("https://gigs.example/concerts/{n}"));
+        let read = |values: &[&Value]| {
+            let mut doc = ResourceMeta::new(base.as_str(), "web", 100);
+            jsonld_all(&mut doc, values, &base);
+            doc
+        };
+        // An artist's concerts, none the page: a list, no event.
+        let doc = read(&[&listed(1), &listed(2)]);
+        assert!(!doc.type_path.contains(&"Event".into()), "{doc:?}");
+        assert!(doc.start.is_none());
+        // One event in two scripts (a theme's and a plugin's): the event.
+        let doc = read(&[&listed(1), &listed(1)]);
+        assert_eq!(doc.name.as_deref(), Some("Radiohead @ Arena 1"));
+        assert!(doc.type_path.contains(&"Event".into()));
+        // The page's own among those it lists: its own.
+        let doc = read(&[&listed(1), &concert(9, base.as_str()), &listed(2)]);
+        assert_eq!(doc.name.as_deref(), Some("Radiohead @ Arena 9"));
+        // One listed event naming another page, as before: the event.
+        let doc = read(&[&listed(1)]);
+        assert_eq!(doc.name.as_deref(), Some("Radiohead @ Arena 1"));
+        // Two scripts describing one event (its url), the first naming it, the second dating
+        // and describing it: the event has all three, as reading each in turn once gave.
+        let named = serde_json::json!({"@type":"MusicEvent","name":"Radiohead @ Arena 1","url":"https://gigs.example/concerts/1"});
+        let dated = serde_json::json!({"@type":"MusicEvent","url":"https://gigs.example/concerts/1","startDate":"2027-05-01T19:30:00","description":"Doors at seven."});
+        let doc = read(&[&named, &dated]);
+        assert_eq!(doc.name.as_deref(), Some("Radiohead @ Arena 1"));
+        assert!(doc.start.is_some(), "{doc:?}");
+        assert_eq!(doc.description.as_deref(), Some("Doors at seven."));
+        // Events naming no page are the page's own (a theme's and a plugin's, or two
+        // listings of one night): the first, as before; several as a page's main entity list
+        // are a list.
+        let unnamed = |n: u32| serde_json::json!({"@type":"MusicEvent","name":format!("Night {n}"),"startDate":"2027-05-01T19:30:00"});
+        let doc = read(&[&unnamed(1), &unnamed(2)]);
+        assert_eq!(doc.name.as_deref(), Some("Night 1"));
+        let page = serde_json::json!({"@type":"WebPage","mainEntity":[unnamed(1), unnamed(2)]});
+        let doc = read(&[&page]);
+        assert!(!doc.type_path.contains(&"Event".into()), "{doc:?}");
     }
 }

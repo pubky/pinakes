@@ -521,6 +521,17 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
             })
         })
         .collect();
+    // The page's addresses, for what names it: the one asked for, the one fetched, its head
+    // canonical (an AMP page's article names the canonical).
+    let pages: Vec<String> = [uri.to_owned(), fetched.url.to_string()]
+        .into_iter()
+        .chain(
+            html.select(&selector("head link[rel~=canonical][href]"))
+                .filter_map(|l| origin_url(&fetched.url, l.value().attr("href")?)),
+        )
+        .filter_map(|u| crate::event::page::page_identity(&u))
+        .collect();
+    let scripts = without_parts(scripts, &fetched.url, &pages);
     let page: Vec<String> = [uri.to_owned(), fetched.url.to_string()]
         .into_iter()
         .chain(
@@ -1035,8 +1046,7 @@ fn entity_priority(v: &Value, base: &Url) -> u8 {
             .max()
             .unwrap_or(0);
     }
-    let nested = v
-        .get("mainEntity")
+    let nested = main_entity(v)
         .or_else(|| v.get("@graph"))
         .map(|v| entity_priority(v, base))
         .unwrap_or(0);
@@ -1168,6 +1178,107 @@ fn site_script(v: &Value, base: &Url) -> bool {
         None => site_node(v, base),
     }
 }
+/// Whether a node is of a schema.org type, or a subtype of it.
+fn typed(v: &Value, kind: &str) -> bool {
+    schema_type(v).is_some_and(|k| crate::model::type_path(k).iter().any(|t| t == kind))
+}
+/// The node's main entity, where it is the page's subject: a `FAQPage`'s (its questions, one
+/// or many) are parts of the page, never the page itself; a question is the page's subject as
+/// another page's single main entity (a `QAPage`'s, as Stack Exchange's).
+fn main_entity(v: &Value) -> Option<&Value> {
+    let main = v.get("mainEntity")?;
+    (!typed(v, "FAQPage")).then_some(main)
+}
+/// Every object node of a script's value, through its arrays, `@graph` and `mainEntity`, each
+/// with whether it sits in a list of several main entities.
+fn all_nodes<'a>(v: &'a Value, out: &mut Vec<(&'a Value, bool)>, depth: usize, in_list: bool) {
+    if depth > 6 {
+        return;
+    }
+    match v {
+        Value::Array(a) => a
+            .iter()
+            .take(256)
+            .for_each(|v| all_nodes(v, out, depth + 1, in_list)),
+        Value::Object(_) => {
+            out.push((v, in_list));
+            for key in ["@graph", "mainEntity"] {
+                if let Some(nested) = v.get(key) {
+                    let list =
+                        in_list || (key == "mainEntity" && crate::event::page::main_list(nested));
+                    all_nodes(nested, out, depth + 1, list);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+/// The page's scripts without the parts of the page: the entries of a list it holds (several
+/// entries of one kind naming other pages, or listed as a page's main entity: an artist's
+/// concerts, a FAQ's questions, a category's products, `event::page::listed_kinds`, read
+/// across every script), and on a music object's page (a track, an album, an artist:
+/// `music::parse`) its video. Left out before any script is ranked or read, so the card is the
+/// page's own entity (the artist, the page) and never its first entry; a script with nothing
+/// else goes. `pages`: the page's addresses (`page_identity`), which an entity naming one of
+/// them is the page's own by. Pruned in place: nothing is copied.
+fn without_parts(
+    mut scripts: Vec<(Value, bool)>,
+    base: &Url,
+    pages: &[String],
+) -> Vec<(Value, bool)> {
+    let listed = {
+        let mut nodes = vec![];
+        for (v, _) in &scripts {
+            all_nodes(v, &mut nodes, 0, false);
+        }
+        let entries: Vec<&Value> = nodes
+            .iter()
+            .filter(|(v, in_list)| crate::event::page::entry(v, base, pages, *in_list))
+            .map(|(v, _)| *v)
+            .collect();
+        crate::event::page::listed_kinds(&entries, base, pages)
+    };
+    let music = crate::music::parse(base.as_str())
+        .is_some_and(|link| link.level != crate::music::Level::Video);
+    if listed.is_empty() && !music {
+        return scripts;
+    }
+    let part = |v: &Value, in_list: bool| {
+        (crate::event::page::entry(v, base, pages, in_list)
+            && crate::event::page::listed(v, base, pages, &listed))
+            || (music && typed(v, "VideoObject"))
+    };
+    scripts.retain_mut(|(v, _)| without(v, &part, false));
+    scripts
+}
+/// Removes the nodes `part` names from `v`, at any depth and in place (`in_list`: within a list
+/// of several main entities); false when nothing is left of `v`.
+fn without(v: &mut Value, part: &dyn Fn(&Value, bool) -> bool, in_list: bool) -> bool {
+    match v {
+        Value::Array(a) => {
+            a.retain_mut(|v| without(v, part, in_list));
+            !a.is_empty()
+        }
+        Value::Object(_) => {
+            if part(v, in_list) {
+                return false;
+            }
+            let Value::Object(o) = v else { unreachable!() };
+            for key in ["@graph", "mainEntity"] {
+                let list = in_list
+                    || (key == "mainEntity"
+                        && o.get(key).is_some_and(crate::event::page::main_list));
+                if let Some(nested) = o.get_mut(key) {
+                    if !without(nested, part, list) {
+                        o.remove(key);
+                    }
+                }
+            }
+            true
+        }
+        _ => true,
+    }
+}
 /// A node's `@graph`: an array of nodes, or one node object, which JSON-LD allows in its place.
 fn graph_nodes(v: &Value) -> Option<&[Value]> {
     match v.get("@graph")? {
@@ -1185,7 +1296,7 @@ fn entity_urls(v: &Value) -> impl Iterator<Item = &str> {
         .flat_map(|v| {
             let graph = graph_nodes(v);
             std::iter::once(v)
-                .chain(v.get("mainEntity").filter(|m| m.is_object()))
+                .chain(main_entity(v).filter(|m| m.is_object()))
                 .chain(graph.into_iter().flatten().take(16))
         })
         .flat_map(|n| {
@@ -1227,8 +1338,8 @@ fn jsonld_claims(doc: &mut ResourceMeta, v: &Value, base: &Url) -> bool {
         });
         return best.is_some_and(|b| jsonld_claims(doc, b, base));
     }
-    for nested in ["mainEntity", "@graph"] {
-        if v.get(nested).is_some_and(|n| jsonld_claims(doc, n, base)) {
+    for nested in [main_entity(v), v.get("@graph")].into_iter().flatten() {
+        if jsonld_claims(doc, nested, base) {
             return true;
         }
     }
@@ -1280,7 +1391,7 @@ fn own_products(
             None => out.push((key, fragment)),
         }
     }
-    if let Some(m) = v.get("mainEntity") {
+    if let Some(m) = main_entity(v) {
         own_products(m, base, claims, own, out);
     }
     if let Some(g) = v.get("@graph") {
@@ -1349,7 +1460,7 @@ fn selected<'a>(v: &'a Value, base: &Url, vouched: bool) -> Option<(&'a Value, b
         return selected(best_node(values, base, vouched)?, base, vouched);
     }
     let own = crate::event::page::names_page(v, base).unwrap_or(vouched);
-    v.get("mainEntity")
+    main_entity(v)
         .and_then(|m| selected(m, base, own))
         .or_else(|| v.get("@graph").and_then(|g| selected(g, base, vouched)))
         .or_else(|| (schema_type(v).is_some() && !site_node(v, base)).then_some((v, own)))
@@ -1395,8 +1506,7 @@ fn declared_main(scripts: &[(Value, bool)], base: &Url) -> Option<Vec<String>> {
         {
             return;
         }
-        let main: Vec<String> = v
-            .get("mainEntity")
+        let main: Vec<String> = main_entity(v)
             .map_or_else(Vec::new, |m| {
                 m.as_array()
                     .map_or_else(|| vec![m], |a| a.iter().take(16).collect())
@@ -1425,9 +1535,9 @@ fn has_own_node(v: &Value, base: &Url) -> bool {
         return values.iter().take(16).any(|v| has_own_node(v, base));
     }
     crate::event::page::owns_page(v, base)
-        || ["mainEntity", "@graph"]
+        || [main_entity(v), v.get("@graph")]
             .into_iter()
-            .filter_map(|k| v.get(k))
+            .flatten()
             .any(|v| has_own_node(v, base))
 }
 /// `claims` gates identity-bearing fields (aliases from url/@id/sameAs, typed identifiers):
@@ -1447,7 +1557,7 @@ fn apply_jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url, claims: bool, vou
         Some(own) => own,
         None => vouched,
     };
-    if let Some(v) = v.get("mainEntity") {
+    if let Some(v) = main_entity(v) {
         apply_jsonld(doc, v, base, claims, own);
         if doc.source != "web" {
             return;
@@ -1557,10 +1667,13 @@ fn apply_jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url, claims: bool, vou
             }
         }
     }
-    fill(
-        &mut doc.name,
-        v.get("name").or_else(|| v.get("headline")).and_then(string),
-    );
+    // A FAQ's node names its block ("FAQ Page"), never the page: the page's own title does.
+    if !typed(v, "FAQPage") {
+        fill(
+            &mut doc.name,
+            v.get("name").or_else(|| v.get("headline")).and_then(string),
+        );
+    }
     fill(&mut doc.description, v.get("description").and_then(string));
     fill(
         &mut doc.image,
@@ -2667,5 +2780,179 @@ mod tests {
         let start = tokio::time::Instant::now();
         assert!(resolver.resolve("https://example.org/hangs").await.is_err());
         assert_eq!(start.elapsed(), Duration::from_secs(10));
+    }
+
+    fn read_page(url: &str, html: &str) -> ResourceMeta {
+        let fetched = crate::sources::fixture::page(url, "text/html", html.into(), None);
+        extract(url, &fetched, 100).unwrap().doc
+    }
+    #[test]
+    fn a_faqs_questions_are_parts_of_the_page_and_a_single_question_is_a_pages_subject() {
+        let question = |name: &str| {
+            format!(
+                r#"{{"@type":"Question","name":"{name}","acceptedAnswer":{{"@type":"Answer","text":"Yes."}}}}"#
+            )
+        };
+        let page = |scripts: &str| {
+            read_page(
+                "https://bank.example/",
+                &format!(
+                    r#"<html><head><title>Love your bank | N26</title><meta property="og:title" content="Love your bank">{scripts}</head><body></body></html>"#
+                ),
+            )
+        };
+        // A bank's homepage (n26.com): its organization, its site, and a FAQ block of questions,
+        // each in its own head script. The card is the page's, named by its og:title, not the
+        // first question's.
+        let site = r#"<script type="application/ld+json">{"@type":"Organization","url":"https://bank.example"}</script><script type="application/ld+json">{"@type":"WebSite","name":"N26","url":"https://bank.example/en-eu"}</script>"#;
+        let faq = |questions: &[String]| {
+            format!(
+                r#"<script type="application/ld+json">{{"@type":"FAQPage","name":"FAQ Page","url":"https://bank.example/","mainEntity":[{}]}}</script>"#,
+                questions.join(",")
+            )
+        };
+        let doc = page(&format!(
+            "{site}{}",
+            faq(&[
+                question("Is N26 a bank?"),
+                question("Where is N26 available?")
+            ])
+        ));
+        assert_eq!(doc.type_name, "FAQPage");
+        assert!(doc.type_path.iter().any(|t| t == "WebPage"));
+        assert_eq!(doc.name.as_deref(), Some("Love your bank"));
+        // A FAQ of one question: the same.
+        let doc = page(&format!("{site}{}", faq(&[question("Is N26 a bank?")])));
+        assert_eq!(doc.type_name, "FAQPage");
+        assert_eq!(doc.name.as_deref(), Some("Love your bank"));
+        // Several questions as a page's main entity, without the FAQ type: a list, the page.
+        let doc = page(&format!(
+            r#"<script type="application/ld+json">{{"@type":"WebPage","url":"https://bank.example/","mainEntity":[{},{}]}}</script>"#,
+            question("Is N26 a bank?"),
+            question("Is N26 secure?")
+        ));
+        assert_eq!(doc.type_name, "WebPage");
+        assert_eq!(doc.name.as_deref(), Some("Love your bank"));
+        // A Q&A page's single question is the page (Stack Exchange), as a page's single main
+        // entity is.
+        for kind in ["QAPage", "WebPage"] {
+            let doc = page(&format!(
+                r#"<script type="application/ld+json">{{"@type":"{kind}","mainEntity":{}}}</script>"#,
+                question("How do I open an account?")
+            ));
+            assert_eq!(doc.type_name, "Question", "{kind}");
+            assert_eq!(doc.name.as_deref(), Some("How do I open an account?"));
+        }
+    }
+    #[test]
+    fn a_page_listing_several_entities_of_one_kind_is_not_its_first_entry() {
+        let concert = |n: u32, url: &str| {
+            format!(
+                r#"<script type="application/ld+json">{{"@type":"MusicEvent","name":"Radiohead @ Arena {n}","url":"{url}","startDate":"2027-05-0{n}T19:30:00","location":{{"@type":"Place","name":"Arena {n}"}}}}</script>"#
+            )
+        };
+        let listed = |n: u32| concert(n, &format!("https://gigs.example/concerts/{n}-radiohead"));
+        let page = |url: &str, scripts: &str| {
+            read_page(
+                url,
+                &format!(
+                    r#"<html><head><title>Radiohead Tour Dates</title><meta property="og:title" content="Radiohead Tour Dates">{scripts}</head><body></body></html>"#
+                ),
+            )
+        };
+        let artist = "https://gigs.example/artists/253846-radiohead";
+        let own = r#"<script type="application/ld+json">{"@type":"MusicGroup","name":"Radiohead","url":"https://gigs.example/artists/253846-radiohead"}</script>"#;
+        // An artist's page listing concerts (songkick.com/artists/…), each a MusicEvent in its
+        // own script naming its own page: the card is the artist's own node.
+        let doc = page(
+            artist,
+            &format!("{}{}{}{own}", listed(1), listed(2), listed(3)),
+        );
+        assert_eq!(doc.type_name, "MusicGroup");
+        assert_eq!(doc.name.as_deref(), Some("Radiohead"));
+        assert!(doc.start.is_none());
+        // Without the artist's node: the page, named by its title.
+        let doc = page(artist, &format!("{}{}", listed(1), listed(2)));
+        assert_eq!(doc.type_name, "WebPage");
+        assert_eq!(doc.name.as_deref(), Some("Radiohead Tour Dates"));
+        assert!(doc.start.is_none());
+        // One concert, in two scripts (a theme's and a plugin's node for one event): the concert.
+        let doc = page(artist, &format!("{}{}", listed(1), listed(1)));
+        assert_eq!(doc.type_name, "MusicEvent");
+        assert_eq!(doc.name.as_deref(), Some("Radiohead @ Arena 1"));
+        // A concert's own page listing two others: its own.
+        let doc = page(
+            "https://gigs.example/concerts/9-radiohead",
+            &format!(
+                "{}{}{}",
+                listed(1),
+                concert(9, "https://gigs.example/concerts/9-radiohead"),
+                listed(2)
+            ),
+        );
+        assert_eq!(doc.type_name, "MusicEvent");
+        assert_eq!(doc.name.as_deref(), Some("Radiohead @ Arena 9"));
+        // Two listings naming no page (a theme's and a plugin's node, two nights at a venue):
+        // the page's own, the first, as before.
+        let unnamed = |n: u32| {
+            format!(
+                r#"<script type="application/ld+json">{{"@type":"MusicEvent","name":"Night {n}","startDate":"2027-05-0{n}T19:30:00"}}</script>"#
+            )
+        };
+        let doc = page(artist, &format!("{}{}", unnamed(1), unnamed(2)));
+        assert_eq!(doc.type_name, "MusicEvent");
+        assert_eq!(doc.name.as_deref(), Some("Night 1"));
+        // An AMP page whose head canonical is the story, its article naming the canonical, and a
+        // related article in the body: the article (the canonical is the page's address too).
+        let doc = read_page(
+            "https://news.example/story/amp",
+            r#"<html><head><title>Story</title><link rel="canonical" href="https://news.example/story"><script type="application/ld+json">{"@type":"NewsArticle","headline":"Actual story","url":"https://news.example/story","description":"What happened."}</script></head><body><script type="application/ld+json">{"@type":"Article","headline":"Related 1","url":"https://news.example/r1"}</script></body></html>"#,
+        );
+        assert_eq!(doc.type_name, "NewsArticle");
+        assert_eq!(doc.name.as_deref(), Some("Actual story"));
+        assert_eq!(doc.description.as_deref(), Some("What happened."));
+        // An article naming its page through mainEntityOfPage, with related articles in the
+        // body: the article.
+        let doc = read_page(
+            "https://news.example/story",
+            r#"<html><head><title>Story</title><script type="application/ld+json">{"@type":"NewsArticle","headline":"Actual story","mainEntityOfPage":"https://news.example/story"}</script></head><body><script type="application/ld+json">[{"@type":"Article","headline":"Related 1","url":"https://news.example/r1"},{"@type":"Article","headline":"Related 2","url":"https://news.example/r2"}]</script></body></html>"#,
+        );
+        assert_eq!(doc.type_name, "NewsArticle");
+        assert_eq!(doc.name.as_deref(), Some("Actual story"));
+    }
+    #[test]
+    fn a_music_objects_video_is_a_part_of_its_page() {
+        // A Spotify track page: og:title names the track; its JSON-LD holds a VideoObject for
+        // the track's video, named "… | Music Video". The card is the track.
+        let url = "https://open.spotify.com/track/63OQupATfueTdZMWTxW03A";
+        let video = r#"<script type="application/ld+json">[{"@type":"VideoObject","name":"Karma Police - Radiohead | Music Video","description":"Watch the video.","thumbnailUrl":"https://i.example/x.jpg","uploadDate":"2025-01-01"}]</script>"#;
+        let mut doc = read_page(
+            url,
+            &format!(
+                r#"<html><head><title>Karma Police - Song, Lyrics, and Music Video by Radiohead | Spotify</title><meta property="og:title" content="Karma Police"><meta property="og:site_name" content="Spotify">{video}</head><body></body></html>"#
+            ),
+        );
+        assert_eq!(doc.name.as_deref(), Some("Karma Police"));
+        crate::music::type_card(url, None, &mut doc);
+        assert_eq!(doc.type_name, "MusicRecording");
+        assert_eq!(doc.name.as_deref(), Some("Karma Police"));
+        // A track's own audio (a SoundCloud track's AudioObject, naming and describing it) is
+        // the page's: kept.
+        let doc = read_page(
+            "https://soundcloud.com/radiohead/karma-police",
+            r#"<html><head><title>SoundCloud</title><script type="application/ld+json">{"@type":"AudioObject","name":"Karma Police","description":"From OK Computer.","url":"https://soundcloud.com/radiohead/karma-police"}</script></head><body></body></html>"#,
+        );
+        assert_eq!(doc.name.as_deref(), Some("Karma Police"));
+        assert_eq!(doc.description.as_deref(), Some("From OK Computer."));
+        // Any other page keeps its video.
+        let doc = read_page(
+            "https://videos.example/watch/1",
+            &format!("<html><head><title>Videos</title>{video}</head><body></body></html>"),
+        );
+        assert_eq!(doc.type_name, "VideoObject");
+        assert_eq!(
+            doc.name.as_deref(),
+            Some("Karma Police - Radiohead | Music Video")
+        );
     }
 }

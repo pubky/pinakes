@@ -4416,3 +4416,66 @@ fn a_plain_rule_counts_its_month_day_as_a_whole_month() {
     assert!(bounded("FREQ=WEEKLY", 1));
     assert!(bounded("FREQ=DAILY", 1));
 }
+
+/// An artist's page on an event platform (Songkick's, listing its concerts, each a MusicEvent
+/// naming its own page, with the artist's own node): through the whole event route, with the
+/// platform's state fallback reading the page again, the card stays the artist's, never the
+/// first concert's.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn an_artists_concert_list_on_a_platform_is_the_artist_through_the_whole_route(pool: PgPool) {
+    let egress = Egress::with_backends(
+        EgressConfig::default(),
+        Arc::new(PublicDns),
+        Arc::new(FailedTls(Mutex::new(vec![]))),
+    );
+    let service = pinakes_core::event::service::EventService {
+        pool: pool.clone(),
+        config: EventConfig::default(),
+        osm: Arc::new(OsmResolver::new(pool, OsmConfig::default()).unwrap()),
+    };
+    let asked = "https://www.songkick.com/artists/253846-radiohead";
+    let concert = |n: u32| {
+        format!(
+            r#"<script type="application/ld+json">{{"@type":"MusicEvent","name":"Concert {n}","url":"https://www.songkick.com/concerts/{n}-radiohead","startDate":"2027-05-0{n}T19:30:00","location":{{"@type":"Place","name":"Arena {n}"}},"performer":{{"@type":"MusicGroup","name":"Radiohead"}}}}</script>"#
+        )
+    };
+    let body = format!(
+        r#"<html><head><title>Radiohead Tour Dates</title><meta property="og:title" content="Radiohead Tour Dates">{}{}<script type="application/ld+json">{{"@type":"MusicGroup","name":"Radiohead","url":"{asked}"}}</script></head><body>Radiohead tour dates</body></html>"#,
+        concert(1),
+        concert(2)
+    );
+    let fetched = Fetched {
+        permanent_redirect: false,
+        truncated: false,
+        validators: Default::default(),
+        url: url::Url::parse(asked).unwrap(),
+        content_type: "text/html".into(),
+        status: 200,
+        retry_after_secs: 60,
+        location: None,
+        body: body.into_bytes(),
+    };
+    let input = fetched.clone();
+    let card = pinakes_core::resolver::html::blocking(move || {
+        pinakes_core::resolver::web::extract(asked, &input, 3600)
+            .unwrap()
+            .doc
+    })
+    .await
+    .unwrap();
+    assert_eq!(card.type_name, "MusicGroup");
+    let doc = service
+        .page(
+            asked,
+            &fetched,
+            card,
+            &egress,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+    assert_eq!(doc.type_name, "MusicGroup", "{doc:?}");
+    assert_eq!(doc.name.as_deref(), Some("Radiohead"));
+    assert!(doc.start.is_none(), "{:?}", doc.start);
+    assert!(!doc.type_path.iter().any(|t| t == "Event"));
+}

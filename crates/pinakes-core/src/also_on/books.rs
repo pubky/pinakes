@@ -437,6 +437,16 @@ impl Source for Books {
     fn link_type(&self, uri: &str) -> Option<Option<&'static str>> {
         book(uri).map(|_| Some("Book"))
     }
+    /// A book's page on a service the work's item names (a Goodreads edition or a work's
+    /// edition list, LibraryThing, Google Books, Project Gutenberg, BookBrainz) is on that
+    /// service: its card is named after it, as its links are. Open Library's pages keep the
+    /// name the site gives itself.
+    fn service_name(&self, _host: &str, url: &url::Url) -> Option<&'static str> {
+        match book(url.as_str())? {
+            Book::Wikidata { site, .. } => Some(site),
+            _ => None,
+        }
+    }
     fn id(&self) -> &'static str {
         "books"
     }
@@ -875,5 +885,30 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn a_books_page_on_a_service_is_named_after_it() {
+        for (uri, site) in [
+            (
+                "https://www.goodreads.com/work/editions/1540236",
+                Some("Goodreads"),
+            ),
+            (
+                "https://www.goodreads.com/book/show/4671.The_Great_Gatsby",
+                Some("Goodreads"),
+            ),
+            (
+                "https://www.librarything.com/work/2203",
+                Some("LibraryThing"),
+            ),
+            (
+                "https://www.goodreads.com/author/show/656983.J_R_R_Tolkien",
+                None,
+            ),
+            ("https://openlibrary.org/works/OL468431W", None),
+        ] {
+            assert_eq!(crate::lookups::service_name(uri), site, "{uri}");
+        }
     }
 }
