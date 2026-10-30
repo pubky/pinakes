@@ -329,6 +329,17 @@ fn named_by_podcast_index(doc: &ResourceMeta) -> Option<ResourceMeta> {
     Some(doc)
 }
 
+/// The feed iTunes' record of a show names (`feedUrl`), when it is an http(s) URL.
+fn itunes_feed(raw: &[u8]) -> Option<String> {
+    let v: Value = serde_json::from_slice(raw).ok()?;
+    let [one] = v["results"].as_array()?.as_slice() else {
+        return None;
+    };
+    one["feedUrl"]
+        .as_str()
+        .filter(|u| u.starts_with("https://") || u.starts_with("http://"))
+        .map(str::to_owned)
+}
 /// The card of an Apple podcast's player page from iTunes' record of the show.
 fn itunes_card(cx: &Context<'_>, uri: &str, show: u64, raw: &[u8]) -> Option<ResourceMeta> {
     let v: Value = serde_json::from_slice(raw).ok()?;
@@ -496,9 +507,20 @@ impl Source for MediaRecords {
                     )
                     .await?;
                 super::retry(&f)?;
-                (f.status == 200)
+                match (f.status == 200)
                     .then(|| itunes_card(cx, uri, show, &f.body))
                     .flatten()
+                {
+                    Some(mut doc) => {
+                        // The show's latest episodes, from the feed iTunes names for it
+                        // (`episodes`).
+                        if let Some(feed) = itunes_feed(&f.body) {
+                            doc.episodes = crate::episodes::fetch(cx.egress, &feed, 3600).await;
+                        }
+                        Some(doc)
+                    }
+                    None => None,
+                }
             }
             None => None,
         })
@@ -930,5 +952,55 @@ mod tests {
         assert_eq!(doc.type_name, "PodcastSeries");
         assert!(doc.name.is_some() && doc.status == Status::Ok);
         assert!(itunes_card(&cx, uri, 1, &raw).is_none());
+    }
+
+    /// The walled page's card carries the show's latest episodes, read from the feed iTunes
+    /// names for it (its first items, as recorded); a feed that does not answer leaves the card
+    /// without a list (the stored one stays).
+    #[tokio::test(start_paused = true)]
+    async fn a_walled_player_pages_card_lists_the_shows_latest_episodes() {
+        let lookup = "https://itunes.apple.com/lookup?id=1584274529&entity=podcast&country=us";
+        let feed = "https://feeds.podcastindex.org/pc20.xml";
+        assert_eq!(
+            itunes_feed(&read("itunes-podcast-1584274529.json")).as_deref(),
+            Some(feed)
+        );
+        let (egress, recorded) = fixture::egress(vec![
+            (
+                lookup,
+                200,
+                "text/javascript",
+                read("itunes-podcast-1584274529.json"),
+            ),
+            (feed, 200, "application/xml", read("feed-pc20-head.xml")),
+        ]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let uri = "https://pca.st/itunes/1584274529";
+        let doc = MediaRecords.walled(&cx, uri).await.unwrap().unwrap();
+        assert_eq!(doc.type_name, "PodcastSeries");
+        assert_eq!(recorded.asked(), [lookup, feed]);
+        let episodes = doc.episodes.expect("the feed's episodes");
+        assert_eq!(episodes.len(), crate::episodes::KEPT);
+        let stream = episodes[0].stream.as_ref().expect("a public enclosure");
+        assert!(stream.url.starts_with("https://"), "{stream:?}");
+        assert_eq!(stream.media_type, "audio/mpeg");
+        assert!(episodes[0].published.is_some());
+        // The feed unanswered: the card, without a list.
+        let (egress, _) = fixture::egress(vec![(
+            lookup,
+            200,
+            "text/javascript",
+            read("itunes-podcast-1584274529.json"),
+        )]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let doc = MediaRecords.walled(&cx, uri).await.unwrap().unwrap();
+        assert_eq!(doc.type_name, "PodcastSeries");
+        assert_eq!(doc.episodes, None);
     }
 }

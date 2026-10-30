@@ -362,6 +362,7 @@ fn rest_routes() -> Router<AppState> {
             "/v1/resources/{id}/occurrences",
             get(crate::event::storage::list),
         )
+        .route("/v1/resources/{id}/episodes", get(crate::episodes::list))
         .route(
             "/v1/occurrences/lookup",
             post(crate::event::storage::lookup),
@@ -2565,6 +2566,7 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
         group,
         crate::event::storage::list,
         crate::event::storage::lookup,
+        crate::episodes::list,
         search,
         resource,
         by_uri,
@@ -2582,6 +2584,9 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
         CollapseMode,
         crate::event::storage::OccurrencePage,
         crate::event::storage::OccurrenceLookup,
+        crate::episodes::EpisodePage,
+        crate::episodes::Episode,
+        model::Stream,
         crate::event::storage::ReferenceEvent,
         crate::change_api::ChangeLine,
         crate::change_api::ChangePage,

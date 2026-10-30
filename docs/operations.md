@@ -504,7 +504,12 @@ YouTube's `watch` and `shorts` do), or from any matching provider under `"always
 author and thumbnail come ahead of the page's. A blank field in an answer is no value.
 `web.discover_feeds` (web pages) and `cards.media.discover_feeds` (media pages: podcast feed
 scanning) follow RSS alternates on pages without a typed card. Discovery decisions are counted in
-`pinakes_discovery_decisions_total{kind,decision}`.
+`pinakes_discovery_decisions_total{kind,decision}`. A podcast show's card reads the show's feed
+for its latest episodes at each refresh (a feed card from the feed it is; a Podcast Index or
+Apple Podcasts show page, and a player page opening a show by its Apple ID, from the feed its
+record names: one feed request per read, cached for the card's lifetime, cut at the page cap),
+kept in `podcast_episode` and served by `GET /v1/resources/{id}/episodes` ([API](api.md#episodes)).
+After the upgrade that added them, the lists fill as shows are read again (`reextract web`).
 
 A challenge page (a bot wall, captcha or sign-in redirect) is a failed fetch: the resource turns
 `unreachable` and is retried with the normal backoff, dead-lettering after

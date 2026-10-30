@@ -1107,6 +1107,8 @@ fn podcast_body(
             .descendants()
             .find(|n| n.has_tag_name("channel"))
             .and_then(|n| field(n, "title"));
+        // The show's latest episodes, listed and played from its card (`episodes`).
+        d.episodes = Some(crate::episodes::from_items(&items, &f.url));
     }
     Ok(Some(d.bounded(web::ATTRIBUTES)?))
 }
