@@ -8,7 +8,7 @@ use pinakes_core::{
         Fact, Found, Source, Subject,
     },
     config::Config,
-    model::ResourceMeta,
+    model::{ResourceMeta, Stream},
     resolver::RetryLater,
 };
 use std::sync::Arc;
@@ -205,12 +205,21 @@ async fn an_episode_page_that_names_its_feed() {
         .unwrap();
     assert_eq!(found, Found::default());
     assert_eq!(recorded.signed_with.lock().unwrap().len(), before);
-    // Without Podcast Index nothing vouches for the show: nothing.
+    // Without Podcast Index nothing vouches for the show: no key. The page is still the item
+    // its feed links back to, so it plays the item's audio, which joins nothing.
     let found = Podcasts
         .lookup(&crate::cx(recorded.clone(), Config::default()), &card)
         .await
         .unwrap();
-    assert_eq!(found, Found::default());
+    assert!(found.keys.is_empty() && found.links.is_empty(), "{found:?}");
+    assert_eq!(
+        heard(&found),
+        [
+            ("stream_url", "https://www.podtrac.com/pts/redirect.mp3/dovetail.prxu.org/7057/141e0c43-f935-41de-be94-708448052c4d/darknet-diaries-ep180-conti.mp3"),
+            ("stream_type", "audio/mpeg"),
+            ("stream_duration", "3557"),
+        ]
+    );
 }
 
 /// A copy feed on another host that lists `https://copy.example/ep/` as an item carrying a real
@@ -262,12 +271,20 @@ async fn a_copy_that_claims_a_shows_apple_id_joins_nothing_of_it() {
     let theirs = item_key(own, "prx_7057_141e0c43-f935-41de-be94-708448052c4d").unwrap();
     assert_eq!(keys(&found), [theirs.as_str()]);
     assert!(found.links.is_empty());
-    // Darknet Diaries' own GUID, which Podcast Index says the real feed owns: nothing at all.
+    // Darknet Diaries' own GUID, which Podcast Index says the real feed owns: nothing of the
+    // show at all. Its own audio is still its stream: a stream joins nothing.
     let found = Podcasts
         .lookup(&cx(copy_site(GUID_DARKNET, false), indexed()), &copy_page())
         .await
         .unwrap();
-    assert_eq!(found, Found::default());
+    assert!(found.keys.is_empty() && found.links.is_empty(), "{found:?}");
+    assert_eq!(
+        heard(&found),
+        [
+            ("stream_url", "https://copy.example/a.mp3"),
+            ("stream_type", "audio/mpeg")
+        ]
+    );
 }
 
 #[tokio::test]
@@ -436,6 +453,70 @@ async fn an_episode_has_one_key_on_apple_and_podcast_index() {
         .await
         .unwrap();
     assert_eq!(gone, Found::default());
+}
+
+/// The stream facts a lookup recorded.
+fn heard(found: &Found) -> Vec<(&str, &str)> {
+    found
+        .facts
+        .iter()
+        .filter(|f| f.name.starts_with("stream_"))
+        .map(|f| (f.name.as_str(), f.value.as_str()))
+        .collect()
+}
+
+/// An episode's lookup hears of its enclosure and records it: Apple's episode from iTunes'
+/// record of it, a Podcast Index episode from Podcast Index's, a feed card's item (a Fountain
+/// episode page) from the feed. A card without a stream of its own is read again to take it;
+/// one that plays already is not.
+#[tokio::test]
+async fn an_episode_hears_of_its_stream() {
+    let cx = cx(Recorded::new(), indexed());
+    let enclosure = "https://op3.dev/e/mp3s.nashownotes.com/PC20-275-2026-10-16-Final.mp3";
+    let pc20_275 = [
+        ("stream_url", enclosure),
+        ("stream_type", "audio/mpeg"),
+        ("stream_duration", "5995"),
+    ];
+    let apple = format!("{PC20}?i=1000796718231");
+    let page = ResourceMeta::new(&apple, "media", 3600);
+    let found = Podcasts
+        .lookup(&cx, &subject(&apple, Some("PodcastEpisode"), Some(page)))
+        .await
+        .unwrap();
+    assert_eq!(heard(&found), pc20_275);
+    assert!(found.reread, "the Apple page has no stream yet");
+    let index = "https://podcastindex.org/podcast/920666?episode=61842097688";
+    let mut card = ResourceMeta::new(index, "podcast_index", 3600);
+    card.stream = Stream::public(enclosure, "audio/mpeg", Some(5995), false);
+    let found = Podcasts
+        .lookup(&cx, &subject(index, Some("PodcastEpisode"), Some(card)))
+        .await
+        .unwrap();
+    assert_eq!(heard(&found), pc20_275);
+    assert!(!found.reread, "its card plays it already");
+    let fountain = feed_card(
+        "https://fountain.fm/episode/off-the-rails",
+        "https://feeds.podcastindex.org/pc20.xml",
+        Some("PC20-275"),
+    );
+    let found = Podcasts.lookup(&cx, &fountain).await.unwrap();
+    assert_eq!(heard(&found), pc20_275);
+    assert!(found.reread);
+    // Without Podcast Index nothing vouches for the show, but the feed Fountain names is still
+    // read for the stream its card lacks.
+    let unvouched = crate::cx(Recorded::new(), Config::default());
+    let found = Podcasts.lookup(&unvouched, &fountain).await.unwrap();
+    assert!(found.keys.is_empty(), "{found:?}");
+    assert_eq!(heard(&found), pc20_275);
+    // The Daily's episode on Apple: the enclosure in the feed iTunes reads (`feed=Sl5CSM3S`).
+    let daily = format!("{DAILY}?i=1000797051580");
+    let found = Podcasts
+        .lookup(&cx, &subject(&daily, Some("PodcastEpisode"), None))
+        .await
+        .unwrap();
+    assert!(heard(&found)[0].1.ends_with("&feed=Sl5CSM3S"), "{found:?}");
+    // A show hears of none (`a_feed_names_its_guid_as_a_fact`).
 }
 
 #[tokio::test]

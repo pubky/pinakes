@@ -830,6 +830,75 @@ async fn search_by_key_finds_the_same_object_on_every_service(pool: PgPool) {
     }
 }
 
+/// A stream an also-on source heard of reaches the card through its facts: the hints read it
+/// while the source is on and its rows live, the card takes it, and a changed stream outdates
+/// the stored card (a 304 then reads it again in full).
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_heard_stream_reaches_the_card(pool: PgPool) {
+    use also_on::media::{outdated, type_card, type_hints};
+    let uri = "https://podcasts.apple.com/us/podcast/id1584274529?i=1000796718231";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut doc = ResourceMeta::new(uri, "media", 86400);
+    doc.set_type("PodcastEpisode");
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let enclosure = "https://op3.dev/e/mp3s.nashownotes.com/PC20-275-2026-10-16-Final.mp3";
+    for (name, value) in [
+        ("stream_url", enclosure),
+        ("stream_type", "audio/mpeg"),
+        ("stream_duration", "5995"),
+    ] {
+        sqlx::query("INSERT INTO resource_fact(resource_id,name,value,source,expires_at) VALUES($1,$2,$3,'podcasts',now()+interval '1 day')")
+            .bind(&id)
+            .bind(name)
+            .bind(value)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let hints = |pool: PgPool, id: String| async move {
+        type_hints(&pool, std::slice::from_ref(&id))
+            .await
+            .unwrap()
+            .remove(&id)
+            .unwrap_or_default()
+    };
+    let heard = pinakes_core::model::Stream::public(enclosure, "audio/mpeg", Some(5995), false);
+    let now = hints(pool.clone(), id.clone()).await;
+    assert_eq!(
+        now.stream.clone().map(|(s, stream)| (s, Some(stream))),
+        Some(("podcasts".into(), heard.clone()))
+    );
+    type_card(uri, &now, &mut doc);
+    assert_eq!(doc.stream, heard);
+    assert!(!outdated(&pool, &id, &doc).await.unwrap());
+    // The episode's audio moved: the stored card is outdated.
+    sqlx::query("UPDATE resource_fact SET value='https://op3.dev/e/mp3s.nashownotes.com/PC20-275-v2.mp3' WHERE resource_id=$1 AND name='stream_url'")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(outdated(&pool, &id, &doc).await.unwrap());
+    // A switched-off source's stream is none, and an expired row's.
+    sqlx::query("INSERT INTO also_on_source_off(source) VALUES('podcasts')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(hints(pool.clone(), id.clone()).await.stream, None);
+    sqlx::query("DELETE FROM also_on_source_off")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(hints(pool.clone(), id.clone()).await.stream.is_some());
+    sqlx::query(
+        "UPDATE resource_fact SET expires_at=now()-interval '1 second' WHERE resource_id=$1",
+    )
+    .bind(&id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(hints(pool.clone(), id.clone()).await.stream, None);
+}
+
 /// Every key a resource read lists (`keys`, as stored) searches back to that resource:
 /// `GET /v1/search?key=` takes each exactly as listed (review of d6d0aeb: MusicBrainz and podcast
 /// keys did not; of e48807e: Open Library keys did not).

@@ -22,7 +22,8 @@ use super::{
 };
 use crate::{
     hubs::{self, wikidata},
-    podcast_index_api::{index_page, pi_episode_request, pi_headers, pi_request, Ask},
+    model::Stream,
+    podcast_index_api::{index_page, pi_episode_request, pi_headers, pi_request, pi_stream, Ask},
     resolver::{egress::FetchOptions, RetryLater},
 };
 use anyhow::{Context as _, Result};
@@ -248,6 +249,8 @@ pub struct FeedRead {
     pub item_guid: Option<String>,
     /// Whether the wanted item has an audio or video enclosure (an episode, not a post).
     pub item_media: bool,
+    /// The wanted item's enclosure, when it is a public stream (`cards::item_stream`).
+    pub item_stream: Option<Stream>,
 }
 /// Read an RSS feed (any encoding is read as UTF-8, invalid bytes replaced: the GUIDs and links
 /// are ASCII). `Err` when the body is no RSS channel at all.
@@ -310,6 +313,7 @@ pub fn read_feed(body: &[u8], item: Option<ItemBy<'_>>) -> Result<FeedRead> {
         item_guid: wanted
             .and_then(|n| field(n, "guid"))
             .filter(|g| !g.is_empty()),
+        item_stream: wanted.and_then(crate::resolver::cards::item_stream),
         item_media: wanted.is_some_and(|n| {
             n.children().any(|c| {
                 c.has_tag_name("enclosure")
@@ -353,11 +357,35 @@ pub fn parse_show(status: u16, raw: &[u8], show: u64) -> Result<Option<ItunesSho
 pub struct ItunesShow {
     pub feed: Option<String>,
 }
-/// An episode iTunes lists: its track ID and its feed item's GUID.
+/// An episode iTunes lists: its track ID, its feed item's GUID and its enclosure.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Episode {
     pub track: u64,
     pub guid: Option<String>,
+    pub stream: Option<Stream>,
+}
+/// An episode's enclosure as iTunes lists it (`episodeUrl`, its content type and file extension,
+/// `trackTimeMillis`), when it is a public stream.
+pub fn itunes_stream(e: &serde_json::Value) -> Option<Stream> {
+    let kind = e["episodeContentType"].as_str()?;
+    let extension = e["episodeFileExtension"].as_str()?.to_ascii_lowercase();
+    let subtype = match (kind, extension.as_str()) {
+        ("audio", "mp3") => "mpeg",
+        ("audio", "m4a" | "mp4") | ("video", "mp4" | "m4v") => "mp4",
+        ("audio", "aac") => "aac",
+        ("audio", "ogg" | "oga") => "ogg",
+        ("audio", "opus") => "opus",
+        ("audio", "wav") => "wav",
+        ("audio", "flac") => "flac",
+        ("video", "mov") => "quicktime",
+        _ => return None,
+    };
+    Stream::public(
+        e["episodeUrl"].as_str()?,
+        &format!("{kind}/{subtype}"),
+        e["trackTimeMillis"].as_u64().map(|ms| ms / 1000),
+        false,
+    )
 }
 /// The episodes of `show` iTunes lists.
 pub fn parse_episodes(status: u16, raw: &[u8], show: u64) -> Result<Vec<Episode>> {
@@ -379,6 +407,7 @@ pub fn parse_episodes(status: u16, raw: &[u8], show: u64) -> Result<Vec<Episode>
                     .map(str::trim)
                     .filter(|g| !g.is_empty())
                     .map(str::to_owned),
+                stream: itunes_stream(e),
             })
         })
         .collect())
@@ -439,11 +468,12 @@ pub fn parse_pi(status: u16, raw: &[u8], ask: Ask) -> Result<Option<IndexFeed>> 
     };
     Ok(theirs.then_some(found))
 }
-/// An episode as Podcast Index records it: its item GUID and its feed.
+/// An episode as Podcast Index records it: its item GUID, its feed and its enclosure.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndexEpisode {
     pub guid: String,
     pub feed: u64,
+    pub stream: Option<Stream>,
 }
 /// The episode, or `None` when Podcast Index has none or answers another one.
 pub fn parse_pi_episode(status: u16, raw: &[u8], id: u64) -> Result<Option<IndexEpisode>> {
@@ -459,6 +489,7 @@ pub fn parse_pi_episode(status: u16, raw: &[u8], id: u64) -> Result<Option<Index
             (Some(g), Some(feed)) if !g.is_empty() && feed > 0 => Some(IndexEpisode {
                 guid: g.to_owned(),
                 feed,
+                stream: pi_stream(e),
             }),
             _ => None,
         },
@@ -574,6 +605,39 @@ pub fn apple_episode(found: &mut Found, show: u64, track: u64, storefront: &str)
 
 /// The source: iTunes, Podcast Index, the feed and Wikidata.
 pub struct Podcasts;
+
+/// The enclosures a lookup heard of for its episode, from each service that names one.
+#[derive(Debug, Default)]
+pub struct Heard {
+    pub feed: Option<Stream>,
+    pub index: Option<Stream>,
+    pub itunes: Option<Stream>,
+}
+impl Heard {
+    /// The episode's stream as facts (`stream_url`, `stream_type`, `stream_duration`): its own
+    /// feed's item first, then Podcast Index's record, then iTunes'. A card with no stream of
+    /// its own takes it (`media::type_card`), and one that has none yet is read again now. A
+    /// show's lookup hears of none.
+    pub fn record(self, found: &mut Found, subject: &Subject) {
+        let Some(stream) = self.feed.or(self.index).or(self.itunes) else {
+            return;
+        };
+        // A fact holds 512 bytes.
+        if stream.url.len() > 512 {
+            return;
+        }
+        found.reread |= subject.doc.as_ref().is_some_and(|d| d.stream.is_none());
+        found.facts.push(Fact::new("stream_url", stream.url));
+        found
+            .facts
+            .push(Fact::new("stream_type", stream.media_type));
+        if let Some(seconds) = stream.duration_s {
+            found
+                .facts
+                .push(Fact::new("stream_duration", seconds.to_string()));
+        }
+    }
+}
 
 impl Podcasts {
     async fn itunes(cx: &Context, url: &str) -> Result<crate::resolver::egress::Fetched> {
@@ -748,10 +812,12 @@ impl Podcasts {
     }
     /// An episode's keys from its show's vouched GUID and its item GUID, and its Apple track
     /// (found by track ID or by item GUID among the show's latest episodes).
+    #[allow(clippy::too_many_arguments)]
     async fn episode(
         cx: &Context,
         found: &mut Found,
         deferred: &mut Deferred,
+        heard: &mut Heard,
         show: Option<u64>,
         show_guid: Option<&str>,
         item: Option<&str>,
@@ -769,6 +835,7 @@ impl Podcasts {
                     _ => None,
                 };
                 if let Some(e) = e {
+                    heard.itunes = e.stream.clone();
                     apple_episode(found, show, e.track, &sf);
                     if item.is_none() {
                         item = e.guid.clone();
@@ -820,6 +887,16 @@ impl Source for Podcasts {
         podcast(subject).is_some()
     }
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
+        let mut heard = Heard::default();
+        let mut found = Self::find(cx, subject, &mut heard).await?;
+        heard.record(&mut found, subject);
+        Ok(found)
+    }
+}
+
+impl Podcasts {
+    /// What the source finds for `subject`, and the episode's enclosures it heard of.
+    async fn find(cx: &Context, subject: &Subject, heard: &mut Heard) -> Result<Found> {
         let mut found = Found::default();
         let mut deferred = Deferred::default();
         let Some(podcast) = podcast(subject) else {
@@ -858,6 +935,7 @@ impl Source for Podcasts {
                             cx,
                             &mut found,
                             &mut deferred,
+                            heard,
                             Some(*show),
                             show_guid.as_deref(),
                             None,
@@ -903,10 +981,12 @@ impl Source for Podcasts {
                     Some(id) => {
                         let e = deferred.take("podcastindex", Self::index_episode(cx, *id).await);
                         if let Some(e) = e.filter(|e| e.feed == *feed) {
+                            heard.index = e.stream.clone();
                             Self::episode(
                                 cx,
                                 &mut found,
                                 &mut deferred,
+                                heard,
                                 apple,
                                 vouched.as_deref(),
                                 Some(&e.guid),
@@ -956,10 +1036,15 @@ impl Source for Podcasts {
                     Some(item) => {
                         // The item key only for the page the vouched feed names as the item's
                         // `<link>`.
+                        // Its stream too, for a card without one of its own (Fountain's page).
+                        let unheard = subject.doc.as_ref().is_some_and(|d| d.stream.is_none());
+                        let read = match vouched.is_some() || unheard {
+                            true => deferred.take("feed", Self::feed(cx, url, Some(item)).await),
+                            false => None,
+                        };
+                        heard.feed = read.as_ref().and_then(|r| r.item_stream.clone());
                         let show_guid = match &vouched {
                             Some(_) => {
-                                let read =
-                                    deferred.take("feed", Self::feed(cx, url, Some(item)).await);
                                 let listed = read.and_then(|r| r.item_link).is_some_and(|link| {
                                     crate::model::identity(&link).ok().map(|v| v.0)
                                         == crate::model::identity(page).ok().map(|v| v.0)
@@ -972,6 +1057,7 @@ impl Source for Podcasts {
                             cx,
                             &mut found,
                             &mut deferred,
+                            heard,
                             apple,
                             show_guid.as_deref(),
                             Some(item),
@@ -991,6 +1077,7 @@ impl Source for Podcasts {
                 let Some((read, at)) = read else {
                     return deferred.finish(found);
                 };
+                heard.feed = read.item_stream.clone();
                 // Only an episode (an item with audio or video) is worth asking Podcast Index.
                 let Some(item) = read.item_guid.filter(|_| read.item_media) else {
                     return deferred.finish(found);
@@ -1011,6 +1098,7 @@ impl Source for Podcasts {
                     cx,
                     &mut found,
                     &mut deferred,
+                    heard,
                     apple,
                     vouched.as_deref(),
                     Some(&item),
@@ -1197,6 +1285,87 @@ mod tests {
         assert_eq!(item_key("not-a-guid", "x"), None);
     }
 
+    /// The stream a lookup records is its own feed's item's, then Podcast Index's, then
+    /// iTunes'; a URL too long for a fact is none; a card without a stream is read again.
+    #[test]
+    fn the_feed_s_enclosure_comes_first() {
+        let at = |n: &str| {
+            Stream::public(
+                &format!("https://cdn.example.org/{n}.mp3"),
+                "audio/mpeg",
+                None,
+                false,
+            )
+        };
+        let card = |stream: Option<Stream>| {
+            let mut doc = crate::model::ResourceMeta::new("https://example.org/ep", "media", 60);
+            doc.stream = stream;
+            Subject {
+                id: "r".into(),
+                uri: "https://example.org/ep".into(),
+                status: "ok".into(),
+                type_name: Some("PodcastEpisode".into()),
+                doc: Some(doc),
+                keys: vec![],
+                first_seen_at: None,
+            }
+        };
+        let url = |heard: Heard, subject: &Subject| {
+            let mut found = Found::default();
+            heard.record(&mut found, subject);
+            let url = found
+                .facts
+                .iter()
+                .find(|f| f.name == "stream_url")
+                .map(|f| f.value.clone());
+            (url, found.reread)
+        };
+        let all = || Heard {
+            feed: at("feed"),
+            index: at("index"),
+            itunes: at("itunes"),
+        };
+        let bare = card(None);
+        assert_eq!(
+            url(all(), &bare),
+            (Some("https://cdn.example.org/feed.mp3".into()), true)
+        );
+        assert_eq!(
+            url(
+                Heard {
+                    feed: None,
+                    ..all()
+                },
+                &bare
+            )
+            .0
+            .as_deref(),
+            Some("https://cdn.example.org/index.mp3")
+        );
+        assert_eq!(
+            url(
+                Heard {
+                    itunes: at("itunes"),
+                    ..Heard::default()
+                },
+                &bare
+            )
+            .0
+            .as_deref(),
+            Some("https://cdn.example.org/itunes.mp3")
+        );
+        assert_eq!(
+            url(all(), &card(at("own"))),
+            (Some("https://cdn.example.org/feed.mp3".into()), false)
+        );
+        assert_eq!(url(Heard::default(), &bare), (None, false));
+        let long = Heard {
+            feed: at(&"a".repeat(600)),
+            ..Heard::default()
+        };
+        assert_eq!(url(long, &bare), (None, false));
+    }
+
     #[test]
     fn a_feed_names_its_own_guid() {
         // Podcasting 2.0 moved to feeds.podcastindex.org but keeps the GUID of its first URL:
@@ -1212,6 +1381,18 @@ mod tests {
                 .item_link
                 .as_deref(),
             Some("https://www.podpage.com/podcasting-20/off-the-rails/")
+        );
+        // And its enclosure, with its `itunes:duration`: the episode's stream.
+        assert_eq!(
+            read_feed(&pc20, Some(ItemBy::Guid("PC20-275")))
+                .unwrap()
+                .item_stream,
+            Stream::public(
+                "https://op3.dev/e/mp3s.nashownotes.com/PC20-275-2026-10-16-Final.mp3",
+                "audio/mpeg",
+                Some(5995),
+                false
+            )
         );
         assert_eq!(
             read_feed(&pc20, Some(ItemBy::Guid("PC20-0")))
@@ -1300,7 +1481,14 @@ mod tests {
             by_guid(&episodes, "1897475d-9b60-447d-ba9b-79aa09f59551"),
             Some(&Episode {
                 track: 1000797051580,
-                guid: Some("1897475d-9b60-447d-ba9b-79aa09f59551".into())
+                guid: Some("1897475d-9b60-447d-ba9b-79aa09f59551".into()),
+                // Its enclosure as iTunes lists it (`episodeUrl`, an `mp3` of `audio`, 29 minutes).
+                stream: Some(Stream {
+                    url: "https://dts.podtrac.com/redirect.mp3/pdst.fm/e/pfx.vpixl.com/6qj4J/pscrb.fm/rss/p/tracking.swap.fm/track/4jdbJYYRKqK96EGqOzQb/nyt.simplecastaudio.com/03d8b493-87fc-4bd1-931f-8a8e9b945d8a/episodes/5d4af67f-8924-4298-8fd7-19a04e793c81/audio/128/default.mp3?aid=rss_feed&awCollectionId=03d8b493-87fc-4bd1-931f-8a8e9b945d8a&awEpisodeId=5d4af67f-8924-4298-8fd7-19a04e793c81&feed=Sl5CSM3S".into(),
+                    media_type: "audio/mpeg".into(),
+                    duration_s: Some(1740),
+                    preview: false,
+                }),
             })
         );
         assert_eq!(by_guid(&episodes, "not-there"), None);
@@ -1468,7 +1656,14 @@ mod tests {
             parse_pi_episode(200, &raw, 61953304662).unwrap(),
             Some(IndexEpisode {
                 guid: "1897475d-9b60-447d-ba9b-79aa09f59551".into(),
-                feed: 743229
+                feed: 743229,
+                // The same episode's enclosure as Podcast Index reads it, in the feed it reads.
+                stream: Some(Stream {
+                    url: "https://dts.podtrac.com/redirect.mp3/pdst.fm/e/pfx.vpixl.com/6qj4J/pscrb.fm/rss/p/tracking.swap.fm/track/4jdbJYYRKqK96EGqOzQb/nyt.simplecastaudio.com/03d8b493-87fc-4bd1-931f-8a8e9b945d8a/episodes/5d4af67f-8924-4298-8fd7-19a04e793c81/audio/128/default.mp3?aid=rss_feed&awCollectionId=03d8b493-87fc-4bd1-931f-8a8e9b945d8a&awEpisodeId=5d4af67f-8924-4298-8fd7-19a04e793c81&feed=54nAGcIl".into(),
+                    media_type: "audio/mpeg".into(),
+                    duration_s: Some(1740),
+                    preview: false,
+                }),
             })
         );
         assert_eq!(parse_pi_episode(200, &raw, 1).unwrap(), None);

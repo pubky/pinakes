@@ -40,6 +40,15 @@ in any spelling, an episode with `?i={n}`), a player link that opens a show by i
 - A link never lists its own service. A Podcast Index failure (a refused key, an outage) never
   fails the lookup: what the other services answered still counts.
 - A Pocket Casts short link (`pca.st/{slug}`) carries no Apple ID and is not looked up.
+- **Stream.** An episode's lookup hears of its enclosure. The source prefers its feed's item,
+  then Podcast Index's record of the episode, then iTunes' (`episodeUrl`), and records the
+  enclosure as the facts `stream_url`, `stream_type` and `stream_duration`.
+  - A card without a [stream](../api.md#stream) of its own takes it at its next read. The
+    source asks for that read at once.
+  - A link that isn't a public stream, or is longer than a fact's 512 bytes, is none.
+  - A Fountain episode's feed is read for the stream even when no GUID is vouched.
+  - A stream joins nothing: a copy of a show's feed plays its own audio, and gets no key from
+    it.
 
 ## Operations
 

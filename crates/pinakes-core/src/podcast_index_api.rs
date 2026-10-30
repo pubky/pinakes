@@ -75,6 +75,20 @@ pub fn pi_request(ask: Ask) -> String {
 pub fn pi_episode_request(id: u64) -> String {
     format!("{PODCAST_INDEX}/episodes/byid?id={id}")
 }
+/// An episode's enclosure as Podcast Index records it (`enclosureUrl`, `enclosureType`,
+/// `duration`), when it is a public stream.
+pub fn pi_stream(e: &serde_json::Value) -> Option<crate::model::Stream> {
+    let duration = match &e["duration"] {
+        serde_json::Value::String(s) => s.trim().parse().ok(),
+        v => v.as_u64(),
+    };
+    crate::model::Stream::public(
+        e["enclosureUrl"].as_str()?,
+        e["enclosureType"].as_str()?,
+        duration,
+        false,
+    )
+}
 /// Podcast Index's signed headers: the key, the time, and SHA-1 of key, secret and time.
 pub fn pi_headers(key: &str, secret: &str, now: i64) -> Vec<(&'static str, String)> {
     let hash = Sha1::digest(format!("{key}{secret}{now}").as_bytes());

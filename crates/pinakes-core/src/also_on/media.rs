@@ -174,7 +174,13 @@ pub struct TypeHints {
     /// name).
     pub title: Option<String>,
     pub title_description: Option<String>,
+    /// The audio an also-on source heard of for it ([`STREAMS`]), with that source.
+    pub stream: Option<(String, crate::model::Stream)>,
 }
+/// The also-on sources that hear of a stream, as the facts `stream_url`, `stream_type` and
+/// `stream_duration`, first the one a card takes: `podcasts`, an episode's enclosure, and
+/// `itunes`, an Apple Music track's preview (`preview: true`).
+pub const STREAMS: &[(&str, bool)] = &[("podcasts", false), ("itunes", true)];
 /// The hints of these resources (live rows only), from the sources that are on.
 pub async fn type_hints(
     pool: &sqlx::PgPool,
@@ -214,6 +220,39 @@ pub async fn type_hints(
             hints.title_description = Some(value);
         }
     }
+    let streams: Vec<(String, String, String, String)> = sqlx::query_as(&format!(
+        "SELECT resource_id,source,name,min(value) FROM resource_fact WHERE resource_id=ANY($1) AND source=ANY($2) AND name IN ('stream_url','stream_type','stream_duration') AND expires_at>now() AND {sources} GROUP BY resource_id,source,name"
+    ))
+    .bind(ids)
+    .bind(STREAMS.iter().map(|(s, _)| *s).collect::<Vec<_>>())
+    .fetch_all(pool)
+    .await?;
+    let mut heard: std::collections::HashMap<(String, String), [Option<String>; 3]> =
+        Default::default();
+    for (id, source, name, value) in streams {
+        let at = match name.as_str() {
+            "stream_url" => 0,
+            "stream_type" => 1,
+            _ => 2,
+        };
+        heard.entry((id, source)).or_default()[at] = Some(value);
+    }
+    for (source, preview) in STREAMS.iter().rev() {
+        for ((id, from), [url, kind, seconds]) in &heard {
+            if from != source {
+                continue;
+            }
+            let stream = crate::model::Stream::public(
+                url.as_deref().unwrap_or_default(),
+                kind.as_deref().unwrap_or_default(),
+                seconds.as_deref().and_then(|s| s.parse().ok()),
+                *preview,
+            );
+            if let Some(stream) = stream {
+                out.entry(id.clone()).or_default().stream = Some((from.clone(), stream));
+            }
+        }
+    }
     Ok(out)
 }
 
@@ -227,10 +266,28 @@ impl TypeHints {
                 fingerprint(&[title, self.title_description.as_deref().unwrap_or("")])
             }),
             "films" => self.title_type.as_deref().map(|t| fingerprint(&[t])),
-            "podcasts" => self.episode.then(|| fingerprint(&["episode"])),
-            _ => None,
+            // An episode without a stream keeps the fingerprint it had before streams.
+            "podcasts" => match self.heard("podcasts") {
+                None => self.episode.then(|| fingerprint(&["episode"])),
+                Some(s) => Some(stream_fingerprint(self.episode.then_some("episode"), s)),
+            },
+            source => self.heard(source).map(|s| stream_fingerprint(None, s)),
         }
     }
+}
+impl TypeHints {
+    /// The stream `source` heard of, when the card takes that source's.
+    fn heard(&self, source: &str) -> Option<&crate::model::Stream> {
+        self.stream
+            .as_ref()
+            .filter(|(from, _)| from == source)
+            .map(|(_, s)| s)
+    }
+}
+/// The fingerprint of a stream a source wrote into a card, with what else it wrote.
+fn stream_fingerprint(also: Option<&str>, s: &crate::model::Stream) -> String {
+    let seconds = s.duration_s.map(|d| d.to_string()).unwrap_or_default();
+    fingerprint(&[also.unwrap_or(""), &s.url, &s.media_type, &seconds])
 }
 /// A short fingerprint of the values a source wrote into a card (`ResourceMeta::hinted_by`).
 pub fn fingerprint(values: &[&str]) -> String {
@@ -323,6 +380,11 @@ pub fn type_card(uri: &str, hints: &TypeHints, doc: &mut crate::model::ResourceM
         }
         None => {}
     }
+    // A card without a stream of its own takes the one a source heard of.
+    if let (None, Some((source, stream))) = (&doc.stream, &hints.stream) {
+        doc.stream = Some(stream.clone());
+        self::hinted(doc, source, hints.finding(source).unwrap_or_default());
+    }
 }
 
 /// An IMDb title ID.
@@ -413,6 +475,82 @@ mod tests {
     use super::*;
     use crate::hubs::wikidata::Item;
     use std::collections::BTreeMap;
+
+    /// A card without a stream of its own takes the one a source heard of, fingerprinted so a
+    /// change reads it again; a card's own stays. An episode without a stream keeps the
+    /// fingerprint it had before streams, so no stored card is read again for nothing.
+    #[test]
+    fn a_card_takes_the_stream_a_source_heard_of() {
+        use crate::model::{ResourceMeta, Stream};
+        let heard = Stream::public(
+            "https://cdn.example.org/ep.mp3",
+            "audio/mpeg",
+            Some(60),
+            false,
+        )
+        .unwrap();
+        let page = "https://example.org/episode/1";
+        let hints = TypeHints {
+            episode: true,
+            stream: Some(("podcasts".into(), heard.clone())),
+            ..Default::default()
+        };
+        let mut doc = ResourceMeta::new(page, "web", 60);
+        type_card(page, &hints, &mut doc);
+        assert_eq!(doc.type_name, "PodcastEpisode");
+        assert_eq!(doc.stream.as_ref(), Some(&heard));
+        assert_eq!(
+            doc.hinted_by["podcasts"],
+            hints.finding("podcasts").unwrap()
+        );
+        // Another stream is another finding: the stored card is outdated.
+        let moved = TypeHints {
+            stream: Some((
+                "podcasts".into(),
+                Stream::public(
+                    "https://cdn.example.org/ep2.mp3",
+                    "audio/mpeg",
+                    Some(60),
+                    false,
+                )
+                .unwrap(),
+            )),
+            ..hints.clone()
+        };
+        assert_ne!(moved.finding("podcasts"), hints.finding("podcasts"));
+        let episode_only = TypeHints {
+            episode: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            episode_only.finding("podcasts"),
+            Some(fingerprint(&["episode"]))
+        );
+        // A card that plays already keeps its own.
+        let own =
+            Stream::public("https://cdn.example.org/own.mp3", "audio/mpeg", None, false).unwrap();
+        let mut doc = ResourceMeta::new(page, "web", 60);
+        doc.stream = Some(own.clone());
+        type_card(page, &hints, &mut doc);
+        assert_eq!(doc.stream, Some(own));
+        // iTunes' preview on an Apple Music track (a card `music::type_card` typed).
+        let preview = Stream::public(
+            "https://audio-ssl.itunes.apple.com/a/mzaf_1.plus.aac.p.m4a",
+            "audio/mp4",
+            None,
+            true,
+        )
+        .unwrap();
+        let track = "https://music.apple.com/us/song/1";
+        let mut doc = ResourceMeta::new(track, "media", 60);
+        let hints = TypeHints {
+            stream: Some(("itunes".into(), preview.clone())),
+            ..Default::default()
+        };
+        type_card(track, &hints, &mut doc);
+        assert_eq!(doc.stream, Some(preview));
+        assert_eq!(doc.hinted_by["itunes"], hints.finding("itunes").unwrap());
+    }
 
     fn item(ids: &[(&str, &[&str])]) -> Item {
         Item {

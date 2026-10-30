@@ -209,7 +209,8 @@ pub struct ResourceMeta {
     pub source: String,
     /// The also-on sources whose findings the queue wrote into this card itself, each with a
     /// fingerprint of every value it wrote (`titles`: the name and description; `films`,
-    /// `podcasts` or an artist's source: the type; `media::type_card`, `music::type_card`). A
+    /// `podcasts` or an artist's source: the type; `podcasts` and `itunes`: the stream;
+    /// `media::type_card`, `music::type_card`). A
     /// 304 reuses the card only while each of them is on and finds exactly that now
     /// (`media::outdated`); else the page is read again in full. Read from the list of sources
     /// an earlier build stored, as unknown fingerprints.
