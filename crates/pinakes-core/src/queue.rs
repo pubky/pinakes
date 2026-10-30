@@ -440,8 +440,9 @@ async fn guarded_finish_job(
     result: Result<crate::model::ResourceMeta>,
 ) -> Result<()> {
     // An unchanged page is its accepted document, typed again like a new one (what the also-on
-    // sources found since may name or type it). One that still carries what a switched-off
-    // source gave it is not: its validators go and the page is read again in full, once.
+    // sources found since may name or type it). One that carries a finding of a source that no
+    // longer gives it (switched off, or its row expired: `media::outdated`) is not: its
+    // validators go and the page is read again in full, once.
     let result = match result {
         Err(error) if error.is::<crate::resolver::NotModified>() => {
             let value: Option<serde_json::Value> =
@@ -459,10 +460,7 @@ async fn guarded_finish_job(
                     doc
                 });
             match cached {
-                Ok(doc)
-                    if crate::also_on::media::holds_switched_off(pool, &job.id, &job.uri, &doc)
-                        .await? =>
-                {
+                Ok(doc) if crate::also_on::media::outdated(pool, &job.id, &doc).await? => {
                     sqlx::query("UPDATE event_fetch SET validators='{}' WHERE resource_id=$1 AND validators<>'{}'")
                         .bind(&job.id)
                         .execute(pool)
@@ -483,11 +481,13 @@ async fn guarded_finish_job(
     let result = match result {
         Ok(mut doc) if crate::music::parse(&job.uri).is_some() => {
             // What the also-on sources said about the artist (a person or a group), if anything.
-            let artist_type: Option<String> = sqlx::query_scalar("SELECT value FROM resource_fact WHERE resource_id=$1 AND name='artist_type' AND expires_at>now() AND source NOT IN (SELECT source FROM also_on_source_off) ORDER BY value LIMIT 1")
-                .bind(&job.id)
-                .fetch_optional(pool)
-                .await?;
-            crate::music::type_card(&job.uri, artist_type.as_deref(), &mut doc);
+            let artist = crate::also_on::media::artist_type(pool, &job.id).await?;
+            crate::music::type_card(&job.uri, artist.as_ref().map(|(t, _)| t.as_str()), &mut doc);
+            if let Some((_, source)) =
+                artist.filter(|(t, _)| t == "Person" && doc.type_name == "Person")
+            {
+                crate::also_on::media::hinted(&mut doc, &source);
+            }
             Ok(doc)
         }
         // A card of a service the lookups know is named after it, as its derived links are.

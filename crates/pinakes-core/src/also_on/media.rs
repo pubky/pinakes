@@ -180,20 +180,7 @@ pub async fn type_hints(
     pool: &sqlx::PgPool,
     ids: &[String],
 ) -> Result<std::collections::HashMap<String, TypeHints>> {
-    hints(pool, ids, false).await
-}
-/// The hints of these resources' live rows, from the sources that are on, or with `off` from
-/// those switched off (`also_on_source_off`).
-async fn hints(
-    pool: &sqlx::PgPool,
-    ids: &[String],
-    off: bool,
-) -> Result<std::collections::HashMap<String, TypeHints>> {
-    let sources = if off {
-        "source IN (SELECT source FROM also_on_source_off)"
-    } else {
-        "source NOT IN (SELECT source FROM also_on_source_off)"
-    };
+    let sources = "source NOT IN (SELECT source FROM also_on_source_off)";
     let mut out: std::collections::HashMap<String, TypeHints> = Default::default();
     let episodes: Vec<String> = sqlx::query_scalar(&format!(
         "SELECT DISTINCT resource_id FROM resource_key WHERE resource_id=ANY($1) AND source='podcasts' AND key LIKE 'podcast:item:%' AND expires_at>now() AND {sources}"
@@ -230,37 +217,53 @@ async fn hints(
     Ok(out)
 }
 
-/// Whether a card's stored document still carries what a switched-off source gave it when it
-/// was read: the name, description or type `type_card` would write from the off sources' live
-/// rows, or an artist's type (`music::type_card`). Such a document is not reused on a 304
-/// (`queue`): the page is read again in full, without them.
-pub async fn holds_switched_off(
+impl TypeHints {
+    /// The sources these hints come from (`titles`, `films`, `podcasts`).
+    pub fn sources(&self) -> Vec<&'static str> {
+        [
+            (self.title.is_some(), "titles"),
+            (self.title_type.is_some(), "films"),
+            (self.episode, "podcasts"),
+        ]
+        .into_iter()
+        .filter_map(|(found, source)| found.then_some(source))
+        .collect()
+    }
+}
+/// The also-on source of a live `artist_type` fact, from the sources that are on, and its value.
+pub async fn artist_type(pool: &sqlx::PgPool, id: &str) -> Result<Option<(String, String)>> {
+    Ok(sqlx::query_as("SELECT value,source FROM resource_fact WHERE resource_id=$1 AND name='artist_type' AND expires_at>now() AND source NOT IN (SELECT source FROM also_on_source_off) ORDER BY value LIMIT 1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?)
+}
+/// Whether a stored card carries a finding of a source (`ResourceMeta::hinted_by`) that no longer
+/// gives it: switched off, or its row expired or gone, whatever the value was. A 304 does not
+/// reuse such a card (`queue`): the page is read again in full. A source that still finds it,
+/// changed or not, writes its current value over the old one.
+pub async fn outdated(
     pool: &sqlx::PgPool,
     id: &str,
-    uri: &str,
     doc: &crate::model::ResourceMeta,
 ) -> Result<bool> {
-    let shown = |d: &crate::model::ResourceMeta| {
-        (d.name.clone(), d.description.clone(), d.type_name.clone())
-    };
-    let off = hints(pool, &[id.to_owned()], true)
+    if doc.hinted_by.is_empty() {
+        return Ok(false);
+    }
+    let hints = type_hints(pool, &[id.to_owned()])
         .await?
         .remove(id)
         .unwrap_or_default();
-    if off != TypeHints::default() {
-        let mut probe = doc.clone();
-        type_card(uri, &off, &mut probe);
-        if shown(&probe) == shown(doc) {
-            return Ok(true);
-        }
+    let mut finding = hints.sources();
+    let artist = artist_type(pool, id).await?;
+    finding.extend(artist.as_ref().map(|(_, source)| source.as_str()));
+    Ok(doc.hinted_by.iter().any(|s| !finding.contains(&s.as_str())))
+}
+/// Record that `source`'s finding is written into the card.
+pub fn hinted(doc: &mut crate::model::ResourceMeta, source: &str) {
+    if !doc.hinted_by.iter().any(|s| s == source) {
+        doc.hinted_by.push(source.to_owned());
+        doc.hinted_by.sort();
     }
-    let artist: Option<String> = sqlx::query_scalar("SELECT value FROM resource_fact WHERE resource_id=$1 AND name='artist_type' AND expires_at>now() AND source IN (SELECT source FROM also_on_source_off) ORDER BY value LIMIT 1")
-        .bind(id)
-        .fetch_optional(pool)
-        .await?;
-    Ok(artist.as_deref() == Some("Person")
-        && doc.type_name == "Person"
-        && crate::music::parse(uri).is_some_and(|l| l.level == crate::music::Level::Artist))
 }
 
 /// A Goodreads ID: digits, then an optional title slug (`1540236.The_Hobbit`, `4671-the-great-gatsby`).
@@ -284,12 +287,22 @@ pub fn type_card(uri: &str, hints: &TypeHints, doc: &mut crate::model::ResourceM
         .into_iter()
         .find(|k| *k == doc.type_name);
     if let Some(title) = &hints.title {
-        crate::sources::apply_title(uri, title, hints.title_description.as_deref(), doc);
+        if crate::sources::apply_title(uri, title, hints.title_description.as_deref(), doc) {
+            self::hinted(doc, "titles");
+        }
     }
     match link_type(uri) {
-        Some("CreativeWork") => doc.set_type(hinted.or(own).unwrap_or("CreativeWork")),
+        Some("CreativeWork") => {
+            if hinted.is_some() {
+                self::hinted(doc, "films");
+            }
+            doc.set_type(hinted.or(own).unwrap_or("CreativeWork"))
+        }
         Some(kind) => doc.set_type(kind),
-        None if hints.episode => doc.set_type("PodcastEpisode"),
+        None if hints.episode => {
+            self::hinted(doc, "podcasts");
+            doc.set_type("PodcastEpisode")
+        }
         None => {}
     }
 }
