@@ -542,7 +542,7 @@ resource (or a feed) when an event's start, place, name or document changes. Eac
 25 queued resources and up to 200 of their new or changed events, and the next pass follows at once
 while there was work, else after five seconds. An event's normalised name, place and identifiers
 are stored once read, and its pairs are matched among the events already read through their start
-index, round those starting within 36 hours. An event keeps its best twenty pairs and is named by at most forty
+index, round those starting within 50 hours (an all-day listing and a timed one on one local date may start that far apart, each in its own zone). An event keeps its best twenty pairs and is named by at most forty
 (`limits.same_event_incoming_kept`), and never names one whose forty all rank above it; a read
 examines at most a hundred candidates, with room or not, and one that runs out with room left
 goes on from where it stopped in a later read; one that changes or goes (out of the window, or
