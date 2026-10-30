@@ -178,12 +178,25 @@ async fn main() -> Result<()> {
         };
         let mut result =
             json!({"id":id,"uri":uri,"at":chrono::Utc::now(),"ua_profile":m.ua_profile});
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(15),
-            resolver.probe_manifest(uri, &m),
-        )
-        .await
-        {
+        // A platform's canary is read as the canary reads it: a listing's first event link.
+        let canary = m.canary.as_ref().is_some_and(|c| c.as_str() == uri);
+        let probe = async {
+            let target = if canary {
+                resolver.canary_target(&m).await?
+            } else {
+                uri.to_owned()
+            };
+            let doc = resolver.probe_manifest(&target, &m).await?;
+            anyhow::Ok((target, doc))
+        };
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(15), probe).await;
+        let outcome = outcome.map(|r| {
+            r.map(|(target, doc)| {
+                result["target"] = json!(target);
+                doc
+            })
+        });
+        match outcome {
             Ok(Ok(doc)) => {
                 result["document"] = json!(doc);
                 result["missing_fields"] = json!(m.missing_fields(&doc));

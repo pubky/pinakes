@@ -907,8 +907,9 @@
       "name",
       "start"
     ],
-    "canary": "https://infomaniak.events/en-ch/conferences/seminaire-des-autorites-2026/92392f2a-6711-4917-b9e9-60c88e8c550a/events/396911",
-    "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
+    "canary": "https://infomaniak.events/en-ch",
+    "canary_link": "/*/*/*/*/events/*",
+    "canary_note": "The listing's first event page: a current event, never one gone stale.",
     "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,

@@ -561,6 +561,30 @@ impl Resolver for PlatformResolver {
             seconds: 60,
         })?
     }
+    /// A platform whose canary is a listing (`Definition::canary_link`) reads the listing with its
+    /// user-agent profile and takes its first link of that form; any other reads its sample.
+    async fn canary_target(&self, m: &crate::adapter::Manifest) -> Result<String> {
+        let listing = m.canary.clone().context("no canary")?;
+        let Some(pattern) = super::definition(&m.source).and_then(|d| d.canary_link.clone()) else {
+            return Ok(listing.to_string());
+        };
+        let opts = FetchOptions {
+            user_agent: Some(profile(&m.ua_profile).into()),
+            ..Default::default()
+        };
+        let fetched = self.web.egress.fetch_with(listing.as_str(), &opts).await?;
+        upstream_status(&fetched)?;
+        if fetched.status != 200 {
+            return Err(anyhow::Error::new(crate::resolver::ErrorClass("http_4xx"))
+                .context(crate::resolver::Upstream(fetched.status)));
+        }
+        let base = fetched.url.clone();
+        crate::resolver::html::blocking(move || {
+            canary_link(&base, &String::from_utf8_lossy(&fetched.body), &pattern)
+        })
+        .await?
+        .ok_or_else(|| parse_error("the canary listing links no event of its form"))
+    }
     async fn probe_manifest(
         &self,
         uri: &str,
@@ -764,6 +788,23 @@ pub fn endpoint(
         _ => None,
     };
     Ok(result)
+}
+/// The first link of a canary listing (`base`, its HTML `text`) on the listing's host whose path
+/// has the form `pattern` (`canary_link_matches`).
+pub fn canary_link(base: &Url, text: &str, pattern: &str) -> Option<String> {
+    let html = crate::resolver::html::document(text).ok()?;
+    html.select(&scraper::Selector::parse("a[href]").unwrap())
+        .filter_map(|e| e.value().attr("href"))
+        .filter_map(|s| base.join(s).ok())
+        .find(|u| {
+            u.host_str() == base.host_str()
+                && matches!(u.scheme(), "http" | "https")
+                && super::canary_link_matches(pattern, u.path())
+        })
+        .map(|mut u| {
+            u.set_fragment(None);
+            u.to_string()
+        })
 }
 pub fn ics_link(_id: &str, base: &Url, text: &str) -> Option<String> {
     let html = crate::resolver::html::document(text).ok()?;

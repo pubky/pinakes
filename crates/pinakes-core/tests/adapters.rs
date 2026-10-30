@@ -2362,9 +2362,15 @@ async fn recorded_public_adapter_responses_replay_without_network(pool: PgPool) 
     for case in cases {
         let id = case["id"].as_str().unwrap();
         let manifest = adapters::manifest(adapters::definition(id).unwrap(), &cfg);
-        let result = platform
-            .probe_manifest(case["uri"].as_str().unwrap(), &manifest)
-            .await;
+        // A canary case reads its target as the canary does (a listing's first event link).
+        let target = if case["canary"] == true {
+            let target = platform.canary_target(&manifest).await.unwrap();
+            assert_eq!(target, case["target"].as_str().unwrap(), "{id}");
+            target
+        } else {
+            case["uri"].as_str().unwrap().to_owned()
+        };
+        let result = platform.probe_manifest(&target, &manifest).await;
         if case["error"] == true {
             assert!(result.is_err(), "{id}");
             continue;
@@ -5292,6 +5298,40 @@ async fn a_page_inherits_an_ics_uid_only_from_its_own_origin(pool: PgPool) {
     assert!(uids(&moved).is_empty(), "{:?}", moved.group_keys);
 }
 
+/// A canary link's form: as many path segments, `*` any one non-empty segment.
+#[test]
+fn a_canary_link_has_its_declared_form() {
+    let form = "/*/*/*/*/events/*";
+    for (path, matches) in [
+        (
+            "/en-ch/concerts/merci-johnny/7790028e-946c-4318-b64b-467fb0f9e071/events/390099",
+            true,
+        ),
+        ("/en-ch/concerts", false),
+        ("/en-ch/concerts/merci-johnny/7790028e/events/", false),
+        (
+            "/en-ch/concerts/merci-johnny/7790028e/events/390099/tickets",
+            false,
+        ),
+        ("/en-ch/concerts/merci-johnny/7790028e/shows/390099", false),
+    ] {
+        assert_eq!(adapters::canary_link_matches(form, path), matches, "{path}");
+    }
+    let listing: url::Url = "https://infomaniak.events/en-ch".parse().unwrap();
+    let html = r#"<a href="/en-ch/concerts">Concerts</a>
+        <a href="https://other.example/en-ch/a/b/c/events/1">elsewhere</a>
+        <a href="/en-ch/concerts/merci-johnny/7790028e-946c-4318-b64b-467fb0f9e071/events/390099#tickets">Merci Johnny</a>
+        <a href="/en-ch/dance/silahkan/264f9e74-5665-4208-9706-91200bd609a9/events/393415">Silahkan</a>"#;
+    assert_eq!(
+        adapters::service::canary_link(&listing, html, form).as_deref(),
+        Some("https://infomaniak.events/en-ch/concerts/merci-johnny/7790028e-946c-4318-b64b-467fb0f9e071/events/390099")
+    );
+    assert_eq!(
+        adapters::service::canary_link(&listing, "<a href=\"/en-ch\">x</a>", form),
+        None
+    );
+}
+
 /// A portal's calendar export that names the page in its `url` parameter (Guidle's
 /// `/iCalendar/?id=…&url=<page>`) is the page's own, and is read for its event. When the fetch
 /// refuses its content type, the refusal propagates: nothing is read as an event.
@@ -5360,4 +5400,54 @@ async fn a_portal_calendar_export_naming_its_page_is_read_and_its_refusal_propag
         refused.to_string().contains("content type is not allowed"),
         "{refused:#}"
     );
+}
+
+/// A listing canary runs on the listing's first event link: the event is read and the canary is
+/// healthy. The listing itself is no event.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_listing_canary_runs_on_its_first_event_link(pool: PgPool) {
+    use pinakes_core::{canary, config::CanaryConfig, telemetry::Metrics};
+    let listing = "https://infomaniak.events/en-ch";
+    let event = "https://infomaniak.events/en-ch/concerts/fixture/7790028e-946c-4318-b64b-467fb0f9e071/events/390099";
+    let start = (Utc::now() + Duration::days(30)).to_rfc3339();
+    let page = format!(
+        r#"<title>Fixture concert</title><script type="application/ld+json">{{"@context":"https://schema.org","@type":"Event","name":"Fixture concert","startDate":"{start}"}}</script>"#
+    );
+    let html = format!(
+        r#"<title>Events</title><a href="/en-ch/concerts">Concerts</a><a href="{event}">Fixture concert</a>"#
+    );
+    let cfg = EventConfig {
+        geocoding: false,
+        ..Default::default()
+    };
+    let manifest = adapters::manifest(adapters::definition("infomaniak").unwrap(), &cfg);
+    let egress = recorded_egress(vec![
+        (listing, &html, Value::Null),
+        (event, &page, Value::Null),
+    ]);
+    let platform = platform(&pool, cfg, egress);
+    let config = CanaryConfig::default();
+    let metrics = Metrics::new().unwrap();
+    assert!(canary::claim(&pool, &manifest, &config)
+        .await
+        .unwrap()
+        .is_none());
+    sqlx::query("UPDATE source_state SET canary_due_at=now() WHERE source='infomaniak'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let generation = canary::claim(&pool, &manifest, &config)
+        .await
+        .unwrap()
+        .unwrap();
+    canary::run_manifest(&pool, &platform, &manifest, &config, &metrics, generation)
+        .await
+        .unwrap();
+    let (ok, missing): (Option<bool>, Vec<String>) = sqlx::query_as(
+        "SELECT canary_ok,canary_missing FROM source_state WHERE source='infomaniak'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((ok, missing), (Some(true), vec![]));
 }

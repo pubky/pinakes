@@ -792,7 +792,10 @@ Canaries (`canary.enabled`) run every `limits.canary_interval_secs`, first one i
 startup, on the ordinary workers and host budgets; their state survives restarts and they never
 write documents, the OSM cache or changes. A successful result missing a declared field is
 `outcome=drift`; generic web declares no fields. A canary denied by host policy is skipped, and
-an over-budget sample is inconclusive. See [ops/README.md](../ops/README.md) for alert rules, the
+an over-budget sample is inconclusive. A platform whose canary names a listing page
+(`canary_link` in the table: Infomaniak) reads that listing's first event link of the declared
+form, so its canary never reads an event gone stale; any other reads its fixed sample, which its
+`canary_note` says when to rotate. See [ops/README.md](../ops/README.md) for alert rules, the
 dashboard and scrape setup; `scripts/check-ops` checks every alert and dashboard metric against
 the registry (and runs `promtool check rules` when installed).
 

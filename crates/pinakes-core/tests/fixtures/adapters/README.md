@@ -1,6 +1,6 @@
 # Recorded adapter regression inputs
 
-Public provider responses captured on 2026-10-16 (Guidle's on 2026-10-30),
+Public provider responses captured on 2026-10-16 (Guidle's and Infomaniak's on 2026-10-30),
 reused without repeat HTTP calls.
 `responses.json` preserves available capture time/status/headers and
 body SHA-256; bodies are gzip-compressed with deterministic metadata. The captured
@@ -14,6 +14,7 @@ compressed bodies without printing matched capabilities.
 The integration test uses mock DNS/transport and disables relay fallback. Thirty-nine
 produce the expected fields. Billetto/Rausgegangen/Reservix return 403, Dice returns
 503. Fever exceeds the page cap, and the selected Entradium page lacks event fields.
+Infomaniak's case is its canary: the listing, then its first event page.
 These cases test how failures surface; they do not show extraction working.
 Counts of time-windowed occurrences are not fixed, since the clock advances.
 
