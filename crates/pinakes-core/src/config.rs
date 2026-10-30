@@ -841,6 +841,16 @@ impl Config {
             .nexus_authorization
             .take()
             .filter(|a| !a.trim().is_empty());
+        for (name, rules) in [
+            ("egress.allow_hosts", &mut cfg.egress.allow_hosts),
+            ("egress.deny_hosts", &mut cfg.egress.deny_hosts),
+        ] {
+            for rule in rules.iter_mut() {
+                *rule = host_rule(rule).with_context(|| {
+                    format!("{name}: {rule:?} is not a host name or `*.` and one")
+                })?;
+            }
+        }
         let limits = cfg.limits.clone();
         limits.apply(&mut cfg);
         cfg.queue.groups = cfg.groups.clone();
@@ -1153,6 +1163,24 @@ fn merge(dst: &mut serde_json::Value, src: serde_json::Value) {
 
 /// An upstream service's URL is a web URL with a host, and holds no secret: no user info, query
 /// or fragment, which logs and errors would otherwise carry.
+/// An egress host rule as the hosts it is compared with are written (`Url::host_str`): trimmed,
+/// without a trailing dot, lower case and IDNA ASCII (`faß.de` is `xn--fa-hia.de`), a leading
+/// `*.` kept; an IP address in its canonical form (`[::1]`). `None` for what names no host.
+fn host_rule(rule: &str) -> Option<String> {
+    let rule = rule.trim().trim_end_matches('.');
+    let (wild, name) = match rule.strip_prefix("*.") {
+        Some(name) => (true, name),
+        None => (false, rule),
+    };
+    match url::Host::parse(name).ok()? {
+        url::Host::Domain(d) if !d.is_empty() && !d.contains('*') => {
+            Some(if wild { format!("*.{d}") } else { d })
+        }
+        url::Host::Domain(_) => None,
+        ip if !wild => Some(ip.to_string()),
+        _ => None,
+    }
+}
 fn plain_upstream(raw: &str) -> Result<bool> {
     let url = url::Url::parse(raw)?;
     Ok(matches!(url.scheme(), "http" | "https")
@@ -1558,6 +1586,65 @@ mod tests {
             refused.contains("PINAKES_NEXUS_AUTHORIZATION") && !refused.contains("ABCDEF"),
             "{refused}"
         );
+    }
+    /// Egress host rules may be written in Unicode or punycode, any case, with a trailing dot:
+    /// each is compared as URL hosts are written. One that names no host stops startup, naming
+    /// the rule.
+    #[test]
+    fn egress_host_rules_are_canonical_and_a_bad_one_is_refused() {
+        let rules = |deny: &[&str]| with(serde_json::json!({"egress": {"deny_hosts": deny}}));
+        let cfg = rules(&[
+            "faß.de",
+            "*.Bücher.DE.",
+            " Example.ORG ",
+            "xn--fa-hia.de",
+            "10.0.0.1",
+            "[::1]",
+        ])
+        .unwrap();
+        assert_eq!(
+            cfg.egress.deny_hosts,
+            [
+                "xn--fa-hia.de",
+                "*.xn--bcher-kva.de",
+                "example.org",
+                "xn--fa-hia.de",
+                "10.0.0.1",
+                "[::1]"
+            ]
+        );
+        let egress = crate::resolver::egress::Egress::new(cfg.egress.clone());
+        for denied in [
+            "https://xn--fa-hia.de/",
+            "https://faß.de/x",
+            "https://FAß.DE/",
+            "https://shop.bücher.de/",
+            "https://bücher.de/",
+            "https://shop.xn--bcher-kva.de/",
+            "https://example.org./",
+        ] {
+            assert!(!egress.allows(denied), "{denied}");
+        }
+        for allowed in ["https://fass.de/", "https://buecher.de/", "https://de/"] {
+            assert!(egress.allows(allowed), "{allowed}");
+        }
+        let allow = with(serde_json::json!({"egress": {"allow_hosts": ["*.bücher.de"]}})).unwrap();
+        assert_eq!(allow.egress.allow_hosts, ["*.xn--bcher-kva.de"]);
+        for bad in [
+            "exa mple.com",
+            "",
+            "*.",
+            "*",
+            "a*b.example",
+            "*.10.0.0.1",
+            "::1",
+        ] {
+            let refused = rules(&[bad]).unwrap_err().to_string();
+            assert!(
+                refused.contains("egress.deny_hosts") && refused.contains(&format!("{bad:?}")),
+                "{bad}: {refused}"
+            );
+        }
     }
     /// The facts cap has a floor: a recording's single-valued facts fit beside its ISRCs.
     #[test]
