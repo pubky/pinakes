@@ -1,9 +1,9 @@
 //! The hub clients through Egress, against recorded MusicBrainz and Wikidata answers.
+mod common;
 use pinakes_core::{
     also_on,
     api::{self, AppState},
     config::{Config, EgressConfig},
-    groups,
     hubs::{musicbrainz, wikidata, MbKind},
     model::ResourceMeta,
     resolver::{
@@ -562,9 +562,7 @@ async fn music_links_join_through_the_hubs_and_list_each_other(pool: sqlx::PgPoo
             "wikidata:Q202996 wikidata"
         ]
     );
-    groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     let app = api::router(AppState::new(pool.clone(), config).unwrap());
     let mut request = axum::http::Request::builder()
         .uri(format!("/v1/resources/{}", ids[0]))
@@ -704,9 +702,7 @@ async fn wikipedia_editions_join_through_their_item(pool: sqlx::PgPool) {
     also_on::drain(&pool, &cx, &also_on::registry(), 100)
         .await
         .unwrap();
-    groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     let app = api::router(AppState::new(pool.clone(), config).unwrap());
     let mut request = axum::http::Request::builder()
         .uri(format!("/v1/resources/{}", ids[1]))
@@ -989,9 +985,7 @@ async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
     also_on::drain(&pool, &cx, &also_on::registry(), 100)
         .await
         .unwrap();
-    groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     let rows = |sql: &'static str, id: String| {
         let pool = pool.clone();
         async move {
@@ -1146,9 +1140,7 @@ async fn a_spotify_track_joins_the_musicbrainz_recording(pool: sqlx::PgPool) {
     also_on::drain(&pool, &cx, &also_on::registry(), 100)
         .await
         .unwrap();
-    groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     let keys: Vec<String> = sqlx::query_scalar(
         "SELECT key||' '||source FROM resource_key WHERE resource_id=$1 ORDER BY key COLLATE \"C\"",
     )
@@ -1264,9 +1256,7 @@ async fn spotify_falls_back_to_musicbrainz(pool: sqlx::PgPool, spotify: Option<&
             .unwrap()
             .flatten();
     assert_eq!(last_error, error);
-    groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     let mut groups = vec![];
     for id in &ids {
         let group: Option<String> =
@@ -1357,9 +1347,7 @@ async fn a_deezer_barcode_names_the_apple_album_that_joins(pool: sqlx::PgPool) {
         seen.contains(&"api.deezer.com/album/41839661?".to_owned()),
         "{seen:?}"
     );
-    groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     let rows = |sql: &'static str, id: String| {
         let pool = pool.clone();
         async move {
@@ -1689,9 +1677,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     also_on::drain(&pool, &cx, &also_on::registry(), 100)
         .await
         .unwrap();
-    groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     let rows = |sql: &'static str, id: String| {
         let pool = pool.clone();
         async move {
@@ -2350,9 +2336,7 @@ async fn discogs_joins_at_its_level(pool: sqlx::PgPool) {
     also_on::drain(&pool, &cx, &also_on::registry(), 100)
         .await
         .unwrap();
-    groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     let rows = |sql: &'static str, id: String| {
         let pool = pool.clone();
         async move {
