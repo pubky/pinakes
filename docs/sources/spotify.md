@@ -30,6 +30,11 @@ look its URL up exactly, never by title or artist, and neither needs this one.
     URL cleanup folds the others), for a track (a recording, or an episode), an album (a
     release), an artist, and a show (a series). It takes no playlists. Every spelling Pinakes
     folds is that URL ([aliases](../api.md#aliases)), and that is the URL asked.
+  - **Links stored before their spelling folded** (the embedded player's: an older build kept
+    each as a link of its own) become aliases at `pinakesd reextract web media`, which selects
+    the routes they are stored on. `open.spotify.com/embed/…` is on `media` (`web` with
+    `[cards.media] enabled = false`), and `embed.spotify.com/?uri=…` on `web`, so
+    `reextract web` alone leaves the first kind. `reextract all` covers both.
   - **Coverage is partial:** only links an editor added. For example, `…/track/6LgJvl0Xdtc73RJ1mmpotq` is
     related to the recording "Paranoid Android" (9f9cf187-d6f9-437f-9d98-d59cdbd52757), and
     `…/album/6dVIqQ8qmQ5GBnJ9shOYGE` to the release "OK Computer"; but
@@ -91,10 +96,15 @@ credentials (above):
   `forbidden`, and `pinakes_also_on_service_errors_total{service="spotify",class="forbidden"}`;
 - the Spotify links read meanwhile keep what Spotify gave them before and wait with
   `spotify_auth` in `also_on_dirty.last_error`;
-- the refusal is held five minutes, so Spotify gets one token request and one API request at
-  most every five minutes, each answered 403 again.
+- the refusal is held five minutes, and Spotify is asked nothing while it holds, so it gets one
+  token request and one API request at most every five minutes, each answered 403 again;
+- each link's own retry is a failed also-on run's: `limits.also_on_retry_secs` (five minutes)
+  after its first refusal, doubling with each one after, up to an hour.
 
 The remedy is the owner's: take out or renew Premium on the account that owns the app. Spotify
-then answers the same app again, and Pinakes asks it when the hold ends, within five minutes,
-with no new credentials and no restart. Until then, to stop asking, remove the credentials or
-turn the source off (`[also_on.sources.spotify] enabled = false`).
+then answers the same app again, with no new credentials and no restart. Pinakes asks it at the
+first link retry due after the hold has ended, and that retry is the link's own: five minutes
+after a link's first refusal, then 10, 20 and 40 minutes, and an hour after its fifth and each
+one after. To ask for every link at once, run `pinakesd reextract also-on` with the daemon
+stopped (it queues every resource's also-on lookups, not only Spotify's). Until then, to stop
+asking, remove the credentials or turn the source off (`[also_on.sources.spotify] enabled = false`).

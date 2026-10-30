@@ -1596,6 +1596,58 @@ async fn invalid_non_event_feed_clock_has_its_own_rejection_reason(pool: PgPool)
     );
 }
 
+/// Spotify's embedded-player links an older build stored as links of their own become aliases of
+/// their track at `reextract` of the route each is stored on (Codex's review of
+/// spotify-fallbacks-1): `open.spotify.com/embed/…` is on `media`, so `reextract web` folds only
+/// `embed.spotify.com`, and `reextract web media` both.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn reextract_folds_a_stored_spotify_embed_on_its_own_route(pool: PgPool) {
+    let track = "https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq";
+    let player = "https://open.spotify.com/embed/track/6LgJvl0Xdtc73RJ1mmpotq";
+    let retired = "https://embed.spotify.com/?uri=spotify:track:6LgJvl0Xdtc73RJ1mmpotq";
+    assert_eq!(pinakes_core::resolver::classify(player), Some("media"));
+    assert_eq!(pinakes_core::resolver::classify(retired), Some("web"));
+    let root = store::ensure_resource(&pool, track).await.unwrap();
+    let mut ids = std::collections::BTreeMap::new();
+    for uri in [player, retired] {
+        ids.insert(uri, store::ensure_resource(&pool, uri).await.unwrap());
+    }
+    // As the older build left them: no alias, each on its route.
+    sqlx::query("DELETE FROM resource_alias")
+        .execute(&pool)
+        .await
+        .unwrap();
+    for (uri, route) in [(player, "media"), (retired, "web")] {
+        sqlx::query("UPDATE resource SET resolver=$2,status='ok' WHERE id=$1")
+            .bind(&ids[uri])
+            .bind(route)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let root_of = |uri: &str| {
+        let (pool, id) = (pool.clone(), ids[uri].clone());
+        async move {
+            sqlx::query_scalar::<_, String>("SELECT root_id FROM resource_alias WHERE alias_id=$1")
+                .bind(id)
+                .fetch_optional(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    queue::reextract(&pool, &["web".into()]).await.unwrap();
+    assert_eq!(root_of(retired).await, Some(root.clone()));
+    assert_eq!(
+        root_of(player).await,
+        None,
+        "`web` left the media route's embed"
+    );
+    queue::reextract(&pool, &["web".into(), "media".into()])
+        .await
+        .unwrap();
+    assert_eq!(root_of(player).await, Some(root));
+}
+
 /// `pinakesd reextract <route…|all>` re-queues only the selected rows, now, fenced by a
 /// generation bump, without their HTTP validators.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
