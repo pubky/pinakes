@@ -1163,20 +1163,29 @@ fn merge(dst: &mut serde_json::Value, src: serde_json::Value) {
 
 /// An upstream service's URL is a web URL with a host, and holds no secret: no user info, query
 /// or fragment, which logs and errors would otherwise carry.
-/// An egress host rule as the hosts it is compared with are written (`Url::host_str`): trimmed,
-/// without a trailing dot, lower case and IDNA ASCII (`faß.de` is `xn--fa-hia.de`), a leading
-/// `*.` kept; an IP address in its canonical form (`[::1]`). `None` for what names no host.
+/// An egress host rule as the hosts it is compared with are written (`Url::host_str`, its
+/// trailing dot dropped as `Egress::allows_host` drops it): trimmed, lower case and IDNA ASCII
+/// (`faß.de` is `xn--fa-hia.de`), a leading `*.` kept, without trailing dots (`.`, and the
+/// full stops IDNA maps to one: `。`, `．`, `｡`, `%2e`); an IP address in its canonical form
+/// (`[::1]`). `None` for what names no host.
 fn host_rule(rule: &str) -> Option<String> {
-    let rule = rule.trim().trim_end_matches('.');
+    let rule = rule.trim();
     let (wild, name) = match rule.strip_prefix("*.") {
         Some(name) => (true, name),
         None => (false, rule),
     };
     match url::Host::parse(name).ok()? {
-        url::Host::Domain(d) if !d.is_empty() && !d.contains('*') => {
-            Some(if wild { format!("*.{d}") } else { d })
+        url::Host::Domain(d) => {
+            // Only after the mapping: a full stop is a dot once IDNA has read it.
+            let d = d.trim_end_matches('.');
+            (!d.is_empty() && !d.contains('*') && !d.starts_with('.')).then(|| {
+                if wild {
+                    format!("*.{d}")
+                } else {
+                    d.to_owned()
+                }
+            })
         }
-        url::Host::Domain(_) => None,
         ip if !wild => Some(ip.to_string()),
         _ => None,
     }
@@ -1630,6 +1639,19 @@ mod tests {
         }
         let allow = with(serde_json::json!({"egress": {"allow_hosts": ["*.bücher.de"]}})).unwrap();
         assert_eq!(allow.egress.allow_hosts, ["*.xn--bcher-kva.de"]);
+        // A trailing full stop, in any of the forms IDNA maps to a dot, goes like a dot.
+        for dot in [".", "。", "．", "｡", "%2e", "%2E", "..", ".。"] {
+            let cfg = rules(&[&format!("*.bücher.de{dot}"), &format!("faß.de{dot}")]).unwrap();
+            assert_eq!(
+                cfg.egress.deny_hosts,
+                ["*.xn--bcher-kva.de", "xn--fa-hia.de"],
+                "{dot}"
+            );
+            let egress = crate::resolver::egress::Egress::new(cfg.egress.clone());
+            for denied in ["https://shop.bücher.de/", "https://faß.de/"] {
+                assert!(!egress.allows(denied), "{dot} {denied}");
+            }
+        }
         for bad in [
             "exa mple.com",
             "",
@@ -1638,6 +1660,11 @@ mod tests {
             "a*b.example",
             "*.10.0.0.1",
             "::1",
+            ".",
+            "。",
+            "%2e",
+            "*.。",
+            "..example",
         ] {
             let refused = rules(&[bad]).unwrap_err().to_string();
             assert!(
