@@ -1045,13 +1045,15 @@ questions, a category's products, a blog's posts. An entry is an entity naming a
 `url`, else `@id`, is another address) or one among several listed as a page's `mainEntity`; an
 entity naming no page is the page's own (a product page's variants, a theme's and a plugin's
 node for one event), as is one whose `url`, `@id` or `mainEntityOfPage` is the page under any of
-its addresses (the one asked for, the one fetched, its head canonical: an AMP page's article
-names the canonical). The entries
+its addresses (the one asked for, the one fetched, its head canonical, its `og:url`: an AMP
+page's article or event names the canonical), on the web route and the event route alike. The
+entries
 are parts of the page, never its subject, and are left out before the page's JSON-LD is read,
 whichever scripts hold them: the card is the page's own entity (the artist's `MusicGroup` on
 its concert list) or else the page (a `WebPage` named by its title), not the first entry. Two
-entries with one `@id`, `url` or name are one, and on the event route the same event in several
-scripts is read as one: what the first lacks (a start, a description) comes from the next. On
+entries with one `url` (else one `@id`, else one name) are one, and on the event route the same
+event in several scripts is read as one, whatever `@id` each script gives it: what the first
+lacks (a start, a description) comes from the next. On
 the event route such a list yields no event, in the page's JSON-LD and in a platform's embedded
 state alike. A music object's page (a track, an album, an
 artist) treats its video (`VideoObject`) as a part too: the card is the track, named by the

@@ -4479,3 +4479,61 @@ async fn an_artists_concert_list_on_a_platform_is_the_artist_through_the_whole_r
     assert!(doc.start.is_none(), "{:?}", doc.start);
     assert!(!doc.type_path.iter().any(|t| t == "Event"));
 }
+
+/// An event page under another address (an AMP copy whose head canonical is the event page):
+/// its MusicEvent names the canonical, a related event is listed beside it. Through the whole
+/// event route the card is the event, with its start, not a page without one.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn an_event_naming_the_pages_canonical_is_the_pages_event_through_the_whole_route(
+    pool: PgPool,
+) {
+    let egress = Egress::with_backends(
+        EgressConfig::default(),
+        Arc::new(PublicDns),
+        Arc::new(FailedTls(Mutex::new(vec![]))),
+    );
+    let service = pinakes_core::event::service::EventService {
+        pool: pool.clone(),
+        config: EventConfig::default(),
+        osm: Arc::new(OsmResolver::new(pool, OsmConfig::default()).unwrap()),
+    };
+    let asked = "https://gigs.example/concert/amp";
+    let body = r#"<html><head><title>Radiohead @ Arena</title><link rel="canonical" href="https://gigs.example/concert"><script type="application/ld+json">{"@type":"MusicEvent","name":"Radiohead @ Arena","url":"https://gigs.example/concert","startDate":"2027-05-03T19:30:00","location":{"@type":"Place","name":"Arena"}}</script><script type="application/ld+json">{"@type":"MusicEvent","name":"Other night","url":"https://gigs.example/other","startDate":"2027-05-09T19:30:00"}</script></head><body></body></html>"#;
+    let fetched = Fetched {
+        permanent_redirect: false,
+        truncated: false,
+        validators: Default::default(),
+        url: url::Url::parse(asked).unwrap(),
+        content_type: "text/html".into(),
+        status: 200,
+        retry_after_secs: 60,
+        location: None,
+        body: body.as_bytes().to_vec(),
+    };
+    let input = fetched.clone();
+    let card = pinakes_core::resolver::html::blocking(move || {
+        pinakes_core::resolver::web::extract(asked, &input, 3600)
+            .unwrap()
+            .doc
+    })
+    .await
+    .unwrap();
+    assert_eq!(card.type_name, "MusicEvent", "the web route");
+    let doc = service
+        .page(
+            asked,
+            &fetched,
+            card,
+            &egress,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+    assert_eq!(doc.type_name, "MusicEvent", "{doc:?}");
+    assert_eq!(doc.name.as_deref(), Some("Radiohead @ Arena"));
+    assert!(doc.start.is_some(), "{doc:?}");
+    assert_eq!(
+        doc.event.venue.as_ref().map(|v| v.text.as_str()),
+        Some("Arena")
+    );
+}

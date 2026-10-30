@@ -314,6 +314,7 @@ pub fn parse(id: &str, uri: &str, body: &[u8]) -> Option<ResourceMeta> {
     let text = String::from_utf8_lossy(body);
     let base = Url::parse(uri).ok()?;
     let mut roots = vec![];
+    let mut pages: Vec<String> = page::page_identity(uri).into_iter().collect();
     // State embedded in a page script is HTML-escaped like JSON-LD; an API's JSON body is not.
     let from_scripts = match serde_json::from_str::<Value>(&text) {
         Ok(v) => {
@@ -327,6 +328,7 @@ pub fn parse(id: &str, uri: &str, body: &[u8]) -> Option<ResourceMeta> {
         .then(|| crate::resolver::html::document(&text).ok())
         .flatten()
     {
+        pages = page::page_addresses(uri, &base, &html);
         for node in html.select(&scraper::Selector::parse("script").unwrap()) {
             if roots.len() >= 256 || std::time::Instant::now() >= deadline {
                 break;
@@ -411,8 +413,8 @@ pub fn parse(id: &str, uri: &str, body: &[u8]) -> Option<ResourceMeta> {
     // concerts) is a list, and yields no event here either, not from its JSON-LD
     // (`page::jsonld_all`) and not from the state its scripts embed (the candidates below).
     let values: Vec<&Value> = roots.iter().collect();
-    page::jsonld_all(&mut doc, &values, &base);
-    if !doc.type_path.contains(&"Event".into()) && page::lists_events(&values, &base) {
+    page::jsonld_all(&mut doc, &values, &base, &pages);
+    if !doc.type_path.contains(&"Event".into()) && page::lists_events(&values, &base, &pages) {
         return None;
     }
     let mut nodes = 50000;

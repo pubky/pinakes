@@ -522,15 +522,8 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
         })
         .collect();
     // The page's addresses, for what names it: the one asked for, the one fetched, its head
-    // canonical (an AMP page's article names the canonical).
-    let pages: Vec<String> = [uri.to_owned(), fetched.url.to_string()]
-        .into_iter()
-        .chain(
-            html.select(&selector("head link[rel~=canonical][href]"))
-                .filter_map(|l| origin_url(&fetched.url, l.value().attr("href")?)),
-        )
-        .filter_map(|u| crate::event::page::page_identity(&u))
-        .collect();
+    // canonical and og:url (an AMP page's article names the canonical).
+    let pages = crate::event::page::page_addresses(uri, &fetched.url, &html);
     let scripts = without_parts(scripts, &fetched.url, &pages);
     let page: Vec<String> = [uri.to_owned(), fetched.url.to_string()]
         .into_iter()

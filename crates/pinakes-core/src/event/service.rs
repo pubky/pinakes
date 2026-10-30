@@ -236,7 +236,15 @@ impl EventService {
                             values.push(v);
                         }
                     }
-                    page::jsonld_all(&mut event, &values.iter().collect::<Vec<_>>(), &fetched.url);
+                    // The page's addresses (the one asked for, the one fetched, its canonical,
+                    // its og:url): an event naming any of them is the page's own.
+                    let pages = page::page_addresses(uri, &fetched.url, &html);
+                    page::jsonld_all(
+                        &mut event,
+                        &values.iter().collect::<Vec<_>>(),
+                        &fetched.url,
+                        &pages,
+                    );
                     if let Some(v) = values.first().filter(|_| body_json) {
                         page::activity(&mut event, v, &fetched.url);
                     }
