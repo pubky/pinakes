@@ -1078,7 +1078,7 @@ record or a product database (their pages say which).
 - Its barcode, `facts.gtin`, is the product's own GTIN as GTIN-13: from its `gtin13`,
   `gtin`, `gtin12`, `gtin14`, `gtin8` or `isbn` (a book's), or its one offer's, with the check
   digit verified. The barcode, `sku` and `mpn` come only from the page's own product (in the
-  page's head, or naming the page), never from another product a page lists; a page with
+  page's head, or naming the page; a page served as JSON-LD is all head, under the same rules), never from another product a page lists; a page with
   several products of its own (a category page's head list) states the barcode of none. One
   product described twice (by the same `@id`, else `url`) is one product; two `@id`s are two
   products, whatever `url` they share. A product naming the page only by a fragment (its `url`, else
