@@ -205,7 +205,10 @@ INSERT INTO same_recording_dirty(resource_id) SELECT resource_id FROM same_recor
 Web fetches bypass environment proxies, validate every DNS answer, pin the checked addresses and
 repeat the policy at every redirect (three hops; HTML meta refresh and literal JavaScript
 redirects count). `egress.allow_hosts` and `egress.deny_hosts` take exact names or
-`*.example.org`; they never override the IP policy, and deny wins. Pages are capped at 1 MB of
+`*.example.org`; they never override the IP policy, and deny wins. A rule may be written in
+Unicode or punycode, in any case and with a trailing dot or full stop (`.`, `。`, `．`, `｡`,
+`%2e`; `faß.de` and `xn--fa-hia.de` are one rule); an IP address is written as in a URL (`10.0.0.1`, `[::1]`). A rule that names no host
+stops startup, naming the rule. Pages are capped at 1 MB of
 decoded body; an oversized page keeps its head metadata with a `truncated` warning. An HTML page
 past the cap is read on to `limits.html_head_bytes`, whole when it ends before that and cut there
 otherwise: nothing in the page's text stops the read earlier, since only the parser can say where
