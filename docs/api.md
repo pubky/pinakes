@@ -615,7 +615,8 @@ root, and a read, lookup, change query or occurrence read of the alias answers w
   aliases of their feed.
 - **Music service links**: every spelling of one track, album, artist or playlist on one service
   is an alias of its canonical URL: Spotify (`intl-xx` paths, `spotify:{kind}:{id}`, the old
-  `user/…/playlist/…` form) → `https://open.spotify.com/{kind}/{id}`; Apple Music →
+  `user/…/playlist/…` form, `play.spotify.com`, the embedded player's `/embed/…` and the retired
+  `embed.spotify.com/?uri=spotify:…`) → `https://open.spotify.com/{kind}/{id}`; Apple Music →
   `https://music.apple.com/{kind}/{id}` without the storefront (the catalogue ID is global, and
   Apple answers the storefront-less URL with the viewer's storefront) and without the name slug,
   an album URL with `?i={id}` naming that track (`/song/{id}`), the iTunes Store's
