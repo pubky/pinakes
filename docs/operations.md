@@ -165,7 +165,12 @@ gone even when its author had opted out. A gone post's card keeps nothing of the
 `SocialMediaPosting`), its change lines and also-on results are
 deleted, and it is regrouped. An opted-out post's lines lose their documents. The aliases of
 either keep only their `aliased` line: their cards, other lines and also-on results are deleted.
-It prints `scrubbed N posts gone or opted out`, then the re-queued count.
+Then it scrubs what a `pubky://` object Pinakes never fetches still keeps of a card stored
+before the rule: a path an app's profile leaves out, or any path in a namespace Pinakes never
+fetches (the old Mapky and Eventky layouts among them, [Pubky apps](pubky-apps.md)). Such an
+object's card becomes the card it gets now (a missing `CreativeWork` with only its link), its
+change lines lose their documents, and it is regrouped. It prints `scrubbed N posts gone or
+opted out` and `scrubbed N objects never fetched`, then the re-queued count.
 
 **Dead letters.** To retry one by hand:
 

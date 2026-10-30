@@ -7,7 +7,10 @@ objects (`/pub/social/…`, any version: posts, events, rsvps, availability, tag
 Nexus's and never fetched: social events and availability come from Nexus (owner decisions,
 2026-10-26 and 2026-10-27). Neither are the old Mapky and Eventky layouts (`/pub/mapky.app/…`,
 `/pub/eventky.app/…`) fetched, whose data is disregarded: routes now come as [posts](#posts),
-events and availability as social posts.
+events and availability as social posts. An object of any of these namespaces stored before the
+rule keeps nothing of a card it had, as a left-out path of a profiled app (below): `pinakesd
+reextract` scrubs it ([operations](operations.md#database)), and the resolver gives it no card
+without a request.
 
 For an app Pinakes has a profile for, the card is that app's: a schema.org type, the name,
 description, image and a few facts the app's format holds, and `open_in`, the clients that open

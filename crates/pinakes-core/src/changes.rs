@@ -615,6 +615,74 @@ pub async fn scrub_stored(pool: &PgPool) -> Result<u64> {
         }
     }
 }
+/// Scrub what `pubky://` objects that are never fetched (`pubky_apps::excluded`: a path an app's
+/// profile leaves out, or any path in a namespace Pinakes never fetches, such as the old Mapky and
+/// Eventky layouts) still keep of a card stored before the rule, in batches of 500, as a save of
+/// their `no_card` would have: the card becomes `no_card` (its fetch time kept) and the lines of
+/// its history lose their documents. A changed one is regrouped. Run by `pinakesd reextract`, as
+/// such an object's refusal before the rule left it dead-lettered with its card. The objects it
+/// changed.
+pub async fn scrub_never_fetched(pool: &PgPool) -> Result<u64> {
+    let (mut last, mut scrubbed) = (String::new(), 0u64);
+    loop {
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id,uri FROM resource WHERE id>$1 AND uri LIKE 'pubky://%' ORDER BY id LIMIT 500",
+        )
+        .bind(&last)
+        .fetch_all(pool)
+        .await?;
+        let Some((end, _)) = rows.last() else {
+            return Ok(scrubbed);
+        };
+        last = end.clone();
+        for (id, uri) in rows {
+            if !crate::resolver::pubky_apps::excluded(&uri) {
+                continue;
+            }
+            let mut tx = pool.begin().await?;
+            crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
+            let doc: Option<Value> =
+                sqlx::query_scalar("SELECT doc FROM resource WHERE id=$1 FOR UPDATE")
+                    .bind(&id)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            let Some(doc) = doc else { continue };
+            let stored = serde_json::from_value::<ResourceMeta>(doc).ok();
+            let mut card = crate::resolver::pubky_apps::no_card(
+                &uri,
+                stored.as_ref().map_or(0, |d| d.ttl_secs),
+            );
+            if let Some(stored) = &stored {
+                card.fetched_at = stored.fetched_at;
+            }
+            let kept = serde_json::to_value(&card)?;
+            let lines = sqlx::query("UPDATE resource_change SET before=NULL,after=NULL WHERE resource_id=$1 AND (before IS NOT NULL OR after IS NOT NULL)")
+                .bind(&id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+            let changed = sqlx::query("UPDATE resource SET type=$3,type_path=$4,name=NULL,category=NULL,point=NULL,start_at=NULL,end_at=NULL,venue_id=NULL,doc=$2 WHERE id=$1 AND (doc IS DISTINCT FROM $2 OR name IS NOT NULL OR category IS NOT NULL OR point IS NOT NULL OR start_at IS NOT NULL OR end_at IS NOT NULL OR venue_id IS NOT NULL OR type IS DISTINCT FROM $3 OR type_path IS DISTINCT FROM $4)")
+                .bind(&id)
+                .bind(&kept)
+                .bind(&card.type_name)
+                .bind(&card.type_path)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+            if changed > 0 {
+                // Its group was formed from the card it no longer has.
+                sqlx::query(
+                    "INSERT INTO group_dirty(resource_id) VALUES($1) ON CONFLICT DO NOTHING",
+                )
+                .bind(&id)
+                .execute(&mut *tx)
+                .await?;
+            }
+            tx.commit().await?;
+            scrubbed += u64::from(lines + changed > 0);
+        }
+    }
+}
 /// Delete resources orphaned for `grace_days`. A derived child's grace counts from its link's
 /// expiry, not from its creation: a lapsed link (a calendar that failed for a day, an event link
 /// past its cap) keeps its child, and its row for a later revival, through the same grace.
