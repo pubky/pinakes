@@ -196,9 +196,13 @@ impl EventService {
                 let event_candidate;
                 {
                     let text = String::from_utf8_lossy(&fetched.body);
+                    // The page's structured data, read together: a body that is JSON, and
+                    // its scripts (a page listing several events is a list, whichever script
+                    // holds each).
+                    let mut values = vec![];
+                    let body_json = page::lenient_json(&text).is_some();
                     if let Some(v) = page::lenient_json(&text) {
-                        page::jsonld(&mut event, &v, &fetched.url);
-                        page::activity(&mut event, &v, &fetched.url);
+                        values.push(v);
                     }
                     let html = crate::resolver::html::document(&text)?;
                     event_candidate = text.contains("startDate")
@@ -229,8 +233,12 @@ impl EventService {
                     ) {
                         if let Some(mut v) = page::lenient_json(&node.text().collect::<String>()) {
                             crate::resolver::web::decode_json_strings(&mut v);
-                            page::jsonld(&mut event, &v, &fetched.url);
+                            values.push(v);
                         }
+                    }
+                    page::jsonld_all(&mut event, &values.iter().collect::<Vec<_>>(), &fetched.url);
+                    if let Some(v) = values.first().filter(|_| body_json) {
+                        page::activity(&mut event, v, &fetched.url);
                     }
                     if config.calendars {
                         calendar_link = html

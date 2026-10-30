@@ -52,7 +52,9 @@ before rendering them as HTML.
 A music link is typed by what it is, whatever the service's page or player calls it: a track is a
 `MusicRecording`, an album a `MusicAlbum`, an artist a `MusicGroup` (a `Person` from the next
 refresh after MusicBrainz says the artist is one) and a playlist a `MusicPlaylist`, on every
-service ([music service links](#aliases)). A video stays a `VideoObject`. The card's `site` is the
+service ([music service links](#aliases)). A video stays a `VideoObject`; a track's, album's or
+artist's page keeps its own video (a `VideoObject` in its JSON-LD) as a part of the page, not its
+card ([lists](#lists)). The card's `site` is the
 service's name (`Spotify`, `Apple Music`, `TIDAL`, `YouTube`, …), as derived links show it, in
 any page language. A Bandcamp root or `/music` page features an album but is the artist's page: a
 `MusicGroup` named after the artist, without the album's description. When the service's own
@@ -65,8 +67,12 @@ A media link is typed the same way: a TMDB, Letterboxd or Trakt movie is a `Movi
 Trakt or TVmaze series a `TVSeries`; an Open Library work or edition and a Goodreads work or book
 a `Book`; an Apple Podcasts, Podcast Index, Pocket Casts, Castro or Fountain show a
 `PodcastSeries` and its episode a `PodcastEpisode`. A Netflix title is a `Movie` or `TVSeries`
-when its Wikidata item says which, else a `CreativeWork`. A page that is a podcast episode by its
-feed ([also on](#also-on)) is a `PodcastEpisode` from its next refresh.
+when its Wikidata item says which, else a `CreativeWork`. A Wikidata item that is a creative
+work (a series, a film, a book, an album, a song, a game, a podcast or a periodical by what it is
+an instance of, P31; else one with a publication date, an author, a director, a composer, a
+publisher or an episode count) is that work (`TVSeries`, `Movie`, `Book`, …), never an `Event`,
+whatever dates it carries: a series' run is not an occurrence. A page that is a podcast episode
+by its feed ([also on](#also-on)) is a `PodcastEpisode` from its next refresh.
 
 Such a card is named after its object, not its page: where a TMDB, Trakt, Netflix, Goodreads,
 Letterboxd, Open Library, TVmaze or Podcast Index page names its site, another language's title
@@ -252,7 +258,7 @@ of the same URIs and checks that this list matches.
 | `POST /v1/resolve {"uri":"https://en.wikipedia.org/wiki/Immanuel_Kant"}` | Article |
 | `POST /v1/resolve {"uri":"https://de.wikipedia.org/wiki/Immanuel_Kant"}` | Article |
 | `POST /v1/resolve {"uri":"https://www.wikidata.org/wiki/Q90"}` | Place |
-| `POST /v1/resolve {"uri":"https://n26.com/"}` | WebPage |
+| `POST /v1/resolve {"uri":"https://n26.com/"}` | FAQPage |
 | `POST /v1/resolve {"uri":"https://pubky.org/"}` | CreativeWork |
 | `POST /v1/resolve {"uri":"https://casa.io/"}` | WebPage |
 | `POST /v1/resolve {"uri":"https://example.org/"}` | WebPage |
@@ -1028,6 +1034,26 @@ counts by status.
 Disabled identifier routes wait in the queue; an enabled web resolver still gives ordinary HTTP
 links a card.
 
+## Lists
+
+A page whose structured data holds several entries of one kind (events, questions, products,
+articles, places, media, job postings, recipes) lists them: an artist's concerts, a FAQ's
+questions, a category's products, a blog's posts. An entry is an entity naming another page (its
+`url`, else `@id`, is another address) or one among several listed as a page's `mainEntity`; an
+entity naming no page is the page's own (a product page's variants, a theme's and a plugin's
+node for one event), as is one whose `url`, `@id` or `mainEntityOfPage` is the page under any of
+its addresses (the one asked for, the one fetched, its head canonical: an AMP page's article
+names the canonical). The entries
+are parts of the page, never its subject, and are left out before the page's JSON-LD is read,
+whichever scripts hold them: the card is the page's own entity (the artist's `MusicGroup` on
+its concert list) or else the page (a `WebPage` named by its title), not the first entry. Two
+entries with one `@id`, `url` or name are one, and on the event route the same event in several
+scripts is read as one: what the first lacks (a start, a description) comes from the next. On
+the event route such a list yields no event, in the page's JSON-LD and in a platform's embedded
+state alike. A music object's page (a track, an album, an
+artist) treats its video (`VideoObject`) as a part too: the card is the track, named by the
+page's title, not "… | Music Video".
+
 ## Jobs
 
 A page whose JSON-LD is a `JobPosting` (most job boards and career pages publish one) gets a
@@ -1116,9 +1142,11 @@ record or a product database (their pages say which).
 
 ## Questions
 
-A page whose JSON-LD is a `Question` (a `QAPage`'s main entity), and the questions
-[sources](sources/README.md) read from a Q&A site's API or a forum topic marked solved, are
-`Question` cards: named by the question's title, described by the start of its text (200
+A page whose JSON-LD is a `Question` (a `QAPage`'s single main entity, as Stack Exchange's), and
+the questions [sources](sources/README.md) read from a Q&A site's API or a forum topic marked
+solved, are `Question` cards. A `FAQPage`'s questions (its main entity, one or many) are parts of
+the page, never the page itself: its card stays the page's (`FAQPage`, a `WebPage`), named by the
+page's own title, as a homepage with a FAQ block is. `Question` cards are named by the question's title, described by the start of its text (200
 characters, as a quoted post is), with its asker as `author` and when it was asked as
 `published`.
 

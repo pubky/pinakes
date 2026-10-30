@@ -404,11 +404,16 @@ pub fn parse(id: &str, uri: &str, body: &[u8]) -> Option<ResourceMeta> {
         }
     }
     let mut doc = ResourceMeta::new(uri, id, 3600);
-    for v in &roots {
-        if std::time::Instant::now() >= deadline {
-            return None;
-        }
-        page::jsonld(&mut doc, v, &base);
+    if std::time::Instant::now() >= deadline {
+        return None;
+    }
+    // The scripts read together: a page listing several events and none its own (an artist's
+    // concerts) is a list, and yields no event here either, not from its JSON-LD
+    // (`page::jsonld_all`) and not from the state its scripts embed (the candidates below).
+    let values: Vec<&Value> = roots.iter().collect();
+    page::jsonld_all(&mut doc, &values, &base);
+    if !doc.type_path.contains(&"Event".into()) && page::lists_events(&values, &base) {
+        return None;
     }
     let mut nodes = 50000;
     for root in &roots {

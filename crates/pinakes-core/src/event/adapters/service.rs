@@ -921,8 +921,32 @@ pub fn wiki_value(uri: &str, v: &Value) -> Result<ResourceMeta> {
             })
             .and_then(|v| v.pointer("/mainsnak/datavalue/value"))
     };
+    // A creative work (a series, a film, a book, an album, a game, a podcast: by what the item
+    // is an instance of, P31, else by what only a work carries: a publication date, an author,
+    // a director, a composer, a publisher, an episode count; not a broadcaster, which a
+    // broadcast event has too) is never an event, whatever dates it carries: a series' run
+    // (P580, P582) is not an occurrence.
+    let instances: Vec<&str> = entity["claims"]["P31"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|v| v["rank"] != "deprecated")
+        .filter_map(|v| {
+            v.pointer("/mainsnak/datavalue/value/id")
+                .and_then(Value::as_str)
+        })
+        .collect();
+    let work = instances.iter().find_map(|q| work_class(q)).or_else(|| {
+        ["P577", "P50", "P57", "P86", "P123", "P1113"]
+            .iter()
+            .any(|p| claim(p).is_some())
+            .then_some("CreativeWork")
+    });
+    if let Some(kind) = work {
+        doc.set_type(kind);
+    }
     for (p, end) in [("P580", false), ("P585", false), ("P582", true)] {
-        if !end && doc.start.is_some() {
+        if work.is_some() || (!end && doc.start.is_some()) {
             continue;
         }
         if let Some(v) = claim(p) {
@@ -952,7 +976,7 @@ pub fn wiki_value(uri: &str, v: &Value) -> Result<ResourceMeta> {
     {
         doc.location = Some(p);
         doc.location_source = Some(crate::model::LocationSource::Page);
-        if doc.start.is_none() && !doc.type_path.contains(&"Person".into()) {
+        if doc.start.is_none() && work.is_none() && !doc.type_path.contains(&"Person".into()) {
             doc.set_type("Place");
         }
     }
@@ -970,6 +994,29 @@ pub fn wiki_value(uri: &str, v: &Value) -> Result<ResourceMeta> {
         ));
     }
     Ok(doc)
+}
+
+/// The schema.org type of a Wikidata class a creative work is an instance of (P31).
+fn work_class(q: &str) -> Option<&'static str> {
+    Some(match q {
+        // television series, television program, animated series, miniseries
+        "Q5398426" | "Q15416" | "Q581714" | "Q1259759" => "TVSeries",
+        "Q3464665" => "TVSeason",
+        "Q21191270" => "TVEpisode",
+        // film, short film, animated film
+        "Q11424" | "Q24862" | "Q202866" => "Movie",
+        // literary work, book, written work, novel, short story
+        "Q7725634" | "Q571" | "Q47461344" | "Q8261" | "Q49084" => "Book",
+        // album, extended play, live album, single
+        "Q482994" | "Q169930" | "Q209939" | "Q134556" => "MusicAlbum",
+        // song, musical work/composition
+        "Q7366" | "Q2188189" => "MusicComposition",
+        "Q7889" => "VideoGame",
+        "Q24634210" => "PodcastSeries",
+        // periodical, newspaper
+        "Q1002697" | "Q11032" => "Periodical",
+        _ => return None,
+    })
 }
 
 fn feed_path(uri: &str) -> bool {
@@ -1052,5 +1099,66 @@ pub fn keyed_url(adapter: &str, uri: &str) -> Result<Url> {
             Ok(url)
         }
         _ => anyhow::bail!("unknown keyed adapter"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn item(qid: &str, label: &str, claims: Value) -> Value {
+        json!({"entities": {qid: {"id": qid, "labels": {"en": {"value": label}}, "claims": claims}}})
+    }
+    fn time(t: &str) -> Value {
+        json!([{"rank":"normal","mainsnak":{"datavalue":{"value":{"time":t,"precision":11}}}}])
+    }
+    fn id(q: &str) -> Value {
+        json!([{"rank":"normal","mainsnak":{"datavalue":{"value":{"id":q}}}}])
+    }
+    #[test]
+    fn a_creative_work_with_a_run_is_no_event() {
+        // Breaking Bad: a television series (Q5398426) first and last aired 2008 and 2013.
+        let series = item(
+            "Q1079",
+            "Breaking Bad",
+            json!({"P31": id("Q5398426"), "P580": time("+2008-01-20T00:00:00Z"), "P582": time("+2013-09-29T00:00:00Z"), "P449": id("Q294660")}),
+        );
+        let doc = wiki_value("https://www.wikidata.org/wiki/Q1079", &series).unwrap();
+        assert_eq!(doc.type_name, "TVSeries");
+        assert!(doc.type_path.iter().any(|t| t == "CreativeWork"));
+        assert!(!doc.type_path.iter().any(|t| t == "Event"));
+        assert!(doc.start.is_none() && doc.end.is_none());
+        assert_eq!(doc.event.all_day, None);
+        assert_eq!(doc.name.as_deref(), Some("Breaking Bad"));
+        // A work of a class not known here, by what only a work carries (an episode count): a
+        // creative work.
+        let anime = item(
+            "Q1",
+            "Some Show",
+            json!({"P31": id("Q63952888"), "P580": time("+2016-07-15T00:00:00Z"), "P449": id("Q907311"), "P1113": [{"rank":"normal","mainsnak":{"datavalue":{"value":{"amount":"+24"}}}}]}),
+        );
+        let doc = wiki_value("https://www.wikidata.org/wiki/Q1", &anime).unwrap();
+        assert_eq!(doc.type_name, "CreativeWork");
+        assert!(doc.start.is_none());
+        // A work with coordinates is no place.
+        let book = item(
+            "Q2",
+            "A Book",
+            json!({"P31": id("Q7725634"), "P625": [{"rank":"normal","mainsnak":{"datavalue":{"value":{"latitude":47.37,"longitude":8.54}}}}]}),
+        );
+        let doc = wiki_value("https://www.wikidata.org/wiki/Q2", &book).unwrap();
+        assert_eq!(doc.type_name, "Book");
+        // An occurrence with a start is an event, as before, a broadcaster or not (a song
+        // contest's edition is broadcast); a human a person.
+        let festival = item(
+            "Q3",
+            "A Festival",
+            json!({"P31": id("Q868557"), "P580": time("+2027-07-01T00:00:00Z"), "P582": time("+2027-07-03T00:00:00Z"), "P449": id("Q262386")}),
+        );
+        let doc = wiki_value("https://www.wikidata.org/wiki/Q3", &festival).unwrap();
+        assert_eq!(doc.type_name, "Event");
+        assert!(doc.start.is_some() && doc.end.is_some());
+        let human = item("Q4", "Someone", json!({"P31": id("Q5")}));
+        let doc = wiki_value("https://www.wikidata.org/wiki/Q4", &human).unwrap();
+        assert_eq!(doc.type_name, "Person");
     }
 }
