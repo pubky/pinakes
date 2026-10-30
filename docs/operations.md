@@ -631,7 +631,14 @@ unfinished subscription never confirms absence. A full tied page, an exhausted b
 indexer 404 is inconclusive and retries after five minutes without charging an attempt.
 
 Only parser failures fall back to a web card. Upstream failures keep the accepted document and
-retry; a refresh never replaces a dated Event with a start-less card. Registry-listed secondary
+retry; a refresh never replaces a dated Event with a start-less card that decides nothing (a
+consent wall answering 200, a date that failed to parse): the row keeps its card, records
+`last_error=drift` and is read again an hour later. The one exception is a reading that decides
+the page is no event at all and says so on the card (`event.not_event`: `lists_events`, a page
+listing several events, read as the artist or the page itself; `creative_work`, a Wikidata item
+that is a work, read as the `TVSeries` or `Book` it is, without dates): it replaces the stored
+event, dates and all, as the correction it is, and a later reading that finds an event again
+simply stores it ([Lists](api.md#lists)). Registry-listed secondary
 denials and GraphQL failures defer, and after three days become `unreachable` with ordinary
 backoff. HTTP 451 and cursor 401/403/404 follow two-observation disappearance. Direct Wikidata
 404/410 do too, and a missing entity never removes a live Wikipedia article.
