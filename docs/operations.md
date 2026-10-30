@@ -421,6 +421,16 @@ Nexus. `nexus_reach_set` (default `false`) says that Nexus also serves the reach
 answers 501 and Nexus is never asked for it. Sets are kept in memory only, per viewer, five
 minutes (a `wot_2` set up to an hour, re-validated by its `ETag`).
 
+A Nexus behind credentials gets them from `PINAKES_NEXUS_AUTHORIZATION` (owner decision,
+2026-10-30), never from `nexus_url`, which refuses user info, a query or a fragment and says so.
+Its whole value is sent as the `Authorization` header (`Bearer …`, `Basic …`) on every request
+to the Nexus: the feed, the reach lists and reach-set route, and the batch resource view that
+the `social` tool reads. Every one goes through one client. It is sent to no other host: the
+Nexus client follows no redirect, and Nominatim, sources and the egress have clients of their
+own. The value is never logged or shown (errors, metrics, `/v1/info` public or admin, the
+agents' texts), and the configuration's `Debug` redacts it. Empty means none; a value that is no
+valid header value stops startup, without being named.
+
 ## Queue and refresh
 
 The durable queue leases rows with `SKIP LOCKED` and fences stale completions by a generation
@@ -631,7 +641,14 @@ worker; stored keys keep grouping and stored links stay on cards until they expi
 the sources' lifetimes). `derive_links = false` keeps keys and facts only: no derived links on
 cards, so a tagged link an exact derivation names no longer joins by it either;
 `[also_on.sources.<id>] enabled = false` turns one source off and `enabled = true` turns on one
-that is off by default (an unknown ID stops startup). Sources run in a fixed order, and each
+that is off by default (an unknown ID stops startup). A source that is off (switched off, or off
+by default and not turned on) stops showing at the next start: the daemon writes the sources
+that are off to `also_on_source_off`, and no card, `also_on` list, search, group or later
+source reads their keys, facts or links. Those rows stay in the database and expire as before;
+nothing is deleted, and a source switched on again shows its unexpired rows at once. The
+resources its keys and keyed links name are regrouped in the background (`group_dirty`), and its
+recordings' same-recording pairs are read again. `[also_on] enabled = false` hides nothing: it
+only stops the worker. Sources run in a fixed order, and each
 sees the keys the ones before it found in the same run (a barcode MusicBrainz names, then the
 services looked up by it); a source that no longer applies (its key is gone) drops its rows. A
 social post found gone gets no lookups, and its rows are dropped: nothing is derived from it, an

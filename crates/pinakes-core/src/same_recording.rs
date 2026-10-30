@@ -233,8 +233,8 @@ pub async fn read_in(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, id: &str) -
     let row = sqlx::query(
         "SELECT r.name,(r.type_path @> ARRAY['MusicRecording'] AND r.status='ok' AND NOT EXISTS(SELECT 1 FROM resource_alias a WHERE a.alias_id=r.id)) AS recording,\
          r.doc#>>'{attributes,artist}' AS page_artist,r.doc#>>'{attributes,duration}' AS page_duration,\
-         (SELECT min(f.value) FROM resource_fact f WHERE f.resource_id=r.id AND f.name='artist' AND f.expires_at>now()) AS artist,\
-         (SELECT min(f.value) FROM resource_fact f WHERE f.resource_id=r.id AND f.name='duration' AND f.expires_at>now()) AS duration,\
+         (SELECT min(f.value) FROM resource_fact f WHERE f.resource_id=r.id AND f.name='artist' AND f.expires_at>now() AND f.source NOT IN (SELECT source FROM also_on_source_off)) AS artist,\
+         (SELECT min(f.value) FROM resource_fact f WHERE f.resource_id=r.id AND f.name='duration' AND f.expires_at>now() AND f.source NOT IN (SELECT source FROM also_on_source_off)) AS duration,\
          u.fingerprint,u.scan_after AS stopped_at,u.scan_after_length AS stopped_at_length \
          FROM resource r LEFT JOIN same_recording_unit u ON u.resource_id=r.id WHERE r.id=$1",
     )

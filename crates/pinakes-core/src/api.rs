@@ -52,10 +52,7 @@ impl AppState {
         let metrics = Arc::new(crate::telemetry::Metrics::new()?);
         Ok(Self {
             pool,
-            nexus: Nexus::with_reach_timeout(
-                &config.nexus_url,
-                Duration::from_secs(config.search.reach_timeout_secs),
-            )?,
+            nexus: Nexus::configured(&config)?,
             config,
             wake: Arc::default(),
             metrics,
@@ -1134,9 +1131,9 @@ pub(crate) fn maybe_same_sql(
     format!(
         "coalesce(maybe_same_hint({unit},{type_path},{n},{events},{recordings}),CASE WHEN {events} THEN (SELECT jsonb_agg(jsonb_build_object('id',same_app.id,'uri',same_app.uri,'host',same_app.host,'site',same_app.site,'start',NULL,'score',1) ORDER BY same_app.uri) \
          FROM (SELECT DISTINCT same_r.id,same_r.uri,same_r.host,same_r.doc->>'site' AS site FROM resource_fact same_f \
-         JOIN resource_fact same_g ON same_g.name='app_match' AND same_g.value=same_f.value AND same_g.resource_id<>same_f.resource_id AND same_g.expires_at>now() \
+         JOIN resource_fact same_g ON same_g.name='app_match' AND same_g.value=same_f.value AND same_g.resource_id<>same_f.resource_id AND same_g.expires_at>now() AND same_g.source NOT IN (SELECT source FROM also_on_source_off) \
          JOIN resource same_r ON same_r.id=same_g.resource_id \
-         WHERE same_f.resource_id={unit} AND same_f.name='app_match' AND same_f.expires_at>now() AND same_r.status<>'missing' \
+         WHERE same_f.resource_id={unit} AND same_f.name='app_match' AND same_f.expires_at>now() AND same_f.source NOT IN (SELECT source FROM also_on_source_off) AND same_r.status<>'missing' \
          AND NOT EXISTS (SELECT 1 FROM resource_alias same_alias WHERE same_alias.alias_id=same_r.id) \
          AND NOT EXISTS (SELECT 1 FROM group_unit same_a JOIN group_unit same_b ON same_b.group_id=same_a.group_id WHERE same_a.unit_id={unit} AND same_b.unit_id=same_r.id AND same_a.group_id IS NOT NULL) \
          ORDER BY same_r.uri LIMIT {n}) same_app) END)"
@@ -1912,19 +1909,19 @@ pub async fn search(
         }
     }
     // Exact identifiers: a source's live keys or facts on the resource, or a key an exact lookup
-    // named it by (aliases read as roots).
+    // named it by (aliases read as roots); never a switched-off source's.
     if let Some(KeyFilter { keys, fact }) = &key {
         sql.push(" AND r.id IN (SELECT resource_id FROM resource_key WHERE key=ANY(")
             .push_bind(keys.clone())
-            .push(") AND expires_at>now() UNION SELECT link_id FROM derived_link WHERE key=ANY(")
+            .push(") AND expires_at>now() AND source NOT IN (SELECT source FROM also_on_source_off) UNION SELECT link_id FROM derived_link WHERE key=ANY(")
             .push_bind(keys.clone())
-            .push(") AND expires_at>now()");
+            .push(") AND expires_at>now() AND source NOT IN (SELECT source FROM also_on_source_off)");
         if let Some((name, value)) = fact {
             sql.push(" UNION SELECT resource_id FROM resource_fact WHERE name=")
                 .push_bind(*name)
                 .push(" AND value=")
                 .push_bind(value.clone())
-                .push(" AND expires_at>now()");
+                .push(" AND expires_at>now() AND source NOT IN (SELECT source FROM also_on_source_off)");
         }
         sql.push(")");
     }
@@ -2234,7 +2231,7 @@ async fn read(
         sqlx::query_scalar(&[
             "SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_hint(r.id) END,'maybe_same',",
             &maybe_same_sql("r.id", "r.type_path", 10, "$3", "$4"),
-            ",'also_on',also_on(r.id,r.id,256,$2),'also_on_all',also_on(r.id,r.id,256,$2,false),'aliases',coalesce((SELECT jsonb_agg(uri ORDER BY uri) FROM (SELECT x.uri FROM resource_alias a JOIN resource x ON x.id=a.alias_id WHERE a.root_id=r.id ORDER BY x.uri LIMIT 50) s),'[]'),'keys',coalesce((SELECT jsonb_agg(key ORDER BY key COLLATE \"C\") FROM resource_key WHERE resource_id=r.id AND expires_at>now()),'[]'),'facts',(SELECT jsonb_object_agg(name,vals) FROM (SELECT name,string_agg(value,'; ' ORDER BY value) AS vals FROM resource_fact WHERE resource_id=r.id AND expires_at>now() GROUP BY name) f)) FROM resource_document r WHERE r.id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1)",
+            ",'also_on',also_on(r.id,r.id,256,$2),'also_on_all',also_on(r.id,r.id,256,$2,false),'aliases',coalesce((SELECT jsonb_agg(uri ORDER BY uri) FROM (SELECT x.uri FROM resource_alias a JOIN resource x ON x.id=a.alias_id WHERE a.root_id=r.id ORDER BY x.uri LIMIT 50) s),'[]'),'keys',coalesce((SELECT jsonb_agg(key ORDER BY key COLLATE \"C\") FROM resource_key WHERE resource_id=r.id AND expires_at>now() AND source NOT IN (SELECT source FROM also_on_source_off)),'[]'),'facts',(SELECT jsonb_object_agg(name,vals) FROM (SELECT name,string_agg(value,'; ' ORDER BY value) AS vals FROM resource_fact WHERE resource_id=r.id AND expires_at>now() AND source NOT IN (SELECT source FROM also_on_source_off) GROUP BY name) f)) FROM resource_document r WHERE r.id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1)",
         ]
         .concat())
             .bind(id)

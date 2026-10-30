@@ -719,6 +719,15 @@ CREATE TABLE derived_link (
 CREATE INDEX derived_link_named_idx ON derived_link USING btree (link_id) WHERE key IS NOT NULL;
 CREATE INDEX derived_link_key_idx ON derived_link USING btree (key) WHERE key IS NOT NULL;
 
+-- The also-on sources the operator has switched off (`[also_on.sources.<id>] enabled = false`,
+-- or off by default and not turned on), written at startup from the configuration
+-- (`also_on::configure`). Their keys, facts and links stay and expire as before, but nothing
+-- reads them: not a card, its `also_on`, a search or grouping. Switched on again, they show.
+CREATE TABLE also_on_source_off (
+    source text PRIMARY KEY,
+    CONSTRAINT also_on_source_off_source_check CHECK ((source ~ '^[a-z0-9_]{1,32}$'))
+);
+
 -- Resources whose sources are due: after a save that changed the document, and when the
 -- shortest source lifetime has passed. Failures back off like grouping's.
 CREATE TABLE also_on_dirty (
@@ -762,13 +771,34 @@ BEGIN
 END $$;
 CREATE TRIGGER derived_link_named_group_dirty AFTER INSERT OR DELETE OR UPDATE ON derived_link FOR EACH ROW EXECUTE FUNCTION mark_named_group_dirty();
 
+-- A source switched off or on changes what grouping and the same-recording pass read: the
+-- resources its keys and keyed links name are regrouped (their `group_revision` bumped, as a
+-- key's change does), and its recordings' pairs are read again. Searches see a new revision.
+CREATE FUNCTION also_on_source_switched() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$ DECLARE src text := CASE WHEN TG_OP='DELETE' THEN OLD.source ELSE NEW.source END;
+BEGIN
+ WITH named AS (SELECT resource_id AS id FROM resource_key WHERE source=src
+     UNION SELECT link_id FROM derived_link WHERE source=src AND key IS NOT NULL),
+  bumped AS (UPDATE resource r SET group_revision=r.group_revision+1 FROM named n WHERE r.id=n.id RETURNING r.id)
+ INSERT INTO group_dirty(resource_id) SELECT id FROM bumped ON CONFLICT DO NOTHING;
+ INSERT INTO same_recording_dirty(resource_id)
+  SELECT DISTINCT f.resource_id FROM resource_fact f JOIN resource r ON r.id=f.resource_id
+  WHERE f.source=src AND f.name IN ('artist','duration') AND r.type_path @> ARRAY['MusicRecording']
+  ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=excluded.next_attempt_at WHERE same_recording_dirty.next_attempt_at>excluded.next_attempt_at;
+ RETURN NULL;
+END $$;
+CREATE TRIGGER also_on_source_switched AFTER INSERT OR DELETE ON also_on_source_off FOR EACH ROW EXECUTE FUNCTION also_on_source_switched();
+CREATE TRIGGER also_on_source_revision BEFORE INSERT OR DELETE ON also_on_source_off FOR EACH STATEMENT EXECUTE FUNCTION bump_search_revision();
+
 -- A card's `also_on`: the other members of its group (tagged links, with their ID: other
 -- resources first, one each by ID, then other units of its own resource), then the live derived
 -- links of the card's resource and of every member, by service name, each URL once and never
 -- the card itself; at most `cap` entries. `resource` is the card's resource ID for a resource's
 -- card, and the unit for an occurrence or an event reference (whose feed's links are not its
 -- own). `members` false (groups switched off) leaves the group out. Read at
--- request time: OSM-derived values never enter these tables.
+-- request time: OSM-derived values never enter these tables, and a switched-off source's rows
+-- (`also_on_source_off`) are not read.
 -- A card (`per_site`) shows one entry per service. A tagged member whose URL is on a service
 -- (`doc.service`: a music service, or one a derived link names, such as Wikidata's F-Droid link)
 -- takes that service's place ahead of the derived links (on music, the member on the recording's
@@ -791,7 +821,8 @@ CREATE FUNCTION also_on(unit text, resource text, cap integer, members boolean, 
  m AS (SELECT d.id,CASE WHEN d.occurrence IS NULL THEN d.uri ELSE coalesce(nullif(d.doc->>'url',''),d.uri) END AS uri,
    d.host,d.doc->>'site' AS site,d.doc->>'service' AS service,d.osm_type IS NOT NULL AS osm,d.unit_id=unit AS own,d.id=(SELECT resource_id FROM grp) AS mine,
    d.type IN ('MusicRecording','MusicAlbum','MusicGroup','MusicPlaylist') AS music,
-   (SELECT f.value FROM resource_fact f WHERE f.resource_id=d.id AND f.name='album' AND f.expires_at>now() ORDER BY f.value LIMIT 1) AS album
+   (SELECT f.value FROM resource_fact f WHERE f.resource_id=d.id AND f.name='album' AND f.expires_at>now()
+     AND f.source NOT IN (SELECT source FROM also_on_source_off) ORDER BY f.value LIMIT 1) AS album
    FROM picked p
    CROSS JOIN LATERAL (SELECT * FROM group_member_document WHERE unit_id=p.unit_id OFFSET 0) d),
  -- The service a member's URL is on: the one its save recorded (`doc.service`) or an OSM object's
@@ -800,15 +831,17 @@ CREATE FUNCTION also_on(unit text, resource text, cap integer, members boolean, 
      coalesce(min(service),CASE WHEN bool_or(osm) THEN 'OpenStreetMap' END) AS service,
      bool_or(mine) AS mine,bool_or(music) AS music,min(album) AS album FROM m GROUP BY id,uri HAVING NOT bool_or(own)),
  owners AS (SELECT resource AS resource_id UNION SELECT u.resource_id FROM grp JOIN group_unit u USING(group_id)),
- original AS (SELECT lower(min(f.value)) AS title FROM resource_fact f JOIN owners o USING(resource_id) WHERE f.name='original_album' AND f.expires_at>now()),
+ original AS (SELECT lower(min(f.value)) AS title FROM resource_fact f JOIN owners o USING(resource_id) WHERE f.name='original_album' AND f.expires_at>now()
+   AND f.source NOT IN (SELECT source FROM also_on_source_off)),
  -- The services the live derived links name, before those already tagged members are dropped:
  -- two tagged spellings of one F-Droid page share its slot even when the derived link is one of them.
  services AS (SELECT DISTINCT lower(l.site) AS service FROM derived_link l JOIN owners o USING(resource_id)
-   WHERE l.expires_at>now() AND l.site IS NOT NULL),
+   WHERE l.expires_at>now() AND l.site IS NOT NULL AND l.source NOT IN (SELECT source FROM also_on_source_off)),
  derived AS (SELECT DISTINCT ON (l.link_id) l.link_id,l.uri,l.site,l.via,l.kind,l.at,
      count(*) OVER (PARTITION BY l.link_id) AS named
    FROM derived_link l JOIN owners o USING(resource_id)
-   WHERE l.expires_at>now() AND NOT EXISTS(SELECT 1 FROM owners x WHERE x.resource_id=l.link_id)
+   WHERE l.expires_at>now() AND l.source NOT IN (SELECT source FROM also_on_source_off)
+     AND NOT EXISTS(SELECT 1 FROM owners x WHERE x.resource_id=l.link_id)
      AND NOT EXISTS(SELECT 1 FROM tagged t WHERE t.id=l.link_id)
    ORDER BY l.link_id,l.seen_at DESC,l.via),
  entries AS (SELECT CASE WHEN mine THEN 1 ELSE 0 END AS o,id AS k1,uri AS k2,

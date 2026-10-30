@@ -3229,3 +3229,122 @@ async fn a_lookup_whose_resource_became_an_alias_writes_nothing(pool: PgPool) {
     assert!(alias);
     assert_eq!(derived(&pool, &id).await, 0);
 }
+
+/// A source the operator switches off stops showing at once: its keys, facts and derived links
+/// stay in the database until they expire, but no card, `also_on` list, search or group reads
+/// them. Switched on again, they show again.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_switched_off_source_shows_nothing_until_it_is_on_again(pool: PgPool) {
+    use pinakes_core::also_on::{Fact, SourceOptions};
+    // Whichever source this build has: the switch is the configuration's.
+    let id = also_on::registered()[0].id();
+    let config = |on: bool| {
+        let mut config = Config::default();
+        config.also_on.sources.insert(
+            id.into(),
+            SourceOptions {
+                enabled: Some(on),
+                ..Default::default()
+            },
+        );
+        config
+    };
+    let mbid = "9f9cf187-d6f9-437f-9d98-d59cdbd52757";
+    let (a, b) = (
+        "https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq",
+        "https://www.deezer.com/track/138539973",
+    );
+    let ids = [
+        page(&pool, a, "Paranoid Android").await,
+        page(&pool, b, "Paranoid Android").await,
+    ];
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,object_path,label,created_at) SELECT id,repeat('a',52),'tag','/pub/test/tags/'||id,'music',now() FROM unnest($1::text[]) id")
+        .bind(&ids[..])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let source = Fake::new(id);
+    for uri in [a, b] {
+        source.answer(
+            uri,
+            Ok(Found {
+                keys: vec![key(&format!("mb:recording:{mbid}"))],
+                links: vec![Link::new(
+                    "https://music.apple.com/us/song/1",
+                    "Apple Music",
+                    "musicbrainz",
+                )],
+                facts: vec![Fact::new("isrc", "GBAYE9701376")],
+                ..Default::default()
+            }),
+        );
+    }
+    let sources: Vec<Arc<dyn Source>> = vec![source];
+    drain(&pool, &cx(config(true)), &sources).await;
+    let mut both = ids.to_vec();
+    both.sort();
+    for on in [true, false, true] {
+        let config = config(on);
+        also_on::configure(&pool, &config.also_on).await.unwrap();
+        groups::drain(&pool, &Default::default(), 100)
+            .await
+            .unwrap();
+        let app = api::router(AppState::new(pool.clone(), config).unwrap());
+        let card = get(&app, &format!("/v1/resources/{}", ids[0])).await;
+        let listed = post(&app, "/v1/resources/lookup", json!({"ids": [ids[0]]})).await;
+        let found = |key: String| {
+            let app = app.clone();
+            async move {
+                let mut rows: Vec<String> = get(&app, &format!("/v1/search?key={key}")).await
+                    ["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|r| r["id"].as_str().unwrap().to_owned())
+                    .collect();
+                rows.sort();
+                rows
+            }
+        };
+        let (by_mbid, by_isrc) = (
+            found(format!("mbid:{mbid}")).await,
+            found("isrc:GBAYE9701376".into()).await,
+        );
+        if on {
+            assert_eq!(card["group"]["size"], 2, "{card}");
+            assert_eq!(card["facts"], json!({"isrc": "GBAYE9701376"}), "{card}");
+            assert!(
+                card["keys"].as_array().is_some_and(|k| !k.is_empty()),
+                "{card}"
+            );
+            let derived = |also: &Value| {
+                also.as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e["derived"] == true && e["site"] == "Apple Music")
+            };
+            assert!(derived(&card["also_on"]), "{card}");
+            assert!(derived(&listed[0]["also_on"]), "{listed}");
+            assert_eq!((&by_mbid, &by_isrc), (&both, &both));
+        } else {
+            assert!(card["group"].is_null(), "{card}");
+            assert!(card["facts"].is_null(), "{card}");
+            assert!(card["keys"].as_array().is_none_or(Vec::is_empty), "{card}");
+            assert_eq!(card["also_on"], json!([]), "{card}");
+            assert_eq!(listed[0]["also_on"], json!([]), "{listed}");
+            assert!(
+                by_mbid.is_empty() && by_isrc.is_empty(),
+                "{by_mbid:?} {by_isrc:?}"
+            );
+            // Kept, not deleted.
+            let kept: i64 = sqlx::query_scalar(
+                "SELECT (SELECT count(*) FROM resource_key WHERE source=$1)+(SELECT count(*) FROM resource_fact WHERE source=$1)+(SELECT count(*) FROM derived_link WHERE source=$1)",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(kept, 6);
+        }
+    }
+}
