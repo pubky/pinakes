@@ -218,12 +218,12 @@
   {
     "id": "guidle",
     "uri": "https://www.guidle.com/de/veranstaltungen/dies-das/ueberlingen/gregor-haegele-live-2027_A2rCGkH",
-    "error": true,
+    "error": false,
     "status": "ok",
     "type": "Event",
     "missing_fields": [],
     "tz": null,
-    "note": "T7: captured calendar-discovery egress policy failure must be propagated, never committed as a successful refresh."
+    "note": "Recorded 2026-10-30: the page links its own iCalendar export (url= the page); the export is read for the event."
   },
   {
     "id": "eventfrog",

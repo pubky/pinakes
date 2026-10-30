@@ -1973,11 +1973,6 @@ fn own_calendar_links_and_deterministic_platform_endpoints() {
             "https://luma.com/event/evt-abc",
             "https://api.lu.ma/event/get?event_api_id=evt-abc",
         ),
-        (
-            "guidle",
-            "https://www.guidle.com/de/veranstaltungen/title_A123",
-            "https://www.guidle.com/iCalendar/?lang=de&id=A123",
-        ),
     ] {
         assert_eq!(
             endpoint(adapters::definition(id).unwrap(), uri, Some(&f), &cfg)
@@ -1987,6 +1982,29 @@ fn own_calendar_links_and_deterministic_platform_endpoints() {
             expected
         );
     }
+    // A portal's export naming the page in its `url` parameter is the page's own; one naming
+    // another page is not. A slug is no export id: a page without its link has no endpoint.
+    let page = "https://www.guidle.com/de/veranstaltungen/title_A123";
+    let export =
+        |of: &str| format!("<a href='/iCalendar/?id=42&amp;lang=de&amp;url={of}'>iCal</a>");
+    let guidle = adapters::definition("guidle").unwrap();
+    assert_eq!(
+        ics_link(
+            "guidle",
+            &page.parse().unwrap(),
+            &export("https://www.guidle.com/de/veranstaltungen/other_B456")
+        ),
+        None
+    );
+    assert_eq!(
+        ics_link("guidle", &page.parse().unwrap(), &export(page)).unwrap(),
+        format!("https://www.guidle.com/iCalendar/?id=42&lang=de&url={page}")
+    );
+    let f = Fetched {
+        url: page.parse().unwrap(),
+        ..f
+    };
+    assert!(endpoint(guidle, page, Some(&f), &cfg).unwrap().is_none());
 }
 
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
@@ -5272,4 +5290,74 @@ async fn a_page_inherits_an_ics_uid_only_from_its_own_origin(pool: PgPool) {
     assert_eq!(uids(&own), ["ics_uid:show-uid"], "{:?}", own.group_keys);
     let moved = r.resolve("https://moved.example/talk").await.unwrap();
     assert!(uids(&moved).is_empty(), "{:?}", moved.group_keys);
+}
+
+/// A portal's calendar export that names the page in its `url` parameter (Guidle's
+/// `/iCalendar/?id=…&url=<page>`) is the page's own, and is read for its event. When the fetch
+/// refuses its content type, the refusal propagates: nothing is read as an event.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_portal_calendar_export_naming_its_page_is_read_and_its_refusal_propagates(pool: PgPool) {
+    use pinakes_core::resolver::Resolver;
+    let page = "https://www.guidle.com/de/veranstaltungen/musik/zuerich/fixture-konzert_A1b2C3";
+    let query = format!("id=42&lang=de&portal=https://www.guidle.com&url={page}");
+    let export = format!("https://www.guidle.com/iCalendar/?{query}");
+    let html = format!(
+        "<title>Fixture-Konzert</title><a href=\"/iCalendar/?{}\">iCal</a>",
+        query.replace('&', "&amp;")
+    );
+    let start = (Utc::now() + Duration::days(30)).format("%Y%m%dT%H%M%SZ");
+    let ics = format!("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:guidle-fixture\r\nDTSTART:{start}\r\nSUMMARY:Fixture-Konzert\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n");
+    let cfg = EventConfig {
+        geocoding: false,
+        ..Default::default()
+    };
+    let manifest = adapters::manifest(adapters::definition("guidle").unwrap(), &cfg);
+    let egress = recorded_egress(vec![
+        (page, &html, Value::Null),
+        (&export, &ics, Value::Null),
+    ]);
+    let doc = platform(&pool, cfg.clone(), egress)
+        .probe_manifest(page, &manifest)
+        .await
+        .unwrap();
+    assert_eq!(doc.type_name, "Event");
+    assert_eq!(doc.name.as_deref(), Some("Fixture-Konzert"));
+    assert!(doc.start.is_some());
+    assert_eq!(json!(manifest.missing_fields(&doc)), json!([]));
+    // The transport refuses a body of a type the fetch does not allow, as the pinned one does.
+    let mut responses = std::collections::HashMap::new();
+    responses.insert(
+        format!("{page}:"),
+        Ok(Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            url: page.parse().unwrap(),
+            body: html.clone().into_bytes(),
+            content_type: "text/html".into(),
+            status: 200,
+            retry_after_secs: 60,
+            location: None,
+            validators: Default::default(),
+        }),
+    );
+    responses.insert(
+        format!("{export}:"),
+        Err("content type is not allowed".to_owned()),
+    );
+    let egress = Egress::with_backends(
+        pinakes_core::config::EgressConfig {
+            host_requests_per_second: 1000.,
+            ..Default::default()
+        },
+        Arc::new(AdapterDns),
+        Arc::new(RecordedResponses(responses)),
+    );
+    let refused = platform(&pool, cfg, egress)
+        .probe_manifest(page, &manifest)
+        .await
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("content type is not allowed"),
+        "{refused:#}"
+    );
 }

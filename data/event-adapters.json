@@ -575,7 +575,7 @@
       "start"
     ],
     "canary": "https://www.guidle.com/de/veranstaltungen/dies-das/ueberlingen/gregor-haegele-live-2027_A2rCGkH",
-    "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
+    "canary_note": "A dated sample (8 July 2027); rotate before then. guidle's listings are rendered by script, so no listing can pick a current event.",
     "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,

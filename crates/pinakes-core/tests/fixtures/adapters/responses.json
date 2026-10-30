@@ -422,32 +422,6 @@
     "sha256": "5a12f97dbdebb20357a59e28c400607cc61a142ec1111736b0e775a1205741fe"
   },
   {
-    "at": "2026-10-16T04:54:10.859582791Z",
-    "blake3": "8d2bcf84fab9ac1372673ee30416672d669a802cc5854069a2df0c9d84640cce",
-    "bytes": 280482,
-    "content_type": "text/html",
-    "feed_hint": false,
-    "json_body": null,
-    "location": null,
-    "path": "337cba4d83ea4d07fdebd3f865bcbfee186f89306d40499a766990a0125097fe.gz",
-    "status": 200,
-    "uri": "https://www.guidle.com/de/veranstaltungen/dies-das/ueberlingen/gregor-haegele-live-2027_A2rCGkH",
-    "user_agent": "pinakes/0.1.0 (+https://github.com/pubky/pinakes)",
-    "validators": {
-      "etag": null,
-      "last_modified": null
-    },
-    "sha256": "337cba4d83ea4d07fdebd3f865bcbfee186f89306d40499a766990a0125097fe"
-  },
-  {
-    "at": "2026-10-16T04:54:12.600494725Z",
-    "error": "content type is not allowed",
-    "feed_hint": false,
-    "json_body": null,
-    "uri": "https://www.guidle.com/iCalendar/?lang=de&id=A2rCGkH",
-    "user_agent": "pinakes/0.1.0 (+https://github.com/pubky/pinakes)"
-  },
-  {
     "at": "2026-10-16T04:54:12.710413604Z",
     "blake3": "b9f65d70bde3dc7f1cb183e2aa2dac5dccbffea32028d4d3f6e949c364d72984",
     "bytes": 595,
@@ -849,5 +823,41 @@
       "last_modified": null
     },
     "sha256": "815ae60b0766d54dfc2384bc233256008480c2751703aaa73ef986bd09f22499"
+  },
+  {
+    "at": "2026-10-30T06:09:48.290700646Z",
+    "blake3": "c3bdad03f99a3e639378b244b4607ff0361f5e2050381066f5f12ef735ec7f2c",
+    "bytes": 280962,
+    "content_type": "text/html",
+    "feed_hint": false,
+    "json_body": null,
+    "location": null,
+    "path": "80b1d8cdb2c39ef33f11ea5cac593e3ae02cba22e5cd6b4faa65a927eaa53f8b.gz",
+    "status": 200,
+    "uri": "https://www.guidle.com/de/veranstaltungen/dies-das/ueberlingen/gregor-haegele-live-2027_A2rCGkH",
+    "user_agent": "pinakes/0.1.0 (+https://pubky.app)",
+    "validators": {
+      "etag": null,
+      "last_modified": null
+    },
+    "sha256": "80b1d8cdb2c39ef33f11ea5cac593e3ae02cba22e5cd6b4faa65a927eaa53f8b"
+  },
+  {
+    "at": "2026-10-30T06:10:02.236599366Z",
+    "blake3": "acea2c4ab5da10b2740aa386879ac789a414097e141f107671bf907a7ce995c2",
+    "bytes": 2516,
+    "content_type": "text/calendar",
+    "feed_hint": false,
+    "json_body": null,
+    "location": null,
+    "path": "a485e5cdbea03084ceb2efc22f9fa43f99802660ce326b99fae015a1871bba41.gz",
+    "status": 200,
+    "uri": "https://www.guidle.com/iCalendar/?id=1287399006&lang=no&portal=https://www.guidle.com&url=https://www.guidle.com/de/veranstaltungen/dies-das/ueberlingen/gregor-haegele-live-2027_A2rCGkH",
+    "user_agent": "pinakes/0.1.0 (+https://pubky.app)",
+    "validators": {
+      "etag": null,
+      "last_modified": null
+    },
+    "sha256": "a485e5cdbea03084ceb2efc22f9fa43f99802660ce326b99fae015a1871bba41"
   }
 ]

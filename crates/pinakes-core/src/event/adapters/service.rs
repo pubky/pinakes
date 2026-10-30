@@ -738,8 +738,6 @@ pub fn endpoint(
                 "gathio" => Some(u.join(&format!("/export/event/{id}"))?.into()),
                 "allevents" if !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()) => Some(query(
                     "https://allevents.in/api/addtocal.php?type=ical", "event_id", id)?),
-                "guidle" => id.rsplit_once('_').map(|(_, id)| query(
-                    "https://www.guidle.com/iCalendar/?lang=de", "id", id)).transpose()?,
                 "weezevent" if id.starts_with('E') && id[1..].chars().all(|c| c.is_ascii_digit()) => Some(format!("https://api.weezevent.com/sites/view/live/{id}.ics")),
                 "eventfrog" => id
                     .trim_end_matches(".html")
