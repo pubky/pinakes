@@ -582,9 +582,14 @@ when it is turned back on.
 floor, expected fields, user-agent profile, key requirement and canary. Configure a platform
 under `[event.adapters.platforms.<id>]` with `enabled` and `key`; a missing key disables only
 that platform and no key ever appears in `/v1/info`. Resident Advisor (an unofficial GraphQL
-API) is off by default; Posh is marked fragile. `event.adapters.enabled = false` sends platform
-URLs to the web resolver. The `browser` and `firefox` user-agent profiles imitate browsers to
-pass bot walls; consider the provider's terms before enabling those platforms.
+API) is off by default; Posh is marked fragile. Billetto, Reservix, Rausgegangen and Entradium
+are off and fragile: each walls its event pages off from Pinakes's user agent (a CloudFront 403,
+a script challenge, an "update your browser" page), and a bot wall is never worked around.
+Starticket is off: it is retired, its site redirects to See Tickets. Each platform's
+`canary_note` in the table gives the reason and when it was checked. A platform that is off
+sends its URLs to the web resolver, as `event.adapters.enabled = false` sends every platform's.
+The `browser` and `firefox` user-agent profiles imitate browsers to pass bot walls; consider the
+provider's terms before enabling those platforms.
 
 Luma, Meetup, Eventbrite, Partiful, Posh, RingCentral, Airmeet, Mobilizon, Gancio, Wikidata,
 Dice, Xceed, Ents24 and Ticketino supplement JSON-LD with bounded state parsing; JavaScript is
@@ -791,13 +796,15 @@ them. Admin info and database metrics are cached for 15 seconds.
 Canaries (`canary.enabled`) run every `limits.canary_interval_secs`, first one interval after
 startup, on the ordinary workers and host budgets; their state survives restarts and they never
 write documents, the OSM cache or changes. A successful result missing a declared field is
-`outcome=drift`; generic web declares no fields. A canary denied by host policy is skipped, and
-an over-budget sample is inconclusive. A platform whose canary names a listing page
-(`canary_link` in the table: Infomaniak) reads that listing's first event link of the declared
-form, so its canary never reads an event gone stale; any other reads its fixed sample, which its
-`canary_note` says when to rotate. See [ops/README.md](../ops/README.md) for alert rules, the
-dashboard and scrape setup; `scripts/check-ops` checks every alert and dashboard metric against
-the registry (and runs `promtool check rules` when installed).
+`outcome=drift`; generic web declares no fields. A canary whose host the egress policy denies
+(`deny_hosts`, `allow_hosts`) is skipped before any request: its gauges are cleared, so it counts
+as neither a failure nor a success. Any other refusal of a canary's request (a content type, a
+redirect) is a failure. An over-budget sample is inconclusive. A platform whose canary names a
+listing page (`canary_link` in the table: Infomaniak) reads that listing's first event link of
+the declared form, so its canary never reads an event gone stale; any other reads its fixed
+sample, which its `canary_note` says when to rotate. See [ops/README.md](../ops/README.md) for
+alert rules, the dashboard and scrape setup; `scripts/check-ops` checks every alert and dashboard
+metric against the registry (and runs `promtool check rules` when installed).
 
 The capability-URL guard (`scripts/verify-no-capability-urls`, run by the tests) scans every
 tracked and new source file for capability URLs; synthetic fixture URLs are allowed only in

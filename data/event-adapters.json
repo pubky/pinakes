@@ -643,12 +643,12 @@
       "name",
       "start"
     ],
-    "canary": "https://billetto.co.uk/e/farm-halloween-tickets-1977196",
-    "canary_note": null,
+    "canary": null,
+    "canary_note": "Off: CloudFront refuses its event pages (/e/…) to Pinakes's user agent with 403 while its home page answers (checked 2026-10-30); a bot wall is not worked around.",
     "ua_profile": "pinakes",
     "requires_key": false,
-    "fragile": false,
-    "enabled": true
+    "fragile": true,
+    "enabled": false
   },
   {
     "id": "fatsoma",
@@ -709,12 +709,12 @@
       "name",
       "start"
     ],
-    "canary": "https://rausgegangen.de/en/events/geheimkonzert-dusseldorf-20-open-air-by-rausgegangen-0/",
-    "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
+    "canary": null,
+    "canary_note": "Off: Bunny Shield answers its event pages with a JavaScript challenge (403, checked 2026-10-30); a bot wall is not worked around.",
     "ua_profile": "pinakes",
     "requires_key": false,
-    "fragile": false,
-    "enabled": true
+    "fragile": true,
+    "enabled": false
   },
   {
     "id": "fixr",
@@ -798,12 +798,12 @@
       "name",
       "start"
     ],
-    "canary": "https://www.reservix.de/tickets-voodoo-juergens-und-die-ansa-panier-in-wiesbaden-schlachthof-wiesbaden-halle-am-21-5-2026/e2483153",
-    "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
+    "canary": null,
+    "canary_note": "Off: CloudFront refuses every page, robots.txt included, to Pinakes's user agent with 403 (checked 2026-10-30); a bot wall is not worked around.",
     "ua_profile": "pinakes",
     "requires_key": false,
-    "fragile": false,
-    "enabled": true
+    "fragile": true,
+    "enabled": false
   },
   {
     "id": "entradium",
@@ -820,12 +820,12 @@
       "name",
       "start"
     ],
-    "canary": "https://entradium.com/en/events/like-a-stone-vigo-supersonic",
-    "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
+    "canary": null,
+    "canary_note": "Off: every page, robots.txt included, answers Pinakes's user agent with an 'update your browser' page (checked 2026-10-30); a user-agent wall is not worked around.",
     "ua_profile": "pinakes",
     "requires_key": false,
-    "fragile": false,
-    "enabled": true
+    "fragile": true,
+    "enabled": false
   },
   {
     "id": "starticket",
@@ -841,12 +841,12 @@
     "expected_fields": [
       "type"
     ],
-    "canary": "https://s3-eu-west-1.amazonaws.com/starticket/wwwroot/ticketing/feeds/starticketfeed_D.xml",
-    "canary_note": "Atom feed canary may contain only dates outside the horizon; validates dated feed shape, not current inventory.",
+    "canary": null,
+    "canary_note": "Off: retired; starticket.ch redirects to See Tickets and its Atom feed answers 403 AccessDenied (checked 2026-10-30).",
     "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
-    "enabled": true
+    "enabled": false
   },
   {
     "id": "songkick",

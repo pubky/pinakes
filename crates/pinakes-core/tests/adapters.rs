@@ -5332,6 +5332,59 @@ fn a_canary_link_has_its_declared_form() {
     );
 }
 
+/// Platforms that wall their event pages off from Pinakes's user agent, and a retired one, are
+/// off with no canary, and say why: a bot wall is never worked around.
+#[test]
+fn walled_and_retired_platforms_are_off_without_a_canary() {
+    let cfg = EventConfig::default();
+    for id in [
+        "billetto",
+        "reservix",
+        "rausgegangen",
+        "entradium",
+        "starticket",
+    ] {
+        let d = adapters::definition(id).unwrap();
+        let m = adapters::manifest(d, &cfg);
+        assert!(!m.enabled, "{id}");
+        assert!(m.canary.is_none(), "{id}");
+        assert!(
+            d.canary_note
+                .as_deref()
+                .is_some_and(|n| n.starts_with("Off: ")),
+            "{id}"
+        );
+        assert_eq!(d.fragile, id != "starticket", "{id}");
+    }
+}
+
+/// A platform canary whose host the egress policy denies is skipped before any request: the
+/// queue never claims it and clears its gauges (`canary::suspend`), so it is no failure.
+#[test]
+fn a_canary_on_a_denied_host_is_skipped() {
+    use pinakes_core::resolver::Resolver;
+    let cfg = EventConfig::default();
+    let m = adapters::manifest(adapters::definition("guidle").unwrap(), &cfg);
+    let resolver = |deny: Vec<String>| adapters::service::PlatformResolver {
+        web: pinakes_core::resolver::web::WebResolver {
+            oembed_policy: Default::default(),
+            cards: None,
+            events: None,
+            egress: Egress::with_backends(
+                pinakes_core::config::EgressConfig {
+                    deny_hosts: deny,
+                    ..Default::default()
+                },
+                Arc::new(AdapterDns),
+                Arc::new(RecordedResponses(Default::default())),
+            ),
+            config: Default::default(),
+        },
+    };
+    assert!(resolver(vec![]).canary_allowed_for(&m));
+    assert!(!resolver(vec!["www.guidle.com".into()]).canary_allowed_for(&m));
+}
+
 /// A portal's calendar export that names the page in its `url` parameter (Guidle's
 /// `/iCalendar/?id=…&url=<page>`) is the page's own, and is read for its event. When the fetch
 /// refuses its content type, the refusal propagates: nothing is read as an event.

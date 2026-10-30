@@ -13,8 +13,9 @@ compressed bodies without printing matched capabilities.
 `cases.json` lists 45 keyless probes and expected type/status/fields on these inputs.
 The integration test uses mock DNS/transport and disables relay fallback. Thirty-nine
 produce the expected fields. Billetto/Rausgegangen/Reservix return 403, Dice returns
-503. Fever exceeds the page cap, and the selected Entradium page lacks event fields.
-Infomaniak's case is its canary: the listing, then its first event page.
+503. Fever exceeds the page cap, and the Entradium capture is its "update your browser" page.
+Billetto, Rausgegangen, Reservix, Entradium and Starticket are off now, so their links are read
+as plain web pages. Infomaniak's case is its canary: the listing, then its first event page.
 These cases test how failures surface; they do not show extraction working.
 Counts of time-windowed occurrences are not fixed, since the clock advances.
 

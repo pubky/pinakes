@@ -331,10 +331,10 @@
     "status": "ok",
     "type": "WebPage",
     "missing_fields": [
-      "name",
       "start"
     ],
-    "tz": null
+    "tz": null,
+    "note": "Off since 2026-10-30 (a user-agent wall): its links are read as plain web pages, so the captured wall page gives a name and no start."
   },
   {
     "id": "starticket",
