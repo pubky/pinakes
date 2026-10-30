@@ -218,17 +218,28 @@ pub async fn type_hints(
 }
 
 impl TypeHints {
-    /// The sources these hints come from (`titles`, `films`, `podcasts`).
-    pub fn sources(&self) -> Vec<&'static str> {
-        [
-            (self.title.is_some(), "titles"),
-            (self.title_type.is_some(), "films"),
-            (self.episode, "podcasts"),
-        ]
-        .into_iter()
-        .filter_map(|(found, source)| found.then_some(source))
-        .collect()
+    /// What `source` finds for a card now, as one fingerprint of every value it writes into it
+    /// (`titles`: the title and description; `films`: the title type; `podcasts`: the episode);
+    /// `None` when it finds nothing.
+    pub fn finding(&self, source: &str) -> Option<String> {
+        match source {
+            "titles" => self.title.as_deref().map(|title| {
+                fingerprint(&[title, self.title_description.as_deref().unwrap_or("")])
+            }),
+            "films" => self.title_type.as_deref().map(|t| fingerprint(&[t])),
+            "podcasts" => self.episode.then(|| fingerprint(&["episode"])),
+            _ => None,
+        }
     }
+}
+/// A short fingerprint of the values a source wrote into a card (`ResourceMeta::hinted_by`).
+pub fn fingerprint(values: &[&str]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for value in values {
+        hasher.update(value.as_bytes());
+        hasher.update(&[0x1f]);
+    }
+    hasher.finalize().to_hex()[..16].to_owned()
 }
 /// The also-on source of a live `artist_type` fact, from the sources that are on, and its value.
 pub async fn artist_type(pool: &sqlx::PgPool, id: &str) -> Result<Option<(String, String)>> {
@@ -237,10 +248,10 @@ pub async fn artist_type(pool: &sqlx::PgPool, id: &str) -> Result<Option<(String
         .fetch_optional(pool)
         .await?)
 }
-/// Whether a stored card carries a finding of a source (`ResourceMeta::hinted_by`) that no longer
-/// gives it: switched off, or its row expired or gone, whatever the value was. A 304 does not
-/// reuse such a card (`queue`): the page is read again in full. A source that still finds it,
-/// changed or not, writes its current value over the old one.
+/// Whether a stored card carries a finding (`ResourceMeta::hinted_by`) its source no longer
+/// gives as it is: switched off, its row expired or gone, or any value it wrote changed or
+/// dropped (a description gone under an unchanged title). A 304 does not reuse such a card
+/// (`queue`): the page is read again in full, and takes what the sources find now.
 pub async fn outdated(
     pool: &sqlx::PgPool,
     id: &str,
@@ -253,17 +264,20 @@ pub async fn outdated(
         .await?
         .remove(id)
         .unwrap_or_default();
-    let mut finding = hints.sources();
     let artist = artist_type(pool, id).await?;
-    finding.extend(artist.as_ref().map(|(_, source)| source.as_str()));
-    Ok(doc.hinted_by.iter().any(|s| !finding.contains(&s.as_str())))
+    Ok(doc.hinted_by.iter().any(|(source, written)| {
+        let now = hints.finding(source).or_else(|| {
+            artist
+                .as_ref()
+                .filter(|(_, s)| s == source)
+                .map(|(t, _)| fingerprint(&[t]))
+        });
+        now.as_ref() != Some(written)
+    }))
 }
-/// Record that `source`'s finding is written into the card.
-pub fn hinted(doc: &mut crate::model::ResourceMeta, source: &str) {
-    if !doc.hinted_by.iter().any(|s| s == source) {
-        doc.hinted_by.push(source.to_owned());
-        doc.hinted_by.sort();
-    }
+/// Record that `source`'s finding, `fingerprint`, is written into the card.
+pub fn hinted(doc: &mut crate::model::ResourceMeta, source: &str, fingerprint: String) {
+    doc.hinted_by.insert(source.to_owned(), fingerprint);
 }
 
 /// A Goodreads ID: digits, then an optional title slug (`1540236.The_Hobbit`, `4671-the-great-gatsby`).
@@ -288,19 +302,23 @@ pub fn type_card(uri: &str, hints: &TypeHints, doc: &mut crate::model::ResourceM
         .find(|k| *k == doc.type_name);
     if let Some(title) = &hints.title {
         if crate::sources::apply_title(uri, title, hints.title_description.as_deref(), doc) {
-            self::hinted(doc, "titles");
+            self::hinted(doc, "titles", hints.finding("titles").unwrap_or_default());
         }
     }
     match link_type(uri) {
         Some("CreativeWork") => {
             if hinted.is_some() {
-                self::hinted(doc, "films");
+                self::hinted(doc, "films", hints.finding("films").unwrap_or_default());
             }
             doc.set_type(hinted.or(own).unwrap_or("CreativeWork"))
         }
         Some(kind) => doc.set_type(kind),
         None if hints.episode => {
-            self::hinted(doc, "podcasts");
+            self::hinted(
+                doc,
+                "podcasts",
+                hints.finding("podcasts").unwrap_or_default(),
+            );
             doc.set_type("PodcastEpisode")
         }
         None => {}
