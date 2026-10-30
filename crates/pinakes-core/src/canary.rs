@@ -68,12 +68,11 @@ pub async fn run_manifest(
     metrics: &Metrics,
     generation: i64,
 ) -> Result<()> {
-    let uri = manifest.canary.as_ref().expect("claimed canary");
     let (result, observations) = crate::telemetry::observe(metrics, manifest, async {
-        let result = tokio::time::timeout(
-            Duration::from_secs(15),
-            resolver.probe_manifest(uri.as_str(), manifest),
-        )
+        let result = tokio::time::timeout(Duration::from_secs(15), async {
+            let target = resolver.canary_target(manifest).await?;
+            resolver.probe_manifest(&target, manifest).await
+        })
         .await
         .map_err(anyhow::Error::from)
         .and_then(|r| r);

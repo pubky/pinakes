@@ -874,12 +874,21 @@ pub(crate) fn header_alternate(header: Option<&str>, base: &url::Url) -> Option<
         ))
     })
 }
+/// Whether a calendar `link` on the page at `base` is the page's own: on its host, and below its
+/// path, named after its last segment, or naming the page itself in its `url` parameter (a
+/// portal's export, `/iCalendar/?id=…&url=<page>`).
 pub(crate) fn own_calendar_link(base: &url::Url, link: &str) -> bool {
     let Ok(link) = url::Url::parse(link) else {
         return false;
     };
     if base.host_str() != link.host_str() {
         return false;
+    }
+    if link
+        .query_pairs()
+        .any(|(k, v)| k == "url" && url::Url::parse(&v).is_ok_and(|v| v == *base))
+    {
+        return true;
     }
     let stem = base
         .path()

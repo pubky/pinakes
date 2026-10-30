@@ -28,6 +28,14 @@ pub trait Resolver: Send + Sync {
     fn canary_allowed_for(&self, manifest: &crate::adapter::Manifest) -> bool {
         manifest.enabled && self.canary_allowed()
     }
+    /// The link a canary reads: the manifest's own sample.
+    async fn canary_target(&self, manifest: &crate::adapter::Manifest) -> Result<String> {
+        manifest
+            .canary
+            .as_ref()
+            .map(|u| u.to_string())
+            .ok_or_else(|| anyhow::anyhow!("no canary"))
+    }
     async fn probe_manifest(
         &self,
         uri: &str,

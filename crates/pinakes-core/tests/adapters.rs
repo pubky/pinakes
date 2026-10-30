@@ -1973,11 +1973,6 @@ fn own_calendar_links_and_deterministic_platform_endpoints() {
             "https://luma.com/event/evt-abc",
             "https://api.lu.ma/event/get?event_api_id=evt-abc",
         ),
-        (
-            "guidle",
-            "https://www.guidle.com/de/veranstaltungen/title_A123",
-            "https://www.guidle.com/iCalendar/?lang=de&id=A123",
-        ),
     ] {
         assert_eq!(
             endpoint(adapters::definition(id).unwrap(), uri, Some(&f), &cfg)
@@ -1987,6 +1982,29 @@ fn own_calendar_links_and_deterministic_platform_endpoints() {
             expected
         );
     }
+    // A portal's export naming the page in its `url` parameter is the page's own; one naming
+    // another page is not. A slug is no export id: a page without its link has no endpoint.
+    let page = "https://www.guidle.com/de/veranstaltungen/title_A123";
+    let export =
+        |of: &str| format!("<a href='/iCalendar/?id=42&amp;lang=de&amp;url={of}'>iCal</a>");
+    let guidle = adapters::definition("guidle").unwrap();
+    assert_eq!(
+        ics_link(
+            "guidle",
+            &page.parse().unwrap(),
+            &export("https://www.guidle.com/de/veranstaltungen/other_B456")
+        ),
+        None
+    );
+    assert_eq!(
+        ics_link("guidle", &page.parse().unwrap(), &export(page)).unwrap(),
+        format!("https://www.guidle.com/iCalendar/?id=42&lang=de&url={page}")
+    );
+    let f = Fetched {
+        url: page.parse().unwrap(),
+        ..f
+    };
+    assert!(endpoint(guidle, page, Some(&f), &cfg).unwrap().is_none());
 }
 
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
@@ -2344,9 +2362,15 @@ async fn recorded_public_adapter_responses_replay_without_network(pool: PgPool) 
     for case in cases {
         let id = case["id"].as_str().unwrap();
         let manifest = adapters::manifest(adapters::definition(id).unwrap(), &cfg);
-        let result = platform
-            .probe_manifest(case["uri"].as_str().unwrap(), &manifest)
-            .await;
+        // A canary case reads its target as the canary does (a listing's first event link).
+        let target = if case["canary"] == true {
+            let target = platform.canary_target(&manifest).await.unwrap();
+            assert_eq!(target, case["target"].as_str().unwrap(), "{id}");
+            target
+        } else {
+            case["uri"].as_str().unwrap().to_owned()
+        };
+        let result = platform.probe_manifest(&target, &manifest).await;
         if case["error"] == true {
             assert!(result.is_err(), "{id}");
             continue;
@@ -5272,4 +5296,211 @@ async fn a_page_inherits_an_ics_uid_only_from_its_own_origin(pool: PgPool) {
     assert_eq!(uids(&own), ["ics_uid:show-uid"], "{:?}", own.group_keys);
     let moved = r.resolve("https://moved.example/talk").await.unwrap();
     assert!(uids(&moved).is_empty(), "{:?}", moved.group_keys);
+}
+
+/// A canary link's form: as many path segments, `*` any one non-empty segment.
+#[test]
+fn a_canary_link_has_its_declared_form() {
+    let form = "/*/*/*/*/events/*";
+    for (path, matches) in [
+        (
+            "/en-ch/concerts/merci-johnny/7790028e-946c-4318-b64b-467fb0f9e071/events/390099",
+            true,
+        ),
+        ("/en-ch/concerts", false),
+        ("/en-ch/concerts/merci-johnny/7790028e/events/", false),
+        (
+            "/en-ch/concerts/merci-johnny/7790028e/events/390099/tickets",
+            false,
+        ),
+        ("/en-ch/concerts/merci-johnny/7790028e/shows/390099", false),
+    ] {
+        assert_eq!(adapters::canary_link_matches(form, path), matches, "{path}");
+    }
+    let listing: url::Url = "https://infomaniak.events/en-ch".parse().unwrap();
+    let html = r#"<a href="/en-ch/concerts">Concerts</a>
+        <a href="https://other.example/en-ch/a/b/c/events/1">elsewhere</a>
+        <a href="/en-ch/concerts/merci-johnny/7790028e-946c-4318-b64b-467fb0f9e071/events/390099#tickets">Merci Johnny</a>
+        <a href="/en-ch/dance/silahkan/264f9e74-5665-4208-9706-91200bd609a9/events/393415">Silahkan</a>"#;
+    assert_eq!(
+        adapters::service::canary_link(&listing, html, form).as_deref(),
+        Some("https://infomaniak.events/en-ch/concerts/merci-johnny/7790028e-946c-4318-b64b-467fb0f9e071/events/390099")
+    );
+    assert_eq!(
+        adapters::service::canary_link(&listing, "<a href=\"/en-ch\">x</a>", form),
+        None
+    );
+}
+
+/// Platforms that wall their event pages off from Pinakes's user agent, and a retired one, are
+/// off with no canary, and say why: a bot wall is never worked around.
+#[test]
+fn walled_and_retired_platforms_are_off_without_a_canary() {
+    let cfg = EventConfig::default();
+    for id in [
+        "billetto",
+        "reservix",
+        "rausgegangen",
+        "entradium",
+        "starticket",
+    ] {
+        let d = adapters::definition(id).unwrap();
+        let m = adapters::manifest(d, &cfg);
+        assert!(!m.enabled, "{id}");
+        assert!(m.canary.is_none(), "{id}");
+        assert!(
+            d.canary_note
+                .as_deref()
+                .is_some_and(|n| n.starts_with("Off: ")),
+            "{id}"
+        );
+        assert_eq!(d.fragile, id != "starticket", "{id}");
+    }
+}
+
+/// A platform canary whose host the egress policy denies is skipped before any request: the
+/// queue never claims it and clears its gauges (`canary::suspend`), so it is no failure.
+#[test]
+fn a_canary_on_a_denied_host_is_skipped() {
+    use pinakes_core::resolver::Resolver;
+    let cfg = EventConfig::default();
+    let m = adapters::manifest(adapters::definition("guidle").unwrap(), &cfg);
+    let resolver = |deny: Vec<String>| adapters::service::PlatformResolver {
+        web: pinakes_core::resolver::web::WebResolver {
+            oembed_policy: Default::default(),
+            cards: None,
+            events: None,
+            egress: Egress::with_backends(
+                pinakes_core::config::EgressConfig {
+                    deny_hosts: deny,
+                    ..Default::default()
+                },
+                Arc::new(AdapterDns),
+                Arc::new(RecordedResponses(Default::default())),
+            ),
+            config: Default::default(),
+        },
+    };
+    assert!(resolver(vec![]).canary_allowed_for(&m));
+    assert!(!resolver(vec!["www.guidle.com".into()]).canary_allowed_for(&m));
+}
+
+/// A portal's calendar export that names the page in its `url` parameter (Guidle's
+/// `/iCalendar/?id=…&url=<page>`) is the page's own, and is read for its event. When the fetch
+/// refuses its content type, the refusal propagates: nothing is read as an event.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_portal_calendar_export_naming_its_page_is_read_and_its_refusal_propagates(pool: PgPool) {
+    use pinakes_core::resolver::Resolver;
+    let page = "https://www.guidle.com/de/veranstaltungen/musik/zuerich/fixture-konzert_A1b2C3";
+    let query = format!("id=42&lang=de&portal=https://www.guidle.com&url={page}");
+    let export = format!("https://www.guidle.com/iCalendar/?{query}");
+    let html = format!(
+        "<title>Fixture-Konzert</title><a href=\"/iCalendar/?{}\">iCal</a>",
+        query.replace('&', "&amp;")
+    );
+    let start = (Utc::now() + Duration::days(30)).format("%Y%m%dT%H%M%SZ");
+    let ics = format!("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:guidle-fixture\r\nDTSTART:{start}\r\nSUMMARY:Fixture-Konzert\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n");
+    let cfg = EventConfig {
+        geocoding: false,
+        ..Default::default()
+    };
+    let manifest = adapters::manifest(adapters::definition("guidle").unwrap(), &cfg);
+    let egress = recorded_egress(vec![
+        (page, &html, Value::Null),
+        (&export, &ics, Value::Null),
+    ]);
+    let doc = platform(&pool, cfg.clone(), egress)
+        .probe_manifest(page, &manifest)
+        .await
+        .unwrap();
+    assert_eq!(doc.type_name, "Event");
+    assert_eq!(doc.name.as_deref(), Some("Fixture-Konzert"));
+    assert!(doc.start.is_some());
+    assert_eq!(json!(manifest.missing_fields(&doc)), json!([]));
+    // The transport refuses a body of a type the fetch does not allow, as the pinned one does.
+    let mut responses = std::collections::HashMap::new();
+    responses.insert(
+        format!("{page}:"),
+        Ok(Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            url: page.parse().unwrap(),
+            body: html.clone().into_bytes(),
+            content_type: "text/html".into(),
+            status: 200,
+            retry_after_secs: 60,
+            location: None,
+            validators: Default::default(),
+        }),
+    );
+    responses.insert(
+        format!("{export}:"),
+        Err("content type is not allowed".to_owned()),
+    );
+    let egress = Egress::with_backends(
+        pinakes_core::config::EgressConfig {
+            host_requests_per_second: 1000.,
+            ..Default::default()
+        },
+        Arc::new(AdapterDns),
+        Arc::new(RecordedResponses(responses)),
+    );
+    let refused = platform(&pool, cfg, egress)
+        .probe_manifest(page, &manifest)
+        .await
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("content type is not allowed"),
+        "{refused:#}"
+    );
+}
+
+/// A listing canary runs on the listing's first event link: the event is read and the canary is
+/// healthy. The listing itself is no event.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_listing_canary_runs_on_its_first_event_link(pool: PgPool) {
+    use pinakes_core::{canary, config::CanaryConfig, telemetry::Metrics};
+    let listing = "https://infomaniak.events/en-ch";
+    let event = "https://infomaniak.events/en-ch/concerts/fixture/7790028e-946c-4318-b64b-467fb0f9e071/events/390099";
+    let start = (Utc::now() + Duration::days(30)).to_rfc3339();
+    let page = format!(
+        r#"<title>Fixture concert</title><script type="application/ld+json">{{"@context":"https://schema.org","@type":"Event","name":"Fixture concert","startDate":"{start}"}}</script>"#
+    );
+    let html = format!(
+        r#"<title>Events</title><a href="/en-ch/concerts">Concerts</a><a href="{event}">Fixture concert</a>"#
+    );
+    let cfg = EventConfig {
+        geocoding: false,
+        ..Default::default()
+    };
+    let manifest = adapters::manifest(adapters::definition("infomaniak").unwrap(), &cfg);
+    let egress = recorded_egress(vec![
+        (listing, &html, Value::Null),
+        (event, &page, Value::Null),
+    ]);
+    let platform = platform(&pool, cfg, egress);
+    let config = CanaryConfig::default();
+    let metrics = Metrics::new().unwrap();
+    assert!(canary::claim(&pool, &manifest, &config)
+        .await
+        .unwrap()
+        .is_none());
+    sqlx::query("UPDATE source_state SET canary_due_at=now() WHERE source='infomaniak'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let generation = canary::claim(&pool, &manifest, &config)
+        .await
+        .unwrap()
+        .unwrap();
+    canary::run_manifest(&pool, &platform, &manifest, &config, &metrics, generation)
+        .await
+        .unwrap();
+    let (ok, missing): (Option<bool>, Vec<String>) = sqlx::query_as(
+        "SELECT canary_ok,canary_missing FROM source_state WHERE source='infomaniak'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((ok, missing), (Some(true), vec![]));
 }

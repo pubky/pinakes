@@ -102,11 +102,26 @@ pub struct Definition {
     pub cancellation: String,
     pub expected_fields: Vec<String>,
     pub canary: Option<Url>,
+    /// When set, `canary` is a listing page and the canary reads its first link whose path has
+    /// this form (`canary_link_matches`): a current event, so the canary never goes stale.
+    #[serde(default)]
+    pub canary_link: Option<String>,
     pub canary_note: Option<String>,
     pub ua_profile: String,
     pub requires_key: bool,
     pub fragile: bool,
     pub enabled: bool,
+}
+/// Whether `path` has a canary link's form (`Definition::canary_link`): as many segments, each
+/// equal to the pattern's, where `*` stands for any one non-empty segment.
+pub fn canary_link_matches(pattern: &str, path: &str) -> bool {
+    let (pattern, path): (Vec<&str>, Vec<&str>) =
+        (pattern.split('/').collect(), path.split('/').collect());
+    pattern.len() == path.len()
+        && pattern
+            .iter()
+            .zip(&path)
+            .all(|(p, s)| if *p == "*" { !s.is_empty() } else { p == s })
 }
 pub fn definitions() -> &'static [Definition] {
     static ALL: OnceLock<Vec<Definition>> = OnceLock::new();
@@ -330,7 +345,10 @@ pub fn validate(cfg: &EventConfig) -> anyhow::Result<()> {
                     "state"
                 ]
                 .contains(&d.parser.as_str())
-                && ["pinakes", "plain", "browser", "firefox"].contains(&d.ua_profile.as_str()),
+                && ["pinakes", "plain", "browser", "firefox"].contains(&d.ua_profile.as_str())
+                && d.canary_link.as_ref().is_none_or(|l| {
+                    d.canary.is_some() && l.starts_with('/') && l.split('/').any(|s| s == "*")
+                }),
             "invalid adapter declaration {}",
             d.id
         );

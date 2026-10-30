@@ -422,32 +422,6 @@
     "sha256": "5a12f97dbdebb20357a59e28c400607cc61a142ec1111736b0e775a1205741fe"
   },
   {
-    "at": "2026-10-16T04:54:10.859582791Z",
-    "blake3": "8d2bcf84fab9ac1372673ee30416672d669a802cc5854069a2df0c9d84640cce",
-    "bytes": 280482,
-    "content_type": "text/html",
-    "feed_hint": false,
-    "json_body": null,
-    "location": null,
-    "path": "337cba4d83ea4d07fdebd3f865bcbfee186f89306d40499a766990a0125097fe.gz",
-    "status": 200,
-    "uri": "https://www.guidle.com/de/veranstaltungen/dies-das/ueberlingen/gregor-haegele-live-2027_A2rCGkH",
-    "user_agent": "pinakes/0.1.0 (+https://github.com/pubky/pinakes)",
-    "validators": {
-      "etag": null,
-      "last_modified": null
-    },
-    "sha256": "337cba4d83ea4d07fdebd3f865bcbfee186f89306d40499a766990a0125097fe"
-  },
-  {
-    "at": "2026-10-16T04:54:12.600494725Z",
-    "error": "content type is not allowed",
-    "feed_hint": false,
-    "json_body": null,
-    "uri": "https://www.guidle.com/iCalendar/?lang=de&id=A2rCGkH",
-    "user_agent": "pinakes/0.1.0 (+https://github.com/pubky/pinakes)"
-  },
-  {
     "at": "2026-10-16T04:54:12.710413604Z",
     "blake3": "b9f65d70bde3dc7f1cb183e2aa2dac5dccbffea32028d4d3f6e949c364d72984",
     "bytes": 595,
@@ -701,24 +675,6 @@
     "sha256": "c8ffcf993cbf5bd869960fc85a8b1a042e7b378c3451ed29f93d61f8a5d28385"
   },
   {
-    "at": "2026-10-16T04:54:26.098106796Z",
-    "blake3": "459f0e0bcdae6ffa09a201440a6e26d889c2fbc23b45508d1588718f20f98066",
-    "bytes": 40165,
-    "content_type": "text/html",
-    "feed_hint": false,
-    "json_body": null,
-    "location": null,
-    "path": "23c013083b476d23cd94d6cca41f71bcbf2abe6c9684d3be672724a2a6b0dca6.gz",
-    "status": 200,
-    "uri": "https://infomaniak.events/en-ch/conferences/seminaire-des-autorites-2026/92392f2a-6711-4917-b9e9-60c88e8c550a/events/396911",
-    "user_agent": "pinakes/0.1.0 (+https://github.com/pubky/pinakes)",
-    "validators": {
-      "etag": null,
-      "last_modified": null
-    },
-    "sha256": "23c013083b476d23cd94d6cca41f71bcbf2abe6c9684d3be672724a2a6b0dca6"
-  },
-  {
     "at": "2026-10-16T04:54:27.322588939Z",
     "blake3": "97997e4921fb3d7ac8aab6977f68f99d1bdc2de94675c4bef67681aa1f4bd05e",
     "bytes": 432210,
@@ -849,5 +805,77 @@
       "last_modified": null
     },
     "sha256": "815ae60b0766d54dfc2384bc233256008480c2751703aaa73ef986bd09f22499"
+  },
+  {
+    "at": "2026-10-30T06:09:48.290700646Z",
+    "blake3": "c3bdad03f99a3e639378b244b4607ff0361f5e2050381066f5f12ef735ec7f2c",
+    "bytes": 280962,
+    "content_type": "text/html",
+    "feed_hint": false,
+    "json_body": null,
+    "location": null,
+    "path": "80b1d8cdb2c39ef33f11ea5cac593e3ae02cba22e5cd6b4faa65a927eaa53f8b.gz",
+    "status": 200,
+    "uri": "https://www.guidle.com/de/veranstaltungen/dies-das/ueberlingen/gregor-haegele-live-2027_A2rCGkH",
+    "user_agent": "pinakes/0.1.0 (+https://pubky.app)",
+    "validators": {
+      "etag": null,
+      "last_modified": null
+    },
+    "sha256": "80b1d8cdb2c39ef33f11ea5cac593e3ae02cba22e5cd6b4faa65a927eaa53f8b"
+  },
+  {
+    "at": "2026-10-30T06:09:48.561824899Z",
+    "blake3": "e30ee2fdf4a4d79a75e62c2728927a96951d8499aee2cecce80755c537668871",
+    "bytes": 248595,
+    "content_type": "text/html",
+    "feed_hint": false,
+    "json_body": null,
+    "location": null,
+    "path": "ec7262c40bc93ddeda94b5c6b4100c623dd17bc3a0abaefec0d922caede8353e.gz",
+    "status": 200,
+    "uri": "https://infomaniak.events/en-ch",
+    "user_agent": "pinakes/0.1.0 (+https://pubky.app)",
+    "validators": {
+      "etag": null,
+      "last_modified": null
+    },
+    "sha256": "ec7262c40bc93ddeda94b5c6b4100c623dd17bc3a0abaefec0d922caede8353e"
+  },
+  {
+    "at": "2026-10-30T06:09:49.602470435Z",
+    "blake3": "6d807170ca19adfbe6f71514b5622edf6100ed4d0e0b67f6e46a02c35ff7655a",
+    "bytes": 60375,
+    "content_type": "text/html",
+    "feed_hint": false,
+    "json_body": null,
+    "location": null,
+    "path": "e6b5268fba16894fbef1fd9bdbb08b48a60947049adb7558072418dd7d3fc061.gz",
+    "status": 200,
+    "uri": "https://infomaniak.events/en-ch/training-courses/realisez-vos-taches-a-la-demi-journee-dans-un-environnement-ressourcant/277c2915-d127-42e5-9b2f-259cd127d325/events/391252",
+    "user_agent": "pinakes/0.1.0 (+https://pubky.app)",
+    "validators": {
+      "etag": null,
+      "last_modified": null
+    },
+    "sha256": "e6b5268fba16894fbef1fd9bdbb08b48a60947049adb7558072418dd7d3fc061"
+  },
+  {
+    "at": "2026-10-30T06:10:02.236599366Z",
+    "blake3": "acea2c4ab5da10b2740aa386879ac789a414097e141f107671bf907a7ce995c2",
+    "bytes": 2516,
+    "content_type": "text/calendar",
+    "feed_hint": false,
+    "json_body": null,
+    "location": null,
+    "path": "a485e5cdbea03084ceb2efc22f9fa43f99802660ce326b99fae015a1871bba41.gz",
+    "status": 200,
+    "uri": "https://www.guidle.com/iCalendar/?id=1287399006&lang=no&portal=https://www.guidle.com&url=https://www.guidle.com/de/veranstaltungen/dies-das/ueberlingen/gregor-haegele-live-2027_A2rCGkH",
+    "user_agent": "pinakes/0.1.0 (+https://pubky.app)",
+    "validators": {
+      "etag": null,
+      "last_modified": null
+    },
+    "sha256": "a485e5cdbea03084ceb2efc22f9fa43f99802660ce326b99fae015a1871bba41"
   }
 ]

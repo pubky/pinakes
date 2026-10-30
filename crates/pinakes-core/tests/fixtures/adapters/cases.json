@@ -218,12 +218,12 @@
   {
     "id": "guidle",
     "uri": "https://www.guidle.com/de/veranstaltungen/dies-das/ueberlingen/gregor-haegele-live-2027_A2rCGkH",
-    "error": true,
+    "error": false,
     "status": "ok",
     "type": "Event",
     "missing_fields": [],
     "tz": null,
-    "note": "T7: captured calendar-discovery egress policy failure must be propagated, never committed as a successful refresh."
+    "note": "Recorded 2026-10-30: the page links its own iCalendar export (url= the page); the export is read for the event."
   },
   {
     "id": "eventfrog",
@@ -331,10 +331,10 @@
     "status": "ok",
     "type": "WebPage",
     "missing_fields": [
-      "name",
       "start"
     ],
-    "tz": null
+    "tz": null,
+    "note": "Off since 2026-10-30 (a user-agent wall): its links are read as plain web pages, so the captured wall page gives a name and no start."
   },
   {
     "id": "starticket",
@@ -365,12 +365,15 @@
   },
   {
     "id": "infomaniak",
-    "uri": "https://infomaniak.events/en-ch/conferences/seminaire-des-autorites-2026/92392f2a-6711-4917-b9e9-60c88e8c550a/events/396911",
+    "uri": "https://infomaniak.events/en-ch",
+    "canary": true,
+    "target": "https://infomaniak.events/en-ch/training-courses/realisez-vos-taches-a-la-demi-journee-dans-un-environnement-ressourcant/277c2915-d127-42e5-9b2f-259cd127d325/events/391252",
     "error": false,
     "status": "ok",
     "type": "Event",
     "missing_fields": [],
-    "tz": "Europe/Zurich"
+    "tz": "Europe/Zurich",
+    "note": "Recorded 2026-10-30: the canary reads the listing and takes its first event page."
   },
   {
     "id": "xceed",
