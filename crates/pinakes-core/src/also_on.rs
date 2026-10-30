@@ -400,8 +400,8 @@ pub fn registered() -> &'static [Arc<dyn Source>] {
 /// grouping): a source switched off stops showing at once, its rows kept until they expire, and
 /// shows again when switched on. A change regroups what its rows name (the table's trigger), and
 /// the cards holding its keys or facts are due at once: what it gave a card itself (a title's
-/// name, a type) leaves, or comes back, at that read (`media::holds_switched_off` keeps a 304
-/// from holding it). The rows of a source this build no longer has are read as before. Run at
+/// name, a type) leaves, or comes back, at that read (`media::outdated` keeps a 304 from holding
+/// it). The rows of a source this build no longer has are read as before. Run at
 /// startup, before the workers.
 pub async fn configure(pool: &PgPool, cfg: &AlsoOnConfig) -> Result<()> {
     let off: Vec<&str> = registered()

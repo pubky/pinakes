@@ -131,6 +131,13 @@ pub struct ResourceMeta {
     #[serde(skip)]
     pub source_root: Option<String>,
     pub source: String,
+    /// The also-on sources whose findings the queue wrote into this card itself (a title's name
+    /// from `titles`, a type from `films`, `podcasts` or an artist's source:
+    /// `media::type_card`, `music::type_card`). A 304 reuses the card only while each of them is
+    /// on and still finds it (`media::outdated`); else the page is read again in full.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schema(ignore)]
+    pub hinted_by: Vec<String>,
     #[serde(default)]
     pub fetched_at: i64,
     #[serde(default, skip_serializing_if = "is_zero")]

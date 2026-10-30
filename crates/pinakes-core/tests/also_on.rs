@@ -3389,7 +3389,8 @@ impl pinakes_core::resolver::Resolver for Scripted {
 /// What a switched-off source gave a card itself (here the `titles` source's name for a Netflix
 /// title, which the queue writes into the card) leaves at its next read, which switching it
 /// makes due at once, and a 304 does not keep it: the page is read again in full. Switched on
-/// again, the name comes back the same way.
+/// again, the name comes back the same way. The card records the source, so this holds when the
+/// fact changed or expired before the switch, and when it expires with the source on.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_switched_off_source_s_name_leaves_the_card_even_on_a_304(pool: PgPool) {
     use pinakes_core::{also_on::Fact, also_on::SourceOptions, config::QueueConfig, queue};
@@ -3479,4 +3480,42 @@ async fn a_switched_off_source_s_name_leaves_the_card_even_on_a_304(pool: PgPool
         .unwrap();
     assert!(due().await);
     assert_eq!(read(&[true]).await, (Some("The Crown".into()), 1));
+
+    // The card records whose finding it carries, so the cleanup needs no fact: one changed, or
+    // expired, before the source is switched off goes as well.
+    let fact = |set: &'static str| {
+        let (pool, id) = (pool.clone(), id.clone());
+        async move {
+            sqlx::query(&format!(
+                "UPDATE resource_fact SET {set} WHERE resource_id=$1 AND source='titles' AND name='title'"
+            ))
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+    };
+    let switch = |on: bool| {
+        let (pool, config) = (pool.clone(), config(on));
+        async move { also_on::configure(&pool, &config.also_on).await.unwrap() }
+    };
+    // Changed, then off.
+    fact("value='The Crown (2016)'").await;
+    switch(false).await;
+    assert_eq!(read(&[true, false]).await, (Some("Netflix".into()), 2));
+    // On, a changed value is written over the old one on a 304.
+    switch(true).await;
+    assert_eq!(read(&[true]).await, (Some("The Crown (2016)".into()), 1));
+    fact("value='The Crown'").await;
+    assert_eq!(read(&[true]).await, (Some("The Crown".into()), 1));
+    // Expired, then off.
+    fact("expires_at=now()-interval '1 second'").await;
+    switch(false).await;
+    assert_eq!(read(&[true, false]).await, (Some("Netflix".into()), 2));
+    // Expired while on: the source no longer finds it, so the same.
+    switch(true).await;
+    fact("expires_at=now()+interval '1 day'").await;
+    assert_eq!(read(&[true]).await, (Some("The Crown".into()), 1));
+    fact("expires_at=now()-interval '1 second'").await;
+    assert_eq!(read(&[true, false]).await, (Some("Netflix".into()), 2));
 }
