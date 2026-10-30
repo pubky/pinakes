@@ -438,7 +438,13 @@ counter. A job lease lasts at least `limits.lease_secs`; a 50-object OSM batch g
 Failures back off exponentially from `limits.backoff_secs` to `limits.max_backoff_secs` and
 dead-letter after `limits.max_failures`. The first `limits.timeout_grace` consecutive timeouts
 back off without charging an attempt. A missing result needs a second fresh fetch to confirm,
-scheduled after `limits.missing_ttl_secs`; a cached copy cannot count twice. A lookup or preview
+scheduled after `limits.missing_ttl_secs` (at least an hour) for a link with an accepted card, and
+after `limits.backoff_secs` for one with none yet (a new preview has nothing to keep and would show
+`pending` for that hour); a cached copy cannot count twice, and the confirming fetch asks the
+upstream again (an answer the request cache keeps that is no success, a 404 for five minutes, is
+not replayed to it; a failure that named its wait is still waited out). The wait is not charged as an attempt:
+the row's `last_error` is `missing_unconfirmed`, it is logged (`a missing answer waits for its
+confirming fetch`) and counted in `pinakes_resolution_deferred_total{reason="missing_unconfirmed"}`. A lookup or preview
 moves an overdue resource to the front within its TTL, author budget and retry schedule; it
 cannot revive a dead letter. Resolution is also limited per referencing author
 (`limits.author_requests_per_second`); several tags never multiply fetches.

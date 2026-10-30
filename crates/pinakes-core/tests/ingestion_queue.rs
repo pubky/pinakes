@@ -673,6 +673,219 @@ async fn missing_responses_get_short_refresh_without_losing_references(pool: PgP
     assert!(seconds > 3590.0 && seconds <= 3600.0);
     assert_eq!(refs(&pool).await, 1);
 }
+/// The row's wait after one missing answer: its status, attempts, missing streak, error class and
+/// seconds to its next attempt.
+async fn parked(pool: &PgPool) -> (String, i32, i32, Option<String>, f64) {
+    sqlx::query_as("SELECT status,attempts,missing_streak,last_error,extract(epoch FROM next_attempt_at-now())::float8 FROM resource")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+/// A preview of a link that is not there (on stable, a made-up job posting and toot): its first
+/// missing answer left it `pending` for exactly an hour, with no attempt, error, log line or
+/// metric. A link with no accepted card has nothing to keep: the fetch that confirms it comes
+/// after the first backoff, the wait says why, and `POST /v1/resolve` says when to ask again.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_new_link_s_first_missing_answer_is_confirmed_soon(pool: PgPool) {
+    use tower::ServiceExt;
+    let uri = "https://example.org/jobs/4000000000";
+    let a = change(uri, "a", "/pub/app/tags/a");
+    batch(&pool, vec![a], Some("one")).await;
+    let cfg = QueueConfig::default();
+    let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    queue::run_job(&pool, &MissingResolver, &cfg, &job)
+        .await
+        .unwrap();
+    let (status, attempts, streak, error, wait) = parked(&pool).await;
+    assert_eq!(
+        (status.as_str(), attempts, streak, error.as_deref()),
+        ("pending", 0, 1, Some("missing_unconfirmed"))
+    );
+    assert!(
+        wait > 0.0 && wait <= cfg.backoff_secs as f64,
+        "{wait} s, not an hour"
+    );
+    // Asked again meanwhile: 202, and when to ask again.
+    let app = pinakes_core::api::router(
+        pinakes_core::api::AppState::new(pool.clone(), Default::default()).unwrap(),
+    );
+    let mut request = axum::http::Request::post("/v1/resolve")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(format!(r#"{{"uri":"{uri}"}}"#)))
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.2:1234".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::ACCEPTED);
+    let retry: u64 = response.headers()["retry-after"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((1..=cfg.backoff_secs).contains(&retry), "{retry}");
+    // The second fresh fetch confirms it.
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    sqlx::query("UPDATE resource SET next_attempt_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    queue::run_job(&pool, &MissingResolver, &cfg, &job)
+        .await
+        .unwrap();
+    let (status, _, _, error, _) = parked(&pool).await;
+    assert_eq!((status.as_str(), error), ("missing", None));
+}
+/// An upstream that answers each request with the next status, and counts the requests.
+struct Upstream {
+    answers: std::sync::Mutex<Vec<u16>>,
+    asked: std::sync::atomic::AtomicUsize,
+}
+#[async_trait::async_trait]
+impl pinakes_core::resolver::egress::Transport for Upstream {
+    async fn get(
+        &self,
+        url: &url::Url,
+        addresses: &[std::net::SocketAddr],
+    ) -> anyhow::Result<pinakes_core::resolver::egress::Fetched> {
+        self.get_with(url, addresses, &Default::default()).await
+    }
+    async fn get_with(
+        &self,
+        url: &url::Url,
+        _: &[std::net::SocketAddr],
+        _: &pinakes_core::resolver::egress::FetchOptions,
+    ) -> anyhow::Result<pinakes_core::resolver::egress::Fetched> {
+        self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let status = self.answers.lock().unwrap().remove(0);
+        Ok(pinakes_core::resolver::egress::Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            validators: Default::default(),
+            url: url.clone(),
+            status,
+            retry_after_secs: 60,
+            location: None,
+            content_type: "application/json".into(),
+            body: b"{}".to_vec(),
+        })
+    }
+}
+struct PublicDns;
+#[async_trait::async_trait]
+impl pinakes_core::resolver::egress::Dns for PublicDns {
+    async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<std::net::SocketAddr>> {
+        Ok(vec![std::net::SocketAddr::new("8.8.8.8".parse()?, port)])
+    }
+}
+/// A resolver that reads its link through Egress's discovery cache, as the official sources do
+/// (GitHub's, say): a 404 is missing, anything else a page.
+struct Discovering(pinakes_core::resolver::egress::Egress);
+#[async_trait::async_trait]
+impl Resolver for Discovering {
+    fn name(&self) -> &'static str {
+        "web"
+    }
+    fn matches(&self, _: &str) -> bool {
+        true
+    }
+    async fn resolve(&self, uri: &str) -> anyhow::Result<ResourceMeta> {
+        let fetched = self.0.discover(uri, &Default::default(), 3600).await?;
+        let mut doc = ResourceMeta::new(uri, "web", 86400);
+        if fetched.status == 404 {
+            doc.status = Status::Missing;
+        } else {
+            doc.set_type("WebPage");
+            doc.name = Some("Here after all".into());
+        }
+        Ok(doc)
+    }
+    fn refresh_after(&self, _: &ResourceMeta) -> Duration {
+        Duration::from_secs(86400)
+    }
+}
+/// The fetch that confirms a missing answer asks the upstream again, whatever Egress cached
+/// (a 404 for five minutes, past the 30-second retry): a cached 404 never confirms `missing`
+/// after one upstream request (Codex's review of preview-park-1). A link back meanwhile is
+/// read; two real 404s make it missing.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_confirmation_asks_the_upstream_again(pool: PgPool) {
+    let cfg = QueueConfig::default();
+    for (n, answers, status) in [(0, [404, 200], "ok"), (1, [404, 404], "missing")] {
+        let uri = format!("https://example.org/repo/{n}");
+        batch(
+            &pool,
+            vec![change(&uri, "a", "/pub/app/tags/a")],
+            Some("one"),
+        )
+        .await;
+        let upstream = std::sync::Arc::new(Upstream {
+            answers: std::sync::Mutex::new(answers.to_vec()),
+            asked: Default::default(),
+        });
+        let resolver = Discovering(pinakes_core::resolver::egress::Egress::with_backends(
+            Default::default(),
+            std::sync::Arc::new(PublicDns),
+            upstream.clone(),
+        ));
+        let row = |pool: PgPool, uri: String| async move {
+            sqlx::query_as::<_, (String, i32)>(
+                "SELECT status,missing_streak FROM resource WHERE uri=$1",
+            )
+            .bind(uri)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+        let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+        queue::run_job(&pool, &resolver, &cfg, &job).await.unwrap();
+        assert_eq!(row(pool.clone(), uri.clone()).await, ("pending".into(), 1));
+        // The retry, within the five minutes Egress keeps the 404.
+        sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE uri=$1")
+            .bind(&uri)
+            .execute(&pool)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+        queue::run_job(&pool, &resolver, &cfg, &job).await.unwrap();
+        assert_eq!(
+            upstream.asked.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "{uri}"
+        );
+        assert_eq!(row(pool.clone(), uri.clone()).await.0, status, "{uri}");
+    }
+}
+/// A link with an accepted card keeps it through one missing answer, for an hour, as before.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_card_s_first_missing_answer_keeps_it_for_an_hour(pool: PgPool) {
+    let a = change("https://example.org/was-here", "a", "/pub/app/tags/a");
+    batch(&pool, vec![a], Some("one")).await;
+    let cfg = QueueConfig::default();
+    let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    let mut doc = ResourceMeta::new(&job.uri, "web", 86400);
+    doc.set_type("WebPage");
+    doc.name = Some("Was here".into());
+    store::save_document(&pool, &job.id, job.generation, &doc)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource SET next_attempt_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    queue::run_job(&pool, &MissingResolver, &cfg, &job)
+        .await
+        .unwrap();
+    let (status, attempts, streak, error, wait) = parked(&pool).await;
+    assert_eq!(
+        (status.as_str(), attempts, streak, error.as_deref()),
+        ("ok", 0, 1, Some("missing_unconfirmed"))
+    );
+    assert!(wait > 3590.0 && wait <= 3600.0, "{wait}");
+}
 /// A resolver that answers an upstream failure with the given HTTP status, as the web resolver
 /// does for a 5xx, a 429 or another error status.
 struct FailingResolver(u16);

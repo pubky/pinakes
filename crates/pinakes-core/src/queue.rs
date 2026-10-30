@@ -389,23 +389,29 @@ async fn run_job_inner(
     cfg: &QueueConfig,
     job: &Job,
 ) -> Result<()> {
-    let result = std::panic::AssertUnwindSafe(tokio::time::timeout(
-        RESOLVE_TIMEOUT,
-        resolver.resolve(&job.uri),
-    ))
-    .catch_unwind()
-    .await
-    .map_err(|_| anyhow::anyhow!("resolver panic"))
-    .and_then(|r| {
-        r.map_err(|_| {
-            crate::resolver::RetryLater {
-                class: "timeout",
-                seconds: 60,
-            }
-            .into()
+    let confirming = confirming(pool, std::slice::from_ref(job)).await?;
+    let resolve = resolver.resolve(&job.uri);
+    let resolve = async {
+        if confirming {
+            crate::resolver::egress::confirming(resolve).await
+        } else {
+            resolve.await
+        }
+    };
+    let result = std::panic::AssertUnwindSafe(tokio::time::timeout(RESOLVE_TIMEOUT, resolve))
+        .catch_unwind()
+        .await
+        .map_err(|_| anyhow::anyhow!("resolver panic"))
+        .and_then(|r| {
+            r.map_err(|_| {
+                crate::resolver::RetryLater {
+                    class: "timeout",
+                    seconds: 60,
+                }
+                .into()
+            })
         })
-    })
-    .and_then(|r| r);
+        .and_then(|r| r);
     guarded_finish_job(
         pool,
         resolver,
@@ -736,6 +742,15 @@ pub async fn run_batch(
     )
     .await
 }
+/// Whether any of `jobs` is the fetch that confirms a missing answer (one missing answer, not
+/// yet `missing`): it must ask the upstream again, never take a cached failure as the second.
+async fn confirming(pool: &PgPool, jobs: &[Job]) -> Result<bool> {
+    let ids: Vec<&str> = jobs.iter().map(|j| j.id.as_str()).collect();
+    Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource WHERE id=ANY($1) AND missing_streak>0 AND status<>'missing')")
+        .bind(&ids)
+        .fetch_one(pool)
+        .await?)
+}
 async fn run_batch_config(
     pool: &PgPool,
     resolver: &dyn Resolver,
@@ -744,11 +759,16 @@ async fn run_batch_config(
     jobs: &[Job],
 ) -> Result<()> {
     let uris = jobs.iter().map(|j| j.uri.clone()).collect::<Vec<_>>();
-    let results = tokio::time::timeout(
-        RESOLVE_TIMEOUT * jobs.len() as u32,
-        std::panic::AssertUnwindSafe(resolver.resolve_batch(&uris)).catch_unwind(),
-    )
-    .await;
+    let confirming = confirming(pool, jobs).await?;
+    let resolve = async {
+        let resolve = std::panic::AssertUnwindSafe(resolver.resolve_batch(&uris)).catch_unwind();
+        if confirming {
+            crate::resolver::egress::confirming(resolve).await
+        } else {
+            resolve.await
+        }
+    };
+    let results = tokio::time::timeout(RESOLVE_TIMEOUT * jobs.len() as u32, resolve).await;
     let results = match results {
         Ok(Ok(results)) if results.len() == jobs.len() => results,
         Err(_) if resolver.name() == "osm" => jobs

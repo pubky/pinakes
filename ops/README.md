@@ -45,6 +45,7 @@ No messages are sent or contact points provisioned by these files.
 | `pinakes_resources{resolver,status}` | Current resource totals |
 | `pinakes_api_panics_total` | API requests (public or admin listener) whose handler panicked and were answered 500 |
 | `pinakes_discovery_decisions_total{kind,decision}` | Optional metadata discovery decisions (a request may come from cache) |
+| `pinakes_resolution_deferred_total{reason}` | Resolutions put off without a charged attempt, by reason: `missing_unconfirmed` (a missing answer waiting for the fetch that confirms it) |
 | `pinakes_also_on_service_errors_total{service,class}` | Failed also-on requests to a service (`wikidata`, `itunes`, `tidal`, `crossref`, …), by error class; the lookup goes on without that service |
 | `pinakes_source_token_refusals_total{source}` | Requests where a source's service refused its configured token (`github`, `discogs`) |
 
