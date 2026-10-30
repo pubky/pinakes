@@ -156,6 +156,23 @@ fn only_the_pages_own_product_gives_its_barcode() {
             format!(r#"{{"@type": "WebPage", "mainEntity": {other}}}"#),
             a.clone(),
         ],
+        // Beside the page's metadata, which names the page.
+        vec![
+            format!(r##"{{"@graph": [{{"@type": "WebPage", "@id": "#webpage"}}, {other}]}}"##),
+            a.clone(),
+        ],
+        vec![
+            format!(
+                r##"{{"@graph": [{{"@type": "BreadcrumbList", "@id": "{page}#breadcrumb", "itemListElement": []}}, {other}]}}"##
+            ),
+            a.clone(),
+        ],
+        vec![
+            format!(
+                r##"{{"@graph": [{{"@type": "WebPage", "@id": "{page}#webpage", "url": "{page}", "breadcrumb": {{"@id": "{page}#breadcrumb"}}}}, {{"@type": "BreadcrumbList", "@id": "{page}#breadcrumb"}}, {other}]}}"##
+            ),
+            a.clone(),
+        ],
     ] {
         let doc = extract(page, head(&scripts));
         assert_eq!(
@@ -263,23 +280,47 @@ fn a_product_a_category_page_lists_by_a_fragment_is_not_its_own() {
     // The head says the page is a collection (or about another entity); a body product named
     // only by a fragment of the page is one it lists. A product page's `#product`, declared as
     // its main entity or with nothing declared, is its own.
-    let nutella = |id: &str| {
+    let named = |named: &str| {
         format!(
-            r##"{{"@type": "Product", "@id": "{id}", "name": "Nutella", "gtin13": "3017620422003", "sku": "N-400", "offers": {{"price": "4.95", "priceCurrency": "CHF"}}}}"##
+            r##"{{"@type": "Product", {named}, "name": "Nutella", "gtin13": "3017620422003", "sku": "N-400", "offers": {{"price": "4.95", "priceCurrency": "CHF"}}}}"##
         )
     };
+    let nutella = |id: &str| named(&format!(r#""@id": "{id}""#));
     let category = "https://shop.example/c/spreads";
+    let collection =
+        format!(r#"{{"@type": "CollectionPage", "url": "{category}", "name": "Spreads"}}"#);
     for head in [
-        format!(r#"{{"@type": "CollectionPage", "url": "{category}", "name": "Spreads"}}"#),
+        collection.clone(),
         r#"{"@graph": [{"@type": "CollectionPage", "name": "Spreads"}]}"#.to_owned(),
         r##"{"@type": "WebPage", "mainEntity": {"@id": "#list"}}"##.to_owned(),
     ] {
-        let doc = extracted(category, &scripts(&[&head], &[&nutella("#nutella")]));
-        for key in ["gtin", "sku", "mpn"] {
-            assert!(!doc.attributes.contains_key(key), "{key} {head}");
+        // Named by its `@id`, or by a fragment `url`, relative or absolute.
+        for body in [
+            nutella("#nutella"),
+            named(r##""url": "#nutella""##),
+            named(&format!(r##""url": "{category}#nutella""##)),
+            named(&format!(
+                r##""url": "{category}#nutella", "@id": "#nutella""##
+            )),
+        ] {
+            let doc = extracted(category, &scripts(&[&head], &[&body]));
+            for key in ["gtin", "sku", "mpn"] {
+                assert!(!doc.attributes.contains_key(key), "{key} {head} {body}");
+            }
+            assert_eq!(doc.attributes["price"], "4.95", "{head} {body}");
         }
-        assert_eq!(doc.attributes["price"], "4.95", "{head}");
     }
+    // Named by the page's own `url`, whatever its `@id`: its own.
+    let doc = extracted(
+        category,
+        &scripts(
+            &[&collection],
+            &[&named(&format!(
+                r##""url": "{category}", "@id": "#nutella""##
+            ))],
+        ),
+    );
+    assert_eq!(doc.attributes["gtin"], "3017620422003");
     let page = "https://shop.example/p/nutella";
     for head in [
         vec![r##"{"@type": "ItemPage", "mainEntity": {"@id": "#product"}}"##.to_owned()],
