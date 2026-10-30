@@ -398,9 +398,11 @@ pub fn registered() -> &'static [Arc<dyn Source>] {
 /// Write the sources this build has that the operator switched off to `also_on_source_off`,
 /// which every read of keys, facts and derived links leaves out (cards, `also_on`, search,
 /// grouping): a source switched off stops showing at once, its rows kept until they expire, and
-/// shows again when switched on. A change regroups what its rows name (the table's trigger). The
-/// rows of a source this build no longer has are read as before. Run at startup, before the
-/// workers.
+/// shows again when switched on. A change regroups what its rows name (the table's trigger), and
+/// the cards holding its keys or facts are due at once: what it gave a card itself (a title's
+/// name, a type) leaves, or comes back, at that read (`media::holds_switched_off` keeps a 304
+/// from holding it). The rows of a source this build no longer has are read as before. Run at
+/// startup, before the workers.
 pub async fn configure(pool: &PgPool, cfg: &AlsoOnConfig) -> Result<()> {
     let off: Vec<&str> = registered()
         .iter()
@@ -408,16 +410,30 @@ pub async fn configure(pool: &PgPool, cfg: &AlsoOnConfig) -> Result<()> {
         .map(|s| s.id())
         .collect();
     let mut tx = pool.begin().await?;
-    sqlx::query("DELETE FROM also_on_source_off WHERE NOT source=ANY($1)")
-        .bind(&off)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query(
-        "INSERT INTO also_on_source_off(source) SELECT unnest($1::text[]) ON CONFLICT DO NOTHING",
+    let mut changed: Vec<String> = sqlx::query_scalar(
+        "DELETE FROM also_on_source_off WHERE NOT source=ANY($1) RETURNING source",
     )
     .bind(&off)
-    .execute(&mut *tx)
+    .fetch_all(&mut *tx)
     .await?;
+    changed.extend(
+        sqlx::query_scalar::<_, String>(
+            "INSERT INTO also_on_source_off(source) SELECT unnest($1::text[]) ON CONFLICT DO NOTHING RETURNING source",
+        )
+        .bind(&off)
+        .fetch_all(&mut *tx)
+        .await?,
+    );
+    if !changed.is_empty() {
+        // Many resources' rows, in no particular order.
+        crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Exclusive).await?;
+        let due = sqlx::query("UPDATE resource SET next_attempt_at=now(),refresh_at=now(),priority_at=coalesce(priority_at,now()) WHERE id IN (SELECT resource_id FROM resource_key WHERE source=ANY($1) UNION SELECT resource_id FROM resource_fact WHERE source=ANY($1)) AND NOT final AND NOT dead_letter")
+            .bind(&changed)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        tracing::info!(sources = ?changed, due, "also-on sources switched: the cards holding their rows are read again");
+    }
     tx.commit().await?;
     if !off.is_empty() {
         tracing::info!(sources = ?off, "also-on sources switched off: their stored rows are not read");

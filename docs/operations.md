@@ -431,8 +431,10 @@ to the Nexus: the feed, the reach lists and reach-set route, and the batch resou
 the `social` tool reads. Every one goes through one client. It is sent to no other host: the
 Nexus client follows no redirect, and Nominatim, sources and the egress have clients of their
 own. The value is never logged or shown (errors, metrics, `/v1/info` public or admin, the
-agents' texts), and the configuration's `Debug` redacts it. Empty means none; a value that is no
-valid header value stops startup, without being named.
+agents' texts), and the configuration's `Debug` redacts it. Empty means none: the variable set
+empty clears a value the file (`nexus_authorization`) holds, unlike a source's variables, which
+an empty value leaves to the file. A value that is no valid header value stops startup, without
+being named.
 
 ## Queue and refresh
 
@@ -656,7 +658,12 @@ that are off to `also_on_source_off`, and no card, `also_on` list, search, group
 source reads their keys, facts or links. Those rows stay in the database and expire as before;
 nothing is deleted, and a source switched on again shows its unexpired rows at once. The
 resources its keys and keyed links name are regrouped in the background (`group_dirty`), and its
-recordings' same-recording pairs are read again. `[also_on] enabled = false` hides nothing: it
+recordings' same-recording pairs are read again. What a source gave a card itself, written into its stored
+document when the link was read (a title's name and description from `titles`, a title's or an
+episode's type, an artist's type), goes with the link's next read: switching a source makes
+every card holding its keys or facts due at once, so the change shows as the queue reaches them,
+and a 304 never keeps it. An unchanged page whose stored card still carries what a source that is
+off would write is read again in full, without its validators. `[also_on] enabled = false` hides nothing: it
 only stops the worker. Sources run in a fixed order, and each
 sees the keys the ones before it found in the same run (a barcode MusicBrainz names, then the
 services looked up by it); a source that no longer applies (its key is gone) drops its rows. A

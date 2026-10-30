@@ -175,33 +175,47 @@ pub struct TypeHints {
     pub title: Option<String>,
     pub title_description: Option<String>,
 }
-/// The hints of these resources (live rows only).
+/// The hints of these resources (live rows only), from the sources that are on.
 pub async fn type_hints(
     pool: &sqlx::PgPool,
     ids: &[String],
 ) -> Result<std::collections::HashMap<String, TypeHints>> {
+    hints(pool, ids, false).await
+}
+/// The hints of these resources' live rows, from the sources that are on, or with `off` from
+/// those switched off (`also_on_source_off`).
+async fn hints(
+    pool: &sqlx::PgPool,
+    ids: &[String],
+    off: bool,
+) -> Result<std::collections::HashMap<String, TypeHints>> {
+    let sources = if off {
+        "source IN (SELECT source FROM also_on_source_off)"
+    } else {
+        "source NOT IN (SELECT source FROM also_on_source_off)"
+    };
     let mut out: std::collections::HashMap<String, TypeHints> = Default::default();
-    let episodes: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT resource_id FROM resource_key WHERE resource_id=ANY($1) AND source='podcasts' AND key LIKE 'podcast:item:%' AND expires_at>now() AND source NOT IN (SELECT source FROM also_on_source_off)",
-    )
+    let episodes: Vec<String> = sqlx::query_scalar(&format!(
+        "SELECT DISTINCT resource_id FROM resource_key WHERE resource_id=ANY($1) AND source='podcasts' AND key LIKE 'podcast:item:%' AND expires_at>now() AND {sources}"
+    ))
     .bind(ids)
     .fetch_all(pool)
     .await?;
     for id in episodes {
         out.entry(id).or_default().episode = true;
     }
-    let types: Vec<(String, String)> = sqlx::query_as(
-        "SELECT resource_id, min(value) FROM resource_fact WHERE resource_id=ANY($1) AND source='films' AND name='title_type' AND expires_at>now() AND source NOT IN (SELECT source FROM also_on_source_off) GROUP BY resource_id",
-    )
+    let types: Vec<(String, String)> = sqlx::query_as(&format!(
+        "SELECT resource_id, min(value) FROM resource_fact WHERE resource_id=ANY($1) AND source='films' AND name='title_type' AND expires_at>now() AND {sources} GROUP BY resource_id"
+    ))
     .bind(ids)
     .fetch_all(pool)
     .await?;
     for (id, kind) in types {
         out.entry(id).or_default().title_type = Some(kind);
     }
-    let titles: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT DISTINCT ON (resource_id,name) resource_id,name,value FROM resource_fact WHERE resource_id=ANY($1) AND source='titles' AND name IN ('title','title_description') AND expires_at>now() AND source NOT IN (SELECT source FROM also_on_source_off) ORDER BY resource_id,name,value",
-    )
+    let titles: Vec<(String, String, String)> = sqlx::query_as(&format!(
+        "SELECT DISTINCT ON (resource_id,name) resource_id,name,value FROM resource_fact WHERE resource_id=ANY($1) AND source='titles' AND name IN ('title','title_description') AND expires_at>now() AND {sources} ORDER BY resource_id,name,value"
+    ))
     .bind(ids)
     .fetch_all(pool)
     .await?;
@@ -214,6 +228,39 @@ pub async fn type_hints(
         }
     }
     Ok(out)
+}
+
+/// Whether a card's stored document still carries what a switched-off source gave it when it
+/// was read: the name, description or type `type_card` would write from the off sources' live
+/// rows, or an artist's type (`music::type_card`). Such a document is not reused on a 304
+/// (`queue`): the page is read again in full, without them.
+pub async fn holds_switched_off(
+    pool: &sqlx::PgPool,
+    id: &str,
+    uri: &str,
+    doc: &crate::model::ResourceMeta,
+) -> Result<bool> {
+    let shown = |d: &crate::model::ResourceMeta| {
+        (d.name.clone(), d.description.clone(), d.type_name.clone())
+    };
+    let off = hints(pool, &[id.to_owned()], true)
+        .await?
+        .remove(id)
+        .unwrap_or_default();
+    if off != TypeHints::default() {
+        let mut probe = doc.clone();
+        type_card(uri, &off, &mut probe);
+        if shown(&probe) == shown(doc) {
+            return Ok(true);
+        }
+    }
+    let artist: Option<String> = sqlx::query_scalar("SELECT value FROM resource_fact WHERE resource_id=$1 AND name='artist_type' AND expires_at>now() AND source IN (SELECT source FROM also_on_source_off) ORDER BY value LIMIT 1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(artist.as_deref() == Some("Person")
+        && doc.type_name == "Person"
+        && crate::music::parse(uri).is_some_and(|l| l.level == crate::music::Level::Artist))
 }
 
 /// A Goodreads ID: digits, then an optional title slug (`1540236.The_Hobbit`, `4671-the-great-gatsby`).

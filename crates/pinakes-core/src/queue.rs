@@ -373,6 +373,36 @@ async fn denied(
     tx.commit().await?;
     Ok(())
 }
+/// One link read by its resolver, within `RESOLVE_TIMEOUT`, as the fetch that confirms a
+/// missing answer when `confirming` (`egress::confirming`); a panic is an error.
+async fn resolve(
+    resolver: &dyn Resolver,
+    uri: &str,
+    confirming: bool,
+) -> Result<crate::model::ResourceMeta> {
+    let resolve = resolver.resolve(uri);
+    let resolve = async {
+        if confirming {
+            crate::resolver::egress::confirming(resolve).await
+        } else {
+            resolve.await
+        }
+    };
+    std::panic::AssertUnwindSafe(tokio::time::timeout(RESOLVE_TIMEOUT, resolve))
+        .catch_unwind()
+        .await
+        .map_err(|_| anyhow::anyhow!("resolver panic"))
+        .and_then(|r| {
+            r.map_err(|_| {
+                crate::resolver::RetryLater {
+                    class: "timeout",
+                    seconds: 60,
+                }
+                .into()
+            })
+        })
+        .and_then(|r| r)
+}
 pub async fn run_job(
     pool: &PgPool,
     resolver: &dyn Resolver,
@@ -390,28 +420,7 @@ async fn run_job_inner(
     job: &Job,
 ) -> Result<()> {
     let confirming = confirming(pool, std::slice::from_ref(job)).await?;
-    let resolve = resolver.resolve(&job.uri);
-    let resolve = async {
-        if confirming {
-            crate::resolver::egress::confirming(resolve).await
-        } else {
-            resolve.await
-        }
-    };
-    let result = std::panic::AssertUnwindSafe(tokio::time::timeout(RESOLVE_TIMEOUT, resolve))
-        .catch_unwind()
-        .await
-        .map_err(|_| anyhow::anyhow!("resolver panic"))
-        .and_then(|r| {
-            r.map_err(|_| {
-                crate::resolver::RetryLater {
-                    class: "timeout",
-                    seconds: 60,
-                }
-                .into()
-            })
-        })
-        .and_then(|r| r);
+    let result = resolve(resolver, &job.uri, confirming).await;
     guarded_finish_job(
         pool,
         resolver,
@@ -431,7 +440,8 @@ async fn guarded_finish_job(
     result: Result<crate::model::ResourceMeta>,
 ) -> Result<()> {
     // An unchanged page is its accepted document, typed again like a new one (what the also-on
-    // sources found since may name or type it).
+    // sources found since may name or type it). One that still carries what a switched-off
+    // source gave it is not: its validators go and the page is read again in full, once.
     let result = match result {
         Err(error) if error.is::<crate::resolver::NotModified>() => {
             let value: Option<serde_json::Value> =
@@ -439,7 +449,7 @@ async fn guarded_finish_job(
                     .bind(&job.id)
                     .fetch_optional(pool)
                     .await?;
-            value
+            let cached = value
                 .ok_or_else(|| anyhow::anyhow!("304 without an accepted document"))
                 .and_then(|v| {
                     serde_json::from_value::<crate::model::ResourceMeta>(v).map_err(Into::into)
@@ -447,7 +457,24 @@ async fn guarded_finish_job(
                 .map(|mut doc| {
                     doc.fetched_at = chrono::Utc::now().timestamp_millis();
                     doc
-                })
+                });
+            match cached {
+                Ok(doc)
+                    if crate::also_on::media::holds_switched_off(pool, &job.id, &job.uri, &doc)
+                        .await? =>
+                {
+                    sqlx::query("UPDATE event_fetch SET validators='{}' WHERE resource_id=$1 AND validators<>'{}'")
+                        .bind(&job.id)
+                        .execute(pool)
+                        .await?;
+                    let confirming = confirming(pool, std::slice::from_ref(job)).await?;
+                    match resolve(resolver, &job.uri, confirming).await {
+                        Err(error) if error.is::<crate::resolver::NotModified>() => Ok(doc),
+                        other => other,
+                    }
+                }
+                other => other,
+            }
         }
         other => other,
     };
