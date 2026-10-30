@@ -103,7 +103,8 @@ pub struct Definition {
     pub expected_fields: Vec<String>,
     pub canary: Option<Url>,
     /// When set, `canary` is a listing page and the canary reads its first link whose path has
-    /// this form (`canary_link_matches`): a current event, so the canary never goes stale.
+    /// this form (`canary_link_matches`). Only the host and path are checked, so the event is as
+    /// current as the provider keeps its listing.
     #[serde(default)]
     pub canary_link: Option<String>,
     pub canary_note: Option<String>,
