@@ -116,7 +116,8 @@ fn link(uri: &str, value: &str) -> Option<String> {
 pub enum Route {
     /// A kind a profile reads, with its path's values.
     Kind(&'static Profile, &'static Kind, Vec<(&'static str, String)>),
-    /// Any other path in a known app's namespaces: never fetched.
+    /// Any other path in a known app's namespaces, and any path in a namespace Pinakes never
+    /// fetches (`NEVER_FETCHED`): never fetched, no card (`no_card`).
     Excluded,
     /// An app no profile knows: the general card.
     General,
@@ -128,14 +129,14 @@ pub enum Route {
 /// (`posts`), and events and availability are social posts.
 const NEVER_FETCHED: &[&str] = &["pubky.app", "social", "mapky.app", "eventky.app"];
 /// Whether Pinakes never fetches the objects of this namespace (decoded): ingest drops their post
-/// lines, so they create no resource.
+/// lines, so they create no resource, and one stored before the rule keeps no card (`no_card`).
 pub fn never_fetched(namespace: &str) -> bool {
     NEVER_FETCHED.contains(&namespace)
 }
 /// The route of a `pubky://` object of another app, from its decoded path segments below
-/// `/pub/` (`resolver::pubky_app`'s reading). `None` for the objects Nexus describes
-/// (`NEVER_FETCHED`) and for any path inside a post of a namespace no profile reads, whose post
-/// itself is `posts::ANY`'s.
+/// `/pub/` (`resolver::pubky_app`'s reading). `Excluded` for every path in a namespace Pinakes
+/// never fetches (`NEVER_FETCHED`); `None` for any path inside a post of a namespace no profile
+/// reads, whose post itself is `posts::ANY`'s.
 pub fn route(segments: &[String]) -> Option<Route> {
     for profile in REGISTRY {
         for namespace in profile.namespaces {
@@ -153,7 +154,7 @@ pub fn route(segments: &[String]) -> Option<Route> {
         }
     }
     if segments.first().is_some_and(|app| never_fetched(app)) {
-        return None;
+        return Some(Route::Excluded);
     }
     // A post in a namespace no profile reads (`/pub/<ns>/v1/posts/{id}`) has the general card,
     // with its namespace and kind (owner decision, 2026-10-27); a path inside one (a version
@@ -355,7 +356,8 @@ pub fn open_in(uri: &str) -> Vec<OpenIn> {
         _ => vec![],
     }
 }
-/// Whether a `pubky://` object is in a known app's namespace, of a kind its profile reads or not.
+/// Whether a `pubky://` object is in a known app's namespace, of a kind its profile reads or not,
+/// or in a namespace Pinakes never fetches.
 pub fn known(uri: &str) -> bool {
     segments(uri).is_some_and(|(_, s)| matches!(route(&s), Some(Route::Kind(..) | Route::Excluded)))
 }
@@ -364,9 +366,19 @@ pub fn versioned(uri: &str) -> bool {
     segments(uri)
         .is_some_and(|(_, s)| matches!(route(&s), Some(Route::Kind(_, kind, _)) if kind.versions))
 }
-/// Whether a `pubky://` object is in a known app's namespace but of no kind its profile reads.
+/// Whether a `pubky://` object is never fetched: in a known app's namespace but of no kind its
+/// profile reads, or in a namespace Pinakes never fetches.
 pub fn excluded(uri: &str) -> bool {
     segments(uri).is_some_and(|(_, s)| matches!(route(&s), Some(Route::Excluded)))
+}
+/// The card of an object that is never fetched (`excluded`): a missing `CreativeWork` with
+/// nothing of the object, confirmed at once (`withheld`).
+pub fn no_card(uri: &str, ttl_secs: u64) -> ResourceMeta {
+    let mut doc = ResourceMeta::new(uri, "pubky", ttl_secs);
+    doc.set_type("CreativeWork");
+    doc.status = Status::Missing;
+    doc.withheld = true;
+    doc
 }
 /// The profile whose namespace holds a `pubky://` object.
 pub fn profile(uri: &str) -> Option<&'static Profile> {

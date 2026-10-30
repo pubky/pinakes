@@ -136,14 +136,11 @@ impl Resolver for PubkyResolver {
     async fn resolve(&self, uri: &str) -> Result<ResourceMeta> {
         tokio::time::timeout(Duration::from_secs(10), async {
             let object = Url::parse(uri)?;
-            // A path an app's profile does not read (one stored before the profile excluded it)
-            // is never fetched: it keeps no card.
+            // A path an app's profile does not read, or any path in a namespace Pinakes never
+            // fetches (one stored before the profile excluded it, or before the rule), is never
+            // fetched: it keeps no card.
             if super::pubky_apps::excluded(uri) {
-                let mut doc = ResourceMeta::new(uri, "pubky", self.config.ttl_secs);
-                doc.set_type("CreativeWork");
-                doc.status = Status::Missing;
-                doc.withheld = true;
-                return Ok(doc);
+                return Ok(super::pubky_apps::no_card(uri, self.config.ttl_secs));
             }
             // Only objects of other apps, by their decoded path (`classify`).
             if super::classify(uri) != Some("pubky") {
@@ -511,7 +508,6 @@ mod tests {
             // A homeserver decodes the path and resolves dot segments: these would read a
             // pubky.app post or a private file.
             format!("pubky://{key}/pub/a.app/x%2F..%2F..%2Fpubky.app%2Fposts%2F0034A0X7NJ52G"),
-            format!("pubky://{key}/pub/%70ubky.app/posts/0034A0X7NJ52G"),
             format!("pubky://{key}/pub/a.app/x%2F..%2F..%2F..%2Fpriv%2Fapp.locks%2Ff"),
             format!("pubky://{key}/pub/a.app/x%5C..%5C..%5Cpriv/f"),
             format!("pubky://{key}/pub/a.app/%2E%2E/%2E%2E/priv/f"),
@@ -543,6 +539,35 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(doc.status, Status::Missing, "{path}");
+            assert_eq!((doc.name, doc.description), (None, None));
+            assert!(homeserver.requests.lock().unwrap().is_empty(), "{path}");
+        }
+    }
+
+    /// An object of a namespace Pinakes never fetches (the old Mapky and Eventky layouts, the
+    /// social specs', pubky.app's), however its namespace is spelt, stored before the rule and
+    /// read again: missing with no card, and its homeserver is never asked.
+    #[tokio::test]
+    async fn an_object_of_a_namespace_never_fetched_is_missing_without_a_request() {
+        let owner = Keypair::random();
+        let key = owner.public_key().to_z32();
+        for path in [
+            "mapky.app/posts/00358SJCCNK1G",
+            "eventky.app/events/0034FED2YCDKG",
+            "mapky.ap%70/routes/0034FED2YCDKH",
+            "social/v1/posts/0034FED2YCDKJ",
+            "pubky.app/posts/0034A0X7NJ52G",
+            "%70ubky.app/posts/0034A0X7NJ52G",
+        ] {
+            let homeserver = Arc::new(Homeserver::default());
+            let packet = https(&owner, "_pubky", "homeserver.example", 9443, &[]);
+            let doc = resolver(&[packet], &["8.8.8.8"], homeserver.clone())
+                .resolve(&format!("pubky://{key}/pub/{path}"))
+                .await
+                .unwrap();
+            assert_eq!(doc.status, Status::Missing, "{path}");
+            assert!(doc.withheld, "{path}");
+            assert_eq!(doc.type_name, "CreativeWork", "{path}");
             assert_eq!((doc.name, doc.description), (None, None));
             assert!(homeserver.requests.lock().unwrap().is_empty(), "{path}");
         }
