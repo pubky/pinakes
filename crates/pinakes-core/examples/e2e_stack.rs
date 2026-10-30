@@ -412,6 +412,7 @@ async fn run(pool: sqlx::PgPool, f: Fixture) -> Result<()> {
     cfg.api.requests_per_minute = 10000;
     // The harness tags as one author: one shared tagger relates two samples.
     cfg.search.related_min_shared = 1;
+    pinakes_core::also_on::configure(&pool, &cfg.also_on).await?;
     let state = AppState::new(pool.clone(), cfg.clone())?;
     let metrics = state.metrics.clone();
     let wake = state.wake.clone();
@@ -617,6 +618,7 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let base = format!("http://{}", listener.local_addr()?);
+    pinakes_core::also_on::configure(&pool, &cfg.also_on).await?;
     let state = AppState::new(pool.clone(), cfg.as_ref().clone())?;
     let metrics = state.metrics.clone();
     let app = api::router(state);

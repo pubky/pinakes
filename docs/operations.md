@@ -641,7 +641,14 @@ worker; stored keys keep grouping and stored links stay on cards until they expi
 the sources' lifetimes). `derive_links = false` keeps keys and facts only: no derived links on
 cards, so a tagged link an exact derivation names no longer joins by it either;
 `[also_on.sources.<id>] enabled = false` turns one source off and `enabled = true` turns on one
-that is off by default (an unknown ID stops startup). Sources run in a fixed order, and each
+that is off by default (an unknown ID stops startup). A source that is off (switched off, or off
+by default and not turned on) stops showing at the next start: the daemon writes the sources
+that are off to `also_on_source_off`, and no card, `also_on` list, search, group or later
+source reads their keys, facts or links. Those rows stay in the database and expire as before;
+nothing is deleted, and a source switched on again shows its unexpired rows at once. The
+resources its keys and keyed links name are regrouped in the background (`group_dirty`), and its
+recordings' same-recording pairs are read again. `[also_on] enabled = false` hides nothing: it
+only stops the worker. Sources run in a fixed order, and each
 sees the keys the ones before it found in the same run (a barcode MusicBrainz names, then the
 services looked up by it); a source that no longer applies (its key is gone) drops its rows. A
 social post found gone gets no lookups, and its rows are dropped: nothing is derived from it, an

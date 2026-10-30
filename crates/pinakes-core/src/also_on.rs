@@ -82,12 +82,15 @@ impl Default for AlsoOnConfig {
 }
 impl AlsoOnConfig {
     pub fn source_enabled(&self, source: &dyn Source) -> bool {
-        self.enabled
-            && self
-                .sources
-                .get(source.id())
-                .and_then(|s| s.enabled)
-                .unwrap_or(source.enabled_by_default())
+        self.enabled && self.source_on(source)
+    }
+    /// Whether the operator has the source on (`[also_on.sources.<id>] enabled`, else its
+    /// default), whether or not the worker runs (`[also_on] enabled`).
+    pub fn source_on(&self, source: &dyn Source) -> bool {
+        self.sources
+            .get(source.id())
+            .and_then(|s| s.enabled)
+            .unwrap_or(source.enabled_by_default())
     }
     /// The MusicBrainz web service: `[also_on.sources.musicbrainz] base_url`, or the public one.
     pub fn musicbrainz_base(&self) -> &str {
@@ -391,6 +394,35 @@ pub fn registry() -> Vec<Arc<dyn Source>> {
 pub fn registered() -> &'static [Arc<dyn Source>] {
     static ALL: std::sync::OnceLock<Vec<Arc<dyn Source>>> = std::sync::OnceLock::new();
     ALL.get_or_init(registry)
+}
+/// Write the sources this build has that the operator switched off to `also_on_source_off`,
+/// which every read of keys, facts and derived links leaves out (cards, `also_on`, search,
+/// grouping): a source switched off stops showing at once, its rows kept until they expire, and
+/// shows again when switched on. A change regroups what its rows name (the table's trigger). The
+/// rows of a source this build no longer has are read as before. Run at startup, before the
+/// workers.
+pub async fn configure(pool: &PgPool, cfg: &AlsoOnConfig) -> Result<()> {
+    let off: Vec<&str> = registered()
+        .iter()
+        .filter(|s| !cfg.source_on(s.as_ref()))
+        .map(|s| s.id())
+        .collect();
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM also_on_source_off WHERE NOT source=ANY($1)")
+        .bind(&off)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO also_on_source_off(source) SELECT unnest($1::text[]) ON CONFLICT DO NOTHING",
+    )
+    .bind(&off)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    if !off.is_empty() {
+        tracing::info!(sources = ?off, "also-on sources switched off: their stored rows are not read");
+    }
+    Ok(())
 }
 /// Every also-on source's published host limits ([`Source::budgets`]).
 pub fn budgets() -> impl Iterator<Item = (&'static str, f64)> {
@@ -703,7 +735,7 @@ pub async fn prune(pool: &PgPool) -> Result<u64> {
 }
 
 async fn subject(pool: &PgPool, id: &str) -> Result<Option<Subject>> {
-    let row: Option<Value> = sqlx::query_scalar("SELECT jsonb_build_object('id',r.id,'uri',r.uri,'status',r.status,'type',r.type,'doc',r.doc,'first_seen_at',(SELECT min(created_at) FROM reference f WHERE f.resource_id=r.id),'keys',coalesce((SELECT jsonb_agg(jsonb_build_array(k.key,k.source) ORDER BY k.key) FROM resource_key k WHERE k.resource_id=r.id AND k.expires_at>now()),'[]')) FROM resource_document r WHERE r.id=$1 AND NOT EXISTS(SELECT 1 FROM resource_alias a WHERE a.alias_id=r.id)")
+    let row: Option<Value> = sqlx::query_scalar("SELECT jsonb_build_object('id',r.id,'uri',r.uri,'status',r.status,'type',r.type,'doc',r.doc,'first_seen_at',(SELECT min(created_at) FROM reference f WHERE f.resource_id=r.id),'keys',coalesce((SELECT jsonb_agg(jsonb_build_array(k.key,k.source) ORDER BY k.key) FROM resource_key k WHERE k.resource_id=r.id AND k.expires_at>now() AND k.source NOT IN (SELECT source FROM also_on_source_off)),'[]')) FROM resource_document r WHERE r.id=$1 AND NOT EXISTS(SELECT 1 FROM resource_alias a WHERE a.alias_id=r.id)")
         .bind(id)
         .fetch_optional(pool)
         .await?;
@@ -928,7 +960,7 @@ async fn one(
                     .await
                     .with_context(|| format!("record {}", source.id()))?;
                 next = Some(next.map_or(lifetime, |n| n.min(lifetime)));
-                subject.keys = sqlx::query_as("SELECT key,source FROM resource_key WHERE resource_id=$1 AND expires_at>now() ORDER BY key")
+                subject.keys = sqlx::query_as("SELECT key,source FROM resource_key WHERE resource_id=$1 AND expires_at>now() AND source NOT IN (SELECT source FROM also_on_source_off) ORDER BY key")
                     .bind(id)
                     .fetch_all(pool)
                     .await?;

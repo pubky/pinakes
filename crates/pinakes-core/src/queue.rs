@@ -450,7 +450,7 @@ async fn guarded_finish_job(
     let result = match result {
         Ok(mut doc) if crate::music::parse(&job.uri).is_some() => {
             // What the also-on sources said about the artist (a person or a group), if anything.
-            let artist_type: Option<String> = sqlx::query_scalar("SELECT value FROM resource_fact WHERE resource_id=$1 AND name='artist_type' AND expires_at>now() ORDER BY value LIMIT 1")
+            let artist_type: Option<String> = sqlx::query_scalar("SELECT value FROM resource_fact WHERE resource_id=$1 AND name='artist_type' AND expires_at>now() AND source NOT IN (SELECT source FROM also_on_source_off) ORDER BY value LIMIT 1")
                 .bind(&job.id)
                 .fetch_optional(pool)
                 .await?;

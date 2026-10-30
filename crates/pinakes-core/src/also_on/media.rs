@@ -182,7 +182,7 @@ pub async fn type_hints(
 ) -> Result<std::collections::HashMap<String, TypeHints>> {
     let mut out: std::collections::HashMap<String, TypeHints> = Default::default();
     let episodes: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT resource_id FROM resource_key WHERE resource_id=ANY($1) AND source='podcasts' AND key LIKE 'podcast:item:%' AND expires_at>now()",
+        "SELECT DISTINCT resource_id FROM resource_key WHERE resource_id=ANY($1) AND source='podcasts' AND key LIKE 'podcast:item:%' AND expires_at>now() AND source NOT IN (SELECT source FROM also_on_source_off)",
     )
     .bind(ids)
     .fetch_all(pool)
@@ -191,7 +191,7 @@ pub async fn type_hints(
         out.entry(id).or_default().episode = true;
     }
     let types: Vec<(String, String)> = sqlx::query_as(
-        "SELECT resource_id, min(value) FROM resource_fact WHERE resource_id=ANY($1) AND source='films' AND name='title_type' AND expires_at>now() GROUP BY resource_id",
+        "SELECT resource_id, min(value) FROM resource_fact WHERE resource_id=ANY($1) AND source='films' AND name='title_type' AND expires_at>now() AND source NOT IN (SELECT source FROM also_on_source_off) GROUP BY resource_id",
     )
     .bind(ids)
     .fetch_all(pool)
@@ -200,7 +200,7 @@ pub async fn type_hints(
         out.entry(id).or_default().title_type = Some(kind);
     }
     let titles: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT DISTINCT ON (resource_id,name) resource_id,name,value FROM resource_fact WHERE resource_id=ANY($1) AND source='titles' AND name IN ('title','title_description') AND expires_at>now() ORDER BY resource_id,name,value",
+        "SELECT DISTINCT ON (resource_id,name) resource_id,name,value FROM resource_fact WHERE resource_id=ANY($1) AND source='titles' AND name IN ('title','title_description') AND expires_at>now() AND source NOT IN (SELECT source FROM also_on_source_off) ORDER BY resource_id,name,value",
     )
     .bind(ids)
     .fetch_all(pool)
