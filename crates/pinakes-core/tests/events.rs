@@ -4478,6 +4478,11 @@ async fn an_artists_concert_list_on_a_platform_is_the_artist_through_the_whole_r
     assert_eq!(doc.name.as_deref(), Some("Radiohead"));
     assert!(doc.start.is_none(), "{:?}", doc.start);
     assert!(!doc.type_path.iter().any(|t| t == "Event"));
+    assert_eq!(
+        doc.event.not_event.as_deref(),
+        Some("lists_events"),
+        "the decision rides on the card"
+    );
 }
 
 /// An event page under another address (an AMP copy whose head canonical is the event page):

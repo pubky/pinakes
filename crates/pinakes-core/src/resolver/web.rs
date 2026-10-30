@@ -524,7 +524,10 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
     // The page's addresses, for what names it: the one asked for, the one fetched, its head
     // canonical and og:url (an AMP page's article names the canonical).
     let pages = crate::event::page::page_addresses(uri, &fetched.url, &html);
-    let scripts = without_parts(scripts, &fetched.url, &pages);
+    let (scripts, lists_events) = without_parts(scripts, &fetched.url, &pages);
+    if lists_events {
+        out.doc.event.not_event = Some("lists_events".into());
+    }
     let page: Vec<String> = [uri.to_owned(), fetched.url.to_string()]
         .into_iter()
         .chain(
@@ -1213,12 +1216,13 @@ fn all_nodes<'a>(v: &'a Value, out: &mut Vec<(&'a Value, bool)>, depth: usize, i
 /// `music::parse`) its video. Left out before any script is ranked or read, so the card is the
 /// page's own entity (the artist, the page) and never its first entry; a script with nothing
 /// else goes. `pages`: the page's addresses (`page_identity`), which an entity naming one of
-/// them is the page's own by. Pruned in place: nothing is copied.
+/// them is the page's own by. Pruned in place: nothing is copied. Also whether the page lists
+/// events (the extractor's decision, recorded on the card as `not_event`).
 fn without_parts(
     mut scripts: Vec<(Value, bool)>,
     base: &Url,
     pages: &[String],
-) -> Vec<(Value, bool)> {
+) -> (Vec<(Value, bool)>, bool) {
     let listed = {
         let mut nodes = vec![];
         for (v, _) in &scripts {
@@ -1231,10 +1235,11 @@ fn without_parts(
             .collect();
         crate::event::page::listed_kinds(&entries, base, pages)
     };
+    let lists_events = listed.contains("Event");
     let music = crate::music::parse(base.as_str())
         .is_some_and(|link| link.level != crate::music::Level::Video);
     if listed.is_empty() && !music {
-        return scripts;
+        return (scripts, lists_events);
     }
     let part = |v: &Value, in_list: bool| {
         (crate::event::page::entry(v, base, pages, in_list)
@@ -1242,7 +1247,7 @@ fn without_parts(
             || (music && typed(v, "VideoObject"))
     };
     scripts.retain_mut(|(v, _)| without(v, &part, false));
-    scripts
+    (scripts, lists_events)
 }
 /// Removes the nodes `part` names from `v`, at any depth and in place (`in_list`: within a list
 /// of several main entities); false when nothing is left of `v`.
@@ -2864,6 +2869,7 @@ mod tests {
         assert_eq!(doc.type_name, "MusicGroup");
         assert_eq!(doc.name.as_deref(), Some("Radiohead"));
         assert!(doc.start.is_none());
+        assert_eq!(doc.event.not_event.as_deref(), Some("lists_events"));
         // Without the artist's node: the page, named by its title.
         let doc = page(artist, &format!("{}{}", listed(1), listed(2)));
         assert_eq!(doc.type_name, "WebPage");
@@ -2873,6 +2879,7 @@ mod tests {
         let doc = page(artist, &format!("{}{}", listed(1), listed(1)));
         assert_eq!(doc.type_name, "MusicEvent");
         assert_eq!(doc.name.as_deref(), Some("Radiohead @ Arena 1"));
+        assert_eq!(doc.event.not_event, None);
         // A concert's own page listing two others: its own.
         let doc = page(
             "https://gigs.example/concerts/9-radiohead",

@@ -1055,7 +1055,10 @@ entries with one `url` (else one `@id`, else one name) are one, and on the event
 event in several scripts is read as one, whatever `@id` each script gives it: what the first
 lacks (a start, a description) comes from the next. On
 the event route such a list yields no event, in the page's JSON-LD and in a platform's embedded
-state alike. A music object's page (a track, an album, an
+state alike. The decision rides on the card (`event.not_event`: `lists_events`, or
+`creative_work` for a Wikidata item that is a work): a stored event re-read with it is replaced,
+type and all, where a stored event that merely lost its start for one fetch (a consent wall, a
+date that failed to parse) keeps its card until the next refresh (drift). A music object's page (a track, an album, an
 artist) treats its video (`VideoObject`) as a part too: the card is the track, named by the
 page's title, not "… | Music Video".
 

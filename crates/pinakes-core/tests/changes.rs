@@ -1055,3 +1055,77 @@ async fn retention_and_an_opted_out_save_of_the_same_post_never_deadlock(pool: P
     .unwrap();
     assert_eq!((lines, with_documents), (1, 0));
 }
+
+/// A stored event re-read as no event on a recorded decision (`not_event`: the page lists
+/// several events, or is a creative work) is replaced, type and all; without the decision a
+/// reading that merely lost the start is drift and keeps the card, as before.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_decided_no_event_replaces_a_stored_event_and_a_lost_start_is_still_drift(pool: PgPool) {
+    let (id, mut accepted) = seed(&pool, "https://www.wikidata.org/wiki/Q1079").await;
+    accepted.start = Some(chrono::Utc::now() + chrono::Duration::days(1));
+    store::save_document(&pool, &id, 0, &accepted)
+        .await
+        .unwrap();
+    // The same page read as a page without a start and without a decision: drift.
+    let mut lost = ResourceMeta::new(&accepted.url, "web", 3600);
+    lost.set_type("WebPage");
+    let err = store::save_document(&pool, &id, 0, &lost)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.downcast_ref::<pinakes_core::resolver::RetryLater>()
+            .unwrap()
+            .class,
+        "drift"
+    );
+    // A decision that is still an event (the type path keeps Event) is no re-interpretation.
+    let mut still = ResourceMeta::new(&accepted.url, "web", 3600);
+    still.set_type("MusicEvent");
+    still.event.not_event = Some("lists_events".into());
+    let err = store::save_document(&pool, &id, 0, &still)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.downcast_ref::<pinakes_core::resolver::RetryLater>()
+            .unwrap()
+            .class,
+        "drift"
+    );
+    // Breaking Bad's item read as the series it is: the decision replaces the card.
+    let series = pinakes_core::event::adapters::service::wiki_value(
+        &accepted.url,
+        &json!({"entities": {"Q1079": {"id": "Q1079", "labels": {"en": {"value": "Breaking Bad"}}, "claims": {
+            "P31": [{"rank":"normal","mainsnak":{"datavalue":{"value":{"id":"Q5398426"}}}}],
+            "P580": [{"rank":"normal","mainsnak":{"datavalue":{"value":{"time":"+2008-01-20T00:00:00Z","precision":11}}}}],
+            "P582": [{"rank":"normal","mainsnak":{"datavalue":{"value":{"time":"+2013-09-29T00:00:00Z","precision":11}}}}]}}}}),
+    )
+    .unwrap();
+    assert_eq!(series.event.not_event.as_deref(), Some("creative_work"));
+    store::save_document(&pool, &id, 0, &series).await.unwrap();
+    let (kind, path, start): (String, Vec<String>, Option<chrono::DateTime<chrono::Utc>>) =
+        sqlx::query_as("SELECT type,type_path,start_at FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(kind, "TVSeries");
+    assert!(!path.iter().any(|t| t == "Event"), "{path:?}");
+    assert!(start.is_none());
+    // An artist's page stored as its first concert, re-read as the artist (the page lists
+    // events): replaced too.
+    let (id, mut concert) = seed(&pool, "https://www.songkick.com/artists/253846-radiohead").await;
+    concert.start = Some(chrono::Utc::now() + chrono::Duration::days(3));
+    store::save_document(&pool, &id, 0, &concert).await.unwrap();
+    let mut artist = ResourceMeta::new(&concert.url, "jsonld", 3600);
+    artist.set_type("MusicGroup");
+    artist.name = Some("Radiohead".into());
+    artist.event.not_event = Some("lists_events".into());
+    store::save_document(&pool, &id, 0, &artist).await.unwrap();
+    let (kind, start): (String, Option<chrono::DateTime<chrono::Utc>>) =
+        sqlx::query_as("SELECT type,start_at FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((kind.as_str(), start), ("MusicGroup", None));
+}
