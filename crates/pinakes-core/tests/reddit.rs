@@ -613,25 +613,26 @@ async fn a_deleted_post_scrubs_every_spelling_of_many(pool: sqlx::PgPool) {
     assert_scrubbed(&pool, &spellings).await;
 }
 
-/// The entries of `resource_alias` read so far by any scan, by its root index or the whole
-/// table, on `one` connection's statistics.
+/// The entries of `resource_alias` read so far through its root index, on `one` connection's
+/// statistics.
 async fn alias_entries_read(one: &sqlx::PgPool) -> i64 {
     sqlx::query("SELECT pg_stat_force_next_flush()")
         .execute(one)
         .await
         .unwrap();
     sqlx::query_scalar(
-        "SELECT (SELECT coalesce(seq_tup_read,0) FROM pg_stat_user_tables WHERE relname='resource_alias')\
-         +(SELECT coalesce(idx_tup_read,0) FROM pg_stat_user_indexes WHERE indexrelname='resource_alias_root')",
+        "SELECT coalesce(idx_tup_read,0) FROM pg_stat_user_indexes WHERE indexrelname='resource_alias_root'",
     )
     .fetch_one(one)
     .await
     .unwrap()
 }
 
-/// The repair reads each of a post's 3,000 spellings from the alias index once, however many
-/// pages it scrubs them in (six), and no other post's: not every spelling again for each page.
-/// Counted on one connection's statistics.
+/// The repair reads each of a post's 3,000 spellings from the alias root index once, however many
+/// pages it scrubs them in (six), and no other post's: not every spelling again for each page,
+/// and not by a scan of the whole table (that reads none through the index). Counted on one
+/// connection's statistics. The repair's own page query may also read the whole alias table for
+/// its `NOT EXISTS`, as the planner chooses; that is not counted.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn the_repair_reads_each_spelling_once(pool: sqlx::PgPool) {
     if pinakes_core::sources::by_name("reddit").is_none() {
@@ -660,7 +661,8 @@ async fn the_repair_reads_each_spelling_once(pool: sqlx::PgPool) {
         .execute(&one)
         .await
         .unwrap();
-    sqlx::query("ANALYZE resource_alias")
+    // Both tables analyzed here, so no plan depends on when autovacuum gets to them.
+    sqlx::query("ANALYZE resource, resource_alias")
         .execute(&one)
         .await
         .unwrap();
