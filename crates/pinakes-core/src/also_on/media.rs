@@ -159,6 +159,7 @@ pub fn link_type(uri: &str) -> Option<&'static str> {
         ("goodreads.com", ["book", "show", id]) if work_id(id) => Some("Book"),
         ("fountain.fm", ["show", id]) if slug(id) => Some("PodcastSeries"),
         ("fountain.fm", ["episode", id]) if slug(id) => Some("PodcastEpisode"),
+        ("castro.fm", ["episode", id]) if slug(id) => Some("PodcastEpisode"),
         _ => None,
     }
 }

@@ -284,6 +284,16 @@
     "status": 200,
     "url": "https://api.podcastindex.org/api/1.0/episodes/byid?id=61953304662"
   },
+  "pi-episode-byguid-92ba9167": {
+    "bytes": 136,
+    "content_type": "application/json",
+    "file": "pi-episode-byguid-92ba9167.json",
+    "note": "Podcast Index API, signed with the operator's key (not recorded). iTunes' GUID for Darknet Diaries' \"Conti\", which the show's own feed names otherwise.",
+    "recorded_at": "2026-10-30T19:40:00+00:00",
+    "sha256": "aad0b929c18897fa1ecacb9c3ebae0f13e0c1ab851d81c8a742b02866e76d774",
+    "status": 200,
+    "url": "https://api.podcastindex.org/api/1.0/episodes/byguid?guid=92ba9167-f21b-45a9-af08-ec88fe449873&feedid=577105"
+  },
   "pi-episode-byguid-PC20-275": {
     "bytes": 3423,
     "content_type": "application/json",

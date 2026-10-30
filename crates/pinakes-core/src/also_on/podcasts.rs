@@ -35,6 +35,9 @@ use sha1::{Digest, Sha1};
 /// What a subject names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Podcast {
+    /// A player's page of an episode (Castro's) that plays a file and names its show's Apple
+    /// ID: the episode is the one iTunes lists with that file.
+    Played { show: u64, file: String },
     /// A show by its Apple ID, or one of its episodes (`?i=`), on Apple Podcasts or a player
     /// that opens shows by Apple ID; `site` is the link's own service.
     Apple {
@@ -148,6 +151,13 @@ pub fn podcast(subject: &Subject) -> Option<Podcast> {
             .cloned()
     };
     let kind = subject.type_name.as_deref();
+    let apple = doc.attributes.get("podcast_apple").and_then(|v| number(v));
+    if let (Some(show), Some("PodcastEpisode"), Some(stream)) = (apple, kind, &doc.stream) {
+        return Some(Podcast::Played {
+            show,
+            file: stream.url.clone(),
+        });
+    }
     if let (Some(url), Some("PodcastSeries" | "PodcastEpisode")) = (attribute("podcast_feed"), kind)
     {
         if kind == Some("PodcastSeries") {
@@ -437,6 +447,21 @@ fn by_guid<'a>(episodes: &'a [Episode], item: &str) -> Option<&'a Episode> {
 fn by_track(episodes: &[Episode], track: u64) -> Option<&Episode> {
     episodes.iter().find(|e| e.track == track)
 }
+/// The one episode that plays this file (compared as enclosure keys).
+fn by_file<'a>(episodes: &'a [Episode], file: &str) -> Option<&'a Episode> {
+    let want = enclosure_key(file)?;
+    let mut found = episodes.iter().filter(|e| {
+        e.stream
+            .as_ref()
+            .and_then(|s| enclosure_key(&s.url))
+            .as_ref()
+            == Some(&want)
+    });
+    match (found.next(), found.next()) {
+        (Some(one), None) => Some(one),
+        _ => None,
+    }
+}
 
 /// A feed as Podcast Index records it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -662,6 +687,8 @@ struct Want<'a> {
     index: Option<&'a IndexFeed>,
     item: Option<&'a str>,
     track: Option<u64>,
+    /// The file a player's page plays, by which iTunes' list names the episode.
+    file: Option<&'a str>,
     /// The feed as the card's own lookup read it, so it is not read again.
     read: Option<&'a FeedRead>,
     /// The card is Podcast Index's own page of the episode.
@@ -882,14 +909,20 @@ impl Podcasts {
             if let Some(episodes) =
                 deferred.take("itunes", Self::episodes(cx, show).await.map(Some))
             {
-                let e = match (want.track, &item) {
-                    (Some(t), _) => by_track(&episodes, t),
-                    (None, Some(g)) => by_guid(&episodes, g),
+                let e = match (want.track, &item, want.file) {
+                    (Some(t), _, _) => by_track(&episodes, t),
+                    (None, Some(g), _) => by_guid(&episodes, g),
+                    (None, None, Some(file)) => by_file(&episodes, file),
                     _ => None,
                 };
                 if let Some(e) = e {
                     heard.itunes = e.stream.clone();
                     apple_episode(found, show, e.track, &sf);
+                    // Apple's record of its own episode names the file it plays: a key, as its
+                    // track is, whether or not the show's GUID is vouched.
+                    if let Some(k) = e.stream.as_ref().and_then(|s| enclosure_key(&s.url)) {
+                        found.keys.push(key(k, "itunes"));
+                    }
                     if item.is_none() {
                         item = e.guid.clone();
                     }
@@ -927,7 +960,9 @@ impl Podcasts {
                 }
             }
         }
-        if let Some(rss) = feed.and_then(|f| rss_item(f, guid)) {
+        // The RSS item only when the feed has it (iTunes may know an item by another GUID).
+        let listed = read.as_ref().is_some_and(|r| r.item_guid.is_some());
+        if let Some(rss) = feed.and_then(|f| rss_item(f, guid)).filter(|_| listed) {
             if !same_page(&rss, want.page) {
                 add(
                     found,
@@ -1058,6 +1093,23 @@ impl Podcasts {
                 }
                 // The link's own service is the card itself.
                 found.links.retain(|l| l.site != *site);
+            }
+            Podcast::Played { show, file } => {
+                let Some(record) = deferred.take("itunes", Self::itunes_show(cx, *show).await)
+                else {
+                    return deferred.finish(found);
+                };
+                let indexed =
+                    Self::index_for_apple(cx, &mut deferred, *show, record.feed.as_deref()).await;
+                let want = Want {
+                    show: Some(*show),
+                    show_guid: indexed.as_ref().and_then(|(_, v)| v.as_deref()),
+                    index: indexed.as_ref().map(|(f, _)| f),
+                    file: Some(file),
+                    page: &subject.uri,
+                    ..Default::default()
+                };
+                Self::episode(cx, &mut found, &mut deferred, heard, want).await;
             }
             Podcast::Index { feed, episode } => {
                 let indexed =

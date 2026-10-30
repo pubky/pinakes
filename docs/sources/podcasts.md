@@ -44,6 +44,15 @@ Podcast Index page
     One episode may play several files: iTunes may read another copy of a show's feed, which
     names the file differently. `GET /v1/search?key=podcast:enclosure:{URL}` takes the file's
     URL too.
+- **An Apple episode's file.** The file iTunes' record of an Apple episode names is a key
+  whether or not the show's GUID is vouched, just as its track is: Apple is the authority for
+  its own episodes. iTunes may know an item by another GUID than the show's feed does (Darknet
+  Diaries' "Conti"). Then the file is what joins Apple's episode to the show's own page.
+- **A player's episode page.** A Castro episode page ([castro](castro.md)) plays a file and
+  names its show's Apple ID. The episode is the one among the show's latest 200 that iTunes
+  lists with that very file. It gets that episode's keys, and the item key when the show is
+  vouched. Castro's word alone is no key. Pocket Casts' and Overcast's episode pages are never
+  read: Pocket Casts refuses Pinakes, and Overcast asks a reader to sign in.
 - A Podcast Index page links the show's feed and its Apple, Pocket Casts and Castro pages.
 - The show's Wikidata item (by its Apple ID) gives its Q-id as a key and its Spotify, Podcast
   Index, Podchaser, Pocket Casts and Castbox pages.

@@ -154,6 +154,7 @@ Which cards carry one:
   links back to it): the item's first audio or video `<enclosure>`, with its `itunes:duration`;
 - a Podcast Index episode: the enclosure Podcast Index records
   ([podcast_index](sources/podcast_index.md));
+- a Castro episode: the file its page plays ([castro](sources/castro.md));
 - any other episode the also-on [`podcasts`](sources/podcasts.md) source reads (an Apple Podcasts
   or Fountain episode, a page its feed's item links back to): the enclosure it hears of, from
   the card's next read (the source asks for one at once);

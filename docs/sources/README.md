@@ -57,6 +57,7 @@ or got plain web cards before are read by their source.
 - [`app_store`](app_store.md): App Store apps by ID, from the iTunes Lookup API.
 - [`artic`](artic.md): Art Institute of Chicago artworks by id.
 - [`bluesky`](bluesky.md): Bluesky posts and profiles.
+- [`castro`](castro.md): page hook: a Castro episode's file and show, from its own page.
 - [`cleveland`](cleveland.md): Cleveland Museum of Art artworks by accession number.
 - [`clinicaltrials`](clinicaltrials.md): ClinicalTrials.gov clinical studies by NCT number.
 - [`commons`](commons.md): Wikimedia Commons files (images, video, audio) by file name.

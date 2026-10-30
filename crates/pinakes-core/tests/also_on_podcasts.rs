@@ -455,8 +455,8 @@ async fn an_episode_has_one_key_on_apple_and_podcast_index() {
         keys(&apple),
         [
             "podcast:apple_episode:1000796718231",
-            item.as_str(),
-            enclosure.as_str()
+            enclosure.as_str(),
+            item.as_str()
         ]
     );
     // Everything keyed by the item, never its own Apple page: the item's own page (its
@@ -500,15 +500,16 @@ async fn an_episode_has_one_key_on_apple_and_podcast_index() {
         keys(&index),
         [
             "podcast:apple_episode:1000796718231",
-            item.as_str(),
-            enclosure.as_str()
+            enclosure.as_str(),
+            item.as_str()
         ]
     );
     assert!(
         !sites(&index).contains(&"Podcast Index"),
         "its own Podcast Index page is the card"
     );
-    // The Daily's episode: Apple's track only (iTunes and Podcast Index name different feeds).
+    // The Daily's episode: Apple's track and the file it names, no item key (iTunes and Podcast
+    // Index name different feeds).
     let daily = Podcasts
         .lookup(
             &cx,
@@ -516,7 +517,11 @@ async fn an_episode_has_one_key_on_apple_and_podcast_index() {
         )
         .await
         .unwrap();
-    assert_eq!(keys(&daily), ["podcast:apple_episode:1000797051580"]);
+    let daily_file = enclosure_key("https://dts.podtrac.com/redirect.mp3/pdst.fm/e/pfx.vpixl.com/6qj4J/pscrb.fm/rss/p/tracking.swap.fm/track/4jdbJYYRKqK96EGqOzQb/nyt.simplecastaudio.com/03d8b493-87fc-4bd1-931f-8a8e9b945d8a/episodes/5d4af67f-8924-4298-8fd7-19a04e793c81/audio/128/default.mp3?aid=rss_feed&awCollectionId=03d8b493-87fc-4bd1-931f-8a8e9b945d8a&awEpisodeId=5d4af67f-8924-4298-8fd7-19a04e793c81&feed=Sl5CSM3S").unwrap();
+    assert_eq!(
+        keys(&daily),
+        ["podcast:apple_episode:1000797051580", daily_file.as_str()]
+    );
     assert_eq!(
         index.links[0].key.as_deref(),
         Some("podcast:apple_episode:1000796718231"),
@@ -531,6 +536,70 @@ async fn an_episode_has_one_key_on_apple_and_podcast_index() {
         .await
         .unwrap();
     assert_eq!(gone, Found::default());
+}
+
+/// A Castro episode page plays the show's own file and names its Apple ID (`sources::castro`):
+/// the episode is the one iTunes lists with that very file, so it gets Apple's track and the
+/// file's key. Darknet Diaries' "Conti" has another GUID at iTunes than in the show's feed, so
+/// the file is what joins Apple's episode, Castro's and the show's own page (which plays the
+/// same file). A file iTunes doesn't list joins nothing.
+#[tokio::test]
+async fn a_castro_episode_joins_by_the_file_apple_lists() {
+    let conti = "https://www.podtrac.com/pts/redirect.mp3/dovetail.prxu.org/7057/141e0c43-f935-41de-be94-708448052c4d/darknet-diaries-ep180-conti.mp3";
+    let file = enclosure_key(conti).unwrap();
+    let cx = cx(Recorded::new(), indexed());
+    let castro = |played: &str| {
+        let uri = "https://castro.fm/episode/A1tnxb";
+        let mut doc = ResourceMeta::new(uri, "castro", 3600);
+        doc.set_type("PodcastEpisode");
+        doc.attributes
+            .insert("podcast_apple".into(), "1296350485".into());
+        doc.stream = Stream::public(played, "audio/mpeg", None, false);
+        subject(uri, Some("PodcastEpisode"), Some(doc))
+    };
+    let found = Podcasts.lookup(&cx, &castro(conti)).await.unwrap();
+    // The show's GUID is vouched, so iTunes' GUID for the item is a key under it too; the
+    // show's feed has no such item, so there is no RSS item to link.
+    let itunes_item = item_key(GUID_DARKNET, "92ba9167-f21b-45a9-af08-ec88fe449873").unwrap();
+    assert_eq!(
+        keys(&found),
+        [
+            "podcast:apple_episode:1000791501104",
+            file.as_str(),
+            itunes_item.as_str()
+        ]
+    );
+    assert_eq!(
+        links(&found),
+        [(
+            "Apple Podcasts",
+            "https://podcasts.apple.com/us/podcast/id1296350485?i=1000791501104",
+            "itunes"
+        )]
+    );
+    assert!(!found.reread, "its card plays already");
+    // Apple's own episode: the same file, as iTunes lists it.
+    let apple = Podcasts
+        .lookup(
+            &cx,
+            &subject(&format!("{DARKNET}?i=1000791501104"), None, None),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        keys(&apple),
+        [
+            "podcast:apple_episode:1000791501104",
+            file.as_str(),
+            itunes_item.as_str()
+        ]
+    );
+    // A file iTunes lists for no episode of the show: nothing.
+    let found = Podcasts
+        .lookup(&cx, &castro("https://cdn.example.org/other.mp3"))
+        .await
+        .unwrap();
+    assert!(found.keys.is_empty() && found.links.is_empty(), "{found:?}");
 }
 
 /// The stream facts a lookup recorded.
@@ -674,8 +743,8 @@ async fn a_feed_item_page_joins_its_episode() {
         keys(&found),
         [
             "podcast:apple_episode:1000796718231",
-            item.as_str(),
-            enclosure.as_str()
+            enclosure.as_str(),
+            item.as_str()
         ]
     );
     // The page is the item's own `<link>`: not listed again.
@@ -691,7 +760,11 @@ async fn a_feed_item_page_joins_its_episode() {
         )
         .await
         .unwrap();
-    assert_eq!(keys(&other), ["podcast:apple_episode:1000796718231"]);
+    assert_eq!(
+        keys(&other),
+        ["podcast:apple_episode:1000796718231", enclosure.as_str()],
+        "Apple's track, and the file Apple's record names"
+    );
 }
 
 #[tokio::test]
@@ -702,7 +775,14 @@ async fn a_feed_episode_on_apple_podcasts() {
     let cx = cx(Recorded::new(), indexed());
     let card = feed_card("https://example.org/somewhere/", feed, Some("PC20-275"));
     let found = Podcasts.lookup(&cx, &card).await.unwrap();
-    assert_eq!(keys(&found), ["podcast:apple_episode:1000796718231"]);
+    // And the file Apple's record names, which is a key as its track is.
+    let file =
+        enclosure_key("https://op3.dev/e/mp3s.nashownotes.com/PC20-275-2026-10-16-Final.mp3")
+            .unwrap();
+    assert_eq!(
+        keys(&found),
+        ["podcast:apple_episode:1000796718231", file.as_str()]
+    );
     // The Daily's feed: iTunes names another feed for the Apple ID, so no Apple track.
     let daily = "https://feeds.simplecast.com/54nAGcIl";
     let card = feed_card(
