@@ -1080,7 +1080,7 @@ mod tests {
 
     #[tokio::test]
     async fn without_a_contact_edgar_links_wait() {
-        let egress = crate::resolver::egress::Egress::new(Default::default());
+        let (egress, _) = crate::sources::fixture::egress(vec![]);
         assert_eq!(egress.contact(), None);
         let cx = Context {
             egress: &egress,

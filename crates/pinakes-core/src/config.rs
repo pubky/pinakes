@@ -1209,6 +1209,16 @@ mod tests {
         merge(&mut value, change);
         Config::from_value(value)
     }
+    /// An egress with these rules, for asking its policy (`allows`); it resolves to a fixed
+    /// address and answers from recordings, never the network.
+    fn policy(cfg: &Config) -> crate::resolver::egress::Egress {
+        let (_, recorded) = crate::sources::fixture::egress(vec![]);
+        crate::resolver::egress::Egress::with_backends(
+            cfg.egress.clone(),
+            std::sync::Arc::new(crate::sources::fixture::PublicDns),
+            recorded,
+        )
+    }
     #[test]
     fn loading_nothing_gives_the_defaults_and_limits_round_trip() {
         let loaded = Config::load(None).unwrap();
@@ -1654,7 +1664,7 @@ mod tests {
                 "[::1]"
             ]
         );
-        let egress = crate::resolver::egress::Egress::new(cfg.egress.clone());
+        let egress = policy(&cfg);
         for denied in [
             "https://xn--fa-hia.de/",
             "https://faß.de/x",
@@ -1682,7 +1692,7 @@ mod tests {
             cfg.egress.deny_hosts,
             ["8.8.0.8", "8.8.0.8", "127.0.0.1", "127.0.0.2", "10.0.0.1"]
         );
-        let egress = crate::resolver::egress::Egress::new(cfg.egress.clone());
+        let egress = policy(&cfg);
         for denied in [
             "https://8.8.8/",
             "https://8.8.0.8/",
@@ -1701,7 +1711,7 @@ mod tests {
                 ["*.xn--bcher-kva.de", "xn--fa-hia.de"],
                 "{dot}"
             );
-            let egress = crate::resolver::egress::Egress::new(cfg.egress.clone());
+            let egress = policy(&cfg);
             for denied in ["https://shop.bücher.de/", "https://faß.de/"] {
                 assert!(!egress.allows(denied), "{dot} {denied}");
             }
@@ -1779,7 +1789,7 @@ mod tests {
             for rule in *spellings {
                 let cfg = with(serde_json::json!({"egress": {"deny_hosts": [rule]}}))
                     .unwrap_or_else(|e| panic!("{rule}: {e:#}"));
-                let egress = crate::resolver::egress::Egress::new(cfg.egress.clone());
+                let egress = policy(&cfg);
                 for (m, others) in hosts.iter().enumerate() {
                     for host in *others {
                         let url = format!("http://{host}/");

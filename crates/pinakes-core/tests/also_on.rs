@@ -9,7 +9,6 @@ use pinakes_core::{
     config::Config,
     groups,
     model::ResourceMeta,
-    resolver::egress::Egress,
     store,
 };
 use serde_json::{json, Value};
@@ -97,7 +96,7 @@ fn named(uris: &[&str]) {
 
 fn cx(config: Config) -> Context {
     Context {
-        egress: Egress::new(config.egress.clone()),
+        egress: common::offline_egress(config.egress.clone()),
         config: Arc::new(config),
     }
 }

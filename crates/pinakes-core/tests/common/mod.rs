@@ -291,3 +291,26 @@ impl pinakes_core::resolver::egress::Dns for PublicDns {
         )])
     }
 }
+/// An egress that never reaches the network: every host resolves to a fixed public address, so
+/// the egress' own checks (policy, private addresses) run as they would, and every request fails.
+/// For tests whose links are refused, or answered from the store, before anything is fetched.
+pub fn offline_egress(
+    cfg: pinakes_core::config::EgressConfig,
+) -> pinakes_core::resolver::egress::Egress {
+    pinakes_core::resolver::egress::Egress::with_backends(
+        cfg,
+        std::sync::Arc::new(PublicDns),
+        std::sync::Arc::new(Offline),
+    )
+}
+struct Offline;
+#[async_trait::async_trait]
+impl pinakes_core::resolver::egress::Transport for Offline {
+    async fn get(
+        &self,
+        url: &url::Url,
+        _: &[std::net::SocketAddr],
+    ) -> anyhow::Result<pinakes_core::resolver::egress::Fetched> {
+        anyhow::bail!("no network in tests: {}", url.host_str().unwrap_or(""))
+    }
+}
