@@ -181,6 +181,20 @@ pub struct TypeHints {
 /// `stream_duration`, first the one a card takes: `podcasts`, an episode's enclosure, and
 /// `itunes`, an Apple Music track's preview (`preview: true`).
 pub const STREAMS: &[(&str, bool)] = &[("podcasts", false), ("itunes", true)];
+/// An episode's enclosure as a key, `podcast:enclosure:{SHA-256 of its URL}` (an http(s) URL,
+/// without its fragment): the very file a feed, Podcast Index, iTunes or a player's page plays.
+/// One episode may play several (a show's feed and the copy iTunes reads).
+pub fn enclosure_key(url: &str) -> Option<String> {
+    use sha2::Digest as _;
+    let mut url = url::Url::parse(url.trim()).ok()?;
+    if !matches!(url.scheme(), "https" | "http") {
+        return None;
+    }
+    url.set_fragment(None);
+    let hash = sha2::Sha256::digest(url.as_str().as_bytes());
+    let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+    Some(format!("podcast:enclosure:{hex}"))
+}
 /// Record a stream a [`STREAMS`] source heard of as its facts: a card without a stream of its
 /// own takes it ([`type_card`]), and one that has none yet is read again now. A link longer than
 /// a fact holds (512 bytes) is none.

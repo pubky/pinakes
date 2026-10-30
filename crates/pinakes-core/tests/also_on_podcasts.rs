@@ -4,7 +4,7 @@ mod common;
 use common::media::*;
 use pinakes_core::{
     also_on::{
-        podcasts::{derived_guid, item_key, Podcasts},
+        podcasts::{derived_guid, enclosure_key, item_key, Podcasts},
         Fact, Found, Source, Subject,
     },
     config::Config,
@@ -57,6 +57,7 @@ async fn an_apple_show_without_podcast_index() {
         [
             ("Pocket Casts", "https://pca.st/itunes/1200361736", "itunes"),
             ("Castro", "https://castro.fm/itunes/1200361736", "itunes"),
+            ("Overcast", "https://overcast.fm/itunes1200361736", "itunes"),
             (
                 "Spotify",
                 "https://open.spotify.com/show/3IM0lmZxpFAY7CwMuv9H4g",
@@ -192,7 +193,23 @@ async fn an_episode_page_that_names_its_feed() {
         "prx_7057_141e0c43-f935-41de-be94-708448052c4d",
     )
     .unwrap();
-    assert_eq!(keys(&found), [item.as_str()]);
+    let enclosure = enclosure_key("https://www.podtrac.com/pts/redirect.mp3/dovetail.prxu.org/7057/141e0c43-f935-41de-be94-708448052c4d/darknet-diaries-ep180-conti.mp3").unwrap();
+    assert_eq!(keys(&found), [item.as_str(), enclosure.as_str()]);
+    assert_eq!(
+        links(&found),
+        [
+            (
+                "Podcast feed",
+                "https://podcast.darknetdiaries.com/?guid=prx_7057_141e0c43-f935-41de-be94-708448052c4d",
+                "feed"
+            ),
+            (
+                "Podcast Index",
+                "https://podcastindex.org/podcast/577105?episode=61326138294",
+                "podcastindex"
+            ),
+        ]
+    );
     // Another page of the site names the same feed but is no item of it: nothing, and no
     // Podcast Index request.
     let before = recorded.signed_with.lock().unwrap().len();
@@ -249,6 +266,11 @@ fn copy_site(copy_guid: &str, owns: bool) -> Arc<Recorded> {
             "application/json",
             owner,
         ),
+        (
+            "https://api.podcastindex.org/api/1.0/episodes/byguid?guid=prx_7057_141e0c43-f935-41de-be94-708448052c4d&feedid=888888",
+            "application/json",
+            r#"{"status":"true","episode":[],"description":"Episode not found."}"#.into(),
+        ),
     ])
 }
 fn copy_page() -> Subject {
@@ -269,8 +291,9 @@ async fn a_copy_that_claims_a_shows_apple_id_joins_nothing_of_it() {
         .await
         .unwrap();
     let theirs = item_key(own, "prx_7057_141e0c43-f935-41de-be94-708448052c4d").unwrap();
-    assert_eq!(keys(&found), [theirs.as_str()]);
-    assert!(found.links.is_empty());
+    let file = enclosure_key("https://copy.example/a.mp3").unwrap();
+    assert_eq!(keys(&found), [theirs.as_str(), file.as_str()]);
+    assert_eq!(sites(&found), ["Podcast feed"], "its own RSS item only");
     // Darknet Diaries' own GUID, which Podcast Index says the real feed owns: nothing of the
     // show at all. Its own audio is still its stream: a stream joins nothing.
     let found = Podcasts
@@ -339,7 +362,21 @@ async fn players_name_a_show_by_its_apple_id() {
         .unwrap();
     assert_eq!(found.keys[0].key, "podcast:apple:1200361736");
     assert!(sites(&found).contains(&"Castro"));
+    assert!(sites(&found).contains(&"Overcast"));
     assert!(!sites(&found).contains(&"Pocket Casts"), "the card itself");
+    // Overcast's link, with or without the show's slug, names its show the same way.
+    for overcast in [
+        "https://overcast.fm/itunes1200361736/the-daily",
+        "https://overcast.fm/itunes1200361736",
+    ] {
+        let found = Podcasts
+            .lookup(&cx, &subject(overcast, None, None))
+            .await
+            .unwrap();
+        assert_eq!(found.keys[0].key, "podcast:apple:1200361736", "{overcast}");
+        assert!(sites(&found).contains(&"Pocket Casts"));
+        assert!(!sites(&found).contains(&"Overcast"), "the card itself");
+    }
     // An ID iTunes doesn't know still names itself: the key, from the URL alone.
     let found = Podcasts
         .lookup(&cx, &subject("https://castro.fm/itunes/1", None, None))
@@ -410,11 +447,44 @@ async fn an_episode_has_one_key_on_apple_and_podcast_index() {
         .await
         .unwrap();
     let item = item_key(GUID_PC20, "PC20-275").unwrap();
+    // The file it plays (the feed's, Podcast Index's and iTunes' alike) is a key too.
+    let enclosure =
+        enclosure_key("https://op3.dev/e/mp3s.nashownotes.com/PC20-275-2026-10-16-Final.mp3")
+            .unwrap();
     assert_eq!(
         keys(&apple),
-        ["podcast:apple_episode:1000796718231", item.as_str()]
+        [
+            "podcast:apple_episode:1000796718231",
+            item.as_str(),
+            enclosure.as_str()
+        ]
     );
-    assert!(apple.links.is_empty(), "its own Apple page is the card");
+    // Everything keyed by the item, never its own Apple page: the item's own page (its
+    // `<link>`), the RSS item and Podcast Index's page of the episode.
+    assert_eq!(
+        links(&apple),
+        [
+            (
+                "www.podpage.com",
+                "https://www.podpage.com/podcasting-20/off-the-rails/",
+                "feed"
+            ),
+            (
+                "Podcast feed",
+                "https://feeds.podcastindex.org/pc20.xml?guid=PC20-275",
+                "feed"
+            ),
+            (
+                "Podcast Index",
+                "https://podcastindex.org/podcast/920666?episode=61842097688",
+                "podcastindex"
+            ),
+        ]
+    );
+    assert!(apple
+        .links
+        .iter()
+        .all(|l| l.key.as_deref() == Some(item.as_str())));
     let index = Podcasts
         .lookup(
             &cx,
@@ -428,7 +498,15 @@ async fn an_episode_has_one_key_on_apple_and_podcast_index() {
         .unwrap();
     assert_eq!(
         keys(&index),
-        ["podcast:apple_episode:1000796718231", item.as_str()]
+        [
+            "podcast:apple_episode:1000796718231",
+            item.as_str(),
+            enclosure.as_str()
+        ]
+    );
+    assert!(
+        !sites(&index).contains(&"Podcast Index"),
+        "its own Podcast Index page is the card"
     );
     // The Daily's episode: Apple's track only (iTunes and Podcast Index name different feeds).
     let daily = Podcasts
@@ -567,7 +645,13 @@ async fn a_moved_feed_through_podcast_index() {
     );
     assert_eq!(
         sites(&found),
-        ["Apple Podcasts", "Pocket Casts", "Castro", "Podcast Index"]
+        [
+            "Apple Podcasts",
+            "Pocket Casts",
+            "Castro",
+            "Overcast",
+            "Podcast Index"
+        ]
     );
 }
 
@@ -583,9 +667,21 @@ async fn a_feed_item_page_joins_its_episode() {
         .await
         .unwrap();
     let item = item_key("917393e3-1b1e-5cef-ace4-edaa54e1f810", "PC20-275").unwrap();
+    let enclosure =
+        enclosure_key("https://op3.dev/e/mp3s.nashownotes.com/PC20-275-2026-10-16-Final.mp3")
+            .unwrap();
     assert_eq!(
         keys(&found),
-        ["podcast:apple_episode:1000796718231", item.as_str()]
+        [
+            "podcast:apple_episode:1000796718231",
+            item.as_str(),
+            enclosure.as_str()
+        ]
+    );
+    // The page is the item's own `<link>`: not listed again.
+    assert_eq!(
+        sites(&found),
+        ["Apple Podcasts", "Podcast feed", "Podcast Index"]
     );
     // Another page claiming the item gets its Apple track (by the item GUID) but not the key.
     let other = Podcasts

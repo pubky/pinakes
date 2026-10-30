@@ -1553,13 +1553,22 @@ pub(crate) fn key_filter(key: &str) -> Result<KeyFilter, ApiError> {
             Ok(keys(vec![crate::hubs::key::mb(kind, id).ok_or_else(bad)?]))
         }
         // A show's GUID, or a podcast key as stored: `podcast:guid:…`, `podcast:apple:…`,
-        // `podcast:apple_episode:…`, `podcast:item:{show GUID}:{SHA-256 of the item GUID}`.
+        // `podcast:apple_episode:…`, `podcast:item:{show GUID}:{SHA-256 of the item GUID}`,
+        // `podcast:enclosure:{SHA-256 of the URL}` (or the enclosure's URL itself).
         "podcast" => {
             let guid = crate::also_on::media::guid;
             let key = match value.split_once(':') {
                 Some(("guid", g)) => guid(g).map(|g| format!("podcast:guid:{g}")),
                 Some((kind @ ("apple" | "apple_episode"), id)) if crate::lookups::digits(id) => {
                     Some(format!("podcast:{kind}:{id}"))
+                }
+                Some(("enclosure", file)) => {
+                    let hash = file.to_ascii_lowercase();
+                    if hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        Some(format!("podcast:enclosure:{hash}"))
+                    } else {
+                        crate::also_on::media::enclosure_key(file)
+                    }
                 }
                 Some(("item", rest)) => rest.split_once(':').and_then(|(g, hash)| {
                     let hash = hash.to_ascii_lowercase();

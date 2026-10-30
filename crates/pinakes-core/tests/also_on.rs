@@ -971,6 +971,23 @@ async fn every_key_a_read_lists_searches_back(pool: PgPool) {
             .collect();
         assert_eq!(found, [id.as_str()], "{key}");
     }
+    // An episode's enclosure key is found by the file's own URL too, whatever its fragment.
+    let file = "https://cdn.example.org/episode-1.mp3";
+    let enclosure = also_on::media::enclosure_key(file).unwrap();
+    sqlx::query("INSERT INTO resource_key(resource_id,key,source,via,expires_at) VALUES($1,$2,'test','test',now()+interval '1 day')")
+        .bind(&id)
+        .bind(&enclosure)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for asked in [enclosure.clone(), format!("podcast:enclosure:{file}#t=30")] {
+        let path = format!(
+            "/v1/search?key={}",
+            url::form_urlencoded::byte_serialize(asked.as_bytes()).collect::<String>()
+        );
+        let page = get(&app, &path).await;
+        assert_eq!(page["items"][0]["id"], id.as_str(), "{asked}: {page}");
+    }
 }
 
 /// `sort=trending` ranks by the references made inside the window (7 days by default), shows

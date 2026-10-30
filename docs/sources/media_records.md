@@ -27,8 +27,9 @@ Only the object's own page qualifies, never a cast, season, review or episode pa
 Walled pages:
 - an IMDb title (`imdb.com/title/tt…`) whose page answers with a challenge gets a card from the
   item with that IMDb ID (P345);
-- a Pocket Casts or Castro page of an Apple podcast (`pca.st/itunes/{id}`,
-  `castro.fm/itunes/{id}`) gets one from iTunes' record of the show (`itunes.apple.com/lookup`).
+- a Pocket Casts, Castro or Overcast page of an Apple podcast (`pca.st/itunes/{id}`,
+  `castro.fm/itunes/{id}`, `overcast.fm/itunes{id}`, which sends a reader to its sign-in page) gets
+  one from iTunes' record of the show (`itunes.apple.com/lookup`).
 
 When the item's requests do not answer within the hook's time (Wikidata busy or slow), the page
 keeps its own card at first. The also-on source `titles` then reads the same item without a time

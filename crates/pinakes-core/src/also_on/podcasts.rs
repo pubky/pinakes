@@ -23,7 +23,9 @@ use super::{
 use crate::{
     hubs::{self, wikidata},
     model::Stream,
-    podcast_index_api::{index_page, pi_episode_request, pi_headers, pi_request, pi_stream, Ask},
+    podcast_index_api::{
+        index_page, pi_episode_by_guid, pi_episode_request, pi_headers, pi_request, pi_stream, Ask,
+    },
     resolver::{egress::FetchOptions, RetryLater},
 };
 use anyhow::{Context as _, Result};
@@ -89,17 +91,26 @@ pub fn apple(uri: &str) -> Option<(u64, Option<u64>)> {
     };
     Some((show, episode))
 }
-/// The show a player link names by its Apple ID: `pca.st/itunes/{id}` (Pocket Casts) or
-/// `castro.fm/itunes/{id}` (Castro).
+/// The show a player link names by its Apple ID: `pca.st/itunes/{id}` (Pocket Casts),
+/// `castro.fm/itunes/{id}` (Castro) or `overcast.fm/itunes{id}` with or without its slug
+/// (Overcast).
 pub fn player(uri: &str) -> Option<(u64, &'static str)> {
-    let url = plain(uri, &["pca.st", "castro.fm", "www.castro.fm"])?;
-    let site = if url.host_str()? == "pca.st" {
-        "Pocket Casts"
-    } else {
-        "Castro"
-    };
-    match segments(&url).as_slice() {
-        ["itunes", id] => Some((number(id)?, site)),
+    let url = plain(
+        uri,
+        &[
+            "pca.st",
+            "castro.fm",
+            "www.castro.fm",
+            "overcast.fm",
+            "www.overcast.fm",
+        ],
+    )?;
+    match (url.host_str()?, segments(&url).as_slice()) {
+        ("pca.st", ["itunes", id]) => Some((number(id)?, "Pocket Casts")),
+        ("castro.fm" | "www.castro.fm", ["itunes", id]) => Some((number(id)?, "Castro")),
+        ("overcast.fm" | "www.overcast.fm", [id] | [id, _]) => {
+            Some((number(id.strip_prefix("itunes")?)?, "Overcast"))
+        }
         _ => None,
     }
 }
@@ -233,6 +244,8 @@ pub fn item_key(show_guid: &str, item_guid: &str) -> Option<String> {
     let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
     Some(format!("podcast:item:{}:{hex}", guid(show_guid)?))
 }
+
+pub use super::media::enclosure_key;
 
 /// Which item of a feed is wanted: the one with this GUID, or the one whose `<link>` is this page
 /// (compared as resource identities, so spellings of one page match).
@@ -496,6 +509,36 @@ pub fn parse_pi_episode(status: u16, raw: &[u8], id: u64) -> Result<Option<Index
     )
 }
 
+/// The id of the episode Podcast Index answers for this item GUID in `feed`, or `None` when it
+/// has none or answers another one.
+pub fn parse_pi_episode_by_guid(
+    status: u16,
+    raw: &[u8],
+    guid: &str,
+    feed: u64,
+) -> Result<Option<u64>> {
+    let Some(v) = media::json(status, raw, &[400, 404])? else {
+        return Ok(None);
+    };
+    let e = &v["episode"];
+    Ok((e["guid"].as_str().map(str::trim) == Some(guid.trim())
+        && e["feedId"].as_u64() == Some(feed))
+    .then(|| e["id"].as_u64())
+    .flatten()
+    .filter(|id| *id > 0))
+}
+/// The same page, compared as resource identities.
+fn same_page(a: &str, b: &str) -> bool {
+    let id = |u: &str| crate::model::identity(u).ok().map(|v| v.0);
+    id(a).is_some() && id(a) == id(b)
+}
+/// The feed item's link: the feed's URL with `?guid=`, which a feed card reads as that item.
+fn rss_item(feed: &str, guid: &str) -> Option<String> {
+    let mut url = url::Url::parse(feed).ok()?;
+    url.query_pairs_mut().append_pair("guid", guid);
+    Some(url.into())
+}
+
 /// The show's other pages, from its Wikidata item (found by its Apple Podcasts ID).
 pub const WIKIDATA: &[Property] = &[
     property(
@@ -553,6 +596,7 @@ pub fn apple_show(found: &mut Found, show: u64, storefront: &str) {
         ),
         (format!("https://pca.st/itunes/{show}"), "Pocket Casts"),
         (format!("https://castro.fm/itunes/{show}"), "Castro"),
+        (format!("https://overcast.fm/itunes{show}"), "Overcast"),
     ] {
         add(found, Link::new(uri, site, "itunes").keyed(&apple));
     }
@@ -605,6 +649,26 @@ pub fn apple_episode(found: &mut Found, show: u64, track: u64, storefront: &str)
 
 /// The source: iTunes, Podcast Index, the feed and Wikidata.
 pub struct Podcasts;
+
+/// What an episode's lookup starts from ([`Podcasts::episode`]).
+#[derive(Default)]
+struct Want<'a> {
+    /// The show's Apple ID, as iTunes confirmed it.
+    show: Option<u64>,
+    /// The show's GUID Podcast Index vouches for, when this card is the episode it names.
+    show_guid: Option<&'a str>,
+    /// Podcast Index's record of the show's feed: its id finds the episode's page there, its URL
+    /// the item.
+    index: Option<&'a IndexFeed>,
+    item: Option<&'a str>,
+    track: Option<u64>,
+    /// The feed as the card's own lookup read it, so it is not read again.
+    read: Option<&'a FeedRead>,
+    /// The card is Podcast Index's own page of the episode.
+    on_index: bool,
+    /// The card's own link, never listed.
+    page: &'a str,
+}
 
 /// The enclosures a lookup heard of for its episode, from each service that names one.
 #[derive(Debug, Default)]
@@ -794,26 +858,31 @@ impl Podcasts {
         deferred.take("wikidata", Self::wikidata(cx, found, show).await);
         Ok(indexed.and_then(|(f, _)| f.guid))
     }
-    /// An episode's keys from its show's vouched GUID and its item GUID, and its Apple track
-    /// (found by track ID or by item GUID among the show's latest episodes).
-    #[allow(clippy::too_many_arguments)]
+    /// Podcast Index's episode with this item GUID in `feed`.
+    async fn index_episode_by_guid(cx: &Context, guid: &str, feed: u64) -> Result<Option<u64>> {
+        match Self::index_get(cx, &pi_episode_by_guid(guid, feed)).await? {
+            Some(f) => parse_pi_episode_by_guid(f.status, &f.body, guid, feed),
+            None => Ok(None),
+        }
+    }
+    /// An episode's Apple track (found by track ID or by item GUID among the show's latest
+    /// episodes), and once its show's GUID is vouched, its item key and everything keyed by it:
+    /// the item's own page (its `<link>`) and the RSS item in the vouched feed, Podcast Index's
+    /// page of it and the enclosures it plays.
     async fn episode(
         cx: &Context,
         found: &mut Found,
         deferred: &mut Deferred,
         heard: &mut Heard,
-        show: Option<u64>,
-        show_guid: Option<&str>,
-        item: Option<&str>,
-        track: Option<u64>,
+        want: Want<'_>,
     ) -> Option<String> {
         let sf = cx.config.also_on.apple_storefront.clone();
-        let mut item = item.map(str::to_owned);
-        if let Some(show) = show {
+        let mut item = want.item.map(str::to_owned);
+        if let Some(show) = want.show {
             if let Some(episodes) =
                 deferred.take("itunes", Self::episodes(cx, show).await.map(Some))
             {
-                let e = match (track, &item) {
+                let e = match (want.track, &item) {
                     (Some(t), _) => by_track(&episodes, t),
                     (None, Some(g)) => by_guid(&episodes, g),
                     _ => None,
@@ -827,10 +896,69 @@ impl Podcasts {
                 }
             }
         }
-        if let (Some(show_guid), Some(item)) = (show_guid, &item) {
-            found
-                .keys
-                .extend(item_key(show_guid, item).map(|k| key(k, "podcastindex")));
+        let (Some(show_guid), Some(guid)) = (want.show_guid, item.as_deref()) else {
+            return item;
+        };
+        let Some(item_key) = item_key(show_guid, guid) else {
+            return item;
+        };
+        found.keys.push(key(item_key.clone(), "podcastindex"));
+        // The item in the vouched feed: its own page, and the file it plays there.
+        let feed = want.index.and_then(|f| f.url.as_deref());
+        let read = match (want.read, feed) {
+            (Some(read), _) => Some(read.clone()),
+            (None, Some(url)) => deferred.take("feed", Self::feed(cx, url, Some(guid)).await),
+            (None, None) => None,
+        };
+        if let Some(read) = &read {
+            if heard.feed.is_none() {
+                heard.feed = read.item_stream.clone();
+            }
+            if let Some(link) = read.item_link.as_deref() {
+                if !same_page(link, want.page) {
+                    let site = crate::api::service_site(link).or_else(|| {
+                        url::Url::parse(link)
+                            .ok()
+                            .and_then(|u| u.host_str().map(str::to_owned))
+                    });
+                    if let Some(site) = site {
+                        add(found, Link::new(link, site, "feed").keyed(&item_key));
+                    }
+                }
+            }
+        }
+        if let Some(rss) = feed.and_then(|f| rss_item(f, guid)) {
+            if !same_page(&rss, want.page) {
+                add(
+                    found,
+                    Link::new(rss, "Podcast feed", "feed").keyed(&item_key),
+                );
+            }
+        }
+        if let (Some(index), false) = (want.index, want.on_index) {
+            let id = deferred.take(
+                "podcastindex",
+                Self::index_episode_by_guid(cx, guid, index.id).await,
+            );
+            if let Some(id) = id {
+                let page = format!("https://podcastindex.org/podcast/{}?episode={id}", index.id);
+                add(
+                    found,
+                    Link::new(page, "Podcast Index", "podcastindex").keyed(&item_key),
+                );
+            }
+        }
+        // The files it plays, each as a key.
+        for (stream, via) in [
+            (&heard.feed, "feed"),
+            (&heard.index, "podcastindex"),
+            (&heard.itunes, "itunes"),
+        ] {
+            if let Some(k) = stream.as_ref().and_then(|s| enclosure_key(&s.url)) {
+                if !found.keys.iter().any(|have| have.key == k) {
+                    found.keys.push(key(k, via));
+                }
+            }
         }
         item
     }
@@ -847,6 +975,10 @@ impl Source for Podcasts {
                 "podcast:item",
                 "917393e3-1b1e-5cef-ace4-edaa54e1f810:\
                  9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+            ),
+            (
+                "podcast:enclosure",
+                "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
             ),
             ("wikidata", "Q42"),
         ]
@@ -911,21 +1043,17 @@ impl Podcasts {
                         }
                     }
                     Some(track) => {
-                        let show_guid =
-                            Self::index_for_apple(cx, &mut deferred, *show, itunes_feed)
-                                .await
-                                .and_then(|(_, vouched)| vouched);
-                        Self::episode(
-                            cx,
-                            &mut found,
-                            &mut deferred,
-                            heard,
-                            Some(*show),
-                            show_guid.as_deref(),
-                            None,
-                            Some(*track),
-                        )
-                        .await;
+                        let indexed =
+                            Self::index_for_apple(cx, &mut deferred, *show, itunes_feed).await;
+                        let want = Want {
+                            show: Some(*show),
+                            show_guid: indexed.as_ref().and_then(|(_, v)| v.as_deref()),
+                            index: indexed.as_ref().map(|(f, _)| f),
+                            track: Some(*track),
+                            page: &subject.uri,
+                            ..Default::default()
+                        };
+                        Self::episode(cx, &mut found, &mut deferred, heard, want).await;
                     }
                 }
                 // The link's own service is the card itself.
@@ -966,17 +1094,16 @@ impl Podcasts {
                         let e = deferred.take("podcastindex", Self::index_episode(cx, *id).await);
                         if let Some(e) = e.filter(|e| e.feed == *feed) {
                             heard.index = e.stream.clone();
-                            Self::episode(
-                                cx,
-                                &mut found,
-                                &mut deferred,
-                                heard,
-                                apple,
-                                vouched.as_deref(),
-                                Some(&e.guid),
-                                None,
-                            )
-                            .await;
+                            let want = Want {
+                                show: apple,
+                                show_guid: vouched.as_deref(),
+                                index: Some(&indexed),
+                                item: Some(&e.guid),
+                                on_index: true,
+                                page: &subject.uri,
+                                ..Default::default()
+                            };
+                            Self::episode(cx, &mut found, &mut deferred, heard, want).await;
                         }
                     }
                 }
@@ -1027,27 +1154,21 @@ impl Podcasts {
                             false => None,
                         };
                         heard.feed = read.as_ref().and_then(|r| r.item_stream.clone());
-                        let show_guid = match &vouched {
-                            Some(_) => {
-                                let listed = read.and_then(|r| r.item_link).is_some_and(|link| {
-                                    crate::model::identity(&link).ok().map(|v| v.0)
-                                        == crate::model::identity(page).ok().map(|v| v.0)
-                                });
-                                listed.then(|| vouched.clone()).flatten()
-                            }
-                            None => None,
+                        let listed = read
+                            .as_ref()
+                            .and_then(|r| r.item_link.as_deref())
+                            .is_some_and(|link| same_page(link, page));
+                        let show_guid = vouched.as_deref().filter(|_| listed);
+                        let want = Want {
+                            show: apple,
+                            show_guid,
+                            index: indexed.as_ref(),
+                            item: Some(item),
+                            read: read.as_ref(),
+                            page,
+                            ..Default::default()
                         };
-                        Self::episode(
-                            cx,
-                            &mut found,
-                            &mut deferred,
-                            heard,
-                            apple,
-                            show_guid.as_deref(),
-                            Some(item),
-                            None,
-                        )
-                        .await;
+                        Self::episode(cx, &mut found, &mut deferred, heard, want).await;
                     }
                 }
             }
@@ -1063,7 +1184,7 @@ impl Podcasts {
                 };
                 heard.feed = read.item_stream.clone();
                 // Only an episode (an item with audio or video) is worth asking Podcast Index.
-                let Some(item) = read.item_guid.filter(|_| read.item_media) else {
+                let Some(item) = read.item_guid.clone().filter(|_| read.item_media) else {
                     return deferred.finish(found);
                 };
                 let indexed = deferred.take("podcastindex", Self::index(cx, Ask::Feed(&at)).await);
@@ -1078,17 +1199,16 @@ impl Podcasts {
                     &[Some(&at), indexed.url.as_deref()],
                 )
                 .await;
-                Self::episode(
-                    cx,
-                    &mut found,
-                    &mut deferred,
-                    heard,
-                    apple,
-                    vouched.as_deref(),
-                    Some(&item),
-                    None,
-                )
-                .await;
+                let want = Want {
+                    show: apple,
+                    show_guid: vouched.as_deref(),
+                    index: Some(&indexed),
+                    item: Some(&item),
+                    read: Some(&read),
+                    page,
+                    ..Default::default()
+                };
+                Self::episode(cx, &mut found, &mut deferred, heard, want).await;
             }
         }
         deferred.finish(found)
@@ -1627,6 +1747,35 @@ mod tests {
                 page: "https://darknetdiaries.com/episode/180/".into(),
             })
         );
+    }
+
+    /// Podcast Index's episode of an item GUID in a feed: only its own answer for that GUID in
+    /// that feed; "not found" is none.
+    #[test]
+    fn podcast_index_finds_an_episode_by_its_item() {
+        assert_eq!(
+            pi_episode_by_guid("PC20-275", 920666),
+            "https://api.podcastindex.org/api/1.0/episodes/byguid?guid=PC20-275&feedid=920666"
+        );
+        let raw = read("pi-episode-byguid-PC20-275.json");
+        assert_eq!(
+            parse_pi_episode_by_guid(200, &raw, "PC20-275", 920666).unwrap(),
+            Some(61842097688)
+        );
+        assert_eq!(
+            parse_pi_episode_by_guid(200, &raw, "PC20-274", 920666).unwrap(),
+            None
+        );
+        assert_eq!(
+            parse_pi_episode_by_guid(200, &raw, "PC20-275", 1).unwrap(),
+            None
+        );
+        let missing = read("pi-episode-byguid-missing.json");
+        assert_eq!(
+            parse_pi_episode_by_guid(200, &missing, "not-an-item", 920666).unwrap(),
+            None
+        );
+        assert!(parse_pi_episode_by_guid(503, b"", "PC20-275", 920666).is_err());
     }
 
     #[test]
