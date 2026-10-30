@@ -152,7 +152,7 @@ goes without the others needing a change.
 - [`wikidata`](wikidata.md): the Wikidata item of a music link.
 - [`discogs`](discogs.md#also-on): a Discogs object's key and a release's barcodes.
 - [`deezer`](deezer.md): Deezer's own ISRCs and barcodes (off by default).
-- [`itunes`](itunes.md): Apple Music albums by barcode.
+- [`itunes`](itunes.md): Apple Music albums by barcode, and an Apple Music track's preview.
 - [`wikipedia`](wikipedia.md): the other editions of a Wikipedia article.
 - [`wikidata_item`](wikidata_item.md): a Wikidata item link as its own hub.
 - [`books`](books.md): Open Library, Amazon, Apple Books and Wikidata for a book.

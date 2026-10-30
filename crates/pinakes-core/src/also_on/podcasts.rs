@@ -614,27 +614,11 @@ pub struct Heard {
     pub itunes: Option<Stream>,
 }
 impl Heard {
-    /// The episode's stream as facts (`stream_url`, `stream_type`, `stream_duration`): its own
-    /// feed's item first, then Podcast Index's record, then iTunes'. A card with no stream of
-    /// its own takes it (`media::type_card`), and one that has none yet is read again now. A
-    /// show's lookup hears of none.
+    /// The episode's stream ([`media::hear`]): its own feed's item first, then Podcast Index's
+    /// record, then iTunes'. A show's lookup hears of none.
     pub fn record(self, found: &mut Found, subject: &Subject) {
-        let Some(stream) = self.feed.or(self.index).or(self.itunes) else {
-            return;
-        };
-        // A fact holds 512 bytes.
-        if stream.url.len() > 512 {
-            return;
-        }
-        found.reread |= subject.doc.as_ref().is_some_and(|d| d.stream.is_none());
-        found.facts.push(Fact::new("stream_url", stream.url));
-        found
-            .facts
-            .push(Fact::new("stream_type", stream.media_type));
-        if let Some(seconds) = stream.duration_s {
-            found
-                .facts
-                .push(Fact::new("stream_duration", seconds.to_string()));
+        if let Some(stream) = self.feed.or(self.index).or(self.itunes) {
+            media::hear(found, subject, stream);
         }
     }
 }

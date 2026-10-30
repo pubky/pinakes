@@ -156,7 +156,10 @@ Which cards carry one:
   ([podcast_index](sources/podcast_index.md));
 - any other episode the also-on [`podcasts`](sources/podcasts.md) source reads (an Apple Podcasts
   or Fountain episode, a page its feed's item links back to): the enclosure it hears of, from
-  the card's next read (the source asks for one at once).
+  the card's next read (the source asks for one at once);
+- an Apple Music track: iTunes' 30-second preview, `preview: true` ([itunes](sources/itunes.md)),
+  from the card's next read. Deezer's previews are signed and expire, so they are never one;
+  Spotify's are not used.
 
 ### Resource read
 

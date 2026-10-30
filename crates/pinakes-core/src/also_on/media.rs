@@ -181,6 +181,24 @@ pub struct TypeHints {
 /// `stream_duration`, first the one a card takes: `podcasts`, an episode's enclosure, and
 /// `itunes`, an Apple Music track's preview (`preview: true`).
 pub const STREAMS: &[(&str, bool)] = &[("podcasts", false), ("itunes", true)];
+/// Record a stream a [`STREAMS`] source heard of as its facts: a card without a stream of its
+/// own takes it ([`type_card`]), and one that has none yet is read again now. A link longer than
+/// a fact holds (512 bytes) is none.
+pub fn hear(found: &mut super::Found, subject: &super::Subject, stream: crate::model::Stream) {
+    if stream.url.len() > 512 {
+        return;
+    }
+    found.reread |= subject.doc.as_ref().is_some_and(|d| d.stream.is_none());
+    found.facts.push(super::Fact::new("stream_url", stream.url));
+    found
+        .facts
+        .push(super::Fact::new("stream_type", stream.media_type));
+    if let Some(seconds) = stream.duration_s {
+        found
+            .facts
+            .push(super::Fact::new("stream_duration", seconds.to_string()));
+    }
+}
 /// The hints of these resources (live rows only), from the sources that are on.
 pub async fn type_hints(
     pool: &sqlx::PgPool,
