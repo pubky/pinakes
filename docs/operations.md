@@ -142,7 +142,10 @@ becomes pending, as does an OSM-host URL moving to web. Leases are fenced by a g
 Aliases have no route and are not re-queued; one that still holds a failure (an error, a dead
 letter, a retry count) gets an alias's state, `pending` (or `ok` if it was read) with none, since
 its root answers for it. A row whose URI now has a static alias root (a new tracking parameter,
-say) becomes an alias of it. A selected alias (by the route its URI classifies to) whose URI a
+say) becomes an alias of it when the route it is stored on is selected, and spellings of one
+link can be stored on different routes: Spotify's `open.spotify.com/embed/…` is on `media` (`web`
+with `[cards.media] enabled = false`) and `embed.spotify.com` on `web`, so folding both takes
+`reextract web media` (or `all`). A selected alias (by the route its URI classifies to) whose URI a
 rule now gives another root moves to that root. One that no rule names any more (a source that
 read it as another object's spelling now reads it at its own address) answers for itself again:
 it is re-queued on its route, regrouped and rescored with its old root, and its `aliased` change
