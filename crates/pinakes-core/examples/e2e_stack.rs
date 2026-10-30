@@ -474,7 +474,7 @@ async fn run(pool: sqlx::PgPool, f: Fixture) -> Result<()> {
         metrics.clone(),
         egress,
     )?;
-    let nexus = Nexus::new(&base)?;
+    let nexus = Nexus::new(&base, None)?;
     let url = base.clone();
     let polling = tokio::spawn(async move {
         loop {
@@ -620,7 +620,7 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
     let state = AppState::new(pool.clone(), cfg.as_ref().clone())?;
     let metrics = state.metrics.clone();
     let app = api::router(state);
-    let nexus = Nexus::new(&cfg.nexus_url)?;
+    let nexus = Nexus::configured(&cfg)?;
     let ready = json!({"pinakes":base,"nexus":cfg.nexus_url,"mock":false,"skipped":skipped});
     let also_on = pinakes_core::also_on::Context {
         egress: egress.clone(),

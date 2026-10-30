@@ -129,21 +129,45 @@ pub fn reach_kind(kind: &str) -> bool {
 #[derive(Clone)]
 pub struct Nexus {
     base: String,
-    /// Every request error drops its URL (`without_url`): the configured base may hold user
-    /// info, and a reach request names its viewer.
+    /// Every request error drops its URL (`without_url`): a reach request names its viewer. The
+    /// one client every request goes through: it sends the configured `Authorization` header
+    /// (marked sensitive), and follows no redirect, so the header never reaches another host.
     client: reqwest::Client,
     cache: ReachCache,
     reach_timeout: Duration,
 }
 impl Nexus {
-    pub fn new(base: &str) -> Result<Self> {
-        Self::with_reach_timeout(base, Duration::from_secs(5))
+    /// The Nexus the configuration names: `nexus_url`, its `Authorization` header and the
+    /// search's reach deadline.
+    pub fn configured(config: &crate::config::Config) -> Result<Self> {
+        Self::with_reach_timeout(
+            &config.nexus_url,
+            config.nexus_authorization.as_deref(),
+            Duration::from_secs(config.search.reach_timeout_secs),
+        )
     }
-    pub fn with_reach_timeout(base: &str, reach_timeout: Duration) -> Result<Self> {
+    /// A Nexus at `base`, sent `authorization` (whole, as the `Authorization` header) when given.
+    pub fn new(base: &str, authorization: Option<&str>) -> Result<Self> {
+        Self::with_reach_timeout(base, authorization, Duration::from_secs(5))
+    }
+    pub fn with_reach_timeout(
+        base: &str,
+        authorization: Option<&str>,
+        reach_timeout: Duration,
+    ) -> Result<Self> {
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Some(value) = authorization.filter(|a| !a.trim().is_empty()) {
+            // The error names no value: it is a credential.
+            let mut value = reqwest::header::HeaderValue::from_str(value)
+                .map_err(|_| anyhow::anyhow!("invalid Nexus authorization header"))?;
+            value.set_sensitive(true);
+            headers.insert(reqwest::header::AUTHORIZATION, value);
+        }
         Ok(Self {
             base: base.trim_end_matches('/').into(),
             client: reqwest::Client::builder()
                 .no_proxy()
+                .default_headers(headers)
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(10))
                 .build()?,
@@ -417,6 +441,124 @@ mod tests {
         }
     }
 
+    /// Every request to the Nexus (the feed, the batch view, each reach list's pages and the
+    /// reach-set route) carries the configured `Authorization` header, and none without one.
+    #[tokio::test]
+    async fn every_nexus_request_carries_the_configured_authorization() {
+        use axum::{http::HeaderMap, routing::post};
+        // Each call's path and the header it carried.
+        type Seen = Arc<std::sync::Mutex<Vec<(String, Option<String>)>>>;
+        let seen: Seen = Arc::default();
+        let record = |seen: &Seen, path: &str, headers: &HeaderMap| {
+            let auth = headers
+                .get("authorization")
+                .map(|v| v.to_str().unwrap().to_owned());
+            seen.lock().unwrap().push((path.to_owned(), auth));
+        };
+        let app = {
+            let (a, b, c) = (seen.clone(), seen.clone(), seen.clone());
+            Router::new()
+                .route(
+                    "/v0/resources/changes",
+                    get(move |headers: HeaderMap| async move {
+                        record(&a, "changes", &headers);
+                        (
+                            [("x-events-length", "0")],
+                            Json(serde_json::json!({"lines": [], "next_cursor": 0})),
+                        )
+                    }),
+                )
+                .route(
+                    "/v0/stream/resources/by_ids",
+                    post(move |headers: HeaderMap| async move {
+                        record(&b, "by_ids", &headers);
+                        Json(serde_json::json!([]))
+                    }),
+                )
+                .route(
+                    "/v0/user/{viewer}/{list}",
+                    get(move |Path((_, list)): Path<(String, String)>, headers: HeaderMap| async move {
+                        record(&c, &list, &headers);
+                        if list == "reach-set" {
+                            return Json(serde_json::json!({"authors": [], "truncated": false}));
+                        }
+                        // A full first page, so the list is read on.
+                        let n = c.lock().unwrap().iter().filter(|(p, _)| *p == list).count();
+                        Json(serde_json::json!(if n == 1 { vec!["y".repeat(52); 200] } else { vec![] }))
+                    }),
+                )
+        };
+        let (url, task) = server(app).await;
+        let viewer = "y".repeat(52);
+        for auth in [Some("Bearer CANARY-NEXUS"), None] {
+            seen.lock().unwrap().clear();
+            let nexus = Nexus::new(&url, auth).unwrap();
+            nexus.changes(0).await.unwrap();
+            nexus
+                .resources_by_uris(&["https://example.org/".into()], Some(&viewer))
+                .await
+                .unwrap();
+            for kind in ["following", "friends", "wot_2"] {
+                nexus.reach(&viewer, kind).await.unwrap();
+            }
+            let seen = seen.lock().unwrap().clone();
+            let paths: Vec<&str> = seen.iter().map(|(p, _)| p.as_str()).collect();
+            assert_eq!(
+                paths,
+                [
+                    "changes",
+                    "by_ids",
+                    "following",
+                    "following",
+                    "friends",
+                    "friends",
+                    "reach-set"
+                ]
+            );
+            assert!(
+                seen.iter().all(|(_, a)| a.as_deref() == auth),
+                "{auth:?} {seen:?}"
+            );
+        }
+        // No value is none.
+        assert!(Nexus::new(&url, Some(" ")).is_ok());
+        task.abort();
+    }
+
+    /// A Nexus answering with a redirect to another host is not followed: the header never
+    /// reaches that host, and the answer fails.
+    #[tokio::test]
+    async fn a_redirect_takes_the_authorization_nowhere() {
+        let asked = Arc::new(AtomicUsize::new(0));
+        let a = asked.clone();
+        let (other, other_task) = server(Router::new().fallback(move || {
+            a.fetch_add(1, Ordering::SeqCst);
+            async { Json(serde_json::json!({"lines": [], "next_cursor": 0})) }
+        }))
+        .await;
+        let to = other.replace("127.0.0.1", "localhost");
+        let (url, task) = server(Router::new().fallback(move || {
+            let to = to.clone();
+            async move {
+                (
+                    axum::http::StatusCode::TEMPORARY_REDIRECT,
+                    [("location", format!("{to}/v0/resources/changes?cursor=0"))],
+                )
+            }
+        }))
+        .await;
+        let nexus = Nexus::new(&url, Some("Bearer CANARY-NEXUS")).unwrap();
+        let error = format!("{:#}", nexus.changes(0).await.unwrap_err());
+        assert!(!error.contains("CANARY"), "{error}");
+        assert!(nexus
+            .resources_by_uris(&["https://example.org/".into()], None)
+            .await
+            .is_err());
+        assert_eq!(asked.load(Ordering::SeqCst), 0);
+        task.abort();
+        other_task.abort();
+    }
+
     /// A failed Nexus request names no URL: not the base's user info, not the feed's query,
     /// not the viewer a reach request asks for. Refused, and answered 500.
     #[tokio::test]
@@ -438,7 +580,7 @@ mod tests {
         let viewer = "y".repeat(52);
         for base in [url, refused] {
             let base = base.replace("http://", "http://feeder:CANARY@");
-            let nexus = Nexus::new(&base).unwrap();
+            let nexus = Nexus::new(&base, Some("Bearer CANARY")).unwrap();
             let changes = format!("{:#}", nexus.changes(7).await.unwrap_err());
             let reach = format!("{:#}", nexus.reach(&viewer, "following").await.unwrap_err());
             for line in [changes, reach] {
@@ -474,7 +616,7 @@ mod tests {
             }),
         );
         let (url, server) = server(app).await;
-        let nexus = Nexus::new(&url).unwrap();
+        let nexus = Nexus::new(&url, None).unwrap();
         let slow_client = nexus.clone();
         let slow =
             tokio::spawn(async move { slow_client.reach(&"y".repeat(52), "following").await });
@@ -515,7 +657,7 @@ mod tests {
             }),
         );
         let (url, server) = server(app).await;
-        let nexus = Nexus::with_reach_timeout(&url, Duration::from_millis(150)).unwrap();
+        let nexus = Nexus::with_reach_timeout(&url, None, Duration::from_millis(150)).unwrap();
         let started = Instant::now();
         assert!(nexus
             .reach(&"b".repeat(52), "following")
@@ -563,7 +705,7 @@ mod tests {
             }),
         );
         let (url, task) = server(app).await;
-        let nexus = Nexus::new(&url).unwrap();
+        let nexus = Nexus::new(&url, None).unwrap();
         let viewer = "y".repeat(52);
         let first = nexus.reach(&viewer, "wot_2").await.unwrap();
         assert_eq!(

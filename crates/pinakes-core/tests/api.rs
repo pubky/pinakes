@@ -564,7 +564,7 @@ async fn polls_the_http_feed_and_replays_without_duplicates(pool: PgPool) {
         at: Utc::now().timestamp_millis(),
     };
     let (url, _, task) = mock_nexus(vec![line.clone(), line]).await;
-    let nexus = Nexus::new(&url).unwrap();
+    let nexus = Nexus::new(&url, None).unwrap();
     assert_eq!(
         ingest::poll_once(
             &pool,

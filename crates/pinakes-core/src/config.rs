@@ -14,6 +14,10 @@ pub struct Config {
     pub admin_listen: String,
     pub admin_token: Option<SecretKey>,
     pub nexus_url: String,
+    /// The `Authorization` header sent, whole, on every request to the Nexus at `nexus_url`
+    /// (`PINAKES_NEXUS_AUTHORIZATION`), for a Nexus behind credentials; `nexus_url` itself never
+    /// carries any. Empty is none. `Debug` and serialization show `[REDACTED]`.
+    pub nexus_authorization: Option<SecretKey>,
     /// Whether the Nexus at `nexus_url` serves the reach-set route, so search takes
     /// `reach=wot_2` and `boost=wot_2` (`nexus::Nexus::reach`); off, those answer 501.
     pub nexus_reach_set: bool,
@@ -151,6 +155,8 @@ const ENV_MAPS: &[&[&str]] = &[
 ];
 /// The one map whose new entries are numbers.
 const HOST_RATES: &[&str] = &["limits", "host_rates"];
+/// The variable whose whole value is the `Authorization` header sent to the Nexus.
+pub const NEXUS_AUTHORIZATION: &str = "PINAKES_NEXUS_AUTHORIZATION";
 /// Secrets read from a variable of their own (`PINAKES_NAME`, one underscore), as the sources
 /// name them: a source's own section's (`also_on::OwnSection::VARIABLES`) and an official
 /// source's token (`sources::Source::token_variable`). A build that has no such setting ignores
@@ -178,7 +184,16 @@ fn named_variables() -> Vec<(&'static str, Vec<&'static str>, Named)> {
             )
         }))
     });
-    sections.chain(tokens).chain(app_keys.flatten()).collect()
+    let nexus = std::iter::once((
+        NEXUS_AUTHORIZATION,
+        vec!["nexus_authorization"],
+        Named::Sets,
+    ));
+    sections
+        .chain(tokens)
+        .chain(app_keys.flatten())
+        .chain(nexus)
+        .collect()
 }
 /// How a named variable meets the file form.
 #[derive(Clone, Copy, PartialEq)]
@@ -292,6 +307,7 @@ impl Config {
             podcast_index: Default::default(),
             sections: Sections::defaults(),
             nexus_url: "http://127.0.0.1:8080".into(),
+            nexus_authorization: None,
             nexus_reach_set: false,
             poll_secs: 5,
             ingest: IngestConfig::default(),
@@ -821,6 +837,10 @@ impl Config {
     /// A configuration from its file form (sections plus `[limits]`), validated.
     pub fn from_value(value: serde_json::Value) -> Result<Self> {
         let mut cfg: Self = serde_json::from_value(value)?;
+        cfg.nexus_authorization = cfg
+            .nexus_authorization
+            .take()
+            .filter(|a| !a.trim().is_empty());
         let limits = cfg.limits.clone();
         limits.apply(&mut cfg);
         cfg.queue.groups = cfg.groups.clone();
@@ -1036,8 +1056,16 @@ impl Config {
         {
             bail!("invalid refresh, canary or admin configuration");
         }
-        if !plain_upstream(&self.nexus_url)? {
-            bail!("invalid Nexus URL");
+        if !plain_upstream(&self.nexus_url).unwrap_or(false) {
+            bail!("invalid Nexus URL: an http(s) base without user info, query or fragment; send credentials with {NEXUS_AUTHORIZATION}");
+        }
+        // Never shown: the value is a credential.
+        if self
+            .nexus_authorization
+            .as_ref()
+            .is_some_and(|a| a.len() > 4096 || reqwest::header::HeaderValue::from_str(a).is_err())
+        {
+            bail!("invalid {NEXUS_AUTHORIZATION}: not a header value");
         }
         if !plain_upstream(&self.osm.nominatim_url)? {
             bail!("invalid OSM upstream URL");
@@ -1479,7 +1507,13 @@ mod tests {
             "ftp://nexus.example.org",
             "unix:/run/nexus",
         ] {
-            assert!(nexus(url).is_err(), "{url}");
+            let refused = nexus(url).unwrap_err().to_string();
+            // The way to send credentials, and nothing of the URL.
+            assert!(
+                refused.contains("PINAKES_NEXUS_AUTHORIZATION")
+                    && !refused.contains("nexus.example"),
+                "{refused}"
+            );
             assert!(osm(url).is_err(), "{url}");
         }
         for url in [
@@ -1489,6 +1523,41 @@ mod tests {
             assert!(nexus(url).is_ok(), "{url}");
             assert!(osm(url).is_ok(), "{url}");
         }
+    }
+    /// The Nexus's `Authorization` header comes from its own variable, is never shown, and is
+    /// none when empty; a value that is no header value is refused without being named.
+    #[test]
+    fn the_nexus_authorization_comes_from_its_variable_and_stays_secret() {
+        let read = |vars: &[(&str, &str)]| {
+            let mut value = Config::defaults().unwrap();
+            let vars = vars.iter().map(|(k, v)| (k.to_string(), v.to_string()));
+            apply_env(&mut value, vars.clone())?;
+            apply_named_env(&mut value, vars)?;
+            Config::from_value(value)
+        };
+        let cfg = read(&[("PINAKES_NEXUS_AUTHORIZATION", "Bearer ABCDEFNEXUS")]).unwrap();
+        assert_eq!(
+            cfg.nexus_authorization.as_deref(),
+            Some("Bearer ABCDEFNEXUS")
+        );
+        let shown = format!("{cfg:?} {}", serde_json::to_string(&cfg).unwrap());
+        assert!(!shown.contains("ABCDEF"), "{shown}");
+        for empty in [
+            ("PINAKES_NEXUS_AUTHORIZATION", ""),
+            ("PINAKES__NEXUS_AUTHORIZATION", " "),
+        ] {
+            assert!(
+                read(&[empty]).unwrap().nexus_authorization.is_none(),
+                "{empty:?}"
+            );
+        }
+        let refused = read(&[("PINAKES_NEXUS_AUTHORIZATION", "Bearer ABCDEF\u{7f}")])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("PINAKES_NEXUS_AUTHORIZATION") && !refused.contains("ABCDEF"),
+            "{refused}"
+        );
     }
     /// The facts cap has a floor: a recording's single-valued facts fit beside its ISRCs.
     #[test]

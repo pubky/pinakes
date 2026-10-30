@@ -52,10 +52,7 @@ impl AppState {
         let metrics = Arc::new(crate::telemetry::Metrics::new()?);
         Ok(Self {
             pool,
-            nexus: Nexus::with_reach_timeout(
-                &config.nexus_url,
-                Duration::from_secs(config.search.reach_timeout_secs),
-            )?,
+            nexus: Nexus::configured(&config)?,
             config,
             wake: Arc::default(),
             metrics,

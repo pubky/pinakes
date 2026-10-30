@@ -421,6 +421,16 @@ Nexus. `nexus_reach_set` (default `false`) says that Nexus also serves the reach
 answers 501 and Nexus is never asked for it. Sets are kept in memory only, per viewer, five
 minutes (a `wot_2` set up to an hour, re-validated by its `ETag`).
 
+A Nexus behind credentials gets them from `PINAKES_NEXUS_AUTHORIZATION` (owner decision,
+2026-10-30), never from `nexus_url`, which refuses user info, a query or a fragment and says so.
+Its whole value is sent as the `Authorization` header (`Bearer …`, `Basic …`) on every request
+to the Nexus: the feed, the reach lists and reach-set route, and the batch resource view that
+the `social` tool reads. Every one goes through one client. It is sent to no other host: the
+Nexus client follows no redirect, and Nominatim, sources and the egress have clients of their
+own. The value is never logged or shown (errors, metrics, `/v1/info` public or admin, the
+agents' texts), and the configuration's `Debug` redacts it. Empty means none; a value that is no
+valid header value stops startup, without being named.
+
 ## Queue and refresh
 
 The durable queue leases rows with `SKIP LOCKED` and fences stale completions by a generation
