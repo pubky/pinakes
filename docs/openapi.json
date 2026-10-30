@@ -2351,7 +2351,17 @@
                 }
               }
             },
-            "description": "Queued; poll resource by ID"
+            "description": "Queued; poll resource by ID",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds until the next attempt, when it is put off (a missing answer waiting for the fetch that confirms it); absent while the job is queued or running",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "400": {
             "description": "Unsupported URI or disabled resolver"

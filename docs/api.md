@@ -21,7 +21,7 @@ snapshot; a test fails when it is stale.
 | `GET /v1/resources/{id}` | 32-character resource ID | The card with the [read's fields](#resource-read); 404 if unknown |
 | `GET /v1/resources/by-uri` | `uri`: any spelling of a link | As `GET /v1/resources/{id}` for the URI's ID (an alias answers with its root); 404 if unknown, nothing is fetched |
 | `POST /v1/resources/lookup` | Exactly one of `{"ids":[…]}` (alias `resource_ids`) or `{"uris":[…]}`, 1–500 entries | `[card]` in request order, duplicates kept, unknowns skipped |
-| `POST /v1/resolve` | `{"uri":"https://example.org/"}` | The card with the read's fields now or within 3 seconds; 202 with `status: "pending"` while queued |
+| `POST /v1/resolve` | `{"uri":"https://example.org/"}` | The card with the read's fields now or within 3 seconds; 202 with `status: "pending"` while queued, with `Retry-After` (seconds) when the next attempt is put off |
 | `GET /v1/resources/{id}/occurrences` | Optional RFC 3339 `from`, `to`, `limit` (1–500, default 100), signed `cursor` | `{items: [occurrence card], cursor}` |
 | `POST /v1/occurrences/lookup` | `{resource_ids?, uris?, from?, to?, limit?, cursor?}`: 1–500 feed IDs and links together | `{items: [occurrence card], cursor}` across the feeds, by start |
 | `GET /v1/groups/{id}` | 32-character group ID | `{id, type, curated, keys, members: [card]}`; 404 if unknown |
@@ -573,9 +573,12 @@ and per URI (`limits.preview_requests_per_minute`, `limits.preview_uri_requests_
 Statuses:
 
 - `ok`: the current metadata was accepted.
-- `pending`: queued and not yet resolved.
+- `pending`: queued and not yet resolved. A link's first missing answer leaves it `pending` until a
+  second fetch confirms it: one with no accepted card yet (a new preview) is asked again after
+  `limits.backoff_secs` (30 s), and `POST /v1/resolve` answers 202 with `Retry-After` until then.
 - `missing`: confirmed gone by two fresh fetches; one missing answer keeps the last accepted
-  metadata, and a repeated cached observation does not count twice.
+  metadata (the second fetch comes after `limits.missing_ttl_secs`, at least an hour), and a
+  repeated cached observation does not count twice.
 - `unreachable`: the upstream denied access (401, 403) or answered with a challenge page (a bot
   wall, captcha or sign-in redirect); it is retried with backoff like an error.
 - `error`: the fetch failed; it is retried with backoff and dead-letters after

@@ -2349,7 +2349,7 @@ pub async fn lookup(
     with_refs(&state.pool, cards.iter_mut()).await?;
     Ok(Json(cards))
 }
-#[utoipa::path(post,tag="Previews",path="/v1/resolve",request_body=ResolveRequest,responses((status=200,body=ResourceDetail),(status=202,body=ResourceDetail,description="Queued; poll resource by ID"),(status=400,description="Unsupported URI or disabled resolver"),(status=429,description="Preview rate limit")))]
+#[utoipa::path(post,tag="Previews",path="/v1/resolve",request_body=ResolveRequest,responses((status=200,body=ResourceDetail),(status=202,body=ResourceDetail,description="Queued; poll resource by ID",headers(("Retry-After"=u64,description="Seconds until the next attempt, when it is put off (a missing answer waiting for the fetch that confirms it); absent while the job is queued or running"))),(status=400,description="Unsupported URI or disabled resolver"),(status=429,description="Preview rate limit")))]
 pub async fn resolve(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -2385,7 +2385,20 @@ pub async fn resolve(
             return Ok((StatusCode::OK, Json(resource)).into_response());
         }
         if tokio::time::Instant::now() >= deadline {
-            return Ok((StatusCode::ACCEPTED, Json(resource)).into_response());
+            // Put off until a later attempt (a missing answer waiting for the fetch that
+            // confirms it, say): when to ask again. A job still queued or running has none.
+            let wait: Option<i64> = sqlx::query_scalar("SELECT ceil(extract(epoch FROM next_attempt_at-now()))::int8 FROM resource WHERE id=$1 AND next_attempt_at>now()+interval '1 second' AND (lease_until IS NULL OR lease_until<now())")
+                .bind(&id)
+                .fetch_optional(&state.pool)
+                .await?;
+            let mut response = (StatusCode::ACCEPTED, Json(resource)).into_response();
+            if let Some(seconds) = wait {
+                response.headers_mut().insert(
+                    header::RETRY_AFTER,
+                    header::HeaderValue::from(seconds.clamp(1, 86_400)),
+                );
+            }
+            return Ok(response);
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }

@@ -418,8 +418,24 @@ pub async fn save(
                     }
                 }
             }
-            let retry = cfg.missing_ttl_secs.max(3600) as f64;
-            sqlx::query("UPDATE resource SET lease_until=NULL,priority_at=NULL,attempts=0,timeout_streak=0,last_error=NULL,refresh_at=now()+$2*interval '1 second',next_attempt_at=now()+$2*interval '1 second' WHERE id=$1").bind(id).bind(retry).execute(&mut *tx).await?;
+            // One missing answer is not yet `missing`; a second fresh fetch confirms it. A link
+            // with an accepted card keeps it meanwhile and is asked again after
+            // `missing_ttl_secs`. One with none yet (a new preview, say) has nothing to keep and
+            // shows only `pending`: it is asked again after the queue's first backoff, never an
+            // hour later. Either wait is recorded (`missing_unconfirmed`), not charged.
+            let retry = if before.is_some() {
+                cfg.missing_ttl_secs.max(3600)
+            } else {
+                cfg.backoff_secs.max(1)
+            };
+            sqlx::query("UPDATE resource SET lease_until=NULL,priority_at=NULL,attempts=0,timeout_streak=0,last_error='missing_unconfirmed',refresh_at=now()+$2*interval '1 second',next_attempt_at=now()+$2*interval '1 second' WHERE id=$1").bind(id).bind(retry as f64).execute(&mut *tx).await?;
+            crate::telemetry::resolution_deferred("missing_unconfirmed");
+            tracing::info!(
+                resource = %id,
+                retry_secs = retry,
+                "a missing answer waits for its confirming fetch"
+            );
+            let retry = retry as f64;
             if source == "osm" {
                 sqlx::query("UPDATE osm_place SET refresh_at=least(refresh_at,now()+$3*interval '1 second') WHERE osm_type=$1 AND osm_id=$2").bind(row.try_get::<Option<String>,_>("osm_type")?).bind(row.try_get::<Option<i64>,_>("osm_id")?).bind(retry).execute(&mut *tx).await?;
             }

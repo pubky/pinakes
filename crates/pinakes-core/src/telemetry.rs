@@ -104,6 +104,7 @@ impl Metrics {
         )?;
         registry.register(Box::new(api_panics.clone()))?;
         registry.register(Box::new(ALSO_ON_SERVICE_ERRORS.clone()))?;
+        registry.register(Box::new(RESOLUTION_DEFERRED.clone()))?;
         let out = Self {
             api_panics,
             ingest_rejected: metric!(
@@ -316,6 +317,21 @@ pub fn also_on_service_error(service: &'static str, class: &'static str) {
     ALSO_ON_SERVICE_ERRORS
         .with_label_values(&[service, class])
         .inc();
+}
+/// Resolutions put off without a charged attempt, by reason (the row's `last_error` class): a
+/// missing answer waiting for the fetch that confirms it (`missing_unconfirmed`).
+static RESOLUTION_DEFERRED: std::sync::LazyLock<IntCounterVec> = std::sync::LazyLock::new(|| {
+    IntCounterVec::new(
+        Opts::new(
+            "pinakes_resolution_deferred_total",
+            "Resolutions put off without a charged attempt, by reason",
+        ),
+        &["reason"],
+    )
+    .expect("static metric")
+});
+pub fn resolution_deferred(reason: &'static str) {
+    RESOLUTION_DEFERRED.with_label_values(&[reason]).inc();
 }
 tokio::task_local! {static FETCHES: Arc<Mutex<Vec<Observation>>>; static DISCOVERY: IntCounterVec;}
 pub fn discovery(kind: &'static str, decision: &'static str) {
