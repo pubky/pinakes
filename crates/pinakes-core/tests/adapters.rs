@@ -795,6 +795,39 @@ async fn btc_status_drift_preserves_single_event(pool: PgPool) {
     }
 }
 
+/// A portal event's list answering 401 or 403 is `missing` to the adapter, so the fetch that
+/// confirms it asks the portal again instead of replaying the discovery cache's answer (Codex's
+/// review of preview-park-3); a 404 likewise. The portal back with a 503 is then the wait it
+/// names, not a confirmed `missing` after one request.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_portal_denial_is_asked_again_by_its_confirmation(pool: PgPool) {
+    use pinakes_core::resolver::{egress::confirming, RetryLater};
+    let uri = "https://portal.einundzwanzig.space/de/meetup/one/event/7";
+    let d = adapters::definition("einundzwanzig").unwrap();
+    let cfg = EventConfig::default();
+    for status in [401, 403, 404] {
+        let (egress, transport) =
+            mock_egress_with_retry(vec![(status, json!({})), (503, json!({}))], 120);
+        let first = cursor::resolve(&pool, uri, d, &egress, &cfg, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            first.status,
+            pinakes_core::model::Status::Missing,
+            "{status}"
+        );
+        let again = confirming(cursor::resolve(&pool, uri, d, &egress, &cfg, false))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            again.downcast_ref::<RetryLater>().map(|r| r.seconds),
+            Some(120),
+            "a cached {status} confirmed missing: {again:#}"
+        );
+        assert_eq!(transport.seen.lock().unwrap().len(), 2, "{status}");
+    }
+}
+
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn portal_expiration_restarts_comparison_baseline(pool: PgPool) {
     let uri = "https://portal.einundzwanzig.space/api/changes";

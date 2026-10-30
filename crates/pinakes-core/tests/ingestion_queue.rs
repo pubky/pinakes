@@ -765,7 +765,7 @@ impl pinakes_core::resolver::egress::Transport for Upstream {
             validators: Default::default(),
             url: url.clone(),
             status,
-            retry_after_secs: 60,
+            retry_after_secs: if status == 503 { 120 } else { 60 },
             location: None,
             content_type: "application/json".into(),
             body: b"{}".to_vec(),
@@ -856,6 +856,103 @@ async fn a_confirmation_asks_the_upstream_again(pool: PgPool) {
             "{uri}"
         );
         assert_eq!(row(pool.clone(), uri.clone()).await.0, status, "{uri}");
+    }
+}
+/// A resolver whose links share one endpoint, as the portal adapter's events share their feed:
+/// a 404 is missing, and a 503 the wait its `Retry-After` names.
+struct Shared(pinakes_core::resolver::egress::Egress);
+#[async_trait::async_trait]
+impl Resolver for Shared {
+    fn name(&self) -> &'static str {
+        "web"
+    }
+    fn matches(&self, _: &str) -> bool {
+        true
+    }
+    async fn resolve(&self, uri: &str) -> anyhow::Result<ResourceMeta> {
+        let fetched = self
+            .0
+            .discover("https://portal.example.org/feed", &Default::default(), 3600)
+            .await?;
+        let mut doc = ResourceMeta::new(uri, "web", 86400);
+        match fetched.status {
+            404 => doc.status = Status::Missing,
+            503 => {
+                return Err(pinakes_core::resolver::RetryLater {
+                    class: "http_5xx",
+                    seconds: fetched.retry_after_secs,
+                }
+                .into())
+            }
+            _ => doc.set_type("Event"),
+        }
+        Ok(doc)
+    }
+    fn refresh_after(&self, _: &ResourceMeta) -> Duration {
+        Duration::from_secs(86400)
+    }
+}
+/// A confirmation never cuts a named wait short (Codex's review of preview-park-2): two links on
+/// one endpoint await confirmation; the first's asks again and gets a real 503 with
+/// `Retry-After: 120`, which discovery keeps; the second's takes that answer, its wait, and asks
+/// nothing. A cached answer that names no wait is asked again.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_confirmation_keeps_the_wait_an_upstream_named(pool: PgPool) {
+    let cfg = QueueConfig::default();
+    for n in 0..2 {
+        let uri = format!("https://portal.example.org/events/{n}");
+        batch(
+            &pool,
+            vec![change(&uri, "a", "/pub/app/tags/a")],
+            Some("one"),
+        )
+        .await;
+    }
+    // The feed answers 404, then 503: a third request fails the test.
+    let upstream = std::sync::Arc::new(Upstream {
+        answers: std::sync::Mutex::new(vec![404, 503]),
+        asked: Default::default(),
+    });
+    let resolver = Shared(pinakes_core::resolver::egress::Egress::with_backends(
+        Default::default(),
+        std::sync::Arc::new(PublicDns),
+        upstream.clone(),
+    ));
+    let asked = || upstream.asked.load(std::sync::atomic::Ordering::SeqCst);
+    // Both read the 404 (the second from the cache): one missing answer each.
+    for _ in 0..2 {
+        let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+        queue::run_job(&pool, &resolver, &cfg, &job).await.unwrap();
+    }
+    assert_eq!(asked(), 1);
+    let streaks: Vec<i32> = sqlx::query_scalar(
+        "SELECT missing_streak FROM resource WHERE status='pending' ORDER BY uri",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(streaks, [1, 1]);
+    // Both confirmations at once: the first asks again (503), the second takes its wait.
+    sqlx::query("UPDATE resource SET next_attempt_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    for _ in 0..2 {
+        let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+        let _ = queue::run_job(&pool, &resolver, &cfg, &job).await;
+    }
+    assert_eq!(asked(), 2, "the named wait was cut short");
+    let rows: Vec<(String, Option<String>, f64)> = sqlx::query_as(
+        "SELECT status,last_error,extract(epoch FROM next_attempt_at-now())::float8 FROM resource ORDER BY uri",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    for (status, error, wait) in rows {
+        assert_eq!(status, "pending");
+        assert_eq!(error.as_deref(), Some("http_5xx"));
+        assert!(wait > 60.0, "{wait}");
     }
 }
 /// A link with an accepted card keeps it through one missing answer, for an hour, as before.
