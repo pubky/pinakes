@@ -496,11 +496,8 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
     if fetched.content_type.ends_with("json") {
         if let Ok(v) = serde_json::from_str::<Value>(&text) {
             apply_jsonld(&mut out.doc, &v, &fetched.url, true, true);
-            let mut own = Vec::new();
-            own_products(&v, &fetched.url, true, true, &mut own);
-            if own.len() > 1 {
-                crate::kinds::products::drop_identity(&mut out.doc);
-            }
+            // The document is the page's own, as a head script is: the same guard holds.
+            guard_identity(&mut out.doc, &[(v, true)], &fetched.url, |_, _| true);
         }
         out.doc.event.read_from(fetched);
         return Ok(out);
@@ -602,24 +599,7 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
             }
         }
     }
-    // A page with several products of its own (a category page's head list) states the
-    // barcode of none: any one would join the page to that product. Nor does a product naming
-    // the page only by a fragment ("#nutella") when the head declares the page to be another
-    // entity (a `CollectionPage`, or a main entity of another `@id`): it is one the page lists.
-    let mut own = Vec::new();
-    for (v, head) in &scripts {
-        own_products(v, &fetched.url, claims(v, *head), *head, &mut own);
-    }
-    let main = declared_main(&scripts, &fetched.url);
-    let listed = |(key, by_fragment): &(Option<String>, bool)| {
-        *by_fragment
-            && key
-                .as_ref()
-                .is_some_and(|key| main.as_ref().is_some_and(|main| !main.contains(key)))
-    };
-    if own.len() > 1 || own.first().is_some_and(listed) {
-        crate::kinds::products::drop_identity(&mut out.doc);
-    }
+    guard_identity(&mut out.doc, &scripts, &fetched.url, claims);
     for (class, kind) in [
         ("h-event", "Event"),
         ("h-card", "Person"),
@@ -1305,6 +1285,33 @@ fn own_products(
     }
     if let Some(g) = v.get("@graph") {
         own_products(g, base, claims, vouched, out);
+    }
+}
+/// The page's product identity guard, for an HTML page's scripts (each with whether it is in the
+/// head) and a JSON document alike (one script, the head's). A page with several products of its
+/// own (a category page's head list) states the barcode, SKU and part number of none: any one
+/// would join the page to that product. Nor does a product naming the page only by a fragment
+/// ("#nutella") when the head declares the page to be another entity (a `CollectionPage`, or a
+/// main entity of another `@id`): it is one the page lists.
+fn guard_identity(
+    doc: &mut ResourceMeta,
+    scripts: &[(Value, bool)],
+    base: &Url,
+    claims: impl Fn(&Value, bool) -> bool,
+) {
+    let mut own = Vec::new();
+    for (v, head) in scripts {
+        own_products(v, base, claims(v, *head), *head, &mut own);
+    }
+    let main = declared_main(scripts, base);
+    let listed = |(key, by_fragment): &(Option<String>, bool)| {
+        *by_fragment
+            && key
+                .as_ref()
+                .is_some_and(|key| main.as_ref().is_some_and(|main| !main.contains(key)))
+    };
+    if own.len() > 1 || own.first().is_some_and(listed) {
+        crate::kinds::products::drop_identity(doc);
     }
 }
 /// A node's identity: its `@id`, else its `url`, with its fragment kept. `#nutella` and `#pen`

@@ -105,7 +105,7 @@ fn only_the_pages_own_product_gives_its_barcode() {
     // array, a graph, or two scripts) give none, but the card keeps the first one's offer.
     let unnamed = |gtin: &str, price: &str| {
         format!(
-            r#"{{"@type": "Product", "name": "Spread {gtin}", "gtin13": "{gtin}", "sku": "S-{gtin}", "offers": {{"price": "{price}", "priceCurrency": "CHF"}}}}"#
+            r#"{{"@type": "Product", "name": "Spread {gtin}", "gtin13": "{gtin}", "sku": "S-{gtin}", "mpn": "M-{gtin}", "offers": {{"price": "{price}", "priceCurrency": "CHF"}}}}"#
         )
     };
     let (a, b) = (
@@ -125,6 +125,7 @@ fn only_the_pages_own_product_gives_its_barcode() {
     let doc = extract(page, head(std::slice::from_ref(&a)));
     assert_eq!(doc.attributes["gtin"], "3017620422003");
     assert_eq!(doc.attributes["sku"], "S-3017620422003");
+    assert_eq!(doc.attributes["mpn"], "M-3017620422003");
     for scripts in [
         vec![format!("[{a}, {b}]")],
         vec![format!(r#"{{"@graph": [{a}, {b}]}}"#)],
@@ -182,6 +183,7 @@ fn only_the_pages_own_product_gives_its_barcode() {
         );
         assert_eq!(doc.attributes["gtin"], "3017620422003", "{scripts:?}");
         assert_eq!(doc.attributes["sku"], "S-3017620422003", "{scripts:?}");
+        assert_eq!(doc.attributes["mpn"], "M-3017620422003", "{scripts:?}");
         assert_eq!(doc.attributes["price"], "4.95", "{scripts:?}");
     }
 }
@@ -282,7 +284,7 @@ fn a_product_a_category_page_lists_by_a_fragment_is_not_its_own() {
     // its main entity or with nothing declared, is its own.
     let named = |named: &str| {
         format!(
-            r##"{{"@type": "Product", {named}, "name": "Nutella", "gtin13": "3017620422003", "sku": "N-400", "offers": {{"price": "4.95", "priceCurrency": "CHF"}}}}"##
+            r##"{{"@type": "Product", {named}, "name": "Nutella", "gtin13": "3017620422003", "sku": "N-400", "mpn": "NUT-400", "offers": {{"price": "4.95", "priceCurrency": "CHF"}}}}"##
         )
     };
     let nutella = |id: &str| named(&format!(r#""@id": "{id}""#));
@@ -321,6 +323,7 @@ fn a_product_a_category_page_lists_by_a_fragment_is_not_its_own() {
         ),
     );
     assert_eq!(doc.attributes["gtin"], "3017620422003");
+    assert_eq!(doc.attributes["mpn"], "NUT-400");
     let page = "https://shop.example/p/nutella";
     for head in [
         vec![r##"{"@type": "ItemPage", "mainEntity": {"@id": "#product"}}"##.to_owned()],
@@ -334,6 +337,72 @@ fn a_product_a_category_page_lists_by_a_fragment_is_not_its_own() {
         let doc = extracted(page, &scripts(&head, &[&nutella("#product")]));
         assert_eq!(doc.attributes["gtin"], "3017620422003", "{head:?}");
         assert_eq!(doc.attributes["sku"], "N-400", "{head:?}");
+        assert_eq!(doc.attributes["mpn"], "NUT-400", "{head:?}");
+    }
+}
+
+#[test]
+fn a_json_document_is_guarded_as_a_pages_head_is() {
+    // A page served as JSON-LD (`application/ld+json`) is all head: a product it names only by a
+    // fragment while it declares itself a collection is one it lists, as in HTML.
+    let served = |page: &str, body: String| {
+        let fetched = Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            url: page.parse().unwrap(),
+            status: 200,
+            content_type: "application/ld+json".into(),
+            body: body.into_bytes(),
+            location: None,
+            retry_after_secs: 60,
+            validators: Default::default(),
+        };
+        web::extract(page, &fetched, 3600).unwrap().doc
+    };
+    let product = |named: &str| {
+        format!(
+            r##"{{"@type": "Product", {named}, "name": "Nutella", "gtin13": "3017620422003", "sku": "N-400", "mpn": "NUT-400", "offers": {{"price": "4.95", "priceCurrency": "CHF"}}}}"##
+        )
+    };
+    let category = "https://shop.example/c/spreads";
+    for kind in ["CollectionPage", "SearchResultsPage"] {
+        let listing = format!(r#"{{"@type": "{kind}", "url": "{category}", "name": "Spreads"}}"#);
+        for named in [
+            r##""url": "#nutella""##.to_owned(),
+            format!(r##""url": "{category}#nutella""##),
+            r##""@id": "#nutella""##.to_owned(),
+        ] {
+            let item = product(&named);
+            for document in [
+                format!(r#"{{"@graph": [{listing}, {item}]}}"#),
+                format!("[{listing}, {item}]"),
+            ] {
+                let doc = served(category, document.clone());
+                assert_eq!(doc.type_name, "Product", "{document}");
+                for key in ["gtin", "sku", "mpn"] {
+                    assert!(!doc.attributes.contains_key(key), "{key} {document}");
+                }
+                assert_eq!(doc.attributes["price"], "4.95", "{document}");
+            }
+        }
+        // A product naming the page by its own `url` is its own, whatever its `@id`.
+        let own = product(&format!(r##""url": "{category}", "@id": "#nutella""##));
+        let doc = served(category, format!(r#"{{"@graph": [{listing}, {own}]}}"#));
+        assert_eq!(doc.attributes["mpn"], "NUT-400", "{kind}");
+    }
+    // A product page's `#product`, declared its main entity or with nothing declared: its own.
+    let page = "https://shop.example/p/nutella";
+    let item = product(r##""@id": "#product""##);
+    for document in [
+        format!(
+            r##"{{"@graph": [{{"@type": "ItemPage", "mainEntity": {{"@id": "#product"}}}}, {item}]}}"##
+        ),
+        item.clone(),
+    ] {
+        let doc = served(page, document.clone());
+        assert_eq!(doc.attributes["gtin"], "3017620422003", "{document}");
+        assert_eq!(doc.attributes["sku"], "N-400", "{document}");
+        assert_eq!(doc.attributes["mpn"], "NUT-400", "{document}");
     }
 }
 
