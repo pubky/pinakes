@@ -2106,7 +2106,7 @@ async fn disabled_calendars_use_web_queue_and_preview(pool: PgPool) {
         oembed_policy: Default::default(),
         cards: None,
         events: Some(service),
-        egress: Egress::new(cfg.egress.clone()),
+        egress: common::offline_egress(cfg.egress.clone()),
         config: cfg.web.clone(),
     };
     assert_eq!(

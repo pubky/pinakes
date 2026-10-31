@@ -291,3 +291,48 @@ impl pinakes_core::resolver::egress::Dns for PublicDns {
         )])
     }
 }
+/// `groups::drain`, then each grouping run it left deferred done again at once through
+/// `groups::sync`, which has neither `groups::reconcile`'s 2 s statement timeout nor its retry
+/// window. On a loaded machine a statement can outlast that timeout (`group_failed`, retried a
+/// minute later), and a run can meet a busy writer (`lock_busy`, a few seconds later); either
+/// way a single drain leaves the unit ungrouped. These tests are about what a run decides, not
+/// when it runs. An error of the run done again fails the test, with its message.
+pub async fn drain_groups(pool: &sqlx::PgPool, cfg: &pinakes_core::groups::GroupConfig) {
+    pinakes_core::groups::drain(pool, cfg, 100).await.unwrap();
+    let deferred: Vec<String> = sqlx::query_scalar(
+        "SELECT resource_id FROM group_dirty WHERE last_error IS NOT NULL ORDER BY resource_id",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    for id in deferred {
+        let mut tx = pool.begin().await.unwrap();
+        pinakes_core::groups::sync(&mut tx, &id, cfg)
+            .await
+            .unwrap_or_else(|e| panic!("grouping {id}: {e:#}"));
+        tx.commit().await.unwrap();
+    }
+}
+/// An egress that never reaches the network: every host resolves to a fixed public address, so
+/// the egress' own checks (policy, private addresses) run as they would, and every request fails.
+/// For tests whose links are refused, or answered from the store, before anything is fetched.
+pub fn offline_egress(
+    cfg: pinakes_core::config::EgressConfig,
+) -> pinakes_core::resolver::egress::Egress {
+    pinakes_core::resolver::egress::Egress::with_backends(
+        cfg,
+        std::sync::Arc::new(PublicDns),
+        std::sync::Arc::new(Offline),
+    )
+}
+struct Offline;
+#[async_trait::async_trait]
+impl pinakes_core::resolver::egress::Transport for Offline {
+    async fn get(
+        &self,
+        url: &url::Url,
+        _: &[std::net::SocketAddr],
+    ) -> anyhow::Result<pinakes_core::resolver::egress::Fetched> {
+        anyhow::bail!("no network in tests: {}", url.host_str().unwrap_or(""))
+    }
+}
