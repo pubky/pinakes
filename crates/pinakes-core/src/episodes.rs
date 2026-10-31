@@ -277,13 +277,19 @@ pub(crate) async fn store(
     id: &str,
     doc: &crate::model::ResourceMeta,
 ) -> Result<()> {
-    let show = doc.type_path.iter().any(|t| t == "PodcastSeries")
-        && doc.status != crate::model::Status::Missing;
+    let show = is_show(&doc.type_path, doc.status.as_str());
     match &doc.episodes {
         Some(list) if show => replace(tx, id, list).await,
         None if show => Ok(()),
         _ => clear(tx, id).await.map(|_| ()),
     }
+}
+/// Whether a card is a podcast show that has episodes to keep or to list: a `PodcastSeries`
+/// whose status is `ok`. The one test for the store (which keeps or clears a card's rows by it)
+/// and the route (which falls back to a group member's list only for such a card: a cleared or
+/// missing card lists nothing, grouped or not).
+pub(crate) fn is_show(type_path: &[String], status: &str) -> bool {
+    type_path.iter().any(|t| t == "PodcastSeries") && status == "ok"
 }
 /// Clears a resource's episodes: for a document replaced outside a save (a scrub).
 pub(crate) async fn clear(tx: &mut Transaction<'_, Postgres>, id: &str) -> Result<u64> {
@@ -358,7 +364,7 @@ pub struct EpisodePage {
     /// feed was not read yet.
     pub items: Vec<Episode>,
 }
-#[utoipa::path(get,path="/v1/resources/{id}/episodes",operation_id="list_episodes",tag="Media",params(("id"=String,Path),EpisodeQuery),responses((status=200,body=EpisodePage),(status=400,description="Invalid resource ID or limit"),(status=404,description="Resource not found")),description="A podcast show's latest episodes as its feed lists them, newest first: at most 20, each with its page or feed item, date and public stream. The show's own list, else that of a member of its group which has one (an Apple Podcasts show grouped with its feed). A known resource that is no show, or whose feed was not read yet, returns an empty list.")]
+#[utoipa::path(get,path="/v1/resources/{id}/episodes",operation_id="list_episodes",tag="Media",params(("id"=String,Path),EpisodeQuery),responses((status=200,body=EpisodePage),(status=400,description="Invalid resource ID or limit"),(status=404,description="Resource not found")),description="A podcast show's latest episodes as its feed lists them, newest first: at most 20, each with its page or feed item, date and public stream. The show's own list, else, for a card that is a show, that of a member of its group which has one (an Apple Podcasts show grouped with its feed). A known resource that is no show, or no longer one, or whose feed was not read yet, returns an empty list.")]
 pub async fn list(
     axum::extract::State(state): axum::extract::State<crate::api::AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -372,24 +378,29 @@ pub async fn list(
     if !(1..=KEPT).contains(&limit) {
         return Err(ApiError::bad("limit must be 1–20"));
     }
-    let root: Option<String> = sqlx::query_scalar("SELECT r.id FROM resource r WHERE r.id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1)")
+    let root: Option<(String, Vec<String>, String)> = sqlx::query_as("SELECT r.id,coalesce(r.type_path,'{}'),r.status FROM resource r WHERE r.id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1)")
         .bind(&id)
         .fetch_optional(&state.pool)
         .await?;
-    let Some(root) = root else {
+    let Some((root, type_path, status)) = root else {
         return Err(ApiError(
             axum::http::StatusCode::NOT_FOUND,
             "resource not found".into(),
         ));
     };
+    // A group member's list stands in for a show's own only: a card cleared, missing or no show
+    // lists nothing, whatever its group has. (`type_path` is null for an OpenStreetMap place,
+    // whose card lives in `osm_place`: no show, read as an empty path.)
+    let show = is_show(&type_path, &status);
     let rows: Vec<Row> = sqlx::query_as(
         "WITH own AS (SELECT $1::text AS id WHERE EXISTS (SELECT 1 FROM podcast_episode WHERE resource_id=$1)),\
-         member AS (SELECT m.resource_id AS id FROM group_unit u JOIN group_unit m ON m.group_id=u.group_id WHERE u.unit_id=$1 AND u.group_id IS NOT NULL AND m.resource_id<>$1 AND m.occurrence_key='' AND EXISTS (SELECT 1 FROM podcast_episode e WHERE e.resource_id=m.resource_id) ORDER BY (SELECT max(published) FROM podcast_episode e WHERE e.resource_id=m.resource_id) DESC NULLS LAST,m.resource_id LIMIT 1),\
+         member AS (SELECT m.resource_id AS id FROM group_unit u JOIN group_unit m ON m.group_id=u.group_id WHERE $3 AND u.unit_id=$1 AND u.group_id IS NOT NULL AND m.resource_id<>$1 AND m.occurrence_key='' AND EXISTS (SELECT 1 FROM podcast_episode e WHERE e.resource_id=m.resource_id) ORDER BY (SELECT max(published) FROM podcast_episode e WHERE e.resource_id=m.resource_id) DESC NULLS LAST,m.resource_id LIMIT 1),\
          chosen AS (SELECT id FROM own UNION ALL SELECT id FROM member WHERE NOT EXISTS (SELECT 1 FROM own))\
          SELECT e.guid,e.url,e.name,e.image,e.published,e.stream::text FROM podcast_episode e JOIN chosen c ON c.id=e.resource_id ORDER BY e.position LIMIT $2",
     )
     .bind(&root)
     .bind(limit as i64)
+    .bind(show)
     .fetch_all(&state.pool)
     .await?;
     let mut items: Vec<Episode> = rows

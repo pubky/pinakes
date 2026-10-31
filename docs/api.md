@@ -840,7 +840,9 @@ its card). A card replaced without a read (cleared after an error, scrubbed) lis
 item's `stream` is `null` as well when its stored form would not fit the store's bound (a URL
 near 2,048 bytes that JSON escaping doubles): the episode is listed all the same. A show card without a list of its own (a page
 whose feed could not be read, a service that names no feed) answers with the list of a member
-of its [group](#groups) that has one: the same show elsewhere. A known resource that is no
+of its [group](#groups) that has one: the same show elsewhere. Only a card that is a show
+(`PodcastSeries`, status `ok`) borrows a member's list: a card cleared after an error, found
+missing, or of another kind lists nothing, whatever its group holds. A known resource that is no
 show, or whose feed was not read yet, returns an empty list; an unknown ID is 404. The items a
 feed holds beyond its first 200 are not looked at: feeds list newest first, and a few are out of
 order. Why a route and not a fact: a fact is one string per name, and a card's document is
