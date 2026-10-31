@@ -32,12 +32,17 @@ test('an interrupted run starts no recipe stack, and one interrupted while it ru
   await assert.rejects(gone, /exited with SIGKILL/);
 });
 test('a failed psql call never shows the cluster\'s password', () => {
-  for (const cluster of ['postgresql://e2e:Dummy-Secret-42@127.0.0.1:1/postgres', 'postgresql:///postgres?host=127.0.0.1&port=1&user=e2e&password=Query-Secret-42']) {
+  for (const cluster of ['postgresql://e2e:Dummy-Secret-42@127.0.0.1:1/postgres', 'postgresql://e2e:Stray%zzSecret-42@127.0.0.1:1/postgres', 'postgresql:///postgres?host=127.0.0.1&port=1&user=e2e&password=Query-Secret-42']) {
     assert.throws(() => psql(cluster, 'postgres', 'SELECT 1'), error => {
       assert.doesNotMatch(error.stack, /Secret-42/); assert.match(error.message, /^psql on postgresql:.*\*\*\*/);
       assert.deepEqual(Object.keys(error), []); return true;
     });
   }
+  // A URL that does not parse (a port out of range): the parser's error would carry it whole.
+  assert.throws(() => psql('postgresql://e2e:Dummy-Secret-42@127.0.0.1:99999/postgres', 'postgres', 'SELECT 1'), error => {
+    assert.doesNotMatch(error.stack, /Secret-42/); assert.equal(error.message, 'psql: the cluster URL does not parse');
+    assert.deepEqual(Object.keys(error), []); assert.equal(error.cause, undefined); return true;
+  });
 });
 test('a PUT that commits then times out is included in cleanup', async () => {
   const stored = new Set(), report = {}, journal = [];

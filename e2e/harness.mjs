@@ -80,13 +80,17 @@ export async function liveRecipes(start, signal) {
 }
 /** `sql`'s unaligned output from psql, in `database` of the cluster at `cluster` (a libpq URL). A
  * failure names the cluster with its password masked, in the URL or its query: psql's own error
- * carries the whole command line. */
+ * carries the whole command line. A cluster URL that does not parse is named not at all: the URL
+ * parser's error carries its input. */
 export function psql(cluster, database, sql) {
-  const url = new URL(cluster); url.pathname = `/${database}`;
+  let url;
+  try { url = new URL(cluster); } catch { throw new Error('psql: the cluster URL does not parse'); }
+  url.pathname = `/${database}`;
   try {
     return execFileSync('psql', [url.href, '-Atc', sql], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   } catch (error) {
-    const secrets = [url.password, decodeURIComponent(url.password), url.searchParams.get('password')].filter(Boolean);
+    const decoded = (() => { try { return decodeURIComponent(url.password); } catch { return url.password; } })();
+    const secrets = [url.password, decoded, url.searchParams.get('password')].filter(Boolean);
     if (url.password) url.password = '***';
     if (url.searchParams.has('password')) url.searchParams.set('password', '***');
     const said = secrets.reduce((text, secret) => text.replaceAll(secret, '***'), String(error.stderr ?? '').trim());
