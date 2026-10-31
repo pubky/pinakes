@@ -364,6 +364,19 @@ async fn stack(args: Vec<String>) -> Result<()> {
             }
         }
     }
+    let recipes = args.get(1).is_some_and(|s| s == "--live-recipes");
+    // A cancelled recipe run (the runner's SIGTERM, a terminal's SIGINT) stops, and its database
+    // is still dropped. Listening from before the database exists leaves no moment it would leak.
+    // The other modes keep their own handling: SIGTERM shuts them down, SIGINT kills them.
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut cancel = if recipes {
+        Some((
+            signal(SignalKind::terminate())?,
+            signal(SignalKind::interrupt())?,
+        ))
+    } else {
+        None
+    };
     let admin = PgPoolOptions::new()
         .max_connections(2)
         .connect(
@@ -384,8 +397,12 @@ async fn stack(args: Vec<String>) -> Result<()> {
         .max_connections(16)
         .connect_with(options)
         .await?;
-    let result = if args.get(1).is_some_and(|s| s == "--live-recipes") {
-        run_recipes(pool.clone()).await
+    let result = if let Some((term, interrupt)) = &mut cancel {
+        tokio::select! {
+            result = run_recipes(pool.clone()) => result,
+            _ = term.recv() => Err(anyhow::anyhow!("interrupted")),
+            _ = interrupt.recv() => Err(anyhow::anyhow!("interrupted")),
+        }
     } else if let Some(samples) = live {
         run_live(pool.clone(), samples).await
     } else {

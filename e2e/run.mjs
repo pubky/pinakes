@@ -14,15 +14,21 @@ process.on('SIGINT', () => control.abort(new Error('Interrupted')));
 process.on('SIGTERM', () => control.abort(new Error('Interrupted')));
 await mkdir('.runtime', { recursive: true });
 const journalFile = `.runtime/e2e-${randomUUID()}.json`;
+/** Stops the stack unless it is gone: one a signal killed has no exit code, and its `exit` event
+ * has passed. */
+async function stop(child) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  const stopped = once(child, 'exit'); child.kill('SIGTERM'); await stopped;
+}
 /** The public `/v1/resolve` recipes, resolved live once each by a stack of their own
  * (`e2e_stack --live-recipes`) and judged (`judgeRecipes`). */
 async function liveRecipes() {
   child = spawn('./target/debug/examples/e2e_stack', ['--live-recipes'], { stdio: ['ignore', 'pipe', 'inherit'] });
   const lines = []; createInterface({ input: child.stdout }).on('line', line => lines.push(line));
   const abort = () => child.kill('SIGTERM'); control.signal.addEventListener('abort', abort);
-  const [code] = await once(child, 'close'); control.signal.removeEventListener('abort', abort);
+  const [code, signal] = await once(child, 'close'); control.signal.removeEventListener('abort', abort);
   control.signal.throwIfAborted();
-  if (code !== 0) throw new Error(`The recipe stack exited with ${code}`);
+  if (code !== 0) throw new Error(`The recipe stack exited with ${code ?? signal}`);
   const recipes = judgeRecipes(JSON.parse(lines.at(-1)).recipes);
   for (const s of recipes.skipped) console.error(`recipe left out: ${s.name} (${s.uri}): ${s.reason}`);
   for (const f of recipes.failed) console.error(`recipe failed: ${f.name} (${f.uri}): ${f.reason}`);
@@ -106,7 +112,7 @@ try {
     report.mode = mock ? 'mock' : 'live'; report.journal = journalFile; if (skipped.length) report.skipped = skipped;
     // An isolated live run also resolves the public recipes, after its own stack has stopped.
     if (process.argv.includes('--isolated-live')) {
-      if (child && child.exitCode === null) { const stopped = once(child, 'exit'); child.kill('SIGTERM'); await stopped; }
+      await stop(child);
       report.recipes = await liveRecipes();
       if (report.recipes.failed.length) report.ok = false;
     }
@@ -115,7 +121,7 @@ try {
   report = { ...report, ok: false, mode: recipesOnly ? 'recipes' : mock ? 'mock' : 'live', error: error.message ?? String(error), journal: journalFile };
 } finally {
   if (session) { try { await session.signout(); } catch { report.session_cleanup = 'signout failed'; } }
-  if (child && child.exitCode === null) { const stopped = once(child, 'exit'); child.kill('SIGTERM'); await stopped; }
+  await stop(child);
   if (liveSamples) await rm(liveSamples, { force: true });
 }
 console.log(JSON.stringify(report, null, 2));

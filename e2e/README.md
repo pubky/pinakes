@@ -40,11 +40,14 @@ one event on two pages: each card must name the other in `maybe_same` (possibly 
 event), and they must not group. Injected transports
 disable direct relay sockets; unknown fixture DNS names resolve to TEST-NET.
 
-Both `--mock` and `--isolated-live` create a unique `pinakes_e2e_owned_*` database
+`--mock`, `--isolated-live` and `--live-recipes` each create a unique `pinakes_e2e_owned_*` database
 through `DATABASE_URL` (default `postgresql:///postgres?host=/var/run/postgresql`).
 The role needs `CREATEDB`; the schema needs the extension privileges used by the test
 suite. Only that newly created database is dropped on exit. They never reset the
-development database. A force-killed process may leave its database for inspection.
+development database. A force-killed process may leave its database for inspection. A recipe
+run stops on SIGTERM or SIGINT and still drops its database, and the runner still writes its
+report (`"error": "Interrupted"`); `scripts/e2e --mock` checks this first, offline
+(`e2e/cancel.test.mjs`).
 
 ## Live identity and dev stack
 
