@@ -28,6 +28,7 @@ pub mod app_store;
 pub mod artic;
 pub mod biodiversity;
 pub mod bluesky;
+pub mod castro;
 pub mod cleveland;
 pub mod clinicaltrials;
 pub mod commons;
@@ -101,6 +102,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &app_store::AppStore,
     &artic::Artic,
     &bluesky::Bluesky,
+    &castro::Castro,
     &cleveland::Cleveland,
     &clinicaltrials::ClinicalTrials,
     &commons::Commons,

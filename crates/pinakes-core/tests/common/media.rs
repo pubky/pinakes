@@ -145,6 +145,23 @@ impl Recorded {
         }
         Arc::new(recorded)
     }
+    /// The same, with more answers, each in place of its URL's: a URL, its status, its content
+    /// type and its body.
+    pub fn with_answers(more: &[(&str, u16, &str, Vec<u8>)]) -> Arc<Self> {
+        let mut recorded = Arc::into_inner(Self::new()).unwrap();
+        for (url, status, content_type, body) in more {
+            recorded.answers.insert(
+                (*url).into(),
+                Answer {
+                    status: *status,
+                    location: None,
+                    content_type: (*content_type).into(),
+                    body: body.clone(),
+                },
+            );
+        }
+        Arc::new(recorded)
+    }
     /// The same, with more answers: a URL and its status, and its `Location` or HTML body.
     pub fn with(more: &[(&str, u16, &str)]) -> Arc<Self> {
         let mut recorded = Arc::into_inner(Self::new()).unwrap();

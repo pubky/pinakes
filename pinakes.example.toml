@@ -60,6 +60,8 @@ enabled = true
 enabled = true
 [sources.bluesky]
 enabled = true
+[sources.castro]
+enabled = true
 [sources.cleveland]
 enabled = true
 [sources.clinicaltrials]

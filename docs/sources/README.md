@@ -57,6 +57,7 @@ or got plain web cards before are read by their source.
 - [`app_store`](app_store.md): App Store apps by ID, from the iTunes Lookup API.
 - [`artic`](artic.md): Art Institute of Chicago artworks by id.
 - [`bluesky`](bluesky.md): Bluesky posts and profiles.
+- [`castro`](castro.md): page hook: a Castro episode's file and show, from its own page.
 - [`cleveland`](cleveland.md): Cleveland Museum of Art artworks by accession number.
 - [`clinicaltrials`](clinicaltrials.md): ClinicalTrials.gov clinical studies by NCT number.
 - [`commons`](commons.md): Wikimedia Commons files (images, video, audio) by file name.
@@ -152,7 +153,7 @@ goes without the others needing a change.
 - [`wikidata`](wikidata.md): the Wikidata item of a music link.
 - [`discogs`](discogs.md#also-on): a Discogs object's key and a release's barcodes.
 - [`deezer`](deezer.md): Deezer's own ISRCs and barcodes (off by default).
-- [`itunes`](itunes.md): Apple Music albums by barcode.
+- [`itunes`](itunes.md): Apple Music albums by barcode, and an Apple Music track's preview.
 - [`wikipedia`](wikipedia.md): the other editions of a Wikipedia article.
 - [`wikidata_item`](wikidata_item.md): a Wikidata item link as its own hub.
 - [`books`](books.md): Open Library, Amazon, Apple Books and Wikidata for a book.

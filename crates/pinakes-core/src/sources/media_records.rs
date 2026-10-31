@@ -133,6 +133,12 @@ fn walled(uri: &str) -> Option<Walled> {
             Some(Walled::Imdb((*tt).to_owned()))
         }
         ("pca.st" | "castro.fm", ["itunes", id]) => id.parse().ok().map(Walled::ApplePodcast),
+        // Overcast's `itunes{id}`, with or without the show's slug, signs a reader in first.
+        ("overcast.fm" | "www.overcast.fm", [id] | [id, _]) => id
+            .strip_prefix("itunes")
+            .filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|id| id.parse().ok())
+            .map(Walled::ApplePodcast),
         _ => None,
     }
 }
@@ -727,6 +733,24 @@ mod tests {
             walled("https://pca.st/itunes/1296350485"),
             Some(Walled::ApplePodcast(1296350485))
         );
+        // Overcast sends a reader to its sign-in page first: a wall.
+        for overcast in [
+            "https://overcast.fm/itunes1296350485",
+            "https://overcast.fm/itunes1296350485/darknet-diaries",
+        ] {
+            assert_eq!(
+                walled(overcast),
+                Some(Walled::ApplePodcast(1296350485)),
+                "{overcast}"
+            );
+        }
+        for not in [
+            "https://overcast.fm/itunes",
+            "https://overcast.fm/+AbCdEf",
+            "https://overcast.fm/itunes12x4",
+        ] {
+            assert_eq!(walled(not), None, "{not}");
+        }
         assert_eq!(walled("https://www.imdb.com/title/tt0903747/reviews"), None);
     }
 

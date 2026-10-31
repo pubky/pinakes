@@ -44,6 +44,80 @@ pub struct OpenIn {
     /// An `https:` URL.
     pub url: String,
 }
+/// Audio a client can play: an episode's enclosure, or a recording's public preview (docs/api.md,
+/// Stream).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, ToSchema)]
+pub struct Stream {
+    pub url: String,
+    #[serde(rename = "type")]
+    pub media_type: String,
+    pub duration_s: Option<u32>,
+    pub preview: bool,
+}
+impl Stream {
+    /// The stream, when `url` is public, direct audio a client may play: `https` or `http` on a
+    /// named host (no IP address, `localhost` or single label), no credentials, no parameter that
+    /// signs it or makes it expire ([`signed`]), at most 2,048 bytes; `media_type` an `audio/` or
+    /// `video/` type of at most 127 bytes (RFC 6838's limit for a subtype; the parameters are
+    /// dropped); a length of at most a week (0 is unknown). Every source's stream is built here.
+    pub fn public(
+        url: &str,
+        media_type: &str,
+        duration_s: Option<u64>,
+        preview: bool,
+    ) -> Option<Stream> {
+        let parsed = url::Url::parse(url.trim()).ok()?;
+        if !matches!(parsed.scheme(), "https" | "http")
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query_pairs().any(|(name, _)| signed(&name))
+        {
+            return None;
+        }
+        let url::Host::Domain(host) = parsed.host()? else {
+            return None;
+        };
+        let host = host.trim_end_matches('.');
+        if !host.contains('.') || host == "localhost" || host.ends_with(".localhost") {
+            return None;
+        }
+        let essence = media_type.split(';').next()?.trim().to_ascii_lowercase();
+        let (top, sub) = essence.split_once('/')?;
+        if !matches!(top, "audio" | "video")
+            || sub.is_empty()
+            || essence.len() > 127
+            || !sub
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"+-.".contains(&b))
+        {
+            return None;
+        }
+        let duration_s = match duration_s {
+            Some(s) if s > 7 * 86400 => return None,
+            s => s.filter(|s| *s > 0).map(|s| s as u32),
+        };
+        let url = String::from(parsed);
+        (url.len() <= 2048).then_some(Stream {
+            url,
+            media_type: essence,
+            duration_s,
+            preview,
+        })
+    }
+}
+/// A query parameter that signs a URL or makes it expire (`X-Amz-Signature`, Deezer's
+/// `hdnea`, a `token`, an `expires`): such a link stops working, or works only for whom it was
+/// made, so it is no public stream.
+fn signed(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    matches!(
+        name.as_str(),
+        "sig" | "hdnea" | "hmac" | "auth" | "expires" | "exp" | "policy" | "key-pair-id"
+    ) || name.starts_with("x-amz-")
+        || name.starts_with("x-goog-")
+        || name.contains("token")
+        || name.contains("signature")
+}
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LocationSource {
@@ -77,6 +151,9 @@ pub struct ResourceMeta {
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
+    /// The audio a client can play ([`Stream`]): an episode's enclosure, a recording's preview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<Stream>,
     pub url: String,
     pub site: String,
     /// The service the link is on, by its URL alone ("Spotify", "F-Droid", "Wikidata"), when
@@ -133,7 +210,8 @@ pub struct ResourceMeta {
     pub source: String,
     /// The also-on sources whose findings the queue wrote into this card itself, each with a
     /// fingerprint of every value it wrote (`titles`: the name and description; `films`,
-    /// `podcasts` or an artist's source: the type; `media::type_card`, `music::type_card`). A
+    /// `podcasts` or an artist's source: the type; `podcasts` and `itunes`: the stream;
+    /// `media::type_card`, `music::type_card`). A
     /// 304 reuses the card only while each of them is on and finds exactly that now
     /// (`media::outdated`); else the page is read again in full. Read from the list of sources
     /// an earlier build stored, as unknown fingerprints.
@@ -254,6 +332,14 @@ impl ResourceMeta {
         if self.image.as_ref().is_some_and(|s| s.len() > 2048) {
             self.image = None;
         }
+        self.stream = self.stream.take().and_then(|s| {
+            Stream::public(
+                &s.url,
+                &s.media_type,
+                s.duration_s.map(u64::from),
+                s.preview,
+            )
+        });
         self.aliases.truncate(4);
         self.open_in.retain(|o| {
             o.url.len() <= 2048
@@ -270,7 +356,10 @@ impl ResourceMeta {
             {
                 continue;
             }
-            if self.description.take().is_some() || self.image.take().is_some() {
+            if self.description.take().is_some()
+                || self.image.take().is_some()
+                || self.stream.take().is_some()
+            {
                 continue;
             }
             self.validate(allowed_attributes)?;
@@ -348,6 +437,101 @@ pub fn valid_id(id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A stream is public, direct audio or video: an episode's enclosure (a tracking redirect is
+    /// the publisher's own link) or iTunes' preview, never a signed, expiring or private link.
+    #[test]
+    fn a_stream_is_only_a_public_direct_link() {
+        let enclosure = "https://www.podtrac.com/pts/redirect.mp3/dovetail.prxu.org/7057/141e0c43-f935-41de-be94-708448052c4d/darknet-diaries-ep180-conti.mp3";
+        assert_eq!(
+            Stream::public(enclosure, "Audio/MPEG; charset=binary", Some(3557), false),
+            Some(Stream {
+                url: enclosure.into(),
+                media_type: "audio/mpeg".into(),
+                duration_s: Some(3557),
+                preview: false,
+            })
+        );
+        // iTunes' preview of a track; the feed's own query (`aid`, `feed`) is no signature.
+        for url in [
+            "https://audio-ssl.itunes.apple.com/itunes-assets/AudioPreview221/v4/8a/1f/43/8a1f43b0-d1e3-2c71-a5d8-1c1f5c7e1c4f/mzaf_1.plus.aac.p.m4a",
+            "https://dts.podtrac.com/redirect.mp3/nyt.simplecastaudio.com/a/default.mp3?aid=rss_feed&feed=Sl5CSM3S",
+            "http://feeds.example.org/ep 1.mp3",
+        ] {
+            assert!(Stream::public(url, "audio/mp4", None, true).is_some(), "{url}");
+        }
+        // A length of 0 is unknown.
+        assert_eq!(
+            Stream::public(enclosure, "video/mp4", Some(0), false)
+                .unwrap()
+                .duration_s,
+            None
+        );
+        for (url, ty) in [
+            // Deezer's recorded preview: signed, and gone within the day.
+            ("https://cdnt-preview.dzcdn.net/api/1/1/f/2/c/0/f2c895eba263c4bd0e1fa4bce235854c.mp3?hdnea=exp=1792455917~acl=/api/1/1/f/2/c/0/f2c895eba263c4bd0e1fa4bce235854c.mp3*~data=user_id=0,application_id=42~hmac=00", "audio/mpeg"),
+            ("https://bucket.s3.amazonaws.com/ep.mp3?X-Amz-Signature=abc&X-Amz-Expires=600", "audio/mpeg"),
+            ("https://cdn.example.org/ep.mp3?Expires=1792455917&Key-Pair-Id=K1&Policy=p", "audio/mpeg"),
+            ("https://cdn.example.org/ep.mp3?access_token=abc", "audio/mpeg"),
+            ("https://cdn.example.org/ep.mp3?__token__=st=1~hmac=2", "audio/mpeg"),
+            ("https://user:pass@cdn.example.org/ep.mp3", "audio/mpeg"),
+            ("ftp://cdn.example.org/ep.mp3", "audio/mpeg"),
+            ("https://127.0.0.1/ep.mp3", "audio/mpeg"),
+            ("https://[::1]/ep.mp3", "audio/mpeg"),
+            ("https://localhost/ep.mp3", "audio/mpeg"),
+            ("https://media/ep.mp3", "audio/mpeg"),
+            ("https://cdn.example.org/ep.mp3", "text/html"),
+            ("https://cdn.example.org/ep.mp3", "audio"),
+            ("https://cdn.example.org/ep.mp3", "audio/<x>"),
+        ] {
+            assert_eq!(Stream::public(url, ty, None, false), None, "{url} {ty}");
+        }
+        let long = format!("https://cdn.example.org/{}.mp3", "a".repeat(2048));
+        assert_eq!(Stream::public(&long, "audio/mpeg", None, false), None);
+        // A type of at most 127 bytes, so a stored stream stays small (review of 49666ef1).
+        let typed = |sub: usize| {
+            Stream::public(
+                enclosure,
+                &format!("audio/{}", "x".repeat(sub)),
+                None,
+                false,
+            )
+        };
+        assert_eq!(typed(121).unwrap().media_type.len(), 127);
+        assert_eq!(typed(122), None);
+        assert_eq!(typed(5000), None);
+        // Long parameters are dropped, not counted.
+        assert_eq!(
+            Stream::public(
+                enclosure,
+                &format!("audio/mpeg; x={}", "y".repeat(5000)),
+                None,
+                false
+            )
+            .unwrap()
+            .media_type,
+            "audio/mpeg"
+        );
+        assert_eq!(
+            Stream::public(enclosure, "audio/mpeg", Some(8 * 86400), false),
+            None
+        );
+        // A stored document's stream is held to the same rules.
+        let mut doc = ResourceMeta::new("https://podcast.example/feed?guid=1", "media", 60);
+        doc.stream = Some(Stream {
+            url: "https://cdn.example.org/ep.mp3?token=1".into(),
+            media_type: "audio/mpeg".into(),
+            duration_s: None,
+            preview: false,
+        });
+        assert_eq!(doc.clone().bounded(&[]).unwrap().stream, None);
+        doc.stream = Some(Stream {
+            url: enclosure.into(),
+            media_type: format!("audio/{}", "x".repeat(5000)),
+            duration_s: None,
+            preview: false,
+        });
+        assert_eq!(doc.bounded(&[]).unwrap().stream, None);
+    }
     #[test]
     fn identity_normalizes_and_hashes() {
         let (id, uri, scheme) =

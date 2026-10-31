@@ -284,6 +284,46 @@
     "status": 200,
     "url": "https://api.podcastindex.org/api/1.0/episodes/byid?id=61953304662"
   },
+  "pi-episode-byguid-92ba9167": {
+    "bytes": 136,
+    "content_type": "application/json",
+    "file": "pi-episode-byguid-92ba9167.json",
+    "note": "Podcast Index API, signed with the operator's key (not recorded). iTunes' GUID for Darknet Diaries' \"Conti\", which the show's own feed names otherwise.",
+    "recorded_at": "2026-10-30T19:40:00+00:00",
+    "sha256": "aad0b929c18897fa1ecacb9c3ebae0f13e0c1ab851d81c8a742b02866e76d774",
+    "status": 200,
+    "url": "https://api.podcastindex.org/api/1.0/episodes/byguid?guid=92ba9167-f21b-45a9-af08-ec88fe449873&feedid=577105"
+  },
+  "pi-episode-byguid-PC20-275": {
+    "bytes": 3423,
+    "content_type": "application/json",
+    "file": "pi-episode-byguid-PC20-275.json",
+    "note": "Podcast Index API, signed with the operator's key (not recorded).",
+    "recorded_at": "2026-10-30T19:12:00+00:00",
+    "sha256": "2ca703ec8e3126d0f54fcea46ce1366f745994144e37b5d74087b63627b5dd3c",
+    "status": 200,
+    "url": "https://api.podcastindex.org/api/1.0/episodes/byguid?guid=PC20-275&feedid=920666"
+  },
+  "pi-episode-byguid-conti": {
+    "bytes": 2448,
+    "content_type": "application/json",
+    "file": "pi-episode-byguid-conti.json",
+    "note": "Podcast Index API, signed with the operator's key (not recorded).",
+    "recorded_at": "2026-10-30T19:12:00+00:00",
+    "sha256": "160e166a0651a4728846dcf87eae6b5f3db40a68931effa3e9c6d194fedac803",
+    "status": 200,
+    "url": "https://api.podcastindex.org/api/1.0/episodes/byguid?guid=prx_7057_141e0c43-f935-41de-be94-708448052c4d&feedid=577105"
+  },
+  "pi-episode-byguid-missing": {
+    "bytes": 111,
+    "content_type": "application/json",
+    "file": "pi-episode-byguid-missing.json",
+    "note": "Podcast Index API, signed with the operator's key (not recorded).",
+    "recorded_at": "2026-10-30T19:12:00+00:00",
+    "sha256": "09ec06ced7dd34396d058cfb5b4402173ec72610405b1fd50ac61a50c32b3451",
+    "status": 200,
+    "url": "https://api.podcastindex.org/api/1.0/episodes/byguid?guid=not-an-item&feedid=920666"
+  },
   "pi-episode-missing": {
     "bytes": 84,
     "content_type": "application/json",

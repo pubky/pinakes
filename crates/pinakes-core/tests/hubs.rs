@@ -321,6 +321,7 @@ impl Transport for Recorded {
                 (200, fixture("mb-release-70477949.json"))
             }
             "/lookup" if query("upc") == "0634904078164" => (200, fixture("itunes-upc.json")),
+            "/lookup" if query("id") == "1097861770" => (200, fixture("itunes-song-1097861770.json")),
             "/lookup" if query("upc") == "0602557656527" => {
                 (200, fixture("itunes-upc-0602557656527.json"))
             }
@@ -1280,6 +1281,72 @@ async fn a_spotify_track_spotify_refuses_joins_by_its_musicbrainz_url(pool: sqlx
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_spotify_track_without_credentials_joins_by_its_musicbrainz_url(pool: sqlx::PgPool) {
     spotify_falls_back_to_musicbrainz(pool, None).await;
+}
+
+/// An Apple Music track plays iTunes' 30-second preview: the `itunes` source hears of it
+/// (recorded: Radiohead's "Paranoid Android"), the card is read again to take it, and the
+/// hints give it as a preview. Another track iTunes has no song for hears of none.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn an_apple_music_track_plays_its_itunes_preview(pool: sqlx::PgPool) {
+    if !has(&["itunes"]) {
+        return;
+    }
+    let mut ids = vec![];
+    for uri in [
+        "https://music.apple.com/us/album/ok-computer/1097861387?i=1097861770",
+        "https://music.apple.com/us/album/ok-computer/1097861387?i=1",
+    ] {
+        let uri = pinakes_core::music::parse(uri).unwrap().canonical;
+        let id = store::ensure_resource(&pool, &uri).await.unwrap();
+        let mut d = ResourceMeta::new(&uri, "media", 86400);
+        d.set_type("MusicRecording");
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        ids.push(id);
+    }
+    sqlx::query("UPDATE resource SET next_attempt_at=now()+interval '1 day'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let t = Arc::new(Recorded {
+        seen: Mutex::default(),
+    });
+    let cx = also_on::Context {
+        egress: egress(t.clone()),
+        config: Arc::new(Config::default()),
+    };
+    sqlx::query("INSERT INTO also_on_dirty(resource_id) SELECT id FROM resource ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    also_on::drain(&pool, &cx, &also_on::registry(), 100)
+        .await
+        .unwrap();
+    let hints = also_on::media::type_hints(&pool, &ids).await.unwrap();
+    let (source, preview) = hints[&ids[0]].stream.clone().unwrap();
+    assert_eq!(source, "itunes");
+    assert_eq!(
+        preview,
+        pinakes_core::model::Stream {
+            url: "https://audio-ssl.itunes.apple.com/itunes-assets/AudioPreview211/v4/67/6c/04/676c04b5-624a-6101-2d63-dc9c971e2a4e/mzaf_680078368934998544.plus.aac.p.m4a".into(),
+            media_type: "audio/mp4".into(),
+            duration_s: None,
+            preview: true,
+        }
+    );
+    assert!(hints.get(&ids[1]).and_then(|h| h.stream.as_ref()).is_none());
+    // The card without a stream is read again now; the one with nothing heard is not.
+    let due = |id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, bool>("SELECT next_attempt_at<=now() FROM resource WHERE id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    assert!(due(ids[0].clone()).await);
+    assert!(!due(ids[1].clone()).await);
 }
 
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]

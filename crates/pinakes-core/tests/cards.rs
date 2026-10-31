@@ -319,6 +319,54 @@ async fn registry_identifiers_negotiation_discovery_and_switches() {
     );
     assert!(cards::doi("doi:10.1/no").is_none());
 }
+/// A feed item's card carries its enclosure as its `stream`, with its `itunes:duration`. The
+/// show's card has none.
+#[test]
+fn a_feed_item_carries_its_enclosure() {
+    let body = r#"<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel><title>Show</title><itunes:author>Host</itunes:author><item><title>Latest</title><guid isPermaLink="false">ep-2</guid><enclosure url="https://cdn.example/pts/redirect.mp3/media.example/ep-2.mp3" length="57000000" type="audio/mpeg"/><itunes:duration>59:17</itunes:duration></item><item><title>First</title><guid isPermaLink="false">ep-1</guid><enclosure url="https://cdn.example/ep-1.mp3" length="1000" type="audio/mpeg"/><itunes:duration>61</itunes:duration></item></channel></rss>"#;
+    let f = Fetched {
+        permanent_redirect: false,
+        truncated: false,
+        url: "https://show.example/".parse().unwrap(),
+        body: body.as_bytes().to_vec(),
+        content_type: "application/rss+xml".into(),
+        status: 200,
+        location: None,
+        retry_after_secs: 60,
+        validators: Default::default(),
+    };
+    let d = cards::podcast("https://show.example/?guid=ep-2", &f, 3600, 1000)
+        .unwrap()
+        .unwrap();
+    assert_eq!(d.type_name, "PodcastEpisode");
+    assert_eq!(
+        d.stream,
+        Some(pinakes_core::model::Stream {
+            url: "https://cdn.example/pts/redirect.mp3/media.example/ep-2.mp3".into(),
+            media_type: "audio/mpeg".into(),
+            duration_s: Some(59 * 60 + 17),
+            preview: false,
+        })
+    );
+    let show = cards::podcast("https://show.example/", &f, 3600, 1000)
+        .unwrap()
+        .unwrap();
+    assert_eq!(show.type_name, "PodcastSeries");
+    assert_eq!(show.stream, None);
+    for (v, secs) in [
+        ("3557", Some(3557)),
+        ("3557.6", Some(3557)),
+        (" 59:17 ", Some(3557)),
+        ("1:02:03", Some(3723)),
+        ("1:75", None),
+        ("1:2:3:4", None),
+        ("", None),
+        ("-5", None),
+        ("1e3", None),
+    ] {
+        assert_eq!(cards::feed_duration(v), secs, "{v}");
+    }
+}
 #[test]
 fn podcast_selection_and_schema_media_keys() {
     let f = Fetched {

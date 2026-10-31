@@ -4,11 +4,12 @@ An [also on](../api.md#also-on) source.
 
 `podcasts`: an Apple Podcasts link (`podcasts.apple.com/{cc}/podcast/{slug}/id{n}`
 in any spelling, an episode with `?i={n}`), a player link that opens a show by its Apple ID
-(`pca.st/itunes/{n}`, `castro.fm/itunes/{n}`), a Podcast Index page
+(`pca.st/itunes/{n}`, `castro.fm/itunes/{n}`, `overcast.fm/itunes{n}` with or without its slug), a
+Podcast Index page
 (`podcastindex.org/podcast/{feed id}`, an episode with `?episode={id}`) or a podcast feed's card
 (a `PodcastSeries`, or a `PodcastEpisode` with its item's GUID) is looked up exactly:
 - iTunes must know an Apple ID as a show. The show's key is `podcast:apple:{id}` (a player link
-  has it from its URL alone), and it links Apple Podcasts, Pocket Casts and Castro.
+  has it from its URL alone), and it links Apple Podcasts, Pocket Casts, Castro and Overcast.
 - Apple is the authority for its own IDs. An Apple ID that Podcast Index names for a feed counts
   only when iTunes' own record of that show names this feed (`feedUrl`, compared without scheme
   and trailing slash); and an Apple show link takes Podcast Index's feed for its ID only when
@@ -31,6 +32,37 @@ in any spelling, an episode with `?i={n}`), a player link that opens a show by i
   redirects, read up to 8 MiB) is vouched and has one item with audio or video whose `<link>` is
   that page. Such a page is typed `PodcastEpisode` from its next refresh. A feed item finds its Apple track among the show's
   latest 200 episodes by its GUID.
+- **What an episode's item key adds.** Once an episode has its item key, each of the following
+  is keyed by it, so a tagged copy of any of them joins the episode:
+  - The item's own page (its `<link>`: the show's site, or a YouTube video when the show
+    publishes there). It is read in the vouched feed at Podcast Index's URL.
+  - The RSS item, `{feed}?guid={item GUID}`, which a feed card reads as that episode.
+  - Podcast Index's page of it (`episodes/byguid` in that feed). An episode's own Podcast
+    Index page is the card.
+  - Each file it plays: `podcast:enclosure:{SHA-256 of the enclosure URL}`, without its
+    fragment. The source takes these from the feed's item, Podcast Index's record and iTunes'.
+    One episode may play several files: iTunes may read another copy of a show's feed, which
+    names the file differently. `GET /v1/search?key=podcast:enclosure:{URL}` takes the file's
+    URL too.
+- **An Apple episode's file.** The file iTunes' record of an Apple episode names is a key
+  whether or not the show's GUID is vouched, just as its track is: Apple is the authority for
+  its own episodes. iTunes may know an item by another GUID than the show's feed does (Darknet
+  Diaries' "Conti"). Then the file is what joins Apple's episode to the show's own page.
+- **A player's episode page.** A Castro episode page (the `castro` source) plays a file and
+  names its show's Apple ID. The episode is the one among the show's latest 200 that iTunes
+  lists with that very file. It gets that episode's keys, and the item key when the show is
+  vouched. Castro's word alone is no key. Pocket Casts' and Overcast's episode pages are never
+  read: Pocket Casts refuses Pinakes, and Overcast asks a reader to sign in.
+- **What joins no episode yet.** These episode links name no item GUID or file Pinakes can
+  read, so they join only when they are an episode's own `<link>`:
+  - a Spotify episode;
+  - a Pocket Casts or Overcast episode page;
+  - a Podchaser page;
+  - a YouTube video.
+
+  Title and date within one show would only ever be a hint (`maybe_same`), never a key. That
+  hint is not built: a Spotify episode's show and date need Spotify's episode record, and the
+  Spotify source answers only once the app owner has Premium.
 - A Podcast Index page links the show's feed and its Apple, Pocket Casts and Castro pages.
 - The show's Wikidata item (by its Apple ID) gives its Q-id as a key and its Spotify, Podcast
   Index, Podchaser, Pocket Casts and Castbox pages.
@@ -40,13 +72,25 @@ in any spelling, an episode with `?i={n}`), a player link that opens a show by i
 - A link never lists its own service. A Podcast Index failure (a refused key, an outage) never
   fails the lookup: what the other services answered still counts.
 - A Pocket Casts short link (`pca.st/{slug}`) carries no Apple ID and is not looked up.
+- **Stream.** An episode's lookup hears of its enclosure. The source prefers its feed's item,
+  then Podcast Index's record of the episode (its episode page's, or the `episodes/byguid` answer
+  that finds that page), then iTunes' (`episodeUrl`), and records the enclosure as the facts
+  `stream_url`, `stream_type` and `stream_duration`.
+  - A card without a [stream](../api.md#stream) of its own takes it at its next read. The
+    source asks for that read at once.
+  - A link that isn't a public stream, or is longer than a fact's 512 bytes, is none.
+  - A Fountain episode's feed is read for the stream even when no GUID is vouched, unless the
+    card plays a stream of its own. A stream it took from this source is no reason to skip the
+    read: each lookup hears of it again, or the card would lose it at its next refresh.
+  - A stream joins nothing: a copy of a show's feed plays its own audio, and gets no key from
+    it.
 
 ## Operations
 
 Each podcast show costs one iTunes lookup, two or three Podcast Index requests (the last asks
 who owns the show's GUID), its feed (usually still cached from its card) and two Wikidata
-requests; each episode up to three Podcast Index requests, two iTunes lookups and, for an
-episode's page, its feed; each page whose head names an RSS feed that feed (cached for an hour,
+requests; each episode up to four Podcast Index requests (the last finds its page there), two
+iTunes lookups and, once its show is vouched, its feed (cached for an hour); each page whose head names an RSS feed that feed (cached for an hour,
 read up to 8 MiB), and Podcast Index only when one item of it with audio or video is that page.
 
 Podcast Index is asked only with a key and secret: `[podcast_index] key` and `secret`, or

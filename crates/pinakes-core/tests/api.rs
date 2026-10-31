@@ -2151,6 +2151,49 @@ async fn cards_carry_the_timezone_boundary_attribution(pool: PgPool) {
     );
 }
 
+/// A card's `stream`, as its document stores it: on a resource read and on the lookup's cards,
+/// in the shape the OpenAPI document declares. A card without one has no `stream` at all.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_card_carries_its_stream(pool: PgPool) {
+    let uri = "https://podcast.example/feed?guid=episode-1";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut doc = ResourceMeta::new(uri, "media", 86400);
+    doc.set_type("PodcastEpisode");
+    doc.name = Some("Episode One".into());
+    doc.stream = pinakes_core::model::Stream::public(
+        "https://cdn.podcast.example/episode-1.mp3",
+        "audio/mpeg",
+        Some(1800),
+        false,
+    );
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let other = "https://example.org/article";
+    let other_id = store::ensure_resource(&pool, other).await.unwrap();
+    store::save_document(&pool, &other_id, 0, &ResourceMeta::new(other, "web", 86400))
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let stream = json!({
+        "url": "https://cdn.podcast.example/episode-1.mp3",
+        "type": "audio/mpeg",
+        "duration_s": 1800,
+        "preview": false
+    });
+    let (code, card) = call(&app, "GET", &format!("/v1/resources/{id}"), None).await;
+    assert_eq!(code, 200, "{card}");
+    assert_eq!(card["stream"], stream);
+    let (code, cards) = call(
+        &app,
+        "POST",
+        "/v1/resources/lookup",
+        Some(json!({"resource_ids": [id, other_id]})),
+    )
+    .await;
+    assert_eq!(code, 200, "{cards}");
+    assert_eq!(cards[0]["stream"], stream);
+    assert!(cards[1].get("stream").is_none(), "{cards}");
+}
+
 /// The stored document, with its internal fields, is on the admin listener only; the public
 /// card leaves those fields out.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]

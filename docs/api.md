@@ -95,6 +95,7 @@ An IMDb title keeps the type its page gives (it can be either).
 | `status` | Fetch health: `ok`, `pending`, `missing`, `unreachable` or `error` |
 | `type`, `type_path` | schema.org type (`MusicEvent`, `Book`, `Place`, …), or one of Pinakes's own types for what schema.org has no class for: `BitcoinBlock`, `BitcoinTransaction`, `BitcoinAddress`, `LightningNode` and `LightningChannel` (not schema.org; each a child of `Thing`); `type_path` is the type's ancestors, root first (`["Thing", "Event", "MusicEvent"]`), the types a `type=` search matches it by |
 | `name`, `description`, `image` | Display metadata; images point to the origin and are never proxied |
+| `stream` | Audio a client can play, `{url, type, duration_s, preview}` ([Stream](#stream)): a podcast episode's enclosure, a recording's public preview. Absent when the card has none |
 | `site` | The publishing site: the page's own site name (`og:site_name`), else its host; for `pubky://` objects the app path segment (`loopky`), not the public key; for a link whose URL names a known service (a music service, a Wikipedia edition, MusicBrainz, Wikidata, a service the also-on lookups know), that service's name (`Apple Music`, `Wikipedia (de)`, `OpenStreetMap`), whatever the page calls itself and even before its card is read; for a card read from an official API without a host of its own, the service's name (`Federal Register`) |
 | `point` | `{lat, lon}` |
 | `start`, `end` | RFC 3339 instants for events and occurrences |
@@ -119,6 +120,46 @@ type every gone post has, `SocialMediaPosting`, whatever the post was (a Reddit 
 video): no name, description, image or facts, no also-on links and no change history. Its read
 lists no `aliases`, and its `refs` name its own link alone: a spelling's link can carry the post's
 title.
+
+### Stream
+
+One field for everything playable, so a client needs one player for episodes and recordings:
+
+```json
+"stream": {"url": "https://…/ep180.mp3", "type": "audio/mpeg", "duration_s": 3557, "preview": false}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `url` | The audio itself, for an `<audio>` element: never a player page. Pinakes never fetches or proxies it |
+| `type` | Its MIME type without parameters, always `audio/…` or `video/…`, at most 127 bytes |
+| `duration_s` | Its length in whole seconds when its source states it, else `null`. A preview's is usually `null`; the recording's own length is the fact `duration` |
+| `preview` | `true` for a short sample of a longer recording (a music service's 30-second preview), `false` for the whole of it (an episode) |
+
+Only public, direct links are a stream:
+- `https` or `http` on a named host: no IP address, `localhost` or single-label name, and no
+  user or password;
+- no query parameter that signs the link or makes it expire (`sig`, `hdnea`, `hmac`, `auth`,
+  `expires`, `exp`, `policy`, `Key-Pair-Id`, any `X-Amz-…` or `X-Goog-…`, any name with `token`
+  or `signature` in it), so a link that stops working, or works only for whom it was made, is
+  never one;
+- at most 2,048 bytes, and at most a week long.
+
+A feed or page behind a login is never read, so nothing behind one is a stream. A publisher's
+tracking redirect (`podtrac.com`, `pdst.fm`) is its public link and stays. No DRM service's audio
+is one: Spotify's, Apple Music's and TIDAL's own players are not streams.
+
+Which cards carry one (each source's page in [docs/sources](sources/README.md) says how):
+- a podcast feed's episode (`{feed}?guid={item}`, or the show's own episode page whose feed item
+  links back to it): the item's first audio or video `<enclosure>`, with its `itunes:duration`;
+- a Podcast Index episode: the enclosure Podcast Index records (the `podcast_index` source);
+- a Castro episode: the file its page plays (the `castro` source);
+- any other episode the also-on `podcasts` source reads (an Apple Podcasts
+  or Fountain episode, a page its feed's item links back to): the enclosure it hears of, from
+  the card's next read (the source asks for one at once);
+- an Apple Music track: iTunes' 30-second preview, `preview: true` (the `itunes` source), from
+  the card's next read. Deezer's previews are signed and expire, so they are never one;
+  Spotify's are not used.
 
 ### Resource read
 
@@ -439,7 +480,7 @@ POST /v1/changes/lookup {"resource_ids":["81cefcae5a6a468cfc27ff1c1b420fce","5bc
 | `q` | Full-text name/description search with a trigram/partial-name fallback; at most 256 bytes. A post whose author opted out of search indexing (a read's `facts.opted_out`: Mastodon's `indexable: false` or `noindex`, Bluesky's `!no-unauthenticated`) never matches |
 | `type` | A schema.org type, ancestors included (`Event` matches `MusicEvent`; `Place` matches cafés and other `LocalBusiness` types), or up to 10 comma-separated: any of them (`type=MusicRecording,MusicAlbum,MusicGroup`). An unknown type is a 400 that names it (only a name of letters and digits is repeated; anything else, such as a URL, gets a general message) |
 | `category`, `host` | Exact filters |
-| `key` | Links carrying one exact identifier, on any service and in any spelling: `mbid:{uuid}` (a MusicBrainz recording, release, release group or artist), `wikidata:{Q-id}`, `isrc:{code}` (any letter case, hyphens allowed), `upc:{barcode}` (a UPC, EAN or GTIN in any of its lengths, check digit verified), `isbn:{ISBN-10 or ISBN-13}` (an edition), `imdb:{tt…}` (a film or series), `podcast:{GUID}` (a show), `osm:{node|way|relation}/{id}`, `doi:{DOI}`, `gtin:{barcode}` (a [product](#products), in any of its lengths), any key exactly as a resource read lists it in `keys` (`mb:recording:{mbid}`, `podcast:guid:{GUID}`, `podcast:apple:{id}`, …), or another namespace a source records (its page in [docs/sources](sources/README.md#also-on) names its namespaces and how each is normalized), as the [also-on](#also-on) sources found them as keys or facts (`mbid:` also the MBID a MusicBrainz page was merged from, its `mbid_was` fact, and with `type=MusicEvent` an artist's events, by their performers), or as an exact lookup by that key named the link; anything else is 400 |
+| `key` | Links carrying one exact identifier, on any service and in any spelling: `mbid:{uuid}` (a MusicBrainz recording, release, release group or artist), `wikidata:{Q-id}`, `isrc:{code}` (any letter case, hyphens allowed), `upc:{barcode}` (a UPC, EAN or GTIN in any of its lengths, check digit verified), `isbn:{ISBN-10 or ISBN-13}` (an edition), `imdb:{tt…}` (a film or series), `podcast:{GUID}` (a show), `podcast:enclosure:{URL}` (an episode, by the file it plays), `osm:{node|way|relation}/{id}`, `doi:{DOI}`, `gtin:{barcode}` (a [product](#products), in any of its lengths), any key exactly as a resource read lists it in `keys` (`mb:recording:{mbid}`, `podcast:guid:{GUID}`, `podcast:apple:{id}`, …), or another namespace a source records (its page in [docs/sources](sources/README.md#also-on) names its namespaces and how each is normalized), as the [also-on](#also-on) sources found them as keys or facts (`mbid:` also the MBID a MusicBrainz page was merged from, its `mbid_was` fact, and with `type=MusicEvent` an artist's events, by their performers), or as an exact lookup by that key named the link; anything else is 400 |
 | `related` | A resource ID: what the people who tagged it also referenced, ranked by how many of them did ([Related](#related)); not with `sort` |
 | `tags` | Comma-separated labels; at most 5, each 1–128 bytes |
 | `match` | `any` (default) or `all` (at most 3 tags) |

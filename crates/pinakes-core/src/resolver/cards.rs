@@ -6,7 +6,7 @@ use super::{
 use crate::{
     adapter::Manifest,
     config::{Config, ResolverConfig},
-    model::{ResourceMeta, Status},
+    model::{ResourceMeta, Status, Stream},
 };
 use anyhow::{bail, ensure, Context as _, Result};
 use async_trait::async_trait;
@@ -1085,6 +1085,7 @@ fn podcast_body(
             d.attributes.insert("duration".into(), duration);
         }
         d.attributes.insert("podcast_guid".into(), guid.clone());
+        d.stream = item_stream(item);
         if let Some(link) = field(item, "link").and_then(|u| web::origin_url(&f.url, &u)) {
             d.aliases.push(link);
         }
@@ -1108,6 +1109,50 @@ fn podcast_body(
             .and_then(|n| field(n, "title"));
     }
     Ok(Some(d.bounded(web::ATTRIBUTES)?))
+}
+
+/// A feed item's audio: its first audio or video `<enclosure>`, with its `itunes:duration`, when
+/// that is a public stream ([`Stream::public`]).
+pub fn item_stream(item: roxmltree::Node<'_, '_>) -> Option<Stream> {
+    let enclosure = item.children().find(|c| {
+        c.has_tag_name("enclosure")
+            && c.attribute("type")
+                .is_some_and(|ty| ty.starts_with("audio/") || ty.starts_with("video/"))
+    })?;
+    let duration = item
+        .children()
+        .find(|c| c.is_element() && c.tag_name().name() == "duration")
+        .and_then(|c| c.text())
+        .and_then(feed_duration);
+    Stream::public(
+        enclosure.attribute("url")?,
+        enclosure.attribute("type")?,
+        duration,
+        false,
+    )
+}
+/// An `itunes:duration` in seconds: `3557` (a fraction is dropped), `59:17` or `1:02:03`.
+pub fn feed_duration(v: &str) -> Option<u64> {
+    let parts: Vec<&str> = v.trim().split(':').collect();
+    if parts.len() > 3 {
+        return None;
+    }
+    let mut total = 0u64;
+    for (i, part) in parts.iter().enumerate() {
+        let whole = match (i + 1 == parts.len()).then(|| part.split_once('.')) {
+            Some(Some((whole, fraction))) if fraction.bytes().all(|b| b.is_ascii_digit()) => whole,
+            _ => part,
+        };
+        if whole.is_empty() || !whole.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let n: u64 = whole.parse().ok()?;
+        if i > 0 && n >= 60 {
+            return None;
+        }
+        total = total.checked_mul(60)?.checked_add(n)?;
+    }
+    Some(total)
 }
 
 pub fn invalid_identifier(uri: &str) -> bool {
