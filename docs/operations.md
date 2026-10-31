@@ -507,8 +507,10 @@ scanning) follow RSS alternates on pages without a typed card. Discovery decisio
 `pinakes_discovery_decisions_total{kind,decision}`. A podcast show's card reads the show's feed
 for its latest episodes at each refresh (a feed card from the feed it is; a Podcast Index or
 Apple Podcasts show page, and a player page opening a show by its Apple ID, from the feed its
-record names: one feed request per read, cached for the card's lifetime, cut at the page cap),
-kept in `podcast_episode` and served by `GET /v1/resources/{id}/episodes` ([API](api.md#episodes)).
+record names: one feed request per read, cached for the card's lifetime, cut at the page cap,
+waited for at most three seconds and within what is left of a wall hook's time, so a slow feed
+costs the list and never the card), kept in `podcast_episode` and served by
+`GET /v1/resources/{id}/episodes` ([API](api.md#episodes)).
 After the upgrade that added them, the lists fill as shows are read again (`reextract web`).
 
 A challenge page (a bot wall, captcha or sign-in redirect) is a failed fetch: the resource turns

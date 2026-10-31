@@ -490,6 +490,7 @@ impl Source for MediaRecords {
                     })
             }
             Some(Walled::ApplePodcast(show)) => {
+                let started = tokio::time::Instant::now();
                 let options = FetchOptions {
                     extra_types: &["text/javascript"],
                     ..json()
@@ -513,9 +514,20 @@ impl Source for MediaRecords {
                 {
                     Some(mut doc) => {
                         // The show's latest episodes, from the feed iTunes names for it
-                        // (`episodes`).
+                        // (`episodes`), within what is left of the hook's time after the
+                        // lookup, less a margin to hand the card back: a slow feed costs the
+                        // list, never the card.
                         if let Some(feed) = itunes_feed(&f.body) {
-                            doc.episodes = crate::episodes::fetch(cx.egress, &feed, 3600).await;
+                            let left = super::WALL_HOOK_TIMEOUT
+                                .saturating_sub(started.elapsed())
+                                .saturating_sub(std::time::Duration::from_millis(500));
+                            doc.episodes = crate::episodes::fetch(
+                                cx.egress,
+                                &feed,
+                                3600,
+                                left.min(crate::episodes::FEED_WAIT),
+                            )
+                            .await;
                         }
                         Some(doc)
                     }
@@ -1000,6 +1012,75 @@ mod tests {
             ttl: 3600,
         };
         let doc = MediaRecords.walled(&cx, uri).await.unwrap().unwrap();
+        assert_eq!(doc.type_name, "PodcastSeries");
+        assert_eq!(doc.episodes, None);
+    }
+
+    /// iTunes answers at once and the feed only after the hook's whole time: the card is handed
+    /// back within the hook's deadline, without a list (the save then keeps the show's stored
+    /// rows: `tests/episodes.rs`), and the list is asked for only within the time left.
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_feed_costs_the_list_not_the_card() {
+        let lookup = "https://itunes.apple.com/lookup?id=1584274529&entity=podcast&country=us";
+        let feed = "https://feeds.podcastindex.org/pc20.xml";
+        let (egress, recorded) = fixture::egress(vec![
+            (
+                lookup,
+                200,
+                "text/javascript",
+                read("itunes-podcast-1584274529.json"),
+            ),
+            (feed, 200, "application/xml", read("feed-pc20-head.xml")),
+        ]);
+        recorded.delay(feed, std::time::Duration::from_secs(7));
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let started = tokio::time::Instant::now();
+        let doc = tokio::time::timeout(
+            crate::sources::WALL_HOOK_TIMEOUT,
+            MediaRecords.walled(&cx, "https://pca.st/itunes/1584274529"),
+        )
+        .await
+        .expect("the card within the hook's time")
+        .unwrap()
+        .unwrap();
+        assert_eq!(doc.type_name, "PodcastSeries");
+        assert_eq!(doc.episodes, None, "no list from a feed that slow");
+        assert_eq!(recorded.asked(), [lookup, feed], "the feed was asked");
+        let waited = started.elapsed();
+        assert!(
+            waited >= crate::episodes::FEED_WAIT && waited < crate::sources::WALL_HOOK_TIMEOUT,
+            "{waited:?}"
+        );
+        // iTunes itself slow: whatever is left goes to the feed, which then gets no time.
+        let (egress, recorded) = fixture::egress(vec![
+            (
+                lookup,
+                200,
+                "text/javascript",
+                read("itunes-podcast-1584274529.json"),
+            ),
+            (feed, 200, "application/xml", read("feed-pc20-head.xml")),
+        ]);
+        recorded.delay(
+            lookup,
+            crate::sources::WALL_HOOK_TIMEOUT - std::time::Duration::from_millis(600),
+        );
+        recorded.delay(feed, std::time::Duration::from_millis(200));
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let doc = tokio::time::timeout(
+            crate::sources::WALL_HOOK_TIMEOUT,
+            MediaRecords.walled(&cx, "https://pca.st/itunes/1584274529"),
+        )
+        .await
+        .expect("the card within the hook's time")
+        .unwrap()
+        .unwrap();
         assert_eq!(doc.type_name, "PodcastSeries");
         assert_eq!(doc.episodes, None);
     }

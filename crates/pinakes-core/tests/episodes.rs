@@ -196,6 +196,86 @@ async fn the_save_replaces_keeps_or_clears_the_list(pool: PgPool) {
     assert_eq!(rows(&pool, &id).await, 0);
 }
 
+/// A feed as a show's read fetches it.
+fn fetched(body: String) -> pinakes_core::resolver::egress::Fetched {
+    pinakes_core::resolver::egress::Fetched {
+        permanent_redirect: false,
+        truncated: false,
+        validators: Default::default(),
+        url: "https://feeds.example.org/show.xml".parse().unwrap(),
+        content_type: "application/rss+xml".into(),
+        status: 200,
+        retry_after_secs: 0,
+        location: None,
+        body: body.into_bytes(),
+    }
+}
+fn feed(items: &str) -> String {
+    format!(
+        r#"<?xml version="1.0"?><rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel><title>Show</title>{items}</channel></rss>"#
+    )
+}
+
+/// From the feed to the route: an item whose only name is a signed enclosure is listed, without
+/// a stream, and the whole response shows nothing of the link, not the token.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn the_route_shows_nothing_of_a_rejected_enclosure(pool: PgPool) {
+    let body = feed(concat!(
+        r#"<item><title>Hidden</title><enclosure url="https://cdn.example/ep.mp3?token=SECRET" type="audio/mpeg"/></item>"#,
+        r#"<item><title>Open</title><guid>ep-2</guid><enclosure url="https://cdn.example/2.mp3" type="audio/mpeg"/></item>"#,
+    ));
+    let episodes = pinakes_core::episodes::from_feed(&fetched(body)).unwrap();
+    assert_eq!(episodes.len(), 2);
+    let id = show(&pool, "https://feeds.example.org/show.xml", Some(episodes)).await;
+    assert_eq!(rows(&pool, &id).await, 2);
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let (status, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
+    assert_eq!(status, 200, "{page}");
+    let text = page.to_string();
+    assert!(!text.contains("SECRET"), "{text}");
+    assert!(!text.contains("ep.mp3"), "{text}");
+    let hidden = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["name"] == "Hidden")
+        .unwrap();
+    assert_eq!(hidden["stream"], Value::Null);
+    assert!(
+        hidden["guid"].as_str().unwrap().starts_with("sha256:"),
+        "{hidden}"
+    );
+    assert!(
+        hidden["uri"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://feeds.example.org/show.xml?guid=sha256%3A"),
+        "{hidden}"
+    );
+}
+
+/// An enclosure with an absurd media type (`audio/` and 5,000 characters) is no stream, and the
+/// show saves with the item listed: the stored stream is bounded by `Stream::public`, which the
+/// table's own bound (4,096 bytes) would otherwise fail the whole save on.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn an_oversized_media_type_is_no_stream_and_the_show_saves(pool: PgPool) {
+    let body = feed(&format!(
+        r#"<item><title>Long</title><guid>ep-1</guid><enclosure url="https://cdn.example/1.mp3" type="audio/{}"/></item><item><title>Short</title><guid>ep-2</guid><enclosure url="https://cdn.example/2.mp3" type="audio/mpeg"/></item>"#,
+        "x".repeat(5000)
+    ));
+    let episodes = pinakes_core::episodes::from_feed(&fetched(body)).unwrap();
+    assert_eq!(episodes.len(), 2);
+    assert_eq!(episodes[0].stream, None, "{:?}", episodes[0]);
+    assert!(episodes[1].stream.is_some());
+    let id = show(&pool, "https://feeds.example.org/show.xml", Some(episodes)).await;
+    assert_eq!(rows(&pool, &id).await, 2);
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let (status, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
+    assert_eq!(status, 200, "{page}");
+    assert_eq!(page["items"][0]["stream"], Value::Null);
+    assert_eq!(page["items"][1]["stream"]["type"], "audio/mpeg");
+}
+
 /// A show card without a list of its own (an Apple Podcasts page whose feed could not be read)
 /// lists the episodes of a member of its group that has them: the same show elsewhere.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]

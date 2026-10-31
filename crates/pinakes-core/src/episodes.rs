@@ -15,6 +15,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{Postgres, Transaction};
+use std::time::Duration;
 use url::Url;
 use utoipa::ToSchema;
 
@@ -38,7 +39,9 @@ pub struct Episode {
     pub name: Option<String>,
     pub image: Option<String>,
     pub published: Option<DateTime<Utc>>,
-    /// The item's GUID as the feed gives it (its enclosure URL when it gives none).
+    /// What names the item ([`item_identity`]): its GUID as the feed gives it; its page when it
+    /// gives none; else `sha256:` and the hex digest of its enclosure's URL, so a signed link
+    /// shows nothing of itself here.
     pub guid: String,
     /// Its enclosure, when public and direct (`Stream`); null when the item has none Pinakes
     /// would hand to a player.
@@ -83,24 +86,37 @@ pub fn from_feed(f: &crate::resolver::egress::Fetched) -> Option<Vec<Episode>> {
         .collect();
     Some(from_items(&items, &f.url))
 }
+/// The longest a show's read waits for its feed's episodes. The list is optional: a feed slower
+/// than this leaves the show's stored list as it is, and the show's card is saved all the same,
+/// within the deadline of the read that asked for it (a wall hook's
+/// [`crate::sources::WALL_HOOK_TIMEOUT`]).
+pub const FEED_WAIT: Duration = Duration::from_secs(3);
+
 /// The episodes of the feed at `url`, read through the egress (a discovery, cached for `ttl`
-/// seconds, cut at the page cap like any feed), or `None` when the feed could not be read or is
-/// none: the show's stored list then stays as it is.
+/// seconds, cut at the page cap like any feed) within `wait`, or `None` when the feed could not
+/// be read in time or is none: the show's stored list then stays as it is.
 pub async fn fetch(
     egress: &crate::resolver::egress::Egress,
     url: &str,
     ttl: u64,
+    wait: Duration,
 ) -> Option<Vec<Episode>> {
     // As the media route reads a feed: a feed body over the page cap is cut there, not refused
     // (the egress reads an XML feed without a feed cap like a page).
-    let f = match egress.discover(url, &Default::default(), ttl).await {
-        Ok(f) if f.status == 200 => f,
-        Ok(f) => {
+    let options = Default::default();
+    let read = egress.discover(url, &options, ttl);
+    let f = match tokio::time::timeout(wait, read).await {
+        Ok(Ok(f)) if f.status == 200 => f,
+        Ok(Ok(f)) => {
             tracing::debug!(host = %crate::resolver::log_host(url), status = f.status, "a show's feed did not answer its episodes");
             return None;
         }
-        Err(error) => {
+        Ok(Err(error)) => {
             tracing::debug!(host = %crate::resolver::log_host(url), kind = crate::resolver::error_class(&error), "a show's feed could not be read for its episodes");
+            return None;
+        }
+        Err(_) => {
+            tracing::debug!(host = %crate::resolver::log_host(url), wait_ms = wait.as_millis() as u64, "a show's feed was too slow for its episodes");
             return None;
         }
     };
@@ -108,6 +124,67 @@ pub async fn fetch(
         .await
         .ok()
         .flatten()
+}
+
+/// What names a feed item, for the list and for the resolver alike.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ItemIdentity {
+    /// The item's `<guid>`, trimmed; without one, its page; without either, `sha256:` and the
+    /// hex digest of its enclosure's URL (without its fragment, as the `podcast:enclosure:` key
+    /// digests it), so a link that carries a token names nothing of it.
+    pub guid: String,
+    /// Its `<link>`, resolved against the feed: the episode's own page.
+    pub page: Option<String>,
+    /// The URL of its first `<enclosure>`, resolved against the feed.
+    pub enclosure: Option<String>,
+}
+impl ItemIdentity {
+    /// The URI that resolves to the item's `PodcastEpisode` card: its page, else its feed item
+    /// (`{feed}?guid={guid}`, which `resolver::cards::podcast_body` matches by this GUID).
+    pub fn uri(&self, feed: &Url) -> String {
+        self.page.clone().unwrap_or_else(|| {
+            let mut u = feed.clone();
+            u.query_pairs_mut().append_pair("guid", &self.guid);
+            u.to_string()
+        })
+    }
+}
+/// A feed item's identity ([`ItemIdentity`]); `None` for an item nothing names (no GUID, no link,
+/// no enclosure), which is no episode. One function names items for the episode list and for
+/// the resolver, so every `uri` the list gives resolves to its episode's card.
+pub fn item_identity(item: roxmltree::Node<'_, '_>, feed: &Url) -> Option<ItemIdentity> {
+    let text = |name: &str| {
+        item.children()
+            .find(|c| c.is_element() && c.tag_name().name() == name)
+            .and_then(|c| c.text())
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned)
+    };
+    let link = |s: &str| crate::resolver::web::origin_url(feed, s).filter(|u| u.len() <= 2048);
+    let enclosure = item
+        .children()
+        .find(|c| c.has_tag_name("enclosure") && c.attribute("url").is_some())
+        .and_then(|e| e.attribute("url"))
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .and_then(link);
+    let page = text("link").and_then(|l| link(&l));
+    let guid = text("guid")
+        .filter(|g| g.len() <= 2048)
+        .or_else(|| page.clone())
+        .or_else(|| enclosure.as_deref().map(enclosure_digest))?;
+    Some(ItemIdentity {
+        guid,
+        page,
+        enclosure,
+    })
+}
+/// `sha256:` and the hex digest of an enclosure's URL without its fragment.
+fn enclosure_digest(url: &str) -> String {
+    use sha2::Digest as _;
+    let url = url.split_once('#').map_or(url, |(u, _)| u);
+    format!("sha256:{:x}", sha2::Sha256::digest(url.as_bytes()))
 }
 
 fn episode(item: roxmltree::Node<'_, '_>, feed: &Url) -> Option<Episode> {
@@ -123,29 +200,13 @@ fn episode(item: roxmltree::Node<'_, '_>, feed: &Url) -> Option<Episode> {
             .map(str::to_owned)
     };
     let link = |s: &str| crate::resolver::web::origin_url(feed, s).filter(|u| u.len() <= 2048);
-    let enclosure = item
-        .children()
-        .find(|c| c.has_tag_name("enclosure") && c.attribute("url").is_some());
-    let enclosure_url = enclosure
-        .and_then(|e| e.attribute("url"))
-        .map(str::trim)
-        .filter(|u| !u.is_empty())
-        .and_then(link);
-    let page = text("link").and_then(|l| link(&l));
-    let guid = text("guid")
-        .filter(|g| g.len() <= 2048)
-        .or_else(|| enclosure_url.clone())
-        .or_else(|| page.clone())?;
-    let uri = page.clone().unwrap_or_else(|| {
-        let mut u = feed.clone();
-        u.query_pairs_mut().append_pair("guid", &guid);
-        u.to_string()
-    });
+    let identity = item_identity(item, feed)?;
+    let uri = identity.uri(feed);
     if uri.len() > 2048 {
         return None;
     }
-    let stream = enclosure.and_then(|e| {
-        let url = enclosure_url.as_deref()?;
+    let stream = child("enclosure").and_then(|e| {
+        let url = identity.enclosure.as_deref()?;
         let media_type = e
             .attribute("type")
             .map(str::trim)
@@ -167,7 +228,7 @@ fn episode(item: roxmltree::Node<'_, '_>, feed: &Url) -> Option<Episode> {
             .and_then(|c| c.attribute("href"))
             .and_then(link),
         published: text("pubDate").as_deref().and_then(date),
-        guid,
+        guid: identity.guid,
         stream,
     })
 }
@@ -388,8 +449,8 @@ mod tests {
             r#"<item><title>Three</title><guid>ep-3</guid><link>https://show.example/3</link><pubDate>Wed, 21 Oct 2026 10:00:00 +0000</pubDate><itunes:duration>1:02:03</itunes:duration><enclosure url="https://cdn.example/3.mp3"/></item>"#,
             // A signed enclosure is listed without a stream.
             r#"<item><title>One</title><guid>ep-1</guid><link>https://show.example/1</link><pubDate>Mon, 19 Oct 2026 10:00:00 +0000</pubDate><itunes:duration>3557</itunes:duration><enclosure url="https://cdn.example/1.mp3?Expires=1&amp;Signature=abc" type="audio/mpeg"/></item>"#,
-            // No GUID and no link: the enclosure names it, and its feed item is its URI.
-            r#"<item><title>Zero</title><enclosure url="https://cdn.example/0.m4a" type="audio/mp4"/></item>"#,
+            // No GUID and no link: a digest of the enclosure names it, and its feed item is its URI.
+            r#"<item><title>Zero</title><enclosure url="https://cdn.example/0.m4a#t=1" type="audio/mp4"/></item>"#,
             // Not an episode: nothing names it.
             r#"<item><title>Note</title><description>text</description></item>"#,
         ));
@@ -426,10 +487,17 @@ mod tests {
         );
         assert_eq!(episodes[2].stream, None, "a signed enclosure is no stream");
         let zero = &episodes[3];
-        assert_eq!(zero.guid, "https://cdn.example/0.m4a");
+        let digest = format!("sha256:{:x}", {
+            use sha2::Digest as _;
+            sha2::Sha256::digest(b"https://cdn.example/0.m4a")
+        });
+        assert_eq!(zero.guid, digest, "the fragment is not part of the name");
         assert_eq!(
             zero.uri,
-            "https://feeds.example.org/show.xml?guid=https%3A%2F%2Fcdn.example%2F0.m4a"
+            format!(
+                "https://feeds.example.org/show.xml?guid={}",
+                digest.replace(':', "%3A")
+            )
         );
         assert_eq!(zero.published, None);
         assert_eq!(
@@ -442,6 +510,73 @@ mod tests {
         let cut = &body[..body.find("<item><title>Note").unwrap() + 20];
         assert_eq!(from_feed(&fetched(cut, true)).unwrap().len(), 4);
         assert_eq!(from_feed(&fetched("<html></html>", false)), None);
+    }
+
+    /// An item named only by an enclosure that is no public stream (a signed link): listed,
+    /// without a stream, and nothing of the link in its name or URI.
+    #[test]
+    fn a_rejected_enclosure_names_its_item_by_a_digest_only() {
+        let body = feed(
+            r#"<item><title>Hidden</title><enclosure url="https://cdn.example/ep.mp3?token=SECRET" type="audio/mpeg"/></item>"#,
+        );
+        let episodes = from_feed(&fetched(&body, false)).unwrap();
+        assert_eq!(episodes.len(), 1);
+        let e = &episodes[0];
+        assert_eq!(e.stream, None);
+        assert!(e.guid.starts_with("sha256:"), "{e:?}");
+        let listed = serde_json::to_string(&episodes).unwrap();
+        assert!(!listed.contains("SECRET"), "{listed}");
+        assert!(!listed.contains("cdn.example"), "{listed}");
+    }
+
+    /// Every URI the list gives resolves to its item's `PodcastEpisode` card, named by the same
+    /// GUID: an item with a GUID and a page, one with a page only, one with an enclosure only,
+    /// one whose enclosure is no stream.
+    #[test]
+    fn every_listed_uri_resolves_to_its_episode() {
+        let body = feed(concat!(
+            r#"<item><title>Named</title><guid> ep-1 </guid><link>https://show.example/1</link><enclosure url="https://cdn.example/1.mp3" type="audio/mpeg"/></item>"#,
+            r#"<item><title>Paged</title><link>/2</link><enclosure url="https://cdn.example/2.mp3" type="audio/mpeg"/></item>"#,
+            r#"<item><title>Filed</title><enclosure url="https://cdn.example/3.mp3" type="audio/mpeg"/></item>"#,
+            r#"<item><title>Hidden</title><enclosure url="https://cdn.example/4.mp3?token=SECRET" type="audio/mpeg"/></item>"#,
+            r#"<item><title>Keyed</title><guid>ep-5</guid><enclosure url="https://cdn.example/5.mp3" type="audio/mpeg"/></item>"#,
+        ));
+        let f = fetched(&body, false);
+        let episodes = from_feed(&f).unwrap();
+        assert_eq!(episodes.len(), 5);
+        assert_eq!(episodes[0].guid, "ep-1", "trimmed");
+        assert_eq!(episodes[1].uri, "https://feeds.example.org/2");
+        assert_eq!(episodes[1].guid, "https://feeds.example.org/2");
+        assert_eq!(
+            episodes[4].uri,
+            "https://feeds.example.org/show.xml?guid=ep-5"
+        );
+        for e in &episodes {
+            // The resolver reads the feed for the URI: the page's feed, or the feed item's URL
+            // (the feed itself, whatever the query).
+            let card = crate::resolver::cards::podcast(&e.uri, &f, 3600, 1000)
+                .unwrap()
+                .unwrap_or_else(|| panic!("{} resolves to nothing", e.uri));
+            assert_eq!(card.type_name, "PodcastEpisode", "{}", e.uri);
+            assert_eq!(card.status, crate::model::Status::Ok, "{}", e.uri);
+            assert_eq!(
+                card.attributes.get("podcast_guid"),
+                Some(&e.guid),
+                "{}",
+                e.uri
+            );
+            assert_eq!(card.name, e.name);
+        }
+        // A GUID the feed does not have is missing, as before.
+        let card = crate::resolver::cards::podcast(
+            "https://feeds.example.org/show.xml?guid=ep-9",
+            &f,
+            3600,
+            1000,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(card.status, crate::model::Status::Missing);
     }
 
     #[test]

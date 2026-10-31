@@ -31,8 +31,8 @@ Walled pages:
   `castro.fm/itunes/{id}`, `overcast.fm/itunes{id}`, which sends a reader to its sign-in page) gets
   one from iTunes' record of the show (`itunes.apple.com/lookup`), and the show's latest episodes
   from the feed that record names (`feedUrl`, read like any feed, cut at the page cap;
-  [Episodes](../api.md#episodes)); a feed that does not answer leaves the show's stored list as
-  it is.
+  [Episodes](../api.md#episodes)); a feed that does not answer, or not within three seconds and
+  the hook's remaining time, leaves the show's stored list as it is.
 
 When the item's requests do not answer within the hook's time (Wikidata busy or slow), the page
 keeps its own card at first. The also-on source `titles` then reads the same item without a time

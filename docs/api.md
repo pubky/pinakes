@@ -817,10 +817,13 @@ that rotates its members never runs into its cap and the links of one nobody fet
 
 `GET /v1/resources/{id}/episodes` lists a podcast show's latest episodes as its feed lists them,
 newest first, at most 20 (`limit`, 1–20): `{items: [...]}`, each item
-`{uri, name, image, published, guid, stream, id?}`. `uri` is the episode's page (the feed item's
-link), else its feed item (`{feed}?guid={guid}`); either resolves to the episode's
-`PodcastEpisode` card (`POST /v1/resolve`), and `id` names that card when Pinakes already has it
-(an alias as its root). `stream` is the item's enclosure when it is public and direct, in the
+`{uri, name, image, published, guid, stream, id?}`. `guid` is what names the item: its GUID as
+the feed gives it; its page when the feed gives none; else `sha256:` and the hex digest of its
+enclosure's URL (without a fragment), so a link that carries a token shows nothing of itself.
+`uri` is the episode's page (the feed item's link), else its feed item (`{feed}?guid={guid}`);
+the resolver names items the same way, so either resolves to the episode's `PodcastEpisode` card
+(`POST /v1/resolve`), and `id` names that card when Pinakes already has it (an alias as its
+root). `stream` is the item's enclosure when it is public and direct, in the
 same shape as a card's (`{url, type, duration_s, preview}`: the URL a client hands to an audio
 element, its `audio/*` or `video/*` type, its length in whole seconds when the feed states one,
 and `preview: false`, the whole episode); `null` when the item has no enclosure or a signed,
@@ -831,7 +834,8 @@ The list is read with the show: the feed's own card (`PodcastSeries`) takes it f
 is; a Podcast Index or Apple Podcasts show page (and the player pages that open a show by its
 Apple ID) fetches the feed its record names, once per read of the show, and takes the same list.
 It is replaced whole each time the show's card is saved from a read of its feed; a read that
-could not reach the feed keeps the list it had. A show card without a list of its own (a page
+could not reach the feed, or not within three seconds, keeps the list it had (the list is
+optional: a slow feed never costs the show its card). A show card without a list of its own (a page
 whose feed could not be read, a service that names no feed) answers with the list of a member
 of its [group](#groups) that has one: the same show elsewhere. A known resource that is no
 show, or whose feed was not read yet, returns an empty list; an unknown ID is 404. The items a

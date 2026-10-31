@@ -939,6 +939,7 @@ pub(crate) mod fixture {
                 .map(|(url, status, kind, body)| (url.to_owned(), (status, kind, body)))
                 .collect(),
             asked: Default::default(),
+            delays: Default::default(),
         });
         let egress = crate::resolver::egress::Egress::with_backends(
             Default::default(),
@@ -951,10 +952,15 @@ pub(crate) mod fixture {
     pub struct Recorded {
         routes: std::collections::BTreeMap<String, (u16, &'static str, Vec<u8>)>,
         pub asked: std::sync::Mutex<Vec<String>>,
+        delays: std::sync::Mutex<std::collections::BTreeMap<String, std::time::Duration>>,
     }
     impl Recorded {
         pub fn asked(&self) -> Vec<String> {
             self.asked.lock().unwrap().clone()
+        }
+        /// Answer `url` only after `delay` (tokio time, so a paused test's clock): a slow host.
+        pub fn delay(&self, url: &str, delay: std::time::Duration) {
+            self.delays.lock().unwrap().insert(url.to_owned(), delay);
         }
     }
     #[async_trait::async_trait]
@@ -965,6 +971,10 @@ pub(crate) mod fixture {
             _: &[std::net::SocketAddr],
         ) -> anyhow::Result<crate::resolver::egress::Fetched> {
             self.asked.lock().unwrap().push(url.to_string());
+            let delay = self.delays.lock().unwrap().get(url.as_str()).copied();
+            if let Some(delay) = delay {
+                tokio::time::sleep(delay).await;
+            }
             let (status, kind, body) = self.routes.get(url.as_str()).cloned().unwrap_or((
                 404,
                 "text/html",

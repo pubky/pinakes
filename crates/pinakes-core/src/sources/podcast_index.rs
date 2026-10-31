@@ -199,7 +199,8 @@ impl Source for PodcastIndex {
             None => cx.missing(uri, self),
         };
         if let Some(feed) = feed_url {
-            doc.episodes = crate::episodes::fetch(cx.egress, &feed, cx.ttl).await;
+            doc.episodes =
+                crate::episodes::fetch(cx.egress, &feed, cx.ttl, crate::episodes::FEED_WAIT).await;
         }
         Ok(doc)
     }
@@ -300,10 +301,15 @@ mod tests {
             .is_none());
     }
 
+    /// The operator's pair is global (`CREDENTIALS`): the tests that set it hold this while
+    /// they run, one at a time, so none sees another's pair.
+    static PAIR: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     /// Without the operator's pair the source declines (the page gets a web card) and asks
-    /// nothing; with it, it asks the API, never the website. One test, since the pair is global.
+    /// nothing; with it, it asks the API, never the website.
     #[tokio::test(start_paused = true)]
     async fn the_api_is_asked_with_the_pair_and_nothing_without() {
+        let _pair = PAIR.lock().await;
         let api = "https://api.podcastindex.org/api/1.0/podcasts/byfeedid?id=577105";
         let (egress, recorded) = fixture::egress(vec![(
             api,
@@ -342,6 +348,7 @@ mod tests {
     /// (its first items, as recorded), newest first, with their public streams.
     #[tokio::test(start_paused = true)]
     async fn a_shows_card_lists_its_latest_episodes_from_its_feed() {
+        let _pair = PAIR.lock().await;
         let api = "https://api.podcastindex.org/api/1.0/podcasts/byfeedid?id=577105";
         let (egress, recorded) = fixture::egress(vec![
             (api, 200, "application/json", read("feed-577105.json")),

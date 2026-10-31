@@ -563,7 +563,7 @@
         "description": "One of a show's latest episodes, as its feed lists it.",
         "properties": {
           "guid": {
-            "description": "The item's GUID as the feed gives it (its enclosure URL when it gives none).",
+            "description": "What names the item ([`item_identity`]): its GUID as the feed gives it; its page when it\ngives none; else `sha256:` and the hex digest of its enclosure's URL, so a signed link\nshows nothing of itself here.",
             "type": "string"
           },
           "id": {

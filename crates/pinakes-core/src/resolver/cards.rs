@@ -1047,23 +1047,25 @@ fn podcast_body(
         .query_pairs()
         .find(|(k, _)| k == "guid")
         .map(|(_, v)| v.into_owned());
-    let chosen = items
-        .iter()
-        .find(|n| {
-            guid.as_ref()
-                .is_some_and(|g| field(**n, "guid").as_ref() == Some(g))
-                || field(**n, "link").is_some_and(|u| {
-                    crate::model::identity(&u).ok().map(|v| v.0)
-                        == crate::model::identity(uri).ok().map(|v| v.0)
-                })
-        })
-        .copied();
+    // The wanted item, named as the episode list names it (`episodes::item_identity`): by the
+    // GUID the URI asks for, or as the page the URI is.
+    let wanted = crate::model::identity(uri).ok().map(|v| v.0);
+    let chosen = items.iter().find_map(|n| {
+        let identity = crate::episodes::item_identity(*n, &f.url)?;
+        (guid.as_ref() == Some(&identity.guid)
+            || identity
+                .page
+                .as_deref()
+                .is_some_and(|p| crate::model::identity(p).ok().map(|v| v.0) == wanted))
+        .then_some((*n, identity))
+    });
     let mut d = ResourceMeta::new(uri, "media", ttl);
     d.attributes
         .insert("podcast_feed".into(), f.url.to_string());
     let episode = chosen.filter(|_| !direct || guid.is_some());
     let is_podcast = episode
-        .map(|item| podcast_namespace || enclosure(item))
+        .as_ref()
+        .map(|(item, _)| podcast_namespace || enclosure(*item))
         .unwrap_or_else(|| items.iter().any(|n| enclosure(*n)));
     if !is_podcast {
         if !direct {
@@ -1074,19 +1076,17 @@ fn podcast_body(
         d.name = field(channel, "title");
         return Ok(Some(d.bounded(web::ATTRIBUTES)?));
     }
-    if let Some(item) = episode {
-        let Some(guid) = field(item, "guid") else {
-            return Ok(None);
-        };
+    if let Some((item, identity)) = episode {
         d.set_type("PodcastEpisode");
         d.name = field(item, "title");
         d.description = field(item, "description").map(|s| plain(&s));
         if let Some(duration) = field(item, "duration") {
             d.attributes.insert("duration".into(), duration);
         }
-        d.attributes.insert("podcast_guid".into(), guid.clone());
+        d.attributes
+            .insert("podcast_guid".into(), identity.guid.clone());
         d.stream = item_stream(item);
-        if let Some(link) = field(item, "link").and_then(|u| web::origin_url(&f.url, &u)) {
+        if let Some(link) = identity.page {
             d.aliases.push(link);
         }
         d.image = item
