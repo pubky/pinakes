@@ -205,21 +205,6 @@ fn episode(item: roxmltree::Node<'_, '_>, feed: &Url) -> Option<Episode> {
     if uri.len() > 2048 {
         return None;
     }
-    let stream = child("enclosure").and_then(|e| {
-        let url = identity.enclosure.as_deref()?;
-        let media_type = e
-            .attribute("type")
-            .map(str::trim)
-            .filter(|t| !t.is_empty())
-            .map(str::to_owned)
-            .or_else(|| media_type_of(url))?;
-        Stream::public(
-            url,
-            &media_type,
-            duration(text("duration").as_deref()),
-            false,
-        )
-    });
     Some(Episode {
         id: None,
         uri,
@@ -229,22 +214,8 @@ fn episode(item: roxmltree::Node<'_, '_>, feed: &Url) -> Option<Episode> {
             .and_then(link),
         published: text("pubDate").as_deref().and_then(date),
         guid: identity.guid,
-        stream,
-    })
-}
-/// Seconds of an `itunes:duration`: `3557`, `59:17` or `1:02:03` (a fraction of a second is
-/// dropped).
-fn duration(s: Option<&str>) -> Option<u64> {
-    let parts: Vec<&str> = s?.trim().split(':').collect();
-    if parts.is_empty() || parts.len() > 3 {
-        return None;
-    }
-    parts.iter().try_fold(0u64, |acc, part| {
-        let whole = part.split('.').next().unwrap_or_default();
-        if whole.is_empty() || !whole.bytes().all(|b| b.is_ascii_digit()) || whole.len() > 9 {
-            return None;
-        }
-        acc.checked_mul(60)?.checked_add(whole.parse().ok()?)
+        // As the episode's own card reads it, so the list and the card play the same file.
+        stream: crate::resolver::cards::item_stream(item),
     })
 }
 /// A date as feeds write it (RFC 2822, some RFC 3339), within the stored range.
@@ -254,26 +225,6 @@ fn date(s: &str) -> Option<DateTime<Utc>> {
         .ok()
         .map(|d| d.to_utc())
         .and_then(crate::event::time::bounded)
-}
-/// The media type an enclosure without one has by its path's extension.
-fn media_type_of(url: &str) -> Option<String> {
-    let path = Url::parse(url).ok()?.path().to_ascii_lowercase();
-    let ext = path.rsplit_once('.')?.1.to_owned();
-    Some(
-        match ext.as_str() {
-            "mp3" => "audio/mpeg",
-            "m4a" => "audio/mp4",
-            "aac" => "audio/aac",
-            "ogg" | "oga" => "audio/ogg",
-            "opus" => "audio/opus",
-            "flac" => "audio/flac",
-            "wav" => "audio/wav",
-            "mp4" | "m4v" => "video/mp4",
-            "webm" => "video/webm",
-            _ => return None,
-        }
-        .to_owned(),
-    )
 }
 fn bounded(mut s: String, max: usize) -> String {
     if s.len() > max {
@@ -446,7 +397,7 @@ mod tests {
         let body = feed(concat!(
             // Out of order: the second item is the newest.
             r#"<item><title>Two</title><guid isPermaLink="false">ep-2</guid><link>https://show.example/2</link><pubDate>Tue, 20 Oct 2026 10:00:00 +0000</pubDate><itunes:duration>59:17</itunes:duration><itunes:image href="/art/2.jpg"/><enclosure url="https://cdn.example/2.mp3" type="audio/mpeg" length="100"/></item>"#,
-            r#"<item><title>Three</title><guid>ep-3</guid><link>https://show.example/3</link><pubDate>Wed, 21 Oct 2026 10:00:00 +0000</pubDate><itunes:duration>1:02:03</itunes:duration><enclosure url="https://cdn.example/3.mp3"/></item>"#,
+            r#"<item><title>Three</title><guid>ep-3</guid><link>https://show.example/3</link><pubDate>Wed, 21 Oct 2026 10:00:00 +0000</pubDate><itunes:duration>1:02:03</itunes:duration><enclosure url="https://cdn.example/3.mp3" type="audio/mpeg"/></item>"#,
             // A signed enclosure is listed without a stream.
             r#"<item><title>One</title><guid>ep-1</guid><link>https://show.example/1</link><pubDate>Mon, 19 Oct 2026 10:00:00 +0000</pubDate><itunes:duration>3557</itunes:duration><enclosure url="https://cdn.example/1.mp3?Expires=1&amp;Signature=abc" type="audio/mpeg"/></item>"#,
             // No GUID and no link: a digest of the enclosure names it, and its feed item is its URI.
@@ -472,8 +423,7 @@ mod tests {
                 media_type: "audio/mpeg".into(),
                 duration_s: Some(3723),
                 preview: false
-            }),
-            "a type the enclosure lacks comes from its extension"
+            })
         );
         let two = &episodes[1];
         assert_eq!(two.stream.as_ref().unwrap().duration_s, Some(3557));
@@ -506,6 +456,13 @@ mod tests {
                 .map(|s| (s.media_type.as_str(), s.duration_s)),
             Some(("audio/mp4", None))
         );
+        // An enclosure without a type is no stream, as the episode's own card has none.
+        let untyped = feed(
+            r#"<item><title>Untyped</title><guid>u</guid><enclosure url="https://cdn.example/u.mp3"/></item>"#,
+        );
+        let listed = from_feed(&fetched(&untyped, false)).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].stream, None);
         // A feed cut at the cap inside its last item reads the whole ones.
         let cut = &body[..body.find("<item><title>Note").unwrap() + 20];
         assert_eq!(from_feed(&fetched(cut, true)).unwrap().len(), 4);
@@ -591,15 +548,7 @@ mod tests {
     }
 
     #[test]
-    fn durations_and_dates_as_feeds_write_them() {
-        assert_eq!(duration(Some("3557")), Some(3557));
-        assert_eq!(duration(Some("59:17")), Some(3557));
-        assert_eq!(duration(Some("1:02:03")), Some(3723));
-        assert_eq!(duration(Some("01:02:03.500")), Some(3723));
-        assert_eq!(duration(Some("")), None);
-        assert_eq!(duration(Some("1:2:3:4")), None);
-        assert_eq!(duration(Some("an hour")), None);
-        assert_eq!(duration(None), None);
+    fn dates_as_feeds_write_them() {
         assert!(date("Tue, 20 Oct 2026 10:00:00 GMT").is_some());
         assert!(date("2026-10-20T10:00:00Z").is_some());
         assert!(date("yesterday").is_none());
