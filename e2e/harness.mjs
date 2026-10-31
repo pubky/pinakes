@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { PubkySpecsBuilder } from 'pubky-app-specs';
@@ -60,6 +61,21 @@ export function judgeRecipes(results) {
     else failed.push({ name: r.name, uri: r.uri, reason: r.status === 'refused' ? `the API refuses it (${r.error}), the recipe promises ${r.want}` : `card ${r.status}${r.type ? ` ${r.type}` : ''}${r.error ? ` (${r.error})` : ''}, the recipe promises ${r.want}` });
   }
   return { checked: results.length, failed, skipped };
+}
+/** `sql`'s unaligned output from psql, in `database` of the cluster at `cluster` (a libpq URL). A
+ * failure names the cluster with its password masked, in the URL or its query: psql's own error
+ * carries the whole command line. */
+export function psql(cluster, database, sql) {
+  const url = new URL(cluster); url.pathname = `/${database}`;
+  try {
+    return execFileSync('psql', [url.href, '-Atc', sql], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  } catch (error) {
+    const secrets = [url.password, decodeURIComponent(url.password), url.searchParams.get('password')].filter(Boolean);
+    if (url.password) url.password = '***';
+    if (url.searchParams.has('password')) url.searchParams.set('password', '***');
+    const said = secrets.reduce((text, secret) => text.replaceAll(secret, '***'), String(error.stderr ?? '').trim());
+    throw new Error(`psql on ${url.href} failed (${error.status ?? error.code})${said ? `: ${said}` : ''}`);
+  }
 }
 /** The newest item's link in an RSS feed: the first `<item>`'s `<link>`. */
 export function newestLink(rss) {

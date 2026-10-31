@@ -1,6 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { dropRefusedPages, expectCard, findsEvery, freshen, instanceAgent, judgeRecipes, mcpAnswer, newestLink, ownTags, rereadMoved, socialAgrees, userAgent, withTags, withoutStackSkipped } from './harness.mjs';
+import { dropRefusedPages, expectCard, findsEvery, freshen, instanceAgent, judgeRecipes, mcpAnswer, newestLink, ownTags, psql, rereadMoved, socialAgrees, userAgent, withTags, withoutStackSkipped } from './harness.mjs';
+test('a failed psql call never shows the cluster\'s password', () => {
+  for (const cluster of ['postgresql://e2e:Dummy-Secret-42@127.0.0.1:1/postgres', 'postgresql:///postgres?host=127.0.0.1&port=1&user=e2e&password=Query-Secret-42']) {
+    assert.throws(() => psql(cluster, 'postgres', 'SELECT 1'), error => {
+      assert.doesNotMatch(error.stack, /Secret-42/); assert.match(error.message, /^psql on postgresql:.*\*\*\*/);
+      assert.deepEqual(Object.keys(error), []); return true;
+    });
+  }
+});
 test('a PUT that commits then times out is included in cleanup', async () => {
   const stored = new Set(), report = {}, journal = [];
   const storage = { exists: async p => stored.has(p), putJson: async p => { stored.add(p); if (p === 'second') throw new Error('timeout'); }, delete: async p => stored.delete(p) };

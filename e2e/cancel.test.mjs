@@ -3,17 +3,15 @@
 // Nothing leaves this host: egress allows no host, and the routes that skip it (Pubky, OSM) are off.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { readFile, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
+import { psql } from './harness.mjs';
 
 const cluster = process.env.DATABASE_URL ?? 'postgresql:///postgres?host=/var/run/postgresql';
 const offline = { PINAKES__EGRESS__ALLOW_HOSTS: '["e2e.invalid"]', PINAKES__PUBKY__ENABLED: 'false', PINAKES__OSM__ENABLED: 'false' };
-const query = (database, sql) => {
-  const url = new URL(cluster); url.pathname = `/${database}`;
-  return execFileSync('psql', [url.href, '-Atc', sql], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-};
+const query = (database, sql) => psql(cluster, database, sql);
 const owned = () => query('postgres', "SELECT datname FROM pg_database WHERE datname LIKE 'pinakes\\_e2e\\_owned\\_%'").split('\n').filter(Boolean);
 /** The run's database once its first recipe is stored: the run is past its setup. */
 async function running(before) {
