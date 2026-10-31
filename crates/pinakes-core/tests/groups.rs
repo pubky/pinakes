@@ -756,6 +756,50 @@ async fn group_failure_keeps_document_and_drain_advances(pool: PgPool) {
     );
 }
 
+/// Whether `a` and `b` are members of one group.
+async fn together(pool: &PgPool, a: &str, b: &str) -> bool {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM group_unit x JOIN group_unit y ON x.group_id=y.group_id WHERE x.resource_id=$1 AND y.resource_id=$2)")
+        .bind(a)
+        .bind(b)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// `common::drain_groups` runs a grouping again that a drain leaves deferred, whether it was
+/// parked on an error (`group_failed`, a minute on) or on a busy writer (`lock_busy`, seconds on).
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn drain_groups_runs_a_deferred_grouping_again(pool: PgPool) {
+    let cfg = groups::GroupConfig::default();
+    for error in ["group_failed", "lock_busy"] {
+        let page_uri = format!("https://example.org/{error}");
+        let card_uri = format!("doi:10.5555/{error}");
+        let page = store::ensure_resource(&pool, &page_uri).await.unwrap();
+        let card = store::ensure_resource(&pool, &card_uri).await.unwrap();
+        // Both runs parked as a loaded machine parks them, due after the test reads groups: the
+        // saves' own runs and a drain skip them.
+        sqlx::query("INSERT INTO group_dirty(resource_id,last_error,next_attempt_at) SELECT unnest($1::text[]),$2,now()+interval '1 hour' ON CONFLICT(resource_id) DO UPDATE SET last_error=excluded.last_error,next_attempt_at=excluded.next_attempt_at")
+            .bind(vec![page.clone(), card.clone()])
+            .bind(error)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut d = ResourceMeta::new(&page_uri, "web", 86400);
+        d.set_type("MusicRecording");
+        group_keys::add(&mut d, "cites_doi", &format!("10.5555/{error}"));
+        store::save_document(&pool, &page, 0, &d).await.unwrap();
+        let mut d = ResourceMeta::new(&card_uri, "doi", 86400);
+        d.set_type("ScholarlyArticle");
+        group_keys::add(&mut d, "doi", &format!("10.5555/{error}"));
+        group_keys::add(&mut d, "registry", &page_uri);
+        store::save_document(&pool, &card, 0, &d).await.unwrap();
+        assert_eq!(groups::drain(&pool, &cfg, 100).await.unwrap(), 0, "{error}");
+        assert!(!together(&pool, &card, &page).await, "{error}");
+        common::drain_groups(&pool, &cfg).await;
+        assert!(together(&pool, &card, &page).await, "{error}");
+    }
+}
+
 /// A card names its group's size, and `also_on` eight other members, the first by ID, whichever
 /// member asks.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
