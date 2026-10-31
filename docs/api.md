@@ -132,7 +132,7 @@ One field for everything playable, so a client needs one player for episodes and
 | Field | Meaning |
 | --- | --- |
 | `url` | The audio itself, for an `<audio>` element: never a player page. Pinakes never fetches or proxies it |
-| `type` | Its MIME type, always `audio/…` or `video/…` |
+| `type` | Its MIME type without parameters, always `audio/…` or `video/…`, at most 127 bytes |
 | `duration_s` | Its length in whole seconds when its source states it, else `null`. A preview's is usually `null`; the recording's own length is the fact `duration` |
 | `preview` | `true` for a short sample of a longer recording (a music service's 30-second preview), `false` for the whole of it (an episode) |
 

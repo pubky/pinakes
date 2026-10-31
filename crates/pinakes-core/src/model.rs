@@ -58,8 +58,8 @@ impl Stream {
     /// The stream, when `url` is public, direct audio a client may play: `https` or `http` on a
     /// named host (no IP address, `localhost` or single label), no credentials, no parameter that
     /// signs it or makes it expire ([`signed`]), at most 2,048 bytes; `media_type` an `audio/` or
-    /// `video/` type; a length of at most a week (0 is unknown). Every source's stream is built
-    /// here.
+    /// `video/` type of at most 127 bytes (RFC 6838's limit for a subtype; the parameters are
+    /// dropped); a length of at most a week (0 is unknown). Every source's stream is built here.
     pub fn public(
         url: &str,
         media_type: &str,
@@ -85,6 +85,7 @@ impl Stream {
         let (top, sub) = essence.split_once('/')?;
         if !matches!(top, "audio" | "video")
             || sub.is_empty()
+            || essence.len() > 127
             || !sub
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b"+-.".contains(&b))
@@ -486,6 +487,30 @@ mod tests {
         }
         let long = format!("https://cdn.example.org/{}.mp3", "a".repeat(2048));
         assert_eq!(Stream::public(&long, "audio/mpeg", None, false), None);
+        // A type of at most 127 bytes, so a stored stream stays small (review of 49666ef1).
+        let typed = |sub: usize| {
+            Stream::public(
+                enclosure,
+                &format!("audio/{}", "x".repeat(sub)),
+                None,
+                false,
+            )
+        };
+        assert_eq!(typed(121).unwrap().media_type.len(), 127);
+        assert_eq!(typed(122), None);
+        assert_eq!(typed(5000), None);
+        // Long parameters are dropped, not counted.
+        assert_eq!(
+            Stream::public(
+                enclosure,
+                &format!("audio/mpeg; x={}", "y".repeat(5000)),
+                None,
+                false
+            )
+            .unwrap()
+            .media_type,
+            "audio/mpeg"
+        );
         assert_eq!(
             Stream::public(enclosure, "audio/mpeg", Some(8 * 86400), false),
             None
@@ -495,6 +520,13 @@ mod tests {
         doc.stream = Some(Stream {
             url: "https://cdn.example.org/ep.mp3?token=1".into(),
             media_type: "audio/mpeg".into(),
+            duration_s: None,
+            preview: false,
+        });
+        assert_eq!(doc.clone().bounded(&[]).unwrap().stream, None);
+        doc.stream = Some(Stream {
+            url: enclosure.into(),
+            media_type: format!("audio/{}", "x".repeat(5000)),
             duration_s: None,
             preview: false,
         });
