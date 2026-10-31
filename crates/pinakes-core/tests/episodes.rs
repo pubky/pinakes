@@ -340,6 +340,31 @@ async fn a_cleared_card_lists_nothing(pool: PgPool) {
     assert_eq!(page["items"].as_array().unwrap().len(), 0, "{page}");
 }
 
+/// An OpenStreetMap place has no `type_path` on its resource row (its card lives in `osm_place`):
+/// it is no show, and the route says so with an empty list, not an error.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_place_without_a_type_path_lists_nothing(pool: PgPool) {
+    let uri = "https://www.openstreetmap.org/node/123";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    // As `store::write_document` leaves a place's row.
+    sqlx::query("UPDATE resource SET type_path=NULL,osm_type='node',osm_id=123 WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let path: Option<Vec<String>> =
+        sqlx::query_scalar("SELECT type_path FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(path, None);
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let (status, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
+    assert_eq!(status, 200, "{page}");
+    assert_eq!(page["items"].as_array().unwrap().len(), 0, "{page}");
+}
+
 /// A show card without a list of its own (an Apple Podcasts page whose feed could not be read)
 /// lists the episodes of a member of its group that has them: the same show elsewhere.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]

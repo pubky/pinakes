@@ -378,7 +378,7 @@ pub async fn list(
     if !(1..=KEPT).contains(&limit) {
         return Err(ApiError::bad("limit must be 1–20"));
     }
-    let root: Option<(String, Vec<String>, String)> = sqlx::query_as("SELECT r.id,r.type_path,r.status FROM resource r WHERE r.id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1)")
+    let root: Option<(String, Vec<String>, String)> = sqlx::query_as("SELECT r.id,coalesce(r.type_path,'{}'),r.status FROM resource r WHERE r.id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1)")
         .bind(&id)
         .fetch_optional(&state.pool)
         .await?;
@@ -389,7 +389,8 @@ pub async fn list(
         ));
     };
     // A group member's list stands in for a show's own only: a card cleared, missing or no show
-    // lists nothing, whatever its group has.
+    // lists nothing, whatever its group has. (`type_path` is null for an OpenStreetMap place,
+    // whose card lives in `osm_place`: no show, read as an empty path.)
     let show = is_show(&type_path, &status);
     let rows: Vec<Row> = sqlx::query_as(
         "WITH own AS (SELECT $1::text AS id WHERE EXISTS (SELECT 1 FROM podcast_episode WHERE resource_id=$1)),\
