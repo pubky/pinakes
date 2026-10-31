@@ -143,6 +143,8 @@ fails when a card is not the type its recipe promises: an event page gone stale,
 down (`recipes.failed` in the report, and `recipe failed: …`). A card of a type under the
 promised one passes (a City is a Place). A recipe this host could not check is left out with the
 reason (`recipes.skipped`, and `recipe left out: …`): its host could not be reached (DNS,
-connection or timeout), answered with a bot wall, or asked this host to wait. It needs no test identity and writes nothing to
+connection or timeout), answered with a bot wall, or asked this host to wait. A recipe `/v1/resolve`
+would refuse under these settings (its resolver switched off, as `PINAKES__GEO__ENABLED=false` does to the `geo:` one) fails,
+with the API's reason. It needs no test identity and writes nothing to
 Pubky or Nexus. `--isolated-live` runs it too, after its own flow. Replace a failed recipe with a
 current link of the same kind, then update docs/api.md and run `scripts/openapi`.

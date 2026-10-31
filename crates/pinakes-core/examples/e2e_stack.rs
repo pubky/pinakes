@@ -649,11 +649,18 @@ async fn run_recipes(pool: sqlx::PgPool) -> Result<()> {
         }
         let (id, uri, _) = identity(uri)?;
         let target = pinakes_core::alias::root(&uri).map_or_else(|| uri.clone(), |a| a.root);
-        let Some(resolver) = pinakes_core::resolver::classify_config(&target, &live.cfg)
-            .and_then(|kind| live.resolvers.iter().find(|r| r.name() == kind))
-        else {
-            results.push(json!({"name":recipe.name,"uri":uri,"want":want,"status":"unrouted"}));
-            continue;
+        // A recipe the endpoint would answer with a 400 (no resolver, or one switched off) is
+        // refused here too, with the endpoint's reason.
+        let resolver = match pinakes_core::resolver::admit(&target, &live.cfg) {
+            Ok(kind) => live
+                .resolvers
+                .iter()
+                .find(|r| r.name() == kind)
+                .expect("live() builds every route"),
+            Err(reason) => {
+                results.push(json!({"name":recipe.name,"uri":uri,"want":want,"status":"refused","error":reason}));
+                continue;
+            }
         };
         pinakes_core::store::ensure_resource(&pool, &uri).await?;
         let id = pinakes_core::alias::resolve_id(&pool, &id).await?;

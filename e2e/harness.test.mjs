@@ -66,7 +66,7 @@ test('a needs_page sample whose site refuses this host is left out with the reas
   // A sample another one joins is never left out.
   await assert.rejects(dropRefusedPages([...samples, { kind: 'pair', uri: 'https://x.example/', group_with: 'index' }], async url => status[url] ?? 200), /joined by another/);
 });
-test('a live recipe must be a card of the type it promises or one under it, unless this host could not check it', () => {
+test('a live recipe must be a card of the type it promises or one under it, unless this host could not check it; one the API refuses fails', () => {
   const r = (name, status, type, error, want = 'Event', type_path = type && ['Thing', type]) => ({ name, uri: `https://${name}.example/e/1`, want, status, type, type_path, error });
   const judged = judgeRecipes([
     r('ok', 'ok', 'Event', null),
@@ -78,14 +78,16 @@ test('a live recipe must be a card of the type it promises or one under it, unle
     r('down', 'pending', null, 'http_5xx'),
     r('walled', 'unreachable', null, 'wall'),
     r('busy', 'pending', null, 'rate_limited'),
-    { name: 'odd', uri: 'nostr:naddr1x', want: 'Event', status: 'unrouted' },
+    { name: 'odd', uri: 'nostr:naddr1x', want: 'Event', status: 'refused', error: 'no resolver available for this URI' },
+    { name: 'off', uri: 'geo:46.0,8.9', want: 'Place', status: 'refused', error: 'resolver is disabled' },
   ]);
-  assert.equal(judged.checked, 10);
+  assert.equal(judged.checked, 11);
   assert.deepEqual(judged.failed, [
     { name: 'page', uri: 'https://page.example/e/1', reason: 'card ok WebPage, the recipe promises Event' },
     { name: 'gone', uri: 'https://gone.example/e/1', reason: 'card pending (http_4xx), the recipe promises DataFeed' },
     { name: 'down', uri: 'https://down.example/e/1', reason: 'card pending (http_5xx), the recipe promises Event' },
-    { name: 'odd', uri: 'nostr:naddr1x', reason: 'no resolver takes it, the recipe promises Event' },
+    { name: 'odd', uri: 'nostr:naddr1x', reason: 'the API refuses it (no resolver available for this URI), the recipe promises Event' },
+    { name: 'off', uri: 'geo:46.0,8.9', reason: 'the API refuses it (resolver is disabled), the recipe promises Place' },
   ]);
   assert.deepEqual(judged.skipped, [
     { name: 'dns', uri: 'https://dns.example/e/1', reason: 'dns.example could not be reached from this host (dns)' },

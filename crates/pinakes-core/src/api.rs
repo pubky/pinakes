@@ -2358,19 +2358,7 @@ pub async fn resolve(
     let (id, uri, _) = model::identity(&body.uri).map_err(|e| ApiError::bad(e.to_string()))?;
     // An alias is never fetched: the root's route decides.
     let target = crate::alias::root(&uri).map_or_else(|| uri.clone(), |a| a.root);
-    let resolver = crate::resolver::classify_config(&target, &state.config)
-        .ok_or_else(|| ApiError::bad("no resolver available for this URI"))?;
-    if (resolver == "event_platform"
-        && crate::event::adapters::detect(&target)
-            .is_none_or(|d| !crate::event::adapters::manifest(d, &state.config.event).enabled))
-        || (resolver == "web" && !state.config.web.enabled)
-        || (resolver == "pubky" && !state.config.pubky.enabled)
-        || (resolver == "geo" && !state.config.geo.enabled)
-        || (resolver == "osm" && !state.config.osm.enabled)
-        || (resolver == "event" && (!state.config.event.enabled || !state.config.event.calendars))
-    {
-        return Err(ApiError::bad("resolver is disabled"));
-    }
+    crate::resolver::admit(&target, &state.config).map_err(ApiError::bad)?;
     state.preview_budget(peer.ip(), &id).await?;
     store::ensure_resource(&state.pool, &uri).await?;
     let id = crate::alias::resolve_id(&state.pool, &id).await?;

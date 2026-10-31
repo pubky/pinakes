@@ -49,14 +49,15 @@ const LEFT_OUT = {
 };
 /** The public `/v1/resolve` recipes as `e2e_stack --live-recipes` resolved them: each must be a
  * card of the type it promises, or of a type under it (a City is a Place), or is left out with
- * the reason when this host could not check it. */
+ * the reason when this host could not check it. One the API refuses (no resolver, or one switched
+ * off) fails. */
 export function judgeRecipes(results) {
   const failed = [], skipped = [];
   for (const r of results) {
     if (r.status === 'ok' && (r.type === r.want || r.type_path?.includes(r.want))) continue;
     const host = /^[a-z]+:\/\/([^/?#]+)/i.exec(r.uri)?.[1] ?? r.uri.split(':')[0];
     if (LEFT_OUT[r.error]) skipped.push({ name: r.name, uri: r.uri, reason: LEFT_OUT[r.error](host) });
-    else failed.push({ name: r.name, uri: r.uri, reason: r.status === 'unrouted' ? `no resolver takes it, the recipe promises ${r.want}` : `card ${r.status}${r.type ? ` ${r.type}` : ''}${r.error ? ` (${r.error})` : ''}, the recipe promises ${r.want}` });
+    else failed.push({ name: r.name, uri: r.uri, reason: r.status === 'refused' ? `the API refuses it (${r.error}), the recipe promises ${r.want}` : `card ${r.status}${r.type ? ` ${r.type}` : ''}${r.error ? ` (${r.error})` : ''}, the recipe promises ${r.want}` });
   }
   return { checked: results.length, failed, skipped };
 }

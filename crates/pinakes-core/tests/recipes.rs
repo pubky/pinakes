@@ -906,6 +906,52 @@ async fn every_named_example_returns_data(pool: PgPool) {
     nexus.abort();
 }
 
+/// A recipe whose resolver is switched off is refused by `resolver::admit`, as `/v1/resolve`
+/// refuses it: the endpoint answers 400 with the same reason, and the live recipe check
+/// (`e2e_stack --live-recipes`), which asks `admit`, reports the refusal instead of a card.
+/// Calendars switched off are read as web pages, by both.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_recipe_whose_resolver_is_off_is_refused_as_the_endpoint_refuses_it(pool: PgPool) {
+    use pinakes_core::resolver::{admit, ROUTES};
+    let uris: Vec<String> = pinakes_core::recipes::recipes()
+        .into_iter()
+        .filter(|r| r.path == "/v1/resolve")
+        .filter_map(|r| r.body.as_ref()?["uri"].as_str().map(str::to_owned))
+        .collect();
+    let on = Config::default();
+    for route in ROUTES {
+        // An event platform's web link falls back to the web route; a Nostr link has none.
+        let uri = uris
+            .iter()
+            .find(|u| {
+                admit(u, &on) == Ok(route) && (route != "event_platform" || u.starts_with("nostr:"))
+            })
+            .unwrap_or_else(|| panic!("no recipe takes the {route} route"));
+        let mut off = Config::default();
+        match route {
+            "web" => off.web.enabled = false,
+            "pubky" => off.pubky.enabled = false,
+            "geo" => off.geo.enabled = false,
+            "osm" => off.osm.enabled = false,
+            "event" => off.event.calendars = false,
+            "event_platform" => off.event.adapters.enabled = false,
+            _ => unreachable!("{route}"),
+        }
+        if route == "event" {
+            assert_eq!(admit(uri, &off), Ok("web"), "{uri}");
+            continue;
+        }
+        assert_eq!(admit(uri, &off), Err("resolver is disabled"), "{uri}");
+        let app = api::router(AppState::new(pool.clone(), off).unwrap());
+        let (code, answer) = send(&app, "POST", "/v1/resolve", Some(&json!({ "uri": uri }))).await;
+        assert_eq!(
+            (code, answer),
+            (400, json!({"error":"resolver is disabled"})),
+            "{uri}"
+        );
+    }
+}
+
 /// Docs/api.md lists every recipe's request line, so the recipes there cannot drift.
 #[test]
 fn the_api_docs_list_every_recipe() {
