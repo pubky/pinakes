@@ -512,7 +512,8 @@ fetched and parsed within three seconds and what is left of the read's deadline,
 or a wait for a parser costs the list and never the card), kept in `podcast_episode` (the rows
 follow the document: replaced at a save, cleared when the card is cleared or scrubbed) and served by
 `GET /v1/resources/{id}/episodes` ([API](api.md#episodes)).
-After the upgrade that added them, the lists fill as shows are read again (`reextract web`).
+After the upgrade that added them, the lists fill as shows are read again: `reextract all`
+(feed cards are `media`, Podcast Index pages `official`, player pages `web`).
 
 A challenge page (a bot wall, captcha or sign-in redirect) is a failed fetch: the resource turns
 `unreachable` and is retried with the normal backoff, dead-lettering after

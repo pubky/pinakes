@@ -387,4 +387,49 @@ async fn a_show_without_a_list_lists_a_group_members(pool: PgPool) {
     // The feed's own list is its own, whatever the group.
     let (_, page) = request(&app, &format!("/v1/resources/{feed}/episodes")).await;
     assert_eq!(page["items"].as_array().unwrap().len(), 2);
+    // A member that is no show (the show's website, grouped with it) lists nothing of the feed's.
+    let site = store::ensure_resource(&pool, "https://show.example/")
+        .await
+        .unwrap();
+    let mut d = ResourceMeta::new("https://show.example/", "web", 86_400);
+    d.set_type("WebSite");
+    store::save_document(&pool, &site, 0, &d).await.unwrap();
+    sqlx::query("UPDATE group_unit SET group_id=$1 WHERE resource_id=$2")
+        .bind(group)
+        .bind(&site)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (_, page) = request(&app, &format!("/v1/resources/{site}/episodes")).await;
+    assert_eq!(page["items"].as_array().unwrap().len(), 0, "{page}");
+    // The Apple page cleared (a page too complex to parse): no longer a show, it lists nothing,
+    // grouped as it still is.
+    pinakes_core::changes::clear(&pool, &apple, 0, "too_complex")
+        .await
+        .unwrap();
+    let (_, page) = request(&app, &format!("/v1/resources/{apple}/episodes")).await;
+    assert_eq!(page["items"].as_array().unwrap().len(), 0, "{page}");
+    // Read again as the show it is (and grouped again, as the grouping pass would leave it), it
+    // lists the feed's once more.
+    let mut d = ResourceMeta::new(
+        "https://podcasts.apple.com/us/podcast/show/id123",
+        "web",
+        86_400,
+    );
+    d.set_type("PodcastSeries");
+    store::save_document(&pool, &apple, 0, &d).await.unwrap();
+    // The save dissolved the group it was in; the grouping pass would form it again.
+    sqlx::query("INSERT INTO \"group\"(id) VALUES($1) ON CONFLICT DO NOTHING")
+        .bind(group)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE group_unit SET group_id=$1 WHERE resource_id=ANY($2)")
+        .bind(group)
+        .bind(vec![feed.clone(), apple.clone()])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (_, page) = request(&app, &format!("/v1/resources/{apple}/episodes")).await;
+    assert_eq!(page["items"].as_array().unwrap().len(), 2, "{page}");
 }

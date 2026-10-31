@@ -2735,7 +2735,7 @@
     },
     "/v1/resources/{id}/episodes": {
       "get": {
-        "description": "A podcast show's latest episodes as its feed lists them, newest first: at most 20, each with its page or feed item, date and public stream. The show's own list, else that of a member of its group which has one (an Apple Podcasts show grouped with its feed). A known resource that is no show, or whose feed was not read yet, returns an empty list.",
+        "description": "A podcast show's latest episodes as its feed lists them, newest first: at most 20, each with its page or feed item, date and public stream. The show's own list, else, for a card that is a show, that of a member of its group which has one (an Apple Podcasts show grouped with its feed). A known resource that is no show, or no longer one, or whose feed was not read yet, returns an empty list.",
         "operationId": "list_episodes",
         "parameters": [
           {
