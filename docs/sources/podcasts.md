@@ -78,7 +78,9 @@ Podcast Index page
   - A card without a [stream](../api.md#stream) of its own takes it at its next read. The
     source asks for that read at once.
   - A link that isn't a public stream, or is longer than a fact's 512 bytes, is none.
-  - A Fountain episode's feed is read for the stream even when no GUID is vouched.
+  - A Fountain episode's feed is read for the stream even when no GUID is vouched, unless the
+    card plays a stream of its own. A stream it took from this source is no reason to skip the
+    read: each lookup hears of it again, or the card would lose it at its next refresh.
   - A stream joins nothing: a copy of a show's feed plays its own audio, and gets no key from
     it.
 

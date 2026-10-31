@@ -196,6 +196,21 @@ pub fn enclosure_key(url: &str) -> Option<String> {
     let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
     Some(format!("podcast:enclosure:{hex}"))
 }
+/// Whether the card plays a stream of its own: one no [`STREAMS`] source wrote into it
+/// ([`type_card`], which fingerprints what it wrote in `hinted_by`). A source that heard of the
+/// stream a card plays keeps hearing of it, or the card loses it at its next refresh.
+pub fn own_stream(doc: &crate::model::ResourceMeta) -> bool {
+    let Some(stream) = &doc.stream else {
+        return false;
+    };
+    !STREAMS.iter().any(|(source, _)| {
+        doc.hinted_by.get(*source).is_some_and(|written| {
+            [None, Some("episode")]
+                .into_iter()
+                .any(|also| *written == stream_fingerprint(also, stream))
+        })
+    })
+}
 /// Record a stream a [`STREAMS`] source heard of as its facts: a card without a stream of its
 /// own takes it ([`type_card`]), and one that has none yet is read again now. A link longer than
 /// a fact holds (512 bytes) is none.

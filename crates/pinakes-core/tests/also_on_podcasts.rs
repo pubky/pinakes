@@ -4,6 +4,7 @@ mod common;
 use common::media::*;
 use pinakes_core::{
     also_on::{
+        media::{type_card, TypeHints},
         podcasts::{derived_guid, enclosure_key, item_key, Podcasts},
         Fact, Found, Source, Subject,
     },
@@ -612,6 +613,27 @@ fn heard(found: &Found) -> Vec<(&str, &str)> {
         .collect()
 }
 
+/// The hints a card would read from these stream facts (`media::type_hints`, without a database).
+fn hints_of(found: &Found, episode: bool) -> TypeHints {
+    let fact = |name: &str| {
+        heard(found)
+            .into_iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, v)| v)
+    };
+    let stream = Stream::public(
+        fact("stream_url").unwrap(),
+        fact("stream_type").unwrap(),
+        fact("stream_duration").map(|d| d.parse().unwrap()),
+        false,
+    );
+    TypeHints {
+        stream: stream.map(|s| ("podcasts".to_owned(), s)),
+        episode,
+        ..Default::default()
+    }
+}
+
 /// An episode's lookup hears of its enclosure and records it: Apple's episode from iTunes'
 /// record of it, a Podcast Index episode from Podcast Index's, a feed card's item (a Fountain
 /// episode page) from the feed. A card without a stream of its own is read again to take it;
@@ -656,6 +678,36 @@ async fn an_episode_hears_of_its_stream() {
     let found = Podcasts.lookup(&unvouched, &fountain).await.unwrap();
     assert!(found.keys.is_empty(), "{found:?}");
     assert_eq!(heard(&found), pc20_275);
+    // Once its card plays that stream, the next lookup still hears of it, so the card keeps it at
+    // its next refresh (review of e10ca9a2: the facts went 3 -> 0 and the card lost its audio).
+    // Whether or not the source also typed the card an episode (its fingerprint says which).
+    for episode in [false, true] {
+        let mut card = fountain.doc.clone().unwrap();
+        type_card(&fountain.uri, &hints_of(&found, episode), &mut card);
+        assert!(card.stream.is_some());
+        let again = subject(&fountain.uri, Some("PodcastEpisode"), Some(card.clone()));
+        let found = Podcasts.lookup(&unvouched, &again).await.unwrap();
+        assert_eq!(heard(&found), pc20_275, "{episode}");
+        assert!(!found.reread, "its card plays it already");
+        let mut refreshed = fountain.doc.clone().unwrap();
+        type_card(&fountain.uri, &hints_of(&found, episode), &mut refreshed);
+        assert_eq!(refreshed.stream, card.stream);
+        assert_eq!(
+            refreshed.hinted_by, card.hinted_by,
+            "the stored card is not outdated"
+        );
+    }
+    // A card with a stream of its own is not read for one.
+    let mut own = fountain.doc.clone().unwrap();
+    own.stream = Stream::public("https://cdn.example.org/own.mp3", "audio/mpeg", None, false);
+    let found = Podcasts
+        .lookup(
+            &unvouched,
+            &subject(&fountain.uri, Some("PodcastEpisode"), Some(own)),
+        )
+        .await
+        .unwrap();
+    assert!(heard(&found).is_empty(), "{found:?}");
     // The Daily's episode on Apple: the enclosure in the feed iTunes reads (`feed=Sl5CSM3S`).
     let daily = format!("{DAILY}?i=1000797051580");
     let found = Podcasts

@@ -1206,8 +1206,10 @@ impl Podcasts {
                     Some(item) => {
                         // The item key only for the page the vouched feed names as the item's
                         // `<link>`.
-                        // Its stream too, for a card without one of its own (Fountain's page).
-                        let unheard = subject.doc.as_ref().is_some_and(|d| d.stream.is_none());
+                        // Its stream too, for a card without one of its own (Fountain's page):
+                        // also once the card plays the one heard here, or the next lookup would
+                        // hear of none and the card would lose it.
+                        let unheard = subject.doc.as_ref().is_some_and(|d| !media::own_stream(d));
                         let read = match vouched.is_some() || unheard {
                             true => deferred.take("feed", Self::feed(cx, url, Some(item)).await),
                             false => None,
