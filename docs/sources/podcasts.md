@@ -73,8 +73,9 @@ Podcast Index page
   fails the lookup: what the other services answered still counts.
 - A Pocket Casts short link (`pca.st/{slug}`) carries no Apple ID and is not looked up.
 - **Stream.** An episode's lookup hears of its enclosure. The source prefers its feed's item,
-  then Podcast Index's record of the episode, then iTunes' (`episodeUrl`), and records the
-  enclosure as the facts `stream_url`, `stream_type` and `stream_duration`.
+  then Podcast Index's record of the episode (its episode page's, or the `episodes/byguid` answer
+  that finds that page), then iTunes' (`episodeUrl`), and records the enclosure as the facts
+  `stream_url`, `stream_type` and `stream_duration`.
   - A card without a [stream](../api.md#stream) of its own takes it at its next read. The
     source asks for that read at once.
   - A link that isn't a public stream, or is longer than a fact's 512 bytes, is none.

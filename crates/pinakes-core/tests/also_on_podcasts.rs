@@ -718,6 +718,60 @@ async fn an_episode_hears_of_its_stream() {
     // A show hears of none (`a_feed_names_its_guid_as_a_fact`).
 }
 
+/// Podcast Index's record of the episode is its stream when the feed does not answer and
+/// iTunes names no file (review of e10ca9a2: its `episodes/byguid` answer was read for its ID
+/// alone): Apple's PC20-275, with the feed answering 404 and iTunes' list without
+/// `episodeUrl`.
+#[tokio::test]
+async fn podcast_index_s_file_when_the_feed_does_not_answer() {
+    let itunes =
+        "https://itunes.apple.com/lookup?id=1584274529&entity=podcastEpisode&limit=200&country=us";
+    let mut list: serde_json::Value =
+        serde_json::from_slice(&read("podcasts", "itunes-episodes-1584274529.json.gz")).unwrap();
+    for e in list["results"].as_array_mut().unwrap() {
+        e.as_object_mut().unwrap().remove("episodeUrl");
+    }
+    let recorded = Recorded::with_answers(&[
+        (
+            "https://feeds.podcastindex.org/pc20.xml",
+            404,
+            "text/html",
+            Vec::new(),
+        ),
+        (
+            itunes,
+            200,
+            "application/json",
+            serde_json::to_vec(&list).unwrap(),
+        ),
+    ]);
+    let cx = cx(recorded.clone(), indexed());
+    let apple = format!("{PC20}?i=1000796718231");
+    let page = ResourceMeta::new(&apple, "media", 3600);
+    let found = Podcasts
+        .lookup(&cx, &subject(&apple, Some("PodcastEpisode"), Some(page)))
+        .await
+        .unwrap();
+    let enclosure = "https://op3.dev/e/mp3s.nashownotes.com/PC20-275-2026-10-16-Final.mp3";
+    assert_eq!(
+        heard(&found),
+        [
+            ("stream_url", enclosure),
+            ("stream_type", "audio/mpeg"),
+            ("stream_duration", "5995"),
+        ]
+    );
+    assert!(found.reread);
+    // The file Podcast Index records is a key, by its word.
+    let file = enclosure_key(enclosure).unwrap();
+    let k = found.keys.iter().find(|k| k.key == file).unwrap();
+    assert_eq!(k.via, "podcastindex");
+    assert!(recorded
+        .seen()
+        .iter()
+        .any(|u| u.starts_with("https://feeds.podcastindex.org/pc20.xml")));
+}
+
 #[tokio::test]
 async fn a_feed_names_its_guid_as_a_fact() {
     // Without Podcast Index's word, the feed's own GUID is a fact, never a key.

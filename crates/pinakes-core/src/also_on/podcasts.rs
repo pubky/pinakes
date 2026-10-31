@@ -541,14 +541,14 @@ pub fn parse_pi_episode(status: u16, raw: &[u8], id: u64) -> Result<Option<Index
     )
 }
 
-/// The id of the episode Podcast Index answers for this item GUID in `feed`, or `None` when it
-/// has none or answers another one.
+/// The id of the episode Podcast Index answers for this item GUID in `feed`, with the enclosure
+/// it records, or `None` when it has none or answers another one.
 pub fn parse_pi_episode_by_guid(
     status: u16,
     raw: &[u8],
     guid: &str,
     feed: u64,
-) -> Result<Option<u64>> {
+) -> Result<Option<(u64, Option<Stream>)>> {
     let Some(v) = media::json(status, raw, &[400, 404])? else {
         return Ok(None);
     };
@@ -557,7 +557,8 @@ pub fn parse_pi_episode_by_guid(
         && e["feedId"].as_u64() == Some(feed))
     .then(|| e["id"].as_u64())
     .flatten()
-    .filter(|id| *id > 0))
+    .filter(|id| *id > 0)
+    .map(|id| (id, pi_stream(e))))
 }
 /// The same page, compared as resource identities.
 fn same_page(a: &str, b: &str) -> bool {
@@ -892,8 +893,12 @@ impl Podcasts {
         deferred.take("wikidata", Self::wikidata(cx, found, show).await);
         Ok(indexed.and_then(|(f, _)| f.guid))
     }
-    /// Podcast Index's episode with this item GUID in `feed`.
-    async fn index_episode_by_guid(cx: &Context, guid: &str, feed: u64) -> Result<Option<u64>> {
+    /// Podcast Index's episode with this item GUID in `feed`, and the enclosure it records.
+    async fn index_episode_by_guid(
+        cx: &Context,
+        guid: &str,
+        feed: u64,
+    ) -> Result<Option<(u64, Option<Stream>)>> {
         match Self::index_get(cx, &pi_episode_by_guid(guid, feed)).await? {
             Some(f) => parse_pi_episode_by_guid(f.status, &f.body, guid, feed),
             None => Ok(None),
@@ -978,11 +983,15 @@ impl Podcasts {
             }
         }
         if let (Some(index), false) = (want.index, want.on_index) {
-            let id = deferred.take(
+            let episode = deferred.take(
                 "podcastindex",
                 Self::index_episode_by_guid(cx, guid, index.id).await,
             );
-            if let Some(id) = id {
+            if let Some((id, stream)) = episode {
+                // Its record of the file, after the feed's own (which may not answer).
+                if heard.index.is_none() {
+                    heard.index = stream;
+                }
                 let page = format!("https://podcastindex.org/podcast/{}?episode={id}", index.id);
                 add(
                     found,
@@ -1821,7 +1830,15 @@ mod tests {
         let raw = read("pi-episode-byguid-PC20-275.json");
         assert_eq!(
             parse_pi_episode_by_guid(200, &raw, "PC20-275", 920666).unwrap(),
-            Some(61842097688)
+            Some((
+                61842097688,
+                Stream::public(
+                    "https://op3.dev/e/mp3s.nashownotes.com/PC20-275-2026-10-16-Final.mp3",
+                    "audio/mpeg",
+                    Some(5995),
+                    false
+                )
+            ))
         );
         assert_eq!(
             parse_pi_episode_by_guid(200, &raw, "PC20-274", 920666).unwrap(),
