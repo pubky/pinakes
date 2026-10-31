@@ -182,6 +182,24 @@ pub fn classify_config(uri: &str, config: &crate::config::Config) -> Option<&'st
     }
 }
 
+/// The route `POST /v1/resolve` takes for `uri` under `config`, or the reason it answers 400: no
+/// resolver reads the URI, or its resolver is switched off.
+pub fn admit(uri: &str, config: &crate::config::Config) -> Result<&'static str, &'static str> {
+    let resolver = classify_config(uri, config).ok_or("no resolver available for this URI")?;
+    if (resolver == EVENT_PLATFORM
+        && crate::event::adapters::detect(uri)
+            .is_none_or(|d| !crate::event::adapters::manifest(d, &config.event).enabled))
+        || (resolver == WEB && !config.web.enabled)
+        || (resolver == PUBKY && !config.pubky.enabled)
+        || (resolver == GEO && !config.geo.enabled)
+        || (resolver == OSM && !config.osm.enabled)
+        || (resolver == EVENT && (!config.event.enabled || !config.event.calendars))
+    {
+        return Err("resolver is disabled");
+    }
+    Ok(resolver)
+}
+
 #[derive(Debug)]
 pub struct NotModified;
 impl std::fmt::Display for NotModified {

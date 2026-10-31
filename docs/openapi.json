@@ -1988,10 +1988,10 @@
                     "uri": "https://grounds.stager.co/shop/default/events/111608505"
                   }
                 },
-                "resolve-infomaniak-events-en-ch-conferences-seminaire-des-autorites": {
-                  "summary": "https://infomaniak.events/en-ch/conferences/seminaire-des-autorites-2026/92392f2a-6711-4917-b9e9-60c88e8c550a/events/396911",
+                "resolve-infomaniak-events-en-ch-festivals-festival-wfc-leman-2026-c9": {
+                  "summary": "https://infomaniak.events/en-ch/festivals/festival-wfc-leman-2026/c90c619b-c155-454d-a277-c2e28e87d379/events/365609",
                   "value": {
-                    "uri": "https://infomaniak.events/en-ch/conferences/seminaire-des-autorites-2026/92392f2a-6711-4917-b9e9-60c88e8c550a/events/396911"
+                    "uri": "https://infomaniak.events/en-ch/festivals/festival-wfc-leman-2026/c90c619b-c155-454d-a277-c2e28e87d379/events/365609"
                   }
                 },
                 "resolve-luma-com-376whqyw": {
@@ -2130,12 +2130,6 @@
                   "summary": "https://radiohead.bandcamp.com/album/ok-computer",
                   "value": {
                     "uri": "https://radiohead.bandcamp.com/album/ok-computer"
-                  }
-                },
-                "resolve-s3-eu-west-1-amazonaws-com-starticket-wwwroot-ticketing-feed": {
-                  "summary": "https://s3-eu-west-1.amazonaws.com/starticket/wwwroot/ticketing/feeds/starticketfeed_D.xml",
-                  "value": {
-                    "uri": "https://s3-eu-west-1.amazonaws.com/starticket/wwwroot/ticketing/feeds/starticketfeed_D.xml"
                   }
                 },
                 "resolve-thebiz-pro-episodes-1-making-cypherpunk-products-and-busines": {

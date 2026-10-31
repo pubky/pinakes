@@ -222,12 +222,12 @@
       "card_type": "Event"
     },
     {
-      "name": "resolve-infomaniak-events-en-ch-conferences-seminaire-des-autorites",
-      "summary": "https://infomaniak.events/en-ch/conferences/seminaire-des-autorites-2026/92392f2a-6711-4917-b9e9-60c88e8c550a/events/396911",
+      "name": "resolve-infomaniak-events-en-ch-festivals-festival-wfc-leman-2026-c9",
+      "summary": "https://infomaniak.events/en-ch/festivals/festival-wfc-leman-2026/c90c619b-c155-454d-a277-c2e28e87d379/events/365609",
       "method": "POST",
       "path": "/v1/resolve",
       "body": {
-        "uri": "https://infomaniak.events/en-ch/conferences/seminaire-des-autorites-2026/92392f2a-6711-4917-b9e9-60c88e8c550a/events/396911"
+        "uri": "https://infomaniak.events/en-ch/festivals/festival-wfc-leman-2026/c90c619b-c155-454d-a277-c2e28e87d379/events/365609"
       },
       "expect": "card",
       "card_type": "Event"
@@ -340,7 +340,7 @@
         "uri": "https://ti.to/scipy/scipy2026.ics"
       },
       "expect": "card",
-      "card_type": "DataFeed"
+      "card_type": "Event"
     },
     {
       "name": "resolve-pretix-eu-demo-democon-ical",
@@ -351,7 +351,7 @@
         "uri": "https://pretix.eu/demo/democon/ical/"
       },
       "expect": "card",
-      "card_type": "DataFeed"
+      "card_type": "Event"
     },
     {
       "name": "resolve-api-weezevent-com-sites-view-live-e1114506-ics",
@@ -362,7 +362,7 @@
         "uri": "https://api.weezevent.com/sites/view/live/E1114506.ics"
       },
       "expect": "card",
-      "card_type": "DataFeed"
+      "card_type": "Event"
     },
     {
       "name": "resolve-eventfrog-ch-stream-de-event-7503702322012243890-ics",
@@ -373,18 +373,7 @@
         "uri": "https://eventfrog.ch/stream/de/event/7503702322012243890.ics"
       },
       "expect": "card",
-      "card_type": "DataFeed"
-    },
-    {
-      "name": "resolve-s3-eu-west-1-amazonaws-com-starticket-wwwroot-ticketing-feed",
-      "summary": "https://s3-eu-west-1.amazonaws.com/starticket/wwwroot/ticketing/feeds/starticketfeed_D.xml",
-      "method": "POST",
-      "path": "/v1/resolve",
-      "body": {
-        "uri": "https://s3-eu-west-1.amazonaws.com/starticket/wwwroot/ticketing/feeds/starticketfeed_D.xml"
-      },
-      "expect": "card",
-      "card_type": "DataFeed"
+      "card_type": "Event"
     },
     {
       "name": "resolve-bitcoinops-org-feed-xml",

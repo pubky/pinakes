@@ -200,7 +200,9 @@ Three caveats:
   group formed differently has another ID (take `group.id` from either member's card).
 
 The examples live in `data/api-recipes.json`; `tests/recipes.rs` runs every one against a fixture
-of the same URIs and checks that this list matches.
+of the same URIs and checks that this list matches. `scripts/e2e --live-recipes` (also run by
+`--isolated-live`) resolves each `/v1/resolve` example live and checks its card's type, so an
+example whose page has gone stale fails there.
 
 ### POST /v1/resolve: a card per link
 
@@ -226,7 +228,7 @@ of the same URIs and checks that this list matches.
 | `POST /v1/resolve {"uri":"https://grounds.stager.co/shop/default/events/111608505"}` | Event |
 | `POST /v1/resolve {"uri":"https://www.songkick.com/concerts/42408878-bausa-at-komplex-457"}` | MusicEvent |
 | `POST /v1/resolve {"uri":"https://events.humanitix.com/great-northern-contemporary-craft-fair"}` | Event |
-| `POST /v1/resolve {"uri":"https://infomaniak.events/en-ch/conferences/seminaire-des-autorites-2026/92392f2a-6711-4917-b9e9-60c88e8c550a/events/396911"}` | Event |
+| `POST /v1/resolve {"uri":"https://infomaniak.events/en-ch/festivals/festival-wfc-leman-2026/c90c619b-c155-454d-a277-c2e28e87d379/events/365609"}` | Event |
 | `POST /v1/resolve {"uri":"https://xceed.me/en/roma/event/dissonanze-2026-day-1/220015"}` | Event |
 | `POST /v1/resolve {"uri":"https://www.ents24.com/london-events/eventim-apollo/simon-brodkin/7474018"}` | Event |
 | `POST /v1/resolve {"uri":"https://www.ticketino.com/en/Event/TICKETINO-BBQ/192364"}` | Event |
@@ -236,11 +238,10 @@ of the same URIs and checks that this list matches.
 | `POST /v1/resolve {"uri":"https://calendar.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics"}` | DataFeed |
 | `POST /v1/resolve {"uri":"webcal://calendar.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics"}` | DataFeed |
 | `POST /v1/resolve {"uri":"https://www.calendarlabs.com/ical-calendar/ics/76/US_Holidays.ics"}` | DataFeed |
-| `POST /v1/resolve {"uri":"https://ti.to/scipy/scipy2026.ics"}` | DataFeed |
-| `POST /v1/resolve {"uri":"https://pretix.eu/demo/democon/ical/"}` | DataFeed |
-| `POST /v1/resolve {"uri":"https://api.weezevent.com/sites/view/live/E1114506.ics"}` | DataFeed |
-| `POST /v1/resolve {"uri":"https://eventfrog.ch/stream/de/event/7503702322012243890.ics"}` | DataFeed |
-| `POST /v1/resolve {"uri":"https://s3-eu-west-1.amazonaws.com/starticket/wwwroot/ticketing/feeds/starticketfeed_D.xml"}` | DataFeed |
+| `POST /v1/resolve {"uri":"https://ti.to/scipy/scipy2026.ics"}` | Event |
+| `POST /v1/resolve {"uri":"https://pretix.eu/demo/democon/ical/"}` | Event |
+| `POST /v1/resolve {"uri":"https://api.weezevent.com/sites/view/live/E1114506.ics"}` | Event |
+| `POST /v1/resolve {"uri":"https://eventfrog.ch/stream/de/event/7503702322012243890.ics"}` | Event |
 | `POST /v1/resolve {"uri":"https://bitcoinops.org/feed.xml"}` | DataFeed |
 | `POST /v1/resolve {"uri":"https://github.com/pubky/pubky-core/releases.atom"}` | DataFeed |
 | `POST /v1/resolve {"uri":"https://www.jsonfeed.org/feed.json"}` | DataFeed |
