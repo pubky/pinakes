@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
-import { E2E_CONTACT, dropRefusedPages, freshen, instanceAgent, json, judgeRecipes, preflight, runFlow, userAgent, withoutStackSkipped } from './harness.mjs';
+import { E2E_CONTACT, dropRefusedPages, freshen, instanceAgent, json, liveRecipes, preflight, runFlow, userAgent, withoutStackSkipped } from './harness.mjs';
 
 const mock = process.argv.includes('--mock');
 const recipesOnly = process.argv.includes('--live-recipes');
@@ -20,16 +20,9 @@ async function stop(child) {
   if (!child || child.exitCode !== null || child.signalCode !== null) return;
   const stopped = once(child, 'exit'); child.kill('SIGTERM'); await stopped;
 }
-/** The public `/v1/resolve` recipes, resolved live once each by a stack of their own
- * (`e2e_stack --live-recipes`) and judged (`judgeRecipes`). */
-async function liveRecipes() {
-  child = spawn('./target/debug/examples/e2e_stack', ['--live-recipes'], { stdio: ['ignore', 'pipe', 'inherit'] });
-  const lines = []; createInterface({ input: child.stdout }).on('line', line => lines.push(line));
-  const abort = () => child.kill('SIGTERM'); control.signal.addEventListener('abort', abort);
-  const [code, signal] = await once(child, 'close'); control.signal.removeEventListener('abort', abort);
-  control.signal.throwIfAborted();
-  if (code !== 0) throw new Error(`The recipe stack exited with ${code ?? signal}`);
-  const recipes = judgeRecipes(JSON.parse(lines.at(-1)).recipes);
+/** The public recipes, live (`liveRecipes`), each one left out or failed logged. */
+async function recipeSweep() {
+  const recipes = await liveRecipes(() => (child = spawn('./target/debug/examples/e2e_stack', ['--live-recipes'], { stdio: ['ignore', 'pipe', 'inherit'] })), control.signal);
   for (const s of recipes.skipped) console.error(`recipe left out: ${s.name} (${s.uri}): ${s.reason}`);
   for (const f of recipes.failed) console.error(`recipe failed: ${f.name} (${f.uri}): ${f.reason}`);
   return recipes;
@@ -37,7 +30,7 @@ async function liveRecipes() {
 let report;
 try {
   if (recipesOnly) {
-    const recipes = await liveRecipes();
+    const recipes = await recipeSweep();
     report = { ok: !recipes.failed.length, mode: 'recipes', recipes };
   } else {
     let pinakes = process.env.PINAKES_E2E_PINAKES ?? 'http://127.0.0.1:8090';
@@ -113,7 +106,7 @@ try {
     // An isolated live run also resolves the public recipes, after its own stack has stopped.
     if (process.argv.includes('--isolated-live')) {
       await stop(child);
-      report.recipes = await liveRecipes();
+      report.recipes = await recipeSweep();
       if (report.recipes.failed.length) report.ok = false;
     }
   }

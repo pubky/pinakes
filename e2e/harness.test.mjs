@@ -1,6 +1,36 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { dropRefusedPages, expectCard, findsEvery, freshen, instanceAgent, judgeRecipes, mcpAnswer, newestLink, ownTags, psql, rereadMoved, socialAgrees, userAgent, withTags, withoutStackSkipped } from './harness.mjs';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
+import { dropRefusedPages, expectCard, findsEvery, freshen, instanceAgent, judgeRecipes, liveRecipes, mcpAnswer, newestLink, ownTags, psql, rereadMoved, socialAgrees, userAgent, withTags, withoutStackSkipped } from './harness.mjs';
+test('an interrupted run starts no recipe stack, and one interrupted while it runs is stopped', { timeout: 5000 }, async () => {
+  // A stand-in for `e2e_stack --live-recipes`: it prints its line and closes when told to, and
+  // closes as a signal ends it when killed.
+  const stacks = [];
+  const start = () => {
+    const child = Object.assign(new EventEmitter(), { stdout: new PassThrough(), killed: [] });
+    child.kill = signal => { child.killed.push(signal); child.stdout.end(); setImmediate(() => child.emit('close', null, signal)); };
+    child.finish = (code, line) => { if (line) child.stdout.write(`${line}\n`); child.stdout.end(); setImmediate(() => child.emit('close', code, null)); };
+    stacks.push(child); return child;
+  };
+  // Interrupted during the flow: the flow returned its report, and no stack starts.
+  const before = new AbortController(); before.abort(new Error('Interrupted'));
+  await assert.rejects(liveRecipes(start, before.signal), /Interrupted/);
+  assert.equal(stacks.length, 0);
+  // Interrupted while the stack runs: it is sent SIGTERM, and the sweep throws.
+  const during = new AbortController();
+  const sweep = liveRecipes(start, during.signal);
+  during.abort(new Error('Interrupted'));
+  await assert.rejects(sweep, /Interrupted/);
+  assert.deepEqual(stacks[0].killed, ['SIGTERM']);
+  // Not interrupted: its line is judged; a stack a signal ended is named by it.
+  const done = liveRecipes(start, new AbortController().signal);
+  stacks[1].finish(0, JSON.stringify({ recipes: [{ name: 'ok', uri: 'https://ok.example/e/1', want: 'Event', status: 'ok', type: 'Event' }] }));
+  assert.deepEqual(await done, { checked: 1, failed: [], skipped: [] });
+  const gone = liveRecipes(start, new AbortController().signal);
+  stacks[2].kill('SIGKILL');
+  await assert.rejects(gone, /exited with SIGKILL/);
+});
 test('a failed psql call never shows the cluster\'s password', () => {
   for (const cluster of ['postgresql://e2e:Dummy-Secret-42@127.0.0.1:1/postgres', 'postgresql:///postgres?host=127.0.0.1&port=1&user=e2e&password=Query-Secret-42']) {
     assert.throws(() => psql(cluster, 'postgres', 'SELECT 1'), error => {

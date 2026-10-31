@@ -47,7 +47,8 @@ suite. Only that newly created database is dropped on exit. They never reset the
 development database. A force-killed process may leave its database for inspection. A recipe
 run stops on SIGTERM or SIGINT and still drops its database, and the runner still writes its
 report (`"error": "Interrupted"`); `scripts/e2e --mock` checks this first, offline
-(`e2e/cancel.test.mjs`).
+(`e2e/cancel.test.mjs`). An `--isolated-live` run interrupted during its flow reports it and starts
+no recipe run.
 
 ## Live identity and dev stack
 
