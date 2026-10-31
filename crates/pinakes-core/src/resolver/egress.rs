@@ -1252,6 +1252,52 @@ where
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    /// No test outside this module builds an egress on the system resolver (`Egress::new`,
+    /// `SystemDns`), so `scripts/test` looks no name up and connects nowhere past loopback: a
+    /// test answers from a fixed resolver and recorded answers (`sources::fixture`,
+    /// `tests/common`). This module's own tests use `Egress::new` without fetching.
+    #[test]
+    fn no_test_elsewhere_reaches_the_network() {
+        fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    rust_files(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut files = vec![];
+        rust_files(&crates, &mut files);
+        let mut found = vec![];
+        for path in files {
+            let rel = path
+                .strip_prefix(&crates)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            if rel == "pinakes-core/src/resolver/egress.rs" {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            // A test file whole; a source file from its first test module on.
+            let tests = if rel.contains("/tests/") {
+                Some(text.as_str())
+            } else if rel.contains("/src/") {
+                text.find("#[cfg(test)]").map(|at| &text[at..])
+            } else {
+                None
+            };
+            for line in tests.into_iter().flat_map(str::lines) {
+                if line.contains("Egress::new(") || line.contains("SystemDns") {
+                    found.push(format!("{rel}: {}", line.trim()));
+                }
+            }
+        }
+        assert!(found.is_empty(), "{found:#?}");
+    }
     #[tokio::test(start_paused = true)]
     async fn slow_hosts_answer_retry_later_instead_of_a_doomed_wait() {
         struct Ok200;

@@ -250,7 +250,7 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
-        let egress = crate::resolver::egress::Egress::new(Default::default());
+        let (egress, _) = fixture::egress(vec![]);
         let cx = Context {
             egress: &egress,
             ttl: 3600,

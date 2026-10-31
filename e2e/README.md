@@ -40,11 +40,15 @@ one event on two pages: each card must name the other in `maybe_same` (possibly 
 event), and they must not group. Injected transports
 disable direct relay sockets; unknown fixture DNS names resolve to TEST-NET.
 
-Both `--mock` and `--isolated-live` create a unique `pinakes_e2e_owned_*` database
+`--mock`, `--isolated-live` and `--live-recipes` each create a unique `pinakes_e2e_owned_*` database
 through `DATABASE_URL` (default `postgresql:///postgres?host=/var/run/postgresql`).
 The role needs `CREATEDB`; the schema needs the extension privileges used by the test
 suite. Only that newly created database is dropped on exit. They never reset the
-development database. A force-killed process may leave its database for inspection.
+development database. A force-killed process may leave its database for inspection. A recipe
+run stops on SIGTERM or SIGINT and still drops its database, and the runner still writes its
+report (`"error": "Interrupted"`); `scripts/e2e --mock` checks this first, offline
+(`e2e/cancel.test.mjs`). An `--isolated-live` run interrupted during its flow reports it and starts
+no recipe run.
 
 ## Live identity and dev stack
 
@@ -128,3 +132,23 @@ may produce zero matches. Facet counts, each bbox/window row, fixture recurrence
 count and created-change classes are checked. Tagged search waits for reference
 ingestion even when a sample document is already cached; collapse waits for reconciliation. Reports contain public IDs/URIs and cleanup
 paths, never the secret. Journals stay under ignored `.runtime/` with mode 0600.
+
+## The public recipes, live
+
+```sh
+CARGO_PROFILE_DEV_DEBUG=0 scripts/e2e --live-recipes
+```
+
+The public `/v1/resolve` examples that promise a card (`data/api-recipes.json` and each official
+source's own) are fixed public links, which `tests/recipes.rs` runs offline against synthetic
+cards only. This mode resolves each one live, once, one at a time, through the live driver's
+resolvers (settings and secrets from the environment, as above) in a database of its own. The run
+fails when a card is not the type its recipe promises: an event page gone stale, a feed taken
+down (`recipes.failed` in the report, and `recipe failed: …`). A card of a type under the
+promised one passes (a City is a Place). A recipe this host could not check is left out with the
+reason (`recipes.skipped`, and `recipe left out: …`): its host could not be reached (DNS,
+connection or timeout), answered with a bot wall, or asked this host to wait. A recipe `/v1/resolve`
+would refuse under these settings (its resolver switched off, as `PINAKES__GEO__ENABLED=false` does to the `geo:` one) fails,
+with the API's reason. It needs no test identity and writes nothing to
+Pubky or Nexus. `--isolated-live` runs it too, after its own flow. Replace a failed recipe with a
+current link of the same kind, then update docs/api.md and run `scripts/openapi`.

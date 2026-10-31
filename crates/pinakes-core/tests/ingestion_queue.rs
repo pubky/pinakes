@@ -779,6 +779,14 @@ impl pinakes_core::resolver::egress::Dns for PublicDns {
         Ok(vec![std::net::SocketAddr::new("8.8.8.8".parse()?, port)])
     }
 }
+/// A resolver that never answers.
+struct Unanswered;
+#[async_trait::async_trait]
+impl pinakes_core::resolver::egress::Dns for Unanswered {
+    async fn lookup(&self, _: &str, _: u16) -> anyhow::Result<Vec<std::net::SocketAddr>> {
+        std::future::pending().await
+    }
+}
 /// A resolver that reads its link through Egress's discovery cache, as the official sources do
 /// (GitHub's, say): a 404 is missing, anything else a page.
 struct Discovering(pinakes_core::resolver::egress::Egress);
@@ -1258,7 +1266,16 @@ async fn a_hook_timeout_names_no_link() {
         return;
     }
     let lines = log_lines();
-    let egress = pinakes_core::resolver::egress::Egress::new(Default::default());
+    // A resolver that never answers stands for the network: the hook is still waiting when the
+    // deadline cuts it off, and no name is looked up for real.
+    let egress = pinakes_core::resolver::egress::Egress::with_backends(
+        Default::default(),
+        std::sync::Arc::new(Unanswered),
+        std::sync::Arc::new(Upstream {
+            answers: Default::default(),
+            asked: Default::default(),
+        }),
+    );
     // A deadline already passed: every wall hook times out at once.
     let uri = "https://hooks.example.org/page?token=CANARY";
     let _ =

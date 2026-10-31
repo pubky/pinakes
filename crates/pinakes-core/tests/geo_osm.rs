@@ -1399,7 +1399,7 @@ async fn osm_url_styles_resolve_as_the_object_a_point_or_one_final_refusal(pool:
         oembed_policy: Default::default(),
         cards: None,
         events: None,
-        egress: pinakes_core::resolver::egress::Egress::new(Default::default()),
+        egress: common::offline_egress(Default::default()),
         config: Default::default(),
     };
     let mut refused = Vec::new();
@@ -1587,7 +1587,7 @@ async fn reextract_makes_object_shortlinks_aliases_and_refuses_osm_host_pages(po
         oembed_policy: Default::default(),
         cards: None,
         events: None,
-        egress: pinakes_core::resolver::egress::Egress::new(Default::default()),
+        egress: common::offline_egress(Default::default()),
         config: Default::default(),
     };
     while let Some(job) = queue::claim(&pool, "web", &QueueConfig::default())
