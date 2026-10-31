@@ -86,44 +86,75 @@ pub fn from_feed(f: &crate::resolver::egress::Fetched) -> Option<Vec<Episode>> {
         .collect();
     Some(from_items(&items, &f.url))
 }
-/// The longest a show's read waits for its feed's episodes. The list is optional: a feed slower
-/// than this leaves the show's stored list as it is, and the show's card is saved all the same,
-/// within the deadline of the read that asked for it (a wall hook's
-/// [`crate::sources::WALL_HOOK_TIMEOUT`]).
+/// The longest a show's read gives its feed's episodes: the fetch, the wait for a parse permit
+/// and the parse together. The list is optional: a feed slower than this leaves the show's
+/// stored list as it is, and the show's card is saved all the same. A read with a deadline of
+/// its own (a wall hook under the web fetch's, `sources::Context::deadline`) gives the feed what
+/// is left of it, less [`HANDBACK`], and never more than this.
 pub const FEED_WAIT: Duration = Duration::from_secs(3);
+/// What a hook keeps of its deadline to hand the card back.
+pub const HANDBACK: Duration = Duration::from_millis(300);
+
+#[cfg(test)]
+tokio::task_local! {
+    /// A test's wait before the feed's parse, as if every parser were busy: a wait a test can
+    /// set for its own task alone. (Holding every parse permit instead would make the paused
+    /// clocks of the tests running beside it advance across their own waits for a parser.)
+    pub(crate) static PARSE_WAIT: Duration;
+}
+
+/// The deadline a show's read gives its feed: `deadline` less [`HANDBACK`] when the read has
+/// one, and at most [`FEED_WAIT`] from now.
+pub fn feed_deadline(deadline: Option<tokio::time::Instant>) -> tokio::time::Instant {
+    let now = tokio::time::Instant::now();
+    let latest = now + FEED_WAIT;
+    match deadline {
+        Some(d) => d.checked_sub(HANDBACK).unwrap_or(now).min(latest),
+        None => latest,
+    }
+}
 
 /// The episodes of the feed at `url`, read through the egress (a discovery, cached for `ttl`
-/// seconds, cut at the page cap like any feed) within `wait`, or `None` when the feed could not
-/// be read in time or is none: the show's stored list then stays as it is.
+/// seconds, cut at the page cap like any feed) and parsed, all before `deadline`
+/// ([`feed_deadline`]); `None` when the feed could not be read or parsed in time or is none: the
+/// show's stored list then stays as it is.
 pub async fn fetch(
     egress: &crate::resolver::egress::Egress,
     url: &str,
     ttl: u64,
-    wait: Duration,
+    deadline: tokio::time::Instant,
 ) -> Option<Vec<Episode>> {
-    // As the media route reads a feed: a feed body over the page cap is cut there, not refused
-    // (the egress reads an XML feed without a feed cap like a page).
-    let options = Default::default();
-    let read = egress.discover(url, &options, ttl);
-    let f = match tokio::time::timeout(wait, read).await {
-        Ok(Ok(f)) if f.status == 200 => f,
-        Ok(Ok(f)) => {
-            tracing::debug!(host = %crate::resolver::log_host(url), status = f.status, "a show's feed did not answer its episodes");
-            return None;
+    let read = async {
+        // As the media route reads a feed: a feed body over the page cap is cut there, not
+        // refused (the egress reads an XML feed without a feed cap like a page).
+        let options = Default::default();
+        let f = match egress.discover(url, &options, ttl).await {
+            Ok(f) if f.status == 200 => f,
+            Ok(f) => {
+                tracing::debug!(host = %crate::resolver::log_host(url), status = f.status, "a show's feed did not answer its episodes");
+                return None;
+            }
+            Err(error) => {
+                tracing::debug!(host = %crate::resolver::log_host(url), kind = crate::resolver::error_class(&error), "a show's feed could not be read for its episodes");
+                return None;
+            }
+        };
+        #[cfg(test)]
+        if let Ok(wait) = PARSE_WAIT.try_with(|d| *d) {
+            tokio::time::sleep(wait).await;
         }
-        Ok(Err(error)) => {
-            tracing::debug!(host = %crate::resolver::log_host(url), kind = crate::resolver::error_class(&error), "a show's feed could not be read for its episodes");
-            return None;
-        }
-        Err(_) => {
-            tracing::debug!(host = %crate::resolver::log_host(url), wait_ms = wait.as_millis() as u64, "a show's feed was too slow for its episodes");
-            return None;
-        }
+        crate::resolver::html::blocking(move || from_feed(&f))
+            .await
+            .ok()
+            .flatten()
     };
-    crate::resolver::html::blocking(move || from_feed(&f))
-        .await
-        .ok()
-        .flatten()
+    match tokio::time::timeout_at(deadline, read).await {
+        Ok(list) => list,
+        Err(_) => {
+            tracing::debug!(host = %crate::resolver::log_host(url), "a show's feed was too slow for its episodes");
+            None
+        }
+    }
 }
 
 /// What names a feed item, for the list and for the resolver alike.
@@ -237,9 +268,10 @@ fn bounded(mut s: String, max: usize) -> String {
     s
 }
 
-/// Writes a saved document's episodes: a list replaces the show's rows whole; a document that is
-/// no podcast show, or a show found missing, clears them; a show's document without a list (a
-/// record read without its feed) leaves them as they are.
+/// Writes a document's episodes as the document is written (`store::write_document`, so every
+/// path that replaces a document passes here: a save, a clear): a list replaces the show's rows
+/// whole; a document that is no podcast show, or a show found missing or cleared, clears them;
+/// a show's document without a list (a record read without its feed) leaves them as they are.
 pub(crate) async fn store(
     tx: &mut Transaction<'_, Postgres>,
     id: &str,
@@ -250,34 +282,56 @@ pub(crate) async fn store(
     match &doc.episodes {
         Some(list) if show => replace(tx, id, list).await,
         None if show => Ok(()),
-        _ => {
-            sqlx::query("DELETE FROM podcast_episode WHERE resource_id=$1")
-                .bind(id)
-                .execute(&mut **tx)
-                .await?;
-            Ok(())
-        }
+        _ => clear(tx, id).await.map(|_| ()),
     }
 }
+/// Clears a resource's episodes: for a document replaced outside a save (a scrub).
+pub(crate) async fn clear(tx: &mut Transaction<'_, Postgres>, id: &str) -> Result<u64> {
+    Ok(
+        sqlx::query("DELETE FROM podcast_episode WHERE resource_id=$1")
+            .bind(id)
+            .execute(&mut **tx)
+            .await?
+            .rows_affected(),
+    )
+}
+/// The table's bound on a stream's stored text (`podcast_episode_stream_check`); jsonb's text
+/// form spaces its colons and commas, so the compact JSON is held a little under it.
+const STREAM_TEXT_CAP: usize = 4096 - 64;
+/// An episode's row as the table takes it, so no one episode fails the show's save: a stream
+/// whose JSON exceeds the table's bound (a URL of 2,048 bytes that JSON escapes to twice that)
+/// is stored as none; a name is cut to 512 bytes, an image or a date outside the bounds dropped;
+/// an episode whose GUID or URI exceeds 2,048 bytes is not stored at all.
+fn storable(e: &Episode) -> Option<(Episode, Option<String>)> {
+    if e.guid.len() > 2048 || e.uri.len() > 2048 {
+        return None;
+    }
+    let stream = e
+        .stream
+        .as_ref()
+        .and_then(|s| serde_json::to_string(s).ok())
+        .filter(|s| s.len() <= STREAM_TEXT_CAP);
+    let mut row = e.clone();
+    row.name = row.name.map(|n| bounded(n, 512));
+    row.image = row.image.filter(|i| i.len() <= 2048);
+    row.published = row.published.and_then(crate::event::time::bounded);
+    row.stream = row.stream.filter(|_| stream.is_some());
+    Some((row, stream))
+}
 async fn replace(tx: &mut Transaction<'_, Postgres>, id: &str, list: &[Episode]) -> Result<()> {
-    sqlx::query("DELETE FROM podcast_episode WHERE resource_id=$1")
-        .bind(id)
-        .execute(&mut **tx)
-        .await?;
-    let list = &list[..list.len().min(KEPT)];
+    clear(tx, id).await?;
+    let list: Vec<(Episode, Option<String>)> =
+        list.iter().filter_map(storable).take(KEPT).collect();
     if list.is_empty() {
         return Ok(());
     }
     let positions: Vec<i16> = (0..list.len() as i16).collect();
-    let guids: Vec<&str> = list.iter().map(|e| e.guid.as_str()).collect();
-    let urls: Vec<&str> = list.iter().map(|e| e.uri.as_str()).collect();
-    let names: Vec<Option<&str>> = list.iter().map(|e| e.name.as_deref()).collect();
-    let images: Vec<Option<&str>> = list.iter().map(|e| e.image.as_deref()).collect();
-    let published: Vec<Option<DateTime<Utc>>> = list.iter().map(|e| e.published).collect();
-    let streams: Vec<Option<String>> = list
-        .iter()
-        .map(|e| e.stream.as_ref().map(serde_json::to_string).transpose())
-        .collect::<Result<_, _>>()?;
+    let guids: Vec<&str> = list.iter().map(|(e, _)| e.guid.as_str()).collect();
+    let urls: Vec<&str> = list.iter().map(|(e, _)| e.uri.as_str()).collect();
+    let names: Vec<Option<&str>> = list.iter().map(|(e, _)| e.name.as_deref()).collect();
+    let images: Vec<Option<&str>> = list.iter().map(|(e, _)| e.image.as_deref()).collect();
+    let published: Vec<Option<DateTime<Utc>>> = list.iter().map(|(e, _)| e.published).collect();
+    let streams: Vec<Option<&str>> = list.iter().map(|(_, s)| s.as_deref()).collect();
     sqlx::query("INSERT INTO podcast_episode(resource_id,position,guid,url,name,image,published,stream) SELECT $1,p,g,u,n,i,d,s::jsonb FROM unnest($2::smallint[],$3::text[],$4::text[],$5::text[],$6::text[],$7::timestamptz[],$8::text[]) AS t(p,g,u,n,i,d,s)")
         .bind(id).bind(&positions).bind(&guids).bind(&urls).bind(&names).bind(&images).bind(&published).bind(&streams)
         .execute(&mut **tx).await?;

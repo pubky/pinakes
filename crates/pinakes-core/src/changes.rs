@@ -515,7 +515,6 @@ pub async fn save(
         .transpose()?;
     let after = normalize(&doc);
     crate::store::write_document(&mut tx, id, generation, &doc).await?;
-    crate::episodes::store(&mut tx, id, &doc).await?;
     if social_missing {
         unqueue_also_on(&mut tx, id).await?;
     }
@@ -608,6 +607,7 @@ pub async fn scrub_stored(pool: &PgPool) -> Result<u64> {
                     .await?
                     .rows_affected();
                 let derived = forget_derived(&mut tx, &ids).await?;
+                crate::episodes::clear(&mut tx, &id).await?;
                 unqueue_also_on(&mut tx, &id).await?;
                 if card + derived > 0 {
                     // Its group was formed from the card it no longer has.
@@ -680,6 +680,7 @@ pub async fn scrub_never_fetched(pool: &PgPool) -> Result<u64> {
                 .execute(&mut *tx)
                 .await?
                 .rows_affected();
+            crate::episodes::clear(&mut tx, &id).await?;
             if changed > 0 {
                 // Its group was formed from the card it no longer has.
                 sqlx::query(

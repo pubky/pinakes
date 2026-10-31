@@ -276,6 +276,70 @@ async fn an_oversized_media_type_is_no_stream_and_the_show_saves(pool: PgPool) {
     assert_eq!(page["items"][1]["stream"]["type"], "audio/mpeg");
 }
 
+/// A valid stream whose JSON would not fit the table (a 2,042-byte URL of backslashes, which
+/// JSON escapes to twice that) is stored as none; the episode is listed and the show saves.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_stream_too_long_for_the_table_is_none_and_the_show_saves(pool: PgPool) {
+    let long = format!("https://cdn.example/a?{}", "\\".repeat(2020));
+    assert_eq!(long.len(), 2042);
+    let body = feed(&format!(
+        r#"<item><title>Long</title><guid>ep-1</guid><enclosure url="{long}" type="audio/mpeg"/></item><item><title>Short</title><guid>ep-2</guid><enclosure url="https://cdn.example/2.mp3" type="audio/mpeg"/></item>"#
+    ));
+    let episodes = pinakes_core::episodes::from_feed(&fetched(body)).unwrap();
+    assert_eq!(episodes.len(), 2);
+    let stream = episodes[0]
+        .stream
+        .as_ref()
+        .expect("a public stream of 2,042 bytes");
+    assert_eq!(stream.url, long, "the URL as given");
+    assert!(
+        serde_json::to_string(stream).unwrap().len() > 4096,
+        "its JSON would not fit the table"
+    );
+    let id = show(&pool, "https://feeds.example.org/show.xml", Some(episodes)).await;
+    assert_eq!(
+        rows(&pool, &id).await,
+        2,
+        "the show saved with both episodes"
+    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let (status, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
+    assert_eq!(status, 200, "{page}");
+    assert_eq!(page["items"][0]["guid"], "ep-1");
+    assert_eq!(page["items"][0]["stream"], Value::Null);
+    assert_eq!(
+        page["items"][1]["stream"]["url"],
+        "https://cdn.example/2.mp3"
+    );
+}
+
+/// A card cleared without a save (a page too complex to parse, an error card in its place) lists
+/// nothing: the rows follow the document, whatever writes it.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_cleared_card_lists_nothing(pool: PgPool) {
+    let id = show(
+        &pool,
+        "https://feeds.example.org/show.xml",
+        Some(vec![episode(2, true), episode(1, true)]),
+    )
+    .await;
+    assert_eq!(rows(&pool, &id).await, 2);
+    pinakes_core::changes::clear(&pool, &id, 0, "too_complex")
+        .await
+        .unwrap();
+    let status: String = sqlx::query_scalar("SELECT status FROM resource WHERE id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "error", "the card was cleared");
+    assert_eq!(rows(&pool, &id).await, 0);
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let (status, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
+    assert_eq!(status, 200, "{page}");
+    assert_eq!(page["items"].as_array().unwrap().len(), 0, "{page}");
+}
+
 /// A show card without a list of its own (an Apple Podcasts page whose feed could not be read)
 /// lists the episodes of a member of its group that has them: the same show elsewhere.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]

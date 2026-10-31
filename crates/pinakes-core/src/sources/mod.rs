@@ -290,7 +290,8 @@ pub async fn wall_hooks(
             .saturating_duration_since(tokio::time::Instant::now())
             .saturating_sub(std::time::Duration::from_millis(25))
             .min(WALL_HOOK_TIMEOUT);
-        match tokio::time::timeout(left, hook.walled(&cx, uri)).await {
+        let deadline = tokio::time::Instant::now() + left;
+        match tokio::time::timeout_at(deadline, within(deadline, hook.walled(&cx, uri))).await {
             Ok(Ok(Some(doc))) => {
                 crate::telemetry::discovery("wall_hook", "applied");
                 return doc.bounded(attributes()).ok();
@@ -352,7 +353,10 @@ pub(crate) async fn page_hooks_with(
             .saturating_duration_since(tokio::time::Instant::now())
             .saturating_sub(std::time::Duration::from_millis(25))
             .min(PAGE_HOOK_TIMEOUT);
-        match tokio::time::timeout(left, hook.page(&cx, uri, page, &doc)).await {
+        let deadline = tokio::time::Instant::now() + left;
+        match tokio::time::timeout_at(deadline, within(deadline, hook.page(&cx, uri, page, &doc)))
+            .await
+        {
             Ok(Ok(Some(improved))) => {
                 crate::telemetry::discovery("page_hook", "applied");
                 return improved;
@@ -458,11 +462,27 @@ pub struct Context<'a> {
     /// The card's lifetime in seconds (`limits.resolver_ttl_secs`).
     pub ttl: u64,
 }
+tokio::task_local! {
+    /// The deadline of the read a hook serves (`wall_hooks`, `page_hooks`), for what the hook
+    /// fetches beyond its card.
+    static DEADLINE: tokio::time::Instant;
+}
+/// Run `hook` with `deadline` as the deadline its context reports (`Context::deadline`).
+pub async fn within<F: std::future::Future>(deadline: tokio::time::Instant, hook: F) -> F::Output {
+    DEADLINE.scope(deadline, hook).await
+}
 impl Context<'_> {
     /// The operator's contact address (`http.contact`). A source whose service refuses requests
     /// without one answers `RetryLater` (class `disabled`) while it is empty.
     pub fn contact(&self) -> Option<&str> {
         self.egress.contact()
+    }
+    /// The deadline of the read this context serves, when its caller set one (a wall or page
+    /// hook runs under the web fetch's): what a source fetches beyond its card, such as a show's
+    /// episodes, stays within it so the card is handed back in time. `None` on the official
+    /// route, which has the fetch to itself.
+    pub fn deadline(&self) -> Option<tokio::time::Instant> {
+        DEADLINE.try_with(|d| *d).ok()
     }
     /// A GET (or, with `options.json_body`, a POST) through the egress policy. Rate limits and
     /// server errors become `RetryLater`; other statuses are the caller's to read. At most

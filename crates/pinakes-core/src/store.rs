@@ -360,6 +360,8 @@ pub(crate) async fn write_document(
         .bind(doc.location.as_ref().map(|p| p.lat)).bind(doc.location.as_ref().map(|p| p.lon))
         .bind(doc.start).bind(doc.end).bind(serde_json::to_value(doc)?).bind(doc.status.as_str()).bind(doc.ttl_secs as f64).bind(doc.event.venue.as_ref().and_then(|v|v.resource_id.as_deref()))
         .execute(&mut **tx).await?;
+    // A show's episodes follow its document: kept, replaced or cleared with it.
+    crate::episodes::store(tx, id, doc).await?;
     if matches!(doc.source.as_str(), "media" | "activitypub")
         && doc.status == crate::model::Status::Ok
     {

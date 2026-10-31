@@ -834,8 +834,11 @@ The list is read with the show: the feed's own card (`PodcastSeries`) takes it f
 is; a Podcast Index or Apple Podcasts show page (and the player pages that open a show by its
 Apple ID) fetches the feed its record names, once per read of the show, and takes the same list.
 It is replaced whole each time the show's card is saved from a read of its feed; a read that
-could not reach the feed, or not within three seconds, keeps the list it had (the list is
-optional: a slow feed never costs the show its card). A show card without a list of its own (a page
+could not reach the feed, or not read and parse it within three seconds and what is left of the
+read's own time, keeps the list it had (the list is optional: a slow feed never costs the show
+its card). A card replaced without a read (cleared after an error, scrubbed) lists nothing. An
+item's `stream` is `null` as well when its stored form would not fit the store's bound (a URL
+near 2,048 bytes that JSON escaping doubles): the episode is listed all the same. A show card without a list of its own (a page
 whose feed could not be read, a service that names no feed) answers with the list of a member
 of its [group](#groups) that has one: the same show elsewhere. A known resource that is no
 show, or whose feed was not read yet, returns an empty list; an unknown ID is 404. The items a

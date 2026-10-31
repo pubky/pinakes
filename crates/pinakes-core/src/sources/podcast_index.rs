@@ -199,8 +199,13 @@ impl Source for PodcastIndex {
             None => cx.missing(uri, self),
         };
         if let Some(feed) = feed_url {
-            doc.episodes =
-                crate::episodes::fetch(cx.egress, &feed, cx.ttl, crate::episodes::FEED_WAIT).await;
+            doc.episodes = crate::episodes::fetch(
+                cx.egress,
+                &feed,
+                cx.ttl,
+                crate::episodes::feed_deadline(cx.deadline()),
+            )
+            .await;
         }
         Ok(doc)
     }

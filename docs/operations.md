@@ -508,8 +508,9 @@ scanning) follow RSS alternates on pages without a typed card. Discovery decisio
 for its latest episodes at each refresh (a feed card from the feed it is; a Podcast Index or
 Apple Podcasts show page, and a player page opening a show by its Apple ID, from the feed its
 record names: one feed request per read, cached for the card's lifetime, cut at the page cap,
-waited for at most three seconds and within what is left of a wall hook's time, so a slow feed
-costs the list and never the card), kept in `podcast_episode` and served by
+fetched and parsed within three seconds and what is left of the read's deadline, so a slow feed
+or a wait for a parser costs the list and never the card), kept in `podcast_episode` (the rows
+follow the document: replaced at a save, cleared when the card is cleared or scrubbed) and served by
 `GET /v1/resources/{id}/episodes` ([API](api.md#episodes)).
 After the upgrade that added them, the lists fill as shows are read again (`reextract web`).
 
