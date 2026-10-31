@@ -454,6 +454,12 @@ GET /v1/resources/2dea92aa8c3cf8ae1cffad92cf3ca718/occurrences?limit=20
 GET /v1/resources/2950248974677c9ca34f1f67b8a2da80/occurrences?limit=10
 ```
 
+### GET /v1/resources/{id}/episodes
+
+```text
+GET /v1/resources/faf081897e81377fd45b404f02a7f190/episodes?limit=20
+```
+
 ### POST /v1/occurrences/lookup
 
 ```text
@@ -806,6 +812,44 @@ still unresolved then, one whose resolution failed, or one without a start is sk
 cancelled after two snapshots. A calendar's link to a member it no longer lists ends at once,
 and a listed member's link lives 24 hours, renewed at every fetch of the calendar, so a calendar
 that rotates its members never runs into its cap and the links of one nobody fetches lapse.
+
+## Episodes
+
+`GET /v1/resources/{id}/episodes` lists a podcast show's latest episodes as its feed lists them,
+newest first, at most 20 (`limit`, 1–20): `{items: [...]}`, each item
+`{uri, name, image, published, guid, stream, id?}`. `guid` is what names the item: its GUID as
+the feed gives it; its page when the feed gives none; else `sha256:` and the hex digest of its
+enclosure's URL (without a fragment), so a link that carries a token shows nothing of itself.
+`uri` is the episode's page (the feed item's link), else its feed item (`{feed}?guid={guid}`);
+the resolver names items the same way, so either resolves to the episode's `PodcastEpisode` card
+(`POST /v1/resolve`), and `id` names that card when Pinakes already has it (an alias as its
+root). `stream` is the item's enclosure when it is public and direct, in the
+same shape as a card's (`{url, type, duration_s, preview}`: the URL a client hands to an audio
+element, its `audio/*` or `video/*` type, its length in whole seconds when the feed states one,
+and `preview: false`, the whole episode); `null` when the item has no enclosure or a signed,
+expiring, credentialed or non-media one (the rules of a card's `stream`). An entry is not a card:
+nothing in it is tagged, grouped or counted.
+
+The list is read with the show: the feed's own card (`PodcastSeries`) takes it from the feed it
+is; a Podcast Index or Apple Podcasts show page (and the player pages that open a show by its
+Apple ID) fetches the feed its record names, once per read of the show, and takes the same list.
+It is replaced whole each time the show's card is saved from a read of its feed; a read that
+could not reach the feed, or not read and parse it within three seconds and what is left of the
+read's own time, keeps the list it had (the list is optional: a slow feed never costs the show
+its card). A card replaced without a read (cleared after an error, scrubbed) lists nothing. An
+item's `stream` is `null` as well when its stored form would not fit the store's bound (a URL
+near 2,048 bytes that JSON escaping doubles): the episode is listed all the same. A show card without a list of its own (a page
+whose feed could not be read, a service that names no feed) answers with the list of a member
+of its [group](#groups) that has one: the same show elsewhere. A known resource that is no
+show, or whose feed was not read yet, returns an empty list; an unknown ID is 404. The items a
+feed holds beyond its first 200 are not looked at: feeds list newest first, and a few are out of
+order. Why a route and not a fact: a fact is one string per name, and a card's document is
+bounded; why not occurrences: an episode has no instant to window by, no recurrence and no
+document of its own here.
+
+```text
+GET /v1/resources/{id}/episodes?limit=20
+```
 
 ## Groups
 

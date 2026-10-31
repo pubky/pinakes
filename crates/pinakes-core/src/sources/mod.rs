@@ -290,7 +290,8 @@ pub async fn wall_hooks(
             .saturating_duration_since(tokio::time::Instant::now())
             .saturating_sub(std::time::Duration::from_millis(25))
             .min(WALL_HOOK_TIMEOUT);
-        match tokio::time::timeout(left, hook.walled(&cx, uri)).await {
+        let deadline = tokio::time::Instant::now() + left;
+        match tokio::time::timeout_at(deadline, within(deadline, hook.walled(&cx, uri))).await {
             Ok(Ok(Some(doc))) => {
                 crate::telemetry::discovery("wall_hook", "applied");
                 return doc.bounded(attributes()).ok();
@@ -352,7 +353,10 @@ pub(crate) async fn page_hooks_with(
             .saturating_duration_since(tokio::time::Instant::now())
             .saturating_sub(std::time::Duration::from_millis(25))
             .min(PAGE_HOOK_TIMEOUT);
-        match tokio::time::timeout(left, hook.page(&cx, uri, page, &doc)).await {
+        let deadline = tokio::time::Instant::now() + left;
+        match tokio::time::timeout_at(deadline, within(deadline, hook.page(&cx, uri, page, &doc)))
+            .await
+        {
             Ok(Ok(Some(improved))) => {
                 crate::telemetry::discovery("page_hook", "applied");
                 return improved;
@@ -458,11 +462,27 @@ pub struct Context<'a> {
     /// The card's lifetime in seconds (`limits.resolver_ttl_secs`).
     pub ttl: u64,
 }
+tokio::task_local! {
+    /// The deadline of the read a hook serves (`wall_hooks`, `page_hooks`), for what the hook
+    /// fetches beyond its card.
+    static DEADLINE: tokio::time::Instant;
+}
+/// Run `hook` with `deadline` as the deadline its context reports (`Context::deadline`).
+pub async fn within<F: std::future::Future>(deadline: tokio::time::Instant, hook: F) -> F::Output {
+    DEADLINE.scope(deadline, hook).await
+}
 impl Context<'_> {
     /// The operator's contact address (`http.contact`). A source whose service refuses requests
     /// without one answers `RetryLater` (class `disabled`) while it is empty.
     pub fn contact(&self) -> Option<&str> {
         self.egress.contact()
+    }
+    /// The deadline of the read this context serves, when its caller set one (a wall or page
+    /// hook runs under the web fetch's): what a source fetches beyond its card, such as a show's
+    /// episodes, stays within it so the card is handed back in time. `None` on the official
+    /// route, which has the fetch to itself.
+    pub fn deadline(&self) -> Option<tokio::time::Instant> {
+        DEADLINE.try_with(|d| *d).ok()
     }
     /// A GET (or, with `options.json_body`, a POST) through the egress policy. Rate limits and
     /// server errors become `RetryLater`; other statuses are the caller's to read. At most
@@ -939,6 +959,7 @@ pub(crate) mod fixture {
                 .map(|(url, status, kind, body)| (url.to_owned(), (status, kind, body)))
                 .collect(),
             asked: Default::default(),
+            delays: Default::default(),
         });
         let egress = crate::resolver::egress::Egress::with_backends(
             Default::default(),
@@ -951,10 +972,15 @@ pub(crate) mod fixture {
     pub struct Recorded {
         routes: std::collections::BTreeMap<String, (u16, &'static str, Vec<u8>)>,
         pub asked: std::sync::Mutex<Vec<String>>,
+        delays: std::sync::Mutex<std::collections::BTreeMap<String, std::time::Duration>>,
     }
     impl Recorded {
         pub fn asked(&self) -> Vec<String> {
             self.asked.lock().unwrap().clone()
+        }
+        /// Answer `url` only after `delay` (tokio time, so a paused test's clock): a slow host.
+        pub fn delay(&self, url: &str, delay: std::time::Duration) {
+            self.delays.lock().unwrap().insert(url.to_owned(), delay);
         }
     }
     #[async_trait::async_trait]
@@ -965,6 +991,10 @@ pub(crate) mod fixture {
             _: &[std::net::SocketAddr],
         ) -> anyhow::Result<crate::resolver::egress::Fetched> {
             self.asked.lock().unwrap().push(url.to_string());
+            let delay = self.delays.lock().unwrap().get(url.as_str()).copied();
+            if let Some(delay) = delay {
+                tokio::time::sleep(delay).await;
+            }
             let (status, kind, body) = self.routes.get(url.as_str()).cloned().unwrap_or((
                 404,
                 "text/html",

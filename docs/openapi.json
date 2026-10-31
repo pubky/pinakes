@@ -559,6 +559,77 @@
         ],
         "type": "object"
       },
+      "Episode": {
+        "description": "One of a show's latest episodes, as its feed lists it.",
+        "properties": {
+          "guid": {
+            "description": "What names the item ([`item_identity`]): its GUID as the feed gives it; its page when it\ngives none; else `sha256:` and the hex digest of its enclosure's URL, so a signed link\nshows nothing of itself here.",
+            "type": "string"
+          },
+          "id": {
+            "description": "The episode's own card, when Pinakes has one for its `uri` (an alias reads as its root);\nabsent until someone looks it up.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "image": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "description": "Plain text, entity-decoded: escape it before rendering it as HTML.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "published": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stream": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Stream",
+                "description": "Its enclosure, when public and direct (`Stream`); null when the item has none Pinakes\nwould hand to a player."
+              }
+            ]
+          },
+          "uri": {
+            "description": "The episode's page (the item's link), else its feed item (`{feed}?guid={guid}`), which\nresolves to its `PodcastEpisode` card.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "uri",
+          "guid"
+        ],
+        "type": "object"
+      },
+      "EpisodePage": {
+        "properties": {
+          "items": {
+            "description": "The show's latest episodes, newest first; empty for a resource that is no show or whose\nfeed was not read yet.",
+            "items": {
+              "$ref": "#/components/schemas/Episode"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
       "Facets": {
         "description": "The facets `facet` asked for, over the whole filtered set.",
         "properties": {
@@ -2659,6 +2730,56 @@
         },
         "tags": [
           "Previews"
+        ]
+      }
+    },
+    "/v1/resources/{id}/episodes": {
+      "get": {
+        "description": "A podcast show's latest episodes as its feed lists them, newest first: at most 20, each with its page or feed item, date and public stream. The show's own list, else that of a member of its group which has one (an Apple Podcasts show grouped with its feed). A known resource that is no show, or whose feed was not read yet, returns an empty list.",
+        "operationId": "list_episodes",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "At most this many, newest first: 1–20, default 20.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EpisodePage"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "description": "Invalid resource ID or limit"
+          },
+          "404": {
+            "description": "Resource not found"
+          }
+        },
+        "tags": [
+          "Media"
         ]
       }
     },

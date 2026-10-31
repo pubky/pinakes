@@ -187,10 +187,27 @@ impl Source for PodcastIndex {
             None => parse_show(f.status, &f.body, feed),
         })
         .await??;
-        Ok(match card {
+        // A show's latest episodes, from the feed Podcast Index names for it (`episodes`).
+        let feed_url = card
+            .as_ref()
+            .filter(|_| episode.is_none())
+            .and_then(|c| c.details.get("feed_url"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let mut doc = match card {
             Some(card) => card.into_doc(cx.card(uri, self), SITE),
             None => cx.missing(uri, self),
-        })
+        };
+        if let Some(feed) = feed_url {
+            doc.episodes = crate::episodes::fetch(
+                cx.egress,
+                &feed,
+                cx.ttl,
+                crate::episodes::feed_deadline(cx.deadline()),
+            )
+            .await;
+        }
+        Ok(doc)
     }
 }
 
@@ -289,10 +306,15 @@ mod tests {
             .is_none());
     }
 
+    /// The operator's pair is global (`CREDENTIALS`): the tests that set it hold this while
+    /// they run, one at a time, so none sees another's pair.
+    static PAIR: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     /// Without the operator's pair the source declines (the page gets a web card) and asks
-    /// nothing; with it, it asks the API, never the website. One test, since the pair is global.
+    /// nothing; with it, it asks the API, never the website.
     #[tokio::test(start_paused = true)]
     async fn the_api_is_asked_with_the_pair_and_nothing_without() {
+        let _pair = PAIR.lock().await;
         let api = "https://api.podcastindex.org/api/1.0/podcasts/byfeedid?id=577105";
         let (egress, recorded) = fixture::egress(vec![(
             api,
@@ -316,8 +338,94 @@ mod tests {
         let doc = PodcastIndex.resolve(&cx, uri).await.unwrap();
         assert_eq!(doc.name.as_deref(), Some("Darknet Diaries"));
         assert_eq!(doc.type_name, "PodcastSeries");
-        assert_eq!(recorded.asked(), [api]);
+        // The show's feed is asked for its latest episodes; unanswered (404 here), the show's
+        // stored list stays (`None`), and the card is the show's all the same.
+        assert_eq!(
+            recorded.asked(),
+            [api, "https://podcast.darknetdiaries.com/"]
+        );
+        assert_eq!(doc.episodes, None);
         assert!(!format!("{doc:?}").contains("TESTSECRET"));
         *CREDENTIALS.write().unwrap() = None;
+    }
+
+    /// A show's card carries its feed's latest episodes, read from the feed Podcast Index names
+    /// (its first items, as recorded), newest first, with their public streams.
+    #[tokio::test(start_paused = true)]
+    async fn a_shows_card_lists_its_latest_episodes_from_its_feed() {
+        let _pair = PAIR.lock().await;
+        let api = "https://api.podcastindex.org/api/1.0/podcasts/byfeedid?id=577105";
+        let (egress, recorded) = fixture::egress(vec![
+            (api, 200, "application/json", read("feed-577105.json")),
+            (
+                "https://podcast.darknetdiaries.com/",
+                200,
+                "application/rss+xml",
+                read("feed-darknetdiaries-head.xml"),
+            ),
+        ]);
+        let cx = super::super::Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        configure(&PodcastIndexConfig {
+            key: Some("TESTKEY".into()),
+            secret: Some("TESTSECRET".into()),
+        });
+        let doc = PodcastIndex
+            .resolve(&cx, "https://podcastindex.org/podcast/577105")
+            .await
+            .unwrap();
+        *CREDENTIALS.write().unwrap() = None;
+        assert_eq!(
+            recorded.asked(),
+            [api, "https://podcast.darknetdiaries.com/"]
+        );
+        let episodes = doc.episodes.expect("the feed's episodes");
+        assert_eq!(episodes.len(), crate::episodes::KEPT);
+        let first = &episodes[0];
+        assert!(first.name.is_some(), "{first:?}");
+        assert!(
+            first.uri.starts_with("https://darknetdiaries.com/episode/"),
+            "{first:?}"
+        );
+        assert!(first.published.is_some());
+        let stream = first.stream.as_ref().expect("a public enclosure");
+        assert!(stream.url.starts_with("https://"), "{stream:?}");
+        assert_eq!(stream.media_type, "audio/mpeg");
+        assert!(stream.duration_s.is_some_and(|d| d > 600), "{stream:?}");
+        assert!(!stream.preview);
+        assert!(
+            episodes
+                .windows(2)
+                .all(|w| w[0].published >= w[1].published),
+            "newest first"
+        );
+        // An episode page asked as such reads no feed.
+        let (egress, recorded) = fixture::egress(vec![(
+            "https://api.podcastindex.org/api/1.0/episodes/byid?id=61684996715",
+            200,
+            "application/json",
+            read("episode-61684996715.json"),
+        )]);
+        let cx = super::super::Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        configure(&PodcastIndexConfig {
+            key: Some("TESTKEY".into()),
+            secret: Some("TESTSECRET".into()),
+        });
+        let doc = PodcastIndex
+            .resolve(
+                &cx,
+                "https://podcastindex.org/podcast/255500?episode=61684996715",
+            )
+            .await
+            .unwrap();
+        *CREDENTIALS.write().unwrap() = None;
+        assert_eq!(doc.type_name, "PodcastEpisode");
+        assert_eq!(doc.episodes, None);
+        assert_eq!(recorded.asked().len(), 1);
     }
 }

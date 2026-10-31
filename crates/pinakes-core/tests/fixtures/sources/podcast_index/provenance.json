@@ -36,6 +36,16 @@
     "status": 200,
     "url": "https://api.podcastindex.org/api/1.0/podcasts/byfeedid?id=577105"
   },
+  "feed-darknetdiaries-head": {
+    "bytes": 196514,
+    "content_type": "application/rss+xml",
+    "file": "feed-darknetdiaries-head.xml",
+    "note": "the show's feed as served, cut after its 25th item and closed (as the fetch cap cuts a long feed); the whole feed was 1-2 MB",
+    "recorded_at": "2026-10-30T18:45:48+00:00",
+    "sha256": "7559c9f117a9b36515f3e64f4b3c7464e1005a7f2113fee750c6cc2dbdc14caa",
+    "status": 200,
+    "url": "https://podcast.darknetdiaries.com/"
+  },
   "feed-missing": {
     "bytes": 94,
     "content_type": "application/json",

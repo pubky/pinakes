@@ -297,6 +297,7 @@ pub async fn save(
     let doc = bounded.as_ref().unwrap_or(doc);
     // Read before the document's copy below, which leaves out what is never stored.
     let withheld = doc.withheld;
+    let episodes = doc.episodes.clone();
     let mut prepared = if let Some(container) = &doc.container {
         Some(
             crate::event::storage::prepare(pool, id, container, doc.fetched_at, doc.ttl_secs)
@@ -365,6 +366,8 @@ pub async fn save(
     // The transient container is serde-skipped: copy only the small parent document,
     // without cloning thousands of already-prepared occurrence documents.
     let mut doc: ResourceMeta = serde_json::from_value(serde_json::to_value(doc)?)?;
+    // A show's episodes ride with this reading; a stored document retained below carries none.
+    doc.episodes = episodes;
     if let Some(plan) = prepared.as_ref().filter(|p| !p.warnings.is_empty()) {
         doc.event.warnings.extend(plan.warnings.iter().cloned());
         doc.event.warnings.sort();
@@ -604,6 +607,7 @@ pub async fn scrub_stored(pool: &PgPool) -> Result<u64> {
                     .await?
                     .rows_affected();
                 let derived = forget_derived(&mut tx, &ids).await?;
+                crate::episodes::clear(&mut tx, &id).await?;
                 unqueue_also_on(&mut tx, &id).await?;
                 if card + derived > 0 {
                     // Its group was formed from the card it no longer has.
@@ -676,6 +680,7 @@ pub async fn scrub_never_fetched(pool: &PgPool) -> Result<u64> {
                 .execute(&mut *tx)
                 .await?
                 .rows_affected();
+            crate::episodes::clear(&mut tx, &id).await?;
             if changed > 0 {
                 // Its group was formed from the card it no longer has.
                 sqlx::query(

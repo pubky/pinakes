@@ -207,6 +207,11 @@ pub struct ResourceMeta {
     /// URI becomes an alias of it after the fetch (`alias::source`). Never stored.
     #[serde(skip)]
     pub source_root: Option<String>,
+    /// A podcast show's latest episodes, from its feed (`episodes`): the save writes them to
+    /// `podcast_episode`, never into the document. `None` leaves the stored list as it is.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub episodes: Option<Vec<crate::episodes::Episode>>,
     pub source: String,
     /// The also-on sources whose findings the queue wrote into this card itself, each with a
     /// fingerprint of every value it wrote (`titles`: the name and description; `films`,

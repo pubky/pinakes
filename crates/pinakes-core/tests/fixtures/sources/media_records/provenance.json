@@ -9,6 +9,16 @@
     "status": 200,
     "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q1079&props=claims%7Csitelinks%2Furls&format=json"
   },
+  "feed-pc20-head": {
+    "bytes": 466545,
+    "content_type": "application/xml",
+    "file": "feed-pc20-head.xml",
+    "note": "the show's feed as served, cut after its 25th item and closed (as the fetch cap cuts a long feed); the whole feed was 1-2 MB",
+    "recorded_at": "2026-10-30T18:45:48+00:00",
+    "sha256": "b4adbcc149fde442afd82b014f25dbbf1de01325c383b5eb322e282b7a6f87e8",
+    "status": 200,
+    "url": "https://feeds.podcastindex.org/pc20.xml"
+  },
   "itunes-podcast-1584274529": {
     "bytes": 1587,
     "content_type": "text/javascript",

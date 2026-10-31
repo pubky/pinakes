@@ -329,6 +329,17 @@ fn named_by_podcast_index(doc: &ResourceMeta) -> Option<ResourceMeta> {
     Some(doc)
 }
 
+/// The feed iTunes' record of a show names (`feedUrl`), when it is an http(s) URL.
+fn itunes_feed(raw: &[u8]) -> Option<String> {
+    let v: Value = serde_json::from_slice(raw).ok()?;
+    let [one] = v["results"].as_array()?.as_slice() else {
+        return None;
+    };
+    one["feedUrl"]
+        .as_str()
+        .filter(|u| u.starts_with("https://") || u.starts_with("http://"))
+        .map(str::to_owned)
+}
 /// The card of an Apple podcast's player page from iTunes' record of the show.
 fn itunes_card(cx: &Context<'_>, uri: &str, show: u64, raw: &[u8]) -> Option<ResourceMeta> {
     let v: Value = serde_json::from_slice(raw).ok()?;
@@ -496,9 +507,28 @@ impl Source for MediaRecords {
                     )
                     .await?;
                 super::retry(&f)?;
-                (f.status == 200)
+                match (f.status == 200)
                     .then(|| itunes_card(cx, uri, show, &f.body))
                     .flatten()
+                {
+                    Some(mut doc) => {
+                        // The show's latest episodes, from the feed iTunes names for it
+                        // (`episodes`), within what is left of the read's deadline after the
+                        // lookup, less what hands the card back: a slow feed, or a wait for a
+                        // parser, costs the list, never the card.
+                        if let Some(feed) = itunes_feed(&f.body) {
+                            doc.episodes = crate::episodes::fetch(
+                                cx.egress,
+                                &feed,
+                                3600,
+                                crate::episodes::feed_deadline(cx.deadline()),
+                            )
+                            .await;
+                        }
+                        Some(doc)
+                    }
+                    None => None,
+                }
             }
             None => None,
         })
@@ -930,5 +960,169 @@ mod tests {
         assert_eq!(doc.type_name, "PodcastSeries");
         assert!(doc.name.is_some() && doc.status == Status::Ok);
         assert!(itunes_card(&cx, uri, 1, &raw).is_none());
+    }
+
+    /// The walled page's card carries the show's latest episodes, read from the feed iTunes
+    /// names for it (its first items, as recorded); a feed that does not answer leaves the card
+    /// without a list (the stored one stays).
+    #[tokio::test(start_paused = true)]
+    async fn a_walled_player_pages_card_lists_the_shows_latest_episodes() {
+        let lookup = "https://itunes.apple.com/lookup?id=1584274529&entity=podcast&country=us";
+        let feed = "https://feeds.podcastindex.org/pc20.xml";
+        assert_eq!(
+            itunes_feed(&read("itunes-podcast-1584274529.json")).as_deref(),
+            Some(feed)
+        );
+        let (egress, recorded) = fixture::egress(vec![
+            (
+                lookup,
+                200,
+                "text/javascript",
+                read("itunes-podcast-1584274529.json"),
+            ),
+            (feed, 200, "application/xml", read("feed-pc20-head.xml")),
+        ]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let uri = "https://pca.st/itunes/1584274529";
+        let doc = MediaRecords.walled(&cx, uri).await.unwrap().unwrap();
+        assert_eq!(doc.type_name, "PodcastSeries");
+        assert_eq!(recorded.asked(), [lookup, feed]);
+        let episodes = doc.episodes.expect("the feed's episodes");
+        assert_eq!(episodes.len(), crate::episodes::KEPT);
+        let stream = episodes[0].stream.as_ref().expect("a public enclosure");
+        assert!(stream.url.starts_with("https://"), "{stream:?}");
+        assert_eq!(stream.media_type, "audio/mpeg");
+        assert!(episodes[0].published.is_some());
+        // The feed unanswered: the card, without a list.
+        let (egress, _) = fixture::egress(vec![(
+            lookup,
+            200,
+            "text/javascript",
+            read("itunes-podcast-1584274529.json"),
+        )]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let doc = MediaRecords.walled(&cx, uri).await.unwrap().unwrap();
+        assert_eq!(doc.type_name, "PodcastSeries");
+        assert_eq!(doc.episodes, None);
+    }
+
+    /// The list is asked for within the read's deadline, and the card is handed back whatever the
+    /// feed does: iTunes at once and the feed after seven seconds (no deadline set: the feed gets
+    /// `FEED_WAIT`); two seconds left and the feed at 2.5 s; two seconds left and every parser
+    /// busy for 6.5 s. Each time the card comes within the time left, without a list (the save
+    /// then keeps the show's stored rows: `tests/episodes.rs`).
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_feed_costs_the_list_not_the_card() {
+        use std::time::Duration;
+        let lookup = "https://itunes.apple.com/lookup?id=1584274529&entity=podcast&country=us";
+        let feed = "https://feeds.podcastindex.org/pc20.xml";
+        let uri = "https://pca.st/itunes/1584274529";
+        let routes = || {
+            fixture::egress(vec![
+                (
+                    lookup,
+                    200,
+                    "text/javascript",
+                    read("itunes-podcast-1584274529.json"),
+                ),
+                (feed, 200, "application/xml", read("feed-pc20-head.xml")),
+            ])
+        };
+        // No deadline of its own: the feed gets `FEED_WAIT`, and no more.
+        let (egress, recorded) = routes();
+        recorded.delay(feed, Duration::from_secs(7));
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let started = tokio::time::Instant::now();
+        let doc = tokio::time::timeout(
+            crate::sources::WALL_HOOK_TIMEOUT,
+            MediaRecords.walled(&cx, uri),
+        )
+        .await
+        .expect("the card within the hook's time")
+        .unwrap()
+        .unwrap();
+        assert_eq!(doc.type_name, "PodcastSeries");
+        assert_eq!(doc.episodes, None, "no list from a feed that slow");
+        assert_eq!(recorded.asked(), [lookup, feed], "the feed was asked");
+        let waited = started.elapsed();
+        assert!(
+            waited >= crate::episodes::FEED_WAIT && waited < crate::sources::WALL_HOOK_TIMEOUT,
+            "{waited:?}"
+        );
+        // Two seconds left of the read, the feed answering at 2.5 s: the card at once, no list.
+        let (egress, recorded) = routes();
+        recorded.delay(feed, Duration::from_millis(2500));
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let started = tokio::time::Instant::now();
+        let deadline = started + Duration::from_secs(2);
+        let doc = tokio::time::timeout_at(
+            deadline,
+            crate::sources::within(deadline, MediaRecords.walled(&cx, uri)),
+        )
+        .await
+        .expect("the card within the read's deadline")
+        .unwrap()
+        .unwrap();
+        assert_eq!(doc.type_name, "PodcastSeries");
+        assert_eq!(doc.episodes, None);
+        assert_eq!(recorded.asked(), [lookup, feed]);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        // Two seconds left, the feed at once, but the feed's parse waiting 6.5 s for a parser:
+        // the wait is under the same deadline, so the card still comes in time, without a list.
+        let (egress, recorded) = routes();
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let started = tokio::time::Instant::now();
+        let deadline = started + Duration::from_secs(2);
+        let doc = tokio::time::timeout_at(
+            deadline,
+            crate::sources::within(
+                deadline,
+                crate::episodes::PARSE_WAIT
+                    .scope(Duration::from_millis(6500), MediaRecords.walled(&cx, uri)),
+            ),
+        )
+        .await
+        .expect("the card within the read's deadline")
+        .unwrap()
+        .unwrap();
+        assert_eq!(doc.type_name, "PodcastSeries");
+        assert_eq!(doc.episodes, None, "no list while the parsers are busy");
+        assert_eq!(recorded.asked(), [lookup, feed]);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        // With time to spare, the same wait ends and the list comes.
+        let (egress, _) = routes();
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let doc = crate::episodes::PARSE_WAIT
+            .scope(Duration::from_millis(1500), MediaRecords.walled(&cx, uri))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(doc.episodes.map(|l| l.len()), Some(crate::episodes::KEPT));
     }
 }
