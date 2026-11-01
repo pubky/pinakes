@@ -613,6 +613,10 @@ pub struct EgressConfig {
     /// How far an HTML page is read while its head is still open at the 1 MB page cap.
     #[serde(skip)]
     pub html_head_bytes: usize,
+    /// The API hosts of the also-on sources that are off (`also_on::off_hosts`), refused as
+    /// `deny_hosts` are: switching a source off stops every call to its API.
+    #[serde(skip)]
+    pub off_hosts: Vec<String>,
 }
 impl Default for EgressConfig {
     fn default() -> Self {
@@ -624,6 +628,7 @@ impl Default for EgressConfig {
             host_rates: BTreeMap::new(),
             source_rates: BTreeMap::new(),
             html_head_bytes: 4 * 1024 * 1024,
+            off_hosts: vec![],
         }
     }
 }
@@ -879,6 +884,7 @@ impl Config {
             .chain(crate::also_on::budgets())
             .map(|(host, rate)| (host.to_owned(), rate))
             .collect();
+        self.egress.off_hosts = crate::also_on::off_hosts(&self.also_on);
     }
     pub fn validate(&self) -> Result<()> {
         if self.pubky.enabled {
@@ -1641,6 +1647,43 @@ mod tests {
     /// Egress host rules may be written in Unicode or punycode, any case, with a trailing dot:
     /// each is compared as URL hosts are written. One that names no host stops startup, naming
     /// the rule.
+    /// A switched-off also-on source's API hosts are refused at the egress, whatever path asks,
+    /// and only those: Deezer's API while it is off (the default), never deezer.com's pages
+    /// (TASK-deezer-api-off).
+    #[test]
+    fn a_switched_off_source_s_api_is_refused_at_the_egress() {
+        if !crate::also_on::registered()
+            .iter()
+            .any(|s| s.id() == "deezer")
+        {
+            return;
+        }
+        let api = "https://api.deezer.com/track/3135556";
+        let pages = [
+            "https://www.deezer.com/track/3135556",
+            "https://deezer.com/album/14879699",
+            "https://deezer.page.link/xyz",
+        ];
+        let off = Config::load(None).unwrap();
+        assert!(off.egress.off_hosts.contains(&"api.deezer.com".to_owned()));
+        assert!(
+            off.egress.deny_hosts.is_empty(),
+            "no rule of the operator's"
+        );
+        assert!(!policy(&off).allows(api));
+        for page in pages {
+            assert!(policy(&off).allows(page), "{page}");
+        }
+        let deezer = |also_on: serde_json::Value| with(serde_json::json!({ "also_on": also_on }));
+        let on = deezer(serde_json::json!({"sources": {"deezer": {"enabled": true}}})).unwrap();
+        assert!(!on.egress.off_hosts.contains(&"api.deezer.com".to_owned()));
+        assert!(policy(&on).allows(api));
+        // With the worker off no source runs, so none calls its API.
+        let idle =
+            deezer(serde_json::json!({"enabled": false, "sources": {"deezer": {"enabled": true}}}))
+                .unwrap();
+        assert!(!policy(&idle).allows(api));
+    }
     #[test]
     fn egress_host_rules_are_canonical_and_a_bad_one_is_refused() {
         let rules = |deny: &[&str]| with(serde_json::json!({"egress": {"deny_hosts": deny}}));

@@ -110,6 +110,31 @@ impl Transport for Recorded {
                 body: b"<html><head><title>Big Band</title></head><body></body></html>".to_vec(),
             });
         }
+        // Deezer's own pages, written by hand in their shape: the title, the Open Graph type, and
+        // an oEmbed discovery link on its API's host (never followed: another origin).
+        if url.host_str() == Some("www.deezer.com") {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(format!("www.deezer.com{}", url.path()));
+            let body = match url.path() {
+                "/album/14879699" => {
+                    r#"<html><head><title>OK Computer - Album by Radiohead | Deezer</title><meta property="og:title" content="OK Computer"><meta property="og:type" content="music.album"><meta property="og:url" content="https://www.deezer.com/album/14879699"><link rel="alternate" type="application/json+oembed" href="https://api.deezer.com/oembed?url=https%3A%2F%2Fwww.deezer.com%2Falbum%2F14879699"></head><body></body></html>"#
+                }
+                other => panic!("unexpected Deezer page {other}"),
+            };
+            return Ok(Fetched {
+                permanent_redirect: false,
+                truncated: false,
+                validators: Default::default(),
+                url: url.clone(),
+                status: 200,
+                retry_after_secs: 60,
+                location: None,
+                content_type: "text/html".into(),
+                body: body.as_bytes().to_vec(),
+            });
+        }
         // Spotify's token and Web API (`spotify`): the track REPORT-matching names, written by
         // hand in the API's shape (Spotify refused to answer the owner's app; tests/spotify.rs).
         if let Some(host @ ("accounts.spotify.com" | "api.spotify.com")) = url.host_str() {
@@ -497,6 +522,206 @@ async fn wikidata_reads_back_every_hit_before_choosing_one() {
 fn has(ids: &[&str]) -> bool {
     let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
     ids.iter().all(|id| registered.contains(id))
+}
+
+/// Deezer's API is never called while its source is off (the default), whatever path asks, and
+/// switching it off hides nothing of deezer.com (TASK-deezer-api-off): a tagged Deezer album
+/// resolves from its own page, the album's other editions list it from MusicBrainz and
+/// Wikidata (P2723) and join it, and search finds it. Deezer itself records nothing.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn deezer_s_api_stays_off_and_its_links_stay(pool: sqlx::PgPool) {
+    use tower::ServiceExt;
+    if !has(&["musicbrainz", "wikidata"]) {
+        return;
+    }
+    // The configuration as the daemon loads it, and its egress (`also_on::off_hosts`).
+    let config = Config::load(None).unwrap();
+    if let Some(deezer) = also_on::registered().iter().find(|s| s.id() == "deezer") {
+        assert!(!config.also_on.source_on(deezer.as_ref()), "off by default");
+    }
+    let t = Arc::new(Recorded {
+        seen: Mutex::default(),
+    });
+    let guarded = Egress::with_backends(config.egress.clone(), Arc::new(PublicDns), t.clone());
+    // A tagged deezer.com link resolves from its page, typed by its Open Graph type.
+    let deezer = "https://www.deezer.com/album/14879699";
+    assert_eq!(
+        pinakes_core::resolver::classify_config(deezer, &config),
+        Some("web")
+    );
+    let web = pinakes_core::resolver::web::WebResolver {
+        oembed_policy: pinakes_core::resolver::cards::OembedPolicy::Always,
+        cards: None,
+        events: None,
+        egress: guarded.clone(),
+        config: config.web.clone(),
+    };
+    let page = web
+        .resolve_with_policy(deezer, Default::default())
+        .await
+        .unwrap();
+    assert_eq!(page.type_name, "MusicAlbum", "{page:?}");
+    assert_eq!(page.name.as_deref(), Some("OK Computer"));
+    // Two Spotify editions: MusicBrainz names Deezer's album for the first, Wikidata (P2723)
+    // for the second.
+    let first = "https://open.spotify.com/album/6dVIqQ8qmQ5GBnJ9shOYGE";
+    let second = "https://open.spotify.com/album/2fGCAYUMssLKiUAoNdxGLx";
+    let mut ids = vec![];
+    for (uri, doc) in [
+        (deezer, page),
+        (first, ResourceMeta::new(first, "media", 86400)),
+        (second, ResourceMeta::new(second, "media", 86400)),
+    ] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut d = doc;
+        d.set_type("MusicAlbum");
+        d.name.get_or_insert_with(|| "OK Computer".into());
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        ids.push(id);
+    }
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,object_path,label,created_at) SELECT id,repeat('a',52),'tag','/pub/test/tags/'||id,'music',now() FROM unnest($1::text[]) id")
+        .bind(&ids)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let cx = also_on::Context {
+        egress: guarded.clone(),
+        config: Arc::new(config.clone()),
+    };
+    sqlx::query("INSERT INTO also_on_dirty(resource_id) SELECT id FROM resource ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    also_on::drain(&pool, &cx, &also_on::registry(), 100)
+        .await
+        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
+    // Not one request to Deezer's API, by any path; its pages are read as any site's.
+    let seen = t.seen.lock().unwrap().clone();
+    assert!(
+        !seen.iter().any(|s| s.contains("api.deezer.com")),
+        "{seen:?}"
+    );
+    assert!(seen.contains(&"www.deezer.com/album/14879699".to_owned()));
+    // Nor at the egress itself: a request there is refused before it is made, while the source
+    // that names the host as its API's is in the build and off.
+    if has(&["deezer"]) {
+        assert!(guarded
+            .discover(
+                "https://api.deezer.com/album/14879699",
+                &FetchOptions {
+                    accept: Some("application/json".into()),
+                    ..Default::default()
+                },
+                60
+            )
+            .await
+            .is_err());
+        assert_eq!(t.seen.lock().unwrap().len(), seen.len());
+    }
+    // Deezer records nothing: no key, link, fact or stream.
+    let deezer_rows: i64 = sqlx::query_scalar(
+        "SELECT (SELECT count(*) FROM resource_key WHERE source='deezer' OR via='deezer')+(SELECT count(*) FROM derived_link WHERE source='deezer' OR via='deezer')+(SELECT count(*) FROM resource_fact WHERE source='deezer')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(deezer_rows, 0);
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
+    let get = |path: String| {
+        let app = app.clone();
+        async move {
+            let mut request = axum::http::Request::builder()
+                .uri(path)
+                .body(axum::body::Body::empty())
+                .unwrap();
+            request.extensions_mut().insert(axum::extract::ConnectInfo(
+                "127.0.0.2:1234".parse::<SocketAddr>().unwrap(),
+            ));
+            let response = app.oneshot(request).await.unwrap();
+            let bytes = http_body_util::BodyExt::collect(response.into_body())
+                .await
+                .unwrap()
+                .to_bytes();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+        }
+    };
+    // Each edition lists the Deezer album: the tagged card, joined to it.
+    for id in &ids[1..] {
+        let card = get(format!("/v1/resources/{id}")).await;
+        let also_on = card["also_on"].as_array().unwrap();
+        assert!(
+            also_on
+                .iter()
+                .any(|e| e["uri"] == deezer && e["id"] == ids[0].as_str()),
+            "{card}"
+        );
+    }
+    let card = get(format!("/v1/resources/{}", ids[0])).await;
+    assert_eq!(card["name"], "OK Computer", "{card}");
+    // Search finds it, by its site too.
+    let found = get("/v1/search?host=www.deezer.com".into()).await;
+    let items: Vec<&str> = found["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(items, [ids[0].as_str()], "{found}");
+}
+
+/// The Deezer source asked directly, past the worker's switch and through an egress without the
+/// off-hosts rule, still calls nothing while it is off: its own record of a Deezer link, or a
+/// lookup by ISRC. On, the same lookups ask Deezer's API.
+#[tokio::test]
+async fn the_deezer_source_off_calls_nothing_even_asked_directly() {
+    let Some(deezer) = also_on::registered().iter().find(|s| s.id() == "deezer") else {
+        return;
+    };
+    let subjects = [
+        ("https://www.deezer.com/album/41839661", vec![]),
+        (
+            "https://tidal.com/track/534050211",
+            vec![("isrc:GBUM71029604".to_owned(), "tidal".to_owned())],
+        ),
+    ];
+    for on in [false, true] {
+        let mut config = Config::default();
+        config.also_on.sources.insert(
+            "deezer".into(),
+            also_on::SourceOptions {
+                enabled: Some(on),
+                ..Default::default()
+            },
+        );
+        let t = Arc::new(Recorded {
+            seen: Mutex::default(),
+        });
+        let cx = also_on::Context {
+            egress: egress(t.clone()),
+            config: Arc::new(config),
+        };
+        for (uri, keys) in &subjects {
+            let subject = also_on::Subject {
+                id: "r1".into(),
+                uri: (*uri).into(),
+                status: "ok".into(),
+                type_name: None,
+                doc: None,
+                keys: keys.clone(),
+                first_seen_at: None,
+            };
+            assert!(deezer.applies(&subject), "{uri}");
+            let found = deezer.lookup(&cx, &subject).await;
+            assert_eq!(found.is_ok(), on, "{uri}: {found:?}");
+        }
+        let seen = t.seen.lock().unwrap().clone();
+        assert_eq!(
+            seen.iter().any(|s| s.starts_with("api.deezer.com")),
+            on,
+            "{seen:?}"
+        );
+    }
 }
 
 /// Two Spotify editions of one album: MusicBrainz names the first (a release, its links and,
