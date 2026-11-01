@@ -1,11 +1,26 @@
 # CourtListener
 
 US court opinions from CourtListener, the Free Law Project's case-law archive, by opinion cluster
-id, through its search API. Case law is in the public domain; no key. Without a token
-CourtListener answers at most five requests per minute, which is this host's budget, so cards
-arrive slowly when many opinions are new: a link whose request would wait more than a few seconds
-for the host is retried when its turn comes, instead of timing out. The card carries the source: "Source: CourtListener,
-Free Law Project".
+id, through its search API with the operator's token. Case law is in the public domain. The source
+is off without a token: CourtListener's API answers no request without one (401), and its opinion
+pages answer bots with a challenge, so opinion links then get ordinary web cards. The card carries
+the source: "Source: CourtListener, Free Law Project".
+
+## Token
+
+`[sources.courtlistener] token`, or the environment variable `PINAKES_COURTLISTENER_TOKEN` (also
+`PINAKES__SOURCES__COURTLISTENER__TOKEN`, which wins over the config file, which wins over the
+short name): the API token of a CourtListener account. It is a secret: it is sent only to
+`www.courtlistener.com`, as `Authorization: Token …`, never through a redirect, and never appears
+in logs, errors, metrics, `Debug` output or cards. A token CourtListener refuses (401 or 403:
+revoked or mistyped) turns the source off until the daemon restarts: opinion links get web cards
+again, one warning is logged, and `pinakes_source_token_refusals_total{source="courtlistener"}`
+counts each refusal.
+
+Pinakes asks at most five requests a minute, the limit CourtListener set for anonymous use, so
+cards arrive slowly when many opinions are new: a link whose request would wait more than a few
+seconds for the host is retried when its turn comes, instead of timing out. A token's own limit may
+be higher; `limits.host_rates` can raise the pace for `www.courtlistener.com`.
 
 ## Links
 

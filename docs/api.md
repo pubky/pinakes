@@ -1286,8 +1286,8 @@ Search by ingredient is `ingredient=` over that list, by whole words, not a full
 ## Sources
 
 Where a service's page is walled, thin or moved, Pinakes reads the service's own API for its
-links instead (keyless, except GitHub, which needs `[sources.github] token` or
-`PINAKES_GITHUB_TOKEN` and is off without one): the read's `from` names the source and `facts` holds the
+links instead (keyless, except GitHub and CourtListener, which need `[sources.<name>] token` or
+`PINAKES_GITHUB_TOKEN` and `PINAKES_COURTLISTENER_TOKEN`, and are off without one): the read's `from` names the source and `facts` holds the
 API's fields. [docs/sources](sources/README.md) lists every source with the links it reads,
 what it fetches, its card, its facts, its limits and licence, and its examples; each can be
 switched off in `[sources.<name>]`.

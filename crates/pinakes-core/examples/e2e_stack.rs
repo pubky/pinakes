@@ -435,6 +435,21 @@ async fn run(pool: sqlx::PgPool, f: Fixture) -> Result<()> {
     cfg.api.requests_per_minute = 10000;
     // The harness tags as one author: one shared tagger relates two samples.
     cfg.search.related_min_shared = 1;
+    // A source that reads with the operator's token (CourtListener) has one here: its recorded
+    // answers (`Source::e2e`) answer only a request that carries it.
+    for source in pinakes_core::sources::REGISTRY
+        .iter()
+        .filter(|s| s.takes_token() && s.e2e().is_some())
+    {
+        cfg.sources.0.insert(
+            source.name().into(),
+            pinakes_core::sources::Switch {
+                enabled: true,
+                token: Some("e2e-token".into()),
+            },
+        );
+    }
+    pinakes_core::configure_sources(&cfg);
     pinakes_core::also_on::configure(&pool, &cfg.also_on).await?;
     let state = AppState::new(pool.clone(), cfg.clone())?;
     let metrics = state.metrics.clone();

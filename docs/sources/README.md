@@ -61,7 +61,8 @@ or got plain web cards before are read by their source.
 - [`cleveland`](cleveland.md): Cleveland Museum of Art artworks by accession number.
 - [`clinicaltrials`](clinicaltrials.md): ClinicalTrials.gov clinical studies by NCT number.
 - [`commons`](commons.md): Wikimedia Commons files (images, video, audio) by file name.
-- [`courtlistener`](courtlistener.md): US court opinions by cluster id.
+- [`courtlistener`](courtlistener.md): US court opinions by cluster id, with the operator's token (off
+  without one)
 - [`discogs`](discogs.md): Discogs artists, masters and releases by ID.
 - [`discourse`](discourse.md): Topics and posts on any Discourse forum.
 - [`docker_hub`](docker_hub.md): Docker Hub image repositories by namespace and name.
