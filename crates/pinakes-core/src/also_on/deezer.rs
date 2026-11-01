@@ -10,8 +10,13 @@ use crate::music_sources::*;
 use serde_json::Value;
 
 const DEEZER_API: &str = "https://api.deezer.com";
-/// One Deezer API object; `None` when Deezer has no data (its error 800) or no such ID.
+/// One Deezer API object; `None` when Deezer has no data (its error 800) or no such ID. Never
+/// while the source is off, whoever asks: the egress refuses `api.deezer.com` then too
+/// (`also_on::off_hosts`).
 async fn deezer(cx: &Context, path: &str) -> Result<Option<Value>> {
+    if !cx.config.also_on.source_enabled(&DeezerSource) {
+        anyhow::bail!("the deezer source is off: its API is not called");
+    }
     let options = crate::resolver::egress::FetchOptions {
         accept: Some("application/json".into()),
         ..Default::default()
@@ -51,6 +56,9 @@ impl Source for DeezerSource {
     fn budgets(&self) -> &'static [(&'static str, f64)] {
         // Deezer's public API: 50 requests per 5 seconds.
         &[("api.deezer.com", 10.0)]
+    }
+    fn api_hosts(&self) -> &'static [&'static str] {
+        &["api.deezer.com"]
     }
     fn id(&self) -> &'static str {
         "deezer"

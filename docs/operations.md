@@ -685,7 +685,10 @@ worker; stored keys keep grouping and stored links stay on cards until they expi
 the sources' lifetimes). `derive_links = false` keeps keys and facts only: no derived links on
 cards, so a tagged link an exact derivation names no longer joins by it either;
 `[also_on.sources.<id>] enabled = false` turns one source off and `enabled = true` turns on one
-that is off by default (an unknown ID stops startup). A source that is off (switched off, or off
+that is off by default (an unknown ID stops startup). Off means no call to its API: a source
+whose API has a host of its own (Deezer's `api.deezer.com`) has that host refused at the egress
+while it is off, whatever path asks, and its site's pages and the links other sources give to them
+stay. A source that is off (switched off, or off
 by default and not turned on) stops showing at the next start: the daemon writes the sources
 that are off to `also_on_source_off`, and no card, `also_on` list, search, group or later
 source reads their keys, facts or links. Those rows stay in the database and expire as before;

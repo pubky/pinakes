@@ -15,3 +15,7 @@ track or album the API names for it, keyed by it.
 (`[also_on.sources.deezer] enabled = true`) only where they do; it costs one request per Deezer
 link and up to two per other track or album with an ISRC or barcode. Deezer's API is paced at 10
 requests/s (its published 50 per 5 seconds).
+
+Off means no request reaches Deezer's API by any path: the egress refuses `api.deezer.com` while
+the source is off. deezer.com links from other sources stay: Wikidata's (P2722, P2723, P2724),
+MusicBrainz's, links people tag, and a tagged deezer.com page, which gets its card from the page.

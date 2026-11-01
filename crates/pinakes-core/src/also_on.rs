@@ -287,6 +287,12 @@ pub trait Source: Send + Sync {
     fn budgets(&self) -> &'static [(&'static str, f64)] {
         &[]
     }
+    /// The hosts that serve its API and nothing else (no page anyone links to): while it is
+    /// switched off the egress refuses them ([`off_hosts`]), so no path calls its API. Its site's
+    /// own pages stay readable, and links to them from other sources stay.
+    fn api_hosts(&self) -> &'static [&'static str] {
+        &[]
+    }
     /// The type a media link it reads names, whatever its page calls itself
     /// (`media::link_type`): `Some(None)` for a link it reads that names no one type.
     fn link_type(&self, _uri: &str) -> Option<Option<&'static str>> {
@@ -439,6 +445,15 @@ pub async fn configure(pool: &PgPool, cfg: &AlsoOnConfig) -> Result<()> {
         tracing::info!(sources = ?off, "also-on sources switched off: their stored rows are not read");
     }
     Ok(())
+}
+/// The API hosts ([`Source::api_hosts`]) of the sources that do not run under `cfg`: switched
+/// off, or the worker off. The egress refuses them (`EgressConfig::off_hosts`).
+pub fn off_hosts(cfg: &AlsoOnConfig) -> Vec<String> {
+    registered()
+        .iter()
+        .filter(|s| !cfg.source_enabled(s.as_ref()))
+        .flat_map(|s| s.api_hosts().iter().map(|h| (*h).to_owned()))
+        .collect()
 }
 /// Every also-on source's published host limits ([`Source::budgets`]).
 pub fn budgets() -> impl Iterator<Item = (&'static str, f64)> {

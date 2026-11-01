@@ -641,6 +641,7 @@ impl Egress {
         let host = host.to_string();
         !super::osm::osm_host(&host)
             && !self.cfg.deny_hosts.iter().any(|h| host_matches(&host, h))
+            && !self.cfg.off_hosts.iter().any(|h| host_matches(&host, h))
             && (self.cfg.allow_hosts.is_empty()
                 || self.cfg.allow_hosts.iter().any(|h| host_matches(&host, h)))
     }
