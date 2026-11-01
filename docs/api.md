@@ -1111,7 +1111,10 @@ counts by status.
   description or subtitle: RSS, RSS 1.0 (`<rdf:RDF>` with its channel), Atom (`<feed>` in the Atom
   namespace) and JSON Feed (a `version` on jsonfeed.org), whatever its content type says. A body
   served as `application/rss+xml`, `application/atom+xml` or `application/feed+json` that does not
-  read as one is a DataFeed with no name. A podcast feed is typed by Media, below.
+  read as one is a DataFeed with no name. A podcast feed is typed by Media, below. A link that
+  looks like a feed (its last segment ends `.atom`, `.rss`, `.rdf` or `.xml`, or is named `feed`,
+  `rss` or `atom`) is fetched with the feed types first in its `Accept` header, as some sites
+  answer a feed's URL with a 404 when HTML leads.
 - **Media**: oEmbed (`media.oembed`) and page JSON-LD, which wins when healthy, except over a
   provider whose scheme names the link exactly (YouTube's `watch` and `shorts`) or any matching
   provider under `"always"`: their title, author and thumbnail come first. A blank field in an

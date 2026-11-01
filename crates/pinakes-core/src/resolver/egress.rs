@@ -69,6 +69,26 @@ pub const ALLOWED_TYPES: &[&str] = &[
     "application/pdf",
 ];
 
+/// What a fetch asks for when its caller names nothing: the allowed types, HTML first; for a link
+/// that looks like a feed (its last segment ends `.atom`, `.rss`, `.rdf` or `.xml`, or is named
+/// `feed`, `rss` or `atom`, with any extension), the feed types first. Some sites answer a feed's
+/// own URL with a 404 when HTML leads (jsonfeed.org's `feed.json`).
+pub fn default_accept(url: &Url) -> String {
+    let last = url
+        .path_segments()
+        .and_then(|mut s| s.rfind(|s| !s.is_empty()))
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let (stem, extension) = last.rsplit_once('.').unwrap_or((&last, ""));
+    if matches!(extension, "atom" | "rss" | "rdf" | "xml")
+        || matches!(stem, "feed" | "rss" | "atom")
+    {
+        "application/atom+xml, application/rss+xml, application/feed+json, */*;q=0.5".into()
+    } else {
+        ALLOWED_TYPES.join(", ")
+    }
+}
+
 pub fn public_ip(ip: IpAddr) -> bool {
     static DENIED: OnceLock<Vec<ipnet::IpNet>> = OnceLock::new();
     let denied = DENIED.get_or_init(|| {
@@ -300,7 +320,7 @@ impl Transport for PinnedTransport {
             options
                 .accept
                 .clone()
-                .unwrap_or_else(|| ALLOWED_TYPES.join(", ")),
+                .unwrap_or_else(|| default_accept(url)),
         );
         for (key, value) in &options.headers {
             request = request.header(*key, value);
@@ -2620,6 +2640,82 @@ mod tests {
             200
         );
         assert_eq!(transport.0.load(Ordering::SeqCst), 2);
+    }
+    /// A link that looks like a feed asks for feed types first; any other link, for HTML first.
+    /// A server that answers a feed's URL with a 404 when HTML leads (as jsonfeed.org does) then
+    /// gives the feed.
+    #[tokio::test]
+    async fn a_feeds_link_asks_for_feeds_first() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let mut seen = vec![];
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut data = vec![0; 4096];
+                let n = socket.read(&mut data).await.unwrap();
+                let request = String::from_utf8_lossy(&data[..n]).to_lowercase();
+                let accept = request
+                    .lines()
+                    .find_map(|l| l.strip_prefix("accept: "))
+                    .unwrap_or("")
+                    .to_owned();
+                let answer = if accept.starts_with("text/html") {
+                    "HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\nContent-Length: 9\r\nConnection: close\r\n\r\nNot Found"
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+                };
+                socket.write_all(answer.as_bytes()).await.unwrap();
+                seen.push(accept);
+            }
+            seen
+        });
+        let url = |path: &str| {
+            Url::parse(&format!(
+                "http://never-resolve.invalid:{}{path}",
+                addr.port()
+            ))
+            .unwrap()
+        };
+        assert_eq!(
+            PinnedTransport
+                .get(&url("/feed.json"), &[addr])
+                .await
+                .unwrap()
+                .status,
+            200
+        );
+        assert_eq!(
+            PinnedTransport
+                .get(&url("/about"), &[addr])
+                .await
+                .unwrap()
+                .status,
+            404
+        );
+        let seen = task.await.unwrap();
+        assert!(seen[0].starts_with("application/atom+xml"), "{seen:?}");
+        assert!(seen[1].starts_with("text/html"), "{seen:?}");
+        for (path, feed) in [
+            ("/feed.xml", true),
+            ("/pubky/releases.atom", true),
+            ("/index.rss", true),
+            ("/blog/feed/", true),
+            ("/rss", true),
+            ("/feed.json", true),
+            ("/news/index.rdf", true),
+            ("/", false),
+            ("/feeding-tips", false),
+            ("/posts/2026/hello.html", false),
+            ("/api/items.json", false),
+        ] {
+            assert_eq!(
+                default_accept(&url(path)).starts_with("application/atom+xml"),
+                feed,
+                "{path}"
+            );
+        }
     }
     /// An RSS 1.0 feed served as `application/rdf+xml` is read, as RSS and Atom are; a type
     /// nothing reads is still refused.
