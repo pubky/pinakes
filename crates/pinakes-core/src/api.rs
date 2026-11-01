@@ -687,8 +687,9 @@ pub struct Card {
     /// A gone social post's are its own link's alone.
     /// Empty when nothing references the card.
     pub refs: Vec<String>,
-    /// How many public collection posts hold the card's link, its own or an alias's, each once,
-    /// counted up to 1,000 (`1000`: 1,000 or more); 0 when none does. The collections are
+    /// How many public collection posts hold the card's link, its own or one of its aliases' (the
+    /// 31 most recently collected), each once, counted up to 1,000 (`1000`: 1,000 or more); 0
+    /// when none does. The collections are
     /// `GET /v1/resources/{id}/collections` (docs/api.md, Collections). An occurrence's are its
     /// feed's.
     pub collections: i64,

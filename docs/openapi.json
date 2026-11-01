@@ -71,7 +71,7 @@
             ]
           },
           "collections": {
-            "description": "How many public collection posts hold the card's link, its own or an alias's, each once,\ncounted up to 1,000 (`1000`: 1,000 or more); 0 when none does. The collections are\n`GET /v1/resources/{id}/collections` (docs/api.md, Collections). An occurrence's are its\nfeed's.",
+            "description": "How many public collection posts hold the card's link, its own or one of its aliases' (the\n31 most recently collected), each once, counted up to 1,000 (`1000`: 1,000 or more); 0\nwhen none does. The collections are\n`GET /v1/resources/{id}/collections` (docs/api.md, Collections). An occurrence's are its\nfeed's.",
             "format": "int64",
             "type": "integer"
           },
