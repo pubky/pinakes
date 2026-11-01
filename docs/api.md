@@ -269,7 +269,7 @@ example whose page has gone stale fails there.
 | `POST /v1/resolve {"uri":"https://grounds.stager.co/shop/default/events/111608505"}` | Event |
 | `POST /v1/resolve {"uri":"https://www.songkick.com/concerts/42408878-bausa-at-komplex-457"}` | MusicEvent |
 | `POST /v1/resolve {"uri":"https://events.humanitix.com/great-northern-contemporary-craft-fair"}` | Event |
-| `POST /v1/resolve {"uri":"https://infomaniak.events/en-ch/festivals/festival-wfc-leman-2026/c90c619b-c155-454d-a277-c2e28e87d379/events/365609"}` | Event |
+| `POST /v1/resolve {"uri":"https://infomaniak.events/en-ch/festivals/fete-de-la-biere-2027/75fb7215-0440-42a2-bee9-1af1bf0aa857/events/394429"}` | Event |
 | `POST /v1/resolve {"uri":"https://xceed.me/en/roma/event/dissonanze-2026-day-1/220015"}` | Event |
 | `POST /v1/resolve {"uri":"https://www.ents24.com/london-events/eventim-apollo/simon-brodkin/7474018"}` | Event |
 | `POST /v1/resolve {"uri":"https://www.ticketino.com/en/Event/TICKETINO-BBQ/192364"}` | Event |
