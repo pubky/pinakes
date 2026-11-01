@@ -1143,7 +1143,9 @@ counts by status.
   characters; unlisted content is omitted.
 - **Feeds**: on every route, a feed is a DataFeed, named by its own title and described by its own
   description or subtitle: RSS, RSS 1.0 (`<rdf:RDF>` with its channel), Atom (`<feed>` in the Atom
-  namespace) and JSON Feed (a `version` on jsonfeed.org), whatever its content type says. A body
+  namespace) and JSON Feed (a `version` on jsonfeed.org), whatever its content type says. Only a
+  field the format makes HTML loses its markup (an Atom `type="html"` text, an RSS description);
+  any other keeps text that looks like markup as it is (`Using <title> in HTML`). A body
   served as `application/rss+xml`, `application/atom+xml` or `application/feed+json` that does not
   read as one is a DataFeed with no name. A podcast feed is typed by Media, below. A link that
   looks like a feed (its last segment ends `.atom`, `.rss`, `.rdf` or `.xml`, or is named `feed`,
