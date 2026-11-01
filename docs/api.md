@@ -1107,11 +1107,16 @@ counts by status.
   SocialMediaPosting cards only when the fetched URL and the object ID share a registrable
   domain (on a multi-tenant host, the same tenant). Note and Article excerpts are capped at 200
   characters; unlisted content is omitted.
+- **Feeds**: on every route, a feed is a DataFeed, named by its own title and described by its own
+  description or subtitle: RSS, RSS 1.0 (`<rdf:RDF>` with its channel), Atom (`<feed>` in the Atom
+  namespace) and JSON Feed (a `version` on jsonfeed.org), whatever its content type says. A body
+  served as `application/rss+xml`, `application/atom+xml` or `application/feed+json` that does not
+  read as one is a DataFeed with no name. A podcast feed is typed by Media, below.
 - **Media**: oEmbed (`media.oembed`) and page JSON-LD, which wins when healthy, except over a
   provider whose scheme names the link exactly (YouTube's `watch` and `shorts`) or any matching
   provider under `"always"`: their title, author and thumbnail come first. A blank field in an
   answer is no value, so the page's stays. An oEmbed answer survives a failed or truncated page. Podcast types need a namespace or an audio/video
-  enclosure; plain RSS is a DataFeed. Direct podcast feeds are PodcastSeries; `?guid=` or the
+  enclosure; any other feed is a DataFeed (Feeds, above). Direct podcast feeds are PodcastSeries; `?guid=` or the
   episode page's RSS link selects an episode. A feed longer than the page cap is read up to its
   last whole item within the first megabyte (the newest come first), so an episode past that is
   never marked missing. No embed HTML or media bytes are served.

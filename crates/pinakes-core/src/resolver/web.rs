@@ -493,6 +493,13 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
         return Ok(out);
     }
     let text = String::from_utf8_lossy(&fetched.body);
+    // A feed, on whichever route fetched it: its own title and description.
+    if let Some((name, description)) = feed(&fetched.content_type, &text) {
+        out.doc.set_type("DataFeed");
+        out.doc.name = name;
+        out.doc.description = description;
+        return Ok(out);
+    }
     if fetched.content_type.ends_with("json") {
         if let Ok(v) = serde_json::from_str::<Value>(&text) {
             apply_jsonld(&mut out.doc, &v, &fetched.url, true, true);
@@ -807,6 +814,151 @@ const TITLE_SEPARATORS: &[&str] = &[" • ", " | ", " - ", " – ", " — ", " �
 /// name, or the head of one before a `:`, `-` or `|`; or its host's registrable label), e.g. "TFTC: A
 /// Bitcoin Podcast • Listen on Fountain". A site's root page keeps its title, and so does a
 /// title that would be left empty.
+/// The content types only a feed is served as.
+const FEED_TYPES: &[&str] = &[
+    "application/rss+xml",
+    "application/atom+xml",
+    "application/feed+json",
+];
+/// Whether `body` is a feed, and its own title and description: RSS (`<rss>`), RSS 1.0 or 0.90
+/// (`<rdf:RDF>` with its channel), Atom (`<feed>` in the Atom namespace) or JSON Feed (a `version`
+/// on jsonfeed.org), whatever the content type says; or a body served as a feed type
+/// (`FEED_TYPES`) that does not read as one, with neither.
+pub(crate) fn feed(content_type: &str, body: &str) -> Option<(Option<String>, Option<String>)> {
+    let body = body.trim_start_matches(['\u{feff}', ' ', '\t', '\r', '\n']);
+    let read = if body.starts_with('<') {
+        xml_feed(body)
+    } else if body.starts_with('{') && body.contains("https://jsonfeed.org/version/") {
+        serde_json::from_str::<Value>(body).ok().and_then(|v| {
+            v["version"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("https://jsonfeed.org/version/"))
+                .then(|| (feed_text(&v["title"]), feed_text(&v["description"])))
+        })
+    } else {
+        None
+    };
+    read.or_else(|| FEED_TYPES.contains(&content_type).then_some((None, None)))
+}
+fn feed_text(v: &Value) -> Option<String> {
+    v.as_str().map(clean_feed_text).filter(|s| !s.is_empty())
+}
+/// A feed's text as plain words: its markup (an HTML description, an Atom `type="html"` title)
+/// gone and its spaces collapsed.
+fn clean_feed_text(s: &str) -> String {
+    let text = if s.contains('<') {
+        super::cards::plain(s)
+    } else {
+        s.to_owned()
+    };
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+/// An XML feed's root, then its own title and description (before its first item or entry), read
+/// as a stream: a body cut at the page cap reads as well as a whole one, and the read stops early.
+fn xml_feed(body: &str) -> Option<(Option<String>, Option<String>)> {
+    use quick_xml::{events::Event, name::ResolveResult, NsReader};
+    const ATOM: &[u8] = b"http://www.w3.org/2005/Atom";
+    const RDF: &[u8] = b"http://www.w3.org/1999/02/22-rdf-syntax-ns#";
+    const RSS1: &[&[u8]] = &[
+        b"http://purl.org/rss/1.0/",
+        b"http://my.netscape.com/rdf/simple/0.9/",
+    ];
+    let mut reader = NsReader::from_str(body);
+    // The element depth at which the feed's own fields sit, once the root is known.
+    let mut fields = None;
+    let mut path: Vec<Vec<u8>> = vec![];
+    let (mut title, mut description) = (None::<String>, None::<String>);
+    let mut capture: Option<(bool, String)> = None;
+    // An RDF document is a feed only with an RSS 1.0 (or 0.90) channel.
+    let (mut rdf, mut rdf_channel) = (false, false);
+    for _ in 0..4096 {
+        let Ok((ns, event)) = reader.read_resolved_event() else {
+            break;
+        };
+        let bound = |ns: &ResolveResult<'_>, want: &[u8]| matches!(ns, ResolveResult::Bound(n) if n.into_inner() == want);
+        match event {
+            Event::Start(e) => {
+                let local = e.local_name().into_inner().to_vec();
+                if path.is_empty() {
+                    fields = match local.as_slice() {
+                        b"rss" if matches!(ns, ResolveResult::Unbound) => Some(3),
+                        b"feed" if bound(&ns, ATOM) => Some(2),
+                        b"RDF" if bound(&ns, RDF) => {
+                            rdf = true;
+                            Some(3)
+                        }
+                        _ => return None,
+                    };
+                } else if rdf && path.len() == 1 && local == b"channel" {
+                    if !RSS1.iter().any(|n| bound(&ns, n)) {
+                        return None;
+                    }
+                    rdf_channel = true;
+                }
+                if matches!(local.as_slice(), b"item" | b"entry") {
+                    break;
+                }
+                path.push(local);
+                if Some(path.len()) == fields && capture.is_none() {
+                    let parent_ok = fields == Some(2) || path[1] == b"channel";
+                    capture = match path.last().map(Vec::as_slice) {
+                        Some(b"title") if parent_ok && title.is_none() => {
+                            Some((true, String::new()))
+                        }
+                        Some(b"description" | b"subtitle")
+                            if parent_ok && description.is_none() =>
+                        {
+                            Some((false, String::new()))
+                        }
+                        _ => None,
+                    };
+                }
+                if path.len() > 64 {
+                    break;
+                }
+            }
+            Event::Empty(e) if path.is_empty() => {
+                let local = e.local_name().into_inner().to_vec();
+                return match local.as_slice() {
+                    b"rss" if matches!(ns, ResolveResult::Unbound) => Some((None, None)),
+                    b"feed" if bound(&ns, ATOM) => Some((None, None)),
+                    _ => None,
+                };
+            }
+            Event::Text(t) => {
+                if let (Some((_, text)), Ok(s)) = (&mut capture, t.unescape()) {
+                    text.push_str(&s);
+                }
+            }
+            Event::CData(t) => {
+                if let (Some((_, text)), Ok(s)) = (&mut capture, t.decode()) {
+                    text.push_str(&s);
+                }
+            }
+            Event::End(_) => {
+                if Some(path.len()) == fields {
+                    if let Some((is_title, text)) = capture.take() {
+                        let text = Some(clean_feed_text(&text)).filter(|s| !s.is_empty());
+                        if is_title {
+                            title = text;
+                        } else {
+                            description = text;
+                        }
+                    }
+                }
+                path.pop();
+                if path.is_empty() {
+                    break;
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    fields
+        .filter(|_| !rdf || rdf_channel)
+        .map(|_| (title, description))
+}
 pub(crate) fn without_site_suffix(title: &str, sites: &[String], url: &Url, root: bool) -> String {
     let title = title.trim();
     if root {
@@ -1777,6 +1929,137 @@ fn oembed_field(v: &Value, field: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A feed is a DataFeed named by its own title on every route: Atom (bitcoinops.org's,
+    /// served as `application/xml`; GitHub's releases), JSON Feed (jsonfeed.org's own), RSS and
+    /// RSS 1.0, also cut off at the page cap. Recorded answers are in `tests/fixtures/web/feeds`.
+    #[test]
+    fn feeds_are_data_feeds_named_by_their_own_title() {
+        let read = |file: &str| {
+            std::fs::read(format!(
+                "{}/tests/fixtures/web/feeds/{file}",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap()
+        };
+        let card = |url: &str, content_type: &str, body: Vec<u8>, truncated: bool| {
+            let f = Fetched {
+                permanent_redirect: false,
+                truncated,
+                validators: Default::default(),
+                url: Url::parse(url).unwrap(),
+                status: 200,
+                retry_after_secs: 60,
+                location: None,
+                content_type: content_type.into(),
+                body,
+            };
+            let d = extract(url, &f, 3600).unwrap().doc;
+            (d.type_name, d.name, d.description)
+        };
+        let feed = |name: &str, description: Option<&str>| {
+            (
+                "DataFeed".to_owned(),
+                Some(name.to_owned()),
+                description.map(str::to_owned),
+            )
+        };
+        let optech = read("bitcoinops-feed.xml");
+        assert_eq!(
+            card(
+                "https://bitcoinops.org/feed.xml",
+                "application/xml",
+                optech.clone(),
+                false
+            ),
+            feed(
+                "Bitcoin Optech",
+                Some("Helping Bitcoin-based businesses integrate scaling technology.")
+            )
+        );
+        // Cut inside its first entry: the feed's own fields came before it.
+        let cut = optech.len() - 200;
+        assert_eq!(
+            card(
+                "https://bitcoinops.org/feed.xml",
+                "application/xml",
+                optech[..cut].to_vec(),
+                true
+            )
+            .1
+            .as_deref(),
+            Some("Bitcoin Optech")
+        );
+        assert_eq!(
+            card(
+                "https://github.com/pubky/pubky-homeserver/releases.atom",
+                "application/atom+xml",
+                read("github-pubky-homeserver-releases.atom"),
+                false
+            ),
+            feed("Release notes from pubky-homeserver", None)
+        );
+        assert_eq!(
+            card(
+                "https://www.jsonfeed.org/feed.json",
+                "application/json",
+                read("jsonfeed-feed.json"),
+                false
+            ),
+            feed("JSON Feed", None)
+        );
+        // RSS, whether or not the media route reads it, and RSS 1.0, as XML or as text.
+        assert_eq!(
+            card("https://news.example/rss", "text/xml", br#"<?xml version="1.0"?><rss version="2.0"><channel><title>News &amp; notes</title><description><![CDATA[<p>Daily <b>news</b></p>]]></description><item><title>One</title></item></channel></rss>"#.to_vec(), false),
+            feed("News & notes", Some("Daily news"))
+        );
+        assert_eq!(
+            card("https://news.example/index.rdf", "text/plain", br#"<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://purl.org/rss/1.0/"><channel rdf:about="https://news.example/"><title>Old news</title><description>Since 2001</description></channel><item rdf:about="https://news.example/1"><title>One</title></item></rdf:RDF>"#.to_vec(), false),
+            feed("Old news", Some("Since 2001"))
+        );
+        // Served as a feed but unreadable: a feed with no name.
+        assert_eq!(
+            card(
+                "https://news.example/feed",
+                "application/rss+xml",
+                b"not xml".to_vec(),
+                false
+            ),
+            ("DataFeed".to_owned(), None, None)
+        );
+        // Not feeds: an RDF document without a channel, a feed-shaped element in another
+        // namespace, ordinary JSON (a version that is not JSON Feed's), and a page.
+        for (content_type, body) in [
+            (
+                "application/xml",
+                r#"<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="https://x.example/"/></rdf:RDF>"#,
+            ),
+            (
+                "application/xml",
+                r#"<feed xmlns="https://other.example/ns"><title>Not Atom</title></feed>"#,
+            ),
+            (
+                "application/json",
+                r#"{"version":"1.2.3","title":"A package"}"#,
+            ),
+            (
+                "text/html",
+                "<!doctype html><html><head><title>A page</title></head></html>",
+            ),
+        ] {
+            assert_ne!(
+                card(
+                    "https://x.example/doc",
+                    content_type,
+                    body.as_bytes().to_vec(),
+                    false
+                )
+                .0,
+                "DataFeed",
+                "{body}"
+            );
+        }
+    }
+
     #[test]
     fn a_page_names_its_feed_in_its_head() {
         let page = |body: &str| Fetched {

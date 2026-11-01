@@ -393,6 +393,7 @@ pub async fn read_response_with(
                 | "application/xml"
                 | "application/rss+xml"
                 | "application/atom+xml"
+                | "application/rdf+xml"
                 | "application/feed+json"
         );
         let possible = feed_type
@@ -409,7 +410,11 @@ pub async fn read_response_with(
         // channel and newest items come first (`cards::feed_prefix` completes the cut).
         let xml_feed = matches!(
             content_type.as_str(),
-            "text/xml" | "application/xml" | "application/rss+xml" | "application/atom+xml"
+            "text/xml"
+                | "application/xml"
+                | "application/rss+xml"
+                | "application/atom+xml"
+                | "application/rdf+xml"
         ) && options.feed_cap.is_none();
         // A file whose card comes from its URL (an image, a PDF) is cut at the page cap, never
         // refused: its size says nothing against the card.
@@ -2615,6 +2620,35 @@ mod tests {
             200
         );
         assert_eq!(transport.0.load(Ordering::SeqCst), 2);
+    }
+    /// An RSS 1.0 feed served as `application/rdf+xml` is read, as RSS and Atom are; a type
+    /// nothing reads is still refused.
+    #[tokio::test]
+    async fn an_rdf_feed_is_admitted() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            for content_type in ["application/rdf+xml", "application/x-shockwave-flash"] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut data = vec![0; 4096];
+                let _ = socket.read(&mut data).await.unwrap();
+                socket
+                    .write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: 9\r\nConnection: close\r\n\r\n<rdf:RDF>").as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+        let url = Url::parse(&format!(
+            "http://never-resolve.invalid:{}/index.rdf",
+            addr.port()
+        ))
+        .unwrap();
+        let rdf = PinnedTransport.get(&url, &[addr]).await.unwrap();
+        assert_eq!((rdf.status, rdf.body.as_slice()), (200, &b"<rdf:RDF>"[..]));
+        let refused = PinnedTransport.get(&url, &[addr]).await.unwrap_err();
+        assert!(refused.to_string().contains("not allowed"), "{refused:#}");
+        task.await.unwrap();
     }
     #[tokio::test]
     async fn a_429_without_retry_after_waits_five_minutes() {
