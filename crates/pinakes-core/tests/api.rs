@@ -178,8 +178,14 @@ async fn every_read_route_and_document_projection(pool: PgPool) {
     assert!(spec["components"]["schemas"]["Card"]["properties"]
         .get("score")
         .is_none());
-    // The public routes, `GET /v1/resources/{id}/episodes` among them (podcast-episodes-1).
-    assert_eq!(spec["paths"].as_object().unwrap().len(), 16);
+    // The public routes, `GET /v1/resources/{id}/episodes` among them (podcast-episodes-1), and
+    // `GET /v1/resources/{id}/collections` (in-collections-1).
+    assert_eq!(spec["paths"].as_object().unwrap().len(), 17);
+    assert_eq!(
+        spec["paths"]["/v1/resources/{id}/collections"]["get"]["operationId"],
+        "list_collections"
+    );
+    assert!(spec["components"]["schemas"]["Card"]["properties"]["collections"].is_object());
     // Swagger UI and client generators key operations by operationId: one each.
     let mut operation_ids = std::collections::BTreeSet::new();
     for item in spec["paths"].as_object().unwrap().values() {

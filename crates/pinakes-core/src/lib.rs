@@ -9,6 +9,7 @@ pub mod barcode;
 pub mod canary;
 pub mod change_api;
 pub mod changes;
+pub mod collections;
 pub mod config;
 pub mod episodes;
 pub mod event;

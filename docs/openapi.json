@@ -70,6 +70,11 @@
               "null"
             ]
           },
+          "collections": {
+            "description": "How many public collection posts hold the card's link, its own or an alias's, each once,\ncounted up to 1,000 (`1000`: 1,000 or more); 0 when none does. The collections are\n`GET /v1/resources/{id}/collections` (docs/api.md, Collections). An occurrence's are its\nfeed's.",
+            "format": "int64",
+            "type": "integer"
+          },
           "description": {
             "description": "Plain text, entity-decoded: escape it before rendering it as HTML.",
             "type": [
@@ -218,6 +223,7 @@
           "type_path",
           "also_on",
           "refs",
+          "collections",
           "open_in"
         ],
         "type": "object"
@@ -447,6 +453,52 @@
           "group"
         ],
         "type": "string"
+      },
+      "Collection": {
+        "description": "A public collection post that holds the card's link.",
+        "properties": {
+          "author": {
+            "description": "Its author's public key.",
+            "type": "string"
+          },
+          "indexed_at": {
+            "description": "When Nexus indexed the version that holds the link: an edit moves it up.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "uri": {
+            "description": "The collection post (`pubky://<author>/pub/<ns>/v1/posts/<id>`). Ask Nexus or the\nhomeserver for its name and items.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "uri",
+          "author",
+          "indexed_at"
+        ],
+        "type": "object"
+      },
+      "CollectionPage": {
+        "properties": {
+          "cursor": {
+            "description": "The next page's cursor; `null` on the last page.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "items": {
+            "description": "The viewer's own first, then newest first.",
+            "items": {
+              "$ref": "#/components/schemas/Collection"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
       },
       "Details": {
         "description": "The fields a resource read adds to the card.",
@@ -2733,6 +2785,81 @@
         ]
       }
     },
+    "/v1/resources/{id}/collections": {
+      "get": {
+        "description": "The public collection posts that hold this card's link, its own or an alias's, as Nexus indexed them: the viewer's own first when `viewer` is given, then newest first. Each once, however many of the card's links it holds. A card's `collections` counts them. Private collections are never seen.",
+        "operationId": "list_collections",
+        "parameters": [
+          {
+            "description": "32 lowercase hex resource ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "A user's public key (z-base-32): that user's collections come first.",
+            "in": "query",
+            "name": "viewer",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "1–100, default 20.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "The page's `cursor`: signed, bound to this resource and `viewer`; invalid after a restart\n(start again on HTTP 400).",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CollectionPage"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "description": "Invalid resource ID, viewer, limit or cursor"
+          },
+          "404": {
+            "description": "Resource not found"
+          }
+        },
+        "tags": [
+          "Previews"
+        ]
+      }
+    },
     "/v1/resources/{id}/episodes": {
       "get": {
         "description": "A podcast show's latest episodes as its feed lists them, newest first: at most 20, each with its page or feed item, date and public stream. The show's own list, else, for a card that is a show, that of a member of its group which has one (an Apple Podcasts show grouped with its feed). A known resource that is no show, or no longer one, or whose feed was not read yet, returns an empty list.",
@@ -3556,6 +3683,18 @@
             "description": "Resource ID of the accepted event venue; filters event units.",
             "in": "query",
             "name": "venue",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "A collection post's URI (an item's `uri` from `GET /v1/resources/{id}/collections`): the\ncards whose link, or an alias's, it holds.",
+            "in": "query",
+            "name": "in_collection",
             "required": false,
             "schema": {
               "type": [

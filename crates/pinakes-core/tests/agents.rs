@@ -842,3 +842,75 @@ async fn refs_count_only_a_cards_most_recently_referenced_aliases(pool: PgPool) 
     let card: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(card["refs"], json!(recent[..5]));
 }
+
+/// The `card` tool names the public collections that hold a link: their count, the newest few
+/// and the route that lists them all. A card nobody collected carries neither.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn the_card_tool_names_the_collections_that_hold_a_link(pool: PgPool) {
+    seed(&pool).await;
+    let (id, uri, _) = identity("https://example.org/article").unwrap();
+    let saved = ingest::cursor(&pool, "fixture").await.unwrap();
+    let lines: Vec<Change> = (0..7)
+        .map(|n| Change {
+            op: Op::Put,
+            uri: uri.clone(),
+            kind: Kind::Collection,
+            author: AUTHOR.into(),
+            object_path: format!("/pub/social/v1/posts/C{n}/C{n}.json"),
+            label: None,
+            at: 1_790_000_000_000 + n,
+        })
+        .collect();
+    let next = saved.cursor + lines.len() as i64;
+    ingest::apply(
+        &pool,
+        "fixture",
+        &saved,
+        &FeedPage {
+            page: Changes {
+                lines,
+                next_cursor: next,
+                skipped: Default::default(),
+            },
+            epoch: Some("fixture".into()),
+            length: next,
+        },
+        &IngestConfig::default(),
+        &Metrics::new().unwrap(),
+    )
+    .await
+    .unwrap();
+    let app = api::router(AppState::new(pool, Config::default()).unwrap());
+    initialize(&app).await;
+    let (error, read) = call(&app, "card", json!({"uri": "https://example.org/article"})).await;
+    assert!(!error, "{read}");
+    let card = &read["card"];
+    assert_eq!(card["collections"], 7);
+    let held: Vec<&str> = card["in_collections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["uri"].as_str().unwrap())
+        .collect();
+    let newest: Vec<String> = (2..7)
+        .rev()
+        .map(|n| format!("pubky://{AUTHOR}/pub/social/v1/posts/C{n}"))
+        .collect();
+    assert_eq!(held, newest);
+    assert_eq!(card["in_collections"][0]["author"], AUTHOR);
+    assert_eq!(
+        card["collections_url"],
+        format!("https://pinakes.example/v1/resources/{id}/collections")
+    );
+    // search: the links one collection holds.
+    let (error, page) = call(&app, "search", json!({"in_collection": newest[0]})).await;
+    assert!(!error, "{page}");
+    assert_eq!(page["items"].as_array().unwrap().len(), 1, "{page}");
+    assert_eq!(page["items"][0]["id"], id.as_str());
+    assert_eq!(page["items"][0]["collections"], 7);
+    let (error, read) = call(&app, "card", json!({"uri": "https://example.org/concert"})).await;
+    assert!(!error, "{read}");
+    for key in ["collections", "in_collections", "collections_url"] {
+        assert!(read["card"].get(key).is_none(), "{key}: {read}");
+    }
+}

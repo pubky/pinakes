@@ -151,6 +151,9 @@ CREATE INDEX reference_resource_created_idx ON reference USING btree (resource_i
 -- `related`'s taggers are the authors of a resource's most recent tags: an index of its
 -- tags alone, so a resource with many replies or embeds and few tags reads only tags.
 CREATE INDEX reference_resource_tag_idx ON reference USING btree (resource_id, created_at) WHERE kind = 'tag';
+-- A card's collections (`collections`): the collection posts naming a link, its count on every
+-- card, read by resource beside its many tags.
+CREATE INDEX reference_resource_collection_idx ON reference USING btree (resource_id, created_at) WHERE kind = 'collection';
 CREATE INDEX reference_start_idx ON reference USING btree (start_at);
 
 -- References as they count: an alias's count for its root, posts' own rows left out.

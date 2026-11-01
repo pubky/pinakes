@@ -364,6 +364,10 @@ fn rest_routes() -> Router<AppState> {
         )
         .route("/v1/resources/{id}/episodes", get(crate::episodes::list))
         .route(
+            "/v1/resources/{id}/collections",
+            get(crate::collections::list),
+        )
+        .route(
             "/v1/occurrences/lookup",
             post(crate::event::storage::lookup),
         )
@@ -582,6 +586,9 @@ pub struct SearchQuery {
     pub cluster: Option<String>,
     /// Resource ID of the accepted event venue; filters event units.
     pub venue: Option<String>,
+    /// A collection post's URI (an item's `uri` from `GET /v1/resources/{id}/collections`): the
+    /// cards whose link, or an alias's, it holds.
+    pub in_collection: Option<String>,
     /// `true`: job postings that may be done remotely; `false`: job postings that may not.
     pub remote: Option<bool>,
     /// `true`: job postings past their `validThrough` (closed) are listed too; they are left out
@@ -680,6 +687,11 @@ pub struct Card {
     /// A gone social post's are its own link's alone.
     /// Empty when nothing references the card.
     pub refs: Vec<String>,
+    /// How many public collection posts hold the card's link, its own or an alias's, each once,
+    /// counted up to 1,000 (`1000`: 1,000 or more); 0 when none does. The collections are
+    /// `GET /v1/resources/{id}/collections` (docs/api.md, Collections). An occurrence's are its
+    /// feed's.
+    pub collections: i64,
     /// The clients that open a Pubky app's object, from the app's profile (docs/pubky-apps.md);
     /// on an event card, those of the event object it names. Empty for every other card.
     pub open_in: Vec<model::OpenIn>,
@@ -1041,6 +1053,7 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
             }),
         also_on,
         refs: vec![],
+        collections: 0,
         open_in,
         attribution: credits(
             row["osm_id"]
@@ -1069,7 +1082,8 @@ const REFS_ALIASES: i64 = 31;
 /// [`REFS_ALIASES`] most recently referenced), most referenced first (counted up to
 /// [`REFS_COUNTED`], then by URI), at most [`REFS`]. A gone social post's are its own link's
 /// alone: a spelling's link can carry the post's title. One query for every card of a response,
-/// and one for the missing cards among them.
+/// and one for the missing cards among them. Then each card's `collections`
+/// (`collections::count`), one query more.
 pub(crate) async fn with_refs<'a>(
     pool: &PgPool,
     cards: impl IntoIterator<Item = &'a mut Card>,
@@ -1121,7 +1135,7 @@ pub(crate) async fn with_refs<'a>(
             card.refs.clone_from(refs);
         }
     }
-    Ok(())
+    crate::collections::count(pool, cards).await
 }
 /// A card's `maybe_same` as SQL, over a unit's ID and type path and the two hints' switches (SQL
 /// expressions): with `events`, the same-event hint for an event and, for an app's store card, up
@@ -1401,6 +1415,14 @@ fn validate_search(q: &SearchQuery) -> Result<Vec<String>, ApiError> {
     ingredient_terms(q)?;
     if q.venue.as_deref().is_some_and(|v| !model::valid_id(v)) {
         return Err(ApiError::bad("venue must be a resource ID"));
+    }
+    if q.in_collection
+        .as_deref()
+        .is_some_and(|c| crate::collections::parse(c).is_none())
+    {
+        return Err(ApiError::bad(
+            "in_collection must be a collection post's pubky:// URI",
+        ));
     }
     if q.collapse.as_deref().is_some_and(|v| v != "group") {
         return Err(ApiError::bad("collapse must be group"));
@@ -1882,6 +1904,17 @@ pub async fn search(
     spatial.apply(&mut sql);
     if let Some(venue) = &q.venue {
         sql.push(" AND r.venue_id=").push_bind(venue.clone());
+    }
+    if let Some(collection) = q
+        .in_collection
+        .as_deref()
+        .and_then(crate::collections::parse)
+    {
+        // The collection's references, read by author and path (the key's prefix); an alias's
+        // count for its root.
+        sql.push(" AND r.id IN (SELECT coalesce(a.root_id,f.resource_id) FROM reference f LEFT JOIN resource_alias a ON a.alias_id=f.resource_id WHERE ");
+        crate::collections::push_items(&mut sql, collection);
+        sql.push(")");
     }
     if let Some(author) = &q.author {
         sql.push(" AND (r.event_author IS NULL OR r.event_author=")
@@ -2567,6 +2600,7 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
         crate::event::storage::list,
         crate::event::storage::lookup,
         crate::episodes::list,
+        crate::collections::list,
         search,
         resource,
         by_uri,
@@ -2586,6 +2620,8 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
         crate::event::storage::OccurrenceLookup,
         crate::episodes::EpisodePage,
         crate::episodes::Episode,
+        crate::collections::CollectionPage,
+        crate::collections::Collection,
         model::Stream,
         crate::event::storage::ReferenceEvent,
         crate::change_api::ChangeLine,

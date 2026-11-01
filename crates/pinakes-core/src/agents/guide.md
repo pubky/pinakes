@@ -169,6 +169,12 @@ instance reads: give it card ids, and it asks by each card's `uri` and `refs` an
 answers per card (each tagger counted once per label; `at_least: true` marks a count that is a
 lower bound, when several links' views count taggers they do not list).
 
+**Collections.** A card's `collections` counts the public Pubky collection posts that hold its
+link (its own or an alias's); `GET {{BASE}}/v1/resources/{id}/collections?viewer=<pubky key>`
+lists them, the viewer's own first, then newest first: `{uri, author, indexed_at}` each, paged
+with `cursor`. `uri` is the collection post: ask Nexus for its name and items. A search with
+`in_collection=<that uri>` lists the cards one collection holds.
+
 For graph questions (who follows whom, trust, threads, a user's tags) use **nexus-scout**
 (`https://nexus-scout.pubky.app/llms.txt`): read-only Cypher over the Pubky social graph. To keep
 only links your network referenced, search here with `reach=following&viewer=<pubky key>` (or
@@ -182,8 +188,8 @@ the full result:
 
 | tool | does |
 | --- | --- |
-| `search` | `GET /v1/search`: `q`, `type` (one or several), `tags`, `match`, `near` + `radius`, `bbox`, `from`, `to`, `key`, `remote`, `closed`, `ingredient`, `sort`, `collapse`, `reach` or `boost` + `viewer`, `limit`, `cursor` |
-| `card` | One link's card by URI (`GET /v1/resources/by-uri`); `resolve: true` asks `POST /v1/resolve` for an unknown link |
+| `search` | `GET /v1/search`: `q`, `type` (one or several), `tags`, `match`, `near` + `radius`, `bbox`, `from`, `to`, `key`, `remote`, `closed`, `ingredient`, `in_collection`, `sort`, `collapse`, `reach` or `boost` + `viewer`, `limit`, `cursor` |
+| `card` | One link's card by URI (`GET /v1/resources/by-uri`); `resolve: true` asks `POST /v1/resolve` for an unknown link. A card a public collection holds carries `collections` (the count), `in_collections` (the newest 5) and `collections_url` |
 | `lookup` | Every card with one identifier (`isbn:…`, `doi:…`, `isrc:…`, `osm:…`, …) |
 | `group` | A group's members by group id |
 | `types` | The card types this instance holds, with counts, and the kinds of links it resolves |
