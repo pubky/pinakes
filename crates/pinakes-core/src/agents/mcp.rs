@@ -196,6 +196,17 @@ impl Tools {
         if !aliases.is_empty() {
             card["aliases"] = aliases.into();
         }
+        // The public collections that hold it, newest first: the first few, and where the rest are.
+        if let (Some(id), true) = (
+            detail["id"].as_str(),
+            detail["collections"].as_i64().is_some_and(|n| n > 0),
+        ) {
+            let list = format!("/v1/resources/{id}/collections?limit={IN_COLLECTIONS}");
+            let page = self.rest(caller, Method::GET, &list, None).await?;
+            card["in_collections"] = page["items"].clone();
+            card["collections_url"] =
+                format!("{}/v1/resources/{id}/collections", caller.base).into();
+        }
         Ok(json!({"url": format!("{}{path}", caller.base), "card": card}))
     }
 
@@ -471,6 +482,7 @@ pub fn tools() -> Vec<Tool> {
                 "remote":{"type":"boolean","description":"true: job postings that may be done remotely; false: job postings that may not."},
                 "closed":{"type":"boolean","description":"true: list job postings past their closing date too (left out by default)."},
                 "ingredient":{"type":"string","description":"Recipes with these ingredients: up to 3, comma-separated, each matching whole words of an ingredient's name (flour matches all-purpose flour)."},
+                "in_collection":{"type":"string","description":"The links one public collection holds: the collection post's pubky:// URI (from a card tool answer's in_collections)."},
                 "sort":{"type":"string","enum":["activity","recent","distance","start","trending"],"description":"activity (default), recent, distance (needs near), start (earliest first), trending (with window)."},
                 "window":{"type":"string","description":"With sort trending: how far back, 1h to 90d, default 7d."},
                 "collapse":{"type":"string","enum":["group"],"description":"group: one row per group of links that are the same thing."},
@@ -483,7 +495,7 @@ pub fn tools() -> Vec<Tool> {
         ),
         tool(
             "card",
-            "Read one link by its URI: its card with details (address, facts from official APIs, other spellings, the same thing on other services). Only links this instance already knows; set resolve to true to have an unknown link read now (it has its own small per-minute budget and may answer pending).",
+            "Read one link by its URI: its card with details (address, facts from official APIs, other spellings, the same thing on other services, the public Pubky collections that hold it). Only links this instance already knows; set resolve to true to have an unknown link read now (it has its own small per-minute budget and may answer pending).",
             json!({"type":"object","required":["uri"],"additionalProperties":false,"properties":{
                 "uri":{"type":"string","description":"The link, in any spelling."},
                 "resolve":{"type":"boolean","description":"Read the link now if it is unknown here. Default false."}
@@ -559,6 +571,7 @@ fn search_query(args: &JsonObject) -> Result<String, Failure> {
         ("viewer", "viewer"),
         ("cursor", "cursor"),
         ("ingredient", "ingredient"),
+        ("in_collection", "in_collection"),
     ];
     let known = [
         "q",
@@ -581,6 +594,7 @@ fn search_query(args: &JsonObject) -> Result<String, Failure> {
         "remote",
         "closed",
         "ingredient",
+        "in_collection",
     ];
     if let Some(unknown) = args.keys().find(|k| !known.contains(&k.as_str())) {
         return Err(Failure::bad(format!(
@@ -655,6 +669,8 @@ fn search_query(args: &JsonObject) -> Result<String, Failure> {
 }
 
 /// A card with the fields an agent needs, and the URL of its full read.
+/// How many of a card's collections the `card` tool lists.
+const IN_COLLECTIONS: usize = 5;
 fn compact(base: &str, card: &Value) -> Value {
     let mut out = Map::new();
     for key in [
@@ -689,6 +705,9 @@ fn compact(base: &str, card: &Value) -> Value {
     }
     if card["refs"].as_array().is_some_and(|r| !r.is_empty()) {
         out.insert("refs".into(), card["refs"].clone());
+    }
+    if card["collections"].as_i64().is_some_and(|n| n > 0) {
+        out.insert("collections".into(), card["collections"].clone());
     }
     for key in ["occurrence", "event", "attribution"] {
         if !card[key].is_null() {

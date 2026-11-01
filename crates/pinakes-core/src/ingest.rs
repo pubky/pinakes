@@ -212,8 +212,20 @@ async fn apply_line(
             return Ok(Some(reason));
         }
     }
-    // One reference per object: the resource feed's lines carry no occurrences.
-    let unit_key = String::new();
+    // One reference per object (a tag file, a post version naming itself), but a post's version
+    // can name several links: one reply, its embeds and a collection's items, each a line of its
+    // own, which Nexus keys by kind and link besides the file. Those key on both here, so an item
+    // put or dropped is that item alone. The link is hashed: the key stays short beside the path.
+    let unit_key = match line.kind {
+        crate::nexus::Kind::Reply | crate::nexus::Kind::Embed | crate::nexus::Kind::Collection => {
+            format!(
+                "{}:{}",
+                line.kind.as_str(),
+                &blake3::hash(line.uri.as_bytes()).to_hex()[..32]
+            )
+        }
+        crate::nexus::Kind::Tag | crate::nexus::Kind::Post => String::new(),
+    };
     let old: Option<String> = sqlx::query_scalar(
         "SELECT resource_id FROM reference WHERE author=$1 AND object_path=$2 AND unit_key=$3",
     )

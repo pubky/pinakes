@@ -23,6 +23,7 @@ snapshot; a test fails when it is stale.
 | `POST /v1/resources/lookup` | Exactly one of `{"ids":[…]}` (alias `resource_ids`) or `{"uris":[…]}`, 1–500 entries | `[card]` in request order, duplicates kept, unknowns skipped |
 | `POST /v1/resolve` | `{"uri":"https://example.org/"}` | The card with the read's fields now or within 3 seconds; 202 with `status: "pending"` while queued, with `Retry-After` (seconds) when the next attempt is put off |
 | `GET /v1/resources/{id}/occurrences` | Optional RFC 3339 `from`, `to`, `limit` (1–500, default 100), signed `cursor` | `{items: [occurrence card], cursor}` |
+| `GET /v1/resources/{id}/collections` | Optional `viewer` (a public key), `limit` (1–100, default 20), signed `cursor` | `{items: [{uri, author, indexed_at}], cursor}`: the public collections that hold the card's link ([Collections](#collections)); 404 if unknown |
 | `POST /v1/occurrences/lookup` | `{resource_ids?, uris?, from?, to?, limit?, cursor?}`: 1–500 feed IDs and links together | `{items: [occurrence card], cursor}` across the feeds, by start |
 | `GET /v1/groups/{id}` | 32-character group ID | `{id, type, curated, keys, members: [card]}`; 404 if unknown |
 | `POST /v1/changes/lookup` | `{resource_ids?, uris?, since?, cursor?, limit?}`: 1–500 IDs and links together | Change page for those resources |
@@ -92,6 +93,7 @@ An IMDb title keeps the type its page gives (it can be either).
 | `id` | Resource ID; for an occurrence, the feed's ID |
 | `uri` | The resource URI; for an occurrence, its own URL when it has one, else the feed's. To combine with Nexus, send `uri` and `refs`, and for an occurrence `occurrence.feed_uri` (its own URL was never tagged) |
 | `refs` | The links people referenced on Pubky that resolve to this card, most referenced first (counted up to 1,000 each, then by URI), at most 5: its own `uri` and its aliases that carry references (the 31 most recently referenced), normalized as every URI is. A typed card's `uri` is often a link nobody wrote (`btc:block/…`, `uniprot:…`, `isbn:…`) while people tagged the mempool.space, UniProt or Open Library page: ask Nexus about each of `refs` too and add up the card's tags over them. An occurrence's are its feed's; a gone social post's, its own link alone. `[]` when nothing references the card |
+| `collections` | How many public collection posts hold the card's link, its own `uri` or an alias's, each post once, counted up to 1,000 (`1000`: 1,000 or more); `0` when none does. They are listed by `GET /v1/resources/{id}/collections` ([Collections](#collections)). An occurrence's are its feed's |
 | `status` | Fetch health: `ok`, `pending`, `missing`, `unreachable` or `error` |
 | `type`, `type_path` | schema.org type (`MusicEvent`, `Book`, `Place`, …), or one of Pinakes's own types for what schema.org has no class for: `BitcoinBlock`, `BitcoinTransaction`, `BitcoinAddress`, `LightningNode` and `LightningChannel` (not schema.org; each a child of `Thing`); `type_path` is the type's ancestors, root first (`["Thing", "Event", "MusicEvent"]`), the types a `type=` search matches it by |
 | `name`, `description`, `image` | Display metadata; images point to the origin and are never proxied |
@@ -460,6 +462,12 @@ GET /v1/resources/2950248974677c9ca34f1f67b8a2da80/occurrences?limit=10
 GET /v1/resources/faf081897e81377fd45b404f02a7f190/episodes?limit=20
 ```
 
+### GET /v1/resources/{id}/collections
+
+```text
+GET /v1/resources/faf081897e81377fd45b404f02a7f190/collections?limit=5
+```
+
 ### POST /v1/occurrences/lookup
 
 ```text
@@ -494,6 +502,7 @@ POST /v1/changes/lookup {"resource_ids":["81cefcae5a6a468cfc27ff1c1b420fce","5bc
 | `reach`, `viewer` | `following`, `friends` or `wot_2` of the Nexus user `viewer`: only their references and tags count (a filter) |
 | `boost`, `viewer` | `following`, `friends` or `wot_2` of the Nexus user `viewer`: cards they referenced rank higher, the more of them and the more recently they did, and nothing is left out ([Reach](#search)); with the default ranking or `sort=trending` |
 | `venue` | Events at this venue resource ID |
+| `in_collection` | The cards a public collection holds: the collection post's `pubky://` URI, an item's `uri` from `GET /v1/resources/{id}/collections` ([Collections](#collections)) |
 | `remote` | `true`: [job postings](#jobs) that may be done remotely; `false`: job postings that may not |
 | `closed` | `true`: list [job postings](#jobs) past their closing date too; they are left out otherwise |
 | `ingredient` | [Recipes](#recipes) with these ingredients: up to 3, comma-separated, each of letters, digits, spaces and hyphens, matching whole words of an ingredient's name as the card records it (`flour` matches "all-purpose flour", `mozz` matches nothing); all must match |
@@ -851,6 +860,31 @@ document of its own here.
 
 ```text
 GET /v1/resources/{id}/episodes?limit=20
+```
+
+## Collections
+
+A public collection is a Pubky post that lists links (Nexus indexes its items; a private
+collection or a bookmark never reaches Nexus). `GET /v1/resources/{id}/collections` lists the
+collection posts that hold the card's link, its own `uri` or an alias's, each post once however
+many of the card's links it holds: `{items: [{uri, author, indexed_at}], cursor}`. `uri` is the
+collection post (`pubky://<author>/pub/<namespace>/v1/posts/<id>`), `author` its author's public
+key and `indexed_at` when Nexus indexed the version that holds the link. Pinakes never fetches a
+collection: ask Nexus or the author's homeserver for its name and items. With `viewer` (a
+52-character public key), that user's own collections come first; then newest `indexed_at`
+first, by author and post on a tie. `limit` is 1–100 (default 20), and `cursor` the previous
+page's (`null` on the last page): signed, bound to this resource and `viewer`, invalid after a
+restart (start again on 400). An alias ID reads its root's list; an unknown ID is 404. Every
+card counts them in `collections`, and `in_collection=<uri>` on [search](#search) lists the
+cards a collection holds.
+
+The list follows Nexus's reference feed: each item of a collection post is a `collection` line
+of its own, and a `del` line drops exactly that item, for a removed item, a deleted post or an
+edit (whose new version's items come as new lines; an edit moves the collection up). A post's
+reply and embeds are kept the same way, one each.
+
+```text
+GET /v1/resources/{id}/collections?viewer={public key}&limit=20
 ```
 
 ## Groups
