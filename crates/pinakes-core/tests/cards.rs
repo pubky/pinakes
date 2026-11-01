@@ -50,6 +50,8 @@ impl Transport for TransportMock {
                 if u.path()=="/post" {("text/html",r#"<title>Blog</title><script type="application/ld+json">{"@type":"BlogPosting","name":"Original blog"}</script><link rel="alternate" type="application/rss+xml" href="/feed">"#.into())}
                 else {("application/rss+xml",r#"<rss><channel><title>Blog feed</title><item><guid>blog-guid</guid><title>Post</title><link>https://blog.example/post</link></item></channel></rss>"#.into())}
             },
+            // A plain feed: a title with markup-like text, which is plain, and an HTML description.
+            "news.example" => ("application/rss+xml",r#"<rss><channel><title><![CDATA[  Using <title>   in RSS ]]></title><description><![CDATA[<p>Daily <b>news</b></p>]]></description><item><title>One</title></item></channel></rss>"#.into()),
             "comments.example" => ("text/html","<title>Episode discussion</title><p>Comment</p><link rel='alternate' type='application/rss+xml' href='https://podcast.example/feed'><link rel='alternate' type='application/activity+json' href='https://ap.example/actor'>".into()),
             "copier.example" => ("text/html","<title>Copied episode</title><link rel='alternate' type='application/rss+xml' href='https://podcast.example/feed'>".into()),
             "podcast.example" => {
@@ -560,6 +562,30 @@ fn generic_nostr_signed_profile_note_and_nip52_routing() {
         Some("event_platform")
     );
     let _: ResourceMeta = ResourceMeta::new("nostr:x", "nostr", 3600);
+}
+
+/// A feed that is no podcast keeps the card the page read made of it (`web::extract`) on the media
+/// route too: its title as plain text, its description without markup, its content type.
+#[tokio::test]
+async fn a_plain_feed_keeps_its_card_on_the_media_route() {
+    let r = resolver(
+        "media",
+        Config::default(),
+        Arc::new(TransportMock::default()),
+    );
+    let d = r.web.resolve("https://news.example/rss").await.unwrap();
+    assert_eq!(
+        (
+            d.type_name.as_str(),
+            d.name.as_deref(),
+            d.description.as_deref()
+        ),
+        ("DataFeed", Some("Using <title> in RSS"), Some("Daily news"))
+    );
+    assert_eq!(
+        d.attributes.get("content_type").map(String::as_str),
+        Some("application/rss+xml")
+    );
 }
 
 #[tokio::test]

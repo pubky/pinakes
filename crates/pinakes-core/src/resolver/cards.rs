@@ -914,7 +914,10 @@ pub async fn enrich(
                         !matches!(k.basis.as_str(), "podcast_guid" | "podcast_series_guid")
                     });
                 }
-                if is_feed || d.type_name == "PodcastEpisode" {
+                // A feed that is no podcast keeps the card the page read made of it
+                // (`web::extract`: its own fields as plain text); a podcast's card, or an episode
+                // the feed doesn't have, replaces it.
+                if d.type_name != "DataFeed" && (is_feed || d.type_name == "PodcastEpisode") {
                     doc = d;
                 }
             }
