@@ -271,7 +271,7 @@ example whose page has gone stale fails there.
 | `POST /v1/resolve {"uri":"https://grounds.stager.co/shop/default/events/111608505"}` | Event |
 | `POST /v1/resolve {"uri":"https://www.songkick.com/concerts/42408878-bausa-at-komplex-457"}` | MusicEvent |
 | `POST /v1/resolve {"uri":"https://events.humanitix.com/great-northern-contemporary-craft-fair"}` | Event |
-| `POST /v1/resolve {"uri":"https://infomaniak.events/en-ch/festivals/festival-wfc-leman-2026/c90c619b-c155-454d-a277-c2e28e87d379/events/365609"}` | Event |
+| `POST /v1/resolve {"uri":"https://infomaniak.events/en-ch/festivals/fete-de-la-biere-2027/75fb7215-0440-42a2-bee9-1af1bf0aa857/events/394429"}` | Event |
 | `POST /v1/resolve {"uri":"https://xceed.me/en/roma/event/dissonanze-2026-day-1/220015"}` | Event |
 | `POST /v1/resolve {"uri":"https://www.ents24.com/london-events/eventim-apollo/simon-brodkin/7474018"}` | Event |
 | `POST /v1/resolve {"uri":"https://www.ticketino.com/en/Event/TICKETINO-BBQ/192364"}` | Event |
@@ -1141,11 +1141,19 @@ counts by status.
   SocialMediaPosting cards only when the fetched URL and the object ID share a registrable
   domain (on a multi-tenant host, the same tenant). Note and Article excerpts are capped at 200
   characters; unlisted content is omitted.
+- **Feeds**: on every route, a feed is a DataFeed, named by its own title and described by its own
+  description or subtitle: RSS, RSS 1.0 (`<rdf:RDF>` with its channel), Atom (`<feed>` in the Atom
+  namespace) and JSON Feed (a `version` on jsonfeed.org), whatever its content type says. A body
+  served as `application/rss+xml`, `application/atom+xml` or `application/feed+json` that does not
+  read as one is a DataFeed with no name. A podcast feed is typed by Media, below. A link that
+  looks like a feed (its last segment ends `.atom`, `.rss`, `.rdf` or `.xml`, or is named `feed`,
+  `rss` or `atom`) is fetched with the feed types first in its `Accept` header, as some sites
+  answer a feed's URL with a 404 when HTML leads.
 - **Media**: oEmbed (`media.oembed`) and page JSON-LD, which wins when healthy, except over a
   provider whose scheme names the link exactly (YouTube's `watch` and `shorts`) or any matching
   provider under `"always"`: their title, author and thumbnail come first. A blank field in an
   answer is no value, so the page's stays. An oEmbed answer survives a failed or truncated page. Podcast types need a namespace or an audio/video
-  enclosure; plain RSS is a DataFeed. Direct podcast feeds are PodcastSeries; `?guid=` or the
+  enclosure; any other feed is a DataFeed (Feeds, above). Direct podcast feeds are PodcastSeries; `?guid=` or the
   episode page's RSS link selects an episode. A feed longer than the page cap is read up to its
   last whole item within the first megabyte (the newest come first), so an episode past that is
   never marked missing. No embed HTML or media bytes are served.
@@ -1312,8 +1320,8 @@ Search by ingredient is `ingredient=` over that list, by whole words, not a full
 ## Sources
 
 Where a service's page is walled, thin or moved, Pinakes reads the service's own API for its
-links instead (keyless, except GitHub, which needs `[sources.github] token` or
-`PINAKES_GITHUB_TOKEN` and is off without one): the read's `from` names the source and `facts` holds the
+links instead (keyless, except GitHub and CourtListener, which need `[sources.<name>] token` or
+`PINAKES_GITHUB_TOKEN` and `PINAKES_COURTLISTENER_TOKEN`, and are off without one): the read's `from` names the source and `facts` holds the
 API's fields. [docs/sources](sources/README.md) lists every source with the links it reads,
 what it fetches, its card, its facts, its limits and licence, and its examples; each can be
 switched off in `[sources.<name>]`.

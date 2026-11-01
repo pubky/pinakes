@@ -16,5 +16,14 @@
     "sha256": "0595424161ea863805d9b92c0e52d7aa1e3c46ec58cd8f0d6933759006a5fb74",
     "status": 200,
     "url": "https://www.courtlistener.com/api/rest/v4/search/?type=o&q=cluster_id%3A999999999"
+  },
+  "search_unauthenticated_401": {
+    "bytes": 58,
+    "content_type": "application/json",
+    "file": "search_unauthenticated_401.json",
+    "recorded_at": "2026-11-01T08:06:36+00:00",
+    "sha256": "dbff0849bc109eee7f9b7b1fe12e40fc8add21823b2f1fb600b37f620cbd7862",
+    "status": 401,
+    "url": "https://www.courtlistener.com/api/rest/v4/search/?type=o&q=cluster_id%3A2812209"
   }
 }

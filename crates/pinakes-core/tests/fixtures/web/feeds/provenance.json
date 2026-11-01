@@ -1,0 +1,32 @@
+{
+  "bitcoinops-feed": {
+    "url": "https://bitcoinops.org/feed.xml",
+    "status": 200,
+    "content_type": "application/xml",
+    "recorded_at": "2026-11-01T08:08:57+00:00",
+    "file": "bitcoinops-feed.xml",
+    "bytes": 1217,
+    "sha256": "d3d2da9fb9d9a24582f2a5d266127a64d0cf615c229f081ac06208429407e3df",
+    "note": "Trimmed from the recorded feed (495264 bytes, sha256 d56b91ca41c2a26a9ca471db4ca0de69c443b420e75765220b6c753adbe99c31): the feed's own elements, then its first entry without its content, summary and thumbnail, then the closing </feed>."
+  },
+  "github-pubky-homeserver-releases": {
+    "url": "https://github.com/pubky/pubky-homeserver/releases.atom",
+    "status": 200,
+    "content_type": "application/atom+xml; charset=utf-8",
+    "recorded_at": "2026-11-01T08:08:59+00:00",
+    "file": "github-pubky-homeserver-releases.atom",
+    "bytes": 876,
+    "sha256": "4ab44667d1e60c43e40bc71c3fd7ee94edbc0879f3ac9614f7d7cb1c40b06a2c",
+    "note": "Trimmed from the recorded feed (192658 bytes, sha256 be2a8829b6c89c6f7638a38c8d4d933683066c2bc688f1aa8f519eb776a46824): the feed's own elements, then its first entry without its content, summary and thumbnail, then the closing </feed>."
+  },
+  "jsonfeed-feed": {
+    "url": "https://www.jsonfeed.org/feed.json",
+    "status": 200,
+    "content_type": "application/json",
+    "recorded_at": "2026-11-01T08:09:01+00:00",
+    "file": "jsonfeed-feed.json",
+    "bytes": 480,
+    "sha256": "32dabee10189a2ca6d8219c32830b71eccdd03ce72b06b1a61ae5e0d8134c4bc",
+    "note": "Trimmed from the recorded feed (3383 bytes, sha256 b86e3a25dab5fbf488f00388872c815db1fb3e9844bf782dd2a53d148caf6551): its version, title, icon, home page and feed URLs, and its first item's id, title, url and date. Recorded with an Accept that lists feed types first; with text/html first the site answers 404."
+  }
+}
