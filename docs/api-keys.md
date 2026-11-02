@@ -33,7 +33,13 @@ Rotate at the provider, update the protected environment and restart; never log 
 ## Optional provider credentials
 
 These are all credentialed providers in the current runtime configuration and event-adapter
-registry. Use separate application credentials per deployment so revocation and quotas are isolated.
+registry. Staging and production may share a provider application's API credentials only where
+the provider's terms, app/deployment rules and combined rate allowance permit it. Pool and budget
+their traffic explicitly; use separate apps/keys when required or when quota/revocation isolation
+is needed. Share self-hosted read-only datasets similarly, with capacity and licence checks
+([deployment](deployment.md#storage-model)), not writable databases or database/admin/Nexus secrets
+across security boundaries. Each environment still injects its credentials from its own protected
+secret store; sharing a provider allowance does not relax access controls or logging rules.
 Provider dashboards can require account verification or approval; a successful signup is not a
 promise of catalogue access. Request read-only public-data access, never publishing, ticket sales,
 private repositories, user libraries or account administration.

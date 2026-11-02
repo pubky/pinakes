@@ -10,7 +10,7 @@ Configuration names come from [`pinakes.example.toml`](../pinakes.example.toml);
 | --- | --- | --- | --- |
 | `pinakesd` | Public cards/search API and a separate private admin listener | 2–4 vCPU, 4–8 GB RAM for a small instance; load-test the actual resolver mix | One daemon per database is enforced by the instance lock. Provider budgets are process-local; several instances behind one IP share upstream quotas. |
 | PostgreSQL 16–18 | Documents, references, queues, groups and change journal | See the storage model below | PostGIS 3.4+, `pg_trgm`, h3 4.2.3+; startup checks `h3_latlng_to_cell(point,integer)`. Package upgrades may also need `ALTER EXTENSION h3 UPDATE;`. |
-| Self-hosted Nominatim | Venue geocoding and OSM place details (`osm.nominatim_url`) | Planet: 128 GB RAM recommended, at least 1 TB fast disk; allow several days for import | [Nominatim hardware guidance](https://nominatim.org/release-docs/5.2/admin/Installation/). Regional extracts reduce the footprint but must cover every place the service needs. Public Nominatim is only for small development runs. |
+| Self-hosted Nominatim | Pinakes hosting dependency for venue geocoding and OSM place details (`osm.nominatim_url`) | Global dataset: 64–128 GB RAM (128 GB recommended), about 1 TB NVMe; allow several days for import | [Nominatim hardware guidance](https://nominatim.org/release-docs/5.2/admin/Installation/). Public Nominatim is only for small development runs. |
 | Nexus | Reference feed and social/reach reads (`nexus_url`) | An existing compatible Nexus deployment | Trusted fixed upstream, not an arbitrary URL from a resource. Optional authorization comes from the environment. |
 | Persistent dump directory | `osm.dump_dir`, served at `/v1/dumps/osm_place.ndjson.gz` | About 1.5 KB per cached place uncompressed; allow two copies during replacement | Keep the compressed dump downloadable and preserve OSM attribution; a CDN can cache it by `ETag`. |
 | Prometheus and Alertmanager | Evaluate admin `/metrics` and the supplied alerts | Small deployment; retention and scrape frequency set disk use | Private scrape path; [ops setup](../ops/README.md) includes alerts and a Grafana dashboard. |
@@ -19,6 +19,13 @@ Configuration names come from [`pinakes.example.toml`](../pinakes.example.toml);
 | Map tiles (later, for clients) | Client map drawing, not called by Pinakes | A regional/planet PMTiles file plus CDN/static storage; capacity depends on the selected build | MapLibre + self-hosted [Protomaps PMTiles](https://docs.protomaps.com/deploy/) is an option. Do not rely on OSM's donation-funded tile servers for production capacity; their [usage policy](https://operations.osmfoundation.org/policies/tiles/) is not a blanket ban on all production use. |
 
 ## Storage model
+
+Staging and production can share read-only self-hosted datasets/services, such as Nominatim or
+an optional MusicBrainz mirror, where their capacity, data licence and access rules permit it.
+Budget staging traffic so it cannot consume production's provider allowance or service capacity.
+Photon and map tiles remain separate client services, not Pinakes startup requirements; a
+MusicBrainz mirror is optional too. Sharing a read endpoint is not permission to share writable
+databases, admin credentials or environment/security boundaries. See [credential sharing](api-keys.md#optional-provider-credentials).
 
 **Measured baseline, 2026-11-02:** the public production graph had **225 Resource targets with
 1,198 incoming TAGGED edges**. Tags on Post or User targets are not Pinakes external-link tags.
