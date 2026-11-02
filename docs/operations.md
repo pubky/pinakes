@@ -1,5 +1,10 @@
 # Operations
 
+Start with [deployment and storage sizing](deployment.md) for what to host and the
+[complete API-key guide](api-keys.md) for credentials, signup links and key-free fallbacks.
+This runbook covers the configuration and day-two behaviour; provider details live in the
+[source catalogue](sources/README.md).
+
 ## Configuration
 
 `pinakes.example.toml` lists the operator choices: addresses and credentials, each resolver's
@@ -110,17 +115,20 @@ run `ALTER EXTENSION h3 UPDATE;` (and `ALTER EXTENSION h3_postgis UPDATE;` if in
 on an empty database and exits; the daemon does the same at startup, and so does `reextract`. A
 database that already has it is left as it is.
 
-Until the first deployment there is this one file and no upgrade path: a schema change edits
-`0001_schema.sql`, and every local database is then recreated (Pinakes refills it from the Nexus
-feed). Tests create their own databases and need nothing. Numbered migrations come back with the
-first deployment.
+Schema changes edit `0001_schema.sql`; this is not an incremental migration runner. A daemon
+refuses a database built from a different schema version. For a production upgrade, back up and
+restore-test first, apply a reviewed upgrade procedure while stopped, and prove the resulting
+schema matches a freshly migrated disposable database. Do not drop a production database to
+upgrade it: a feed replay cannot restore operator curation or the change journal.
+
+Only for a disposable local development database:
 
 ```sh
 dropdb pinakes && createdb pinakes
 pinakesd --config pinakes.toml --migrate
 ```
 
-The daemon refuses a database built from another version of the file, naming this remedy.
+Tests create their own disposable databases.
 
 A database advisory lock, the instance lock, allows one daemon per database. The daemon holds it on
 a connection of its own for its whole life. Resolver, host, author, reach-cache and IP budgets are
@@ -417,7 +425,7 @@ Apps' posts come on the same feed as `post` lines: the line's `uri` is the post 
 versionless (`pubky://<author>/pub/<namespace>/v1/posts/{id}`), and its `object_path` the version
 file written (`…/{id}/{editId}.json`). The URI must be a post in its author's own storage (else
 `uri`) and the object path a version file directly in it (else `object_path`). Social events and
-rsvps are Nexus's (owner decision, 2026-10-26): Nexus indexes them. A `post` line in a namespace
+rsvps are indexed by Nexus. A `post` line in a namespace
 Pinakes never fetches (`social`, `pubky.app`, and the old `mapky.app` and `eventky.app`, read
 decoded, so `%73ocial` is `social`) is rejected (`never_fetched`), creating no resource or
 reference and fetching nothing. Letter case is kept, as the resolver keeps it: `Social` is another
@@ -435,8 +443,8 @@ Nexus. `nexus_reach_set` (default `false`) says that Nexus also serves the reach
 answers 501 and Nexus is never asked for it. Sets are kept in memory only, per viewer, five
 minutes (a `wot_2` set up to an hour, re-validated by its `ETag`).
 
-A Nexus behind credentials gets them from `PINAKES_NEXUS_AUTHORIZATION` (owner decision,
-2026-10-30), never from `nexus_url`, which refuses user info, a query or a fragment and says so.
+A Nexus behind credentials gets them from `PINAKES_NEXUS_AUTHORIZATION`, never from
+`nexus_url`, which refuses user info, a query or a fragment and says so.
 Its whole value is sent as the `Authorization` header (`Bearer …`, `Basic …`) on every request
 to the Nexus: the feed, the reach lists and reach-set route, and the batch resource view that
 the `social` tool reads. Every one goes through one client. It is sent to no other host: the

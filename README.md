@@ -13,7 +13,7 @@ cards Pinakes returns (`uri`, and `aliases` for other spellings; for an occurren
 counts and tags. Pinakes IDs are its own and never match Nexus IDs.
 That batch view, and a feed of tag lines, are on the branch `feat/resources-changes-feed` of the
 fork [`gillohner/pubky-nexus`](https://github.com/gillohner/pubky-nexus/tree/feat/resources-changes-feed),
-not yet in pubky/pubky-nexus ([design §4](docs/design.md#nexus)).
+not yet in pubky/pubky-nexus ([design §4](docs/design.md)).
 
 ## How it works
 
@@ -85,8 +85,8 @@ facets, map clusters and group collapse; cards by ID or URI; batch lookup; a com
 resolution, `group_dirty`, `also_on_dirty` and `same_event_dirty`. OpenStreetMap-derived facts
 live only in `osm_place`, which is published under ODbL as a dump file. The current index can be
 rebuilt by replaying the Nexus feed and fetching every link again; operator group curation
-(`group_override`) and the change journal (`resource_change`) cannot, so back them up. Until the
-first deployment a schema change edits `0001_schema.sql` and local databases are recreated
+(`group_override`) and the change journal (`resource_change`) cannot, so back them up. Production
+schema upgrades require a reviewed in-place procedure; disposable local databases can be recreated
 ([operations](docs/operations.md#database)).
 
 **Egress.** Every fetch a reference can steer goes through one client (`resolver/egress.rs`):
@@ -173,8 +173,9 @@ Secrets come from the environment. Any key can be set as `PINAKES__SECTION__KEY`
 (`PINAKES__WEB__ENABLED=false`, `PINAKES__LIMITS__POLL_SECS=10`): strings are literal; numbers,
 booleans and arrays are JSON. The environment wins over the file, and unknown keys or invalid values
 stop startup. [`.env.example`](.env.example) lists the secret variables with placeholder values: the
-database URL, the admin token, event platform keys, the Podcast Index key and secret, the TIDAL
-client ID and secret, and the Discogs and GitHub tokens. Copy it to `.env`, fill in what you use,
+database URL, admin token and all optional provider credentials, including Spotify, TIDAL,
+Discogs, GitHub and CourtListener. The [API-key guide](docs/api-keys.md) explains signup,
+minimum permissions and key-free fallbacks. Copy it to `.env`, fill in what you use,
 and load it (`set -a; . ./.env; set +a`, systemd `EnvironmentFile=`, or `docker run --env-file`).
 Keep `.env` out of version control and readable by the service user only.
 
@@ -188,6 +189,9 @@ without one.
 - [docs/api.md](docs/api.md): the `/v1` API, response shapes and example requests.
 - [docs/operations.md](docs/operations.md): limits, database, egress, re-extraction, monitoring
   and maintenance.
+- [docs/deployment.md](docs/deployment.md): services to host, measured storage baseline,
+  sizing estimates, production network and upgrade checklist.
+- [docs/api-keys.md](docs/api-keys.md): complete credential setup and provider fallbacks.
 - [docs/sources](docs/sources/README.md): one page per official-API source.
 - [ops/README.md](ops/README.md): metrics, alerts and the Grafana dashboard.
 - [data/README.md](data/README.md): pinned data sets and their licences.
