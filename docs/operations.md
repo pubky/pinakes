@@ -118,8 +118,15 @@ database that already has it is left as it is.
 Schema changes edit `0001_schema.sql`; this is not an incremental migration runner. A daemon
 refuses a database built from a different schema version. For a production upgrade, back up and
 restore-test first, apply a reviewed upgrade procedure while stopped, and prove the resulting
-schema matches a freshly migrated disposable database. Do not drop a production database to
-upgrade it: a feed replay cannot restore operator curation or the change journal.
+schema matches a freshly migrated disposable database. Schema equivalence alone is insufficient:
+SQLx also validates the migration history in `_sqlx_migrations`, including the checksum of
+`0001_schema.sql`. A reviewed, version-specific procedure must reconcile that metadata with the
+target binary only after proving the intended schema/data transformation. Do not simply delete
+the history or change its checksum to suppress `VersionMismatch`. On the restored upgrade-test
+copy, run the actual target binary through migration and daemon startup and verify its API and
+workers before production rollout. There is no general automatic in-place upgrade command.
+Do not drop a production database to upgrade it: a feed replay cannot restore operator curation
+or the change journal.
 
 Only for a disposable local development database:
 

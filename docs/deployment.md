@@ -15,7 +15,7 @@ Configuration names come from [`pinakes.example.toml`](../pinakes.example.toml);
 | Persistent dump directory | `osm.dump_dir`, served at `/v1/dumps/osm_place.ndjson.gz` | About 1.5 KB per cached place uncompressed; allow two copies during replacement | Keep the compressed dump downloadable and preserve OSM attribution; a CDN can cache it by `ETag`. |
 | Prometheus and Alertmanager | Evaluate admin `/metrics` and the supplied alerts | Small deployment; retention and scrape frequency set disk use | Private scrape path; [ops setup](../ops/README.md) includes alerts and a Grafana dashboard. |
 | MusicBrainz mirror (optional) | Higher music-lookup throughput via `also_on.sources.musicbrainz.base_url` | Size for the chosen mirror/search-index components, not a fixed 100 GB allowance | The hosted API's IP allowance is shared; a mirror is optional, not another provider key. [Server documentation](https://musicbrainz.org/doc/MusicBrainz_Server). |
-| Photon (later, for clients) | Client place-search type-ahead, not called by Pinakes | Regional or planet index; provision against the selected [Photon dump](https://github.com/komoot/photon#pre-built-databases) | Clients call it directly; do not add a Pinakes autocomplete proxy. |
+| Photon (later, for clients) | Client place-search type-ahead, not called by Pinakes | Regional or planet index; provision against the selected [Photon dump](https://github.com/komoot/photon#setting-photon-up-with-the-release-binaries-and-extracts) | Clients call it directly; do not add a Pinakes autocomplete proxy. |
 | Map tiles (later, for clients) | Client map drawing, not called by Pinakes | A regional/planet PMTiles file plus CDN/static storage; capacity depends on the selected build | MapLibre + self-hosted [Protomaps PMTiles](https://docs.protomaps.com/deploy/) is an option. Do not rely on OSM's donation-funded tile servers for production capacity; their [usage policy](https://operations.osmfoundation.org/policies/tiles/) is not a blanket ban on all production use. |
 
 ## Storage model
@@ -83,7 +83,9 @@ not just `resource`, and budget backup retention separately from the table's sin
 ## Day-two checklist
 
 1. Before an upgrade, take and restore-test a backup; compare any schema change against a fresh
-   schema on a disposable database. Never recreate a production database as an upgrade shortcut.
+   schema on a disposable database. The reviewed procedure must also handle SQLx migration
+   metadata and prove that the actual target binary starts against the upgraded copy
+   ([details](operations.md#database)). Never recreate a production database as an upgrade shortcut.
 2. Stop the daemon before `pinakesd --config <path> reextract <route…|all|also-on>`;
    restart it afterward. Follow [database and re-extraction operations](operations.md#database)
    for the exact routes and queues affected.
