@@ -3248,7 +3248,7 @@ async fn public_canary_redaction_unknown_size_and_disabled_nostr(pool: PgPool) {
     use tower::ServiceExt;
     // Public info shows a canary's host only; the admin listener keeps the full URL.
     let cfg = Config::default();
-    let state = AppState::new(pool.clone(), cfg.clone()).unwrap();
+    let state = AppState::new(pool.clone(), cfg.clone()).await.unwrap();
     for (app, private) in [
         (api::router(state.clone()), false),
         (api::admin_router(state), true),
@@ -3360,7 +3360,11 @@ async fn alias_references_scope_search_and_occurrence_reads(pool: PgPool) {
     assert_eq!((mapped.as_str(), resolver), (root.as_str(), None));
     let doc = snapshot(root_uri, 3, Utc::now().timestamp_millis());
     store::save_document(&pool, &root, 0, &doc).await.unwrap();
-    let app = api::router(AppState::new(pool.clone(), Default::default()).unwrap());
+    let app = api::router(
+        AppState::new(pool.clone(), Default::default())
+            .await
+            .unwrap(),
+    );
     for path in [
         format!("/v1/resources/{alias}/occurrences?limit=2"),
         "/v1/search?type=Event&tags=review&facet=tags".into(),

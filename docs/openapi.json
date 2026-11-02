@@ -64,7 +64,7 @@
             "type": "array"
           },
           "attribution": {
-            "description": "OpenStreetMap cards, events placed at an OSM venue and events whose zone was derived from\ncoordinates: the ODbL attribution to display with the card.",
+            "description": "OpenStreetMap cards, events placed at an OSM venue and events whose zone was derived from\ncoordinates: the attribution to display with the card. A place's is the credit of the\nservice that answered the version shown (the ODbL credit, and LocationIQ's for a place\nLocationIQ answered).",
             "type": [
               "string",
               "null"
@@ -1149,6 +1149,10 @@
           "licence_url": {
             "type": "string"
           },
+          "note": {
+            "description": "What the licence covers: each place's `attribution` names the service that answered\nit, whose terms apply to what it added.",
+            "type": "string"
+          },
           "notice": {
             "type": "string"
           },
@@ -1162,6 +1166,7 @@
           "licence",
           "licence_url",
           "attribution_url",
+          "note",
           "table"
         ],
         "type": "object"
@@ -1171,6 +1176,13 @@
         "properties": {
           "address": {
             "type": "object"
+          },
+          "attribution": {
+            "description": "The credit of the service that answered the place (Nominatim's is the OSM credit alone);\nthat service's terms apply to what it added.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "bbox": {
             "description": "`[min_lon, min_lat, max_lon, max_lat]`.",
@@ -1261,6 +1273,7 @@
           "address",
           "tags",
           "display_name",
+          "attribution",
           "status",
           "fetched_at",
           "versions"
@@ -1270,6 +1283,7 @@
       "OsmLicence": {
         "properties": {
           "attribution": {
+            "description": "The credit for places the current provider answers.",
             "type": "string"
           },
           "dump": {
@@ -1278,6 +1292,18 @@
           },
           "licence": {
             "type": "string"
+          },
+          "provider": {
+            "description": "The service that answers OSM lookups and geocoding: `nominatim` or `locationiq`.",
+            "example": "nominatim",
+            "type": "string"
+          },
+          "terms": {
+            "description": "The provider's terms, which apply beside the ODbL to what it adds; absent for\nNominatim.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "updated_at": {
             "description": "When the file was last written; `null` before the first.",
@@ -1295,6 +1321,7 @@
           "licence",
           "attribution",
           "url",
+          "provider",
           "dump"
         ],
         "type": "object"
@@ -1777,7 +1804,7 @@
             "description": "Over `limits.osm_dump_downloads_per_hour` transfers (200 or 206) to this address in the last hour; HEAD, 304 and 416 are free"
           },
           "503": {
-            "description": "No dump file written yet; retry later"
+            "description": "No dump file written yet, or the file is withheld: it holds places LocationIQ answered and this instance is not authorized to publish them; retry later"
           }
         },
         "tags": [

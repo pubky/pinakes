@@ -460,7 +460,9 @@ async fn walls_are_unreachable_with_normal_backoff_and_keep_their_facts(pool: Pg
             .unwrap();
     assert_eq!(classes, vec!["created".to_string()]);
     let app = pinakes_core::api::router(
-        pinakes_core::api::AppState::new(pool.clone(), Default::default()).unwrap(),
+        pinakes_core::api::AppState::new(pool.clone(), Default::default())
+            .await
+            .unwrap(),
     );
     let get = |path: String| {
         let app = app.clone();

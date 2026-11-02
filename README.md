@@ -55,7 +55,7 @@ Pinakes never parses the social specs.
 leases rows per route and runs that route's resolver under its own concurrency and rate limits. The
 web resolver reads JSON-LD, microformats, OpenGraph, oEmbed and the title. The other routes read
 `pubky://` objects of other apps, `geo:` URIs and map links, OpenStreetMap objects (through
-Nominatim), event pages and calendar feeds, event platforms (`data/event-adapters.json`), and media,
+Nominatim, or LocationIQ where the operator chooses it), event pages and calendar feeds, event platforms (`data/event-adapters.json`), and media,
 ISBN, DOI, Nostr and ActivityPub cards. Over forty services with their own API (Federal Register,
 SEC EDGAR, Bluesky, GitHub, Discogs, Zenodo, …) are read from that API instead of their pages; each
 has a page in [docs/sources](docs/sources/README.md). The result is one document per resource: a
@@ -96,7 +96,8 @@ MusicBrainz and Wikidata answers). Requests to one host go one at a time, paced 
 `limits.host_requests_per_second` or the host's published rate. Discovery reads (also-on
 lookups, oEmbed, feed discovery) are cached and shared between concurrent readers. Card images
 stay origin URLs and are never fetched; a link that is itself an image resolves to an ImageObject
-card. Nominatim and Nexus are trusted upstreams outside this policy.
+card. The OSM provider (Nominatim or LocationIQ) and Nexus are trusted upstreams outside this
+policy.
 
 ## Run locally
 

@@ -181,7 +181,11 @@ async fn hub_keys_join_and_derived_links_reach_the_cards(pool: PgPool) {
     groups::drain(&pool, &Default::default(), 100)
         .await
         .unwrap();
-    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let app = api::router(
+        AppState::new(pool.clone(), Config::default())
+            .await
+            .unwrap(),
+    );
     let card = get(&app, &format!("/v1/resources/{a}")).await;
     assert_eq!(card["group"]["size"], 2, "{card}");
     assert!(card["group"].get("members").is_none());
@@ -282,7 +286,11 @@ async fn a_card_shows_eight_and_the_read_all(pool: PgPool) {
     );
     let sources: Vec<Arc<dyn Source>> = vec![hub];
     drain(&pool, &cx(Config::default()), &sources).await;
-    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let app = api::router(
+        AppState::new(pool.clone(), Config::default())
+            .await
+            .unwrap(),
+    );
     let read = get(&app, &format!("/v1/resources/{id}")).await;
     assert_eq!(read["also_on"].as_array().unwrap().len(), 12);
     let cards = post(&app, "/v1/resources/lookup", json!({"ids": [id]})).await;
@@ -433,7 +441,11 @@ async fn runs_replace_their_rows_failures_keep_them_and_rows_expire(pool: PgPool
         .execute(&pool)
         .await
         .unwrap();
-    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let app = api::router(
+        AppState::new(pool.clone(), Config::default())
+            .await
+            .unwrap(),
+    );
     assert_eq!(
         get(&app, &format!("/v1/resources/{id}")).await["also_on"],
         json!([]),
@@ -692,7 +704,11 @@ async fn facts_are_shown_checked_and_never_join(pool: PgPool) {
     }
     let sources: Vec<Arc<dyn Source>> = vec![hub];
     drain(&pool, &cx(Config::default()), &sources).await;
-    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let app = api::router(
+        AppState::new(pool.clone(), Config::default())
+            .await
+            .unwrap(),
+    );
     let read = get(&app, &format!("/v1/resources/{ia}")).await;
     assert_eq!(
         read["facts"],
@@ -759,7 +775,11 @@ async fn search_by_key_finds_the_same_object_on_every_service(pool: PgPool) {
         .unwrap();
     let sources: Vec<Arc<dyn Source>> = vec![hub];
     drain(&pool, &cx(Config::default()), &sources).await;
-    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let app = api::router(
+        AppState::new(pool.clone(), Config::default())
+            .await
+            .unwrap(),
+    );
     let found = |path: String| {
         let app = app.clone();
         async move {
@@ -947,7 +967,11 @@ async fn every_key_a_read_lists_searches_back(pool: PgPool) {
             .await
             .unwrap();
     }
-    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let app = api::router(
+        AppState::new(pool.clone(), Config::default())
+            .await
+            .unwrap(),
+    );
     let read = get(&app, &format!("/v1/resources/{id}")).await;
     let listed: Vec<&str> = read["keys"]
         .as_array()
@@ -1020,7 +1044,11 @@ async fn trending_counts_references_inside_the_window(pool: PgPool) {
             .await
             .unwrap();
     }
-    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let app = api::router(
+        AppState::new(pool.clone(), Config::default())
+            .await
+            .unwrap(),
+    );
     let rows = |path: &'static str| {
         let app = app.clone();
         async move {
@@ -1292,7 +1320,11 @@ async fn the_production_queue_types_and_names_music_links(pool: PgPool) {
         }
         queue::run_batch(&pool, &Pages, &cfg, &jobs).await.unwrap();
     }
-    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let app = api::router(
+        AppState::new(pool.clone(), Config::default())
+            .await
+            .unwrap(),
+    );
     for ((uri, kind, site), id) in expected.iter().zip(&ids) {
         let card = get(&app, &format!("/v1/resources/{id}")).await;
         assert_eq!(
@@ -1672,7 +1704,11 @@ async fn a_tagged_member_and_a_derived_link_of_one_service_show_once(pool: PgPoo
     groups::drain(&pool, &Default::default(), 100)
         .await
         .unwrap();
-    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let app = api::router(
+        AppState::new(pool.clone(), Config::default())
+            .await
+            .unwrap(),
+    );
     let read = lookup_card(&app, &card).await;
     let mut shown: Vec<String> = read["also_on"]
         .as_array()
@@ -1746,7 +1782,11 @@ async fn search_by_doi_finds_the_card_and_its_preprint(pool: PgPool) {
         .unwrap();
     let sources: Vec<Arc<dyn Source>> = vec![datacite];
     drain(&pool, &cx(Config::default()), &sources).await;
-    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let app = api::router(
+        AppState::new(pool.clone(), Config::default())
+            .await
+            .unwrap(),
+    );
     let found = |key: &str| {
         let app = app.clone();
         let path = format!("/v1/search?key={}", urlencoding(key));
@@ -1822,7 +1862,11 @@ async fn two_tagged_spellings_of_a_derived_link_show_once(pool: PgPool) {
     groups::drain(&pool, &Default::default(), 100)
         .await
         .unwrap();
-    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let app = api::router(
+        AppState::new(pool.clone(), Config::default())
+            .await
+            .unwrap(),
+    );
     let read = lookup_card(&app, &card).await;
     let sites: Vec<&str> = read["also_on"]
         .as_array()
@@ -1885,7 +1929,11 @@ async fn a_page_naming_itself_after_a_service_takes_no_slot(pool: PgPool) {
     groups::drain(&pool, &Default::default(), 100)
         .await
         .unwrap();
-    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let app = api::router(
+        AppState::new(pool.clone(), Config::default())
+            .await
+            .unwrap(),
+    );
     let read = get(&app, &format!("/v1/resources/{card}")).await;
     let entries: Vec<(String, bool)> = read["also_on"]
         .as_array()
@@ -2123,7 +2171,11 @@ async fn a_music_typed_impostor_takes_no_slot_and_hides_nothing(pool: PgPool) {
     groups::drain(&pool, &Default::default(), 100)
         .await
         .unwrap();
-    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let app = api::router(
+        AppState::new(pool.clone(), Config::default())
+            .await
+            .unwrap(),
+    );
     for id in &ids {
         let read = get(&app, &format!("/v1/resources/{id}")).await;
         let entries: Vec<(String, bool)> = read["also_on"]
@@ -2185,7 +2237,11 @@ async fn a_non_object_page_on_a_service_host_takes_no_slot(pool: PgPool) {
     groups::drain(&pool, &Default::default(), 100)
         .await
         .unwrap();
-    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let app = api::router(
+        AppState::new(pool.clone(), Config::default())
+            .await
+            .unwrap(),
+    );
     let read = get(&app, &format!("/v1/resources/{}", ids[0])).await;
     let entries: Vec<(String, bool)> = read["also_on"]
         .as_array()
@@ -2242,7 +2298,11 @@ async fn a_shared_repository_link_with_a_tab_is_the_repository_once(pool: PgPool
     groups::drain(&pool, &Default::default(), 100)
         .await
         .unwrap();
-    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let app = api::router(
+        AppState::new(pool.clone(), Config::default())
+            .await
+            .unwrap(),
+    );
     let read = lookup_card(&app, &ids[0]).await;
     let entries: Vec<(String, String, bool)> = read["also_on"]
         .as_array()
@@ -2419,7 +2479,7 @@ async fn a_link_an_exact_lookup_names_joins_by_its_key(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let app = api::router(AppState::new(pool.clone(), on.clone()).unwrap());
+    let app = api::router(AppState::new(pool.clone(), on.clone()).await.unwrap());
     // Any spelling of the barcode finds both.
     let mut found: Vec<String> = get(&app, "/v1/search?key=upc:602557656527").await["items"]
         .as_array()
@@ -2516,7 +2576,11 @@ async fn a_card_shows_one_link_per_service(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let app = api::router(
+        AppState::new(pool.clone(), Config::default())
+            .await
+            .unwrap(),
+    );
     let of = |also: &Value, site: &str| -> Vec<String> {
         also.as_array()
             .unwrap()
@@ -2604,7 +2668,11 @@ async fn a_card_shows_no_other_page_of_its_own_service(pool: PgPool) {
     );
     let sources: Vec<Arc<dyn Source>> = vec![hub];
     drain(&pool, &cx(Config::default()), &sources).await;
-    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let app = api::router(
+        AppState::new(pool.clone(), Config::default())
+            .await
+            .unwrap(),
+    );
     let read = get(&app, &format!("/v1/resources/{id}")).await;
     let uris = |also: &Value| -> Vec<String> {
         also.as_array()
@@ -3374,7 +3442,7 @@ async fn a_switched_off_source_shows_nothing_until_it_is_on_again(pool: PgPool) 
         groups::drain(&pool, &Default::default(), 100)
             .await
             .unwrap();
-        let app = api::router(AppState::new(pool.clone(), config).unwrap());
+        let app = api::router(AppState::new(pool.clone(), config).await.unwrap());
         let card = get(&app, &format!("/v1/resources/{}", ids[0])).await;
         let listed = post(&app, "/v1/resources/lookup", json!({"ids": [ids[0]]})).await;
         let found = |key: String| {

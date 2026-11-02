@@ -110,7 +110,7 @@ async fn the_nexus_authorization_is_sent_on_every_call_and_shown_nowhere(pool: P
         ..Config::default()
     };
     config.validate().unwrap();
-    let state = AppState::new(pool.clone(), config).unwrap();
+    let state = AppState::new(pool.clone(), config).await.unwrap();
     let (app, admin) = (api::router(state.clone()), api::admin_router(state.clone()));
 
     let logs = Lines::default();
