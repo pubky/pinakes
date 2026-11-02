@@ -171,7 +171,7 @@ lower bound, when several links' views count taggers they do not list).
 
 **Collections.** A card's `collections` counts the public Pubky collection posts that hold its
 link (its own or an alias's); `GET {{BASE}}/v1/resources/{id}/collections?viewer=<pubky key>`
-lists them, the viewer's own first, then newest first: `{uri, author, indexed_at}` each, paged
+lists them, the viewer's own first (their 100 newest), then newest first: `{uri, author, indexed_at}` each, paged
 with `cursor`. `uri` is the collection post: ask Nexus for its name and items. A search with
 `in_collection=<that uri>` lists the cards one collection holds.
 

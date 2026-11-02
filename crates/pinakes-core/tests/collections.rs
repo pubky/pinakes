@@ -454,3 +454,130 @@ async fn search_in_collection_keeps_the_cards_it_holds(pool: PgPool) {
         assert_eq!(status, 400, "{bad}");
     }
 }
+
+/// Every page of a card's collections, `limit` at a time, as URIs.
+async fn all_pages(app: &axum::Router, id: &str, query: &str, limit: usize) -> Vec<String> {
+    let mut seen = vec![];
+    let mut cursor: Option<String> = None;
+    loop {
+        let after = cursor
+            .as_ref()
+            .map_or(String::new(), |c| format!("&cursor={c}"));
+        let (status, page) = request(
+            app,
+            &format!("/v1/resources/{id}/collections?limit={limit}{query}{after}"),
+        )
+        .await;
+        assert_eq!(status, 200, "{page}");
+        seen.extend(
+            page["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| i["uri"].as_str().unwrap().to_owned()),
+        );
+        cursor = page["cursor"].as_str().map(str::to_owned);
+        if cursor.is_none() {
+            return seen;
+        }
+    }
+}
+
+/// A viewer's own collections come first, their 100 newest; any more are listed with the others,
+/// by time.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_viewer_has_their_100_newest_first_and_the_rest_by_time(pool: PgPool) {
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let link = "https://example.org/song";
+    let id = card(&pool, link, "Song").await;
+    let (a, b) = (author('a'), author('b'));
+    let mut lines: Vec<Change> = (1..=102)
+        .map(|k| item(Op::Put, &a, &format!("A{k:03}"), "v", link, k * 1_000))
+        .collect();
+    lines.push(item(Op::Put, &b, "Bnew", "v", link, 1_000_000));
+    lines.push(item(Op::Put, &b, "Bold", "v", link, 500));
+    batch(&pool, lines).await;
+    let own = |k: i64| collection(&a, &format!("A{k:03}"));
+    let mut viewed: Vec<String> = (3..=102).rev().map(own).collect();
+    viewed.extend([
+        collection(&b, "Bnew"),
+        own(2),
+        own(1),
+        collection(&b, "Bold"),
+    ]);
+    for limit in [7, 100] {
+        assert_eq!(
+            all_pages(&app, &id, &format!("&viewer={a}"), limit).await,
+            viewed,
+            "{limit}"
+        );
+    }
+    let mut newest = vec![collection(&b, "Bnew")];
+    newest.extend((1..=102).rev().map(own));
+    newest.push(collection(&b, "Bold"));
+    assert_eq!(all_pages(&app, &id, "", 9).await, newest);
+}
+
+/// A post whose references to a card's links were indexed at different instants (a skipped line
+/// of a newer version) is listed once, at its newest, on whichever page that falls.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_post_held_under_two_links_is_listed_once_at_its_newest(pool: PgPool) {
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let a = author('a');
+    let root = card(&pool, "https://example.org/root", "Root").await;
+    let alias = store::ensure_resource(&pool, "https://example.org/spelling")
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'canonical')")
+        .bind(&alias)
+        .bind(&root)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut lines: Vec<Change> = (1..=6)
+        .map(|k| {
+            item(
+                Op::Put,
+                &a,
+                &format!("Q{k}"),
+                "v",
+                "https://example.org/root",
+                k * 1_000,
+            )
+        })
+        .collect();
+    lines.push(item(
+        Op::Put,
+        &a,
+        "P",
+        "v",
+        "https://example.org/root",
+        3_500,
+    ));
+    lines.push(item(
+        Op::Put,
+        &a,
+        "P",
+        "v",
+        "https://example.org/spelling",
+        3_500,
+    ));
+    batch(&pool, lines).await;
+    // The alias's reference of P kept an older instant.
+    sqlx::query("UPDATE reference SET created_at=to_timestamp(0.2) WHERE resource_id=$1")
+        .bind(&alias)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let q = |k: u32| collection(&a, &format!("Q{k}"));
+    let want = vec![q(6), q(5), q(4), collection(&a, "P"), q(3), q(2), q(1)];
+    for limit in [1, 2, 20] {
+        assert_eq!(all_pages(&app, &root, "", limit).await, want, "{limit}");
+        assert_eq!(
+            all_pages(&app, &root, &format!("&viewer={a}"), limit).await,
+            want,
+            "{limit}"
+        );
+    }
+    assert_eq!(count(&app, &root).await, 7);
+}

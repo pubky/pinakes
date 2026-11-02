@@ -872,7 +872,8 @@ card's links it holds: `{items: [{uri, author, indexed_at}], cursor}`. `uri` is 
 collection post (`pubky://<author>/pub/<namespace>/v1/posts/<id>`), `author` its author's public
 key and `indexed_at` when Nexus indexed the version that holds the link. Pinakes never fetches a
 collection: ask Nexus or the author's homeserver for its name and items. With `viewer` (a
-52-character public key), that user's own collections come first; then newest `indexed_at`
+52-character public key), that user's own collections come first, their 100 newest (any more
+are listed with the others); then newest `indexed_at`
 first, by author and post on a tie. `limit` is 1–100 (default 20), and `cursor` the previous
 page's (`null` on the last page): signed, bound to this resource and `viewer`, invalid after a
 restart (start again on 400). An alias ID reads its root's list; an unknown ID is 404. Every
@@ -884,11 +885,16 @@ of its own, and a `del` line drops exactly that item, for a removed item, a dele
 edit (whose new version's items come as new lines; an edit moves the collection up). A post's
 reply and embeds are kept the same way, one each.
 
-Every read is a bounded walk, however many collections hold a link or an author has made: a
-page or a cursor reads at most `limit` + 1 posts per link (the card's own and each of those
-aliases), the count at most 1,000 per link, and `in_collection` the one post's files. Each step
-follows an index (newest first, then author and file; the viewer's own by author;
-a post's files in byte order), so no plan reads a link's every collection.
+A post is listed once, at its newest: if its references to the card's links were indexed at
+different instants (a newer version's line skipped), the older ones are passed over.
+
+Every read is a bounded walk, however many collections hold a link, an author has made or the
+viewer holds: a page or a cursor reads at most `limit` + 1 posts per link (the card's own and
+each of those aliases), stepping over at most the viewer's 100 pinned posts; the count reads at
+most 1,000 per link, and `in_collection` the one post's files. Each step is one or two probes
+of an index, in its order (newest first, then author and file; the viewer's own by author; a
+post's files in byte order), so no plan reads a link's or an author's every collection, ties of
+one instant included.
 
 ```text
 GET /v1/resources/{id}/collections?viewer={public key}&limit=20
