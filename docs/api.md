@@ -93,7 +93,7 @@ An IMDb title keeps the type its page gives (it can be either).
 | `id` | Resource ID; for an occurrence, the feed's ID |
 | `uri` | The resource URI; for an occurrence, its own URL when it has one, else the feed's. To combine with Nexus, send `uri` and `refs`, and for an occurrence `occurrence.feed_uri` (its own URL was never tagged) |
 | `refs` | The links people referenced on Pubky that resolve to this card, most referenced first (counted up to 1,000 each, then by URI), at most 5: its own `uri` and its aliases that carry references (the 31 most recently referenced), normalized as every URI is. A typed card's `uri` is often a link nobody wrote (`btc:block/…`, `uniprot:…`, `isbn:…`) while people tagged the mempool.space, UniProt or Open Library page: ask Nexus about each of `refs` too and add up the card's tags over them. An occurrence's are its feed's; a gone social post's, its own link alone. `[]` when nothing references the card |
-| `collections` | How many public collection posts hold the card's link, its own `uri` or an alias's, each post once, counted up to 1,000 (`1000`: 1,000 or more); `0` when none does. They are listed by `GET /v1/resources/{id}/collections` ([Collections](#collections)). An occurrence's are its feed's |
+| `collections` | How many public collection posts hold the card's link, its own `uri` or one of its aliases' (the 31 most recently collected), each post once, counted up to 1,000 (`1000`: 1,000 or more); `0` when none does. They are listed by `GET /v1/resources/{id}/collections` ([Collections](#collections)). An occurrence's are its feed's |
 | `status` | Fetch health: `ok`, `pending`, `missing`, `unreachable` or `error` |
 | `type`, `type_path` | schema.org type (`MusicEvent`, `Book`, `Place`, …), or one of Pinakes's own types for what schema.org has no class for: `BitcoinBlock`, `BitcoinTransaction`, `BitcoinAddress`, `LightningNode` and `LightningChannel` (not schema.org; each a child of `Thing`); `type_path` is the type's ancestors, root first (`["Thing", "Event", "MusicEvent"]`), the types a `type=` search matches it by |
 | `name`, `description`, `image` | Display metadata; images point to the origin and are never proxied |
@@ -866,8 +866,9 @@ GET /v1/resources/{id}/episodes?limit=20
 
 A public collection is a Pubky post that lists links (Nexus indexes its items; a private
 collection or a bookmark never reaches Nexus). `GET /v1/resources/{id}/collections` lists the
-collection posts that hold the card's link, its own `uri` or an alias's, each post once however
-many of the card's links it holds: `{items: [{uri, author, indexed_at}], cursor}`. `uri` is the
+collection posts that hold the card's link, its own `uri` or one of its aliases' (the 31 most
+recently collected, as [`refs`](#card) bounds its aliases), each post once however many of the
+card's links it holds: `{items: [{uri, author, indexed_at}], cursor}`. `uri` is the
 collection post (`pubky://<author>/pub/<namespace>/v1/posts/<id>`), `author` its author's public
 key and `indexed_at` when Nexus indexed the version that holds the link. Pinakes never fetches a
 collection: ask Nexus or the author's homeserver for its name and items. With `viewer` (a
@@ -882,6 +883,12 @@ The list follows Nexus's reference feed: each item of a collection post is a `co
 of its own, and a `del` line drops exactly that item, for a removed item, a deleted post or an
 edit (whose new version's items come as new lines; an edit moves the collection up). A post's
 reply and embeds are kept the same way, one each.
+
+Every read is a bounded walk, however many collections hold a link or an author has made: a
+page or a cursor reads at most `limit` + 1 posts per link (the card's own and each of those
+aliases), the count at most 1,000 per link, and `in_collection` the one post's files. Each step
+follows an index (newest first, then author and file; the viewer's own by author;
+a post's files in byte order), so no plan reads a link's every collection.
 
 ```text
 GET /v1/resources/{id}/collections?viewer={public key}&limit=20

@@ -151,9 +151,14 @@ CREATE INDEX reference_resource_created_idx ON reference USING btree (resource_i
 -- `related`'s taggers are the authors of a resource's most recent tags: an index of its
 -- tags alone, so a resource with many replies or embeds and few tags reads only tags.
 CREATE INDEX reference_resource_tag_idx ON reference USING btree (resource_id, created_at) WHERE kind = 'tag';
--- A card's collections (`collections`): the collection posts naming a link, its count on every
--- card, read by resource beside its many tags.
-CREATE INDEX reference_resource_collection_idx ON reference USING btree (resource_id, created_at) WHERE kind = 'collection';
+-- A card's collections (`collections`): each link's collection posts newest first, in the order
+-- the route lists them, so its count and every page read a bounded walk from the cursor on.
+CREATE INDEX reference_resource_collection_idx ON reference USING btree (resource_id, created_at DESC, author, object_path) WHERE kind = 'collection';
+-- The viewer's own collections of a link, listed first.
+CREATE INDEX reference_collection_author_idx ON reference USING btree (resource_id, author, created_at DESC, object_path) WHERE kind = 'collection';
+-- A collection's items (search's `in_collection`): its author's files under the post's path, a
+-- range in byte order whatever the database's collation.
+CREATE INDEX reference_collection_post_idx ON reference USING btree (author, object_path COLLATE "C") WHERE kind = 'collection';
 CREATE INDEX reference_start_idx ON reference USING btree (start_at);
 
 -- References as they count: an alias's count for its root, posts' own rows left out.
