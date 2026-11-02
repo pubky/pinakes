@@ -488,7 +488,7 @@
             ]
           },
           "items": {
-            "description": "The viewer's own first, then newest first.",
+            "description": "The viewer's own first (their 100 newest), then newest first.",
             "items": {
               "$ref": "#/components/schemas/Collection"
             },
@@ -2787,7 +2787,7 @@
     },
     "/v1/resources/{id}/collections": {
       "get": {
-        "description": "The public collection posts that hold this card's link, its own or an alias's, as Nexus indexed them: the viewer's own first when `viewer` is given, then newest first. Each once, however many of the card's links it holds. A card's `collections` counts them. Private collections are never seen.",
+        "description": "The public collection posts that hold this card's link, its own or an alias's, as Nexus indexed them: the viewer's own first when `viewer` is given (their 100 newest), then newest first. Each once, however many of the card's links it holds. A card's `collections` counts them. Private collections are never seen.",
         "operationId": "list_collections",
         "parameters": [
           {
@@ -2800,7 +2800,7 @@
             }
           },
           {
-            "description": "A user's public key (z-base-32): that user's collections come first.",
+            "description": "A user's public key (z-base-32): that user's collections come first, their 100 newest;\nany more are listed with the others.",
             "in": "query",
             "name": "viewer",
             "required": false,
