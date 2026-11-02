@@ -295,7 +295,11 @@ async fn a_deleted_posts_aliases_keep_none_of_its_text(pool: sqlx::PgPool) {
     let (reddit, resolver, id, at) = post(&pool).await;
     let alias_id = spelling(&pool, SUBREDDIT_SPELLING, at - 1).await;
     assert!(texts(&pool, &[&id, &alias_id]).await > 2);
-    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let app = api::router(
+        AppState::new(pool.clone(), Config::default())
+            .await
+            .unwrap(),
+    );
     let (_, read) = call(&app, "GET", &format!("/v1/resources/{id}"), None).await;
     assert_eq!(read["facts"]["author"], "reddit_admin", "{read}");
     assert_eq!(read["type"], "DiscussionForumPosting", "{read}");

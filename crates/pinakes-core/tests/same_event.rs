@@ -70,7 +70,7 @@ async fn pass(pool: &PgPool, config: &Config) {
 }
 
 async fn get(config: &Config, pool: &PgPool, path: &str) -> Value {
-    let app = api::router(AppState::new(pool.clone(), config.clone()).unwrap());
+    let app = api::router(AppState::new(pool.clone(), config.clone()).await.unwrap());
     let mut request = Request::get(path).body(Body::empty()).unwrap();
     request.extensions_mut().insert(ConnectInfo(
         "127.0.0.1:4000".parse::<std::net::SocketAddr>().unwrap(),
@@ -815,7 +815,11 @@ async fn a_search_page_changes_its_etag_when_its_hint_does(pool: PgPool) {
         .await;
     }
     let etag = || async {
-        let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+        let app = api::router(
+            AppState::new(pool.clone(), Config::default())
+                .await
+                .unwrap(),
+        );
         let mut request = Request::get("/v1/search?type=Event")
             .body(Body::empty())
             .unwrap();

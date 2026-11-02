@@ -234,7 +234,11 @@ async fn call(app: &Router, tool: &str, arguments: Value) -> (bool, Value) {
 
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn the_guide_and_the_index_name_the_host_that_asked(pool: PgPool) {
-    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let app = api::router(
+        AppState::new(pool.clone(), Config::default())
+            .await
+            .unwrap(),
+    );
     let host = [("host", "pinakes.example")];
     let (code, headers, body) = raw(&app, "GET", "/llms.txt", &host, None).await;
     assert_eq!(code, 200);
@@ -278,7 +282,7 @@ async fn the_guide_and_the_index_name_the_host_that_asked(pool: PgPool) {
     // With `api.mcp` off, the index names no endpoint and there is none.
     let mut config = Config::default();
     config.api.mcp = false;
-    let off = api::router(AppState::new(pool, config).unwrap());
+    let off = api::router(AppState::new(pool, config).await.unwrap());
     let (_, _, body) = raw(&off, "GET", "/", &host, None).await;
     let index: Value = serde_json::from_slice(&body).unwrap();
     assert!(index["links"].get("mcp").is_none());
@@ -298,7 +302,7 @@ async fn the_mcp_handshake_and_every_tool(pool: PgPool) {
         nexus_url: nexus().await,
         ..Config::default()
     };
-    let app = api::router(AppState::new(pool, config).unwrap());
+    let app = api::router(AppState::new(pool, config).await.unwrap());
     initialize(&app).await;
     let (status, _) = mcp(
         &app,
@@ -473,7 +477,7 @@ async fn social_without_a_nexus_is_a_plain_error(pool: PgPool) {
             nexus_url: nexus_url.clone(),
             ..Config::default()
         };
-        let app = api::router(AppState::new(pool.clone(), config).unwrap());
+        let app = api::router(AppState::new(pool.clone(), config).await.unwrap());
         let (error, answer) = call(&app, "social", json!({"uris": ["https://example.org/"]})).await;
         assert!(error, "{nexus_url}: {answer}");
         assert_eq!(answer["status"], 502, "{nexus_url}");
@@ -486,7 +490,7 @@ async fn a_tool_call_spends_the_same_per_ip_budget(pool: PgPool) {
     seed(&pool).await;
     let mut config = Config::default();
     config.api.requests_per_minute = 1;
-    let app = api::router(AppState::new(pool, config).unwrap());
+    let app = api::router(AppState::new(pool, config).await.unwrap());
     // The MCP message takes the one unit; the tool's search finds the budget spent.
     let (error, answer) = call(&app, "search", json!({"q": "concert"})).await;
     assert!(error);
@@ -514,7 +518,7 @@ async fn no_admin_route_is_reachable_through_mcp(pool: PgPool) {
         admin_token: Some("admin-secret-token".into()),
         ..Config::default()
     };
-    let state = AppState::new(pool, config).unwrap();
+    let state = AppState::new(pool, config).await.unwrap();
     let public = api::router(state.clone());
     let admin = api::admin_router(state);
     // The admin routes answer on their own listener only, with the token.
@@ -558,7 +562,7 @@ async fn no_admin_route_is_reachable_through_mcp(pool: PgPool) {
 
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_browser_opening_mcp_sees_how_to_connect(pool: PgPool) {
-    let app = api::router(AppState::new(pool, Config::default()).unwrap());
+    let app = api::router(AppState::new(pool, Config::default()).await.unwrap());
     let browser = [
         ("host", "pinakes.example"),
         ("accept", "text/html,application/xhtml+xml,*/*;q=0.8"),
@@ -692,7 +696,7 @@ async fn typed_cards_name_the_links_people_wrote_and_social_joins_by_them(pool: 
         nexus_url: nexus().await,
         ..Config::default()
     };
-    let app = api::router(AppState::new(pool.clone(), config).unwrap());
+    let app = api::router(AppState::new(pool.clone(), config).await.unwrap());
     let get = |path: String| {
         let app = app.clone();
         async move {
@@ -793,7 +797,11 @@ async fn refs_count_each_link_only_up_to_a_bound(pool: PgPool) {
             .await
             .unwrap();
     }
-    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let app = api::router(
+        AppState::new(pool.clone(), Config::default())
+            .await
+            .unwrap(),
+    );
     let (code, _, body) = raw(&app, "GET", &format!("/v1/resources/{}", ids[2]), &[], None).await;
     assert_eq!(code, 200);
     let card: Value = serde_json::from_slice(&body).unwrap();
@@ -836,7 +844,11 @@ async fn refs_count_only_a_cards_most_recently_referenced_aliases(pool: PgPool) 
         }
     }
     recent.sort();
-    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let app = api::router(
+        AppState::new(pool.clone(), Config::default())
+            .await
+            .unwrap(),
+    );
     let (code, _, body) = raw(&app, "GET", &format!("/v1/resources/{}", ids[2]), &[], None).await;
     assert_eq!(code, 200);
     let card: Value = serde_json::from_slice(&body).unwrap();
@@ -880,7 +892,7 @@ async fn the_card_tool_names_the_collections_that_hold_a_link(pool: PgPool) {
     )
     .await
     .unwrap();
-    let app = api::router(AppState::new(pool, Config::default()).unwrap());
+    let app = api::router(AppState::new(pool, Config::default()).await.unwrap());
     initialize(&app).await;
     let (error, read) = call(&app, "card", json!({"uri": "https://example.org/article"})).await;
     assert!(!error, "{read}");

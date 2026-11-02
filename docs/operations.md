@@ -40,6 +40,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `author_requests_per_second` | `1.0` | Resolution budget per author per second. |
 | `max_label_bytes` | `128` | Longest accepted tag label (bytes). |
 | `max_object_path_bytes` | `2048` | Longest accepted Pubky object path (bytes). |
+| `locationiq_requests_per_second` | `1.0` | Requests per second to LocationIQ, when it is the OSM provider (the free plan allows 60 a minute). |
 | `osm_ttl_secs` | `2592000` | OSM place cache lifetime (seconds). |
 | `osm_dump_every_hours` | `24` | Hours between two writes of the ODbL dump file. |
 | `osm_dump_downloads_per_hour` | `6` | ODbL dump downloads per hour per client address. |
@@ -302,21 +303,116 @@ later instead of timing out; a redirect within the host keeps the slot it has. A
 that adds a source, run `pinakesd reextract web official`: links already known get their source's
 card.
 
-Two clients are outside that policy. Nominatim and Nexus are trusted, operator-configured
-upstreams at fixed URLs that no reference can change: their clients do not apply the web DNS
+Two clients are outside that policy. The OSM provider (Nominatim, or LocationIQ) and Nexus are
+trusted, operator-configured upstreams at fixed URLs that no reference can change: their clients do not apply the web DNS
 pinning or the private-address refusal (Nexus defaults to loopback), so configure their URLs and
 DNS through trusted controls. Their Retry-After delays are capped at one hour. The public
 Nominatim is for a small development run only: its [usage
 policy](https://operations.osmfoundation.org/policies/nominatim/) requires an identifying
 User-Agent, caching and at most one request per second, and `osm.requests_per_second` defaults
-to 0.5 and is refused above 1 for a public host. Staging and production use their own
-`osm.nominatim_url`. Pinakes never proxies place search, autocomplete or reverse geocoding.
+to 0.5 and is refused above 1 for a public host. Deployments selecting Nominatim use their own
+`osm.nominatim_url`; LocationIQ is the hosted alternative below, not an automatic fallback.
+Pinakes never proxies place search, autocomplete or reverse geocoding.
+
+### OpenStreetMap provider
+
+`osm.provider` chooses who answers OSM lookups and venue geocoding: `nominatim` (the default, at
+`osm.nominatim_url`) or `locationiq`. One provider at a time: a failing provider is never
+replaced by the other.
+
+LocationIQ is refused at startup unless `osm.locationiq.public_use_authorized = true`. Set it
+only when LocationIQ has given written permission for what Pinakes does with its answers: store
+them, use the configured cache lifetime and retained versions, serve them from the public API
+and publish permitted fields in the downloadable ODbL dump. A key or a paid plan alone does not
+establish those rights. LocationIQ allows permanent response-data storage but limits request-response
+caching to 48 hours on free accounts or the paid subscription period; that is not blanket public
+dataset redistribution permission. The default 30-day OSM cache and retained versions must be
+covered by the written authorization, not assumed compatible. Keep the permission with deployment
+records; leave the gate false until it covers the actual fields, retention, public API and export.
+See the [current terms](https://locationiq.com/tos) and [storage guidance](https://help.locationiq.com/support/solutions/articles/36000216111-can-i-save-addresses-from-api-output-).
+Every resolver is built through the same check, not only the daemon's: without the
+authorization, a product key and a rate there is no LocationIQ resolver.
+
+- The key comes from `LOCATIONIQ_API_KEY` alone (no TOML or `PINAKES__` form) and is read only
+  for LocationIQ; a missing, malformed or account (`sk.`) token stops startup without being
+  repeated ([API keys](api-keys.md)). It is sent only to the regional HTTPS endpoint
+  `osm.locationiq.region` names (`us1`: `https://us1.locationiq.com/v1`, `eu1`:
+  `https://eu1.locationiq.com/v1`), in the query of each request; there is no URL setting, and
+  no redirect is followed. No error and no log line carries the URL it was sent to: a request
+  error is reduced to its class, and the daemon drops the HTTP libraries' lines below warn,
+  which name request URLs, whatever `RUST_LOG` says.
+- Lookups name at most 3 objects (`format=json`), accepting LocationIQ's documented single-object answer and batch arrays; Nominatim retains its array-only JSONv2 contract and takes 50. A venue's address goes to
+  `/v1/search/structured`, a one-line town to `/v1/search`. An event venue given only as one
+  line of text (JSON-LD `location` as a string) goes to `/v1/search` when the line reads as a
+  street address (two comma-separated parts or more, one word with a digit), never a bare
+  name. The venue is placed only when exactly one hit has an OSM identity, one part of the line
+  is exactly that hit's street and house number, and every word of every part after it is the
+  hit's town, postcode, region (name or ISO 3166-2 code) or country (name or code), the town or
+  postcode among them. Parts before the street are the venue's name and confirm nothing; a part
+  the hit contradicts or cannot confirm ("IL" for a place in Massachusetts, "Old Town") places
+  nothing. Nominatim is never asked such a line. LocationIQ documents no settlement
+  filter, so a town search asks for 10 hits and keeps the cities, towns, villages, hamlets,
+  municipalities and administrative boundaries among them; exactly one must remain, as with
+  Nominatim. A hit or row without an OSM type and id is skipped; its `place_id` is never read
+  as an OSM id.
+- Requests are paced at `limits.locationiq_requests_per_second` (1; the free plan's 60 a
+  minute), lookups and venue searches together. A 429 starts a wait of `Retry-After`, else of
+  the window LocationIQ names (a second, a minute); a daily limit waits an hour each time,
+  whatever `Retry-After` says. 5xx waits for `Retry-After`. During the wait nothing is sent:
+  every lookup is deferred at once to its end (the job's next attempt, with `last_error`
+  `http_4xx` or `http_5xx`, no attempt or timeout counted), and an event's venue stays unplaced
+  for that read (`venue_unavailable`). 401 and 403 (a refused key, a missing scope, a plan
+  without the API) and any other answer are errors the job records, without the body, and start
+  no wait. A 404 that says nothing matched is a missing object.
+- Places LocationIQ answered carry its credit (`© OpenStreetMap contributors (ODbL); geocoded by
+  LocationIQ.com under its terms`) in their documents, versions and dump lines. A card shows the
+  credit of the place version it shows: an OSM card's own, an event's or job's at an OSM venue
+  its venue's. A map cluster is placed at its members' current points (the version `osm_place`
+  holds now) and carries the credits of those versions. `/v1/info` names the provider and
+  LocationIQ's terms in `osm_licence`.
+
+Changing the provider changes no stored place: each is asked again of the new provider when its
+`limits.osm_ttl_secs` runs out, and keeps the old provider's credit until then. A refresh adds a
+version; the versions resources and change lines show stay. What LocationIQ answered is therefore
+still served after a switch to Nominatim, so the authorization outlives the provider. Without
+`osm.locationiq.public_use_authorized = true`, whichever provider is selected:
+
+- the API is not started (`AppState::new`, and so the daemon) while `osm_place` holds a place
+  whose document, last fetch or any version carries a credit other than the OSM credit alone,
+  or the dump file has such a line or version. The check reads the database and the file once,
+  at startup, and changes nothing;
+- the dump writer stops at such a place and keeps the previous file;
+- a download reads the file it opened once (and again only when another file is in its place)
+  and withholds a file holding such a place (503), for example one another daemon sharing the
+  directory wrote;
+- a cached answer of LocationIQ is not reused: the place is asked again of Nominatim.
+
+Keep the authorization while those answers remain. `pinakesd --migrate` and `pinakesd reextract`
+run without the check; they serve nothing. Refreshes and `pinakesd reextract osm` do not remove
+them.
+
+When the permission ends, withdraw without destroying the database:
+
+1. Stop the daemon. Without the authorization it does not start again on that database.
+2. Back up the database (`pg_dump`) and move `osm_place.ndjson.gz` out of `osm.dump_dir` into an
+   archive outside every served directory; keep both as your records and LocationIQ's terms
+   require. Neither is deleted: the database holds operator curation and the change journal,
+   which a feed replay cannot restore.
+3. To serve again at once, start a clean instance on a separate empty database (`createdb` with
+   a new name, `pinakesd --migrate`) and an empty dump directory, leaving the retained database
+   as it is. It rebuilds its references from Nexus and its places from Nominatim, without the
+   old database's curation or history.
+4. Removing LocationIQ's answers from the retained database (its places, every version and the
+   dump) while keeping the rest is a reviewed, manual procedure on a restore-tested copy;
+   Pinakes has no command for it. Until it is done, that database is served only with the
+   authorization.
 
 The ODbL share-alike download is a file: the daemon writes `osm_place.ndjson.gz` into
 `osm.dump_dir` (default `dumps`, relative to the working directory) at startup when it is missing
 or older than `limits.osm_dump_every_hours` (24), then at that interval. One writer per
 directory: the writer holds `osm_place.ndjson.gz.lock` (a file lock), so daemons sharing the
-directory take turns and one skips a file another has just written; holding it, the writer, and
+directory take turns and one skips a file another has just written (a daemon without
+LocationIQ's authorization withholds such a file if it holds LocationIQ's answers, see above); holding it, the writer, and
 the daemon at startup, remove the temporary files an interrupted write left. It reads one repeatable-read snapshot
 without a statement timeout, compresses it into a temporary file of its own
 (`osm_place.ndjson.gz.{pid}.{random}.tmp`) off the async workers, syncs it and renames it into
@@ -586,9 +682,11 @@ floating times. A change of either applies at each calendar's next re-parse;
 get new keys once: the old rows are cancelled after two snapshots, or the feed is held if more
 than half its keys move.
 
-Page coordinates win over geocoding, and online events are not geocoded. A structured Nominatim
-search is accepted only for one sufficiently matching address (`limits.geocode_score`); an OSM
-venue link also needs the name and full address to match. Geocoded facts stay in `osm_place`;
+Page coordinates win over geocoding, and online events are not geocoded. A structured search of the
+OSM provider is accepted only for one sufficiently matching address (`limits.geocode_score`); an OSM
+venue link also needs the name and full address to match. With LocationIQ, a venue given only as
+a line of text is searched as that line and placed only at the one hit whose street address the
+line names ([OpenStreetMap provider](#openstreetmap-provider)); it gets no venue link. Geocoded facts stay in `osm_place`;
 documents store versioned references and compose coordinates at read time.
 
 `event.same_event_hint` (default `"on"`; `"off"`) puts `maybe_same` on event cards: other events
@@ -833,7 +931,7 @@ a last guard that cuts every URL before its query or fragment and drops its user
 `nexus_url` or `osm.nominatim_url` with user info, a query or a fragment is refused at startup. A
 path is allowed, and may hold a token, so the feed's log lines (a reset, a skipped line that
 panicked) name the Nexus by its host alone (`nexus`), and a Nominatim request is logged by its
-path below the configured base (`path`: `lookup`, `search`); only admin `GET /v1/info` shows the
+path below the configured base (`path`: `lookup`, `search`; LocationIQ's `search/structured` too); only admin `GET /v1/info` shows the
 Nexus URL, in its ingestion cursors. Logs name
 a link only by its host (a calendar's token or a user's name in a link never reaches a log line),
 errors carry no URL (a fetch error or a Nexus request error names none, an upstream service's

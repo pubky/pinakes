@@ -280,7 +280,11 @@ async fn an_app_wikidata_lacks_is_only_possibly_the_same(pool: sqlx::PgPool) {
             "notes.example example notes private notes",
         ]
     );
-    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let app = api::router(
+        AppState::new(pool.clone(), Config::default())
+            .await
+            .unwrap(),
+    );
     let read = |id: &String| {
         let app = app.clone();
         let mut request = axum::http::Request::get(format!("/v1/resources/{id}"))
@@ -318,7 +322,7 @@ async fn an_app_wikidata_lacks_is_only_possibly_the_same(pool: sqlx::PgPool) {
         ("[event]\nsame_event_hint = \"off\"\n", false),
     ] {
         let config: Config = toml::from_str(settings).unwrap();
-        let app = api::router(AppState::new(pool.clone(), config).unwrap());
+        let app = api::router(AppState::new(pool.clone(), config).await.unwrap());
         let mut request = axum::http::Request::get(format!("/v1/resources/{}", ids[0]))
             .body(axum::body::Body::empty())
             .unwrap();

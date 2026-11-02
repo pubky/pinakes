@@ -80,7 +80,7 @@ async fn pass(pool: &PgPool, config: &Config) {
 }
 
 async fn response(config: &Config, pool: &PgPool, path: &str) -> (Value, String) {
-    let app = api::router(AppState::new(pool.clone(), config.clone()).unwrap());
+    let app = api::router(AppState::new(pool.clone(), config.clone()).await.unwrap());
     let mut request = Request::get(path).body(Body::empty()).unwrap();
     request.extensions_mut().insert(ConnectInfo(
         "127.0.0.1:4000".parse::<std::net::SocketAddr>().unwrap(),

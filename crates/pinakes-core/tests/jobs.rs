@@ -277,7 +277,11 @@ async fn postings_are_placed_found_and_close(pool: PgPool) {
     assert!(stored.get("location").is_none());
     assert_eq!(stored["venue"]["osm_id"], "relation/188022");
 
-    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let app = api::router(
+        AppState::new(pool.clone(), Config::default())
+            .await
+            .unwrap(),
+    );
     let (code, card) = call(&app, &format!("/v1/resources/{}", saved[BATTERY])).await;
     assert_eq!(code, 200, "{card}");
     assert_eq!(card["type"], "JobPosting");
