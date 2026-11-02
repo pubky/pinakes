@@ -1,5 +1,9 @@
 # Sources: cards from official APIs
 
+For provisioning, use the [API-key guide](../api-keys.md): every supported optional credential,
+where to obtain it, minimum access and what remains without it. The
+[deployment guide](../deployment.md) covers hosting, storage and network requirements.
+
 Some services answer exactly from their own API where their page is walled, thin or has moved.
 For their links, Pinakes reads that API instead of the page. Every source here:
 
