@@ -840,13 +840,17 @@ pub(crate) fn feed(content_type: &str, body: &str) -> Option<(Option<String>, Op
     };
     read.or_else(|| FEED_TYPES.contains(&content_type).then_some((None, None)))
 }
+/// A JSON Feed's `title` or `description`: plain text, as its specification has them.
 fn feed_text(v: &Value) -> Option<String> {
-    v.as_str().map(clean_feed_text).filter(|s| !s.is_empty())
+    v.as_str()
+        .map(|s| feed_words(s, false))
+        .filter(|s| !s.is_empty())
 }
-/// A feed's text as plain words: its markup (an HTML description, an Atom `type="html"` title)
-/// gone and its spaces collapsed.
-fn clean_feed_text(s: &str) -> String {
-    let text = if s.contains('<') {
+/// A feed field's words with its spaces collapsed. Only a field the feed's format makes HTML
+/// (`html`: an Atom `type="html"` text, an RSS description) has its markup taken out; any other
+/// keeps what looks like markup as the literal text it is (`Using <title> in HTML`).
+fn feed_words(s: &str, html: bool) -> String {
+    let text = if html {
         super::cards::plain(s)
     } else {
         s.to_owned()
@@ -868,7 +872,8 @@ fn xml_feed(body: &str) -> Option<(Option<String>, Option<String>)> {
     let mut fields = None;
     let mut path: Vec<Vec<u8>> = vec![];
     let (mut title, mut description) = (None::<String>, None::<String>);
-    let mut capture: Option<(bool, String)> = None;
+    // The field being read: whether it is the title, whether its text is HTML, and its text.
+    let mut capture: Option<(bool, bool, String)> = None;
     // An RDF document is a feed only with an RSS 1.0 (or 0.90) channel.
     let (mut rdf, mut rdf_channel) = (false, false);
     for _ in 0..4096 {
@@ -900,15 +905,27 @@ fn xml_feed(body: &str) -> Option<(Option<String>, Option<String>)> {
                 }
                 path.push(local);
                 if Some(path.len()) == fields && capture.is_none() {
-                    let parent_ok = fields == Some(2) || path[1] == b"channel";
+                    let atom = fields == Some(2);
+                    let parent_ok = atom || path[1] == b"channel";
+                    // An Atom text is HTML only as `type="html"`: `text` (the default) is plain,
+                    // and `xhtml` is elements, whose text is all that is read. An RSS description
+                    // is HTML by convention; its title is plain.
+                    let html = if atom {
+                        e.try_get_attribute("type")
+                            .ok()
+                            .flatten()
+                            .is_some_and(|a| a.value.as_ref() == b"html")
+                    } else {
+                        path.last().is_some_and(|l| l == b"description")
+                    };
                     capture = match path.last().map(Vec::as_slice) {
                         Some(b"title") if parent_ok && title.is_none() => {
-                            Some((true, String::new()))
+                            Some((true, html, String::new()))
                         }
                         Some(b"description" | b"subtitle")
                             if parent_ok && description.is_none() =>
                         {
-                            Some((false, String::new()))
+                            Some((false, html, String::new()))
                         }
                         _ => None,
                     };
@@ -926,19 +943,19 @@ fn xml_feed(body: &str) -> Option<(Option<String>, Option<String>)> {
                 };
             }
             Event::Text(t) => {
-                if let (Some((_, text)), Ok(s)) = (&mut capture, t.unescape()) {
+                if let (Some((_, _, text)), Ok(s)) = (&mut capture, t.unescape()) {
                     text.push_str(&s);
                 }
             }
             Event::CData(t) => {
-                if let (Some((_, text)), Ok(s)) = (&mut capture, t.decode()) {
+                if let (Some((_, _, text)), Ok(s)) = (&mut capture, t.decode()) {
                     text.push_str(&s);
                 }
             }
             Event::End(_) => {
                 if Some(path.len()) == fields {
-                    if let Some((is_title, text)) = capture.take() {
-                        let text = Some(clean_feed_text(&text)).filter(|s| !s.is_empty());
+                    if let Some((is_title, html, text)) = capture.take() {
+                        let text = Some(feed_words(&text, html)).filter(|s| !s.is_empty());
                         if is_title {
                             title = text;
                         } else {
@@ -2015,6 +2032,49 @@ mod tests {
         assert_eq!(
             card("https://news.example/index.rdf", "text/plain", br#"<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://purl.org/rss/1.0/"><channel rdf:about="https://news.example/"><title>Old news</title><description>Since 2001</description></channel><item rdf:about="https://news.example/1"><title>One</title></item></rdf:RDF>"#.to_vec(), false),
             feed("Old news", Some("Since 2001"))
+        );
+        // Text that looks like markup is markup only where the format says the field is HTML: an
+        // Atom `type="html"` text and an RSS description. Atom `text` (the default) and `xhtml`
+        // texts, RSS titles and JSON Feed's fields keep it as the literal text it is.
+        for (title, want) in [
+            (
+                r#"<title type="text">Using &lt;title&gt; in HTML</title>"#,
+                "Using <title> in HTML",
+            ),
+            (
+                r#"<title>Using &lt;title&gt; in HTML</title>"#,
+                "Using <title> in HTML",
+            ),
+            (
+                r#"<title type="html">Using &amp;lt;title&amp;gt; in &lt;b&gt;HTML&lt;/b&gt;</title>"#,
+                "Using <title> in HTML",
+            ),
+            (
+                r#"<title type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml">Using &lt;title&gt; in <b>HTML</b></div></title>"#,
+                "Using <title> in HTML",
+            ),
+        ] {
+            let atom = format!(r#"<feed xmlns="http://www.w3.org/2005/Atom">{title}</feed>"#);
+            assert_eq!(
+                card(
+                    "https://x.example/atom",
+                    "application/atom+xml",
+                    atom.into_bytes(),
+                    false
+                )
+                .1
+                .as_deref(),
+                Some(want),
+                "{title}"
+            );
+        }
+        assert_eq!(
+            card("https://x.example/feed.json", "application/feed+json", br#"{"version":"https://jsonfeed.org/version/1.1","title":"Using <title> in HTML","description":"Why a <b> tag   bolds"}"#.to_vec(), false),
+            feed("Using <title> in HTML", Some("Why a <b> tag bolds"))
+        );
+        assert_eq!(
+            card("https://x.example/rss", "application/rss+xml", br#"<rss><channel><title>Using &lt;title&gt; in HTML</title><description>&lt;p&gt;Why a &lt;b&gt;tag&lt;/b&gt; bolds&lt;/p&gt;</description></channel></rss>"#.to_vec(), false),
+            feed("Using <title> in HTML", Some("Why a tag bolds"))
         );
         // Served as a feed but unreadable: a feed with no name.
         assert_eq!(
