@@ -538,8 +538,9 @@ async fn a_viewer_has_their_100_newest_first_and_the_rest_by_time(pool: PgPool) 
     assert_eq!(all_pages(&app, &id, "", 9).await, newest);
 }
 
-/// A post whose references to a card's links were indexed at different instants (a skipped line
-/// of a newer version) is listed once, at its newest, on whichever page that falls.
+/// A post holding a card's link and its alias, edited (same file, a later instant) with the
+/// alias's put skipped: ingest settles the alias's row to the edit's instant, as the rest of
+/// Nexus's stage would, so the post is listed once, at its newest, on whichever page that falls.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_post_held_under_two_links_is_listed_once_at_its_newest(pool: PgPool) {
     let app = api::router(
@@ -576,7 +577,7 @@ async fn a_post_held_under_two_links_is_listed_once_at_its_newest(pool: PgPool) 
         "P",
         "v",
         "https://example.org/root",
-        3_500,
+        1_500,
     ));
     lines.push(item(
         Op::Put,
@@ -584,15 +585,29 @@ async fn a_post_held_under_two_links_is_listed_once_at_its_newest(pool: PgPool) 
         "P",
         "v",
         "https://example.org/spelling",
-        3_500,
+        1_500,
     ));
     batch(&pool, lines).await;
-    // The alias's reference of P kept an older instant.
-    sqlx::query("UPDATE reference SET created_at=to_timestamp(0.2) WHERE resource_id=$1")
-        .bind(&alias)
-        .execute(&pool)
-        .await
-        .unwrap();
+    // The edit: its put of the alias item was skipped.
+    batch(
+        &pool,
+        vec![item(
+            Op::Put,
+            &a,
+            "P",
+            "v",
+            "https://example.org/root",
+            3_500,
+        )],
+    )
+    .await;
+    let instants: Vec<i64> = sqlx::query_scalar(
+        "SELECT (extract(epoch FROM created_at)*1000)::bigint FROM reference WHERE object_path LIKE '%/P/%' ORDER BY 1",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(instants, [3_500, 3_500]);
     let q = |k: u32| collection(&a, &format!("Q{k}"));
     let want = vec![q(6), q(5), q(4), collection(&a, "P"), q(3), q(2), q(1)];
     for limit in [1, 2, 20] {
@@ -604,4 +619,142 @@ async fn a_post_held_under_two_links_is_listed_once_at_its_newest(pool: PgPool) 
         );
     }
     assert_eq!(count(&app, &root).await, 7);
+}
+
+/// A post's new version (another version file) replaces its older one even when a del of the
+/// older version's lines was skipped: the post is listed once, by its one URI.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_new_version_replaces_an_older_one_whose_del_was_skipped(pool: PgPool) {
+    let app = api::router(
+        AppState::new(pool.clone(), Config::default())
+            .await
+            .unwrap(),
+    );
+    let a = author('a');
+    let link = "https://example.org/song";
+    let id = card(&pool, link, "Song").await;
+    batch(
+        &pool,
+        vec![
+            item(Op::Put, &a, "R", "v1", link, 1_000),
+            item(Op::Put, &a, "S", "S", link, 2_000),
+        ],
+    )
+    .await;
+    // The edit: R's version v2, its del of v1's line skipped.
+    batch(&pool, vec![item(Op::Put, &a, "R", "v2", link, 5_000)]).await;
+    let files: Vec<String> = sqlx::query_scalar(
+        "SELECT object_path FROM reference WHERE kind='collection' ORDER BY object_path",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        files,
+        [
+            "/pub/social/v1/posts/R/v2.json",
+            "/pub/social/v1/posts/S/S.json"
+        ]
+    );
+    for limit in [1, 20] {
+        assert_eq!(
+            all_pages(&app, &id, "", limit).await,
+            [collection(&a, "R"), collection(&a, "S")],
+            "{limit}"
+        );
+    }
+    // A late replay of the older version does not bring it back above the newer.
+    batch(&pool, vec![item(Op::Put, &a, "R", "v1", link, 1_000)]).await;
+    assert_eq!(count(&app, &id).await, 2);
+}
+
+/// A collection holds at most 100 items (the specs' cap): a new item past them is refused, a put
+/// of one it holds is not.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_collection_holds_at_most_100_items(pool: PgPool) {
+    let a = author('a');
+    let link = |k: i64| format!("https://example.org/item/{k}");
+    batch(
+        &pool,
+        (0..100)
+            .map(|k| item(Op::Put, &a, "C", "C", &link(k), 1_000))
+            .collect(),
+    )
+    .await;
+    batch(
+        &pool,
+        vec![
+            item(Op::Put, &a, "C", "C", &link(100), 2_000),
+            item(Op::Put, &a, "C", "C", &link(7), 2_000),
+        ],
+    )
+    .await;
+    let (items, newest): (i64, i64) = sqlx::query_as(
+        "SELECT count(*),count(*) FILTER (WHERE created_at=to_timestamp(2)) FROM reference WHERE kind='collection'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((items, newest), (100, 100));
+    let past: i64 = sqlx::query_scalar("SELECT count(*) FROM reference WHERE resource_id=$1")
+        .bind(id(&link(100)))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(past, 0);
+}
+
+/// The viewer's pinned set is fixed by the first page: a collection of theirs added while they
+/// page moves no post between their own and the others.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn the_pinned_set_holds_while_a_viewer_pages(pool: PgPool) {
+    let app = api::router(
+        AppState::new(pool.clone(), Config::default())
+            .await
+            .unwrap(),
+    );
+    let link = "https://example.org/song";
+    let id = card(&pool, link, "Song").await;
+    let (a, b) = (author('a'), author('b'));
+    let mut lines: Vec<Change> = (1..=102)
+        .map(|k| item(Op::Put, &a, &format!("A{k:03}"), "v", link, k * 1_000))
+        .collect();
+    lines.push(item(Op::Put, &b, "Bnew", "v", link, 1_000_000));
+    batch(&pool, lines).await;
+    let (status, first) = request(
+        &app,
+        &format!("/v1/resources/{id}/collections?viewer={a}&limit=50"),
+    )
+    .await;
+    assert_eq!(status, 200, "{first}");
+    // A new collection of the viewer's, the newest of all, while they page.
+    batch(&pool, vec![item(Op::Put, &a, "A103", "v", link, 2_000_000)]).await;
+    let mut seen: Vec<String> = first["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["uri"].as_str().unwrap().to_owned())
+        .collect();
+    let mut cursor = first["cursor"].as_str().map(str::to_owned);
+    while let Some(c) = cursor {
+        let (status, page) = request(
+            &app,
+            &format!("/v1/resources/{id}/collections?viewer={a}&limit=50&cursor={c}"),
+        )
+        .await;
+        assert_eq!(status, 200, "{page}");
+        seen.extend(
+            page["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| i["uri"].as_str().unwrap().to_owned()),
+        );
+        cursor = page["cursor"].as_str().map(str::to_owned);
+    }
+    let own = |k: i64| collection(&a, &format!("A{k:03}"));
+    // The first page's 100 stay first; the newcomer was added above where paging had reached.
+    let mut want: Vec<String> = (3..=102).rev().map(own).collect();
+    want.extend([collection(&b, "Bnew"), own(2), own(1)]);
+    assert_eq!(seen, want);
 }

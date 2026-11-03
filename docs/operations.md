@@ -512,8 +512,8 @@ of a kind this build does not read (`unknown_kind`, a newer Nexus's) or one it c
 (`malformed`) is skipped without its content in any log, and only the page's envelope (`lines`,
 `next_cursor`) must be well formed. A bad line is skipped and counted in
 `pinakes_ingest_rejected_total{reason}` (`unknown_kind`, `malformed`, `author`, `label`,
-`object_path`, `uri`, `timestamp`, `never_fetched`, `panic`) after the batch commits; the cursor still advances
-past it. Each line runs in a savepoint: a line whose processing panics is rolled back alone and skipped (`panic`; the log
+`object_path`, `uri`, `timestamp`, `never_fetched`, `collection_items`, `panic`) after the batch commits; the cursor still advances
+past it. `collection_items` is a new item of a collection post that already holds 100 (the specs' cap). Each line runs in a savepoint: a line whose processing panics is rolled back alone and skipped (`panic`; the log
 line names its feed position only, never its content). A panic anywhere else in a poll (the
 batch's score update or cursor write, say) is an error: the batch rolls back, the cursor holds,
 `pinakes_ingest_panics_total` counts it and the poll is retried. A feed epoch change, or a
