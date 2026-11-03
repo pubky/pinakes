@@ -174,10 +174,20 @@ CREATE FUNCTION collection_post(object_path text) RETURNS text
  SELECT CASE WHEN object_path ~ '^/pub/[^/]+/v1/posts/[^/]+/[^/]*\.json$'
    THEN regexp_replace(object_path, '/[^/]*$', '') ELSE object_path END
 $$;
+-- A collection reference's file within its collection (`collections::file`): a version file's leaf
+-- under its post, '' for any other file. With `collection_post` it is the path, less one `/`.
+CREATE FUNCTION collection_file(object_path text) RETURNS text
+    LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
+    AS $$
+ SELECT CASE WHEN object_path ~ '^/pub/[^/]+/v1/posts/[^/]+/[^/]*\.json$'
+   THEN substring(object_path from '[^/]*$') ELSE '' END
+$$;
 -- A collection's files by author and collection, its current file first: the greatest instant,
--- then file name in byte order (`collections::settle`). One probe finds it, for search's
--- `in_collection`, the count and a page (`collections::current`); the instant as the walk's.
-CREATE INDEX reference_collection_post_idx ON reference USING btree (author, collection_post(object_path), timezone('UTC', created_at) DESC, object_path COLLATE "C" DESC) INCLUDE (created_at) WHERE kind = 'collection';
+-- then file name in byte order (`collections::settle`; its files share the post, so their leaves
+-- order them as their names do). One probe finds it, for search's `in_collection`, the count and
+-- a page (`collections::current`); the instant as the walk's. The path is stored once, as post
+-- and leaf, so every path ingest accepts fits a btree entry.
+CREATE INDEX reference_collection_post_idx ON reference USING btree (author, collection_post(object_path), timezone('UTC', created_at) DESC, collection_file(object_path) COLLATE "C" DESC) INCLUDE (created_at) WHERE kind = 'collection';
 CREATE INDEX reference_start_idx ON reference USING btree (start_at);
 
 -- References as they count: an alias's count for its root, posts' own rows left out.

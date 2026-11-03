@@ -878,7 +878,8 @@ collection: ask Nexus or the author's homeserver for its name and items. With `v
 52-character public key), that user's own collections come first, their 100 newest (any more
 are listed with the others); then newest `indexed_at`
 first, by author and post on a tie. `limit` is 1–100 (default 20), and `cursor` the previous
-page's (`null` on the last page): signed, bound to this resource and `viewer`, invalid after a
+page's (`null` on the last page): signed, bound to this resource and `viewer`, under 6,000
+characters however long its paths (the route refuses any over 8,192), invalid after a
 restart (start again on 400). An alias ID reads its root's list; an unknown ID is 404. Every
 card counts them in `collections`, and `in_collection=<uri>` on [search](#search) lists the
 cards a collection holds.
@@ -911,7 +912,7 @@ fewer than `limit` items, none even, with a `cursor` to the next: page on until 
 `null`.
 
 The viewer's pinned set is fixed by the first page and carried in its cursor: the window from
-their newest post to their 100th newest, as that page found them. While a client pages, no post
+the instant of their newest post to their 100th newest, as that page found them. While a client pages, no post
 moves between the viewer's own and the others. A collection the viewer adds or edits later is newer
 than the window and listed with the others, by time. An edit still moves a collection up (its new
 instant), so a client paging through a list that changes meanwhile can see a post again or miss
@@ -923,7 +924,8 @@ or the viewer holds, ties of one instant included:
   those aliases), and one probe for each of its `limit` + 1 places, whether it is current.
 - **The others' walk** steps over the viewer's pinned window alone: the at most 100 posts of at
   most 100 items each that the first page found, and any reference Nexus appended to its feed
-  later with an instant inside the window (an append recovered after a later one).
+  later with an instant inside the window (an append recovered after a later one, or one in the
+  same millisecond as their newest).
 - **The viewer's pinned window** reads at most 100 posts per link on a first page.
 - **The count** reads at most 1,000 posts per link, and one probe for each post it counts.
 - **`in_collection`** reads the one post's files.

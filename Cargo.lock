@@ -2652,6 +2652,7 @@ dependencies = [
  "nostr",
  "percent-encoding",
  "pkarr 8.1.0",
+ "postcard",
  "prometheus",
  "psl",
  "pubky-social-specs",

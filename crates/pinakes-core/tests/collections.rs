@@ -774,6 +774,8 @@ fn line(op: Op, by: &str, path: &str, uri: &str, at: i64) -> Change {
 }
 /// The cards a search `in_collection` finds, sorted.
 async fn found(app: &axum::Router, collection: &str) -> Vec<String> {
+    let collection =
+        percent_encoding::utf8_percent_encode(collection, percent_encoding::NON_ALPHANUMERIC);
     let (status, page) = request(app, &format!("/v1/search?in_collection={collection}")).await;
     assert_eq!(status, 200, "{page}");
     let mut ids: Vec<String> = page["items"]
@@ -994,4 +996,131 @@ async fn references_stored_before_settling_list_each_post_once(pool: PgPool) {
     let mut z = vec![root.clone(), other];
     z.sort();
     assert_eq!(found(&app, &post(&b, "Z")).await, z);
+}
+
+/// A path segment of `len` bytes no compression shortens: URL-safe characters drawn from a hash
+/// of `seed`, with a control character (which JSON would escape six-fold) every 50th.
+fn long(seed: &str, len: usize) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut bytes = vec![0; len];
+    blake3::Hasher::new()
+        .update(seed.as_bytes())
+        .finalize_xof()
+        .fill(&mut bytes);
+    bytes
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            if i % 50 == 49 {
+                '\u{1}'
+            } else {
+                ALPHABET[(*b % 64) as usize] as char
+            }
+        })
+        .collect()
+}
+
+/// Every path ingest accepts, up to `max_object_path_bytes` (2,048 bytes), is kept and paged:
+/// a viewer's 102 collections at 2,048-byte paths, tied across their 100th, another author's
+/// 2,048-byte collection that is no post and their long post's two versions in one millisecond.
+/// Ingest applies every line; every page, followed to the end at limits 1, 7 and 20, with and
+/// without the viewer, lists each post once in order; each cursor fits the decoder's cap; the
+/// count and `in_collection` agree.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn the_longest_accepted_paths_are_kept_and_paged(pool: PgPool) {
+    // Some 250 pages, one client: past the default rate limit.
+    let mut config = Config::default();
+    config.api.requests_per_minute = 10_000;
+    let app = api::router(AppState::new(pool.clone(), config).await.unwrap());
+    let link = "https://example.org/song";
+    let id = card(&pool, link, "Song").await;
+    let (a, b) = (author('a'), author('b'));
+    let max = IngestConfig::default().max_object_path_bytes;
+    assert_eq!(max, 2_048);
+    // `/pub/social/v1/posts/` + id + `/v.json`.
+    let post_id = |seed: &str| long(seed, max - 28);
+    // (author, post URI, instant, file), as the listing orders them.
+    let mut posts: Vec<(String, String, i64, String)> = vec![];
+    let mut lines = vec![];
+    for k in 0..102i64 {
+        let p = post_id(&format!("a{k}"));
+        // Three to an instant: the 100th is in a tie.
+        let at = 1_000 + (k / 3) * 1_000;
+        let line = item(Op::Put, &a, &p, "v", link, at);
+        assert_eq!(line.object_path.len(), max);
+        posts.push((a.clone(), collection(&a, &p), at, line.object_path.clone()));
+        lines.push(line);
+    }
+    let file = format!("/pub/social/{}", long("b-file", max - 12));
+    assert_eq!(file.len(), max);
+    lines.push(line(Op::Put, &b, &file, link, 20_500));
+    posts.push((
+        b.clone(),
+        format!("pubky://{b}{file}"),
+        20_500,
+        file.clone(),
+    ));
+    let bp = post_id("b-post");
+    let v1 = item(Op::Put, &b, &bp, "v", link, 30_500);
+    let v2 = item(Op::Put, &b, &bp, "w", link, 30_500);
+    assert_eq!(v2.object_path.len(), max);
+    posts.push((
+        b.clone(),
+        collection(&b, &bp),
+        30_500,
+        v2.object_path.clone(),
+    ));
+    lines.push(v1);
+    lines.push(v2);
+    batch(&pool, lines).await;
+    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM reference WHERE kind='collection'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, 104);
+    // Newest first, then author and file in byte order; the viewer's 100 newest first.
+    posts.sort_by(|x, y| y.2.cmp(&x.2).then(x.0.cmp(&y.0)).then(x.3.cmp(&y.3)));
+    let newest: Vec<String> = posts.iter().map(|p| p.1.clone()).collect();
+    let (mut viewed, mut others): (Vec<_>, Vec<_>) = (vec![], vec![]);
+    for p in &posts {
+        if p.0 == a && viewed.len() < 100 {
+            viewed.push(p.1.clone());
+        } else {
+            others.push(p.1.clone());
+        }
+    }
+    viewed.extend(others);
+    for limit in [1, 7, 20] {
+        for (query, want) in [("".to_owned(), &newest), (format!("&viewer={a}"), &viewed)] {
+            let mut seen = vec![];
+            let mut cursor: Option<String> = None;
+            loop {
+                let after = cursor
+                    .as_ref()
+                    .map_or(String::new(), |c| format!("&cursor={c}"));
+                let (status, page) = request(
+                    &app,
+                    &format!("/v1/resources/{id}/collections?limit={limit}{query}{after}"),
+                )
+                .await;
+                assert_eq!(status, 200, "{limit}{query}: {page}");
+                seen.extend(
+                    page["items"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|i| i["uri"].as_str().unwrap().to_owned()),
+                );
+                cursor = page["cursor"].as_str().map(str::to_owned);
+                match &cursor {
+                    Some(c) => assert!(c.len() <= 8_192, "{limit}{query}: {}", c.len()),
+                    None => break,
+                }
+            }
+            assert_eq!(&seen, want, "{limit}{query}");
+        }
+    }
+    assert_eq!(count(&app, &id).await, 104);
+    assert_eq!(found(&app, &collection(&b, &bp)).await, vec![id.clone()]);
+    assert_eq!(found(&app, &format!("pubky://{b}{file}")).await, vec![id]);
 }
