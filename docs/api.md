@@ -878,7 +878,8 @@ collection: ask Nexus or the author's homeserver for its name and items. With `v
 52-character public key), that user's own collections come first, their 100 newest (any more
 are listed with the others); then newest `indexed_at`
 first, by author and post on a tie. `limit` is 1–100 (default 20), and `cursor` the previous
-page's (`null` on the last page): signed, bound to this resource and `viewer`, invalid after a
+page's (`null` on the last page): signed, bound to this resource and `viewer`, under 6,000
+characters however long its paths (the route refuses any over 8,192), invalid after a
 restart (start again on 400). An alias ID reads its root's list; an unknown ID is 404. Every
 card counts them in `collections`, and `in_collection=<uri>` on [search](#search) lists the
 cards a collection holds.
@@ -888,16 +889,52 @@ of its own, and a `del` line drops exactly that item, for a removed item, a dele
 edit (whose new version's items come as new lines; an edit moves the collection up). A post's
 reply and embeds are kept the same way, one each.
 
-A post is listed once, at its newest: if its references to the card's links were indexed at
-different instants (a newer version's line skipped), the older ones are passed over.
+A post is listed once, at its newest, under its one URI. Its version files
+(`…/posts/<id>/<editId>.json`) are its versions; any other file, a path nested deeper under a post
+or not JSON included, is a collection of its own. Of a post's files, the current one is the one
+Nexus indexed last, and of files indexed in the same millisecond the greatest name in byte order
+(the specs' newest editId: fixed-width timestamp IDs). Its items are the current file's alone,
+for the list, the count and `in_collection`.
 
-Every read is a bounded walk, however many collections hold a link, an author has made or the
-viewer holds: a page or a cursor reads at most `limit` + 1 posts per link (the card's own and
-each of those aliases), stepping over at most the viewer's 100 pinned posts; the count reads at
-most 1,000 per link, and `in_collection` the one post's files. Each step is one or two probes
-of an index, in its order (newest first, then author and file; the viewer's own by author; a
-post's files in byte order), so no plan reads a link's or an author's every collection, ties of
-one instant included.
+Nexus stages a post's version as one batch (a del for each line it drops, then a put for each
+item, all at one instant), and ingest keeps the post towards what that batch leaves: a put of a
+collection file gives the file's every item its newest instant, and drops the post's other files.
+So a skipped or late line never leaves a post at two instants or under two files. What ingest
+cannot recover from a skipped line: an item whose only put was skipped is missing, and an item
+whose del was skipped stays listed, until the post's next edit. A collection holds at most 100
+items, the specs' cap: a new item past them is refused (`collection_items` in
+`pinakes_ingest_rejected_total`), also when a skipped del left one of the 100 stale.
+
+References stored before ingest kept posts so (until a repair of them runs) are left out as each
+page reads them: a file that is not its post's current one, and an older reference of a file that
+holds a newer one among the card's links. So each post is still listed once, but a page can hold
+fewer than `limit` items, none even, with a `cursor` to the next: page on until `cursor` is
+`null`.
+
+The viewer's pinned set is fixed by the first page and carried in its cursor: the window from
+the instant of their newest post to their 100th newest, as that page found them. While a client pages, no post
+moves between the viewer's own and the others. A collection the viewer adds or edits later is newer
+than the window and listed with the others, by time. An edit still moves a collection up (its new
+instant), so a client paging through a list that changes meanwhile can see a post again or miss
+one, as with any newest-first list.
+
+Every read is bounded, with these limits however many collections hold a link, an author made
+or the viewer holds, ties of one instant included:
+- **A page** (any cursor) reads at most `limit` + 1 posts per link (the card's own and each of
+  those aliases), and one probe for each of its `limit` + 1 places, whether it is current.
+- **The others' walk** steps over the viewer's pinned window alone: the at most 100 posts of at
+  most 100 items each that the first page found, and any reference Nexus appended to its feed
+  later with an instant inside the window (an append recovered after a later one, or one in the
+  same millisecond as their newest).
+- **The viewer's pinned window** reads at most 100 posts per link on a first page.
+- **The count** reads at most 1,000 posts per link, and one probe for each post it counts.
+- **`in_collection`** reads the one post's files.
+
+Each step is one or more probes of an index, each a range in the index's order (newest first,
+then author and file; the viewer's own by author, never past their pinned boundary; a post's
+files newest first). A stale file from before ingest kept posts costs one probe more; until the
+repair, such files take steps of the count's walk too, so a card more than 1,000 posts hold can
+count fewer.
 
 ```text
 GET /v1/resources/{id}/collections?viewer={public key}&limit=20

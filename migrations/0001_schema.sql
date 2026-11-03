@@ -152,16 +152,42 @@ CREATE INDEX reference_resource_created_idx ON reference USING btree (resource_i
 -- tags alone, so a resource with many replies or embeds and few tags reads only tags.
 CREATE INDEX reference_resource_tag_idx ON reference USING btree (resource_id, created_at) WHERE kind = 'tag';
 -- A card's collections (`collections`): each link's collection posts newest first, in the order
--- the route lists them, so its count and every page read a bounded walk from the cursor on.
-CREATE INDEX reference_resource_collection_idx ON reference USING btree (resource_id, created_at DESC, author, object_path) WHERE kind = 'collection';
--- The viewer's own collections of a link, listed first. Only the viewer's walk states
--- `author <> ''` (every author is a 52-character key, so every collection reference is here):
--- no other probe can read this index, which would give a link walk's probe of one instant its
--- order and read a whole author's run of it.
-CREATE INDEX reference_collection_author_idx ON reference USING btree (resource_id, author, created_at DESC, object_path) WHERE kind = 'collection' AND author <> '';
--- A collection's items (search's `in_collection`): its author's files under the post's path, a
--- range in byte order whatever the database's collation.
-CREATE INDEX reference_collection_post_idx ON reference USING btree (author, object_path COLLATE "C") WHERE kind = 'collection';
+-- the route lists them, so its count and every page read a bounded walk from the cursor on. Each
+-- walk index serves its own probes and no others, whatever the planner's estimates:
+-- - the link, author and file are in the "C" collation, as the probes compare them, so no index
+--   of the default collation (the key by author and file, the resource's by time) can serve them;
+-- - the instant is the expression `timezone('UTC', created_at)` (its UTC time, in the same order),
+--   as the probes compare and order it, so no index of `created_at` itself (`trending`'s) can
+--   serve them; `created_at` is included, for index-only scans;
+-- - the predicates exclude each other's probes: only the link's walk states `object_path <> ''`,
+--   only the viewer's `author <> ''` (every collection reference has both, so both indexes hold
+--   every one).
+CREATE INDEX reference_resource_collection_idx ON reference USING btree (resource_id COLLATE "C", timezone('UTC', created_at) DESC, author COLLATE "C", object_path COLLATE "C") INCLUDE (created_at) WHERE kind = 'collection' AND object_path <> '';
+-- The viewer's own collections of a link, listed first.
+CREATE INDEX reference_collection_author_idx ON reference USING btree (resource_id COLLATE "C", author COLLATE "C", timezone('UTC', created_at) DESC, object_path COLLATE "C") INCLUDE (created_at) WHERE kind = 'collection' AND author <> '';
+-- The collection a collection reference's file belongs to (`collections::uri`): a post's version
+-- file (`/pub/<ns>/v1/posts/<id>/<leaf>.json`, no further `/`) belongs to its post, any other file
+-- is a collection of its own.
+CREATE FUNCTION collection_post(object_path text) RETURNS text
+    LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
+    AS $$
+ SELECT CASE WHEN object_path ~ '^/pub/[^/]+/v1/posts/[^/]+/[^/]*\.json$'
+   THEN regexp_replace(object_path, '/[^/]*$', '') ELSE object_path END
+$$;
+-- A collection reference's file within its collection (`collections::file`): a version file's leaf
+-- under its post, '' for any other file. With `collection_post` it is the path, less one `/`.
+CREATE FUNCTION collection_file(object_path text) RETURNS text
+    LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
+    AS $$
+ SELECT CASE WHEN object_path ~ '^/pub/[^/]+/v1/posts/[^/]+/[^/]*\.json$'
+   THEN substring(object_path from '[^/]*$') ELSE '' END
+$$;
+-- A collection's files by author and collection, its current file first: the greatest instant,
+-- then file name in byte order (`collections::settle`; its files share the post, so their leaves
+-- order them as their names do). One probe finds it, for search's `in_collection`, the count and
+-- a page (`collections::current`); the instant as the walk's. The path is stored once, as post
+-- and leaf, so every path ingest accepts fits a btree entry.
+CREATE INDEX reference_collection_post_idx ON reference USING btree (author, collection_post(object_path), timezone('UTC', created_at) DESC, collection_file(object_path) COLLATE "C" DESC) INCLUDE (created_at) WHERE kind = 'collection';
 CREATE INDEX reference_start_idx ON reference USING btree (start_at);
 
 -- References as they count: an alias's count for its root, posts' own rows left out.

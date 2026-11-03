@@ -26,6 +26,8 @@ utoipa-swagger-ui.workspace = true
 pkarr = { version = "=8.1.0", default-features = false, features = ["signed_packet"] }
 getrandom = "0.4"
 hmac = "0.13"
+# Page cursors as bytes (`collections`); already built for pubky-common.
+postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 scraper = "0.24"
 # The HTML named character references (the same table scraper's parser uses).
 markup5ever = "=0.35.0"

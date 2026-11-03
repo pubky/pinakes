@@ -24,14 +24,30 @@ const MAX_LIMIT: usize = 100;
 pub const PINNED: usize = 100;
 
 /// The collection post that a `collection` reference's file belongs to: `pubky://<author>` and
-/// the file's path, a post's version file (`/pub/<ns>/v1/posts/<id>/<editId>.json`) read as its
-/// post.
+/// the file's [`post`].
 pub fn uri(author: &str, object_path: &str) -> String {
-    let path = match object_path.rsplit_once('/') {
+    format!("pubky://{author}{}", post(object_path))
+}
+/// The collection a collection reference's file belongs to: a post's version file
+/// (`/pub/<ns>/v1/posts/<id>/<leaf>.json`, no further `/`) belongs to its post, any other file is
+/// a collection of its own (a path nested deeper in a post, or not JSON, is never its version).
+/// The schema's `collection_post(object_path)` is the same function, in SQL.
+fn post(object_path: &str) -> &str {
+    match object_path.rsplit_once('/') {
         Some((post, file)) if versioned(post) && file.ends_with(".json") => post,
         _ => object_path,
-    };
-    format!("pubky://{author}{path}")
+    }
+}
+/// A file's name within its collection ([`post`]): a version file's leaf, `""` for any other file.
+/// The post and the leaf are the path less one `/`, so an index of both holds the path once. The
+/// schema's `collection_file(object_path)` is the same function, in SQL; only SQL orders by it, so
+/// this twin is the test's, which checks they agree.
+#[cfg(test)]
+fn file(object_path: &str) -> &str {
+    match object_path.rsplit_once('/') {
+        Some((post, file)) if versioned(post) && file.ends_with(".json") => file,
+        _ => "",
+    }
 }
 /// Whether `path` is an app's post (`/pub/<ns>/v1/posts/<id>`), whose files are its versions.
 fn versioned(path: &str) -> bool {
@@ -39,8 +55,8 @@ fn versioned(path: &str) -> bool {
         ["", "pub", ns, "v1", "posts", id] if !ns.is_empty() && !id.is_empty())
 }
 /// A collection's URI (an item's `uri`) as the references that name it are stored: its author
-/// and the path of the post, and whether the post's version files name it too.
-pub(crate) fn parse(collection: &str) -> Option<(String, String, bool)> {
+/// and its [`post`] (a version file's URI names its post).
+pub(crate) fn parse(collection: &str) -> Option<(String, String)> {
     let rest = collection.strip_prefix("pubky://")?;
     let (author, path) = rest.split_at(rest.find('/')?);
     (crate::nexus::valid_author(author)
@@ -48,34 +64,98 @@ pub(crate) fn parse(collection: &str) -> Option<(String, String, bool)> {
         && path.len() <= 2048
         && !path.ends_with('/')
         && !path.contains(['\0', '?', '#']))
-    .then(|| (author.to_owned(), path.to_owned(), versioned(path)))
+    .then(|| (author.to_owned(), post(path).to_owned()))
 }
-/// Pushes the condition that a reference `f` is an item of the collection whose author, post path
-/// and versioning are `parse`'s: a reference by its file, the post's own or (for an app's post)
-/// one of its version files, `<path>/<editId>.json`. The version files are a range of the path in
-/// byte order (`<path>/` up to `<path>0`, `0` following `/`), compared in the "C" collation as
-/// `reference_collection_post_idx` orders them, whatever the database's own: an index walk over
-/// the post's files alone, never over every reference of its author.
+/// SQL for the current file of the collection whose author and [`post`] are the expressions
+/// `author` and `post`: of its files, the one with the newest reference, and of files equally new
+/// the greatest name in byte order (the specs' newest editId: fixed-width timestamp IDs; a
+/// collection's files share its post, so their [`file`] leaves order them so). One probe of
+/// `reference_collection_post_idx`, which orders a collection's references so; `NULL`
+/// when it has none. Every reader and `settle` take a collection's items from this file alone.
+fn current(author: &str, post: &str) -> String {
+    format!(
+        "(SELECT g.object_path FROM reference g WHERE g.kind='collection' AND g.author={author} AND collection_post(g.object_path)={post} \
+         ORDER BY timezone('UTC',g.created_at) DESC,collection_file(g.object_path) COLLATE \"C\" DESC LIMIT 1)"
+    )
+}
+/// Pushes the condition that a reference `f` is an item of the collection whose author and post
+/// are `parse`'s: a reference in its [`current`] file. Read along `reference_collection_post_idx`:
+/// the collection's own references, never every reference of its author.
 pub(crate) fn push_items(
     sql: &mut sqlx::QueryBuilder<'_, sqlx::Postgres>,
-    (author, path, versioned): (String, String, bool),
+    (author, post): (String, String),
 ) {
     sql.push("f.kind='collection' AND f.author=")
+        .push_bind(author.clone())
+        .push(" AND collection_post(f.object_path)=")
+        .push_bind(post.clone())
+        .push(" AND f.object_path=(SELECT g.object_path FROM reference g WHERE g.kind='collection' AND g.author=")
         .push_bind(author)
-        .push(" AND (f.object_path COLLATE \"C\"=")
-        .push_bind(path.clone());
-    if versioned {
-        // Characters, as `substr` counts them.
-        let n = path.chars().count() as i32 + 1;
-        sql.push(" OR (f.object_path COLLATE \"C\">=")
-            .push_bind(format!("{path}/"))
-            .push(" AND f.object_path COLLATE \"C\"<")
-            .push_bind(format!("{path}0"))
-            .push(" AND strpos(substr(f.object_path,")
-            .push_bind(n + 1)
-            .push("),'/')=0 AND right(f.object_path,5)='.json')");
-    }
-    sql.push(")");
+        .push(" AND collection_post(g.object_path)=")
+        .push_bind(post)
+        .push(" ORDER BY timezone('UTC',g.created_at) DESC,collection_file(g.object_path) COLLATE \"C\" DESC LIMIT 1)");
+}
+
+/// The most items one collection post holds: the specs' cap (`collection_items_max_count`).
+/// Ingest refuses a new item past it (`collection_items`).
+pub const ITEMS: i64 = 100;
+/// Whether the collection file `object_path` of `author` already holds [`ITEMS`] items. Reads at
+/// most that many of its rows along the key.
+pub(crate) async fn full(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    author: &str,
+    object_path: &str,
+) -> sqlx::Result<bool> {
+    sqlx::query_scalar("SELECT count(*)>=$3 FROM (SELECT 1 FROM reference WHERE author=$1 AND object_path=$2 AND kind='collection' LIMIT $3) f")
+        .bind(author)
+        .bind(object_path)
+        .bind(ITEMS)
+        .fetch_one(&mut **tx)
+        .await
+}
+/// Brings a collection's references in line after a put of its file `object_path`, towards the
+/// state Nexus's stage for that version leaves, and returns the resources whose references
+/// changed. Nexus stages a post's version as one batch: a del for each line it drops (every line
+/// of the older version, when the post's version file changed, and removed items), then a put
+/// for each of its items, all at the stage's instant. So after a put of the file:
+/// - the file's rows all take its newest instant: an older row is an item whose put at that
+///   instant follows in this stage, or was skipped, or was replayed late (or one whose del was
+///   skipped: it was listed before, and stays listed);
+/// - of the collection's files ([`post`]), the [`current`] one alone is kept: the others are
+///   older versions whose every line was deleted, or a del skipped, or a version replayed late.
+///
+/// So a collection never stays at two instants or under two files, whatever order its lines
+/// arrive in, and readers take one file per collection. What settle cannot recover: an item
+/// whose put was skipped is missing until the post is staged again, and an item whose del was
+/// skipped stays listed (docs/api.md, Collections). Reads at most [`ITEMS`] rows of the file,
+/// along the key, and the collection's files along `reference_collection_post_idx`: its current
+/// file and this one, besides stale files from before this rule.
+pub(crate) async fn settle(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    author: &str,
+    object_path: &str,
+) -> sqlx::Result<Vec<String>> {
+    let mut changed: Vec<String> = sqlx::query_scalar(
+        "UPDATE reference r SET created_at=m.at FROM (SELECT f.created_at AS at FROM reference f \
+           WHERE f.author=$1 AND f.object_path=$2 AND f.kind='collection' ORDER BY timezone('UTC',f.created_at) DESC LIMIT 1) m \
+         WHERE r.author=$1 AND r.object_path=$2 AND r.kind='collection' AND r.created_at<>m.at RETURNING r.resource_id",
+    )
+    .bind(author)
+    .bind(object_path)
+    .fetch_all(&mut **tx)
+    .await?;
+    changed.extend(
+        sqlx::query_scalar::<_, String>(&format!(
+            "DELETE FROM reference WHERE kind='collection' AND author=$1 AND collection_post(object_path)=$2 \
+             AND object_path<>{} RETURNING resource_id",
+            current("$1", "$2")
+        ))
+        .bind(author)
+        .bind(post(object_path))
+        .fetch_all(&mut **tx)
+        .await?,
+    );
+    Ok(changed)
 }
 
 /// SQL for the links of the card whose ID is the expression `card`: its own and its [`ALIASES`]
@@ -86,59 +166,60 @@ fn links(card: &str) -> String {
     let aliases = ALIASES;
     format!(
         "SELECT {card} AS link UNION ALL (SELECT a.alias_id FROM resource_alias a CROSS JOIN LATERAL \
-           (SELECT f.created_at FROM reference f WHERE f.resource_id=a.alias_id AND f.kind='collection' ORDER BY f.created_at DESC,f.author,f.object_path LIMIT 1) n \
+           (SELECT f.created_at FROM reference f WHERE f.resource_id COLLATE \"C\"=a.alias_id AND f.kind='collection' AND f.object_path<>'' ORDER BY timezone('UTC',f.created_at) DESC,f.author COLLATE \"C\",f.object_path COLLATE \"C\" LIMIT 1) n \
          WHERE a.root_id={card} ORDER BY n.created_at DESC,a.alias_id LIMIT {aliases})"
     )
 }
 /// SQL for the post that follows (`at`, `author`, `path`) among link `link`'s collection
 /// references, in the order they are listed (newest first, then author and file), as one row
 /// (`created_at`, `author`, `object_path`) or none. Two probes, each an `ORDER BY … LIMIT 1` in
-/// the order of `reference_resource_collection_idx` (`resource_id, created_at DESC, author,
-/// object_path`) and bounded on it: a later post of the same instant (an equality on the instant
-/// and a range on author and file), else the next older one. A step of a walk is one probe or
-/// two, whatever the planner thinks of the link's size, and a post named twice in a link (two of
+/// the order of `reference_resource_collection_idx` (`resource_id, timezone('UTC', created_at)
+/// DESC, author, object_path`, link, author and file in the "C" collation) and bounded on it: a
+/// later post of the same instant (an equality on the instant and a range on author and file),
+/// else the next older one. Only that index can serve these probes: they compare in its
+/// collation, which no index of the default collation (the key by author and file, the
+/// resource's by time) has, they compare the instant as its expression, which no index of
+/// `created_at` itself (`trending`'s) has, and they state its predicate `object_path <> ''`,
+/// which the viewer's index does not have. A step
+/// of a walk is one probe or two, whatever the planner thinks of the link's size, and a post named twice in a link (two of
 /// its spellings) is stepped over. `filter` narrows the references; a row it drops is stepped
-/// over within the probe, so a filter must drop few (the viewer's pinned posts, a post's stale
-/// references).
+/// over within the probe, so a filter must drop few (the viewer's pinned window). Nothing else
+/// is filtered in a walk: whether a row is its collection's current one is asked of the rows a
+/// walk returns, never inside it ([`current`]).
 fn next(link: &str, at: &str, author: &str, path: &str, filter: &str) -> String {
     let from = format!(
-        "SELECT f.created_at,f.author,f.object_path FROM reference f WHERE f.resource_id={link} AND f.kind='collection'{filter}"
+        "SELECT f.created_at,f.author,f.object_path FROM reference f WHERE f.resource_id COLLATE \"C\"={link} AND f.kind='collection' AND f.object_path<>''{filter}"
     );
     format!(
-        "(SELECT s.* FROM (({from} AND f.created_at={at} AND (f.author,f.object_path)>({author},{path}) \
-         ORDER BY f.created_at DESC,f.author,f.object_path LIMIT 1) UNION ALL ({from} AND f.created_at<{at} \
-         ORDER BY f.created_at DESC,f.author,f.object_path LIMIT 1)) s LIMIT 1)"
+        "(SELECT s.* FROM (({from} AND timezone('UTC',f.created_at)=timezone('UTC',{at}) AND (f.author COLLATE \"C\",f.object_path COLLATE \"C\")>({author},{path}) \
+         ORDER BY timezone('UTC',f.created_at) DESC,f.author COLLATE \"C\",f.object_path COLLATE \"C\" LIMIT 1) UNION ALL ({from} AND timezone('UTC',f.created_at)<timezone('UTC',{at}) \
+         ORDER BY timezone('UTC',f.created_at) DESC,f.author COLLATE \"C\",f.object_path COLLATE \"C\" LIMIT 1)) s LIMIT 1)"
     )
 }
-/// [`next`] among the viewer's own references of `link` (`q.viewer`), along
-/// `reference_collection_author_idx` (`resource_id, author, created_at DESC, object_path`, for
-/// references with `author <> ''`, which only these probes state, so no other probe reads it): the
-/// author fixed, a later file of the same instant, else the next older one down to the pinned
+/// [`next`] among the viewer's own references of `link` (`q.viewer`), down to the pinned
 /// boundary (`q.bt`, `q.bp`: the viewer's [`PINNED`]th newest post; `-infinity` when they hold
-/// fewer). Each probe is a range of that index.
-fn next_own(link: &str, at: &str, path: &str, filter: &str) -> String {
+/// fewer), along `reference_collection_author_idx` (`resource_id, author, timezone('UTC',
+/// created_at) DESC, object_path`, in the "C" collation, for references with `author <> ''`, which only these probes
+/// state: no other probe reads it, and they read no other index). In listing order, four ranges of that index, each an `ORDER BY … LIMIT 1`:
+/// a later file of the same instant (bounded by `q.bp` when the instant is the boundary's), the
+/// next older instant above the boundary, then the boundary's own instant up to `q.bp`. Which
+/// ranges apply is decided once per probe from the position (`at`), never row by row, so a probe
+/// reads no row past the boundary however large a tie, and at the boundary every range is empty.
+fn next_own(link: &str, at: &str, path: &str) -> String {
     let from = format!(
-        "SELECT f.created_at,f.author,f.object_path FROM reference f WHERE f.resource_id={link} AND f.kind='collection' \
-         AND f.author<>'' AND f.author=(SELECT viewer FROM q){filter}"
+        "SELECT f.created_at,f.author,f.object_path FROM reference f WHERE f.resource_id COLLATE \"C\"={link} AND f.kind='collection' \
+         AND f.author<>'' AND f.author COLLATE \"C\"=(SELECT viewer FROM q)"
     );
+    let (bt, bp) = ("(SELECT bt FROM q)", "(SELECT bp FROM q)");
     format!(
-        "(SELECT s.* FROM (({from} AND f.created_at={at} AND f.object_path>{path} \
-         AND (f.created_at>(SELECT bt FROM q) OR f.object_path<=(SELECT bp FROM q)) \
-         ORDER BY f.created_at DESC,f.object_path LIMIT 1) UNION ALL ({from} AND f.created_at<{at} \
-         AND f.created_at>=(SELECT bt FROM q) AND (f.created_at>(SELECT bt FROM q) OR f.object_path<=(SELECT bp FROM q)) \
-         ORDER BY f.created_at DESC,f.object_path LIMIT 1)) s LIMIT 1)"
+        "(SELECT s.* FROM (\
+         ({from} AND {at}>{bt} AND timezone('UTC',f.created_at)=timezone('UTC',{at}) AND f.object_path COLLATE \"C\">{path} ORDER BY timezone('UTC',f.created_at) DESC,f.object_path COLLATE \"C\" LIMIT 1) \
+         UNION ALL ({from} AND {at}={bt} AND timezone('UTC',f.created_at)=timezone('UTC',{at}) AND f.object_path COLLATE \"C\">{path} AND f.object_path COLLATE \"C\"<={bp} ORDER BY timezone('UTC',f.created_at) DESC,f.object_path COLLATE \"C\" LIMIT 1) \
+         UNION ALL ({from} AND timezone('UTC',f.created_at)<timezone('UTC',{at}) AND timezone('UTC',f.created_at)>timezone('UTC',{bt}) ORDER BY timezone('UTC',f.created_at) DESC,f.object_path COLLATE \"C\" LIMIT 1) \
+         UNION ALL ({from} AND {bt}<{at} AND timezone('UTC',f.created_at)=timezone('UTC',{bt}) AND f.object_path COLLATE \"C\"<={bp} ORDER BY timezone('UTC',f.created_at) DESC,f.object_path COLLATE \"C\" LIMIT 1)\
+         ) s LIMIT 1)"
     )
 }
-/// A reference `f` of a page is its post's newest among the card's links (`links`): a post whose
-/// references were indexed at different instants (a line of a newer version skipped, a version
-/// read across two feed pages) is listed once, at its newest, never again further down. One
-/// probe of the key (`author`, `object_path`, …) per row: the post's own items, and only they
-/// (`OFFSET 0` keeps the instant out of the scan, so no index by author and time can read an
-/// author's every later reference).
-const NEWEST: &str =
-    " AND NOT EXISTS (SELECT 1 FROM (SELECT g.created_at,g.resource_id FROM reference g \
-     WHERE g.author=f.author AND g.object_path=f.object_path AND g.kind='collection' OFFSET 0) g \
-     WHERE g.created_at>f.created_at AND g.resource_id IN (SELECT link FROM links))";
 /// SQL for a recursive walk `name` (`link`, `k`, `at`, `author`, `path`): from each row of
 /// `start` (a `link` with the position to start after: `at`, `author`, `path`), the next `n`
 /// posts of the link, each the row `step` (over a link, `at`, `author` and `path` expressions)
@@ -158,15 +239,18 @@ fn walk(
 }
 /// The count of every card in `$1` (IDs), up to `$2` ([`COUNTED`]), over its [`links`]: each
 /// link walked from its newest post, at most `$2` posts. A link holding that many already makes
-/// the count, and otherwise each link's walk is whole. So a card costs at most `$2` steps per
-/// link, however many collections hold it.
+/// the count, and otherwise each link's walk is whole. Each file the walks found counts if it is
+/// its collection's [`current`] file, one probe, until `$2` have. So a card costs at most `$2`
+/// steps per link and `$2` probes, besides one for each stale file from before ingest settled
+/// collections, however many collections hold it.
 fn count_sql() -> String {
     format!(
         "WITH RECURSIVE cards AS (SELECT DISTINCT id FROM unnest($1::text[]) id), \
          starts AS (SELECT c.id AS card,l.link,'infinity'::timestamptz AS at,''::text AS author,''::text AS path \
            FROM cards c CROSS JOIN LATERAL ({}) l), \
          {} \
-         SELECT c.id,(SELECT count(*) FROM (SELECT DISTINCT p.author,p.path FROM walk p JOIN starts s ON s.link=p.link WHERE s.card=c.id LIMIT $2) x) FROM cards c",
+         SELECT c.id,(SELECT count(*) FROM (SELECT 1 FROM (SELECT DISTINCT p.author,p.path FROM walk p JOIN starts s ON s.link=p.link WHERE s.card=c.id) x \
+           WHERE x.path={} LIMIT $2) y) FROM cards c",
         links("c.id"),
         walk(
             "walk",
@@ -174,6 +258,7 @@ fn count_sql() -> String {
             "$2",
             |l, a, w, p| next(l, a, w, p, "")
         ),
+        current("x.author", "collection_post(x.path)"),
     )
 }
 
@@ -228,11 +313,30 @@ pub struct Collection {
 }
 #[derive(Serialize, ToSchema)]
 pub struct CollectionPage {
-    /// The viewer's own first (their 100 newest), then newest first.
+    /// The viewer's own first (their 100 newest), then newest first. Can hold fewer than `limit`,
+    /// none even, while references stored before ingest kept each post at one file remain: page
+    /// on until `cursor` is `null`.
     pub items: Vec<Collection>,
     /// The next page's cursor; `null` on the last page.
     pub cursor: Option<String>,
 }
+/// A post's place in the listing: its instant and file.
+type Place = (DateTime<Utc>, String);
+/// The viewer's pinned posts as the first page found them: the window from the instant of their
+/// newest post to their [`PINNED`]th. Later pages keep it, so no post moves between the viewer's
+/// own and the others while a client pages, and the others' walk steps over this window alone.
+#[derive(Clone, Default, Deserialize, Serialize)]
+struct Pinned {
+    /// Their newest post's instant, the window's top: `None` when they held none. Its instant
+    /// alone: a post of theirs added later is newer, unless Nexus appended it later within that
+    /// millisecond (a late arrival inside the window, docs/api.md).
+    top: Option<DateTime<Utc>>,
+    /// Their [`PINNED`]th newest, the window's end: `None` when they held fewer.
+    boundary: Option<Place>,
+}
+/// A page's cursor: where the page ended and the viewer's pinned window, signed. At most two
+/// paths (the place's and the boundary's), as bytes ([`encode`]), so the longest fits
+/// [`MAX_CURSOR`].
 #[derive(Deserialize, Serialize)]
 struct PageCursor {
     scope: String,
@@ -241,7 +345,12 @@ struct PageCursor {
     at: DateTime<Utc>,
     author: String,
     path: String,
+    /// With a viewer: their pinned window as the first page found it.
+    pinned: Pinned,
 }
+/// The longest cursor the route reads: one of the longest paths ingest accepts
+/// (`max_object_path_bytes`, at most 2,048) twice, with the rest, encoded, is under 6,000.
+const MAX_CURSOR: usize = 8192;
 
 #[utoipa::path(get,path="/v1/resources/{id}/collections",operation_id="list_collections",tag="Previews",params(("id"=String,Path,description="32 lowercase hex resource ID"),CollectionQuery),responses((status=200,body=CollectionPage),(status=400,description="Invalid resource ID, viewer, limit or cursor"),(status=404,description="Resource not found")),description="The public collection posts that hold this card's link, its own or an alias's, as Nexus indexed them: the viewer's own first when `viewer` is given (their 100 newest), then newest first. Each once, however many of the card's links it holds. A card's `collections` counts them. Private collections are never seen.")]
 pub async fn list(
@@ -285,29 +394,39 @@ pub async fn list(
             "cursor belongs to another resource or viewer",
         ));
     }
-    let pinned = match &q.viewer {
-        Some(viewer) => {
+    // The first page reads the viewer's pinned window and the page from one snapshot; later
+    // pages take the window from their cursor.
+    let mut tx = state.pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await?;
+    let pinned = match (&q.viewer, &cursor) {
+        (Some(_), Some(c)) => c.pinned.clone(),
+        (Some(viewer), None) => {
             let mut sql = sqlx::QueryBuilder::new("");
             push_pinned(&mut sql, root.clone(), viewer.clone());
-            sql.build_query_as().fetch_optional(&state.pool).await?
+            pinned(sql.build_query_as().fetch_all(&mut *tx).await?)
         }
-        None => None,
+        (None, _) => Pinned::default(),
     };
     let mut sql = sqlx::QueryBuilder::new("");
     push_page(
         &mut sql,
         root.clone(),
         q.viewer.clone(),
-        pinned,
+        pinned.clone(),
         cursor.as_ref(),
         limit + 1,
     );
-    let rows: Vec<(bool, DateTime<Utc>, String, String)> =
-        sql.build_query_as().fetch_all(&state.pool).await?;
+    let rows: Vec<(bool, DateTime<Utc>, String, String, bool)> =
+        sql.build_query_as().fetch_all(&mut *tx).await?;
+    tx.commit().await?;
+    // The page is the first `limit` places; those not current are left out (`push_page`), so a
+    // page can hold fewer, and the cursor is the last place, listed or not.
     let more = rows.len() > limit;
     let rows = &rows[..rows.len().min(limit)];
     let cursor = match rows.last() {
-        Some((own, at, author, path)) if more => Some(encode(
+        Some((own, at, author, path, _)) if more => Some(encode(
             &PageCursor {
                 scope: root,
                 viewer: q.viewer.clone(),
@@ -315,6 +434,7 @@ pub async fn list(
                 at: *at,
                 author: author.clone(),
                 path: path.clone(),
+                pinned,
             },
             &state.cursor_mac,
         )?),
@@ -322,7 +442,8 @@ pub async fn list(
     };
     let items = rows
         .iter()
-        .map(|(_, at, author, path)| Collection {
+        .filter(|(.., current)| *current)
+        .map(|(_, at, author, path, _)| Collection {
             uri: uri(author, path),
             author: author.clone(),
             indexed_at: *at,
@@ -330,16 +451,17 @@ pub async fn list(
         .collect();
     Ok(axum::Json(CollectionPage { items, cursor }))
 }
-/// Pushes the head of a page query: `q` (`root`, `viewer`, `n`, and the pinned boundary `bt`,
-/// `bp`) and the card's `links`.
+/// Pushes the head of a page query: `q` (`root`, `viewer`, `n`, the pinned window's top `tt` and
+/// its boundary `bt`, `bp`) and the card's `links`.
 fn push_head(
     sql: &mut sqlx::QueryBuilder<'_, sqlx::Postgres>,
     root: String,
     viewer: Option<String>,
     n: usize,
-    pinned: Option<(DateTime<Utc>, String)>,
+    pinned: Pinned,
 ) {
-    let (bt, bp) = pinned.unzip();
+    let tt = pinned.top;
+    let (bt, bp) = pinned.boundary.unzip();
     sql.push("WITH RECURSIVE q AS (SELECT ")
         .push_bind(root)
         .push("::text AS root,")
@@ -347,6 +469,8 @@ fn push_head(
         .push("::text AS viewer,")
         .push_bind(n as i64)
         .push("::bigint AS n,coalesce(")
+        .push_bind(tt)
+        .push("::timestamptz,'-infinity') AS tt,coalesce(")
         .push_bind(bt)
         .push("::timestamptz,'-infinity') AS bt,coalesce(")
         .push_bind(bp)
@@ -354,32 +478,48 @@ fn push_head(
         .push(links("q.root"))
         .push(") l)");
 }
-/// Pushes the query for the viewer's pinned boundary: their [`PINNED`]th newest post among
-/// `root`'s links (`at`, file), none when they hold fewer. At most [`PINNED`] steps per link.
+/// Pushes the query for the viewer's pinned window: their newest post and their [`PINNED`]th
+/// newest among `root`'s links (`at`, file), in that order, as many as they hold. At most
+/// [`PINNED`] steps per link.
 fn push_pinned(sql: &mut sqlx::QueryBuilder<'_, sqlx::Postgres>, root: String, viewer: String) {
-    push_head(sql, root, Some(viewer), PINNED, None);
+    push_head(sql, root, Some(viewer), PINNED, Pinned::default());
     sql.push(
         ", own_start AS (SELECT link,'infinity'::timestamptz AS at,''::text AS author,''::text AS path FROM links), ",
     )
     .push(walk("own", "own_start", "(SELECT n FROM q)", |l, a, _, p| {
-        next_own(l, a, p, NEWEST)
+        next_own(l, a, p)
     }))
-    .push(" SELECT at,path FROM (SELECT path,max(at) AS at FROM own GROUP BY path) x ORDER BY at DESC,path LIMIT 1 OFFSET ")
-    .push_bind(PINNED as i64 - 1);
+    .push(" SELECT at,path FROM (SELECT at,path,row_number() OVER (ORDER BY at DESC,path COLLATE \"C\") AS i \
+      FROM (SELECT path,max(at) AS at FROM own GROUP BY path) x) y WHERE i IN (1,")
+    .push_bind(PINNED as i64)
+    .push(") ORDER BY i");
 }
-/// Pushes one page of `root`'s collections, `n` of them: the viewer's pinned posts (their
-/// [`PINNED`] newest, `pinned` the boundary from [`push_pinned`]), then the others, each newest
-/// first, as (own, indexed_at, author, file). Each of the card's [`links`] is walked from the
-/// cursor on ([`walk`]), at most `n` posts: the page's posts are among them (a link's earlier
+/// The pinned window from [`push_pinned`]'s rows.
+fn pinned(rows: Vec<Place>) -> Pinned {
+    let mut rows = rows.into_iter();
+    Pinned {
+        top: rows.next().map(|(at, _)| at),
+        boundary: rows.next(),
+    }
+}
+/// Pushes one page of `root`'s collections, `n` places of them: the viewer's pinned posts (their
+/// [`PINNED`] newest, `pinned` the window from [`push_pinned`]), then the others, each newest
+/// first, as (own, indexed_at, author, file, current). Each of the card's [`links`] is walked from
+/// the cursor on ([`walk`]), at most `n` posts: the page's posts are among them (a link's earlier
 /// posts are earlier on the page too), so a page costs at most `n` steps per link, however deep
 /// it is and however many collections hold the card or its viewer made. The others' walk steps
-/// over the viewer's pinned posts alone (at most [`PINNED`]); a segment the cursor is past is not
-/// walked.
+/// over the viewer's pinned window alone; a segment the cursor is past is not walked.
+///
+/// `current` is false for a place to leave out, asked of the `n` places alone, never in a walk:
+/// a file that is not its collection's [`current`] one (an older version), or a reference older
+/// than another of the same file among the card's links (the file is listed at that one). One
+/// probe a place, besides a stale file's newer references; after ingest settles a collection
+/// (`settle`), every place is current, so only references stored before can be left out.
 fn push_page(
     sql: &mut sqlx::QueryBuilder<'_, sqlx::Postgres>,
     root: String,
     viewer: Option<String>,
-    pinned: Option<(DateTime<Utc>, String)>,
+    pinned: Pinned,
     cursor: Option<&PageCursor>,
     n: usize,
 ) {
@@ -397,14 +537,17 @@ fn push_page(
         Some(c) if !c.own => after(c),
         _ => top(),
     };
-    // The others are every post but the viewer's pinned ones.
+    // The others are every post but the viewer's pinned window: from their newest post's instant
+    // as the first page found it (`tt`) to their boundary (`bt`, `bp`). A post they add or edit
+    // later is newer than the window, and listed with the others. So the others' walk steps over
+    // the window alone: at most [`PINNED`] posts of at most [`ITEMS`] rows each, as the first page
+    // found them.
     let others_filter = if viewer.is_some() {
-        format!(
-            " AND NOT (f.author=(SELECT viewer FROM q) AND (f.created_at>(SELECT bt FROM q) \
-             OR (f.created_at=(SELECT bt FROM q) AND f.object_path<=(SELECT bp FROM q)))){NEWEST}"
-        )
+        " AND NOT (f.author=(SELECT viewer FROM q) \
+         AND timezone('UTC',f.created_at)<=timezone('UTC',(SELECT tt FROM q)) \
+         AND (timezone('UTC',f.created_at)>timezone('UTC',(SELECT bt FROM q)) OR timezone('UTC',f.created_at)=timezone('UTC',(SELECT bt FROM q)) AND f.object_path COLLATE \"C\"<=(SELECT bp FROM q)))"
     } else {
-        NEWEST.to_owned()
+        ""
     };
     push_head(sql, root, viewer, n, pinned);
     sql.push(", others_start AS (SELECT l.link,coalesce(")
@@ -427,7 +570,7 @@ fn push_page(
                 "own",
                 "own_start",
                 "(SELECT n FROM q)",
-                |l, a, _, p| next_own(l, a, p, NEWEST),
+                |l, a, _, p| next_own(l, a, p),
             ))
             .push(", ");
     }
@@ -435,18 +578,25 @@ fn push_page(
         "others",
         "others_start",
         "(SELECT n FROM q)",
-        |l, a, w, p| next(l, a, w, p, &others_filter),
+        |l, a, w, p| next(l, a, w, p, others_filter),
     ))
-    .push(" SELECT own,max(at),author,path FROM (");
+    .push(" SELECT c.own,c.at,c.author,c.path,coalesce(c.path=g.object_path AND (g.created_at=c.at OR NOT EXISTS \
+      (SELECT 1 FROM reference h WHERE h.kind='collection' AND h.author=c.author AND collection_post(h.object_path)=collection_post(c.path) \
+       AND timezone('UTC',h.created_at)>timezone('UTC',c.at) AND h.object_path=c.path AND h.resource_id IN (SELECT link FROM links))),false) \
+      FROM (SELECT own,max(at) AS at,author,path FROM (");
     if own {
         sql.push("SELECT true AS own,at,author,path FROM own UNION ALL ");
     }
-    sql.push("SELECT false AS own,at,author,path FROM others) x GROUP BY own,author,path ORDER BY own DESC,max(at) DESC,author,path LIMIT (SELECT n FROM q)");
+    sql.push("SELECT false AS own,at,author,path FROM others) x GROUP BY own,author,path ORDER BY own DESC,max(at) DESC,author COLLATE \"C\",path COLLATE \"C\" LIMIT (SELECT n FROM q)) c \
+      LEFT JOIN LATERAL (SELECT g.created_at,g.object_path FROM reference g WHERE g.kind='collection' AND g.author=c.author AND collection_post(g.object_path)=collection_post(c.path) \
+       ORDER BY timezone('UTC',g.created_at) DESC,collection_file(g.object_path) COLLATE \"C\" DESC LIMIT 1) g ON true \
+      ORDER BY c.own DESC,c.at DESC,c.author COLLATE \"C\",c.path COLLATE \"C\"");
 }
 fn encode(cursor: &PageCursor, key: &hmac::SimpleHmac<blake3::Hasher>) -> anyhow::Result<String> {
     use base64::Engine;
     use hmac::Mac;
-    let payload = serde_json::to_vec(cursor)?;
+    // Bytes, not JSON: a path is its length and bytes, never escaped.
+    let payload = postcard::to_allocvec(cursor)?;
     let mut mac = key.clone();
     mac.update(&payload);
     let mut signed = mac.finalize().into_bytes().to_vec();
@@ -457,7 +607,7 @@ fn decode(s: &str, key: &hmac::SimpleHmac<blake3::Hasher>) -> Result<PageCursor,
     use base64::Engine;
     use hmac::Mac;
     let invalid = || ApiError::bad("invalid cursor");
-    if s.len() > 8192 {
+    if s.len() > MAX_CURSOR {
         return Err(invalid());
     }
     let signed = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -470,7 +620,7 @@ fn decode(s: &str, key: &hmac::SimpleHmac<blake3::Hasher>) -> Result<PageCursor,
     let mut mac = key.clone();
     mac.update(payload);
     mac.verify_slice(tag).map_err(|_| invalid())?;
-    serde_json::from_slice(payload).map_err(|_| invalid())
+    postcard::from_bytes(payload).map_err(|_| invalid())
 }
 
 #[cfg(test)]
@@ -490,11 +640,12 @@ mod tests {
         );
         assert_eq!(
             parse(&social),
-            Some((
-                author.clone(),
-                "/pub/social/v1/posts/0035XTZFQH4P2".into(),
-                true
-            ))
+            Some((author.clone(), "/pub/social/v1/posts/0035XTZFQH4P2".into()))
+        );
+        // A version file's URI names its post.
+        assert_eq!(
+            parse(&format!("{social}/0035XTZFQH4P3.json")),
+            parse(&social)
         );
         // A file that is no post version is its own collection.
         let other = uri(&author, "/pub/pubky.app/posts/0035XTZFQH4P2");
@@ -504,11 +655,7 @@ mod tests {
         );
         assert_eq!(
             parse(&other),
-            Some((
-                author.clone(),
-                "/pub/pubky.app/posts/0035XTZFQH4P2".into(),
-                false
-            ))
+            Some((author.clone(), "/pub/pubky.app/posts/0035XTZFQH4P2".into()))
         );
         for bad in [
             "https://example.org/pub/x".to_owned(),
@@ -520,6 +667,86 @@ mod tests {
         ] {
             assert_eq!(parse(&bad), None, "{bad}");
         }
+    }
+
+    /// The schema's `collection_post` is [`post`]: a post's version files belong to it, a path
+    /// nested deeper in a post or not JSON is a collection of its own.
+    #[sqlx::test(
+        migrations = "../../migrations",
+        fixtures("../tests/fixtures/require_h3.sql")
+    )]
+    async fn the_schema_reads_a_files_collection_as_post_does(pool: PgPool) {
+        let paths = [
+            "/pub/social/v1/posts/P/V.json",
+            "/pub/social/v1/posts/P/V-label.json",
+            "/pub/social/v1/posts/P/.json",
+            "/pub/social/v1/posts/P",
+            "/pub/social/v1/posts/P/notes",
+            "/pub/social/v1/posts/P/x/y.json",
+            "/pub/social/v1/posts/P/V.json/w.json",
+            "/pub/social/v2/posts/P/V.json",
+            "/pub/social/v1/post/P/V.json",
+            "/pub//v1/posts/P/V.json",
+            "/pub/social/v1/posts//V.json",
+            "/pub/ünï/v1/posts/ß/ö.json",
+            "/pub/social/v1/posts/P/V.JSON",
+            "/pub/pubky.app/posts/P",
+            "/pub/a/b/c/v1/posts/P/V.json",
+        ];
+        for path in paths {
+            let (sql, leaf): (String, String) =
+                sqlx::query_as("SELECT collection_post($1),collection_file($1)")
+                    .bind(path)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(sql, post(path), "{path}");
+            assert_eq!(leaf, file(path), "{path}");
+            // The post and the leaf are the path, less one `/`.
+            match leaf.as_str() {
+                "" => assert_eq!(sql, path),
+                leaf => assert_eq!(format!("{sql}/{leaf}"), path),
+            }
+        }
+        assert_eq!(post(paths[0]), "/pub/social/v1/posts/P");
+        assert_eq!(post(paths[4]), paths[4]);
+        assert_eq!(post(paths[5]), paths[5]);
+    }
+
+    /// A cursor whose every field is as long as the API accepts (paths of
+    /// `max_object_path_bytes`, of the characters JSON would escape six-fold or of four bytes
+    /// each) fits the decoder's cap and reads back as it was written; anything longer, or not
+    /// signed by this key, is refused.
+    #[test]
+    fn the_longest_cursor_fits_and_reads_back() {
+        use hmac::KeyInit;
+        let key = hmac::SimpleHmac::<blake3::Hasher>::new_from_slice(b"key").unwrap();
+        let max = crate::config::IngestConfig::default().max_object_path_bytes;
+        let at: DateTime<Utc> = "9999-12-31T23:59:59.999999Z".parse().unwrap();
+        for unit in ["\u{1}", "\"", "𝄞"] {
+            let path = unit.repeat(max / unit.len());
+            assert_eq!(path.len(), max);
+            let cursor = PageCursor {
+                scope: "f".repeat(32),
+                viewer: Some("z".repeat(52)),
+                own: true,
+                at,
+                author: "z".repeat(52),
+                path: path.clone(),
+                pinned: Pinned {
+                    top: Some(at),
+                    boundary: Some((at, path)),
+                },
+            };
+            let encoded = encode(&cursor, &key).unwrap();
+            assert!(encoded.len() < 6_000, "{unit:?}: {}", encoded.len());
+            let read = decode(&encoded, &key).unwrap();
+            assert_eq!(encode(&read, &key).unwrap(), encoded);
+            assert_eq!(read.pinned.boundary, cursor.pinned.boundary);
+            let other = hmac::SimpleHmac::<blake3::Hasher>::new_from_slice(b"other").unwrap();
+            assert!(decode(&encoded, &other).is_err());
+        }
+        assert!(decode(&"A".repeat(MAX_CURSOR + 1), &key).is_err());
     }
 
     /// What a statement did with `reference`: the rows its scans of the table produced or
@@ -577,11 +804,10 @@ mod tests {
     const MAIN: &str = "reference_resource_collection_idx";
     const OWN: &str = "reference_collection_author_idx";
     const POST: &str = "reference_collection_post_idx";
-    const KEY: &str = "reference_pkey";
-    /// The indexes a page may read: the walk's, the viewer's (with a viewer) and the key (a
-    /// post's items, for its newest reference).
+    /// The indexes a page may read: the walk's, the collections' (whether a place is current)
+    /// and, with a viewer, the viewer's.
     fn page_indexes(viewer: bool) -> std::collections::BTreeSet<String> {
-        [MAIN, KEY]
+        [MAIN, POST]
             .into_iter()
             .chain(viewer.then_some(OWN))
             .map(str::to_owned)
@@ -621,6 +847,13 @@ mod tests {
             "INSERT INTO reference(resource_id,kind,author,label,object_path,created_at) SELECT md5('r1'),'tag',lpad(n::text,52,'t'),'music','/pub/app/tags/'||n,timestamptz '2026-07-01'+n*interval '1 second' FROM generate_series(1,20000) n",
             // One author's 20,000 collections, of other links.
             "INSERT INTO reference(resource_id,kind,author,object_path,created_at,unit_key) SELECT md5('x'||(1+n%40)),'collection',repeat('x',52),'/pub/social/v1/posts/X'||n||'/X'||n||'.json',timestamptz '2026-01-01'+n*interval '1 second','collection:'||md5(n::text) FROM generate_series(1,20000) n",
+            // One author's 20,000 collections of one link, all at one instant.
+            "INSERT INTO resource(id,uri) VALUES (repeat('2',32),'https://example.org/one-instant'),(repeat('3',32),'https://example.org/two-links'),(md5('a3'),'https://example.org/two-links-alias')",
+            "INSERT INTO reference(resource_id,kind,author,object_path,created_at,unit_key) SELECT repeat('2',32),'collection',repeat('d',52),'/pub/social/v1/posts/D'||lpad(n::text,5,'0')||'/D.json',timestamptz '2026-02-01','collection:'||md5(n::text) FROM generate_series(0,19999) n",
+            // 20,000 posts each holding a card and its alias, at one instant per post (as ingest
+            // settles them).
+            "INSERT INTO resource_alias(alias_id,root_id,basis) VALUES (md5('a3'),repeat('3',32),'canonical')",
+            "INSERT INTO reference(resource_id,kind,author,object_path,created_at,unit_key) SELECT l.id,'collection',lpad(n::text,52,'s'),'/pub/social/v1/posts/S'||n||'/S.json',timestamptz '2026-03-01'+n*interval '1 second','collection:'||md5(l.id) FROM generate_series(1,20000) n,(VALUES (repeat('3',32)),(md5('a3'))) l(id)",
             // One author's 20,000 collections of one link, 200 at each of 100 instants.
             "INSERT INTO reference(resource_id,kind,author,object_path,created_at,unit_key) SELECT repeat('1',32),'collection',repeat('c',52),'/pub/social/v1/posts/C'||lpad(n::text,5,'0')||'/C.json',timestamptz '2026-01-01'+(n/200)*interval '1 hour','collection:'||md5(n::text) FROM generate_series(0,19999) n",
             "RESET session_replication_role",
@@ -666,6 +899,7 @@ mod tests {
             at: at.parse().unwrap(),
             author: author.into(),
             path: path.into(),
+            pinned: Pinned::default(),
         }
     }
     async fn check_bounded_walks(pool: &PgPool, phase: &str) {
@@ -686,10 +920,14 @@ mod tests {
             .unwrap();
             let w = work(&plan);
             assert!(
-                !w.seq && !w.sorted && w.rows <= 1_200 && w.buffers <= BUDGET_COUNT,
+                !w.seq && !w.sorted && w.rows <= 2_400 && w.buffers <= BUDGET_COUNT,
                 "{phase}, count {card}: {w:?}"
             );
-            assert_eq!(w.indexes, [MAIN.to_owned()].into(), "{phase}, count {card}");
+            assert_eq!(
+                w.indexes,
+                [MAIN.to_owned(), POST.to_owned()].into(),
+                "{phase}, count {card}"
+            );
             let counted: i64 =
                 sqlx::query_scalar(&format!("SELECT count FROM ({}) c(id,count)", count_sql()))
                     .bind(vec![card.clone()])
@@ -737,7 +975,70 @@ mod tests {
             &c,
             &tied(10_050),
         );
+        let (two, three, d) = ("2".repeat(32), "3".repeat(32), "d".repeat(52));
+        let big = |n: u32| format!("/pub/social/v1/posts/D{n:05}/D.json");
+        let pair = |n: u32| format!("/pub/social/v1/posts/S{n}/S.json");
+        // The one-instant card: its viewer's 100th post is the pinned boundary.
+        let big_pinned_end = cursor(&two, Some(&d), true, "2026-02-01T00:00:00Z", &d, &big(99));
+        let big_others_deep = cursor(
+            &two,
+            Some(&d),
+            false,
+            "2026-02-01T00:00:00Z",
+            &d,
+            &big(10_000),
+        );
+        let big_deep = cursor(&two, None, false, "2026-02-01T00:00:00Z", &d, &big(10_000));
+        let pair_deep = cursor(
+            &three,
+            None,
+            false,
+            "2026-03-01T02:46:40Z",
+            &format!("{:s>52}", 10_000),
+            &pair(10_000),
+        );
         for (name, card, viewer, cursor, first, own) in [
+            (
+                "one instant, viewer holds all",
+                &two,
+                Some(&d),
+                None,
+                big(0),
+                21,
+            ),
+            (
+                "one instant, past the pinned",
+                &two,
+                Some(&d),
+                Some(&big_pinned_end),
+                big(100),
+                0,
+            ),
+            (
+                "one instant, others deep",
+                &two,
+                Some(&d),
+                Some(&big_others_deep),
+                big(10_001),
+                0,
+            ),
+            (
+                "one instant, deep",
+                &two,
+                None,
+                Some(&big_deep),
+                big(10_001),
+                0,
+            ),
+            ("two links", &three, None, None, pair(20_000), 0),
+            (
+                "two links, deep",
+                &three,
+                None,
+                Some(&pair_deep),
+                pair(9_999),
+                0,
+            ),
             (
                 "first",
                 &root,
@@ -791,9 +1092,9 @@ mod tests {
                     );
                     let mut sql = sqlx::QueryBuilder::new("");
                     push_pinned(&mut sql, card.clone(), viewer.clone());
-                    sql.build_query_as().fetch_optional(pool).await.unwrap()
+                    pinned(sql.build_query_as().fetch_all(pool).await.unwrap())
                 }
-                None => None,
+                None => Pinned::default(),
             };
             let mut sql = explain();
             push_page(
@@ -815,9 +1116,13 @@ mod tests {
             );
             let mut sql = sqlx::QueryBuilder::new("");
             push_page(&mut sql, card.clone(), viewer.cloned(), pinned, cursor, 21);
-            let page: Vec<(bool, DateTime<Utc>, String, String)> =
+            let page: Vec<(bool, DateTime<Utc>, String, String, bool)> =
                 sql.build_query_as().fetch_all(pool).await.unwrap();
             assert_eq!(page.len(), 21, "{phase}, {name}");
+            assert!(page.iter().all(|r| r.4), "{phase}, {name}: not current");
+            let posts: std::collections::BTreeSet<(&String, &String)> =
+                page.iter().map(|r| (&r.2, &r.3)).collect();
+            assert_eq!(posts.len(), 21, "{phase}, {name}: a post twice");
             assert_eq!(page[0].3, first, "{phase}, {name}");
             assert_eq!(page.iter().filter(|r| r.0).count(), own, "{phase}, {name}");
         }
@@ -836,9 +1141,10 @@ mod tests {
             !w.seq && w.rows <= 5 && w.buffers <= 20,
             "{phase}, in_collection: {w:?}"
         );
+        // The collection's current file, then that file's references by the key.
         assert_eq!(
             w.indexes,
-            [POST.to_owned()].into(),
+            [POST.to_owned(), "reference_pkey".to_owned()].into(),
             "{phase}, in_collection"
         );
         let mut sql = sqlx::QueryBuilder::new("SELECT count(*) FROM reference f WHERE ");
@@ -846,10 +1152,190 @@ mod tests {
         let found: i64 = sql.build_query_scalar().fetch_one(pool).await.unwrap();
         assert_eq!(found, 1, "{phase}");
     }
-    /// Buffers a count may touch: its walks are at most 1,000 steps a link (here about 7,800 for
-    /// a card and its 40 aliases). A probe that read an index range row by row would touch tens
-    /// of thousands.
-    const BUDGET_COUNT: i64 = 10_000;
+    /// Two cards whose pages read a bounded walk however the table changes under them.
+    /// - **A held cursor:** a viewer with 150 posts holding a link starts paging, then adds 20,000
+    ///   more. Pages from the first page's cursor, in the viewer's own segment and in the
+    ///   others', step over the first page's pinned window alone: the new posts are newer than it,
+    ///   listed with the others, never stepped over.
+    /// - **References stored before ingest settled collections:** 10,000 posts holding a card in
+    ///   an older version file beside the current one (a del skipped), and 10,000 holding it
+    ///   at their newest and its alias at an older instant. A page leaves those out after its
+    ///   walk, one probe a place, so it reads as many rows as any page, however many of its
+    ///   places it leaves out (a page of the alias's older references lists none).
+    #[sqlx::test(
+        migrations = "../../migrations",
+        fixtures("../tests/fixtures/require_h3.sql")
+    )]
+    async fn a_page_reads_a_bounded_walk_whatever_changed(pool: PgPool) {
+        let (card, stale) = ("5".repeat(32), "4".repeat(32));
+        let (e, o) = ("e".repeat(52), "o".repeat(52));
+        let mine = |n: u32| format!("/pub/social/v1/posts/E{n:05}/E.json");
+        let mut seed = pool.acquire().await.unwrap();
+        for statement in [
+            "SET session_replication_role = replica",
+            "INSERT INTO resource(id,uri) VALUES (repeat('5',32),'https://example.org/window'),(repeat('4',32),'https://example.org/stale'),(md5('a4'),'https://example.org/stale-alias')",
+            "INSERT INTO resource_alias(alias_id,root_id,basis) VALUES (md5('a4'),repeat('4',32),'canonical')",
+            // The viewer's 150 posts, a minute apart, and 300 of others between them.
+            "INSERT INTO reference(resource_id,kind,author,object_path,created_at,unit_key) SELECT repeat('5',32),'collection',repeat('e',52),'/pub/social/v1/posts/E'||lpad(n::text,5,'0')||'/E.json',timestamptz '2026-04-20'+n*interval '1 minute','collection:5' FROM generate_series(1,150) n",
+            "INSERT INTO reference(resource_id,kind,author,object_path,created_at,unit_key) SELECT repeat('5',32),'collection',repeat('o',52),'/pub/social/v1/posts/O'||lpad(n::text,5,'0')||'/O.json',timestamptz '2026-04-20'+n*interval '30 seconds','collection:5' FROM generate_series(1,300) n",
+            // Each post in an older version file and its current one, half a second apart.
+            "INSERT INTO reference(resource_id,kind,author,object_path,created_at,unit_key) SELECT repeat('4',32),'collection',lpad(n::text,52,'k'),'/pub/social/v1/posts/K'||n||'/'||v||'.json',timestamptz '2026-04-01'+n*interval '1 second'+(v='v2')::int*interval '500 milliseconds','collection:4' FROM generate_series(1,10000) n,(VALUES ('v1'),('v2')) x(v)",
+            // Each post holding the card at its newest, its alias five days older.
+            "INSERT INTO reference(resource_id,kind,author,object_path,created_at,unit_key) SELECT l.id,'collection',lpad(n::text,52,'l'),'/pub/social/v1/posts/L'||n||'/L.json',timestamptz '2026-04-05'+n*interval '1 second'+l.later*interval '5 days','collection:'||md5(l.id) FROM generate_series(1,10000) n,(VALUES (repeat('4',32),1),(md5('a4'),0)) l(id,later)",
+            "RESET session_replication_role",
+        ] {
+            sqlx::query(statement).execute(&mut *seed).await.unwrap();
+        }
+        sqlx::query("VACUUM ANALYZE reference")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut sql = sqlx::QueryBuilder::new("");
+        push_pinned(&mut sql, card.clone(), e.clone());
+        let window = pinned(sql.build_query_as().fetch_all(&pool).await.unwrap());
+        let at = |n: u32| {
+            (
+                timestamp("2026-04-20T00:00:00Z") + chrono::Duration::minutes(n as i64),
+                mine(n),
+            )
+        };
+        assert_eq!(window.top, Some(at(150).0));
+        assert_eq!(window.boundary, Some(at(51)));
+        // The viewer's 20,000 posts more, after their first page.
+        let mut seed = pool.acquire().await.unwrap();
+        for statement in [
+            "SET session_replication_role = replica",
+            "INSERT INTO reference(resource_id,kind,author,object_path,created_at,unit_key) SELECT repeat('5',32),'collection',repeat('e',52),'/pub/social/v1/posts/N'||lpad(n::text,5,'0')||'/N.json',timestamptz '2026-05-01'+n*interval '1 second','collection:5' FROM generate_series(1,20000) n",
+            "RESET session_replication_role",
+        ] {
+            sqlx::query(statement).execute(&mut *seed).await.unwrap();
+        }
+        sqlx::query("VACUUM ANALYZE reference")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (t100, p100) = at(100);
+        let own_later = cursor(&card, Some(&e), true, &t100.to_rfc3339(), &e, &p100);
+        // Past the window's end, with the others: an other's post, at 990 seconds; next is the
+        // viewer's 16th post, past their window, at 960 seconds.
+        let others_later = cursor(
+            &card,
+            Some(&e),
+            false,
+            "2026-04-20T00:16:30Z",
+            &o,
+            "/pub/social/v1/posts/O00033/O.json",
+        );
+        let deep = |at: &str| cursor(&stale, None, false, at, "", "");
+        let (alias_deep, versions_deep) =
+            (deep("2026-04-05T01:23:20Z"), deep("2026-04-01T01:23:20Z"));
+        let newest = "/pub/social/v1/posts/N20000/N.json".to_owned();
+        let k = |n: u32| format!("/pub/social/v1/posts/K{n}/v2.json");
+        for (name, card, window, cursor, first, own, listed) in [
+            (
+                "held cursor, own",
+                &card,
+                window.clone(),
+                Some(&own_later),
+                Some(mine(99)),
+                21,
+                21,
+            ),
+            (
+                "held cursor, others",
+                &card,
+                window.clone(),
+                Some(&others_later),
+                Some(mine(16)),
+                0,
+                21,
+            ),
+            (
+                "stale, first",
+                &stale,
+                Pinned::default(),
+                None,
+                Some("/pub/social/v1/posts/L10000/L.json".to_owned()),
+                0,
+                21,
+            ),
+            (
+                "stale alias, deep",
+                &stale,
+                Pinned::default(),
+                Some(&alias_deep),
+                None,
+                0,
+                0,
+            ),
+            (
+                "stale versions, deep",
+                &stale,
+                Pinned::default(),
+                Some(&versions_deep),
+                Some(k(4_999)),
+                0,
+                10,
+            ),
+        ] {
+            let viewer = window.top.is_some().then(|| e.clone());
+            let mut sql = explain();
+            push_page(
+                &mut sql,
+                card.clone(),
+                viewer.clone(),
+                window.clone(),
+                cursor,
+                21,
+            );
+            let w = explained(&pool, sql).await;
+            assert!(
+                !w.seq && !w.sorted && w.rows <= 400 && w.buffers <= BUDGET_PAGE,
+                "{name}: {w:?}"
+            );
+            assert!(
+                w.indexes.is_subset(&page_indexes(viewer.is_some())),
+                "{name}: {w:?}"
+            );
+            let mut sql = sqlx::QueryBuilder::new("");
+            push_page(&mut sql, card.clone(), viewer, window, cursor, 21);
+            let page: Vec<(bool, DateTime<Utc>, String, String, bool)> =
+                sql.build_query_as().fetch_all(&pool).await.unwrap();
+            assert_eq!(page.len(), 21, "{name}");
+            let current: Vec<_> = page.iter().filter(|r| r.4).collect();
+            assert_eq!(current.len(), listed, "{name}");
+            let posts: std::collections::BTreeSet<String> =
+                current.iter().map(|r| uri(&r.2, &r.3)).collect();
+            assert_eq!(posts.len(), listed, "{name}: a post twice");
+            assert_eq!(current.first().map(|r| r.3.clone()), first, "{name}");
+            assert_eq!(page.iter().filter(|r| r.0).count(), own, "{name}");
+            assert!(!page.iter().any(|r| r.3 == newest) || own == 0, "{name}");
+        }
+        // The count of the stale card: its walks, and one probe a file.
+        let plan: serde_json::Value = sqlx::query_scalar(&format!(
+            "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {}",
+            count_sql()
+        ))
+        .bind(vec![stale.clone()])
+        .bind(COUNTED)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let w = work(&plan);
+        // Two walks of 1,000 steps and a probe for each of the 1,000 posts counted.
+        assert!(
+            !w.seq && !w.sorted && w.rows <= 3_200 && w.buffers <= BUDGET_COUNT,
+            "count: {w:?}"
+        );
+    }
+    fn timestamp(at: &str) -> DateTime<Utc> {
+        at.parse().unwrap()
+    }
+    /// Buffers a count may touch: its walks are at most 1,000 steps a link, and one probe for each
+    /// post it counts, at most 1,000, each an index descent and the current file's heap page (here
+    /// 16,000 to 18,100 for a card and an alias each holding over 1,000, with 3,001 rows). Its rows
+    /// are the sharper bound: a probe that read an index range row by row reads tens of thousands.
+    const BUDGET_COUNT: i64 = 24_000;
     /// Buffers the viewer's pinned boundary may touch: at most [`PINNED`] steps a link (here
     /// about 800).
     const BUDGET_PINNED: i64 = 1_200;

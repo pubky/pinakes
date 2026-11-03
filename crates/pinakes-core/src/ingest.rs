@@ -19,6 +19,7 @@ pub const REJECT_REASONS: &[&str] = &[
     "timestamp",
     "uri",
     "never_fetched",
+    "collection_items",
     "panic",
 ];
 fn rejection_reason(line: &Change, limits: &IngestConfig) -> Option<&'static str> {
@@ -237,6 +238,16 @@ async fn apply_line(
     if let Some(old) = &old {
         affected.insert(old.clone());
     }
+    let collection = matches!(line.kind, crate::nexus::Kind::Collection);
+    // A collection holds at most `collections::ITEMS` links (the specs' cap): a new item past
+    // it is refused, so every read of one post's items is bounded.
+    if collection
+        && matches!(line.op, Op::Put)
+        && old.is_none()
+        && crate::collections::full(tx, &line.author, &line.object_path).await?
+    {
+        return Ok(Some("collection_items"));
+    }
     match line.op {
         Op::Put => {
             *alias = store::insert_resource(tx, &id, &uri).await?;
@@ -256,6 +267,10 @@ async fn apply_line(
                 .bind(timestamp(Some(line.at))?).bind(&unit_key)
                 .execute(&mut **tx).await?;
             affected.insert(id.clone());
+            if collection {
+                affected
+                    .extend(crate::collections::settle(tx, &line.author, &line.object_path).await?);
+            }
         }
         Op::Del => {
             sqlx::query("DELETE FROM reference WHERE author=$1 AND object_path=$2 AND unit_key=$3")

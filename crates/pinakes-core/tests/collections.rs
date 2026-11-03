@@ -538,8 +538,9 @@ async fn a_viewer_has_their_100_newest_first_and_the_rest_by_time(pool: PgPool) 
     assert_eq!(all_pages(&app, &id, "", 9).await, newest);
 }
 
-/// A post whose references to a card's links were indexed at different instants (a skipped line
-/// of a newer version) is listed once, at its newest, on whichever page that falls.
+/// A post holding a card's link and its alias, edited (same file, a later instant) with the
+/// alias's put skipped: ingest settles the alias's row to the edit's instant, as the rest of
+/// Nexus's stage would, so the post is listed once, at its newest, on whichever page that falls.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_post_held_under_two_links_is_listed_once_at_its_newest(pool: PgPool) {
     let app = api::router(
@@ -576,7 +577,7 @@ async fn a_post_held_under_two_links_is_listed_once_at_its_newest(pool: PgPool) 
         "P",
         "v",
         "https://example.org/root",
-        3_500,
+        1_500,
     ));
     lines.push(item(
         Op::Put,
@@ -584,15 +585,29 @@ async fn a_post_held_under_two_links_is_listed_once_at_its_newest(pool: PgPool) 
         "P",
         "v",
         "https://example.org/spelling",
-        3_500,
+        1_500,
     ));
     batch(&pool, lines).await;
-    // The alias's reference of P kept an older instant.
-    sqlx::query("UPDATE reference SET created_at=to_timestamp(0.2) WHERE resource_id=$1")
-        .bind(&alias)
-        .execute(&pool)
-        .await
-        .unwrap();
+    // The edit: its put of the alias item was skipped.
+    batch(
+        &pool,
+        vec![item(
+            Op::Put,
+            &a,
+            "P",
+            "v",
+            "https://example.org/root",
+            3_500,
+        )],
+    )
+    .await;
+    let instants: Vec<i64> = sqlx::query_scalar(
+        "SELECT (extract(epoch FROM created_at)*1000)::bigint FROM reference WHERE object_path LIKE '%/P/%' ORDER BY 1",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(instants, [3_500, 3_500]);
     let q = |k: u32| collection(&a, &format!("Q{k}"));
     let want = vec![q(6), q(5), q(4), collection(&a, "P"), q(3), q(2), q(1)];
     for limit in [1, 2, 20] {
@@ -604,4 +619,508 @@ async fn a_post_held_under_two_links_is_listed_once_at_its_newest(pool: PgPool) 
         );
     }
     assert_eq!(count(&app, &root).await, 7);
+}
+
+/// A post's new version (another version file) replaces its older one even when a del of the
+/// older version's lines was skipped: the post is listed once, by its one URI.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_new_version_replaces_an_older_one_whose_del_was_skipped(pool: PgPool) {
+    let app = api::router(
+        AppState::new(pool.clone(), Config::default())
+            .await
+            .unwrap(),
+    );
+    let a = author('a');
+    let link = "https://example.org/song";
+    let id = card(&pool, link, "Song").await;
+    batch(
+        &pool,
+        vec![
+            item(Op::Put, &a, "R", "v1", link, 1_000),
+            item(Op::Put, &a, "S", "S", link, 2_000),
+        ],
+    )
+    .await;
+    // The edit: R's version v2, its del of v1's line skipped.
+    batch(&pool, vec![item(Op::Put, &a, "R", "v2", link, 5_000)]).await;
+    let files: Vec<String> = sqlx::query_scalar(
+        "SELECT object_path FROM reference WHERE kind='collection' ORDER BY object_path",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        files,
+        [
+            "/pub/social/v1/posts/R/v2.json",
+            "/pub/social/v1/posts/S/S.json"
+        ]
+    );
+    for limit in [1, 20] {
+        assert_eq!(
+            all_pages(&app, &id, "", limit).await,
+            [collection(&a, "R"), collection(&a, "S")],
+            "{limit}"
+        );
+    }
+    // A late replay of the older version does not bring it back above the newer.
+    batch(&pool, vec![item(Op::Put, &a, "R", "v1", link, 1_000)]).await;
+    assert_eq!(count(&app, &id).await, 2);
+}
+
+/// A collection holds at most 100 items (the specs' cap): a new item past them is refused, a put
+/// of one it holds is not.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_collection_holds_at_most_100_items(pool: PgPool) {
+    let a = author('a');
+    let link = |k: i64| format!("https://example.org/item/{k}");
+    batch(
+        &pool,
+        (0..100)
+            .map(|k| item(Op::Put, &a, "C", "C", &link(k), 1_000))
+            .collect(),
+    )
+    .await;
+    batch(
+        &pool,
+        vec![
+            item(Op::Put, &a, "C", "C", &link(100), 2_000),
+            item(Op::Put, &a, "C", "C", &link(7), 2_000),
+        ],
+    )
+    .await;
+    let (items, newest): (i64, i64) = sqlx::query_as(
+        "SELECT count(*),count(*) FILTER (WHERE created_at=to_timestamp(2)) FROM reference WHERE kind='collection'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((items, newest), (100, 100));
+    let past: i64 = sqlx::query_scalar("SELECT count(*) FROM reference WHERE resource_id=$1")
+        .bind(id(&link(100)))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(past, 0);
+}
+
+/// The viewer's pinned set is fixed by the first page: a collection of theirs added while they
+/// page moves no post between their own and the others. It is newer than the first page's
+/// pinned window, so it is listed with the others, by time.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn the_pinned_set_holds_while_a_viewer_pages(pool: PgPool) {
+    let app = api::router(
+        AppState::new(pool.clone(), Config::default())
+            .await
+            .unwrap(),
+    );
+    let link = "https://example.org/song";
+    let id = card(&pool, link, "Song").await;
+    let (a, b) = (author('a'), author('b'));
+    let mut lines: Vec<Change> = (1..=102)
+        .map(|k| item(Op::Put, &a, &format!("A{k:03}"), "v", link, k * 1_000))
+        .collect();
+    lines.push(item(Op::Put, &b, "Bnew", "v", link, 1_000_000));
+    batch(&pool, lines).await;
+    let (status, first) = request(
+        &app,
+        &format!("/v1/resources/{id}/collections?viewer={a}&limit=50"),
+    )
+    .await;
+    assert_eq!(status, 200, "{first}");
+    // A new collection of the viewer's, the newest of all, while they page.
+    batch(&pool, vec![item(Op::Put, &a, "A103", "v", link, 2_000_000)]).await;
+    let mut seen: Vec<String> = first["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["uri"].as_str().unwrap().to_owned())
+        .collect();
+    let mut cursor = first["cursor"].as_str().map(str::to_owned);
+    while let Some(c) = cursor {
+        let (status, page) = request(
+            &app,
+            &format!("/v1/resources/{id}/collections?viewer={a}&limit=50&cursor={c}"),
+        )
+        .await;
+        assert_eq!(status, 200, "{page}");
+        seen.extend(
+            page["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| i["uri"].as_str().unwrap().to_owned()),
+        );
+        cursor = page["cursor"].as_str().map(str::to_owned);
+    }
+    let own = |k: i64| collection(&a, &format!("A{k:03}"));
+    // The first page's 100 stay first; the newcomer is the newest of the others.
+    let mut want: Vec<String> = (3..=102).rev().map(own).collect();
+    want.extend([own(103), collection(&b, "Bnew"), own(2), own(1)]);
+    assert_eq!(seen, want);
+}
+
+/// A collection line of any file, as Nexus may send one: ingest takes any path.
+fn line(op: Op, by: &str, path: &str, uri: &str, at: i64) -> Change {
+    Change {
+        op,
+        uri: uri.into(),
+        kind: Kind::Collection,
+        author: by.into(),
+        object_path: path.into(),
+        label: None,
+        at,
+    }
+}
+/// The cards a search `in_collection` finds, sorted.
+async fn found(app: &axum::Router, collection: &str) -> Vec<String> {
+    let collection =
+        percent_encoding::utf8_percent_encode(collection, percent_encoding::NON_ALPHANUMERIC);
+    let (status, page) = request(app, &format!("/v1/search?in_collection={collection}")).await;
+    assert_eq!(status, 200, "{page}");
+    let mut ids: Vec<String> = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap().to_owned())
+        .collect();
+    ids.sort();
+    ids
+}
+async fn files(pool: &PgPool) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT DISTINCT object_path FROM reference WHERE kind='collection' ORDER BY object_path",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+/// Only a post's version files (`<post>/<leaf>.json`) are its versions: a file nested deeper
+/// under its path, or not JSON, is a collection of its own, older or newer than an edit. An edit
+/// of the post neither deletes it nor is deleted by it.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn files_under_a_post_that_are_not_its_versions_are_collections_of_their_own(pool: PgPool) {
+    let app = api::router(
+        AppState::new(pool.clone(), Config::default())
+            .await
+            .unwrap(),
+    );
+    let a = author('a');
+    let link = "https://example.org/song";
+    let id = card(&pool, link, "Song").await;
+    let post = "/pub/social/v1/posts/P";
+    batch(
+        &pool,
+        vec![
+            line(Op::Put, &a, &format!("{post}/x/y.json"), link, 500),
+            line(Op::Put, &a, &format!("{post}/notes"), link, 9_000),
+            line(Op::Put, &a, &format!("{post}/v1.json"), link, 1_000),
+        ],
+    )
+    .await;
+    // The edit, its del of v1's line skipped.
+    batch(
+        &pool,
+        vec![line(Op::Put, &a, &format!("{post}/v2.json"), link, 2_000)],
+    )
+    .await;
+    assert_eq!(
+        files(&pool).await,
+        [
+            format!("{post}/notes"),
+            format!("{post}/v2.json"),
+            format!("{post}/x/y.json")
+        ]
+    );
+    let want = [
+        format!("pubky://{a}{post}/notes"),
+        collection(&a, "P"),
+        format!("pubky://{a}{post}/x/y.json"),
+    ];
+    for limit in [1, 20] {
+        assert_eq!(all_pages(&app, &id, "", limit).await, want, "{limit}");
+    }
+    assert_eq!(count(&app, &id).await, 3);
+    assert_eq!(found(&app, &collection(&a, "P")).await, vec![id.clone()]);
+    assert_eq!(found(&app, &want[0]).await, [id]);
+}
+
+/// Two versions staged in one millisecond, the older's del skipped, in either order: the post
+/// keeps one, the greatest editId (the specs' newest), listed and counted once, and only its
+/// items are the collection's.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn versions_staged_in_one_millisecond_leave_the_greatest(pool: PgPool) {
+    let app = api::router(
+        AppState::new(pool.clone(), Config::default())
+            .await
+            .unwrap(),
+    );
+    let a = author('a');
+    let link = "https://example.org/song";
+    let id = card(&pool, link, "Song").await;
+    let dropped = card(&pool, "https://example.org/dropped", "Dropped").await;
+    let v1 = |post: &str| {
+        vec![
+            item(Op::Put, &a, post, "0035XTZFQH4P2", link, 1_000),
+            item(
+                Op::Put,
+                &a,
+                post,
+                "0035XTZFQH4P2",
+                "https://example.org/dropped",
+                1_000,
+            ),
+        ]
+    };
+    let v2 = |post: &str| vec![item(Op::Put, &a, post, "0035XTZFQH4P3", link, 1_000)];
+    batch(&pool, v1("R")).await;
+    batch(&pool, v2("R")).await;
+    batch(&pool, v2("T")).await;
+    batch(&pool, v1("T")).await;
+    batch(&pool, vec![item(Op::Put, &a, "S", "S", link, 500)]).await;
+    assert_eq!(
+        files(&pool).await,
+        [
+            "/pub/social/v1/posts/R/0035XTZFQH4P3.json",
+            "/pub/social/v1/posts/S/S.json",
+            "/pub/social/v1/posts/T/0035XTZFQH4P3.json",
+        ]
+    );
+    let want = [
+        collection(&a, "R"),
+        collection(&a, "T"),
+        collection(&a, "S"),
+    ];
+    for limit in [1, 2, 20] {
+        assert_eq!(all_pages(&app, &id, "", limit).await, want, "{limit}");
+        assert_eq!(
+            all_pages(&app, &id, &format!("&viewer={a}"), limit).await,
+            want,
+            "{limit}"
+        );
+    }
+    assert_eq!(count(&app, &id).await, 3);
+    assert_eq!(count(&app, &dropped).await, 0);
+    assert_eq!(found(&app, &collection(&a, "R")).await, vec![id.clone()]);
+    assert_eq!(found(&app, &collection(&a, "T")).await, [id]);
+}
+
+/// References stored before ingest settled collections (this release's upgrade keeps them): a
+/// post's file whose link and alias rows carry different instants, an older version file beside
+/// the current one, two version files of one instant, and a file whose newest item is another
+/// link's. Each post is listed once, at its newest reference among the card's links, on whichever
+/// page that falls, with and without a viewer; the count agrees; and a collection's items are its
+/// current file's. A page may hold fewer than `limit` while such references remain.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn references_stored_before_settling_list_each_post_once(pool: PgPool) {
+    let app = api::router(
+        AppState::new(pool.clone(), Config::default())
+            .await
+            .unwrap(),
+    );
+    let (a, b) = (author('a'), author('b'));
+    let root = card(&pool, "https://example.org/root", "Root").await;
+    let alias = store::ensure_resource(&pool, "https://example.org/spelling")
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'canonical')")
+        .bind(&alias)
+        .bind(&root)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let only_old = card(&pool, "https://example.org/only-old", "Only old").await;
+    let other = card(&pool, "https://example.org/other", "Other").await;
+    // As the release finds them: written before settling, so written here directly.
+    for (resource, by, path, at) in [
+        // P: the card at 3 s, its alias at 1 s, one file.
+        (&root, &a, "P/v.json", 3_000),
+        (&alias, &a, "P/v.json", 1_000),
+        (&root, &b, "S/S.json", 2_000),
+        // V: an older version (holding a card the newer one dropped) beside the current one.
+        (&root, &a, "V/v1.json", 1_500),
+        (&only_old, &a, "V/v1.json", 1_500),
+        (&root, &a, "V/v2.json", 2_500),
+        // W: two versions of one instant.
+        (&root, &b, "W/a.json", 1_200),
+        (&only_old, &b, "W/a.json", 1_200),
+        (&root, &b, "W/b.json", 1_200),
+        // Z: the alias at 0.5 s, another link at 4 s, one file.
+        (&alias, &b, "Z/z.json", 500),
+        (&other, &b, "Z/z.json", 4_000),
+    ] {
+        sqlx::query("INSERT INTO reference(resource_id,kind,author,object_path,created_at,unit_key) VALUES($1,'collection',$2,$3,to_timestamp($4/1000.0),'collection:'||md5($1))")
+            .bind(resource)
+            .bind(by)
+            .bind(format!("/pub/social/v1/posts/{path}"))
+            .bind(at as f64)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let post = |by: &str, p: &str| collection(by, p);
+    let newest = vec![
+        post(&a, "P"),
+        post(&a, "V"),
+        post(&b, "S"),
+        post(&b, "W"),
+        post(&b, "Z"),
+    ];
+    for limit in [1, 2, 20] {
+        assert_eq!(all_pages(&app, &root, "", limit).await, newest, "{limit}");
+        // The viewer's own first: theirs are the newest two already.
+        assert_eq!(
+            all_pages(&app, &root, &format!("&viewer={a}"), limit).await,
+            newest,
+            "{limit}"
+        );
+        // Another viewer's own first, then the rest.
+        let theirs = all_pages(&app, &root, &format!("&viewer={b}"), limit).await;
+        assert_eq!(
+            theirs,
+            [
+                post(&b, "S"),
+                post(&b, "W"),
+                post(&b, "Z"),
+                post(&a, "P"),
+                post(&a, "V")
+            ],
+            "{limit}"
+        );
+    }
+    assert_eq!(count(&app, &root).await, 5);
+    assert_eq!(count(&app, &only_old).await, 0);
+    assert_eq!(found(&app, &post(&a, "V")).await, vec![root.clone()]);
+    assert_eq!(found(&app, &post(&b, "W")).await, vec![root.clone()]);
+    let mut z = vec![root.clone(), other];
+    z.sort();
+    assert_eq!(found(&app, &post(&b, "Z")).await, z);
+}
+
+/// A path segment of `len` bytes no compression shortens: URL-safe characters drawn from a hash
+/// of `seed`, with a control character (which JSON would escape six-fold) every 50th.
+fn long(seed: &str, len: usize) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut bytes = vec![0; len];
+    blake3::Hasher::new()
+        .update(seed.as_bytes())
+        .finalize_xof()
+        .fill(&mut bytes);
+    bytes
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            if i % 50 == 49 {
+                '\u{1}'
+            } else {
+                ALPHABET[(*b % 64) as usize] as char
+            }
+        })
+        .collect()
+}
+
+/// Every path ingest accepts, up to `max_object_path_bytes` (2,048 bytes), is kept and paged:
+/// a viewer's 102 collections at 2,048-byte paths, tied across their 100th, another author's
+/// 2,048-byte collection that is no post and their long post's two versions in one millisecond.
+/// Ingest applies every line; every page, followed to the end at limits 1, 7 and 20, with and
+/// without the viewer, lists each post once in order; each cursor fits the decoder's cap; the
+/// count and `in_collection` agree.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn the_longest_accepted_paths_are_kept_and_paged(pool: PgPool) {
+    // Some 250 pages, one client: past the default rate limit.
+    let mut config = Config::default();
+    config.api.requests_per_minute = 10_000;
+    let app = api::router(AppState::new(pool.clone(), config).await.unwrap());
+    let link = "https://example.org/song";
+    let id = card(&pool, link, "Song").await;
+    let (a, b) = (author('a'), author('b'));
+    let max = IngestConfig::default().max_object_path_bytes;
+    assert_eq!(max, 2_048);
+    // `/pub/social/v1/posts/` + id + `/v.json`.
+    let post_id = |seed: &str| long(seed, max - 28);
+    // (author, post URI, instant, file), as the listing orders them.
+    let mut posts: Vec<(String, String, i64, String)> = vec![];
+    let mut lines = vec![];
+    for k in 0..102i64 {
+        let p = post_id(&format!("a{k}"));
+        // Three to an instant: the 100th is in a tie.
+        let at = 1_000 + (k / 3) * 1_000;
+        let line = item(Op::Put, &a, &p, "v", link, at);
+        assert_eq!(line.object_path.len(), max);
+        posts.push((a.clone(), collection(&a, &p), at, line.object_path.clone()));
+        lines.push(line);
+    }
+    let file = format!("/pub/social/{}", long("b-file", max - 12));
+    assert_eq!(file.len(), max);
+    lines.push(line(Op::Put, &b, &file, link, 20_500));
+    posts.push((
+        b.clone(),
+        format!("pubky://{b}{file}"),
+        20_500,
+        file.clone(),
+    ));
+    let bp = post_id("b-post");
+    let v1 = item(Op::Put, &b, &bp, "v", link, 30_500);
+    let v2 = item(Op::Put, &b, &bp, "w", link, 30_500);
+    assert_eq!(v2.object_path.len(), max);
+    posts.push((
+        b.clone(),
+        collection(&b, &bp),
+        30_500,
+        v2.object_path.clone(),
+    ));
+    lines.push(v1);
+    lines.push(v2);
+    batch(&pool, lines).await;
+    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM reference WHERE kind='collection'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, 104);
+    // Newest first, then author and file in byte order; the viewer's 100 newest first.
+    posts.sort_by(|x, y| y.2.cmp(&x.2).then(x.0.cmp(&y.0)).then(x.3.cmp(&y.3)));
+    let newest: Vec<String> = posts.iter().map(|p| p.1.clone()).collect();
+    let (mut viewed, mut others): (Vec<_>, Vec<_>) = (vec![], vec![]);
+    for p in &posts {
+        if p.0 == a && viewed.len() < 100 {
+            viewed.push(p.1.clone());
+        } else {
+            others.push(p.1.clone());
+        }
+    }
+    viewed.extend(others);
+    for limit in [1, 7, 20] {
+        for (query, want) in [("".to_owned(), &newest), (format!("&viewer={a}"), &viewed)] {
+            let mut seen = vec![];
+            let mut cursor: Option<String> = None;
+            loop {
+                let after = cursor
+                    .as_ref()
+                    .map_or(String::new(), |c| format!("&cursor={c}"));
+                let (status, page) = request(
+                    &app,
+                    &format!("/v1/resources/{id}/collections?limit={limit}{query}{after}"),
+                )
+                .await;
+                assert_eq!(status, 200, "{limit}{query}: {page}");
+                seen.extend(
+                    page["items"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|i| i["uri"].as_str().unwrap().to_owned()),
+                );
+                cursor = page["cursor"].as_str().map(str::to_owned);
+                match &cursor {
+                    Some(c) => assert!(c.len() <= 8_192, "{limit}{query}: {}", c.len()),
+                    None => break,
+                }
+            }
+            assert_eq!(&seen, want, "{limit}{query}");
+        }
+    }
+    assert_eq!(count(&app, &id).await, 104);
+    assert_eq!(found(&app, &collection(&b, &bp)).await, vec![id.clone()]);
+    assert_eq!(found(&app, &format!("pubky://{b}{file}")).await, vec![id]);
 }
