@@ -488,7 +488,7 @@
             ]
           },
           "items": {
-            "description": "The viewer's own first (their 100 newest), then newest first.",
+            "description": "The viewer's own first (their 100 newest), then newest first. Can hold fewer than `limit`,\nnone even, while references stored before ingest kept each post at one file remain: page\non until `cursor` is `null`.",
             "items": {
               "$ref": "#/components/schemas/Collection"
             },
