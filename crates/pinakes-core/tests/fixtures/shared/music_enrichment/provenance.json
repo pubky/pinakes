@@ -3,34 +3,34 @@
     "note": "Recorded with curl, User-Agent 'pinakes-dev/0.1 (+https://pubky.app; info@synonym.to)', at most one request a second to MusicBrainz. Derived and synthetic answers the tests build in code: wd-p18-no-author (Daft Punk's wd-p18-Q185828 answer with its file name replaced by the no-author file's, the only edit); Wikipedia's 503 with Retry-After: 120 and Commons' 429 (status and header only, no body recorded)."
   },
   "commons-daft-punk": {
-    "bytes": 2030,
+    "bytes": 1791,
     "content_type": "application/json",
     "file": "commons-daft-punk.json",
     "note": "CC BY 4.0 with its author (Sony Music Entertainment): accepted.",
-    "recorded_at": "2026-11-04T15:49:30+00:00",
-    "sha256": "bb808ebba45ce4c431ffe761339c546c538c1836c6022497d97ef7018de567a9",
+    "recorded_at": "2026-11-04T17:17:03+00:00",
+    "sha256": "8dff73e9cc5f52b8fde940599b5d265497943f93925bce085befebefa920d099",
     "status": 200,
-    "url": "https://commons.wikimedia.org/w/api.php?action=query&format=json&formatversion=2&prop=imageinfo&iiprop=url%7Cmime%7Cextmetadata&iiurlwidth=640&iiextmetadatafilter=Artist%7CLicenseShortName%7CLicense%7CLicenseUrl%7CNonFree%7CAttributionRequired%7CCopyrighted%7CUsageTerms&iiextmetadatalanguage=en&titles=File%3ADaft+Punk+in+2013.jpg"
+    "url": "https://commons.wikimedia.org/w/api.php?action=query&format=json&formatversion=2&prop=imageinfo&iiprop=url%7Cmime%7Cextmetadata&iiurlwidth=640&iiextmetadatafilter=Artist%7CLicenseShortName%7CLicense%7CLicenseUrl%7CNonFree&iiextmetadatalanguage=en&titles=File%3ADaft+Punk+in+2013.jpg"
   },
   "commons-miles-davis": {
-    "bytes": 2299,
+    "bytes": 2048,
     "content_type": "application/json",
     "file": "commons-miles-davis.json",
     "note": "CC BY-SA 2.0 with its author (Tom Palumbo): accepted.",
-    "recorded_at": "2026-11-04T15:49:30+00:00",
-    "sha256": "9cd8d8c45399698d7622c76a67c865938939cdaaac4b37daab1a7ecae403f365",
+    "recorded_at": "2026-11-04T17:17:03+00:00",
+    "sha256": "87aa391c79d06d4e6ee8d044c6c06eeee8034c9dff9a241883524c2c6145726a",
     "status": 200,
-    "url": "https://commons.wikimedia.org/w/api.php?action=query&format=json&formatversion=2&prop=imageinfo&iiprop=url%7Cmime%7Cextmetadata&iiurlwidth=640&iiextmetadatafilter=Artist%7CLicenseShortName%7CLicense%7CLicenseUrl%7CNonFree%7CAttributionRequired%7CCopyrighted%7CUsageTerms&iiextmetadatalanguage=en&titles=File%3AMiles+Davis+by+Palumbo+cropped.jpg"
+    "url": "https://commons.wikimedia.org/w/api.php?action=query&format=json&formatversion=2&prop=imageinfo&iiprop=url%7Cmime%7Cextmetadata&iiurlwidth=640&iiextmetadatafilter=Artist%7CLicenseShortName%7CLicense%7CLicenseUrl%7CNonFree&iiextmetadatalanguage=en&titles=File%3AMiles+Davis+by+Palumbo+cropped.jpg"
   },
   "commons-no-author": {
-    "bytes": 2873,
+    "bytes": 2634,
     "content_type": "application/json",
     "file": "commons-no-author.json",
     "note": "A real CC BY 4.0 file with no machine-readable author (in Commons' category 'Files with no machine-readable author'): refused. The tests serve it as the image of a derived Wikidata answer (see wd-p18-no-author).",
-    "recorded_at": "2026-11-04T15:50:05+00:00",
-    "sha256": "677aa9e9f0c7dc733307dd2a7fb28d4eb7ca1244991764c9dc6f8edd84fe1f75",
+    "recorded_at": "2026-11-04T17:17:03+00:00",
+    "sha256": "b8d1ce63e1f7c80ae716c328e032ed4e92699ccd54e68f56f8475a543528874e",
     "status": 200,
-    "url": "https://commons.wikimedia.org/w/api.php?action=query&format=json&formatversion=2&prop=imageinfo&iiprop=url%7Cmime%7Cextmetadata&iiurlwidth=640&iiextmetadatafilter=Artist%7CLicenseShortName%7CLicense%7CLicenseUrl%7CNonFree%7CAttributionRequired%7CCopyrighted%7CUsageTerms&iiextmetadatalanguage=en&titles=File%3A%22+%22Gruss%22+a.+d.+Res.+Lazarett+in+Engers+a.+Rh.+1915.%22%2C+Gruppenbild+-+LABW+-+Staatsarchiv+Sigmaringen+N+1-85+T+1+Nr.+159.jpeg"
+    "url": "https://commons.wikimedia.org/w/api.php?action=query&format=json&formatversion=2&prop=imageinfo&iiprop=url%7Cmime%7Cextmetadata&iiurlwidth=640&iiextmetadatafilter=Artist%7CLicenseShortName%7CLicense%7CLicenseUrl%7CNonFree&iiextmetadatalanguage=en&titles=File%3A%22+%22Gruss%22+a.+d.+Res.+Lazarett+in+Engers+a.+Rh.+1915.%22%2C+Gruppenbild+-+LABW+-+Staatsarchiv+Sigmaringen+N+1-85+T+1+Nr.+159.jpeg"
   },
   "enwiki-summary-404": {
     "bytes": 38,
@@ -56,7 +56,7 @@
     "bytes": 1194,
     "content_type": "application/json",
     "file": "enwiki-summary-get-lucky-disambiguation.json",
-    "note": "A disambiguation page's summary (type disambiguation): no description.",
+    "note": "A disambiguation page's summary (type disambiguation): no description (fed through summary_text by the tests).",
     "recorded_at": "2026-11-04T15:50:05+00:00",
     "sha256": "d43415c420e4d012dcec5090d201d4b3fe60afa761e32b745fa15c28fd8b7bfd",
     "status": 200,
@@ -92,6 +92,16 @@
     "status": 200,
     "url": "https://en.wikipedia.org/api/rest_v1/page/summary/Miles_Davis"
   },
+  "enwiki-summary-richard-colburn-redirect": {
+    "bytes": 2539,
+    "content_type": "application/json",
+    "file": "enwiki-summary-richard-colburn-redirect.json",
+    "note": "The redirect's summary: the redirect followed, it is Belle and Sebastian's (titles.canonical Belle_and_Sebastian), not the drummer's: no description.",
+    "recorded_at": "2026-11-04T17:13:28+00:00",
+    "sha256": "9c1f796e39e6993c24dfe3d0855e9d916648704f524faa60052d55b67277b8ce",
+    "status": 200,
+    "url": "https://en.wikipedia.org/api/rest_v1/page/summary/Richard_Colburn"
+  },
   "mb-artist-daft-punk": {
     "bytes": 26731,
     "content_type": "application/json",
@@ -111,6 +121,16 @@
     "sha256": "2acfe9b0a50a84ac6a9ed6d2279245263e64a767b16441b9e3854ee2758935bc",
     "status": 200,
     "url": "https://musicbrainz.org/ws/2/artist/561d854a-6a28-4aa7-8c99-323e6ce46c2a?inc=url-rels&fmt=json"
+  },
+  "mb-artist-richard-colburn": {
+    "bytes": 2143,
+    "content_type": "application/json",
+    "file": "mb-artist-richard-colburn.json",
+    "note": "Richard Colburn (Person), Wikidata Q3780426, whose English sitelink is to a redirect.",
+    "recorded_at": "2026-11-04T17:13:27+00:00",
+    "sha256": "14023e10f143d4c7a252ff7710cf3c1b1644370908e7a059b9eae6753e1c4665",
+    "status": 200,
+    "url": "https://musicbrainz.org/ws/2/artist/e7528aba-c5e2-4917-9a52-9b61d56f9a13?inc=url-rels&fmt=json"
   },
   "mb-artist-sefa": {
     "bytes": 8398,
@@ -182,6 +202,16 @@
     "status": 200,
     "url": "https://www.wikidata.org/w/api.php?action=wbgetclaims&entity=Q283221&property=P18&format=json"
   },
+  "wd-p18-Q3780426": {
+    "bytes": 13,
+    "content_type": "application/json",
+    "file": "wd-p18-Q3780426.json",
+    "note": "No image claim.",
+    "recorded_at": "2026-11-04T17:13:28+00:00",
+    "sha256": "91eaeaac96fb538eb1fab799f99cb93ace0544197840dbe49c745766fadbfdcb",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=wbgetclaims&entity=Q3780426&property=P18&format=json"
+  },
   "wd-p18-Q93341": {
     "bytes": 915,
     "content_type": "application/json",
@@ -221,6 +251,16 @@
     "sha256": "112601586212b21c65de46543563ff57fd59dfa27287cadcd398feff6340f03a",
     "status": 200,
     "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q283221&props=sitelinks%2Furls&sitefilter=enwiki&format=json"
+  },
+  "wd-sitelink-Q3780426": {
+    "bytes": 213,
+    "content_type": "application/json",
+    "file": "wd-sitelink-Q3780426.json",
+    "note": "Richard Colburn's enwiki sitelink carries the badge Q70893996 (sitelink to redirect): no article.",
+    "recorded_at": "2026-11-04T17:13:28+00:00",
+    "sha256": "e9a795d86d3c7582ddb30bea7ca2d1d2f3bd51b7d0a8eefe101cb323b7d98381",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q3780426&props=sitelinks%2Furls&sitefilter=enwiki&format=json"
   },
   "wd-sitelink-Q93341": {
     "bytes": 190,

@@ -2398,7 +2398,8 @@ limits! {
     /// When a MusicBrainz card whose enrichment failed for a while (a timeout, a 429, a 5xx) is
     /// read again (seconds), at the latest.
     music_enrichment_retry_secs: u64 = |c| c.web.music_enrichment_retry_secs => [|c, v| c.web.music_enrichment_retry_secs = v],
-    /// The width of the Commons thumbnail an enriched card shows (pixels).
+    /// The width of the Commons thumbnail an enriched card asks for (pixels); Commons serves the
+    /// next of its standard sizes (960 for 640).
     music_image_width: u32 = |c| c.web.music_image_width => [|c, v| c.web.music_image_width = v],
     /// Requests per second to any one upstream host.
     host_requests_per_second: f64 = |c| c.egress.host_requests_per_second => [|c, v| c.egress.host_requests_per_second = v],

@@ -31,6 +31,7 @@ const DAFT_PUNK: &str = "https://musicbrainz.org/artist/056e4f3e-d505-4dad-8ec1-
 const KIND_OF_BLUE: &str =
     "https://musicbrainz.org/release-group/8e8a594f-2175-38c7-a871-abb68ec363e7";
 const GET_LUCKY: &str = "https://musicbrainz.org/recording/833f00e1-781f-4edd-90e4-e52712618862";
+const COLBURN: &str = "https://musicbrainz.org/artist/e7528aba-c5e2-4917-9a52-9b61d56f9a13";
 
 struct PublicDns;
 #[async_trait::async_trait]
@@ -124,6 +125,9 @@ impl Transport for Recorded {
                     "artist/b5416a54-4941-4fcf-b2a0-7f98da6f9344" => "mb-artist-sefa.json",
                     "artist/561d854a-6a28-4aa7-8c99-323e6ce46c2a" => "mb-artist-miles-davis.json",
                     "artist/056e4f3e-d505-4dad-8ec1-d04f521cbb56" => "mb-artist-daft-punk.json",
+                    "artist/e7528aba-c5e2-4917-9a52-9b61d56f9a13" => {
+                        "mb-artist-richard-colburn.json"
+                    }
                     "release-group/8e8a594f-2175-38c7-a871-abb68ec363e7" => {
                         "mb-release-group-kind-of-blue.json"
                     }
@@ -355,6 +359,17 @@ async fn cards_take_credited_content_from_their_own_item() {
         )])
     );
 
+    // MusicBrainz's own description of an album or a recording (its artist credit and length)
+    // gives way to the article's summary.
+    for (enriched, uri) in [(&album, KIND_OF_BLUE), (&song, GET_LUCKY)] {
+        let own = card(&plain, uri).await;
+        let line = own.description.unwrap_or_default();
+        assert!(
+            line.starts_with("Daft Punk") || line.starts_with("Miles Davis"),
+            "{line}"
+        );
+        assert_ne!(enriched.description.as_deref(), Some(line.as_str()));
+    }
     // Everything else is MusicBrainz's card as it is with enrichment off.
     for (enriched, uri) in [
         (&sefa, SEFA),
@@ -399,6 +414,47 @@ async fn cards_take_credited_content_from_their_own_item() {
             "musicbrainz.org",
             "www.wikidata.org"
         ]
+    );
+}
+
+/// A sitelink to a redirect names another entity's article (a band member's leads to the band's):
+/// no description, and the article is never asked for. A summary is used only when it is of the
+/// sitelink's own article and a standard one: neither a redirect's target nor a disambiguation
+/// page gives text.
+#[tokio::test]
+async fn a_redirect_or_a_disambiguation_page_gives_no_description() {
+    let t = Recorded::new(Mode::default());
+    let colburn = card(&web(t.clone(), true), COLBURN).await;
+    assert_eq!(
+        (colburn.type_name.as_str(), colburn.name.as_deref()),
+        ("Person", Some("Richard Colburn"))
+    );
+    assert_eq!((&colburn.image, &colburn.description), (&None, &None));
+    assert_eq!(credits(&colburn), json!([]));
+    assert!(
+        colburn.unread_enriched.is_empty(),
+        "a redirect is an answer"
+    );
+    assert_eq!(
+        t.hosts(),
+        ["musicbrainz.org", "www.wikidata.org"],
+        "{:?}",
+        t.seen()
+    );
+
+    let redirect = fixture_json("enwiki-summary-richard-colburn-redirect.json");
+    assert_eq!(
+        pinakes_core::music_enrichment::summary_text(&redirect, "Richard_Colburn"),
+        None
+    );
+    assert!(
+        pinakes_core::music_enrichment::summary_text(&redirect, "Belle_and_Sebastian")
+            .is_some_and(|t| t.starts_with("Belle and Sebastian"))
+    );
+    let disambiguation = fixture_json("enwiki-summary-get-lucky-disambiguation.json");
+    assert_eq!(
+        pinakes_core::music_enrichment::summary_text(&disambiguation, "Get_Lucky"),
+        None
     );
 }
 
@@ -554,8 +610,8 @@ async fn tag(pool: &PgPool, uris: &[&str]) {
     .unwrap();
 }
 
-/// A transient failure (Wikipedia's 503, Commons' 429) keeps the stored image, description and
-/// credits; a definite miss (the article is gone: 404) clears that field and its credit, and
+/// A transient failure (Wikipedia's 503 or 403, Commons' 429) keeps the stored image, description
+/// and credits, and is asked about less often while it lasts; a definite miss (the article is gone: 404) clears that field and its credit, and
 /// keeps the other. A transient failure with nothing stored saves MusicBrainz's own card.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn transient_failures_keep_stored_content_and_misses_clear_it(pool: PgPool) {
@@ -592,6 +648,31 @@ async fn transient_failures_keep_stored_content_and_misses_clear_it(pool: PgPool
     assert_eq!(kept.description, full.description);
     assert_eq!(credits(&kept), miles_credits());
     assert_eq!(kept.name.as_deref(), Some("Miles Davis"));
+    // A refusal of this client (Wikipedia's 403) says nothing about the article: kept too.
+    let refused = Mode {
+        wikipedia: Some((403, 60)),
+        ..Default::default()
+    };
+    let kept = resolve_once(&pool, &web(Recorded::new(refused), true), MILES).await;
+    assert_eq!(kept.description, full.description);
+    assert_eq!(credits(&kept), miles_credits());
+    // A failure that lasts is asked about less often: the stored reading three hours old, the
+    // next one in six.
+    sqlx::query("UPDATE resource SET doc=jsonb_set(doc,'{fetched_at}',to_jsonb((extract(epoch from now() - interval '3 hours')*1000)::bigint)) WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let kept = resolve_once(&pool, &web(Recorded::new(busy), true), MILES).await;
+    assert_eq!(credits(&kept), miles_credits());
+    let later: bool = sqlx::query_scalar(
+        "SELECT refresh_at BETWEEN now() + interval '359 minutes' AND now() + interval '361 minutes' FROM resource WHERE id=$1",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(later);
     // The article is gone: its description and credit go, the image stays.
     let gone = Mode {
         wikipedia: Some((404, 60)),

@@ -481,7 +481,17 @@ impl ResourceMeta {
     /// (`unread_enriched`): each one's stored value and credit, when the stored document has
     /// both. A field the stored document holds without a credit was not enriched: this reading's
     /// own value stays. Nothing is taken when the document would no longer fit.
+    ///
+    /// The early read again (`refresh_by`) waits at least twice as long as since the stored
+    /// reading, so a failure that lasts is asked about less and less often, up to the card's own
+    /// refresh time; a card read in full a refresh time ago is not read again sooner.
     pub fn keep_enriched(&mut self, stored: &ResourceMeta) {
+        if let Some(by) = self.refresh_by {
+            let now = Utc::now();
+            let since = (now.timestamp_millis() - stored.fetched_at).max(0) / 1000;
+            let later = now + chrono::Duration::seconds(since.saturating_mul(2));
+            self.refresh_by = Some(by.max(later));
+        }
         let mut kept = self.clone();
         for field in std::mem::take(&mut kept.unread_enriched) {
             let Some(credit) = stored.credits.iter().find(|c| c.field == field) else {
@@ -794,6 +804,37 @@ mod tests {
         full.keep_enriched(&big);
         assert_eq!(full.image, None);
         assert!(full.credits.is_empty() && full.unread_enriched.is_empty());
+    }
+    /// A field unread again is asked about less and less often: at least twice as long as since
+    /// the stored reading, never sooner than the reading asked.
+    #[test]
+    fn an_unread_field_backs_off() {
+        let now = Utc::now();
+        let mut stored = ResourceMeta::new("https://musicbrainz.org/artist/x", "musicbrainz", 60);
+        let mut fresh = stored.clone();
+        fresh.unread_enriched = vec![CreditField::Image];
+        fresh.refresh_by = Some(now + chrono::Duration::hours(1));
+        // Read just now: the reading's own hour.
+        let mut soon = fresh.clone();
+        soon.keep_enriched(&stored);
+        let by = soon.refresh_by.unwrap();
+        assert!(
+            by >= now + chrono::Duration::minutes(59) && by <= now + chrono::Duration::minutes(61)
+        );
+        // Read three hours ago: six hours from now.
+        stored.fetched_at = (now - chrono::Duration::hours(3)).timestamp_millis();
+        let mut later = fresh.clone();
+        later.keep_enriched(&stored);
+        let by = later.refresh_by.unwrap();
+        assert!(
+            by >= now + chrono::Duration::minutes(359)
+                && by <= now + chrono::Duration::minutes(361)
+        );
+        // No early read asked: none is added.
+        let mut none = fresh.clone();
+        none.refresh_by = None;
+        none.keep_enriched(&stored);
+        assert_eq!(none.refresh_by, None);
     }
     /// A recording's card with a 2,048-byte description, an image and both credits at generous
     /// lengths keeps them all within the document cap; one past it (every URL of both credits

@@ -926,8 +926,12 @@ pub mod wikidata {
     pub fn sitelink_lookup(qid: &str, site: &str) -> String {
         format!("{API}?action=wbgetentities&ids={qid}&props=sitelinks%2Furls&sitefilter={site}&format=json")
     }
+    /// The badges Wikidata gives a sitelink to a redirect ("sitelink to redirect", "intentional
+    /// sitelink to redirect"): the page it names is about something else (a song's redirects to
+    /// its album).
+    pub const REDIRECT_BADGES: [&str; 2] = ["Q70893996", "Q70894304"];
     /// The page URL of `site` in a `sitelink_lookup` answer (the one item it holds, which may
-    /// be the item an ID redirects to).
+    /// be the item an ID redirects to); `None` for a sitelink to a redirect.
     pub fn parse_sitelink(v: &Value, site: &str) -> Option<String> {
         let entities = v["entities"].as_object()?;
         let mut items = entities
@@ -936,7 +940,16 @@ pub mod wikidata {
         let (Some(item), None) = (items.next(), items.next()) else {
             return None;
         };
-        item["sitelinks"][site]["url"].as_str().map(str::to_owned)
+        let link = &item["sitelinks"][site];
+        let redirect = link["badges"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|b| b.as_str().is_some_and(|b| REDIRECT_BADGES.contains(&b)));
+        if redirect {
+            return None;
+        }
+        link["url"].as_str().map(str::to_owned)
     }
     /// The page of item `qid` on `site`; `None` when the item is unknown or has none there.
     pub async fn sitelink(egress: &Egress, qid: &str, site: &str) -> Result<Option<String>> {

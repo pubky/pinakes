@@ -12,9 +12,10 @@
 //! usually a non-free file of Wikipedia's own). The image is shown only when Commons says the
 //! file is free to show with its credit (`wikimedia::free_file`).
 //!
-//! Each field ends in one of three ways: a value with its credit; missing (no item, no article,
-//! a disambiguation page, no image, a refused file), which leaves the card as MusicBrainz alone
-//! makes it; or unread (a timeout, a 429, a 5xx), which keeps what the stored card holds
+//! Each field ends in one of three ways: a value with its credit; missing (no item, an article
+//! that is not there (404, 410), a sitelink to a redirect, a disambiguation page, no image, a
+//! refused file), which leaves the card as MusicBrainz alone makes it; or unread (a timeout, a
+//! 429, a 5xx, any other status), which keeps what the stored card holds
 //! (`ResourceMeta::keep_enriched`). Every request goes through the egress, whose shared flights
 //! and cache make concurrent cards of one entity ask once.
 use crate::{
@@ -62,7 +63,8 @@ impl Enrichment {
         }
     }
     /// Writes the found values and their credits into `doc`. An unread field is listed in
-    /// `unread_enriched`, and the card is read again within `retry_secs`.
+    /// `unread_enriched`, and the card is read again within `retry_secs` (later when it was
+    /// already unread: `ResourceMeta::keep_enriched`).
     pub fn apply(self, doc: &mut ResourceMeta, retry_secs: u64) {
         for (field, found) in [
             (CreditField::Image, self.image),
@@ -199,18 +201,20 @@ async fn description(egress: &Egress, mbid: &str, qid: &str, subject: Option<Str
     };
     match fetched.status {
         200 => {}
-        status if crate::resolver::egress::names_a_wait(status, &[]) => {
-            tracing::info!(mbid, status, "music enrichment: Wikipedia answered a wait");
+        // No such article.
+        404 | 410 => return Found::Missing,
+        // A wait, or a refusal of this client (a 403 for its User-Agent): no answer about the
+        // article.
+        status => {
+            tracing::info!(mbid, status, "music enrichment: Wikipedia did not answer");
             return Found::Unread;
         }
-        // No such article (404), or an answer not worth asking again.
-        _ => return Found::Missing,
     }
     let Ok(v) = serde_json::from_slice::<Value>(&fetched.body) else {
         tracing::info!(mbid, "music enrichment: Wikipedia's summary is not JSON");
         return Found::Unread;
     };
-    let Some(text) = summary_text(&v) else {
+    let Some(text) = summary_text(&v, &article.title) else {
         return Found::Missing;
     };
     let (text, _) = excerpt(&text, crate::model::DESCRIPTION_CAP);
@@ -233,10 +237,12 @@ async fn description(egress: &Egress, mbid: &str, qid: &str, subject: Option<Str
     }
 }
 
-/// An article summary's plain text: a standard article's `extract`; nothing for a
-/// disambiguation page or an article without one.
-pub fn summary_text(v: &Value) -> Option<String> {
-    if v["type"].as_str() != Some("standard") {
+/// An article summary's plain text: a standard article's `extract`, when the summary is of
+/// `title` (with `_` for spaces) itself; nothing for a disambiguation page, an article without
+/// one, or the page a redirect leads to (the summary follows redirects: a song's title may lead
+/// to its album's article).
+pub fn summary_text(v: &Value, title: &str) -> Option<String> {
+    if v["type"].as_str() != Some("standard") || v["titles"]["canonical"].as_str() != Some(title) {
         return None;
     }
     v["extract"]
@@ -307,15 +313,16 @@ async fn image(egress: &Egress, mbid: &str, qid: &str, width: u32) -> Found {
         .await
     {
         Ok(fetched) if fetched.status == 200 => fetched,
-        Ok(fetched) if crate::resolver::egress::names_a_wait(fetched.status, &[]) => {
+        Ok(fetched) if matches!(fetched.status, 404 | 410) => return Found::Missing,
+        // A wait, or a refusal of this client: no answer about the file.
+        Ok(fetched) => {
             tracing::info!(
                 mbid,
                 status = fetched.status,
-                "music enrichment: Commons answered a wait"
+                "music enrichment: Commons did not answer"
             );
             return Found::Unread;
         }
-        Ok(_) => return Found::Missing,
         Err(error) => {
             unread(mbid, "commons_file", &error);
             return Found::Unread;
@@ -399,14 +406,16 @@ mod tests {
     }
     #[test]
     fn only_a_standard_article_has_text() {
-        let standard = serde_json::json!({"type": "standard", "extract": " Text. "});
-        assert_eq!(summary_text(&standard).as_deref(), Some("Text."));
+        let standard = serde_json::json!({"type": "standard", "titles": {"canonical": "X"}, "extract": " Text. "});
+        assert_eq!(summary_text(&standard, "X").as_deref(), Some("Text."));
+        assert_eq!(summary_text(&standard, "Y"), None, "a redirect's target");
         for v in [
-            serde_json::json!({"type": "disambiguation", "extract": "X may refer to:"}),
-            serde_json::json!({"type": "standard", "extract": " "}),
+            serde_json::json!({"type": "disambiguation", "titles": {"canonical": "X"}, "extract": "X may refer to:"}),
+            serde_json::json!({"type": "standard", "titles": {"canonical": "X"}, "extract": " "}),
+            serde_json::json!({"type": "standard", "extract": "Text."}),
             serde_json::json!({"type": "no-extract"}),
         ] {
-            assert_eq!(summary_text(&v), None, "{v}");
+            assert_eq!(summary_text(&v, "X"), None, "{v}");
         }
     }
     #[test]
