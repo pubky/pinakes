@@ -105,22 +105,57 @@ pub async fn write(pool: &PgPool, dir: &Path) -> Result<usize> {
     tokio::fs::create_dir_all(dir)
         .await
         .with_context(|| format!("dump directory {}", dir.display()))?;
-    let _lock = lock(dir)?.context("another writer holds the dump directory's lock")?;
+    let lock = lock(dir)?.context("another writer holds the dump directory's lock")?;
     remove_temps(dir)?;
     let tmp = temp_path(dir);
-    let result = write_to(pool, &tmp).await;
-    match result {
-        Ok(places) => {
-            tokio::fs::rename(&tmp, path(dir)).await?;
-            // The rename is durable once the directory is.
-            let dir = dir.to_owned();
-            tokio::task::spawn_blocking(move || std::fs::File::open(dir)?.sync_all()).await??;
-            Ok(places)
-        }
+    match write_to(pool, &tmp).await {
+        Ok(places) => replace(dir, tmp, lock).await.map(|()| places),
         Err(error) => {
             let _ = tokio::fs::remove_file(&tmp).await;
             Err(error)
         }
+    }
+}
+
+/// Rename `tmp` into place and sync the directory, in one blocking task that holds the
+/// directory's `lock` until its last file operation, so a cancelled write never frees the lock
+/// while its rename is still to come. On a failure the temporary file is removed.
+async fn replace(dir: &Path, tmp: PathBuf, lock: std::fs::File) -> Result<()> {
+    let dir = dir.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let _lock = lock;
+        let replaced = (|| -> Result<()> {
+            #[cfg(test)]
+            before_rename(&dir);
+            std::fs::rename(&tmp, path(&dir))?;
+            // The rename is durable once the directory is.
+            std::fs::File::open(&dir)?.sync_all()?;
+            Ok(())
+        })();
+        if replaced.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        replaced
+    })
+    .await?
+}
+
+/// A test's pause before a writer's final rename, by dump directory.
+#[cfg(test)]
+pub(crate) type Pause = std::sync::Arc<dyn Fn() + Send + Sync>;
+#[cfg(test)]
+pub(crate) static BEFORE_RENAME: std::sync::Mutex<Vec<(PathBuf, Pause)>> =
+    std::sync::Mutex::new(Vec::new());
+#[cfg(test)]
+fn before_rename(dir: &Path) {
+    let pause = BEFORE_RENAME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .find(|(at, _)| at == dir)
+        .map(|(_, pause)| pause.clone());
+    if let Some(pause) = pause {
+        pause();
     }
 }
 
@@ -204,5 +239,76 @@ pub async fn run(pool: PgPool, dir: PathBuf, every: Duration, mut shutdown: watc
                 Duration::from_secs(300)
             }
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::MetadataExt;
+    use std::sync::{Arc, Mutex};
+
+    /// A write cancelled at its last step (shutdown) keeps the directory's lock until its rename
+    /// is done: another writer can neither take the lock nor publish while the cancelled write's
+    /// rename is still to come, and once it has gone the next writer's file stays in place.
+    #[sqlx::test(
+        migrations = "../../migrations",
+        fixtures("../tests/fixtures/require_h3.sql")
+    )]
+    async fn a_cancelled_write_keeps_the_lock_until_its_rename_is_done(pool: PgPool) {
+        let dir = std::env::temp_dir().join(format!("pinakes-cancelled-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        write(&pool, &dir).await.unwrap();
+        let before = std::fs::read(path(&dir)).unwrap();
+        // Writer A stops before its rename until `go`.
+        let (paused, reached) = std::sync::mpsc::channel::<()>();
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        let wait = Mutex::new(wait);
+        BEFORE_RENAME.lock().unwrap().push((
+            dir.clone(),
+            Arc::new(move || {
+                let _ = paused.send(());
+                let _ = wait.lock().unwrap().recv();
+            }),
+        ));
+        let a = {
+            let (pool, dir) = (pool.clone(), dir.clone());
+            tokio::spawn(async move { write(&pool, &dir).await })
+        };
+        tokio::task::spawn_blocking(move || reached.recv_timeout(Duration::from_secs(10)))
+            .await
+            .unwrap()
+            .expect("writer A reached its rename");
+        a.abort();
+        assert!(a.await.unwrap_err().is_cancelled());
+        // A's rename is still to come: B neither takes the lock nor publishes.
+        assert!(lock(&dir).unwrap().is_none(), "the lock is free");
+        let refused = write(&pool, &dir).await.unwrap_err();
+        assert!(format!("{refused:#}").contains("lock"), "{refused:#}");
+        assert_eq!(std::fs::read(path(&dir)).unwrap(), before);
+        go.send(()).unwrap();
+        BEFORE_RENAME.lock().unwrap().retain(|(at, _)| at != &dir);
+        // A's file work ends, its file in place, and the lock is free again.
+        let mut free = false;
+        for _ in 0..500 {
+            if lock(&dir).unwrap().is_some() {
+                free = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(free, "the lock was never released");
+        let a_file = std::fs::metadata(path(&dir)).unwrap().ino();
+        write(&pool, &dir).await.unwrap();
+        let b_file = std::fs::metadata(path(&dir)).unwrap().ino();
+        assert_ne!(a_file, b_file);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            std::fs::metadata(path(&dir)).unwrap().ino(),
+            b_file,
+            "B's file stays in place"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

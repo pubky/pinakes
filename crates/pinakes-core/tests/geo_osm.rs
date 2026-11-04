@@ -1103,6 +1103,13 @@ async fn startup_writes_a_missing_or_stale_dump(pool: PgPool) {
     assert!(due_in(&dir, day) > day - std::time::Duration::from_secs(60));
     stop.send(true).unwrap();
     task.await.unwrap();
+    // A write the stop cancelled at its rename still finishes it, holding the lock.
+    for _ in 0..100 {
+        if pinakes_core::osm_dump::lock(&dir).unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
     // Two days old: stale, so the next start rewrites it.
     let file = std::fs::File::options()
         .write(true)

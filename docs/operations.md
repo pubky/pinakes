@@ -320,9 +320,11 @@ directory take turns and one skips a file another has just written; holding it, 
 the daemon at startup, remove the temporary files an interrupted write left. It reads one repeatable-read snapshot
 without a statement timeout, compresses it into a temporary file of its own
 (`osm_place.ndjson.gz.{pid}.{random}.tmp`) off the async workers, syncs it and renames it into
-place; a failed write, or one refused because another daemon holds the lock, keeps the previous
-file and is retried after five minutes. Shutdown does not wait for a write in progress: it is
-cancelled, the previous file stays, and the next start removes its temporary file. The directory
+place, holding the lock until the rename and the directory's sync are done; a failed write, or
+one refused because another daemon holds the lock, keeps the previous file and is retried after
+five minutes. Shutdown cancels a write in progress. One cancelled while it writes its temporary
+file keeps the previous file, and the next start removes the temporary file; one cancelled at its
+rename still finishes it, holding the lock until it is done. The directory
 must be writable by the daemon and hold two copies of the file while one is written: about 1.5 KB per cached place
 uncompressed, several times less gzipped. Downloads read the file only (no database work),
 `limits.osm_dump_downloads_per_hour` (6) transfers per address (`HEAD`, 304 and 416 are free);
