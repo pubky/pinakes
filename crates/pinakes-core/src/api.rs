@@ -716,6 +716,12 @@ pub struct Card {
     /// LocationIQ answered).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attribution: Option<String>,
+    /// Where `image` and `description` came from when Pinakes added them from another source
+    /// than the link itself (a MusicBrainz card's Wikipedia summary and Commons image): one
+    /// credit per such field, with its source page, author and licence, to show with the value
+    /// (docs/api.md, Credits). At most 4; `[]` when none. A field without a credit came from the
+    /// link itself.
+    pub credits: Vec<model::Credit>,
     /// An event card's OSM venue: `with_refs` credits the card with its place version's
     /// provider.
     #[serde(skip)]
@@ -1046,6 +1052,23 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
         (None, Some(d)) => d.open_in.clone(),
         (None, None) => crate::resolver::pubky_apps::open_in(&uri),
     };
+    let description = doc.as_ref().and_then(|d| present(d.description.as_deref()));
+    let image = doc.as_ref().and_then(|d| present(d.image.as_deref()));
+    // A credit goes with its field's value, never without it.
+    let enriched: Vec<model::Credit> = doc
+        .as_ref()
+        .map(|d| {
+            d.credits
+                .iter()
+                .filter(|c| match c.field {
+                    model::CreditField::Image => image.is_some(),
+                    model::CreditField::Description => description.is_some(),
+                })
+                .take(model::CREDITS_CAP)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(Card {
         site: site(
             &uri,
@@ -1059,8 +1082,8 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
         type_path: serde_json::from_value(row["type_path"].clone()).unwrap_or_default(),
         name: present(row["name"].as_str())
             .or_else(|| doc.as_ref().and_then(|d| present(d.name.as_deref()))),
-        description: doc.as_ref().and_then(|d| present(d.description.as_deref())),
-        image: doc.as_ref().and_then(|d| present(d.image.as_deref())),
+        description,
+        image,
         stream: doc.as_ref().and_then(|d| d.stream.clone()),
         point: doc.as_ref().and_then(|d| d.location.clone()),
         start: doc.as_ref().and_then(|d| d.start),
@@ -1091,6 +1114,7 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
             doc.as_ref()
                 .and_then(|d| d.event.timezone_attribution.clone()),
         ),
+        credits: enriched,
         venue_place: doc
             .as_ref()
             .filter(|_| row["osm_id"].as_i64().is_none())
@@ -2722,6 +2746,9 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
         crate::collections::CollectionPage,
         crate::collections::Collection,
         model::Stream,
+        model::Credit,
+        model::CreditField,
+        model::CreditProvider,
         crate::event::storage::ReferenceEvent,
         crate::change_api::ChangeLine,
         crate::change_api::ChangePage,

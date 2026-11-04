@@ -105,6 +105,7 @@ An IMDb title keeps the type its page gives (it can be either).
 | `also_on` | The same thing elsewhere ([Also on](#also-on)): the other members of its group as `{id, uri, site}` (other resources first, one entry each by ID, then other occurrences of its own feed), then derived links nobody tagged as `{uri, site, derived: true, via, kind?, at?}`, by service name; one per service, at most 8 on a search, lookup or group card; on a resource read every link, several of one service too, up to 256. A hint only: every member keeps its own card |
 | `open_in` | The clients that open a Pubky app's object, `[{client, url}]` (`url` is `https:`): from the app's profile ([Pubky apps](pubky-apps.md)), e.g. Loopky for a deck; on a Pubky event reference's card, those of the event object. `[]` on every other card |
 | `attribution` | Present on OSM cards, events placed at an OSM venue and events whose zone came from coordinates; display it with the card. A place's credit is that of the provider that answered the version shown (LocationIQ's beside the ODbL credit for a place LocationIQ answered) |
+| `credits` | Where `image` and `description` came from when Pinakes added them from another source than the link ([Credits](#credits)): one entry per such field, at most 4. `[]` when none: such a field came from the link itself |
 | `occurrence` | Occurrence cards only: `{feed_id, feed_uri, uid, recurrence_id, status}`; `feed_uri` is the feed's URI, the link people tagged |
 | `event` | Pubky event references only (an event post's occurrence at a place; no feed writes them today: social events are Nexus's, see [Pubky events](#calendars-and-occurrences)): `{author, object_path, recurrence_id, start, end, status}`; `object_path` is the post's versionless path, `recurrence_id` the occurrence's local start (`YYYY-MM-DDTHH:MM:SS`) or null for a one-off |
 | `maybe_same` | Event and occurrence cards: other events that are [possibly the same event](#possibly-the-same-event), best first, each `{id, uri, site, start, score}` (`[]` when there are none). An app's store card: store cards that are [possibly the same app](#possibly-the-same-app). `MusicRecording` cards: other recordings that are [possibly the same recording](#possibly-the-same-recording), the same shape (`start` is `null`). Up to three on a search, lookup or group card, up to ten on a resource read. A hint only, like `group`. Absent on other cards, on event and app cards with `[event] same_event_hint = "off"` and on recording cards with `[groups] same_recording_hint = "off"` |
@@ -162,6 +163,43 @@ Which cards carry one (each source's page in [docs/sources](sources/README.md) s
 - an Apple Music track: iTunes' 30-second preview, `preview: true` (the `itunes` source), from
   the card's next read. Deezer's previews are signed and expire, so they are never one;
   Spotify's are not used.
+
+### Credits
+
+A MusicBrainz card can show an image from Wikimedia Commons and a description from Wikipedia
+([Cards and resolvers](#cards-and-resolvers)). Each such field has a credit; show it with the
+value, linked:
+
+```json
+"credits": [
+  {"field": "image", "provider": "wikimedia_commons",
+   "source_url": "https://commons.wikimedia.org/wiki/File:Miles_Davis_by_Palumbo_cropped.jpg",
+   "author": "Tom Palumbo from New York City, USA", "license": "CC-BY-SA-2.0",
+   "license_url": "https://creativecommons.org/licenses/by-sa/2.0/", "lang": null,
+   "excerpted": false, "modified": false, "subject": null},
+  {"field": "description", "provider": "wikipedia",
+   "source_url": "https://en.wikipedia.org/wiki/Miles_Davis", "author": "Wikipedia contributors",
+   "license": "CC-BY-SA-4.0", "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+   "lang": "en", "excerpted": true, "modified": false, "subject": null}
+]
+```
+
+| Field | Meaning |
+| --- | --- |
+| `field` | `image` or `description`: the card field the value is in |
+| `provider` | `wikipedia` or `wikimedia_commons` |
+| `source_url` | The article, or the file's page on Commons: `https:`, at most 1,024 bytes |
+| `author` | Plain text, at most 256 bytes: `Wikipedia contributors` for an article, the file's author for an image; `null` for a CC0 or public-domain file that names none |
+| `license` | An SPDX licence ID (`CC-BY-SA-4.0`, `CC-BY-2.0`, `CC-BY-SA-3.0-DE`, `CC0-1.0`) or `public-domain` |
+| `license_url` | The licence's text (`https:`); `null` for the public domain without a mark |
+| `lang` | The text's language (`en`); `null` for an image |
+| `excerpted` | `true` when the text is a part of a longer source: a summary is the article's first paragraphs, and one over 2,048 bytes is cut at a sentence or a word |
+| `modified` | `true` when the value was changed beyond cutting it |
+| `subject` | The link of what the value is about when that is not the card itself: a recording's description taken from its work's article names the work (`https://musicbrainz.org/work/…`); else `null` |
+
+A credit is there only with its value: a card without the image or description has none for it.
+The same credits are on every card of the resource: a search, lookup or group card, a resource
+read, the MCP tools' cards.
 
 ### Resource read
 

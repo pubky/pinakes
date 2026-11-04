@@ -680,12 +680,30 @@ fn compact(base: &str, card: &Value) -> Value {
             out.insert(key.into(), card[key].clone());
         }
     }
+    let mut shortened = false;
     if let Some(description) = card["description"].as_str() {
         let mut short: String = description.chars().take(DESCRIPTION_CHARS).collect();
         if short.len() < description.len() {
             short.push('…');
+            shortened = true;
         }
         out.insert("description".into(), short.into());
+    }
+    // The credits of the image and description shown; a shortened description is an excerpt.
+    let credits: Vec<Value> = card["credits"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|c| {
+            let mut c = c.clone();
+            if shortened && c["field"] == "description" {
+                c["excerpted"] = true.into();
+            }
+            c
+        })
+        .collect();
+    if !credits.is_empty() {
+        out.insert("credits".into(), credits.into());
     }
     if card["group"].is_object() {
         out.insert("group".into(), card["group"].clone());
@@ -933,9 +951,27 @@ mod tests {
             compact["also_on"],
             json!([{"uri": "https://example.com/", "site": "Example"}])
         );
-        for absent in ["image", "point", "group", "open_in"] {
+        for absent in ["image", "point", "group", "open_in", "credits"] {
             assert!(compact.get(absent).is_none(), "{absent}");
         }
+        // The credits of what it shows come along; a shortened description is an excerpt.
+        let credit = |field: &str| {
+            json!({"field": field, "provider": "wikipedia", "source_url": "https://en.wikipedia.org/wiki/X",
+                   "author": "Wikipedia contributors", "license": "CC-BY-SA-4.0",
+                   "license_url": "https://creativecommons.org/licenses/by-sa/4.0/", "lang": "en",
+                   "excerpted": false, "modified": false, "subject": null})
+        };
+        let mut credited = card.clone();
+        credited["credits"] = json!([credit("description")]);
+        let compact = super::compact("https://pinakes.example", &credited);
+        assert_eq!(compact["credits"][0]["excerpted"], true);
+        assert_eq!(
+            compact["credits"][0]["source_url"],
+            "https://en.wikipedia.org/wiki/X"
+        );
+        credited["description"] = "short".into();
+        let compact = super::compact("https://pinakes.example", &credited);
+        assert_eq!(compact["credits"], json!([credit("description")]));
     }
 
     #[test]
