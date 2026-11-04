@@ -1221,6 +1221,13 @@ impl Config {
         {
             bail!("limits.html_head_bytes must be 1–16 MB");
         }
+        let w = &self.web;
+        if !(100..=13000).contains(&w.music_enrichment_timeout_ms)
+            || !(60..=604800).contains(&w.music_enrichment_retry_secs)
+            || !(20..=4096).contains(&w.music_image_width)
+        {
+            bail!("invalid music enrichment limits");
+        }
         let e = &self.event;
         let c = &e.container;
         if !(1..=1000).contains(&c.max_changes)
@@ -2204,6 +2211,24 @@ mod tests {
         c.also_on.facts_per_source = 8;
         assert!(c.validate().is_ok());
     }
+    /// The music enrichment limits stay where the card's read and the clock hold them.
+    #[test]
+    fn music_enrichment_limits_have_bounds() {
+        let ok = Config::default();
+        assert!(ok.validate().is_ok());
+        for set in [
+            |c: &mut Config| c.web.music_enrichment_timeout_ms = 13001,
+            |c: &mut Config| c.web.music_enrichment_timeout_ms = u64::MAX,
+            |c: &mut Config| c.web.music_enrichment_retry_secs = 59,
+            |c: &mut Config| c.web.music_enrichment_retry_secs = u64::MAX,
+            |c: &mut Config| c.web.music_image_width = 0,
+            |c: &mut Config| c.web.music_image_width = 4097,
+        ] {
+            let mut c = Config::default();
+            set(&mut c);
+            assert!(c.validate().is_err());
+        }
+    }
     /// An also-on source's own limits pace its hosts as an official source's do.
     #[test]
     fn also_on_source_budgets_pace_their_hosts() {
@@ -2393,13 +2418,14 @@ limits! {
         |c, v| c.cards.doi.ttl_secs = v, |c, v| c.cards.nostr.ttl_secs = v,
         |c, v| c.cards.activitypub.ttl_secs = v, |c, v| c.cards.official.ttl_secs = v],
     /// How long a MusicBrainz card's enrichment may take, within the card's own read
-    /// (milliseconds); past it, the card keeps its stored image and description.
+    /// (milliseconds, 100–13000); past it, the card keeps its stored image and description.
     music_enrichment_timeout_ms: u64 = |c| c.web.music_enrichment_timeout_ms => [|c, v| c.web.music_enrichment_timeout_ms = v],
-    /// When a MusicBrainz card whose enrichment failed for a while (a timeout, a 429, a 5xx) is
-    /// read again (seconds), at the latest.
+    /// The earliest a MusicBrainz card whose enrichment failed for a while (a timeout, a 429, a
+    /// 5xx) is read again (seconds, 60–604800): it waits at least twice as long as since its last
+    /// reading, up to its own refresh time, so a failure on a routine refresh waits for the next.
     music_enrichment_retry_secs: u64 = |c| c.web.music_enrichment_retry_secs => [|c, v| c.web.music_enrichment_retry_secs = v],
-    /// The width of the Commons thumbnail an enriched card asks for (pixels); Commons serves the
-    /// next of its standard sizes (960 for 640).
+    /// The width of the Commons thumbnail an enriched card asks for (pixels, 20–4096); Commons
+    /// serves the next of its standard sizes (960 for 640).
     music_image_width: u32 = |c| c.web.music_image_width => [|c, v| c.web.music_image_width = v],
     /// Requests per second to any one upstream host.
     host_requests_per_second: f64 = |c| c.egress.host_requests_per_second => [|c, v| c.egress.host_requests_per_second = v],

@@ -1211,8 +1211,9 @@ MusicBrainz's web service (the entity it names), not from the page (unless that 
 8 MB cap: then the page is read as any page, and the sources record only what its URL proves, the
 MBID or the ISRC): the title, `MusicRecording`, `MusicAlbum`, `MusicGroup` or `Person` (an artist
 MusicBrainz calls a person), the artist credit and a recording's length as its description (an
-enriched description below takes the place of this line), `site` `MusicBrainz`; an ISRC's page
-is its one recording's card, else named `ISRC {code}`.
+enriched description below takes the place of this line; the resource read's `facts` still give
+them as `artist` and `duration`, in seconds, from the `musicbrainz_entity` source), `site`
+`MusicBrainz`; an ISRC's page is its one recording's card, else named `ISRC {code}`.
 
 A MusicBrainz artist, release group, release or recording card also takes an image and a
 description from the entity's own Wikidata item, each with its [credit](#credits) (`[web]
@@ -1233,8 +1234,9 @@ music_enrichment`, on by default):
 What it does not find leaves the card as MusicBrainz makes it (an artist without an item, such as
 most small artists, has no image or description: the card is still `ok`). An answer that fails for
 a while (a timeout, a 429, a 5xx, another unexpected status) keeps what the card had of that
-field, and the card is read again within the hour, or later while the failure lasts; a definite
-answer (no article, a refused file) removes it.
+field, and the card is read again after at least an hour and at least twice as long as since its
+last reading, up to its own refresh time (so a failure on a routine refresh waits for the next); a
+definite answer (no article, a refused file) removes it.
 
 ## Cards and resolvers
 

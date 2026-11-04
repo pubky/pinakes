@@ -28,9 +28,9 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `resolver_concurrency` | `2` | Concurrent jobs per pubky or card resolver. |
 | `resolver_requests_per_second` | `2.0` | Jobs per second per pubky or card resolver. |
 | `resolver_ttl_secs` | `86400` | Default document lifetime (seconds) for web, pubky and card resolvers. |
-| `music_enrichment_timeout_ms` | `8000` | How long a MusicBrainz card's enrichment may take, within the card's own read (milliseconds); past it, the card keeps its stored image and description. |
-| `music_enrichment_retry_secs` | `3600` | When a MusicBrainz card whose enrichment failed for a while (a timeout, a 429, a 5xx) is read again (seconds), at the latest; a failure that lasts waits at least twice as long as since the card's last reading. |
-| `music_image_width` | `640` | The width of the Commons thumbnail an enriched card asks for (pixels); Commons serves the next of its standard sizes (960 for 640). |
+| `music_enrichment_timeout_ms` | `8000` | How long a MusicBrainz card's enrichment may take, within the card's own read (milliseconds, 100–13000); past it, the card keeps its stored image and description. |
+| `music_enrichment_retry_secs` | `3600` | The earliest a MusicBrainz card whose enrichment failed for a while (a timeout, a 429, a 5xx) is read again (seconds, 60–604800): it waits at least twice as long as since its last reading, up to its own refresh time, so a failure on a routine refresh waits for the next. |
+| `music_image_width` | `640` | The width of the Commons thumbnail an enriched card asks for (pixels, 20–4096); Commons serves the next of its standard sizes (960 for 640). |
 | `host_requests_per_second` | `1.0` | Requests per second to any one upstream host. |
 | `host_rates` | `{}` | Per-host overrides of `host_requests_per_second`. |
 | `html_head_bytes` | `4194304` | How far an HTML page past the 1 MB page cap is read (bytes); nothing in the page stops the read earlier. |
@@ -857,8 +857,8 @@ Commons, through the egress and its pace for those hosts, within
 `limits.music_enrichment_timeout_ms`. A failed or slow request never fails the card: the card
 saves with what it found, and a field a timeout, a 429, a 5xx or any other unexpected status (a
 403 refusing this client) left unread keeps its stored value and credit. The card is then read
-again within `limits.music_enrichment_retry_secs`, or later when the failure lasts: at least twice
-as long as since its last reading, up to its own refresh time. A definite answer (no item, no
+again after at least `limits.music_enrichment_retry_secs` and at least twice as long as since its
+last reading, up to its own refresh time (so a failure on a routine refresh waits for the next). A definite answer (no item, no
 article: 404 or 410, a sitelink to a redirect, a refused file) removes the field. The egress shares concurrent requests
 and keeps answers an hour, and a wait an answer names (`Retry-After`, up to five minutes) for that
 request. Stored cards change at their next read; to apply a change of this switch or of the
