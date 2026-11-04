@@ -104,7 +104,7 @@ An IMDb title keeps the type its page gives (it can be either).
 | `group` | `{id, size}` when the resource or occurrence is in a [group](#groups), else `null` |
 | `also_on` | The same thing elsewhere ([Also on](#also-on)): the other members of its group as `{id, uri, site}` (other resources first, one entry each by ID, then other occurrences of its own feed), then derived links nobody tagged as `{uri, site, derived: true, via, kind?, at?}`, by service name; one per service, at most 8 on a search, lookup or group card; on a resource read every link, several of one service too, up to 256. A hint only: every member keeps its own card |
 | `open_in` | The clients that open a Pubky app's object, `[{client, url}]` (`url` is `https:`): from the app's profile ([Pubky apps](pubky-apps.md)), e.g. Loopky for a deck; on a Pubky event reference's card, those of the event object. `[]` on every other card |
-| `attribution` | Present on OSM cards, events placed at an OSM venue and events whose zone came from coordinates; display it with the card. A place's credit is that of the provider that answered the version shown (LocationIQ's beside the ODbL credit for a place LocationIQ answered) |
+| `attribution` | Present on OSM cards, events placed at an OSM venue and events whose zone came from coordinates; display it with the card |
 | `occurrence` | Occurrence cards only: `{feed_id, feed_uri, uid, recurrence_id, status}`; `feed_uri` is the feed's URI, the link people tagged |
 | `event` | Pubky event references only (an event post's occurrence at a place; no feed writes them today: social events are Nexus's, see [Pubky events](#calendars-and-occurrences)): `{author, object_path, recurrence_id, start, end, status}`; `object_path` is the post's versionless path, `recurrence_id` the occurrence's local start (`YYYY-MM-DDTHH:MM:SS`) or null for a one-off |
 | `maybe_same` | Event and occurrence cards: other events that are [possibly the same event](#possibly-the-same-event), best first, each `{id, uri, site, start, score}` (`[]` when there are none). An app's store card: store cards that are [possibly the same app](#possibly-the-same-app). `MusicRecording` cards: other recordings that are [possibly the same recording](#possibly-the-same-recording), the same shape (`start` is `null`). Up to three on a search, lookup or group card, up to ten on a resource read. A hint only, like `group`. Absent on other cards, on event and app cards with `[event] same_event_hint = "off"` and on recording cards with `[groups] same_recording_hint = "off"` |
@@ -552,10 +552,7 @@ updates are visible between pages; this is not a frozen snapshot.
 **Map clusters.** `cluster=<zoom>` returns `{resolution, clusters, points, truncated, total,
 reach_truncated, facets?}`. A cluster is `{cell, count, lat, lon, top, attribution?}`, where
 `top` holds at most three card IDs by rank, `lat` is the members' mean latitude and `lon` the
-circular mean of their longitudes. `attribution` is present when a member is an OSM place or
-placed at one. A cluster is placed at its members' current points (the place version Pinakes
-holds now, which can be newer than the one a card shows) and carries those versions' credits: the
-OSM credit, or every other credit among them (LocationIQ's). Points are cards. The H3 resolution comes from `limits.h3_resolutions` by floored zoom;
+circular mean of their longitudes. Points are cards. The H3 resolution comes from `limits.h3_resolutions` by floored zoom;
 large viewports coarsen to stay within `limits.max_cluster_cells` and `resolution` reports the
 value used; a viewport that still has more cells returns 400. Singleton cells are points, and when the filtered total fits in `limit` every unit
 is a point. `limit` caps clusters plus points; `truncated` marks omitted units, and otherwise
@@ -1264,15 +1261,15 @@ described by the start of its text, as plain text.
 - The workplace (`jobLocation`) is the card's venue (`venue`), placed on the map as an
   event's venue is ([OpenStreetMap and locations](#openstreetmap-and-locations)): from the
   page's own coordinates; else, with a street, the address geocoded; else the town, when
-  the OSM provider finds exactly one settlement of that name (and country, when the posting names one),
+  Nominatim finds exactly one settlement of that name (and country, when the posting names one),
   in no other region (state, by name or ISO code) and postal region (a numeric postcode's first
   digit) than the posting names. A one-line place ("Springfield, IL", "Austin, TX 78701") is
   checked too: a US state's, Canadian province's or Australian state's code after the town must
   be the settlement's ("London, ON" is not London, England); any code that is the settlement's
   own ISO 3166-2 code agrees ("Chennai, TN" is Chennai, IN-TN), and a numeric postcode there (four
   digits or more, or three and two: "114 55") its postal region. Other words after a town ("UK",
-  "EU", "HQ", "District 1", a region in full) are left to the provider, which reads the whole line. The card's `point` is then that place's,
-  with the provider's attribution.
+  "EU", "HQ", "District 1", a region in full) are left to Nominatim, which reads the whole line. The card's `point` is then that place's,
+  with OpenStreetMap's attribution.
 - A posting is remote when its `jobLocationType` is `TELECOMMUTE` or its place says "Remote"
   ("Remote - US"); it then names the regions it accepts applicants from
   (`applicantLocationRequirements`, or those its place names after "Remote"), up to 32. A place
@@ -1399,34 +1396,23 @@ honouring a Retry-After of up to one hour.
 links resolve offline as Place points (`geo.enabled`): OSM marker links (`/?mlat=&mlon=`), OSM
 shortlinks without an object, OsmAnd `osmand.net/map?pin=` and `osmand.net/go?lat=&lon=`, and
 Organic Maps `omaps.app/<ge0 code>`. Points are not identities and never group. Pinakes does no
-reverse geocoding and offers no place search; event venues are geocoded through the OSM provider
+reverse geocoding and offers no place search; event venues are geocoded through Nominatim
 (`event.geocoding`).
-
-The OSM provider is Nominatim by default, or LocationIQ when the operator chooses it
-(`osm.provider`; see [operations](operations.md#openstreetmap-provider)). Either way a place is an
-OSM object: a provider's answer without an OSM type and id is never stored, and LocationIQ's own
-`place_id` is never read as one. A place's `attribution` (in the dump, see below) names the
-provider that answered it, and so does the `attribution` of a card that shows the place: an OSM
-card's version, or the venue version of an event or job placed at it. `/v1/info` names the provider in `osm_licence.provider`, with
-`osm_licence.terms` when its terms apply beside the ODbL (LocationIQ's).
 
 `GET /v1/dumps/osm_place.ndjson.gz` is the ODbL derivative database as a static file the daemon
 writes every `limits.osm_dump_every_hours` (24) from one repeatable-read snapshot
 (`application/gzip`, `Content-Disposition: attachment`). `/v1/info` gives its path and
 `updated_at` in `osm_licence`. Decompressed, its first line is the licence notice (`notice`,
-`licence`, `licence_url`, `attribution_url`, `note`, `table`), then one object per cached OSM
-object. The ODbL covers the OpenStreetMap data; `note` says that each place's `attribution`
-names the service that answered it, whose terms apply to what it added.
+`licence`, `licence_url`, `attribution_url`, `table`), then one object per cached OSM object:
 
 | Field | Meaning |
 | --- | --- |
 | `osm_type`, `osm_id` | The OSM object (`node`, `way` or `relation`, positive id) |
 | `name`, `type`, `type_path`, `category` | Current name, schema.org type and its path, OSM `key/value` category |
 | `point`, `bbox` | `{lat, lon}` and `[min_lon, min_lat, max_lon, max_lat]`; null for missing objects |
-| `address`, `tags`, `display_name` | Address parts, allowlisted OSM tags, the provider's display name |
-| `attribution` | The credit of the provider that answered the place: `© OpenStreetMap contributors (ODbL)` for Nominatim, `© OpenStreetMap contributors (ODbL); geocoded by LocationIQ.com under its terms` for LocationIQ |
+| `address`, `tags`, `display_name` | Address parts, allowlisted OSM tags, Nominatim display name |
 | `status` | `ok`, or `missing` for cached missing records |
-| `fetched_at` | When the provider last returned the object |
+| `fetched_at` | When Nominatim last returned the object |
 | `versions` | Every derived document served publicly, keyed by version, so earlier values behind the change journal are in the dump |
 
 The raw fetch, the search vector and the refresh schedule are not exported; a new column is not

@@ -42,7 +42,7 @@ async fn tag(pool: &PgPool, id: &str, who: usize, days: i64) {
 }
 
 async fn get_with(config: &Config, pool: &PgPool, path: &str) -> (u16, Value) {
-    let app = api::router(AppState::new(pool.clone(), config.clone()).await.unwrap());
+    let app = api::router(AppState::new(pool.clone(), config.clone()).unwrap());
     let mut request = Request::get(path).body(Body::empty()).unwrap();
     request.extensions_mut().insert(ConnectInfo(
         "127.0.0.1:4000".parse::<std::net::SocketAddr>().unwrap(),
@@ -135,7 +135,7 @@ async fn ranked_by_shared_taggers_then_recency(pool: PgPool) {
         "facets count the related rows"
     );
     // A page and the next one keep the ranking (one daemon: cursors are its own).
-    let app = api::router(AppState::new(pool.clone(), one_shared()).await.unwrap());
+    let app = api::router(AppState::new(pool.clone(), one_shared()).unwrap());
     let page = |path: String| {
         let app = app.clone();
         async move {
@@ -557,9 +557,7 @@ async fn the_ranking_holds_whatever_the_dates_even_in_year_one(pool: PgPool) {
         at(&newer, who, "02-10").await;
         at(&older, who, "01-05").await;
     }
-    let mut state = AppState::new(pool.clone(), Config::default())
-        .await
-        .unwrap();
+    let mut state = AppState::new(pool.clone(), Config::default()).unwrap();
     let now: chrono::DateTime<chrono::Utc> = "0001-03-01T00:00:00Z".parse().unwrap();
     state.clock = Some(std::sync::Arc::new(move || now));
     let app = api::router(state);

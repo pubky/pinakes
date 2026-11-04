@@ -837,7 +837,6 @@ async fn every_named_example_returns_data(pool: PgPool) {
             config.api.requests_per_minute = 100_000;
             config
         })
-        .await
         .unwrap(),
     );
     let (status, doc) = send(&app, "GET", "/v1/openapi.json", None).await;
@@ -943,7 +942,7 @@ async fn a_recipe_whose_resolver_is_off_is_refused_as_the_endpoint_refuses_it(po
             continue;
         }
         assert_eq!(admit(uri, &off), Err("resolver is disabled"), "{uri}");
-        let app = api::router(AppState::new(pool.clone(), off).await.unwrap());
+        let app = api::router(AppState::new(pool.clone(), off).unwrap());
         let (code, answer) = send(&app, "POST", "/v1/resolve", Some(&json!({ "uri": uri }))).await;
         assert_eq!(
             (code, answer),

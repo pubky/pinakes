@@ -223,11 +223,7 @@ async fn paging_lookup_retention_and_deleted_history(pool: PgPool) {
         doc.name = Some(name.into());
         store::save_document(&pool, &id, 0, &doc).await.unwrap();
     }
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let (status, first) = changes_of(&app, &[&id, &other], 0, 2).await;
     assert_eq!(status, 200, "{first}");
     assert_eq!(first["lines"].as_array().unwrap().len(), 2);
@@ -317,11 +313,7 @@ async fn a_change_lookup_takes_links_ids_or_both(pool: PgPool) {
     let variant = "https://example.org/one?utm_source=newsletter";
     let alias = store::ensure_resource(&pool, variant).await.unwrap();
     assert_ne!(alias, id);
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let ask = |body: Value| {
         let app = app.clone();
         async move {
@@ -416,11 +408,7 @@ async fn overdue_priority_respects_backoff_and_final(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     assert_eq!(
         call(
             &app,
@@ -639,9 +627,7 @@ async fn canary_bookkeeping_metrics_and_separate_listener(pool: PgPool) {
             .unwrap(),
         0
     );
-    let state = AppState::new(pool.clone(), Config::default())
-        .await
-        .unwrap();
+    let state = AppState::new(pool.clone(), Config::default()).unwrap();
     let admin = api::admin_router(state.clone());
     let public = api::router(state);
     assert_eq!(call(&public, "GET", "/metrics", None).await.0, 404);
@@ -917,9 +903,7 @@ async fn public_info_is_redacted_and_source_errors_are_classes(pool: PgPool) {
             .await
             .is_err()
     );
-    let state = AppState::new(pool.clone(), Config::default())
-        .await
-        .unwrap();
+    let state = AppState::new(pool.clone(), Config::default()).unwrap();
     let public = api::router(state.clone());
     let admin = api::admin_router(state);
     let (_, body) = call(&public, "GET", "/v1/info", None).await;

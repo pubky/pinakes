@@ -135,43 +135,10 @@ async fn send(
     let value = parsed.unwrap_or_else(|| json!({"body":String::from_utf8_lossy(&bytes)}));
     (status, value)
 }
-/// With LocationIQ as the OSM provider, the info names it, its credit and its terms beside
-/// the ODbL, and the operator view its rate and batch.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
-async fn the_info_names_the_osm_provider_and_its_terms(pool: PgPool) {
-    let mut config = Config::default();
-    config.osm.provider = pinakes_core::config::OsmProvider::LocationIq;
-    config.osm.locationiq.public_use_authorized = true;
-    config.osm.locationiq.key = Some("pk.KEYCANARY".into());
-    config.osm.locationiq.requests_per_second = 2.0;
-    let state = AppState::new(pool, config).await.unwrap();
-    let (_, info) = call(&api::router(state.clone()), "GET", "/v1/info", None).await;
-    let licence = &info["osm_licence"];
-    assert_eq!(licence["provider"], "locationiq", "{info}");
-    assert_eq!(licence["licence"], "ODbL-1.0");
-    assert_eq!(licence["terms"], "https://locationiq.com/tos");
-    assert_eq!(
-        licence["attribution"],
-        pinakes_core::resolver::locationiq::ATTRIBUTION
-    );
-    let (_, admin) = admin_call(&api::admin_router(state), "GET", "/v1/info", None).await;
-    let osm = &admin["resolvers"]["osm"];
-    assert_eq!(
-        (
-            &osm["provider"],
-            &osm["batch_size"],
-            &osm["requests_per_second"]
-        ),
-        (&json!("locationiq"), &json!(3), &json!(2.0)),
-        "{admin}"
-    );
-    assert_eq!(admin["osm_licence"]["provider"], "locationiq");
-    assert!(!format!("{info}{admin}").contains("KEYCANARY"));
-}
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn every_read_route_and_document_projection(pool: PgPool) {
     let ids = seed(&pool).await;
-    let state = AppState::new(pool, Config::default()).await.unwrap();
+    let state = AppState::new(pool, Config::default()).unwrap();
     let app = api::router(state);
     let (code, info) = call(&app, "GET", "/v1/info", None).await;
     assert_eq!(code, 200);
@@ -201,9 +168,6 @@ async fn every_read_route_and_document_projection(pool: PgPool) {
         .iter()
         .any(|k| k == "web"));
     assert_eq!(info["limits"]["lookup"], 500);
-    assert_eq!(info["osm_licence"]["provider"], "nominatim", "{info}");
-    assert_eq!(info["osm_licence"]["licence"], "ODbL-1.0");
-    assert!(info["osm_licence"].get("terms").is_none(), "{info}");
     assert_eq!(
         info["limits"]["requests_per_minute"],
         Config::default().api.requests_per_minute
@@ -310,11 +274,7 @@ async fn search_filters_facets_true_keyset_and_invalid_options(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let (code, page) = call(
         &app,
         "GET",
@@ -559,7 +519,6 @@ async fn nexus_reach_paginates_caches_and_scopes_tag_facets(pool: PgPool) {
                 ..Default::default()
             },
         )
-        .await
         .unwrap(),
     );
     let path = format!(
@@ -656,7 +615,7 @@ async fn preview_pending_cached_completion_and_per_ip_uri_budgets(pool: PgPool) 
         },
         ..Default::default()
     };
-    let state = AppState::new(pool.clone(), config.clone()).await.unwrap();
+    let state = AppState::new(pool.clone(), config.clone()).unwrap();
     let app = api::router(state);
     let start = std::time::Instant::now();
     let (code, preview) = call(
@@ -764,11 +723,7 @@ async fn preview_pending_cached_completion_and_per_ip_uri_budgets(pool: PgPool) 
 
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn preview_returns_completion_within_synchronous_window(pool: PgPool) {
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let worker = tokio::spawn(async move {
         loop {
             if let Some(job) = queue::claim(&pool, "web", &Default::default())
@@ -809,7 +764,7 @@ async fn public_budget_covers_reads_and_evicts_old_ips(pool: PgPool) {
         },
         ..Default::default()
     };
-    let app = api::router(AppState::new(pool, config).await.unwrap());
+    let app = api::router(AppState::new(pool, config).unwrap());
     async fn read_from(app: &Router, path: &str, peer: &str) -> u16 {
         let mut r = Request::builder().uri(path).body(Body::empty()).unwrap();
         r.extensions_mut().insert(axum::extract::ConnectInfo(
@@ -861,7 +816,7 @@ async fn api_pool_enforces_query_timeout(pool: PgPool) {
 /// A request body over 2 MB is refused before any handler reads it.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_body_over_two_megabytes_is_refused(pool: PgPool) {
-    let app = api::router(AppState::new(pool, Config::default()).await.unwrap());
+    let app = api::router(AppState::new(pool, Config::default()).unwrap());
     let uris: Vec<String> = (0..1000)
         .map(|n| format!("https://example.org/{n}/{}", "x".repeat(2100)))
         .collect();
@@ -876,7 +831,7 @@ async fn a_body_over_two_megabytes_is_refused(pool: PgPool) {
 /// `/v1/resolve` (Codex's case) stays out of the answer.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_rejected_request_quotes_no_input(pool: PgPool) {
-    let app = api::router(AppState::new(pool, Config::default()).await.unwrap());
+    let app = api::router(AppState::new(pool, Config::default()).unwrap());
     let link = "HTTPS://user:CANARY@example.org/calendar?token=QUERYCANARY#FRAGMENTCANARY";
     let canary = |answer: &Value| {
         let text = answer.to_string();
@@ -927,7 +882,7 @@ async fn reach_searches_pay_for_upstream_pages_before_fetching(pool: PgPool) {
         ..Default::default()
     };
     config.api.requests_per_minute = 7;
-    let app = api::router(AppState::new(pool, config).await.unwrap());
+    let app = api::router(AppState::new(pool, config).unwrap());
     let path = format!("/v1/search?%72each=following&viewer={}", author(0));
     assert_eq!(call(&app, "GET", &path, None).await.0, 200);
     assert_eq!(calls.load(Ordering::SeqCst), 6);
@@ -948,7 +903,7 @@ async fn related_searches_cost_their_own_units_and_with_reach_both(pool: PgPool)
     let seed = "0".repeat(32);
     let mut config = Config::default();
     config.api.requests_per_minute = 7;
-    let app = api::router(AppState::new(pool.clone(), config).await.unwrap());
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
     let path = format!("/v1/search?%72elated={seed}");
     assert_eq!(call(&app, "GET", &path, None).await.0, 200);
     assert_eq!(call(&app, "GET", &path, None).await.0, 429);
@@ -966,7 +921,7 @@ async fn related_searches_cost_their_own_units_and_with_reach_both(pool: PgPool)
             ..Default::default()
         };
         config.api.requests_per_minute = budget;
-        let app = api::router(AppState::new(pool.clone(), config).await.unwrap());
+        let app = api::router(AppState::new(pool.clone(), config).unwrap());
         assert_eq!(call(&app, "GET", &both, None).await.0, status, "{budget}");
         assert_eq!(calls.load(Ordering::SeqCst), fetched, "{budget}");
     }
@@ -977,11 +932,7 @@ async fn related_searches_cost_their_own_units_and_with_reach_both(pool: PgPool)
 async fn cursors_reject_payload_tampering_unsigned_forgery_and_another_daemon_key(pool: PgPool) {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
     seed(&pool).await;
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let (_, first) = call(&app, "GET", "/v1/search?limit=2", None).await;
     let cursor = first["cursor"].as_str().unwrap();
     let signed = URL_SAFE_NO_PAD.decode(cursor).unwrap();
@@ -1033,7 +984,7 @@ async fn cursors_reject_payload_tampering_unsigned_forgery_and_another_daemon_ke
         .0,
         200
     );
-    let restarted = api::router(AppState::new(pool, Config::default()).await.unwrap());
+    let restarted = api::router(AppState::new(pool, Config::default()).unwrap());
     assert_eq!(
         call(
             &restarted,
@@ -1053,11 +1004,7 @@ async fn cursors_reject_payload_tampering_unsigned_forgery_and_another_daemon_ke
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn an_in_flight_writer_changes_the_etag_only_when_it_commits(pool: PgPool) {
     let ids = seed(&pool).await;
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let search = |etag: Option<String>| {
         let app = app.clone();
         async move {
@@ -1158,7 +1105,7 @@ async fn reach_membership_changes_invalidate_etags_without_resource_writes(pool:
         .unwrap()
     });
     let path = format!("/v1/search?reach=following&viewer={}", author(999));
-    let first = api::router(AppState::new(pool.clone(), config.clone()).await.unwrap());
+    let first = api::router(AppState::new(pool.clone(), config.clone()).unwrap());
     let mut request = Request::builder().uri(&path).body(Body::empty()).unwrap();
     request.extensions_mut().insert(axum::extract::ConnectInfo(
         "127.0.0.1:1".parse::<std::net::SocketAddr>().unwrap(),
@@ -1172,7 +1119,7 @@ async fn reach_membership_changes_invalidate_etags_without_resource_writes(pool:
         .unwrap();
     expanded.store(true, Ordering::SeqCst);
     // A new state represents the next reach refresh after the normal five-minute cache expires.
-    let refreshed = api::router(AppState::new(pool.clone(), config).await.unwrap());
+    let refreshed = api::router(AppState::new(pool.clone(), config).unwrap());
     let mut request = Request::builder()
         .uri(path)
         .header("if-none-match", &etag)
@@ -1205,8 +1152,7 @@ async fn admin_bearer_and_network_bind_policy(pool: sqlx::PgPool) {
     assert!(cfg.validate().is_err());
     cfg.admin_token = Some("review-only-operator-token".into());
     assert!(cfg.validate().is_ok());
-    let app =
-        pinakes_core::api::admin_router(pinakes_core::api::AppState::new(pool, cfg).await.unwrap());
+    let app = pinakes_core::api::admin_router(pinakes_core::api::AppState::new(pool, cfg).unwrap());
     for credential in [
         None,
         Some("Bearer wrong"),
@@ -1284,7 +1230,7 @@ async fn swagger_ui_and_the_openapi_document_are_on_the_public_listener_only(poo
         admin_token: Some(token.into()),
         ..Default::default()
     };
-    let state = AppState::new(pool.clone(), config.clone()).await.unwrap();
+    let state = AppState::new(pool.clone(), config.clone()).unwrap();
     let public = api::router(state.clone());
     let admin = api::admin_router(state);
 
@@ -1428,7 +1374,7 @@ async fn swagger_ui_and_the_openapi_document_are_on_the_public_listener_only(poo
     // Switched off, the route is gone.
     let mut off = config;
     off.api.swagger_ui = false;
-    let public = api::router(AppState::new(pool.clone(), off).await.unwrap());
+    let public = api::router(AppState::new(pool.clone(), off).unwrap());
     for path in [
         "/swagger-ui",
         "/swagger-ui/",
@@ -1443,7 +1389,7 @@ async fn swagger_ui_and_the_openapi_document_are_on_the_public_listener_only(poo
     // Swagger UI shares the per-IP budget of the /v1 routes.
     let mut tight = Config::default();
     tight.api.requests_per_minute = 2;
-    let public = api::router(AppState::new(pool, tight).await.unwrap());
+    let public = api::router(AppState::new(pool, tight).unwrap());
     assert_eq!(raw(&public, "GET", "/swagger-ui/", None).await.0, 200);
     assert_eq!(raw(&public, "GET", "/v1/openapi.json", None).await.0, 200);
     let (code, headers, _) = raw(&public, "GET", "/swagger-ui/", None).await;
@@ -1479,8 +1425,7 @@ async fn cors_for_browser_clients_on_the_public_listener_only(pool: PgPool) {
         config.api.cors_allow_origins = origins.into_iter().map(str::to_owned).collect();
         config.api.requests_per_minute = per_minute;
         config.validate().unwrap();
-        let pool = pool.clone();
-        async move { api::router(AppState::new(pool, config).await.unwrap()) }
+        api::router(AppState::new(pool.clone(), config).unwrap())
     };
     let preflight = [
         ("origin", "https://pubky.app"),
@@ -1489,7 +1434,7 @@ async fn cors_for_browser_clients_on_the_public_listener_only(pool: PgPool) {
     ];
     // Default: any origin, no credentials, Retry-After and ETag exposed.
     assert_eq!(Config::default().api.cors_allow_origins, ["*"]);
-    let any = app_with(vec!["*"], 120).await;
+    let any = app_with(vec!["*"], 120);
     let (code, h) = cors_call(&any, "GET", "/v1/info", &[("origin", "https://pubky.app")]).await;
     assert_eq!(code, 200);
     assert_eq!(h["access-control-allow-origin"], "*");
@@ -1509,7 +1454,7 @@ async fn cors_for_browser_clients_on_the_public_listener_only(pool: PgPool) {
     assert_eq!(h["access-control-allow-headers"], "content-type");
     assert_eq!(h["access-control-max-age"], "600");
     // A list: the allowed origin is echoed with Vary: Origin; another origin gets nothing.
-    let listed = app_with(vec!["https://pubky.app"], 120).await;
+    let listed = app_with(vec!["https://pubky.app"], 120);
     let (_, h) = cors_call(
         &listed,
         "GET",
@@ -1537,7 +1482,7 @@ async fn cors_for_browser_clients_on_the_public_listener_only(pool: PgPool) {
     assert!(h.get("access-control-allow-origin").is_none());
     assert!(h.get("access-control-allow-methods").is_none());
     // Preflights share the per-IP budget, and the 429 is readable cross-origin.
-    let tight = app_with(vec!["*"], 2).await;
+    let tight = app_with(vec!["*"], 2);
     for _ in 0..2 {
         assert_eq!(
             cors_call(&tight, "OPTIONS", "/v1/resolve", &preflight)
@@ -1558,18 +1503,14 @@ async fn cors_for_browser_clients_on_the_public_listener_only(pool: PgPool) {
     assert_eq!(h["access-control-allow-origin"], "*");
     assert_eq!(h["access-control-expose-headers"], "retry-after, etag");
     // Disabled: no CORS headers, and OPTIONS is not answered as a preflight.
-    let off = app_with(vec![], 120).await;
+    let off = app_with(vec![], 120);
     let (_, h) = cors_call(&off, "GET", "/v1/info", &[("origin", "https://pubky.app")]).await;
     assert!(h.get("access-control-allow-origin").is_none());
     let (code, h) = cors_call(&off, "OPTIONS", "/v1/resolve", &preflight).await;
     assert_ne!(code, 204);
     assert!(h.get("access-control-allow-methods").is_none());
     // The admin listener never sends CORS headers.
-    let admin = api::admin_router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let admin = api::admin_router(AppState::new(pool.clone(), Config::default()).unwrap());
     for (method, headers) in [
         ("GET", &[("origin", "https://pubky.app")][..]),
         ("OPTIONS", &preflight[..]),
@@ -1599,7 +1540,7 @@ async fn cors_for_browser_clients_on_the_public_listener_only(pool: PgPool) {
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn out_of_range_request_timestamps_answer_400(pool: PgPool) {
     let ids = seed(&pool).await;
-    let app = api::router(AppState::new(pool, Config::default()).await.unwrap());
+    let app = api::router(AppState::new(pool, Config::default()).unwrap());
     let refused = |code: StatusCode, body: &Value, what: &str| {
         assert_eq!(code, 400, "{what}: {body}");
         assert!(
@@ -1754,7 +1695,7 @@ async fn multibyte_input_never_panics_any_public_route(pool: PgPool) {
     config.api.requests_per_minute = 1_000_000;
     config.preview.requests_per_minute = 1_000_000;
     config.preview.uri_requests_per_minute = 1_000_000;
-    let state = AppState::new(pool, config).await.unwrap();
+    let state = AppState::new(pool, config).unwrap();
     let panics = state.metrics.api_panics.clone();
     let app = api::router(state);
     let id = "0123456789abcdef0123456789abcdef";
@@ -2000,7 +1941,7 @@ async fn relative_windows_are_pinned_by_the_search_cursor(pool: PgPool) {
             .unwrap();
         ids.push(id);
     }
-    let mut state = AppState::new(pool, Config::default()).await.unwrap();
+    let mut state = AppState::new(pool, Config::default()).unwrap();
     state.clock = Some(clock);
     let app = api::router(state);
     let path = "/v1/search?type=Event&from=now&sort=start&limit=1";
@@ -2037,7 +1978,7 @@ async fn change_lookup_pins_a_relative_since_per_cursor(pool: PgPool) {
             .unwrap();
     }
     let (now, clock) = test_clock(minute + chrono::Duration::seconds(40));
-    let mut state = AppState::new(pool, Config::default()).await.unwrap();
+    let mut state = AppState::new(pool, Config::default()).unwrap();
     state.clock = Some(clock);
     let app = api::router(state);
     let page = |cursor: Option<i64>| {
@@ -2073,7 +2014,7 @@ async fn change_lookup_pins_a_relative_since_per_cursor(pool: PgPool) {
 /// body with the CORS header and increments `pinakes_api_panics_total`.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn the_panic_backstop_answers_500_with_cors_and_counts(pool: PgPool) {
-    let state = AppState::new(pool, Config::default()).await.unwrap();
+    let state = AppState::new(pool, Config::default()).unwrap();
     let panics = state.metrics.api_panics.clone();
     async fn boom() -> &'static str {
         panic!("test panic")
@@ -2107,7 +2048,7 @@ async fn the_admin_backstop_sits_behind_the_bearer_check(pool: PgPool) {
         admin_token: Some("admin-test-token".into()),
         ..Default::default()
     };
-    let state = AppState::new(pool, config).await.unwrap();
+    let state = AppState::new(pool, config).unwrap();
     let panics = state.metrics.api_panics.clone();
     static RAN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     async fn boom() -> &'static str {
@@ -2194,11 +2135,7 @@ async fn cards_carry_the_timezone_boundary_attribution(pool: PgPool) {
         url: None,
     });
     store::save_document(&pool, &id, 0, &doc).await.unwrap();
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let (code, card) = call(&app, "GET", &format!("/v1/resources/{id}"), None).await;
     assert_eq!(code, 200, "{card}");
     assert_eq!(card["attribution"], pinakes_core::event::time::ATTRIBUTION);
@@ -2242,11 +2179,7 @@ async fn a_card_carries_its_stream(pool: PgPool) {
     store::save_document(&pool, &other_id, 0, &ResourceMeta::new(other, "web", 86400))
         .await
         .unwrap();
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let stream = json!({
         "url": "https://cdn.podcast.example/episode-1.mp3",
         "type": "audio/mpeg",
@@ -2273,7 +2206,7 @@ async fn a_card_carries_its_stream(pool: PgPool) {
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn the_stored_document_is_an_admin_read(pool: PgPool) {
     let ids = seed(&pool).await;
-    let state = AppState::new(pool, Config::default()).await.unwrap();
+    let state = AppState::new(pool, Config::default()).unwrap();
     let (public, admin) = (api::router(state.clone()), api::admin_router(state));
     let path = format!("/v1/resources/{}/document", ids[0]);
     let (code, doc) = admin_call(&admin, "GET", &path, None).await;
@@ -2347,7 +2280,7 @@ async fn an_alias_reads_as_its_root_everywhere(pool: PgPool) {
     assert_eq!(doc.name.as_deref(), Some("Talk"));
     store::save_document(&pool, &root, 0, &doc).await.unwrap();
     let pool_for_checks = pool.clone();
-    let app = api::router(AppState::new(pool, Config::default()).await.unwrap());
+    let app = api::router(AppState::new(pool, Config::default()).unwrap());
     let (code, card) = call(&app, "GET", &format!("/v1/resources/{alias}"), None).await;
     assert_eq!(code, 200, "{card}");
     assert_eq!(
@@ -2466,11 +2399,7 @@ async fn a_deleted_pubky_post_loses_its_excerpt(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let found = |q: &'static str| {
         let app = app.clone();
         async move {
@@ -2544,11 +2473,7 @@ async fn an_opted_out_post_is_not_searched_and_keeps_no_history_text(pool: PgPoo
         .execute(&pool)
         .await
         .unwrap();
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let found = |q: &'static str| {
         let app = app.clone();
         async move {
@@ -2754,11 +2679,7 @@ async fn a_boost_ranks_the_viewers_set_first_and_never_filters(pool: PgPool) {
     // Each item is tagged by its own author (item 0 twice, by one author): the default ranking
     // ties them and orders them by ID. The friend is the author of the last item but item 0,
     // the reach set's the author of the one before it.
-    let plain_app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let plain_app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let (_, page) = call(&plain_app, "GET", "/v1/search?limit=50", None).await;
     let plain = ids_of(&page);
     assert_eq!(plain.len(), 5);
@@ -2773,7 +2694,7 @@ async fn a_boost_ranks_the_viewers_set_first_and_never_filters(pool: PgPool) {
         nexus_url: nexus_url.clone(),
         ..Default::default()
     };
-    let app = api::router(AppState::new(pool.clone(), config).await.unwrap());
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
     let viewer = author(9999);
     let get = |path: String| {
         let app = app.clone();
@@ -2858,7 +2779,6 @@ async fn a_boost_ranks_the_viewers_set_first_and_never_filters(pool: PgPool) {
                 ..Default::default()
             },
         )
-        .await
         .unwrap(),
     );
     let (code, page) = call(
@@ -2906,7 +2826,6 @@ async fn a_boost_over_many_cards_answers_in_time(pool: PgPool) {
                 ..Default::default()
             },
         )
-        .await
         .unwrap(),
     );
     let viewer = author(9999);
@@ -2942,7 +2861,6 @@ async fn an_old_reference_neither_boosts_nor_breaks_a_search(pool: PgPool) {
                 ..Default::default()
             },
         )
-        .await
         .unwrap(),
     );
     let viewer = author(9999);

@@ -27,50 +27,7 @@ pub fn path(dir: &Path) -> PathBuf {
 
 /// The first line of the file.
 pub fn notice() -> Value {
-    json!({"notice":crate::resolver::osm::ATTRIBUTION,"licence":"ODbL-1.0","licence_url":"https://opendatacommons.org/licenses/odbl/1-0/","attribution_url":"https://www.openstreetmap.org/copyright","note":NOTE,"table":"osm_place"})
-}
-/// What the licence covers, in the notice.
-pub const NOTE: &str = "The ODbL covers the OpenStreetMap data. Each place's attribution names the service that answered it; that service's terms apply to what it added.";
-
-/// Whether the file in `dir` holds a place credited to a service beside OpenStreetMap: a line's
-/// `attribution`, or one of its `versions`', other than the OSM credit alone. False without a
-/// file. Blocking: it reads the whole file.
-pub fn credits_beside_osm(dir: &Path) -> Result<bool> {
-    match std::fs::File::open(path(dir)) {
-        Ok(file) => file_credits_beside_osm(&file),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(e).context("the dump file"),
-    }
-}
-/// As `credits_beside_osm`, for an open dump file, read from its start whatever its offset.
-pub fn file_credits_beside_osm(file: &std::fs::File) -> Result<bool> {
-    use std::io::BufRead;
-    /// The file from its start, read at positions of its own.
-    struct At<'a>(&'a std::fs::File, u64);
-    impl std::io::Read for At<'_> {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            let n = std::os::unix::fs::FileExt::read_at(self.0, buf, self.1)?;
-            self.1 += n as u64;
-            Ok(n)
-        }
-    }
-    let lines = std::io::BufReader::new(flate2::read::GzDecoder::new(At(file, 0))).lines();
-    for line in lines {
-        if beside_osm(&serde_json::from_str(&line.context("the dump file")?)?) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-/// Whether a dump line credits a service beside OpenStreetMap: its `attribution`, or one of its
-/// `versions`', is other than the OSM credit alone.
-fn beside_osm(line: &Value) -> bool {
-    let osm = crate::resolver::osm::ATTRIBUTION;
-    let beside = |v: &Value| v["attribution"].as_str().is_some_and(|a| a != osm);
-    beside(line)
-        || line["versions"]
-            .as_object()
-            .is_some_and(|versions| versions.values().any(beside))
+    json!({"notice":crate::resolver::osm::ATTRIBUTION,"licence":"ODbL-1.0","licence_url":"https://opendatacommons.org/licenses/odbl/1-0/","attribution_url":"https://www.openstreetmap.org/copyright","table":"osm_place"})
 }
 
 /// When the file was last written, if it exists.
@@ -143,12 +100,7 @@ pub fn remove_leftovers(dir: &Path) -> std::io::Result<usize> {
 /// Write the file from one read-only snapshot and rename it into place; returns the places
 /// written. On any failure the previous file stays and the temporary one is removed. Refused while
 /// another writer holds the directory's lock.
-/// Without LocationIQ's authorization (`publication`), a place it answered stops the write.
-pub async fn write(
-    pool: &PgPool,
-    dir: &Path,
-    publication: crate::resolver::locationiq::Publication,
-) -> Result<usize> {
+pub async fn write(pool: &PgPool, dir: &Path) -> Result<usize> {
     let _one = WRITER.lock().await;
     tokio::fs::create_dir_all(dir)
         .await
@@ -156,7 +108,7 @@ pub async fn write(
     let _lock = lock(dir)?.context("another writer holds the dump directory's lock")?;
     remove_temps(dir)?;
     let tmp = temp_path(dir);
-    let result = write_to(pool, &tmp, publication).await;
+    let result = write_to(pool, &tmp).await;
     match result {
         Ok(places) => {
             tokio::fs::rename(&tmp, path(dir)).await?;
@@ -172,11 +124,7 @@ pub async fn write(
     }
 }
 
-async fn write_to(
-    pool: &PgPool,
-    tmp: &Path,
-    publication: crate::resolver::locationiq::Publication,
-) -> Result<usize> {
+async fn write_to(pool: &PgPool, tmp: &Path) -> Result<usize> {
     use futures_util::TryStreamExt;
     let (lines, mut received) = tokio::sync::mpsc::channel::<String>(256);
     let file = tmp.to_owned();
@@ -207,10 +155,6 @@ async fn write_to(
         let mut rows = sqlx::query_scalar::<_, Value>(crate::api::OSM_DUMP_LINE).fetch(&mut *tx);
         let mut places = 0;
         while let Some(row) = rows.try_next().await? {
-            anyhow::ensure!(
-                publication.locationiq() || !beside_osm(&row),
-                "the dump holds places LocationIQ answered, and osm.locationiq.public_use_authorized is false"
-            );
             lines.send(row.to_string()).await?;
             places += 1;
         }
@@ -229,13 +173,7 @@ async fn write_to(
 /// directory may have written it), checking again after `every`. A failed write is retried after
 /// five minutes. Shutdown cancels a write in progress: the previous file stays, and the next
 /// start (or the next writer) removes the temporary one.
-pub async fn run(
-    pool: PgPool,
-    dir: PathBuf,
-    every: Duration,
-    publication: crate::resolver::locationiq::Publication,
-    mut shutdown: watch::Receiver<bool>,
-) {
+pub async fn run(pool: PgPool, dir: PathBuf, every: Duration, mut shutdown: watch::Receiver<bool>) {
     let leftovers = dir.clone();
     match tokio::task::spawn_blocking(move || remove_leftovers(&leftovers)).await {
         Ok(Ok(0)) => {}
@@ -255,8 +193,7 @@ pub async fn run(
             wait = due;
             continue;
         }
-        let written =
-            tokio::select! { _=shutdown.changed()=>break, r=write(&pool, &dir, publication)=>r };
+        let written = tokio::select! { _=shutdown.changed()=>break, r=write(&pool, &dir)=>r };
         wait = match written {
             Ok(places) => {
                 tracing::info!(places, file=%path(&dir).display(), "ODbL dump written");

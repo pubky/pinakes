@@ -83,11 +83,7 @@ async fn one_barcode_on_two_shops_is_one_group(pool: PgPool) {
     pinakes_core::groups::drain(&pool, &Default::default(), 100)
         .await
         .unwrap();
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let card: Value = get(&app, &format!("/v1/resources/{}", ids[0])).await;
     assert_eq!(card["group"]["size"], 2, "{card}");
     assert!(card["also_on"]

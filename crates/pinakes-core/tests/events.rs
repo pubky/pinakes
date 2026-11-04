@@ -649,11 +649,7 @@ async fn event_units_pagination_occurrence_route_pubky_recurrences_and_venue(poo
     store::save_document(&pool, &page_id, 0, &page)
         .await
         .unwrap();
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let (code, v) = call(
         &app,
         "/v1/search?type=Event&sort=start&bbox=7,46,9,48&limit=2",
@@ -928,11 +924,7 @@ async fn reextract_repairs_event_text(pool: PgPool) {
         })),
     };
     queue::run_job(&pool, &resolver, &cfg, &job).await.unwrap();
-    let card = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let card = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let (code, v) = call(&card, &format!("/v1/resources/{id}")).await;
     assert_eq!(code, 200, "{v}");
     assert_eq!(v["name"], "Café night");
@@ -1835,11 +1827,7 @@ async fn occurrences_signed_paging_windows_and_indexed_views(pool: PgPool) {
     d.container.as_mut().unwrap().occurrences[1].uid = "id0".into();
     d.container.as_mut().unwrap().occurrences[1].recurrence_id = "second".into();
     store::save_document(&pool, &id, 0, &d).await.unwrap();
-    let app = api::router(
-        api::AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(api::AppState::new(pool.clone(), Config::default()).unwrap());
     let mut next = format!("/v1/resources/{id}/occurrences?limit=2");
     let mut keys = std::collections::BTreeSet::new();
     let mut first_cursor = None;
@@ -1952,11 +1940,7 @@ async fn an_occurrence_lookup_pages_several_feeds_in_time_order(pool: PgPool) {
         feeds.push(id);
     }
     let unknown = "0".repeat(32);
-    let app = api::router(
-        api::AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(api::AppState::new(pool.clone(), Config::default()).unwrap());
     let ask = json!({"resource_ids":[feeds[1], unknown, feeds[0], feeds[1]],"limit":2});
     let (mut body, mut seen, mut first_cursor) = (ask.clone(), vec![], None);
     loop {
@@ -2148,7 +2132,7 @@ async fn disabled_calendars_use_web_queue_and_preview(pool: PgPool) {
         pinakes_core::resolver::classify_config(uri, &on),
         Some("event")
     );
-    let app = api::router(api::AppState::new(pool, cfg).await.unwrap());
+    let app = api::router(api::AppState::new(pool, cfg).unwrap());
     let response = app
         .oneshot(
             Request::builder()
@@ -3777,11 +3761,7 @@ async fn sub_microsecond_instants_never_round_past_9999(pool: PgPool) {
             .await
             .unwrap();
     assert_eq!(end, Some(kept));
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let (code, page) = call(
         &app,
         &format!("/v1/resources/{id}/occurrences?from=2026-01-01T00:00:00Z"),
@@ -3844,11 +3824,7 @@ async fn occurrence_cards_report_their_lifecycle_beside_the_feed_status(pool: Pg
         .await
         .unwrap();
     reference(&pool, uri, "/pub/x/tags/1", Kind::Tag, Op::Put).await;
-    let app = api::router(
-        api::AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(api::AppState::new(pool.clone(), Config::default()).unwrap());
     let lifecycle = |items: &Value| {
         let mut seen: Vec<(String, String, String)> = items
             .as_array()
@@ -4015,11 +3991,7 @@ async fn related_lists_a_feed_and_a_venue_once(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(differ, 0);
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     for collapse in ["", "&collapse=group"] {
         let (code, v) = call(
             &app,
@@ -4415,11 +4387,7 @@ async fn a_one_off_event_reference_has_a_null_recurrence_id(pool: PgPool) {
         &[(None, Utc::now() + Duration::days(2))],
     )
     .await;
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let (code, v) = call(&app, "/v1/search?type=Event").await;
     assert_eq!(code, 200, "{v}");
     assert_eq!(

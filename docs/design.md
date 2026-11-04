@@ -82,7 +82,7 @@ B's one real advantage is independence from Nexus. It costs a second implementat
 A resolver turns a URI into one small typed document, on demand and never inline with ingestion: a queue with per-resolver rate limits, backoff, dead-letter and a refresh past TTL. Four stages:
 
 - **Classify by scheme**, no network: `geo:`, `webcal:`, `nostr:`, `doi:`, and `pubky://` objects of other apps, which get a card from the app's profile in Pinakes's code ([Pubky apps](pubky-apps.md)), or from conventional JSON members for an app without one.
-- **Host adapters**, only where an API or a feed beats the page: OpenStreetMap through cached Nominatim lookups (or LocationIQ's, where the operator has its permission to publish them), oEmbed providers, Wikidata, DOI, event platforms such as Luma and Meetup, and the official APIs in [sources](sources/README.md).
+- **Host adapters**, only where an API or a feed beats the page: OpenStreetMap through cached Nominatim lookups, oEmbed providers, Wikidata, DOI, event platforms such as Luma and Meetup, and the official APIs in [sources](sources/README.md).
 - **Generic web**: one fetch, then JSON-LD, microformats, OpenGraph, oEmbed, title, in that order; a site's own JSON-LD (its WebSite, breadcrumbs or root publisher) never names a page; ActivityPub when advertised; ICS and RSS by content type.
 - **Chains**: an event's venue to a place from the page's own coordinates, else geocoding above a confidence threshold, else nothing. Never a guessed OSM URL.
 

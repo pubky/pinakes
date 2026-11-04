@@ -200,16 +200,6 @@ fn lines(gz: &[u8]) -> Vec<Value> {
         .map(|s| serde_json::from_str::<Value>(s).unwrap())
         .collect()
 }
-/// What a clean Nominatim instance may publish (no dump directory of its own to check).
-async fn publication(pool: &PgPool) -> pinakes_core::resolver::locationiq::Publication {
-    let osm = OsmConfig {
-        dump_dir: dump_dir("publication").to_str().unwrap().into(),
-        ..Default::default()
-    };
-    pinakes_core::resolver::locationiq::Publication::check(pool, &osm)
-        .await
-        .unwrap()
-}
 fn dump_config(dir: &std::path::Path, downloads: usize) -> Config {
     Config {
         osm: OsmConfig {
@@ -281,11 +271,7 @@ async fn fifty_one_jobs_two_calls_cache_refresh_and_separation(pool: PgPool) {
         .unwrap();
     resolver.resolve(&uris[1]).await.unwrap();
     assert_eq!(state.calls.lock().await.len(), 3);
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let id = pinakes_core::model::identity(&uris[0]).unwrap().0;
     let (status, _, view) = call(&app, &format!("/v1/resources/{id}"), None).await;
     assert_eq!(status, 200, "{view}");
@@ -302,16 +288,10 @@ async fn fifty_one_jobs_two_calls_cache_refresh_and_separation(pool: PgPool) {
     // The daemon's file: gzip NDJSON, served as a download.
     let dir = dump_dir("lines");
     assert_eq!(
-        pinakes_core::osm_dump::write(&pool, &dir, publication(&pool).await)
-            .await
-            .unwrap(),
+        pinakes_core::osm_dump::write(&pool, &dir).await.unwrap(),
         51
     );
-    let dumps = api::router(
-        AppState::new(pool.clone(), dump_config(&dir, 6))
-            .await
-            .unwrap(),
-    );
+    let dumps = api::router(AppState::new(pool.clone(), dump_config(&dir, 6)).unwrap());
     let (status, headers, dump) = download(&dumps, &[]).await;
     assert_eq!(status, 200);
     assert_eq!(headers["content-type"], "application/gzip");
@@ -346,7 +326,6 @@ async fn fifty_one_jobs_two_calls_cache_refresh_and_separation(pool: PgPool) {
         place.iter().map(String::as_str).collect::<Vec<_>>(),
         [
             "address",
-            "attribution",
             "bbox",
             "category",
             "display_name",
@@ -378,13 +357,6 @@ async fn fifty_one_jobs_two_calls_cache_refresh_and_separation(pool: PgPool) {
     assert_eq!(berlin["osm_id"], 240109189);
     assert!(berlin["point"]["lat"].is_f64() && berlin["point"]["lon"].is_f64());
     assert_eq!(berlin["status"], "ok");
-    // Who answered the place: its credit, so a provider's terms travel with its rows.
-    assert_eq!(berlin["attribution"], osm::ATTRIBUTION);
-    assert!(
-        rows[0]["note"].as_str().unwrap().contains("attribution"),
-        "{}",
-        rows[0]
-    );
     // The version a resource pins (and change lines name) is in the line.
     let pinned: String = sqlx::query_scalar(
         "SELECT osm_version FROM resource WHERE osm_type='node' AND osm_id=240109189 LIMIT 1",
@@ -445,11 +417,7 @@ async fn unknown_objects_are_missing_429_defers_and_category_filters(pool: PgPoo
     let doc = resolver.resolve(uri).await.unwrap();
     store::save_document(&pool, &id, 0, &doc).await.unwrap();
     reference(&pool, &id, "city").await;
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let (status, _, found) = call(
         &app,
         "/v1/search?bbox=13,52,14,53&type=Place&category=place%2Fcity&q=Berlin&facet=tags",
@@ -541,11 +509,7 @@ async fn viewport_distance_time_facets_clustering_and_etag(pool: PgPool) {
     let doc = resolver.resolve(uri).await.unwrap();
     store::save_document(&pool, &id, 0, &doc).await.unwrap();
     reference(&pool, &id, "berlin").await;
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let (status, headers, view) = call(
         &app,
         "/v1/search?bbox=5,45,11,48&type=Place&facet=tags",
@@ -722,11 +686,7 @@ async fn osm_history_and_unconfirmed_fetches_stay_in_derivative_table(pool: PgPo
     doc.name = Some("Synthetic renamed city".into());
     doc.fetched_at += 1;
     store::save_document(&pool, &id, 0, &doc).await.unwrap();
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let feed = changes_of(&app, &id).await;
     assert_eq!(feed["lines"][1]["class"], "renamed", "{feed}");
     assert_eq!(feed["lines"][1]["resource_id"], id.as_str());
@@ -987,8 +947,6 @@ async fn object_spellings_are_aliases_of_one_object(pool: PgPool) {
 /// file it opened, and a failed write leaves the previous file and no temporary one.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn the_dump_is_a_static_file_written_atomically(pool: PgPool) {
-    // Checked before the test takes any lock.
-    let publication = publication(&pool).await;
     let (_, resolver, server) = mock(&pool).await;
     let node = "https://www.openstreetmap.org/node/240109189";
     let id = store::ensure_resource(&pool, node).await.unwrap();
@@ -1000,18 +958,12 @@ async fn the_dump_is_a_static_file_written_atomically(pool: PgPool) {
         .connect_with((*pool.connect_options()).clone())
         .await
         .unwrap();
-    let app = api::router(
-        AppState::new(api_pool.clone(), dump_config(&dir, 4))
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(api_pool.clone(), dump_config(&dir, 4)).unwrap());
     api_pool.close().await;
     let (status, headers, _) = download(&app, &[]).await;
     assert_eq!(status, 503);
     assert!(headers.contains_key("retry-after"));
-    pinakes_core::osm_dump::write(&pool, &dir, publication)
-        .await
-        .unwrap();
+    pinakes_core::osm_dump::write(&pool, &dir).await.unwrap();
     let (status, headers, first) = download(&app, &[]).await;
     assert_eq!(status, 200);
     let etag = headers["etag"].to_str().unwrap().to_owned();
@@ -1053,11 +1005,7 @@ async fn the_dump_is_a_static_file_written_atomically(pool: PgPool) {
     assert_eq!(download(&app, &[]).await.0, 200);
     assert_eq!(download(&app, &[]).await.0, 429);
     // A download in progress keeps the file it opened while a newer one is renamed into place.
-    let app = api::router(
-        AppState::new(pool.clone(), dump_config(&dir, 100))
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), dump_config(&dir, 100)).unwrap());
     let mut request = Request::builder()
         .uri("/v1/dumps/osm_place.ndjson.gz")
         .body(Body::empty())
@@ -1070,9 +1018,7 @@ async fn the_dump_is_a_static_file_written_atomically(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    pinakes_core::osm_dump::write(&pool, &dir, publication)
-        .await
-        .unwrap();
+    pinakes_core::osm_dump::write(&pool, &dir).await.unwrap();
     let old = open.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(
         old.as_ref(),
@@ -1087,9 +1033,7 @@ async fn the_dump_is_a_static_file_written_atomically(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    assert!(pinakes_core::osm_dump::write(&pool, &dir, publication)
-        .await
-        .is_err());
+    assert!(pinakes_core::osm_dump::write(&pool, &dir).await.is_err());
     assert_eq!(
         std::fs::read(pinakes_core::osm_dump::path(&dir)).unwrap(),
         second
@@ -1107,8 +1051,6 @@ async fn the_dump_is_a_static_file_written_atomically(pool: PgPool) {
 /// writer holding it clears the temporary files an interrupted one left.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn one_writer_per_directory_and_leftover_temporary_files_go(pool: PgPool) {
-    // Checked before the test takes any lock.
-    let publication = publication(&pool).await;
     use pinakes_core::osm_dump::{lock, path, temp_path, write, FILE};
     let dir = dump_dir("temps");
     std::fs::create_dir_all(&dir).unwrap();
@@ -1124,14 +1066,14 @@ async fn one_writer_per_directory_and_leftover_temporary_files_go(pool: PgPool) 
     let other = lock(&dir).unwrap().expect("free");
     std::fs::write(&a, b"another writer's partial file").unwrap();
     assert!(lock(&dir).unwrap().is_none());
-    let refused = write(&pool, &dir, publication).await.unwrap_err();
+    let refused = write(&pool, &dir).await.unwrap_err();
     assert!(format!("{refused:#}").contains("lock"), "{refused:#}");
     assert_eq!(std::fs::read(path(&dir)).unwrap(), b"the dump");
     assert!(a.exists());
     // Released: the next writer clears the leftovers and publishes a whole file.
     drop(other);
     std::fs::write(dir.join(format!("{FILE}.1.dead.tmp")), b"partial").unwrap();
-    write(&pool, &dir, publication).await.unwrap();
+    write(&pool, &dir).await.unwrap();
     let mut left: Vec<String> = std::fs::read_dir(&dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -1145,20 +1087,12 @@ async fn one_writer_per_directory_and_leftover_temporary_files_go(pool: PgPool) 
 /// The daemon writes a missing or stale file at startup and leaves a fresh one alone.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn startup_writes_a_missing_or_stale_dump(pool: PgPool) {
-    // Checked before the test takes any lock.
-    let publication = publication(&pool).await;
     use pinakes_core::osm_dump::{due_in, path, run};
     let day = std::time::Duration::from_secs(86400);
     let dir = dump_dir("startup");
     assert_eq!(due_in(&dir, day), std::time::Duration::ZERO, "missing");
     let (stop, stopped) = tokio::sync::watch::channel(false);
-    let task = tokio::spawn(run(
-        pool.clone(),
-        dir.clone(),
-        day,
-        publication,
-        stopped.clone(),
-    ));
+    let task = tokio::spawn(run(pool.clone(), dir.clone(), day, stopped.clone()));
     for _ in 0..100 {
         if path(&dir).exists() {
             break;
@@ -1179,7 +1113,7 @@ async fn startup_writes_a_missing_or_stale_dump(pool: PgPool) {
     drop(file);
     assert_eq!(due_in(&dir, day), std::time::Duration::ZERO, "stale");
     let (stop, stopped) = tokio::sync::watch::channel(false);
-    let task = tokio::spawn(run(pool.clone(), dir.clone(), day, publication, stopped));
+    let task = tokio::spawn(run(pool.clone(), dir.clone(), day, stopped));
     for _ in 0..100 {
         if due_in(&dir, day) > std::time::Duration::ZERO {
             break;
@@ -1198,8 +1132,6 @@ async fn startup_writes_a_missing_or_stale_dump(pool: PgPool) {
 /// Startup removes an interrupted write's temporary file even when no write is due.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn startup_removes_leftover_temporary_files(pool: PgPool) {
-    // Checked before the test takes any lock.
-    let publication = publication(&pool).await;
     use pinakes_core::osm_dump::{path, run, FILE};
     let day = std::time::Duration::from_secs(86400);
     let dir = dump_dir("leftovers");
@@ -1208,7 +1140,7 @@ async fn startup_removes_leftover_temporary_files(pool: PgPool) {
     let leftover = dir.join(format!("{FILE}.1.dead.tmp"));
     std::fs::write(&leftover, b"partial").unwrap();
     let (stop, stopped) = tokio::sync::watch::channel(false);
-    let task = tokio::spawn(run(pool.clone(), dir.clone(), day, publication, stopped));
+    let task = tokio::spawn(run(pool, dir.clone(), day, stopped));
     for _ in 0..100 {
         if !leftover.exists() {
             break;
@@ -1230,8 +1162,6 @@ async fn startup_removes_leftover_temporary_files(pool: PgPool) {
 /// the next writer removes its temporary file.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn shutdown_cancels_a_dump_write_in_progress(pool: PgPool) {
-    // Checked before the test takes any lock.
-    let publication = publication(&pool).await;
     use pinakes_core::osm_dump::{path, run, write};
     let day = std::time::Duration::from_secs(86400);
     let dir = dump_dir("shutdown");
@@ -1242,7 +1172,7 @@ async fn shutdown_cancels_a_dump_write_in_progress(pool: PgPool) {
         .await
         .unwrap();
     let (stop, stopped) = tokio::sync::watch::channel(false);
-    let task = tokio::spawn(run(pool.clone(), dir.clone(), day, publication, stopped));
+    let task = tokio::spawn(run(pool.clone(), dir.clone(), day, stopped));
     let temp = || {
         std::fs::read_dir(&dir).ok().is_some_and(|entries| {
             entries
@@ -1264,7 +1194,7 @@ async fn shutdown_cancels_a_dump_write_in_progress(pool: PgPool) {
         .unwrap();
     blocker.rollback().await.unwrap();
     assert!(!path(&dir).exists());
-    write(&pool, &dir, publication).await.unwrap();
+    write(&pool, &dir).await.unwrap();
     assert!(path(&dir).exists());
     assert!(
         !temp(),
@@ -1305,11 +1235,7 @@ async fn an_osm_member_keeps_its_own_card_and_the_group_holds_no_osm_fact(pool: 
     )
     .await
     .unwrap();
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     // The page keeps its own card; its hint names the OSM member by link only.
     let (_, _, doc) = call(&app, &format!("/v1/resources/{page}"), None).await;
     assert_eq!(doc["name"], "Own page");
