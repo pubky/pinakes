@@ -620,6 +620,46 @@ pub mod musicbrainz {
         recordings.dedup_by(|a, b| a.mbid == b.mbid);
         recordings
     }
+    /// A work a recording is a performance of, with the work's own URL relations.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct Work {
+        pub mbid: String,
+        pub urls: Vec<UrlRelation>,
+    }
+    /// A recording with the works it performs and their URL relations, in one read.
+    pub fn works_lookup(base: &str, recording: &str) -> String {
+        format!("{base}/recording/{recording}?inc=work-rels+work-level-rels+url-rels&fmt=json")
+    }
+    /// The works a `works_lookup` answer's recording is a current performance of, each once.
+    pub fn parse_works(v: &Value) -> Vec<Work> {
+        let mut works: Vec<Work> = v["relations"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|r| {
+                r["target-type"] == "work" && r["type"] == "performance" && r["ended"] != true
+            })
+            .filter_map(|r| {
+                Some(Work {
+                    mbid: mbid(r["work"]["id"].as_str()?)?,
+                    urls: relations(&r["work"]),
+                })
+            })
+            .collect();
+        works.sort_by(|a, b| a.mbid.cmp(&b.mbid));
+        works.dedup_by(|a, b| a.mbid == b.mbid);
+        works
+    }
+    /// The works a recording performs; none when the MBID is unknown.
+    pub async fn works(egress: &Egress, base: &str, recording: &str) -> Result<Vec<Work>> {
+        let Some(id) = mbid(recording) else {
+            return Ok(vec![]);
+        };
+        Ok(get(egress, &works_lookup(base, &id), "musicbrainz")
+            .await?
+            .map(|v| parse_works(&v))
+            .unwrap_or_default())
+    }
     /// One entity with its URL relations; `None` when the MBID is unknown.
     pub async fn entity(
         egress: &Egress,
@@ -881,6 +921,68 @@ pub mod wikidata {
             }
         };
         (!value.is_empty()).then_some(value)
+    }
+    /// One item's page on one site (`enwiki`) alone.
+    pub fn sitelink_lookup(qid: &str, site: &str) -> String {
+        format!("{API}?action=wbgetentities&ids={qid}&props=sitelinks%2Furls&sitefilter={site}&format=json")
+    }
+    /// The page URL of `site` in a `sitelink_lookup` answer (the one item it holds, which may
+    /// be the item an ID redirects to).
+    pub fn parse_sitelink(v: &Value, site: &str) -> Option<String> {
+        let entities = v["entities"].as_object()?;
+        let mut items = entities
+            .values()
+            .filter(|e| e.get("missing").is_none() && e["type"] == "item");
+        let (Some(item), None) = (items.next(), items.next()) else {
+            return None;
+        };
+        item["sitelinks"][site]["url"].as_str().map(str::to_owned)
+    }
+    /// The page of item `qid` on `site`; `None` when the item is unknown or has none there.
+    pub async fn sitelink(egress: &Egress, qid: &str, site: &str) -> Result<Option<String>> {
+        let Some(qid) = super::qid(qid) else {
+            return Ok(None);
+        };
+        Ok(get(egress, &sitelink_lookup(&qid, site), "wikidata")
+            .await?
+            .and_then(|v| parse_sitelink(&v, site)))
+    }
+    /// One item's claims of one property alone.
+    pub fn claims_lookup(qid: &str, property: &str) -> String {
+        format!("{API}?action=wbgetclaims&entity={qid}&property={property}&format=json")
+    }
+    /// The Commons file names a `claims_lookup` answer holds for `property`, at its best rank
+    /// (preferred if any, else normal; deprecated never), in order.
+    pub fn parse_files(v: &Value, property: &str) -> Vec<String> {
+        let claims = v["claims"][property]
+            .as_array()
+            .map_or(&[][..], Vec::as_slice);
+        let rank = if claims.iter().any(|c| c["rank"] == "preferred") {
+            "preferred"
+        } else {
+            "normal"
+        };
+        claims
+            .iter()
+            .filter(|c| {
+                // A claim without a rank is a normal one.
+                c["rank"].as_str().unwrap_or("normal") == rank
+                    && c["mainsnak"]["snaktype"] == "value"
+                    && c["mainsnak"]["datatype"] == "commonsMedia"
+            })
+            .filter_map(|c| c["mainsnak"]["datavalue"]["value"].as_str())
+            .map(str::to_owned)
+            .collect()
+    }
+    /// The Commons files item `qid` names for `property` (`P18`, its image).
+    pub async fn files(egress: &Egress, qid: &str, property: &str) -> Result<Vec<String>> {
+        let Some(qid) = super::qid(qid) else {
+            return Ok(vec![]);
+        };
+        Ok(get(egress, &claims_lookup(&qid, property), "wikidata")
+            .await?
+            .map(|v| parse_files(&v, property))
+            .unwrap_or_default())
     }
     /// Up to 50 items by ID; unknown or redirected-away IDs are left out.
     pub async fn items(egress: &Egress, qids: &[String]) -> Result<Vec<Item>> {
