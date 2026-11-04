@@ -702,9 +702,7 @@ fn compact(base: &str, card: &Value) -> Value {
             c
         })
         .collect();
-    if !credits.is_empty() {
-        out.insert("credits".into(), credits.into());
-    }
+    out.insert("credits".into(), credits.into());
     if card["group"].is_object() {
         out.insert("group".into(), card["group"].clone());
     }
@@ -951,9 +949,11 @@ mod tests {
             compact["also_on"],
             json!([{"uri": "https://example.com/", "site": "Example"}])
         );
-        for absent in ["image", "point", "group", "open_in", "credits"] {
+        for absent in ["image", "point", "group", "open_in"] {
             assert!(compact.get(absent).is_none(), "{absent}");
         }
+        // Always there, as on every card.
+        assert_eq!(compact["credits"], json!([]));
         // The credits of what it shows come along; a shortened description is an excerpt.
         let credit = |field: &str| {
             json!({"field": field, "provider": "wikipedia", "source_url": "https://en.wikipedia.org/wiki/X",
