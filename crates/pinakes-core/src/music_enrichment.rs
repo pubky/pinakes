@@ -4,7 +4,7 @@
 //!
 //! Only exact identifiers lead there, never a name: the entity's own `wikidata` URL relation
 //! names the item, and the item names the article (its `enwiki` sitelink) and the image (`P18`).
-//! A release and its release group each use their own relation. A recording without one may take
+//! A release and its release group each use their own relation. A recording without any may take
 //! the description of the one work it is a performance of, when that work has its own relation;
 //! the credit then names the work (`subject`), and the work's image is never the recording's.
 //!
@@ -63,8 +63,8 @@ impl Enrichment {
         }
     }
     /// Writes the found values and their credits into `doc`. An unread field is listed in
-    /// `unread_enriched`, and the card is read again within `retry_secs` (later when it was
-    /// already unread: `ResourceMeta::keep_enriched`).
+    /// `unread_enriched`, and the card is read again early, `retry_secs` from now at the soonest
+    /// (`ResourceMeta::keep_enriched` moves that later by how old its stored reading is).
     pub fn apply(self, doc: &mut ResourceMeta, retry_secs: u64) {
         for (field, found) in [
             (CreditField::Image, self.image),
@@ -92,18 +92,29 @@ impl Enrichment {
     }
 }
 
-/// The Wikidata item a list of URL relations names, when it names exactly one.
-fn own_item(urls: &[musicbrainz::UrlRelation]) -> Option<String> {
-    let mut items: Vec<String> = urls
+/// The Wikidata item a list of URL relations names.
+#[derive(Debug, PartialEq)]
+enum Own {
+    /// Exactly one item.
+    Item(String),
+    /// No `wikidata` relation.
+    None,
+    /// `wikidata` relations that name several items, or none that is an item.
+    Unclear,
+}
+fn own_item(urls: &[musicbrainz::UrlRelation]) -> Own {
+    let relations: Vec<&musicbrainz::UrlRelation> =
+        urls.iter().filter(|r| r.kind == "wikidata").collect();
+    let mut items: Vec<String> = relations
         .iter()
-        .filter(|r| r.kind == "wikidata")
         .filter_map(|r| wikidata::item_link(&r.url).map(|(qid, _)| qid))
         .collect();
     items.sort();
     items.dedup();
     match items.as_slice() {
-        [one] => Some(one.clone()),
-        _ => None,
+        [one] => Own::Item(one.clone()),
+        _ if relations.is_empty() => Own::None,
+        _ => Own::Unclear,
     }
 }
 
@@ -115,11 +126,12 @@ pub async fn enrich(
     entity: &musicbrainz::Entity,
     width: u32,
 ) -> Enrichment {
-    if let Some(qid) = own_item(&entity.urls) {
-        return item(egress, &entity.mbid, &qid, None, width).await;
-    }
-    if entity.kind != MbKind::Recording {
-        return Enrichment::missing();
+    match own_item(&entity.urls) {
+        Own::Item(qid) => return item(egress, &entity.mbid, &qid, None, width).await,
+        // A recording whose own relations are unclear is not its work.
+        Own::Unclear => return Enrichment::missing(),
+        Own::None if entity.kind != MbKind::Recording => return Enrichment::missing(),
+        Own::None => {}
     }
     let works = match musicbrainz::works(egress, base, &entity.mbid).await {
         Ok(works) => works,
@@ -131,7 +143,7 @@ pub async fn enrich(
     let [work] = works.as_slice() else {
         return Enrichment::missing();
     };
-    let Some(qid) = own_item(&work.urls) else {
+    let Own::Item(qid) = own_item(&work.urls) else {
         return Enrichment::missing();
     };
     let subject = format!("https://musicbrainz.org/work/{}", work.mbid);
@@ -425,20 +437,54 @@ mod tests {
             url: url.into(),
         };
         assert_eq!(
-            own_item(&[rel("https://www.wikidata.org/wiki/Q93341")]).as_deref(),
-            Some("Q93341")
+            own_item(&[rel("https://www.wikidata.org/wiki/Q93341")]),
+            Own::Item("Q93341".into())
         );
         assert_eq!(
             own_item(&[
                 rel("https://www.wikidata.org/wiki/Q1"),
                 rel("https://www.wikidata.org/wiki/Q2")
             ]),
-            None
+            Own::Unclear
+        );
+        assert_eq!(
+            own_item(&[rel("https://www.wikidata.org/wiki/Property:P18")]),
+            Own::Unclear
         );
         let other = musicbrainz::UrlRelation {
             kind: "other databases".into(),
             url: "https://www.wikidata.org/wiki/Q1".into(),
         };
-        assert_eq!(own_item(&[other]), None);
+        assert_eq!(own_item(&[other]), Own::None);
+    }
+    /// A recording whose own relations name two items takes nothing, not its work's
+    /// description: nothing is asked.
+    #[tokio::test]
+    async fn a_recording_with_two_own_items_takes_nothing() {
+        let rel = |url: &str| musicbrainz::UrlRelation {
+            kind: "wikidata".into(),
+            url: url.into(),
+        };
+        let recording = musicbrainz::Entity {
+            kind: MbKind::Recording,
+            mbid: "833f00e1-781f-4edd-90e4-e52712618862".into(),
+            title: Some("Get Lucky".into()),
+            urls: vec![
+                rel("https://www.wikidata.org/wiki/Q1"),
+                rel("https://www.wikidata.org/wiki/Q2"),
+            ],
+            isrcs: vec![],
+            barcode: None,
+            release_group: None,
+            artist: None,
+            length_ms: None,
+            artist_type: None,
+        };
+        let (egress, recorded) = crate::sources::fixture::egress(vec![]);
+        assert_eq!(
+            enrich(&egress, musicbrainz::BASE, &recording, 640).await,
+            Enrichment::missing()
+        );
+        assert_eq!(recorded.asked(), Vec::<String>::new());
     }
 }
