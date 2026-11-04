@@ -92,8 +92,8 @@ pub fn file_query(name: &str, width: u32) -> String {
 /// A file that may be shown with its credit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FreeFile {
-    /// The image: Commons' thumbnail, else the file itself; `https:` on Wikimedia's upload
-    /// hosts, without tracking parameters.
+    /// The image: Commons' thumbnail, else the file itself when it is a JPEG, PNG, GIF or
+    /// WebP; `https:` on Wikimedia's upload hosts, without tracking parameters.
     pub image: String,
     /// The file's description page.
     pub page: String,
@@ -131,6 +131,8 @@ const IMAGE_TYPES: &[&str] = &[
     "image/tiff",
     "image/svg+xml",
 ];
+/// The image types whose original file a card may show when Commons gives no thumbnail.
+const SHOWN_AS_IS: &[&str] = &["image/jpeg", "image/png", "image/gif", "image/webp"];
 
 /// The file in a `file_query` answer for `name`: accepted only when Commons holds it, it is an
 /// image, it is not marked non-free, its licence is CC0, the public domain, CC BY or CC BY-SA
@@ -191,10 +193,18 @@ pub fn free_file(v: &Value, name: &str) -> Option<FileCheck> {
     if license.attribution && author.is_none() {
         return Some(FileCheck::Refused("author"));
     }
+    // The original only when a browser shows it as it is: never a TIFF or an SVG's source.
+    let original = || {
+        info["mime"]
+            .as_str()
+            .is_some_and(|m| SHOWN_AS_IS.contains(&m))
+            .then(|| info["url"].as_str().and_then(upload_url))
+            .flatten()
+    };
     let Some(image) = info["thumburl"]
         .as_str()
         .and_then(upload_url)
-        .or_else(|| info["url"].as_str().and_then(upload_url))
+        .or_else(original)
     else {
         return Some(FileCheck::Refused("url"));
     };
@@ -493,6 +503,30 @@ mod tests {
             panic!("CC0 needs no author: {cc0:?}");
         };
         assert_eq!(file.author, None);
+    }
+    /// Without a thumbnail, a JPEG is shown as its original file; a TIFF or an SVG is not.
+    #[test]
+    fn an_original_file_only_when_a_browser_shows_it() {
+        let check = |mime: &str| {
+            free_file(
+                &serde_json::json!({"query": {"pages": [{"title": "File:A.x", "ns": 6, "imageinfo": [{
+                    "mime": mime,
+                    "url": "https://upload.wikimedia.org/wikipedia/commons/a/aa/A.x",
+                    "extmetadata": {"License": {"value": "cc0"}, "LicenseUrl": {"value": "https://creativecommons.org/publicdomain/zero/1.0/"}},
+                }]}]}}),
+                "A.x",
+            )
+        };
+        let Some(FileCheck::Free(file)) = check("image/jpeg") else {
+            panic!("a JPEG's original");
+        };
+        assert_eq!(
+            file.image,
+            "https://upload.wikimedia.org/wikipedia/commons/a/aa/A.x"
+        );
+        for mime in ["image/tiff", "image/svg+xml"] {
+            assert_eq!(check(mime), Some(FileCheck::Refused("url")), "{mime}");
+        }
     }
     #[test]
     fn file_pages_and_queries() {
