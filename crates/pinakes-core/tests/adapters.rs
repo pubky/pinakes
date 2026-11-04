@@ -623,7 +623,7 @@ async fn billetto_denied_venue_never_dead_letters(pool: PgPool) {
         OsmResolver::new(
             pool.clone(),
             pinakes_core::config::OsmConfig {
-                nominatim_url: format!("http://{address}"),
+                nominatim_url: format!("http://{address}").into(),
                 ..Default::default()
             },
         )
@@ -898,7 +898,7 @@ async fn slow_optional_venue_keeps_single_event_and_attempts(pool: PgPool) {
         OsmResolver::new(
             pool.clone(),
             pinakes_core::config::OsmConfig {
-                nominatim_url: format!("http://{address}"),
+                nominatim_url: format!("http://{address}").into(),
                 ..Default::default()
             },
         )

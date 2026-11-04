@@ -425,7 +425,7 @@ async fn run(pool: sqlx::PgPool, f: Fixture) -> Result<()> {
         nexus_url: base.clone(),
         ..Default::default()
     };
-    cfg.osm.nominatim_url = base.clone();
+    cfg.osm.nominatim_url = base.clone().into();
     cfg.osm.requests_per_second = 10.;
     cfg.canary.enabled = false;
     // Services that need a contact (SEC EDGAR) wait without one.

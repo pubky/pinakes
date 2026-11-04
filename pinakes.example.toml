@@ -29,7 +29,8 @@ pkarr_relays = ["https://pkarr.pubky.app", "https://pkarr.pubky.org"]
 enabled = true
 
 # Referenced OSM objects, including aliases; no search/reverse-geocoding proxy.
-# The public Nominatim is for a small development run; deployments use their own URL.
+# The public Nominatim is for a small development run; deployments use their own URL. A hosted
+# Nominatim's URL carries its key: set it as PINAKES__OSM__NOMINATIM_URL in the environment file.
 [osm]
 enabled = true
 nominatim_url = "https://nominatim.openstreetmap.org"

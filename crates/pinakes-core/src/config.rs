@@ -679,7 +679,9 @@ impl Default for PreviewConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct OsmConfig {
     pub enabled: bool,
-    pub nominatim_url: String,
+    /// The Nominatim base. A hosted Nominatim's may carry its key, so `Debug` and serialization
+    /// show `[REDACTED]`; set such a base in the environment file (`PINAKES__OSM__NOMINATIM_URL`).
+    pub nominatim_url: SecretKey,
     pub requests_per_second: f64,
     #[serde(skip)]
     pub ttl_secs: u64,
@@ -841,11 +843,12 @@ impl Config {
     }
     /// The defaults in their file form. Secrets serialize as `[REDACTED]`, so their real defaults
     /// are put back here.
-    fn defaults() -> Result<serde_json::Value> {
+    pub(crate) fn defaults() -> Result<serde_json::Value> {
         let config = Self::default();
         let mut value = serde_json::to_value(&config)?;
         value["database_url"] = (*config.database_url).into();
         value["admin_token"] = config.admin_token.as_deref().into();
+        value["osm"]["nominatim_url"] = (*config.osm.nominatim_url).into();
         Ok(value)
     }
     /// A configuration from its file form (sections plus `[limits]`), validated.
@@ -1577,6 +1580,27 @@ mod tests {
             assert!(nexus(url).is_ok(), "{url}");
             assert!(osm(url).is_ok(), "{url}");
         }
+    }
+    /// `osm.nominatim_url` may carry a hosted Nominatim's key: it is read like any setting (the
+    /// file, or `PINAKES__OSM__NOMINATIM_URL` from the environment file), and `Debug` and
+    /// serialization never show it.
+    #[test]
+    fn the_nominatim_url_is_never_shown() {
+        let base = "https://nominatim.example.org/KEY-CANARY";
+        let mut value = Config::defaults().unwrap();
+        assert_eq!(
+            value["osm"]["nominatim_url"],
+            "https://nominatim.openstreetmap.org"
+        );
+        apply_env(
+            &mut value,
+            [("PINAKES__OSM__NOMINATIM_URL".to_owned(), base.to_owned())],
+        )
+        .unwrap();
+        let config = Config::from_value(value).unwrap();
+        assert_eq!(&*config.osm.nominatim_url, base);
+        let shown = format!("{config:?} {}", serde_json::to_string(&config).unwrap());
+        assert!(!shown.contains("KEY-CANARY"), "{shown}");
     }
     /// Nominatim at `osm.nominatim_url` is the one OSM provider: a provider setting, in the file
     /// or as a `PINAKES__…` override, is refused at load, never ignored.

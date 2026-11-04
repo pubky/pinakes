@@ -197,7 +197,7 @@ mod tests {
     #[test]
     fn the_spotify_section_takes_its_own_variables_and_stays_secret() {
         use crate::config::{apply_env, apply_named_env, Config};
-        let mut value = serde_json::to_value(Config::default()).unwrap();
+        let mut value = Config::defaults().unwrap();
         let vars = [
             ("PINAKES_SPOTIFY_CLIENT_ID", "ABCDEFID"),
             ("PINAKES_SPOTIFY_CLIENT_SECRET", "ABCDEFSECRET"),

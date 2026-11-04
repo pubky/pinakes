@@ -229,7 +229,7 @@ async fn postings_are_placed_found_and_close(pool: PgPool) {
                 OsmResolver::new(
                     pool.clone(),
                     OsmConfig {
-                        nominatim_url: format!("http://{addr}"),
+                        nominatim_url: format!("http://{addr}").into(),
                         requests_per_second: 1000.0,
                         ..Default::default()
                     },
@@ -378,7 +378,7 @@ async fn a_workplace_is_never_an_ambiguous_or_other_settlement(pool: PgPool) {
             OsmResolver::new(
                 pool.clone(),
                 OsmConfig {
-                    nominatim_url: format!("http://{addr}"),
+                    nominatim_url: format!("http://{addr}").into(),
                     requests_per_second: 1000.0,
                     ..Default::default()
                 },
@@ -447,7 +447,7 @@ async fn a_workplace_is_never_in_another_region_or_postal_region(pool: PgPool) {
             OsmResolver::new(
                 pool.clone(),
                 OsmConfig {
-                    nominatim_url: format!("http://{addr}"),
+                    nominatim_url: format!("http://{addr}").into(),
                     requests_per_second: 1000.0,
                     ..Default::default()
                 },
@@ -545,7 +545,7 @@ async fn a_one_line_place_is_compared_by_its_region_code_and_postcode(pool: PgPo
             OsmResolver::new(
                 pool.clone(),
                 OsmConfig {
-                    nominatim_url: format!("http://{addr}"),
+                    nominatim_url: format!("http://{addr}").into(),
                     requests_per_second: 1000.0,
                     ..Default::default()
                 },

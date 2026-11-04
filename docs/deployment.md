@@ -18,6 +18,27 @@ Configuration names come from [`pinakes.example.toml`](../pinakes.example.toml);
 | Photon (later, for clients) | Client place-search type-ahead, not called by Pinakes | Regional or planet index; provision against the selected [Photon dump](https://github.com/komoot/photon#setting-photon-up-with-the-release-binaries-and-extracts) | Clients call it directly; do not add a Pinakes autocomplete proxy. |
 | Map tiles (later, for clients) | Client map drawing, not called by Pinakes | A regional/planet PMTiles file plus CDN/static storage; capacity depends on the selected build | MapLibre + self-hosted [Protomaps PMTiles](https://docs.protomaps.com/deploy/) is an option. Do not rely on OSM's donation-funded tile servers for production capacity; their [usage policy](https://operations.osmfoundation.org/policies/tiles/) is not a blanket ban on all production use. |
 
+## Nominatim
+
+Pinakes geocodes venues and reads OSM place details from one Nominatim, at `osm.nominatim_url`;
+there is no other geocoding provider and no failover. Run one of:
+
+- **A self-hosted Nominatim** (sizes above): its URL carries no secret and may stay in the TOML
+  file.
+- **Geofabrik's hosted Nominatim:** a paid, daily-updated service with Nominatim's API
+  ([Geofabrik geocoding](https://geofabrik.de/data/geocoding.html)). Its URL may carry the
+  account's key, so treat the whole URL as a secret: set it as `PINAKES__OSM__NOMINATIM_URL` in
+  the environment file, never in the TOML file. The key must be part of the URL's path (a base
+  with user info, a query or a fragment is refused at startup). Pinakes logs a request by its path
+  below the base alone (`lookup`, `search`), shows the URL as `[REDACTED]` in debug output and
+  serialization, and never in `/v1/info`. Set `osm.requests_per_second` to the plan's allowance.
+  **Its terms for what Pinakes keeps and republishes (cached place documents, the change journal
+  and the ODbL dump) need Geofabrik's written confirmation before staging or production uses
+  it.**
+
+The public `nominatim.openstreetmap.org` is for a small development run only
+([operations](operations.md#deployment-and-egress)).
+
 ## Storage model
 
 Staging and production can share read-only self-hosted datasets/services, such as Nominatim or

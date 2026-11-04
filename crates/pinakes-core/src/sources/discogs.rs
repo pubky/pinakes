@@ -643,7 +643,7 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect::<Vec<_>>()
         };
-        let mut value = serde_json::to_value(Config::default()).unwrap();
+        let mut value = Config::defaults().unwrap();
         apply_named_env(
             &mut value,
             vars(&[
@@ -668,7 +668,7 @@ mod tests {
         );
         // A key without its secret is no credential; the file's value stays when the variable
         // is set too.
-        let mut value = serde_json::to_value(Config::default()).unwrap();
+        let mut value = Config::defaults().unwrap();
         value["also_on"]["sources"]["discogs"] = serde_json::json!({"key": "FROMFILE"});
         apply_named_env(
             &mut value,
@@ -677,11 +677,11 @@ mod tests {
         .unwrap();
         assert_eq!(value["also_on"]["sources"]["discogs"]["key"], "FROMFILE");
         assert!(credential(&Config::from_value(value).unwrap()).is_none());
-        let mut value = serde_json::to_value(Config::default()).unwrap();
+        let mut value = Config::defaults().unwrap();
         value["also_on"]["sources"]["discogs"] = serde_json::json!({"key": "a,b", "secret": "s"});
         assert!(Config::from_value(value).is_err());
         // Only Discogs takes one.
-        let mut value = serde_json::to_value(Config::default()).unwrap();
+        let mut value = Config::defaults().unwrap();
         value["also_on"]["sources"]["deezer"] = serde_json::json!({"key": "k", "secret": "s"});
         assert!(Config::from_value(value).is_err());
     }

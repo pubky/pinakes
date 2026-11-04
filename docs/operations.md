@@ -310,7 +310,8 @@ Nominatim is for a small development run only: its [usage
 policy](https://operations.osmfoundation.org/policies/nominatim/) requires an identifying
 User-Agent, caching and at most one request per second, and `osm.requests_per_second` defaults
 to 0.5 and is refused above 1 for a public host. Staging and production use their own
-`osm.nominatim_url`. Pinakes never proxies place search, autocomplete or reverse geocoding.
+`osm.nominatim_url`, a self-hosted or a hosted Nominatim ([deployment](deployment.md#nominatim)).
+Pinakes never proxies place search, autocomplete or reverse geocoding.
 
 The ODbL share-alike download is a file: the daemon writes `osm_place.ndjson.gz` into
 `osm.dump_dir` (default `dumps`, relative to the working directory) at startup when it is missing
@@ -835,8 +836,9 @@ a last guard that cuts every URL before its query or fragment and drops its user
 `nexus_url` or `osm.nominatim_url` with user info, a query or a fragment is refused at startup. A
 path is allowed, and may hold a token, so the feed's log lines (a reset, a skipped line that
 panicked) name the Nexus by its host alone (`nexus`), and a Nominatim request is logged by its
-path below the configured base (`path`: `lookup`, `search`); only admin `GET /v1/info` shows the
-Nexus URL, in its ingestion cursors. Logs name
+path below the configured base (`path`: `lookup`, `search`); `osm.nominatim_url` itself, which may
+carry a hosted Nominatim's key, shows as `[REDACTED]` in debug output and serialization. Only admin
+`GET /v1/info` shows the Nexus URL, in its ingestion cursors. Logs name
 a link only by its host (a calendar's token or a user's name in a link never reaches a log line),
 errors carry no URL (a fetch error or a Nexus request error names none, an upstream service's
 error text is not repeated, the API answers an invalid link with the reason, not the link, and

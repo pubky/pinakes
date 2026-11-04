@@ -109,7 +109,7 @@ async fn mock(pool: &PgPool) -> (Mock, OsmResolver, tokio::task::JoinHandle<()>)
         .with_state(state.clone());
     let handle = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let config = OsmConfig {
-        nominatim_url: format!("http://{address}"),
+        nominatim_url: format!("http://{address}").into(),
         requests_per_second: 1000.0,
         ..Default::default()
     };
@@ -806,7 +806,7 @@ async fn batch_failures_are_per_object_and_upstream_retries_do_not_charge(pool: 
     }})).fallback(get(||async {StatusCode::INTERNAL_SERVER_ERROR}));
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let config = OsmConfig {
-        nominatim_url: url,
+        nominatim_url: url.into(),
         requests_per_second: 1000.0,
         ..Default::default()
     };

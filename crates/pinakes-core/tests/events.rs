@@ -736,7 +736,7 @@ async fn venue_geocoding_single_match_threshold_and_osm_storage_boundary(pool: P
             OsmResolver::new(
                 pool.clone(),
                 OsmConfig {
-                    nominatim_url: format!("http://{addr}"),
+                    nominatim_url: format!("http://{addr}").into(),
                     requests_per_second: 1000.0,
                     ..Default::default()
                 },
