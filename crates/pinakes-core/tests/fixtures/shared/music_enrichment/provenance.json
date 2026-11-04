@@ -1,0 +1,235 @@
+{
+  "_recorded": {
+    "note": "Recorded with curl, User-Agent 'pinakes-dev/0.1 (+https://pubky.app; info@synonym.to)', at most one request a second to MusicBrainz. Derived and synthetic answers the tests build in code: wd-p18-no-author (Daft Punk's wd-p18-Q185828 answer with its file name replaced by the no-author file's, the only edit); Wikipedia's 503 with Retry-After: 120 and Commons' 429 (status and header only, no body recorded)."
+  },
+  "commons-daft-punk": {
+    "bytes": 2030,
+    "content_type": "application/json",
+    "file": "commons-daft-punk.json",
+    "note": "CC BY 4.0 with its author (Sony Music Entertainment): accepted.",
+    "recorded_at": "2026-11-04T15:49:30+00:00",
+    "sha256": "bb808ebba45ce4c431ffe761339c546c538c1836c6022497d97ef7018de567a9",
+    "status": 200,
+    "url": "https://commons.wikimedia.org/w/api.php?action=query&format=json&formatversion=2&prop=imageinfo&iiprop=url%7Cmime%7Cextmetadata&iiurlwidth=640&iiextmetadatafilter=Artist%7CLicenseShortName%7CLicense%7CLicenseUrl%7CNonFree%7CAttributionRequired%7CCopyrighted%7CUsageTerms&iiextmetadatalanguage=en&titles=File%3ADaft+Punk+in+2013.jpg"
+  },
+  "commons-miles-davis": {
+    "bytes": 2299,
+    "content_type": "application/json",
+    "file": "commons-miles-davis.json",
+    "note": "CC BY-SA 2.0 with its author (Tom Palumbo): accepted.",
+    "recorded_at": "2026-11-04T15:49:30+00:00",
+    "sha256": "9cd8d8c45399698d7622c76a67c865938939cdaaac4b37daab1a7ecae403f365",
+    "status": 200,
+    "url": "https://commons.wikimedia.org/w/api.php?action=query&format=json&formatversion=2&prop=imageinfo&iiprop=url%7Cmime%7Cextmetadata&iiurlwidth=640&iiextmetadatafilter=Artist%7CLicenseShortName%7CLicense%7CLicenseUrl%7CNonFree%7CAttributionRequired%7CCopyrighted%7CUsageTerms&iiextmetadatalanguage=en&titles=File%3AMiles+Davis+by+Palumbo+cropped.jpg"
+  },
+  "commons-no-author": {
+    "bytes": 2873,
+    "content_type": "application/json",
+    "file": "commons-no-author.json",
+    "note": "A real CC BY 4.0 file with no machine-readable author (in Commons' category 'Files with no machine-readable author'): refused. The tests serve it as the image of a derived Wikidata answer (see wd-p18-no-author).",
+    "recorded_at": "2026-11-04T15:50:05+00:00",
+    "sha256": "677aa9e9f0c7dc733307dd2a7fb28d4eb7ca1244991764c9dc6f8edd84fe1f75",
+    "status": 200,
+    "url": "https://commons.wikimedia.org/w/api.php?action=query&format=json&formatversion=2&prop=imageinfo&iiprop=url%7Cmime%7Cextmetadata&iiurlwidth=640&iiextmetadatafilter=Artist%7CLicenseShortName%7CLicense%7CLicenseUrl%7CNonFree%7CAttributionRequired%7CCopyrighted%7CUsageTerms&iiextmetadatalanguage=en&titles=File%3A%22+%22Gruss%22+a.+d.+Res.+Lazarett+in+Engers+a.+Rh.+1915.%22%2C+Gruppenbild+-+LABW+-+Staatsarchiv+Sigmaringen+N+1-85+T+1+Nr.+159.jpeg"
+  },
+  "enwiki-summary-404": {
+    "bytes": 38,
+    "content_type": "application/json",
+    "file": "enwiki-summary-404.json",
+    "note": "A missing article's answer: a definite miss.",
+    "recorded_at": "2026-11-04T15:50:05+00:00",
+    "sha256": "6822e9e2cb1b1f591747dc66de18a4b172e08137cdc5c2c06afda0e6133c9ef0",
+    "status": 404,
+    "url": "https://en.wikipedia.org/api/rest_v1/page/summary/Pinakes_music_enrichment_no_such_article"
+  },
+  "enwiki-summary-daft-punk": {
+    "bytes": 2308,
+    "content_type": "application/json",
+    "file": "enwiki-summary-daft-punk.json",
+    "note": "A standard article's summary.",
+    "recorded_at": "2026-11-04T15:49:30+00:00",
+    "sha256": "cf98544f701760e73c7687c9f87c90d7f85d33c723104f9669a3329b419849bb",
+    "status": 200,
+    "url": "https://en.wikipedia.org/api/rest_v1/page/summary/Daft_Punk"
+  },
+  "enwiki-summary-get-lucky-disambiguation": {
+    "bytes": 1194,
+    "content_type": "application/json",
+    "file": "enwiki-summary-get-lucky-disambiguation.json",
+    "note": "A disambiguation page's summary (type disambiguation): no description.",
+    "recorded_at": "2026-11-04T15:50:05+00:00",
+    "sha256": "d43415c420e4d012dcec5090d201d4b3fe60afa761e32b745fa15c28fd8b7bfd",
+    "status": 200,
+    "url": "https://en.wikipedia.org/api/rest_v1/page/summary/Get_Lucky"
+  },
+  "enwiki-summary-get-lucky-song": {
+    "bytes": 3345,
+    "content_type": "application/json",
+    "file": "enwiki-summary-get-lucky-song.json",
+    "note": "A standard article's summary.",
+    "recorded_at": "2026-11-04T15:49:30+00:00",
+    "sha256": "e39ba8611311baf26448c50353d8efef585e59ac4776a14671a3b5bb8f51a71e",
+    "status": 200,
+    "url": "https://en.wikipedia.org/api/rest_v1/page/summary/Get_Lucky_%28Daft_Punk_song%29"
+  },
+  "enwiki-summary-kind-of-blue": {
+    "bytes": 2637,
+    "content_type": "application/json",
+    "file": "enwiki-summary-kind-of-blue.json",
+    "note": "A standard article's summary; its thumbnail is Wikipedia's own non-free cover, never used.",
+    "recorded_at": "2026-11-04T15:49:30+00:00",
+    "sha256": "2ceec35a7ef2ee8ba35eafb70005926f3d599bcaff4bf5096a025dd87580f6b3",
+    "status": 200,
+    "url": "https://en.wikipedia.org/api/rest_v1/page/summary/Kind_of_Blue"
+  },
+  "enwiki-summary-miles-davis": {
+    "bytes": 2554,
+    "content_type": "application/json",
+    "file": "enwiki-summary-miles-davis.json",
+    "note": "A standard article's summary.",
+    "recorded_at": "2026-11-04T15:49:30+00:00",
+    "sha256": "b4f315187d09bf29686fa935eaf31db93e01fc7aedc5c5b18666151d78e13951",
+    "status": 200,
+    "url": "https://en.wikipedia.org/api/rest_v1/page/summary/Miles_Davis"
+  },
+  "mb-artist-daft-punk": {
+    "bytes": 26731,
+    "content_type": "application/json",
+    "file": "mb-artist-daft-punk.json",
+    "note": "Daft Punk (Group, a MusicGroup card), Wikidata Q185828.",
+    "recorded_at": "2026-11-04T15:49:30+00:00",
+    "sha256": "1910b12d715d8cd69134423555e0fd0588ba16b26368f5265e0c676bf8eb03e8",
+    "status": 200,
+    "url": "https://musicbrainz.org/ws/2/artist/056e4f3e-d505-4dad-8ec1-d04f521cbb56?inc=url-rels&fmt=json"
+  },
+  "mb-artist-miles-davis": {
+    "bytes": 23079,
+    "content_type": "application/json",
+    "file": "mb-artist-miles-davis.json",
+    "note": "Miles Davis (Person), Wikidata Q93341.",
+    "recorded_at": "2026-11-04T15:49:30+00:00",
+    "sha256": "2acfe9b0a50a84ac6a9ed6d2279245263e64a767b16441b9e3854ee2758935bc",
+    "status": 200,
+    "url": "https://musicbrainz.org/ws/2/artist/561d854a-6a28-4aa7-8c99-323e6ce46c2a?inc=url-rels&fmt=json"
+  },
+  "mb-artist-sefa": {
+    "bytes": 8398,
+    "content_type": "application/json",
+    "file": "mb-artist-sefa.json",
+    "note": "Sefa (Person): no Wikidata relation, so a sparse card.",
+    "recorded_at": "2026-11-04T15:49:30+00:00",
+    "sha256": "2277179332aa4416c656b208778e606b8e4d0bec4b895b608e08c05caa9d433e",
+    "status": 200,
+    "url": "https://musicbrainz.org/ws/2/artist/b5416a54-4941-4fcf-b2a0-7f98da6f9344?inc=url-rels&fmt=json"
+  },
+  "mb-recording-get-lucky": {
+    "bytes": 8905,
+    "content_type": "application/json",
+    "file": "mb-recording-get-lucky.json",
+    "note": "Get Lucky (recording): no Wikidata relation of its own.",
+    "recorded_at": "2026-11-04T15:49:30+00:00",
+    "sha256": "c6e724a9a127d9dedb8cef95da5abece720ac5f1cc67f479735a2b15f86e55da",
+    "status": 200,
+    "url": "https://musicbrainz.org/ws/2/recording/833f00e1-781f-4edd-90e4-e52712618862?inc=url-rels+isrcs+artist-credits&fmt=json"
+  },
+  "mb-recording-get-lucky-works": {
+    "bytes": 11738,
+    "content_type": "application/json",
+    "file": "mb-recording-get-lucky-works.json",
+    "note": "Get Lucky: one performance of work b11bf816-1844-47e5-9075-9239b7609c6a, whose Wikidata relation is Q11510350.",
+    "recorded_at": "2026-11-04T15:49:30+00:00",
+    "sha256": "d833eb94505c5bf508bd3c5def053467baeb120223781bb305af826f61856198",
+    "status": 200,
+    "url": "https://musicbrainz.org/ws/2/recording/833f00e1-781f-4edd-90e4-e52712618862?inc=work-rels+work-level-rels+url-rels&fmt=json"
+  },
+  "mb-release-group-kind-of-blue": {
+    "bytes": 3066,
+    "content_type": "application/json",
+    "file": "mb-release-group-kind-of-blue.json",
+    "note": "Kind of Blue (release group), Wikidata Q283221.",
+    "recorded_at": "2026-11-04T15:49:30+00:00",
+    "sha256": "74f646faa919973b0740efeaa63c9a80c985a7d2c3b86cc02cd8277a1fa05b63",
+    "status": 200,
+    "url": "https://musicbrainz.org/ws/2/release-group/8e8a594f-2175-38c7-a871-abb68ec363e7?inc=url-rels+artist-credits&fmt=json"
+  },
+  "wd-p18-Q11510350": {
+    "bytes": 13,
+    "content_type": "application/json",
+    "file": "wd-p18-Q11510350.json",
+    "note": "The work Get Lucky: no image claim.",
+    "recorded_at": "2026-11-04T15:49:30+00:00",
+    "sha256": "91eaeaac96fb538eb1fab799f99cb93ace0544197840dbe49c745766fadbfdcb",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=wbgetclaims&entity=Q11510350&property=P18&format=json"
+  },
+  "wd-p18-Q185828": {
+    "bytes": 1691,
+    "content_type": "application/json",
+    "file": "wd-p18-Q185828.json",
+    "note": "Daft Punk's image.",
+    "recorded_at": "2026-11-04T15:49:30+00:00",
+    "sha256": "ac738e67f7303bbc07f2fdb825cca8c9ead47cc12c52c5822e0eb0d0988c05ab",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=wbgetclaims&entity=Q185828&property=P18&format=json"
+  },
+  "wd-p18-Q283221": {
+    "bytes": 13,
+    "content_type": "application/json",
+    "file": "wd-p18-Q283221.json",
+    "note": "Kind of Blue: no image claim.",
+    "recorded_at": "2026-11-04T15:49:30+00:00",
+    "sha256": "91eaeaac96fb538eb1fab799f99cb93ace0544197840dbe49c745766fadbfdcb",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=wbgetclaims&entity=Q283221&property=P18&format=json"
+  },
+  "wd-p18-Q93341": {
+    "bytes": 915,
+    "content_type": "application/json",
+    "file": "wd-p18-Q93341.json",
+    "note": "Miles Davis's images: a preferred and a normal claim.",
+    "recorded_at": "2026-11-04T15:49:30+00:00",
+    "sha256": "fc9d2d7e03a890536fe89539c3c003caaca39a084f34517922cf612d44a3a822",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=wbgetclaims&entity=Q93341&property=P18&format=json"
+  },
+  "wd-sitelink-Q11510350": {
+    "bytes": 237,
+    "content_type": "application/json",
+    "file": "wd-sitelink-Q11510350.json",
+    "note": "The work Get Lucky's English Wikipedia article.",
+    "recorded_at": "2026-11-04T15:49:30+00:00",
+    "sha256": "bc708fb6b338f4144f44ee02731ee97443116c708029a9f075433aa5e00f761c",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q11510350&props=sitelinks%2Furls&sitefilter=enwiki&format=json"
+  },
+  "wd-sitelink-Q185828": {
+    "bytes": 199,
+    "content_type": "application/json",
+    "file": "wd-sitelink-Q185828.json",
+    "note": "Daft Punk's English Wikipedia article.",
+    "recorded_at": "2026-11-04T15:49:30+00:00",
+    "sha256": "88861325bdeee857d604f00c8020521c838c18670118f0bdfb31dc504e897d62",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q185828&props=sitelinks%2Furls&sitefilter=enwiki&format=json"
+  },
+  "wd-sitelink-Q283221": {
+    "bytes": 205,
+    "content_type": "application/json",
+    "file": "wd-sitelink-Q283221.json",
+    "note": "Kind of Blue's English Wikipedia article.",
+    "recorded_at": "2026-11-04T15:49:30+00:00",
+    "sha256": "112601586212b21c65de46543563ff57fd59dfa27287cadcd398feff6340f03a",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q283221&props=sitelinks%2Furls&sitefilter=enwiki&format=json"
+  },
+  "wd-sitelink-Q93341": {
+    "bytes": 190,
+    "content_type": "application/json",
+    "file": "wd-sitelink-Q93341.json",
+    "note": "Miles Davis's English Wikipedia article.",
+    "recorded_at": "2026-11-04T15:49:30+00:00",
+    "sha256": "18f6baf81d9c50951a1c9c6f2874d70563924aa22ca3ff775320078b3eb725ce",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q93341&props=sitelinks%2Furls&sitefilter=enwiki&format=json"
+  }
+}

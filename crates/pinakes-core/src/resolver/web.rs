@@ -189,6 +189,7 @@ impl WebResolver {
     }
     async fn musicbrainz_entity_card(&self, uri: &str) -> Result<Option<ResourceMeta>> {
         use crate::hubs::musicbrainz;
+        let started = tokio::time::Instant::now();
         let base = Some(self.config.musicbrainz_base.as_str())
             .filter(|b| !b.is_empty())
             .unwrap_or(musicbrainz::BASE);
@@ -196,7 +197,12 @@ impl WebResolver {
         let card = if let Some((kind, mbid, _)) = musicbrainz::entity_link(uri) {
             match musicbrainz::entity(&self.egress, base, kind, &mbid).await? {
                 Some(entity) => {
-                    crate::music_sources::musicbrainz_card(uri, Some(&entity), None, ttl)
+                    let mut card =
+                        crate::music_sources::musicbrainz_card(uri, Some(&entity), None, ttl);
+                    if self.config.music_enrichment {
+                        self.enrich_music(&mut card, &entity, base, started).await;
+                    }
+                    card
                 }
                 None => return Ok(None),
             }
@@ -221,6 +227,39 @@ impl WebResolver {
             return Ok(None);
         };
         Ok(Some(card.bounded(ATTRIBUTES)?))
+    }
+    /// A MusicBrainz entity's image and description with their credits
+    /// (`music_enrichment`), within `limits.music_enrichment_timeout_ms` and the card's own
+    /// read (`started`, within `queue::RESOLVE_TIMEOUT`): past either, both fields are unread,
+    /// and the card keeps what it has stored. Never fails the card.
+    async fn enrich_music(
+        &self,
+        card: &mut ResourceMeta,
+        entity: &crate::hubs::musicbrainz::Entity,
+        base: &str,
+        started: tokio::time::Instant,
+    ) {
+        let deadline = (tokio::time::Instant::now()
+            + Duration::from_millis(self.config.music_enrichment_timeout_ms))
+        .min(started + crate::queue::RESOLVE_TIMEOUT.saturating_sub(Duration::from_secs(2)));
+        let enrichment = match tokio::time::timeout_at(
+            deadline,
+            crate::music_enrichment::enrich(
+                &self.egress,
+                base,
+                entity,
+                self.config.music_image_width,
+            ),
+        )
+        .await
+        {
+            Ok(enrichment) => enrichment,
+            Err(_) => {
+                tracing::info!(mbid = %entity.mbid, "music enrichment timed out");
+                crate::music_enrichment::Enrichment::unread()
+            }
+        };
+        enrichment.apply(card, self.config.music_enrichment_retry_secs);
     }
     pub async fn resolve_with_policy(
         &self,

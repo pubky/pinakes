@@ -1213,6 +1213,25 @@ MBID or the ISRC): the title, `MusicRecording`, `MusicAlbum`, `MusicGroup` or `P
 MusicBrainz calls a person), the artist credit and a recording's length as its description, `site`
 `MusicBrainz`; an ISRC's page is its one recording's card, else named `ISRC {code}`.
 
+A MusicBrainz artist, release group, release or recording card also takes an image and a
+description from the entity's own Wikidata item, each with its [credit](#credits) (`[web]
+music_enrichment`, on by default):
+- the item is the one the entity's own `wikidata` relation on MusicBrainz names; a release uses
+  its own, never its release group's. A recording without one uses the one work it is a
+  performance of, when that work has its own relation, for the description alone (its credit
+  names the work as `subject`). Nothing is matched by name;
+- the description is the summary of the item's English Wikipedia article (plain text, at most
+  2,048 bytes, cut at a sentence or a word); a disambiguation page gives none. The summary's
+  thumbnail is never used;
+- the image is the item's image (`P18`) on Wikimedia Commons, a thumbnail 640 pixels wide, shown
+  only when the file's own page gives a licence on the list (CC0, the public domain, CC BY or CC
+  BY-SA 1.0 to 4.0) and, under CC BY and CC BY-SA, its author.
+
+What it does not find leaves the card as MusicBrainz makes it (an artist without an item, such as
+most small artists, has no image or description: the card is still `ok`). An answer that fails for
+a while (a timeout, a 429, a 5xx) keeps what the card had of that field, and the card is read
+again within the hour; a definite answer (no article, a refused file) removes it.
+
 ## Cards and resolvers
 
 Public `/v1/info` names the kinds this instance resolves in `resolves`; the admin `/v1/info`

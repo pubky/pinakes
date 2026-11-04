@@ -2315,7 +2315,8 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
 
 /// A MusicBrainz page's card comes from the entity MusicBrainz serves, the same read the hub's
 /// source makes: the recording's title, artist credit and length; an artist's type; an ISRC's
-/// page is its one recording's card, or the ISRC's own when two recordings have it.
+/// page is its one recording's card, or the ISRC's own when two recordings have it. (What its
+/// Wikidata item adds is `tests/music_enrichment.rs`'s.)
 #[tokio::test]
 async fn a_musicbrainz_page_card_comes_from_the_entity() {
     let t = Arc::new(Recorded {
@@ -2326,7 +2327,10 @@ async fn a_musicbrainz_page_card_comes_from_the_entity() {
         cards: None,
         events: None,
         egress: egress(t.clone()),
-        config: Default::default(),
+        config: pinakes_core::config::ResolverConfig {
+            music_enrichment: false,
+            ..Default::default()
+        },
     };
     let card = |uri: &'static str| {
         let web = &web;

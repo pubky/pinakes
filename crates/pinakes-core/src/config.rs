@@ -21,9 +21,9 @@ pub struct Config {
     /// Whether the Nexus at `nexus_url` serves the reach-set route, so search takes
     /// `reach=wot_2` and `boost=wot_2` (`nexus::Nexus::reach`); off, those answer 501.
     pub nexus_reach_set: bool,
-    /// `discover_feeds` is accepted here and in `[cards.media]`; the other resolver sections take
-    /// only `enabled`.
-    #[serde(with = "feed_section")]
+    /// `discover_feeds` is accepted here and in `[cards.media]`, `music_enrichment` here alone;
+    /// the other resolver sections take only `enabled`.
+    #[serde(with = "web_section")]
     pub web: ResolverConfig,
     /// `enabled` and `pkarr_relays` (`pubky_section`).
     #[serde(with = "pubky_section")]
@@ -468,8 +468,8 @@ impl Default for IngestConfig {
         }
     }
 }
-/// `[web]` and `[cards.media]` in the file: `enabled` and `discover_feeds` onto the shared
-/// resolver settings.
+/// `[cards.media]` in the file: `enabled` and `discover_feeds` onto the shared resolver
+/// settings.
 pub(crate) mod feed_section {
     use super::ResolverConfig;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -500,6 +500,45 @@ pub(crate) mod feed_section {
         Ok(ResolverConfig {
             enabled: w.enabled,
             discover_feeds: w.discover_feeds,
+            ..Default::default()
+        })
+    }
+}
+/// `[web]` in the file: `enabled`, `discover_feeds` and `music_enrichment`.
+pub(crate) mod web_section {
+    use super::ResolverConfig;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    #[derive(Deserialize, Serialize)]
+    #[serde(default, deny_unknown_fields)]
+    struct Web {
+        enabled: bool,
+        discover_feeds: bool,
+        music_enrichment: bool,
+    }
+    impl Default for Web {
+        fn default() -> Self {
+            let d = ResolverConfig::default();
+            Self {
+                enabled: d.enabled,
+                discover_feeds: d.discover_feeds,
+                music_enrichment: d.music_enrichment,
+            }
+        }
+    }
+    pub fn serialize<S: Serializer>(c: &ResolverConfig, s: S) -> Result<S::Ok, S::Error> {
+        Web {
+            enabled: c.enabled,
+            discover_feeds: c.discover_feeds,
+            music_enrichment: c.music_enrichment,
+        }
+        .serialize(s)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<ResolverConfig, D::Error> {
+        let w = Web::deserialize(d)?;
+        Ok(ResolverConfig {
+            enabled: w.enabled,
+            discover_feeds: w.discover_feeds,
+            music_enrichment: w.music_enrichment,
             ..Default::default()
         })
     }
@@ -569,6 +608,21 @@ pub struct ResolverConfig {
     /// (`limits.event_max_period_dates`), for the Pubky apps' event readers.
     #[serde(skip)]
     pub max_period_dates: usize,
+    /// `web.music_enrichment` only: a MusicBrainz page's card takes an image and a description,
+    /// with their credits, from its own Wikidata item (`music_enrichment`). Off, the card is
+    /// MusicBrainz's alone.
+    #[serde(skip)]
+    pub music_enrichment: bool,
+    /// `web` only: how long a card's enrichment may take (`limits.music_enrichment_timeout_ms`).
+    #[serde(skip)]
+    pub music_enrichment_timeout_ms: u64,
+    /// `web` only: when a card whose enrichment failed for a while is read again
+    /// (`limits.music_enrichment_retry_secs`).
+    #[serde(skip)]
+    pub music_enrichment_retry_secs: u64,
+    /// `web` only: the width of an enriched image (`limits.music_image_width`).
+    #[serde(skip)]
+    pub music_image_width: u32,
 }
 impl Default for ResolverConfig {
     fn default() -> Self {
@@ -581,6 +635,10 @@ impl Default for ResolverConfig {
             ttl_secs: 86400,
             musicbrainz_base: String::new(),
             max_period_dates: crate::event::time::MAX_PERIOD_DATES,
+            music_enrichment: true,
+            music_enrichment_timeout_ms: 8000,
+            music_enrichment_retry_secs: 3600,
+            music_image_width: 640,
         }
     }
 }
@@ -2334,6 +2392,14 @@ limits! {
         |c, v| c.cards.media.ttl_secs = v, |c, v| c.cards.isbn.ttl_secs = v,
         |c, v| c.cards.doi.ttl_secs = v, |c, v| c.cards.nostr.ttl_secs = v,
         |c, v| c.cards.activitypub.ttl_secs = v, |c, v| c.cards.official.ttl_secs = v],
+    /// How long a MusicBrainz card's enrichment may take, within the card's own read
+    /// (milliseconds); past it, the card keeps its stored image and description.
+    music_enrichment_timeout_ms: u64 = |c| c.web.music_enrichment_timeout_ms => [|c, v| c.web.music_enrichment_timeout_ms = v],
+    /// When a MusicBrainz card whose enrichment failed for a while (a timeout, a 429, a 5xx) is
+    /// read again (seconds), at the latest.
+    music_enrichment_retry_secs: u64 = |c| c.web.music_enrichment_retry_secs => [|c, v| c.web.music_enrichment_retry_secs = v],
+    /// The width of the Commons thumbnail an enriched card shows (pixels).
+    music_image_width: u32 = |c| c.web.music_image_width => [|c, v| c.web.music_image_width = v],
     /// Requests per second to any one upstream host.
     host_requests_per_second: f64 = |c| c.egress.host_requests_per_second => [|c, v| c.egress.host_requests_per_second = v],
     /// Per-host overrides of `host_requests_per_second`.
