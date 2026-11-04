@@ -278,9 +278,7 @@ async fn evidence_loss_splits_and_curation_preserves_identity(pool: PgPool) {
             })
             .collect(),
     };
-    let state = AppState::new(pool.clone(), Config::default())
-        .await
-        .unwrap();
+    let state = AppState::new(pool.clone(), Config::default()).unwrap();
     let make_request = || {
         let mut request = Request::builder()
             .method("PUT")
@@ -344,11 +342,7 @@ async fn members_keep_their_own_cards_and_counts_and_collapse_is_a_view(pool: Pg
         .await
         .unwrap();
     drained(&pool, &Default::default()).await;
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let card = get(&app, &format!("/v1/resources/{a}")).await;
     assert_eq!(card["name"], "joined card", "{card}");
     let group = card["group"]["id"].as_str().unwrap().to_owned();
@@ -362,7 +356,7 @@ async fn members_keep_their_own_cards_and_counts_and_collapse_is_a_view(pool: Pg
     );
     let mut disabled = Config::default();
     disabled.groups.enabled = false;
-    let disabled = api::router(AppState::new(pool.clone(), disabled).await.unwrap());
+    let disabled = api::router(AppState::new(pool.clone(), disabled).unwrap());
     assert!(get(&disabled, &format!("/v1/resources/{a}")).await["group"].is_null());
 
     // The group read: the joining keys and every member's own card, no merged card.
@@ -513,11 +507,7 @@ async fn recurring_uid_is_scoped_to_start_and_a_page_joins_only_when_corroborate
         .unwrap();
     assert_eq!(members, 2);
     // The occurrence route names the joined instance's group, as every card does.
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let joined = json!(gid(&pool, &page).await);
     let items = get(&app, &format!("/v1/resources/{id}/occurrences")).await["items"].clone();
     let groups: Vec<&Value> = items
@@ -626,9 +616,7 @@ async fn curation_sets_members_only_and_invalid_curation_is_refused(pool: PgPool
     let (a, _) = save(&pool, "member", &[], None).await;
     let id = "c".repeat(32);
     let body = json!({"members":[{"resource_id":a}]});
-    let state = AppState::new(pool.clone(), Config::default())
-        .await
-        .unwrap();
+    let state = AppState::new(pool.clone(), Config::default()).unwrap();
     let admin = api::admin_router(state.clone());
     let put = |body: Value| {
         Request::builder()
@@ -957,11 +945,7 @@ async fn populated_collapse_and_hints_build_only_page_cards(pool: PgPool) {
             .connect_with((*pool.connect_options()).clone())
             .await
             .unwrap();
-        let app = api::router(
-            AppState::new(connection.clone(), Config::default())
-                .await
-                .unwrap(),
-        );
+        let app = api::router(AppState::new(connection.clone(), Config::default()).unwrap());
         // The hint functions' calls on this connection, flushed to the statistics first.
         let hint_calls = || async {
             sqlx::query("SELECT pg_stat_force_next_flush()")
@@ -1063,11 +1047,7 @@ async fn curation_waits_for_writer_and_policy_changes_redirty(pool: PgPool) {
         .execute(&mut *lock)
         .await
         .unwrap();
-    let app = api::admin_router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::admin_router(AppState::new(pool.clone(), Config::default()).unwrap());
     let body = json!({"members":[{"resource_id":a}]});
     let put = move || {
         Request::builder()
@@ -1162,11 +1142,7 @@ async fn registry_landing_pages_group_publisher_pages_with_identifiers(pool: PgP
     store_document(&pool, &forger, &forged).await;
     assert_ne!(gid(&pool, &forger).await, group);
     // The group lists both members' own cards and the citation that joined them.
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let read = get(&app, &format!("/v1/groups/{group}")).await;
     let mut members: Vec<&str> = read["members"]
         .as_array()
@@ -1227,11 +1203,7 @@ async fn doi_card(pool: &PgPool, uri: &str, csl: &Value) -> String {
 
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn registry_landing_pages_need_the_page_to_cite_the_identifier(pool: PgPool) {
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     // A victim article that cites no DOI, already tagged.
     let victim = page(
         &pool,
@@ -1530,11 +1502,7 @@ async fn a_book_and_its_open_library_edition_page_stay_two_cards(pool: PgPool) {
     tag(&pool, &isbn, &"i".repeat(52), "books").await;
     let group = gid(&pool, &isbn).await;
     assert_eq!(gid(&pool, &edition).await, group);
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     // One type each: the group's type is the first by name.
     let view = get(&app, &format!("/v1/groups/{group}")).await;
     assert_eq!(view["type"], "Book", "{view}");
@@ -1949,11 +1917,7 @@ async fn the_type_facet_counts_every_member_collapsed_or_not(pool: PgPool) {
     for id in [&card, &page] {
         tag(&pool, id, &"f".repeat(52), "facet").await;
     }
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let separate = get(&app, "/v1/search?tags=facet&facet=type").await;
     let total = |v: &Value| {
         v["facets"]["type"]

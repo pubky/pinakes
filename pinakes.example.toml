@@ -29,22 +29,14 @@ pkarr_relays = ["https://pkarr.pubky.app", "https://pkarr.pubky.org"]
 enabled = true
 
 # Referenced OSM objects, including aliases; no search/reverse-geocoding proxy.
-# The public Nominatim is for a small development run; deployments use their own URL.
+# The public Nominatim is for a small development run; deployments use their own URL. A hosted
+# Nominatim's URL carries its key: set it as PINAKES__OSM__NOMINATIM_URL in the environment file.
 [osm]
 enabled = true
-# "nominatim" (nominatim_url) or "locationiq" ([osm.locationiq]); one provider, no failover.
-provider = "nominatim"
 nominatim_url = "https://nominatim.openstreetmap.org"
 requests_per_second = 0.5 # The public host allows at most one request per second.
 # The ODbL dump file (osm_place.ndjson.gz), rewritten daily; it needs room for every cached place.
 dump_dir = "/var/lib/pinakes/dumps"
-# LocationIQ, with provider = "locationiq": its key comes from LOCATIONIQ_API_KEY alone, its rate
-# from limits.locationiq_requests_per_second. public_use_authorized states that LocationIQ has
-# given written permission for Pinakes' public API and dump; a key alone does not. It stays needed,
-# whatever the provider, while places LocationIQ answered are stored or in the dump file.
-# [osm.locationiq]
-# region = "us1" # or "eu1"
-# public_use_authorized = false
 
 # Card resolvers; HTTP fallbacks can still use web.
 [cards.media]

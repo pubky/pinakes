@@ -439,11 +439,7 @@ async fn cards_carry_their_client_links_and_facts(pool: PgPool) {
     // A room not read yet: its kind's links (none until rooms.pubky.app is live).
     let (room, _) = fixture("rooms/0035SFYCGVBV2-introductions");
     let room_id = store::ensure_resource(&pool, &room).await.unwrap();
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let deck = get(&app, &format!("/v1/resources/{id}")).await;
     assert_eq!(
         deck["open_in"],
@@ -465,11 +461,7 @@ async fn cards_carry_their_client_links_and_facts(pool: PgPool) {
 
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn an_object_that_loses_its_card_keeps_nothing_of_it(pool: PgPool) {
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     for (name, change) in [
         (
             "rooms/0035SFYCGVBV2-introductions",
@@ -641,11 +633,7 @@ async fn objects_stored_before_their_paths_were_never_fetched_keep_nothing(pool:
     .execute(&pool)
     .await
     .unwrap();
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let posting = found(&app, "type=SocialMediaPosting").await;
     assert!(posting.contains(&legacy[0].url), "{posting:?}");
     assert_eq!(

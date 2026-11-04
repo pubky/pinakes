@@ -992,7 +992,7 @@ pub fn spawn_with_egress(
             osm,
             crate::config::ResolverConfig {
                 concurrency: 1,
-                requests_per_second: config.osm.rate(),
+                requests_per_second: config.osm.requests_per_second,
                 ttl_secs: config.osm.ttl_secs,
                 enabled: true,
                 ..Default::default()

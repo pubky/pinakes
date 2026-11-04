@@ -1,6 +1,6 @@
 use super::Resolver;
 use crate::{
-    config::{OsmConfig, OsmProvider},
+    config::OsmConfig,
     model::{LocationSource, OsmId, Point, ResourceMeta, Status},
 };
 use anyhow::{ensure, Context, Result};
@@ -164,7 +164,7 @@ pub fn parse_id(uri: &str) -> Option<OsmId> {
     })
 }
 /// A positive decimal id without sign or leading zero that fits in i64.
-pub(crate) fn positive(digits: &str) -> Option<i64> {
+fn positive(digits: &str) -> Option<i64> {
     if digits.is_empty() || digits.starts_with('0') || !digits.bytes().all(|c| c.is_ascii_digit()) {
         return None;
     }
@@ -300,78 +300,15 @@ fn missing(id: &OsmId, ttl: u64) -> ResourceMeta {
     doc.status = Status::Missing;
     doc
 }
-/// The credit on a place the provider answered.
-pub fn attribution(provider: OsmProvider) -> &'static str {
-    match provider {
-        OsmProvider::Nominatim => ATTRIBUTION,
-        OsmProvider::LocationIq => super::locationiq::ATTRIBUTION,
-    }
-}
-/// The most objects one lookup names: Nominatim's 50, LocationIQ's 3.
-pub fn lookup_max(provider: OsmProvider) -> usize {
-    match provider {
-        OsmProvider::Nominatim => 50,
-        OsmProvider::LocationIq => super::locationiq::LOOKUP_MAX,
-    }
-}
-/// A response body, read up to `cap` bytes.
-async fn body(response: reqwest::Response, cap: usize) -> Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| super::RetryLater {
-            class: if e.is_timeout() { "timeout" } else { "connect" },
-            seconds: 60,
-        })?;
-        if bytes.len() + chunk.len() > cap {
-            return Err(super::RetryLater {
-                class: "policy",
-                seconds: 60,
-            }
-            .into());
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    Ok(bytes)
-}
 
 pub struct OsmResolver {
     pub pool: PgPool,
-    /// Fixed when the resolver is built, which checks it: read through `config()`.
-    config: OsmConfig,
-    /// The provider's API base: `osm.nominatim_url`, or LocationIQ's regional endpoint.
-    base: String,
+    pub config: OsmConfig,
     client: reqwest::Client,
-    budget: Mutex<Budget>,
-}
-/// The provider's shared budget: when the next request may go (its rate), and, for LocationIQ,
-/// until when it asked for no requests at all (a 429 or 5xx's wait) and why.
-struct Budget {
-    next: Instant,
-    cooldown: Option<(Instant, &'static str)>,
+    next: Mutex<Instant>,
 }
 impl OsmResolver {
-    /// The resolver for `config`'s provider. LocationIQ needs its authorization, a product key
-    /// and a rate (`LocationIqConfig::check`), and is reached at its regional endpoint alone.
     pub fn new(pool: PgPool, config: OsmConfig) -> Result<Self> {
-        let base = match config.provider {
-            OsmProvider::Nominatim => config.nominatim_url.clone(),
-            OsmProvider::LocationIq => config.locationiq.region.base().to_owned(),
-        };
-        Self::build(pool, config, &base)
-    }
-    /// A resolver whose provider is at `base`: a test's stand-in for LocationIQ's fixed endpoint.
-    #[cfg(test)]
-    pub(crate) fn with_base(pool: PgPool, config: OsmConfig, base: &str) -> Result<Self> {
-        Self::build(pool, config, base)
-    }
-    pub fn config(&self) -> &OsmConfig {
-        &self.config
-    }
-    fn build(pool: PgPool, config: OsmConfig, base: &str) -> Result<Self> {
-        if config.provider == OsmProvider::LocationIq {
-            config.locationiq.check()?;
-        }
         let client = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
@@ -383,72 +320,36 @@ impl OsmResolver {
         Ok(Self {
             pool,
             config,
-            base: base.trim_end_matches('/').to_owned(),
             client,
-            budget: Mutex::new(Budget {
-                next: Instant::now(),
-                cooldown: None,
-            }),
+            next: Mutex::new(Instant::now()),
         })
     }
-    /// One request to the provider, `url` without credentials. LocationIQ's key is added to the
-    /// request alone, so `url` is all a log line or an error can name; a request error (whose
-    /// text holds the URL it was sent to) is dropped for its class.
     pub(crate) async fn request(&self, url: reqwest::Url) -> Result<Option<Value>> {
         // One lock covers the request too: all batches and fallback calls share the host budget.
-        let mut budget = self.budget.lock().await;
-        let locationiq = self.config.provider == OsmProvider::LocationIq;
-        // LocationIQ's wait is never slept out here, inside a job's or an event's time: each
-        // request until it ends is deferred at once for what remains of it.
-        if let Some((until, class)) = budget.cooldown {
-            let left = until.saturating_duration_since(Instant::now());
-            if !left.is_zero() {
-                return Err(super::RetryLater {
-                    class,
-                    seconds: left.as_secs_f64().ceil().max(1.0) as u64,
-                }
-                .into());
-            }
-            budget.cooldown = None;
-        }
-        tokio::time::sleep_until(budget.next).await;
-        let rate = if locationiq {
-            self.config.locationiq.requests_per_second
-        } else if public_upstream(&url) {
+        let mut next = self.next.lock().await;
+        tokio::time::sleep_until(*next).await;
+        let public = public_upstream(&url);
+        let rate = if public {
             self.config.requests_per_second.min(1.0)
         } else {
             self.config.requests_per_second
         };
-        budget.next = Instant::now() + Duration::from_secs_f64(1.0 / rate);
-        let mut sent = url.clone();
-        if locationiq {
-            ensure!(
-                self.below_base(&url),
-                "refused: the LocationIQ key goes to its own endpoint alone"
-            );
-            let key = self
-                .config
-                .locationiq
-                .key
-                .as_deref()
-                .context("no LocationIQ key")?;
-            sent.query_pairs_mut().append_pair("key", key);
-        }
+        *next = Instant::now() + Duration::from_secs_f64(1.0 / rate);
         let mut observation = crate::telemetry::FetchGuard::start();
-        let response = self
-            .client
-            .get(sent)
-            .send()
-            .await
-            .map_err(|e| super::RetryLater {
-                class: if e.is_timeout() { "timeout" } else { "connect" },
-                seconds: 60,
-            })?;
+        let response =
+            self.client
+                .get(url.clone())
+                .send()
+                .await
+                .map_err(|e| super::RetryLater {
+                    class: if e.is_timeout() { "timeout" } else { "connect" },
+                    seconds: 60,
+                })?;
         observation.status(response.status().as_u16());
         let status = response.status();
         // The request's path below the configured base (`lookup`, `search`): never the query, a
         // user's link or the base's own path, which may hold a token.
-        let base = url::Url::parse(&self.base).ok();
+        let base = url::Url::parse(&self.config.nominatim_url).ok();
         let below = base
             .as_ref()
             .and_then(|base| url.path().strip_prefix(base.path().trim_end_matches('/')))
@@ -462,21 +363,9 @@ impl OsmResolver {
         if status.as_u16() == 304 {
             return Err(super::NotModified.into());
         }
-        if locationiq && !status.is_success() {
-            let headers = response.headers().clone();
-            let answer = body(response, 64 * 1024).await.unwrap_or_default();
-            return match super::locationiq::refusal(status.as_u16(), &headers, &answer) {
-                super::locationiq::Refusal::NotFound => Ok(Some(Value::Array(vec![]))),
-                super::locationiq::Refusal::Later(class, seconds) => {
-                    budget.cooldown = Some((Instant::now() + Duration::from_secs(seconds), class));
-                    Err(super::RetryLater { class, seconds }.into())
-                }
-                super::locationiq::Refusal::Error(message) => Err(anyhow::anyhow!(message)),
-            };
-        }
         if status.as_u16() == 429 || status.is_server_error() {
             let seconds = retry_after(response.headers());
-            budget.next = Instant::now() + Duration::from_secs(seconds);
+            *next = Instant::now() + Duration::from_secs(seconds);
             return Err(super::RetryLater {
                 class: if status.as_u16() == 429 {
                     "http_4xx"
@@ -491,133 +380,23 @@ impl OsmResolver {
             return Ok(None);
         }
         ensure!(status.is_success(), "OSM upstream HTTP {status}");
-        let bytes = body(response, 2 * 1024 * 1024).await?;
+        let mut bytes = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| super::RetryLater {
+                class: if e.is_timeout() { "timeout" } else { "connect" },
+                seconds: 60,
+            })?;
+            if bytes.len() + chunk.len() > 2 * 1024 * 1024 {
+                return Err(super::RetryLater {
+                    class: "policy",
+                    seconds: 60,
+                }
+                .into());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
         Ok(Some(serde_json::from_slice(&bytes)?))
-    }
-    /// Whether `url` is on the provider's base (its scheme, host and port) and below its path.
-    fn below_base(&self, url: &reqwest::Url) -> bool {
-        let Ok(base) = reqwest::Url::parse(&self.base) else {
-            return false;
-        };
-        let path = base.path().trim_end_matches('/');
-        base.scheme() == url.scheme()
-            && base.host() == url.host()
-            && base.port_or_known_default() == url.port_or_known_default()
-            && url.username().is_empty()
-            && url.password().is_none()
-            && url
-                .path()
-                .strip_prefix(path)
-                .is_some_and(|rest| rest.starts_with('/'))
-    }
-    /// A place from a provider's row, credited to the provider.
-    pub(crate) fn place(&self, row: &Value) -> Result<ResourceMeta> {
-        let mut doc = map_place(row, self.config.ttl_secs)?;
-        doc.attribution = Some(attribution(self.config.provider).into());
-        Ok(doc)
-    }
-    /// The provider's rows in Nominatim's form; LocationIQ's without OSM identity left out.
-    fn rows(&self, rows: Vec<Value>) -> Vec<Value> {
-        match self.config.provider {
-            OsmProvider::Nominatim => rows,
-            OsmProvider::LocationIq => rows
-                .into_iter()
-                .filter_map(super::locationiq::normalize)
-                .collect(),
-        }
-    }
-    /// A geocoding search for `query`: structured fields (`street`, `city`, `state`,
-    /// `postalcode`, `country`) or free text (`q`), for settlements alone when `settlement`.
-    /// The hits in Nominatim's form; `None` without an answer. Nominatim answers at most two.
-    /// LocationIQ has an endpoint for each form and documents no settlement filter: its settlements are
-    /// picked from up to ten hits, and a hit without OSM identity is left out.
-    pub(crate) async fn search(
-        &self,
-        query: &[(&str, &str)],
-        settlement: bool,
-    ) -> Result<Option<Vec<Value>>> {
-        let locationiq = self.config.provider == OsmProvider::LocationIq;
-        let path = if locationiq && !query.iter().any(|(k, _)| *k == "q") {
-            "search/structured"
-        } else {
-            "search"
-        };
-        let mut url: reqwest::Url = format!("{}/{path}", self.base).parse()?;
-        let (format, limit) = if locationiq {
-            ("json", super::locationiq::search_limit(settlement))
-        } else {
-            ("jsonv2", "2")
-        };
-        url.query_pairs_mut()
-            .append_pair("format", format)
-            .append_pair("addressdetails", "1")
-            .append_pair("namedetails", "1")
-            .append_pair("limit", limit)
-            .append_pair("accept-language", "en");
-        if settlement && !locationiq {
-            url.query_pairs_mut()
-                .append_pair("featureType", "settlement");
-        }
-        for (k, v) in query {
-            url.query_pairs_mut().append_pair(k, v);
-        }
-        let Some(value) = self.request(url).await? else {
-            return Ok(None);
-        };
-        if !locationiq {
-            return Ok(value.as_array().cloned());
-        }
-        let hits = value
-            .as_array()
-            .cloned()
-            .context("LocationIQ response is not a list")?;
-        Ok(Some(
-            self.rows(hits)
-                .into_iter()
-                .filter(|hit| !settlement || super::locationiq::settlement(hit))
-                .collect(),
-        ))
-    }
-    /// One lookup of at most `lookup_max` objects: the rows, in Nominatim's form.
-    async fn lookup(&self, ids: &[OsmId]) -> Result<Vec<Value>> {
-        let mut url: reqwest::Url = format!("{}/lookup", self.base).parse()?;
-        let format = match self.config.provider {
-            OsmProvider::Nominatim => "jsonv2",
-            OsmProvider::LocationIq => "json",
-        };
-        url.query_pairs_mut()
-            .append_pair(
-                "osm_ids",
-                &ids.iter()
-                    .map(OsmId::lookup_id)
-                    .collect::<Vec<_>>()
-                    .join(","),
-            )
-            .append_pair("format", format)
-            .append_pair("addressdetails", "1")
-            .append_pair("extratags", "1")
-            .append_pair("namedetails", "1");
-        let name = match self.config.provider {
-            OsmProvider::Nominatim => "Nominatim",
-            OsmProvider::LocationIq => "LocationIQ",
-        };
-        let body = self
-            .request(url)
-            .await?
-            .with_context(|| format!("{name} lookup endpoint missing"))?;
-        let rows = if let Some(rows) = body.as_array() {
-            rows.clone()
-        } else if self.config.provider == OsmProvider::LocationIq
-            && body.get("error").is_none()
-            && super::locationiq::normalize(body.clone()).is_some()
-        {
-            // The documented LocationIQ single-object example and batch arrays share the
-            // same normalization; an error/non-place object never becomes a missing result.
-            vec![body]
-        } else {
-            anyhow::bail!("{name} response is not a list");
-        };
-        Ok(self.rows(rows))
     }
     async fn cached(&self, id: &OsmId) -> Result<Option<ResourceMeta>> {
         let value: Option<Value> = sqlx::query_scalar(
@@ -627,13 +406,10 @@ impl OsmResolver {
         .bind(id.id)
         .fetch_optional(&self.pool)
         .await?;
-        let doc: Option<ResourceMeta> = value.map(serde_json::from_value).transpose()?;
-        // Another provider's answer (LocationIQ's) is served only with its authorization:
-        // without it the place is asked again.
-        Ok(doc.filter(|doc| {
-            self.config.locationiq.public_use_authorized
-                || doc.attribution.as_deref().is_none_or(|a| a == ATTRIBUTION)
-        }))
+        value
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(Into::into)
     }
     pub(crate) async fn save(
         &self,
@@ -696,11 +472,37 @@ impl OsmResolver {
                 }
             }
         }
-        for pending in pending.chunks(lookup_max(self.config.provider)) {
-            match self.lookup(pending).await {
+        if !pending.is_empty() {
+            let response = async {
+                let mut url: reqwest::Url =
+                    format!("{}/lookup", self.config.nominatim_url.trim_end_matches('/'))
+                        .parse()?;
+                url.query_pairs_mut()
+                    .append_pair(
+                        "osm_ids",
+                        &pending
+                            .iter()
+                            .map(OsmId::lookup_id)
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    )
+                    .append_pair("format", "jsonv2")
+                    .append_pair("addressdetails", "1")
+                    .append_pair("extratags", "1")
+                    .append_pair("namedetails", "1");
+                let body = self
+                    .request(url)
+                    .await?
+                    .context("Nominatim lookup endpoint missing")?;
+                body.as_array()
+                    .cloned()
+                    .context("Nominatim response is not a list")
+            }
+            .await;
+            match response {
                 Err(error) => {
                     for id in pending {
-                        found.insert(id.clone(), Err(copy_error(&error)));
+                        found.insert(id, Err(copy_error(&error)));
                     }
                 }
                 Ok(rows) => {
@@ -720,18 +522,16 @@ impl OsmResolver {
                             continue;
                         };
                         places.entry(id).or_insert_with(|| {
-                            self.place(&row)
+                            map_place(&row, self.config.ttl_secs)
                                 .map(|doc| (doc, text(&row["display_name"]).map(str::to_owned)))
                         });
                     }
                     for id in pending {
                         let result = async {
-                            let (doc, display) = if let Some(place) = places.remove(id) {
+                            let (doc, display) = if let Some(place) = places.remove(&id) {
                                 place?
                             } else {
-                                let mut doc = missing(id, self.config.ttl_secs);
-                                doc.attribution = Some(attribution(self.config.provider).into());
-                                (doc, None)
+                                (missing(&id, self.config.ttl_secs), None)
                             };
                             crate::telemetry::document(
                                 crate::telemetry::last_fetch(),
@@ -739,12 +539,12 @@ impl OsmResolver {
                                 &doc,
                             );
                             if !probe {
-                                self.save(id, &doc, display.as_deref()).await?;
+                                self.save(&id, &doc, display.as_deref()).await?;
                             }
                             Ok(doc)
                         }
                         .await;
-                        found.insert(id.clone(), result);
+                        found.insert(id, result);
                     }
                 }
             }
@@ -773,7 +573,7 @@ impl Resolver for OsmResolver {
         parse_id(uri).is_some()
     }
     fn batch_size(&self) -> usize {
-        lookup_max(self.config.provider)
+        50
     }
     async fn resolve(&self, uri: &str) -> Result<ResourceMeta> {
         self.batch(&[uri.into()], false)
@@ -891,118 +691,6 @@ mod tests {
             assert!(public_upstream(&url.parse().unwrap()), "{url}");
         }
         assert!(!public_upstream(&"http://127.0.0.1:1234".parse().unwrap()));
-    }
-    /// Nominatim, the default, is asked as it always was: up to 50 objects per `jsonv2` lookup,
-    /// searches on `/search` with `featureType=settlement` for towns, and never a key, even
-    /// when one is configured for LocationIQ.
-    #[sqlx::test(
-        migrations = "../../migrations",
-        fixtures("../../tests/fixtures/require_h3.sql")
-    )]
-    async fn nominatim_requests_are_unchanged(pool: PgPool) {
-        use super::super::locationiq::tests::{row, serve};
-        use axum::response::IntoResponse;
-        let (base, mock) = serve(|path, q| match path {
-            "/v1/lookup" => axum::Json(
-                q["osm_ids"]
-                    .split(',')
-                    .map(|id| {
-                        let mut row = row("node", id[1..].parse().unwrap(), "Cafe");
-                        row["osm_id"] = row["osm_id"]
-                            .as_str()
-                            .unwrap()
-                            .parse::<i64>()
-                            .unwrap()
-                            .into();
-                        row
-                    })
-                    .collect::<Vec<_>>(),
-            )
-            .into_response(),
-            _ => axum::Json(json!([])).into_response(),
-        })
-        .await;
-        let mut config = OsmConfig {
-            nominatim_url: base.clone(),
-            requests_per_second: 1000.0,
-            ..Default::default()
-        };
-        config.locationiq.key = Some("pk.KEYCANARY".into());
-        let resolver = OsmResolver::new(pool, config).unwrap();
-        assert_eq!(resolver.batch_size(), 50);
-        let uris: Vec<String> = (1..=50)
-            .map(|id| format!("https://www.openstreetmap.org/node/{id}"))
-            .collect();
-        let docs = resolver.resolve_batch(&uris).await;
-        assert!(docs
-            .iter()
-            .all(|d| d.as_ref().unwrap().attribution.as_deref() == Some(ATTRIBUTION)));
-        resolver
-            .search(&[("street", "Via Nassa 5"), ("city", "Lugano")], false)
-            .await
-            .unwrap();
-        resolver
-            .search(&[("q", "San Francisco, CA")], true)
-            .await
-            .unwrap();
-        let calls = mock.calls.lock().unwrap().clone();
-        let pairs = |pairs: &[(&str, &str)]| -> HashMap<String, String> {
-            pairs
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect()
-        };
-        let ids = (1..=50)
-            .map(|id| format!("N{id}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        let common = [("addressdetails", "1"), ("namedetails", "1")];
-        let search = [
-            ("format", "jsonv2"),
-            ("limit", "2"),
-            ("accept-language", "en"),
-        ];
-        assert_eq!(calls.len(), 3);
-        assert_eq!(calls[0].0, "/v1/lookup");
-        assert_eq!(
-            calls[0].1,
-            pairs(
-                &[
-                    [
-                        ("osm_ids", ids.as_str()),
-                        ("format", "jsonv2"),
-                        ("extratags", "1")
-                    ]
-                    .as_slice(),
-                    &common
-                ]
-                .concat()
-            )
-        );
-        assert_eq!(calls[1].0, "/v1/search");
-        assert_eq!(
-            calls[1].1,
-            pairs(
-                &[
-                    common.as_slice(),
-                    &search,
-                    &[("street", "Via Nassa 5"), ("city", "Lugano")]
-                ]
-                .concat()
-            )
-        );
-        assert_eq!(calls[2].0, "/v1/search");
-        assert_eq!(
-            calls[2].1,
-            pairs(
-                &[
-                    common.as_slice(),
-                    &search,
-                    &[("featureType", "settlement"), ("q", "San Francisco, CA")]
-                ]
-                .concat()
-            )
-        );
     }
     #[test]
     fn mappings_keep_multiple_inheritance() {

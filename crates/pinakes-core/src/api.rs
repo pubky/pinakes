@@ -44,17 +44,9 @@ pub struct AppState {
     /// The request clock for relative times and search cursors; tests set it, the daemon never
     /// does (wall clock).
     pub clock: Option<Clock>,
-    publication: crate::resolver::locationiq::Publication,
-    /// The last dump file a download checked, by its device, inode, length, modification and
-    /// change times, and whether this instance may serve it.
-    dump_checked: Arc<std::sync::Mutex<Option<(DumpFile, bool)>>>,
 }
-/// A dump file as opened: another file renamed into place, or one changed, is another key.
-type DumpFile = (u64, u64, u64, i64, i64, i64, i64);
 impl AppState {
-    pub async fn new(pool: PgPool, config: Config) -> anyhow::Result<Self> {
-        let publication =
-            crate::resolver::locationiq::Publication::check(&pool, &config.osm).await?;
+    pub fn new(pool: PgPool, config: Config) -> anyhow::Result<Self> {
         let mut cursor_key = [0; 32];
         getrandom::fill(&mut cursor_key).context("cursor key entropy unavailable")?;
         let metrics = Arc::new(crate::telemetry::Metrics::new()?);
@@ -70,13 +62,7 @@ impl AppState {
             cursor_mac: SimpleHmac::<blake3::Hasher>::new_from_slice(&cursor_key)
                 .context("initialize cursor MAC")?,
             clock: None,
-            publication,
-            dump_checked: Arc::default(),
         })
-    }
-    /// What this instance may publish (`Publication::check`).
-    pub fn publication(&self) -> crate::resolver::locationiq::Publication {
-        self.publication
     }
     /// Now, for relative times and search cursors.
     pub fn now(&self) -> DateTime<Utc> {
@@ -711,15 +697,9 @@ pub struct Card {
     /// on an event card, those of the event object it names. Empty for every other card.
     pub open_in: Vec<model::OpenIn>,
     /// OpenStreetMap cards, events placed at an OSM venue and events whose zone was derived from
-    /// coordinates: the attribution to display with the card. A place's is the credit of the
-    /// service that answered the version shown (the ODbL credit, and LocationIQ's for a place
-    /// LocationIQ answered).
+    /// coordinates: the ODbL attribution to display with the card.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attribution: Option<String>,
-    /// An event card's OSM venue: `with_refs` credits the card with its place version's
-    /// provider.
-    #[serde(skip)]
-    pub(crate) venue_place: Option<VenuePlace>,
     /// For a calendar occurrence: which feed instance this card is.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub occurrence: Option<OccurrenceKey>,
@@ -1077,41 +1057,18 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
         collections: 0,
         open_in,
         attribution: credits(
-            // An OSM card shows a place version: the credit of the service that answered it.
-            match (
-                row["osm_id"].as_i64(),
-                doc.as_ref().and_then(|d| d.attribution.clone()),
-            ) {
-                (Some(_), credit) => {
-                    Some(credit.unwrap_or_else(|| crate::resolver::osm::ATTRIBUTION.into()))
-                }
-                (None, credit) => credit,
-            },
+            row["osm_id"]
+                .as_i64()
+                .map(|_| crate::resolver::osm::ATTRIBUTION.to_owned())
+                .or_else(|| doc.as_ref().and_then(|d| d.attribution.clone())),
             // A zone derived from coordinates comes from ODbL boundary data: its own credit.
             doc.as_ref()
                 .and_then(|d| d.event.timezone_attribution.clone()),
         ),
-        venue_place: doc
-            .as_ref()
-            .filter(|_| row["osm_id"].as_i64().is_none())
-            .and_then(|d| {
-                let venue = d.event.venue.as_ref()?;
-                Some(VenuePlace {
-                    osm_id: venue.osm_id.clone()?,
-                    version: venue.osm_version.clone()?,
-                    zone: d.event.timezone_attribution.clone(),
-                })
-            }),
         occurrence,
         event,
         maybe_same: same_events(row).map(|all| all.into_iter().take(3).collect()),
     })
-}
-/// The OSM place version an event card's venue shows, and the card's zone credit.
-pub(crate) struct VenuePlace {
-    osm_id: String,
-    version: String,
-    zone: Option<String>,
 }
 /// The most links one card names as `refs`.
 const REFS: usize = 5;
@@ -1179,44 +1136,7 @@ pub(crate) async fn with_refs<'a>(
             card.refs.clone_from(refs);
         }
     }
-    venue_credits(pool, &mut cards).await?;
     crate::collections::count(pool, cards).await
-}
-/// An event card placed at an OSM venue owes the credit of the place version it shows (the read
-/// fills in the venue's location from that version): one query for every such card of a
-/// response.
-async fn venue_credits(pool: &PgPool, cards: &mut [&mut Card]) -> Result<(), ApiError> {
-    let (places, versions): (Vec<String>, Vec<String>) = cards
-        .iter()
-        .filter_map(|c| c.venue_place.as_ref())
-        .map(|v| (v.osm_id.clone(), v.version.clone()))
-        .unzip();
-    if places.is_empty() {
-        return Ok(());
-    }
-    let found: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT p.osm_id,p.version,o.versions->p.version->>'attribution' FROM unnest($1::text[],$2::text[]) p(osm_id,version) \
-         JOIN osm_place o ON o.osm_type=split_part(p.osm_id,'/',1) \
-           AND o.osm_id=CASE WHEN split_part(p.osm_id,'/',2) ~ '^[0-9]{1,18}$' THEN split_part(p.osm_id,'/',2)::bigint END \
-         WHERE o.versions->p.version->>'attribution' IS NOT NULL",
-    )
-    .bind(&places)
-    .bind(&versions)
-    .fetch_all(pool)
-    .await?;
-    let found: BTreeMap<(String, String), String> = found
-        .into_iter()
-        .map(|(osm_id, version, credit)| ((osm_id, version), credit))
-        .collect();
-    for card in cards.iter_mut() {
-        let Some(venue) = &card.venue_place else {
-            continue;
-        };
-        if let Some(credit) = found.get(&(venue.osm_id.clone(), venue.version.clone())) {
-            card.attribution = credits(Some(credit.clone()), venue.zone.clone());
-        }
-    }
-    Ok(())
 }
 /// A card's `maybe_same` as SQL, over a unit's ID and type path and the two hints' switches (SQL
 /// expressions): with `events`, the same-event hint for an event and, for an app's store card, up
@@ -2123,17 +2043,9 @@ pub async fn search(
     if let Some(resolution) = spatial.resolution {
         sql.push("), cells AS (SELECT *, h3_latlng_to_cell(point(ST_X(point),ST_Y(point)),")
             .push_bind(i32::from(u8::from(resolution)))
-            // Each place's credit, from the `osm_place` row whose point the cell is computed from
-            // (an OSM card's own place, an event's venue): its current version, which may be newer
-            // than the one a card pins.
-            .push(")::text AS cell,(SELECT o.doc->>'attribution' FROM osm_place o WHERE o.osm_type=coalesce(f.osm_type,split_part(f.doc#>>'{venue,osm_id}','/',1)) AND o.osm_id=coalesce(f.osm_id,CASE WHEN split_part(f.doc#>>'{venue,osm_id}','/',2) ~ '^[0-9]{1,18}$' THEN split_part(f.doc#>>'{venue,osm_id}','/',2)::bigint END)) AS place_credit FROM filtered f WHERE point IS NOT NULL), groups AS (SELECT cell,count(*) AS count,avg(ST_Y(point)) AS lat,degrees(atan2(avg(sin(radians(ST_X(point)))),avg(cos(radians(ST_X(point)))))) AS lon,ARRAY(SELECT id FROM (SELECT DISTINCT ON (id) id,rank,unit_id FROM cells t WHERE t.cell=cells.cell ORDER BY id,rank DESC,unit_id DESC) unique_ids ORDER BY rank DESC,unit_id DESC LIMIT 3) AS top,max(rank) AS rank,CASE WHEN bool_or(osm_id IS NOT NULL OR doc->>'attribution' IS NOT NULL) THEN ")
-            // The OSM credit, or every other credit a place in the cell owes (each names the
-            // OSM data too).
-            .push("coalesce(string_agg(DISTINCT place_credit,'; ' ORDER BY place_credit) FILTER (WHERE place_credit<>")
+            .push(")::text AS cell FROM filtered WHERE point IS NOT NULL), groups AS (SELECT cell,count(*) AS count,avg(ST_Y(point)) AS lat,degrees(atan2(avg(sin(radians(ST_X(point)))),avg(cos(radians(ST_X(point)))))) AS lon,ARRAY(SELECT id FROM (SELECT DISTINCT ON (id) id,rank,unit_id FROM cells t WHERE t.cell=cells.cell ORDER BY id,rank DESC,unit_id DESC) unique_ids ORDER BY rank DESC,unit_id DESC LIMIT 3) AS top,max(rank) AS rank,CASE WHEN bool_or(osm_id IS NOT NULL OR doc->>'attribution' IS NOT NULL) THEN ")
             .push_bind(crate::resolver::osm::ATTRIBUTION)
-            .push("),")
-            .push_bind(crate::resolver::osm::ATTRIBUTION)
-            .push(") ELSE NULL END AS attribution FROM cells GROUP BY cell LIMIT ")
+            .push(" ELSE NULL END AS attribution FROM cells GROUP BY cell LIMIT ")
             .push_bind((state.config.search.max_cluster_cells+1) as i64)
             .push("), entries AS (SELECT 'cluster' AS kind,cell AS id,cell AS unit_id,rank,to_jsonb(g)-'rank' AS item FROM groups g WHERE count>1 AND (SELECT count(*) FROM filtered)>")
             .push_bind(q.limit.unwrap_or(50) as i64)
@@ -2578,16 +2490,8 @@ pub struct InfoLimits {
 #[derive(Serialize, ToSchema)]
 pub struct OsmLicence {
     pub licence: String,
-    /// The credit for places the current provider answers.
     pub attribution: String,
     pub url: String,
-    /// The service that answers OSM lookups and geocoding: `nominatim` or `locationiq`.
-    #[schema(example = "nominatim")]
-    pub provider: String,
-    /// The provider's terms, which apply beside the ODbL to what it adds; absent for
-    /// Nominatim.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub terms: Option<String>,
     /// The share-alike download: the ODbL derivative database as a daily file.
     pub dump: String,
     /// When the file was last written; `null` before the first.
@@ -2640,10 +2544,8 @@ pub async fn info(State(state): State<AppState>) -> Json<Info> {
         },
         osm_licence: OsmLicence {
             licence: "ODbL-1.0".into(),
-            attribution: crate::resolver::osm::attribution(c.osm.provider).into(),
+            attribution: crate::resolver::osm::ATTRIBUTION.into(),
             url: "https://opendatacommons.org/licenses/odbl/1-0/".into(),
-            provider: c.osm.provider.name().into(),
-            terms: c.osm.provider.terms().map(Into::into),
             dump: "/v1/dumps/osm_place.ndjson.gz".into(),
             updated_at: dump_updated_at(c),
         },
@@ -2668,7 +2570,7 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
     let ingestion:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('nexus',nexus,'cursor',cursor,'feed_length',feed_length,'lag',greatest(feed_length-cursor,0),'epoch',epoch,'updated_at',updated_at) FROM feed_cursor ORDER BY nexus").fetch_all(&state.pool).await?;
     // Aliases are answered by their roots and have no queue of their own: counted apart.
     let statuses:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('resolver',resolver,'status',status,'count',count(*),'dead_letter',count(*) FILTER (WHERE dead_letter),'leased',count(*) FILTER (WHERE lease_until>now())) FROM resource r WHERE NOT EXISTS(SELECT 1 FROM resource_alias a WHERE a.alias_id=r.id) GROUP BY resolver,status ORDER BY resolver,status").fetch_all(&state.pool).await?;
-    let mut body = json!({"groups":state.config.groups,"version":env!("CARGO_PKG_VERSION"),"manifests":crate::adapter::configured(&state.config),"sources":sources,"metrics":state.metrics.summary(),"ingestion":ingestion,"counts":{"resources":row.try_get::<i64,_>("resources")?,"aliases":row.try_get::<i64,_>("aliases")?,"references":row.try_get::<i64,_>("references")?,"occurrences":row.try_get::<i64,_>("occurrences")?},"osm_licence":{"licence":"ODbL-1.0","attribution":crate::resolver::osm::attribution(state.config.osm.provider),"url":"https://opendatacommons.org/licenses/odbl/1-0/","provider":state.config.osm.provider.name(),"terms":state.config.osm.provider.terms(),"dump":"/v1/dumps/osm_place.ndjson.gz","updated_at":dump_updated_at(&state.config)},"resolvers":{"event":{"enabled":state.config.event.enabled,"calendar":state.config.event.calendars,"geocoding":state.config.event.geocoding,"months_back":state.config.event.months_back,"months_forward":state.config.event.months_forward},"geo":{"enabled":state.config.geo.enabled,"network":false},"osm":{"enabled":state.config.osm.enabled,"provider":state.config.osm.provider.name(),"concurrency":1,"batch_size":crate::resolver::osm::lookup_max(state.config.osm.provider),"requests_per_second":state.config.osm.rate()},"web":{"enabled":state.config.web.enabled,"concurrency":state.config.web.concurrency},"pubky":{"enabled":state.config.pubky.enabled,"concurrency":state.config.pubky.concurrency},"statuses":statuses}});
+    let mut body = json!({"groups":state.config.groups,"version":env!("CARGO_PKG_VERSION"),"manifests":crate::adapter::configured(&state.config),"sources":sources,"metrics":state.metrics.summary(),"ingestion":ingestion,"counts":{"resources":row.try_get::<i64,_>("resources")?,"aliases":row.try_get::<i64,_>("aliases")?,"references":row.try_get::<i64,_>("references")?,"occurrences":row.try_get::<i64,_>("occurrences")?},"osm_licence":{"licence":"ODbL-1.0","attribution":crate::resolver::osm::ATTRIBUTION,"url":"https://opendatacommons.org/licenses/odbl/1-0/","dump":"/v1/dumps/osm_place.ndjson.gz","updated_at":dump_updated_at(&state.config)},"resolvers":{"event":{"enabled":state.config.event.enabled,"calendar":state.config.event.calendars,"geocoding":state.config.event.geocoding,"months_back":state.config.event.months_back,"months_forward":state.config.event.months_forward},"geo":{"enabled":state.config.geo.enabled,"network":false},"osm":{"enabled":state.config.osm.enabled,"concurrency":1,"batch_size":50,"requests_per_second":state.config.osm.requests_per_second},"web":{"enabled":state.config.web.enabled,"concurrency":state.config.web.concurrency},"pubky":{"enabled":state.config.pubky.enabled,"concurrency":state.config.pubky.concurrency},"statuses":statuses}});
     for kind in crate::resolver::cards::KINDS {
         let c = state.config.cards.resolver(kind);
         body["resolvers"][kind] = json!({"enabled":c.enabled,"concurrency":c.concurrency,"requests_per_second":c.requests_per_second});
@@ -2893,9 +2795,6 @@ pub struct OsmDumpNotice {
     licence: String,
     licence_url: String,
     attribution_url: String,
-    /// What the licence covers: each place's `attribution` names the service that answered
-    /// it, whose terms apply to what it added.
-    note: String,
     #[schema(example = "osm_place")]
     table: String,
 }
@@ -2929,10 +2828,6 @@ pub struct OsmDumpPlace {
     tags: Value,
     #[schema(required = true)]
     display_name: Option<String>,
-    /// The credit of the service that answered the place (Nominatim's is the OSM credit alone);
-    /// that service's terms apply to what it added.
-    #[schema(required = true)]
-    attribution: Option<String>,
     /// `ok` or `missing`.
     status: String,
     fetched_at: chrono::DateTime<chrono::Utc>,
@@ -2953,10 +2848,10 @@ pub enum OsmDumpLine {
 /// until it is added here, to the schema and to docs/api.md.
 pub const OSM_DUMP_LINE: &str = "SELECT jsonb_build_object('osm_type',osm_type,'osm_id',osm_id,'name',name,'type',type,'type_path',type_path,'category',category,\
     'point',CASE WHEN point IS NULL THEN NULL ELSE jsonb_build_object('lat',ST_Y(point),'lon',ST_X(point)) END,\
-    'bbox',bbox,'address',address,'tags',tags,'display_name',display_name,'attribution',doc->>'attribution','status',status,'fetched_at',fetched_at,'versions',versions) \
+    'bbox',bbox,'address',address,'tags',tags,'display_name',display_name,'status',status,'fetched_at',fetched_at,'versions',versions) \
     FROM osm_place ORDER BY osm_type,osm_id";
 
-#[utoipa::path(get,tag="Licensing",path="/v1/dumps/osm_place.ndjson.gz",responses((status=200,description="The ODbL derivative database, written daily, as a gzip file download. Decompressed it is one JSON object per line: the licence notice first (`OsmDumpNotice`), then one cached OSM object per line (`OsmDumpPlace`). Single byte ranges are served (206)",content_type="application/gzip",headers(("Content-Disposition"=String,description="`attachment; filename=\"osm_place.ndjson.gz\"`"),("ETag"=String),("Last-Modified"=String),("Accept-Ranges"=String,description="`bytes`"))),(status=206,description="The requested byte range of the file",content_type="application/gzip"),(status=304,description="ETag or Last-Modified unchanged"),(status=416,description="Range not satisfiable"),(status=429,description="Over `limits.osm_dump_downloads_per_hour` transfers (200 or 206) to this address in the last hour; HEAD, 304 and 416 are free"),(status=503,description="No dump file written yet, or the file is withheld: it holds places LocationIQ answered and this instance is not authorized to publish them; retry later")))]
+#[utoipa::path(get,tag="Licensing",path="/v1/dumps/osm_place.ndjson.gz",responses((status=200,description="The ODbL derivative database, written daily, as a gzip file download. Decompressed it is one JSON object per line: the licence notice first (`OsmDumpNotice`), then one cached OSM object per line (`OsmDumpPlace`). Single byte ranges are served (206)",content_type="application/gzip",headers(("Content-Disposition"=String,description="`attachment; filename=\"osm_place.ndjson.gz\"`"),("ETag"=String),("Last-Modified"=String),("Accept-Ranges"=String,description="`bytes`"))),(status=206,description="The requested byte range of the file",content_type="application/gzip"),(status=304,description="ETag or Last-Modified unchanged"),(status=416,description="Range not satisfiable"),(status=429,description="Over `limits.osm_dump_downloads_per_hour` transfers (200 or 206) to this address in the last hour; HEAD, 304 and 416 are free"),(status=503,description="No dump file written yet; retry later")))]
 async fn osm_dump(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -2983,52 +2878,6 @@ async fn osm_dump(
         Err(e) => return Err(unavailable(e)),
     };
     let meta = file.metadata().await.map_err(unavailable)?;
-    // Without LocationIQ's authorization, the file opened is served only if it holds none of its
-    // answers: another writer sharing the directory may have renamed one into place. Each file
-    // is read once; its verdict is kept by the file's identity, never by its name.
-    if !state.publication.locationiq() {
-        use std::os::unix::fs::MetadataExt;
-        let key = (
-            meta.dev(),
-            meta.ino(),
-            meta.len(),
-            meta.mtime(),
-            meta.mtime_nsec(),
-            meta.ctime(),
-            meta.ctime_nsec(),
-        );
-        let known = state
-            .dump_checked
-            .lock()
-            .expect("dump check lock")
-            .filter(|(checked, _)| *checked == key)
-            .map(|(_, clean)| clean);
-        let clean = match known {
-            Some(clean) => clean,
-            None => {
-                let opened = file
-                    .try_clone()
-                    .await
-                    .map_err(unavailable)?
-                    .into_std()
-                    .await;
-                // An unreadable file is withheld too.
-                let clean = tokio::task::spawn_blocking(move || {
-                    crate::osm_dump::file_credits_beside_osm(&opened).is_ok_and(|beside| !beside)
-                })
-                .await
-                .unwrap_or(false);
-                *state.dump_checked.lock().expect("dump check lock") = Some((key, clean));
-                clean
-            }
-        };
-        if !clean {
-            return Err(ApiError(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "the dump file is withheld: it holds places whose provider this instance may not publish".into(),
-            ));
-        }
-    }
     let (len, modified) = (meta.len(), meta.modified().map_err(unavailable)?);
     let nanos = modified
         .duration_since(std::time::UNIX_EPOCH)

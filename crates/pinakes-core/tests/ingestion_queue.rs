@@ -707,9 +707,7 @@ async fn a_new_link_s_first_missing_answer_is_confirmed_soon(pool: PgPool) {
     );
     // Asked again meanwhile: 202, and when to ask again.
     let app = pinakes_core::api::router(
-        pinakes_core::api::AppState::new(pool.clone(), Default::default())
-            .await
-            .unwrap(),
+        pinakes_core::api::AppState::new(pool.clone(), Default::default()).unwrap(),
     );
     let mut request = axum::http::Request::post("/v1/resolve")
         .header("content-type", "application/json")
@@ -1189,9 +1187,7 @@ async fn a_too_complex_refresh_clears_the_card(pool: PgPool) {
     assert_eq!(changes_after, changes_before + 1);
     // The public card says so too.
     let app = pinakes_core::api::router(
-        pinakes_core::api::AppState::new(pool.clone(), Default::default())
-            .await
-            .unwrap(),
+        pinakes_core::api::AppState::new(pool.clone(), Default::default()).unwrap(),
     );
     let response = tower::ServiceExt::oneshot(
         app,
@@ -2150,7 +2146,6 @@ async fn an_alias_holds_no_failure_of_its_own(pool: PgPool) {
         .unwrap();
     let app = pinakes_core::api::admin_router(
         pinakes_core::api::AppState::new(pool.clone(), pinakes_core::config::Config::default())
-            .await
             .unwrap(),
     );
     let response = tower::ServiceExt::oneshot(

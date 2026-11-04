@@ -8,7 +8,6 @@ pub mod egress;
 pub mod geo;
 pub mod html;
 pub mod interstitial;
-pub mod locationiq;
 pub mod osm;
 pub mod pkarr_relays;
 pub mod pubky;

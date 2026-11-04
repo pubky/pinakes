@@ -174,11 +174,7 @@ async fn recipes_are_found_by_their_ingredients(pool: PgPool) {
             .await
             .unwrap();
     }
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     for (query, expected) in [
         ("ingredient=mozzarella", vec![LASAGNE]),
         // Whole words: "pasta" is an ingredient word of the pasta only ("penne pasta").

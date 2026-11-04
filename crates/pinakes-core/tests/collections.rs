@@ -108,11 +108,7 @@ async fn count(app: &axum::Router, id: &str) -> i64 {
 /// is back, an edit (a new version file) keeps the post once, and deleting the post drops all.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_collections_items_are_kept_each_and_dropped_alone(pool: PgPool) {
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let a = author('a');
     let links = [
         "https://open.spotify.com/track/1YQWosTIljIvxAgHWTp7KP",
@@ -229,11 +225,7 @@ async fn a_posts_reply_and_embeds_are_kept_each(pool: PgPool) {
 /// ID reads its root's.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn an_alias_link_counts_for_its_root_once_per_post(pool: PgPool) {
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let (a, b) = (author('a'), author('b'));
     let root = card(&pool, "https://example.org/root", "Root").await;
     let alias = store::ensure_resource(&pool, "https://example.org/spelling")
@@ -297,11 +289,7 @@ async fn request_lookup(app: &axum::Router, ids: &[&str]) -> (u16, Value) {
 /// continue to the end without repeating, and a cursor holds to its resource and viewer.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn the_viewers_own_come_first_then_newest_and_pages_continue(pool: PgPool) {
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let link = "https://example.org/song";
     let id = card(&pool, link, "Song").await;
     let other = card(&pool, "https://example.org/other", "Other").await;
@@ -395,11 +383,7 @@ async fn the_viewers_own_come_first_then_newest_and_pages_continue(pool: PgPool)
 /// `in_collection` keeps the cards a collection holds, an alias's link as its root.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn search_in_collection_keeps_the_cards_it_holds(pool: PgPool) {
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let a = author('a');
     let held = card(&pool, "https://example.org/held", "Held").await;
     let root = card(&pool, "https://example.org/root", "Root").await;
@@ -503,11 +487,7 @@ async fn all_pages(app: &axum::Router, id: &str, query: &str, limit: usize) -> V
 /// by time.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_viewer_has_their_100_newest_first_and_the_rest_by_time(pool: PgPool) {
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let link = "https://example.org/song";
     let id = card(&pool, link, "Song").await;
     let (a, b) = (author('a'), author('b'));
@@ -543,11 +523,7 @@ async fn a_viewer_has_their_100_newest_first_and_the_rest_by_time(pool: PgPool) 
 /// Nexus's stage would, so the post is listed once, at its newest, on whichever page that falls.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_post_held_under_two_links_is_listed_once_at_its_newest(pool: PgPool) {
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let a = author('a');
     let root = card(&pool, "https://example.org/root", "Root").await;
     let alias = store::ensure_resource(&pool, "https://example.org/spelling")
@@ -625,11 +601,7 @@ async fn a_post_held_under_two_links_is_listed_once_at_its_newest(pool: PgPool) 
 /// older version's lines was skipped: the post is listed once, by its one URI.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_new_version_replaces_an_older_one_whose_del_was_skipped(pool: PgPool) {
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let a = author('a');
     let link = "https://example.org/song";
     let id = card(&pool, link, "Song").await;
@@ -709,11 +681,7 @@ async fn a_collection_holds_at_most_100_items(pool: PgPool) {
 /// pinned window, so it is listed with the others, by time.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn the_pinned_set_holds_while_a_viewer_pages(pool: PgPool) {
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let link = "https://example.org/song";
     let id = card(&pool, link, "Song").await;
     let (a, b) = (author('a'), author('b'));
@@ -801,11 +769,7 @@ async fn files(pool: &PgPool) -> Vec<String> {
 /// of the post neither deletes it nor is deleted by it.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn files_under_a_post_that_are_not_its_versions_are_collections_of_their_own(pool: PgPool) {
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let a = author('a');
     let link = "https://example.org/song";
     let id = card(&pool, link, "Song").await;
@@ -851,11 +815,7 @@ async fn files_under_a_post_that_are_not_its_versions_are_collections_of_their_o
 /// items are the collection's.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn versions_staged_in_one_millisecond_leave_the_greatest(pool: PgPool) {
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let a = author('a');
     let link = "https://example.org/song";
     let id = card(&pool, link, "Song").await;
@@ -914,11 +874,7 @@ async fn versions_staged_in_one_millisecond_leave_the_greatest(pool: PgPool) {
 /// current file's. A page may hold fewer than `limit` while such references remain.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn references_stored_before_settling_list_each_post_once(pool: PgPool) {
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let (a, b) = (author('a'), author('b'));
     let root = card(&pool, "https://example.org/root", "Root").await;
     let alias = store::ensure_resource(&pool, "https://example.org/spelling")
@@ -1031,7 +987,7 @@ async fn the_longest_accepted_paths_are_kept_and_paged(pool: PgPool) {
     // Some 250 pages, one client: past the default rate limit.
     let mut config = Config::default();
     config.api.requests_per_minute = 10_000;
-    let app = api::router(AppState::new(pool.clone(), config).await.unwrap());
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
     let link = "https://example.org/song";
     let id = card(&pool, link, "Song").await;
     let (a, b) = (author('a'), author('b'));

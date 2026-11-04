@@ -378,7 +378,7 @@ mod tests {
     #[test]
     fn the_tidal_section_takes_its_own_variables_and_stays_secret() {
         use crate::config::{apply_env, apply_named_env, Config};
-        let mut value = serde_json::to_value(Config::default()).unwrap();
+        let mut value = Config::defaults().unwrap();
         let vars = [
             ("PINAKES_TIDAL_CLIENT_ID", "ABCDEFID"),
             ("PINAKES_TIDAL_CLIENT_SECRET", "ABCDEFSECRET"),
@@ -398,13 +398,13 @@ mod tests {
         let shown = format!("{cfg:?} {}", serde_json::to_string(&cfg).unwrap());
         assert!(!shown.contains("ABCDEF"), "{shown}");
         // An empty variable leaves the file's value.
-        let mut value = serde_json::to_value(Config::default()).unwrap();
+        let mut value = Config::defaults().unwrap();
         value["tidal"]["client_id"] = "FROMFILE".into();
         apply_named_env(&mut value, [("PINAKES_TIDAL_CLIENT_ID".into(), "".into())]).unwrap();
         assert_eq!(value["tidal"]["client_id"], "FROMFILE");
         assert_eq!(COUNTRIES.len(), 249);
         let with = |country: &str| {
-            let mut value = serde_json::to_value(Config::default()).unwrap();
+            let mut value = Config::defaults().unwrap();
             value["tidal"]["country"] = country.into();
             Config::from_value(value)
         };

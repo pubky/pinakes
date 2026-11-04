@@ -103,11 +103,7 @@ async fn a_duplicate_joins_its_original(pool: PgPool) {
     ]
     .map(|(uri, file)| (uri, question(uri, file)));
     let ids = recorded(&pool, &cx, Vec::from(questions)).await;
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let duplicate: Value = get(&app, &format!("/v1/resources/{}", ids[0])).await;
     assert_eq!(duplicate["group"]["size"], 2, "{duplicate}");
     assert!(duplicate["also_on"]
@@ -191,11 +187,7 @@ async fn a_chain_of_duplicates_is_one_group(pool: PgPool) {
         })
         .collect();
     let ids = recorded(&pool, &cx, questions).await;
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     for id in &ids {
         let card: Value = get(&app, &format!("/v1/resources/{id}")).await;
         assert_eq!(card["group"]["size"], 3, "{card}");

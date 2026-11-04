@@ -38,7 +38,7 @@ async fn an_osm_request_is_logged_below_its_configured_base(pool: PgPool) {
     );
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let config = OsmConfig {
-        nominatim_url: base,
+        nominatim_url: base.into(),
         requests_per_second: 1000.0,
         ..Default::default()
     };

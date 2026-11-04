@@ -627,7 +627,7 @@ async fn deezer_s_api_stays_off_and_its_links_stay(pool: sqlx::PgPool) {
     .await
     .unwrap();
     assert_eq!(deezer_rows, 0);
-    let app = api::router(AppState::new(pool.clone(), config).await.unwrap());
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
     let get = |path: String| {
         let app = app.clone();
         async move {
@@ -789,7 +789,7 @@ async fn music_links_join_through_the_hubs_and_list_each_other(pool: sqlx::PgPoo
         ]
     );
     common::drain_groups(&pool, &Default::default()).await;
-    let app = api::router(AppState::new(pool.clone(), config).await.unwrap());
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
     let mut request = axum::http::Request::builder()
         .uri(format!("/v1/resources/{}", ids[0]))
         .body(axum::body::Body::empty())
@@ -929,7 +929,7 @@ async fn wikipedia_editions_join_through_their_item(pool: sqlx::PgPool) {
         .await
         .unwrap();
     common::drain_groups(&pool, &Default::default()).await;
-    let app = api::router(AppState::new(pool.clone(), config).await.unwrap());
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
     let mut request = axum::http::Request::builder()
         .uri(format!("/v1/resources/{}", ids[1]))
         .body(axum::body::Body::empty())
@@ -1019,7 +1019,7 @@ async fn a_wikidata_item_lists_its_editions_and_encyclopedias(pool: sqlx::PgPool
     let seen = t.seen.lock().unwrap().clone();
     assert_eq!(seen.len(), 1, "one request: {seen:?}");
     assert!(seen[0].contains("action=wbgetentities") && seen[0].contains("ids=Q9312"));
-    let app = api::router(AppState::new(pool.clone(), config).await.unwrap());
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
     let mut request = axum::http::Request::builder()
         .uri(format!("/v1/resources/{id}"))
         .body(axum::body::Body::empty())
@@ -2008,11 +2008,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
             .execute(&pool)
             .await
             .unwrap();
-        let app = api::router(
-            AppState::new(pool.clone(), Config::default())
-                .await
-                .unwrap(),
-        );
+        let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
         let mut request = axum::http::Request::builder()
             .uri("/v1/search?key=mbid:00000000-0000-4000-8000-00000000000d")
             .body(axum::body::Body::empty())
@@ -2276,11 +2272,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
             .execute(&pool)
             .await
             .unwrap();
-        let app = api::router(
-            AppState::new(pool.clone(), Config::default())
-                .await
-                .unwrap(),
-        );
+        let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
         let mut request = axum::http::Request::builder()
             .uri(
                 "/v1/search?key=mbid:a74b1b7f-71a5-4011-9441-d0b5e4122711&type=MusicEvent&from=now",
