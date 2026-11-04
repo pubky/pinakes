@@ -181,7 +181,13 @@ pub fn free_file(v: &Value, name: &str) -> Option<FileCheck> {
         crate::model::truncate(&mut a, 256);
         a.trim().to_owned()
     });
-    let author = author.filter(|a| !a.is_empty());
+    // Commons' placeholders (`{{Unknown|author}}`) name no one.
+    let author = author.filter(|a| {
+        !a.is_empty()
+            && !["unknown", "unknown author", "author unknown", "anonymous"]
+                .iter()
+                .any(|p| a.eq_ignore_ascii_case(p))
+    });
     if license.attribution && author.is_none() {
         return Some(FileCheck::Refused("author"));
     }
@@ -430,6 +436,63 @@ mod tests {
                 "{template:?} {short:?} {url:?}"
             );
         }
+    }
+    /// Commons' placeholder for an unknown author names no one: refused under CC BY, shown
+    /// without an author under CC0.
+    #[test]
+    fn a_placeholder_author_is_no_author() {
+        let answer = |artist: &str, license: &str, url: &str| {
+            serde_json::json!({"query": {"pages": [{"title": "File:A.jpg", "ns": 6, "imageinfo": [{
+                "mime": "image/jpeg",
+                "url": "https://upload.wikimedia.org/wikipedia/commons/a/aa/A.jpg",
+                "extmetadata": {
+                    "Artist": {"value": artist},
+                    "License": {"value": license},
+                    "LicenseUrl": {"value": url},
+                },
+            }]}]}})
+        };
+        let by = |artist: &str| {
+            free_file(
+                &answer(
+                    artist,
+                    "cc-by-4.0",
+                    "https://creativecommons.org/licenses/by/4.0",
+                ),
+                "A.jpg",
+            )
+        };
+        for placeholder in [
+            "Unknown author",
+            "<span class=\"fn\">unknown</span>",
+            "Anonymous",
+            " Author unknown ",
+        ] {
+            assert_eq!(
+                by(placeholder),
+                Some(FileCheck::Refused("author")),
+                "{placeholder}"
+            );
+        }
+        let Some(FileCheck::Free(file)) = by("Unknown Pleasures Photography Ltd") else {
+            panic!("a named author");
+        };
+        assert_eq!(
+            file.author.as_deref(),
+            Some("Unknown Pleasures Photography Ltd")
+        );
+        let cc0 = free_file(
+            &answer(
+                "Unknown author",
+                "cc0",
+                "https://creativecommons.org/publicdomain/zero/1.0/",
+            ),
+            "A.jpg",
+        );
+        let Some(FileCheck::Free(file)) = cc0 else {
+            panic!("CC0 needs no author: {cc0:?}");
+        };
+        assert_eq!(file.author, None);
     }
     #[test]
     fn file_pages_and_queries() {
