@@ -53,6 +53,28 @@
         ],
         "type": "object"
       },
+      "Because": {
+        "description": "Why a `related` row is listed: the resource's taggers who also referenced it.",
+        "properties": {
+          "shared": {
+            "description": "How many of the resource's sampled taggers referenced this row (with `collapse=group`,\nits group's members together, each tagger once): the count the row is ranked by.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "taggers": {
+            "description": "Up to three of them (Pubky public keys), those who tagged the resource most recently\nfirst. Ask Nexus for their names and tags.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "shared",
+          "taggers"
+        ],
+        "type": "object"
+      },
       "Card": {
         "description": "The one card every route returns for a resource, occurrence or reference event. Absent\nvalues are null, never \"\".",
         "properties": {
@@ -68,6 +90,17 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "because": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Because",
+                "description": "On a `related` search row only: why it is listed, from what its rank counted."
+              }
             ]
           },
           "collections": {
