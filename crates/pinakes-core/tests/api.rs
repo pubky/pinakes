@@ -671,6 +671,70 @@ async fn a_link_that_carries_a_credential_is_never_previewed(pool: PgPool) {
     assert!(logs.contains("events.example.org"));
 }
 
+/// The instance takes at most `limits.preview_new_per_hour` new previews an hour, whoever asks:
+/// over it, `POST /v1/resolve` of a link it does not know answers 503 with `Retry-After` and stores
+/// nothing, a link it knows still reads, and a client over its own budget gets 429 first.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn new_previews_are_capped_for_the_whole_instance(pool: PgPool) {
+    let config = Config::from_value(json!({"limits": {
+        "preview_new_per_hour": 2,
+        "preview_requests_per_minute": 4,
+    }}))
+    .unwrap();
+    let state = AppState::new(pool.clone(), config).unwrap();
+    let refused = state.metrics.preview_refused.clone();
+    let app = api::router(state);
+    for uri in ["https://example.org/one", "https://example.org/two"] {
+        let (code, _) = call(&app, "POST", "/v1/resolve", Some(json!({"uri": uri}))).await;
+        assert!(code == 200 || code == 202, "{uri}: {code}");
+    }
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/v1/resolve")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({"uri": "https://example.org/three"}).to_string(),
+        ))
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.2:1234".parse::<SocketAddr>().unwrap(),
+    ));
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let wait: u64 = response.headers()["retry-after"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((3000..=3600).contains(&wait), "{wait}");
+    assert_eq!(refused.get(), 1);
+    let (id, _, _) = identity("https://example.org/three").unwrap();
+    let stored: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource WHERE id=$1)")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(!stored);
+    // A link the instance knows takes no new place.
+    let (code, _) = call(
+        &app,
+        "POST",
+        "/v1/resolve",
+        Some(json!({"uri": "https://example.org/one"})),
+    )
+    .await;
+    assert!(code == 200 || code == 202, "known: {code}");
+    // This client's own budget (four a minute) is spent: 429 comes first.
+    let (code, _) = call(
+        &app,
+        "POST",
+        "/v1/resolve",
+        Some(json!({"uri": "https://example.org/four"})),
+    )
+    .await;
+    assert_eq!(code, 429);
+}
+
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn preview_pending_cached_completion_and_per_ip_uri_budgets(pool: PgPool) {
     let config = Config {

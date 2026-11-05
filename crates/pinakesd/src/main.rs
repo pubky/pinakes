@@ -147,6 +147,7 @@ async fn serve(config: Option<PathBuf>, command: Command) -> Result<()> {
     let maintenance_task = tokio::spawn(pinakes_core::maintenance::run(
         pool.clone(),
         config.grace_days,
+        config.preview_grace_hours,
         config.refresh.retention_days,
         Duration::from_secs(3600),
         shutdown_rx.clone(),

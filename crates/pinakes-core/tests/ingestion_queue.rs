@@ -99,13 +99,13 @@ async fn put_delete_replay_retarget_and_grace(pool: PgPool) {
             .as_deref(),
         Some("one")
     );
-    assert_eq!(store::cleanup(&pool, 7).await.unwrap(), 0);
+    assert_eq!(store::cleanup(&pool, 7, 7 * 24).await.unwrap(), 0);
     sqlx::query("UPDATE resource SET orphaned_at=now()-interval '8 days' WHERE id=$1")
         .bind(identity(&edit.uri).unwrap().0)
         .execute(&pool)
         .await
         .unwrap();
-    assert_eq!(store::cleanup(&pool, 7).await.unwrap(), 1);
+    assert_eq!(store::cleanup(&pool, 7, 7 * 24).await.unwrap(), 1);
     assert_eq!(refs(&pool).await, 1);
 }
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]

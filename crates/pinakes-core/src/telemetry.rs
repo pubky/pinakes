@@ -48,6 +48,10 @@ pub struct Metrics {
     pub group_key_conflicts: IntGauge,
     /// API handler panics (either listener) answered 500 by the backstop layer.
     pub api_panics: IntCounter,
+    /// New previews `POST /v1/resolve` refused because the instance's hour was full.
+    pub preview_refused: IntCounter,
+    /// Resources nothing ever referenced (only previewed), each kept for the preview grace.
+    pub preview_backlog: IntGauge,
     pub ingest_lag: IntGauge,
     pub ingest_success: IntGauge,
     pub ingest_resets: IntCounter,
@@ -103,10 +107,22 @@ impl Metrics {
             "API requests (public or admin listener) whose handler panicked (answered 500)",
         )?;
         registry.register(Box::new(api_panics.clone()))?;
+        let preview_refused = IntCounter::new(
+            "pinakes_preview_refused_total",
+            "New previews refused because the instance's hourly preview capacity was reached",
+        )?;
+        registry.register(Box::new(preview_refused.clone()))?;
+        let preview_backlog = IntGauge::new(
+            "pinakes_preview_backlog",
+            "Resources nothing ever referenced (only previewed), kept for the preview grace",
+        )?;
+        registry.register(Box::new(preview_backlog.clone()))?;
         registry.register(Box::new(ALSO_ON_SERVICE_ERRORS.clone()))?;
         registry.register(Box::new(RESOLUTION_DEFERRED.clone()))?;
         let out = Self {
             api_panics,
+            preview_refused,
+            preview_backlog,
             ingest_rejected: metric!(
                 IntCounterVec,
                 "pinakes_ingest_rejected_total",
@@ -269,6 +285,12 @@ impl Metrics {
         for row in sqlx::query("SELECT resolver,count(*) FILTER(WHERE dead_letter) AS dead,count(*) FILTER(WHERE NOT dead_letter AND lease_until>now()) AS leased,count(*) FILTER(WHERE NOT dead_letter AND NOT final AND next_attempt_at<=now() AND (lease_until IS NULL OR lease_until<=now())) AS pending,count(*) FILTER(WHERE NOT final AND NOT dead_letter AND refresh_at<now()) AS overdue FROM resource WHERE resolver IS NOT NULL GROUP BY resolver").fetch_all(pool).await? {let resolver:String=row.try_get("resolver")?;for state in ["pending","leased","dead"] {self.queue.with_label_values(&[&resolver,state]).set(row.try_get(state)?);}self.overdue.with_label_values(&[&resolver]).set(row.try_get("overdue")?);}
         let row=sqlx::query("SELECT (SELECT count(*) FROM group_input WHERE parked_keys>0 AND NOT settled_stopped) AS parked,(SELECT count(*) FROM group_dirty WHERE last_error='work_budget') AS stopped,(SELECT count(*) FROM group_input WHERE settled_stopped) AS settled,(SELECT count(*) FROM group_input WHERE key_conflicts>0) AS conflicts").fetch_one(pool).await?;
         self.group_key_conflicts.set(row.try_get("conflicts")?);
+        // A resource nothing ever referenced keeps the instant it was created as its orphan time.
+        self.preview_backlog.set(
+            sqlx::query_scalar("SELECT count(*) FROM resource WHERE orphaned_at IS NOT NULL AND orphaned_at=created_at")
+                .fetch_one(pool)
+                .await?,
+        );
         for state in ["parked", "stopped", "settled"] {
             self.group_budget
                 .with_label_values(&[state])

@@ -635,10 +635,11 @@ of the repository), a password in the user info, or a query key such as `token`,
 budget, and its log line names the host only. A card someone's post made for such a link is still
 read by its URI. Such a link is never sent to another service: also-on lookups (the hubs, the
 Wayback Machine) and oEmbed providers skip it, and it is never kept as another link's alias. A
-resource only previewed, never referenced, is not
-a search result and expires after the orphan grace period. Previews are limited per client IP
-and per URI (`limits.preview_requests_per_minute`, `limits.preview_uri_requests_per_minute`,
-30 each); a 429 carries `Retry-After: 60`.
+resource only previewed, never referenced, is not a search result and expires after `limits.preview_grace_hours` (a day). Previews are limited per
+client IP and per URI (`limits.preview_requests_per_minute`, `limits.preview_uri_requests_per_minute`,
+30 each); a 429 carries `Retry-After: 60`. The instance stores at most
+`limits.preview_new_per_hour` (1000) links it did not know in any hour: over it, a new link gets
+503 with `Retry-After` (seconds) and nothing is stored, while a known link still reads.
 
 Statuses:
 

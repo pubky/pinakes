@@ -6,6 +6,7 @@ use tokio::sync::watch;
 pub async fn run(
     pool: PgPool,
     grace_days: u32,
+    preview_grace_hours: u32,
     retention_days: u32,
     period: Duration,
     mut shutdown: watch::Receiver<bool>,
@@ -29,7 +30,7 @@ pub async fn run(
         if let Err(e) = crate::changes::retain(&pool, retention_days).await {
             tracing::warn!(error=%crate::resolver::log_error(&e),"change retention failed");
         }
-        if let Err(e) = crate::store::cleanup(&pool, grace_days).await {
+        if let Err(e) = crate::store::cleanup(&pool, grace_days, preview_grace_hours).await {
             tracing::warn!(error=%crate::resolver::log_error(&e),"cleanup failed");
         }
         if let Err(e) = crate::also_on::prune(&pool).await {

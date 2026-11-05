@@ -64,6 +64,13 @@ pub struct Config {
     pub ingest: IngestConfig,
     #[serde(skip)]
     pub grace_days: u32,
+    /// Hours a resource nothing ever referenced (one only previewed) is kept, at most `grace_days`.
+    #[serde(skip)]
+    pub preview_grace_hours: u32,
+    /// New previews (`POST /v1/resolve` of a link the instance did not know) per hour, for the
+    /// whole instance.
+    #[serde(skip)]
+    pub preview_new_per_hour: usize,
     #[serde(skip)]
     pub search: SearchConfig,
     #[serde(skip)]
@@ -326,6 +333,8 @@ impl Config {
             poll_secs: 5,
             ingest: IngestConfig::default(),
             grace_days: 7,
+            preview_grace_hours: 24,
+            preview_new_per_hour: 1000,
             // The web route (and the event routes on it) fetches arbitrary hosts: twice the
             // other resolvers' workers and rate.
             web: ResolverConfig {
@@ -1180,6 +1189,8 @@ impl Config {
             || self.preview.requests_per_minute == 0
             || self.preview.uri_requests_per_minute == 0
             || !(1..=100000).contains(&self.preview.cache_capacity)
+            || !(1..=87600).contains(&self.preview_grace_hours)
+            || !(1..=1_000_000).contains(&self.preview_new_per_hour)
         {
             bail!("invalid queue, preview or polling budget");
         }
@@ -2063,6 +2074,10 @@ mod tests {
             ("max_label_bytes", 1025),
             ("max_object_path_bytes", 0),
             ("max_object_path_bytes", 2049),
+            ("preview_grace_hours", 0),
+            ("preview_grace_hours", 87601),
+            ("preview_new_per_hour", 0),
+            ("preview_new_per_hour", 1_000_001),
         ] {
             assert!(
                 with(serde_json::json!({"limits":{key:value}})).is_err(),
@@ -2110,6 +2125,8 @@ limits! {
     poll_secs: u64 = |c| c.poll_secs => [|c, v| c.poll_secs = v],
     /// Days an unreferenced resource is kept before orphan cleanup.
     grace_days: u32 = |c| c.grace_days => [|c, v| c.grace_days = v],
+    /// Hours a resource nothing ever referenced (one only previewed) is kept, at most `grace_days`.
+    preview_grace_hours: u32 = |c| c.preview_grace_hours => [|c, v| c.preview_grace_hours = v],
     /// Resource refresh intervals by tier (seconds).
     refresh_resource_secs: [u64; 4] = |c| c.refresh.resource_secs => [|c, v| c.refresh.resource_secs = v],
     /// Container (calendar, feed) refresh intervals by tier (seconds).
@@ -2209,6 +2226,8 @@ limits! {
     preview_uri_requests_per_minute: usize = |c| c.preview.uri_requests_per_minute => [|c, v| c.preview.uri_requests_per_minute = v],
     /// Preview cache entries.
     preview_cache_capacity: usize = |c| c.preview.cache_capacity => [|c, v| c.preview.cache_capacity = v],
+    /// New previews per hour for the whole instance; over it `POST /v1/resolve` answers 503.
+    preview_new_per_hour: usize = |c| c.preview_new_per_hour => [|c, v| c.preview_new_per_hour = v],
     /// Podcast feed items read per scan.
     podcast_items: usize = |c| c.cards.podcast_items => [|c, v| c.cards.podcast_items = v],
     /// Most members of one automatic group.

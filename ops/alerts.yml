@@ -55,3 +55,8 @@ groups:
         expr: increase(pinakes_api_panics_total[15m]) > 0
         labels: {severity: warning}
         annotations: {summary: "A Pinakes public API handler panicked; the request was answered 500"}
+      - alert: PreviewCapacityReached
+        expr: increase(pinakes_preview_refused_total[15m]) > 0
+        for: 15m
+        labels: {severity: warning}
+        annotations: {summary: "Pinakes refused new previews for fifteen minutes: the instance's hourly preview capacity is taken"}

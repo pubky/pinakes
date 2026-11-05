@@ -39,6 +39,9 @@ pub struct AppState {
     limiter: Arc<Mutex<HashMap<String, (Instant, usize)>>>,
     /// ODbL dump downloads per client address in the current hour.
     downloads: Arc<Mutex<HashMap<std::net::IpAddr, (Instant, usize)>>>,
+    /// When each new preview of the last hour was taken, oldest first: at most
+    /// `limits.preview_new_per_hour` for the whole instance.
+    previews: Arc<Mutex<std::collections::VecDeque<Instant>>>,
     info_cache: Arc<Mutex<Option<(Instant, Value)>>>,
     pub(crate) cursor_mac: SimpleHmac<blake3::Hasher>,
     /// The request clock for relative times and search cursors; tests set it, the daemon never
@@ -58,6 +61,7 @@ impl AppState {
             metrics,
             limiter: Arc::default(),
             downloads: Arc::default(),
+            previews: Arc::default(),
             info_cache: Arc::default(),
             cursor_mac: SimpleHmac::<blake3::Hasher>::new_from_slice(&cursor_key)
                 .context("initialize cursor MAC")?,
@@ -135,6 +139,25 @@ impl AppState {
         }
         *count += 1;
         Ok(())
+    }
+    /// A place for one new preview in the instance's hour, or the seconds until the oldest place
+    /// frees. `release_preview` gives it back when storing the link failed.
+    async fn reserve_preview(&self) -> Result<(), u64> {
+        let hour = Duration::from_secs(3600);
+        let mut previews = self.previews.lock().await;
+        while previews.front().is_some_and(|at| at.elapsed() >= hour) {
+            previews.pop_front();
+        }
+        if previews.len() >= self.config.preview_new_per_hour {
+            return Err(previews
+                .front()
+                .map_or(1, |at| hour.saturating_sub(at.elapsed()).as_secs().max(1)));
+        }
+        previews.push_back(Instant::now());
+        Ok(())
+    }
+    async fn release_preview(&self) {
+        self.previews.lock().await.pop_back();
     }
     async fn preview_budget(&self, ip: std::net::IpAddr, id: &str) -> Result<(), ApiError> {
         self.budget(
@@ -2399,7 +2422,7 @@ pub async fn lookup(
     with_refs(&state.pool, cards.iter_mut()).await?;
     Ok(Json(cards))
 }
-#[utoipa::path(post,tag="Previews",path="/v1/resolve",request_body=ResolveRequest,responses((status=200,body=ResourceDetail),(status=202,body=ResourceDetail,description="Queued; poll resource by ID",headers(("Retry-After"=u64,description="Seconds until the next attempt, when it is put off (a missing answer waiting for the fetch that confirms it); absent while the job is queued or running"))),(status=400,description="Unsupported URI, disabled resolver, or a link that carries a credential"),(status=429,description="Preview rate limit")))]
+#[utoipa::path(post,tag="Previews",path="/v1/resolve",request_body=ResolveRequest,responses((status=200,body=ResourceDetail),(status=202,body=ResourceDetail,description="Queued; poll resource by ID",headers(("Retry-After"=u64,description="Seconds until the next attempt, when it is put off (a missing answer waiting for the fetch that confirms it); absent while the job is queued or running"))),(status=400,description="Unsupported URI, disabled resolver, or a link that carries a credential"),(status=429,description="Preview rate limit"),(status=503,description="The instance's new previews for this hour are taken; nothing was stored",headers(("Retry-After"=u64,description="Seconds until a new preview can be taken")))))]
 pub async fn resolve(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -2421,7 +2444,34 @@ pub async fn resolve(
     let target = crate::alias::root(&uri).map_or_else(|| uri.clone(), |a| a.root);
     crate::resolver::admit(&target, &state.config).map_err(ApiError::bad)?;
     state.preview_budget(peer.ip(), &id).await?;
-    store::ensure_resource(&state.pool, &uri).await?;
+    // A link the instance does not know yet takes a place in its hour of new previews; when the
+    // hour is full, nothing is stored. Two first requests for one link at once may both take one.
+    let known: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM resource WHERE id=$1) OR EXISTS(SELECT 1 FROM resource_alias WHERE alias_id=$1)",
+    )
+    .bind(&id)
+    .fetch_one(&state.pool)
+    .await?;
+    if !known {
+        if let Err(seconds) = state.reserve_preview().await {
+            state.metrics.preview_refused.inc();
+            let mut response = ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "preview capacity reached, try again later".into(),
+            )
+            .into_response();
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, header::HeaderValue::from(seconds));
+            return Ok(response);
+        }
+    }
+    if let Err(error) = store::ensure_resource(&state.pool, &uri).await {
+        if !known {
+            state.release_preview().await;
+        }
+        return Err(error.into());
+    }
     let id = crate::alias::resolve_id(&state.pool, &id).await?;
     store::expedite(&state.pool, std::slice::from_ref(&id)).await?;
     state.wake.notify_waiters();

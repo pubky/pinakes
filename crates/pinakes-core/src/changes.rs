@@ -695,29 +695,48 @@ pub async fn scrub_never_fetched(pool: &PgPool) -> Result<u64> {
         }
     }
 }
+/// How long one cleanup run deletes for at most: it goes on until a batch comes back short or this
+/// runs out, so cleanup keeps up with what the preview cap admits.
+const CLEANUP_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
 /// Delete resources orphaned for `grace_days`. A derived child's grace counts from its link's
 /// expiry, not from its creation: a lapsed link (a calendar that failed for a day, an event link
 /// past its cap) keeps its child, and its row for a later revival, through the same grace.
 pub async fn delete_orphans(pool: &PgPool, grace_days: u32) -> Result<u64> {
-    // Up to 1000 a run, 100 to a transaction: every other writer waits while one holds the write
-    // order exclusively.
+    delete_orphans_within(pool, grace_days, grace_days.saturating_mul(24)).await
+}
+/// `delete_orphans`, with a resource nothing ever referenced (one only previewed) kept for
+/// `preview_grace_hours` instead, at most `grace_days`. Such a resource still has the orphan time
+/// it was created with; a reference clears it, and losing the last reference sets a later one.
+pub async fn delete_orphans_within(
+    pool: &PgPool,
+    grace_days: u32,
+    preview_grace_hours: u32,
+) -> Result<u64> {
+    // 100 to a transaction: every other writer waits while one holds the write order exclusively,
+    // and goes in between two.
+    let started = std::time::Instant::now();
     let mut deleted = 0;
-    for _ in 0..10 {
-        let batch = delete_orphan_batch(pool, grace_days, 100).await?;
+    loop {
+        let batch = delete_orphan_batch(pool, grace_days, preview_grace_hours, 100).await?;
         deleted += batch;
-        if batch < 100 {
+        if batch < 100 || started.elapsed() >= CLEANUP_BUDGET {
             break;
         }
     }
     Ok(deleted)
 }
-async fn delete_orphan_batch(pool: &PgPool, grace_days: u32, limit: i64) -> Result<u64> {
+async fn delete_orphan_batch(
+    pool: &PgPool,
+    grace_days: u32,
+    preview_grace_hours: u32,
+    limit: i64,
+) -> Result<u64> {
     let mut tx = pool.begin().await?;
     // Orphans are many resources' rows, and deleting them reaches their references, aliases and
     // links.
     crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Exclusive).await?;
-    let rows=sqlx::query("SELECT r.id,r.resolver,r.ever_existed,d.doc FROM resource r JOIN resource_document d ON d.id=r.id WHERE r.orphaned_at<now()-$1*interval '1 day' AND NOT EXISTS(SELECT 1 FROM effective_reference f WHERE f.resource_id=r.id) AND NOT EXISTS(SELECT 1 FROM resource_derivation d JOIN resource p ON p.id=d.parent_id WHERE (d.child_id=r.id OR d.child_id IN(SELECT alias_id FROM resource_alias WHERE root_id=r.id)) AND (d.expires_at IS NULL OR d.expires_at>now()-$1*interval '1 day') AND (p.orphaned_at IS NULL OR p.orphaned_at>=now()-$1*interval '1 day' OR EXISTS(SELECT 1 FROM effective_reference f WHERE f.resource_id=p.id))) AND NOT EXISTS(SELECT 1 FROM resource v WHERE v.venue_id=r.id) AND NOT EXISTS(SELECT 1 FROM occurrence o WHERE o.venue_id=r.id) AND (r.lease_until IS NULL OR r.lease_until<now()) FOR UPDATE OF r SKIP LOCKED LIMIT $2")
-        .bind(grace_days as f64).bind(limit).fetch_all(&mut *tx).await?;
+    let rows=sqlx::query("SELECT r.id,r.resolver,r.ever_existed,d.doc FROM resource r JOIN resource_document d ON d.id=r.id WHERE r.orphaned_at<now()-least($1*24,$3)*interval '1 hour' AND (r.orphaned_at=r.created_at OR r.orphaned_at<now()-$1*interval '1 day') AND NOT EXISTS(SELECT 1 FROM effective_reference f WHERE f.resource_id=r.id) AND NOT EXISTS(SELECT 1 FROM resource_derivation d JOIN resource p ON p.id=d.parent_id WHERE (d.child_id=r.id OR d.child_id IN(SELECT alias_id FROM resource_alias WHERE root_id=r.id)) AND (d.expires_at IS NULL OR d.expires_at>now()-$1*interval '1 day') AND (p.orphaned_at IS NULL OR p.orphaned_at>=now()-$1*interval '1 day' OR EXISTS(SELECT 1 FROM effective_reference f WHERE f.resource_id=p.id))) AND NOT EXISTS(SELECT 1 FROM resource v WHERE v.venue_id=r.id) AND NOT EXISTS(SELECT 1 FROM occurrence o WHERE o.venue_id=r.id) AND (r.lease_until IS NULL OR r.lease_until<now()) FOR UPDATE OF r SKIP LOCKED LIMIT $2")
+        .bind(grace_days as f64).bind(limit).bind(preview_grace_hours as f64).fetch_all(&mut *tx).await?;
     for row in &rows {
         let id: String = row.try_get("id")?;
         let source: Option<String> = row.try_get("resolver")?;

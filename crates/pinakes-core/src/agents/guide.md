@@ -212,7 +212,8 @@ Add it to a client as a remote (HTTP) MCP server at `{{BASE}}/mcp`.
   (`limits.previews_per_minute` and `previews_per_uri_per_minute` in `/v1/info`). Search never
   fetches, and nothing you resolve is listed by search until someone references it on Pubky. A
   link that carries a credential (a private calendar link, a `token` or `key` parameter) is
-  refused with 400; never send one.
+  refused with 400; never send one. When the instance has taken all the new links it reads in an
+  hour, a new one gets 503 with `Retry-After`; a link it knows still reads.
 
 ## Errors
 
