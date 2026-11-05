@@ -1122,6 +1122,155 @@ async fn oembed_first_keeps_rich_page_types_and_ap_denial_falls_back() {
         Some("Public web card")
     );
 }
+/// Each first link here redirects to an address that carries a credential; whatever is read
+/// there names relative links (`""`, `#x`).
+struct Landing;
+#[async_trait]
+impl Transport for Landing {
+    async fn get(&self, u: &Url, a: &[SocketAddr]) -> Result<Fetched> {
+        self.get_with(u, a, &Default::default()).await
+    }
+    async fn get_with(&self, u: &Url, _: &[SocketAddr], o: &FetchOptions) -> Result<Fetched> {
+        let ap = o
+            .accept
+            .as_deref()
+            .is_some_and(|s| s.contains("activity+json"));
+        let landed = u.query().is_some_and(|q| q.contains("token="));
+        let note = |icon: &str| {
+            json!({"type":"Note","id":u.as_str(),"content":"Note","icon":{"url":icon}})
+                .to_string()
+                .into_bytes()
+        };
+        let mut f = Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            url: u.clone(),
+            status: 200,
+            body: b"<title>Fallback</title>".to_vec(),
+            content_type: "text/html".into(),
+            location: None,
+            retry_after_secs: 60,
+            validators: Default::default(),
+        };
+        match u.path() {
+            "/note" | "/alternate" | "/header" | "/oembed" if !landed => {
+                f.status = 302;
+                f.location = Some(format!("{}?token=SECRET", u.path()));
+            }
+            _ if ap => {
+                f.content_type = "application/activity+json".into();
+                f.body = note("#x");
+            }
+            "/note" => {
+                f.content_type = "application/activity+json".into();
+                f.body = note("");
+            }
+            "/alternate" => {
+                f.body = br#"<title>Alternate</title><link rel="alternate" type="application/activity+json" href="">"#.to_vec();
+            }
+            "/header" => {
+                f.body = b"<title>Header</title>".to_vec();
+                f.validators.link =
+                    Some("<>; rel=alternate; type=application/activity+json".into());
+            }
+            "/oembed" => {
+                f.content_type = "application/json".into();
+                f.body = json!({"type":"photo","title":"Embedded","thumbnail_url":"#x"})
+                    .to_string()
+                    .into_bytes();
+            }
+            "/video" => {
+                f.body = br#"<title>Video</title><link rel="alternate" type="application/json+oembed" href="/oembed">"#.to_vec();
+            }
+            _ => {}
+        }
+        Ok(f)
+    }
+}
+
+/// A card read at an address that carries a credential, by a redirect, resolves nothing back to
+/// it: an ActivityPub object's empty icon, an empty alternate link or `Link: <>` (whose object is
+/// then fetched), and an oEmbed answer that landed on one, on the page route and the media route.
+#[tokio::test]
+async fn a_card_read_at_a_credential_resolves_nothing_back_to_it() {
+    let mut cfg = Config::default();
+    cfg.cards.activitypub.enabled = true;
+    let egress =
+        || Egress::with_backends(Default::default(), Arc::new(PublicDns), Arc::new(Landing));
+    let web = WebResolver {
+        oembed_policy: cards::OembedPolicy::Always,
+        cards: Some(Arc::new(cfg.cards.clone())),
+        events: None,
+        config: Default::default(),
+        egress: egress(),
+    };
+    for uri in [
+        "https://social.example/note",
+        "https://social.example/alternate",
+        "https://social.example/header",
+        "https://social.example/video",
+    ] {
+        let d = web.resolve(uri).await.unwrap();
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(!json.contains("SECRET"), "{uri}: {json}");
+    }
+    let d = CardResolver::new("media", Arc::new(cfg), egress())
+        .resolve("https://www.youtube.com/watch?v=abc")
+        .await
+        .unwrap();
+    let json = serde_json::to_string(&d).unwrap();
+    assert!(!json.contains("SECRET"), "{json}");
+}
+
+/// Nothing stored names a credential but the resource's own link, whichever field it came in by:
+/// the image, an attribute, an alias, a client link, the stream, a performer's link.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn nothing_stored_names_a_credential_but_its_own_link(pool: sqlx::PgPool) {
+    use pinakes_core::{
+        event::Performer,
+        model::{OpenIn, Stream},
+        store,
+    };
+    let uri = "https://cal.example/feed.ics?token=OWN";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let leaked = "https://cdn.example/x.png?sig=SECRET";
+    let mut d = ResourceMeta::new(uri, "web", 3600);
+    d.name = Some("Calendar".into());
+    d.image = Some(leaked.into());
+    d.attributes.insert("feed".into(), uri.into());
+    d.attributes.insert("author".into(), leaked.into());
+    d.aliases
+        .push("https://cal.example/feed.ics?key=SECRET".into());
+    d.open_in.push(OpenIn {
+        client: "App".into(),
+        url: "https://app.example/#/open?token=SECRET".into(),
+    });
+    d.stream = Some(Stream {
+        url: "https://audio.example/a.mp3?X-Amz-Signature=SECRET".into(),
+        media_type: "audio/mpeg".into(),
+        duration_s: None,
+        preview: false,
+    });
+    d.event.performers.push(Performer {
+        name: "Band".into(),
+        links: vec![leaked.into(), "https://band.example/".into()],
+    });
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    let stored: Value = sqlx::query_scalar("SELECT doc FROM resource WHERE id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let json = stored.to_string();
+    assert!(!json.contains("SECRET"), "{json}");
+    assert_eq!(stored["url"], uri);
+    assert_eq!(stored["attributes"]["feed"], uri);
+    assert_eq!(stored["name"], "Calendar");
+    assert_eq!(
+        stored["performers"][0]["links"],
+        json!(["https://band.example/"])
+    );
+}
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn social_deletion_purges_content_history(pool: sqlx::PgPool) {
     use pinakes_core::{model::Status, store};

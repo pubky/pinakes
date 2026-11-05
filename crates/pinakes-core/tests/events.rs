@@ -874,6 +874,15 @@ impl Transport for ProtocolTransport {
                 f.body.clear();
             }
         }
+        // An ActivityPub alternate that redirects to an address carrying a credential.
+        if url.path() == "/ap-alt" && o.accept.is_some() {
+            f.status = 302;
+            f.location = Some("/ap-alt-landed?token=SECRET".into());
+        }
+        if url.path() == "/ap-alt-landed" {
+            f.content_type = "application/activity+json".into();
+            f.body = json!({"type":"Event","name":"Gig","startTime":"2027-01-20T18:00:00Z","timezone":"Europe/Paris","image":"#x"}).to_string().into_bytes();
+        }
         Ok(f)
     }
 }
@@ -4540,5 +4549,141 @@ async fn an_event_naming_the_pages_canonical_is_the_pages_event_through_the_whol
     assert_eq!(
         doc.event.venue.as_ref().map(|v| v.text.as_str()),
         Some("Arena")
+    );
+}
+
+/// An event page whose fetch ended on an address that carries a credential names nothing after
+/// it: relative JSON-LD `image` and `url` resolve against it.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn an_event_page_reached_at_a_credential_resolves_nothing_back_to_it(pool: PgPool) {
+    let egress = Egress::with_backends(
+        pinakes_core::config::EgressConfig {
+            host_requests_per_second: 1000.0,
+            ..Default::default()
+        },
+        Arc::new(PublicDns),
+        Arc::new(ProtocolTransport {
+            seen: Mutex::default(),
+        }),
+    );
+    let service = pinakes_core::event::service::EventService {
+        pool: pool.clone(),
+        config: EventConfig {
+            geocoding: false,
+            ..Default::default()
+        },
+        osm: Arc::new(OsmResolver::new(pool.clone(), OsmConfig::default()).unwrap()),
+    };
+    let uri = "https://example.org/e/abc";
+    let fetched = Fetched {
+        permanent_redirect: false,
+        truncated: false,
+        validators: Default::default(),
+        url: "https://events.example/share?token=SECRET".parse().unwrap(),
+        status: 200,
+        retry_after_secs: 60,
+        location: None,
+        content_type: "text/html".into(),
+        body: br##"<title>Gig</title><script type="application/ld+json">{"@type":"Event","name":"Gig","startDate":"2027-01-20T18:00:00Z","image":"#poster","url":""}</script>"##.to_vec(),
+    };
+    let card = ResourceMeta::new(uri, "web", 3600);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let doc = service
+        .page(uri, &fetched, card, &egress, deadline)
+        .await
+        .unwrap();
+    let json = serde_json::to_string(&doc).unwrap();
+    assert!(!json.contains("SECRET"), "{json}");
+}
+
+fn protocol_service(
+    pool: &PgPool,
+) -> (
+    Arc<ProtocolTransport>,
+    Egress,
+    pinakes_core::event::service::EventService,
+) {
+    let transport = Arc::new(ProtocolTransport {
+        seen: Mutex::default(),
+    });
+    let egress = Egress::with_backends(
+        pinakes_core::config::EgressConfig {
+            host_requests_per_second: 1000.0,
+            ..Default::default()
+        },
+        Arc::new(PublicDns),
+        transport.clone(),
+    );
+    let service = pinakes_core::event::service::EventService {
+        pool: pool.clone(),
+        config: EventConfig {
+            geocoding: false,
+            ..Default::default()
+        },
+        osm: Arc::new(OsmResolver::new(pool.clone(), OsmConfig::default()).unwrap()),
+    };
+    (transport, egress, service)
+}
+
+fn html_page(url: &str, body: &str) -> Fetched {
+    Fetched {
+        permanent_redirect: false,
+        truncated: false,
+        validators: Default::default(),
+        url: url.parse().unwrap(),
+        status: 200,
+        retry_after_secs: 60,
+        location: None,
+        content_type: "text/html".into(),
+        body: body.as_bytes().to_vec(),
+    }
+}
+
+/// An event page's ActivityPub alternate whose fetch ends on an address that carries a credential
+/// is read at that address's origin: its relative `image` names nothing after it.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn an_activitypub_alternate_reached_at_a_credential_resolves_nothing_back_to_it(
+    pool: PgPool,
+) {
+    let (_, egress, service) = protocol_service(&pool);
+    let uri = "https://events.example/ap-alt";
+    let mut fetched = html_page(
+        uri,
+        r#"<title>Gig</title><script type="application/ld+json">{"@type":"Event","name":"Gig","startDate":"2027-01-20T18:00:00Z"}</script>"#,
+    );
+    fetched.validators.link =
+        Some("</ap-alt>; rel=alternate; type=application/activity+json".into());
+    let card = ResourceMeta::new(uri, "web", 3600);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let doc = service
+        .page(uri, &fetched, card, &egress, deadline)
+        .await
+        .unwrap();
+    let json = serde_json::to_string(&doc).unwrap();
+    assert!(!json.contains("SECRET"), "{json}");
+}
+
+/// A page on host B reached through a link on host A, at an address that carries a credential, is
+/// still B's: a calendar file on A is not its own, so it is never fetched for the page.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_page_reached_at_a_credential_on_another_host_claims_no_calendar_of_the_first(
+    pool: PgPool,
+) {
+    let (transport, egress, service) = protocol_service(&pool);
+    let uri = "https://a.example/e/1";
+    let fetched = html_page(
+        "https://b.example/e?token=SECRET",
+        "<title>Gig</title><div class='h-event'><time class='dt-start' datetime='2027-01-20T18:00:00Z'></time></div><a href='https://a.example/e/1.ics'>Add to calendar</a>",
+    );
+    let card = ResourceMeta::new(uri, "web", 3600);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    service
+        .page(uri, &fetched, card, &egress, deadline)
+        .await
+        .unwrap();
+    let seen = transport.seen.lock().unwrap();
+    assert!(
+        seen.iter().all(|(path, _, _)| path != "/e/1.ics"),
+        "{seen:?}"
     );
 }

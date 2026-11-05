@@ -31,8 +31,9 @@ pub fn is_capability(uri: &str) -> bool {
 
 /// Whether `url` carries a credential: a password in its user info, a calendar provider's secret
 /// share path, or a key in [`CREDENTIAL_KEYS`] in its query, or with a value in its form-encoded
-/// fragment (an OAuth callback's `#access_token=…`; a plain anchor such as `#key` is a place in
-/// the page).
+/// fragment or in any part of it after a `?`, `#` or `;` (an OAuth callback's `#access_token=…`,
+/// a hash router's `#/reset?token=…` or `#/reset;token=…`, an OAuth answer after a route,
+/// `#/cb#access_token=…`; a plain anchor such as `#key` is a place in the page).
 pub fn is_capability_url(url: &Url) -> bool {
     if url.password().is_some() {
         return true;
@@ -53,9 +54,103 @@ pub fn is_capability_url(url: &Url) -> bool {
     secret_share(&host, &path)
         || url.query_pairs().any(|(key, _)| credential(&key))
         || url.fragment().is_some_and(|fragment| {
-            url::form_urlencoded::parse(fragment.as_bytes())
-                .any(|(key, value)| !value.is_empty() && credential(&key))
+            // The fragment as a form, and each part of it after a `?`, `#` or `;`.
+            std::iter::once(fragment)
+                .chain(
+                    fragment
+                        .match_indices(&['?', '#', ';'][..])
+                        .map(|(at, _)| &fragment[at + 1..]),
+                )
+                .any(|form| {
+                    url::form_urlencoded::parse(form.as_bytes())
+                        .any(|(key, value)| !value.is_empty() && credential(&key))
+                })
         })
+}
+
+/// Drops from `value`, a document as it is stored, every URL that carries a credential but `own`
+/// (the link the resource is read by, in any spelling of it): the backstop before anything is
+/// stored, whichever path put it there. The URL goes, or else the list entry or object around it
+/// when a `T` would not read back without the URL; where a `T` cannot do without it, it names `own`
+/// instead. Whether anything went.
+pub fn strip<T: serde::de::DeserializeOwned>(value: &mut serde_json::Value, own: &str) -> bool {
+    let own_id = crate::model::identity(own).ok().map(|(id, _, _)| id);
+    let foreign = |s: &str| {
+        s != own
+            && s.contains("://")
+            && Url::parse(s).is_ok_and(|url| url.has_host() && is_capability_url(&url))
+            && crate::model::identity(s).ok().map(|(id, _, _)| id) != own_id
+    };
+    let mut stripped = false;
+    while let Some(path) = find(value, &foreign) {
+        stripped = true;
+        let kept = (1..=path.len()).rev().find_map(|depth| {
+            let mut candidate = value.clone();
+            remove(&mut candidate, &path[..depth]);
+            serde_json::from_value::<T>(candidate.clone())
+                .is_ok()
+                .then_some(candidate)
+        });
+        match kept {
+            Some(candidate) => *value = candidate,
+            None => {
+                if let Some(at) = path.iter().try_fold(&mut *value, |v, step| match step {
+                    Step::Key(key) => v.get_mut(key.as_str()),
+                    Step::Index(i) => v.get_mut(*i),
+                }) {
+                    *at = own.into();
+                }
+            }
+        }
+    }
+    stripped
+}
+
+/// A step into a JSON value.
+enum Step {
+    Key(String),
+    Index(usize),
+}
+
+/// The path to the first string in `value` that `matches`.
+fn find(value: &serde_json::Value, matches: &impl Fn(&str) -> bool) -> Option<Vec<Step>> {
+    use serde_json::Value;
+    match value {
+        Value::String(s) => matches(s).then(Vec::new),
+        Value::Array(items) => items.iter().enumerate().find_map(|(i, item)| {
+            find(item, matches).map(|mut path| {
+                path.insert(0, Step::Index(i));
+                path
+            })
+        }),
+        Value::Object(fields) => fields.iter().find_map(|(key, field)| {
+            find(field, matches).map(|mut path| {
+                path.insert(0, Step::Key(key.clone()));
+                path
+            })
+        }),
+        _ => None,
+    }
+}
+
+/// Remove what `path` leads to from the object or list that holds it.
+fn remove(value: &mut serde_json::Value, path: &[Step]) {
+    let Some((last, parent)) = path.split_last() else {
+        return;
+    };
+    let parent = parent.iter().try_fold(value, |v, step| match step {
+        Step::Key(key) => v.get_mut(key.as_str()),
+        Step::Index(i) => v.get_mut(*i),
+    });
+    match (parent, last) {
+        (Some(serde_json::Value::Object(fields)), Step::Key(key)) => {
+            fields.remove(key);
+        }
+        (Some(serde_json::Value::Array(items)), Step::Index(i)) if *i < items.len() => {
+            items.remove(*i);
+        }
+        _ => {}
+    }
 }
 
 /// Whether `url` carries a credential, or names a link that does in one of its query values (an
@@ -102,6 +197,13 @@ mod tests {
         assert!(is_capability("https://example.org/cb#Token=x"));
         assert!(!is_capability("https://example.org/page#section-token"));
         assert!(!is_capability("https://example.org/page#t=10"));
+        // A hash router's route keeps its own query after the `?`.
+        assert!(is_capability("https://app.example/#/reset?token=x"));
+        assert!(!is_capability("https://app.example/#/reset?step=2"));
+        // An OAuth answer after a route, and a route's matrix parameters.
+        assert!(is_capability("https://app.example/#/cb#access_token=x"));
+        assert!(is_capability("https://app.example/#/reset;token=x"));
+        assert!(!is_capability("https://app.example/#/reset;step=2"));
         // A plain anchor is a place in the page, not a credential.
         for anchor in ["#Key", "#token", "#auth", "#key="] {
             let url = format!("https://en.wikipedia.org/wiki/Lock_and_key{anchor}");

@@ -365,7 +365,11 @@ pub async fn save(
     }
     // The transient container is serde-skipped: copy only the small parent document,
     // without cloning thousands of already-prepared occurrence documents.
-    let mut doc: ResourceMeta = serde_json::from_value(serde_json::to_value(doc)?)?;
+    // Nothing stored names a credential but the resource's own link, whatever path put it in
+    // (`capability::strip`).
+    let mut value = serde_json::to_value(doc)?;
+    crate::capability::strip::<ResourceMeta>(&mut value, &row.try_get::<String, _>("uri")?);
+    let mut doc: ResourceMeta = serde_json::from_value(value)?;
     // A show's episodes ride with this reading; a stored document retained below carries none.
     doc.episodes = episodes;
     if let Some(plan) = prepared.as_ref().filter(|p| !p.warnings.is_empty()) {

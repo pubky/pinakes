@@ -296,7 +296,13 @@ pub async fn prepare(
         }) {
             continue;
         }
-        let mut doc = item.doc.clone();
+        // Nothing stored names a credential but the feed's own link (`capability::strip`).
+        let mut value = serde_json::to_value(&item.doc)?;
+        let mut doc = if crate::capability::strip::<ResourceMeta>(&mut value, &source_uri) {
+            serde_json::from_value(value)?
+        } else {
+            item.doc.clone()
+        };
         let mut modified = item.modified;
         if let Some((_, _, old, _, _, _, _)) = previous {
             preserve_venue(&mut doc, old);
