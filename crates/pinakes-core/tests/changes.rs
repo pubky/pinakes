@@ -1176,7 +1176,8 @@ async fn a_preview_goes_after_its_own_grace(pool: PgPool) {
         .unwrap();
     let metrics = Metrics::new().unwrap();
     metrics.refresh(&pool).await.unwrap();
-    assert_eq!(metrics.preview_backlog.get(), 4);
+    // The preview and the fresh one; the child and the venue are kept for their calendar.
+    assert_eq!(metrics.preview_backlog.get(), 2);
     assert_eq!(store::cleanup(&pool, 7, 24).await.unwrap(), 1);
     let left: Vec<String> = sqlx::query_scalar("SELECT id FROM resource")
         .fetch_all(&pool)

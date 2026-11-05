@@ -450,7 +450,8 @@ know in any hour, whoever asks. Over it, a new link gets 503 with `Retry-After` 
 the oldest of the hour's previews is an hour old) and nothing is stored; a known link still
 reads, and the per-client budget's 429 comes first. The window is in memory and starts empty at
 startup. `pinakes_preview_refused_total` counts the refusals (alert `PreviewCapacityReached`),
-and `pinakes_preview_backlog` the resources nothing ever referenced.
+and `pinakes_preview_backlog` the resources nothing ever referenced (not derived children or
+venues).
 
 ### Posts
 
