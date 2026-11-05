@@ -1316,7 +1316,8 @@ fn merge_facts(
 /// A card's `also_on` entries from the `also_on()` rows: a member's site as its card names it, a
 /// derived link's service name. For a card's view (`card`, its own URI), a music member whose
 /// card is not read yet counts for the service its URL names, as the card itself does: no derived
-/// link on that service shows beside it (`also_on()` counts only what the stored cards say).
+/// link on that service shows beside it (`also_on()` counts only what the stored cards say), and
+/// no entry on the card's own service shows at all.
 fn also_on_entries(rows: &Value, card: Option<&str>) -> Vec<AlsoOn> {
     let entries: Vec<AlsoOn> = rows
         .as_array()
@@ -1353,8 +1354,12 @@ fn also_on_entries(rows: &Value, card: Option<&str>) -> Vec<AlsoOn> {
         .filter_map(service_site)
         .map(|s| s.to_lowercase())
         .collect();
+    // The card's own service, by its URL: no other page there shows, tagged or derived, its card
+    // read or not (a member's stored service may not be known yet).
+    let own = service_site(card).map(|s| s.to_lowercase());
     entries
         .into_iter()
+        .filter(|e| own.is_none() || service_site(&e.uri).map(|s| s.to_lowercase()) != own)
         .filter(|e| {
             !e.derived
                 || !e

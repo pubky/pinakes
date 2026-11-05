@@ -924,15 +924,15 @@ CREATE FUNCTION also_on(unit text, resource text, cap integer, members boolean, 
  placed AS (SELECT x.link_id,min(x.rank) AS rank FROM link_release x WHERE x.resource_id=also_on.resource
    AND x.expires_at>now() AND x.source NOT IN (SELECT source FROM also_on_source_off) GROUP BY x.link_id),
  entries AS (SELECT CASE WHEN mine THEN 1 ELSE 0 END AS o,id AS k1,uri AS k2,
-     (SELECT rank FROM placed p WHERE p.link_id=tagged.id) AS edition,
+     p.rank AS edition,
      CASE WHEN starts_with(lower(album),(SELECT title FROM original)) THEN -1 ELSE 0 END::bigint AS rank,
      CASE WHEN service IS NOT NULL AND (music OR lower(service) IN (SELECT service FROM services)) THEN lower(service) ELSE 'member:'||id END AS service,
-     jsonb_build_object('id',id,'uri',uri,'host',host,'site',site) AS e FROM tagged
-   UNION ALL SELECT 2,lower(site),uri,(SELECT rank FROM placed p WHERE p.link_id=derived.link_id),-named,lower(site),jsonb_strip_nulls(jsonb_build_object('uri',uri,'site',site,'derived',true,'via',via,'kind',kind,'at',at)) FROM derived),
+     jsonb_build_object('id',id,'uri',uri,'host',host,'site',site) AS e FROM tagged LEFT JOIN placed p ON p.link_id=tagged.id
+   UNION ALL SELECT 2,lower(site),uri,p.rank,-named,lower(site),jsonb_strip_nulls(jsonb_build_object('uri',uri,'site',site,'derived',true,'via',via,'kind',kind,'at',at)) FROM derived LEFT JOIN placed p ON p.link_id=derived.link_id),
  -- The card's own service, by its URL alone, like a member's.
  own AS (SELECT lower(coalesce(r.doc->>'service',CASE WHEN r.osm_type IS NOT NULL THEN 'OpenStreetMap' END)) AS service FROM resource r WHERE r.id=also_on.resource),
  shown AS (SELECT * FROM (SELECT *,row_number() OVER (PARTITION BY service ORDER BY coalesce(edition,500),o,rank,
-     e->>'kind' IS NOT DISTINCT FROM 'pdf' OR k2 ~* '\.(pdf|xml|txt|zip|json|csv|epub|mobi|docx?|xlsx?|odt|rtf)([?#]|$)',
+     e->>'kind' IS NOT DISTINCT FROM 'pdf' OR lower(right(k2,4))='.pdf',
      length(k2),k2) AS nth FROM entries) x
    WHERE NOT per_site OR (nth=1 AND service IS DISTINCT FROM (SELECT service FROM own)))
  SELECT coalesce((SELECT jsonb_agg(e ORDER BY o,k1,k2) FROM (SELECT * FROM shown ORDER BY o,k1,k2 LIMIT cap) x),'[]'::jsonb)
