@@ -605,6 +605,72 @@ async fn polls_the_http_feed_and_replays_without_duplicates(pool: PgPool) {
     );
     task.abort();
 }
+/// Log lines a test's subscriber writes.
+#[derive(Clone, Default)]
+struct Lines(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+impl std::io::Write for Lines {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A link that carries a credential is never previewed: `POST /v1/resolve` answers 400 for every
+/// capability probe of the shared fixture and for a password in the user info, stores nothing and
+/// spends no preview budget, and neither an answer nor a log line holds the secret.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_link_that_carries_a_credential_is_never_previewed(pool: PgPool) {
+    let probes: Value =
+        serde_json::from_str(include_str!("fixtures/capability_urls.json")).unwrap();
+    let config = Config {
+        preview: pinakes_core::config::PreviewConfig {
+            requests_per_minute: 2,
+            uri_requests_per_minute: 2,
+            cache_capacity: 100,
+        },
+        ..Default::default()
+    };
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
+    let logs = Lines::default();
+    let writer = logs.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_max_level(tracing::Level::TRACE)
+        .with_writer(move || writer.clone())
+        .finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    let mut refused = probes["providers"].as_array().unwrap().clone();
+    refused.extend(probes["query"].as_array().unwrap().iter().cloned());
+    refused.push(json!("https://user:SECRET@events.example.org/feed.ics"));
+    for probe in &refused {
+        let probe = probe.as_str().unwrap();
+        let shown = probe.replace("SECRET", "…");
+        let (code, answer) = call(&app, "POST", "/v1/resolve", Some(json!({"uri": probe}))).await;
+        assert_eq!(code, 400, "{shown}: {answer}");
+        assert!(!answer.to_string().contains("SECRET"), "{shown}");
+        let (id, _, _) = identity(probe).unwrap();
+        let stored: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource WHERE id=$1)")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(!stored, "{shown}");
+    }
+    // None of them spent the budget of two previews a minute.
+    for uri in ["https://example.org/one", "https://example.org/two"] {
+        let (code, _) = call(&app, "POST", "/v1/resolve", Some(json!({"uri": uri}))).await;
+        assert!(code == 200 || code == 202, "{uri}: {code}");
+    }
+    drop(guard);
+    let logs = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    assert!(!logs.contains("SECRET"));
+    assert!(logs.contains("a link that carries a credential is not previewed"));
+    assert!(logs.contains("events.example.org"));
+}
+
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn preview_pending_cached_completion_and_per_ip_uri_budgets(pool: PgPool) {
     let config = Config {

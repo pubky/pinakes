@@ -628,7 +628,14 @@ person (`limits.related_min_shared`, 2).
 `POST /v1/resolve` queues a supported URI and waits up to three seconds. Ingestion and every
 preview caller share one queue entry per normalized URI, with one TTL, retry schedule and
 dead-letter state. A 202 carries the ID to poll with `GET /v1/resources/{id}`. Unsupported
-schemes or disabled resolvers return 400. A resource only previewed, never referenced, is not
+schemes or disabled resolvers return 400, and so does a link that carries a credential: a
+calendar provider's secret share link (the patterns `scripts/verify-no-capability-urls` keeps out
+of the repository), a password in the user info, or a query key such as `token`, `key`, `sig` or
+`signature` (`capability::CREDENTIAL_KEYS`). It is not stored, does not count against the preview
+budget, and its log line names the host only. A card someone's post made for such a link is still
+read by its URI. Such a link is never sent to another service: also-on lookups (the hubs, the
+Wayback Machine) and oEmbed providers skip it, and it is never kept as another link's alias. A
+resource only previewed, never referenced, is not
 a search result and expires after the orphan grace period. Previews are limited per client IP
 and per URI (`limits.preview_requests_per_minute`, `limits.preview_uri_requests_per_minute`,
 30 each); a 429 carries `Retry-After: 60`.

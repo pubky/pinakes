@@ -359,7 +359,11 @@ impl WebResolver {
             // needed, while retaining oEmbed's established precedence if fetched.
             let mut candidate = extracted.doc.clone();
             fill(&mut candidate.name, extracted.title.clone());
+            // A link that carries a credential is never sent to an oEmbed provider.
             if let Some(endpoint) = extracted.oembed.take().filter(|endpoint| {
+                if crate::capability::is_capability(uri) {
+                    return false;
+                }
                 let trusted = endpoint.origin() == fetched.url.origin()
                     || super::cards::provider_endpoint(uri).is_some_and(|registered| {
                         registered.origin() == endpoint.origin()
@@ -459,7 +463,11 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
         out.doc.aliases.clear();
         return Ok(out);
     }
-    if fetched.permanent_redirect && fetched.url.as_str() != uri {
+    // A redirect to a link that carries a credential is followed, never kept as an alias.
+    if fetched.permanent_redirect
+        && fetched.url.as_str() != uri
+        && !crate::capability::is_capability_url(&fetched.url)
+    {
         add_alias(&mut out.doc, fetched.url.to_string());
         out.doc.alias_candidates.push(fetched.url.to_string());
     }
@@ -748,7 +756,7 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
             {
                 if let Some(alias) = origin_url(&fetched.url, href) {
                     add_alias(&mut out.doc, alias.clone());
-                    if !canonical_seen {
+                    if !canonical_seen && !crate::capability::is_capability(&alias) {
                         canonical_seen = true;
                         out.doc.alias_candidates.push(alias);
                     }
@@ -1188,8 +1196,13 @@ fn point(lat: f64, lon: f64) -> Option<Point> {
 /// Another URL the page names for itself (canonical, og:url, its JSON-LD `url`, a permanent
 /// redirect), listed in `details.aliases`; never grouping evidence. Only the head canonical and
 /// a permanent redirect are alias candidates (`alias_candidates`).
+/// A link that carries a credential is never published as another's alias.
 fn add_alias(doc: &mut ResourceMeta, alias: String) {
-    if doc.aliases.len() < 4 && alias != doc.url && !doc.aliases.contains(&alias) {
+    if doc.aliases.len() < 4
+        && alias != doc.url
+        && !doc.aliases.contains(&alias)
+        && !crate::capability::is_capability(&alias)
+    {
         doc.aliases.push(alias);
     }
 }
@@ -2166,6 +2179,34 @@ mod tests {
         );
     }
 
+    /// A link that carries a credential is never an alias: not a permanent redirect's target, not a
+    /// head canonical.
+    #[test]
+    fn a_link_that_carries_a_credential_is_never_an_alias() {
+        let page = |url: &str, body: &str| Fetched {
+            permanent_redirect: true,
+            truncated: false,
+            validators: Default::default(),
+            url: Url::parse(url).unwrap(),
+            status: 200,
+            retry_after_secs: 60,
+            location: None,
+            content_type: "text/html".into(),
+            body: body.as_bytes().to_vec(),
+        };
+        let d = extract(
+            "https://example.org/a",
+            &page(
+                "https://example.org/a?token=x",
+                r#"<head><link rel="canonical" href="/a?sig=x"></head><title>T</title>"#,
+            ),
+            3600,
+        )
+        .unwrap()
+        .doc;
+        assert!(d.aliases.is_empty(), "{:?}", d.aliases);
+        assert!(d.alias_candidates.is_empty(), "{:?}", d.alias_candidates);
+    }
     #[test]
     fn only_head_canonicals_and_permanent_redirects_are_alias_candidates() {
         let page = |url: &str, permanent: bool, body: &str| Fetched {

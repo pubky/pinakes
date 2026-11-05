@@ -874,4 +874,8 @@ Any other platform reads its fixed sample, which its `canary_note` says when to 
 
 The capability-URL guard (`scripts/verify-no-capability-urls`, run by the tests) scans every
 tracked and new source file for capability URLs; synthetic fixture URLs are allowed only in
-named test files, and failures print paths without the URLs.
+named test files, and failures print paths without the URLs. The daemon applies the same
+provider patterns, plus credential query keys and a password in the user info, at runtime
+(`crates/pinakes-core/src/capability.rs`): `POST /v1/resolve` refuses such a link, and no
+also-on, archive or oEmbed lookup is sent one. `crates/pinakes-core/tests/fixtures/capability_urls.json`
+holds the probes the guard and the runtime check must agree on; add a pattern to both.

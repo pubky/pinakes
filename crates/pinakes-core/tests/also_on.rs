@@ -2884,6 +2884,23 @@ async fn a_change_saved_during_a_run_is_read_again(pool: PgPool) {
     assert!(later);
 }
 
+/// A link that carries a credential is never sent to another service: no also-on source looks it
+/// up, while a plain link in the same batch is.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_link_that_carries_a_credential_gets_no_lookups(pool: PgPool) {
+    let private = "https://events.example.org/feed.ics?token=x";
+    let public = "https://events.example.org/feed.ics";
+    page(&pool, private, "Private").await;
+    page(&pool, public, "Public").await;
+    let cx = cx(Config::default());
+    let source = Fake::new("podcasts");
+    source.answer(private, Ok(Found::default()));
+    source.answer(public, Ok(Found::default()));
+    let sources: Vec<Arc<dyn Source>> = vec![source.clone()];
+    drain(&pool, &cx, &sources).await;
+    assert_eq!(*source.calls.lock().unwrap(), [public]);
+}
+
 /// `reextract` queues the re-read resources' also-on lookups too: a card that comes back
 /// unchanged would not run them, and their results may predate a source the upgrade added.
 /// `reextract also-on` queues every resource's lookups without re-reading the card.

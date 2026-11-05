@@ -210,7 +210,9 @@ Add it to a client as a remote (HTTP) MCP server at `{{BASE}}/mcp`.
 - **Reading new links**: `POST {{BASE}}/v1/resolve` with `{"uri": "…"}` reads a link now (within 3
   seconds, else 202 `pending`: read it again later by id). It has its own smaller budget
   (`limits.previews_per_minute` and `previews_per_uri_per_minute` in `/v1/info`). Search never
-  fetches, and nothing you resolve is listed by search until someone references it on Pubky.
+  fetches, and nothing you resolve is listed by search until someone references it on Pubky. A
+  link that carries a credential (a private calendar link, a `token` or `key` parameter) is
+  refused with 400; never send one.
 
 ## Errors
 

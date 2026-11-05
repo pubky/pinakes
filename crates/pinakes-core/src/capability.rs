@@ -1,0 +1,102 @@
+//! Links that carry a credential: a calendar provider's secret share link, or a query parameter
+//! that names a token, key or signature. Pinakes never previews one on request and never passes
+//! one to another service (an archive, an oEmbed provider, a hub); a link someone posted is still
+//! read from its own site. The provider patterns are those `scripts/verify-no-capability-urls`
+//! keeps out of the repository; `tests/fixtures/capability_urls.json` holds the probes both check.
+use url::Url;
+
+/// Query keys that carry a credential, compared after percent-decoding and without case.
+pub const CREDENTIAL_KEYS: &[&str] = &[
+    "token",
+    "access_token",
+    "auth",
+    "key",
+    "api_key",
+    "apikey",
+    "secret",
+    "sig",
+    "signature",
+    "password",
+    "x-amz-signature",
+    "x-amz-credential",
+    "x-amz-security-token",
+    "x-goog-signature",
+    "x-goog-credential",
+];
+
+/// Whether `uri` carries a credential ([`is_capability_url`]); a URI that is not a URL does not.
+pub fn is_capability(uri: &str) -> bool {
+    Url::parse(uri).is_ok_and(|url| is_capability_url(&url))
+}
+
+/// Whether `url` carries a credential: a password in its user info, a calendar provider's secret
+/// share path, or a query key in [`CREDENTIAL_KEYS`].
+pub fn is_capability_url(url: &Url) -> bool {
+    if url.password().is_some() {
+        return true;
+    }
+    if !matches!(url.scheme(), "http" | "https" | "webcal" | "webcals") {
+        return false;
+    }
+    let host = url
+        .host_str()
+        .unwrap_or_default()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    let path = url.path().to_ascii_lowercase();
+    secret_share(&host, &path)
+        || url
+            .query_pairs()
+            .any(|(key, _)| CREDENTIAL_KEYS.contains(&key.to_ascii_lowercase().as_str()))
+}
+
+/// A calendar provider's share path whose own segment is the secret.
+fn secret_share(host: &str, path: &str) -> bool {
+    let on = |domain: &str| host == domain || host.ends_with(&format!(".{domain}"));
+    // What follows `marker` in `path`: the secret, when not empty.
+    let after = |marker: &str| {
+        path.find(marker)
+            .is_some_and(|at| !path[at + marker.len()..].is_empty())
+    };
+    ((on("outlook.office365.com") || on("outlook.live.com"))
+        && (path.starts_with("/owa/calendar/") || path.starts_with("/owa/0/calendar/")))
+        || (on("icloud.com") && path.contains("/published/"))
+        || (host == "calendar.google.com"
+            && path.starts_with("/calendar/ical/")
+            && path.contains("/private-"))
+        || after("/remote.php/dav/public-calendars/")
+        || after("/apps/calendar/p/")
+        || after("/apps/calendar/embed/")
+        || (on("proton.me") && path.starts_with("/api/calendar/v1/url/"))
+        || (host == "calendar.proton.me" && path.starts_with("/share/"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_credential_key_is_matched_whole_after_decoding() {
+        for flagged in [
+            "https://example.org/feed.ics?TOKEN=x",
+            "https://example.org/feed.ics?a=1&api%5Fkey=x",
+            "https://example.org/feed.ics?X-Amz-Signature=x",
+            "webcal://example.org/feed.ics?sig=x",
+            "https://user:pass@example.org/feed.ics",
+        ] {
+            assert!(is_capability(flagged), "{flagged}");
+        }
+        for plain in [
+            "https://example.org/feed.ics?key_art=1",
+            "https://example.org/feed.ics?monkey=1",
+            "https://example.org/token/feed.ics",
+            "https://example.org/feed.ics?q=token",
+            "https://user@example.org/feed.ics",
+            "https://example.org/apps/calendar/p/",
+            "nostr:npub1example",
+            "not a url",
+        ] {
+            assert!(!is_capability(plain), "{plain}");
+        }
+    }
+}
