@@ -330,6 +330,58 @@ async fn the_media_route_never_sends_a_link_that_carries_a_credential_to_oembed(
         );
     }
 }
+/// A page that redirects to a link carrying a credential is read there, but the oEmbed endpoint it
+/// advertises (which names that link) is never asked, whatever the policy.
+#[tokio::test]
+async fn a_redirect_to_a_link_that_carries_a_credential_gets_no_oembed() {
+    struct Seen(Mutex<Vec<String>>);
+    #[async_trait]
+    impl Transport for Seen {
+        async fn get(&self, u: &Url, _: &[SocketAddr]) -> Result<Fetched> {
+            self.0.lock().unwrap().push(u.to_string());
+            let landed = u.query().is_some_and(|q| q.contains("token="));
+            Ok(Fetched {
+                permanent_redirect: false,
+                truncated: false,
+                url: u.clone(),
+                status: if u.path() == "/page" && !landed { 302 } else { 200 },
+                body: if u.path().contains("oembed") {
+                    json!({"type":"video","title":"Embed"}).to_string()
+                } else {
+                    "<head><link rel='alternate' type='application/json+oembed' href='/oembed?url=https%3A%2F%2Fmedia.example%2Fpage%3Ftoken%3Dx'></head><title>Page</title>".into()
+                }
+                .into_bytes(),
+                content_type: if u.path().contains("oembed") {
+                    "application/json"
+                } else {
+                    "text/html"
+                }
+                .into(),
+                retry_after_secs: 60,
+                location: (u.path() == "/page" && !landed).then(|| "/page?token=x".into()),
+                validators: Default::default(),
+            })
+        }
+    }
+    let seen = Arc::new(Seen(Mutex::default()));
+    let web = WebResolver {
+        oembed_policy: cards::OembedPolicy::Always,
+        cards: None,
+        events: None,
+        config: Default::default(),
+        egress: Egress::with_backends(Default::default(), Arc::new(PublicDns), seen.clone()),
+    };
+    assert!(web.resolve("https://media.example/page").await.is_ok());
+    let requests = seen.0.lock().unwrap();
+    assert!(
+        requests.iter().any(|r| r.contains("token=x")),
+        "{requests:?}"
+    );
+    assert!(
+        requests.iter().all(|r| !r.contains("/oembed")),
+        "{requests:?}"
+    );
+}
 fn resolver(kind: &'static str, cfg: Config, transport: Arc<TransportMock>) -> CardResolver {
     CardResolver::new(
         kind,

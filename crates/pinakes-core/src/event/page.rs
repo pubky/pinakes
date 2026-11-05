@@ -967,6 +967,32 @@ mod performer_tests {
         );
     }
 
+    /// Performers read on a page whose fetch ended on a link carrying a credential keep only its
+    /// origin as their provenance: the host is all that is read from it.
+    #[test]
+    fn performers_read_past_a_link_that_carries_a_credential_keep_its_origin() {
+        let mut card = ResourceMeta::new("https://www.songkick.com/concerts/1", "web", 60);
+        card.event.performers = vec![super::super::Performer {
+            name: "Radiohead".into(),
+            links: vec!["https://www.songkick.com/artists/253846".into()],
+        }];
+        card.event.read_from(&crate::resolver::egress::Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            validators: Default::default(),
+            url: url::Url::parse("https://www.songkick.com/concerts/1?token=SECRET").unwrap(),
+            status: 200,
+            retry_after_secs: 60,
+            location: None,
+            content_type: "text/html".into(),
+            body: vec![],
+        });
+        assert_eq!(
+            card.event.performers_from(),
+            Some("https://www.songkick.com/")
+        );
+    }
+
     /// The provenance is stored as `performers_fetched_from`; a card stored with another key for
     /// it (an address it was asked for, not one its fetch ended on) has none when read back.
     #[test]

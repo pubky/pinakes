@@ -361,7 +361,10 @@ impl WebResolver {
             fill(&mut candidate.name, extracted.title.clone());
             // A link that carries a credential is never sent to an oEmbed provider.
             if let Some(endpoint) = extracted.oembed.take().filter(|endpoint| {
-                if crate::capability::is_capability(uri) {
+                if crate::capability::is_capability(uri)
+                    || crate::capability::is_capability_url(&fetched.url)
+                    || crate::capability::names_capability(endpoint)
+                {
                     return false;
                 }
                 let trusted = endpoint.origin() == fetched.url.origin()
@@ -489,12 +492,11 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
     }
     if fetched.content_type.starts_with("image/") {
         out.doc.set_type("ImageObject");
-        out.doc.image = Some(fetched.url.to_string());
+        out.doc.image = Some(landed(uri, fetched).to_string());
         return Ok(out);
     }
     if fetched.content_type == "application/pdf" {
-        out.doc.name = fetched
-            .url
+        out.doc.name = landed(uri, fetched)
             .path_segments()
             .and_then(|mut s| s.next_back())
             .map(str::to_owned);
@@ -1196,6 +1198,16 @@ fn point(lat: f64, lon: f64) -> Option<Point> {
 /// Another URL the page names for itself (canonical, og:url, its JSON-LD `url`, a permanent
 /// redirect), listed in `details.aliases`; never grouping evidence. Only the head canonical and
 /// a permanent redirect are alias candidates (`alias_candidates`).
+/// The address a fetch ended on, unless it carries a credential: then the link itself stands in
+/// for it, so nothing stored names it.
+fn landed(uri: &str, fetched: &Fetched) -> Url {
+    if !crate::capability::is_capability_url(&fetched.url) {
+        return fetched.url.clone();
+    }
+    Url::parse(uri)
+        .or_else(|_| Url::parse(&fetched.url.origin().ascii_serialization()))
+        .unwrap_or_else(|_| fetched.url.clone())
+}
 /// A link that carries a credential is never published as another's alias.
 fn add_alias(doc: &mut ResourceMeta, alias: String) {
     if doc.aliases.len() < 4
@@ -2206,6 +2218,33 @@ mod tests {
         .doc;
         assert!(d.aliases.is_empty(), "{:?}", d.aliases);
         assert!(d.alias_candidates.is_empty(), "{:?}", d.alias_candidates);
+    }
+    /// A fetch that ends on a link carrying a credential names nothing after it: not an image's
+    /// address, not a PDF's name.
+    #[test]
+    fn nothing_read_names_a_redirect_target_that_carries_a_credential() {
+        let landed = |content_type: &str| Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            validators: Default::default(),
+            url: Url::parse("https://cdn.example/files/SECRET-NAME.png?token=SECRET").unwrap(),
+            status: 200,
+            retry_after_secs: 60,
+            location: None,
+            content_type: content_type.into(),
+            body: vec![],
+        };
+        for content_type in ["image/png", "application/pdf"] {
+            let d = extract(
+                "https://example.org/files/a.png",
+                &landed(content_type),
+                3600,
+            )
+            .unwrap()
+            .doc;
+            let json = serde_json::to_string(&d).unwrap();
+            assert!(!json.contains("SECRET"), "{content_type}: {json}");
+        }
     }
     #[test]
     fn only_head_canonicals_and_permanent_redirects_are_alias_candidates() {

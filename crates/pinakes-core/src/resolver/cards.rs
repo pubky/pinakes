@@ -1201,6 +1201,10 @@ impl CardResolver {
         endpoint: Url,
         ttl: u64,
     ) -> Option<(ResourceMeta, Value, Url)> {
+        // An endpoint that names a link carrying a credential is never asked.
+        if crate::capability::names_capability(&endpoint) {
+            return None;
+        }
         crate::telemetry::discovery("oembed", "requested");
         if let Ok(Ok(f)) = tokio::time::timeout(
             Duration::from_secs(3),

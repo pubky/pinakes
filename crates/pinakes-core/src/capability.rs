@@ -53,6 +53,15 @@ pub fn is_capability_url(url: &Url) -> bool {
             .any(|(key, _)| CREDENTIAL_KEYS.contains(&key.to_ascii_lowercase().as_str()))
 }
 
+/// Whether `url` carries a credential, or names a link that does in one of its query values (an
+/// oEmbed endpoint's `url=`).
+pub fn names_capability(url: &Url) -> bool {
+    is_capability_url(url)
+        || url
+            .query_pairs()
+            .any(|(_, value)| Url::parse(&value).is_ok_and(|named| is_capability_url(&named)))
+}
+
 /// A calendar provider's share path whose own segment is the secret. Nextcloud's may sit below a
 /// prefix (`/index.php/apps/…`, an install in a sub-path).
 fn secret_share(host: &str, path: &str) -> bool {
