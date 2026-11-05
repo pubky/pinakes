@@ -31,8 +31,9 @@ pub fn is_capability(uri: &str) -> bool {
 
 /// Whether `url` carries a credential: a password in its user info, a calendar provider's secret
 /// share path, or a key in [`CREDENTIAL_KEYS`] in its query, or with a value in its form-encoded
-/// fragment or a hash router's route query (an OAuth callback's `#access_token=…`,
-/// `#/reset?token=…`; a plain anchor such as `#key` is a place in the page).
+/// fragment or in any part of it after a `?`, `#` or `;` (an OAuth callback's `#access_token=…`,
+/// a hash router's `#/reset?token=…` or `#/reset;token=…`, an OAuth answer after a route,
+/// `#/cb#access_token=…`; a plain anchor such as `#key` is a place in the page).
 pub fn is_capability_url(url: &Url) -> bool {
     if url.password().is_some() {
         return true;
@@ -53,12 +54,17 @@ pub fn is_capability_url(url: &Url) -> bool {
     secret_share(&host, &path)
         || url.query_pairs().any(|(key, _)| credential(&key))
         || url.fragment().is_some_and(|fragment| {
-            // The fragment as a form, and a hash router's route query after its first `?`.
-            let route = fragment.split_once('?').map(|(_, query)| query);
-            [Some(fragment), route].into_iter().flatten().any(|form| {
-                url::form_urlencoded::parse(form.as_bytes())
-                    .any(|(key, value)| !value.is_empty() && credential(&key))
-            })
+            // The fragment as a form, and each part of it after a `?`, `#` or `;`.
+            std::iter::once(fragment)
+                .chain(
+                    fragment
+                        .match_indices(&['?', '#', ';'][..])
+                        .map(|(at, _)| &fragment[at + 1..]),
+                )
+                .any(|form| {
+                    url::form_urlencoded::parse(form.as_bytes())
+                        .any(|(key, value)| !value.is_empty() && credential(&key))
+                })
         })
 }
 
@@ -109,6 +115,10 @@ mod tests {
         // A hash router's route keeps its own query after the `?`.
         assert!(is_capability("https://app.example/#/reset?token=x"));
         assert!(!is_capability("https://app.example/#/reset?step=2"));
+        // An OAuth answer after a route, and a route's matrix parameters.
+        assert!(is_capability("https://app.example/#/cb#access_token=x"));
+        assert!(is_capability("https://app.example/#/reset;token=x"));
+        assert!(!is_capability("https://app.example/#/reset;step=2"));
         // A plain anchor is a place in the page, not a credential.
         for anchor in ["#Key", "#token", "#auth", "#key="] {
             let url = format!("https://en.wikipedia.org/wiki/Lock_and_key{anchor}");
