@@ -750,3 +750,58 @@ async fn credits_show_on_every_card_route(pool: PgPool) {
     assert_eq!(read["credits"], json!([]));
     assert_eq!(read["description"], Value::Null);
 }
+
+/// A song whose description is the article's keeps MusicBrainz's length and artist credit as
+/// facts of its own card: the resource read gives `duration` (in seconds, as the
+/// `musicbrainz_entity` source gives it) and `artist` from the card itself, before any also-on
+/// source has read the song (none has here).
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn an_enriched_recording_keeps_its_length_as_a_fact(pool: PgPool) {
+    tag(&pool, &[GET_LUCKY]).await;
+    let doc = resolve_once(&pool, &web(Recorded::new(Mode::default()), true), GET_LUCKY).await;
+    let summary = extract("enwiki-summary-get-lucky-song.json");
+    assert_eq!(doc.description.as_deref(), Some(summary.as_str()));
+    let entity = fixture_json("mb-recording-get-lucky.json");
+    let secs = (entity["length"].as_u64().unwrap() + 500) / 1000;
+    let artist: String = entity["artist-credit"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            format!(
+                "{}{}",
+                c["name"].as_str().unwrap(),
+                c["joinphrase"].as_str().unwrap_or_default()
+            )
+        })
+        .collect();
+    let facts: i64 = sqlx::query_scalar("SELECT count(*) FROM resource_fact")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(facts, 0, "no also-on source has read the song");
+    let (id, _, _) = identity(GET_LUCKY).unwrap();
+    let app = api::router(
+        AppState::new(pool.clone(), Config::default())
+            .await
+            .unwrap(),
+    );
+    let uri = percent_encoding::utf8_percent_encode(GET_LUCKY, percent_encoding::NON_ALPHANUMERIC);
+    let by_uri = call(
+        &app,
+        "GET",
+        &format!("/v1/resources/by-uri?uri={uri}"),
+        None,
+    )
+    .await;
+    let read = call(&app, "GET", &format!("/v1/resources/{id}"), None).await;
+    for (route, card) in [("by-uri", &by_uri), ("read", &read)] {
+        assert_eq!(card["description"], json!(summary), "{route}");
+        assert_eq!(
+            card["facts"]["duration"],
+            json!(secs.to_string()),
+            "{route}: {card}"
+        );
+        assert_eq!(card["facts"]["artist"], json!(artist), "{route}: {card}");
+    }
+}

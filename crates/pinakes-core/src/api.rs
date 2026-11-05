@@ -1426,7 +1426,9 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
             from: crate::sources::from(d).map(str::to_owned),
             facts: merge_facts(
                 crate::kinds::facts(
-                    crate::sources::facts(d).or_else(|| crate::resolver::pubky_apps::facts(d)),
+                    crate::sources::facts(d)
+                        .or_else(|| crate::resolver::pubky_apps::facts(d))
+                        .or_else(|| crate::music_sources::card_facts(d)),
                     d,
                     Utc::now(),
                 ),

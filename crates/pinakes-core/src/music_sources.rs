@@ -176,6 +176,10 @@ pub fn musicbrainz_card(
     let mut about: Vec<String> = entity.artist.iter().cloned().collect();
     if let Some(ms) = entity.length_ms {
         let secs = (ms + 500) / 1000;
+        // Its own attribute too (ISO 8601, as every page's `duration`): an enriched description
+        // takes the place of this line, and the length stays a fact (`card_facts`).
+        doc.attributes
+            .insert("duration".into(), format!("PT{secs}S"));
         about.push(if secs >= 3600 {
             format!("{}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60)
         } else {
@@ -187,6 +191,34 @@ pub fn musicbrainz_card(
         doc.attributes.insert("artist".into(), artist.clone());
     }
     doc
+}
+
+/// The facts a MusicBrainz page's own card states (`musicbrainz_card`): its artist credit and
+/// its length (`duration`, in seconds, as the `musicbrainz_entity` source gives it), so a
+/// resource read keeps them when an enriched description takes the place of MusicBrainz's
+/// "artist · length" line, also before (or without) any also-on source reading the page.
+pub(crate) fn card_facts(
+    doc: &crate::model::ResourceMeta,
+) -> Option<std::collections::BTreeMap<String, String>> {
+    if doc.source != "musicbrainz" {
+        return None;
+    }
+    let mut facts = std::collections::BTreeMap::new();
+    if let Some(artist) = doc
+        .attributes
+        .get("artist")
+        .filter(|a| !a.trim().is_empty())
+    {
+        facts.insert("artist".to_owned(), artist.clone());
+    }
+    if let Some(secs) = doc
+        .attributes
+        .get("duration")
+        .and_then(|d| duration_secs(d))
+    {
+        facts.insert("duration".to_owned(), secs.to_string());
+    }
+    (!facts.is_empty()).then_some(facts)
 }
 
 /// What a performer's link says about the artist: a MusicBrainz artist page names the MBID
@@ -661,6 +693,36 @@ mod tests {
             (link.uri.as_str(), link.site.as_str()),
             ("https://music.apple.com/album/1097861387", "Apple Music")
         );
+    }
+
+    /// A MusicBrainz card's own facts are the `musicbrainz_entity` source's artist and
+    /// duration, same names and units, so a resource read shows each value once; another
+    /// source's document gives none.
+    #[test]
+    fn a_musicbrainz_card_states_its_artist_and_length() {
+        let recording =
+            musicbrainz::parse_entity(MbKind::Recording, &fixture("mb-recording.json")).unwrap();
+        let card = musicbrainz_card(
+            "https://musicbrainz.org/recording/9f9cf187-d6f9-437f-9d98-d59cdbd52757",
+            Some(&recording),
+            None,
+            86400,
+        );
+        let own = card_facts(&card).unwrap();
+        let source: std::collections::BTreeMap<String, String> = facts(&recording)
+            .into_iter()
+            .filter(|f| f.name == "artist" || f.name == "duration")
+            .map(|f| (f.name, f.value))
+            .collect();
+        assert_eq!(own, source);
+        assert_eq!(own.len(), 2, "{own:?}");
+        assert_eq!(page_duration_of(&card), own["duration"].parse::<i64>().ok());
+        let mut page = card.clone();
+        page.source = "jsonld".into();
+        assert_eq!(card_facts(&page), None);
+    }
+    fn page_duration_of(doc: &crate::model::ResourceMeta) -> Option<i64> {
+        duration_secs(doc.attributes.get("duration")?)
     }
 
     #[test]

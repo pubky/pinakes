@@ -221,7 +221,7 @@ answer `If-None-Match` with 304.
 | `venue` | `{name, id}`: the venue's name and, when it resolved to a resource, its ID |
 | `organizer` | `{name, url}` |
 | `from` | Where the card's metadata came from when it is not the page itself: the [source](#sources) whose official API answered, e.g. `federal_register` |
-| `facts` | The fields that API names for the object, by name (`document_type`, `citation`, …), or the facts a [Pubky app's](pubky-apps.md) profile reads (`card_count`, `price`, `rating`, …), then the facts the [also-on](#also-on) sources read for it (such as a music link's `isrc`, `upc` and `mbid`); several values of one name are joined with `; `. Each source keeps at most `limits.also_on_facts_per_source` (32, at least 8) facts per resource, cutting the many values of one name (a recording's ISRCs) before a name's one value (its MBID, artist). Each source's page lists its facts. `null` when there are none. Facts never join anything |
+| `facts` | The fields that API names for the object, by name (`document_type`, `citation`, …), or the facts a [Pubky app's](pubky-apps.md) profile reads (`card_count`, `price`, `rating`, …), or a MusicBrainz page's own `artist` and `duration` (in seconds), then the facts the [also-on](#also-on) sources read for it (such as a music link's `isrc`, `upc` and `mbid`); several values of one name are joined with `; `. Each source keeps at most `limits.also_on_facts_per_source` (32, at least 8) facts per resource, cutting the many values of one name (a recording's ISRCs) before a name's one value (its MBID, artist). Each source's page lists its facts. `null` when there are none. Facts never join anything |
 | `keys` | The public identifiers the resource is keyed by, as `GET /v1/search?key=` takes them (`isrc:…`, `upc:…`, `doi:…`, `isbn:…`, `mb:recording:…`, `wikidata:Q…`, `osm:node/…`): the keys its sources vouch for ([Also on](#also-on)), sorted; `[]` when there are none |
 | `aliases` | Other spellings of this link that resolve to it ([aliases](#aliases)), at most 50; a page's own `url`, `@id`, `sameAs` or canonical claims are not aliases and are not listed. The card's `uri` is the canonical one: an alias is answered with its root's card |
 | `updated_at` | When the current metadata was accepted |
@@ -1212,7 +1212,8 @@ MusicBrainz's web service (the entity it names), not from the page (unless that 
 MBID or the ISRC): the title, `MusicRecording`, `MusicAlbum`, `MusicGroup` or `Person` (an artist
 MusicBrainz calls a person), the artist credit and a recording's length as its description (an
 enriched description below takes the place of this line; the resource read's `facts` still give
-them as `artist` and `duration`, in seconds, from the `musicbrainz_entity` source), `site`
+them as `artist` and `duration`, in seconds, from the card itself as soon as it is read, and from
+the `musicbrainz_entity` source), `site`
 `MusicBrainz`; an ISRC's page is its one recording's card, else named `ISRC {code}`.
 
 A MusicBrainz artist, release group, release or recording card also takes an image and a
