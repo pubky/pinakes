@@ -270,13 +270,6 @@ async fn item(cx: &Context, kind: Kind, id: &str) -> Result<Option<Value>> {
     )
 }
 
-/// The tracks of a TIDAL album, by ID, as the first page of its items lists them, in the
-/// configured country; `None` when TIDAL has no such album there.
-pub(crate) async fn album_tracks(cx: &Context, album: &str) -> Result<Option<Vec<String>>> {
-    let country = &cx.config.section::<TidalConfig>().country;
-    let url = format!("{API}/albums/{album}/relationships/items?countryCode={country}");
-    Ok(api_object(cx, &url).await?.map(|v| items(&v, "tracks")))
-}
 /// The album a TIDAL track is on (the first TIDAL names).
 pub(crate) async fn track_album(cx: &Context, track: &str) -> Result<Option<String>> {
     let country = &cx.config.section::<TidalConfig>().country;

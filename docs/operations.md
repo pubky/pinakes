@@ -774,7 +774,10 @@ answers resets it.
 The sources run in the order [docs/sources](sources/README.md#also-on) lists them (each page says
 what its source reads and costs); `[also_on] apple_storefront` (`us`, a
 two-letter country code) is the storefront the iTunes lookups ask and the Apple Books and Apple
-Podcasts links carry (Apple Music links carry none). `[also_on.sources.musicbrainz] base_url`
+Podcasts links carry (Apple Music links carry none). `[also_on] spotify_pages` (`false`) lets
+[`editions`](sources/editions.md) read a Spotify track's public page for its album where Spotify's
+Web API does not answer (no credentials, or credentials it refuses); off, such Spotify links stay
+unplaced. `[also_on.sources.musicbrainz] base_url`
 (`https://musicbrainz.org/ws/2`) points every MusicBrainz read at a mirror's web service instead
 (every source that reads MusicBrainz, and the cards of MusicBrainz pages), an http(s) URL without a
 trailing slash and reached through the egress policy;

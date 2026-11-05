@@ -55,6 +55,9 @@ pub struct AlsoOnConfig {
     /// The iTunes storefront (country) the album and book lookups ask, `us` by default. Apple
     /// Music links carry no storefront (`music::parse`).
     pub apple_storefront: String,
+    /// Read the public page of a Spotify track a card may show for the album it is on
+    /// (`editions`), where Spotify's Web API does not answer for it: off by default.
+    pub spotify_pages: bool,
     #[serde(skip)]
     pub links_per_source: usize,
     #[serde(skip)]
@@ -73,6 +76,7 @@ impl Default for AlsoOnConfig {
             derive_links: true,
             sources: BTreeMap::new(),
             apple_storefront: "us".into(),
+            spotify_pages: false,
             links_per_source: 32,
             keys_per_source: 16,
             facts_per_source: 32,
@@ -134,7 +138,8 @@ pub struct Subject {
     pub first_seen_at: Option<DateTime<Utc>>,
     /// The links the same thing has elsewhere, as its card may show them: those the sources before
     /// in this run (and their earlier runs) derived for it and for the other members of its group,
-    /// and those members' own links; at most [`CANDIDATES`]. What `editions` places.
+    /// and those members' own links; at most [`CANDIDATES`]. Loaded only for a source that reads
+    /// them ([`Source::reads_candidates`], `editions`), just before it runs.
     pub candidates: Vec<String>,
 }
 /// At most this many links a [`Subject`] carries as candidates.
@@ -315,6 +320,10 @@ pub trait Source: Send + Sync {
     /// (`media::link_type`): `Some(None)` for a link it reads that names no one type.
     fn link_type(&self, _uri: &str) -> Option<Option<&'static str>> {
         None
+    }
+    /// Whether it reads [`Subject::candidates`], which are loaded for it alone.
+    fn reads_candidates(&self) -> bool {
+        false
     }
     /// The top-level section of the config file it owns ([`OwnSection`]), if any.
     fn section(&self) -> Option<Section> {
@@ -776,6 +785,23 @@ pub async fn record(
     Ok(())
 }
 
+/// Run the sources of `ids` again soon, those `editions` reads (a MusicBrainz key): a change of
+/// their groups (a member joining or leaving, a link becoming an alias) changes the links their
+/// cards may show, which it places.
+pub(crate) async fn requeue_placed(
+    tx: &mut Transaction<'_, Postgres>,
+    ids: &[String],
+) -> Result<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    sqlx::query("INSERT INTO also_on_dirty(resource_id) SELECT DISTINCT k.resource_id FROM resource_key k WHERE k.resource_id=ANY($1) AND (k.key LIKE 'mb:recording:%' OR k.key LIKE 'mb:release:%' OR k.key LIKE 'mb:release-group:%') ORDER BY 1 ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=least(also_on_dirty.next_attempt_at,now())")
+        .bind(ids)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
 /// The write order (`store::lock_writers`) shared, as saves take it, and the alias lock: a run
 /// locks rows of several resources in an order of its own (ID order), which a shared writer may
 /// meet the other way round.
@@ -836,7 +862,7 @@ async fn subject(pool: &PgPool, id: &str) -> Result<Option<Subject>> {
             .and_then(|_| serde_json::from_value(row["doc"].clone()).ok()),
         keys: serde_json::from_value(row["keys"].clone()).unwrap_or_default(),
         first_seen_at: row["first_seen_at"].as_str().and_then(|s| s.parse().ok()),
-        candidates: candidates(pool, id).await?,
+        candidates: vec![],
     }))
 }
 /// The links a card may show besides its own (`Subject::candidates`), by URI.
@@ -1037,6 +1063,9 @@ async fn one(
             }
             continue;
         }
+        if source.reads_candidates() {
+            subject.candidates = candidates(pool, id).await?;
+        }
         // A source that panics (a parser meeting an answer of a shape it doesn't expect) fails
         // this run like an error: the others' results are kept and the worker goes on.
         let lookup = std::panic::AssertUnwindSafe(source.lookup(cx, &subject))
@@ -1064,7 +1093,6 @@ async fn one(
                     .bind(id)
                     .fetch_all(pool)
                     .await?;
-                subject.candidates = candidates(pool, id).await?;
             }
             Err(error) => {
                 // The longest wait any failing source asked for sets the retry.

@@ -804,11 +804,11 @@ async fn music_links_join_through_the_hubs_and_list_each_other(pool: sqlx::PgPoo
         .unwrap()
         .to_bytes();
     let card: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    // Every link: the details' list (the card shows one per music service).
+    // One link per service, as every card shows: the other edition is a page of the card's own
+    // service (Spotify), so it does not show.
     let also_on = card["also_on"].as_array().unwrap();
-    // The other edition first, as a tagged member with its ID.
-    assert_eq!(also_on[0]["id"], ids[1].as_str(), "{card}");
-    let derived: Vec<(&str, &str, &str)> = also_on[1..]
+    assert!(also_on.iter().all(|e| e["id"] != ids[1].as_str()), "{card}");
+    let derived: Vec<(&str, &str, &str)> = also_on
         .iter()
         .map(|e| {
             assert_eq!(e["derived"], true);
@@ -1124,7 +1124,11 @@ async fn editions_of_one_release_group_take_the_group(pool: sqlx::PgPool) {
         ["upc 0196874054246"]
     );
     let seen = t.seen.lock().unwrap().clone();
-    let mb: Vec<_> = seen.iter().filter(|s| s.contains("/ws/2/")).collect();
+    // The lookups (`editions` then browses the release group's releases).
+    let mb: Vec<_> = seen
+        .iter()
+        .filter(|s| s.contains("/ws/2/") && !s.contains("/ws/2/release?"))
+        .collect();
     assert_eq!(mb.len(), 3, "{seen:?}");
     assert!(
         mb.iter().all(|s| s.starts_with("mb-mirror.example/ws/2/")),

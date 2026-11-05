@@ -106,13 +106,6 @@ pub fn preview_parse(v: &Value, track: &str) -> Option<crate::model::Stream> {
     };
     crate::model::Stream::public(url, media_type, None, true)
 }
-/// The songs of an Apple Music album, by track ID (iTunes `lookup?id=…&entity=song`, in the
-/// configured storefront); `None` when iTunes has no such album there.
-pub(crate) async fn album_songs(cx: &Context, album: &str) -> Result<Option<Vec<String>>> {
-    Ok(lookup(cx, album)
-        .await?
-        .map(|v| songs(&v, |r| r["collectionId"].as_u64() == album.parse().ok())))
-}
 /// The album an Apple Music track is on (the same lookup as its preview's).
 pub(crate) async fn track_album(cx: &Context, track: &str) -> Result<Option<String>> {
     Ok(lookup(cx, track).await?.and_then(|v| {
@@ -124,17 +117,6 @@ pub(crate) async fn track_album(cx: &Context, track: &str) -> Result<Option<Stri
             .map(|id| id.to_string())
         })
     }))
-}
-/// The track IDs of the songs an iTunes lookup answers that `on` keeps.
-pub fn songs(v: &Value, on: impl Fn(&Value) -> bool) -> Vec<String> {
-    v["results"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|r| r["wrapperType"] == "track" && r["kind"] == "song" && on(r))
-        .filter_map(|r| r["trackId"].as_u64())
-        .map(|id| id.to_string())
-        .collect()
 }
 /// iTunes' `lookup?id={id}&entity=song` in the configured storefront.
 async fn lookup(cx: &Context, id: &str) -> Result<Option<Value>> {

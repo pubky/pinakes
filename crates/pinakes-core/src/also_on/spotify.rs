@@ -4,9 +4,12 @@
 //! ISRC MusicBrainz gives to several recordings keys the one the track's duration picks, else is
 //! a fact only, as every service's own ISRC is (`music_sources::isrc_match`).
 //!
-//! Asked only with an operator's app credentials (`[spotify]`, or `PINAKES_SPOTIFY_CLIENT_ID`
-//! and `PINAKES_SPOTIFY_CLIENT_SECRET`), through the client-credentials grant
-//! (`client_credentials`): no user signs in, and nothing but the public catalogue is read.
+//! The API is asked only with an operator's app credentials (`[spotify]`, or
+//! `PINAKES_SPOTIFY_CLIENT_ID` and `PINAKES_SPOTIFY_CLIENT_SECRET`), through the
+//! client-credentials grant (`client_credentials`): no user signs in, and nothing but the public
+//! catalogue is read. While this source is on, `editions` asks it which album a Spotify track a
+//! card may show is on; where the API does not answer, and only with `[also_on] spotify_pages`,
+//! the track's public page (its `music:album`).
 use super::{
     client_credentials::{self, Api},
     Context, Fact, Found, Key, Source, Subject,
@@ -166,16 +169,36 @@ impl Source for Spotify {
     }
 }
 
-/// The tracks of a Spotify album, by ID, as its public page lists them (`music:song`); `None`
-/// when Spotify has no such page.
-pub(crate) async fn album_tracks(cx: &Context, album: &str) -> Result<Option<Vec<String>>> {
-    page_links(cx, "album", album, "music:song", Level::Track).await
-}
-/// The album a Spotify track is on, as its public page names it (`music:album`).
+/// The album a Spotify track is on: the Web API's record of the track (`/v1/tracks/{id}`) with
+/// the operator's credentials, else, where `[also_on] spotify_pages` allows, the album its public
+/// page names (`music:album`); `None` when neither may answer (credentials Spotify refuses
+/// included: the track is then not placed, and nothing fails).
 pub(crate) async fn track_album(cx: &Context, track: &str) -> Result<Option<String>> {
+    if Spotify.ready(&cx.config) {
+        match object(cx, Kind::Track, track).await {
+            Ok(record) => {
+                return Ok(record.and_then(|v| v["album"]["id"].as_str().map(str::to_owned)))
+            }
+            Err(error) if refused(&error) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    if !cx.config.also_on.spotify_pages {
+        return Ok(None);
+    }
     Ok(page_links(cx, "track", track, "music:album", Level::Album)
         .await?
         .and_then(|albums| albums.into_iter().next()))
+}
+/// Whether Spotify can say which album a track is on: its credentials, or its pages allowed.
+pub(crate) fn places(config: &crate::config::Config) -> bool {
+    Spotify.ready(config) || config.also_on.spotify_pages
+}
+/// Whether an error is Spotify refusing the credentials (its token or its API).
+fn refused(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<crate::resolver::RetryLater>()
+        .is_some_and(|r| r.class == SPOTIFY.auth_class)
 }
 /// The Spotify objects at `level` a public page names in its `<meta name="{meta}">` tags.
 async fn page_links(

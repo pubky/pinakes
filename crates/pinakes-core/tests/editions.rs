@@ -53,13 +53,18 @@ fn key(url: &url::Url) -> String {
 }
 
 /// Every request answered from the captured fixtures (`provenance.json`) by its URL, TIDAL's
-/// token request with a token, anything else with 404; each request noted.
+/// token request with a token, a request to a host of `busy` with 503, anything else with 404;
+/// each request noted.
 struct Captured {
     answers: BTreeMap<String, (u16, String, Vec<u8>)>,
+    busy: Vec<&'static str>,
     seen: Mutex<Vec<String>>,
 }
 impl Captured {
     fn new() -> Arc<Self> {
+        Self::busy(&[])
+    }
+    fn busy(busy: &[&'static str]) -> Arc<Self> {
         let provenance: Value =
             serde_json::from_slice(&std::fs::read(format!("{DIR}/provenance.json")).unwrap())
                 .unwrap();
@@ -85,6 +90,7 @@ impl Captured {
             .collect();
         Arc::new(Self {
             answers,
+            busy: busy.to_vec(),
             seen: Mutex::default(),
         })
     }
@@ -104,7 +110,19 @@ impl Transport for Captured {
         _: &FetchOptions,
     ) -> anyhow::Result<Fetched> {
         self.seen.lock().unwrap().push(url.to_string());
-        let (status, content_type, body) = if url.host_str() == Some("auth.tidal.com") {
+        let (status, content_type, body) = if self.busy.contains(&url.host_str().unwrap_or("")) {
+            (503, "text/plain".to_owned(), b"busy".to_vec())
+        } else if url.host_str() == Some("api.spotify.com") {
+            // Spotify's answer to an app whose owner has no premium plan (2026-11-05).
+            (
+                403,
+                "application/json".to_owned(),
+                br#"{"error":{"status":403,"message":"Active premium subscription required for the owner of the app."}}"#.to_vec(),
+            )
+        } else if matches!(
+            url.host_str(),
+            Some("auth.tidal.com" | "accounts.spotify.com")
+        ) {
             (
                 200,
                 "application/json".to_owned(),
@@ -134,18 +152,29 @@ impl Transport for Captured {
 
 /// TIDAL with a pair (each test its own: tokens are kept per pair), Deezer on or off.
 fn config(pair: &str, deezer: bool) -> Config {
+    switched(pair, &[("deezer", deezer)])
+}
+/// TIDAL with a pair, and these sources on or off.
+fn switched(pair: &str, sources: &[(&str, bool)]) -> Config {
     let mut config = Config::default();
     config.sections.set(
         "tidal",
         serde_json::json!({"client_id": pair, "client_secret": format!("{pair}-secret")}),
     );
-    config.also_on.sources.insert(
-        "deezer".into(),
-        SourceOptions {
-            enabled: Some(deezer),
-            ..Default::default()
-        },
-    );
+    for (source, enabled) in sources {
+        config.also_on.sources.insert(
+            (*source).into(),
+            SourceOptions {
+                enabled: Some(*enabled),
+                ..Default::default()
+            },
+        );
+    }
+    config
+}
+/// `config` that reads Spotify's public pages (`[also_on] spotify_pages`).
+fn with_pages(mut config: Config) -> Config {
+    config.also_on.spotify_pages = true;
     config
 }
 fn context(transport: Arc<Captured>, config: Config) -> also_on::Context {
@@ -203,13 +232,14 @@ fn placed(found: &Found) -> Vec<(String, String, i16)> {
 
 /// Get Lucky's Spotify card is on Random Access Memories of 2013 (its page names the album,
 /// which MusicBrainz relates to that release): TIDAL's link on that album is placed on it (rank
-/// 0), Apple Music's on the original edition's Digital Master (rank 1), never the 10th
-/// anniversary edition's or a soundtrack's. Deezer is off, so nothing asks its API and its links
-/// stay unplaced, as Qobuz's and YouTube's do (no track list here).
+/// 0), Apple Music's on the original edition's Digital Master (rank 3, after two releases of May
+/// 2013 with no service pages), never the 10th anniversary edition's or a soundtrack's. Deezer is
+/// off, so nothing asks its API and its links stay unplaced, as Qobuz's and YouTube's do (their
+/// services name no track's album here).
 #[tokio::test]
 async fn get_luckys_links_are_placed_on_random_access_memories() {
     let transport = Captured::new();
-    let cx = context(transport.clone(), config("editions-off", false));
+    let cx = context(transport.clone(), with_pages(config("editions-off", false)));
     let subject = subject(
         GET_LUCKY,
         &[&format!("mb:recording:{RECORDING}")],
@@ -223,7 +253,7 @@ async fn get_luckys_links_are_placed_on_random_access_memories() {
             (
                 "https://music.apple.com/us/song/617154366".to_owned(),
                 RAM_APPLE.to_owned(),
-                1
+                3
             ),
             (
                 "https://tidal.com/track/20115564".to_owned(),
@@ -249,7 +279,7 @@ async fn get_luckys_links_are_placed_on_random_access_memories() {
 #[tokio::test]
 async fn with_deezer_on_its_link_on_the_album_is_placed() {
     let transport = Captured::new();
-    let cx = context(transport.clone(), config("editions-on", true));
+    let cx = context(transport.clone(), with_pages(config("editions-on", true)));
     let subject = subject(
         GET_LUCKY,
         &[&format!("mb:recording:{RECORDING}")],
@@ -319,6 +349,134 @@ async fn kind_of_blues_album_pages_are_placed_on_its_own_release() {
         "{:?}",
         transport.seen()
     );
+}
+
+/// A service that fails while the card's links are placed fails the run: what earlier runs
+/// recorded stays until the retry, never fewer places because a service was busy.
+#[tokio::test]
+async fn a_busy_service_fails_the_run_so_its_places_stay() {
+    let transport = Captured::busy(&["itunes.apple.com"]);
+    let cx = context(transport.clone(), config("editions-busy", false));
+    let subject = subject(
+        GET_LUCKY,
+        &[&format!("mb:recording:{RECORDING}")],
+        GET_LUCKY_LINKS,
+    );
+    let failed = Editions.lookup(&cx, &subject).await;
+    assert!(failed.is_err(), "{:?}", transport.seen());
+}
+
+/// A Spotify link is placed by its own page (the album it names, `music:album`), never by an
+/// album page nobody linked; with the `spotify` source off, no Spotify page is read.
+#[tokio::test]
+async fn a_spotify_link_is_placed_by_its_own_page() {
+    let apple = "https://music.apple.com/us/song/617154366";
+    let links = &[GET_LUCKY];
+    let transport = Captured::new();
+    let cx = context(
+        transport.clone(),
+        with_pages(config("editions-spotify", false)),
+    );
+    let card = subject(apple, &[&format!("mb:recording:{RECORDING}")], links);
+    let found = Editions.lookup(&cx, &card).await.unwrap();
+    // Not the card's own release (MusicBrainz is not asked about its album here), so the
+    // original edition: the release Spotify's album is of, fourth by date.
+    assert_eq!(
+        placed(&found),
+        [(GET_LUCKY.to_owned(), RAM.to_owned(), 4)],
+        "{:?}",
+        transport.seen()
+    );
+    assert!(
+        !transport
+            .seen()
+            .iter()
+            .any(|u| u.starts_with("https://open.spotify.com/album/")),
+        "{:?}",
+        transport.seen()
+    );
+    // Pages off (the default), no credentials: Spotify places nothing, and nothing is asked.
+    let transport = Captured::new();
+    let cx = context(transport.clone(), config("editions-spotify-off", false));
+    let found = Editions.lookup(&cx, &card).await.unwrap();
+    assert!(found.editions.is_empty());
+    assert!(transport.seen().is_empty(), "{:?}", transport.seen());
+    // The source off: the same, pages allowed or not.
+    let transport = Captured::new();
+    let cx = context(
+        transport.clone(),
+        with_pages(switched(
+            "editions-spotify-source-off",
+            &[("deezer", false), ("spotify", false)],
+        )),
+    );
+    let found = Editions.lookup(&cx, &card).await.unwrap();
+    assert!(found.editions.is_empty());
+    assert!(transport.seen().is_empty(), "{:?}", transport.seen());
+}
+
+/// Credentials Spotify refuses (an app whose owner has no premium plan) place nothing and fail
+/// nothing: the run records what the other services placed.
+#[tokio::test]
+async fn refused_spotify_credentials_place_nothing_and_fail_nothing() {
+    let mut config = config("editions-refused", false);
+    config.sections.set(
+        "spotify",
+        serde_json::json!({"client_id": "editions-refused", "client_secret": "editions-refused-secret"}),
+    );
+    let transport = Captured::new();
+    let cx = context(transport.clone(), config);
+    let card = subject(
+        "https://music.apple.com/us/song/617154366",
+        &[&format!("mb:recording:{RECORDING}")],
+        &[GET_LUCKY, "https://tidal.com/track/20115564"],
+    );
+    let found = Editions.lookup(&cx, &card).await.unwrap();
+    assert_eq!(
+        placed(&found),
+        [(
+            "https://tidal.com/track/20115564".to_owned(),
+            RAM.to_owned(),
+            4
+        )],
+        "{:?}",
+        transport.seen()
+    );
+    assert!(
+        transport
+            .seen()
+            .iter()
+            .any(|u| u.starts_with("https://api.spotify.com/")),
+        "{:?}",
+        transport.seen()
+    );
+    assert!(
+        !transport
+            .seen()
+            .iter()
+            .any(|u| u.starts_with("https://open.spotify.com/")),
+        "{:?}",
+        transport.seen()
+    );
+}
+
+/// A card whose other links are all on services that say no track's album (Qobuz, YouTube) asks
+/// nothing.
+#[tokio::test]
+async fn links_no_service_can_place_ask_nothing() {
+    let transport = Captured::new();
+    let cx = context(transport.clone(), config("editions-unplaceable", false));
+    let subject = subject(
+        GET_LUCKY,
+        &[&format!("mb:recording:{RECORDING}")],
+        &[
+            "https://open.qobuz.com/track/9140031",
+            "https://www.youtube.com/watch?v=5NV6Rdv1a3I",
+        ],
+    );
+    let found = Editions.lookup(&cx, &subject).await.unwrap();
+    assert!(found.editions.is_empty());
+    assert!(transport.seen().is_empty(), "{:?}", transport.seen());
 }
 
 /// A card with no link to place asks nothing.
@@ -556,7 +714,8 @@ async fn a_tagged_member_wins_only_on_as_good_a_release(pool: PgPool) {
     assert_eq!(apple(also_on(&pool, &card, true).await), ["1673536443"]);
 }
 
-/// Of two pages of one document on a service (GovInfo's details page and its PDF), the page.
+/// Of two pages of one document on a service (GovInfo's details page and its PDF), the page,
+/// though the PDF's link is shorter and sorts first.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn of_a_page_and_a_file_on_one_service_the_page_shows(pool: PgPool) {
     let cfg = Config::default().also_on;
@@ -572,10 +731,7 @@ async fn of_a_page_and_a_file_on_one_service_the_page_shows(pool: PgPool) {
         &card,
         "federal_register",
         found_links(&[
-            (
-                "https://www.govinfo.gov/content/pkg/FR-2026-09-09/pdf/2026-18291.pdf",
-                "GovInfo",
-            ),
+            ("https://www.govinfo.gov/app/2026-18291.pdf", "GovInfo"),
             (
                 "https://www.govinfo.gov/app/details/FR-2026-09-09/2026-18291",
                 "GovInfo",
@@ -590,4 +746,87 @@ async fn of_a_page_and_a_file_on_one_service_the_page_shows(pool: PgPool) {
         also_on(&pool, &card, true).await,
         ["https://www.govinfo.gov/app/details/FR-2026-09-09/2026-18291"]
     );
+}
+
+/// A tagged member on the card's own service never shows, its own card read or not (one whose
+/// document names no service yet).
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn no_member_on_the_cards_own_service_shows(pool: PgPool) {
+    let cfg = Config::default().also_on;
+    let card = save(&pool, GET_LUCKY, "MusicRecording", Some("Spotify")).await;
+    let other = "https://open.spotify.com/track/118Opfz7qv2KA1g3Pmyk9T";
+    let member = save(&pool, other, "MusicRecording", None).await;
+    for id in [&card, &member] {
+        also_on::record(
+            &pool,
+            id,
+            "musicbrainz",
+            Found {
+                keys: vec![also_on::Key {
+                    key: format!("mb:recording:{RECORDING}"),
+                    via: "musicbrainz".into(),
+                }],
+                ..Default::default()
+            },
+            std::time::Duration::from_secs(86_400),
+            &cfg,
+        )
+        .await
+        .unwrap();
+    }
+    pinakes_core::groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    // Grouped: the stored list names the member (its document names no service).
+    assert!(tails(also_on(&pool, &card, true).await).contains(&"118Opfz7qv2KA1g3Pmyk9T".into()));
+    // The card shows it nowhere.
+    assert!(!tails(read(&pool, GET_LUCKY).await).contains(&"118Opfz7qv2KA1g3Pmyk9T".into()));
+}
+
+/// A group that changes runs its music cards' sources again: the links each may show changed,
+/// and `editions` places them.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_group_that_changes_places_its_cards_links_again(pool: PgPool) {
+    let cfg = Config::default().also_on;
+    let card = save(&pool, GET_LUCKY, "MusicRecording", Some("Spotify")).await;
+    let member = save(
+        &pool,
+        "https://music.apple.com/song/617154366",
+        "MusicRecording",
+        Some("Apple Music"),
+    )
+    .await;
+    for id in [&card, &member] {
+        also_on::record(
+            &pool,
+            id,
+            "musicbrainz",
+            Found {
+                keys: vec![also_on::Key {
+                    key: format!("mb:recording:{RECORDING}"),
+                    via: "musicbrainz".into(),
+                }],
+                ..Default::default()
+            },
+            std::time::Duration::from_secs(86_400),
+            &cfg,
+        )
+        .await
+        .unwrap();
+    }
+    sqlx::query("DELETE FROM also_on_dirty")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pinakes_core::groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    let mut due: Vec<String> = sqlx::query_scalar("SELECT resource_id FROM also_on_dirty")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    due.sort();
+    let mut both = vec![card, member];
+    both.sort();
+    assert_eq!(due, both);
 }

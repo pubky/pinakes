@@ -536,8 +536,8 @@ pub mod musicbrainz {
             .map(|(_, title)| title.to_owned())
     }
     /// The official releases MusicBrainz lists for `query` (`recording={mbid}&type=album`,
-    /// `release-group={mbid}`), each with its release group and media: up to `pages` pages of
-    /// 100, in MusicBrainz's order. A page it doesn't answer ends the list.
+    /// `release-group={mbid}`), each with its release group, media and URL relations: up to
+    /// `pages` pages of 100, in MusicBrainz's order. A page it doesn't answer ends the list.
     pub async fn releases(
         egress: &Egress,
         base: &str,
@@ -552,7 +552,7 @@ pub mod musicbrainz {
                 format!("&offset={}", page * 100)
             };
             let url = format!(
-                "{base}/release?{query}&status=official&inc=release-groups+media&limit=100{offset}&fmt=json"
+                "{base}/release?{query}&status=official&inc=release-groups+media+url-rels&limit=100{offset}&fmt=json"
             );
             let Some(v) = get(egress, &url, "musicbrainz").await? else {
                 break;
