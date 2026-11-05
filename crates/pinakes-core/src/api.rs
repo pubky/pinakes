@@ -3023,15 +3023,58 @@ pub fn admin_router(state: AppState) -> Router {
     with_admin_layers(routes, state)
 }
 /// The admin listener's layer stack around `routes`: the panic backstop innermost, then the
-/// bearer check, so an unauthenticated request never reaches a handler. No CORS. Public so a test
-/// can mount a route under exactly this stack.
+/// bearer check, then the `Host` check outermost, so a request for another host or without the
+/// credential never reaches a handler. No CORS. Public so a test can mount a route under exactly
+/// this stack.
 pub fn with_admin_layers(routes: Router<AppState>, state: AppState) -> Router {
     panic_backstop(routes, &state, "admin")
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             admin_auth,
         ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            admin_host,
+        ))
         .with_state(state)
+}
+/// Answers 421 to a request whose `Host` (or HTTP/2 authority) the admin listener does not serve
+/// ([`admin_host_allowed`]). A browser always sends one, so a request with neither comes from
+/// another kind of client and passes.
+async fn admin_host(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let authority = match request.headers().get(header::HOST) {
+        Some(value) => Some(value.to_str().unwrap_or_default()),
+        None => request.uri().authority().map(|a| a.as_str()),
+    };
+    if authority.is_some_and(|a| !admin_host_allowed(a, &state.config.admin_hosts)) {
+        return (StatusCode::MISDIRECTED_REQUEST, "admin host not allowed").into_response();
+    }
+    next.run(request).await
+}
+/// Whether the admin listener serves `authority` (`host[:port]`): `localhost`, an IP address, or
+/// one of `admin_hosts`. A page that rebinds its own name to this machine still sends that name;
+/// a browser sends an IP address only for a page this listener itself served.
+fn admin_host_allowed(authority: &str, admin_hosts: &[String]) -> bool {
+    let Ok(authority) = authority.parse::<axum::http::uri::Authority>() else {
+        return false;
+    };
+    if authority.as_str().contains('@') {
+        return false;
+    }
+    let host = authority.host();
+    let literal = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    if literal.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    let host = host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase();
+    host == "localhost" || admin_hosts.contains(&host)
 }
 async fn admin_auth(
     State(state): State<AppState>,
@@ -3193,6 +3236,40 @@ pub async fn curate_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The admin listener serves `localhost`, IP addresses and the configured names, on any port,
+    /// and nothing else: not a rebinding page's own name, not one dressed as loopback.
+    #[test]
+    fn the_admin_listener_serves_loopback_addresses_and_its_own_names() {
+        let names = ["metrics.internal".to_owned()];
+        for allowed in [
+            "localhost",
+            "localhost:9090",
+            "LocalHost.:9090",
+            "127.0.0.1",
+            "127.0.0.1:9090",
+            "[::1]:9090",
+            "[::1]",
+            "10.1.2.3:9090",
+            "metrics.internal:9090",
+            "METRICS.internal",
+        ] {
+            assert!(admin_host_allowed(allowed, &names), "{allowed}");
+        }
+        for refused in [
+            "attacker.example",
+            "attacker.example:9090",
+            "localhost.attacker.example",
+            "127.0.0.1.nip.io:9090",
+            "metrics.internal.attacker.example",
+            "user@127.0.0.1:9090",
+            "",
+            "local host",
+            "[::1",
+        ] {
+            assert!(!admin_host_allowed(refused, &names), "{refused}");
+        }
+        assert!(!admin_host_allowed("metrics.internal", &[]));
+    }
     /// Every form of key a registered source records (`also_on::Source::key_forms`) searches
     /// back exactly as recorded: `key=` with the key a read lists finds that key.
     #[test]

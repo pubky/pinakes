@@ -13,6 +13,10 @@ pub struct Config {
     pub listen: String,
     pub admin_listen: String,
     pub admin_token: Option<SecretKey>,
+    /// Host names the admin listener answers besides `localhost` and IP addresses, such as the
+    /// name a Prometheus in another container scrapes it by. A request for any other `Host` gets
+    /// 421, so a page that rebinds its own name to this machine reaches nothing.
+    pub admin_hosts: Vec<String>,
     pub nexus_url: String,
     /// The `Authorization` header sent, whole, on every request to the Nexus at `nexus_url`
     /// (`PINAKES_NEXUS_AUTHORIZATION`), for a Nexus behind credentials; `nexus_url` itself never
@@ -310,6 +314,7 @@ impl Config {
             listen: "127.0.0.1:8090".into(),
             admin_listen: "127.0.0.1:9090".into(),
             admin_token: None,
+            admin_hosts: Vec::new(),
             refresh: RefreshConfig::default(),
             canary: CanaryConfig::default(),
             also_on: Default::default(),
@@ -956,6 +961,19 @@ impl Config {
         }
         if !admin.ip().is_loopback() && self.admin_token.is_none() {
             bail!("non-loopback admin_listen requires admin_token (PINAKES__ADMIN_TOKEN)");
+        }
+        if let Some(host) = self.admin_hosts.iter().find(|h| {
+            h.is_empty()
+                || h.len() > 253
+                || !h.split('.').all(|label| {
+                    !label.is_empty()
+                        && label.len() <= 63
+                        && label
+                            .bytes()
+                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                })
+        }) {
+            bail!("admin_hosts: {host:?} is not a lowercase host name (no scheme, port, path or wildcard)");
         }
         if !(10000..=100000).contains(&self.groups.max_graph_units)
             || !(1024 * 1024..=128 * 1024 * 1024).contains(&self.groups.max_graph_bytes)

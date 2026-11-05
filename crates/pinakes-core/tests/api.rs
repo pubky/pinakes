@@ -1182,6 +1182,154 @@ async fn admin_bearer_and_network_bind_policy(pool: sqlx::PgPool) {
     }
 }
 
+/// One admin request with an optional `Host` and bearer; its status.
+async fn admin_status(
+    app: &Router,
+    method: &str,
+    path: &str,
+    host: Option<&str>,
+    bearer: Option<&str>,
+    body: &str,
+) -> StatusCode {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("content-type", "application/json");
+    if let Some(host) = host {
+        request = request.header("host", host);
+    }
+    if let Some(token) = bearer {
+        request = request.header("authorization", format!("Bearer {token}"));
+    }
+    app.clone()
+        .oneshot(request.body(Body::from(body.to_owned())).unwrap())
+        .await
+        .unwrap()
+        .status()
+}
+
+/// The admin listener answers only requests for its own host. A page that rebinds its name to this
+/// machine gets 421 on every admin route, with or without a token configured, before a handler or
+/// the credential check runs, and its curation changes nothing; `localhost`, loopback addresses
+/// and `admin_hosts` names pass as before.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn the_admin_listener_refuses_requests_for_other_hosts(pool: PgPool) {
+    let ids = seed(&pool).await;
+    let curation = json!({"members": [
+        {"resource_id": ids[0], "occurrence": null},
+        {"resource_id": ids[1], "occurrence": null},
+    ]})
+    .to_string();
+    let routes = [
+        ("GET", "/v1/info".to_owned()),
+        ("GET", "/metrics".to_owned()),
+        ("GET", format!("/v1/resources/{}/document", ids[0])),
+        ("PUT", format!("/v1/groups/{}", "a".repeat(32))),
+    ];
+    let curated = || async {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM group_override")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    let before = curated().await;
+    // The defaults: loopback, no token.
+    let admin = api::admin_router(AppState::new(pool.clone(), Config::default()).unwrap());
+    for host in [
+        "attacker.example",
+        "attacker.example:9090",
+        "localhost.attacker.example",
+    ] {
+        for (method, path) in &routes {
+            let status = admin_status(&admin, method, path, Some(host), None, &curation).await;
+            assert_eq!(
+                status,
+                StatusCode::MISDIRECTED_REQUEST,
+                "{host} {method} {path}"
+            );
+        }
+    }
+    assert_eq!(curated().await, before);
+    for host in [
+        Some("localhost:9090"),
+        Some("127.0.0.1:9090"),
+        Some("[::1]:9090"),
+        None,
+    ] {
+        let status = admin_status(&admin, "GET", "/v1/info", host, None, "").await;
+        assert_eq!(status, StatusCode::OK, "{host:?}");
+        let status = admin_status(&admin, "GET", "/metrics", host, None, "").await;
+        assert_eq!(status, StatusCode::OK, "{host:?}");
+    }
+    // With a token: the host is checked first, even with the right credential.
+    let config = Config {
+        admin_token: Some("review-only-operator-token".into()),
+        ..Config::default()
+    };
+    let admin = api::admin_router(AppState::new(pool.clone(), config).unwrap());
+    let token = Some("review-only-operator-token");
+    for (method, path) in &routes {
+        let status = admin_status(
+            &admin,
+            method,
+            path,
+            Some("attacker.example"),
+            token,
+            &curation,
+        )
+        .await;
+        assert_eq!(status, StatusCode::MISDIRECTED_REQUEST, "{method} {path}");
+    }
+    assert_eq!(curated().await, before);
+}
+
+/// `admin_hosts` names the hosts a scraper elsewhere reaches the admin listener by; they pass the
+/// host check and then the credential check as before. Each is a bare lowercase host name.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn admin_hosts_names_a_scraper_s_host(pool: PgPool) {
+    let config = Config {
+        admin_token: Some("review-only-operator-token".into()),
+        admin_hosts: vec!["prometheus".into()],
+        ..Config::default()
+    };
+    config.validate().unwrap();
+    let admin = api::admin_router(AppState::new(pool.clone(), config).unwrap());
+    let token = Some("review-only-operator-token");
+    let status = admin_status(
+        &admin,
+        "GET",
+        "/metrics",
+        Some("prometheus.example"),
+        token,
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::MISDIRECTED_REQUEST);
+    for host in ["prometheus:9090", "PROMETHEUS", "127.0.0.1:9090"] {
+        for bearer in [None, Some("wrong")] {
+            let status = admin_status(&admin, "GET", "/metrics", Some(host), bearer, "").await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{host} {bearer:?}");
+        }
+        let status = admin_status(&admin, "GET", "/metrics", Some(host), token, "").await;
+        assert_eq!(status, StatusCode::OK, "{host}");
+    }
+    // Names are bare lowercase host names.
+    for bad in [
+        "prometheus:9090",
+        "http://prometheus",
+        "*.internal",
+        "Prometheus",
+        "a/b",
+        "",
+    ] {
+        let config = Config {
+            admin_hosts: vec![bad.into()],
+            ..Config::default()
+        };
+        assert!(config.validate().is_err(), "{bad}");
+    }
+}
+
 async fn raw(
     app: &Router,
     method: &str,

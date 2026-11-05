@@ -159,6 +159,7 @@ async fn serve(config: Option<PathBuf>, command: Command) -> Result<()> {
     ));
     let admin = tokio::net::TcpListener::bind(&config.admin_listen).await?;
     warn_admin_listener(admin.local_addr()?);
+    warn_admin_without_token(admin.local_addr()?, config.admin_token.is_some());
     let admin_app = api::admin_router(state.clone());
     let mut admin_shutdown = shutdown_rx.clone();
     let admin_task = tokio::spawn(async move {
@@ -203,6 +204,14 @@ async fn serve(config: Option<PathBuf>, command: Command) -> Result<()> {
 fn warn_admin_listener(address: std::net::SocketAddr) {
     if !address.ip().is_loopback() {
         tracing::warn!(admin_listen=%address, "admin listener is not loopback; bearer authentication is required, use TLS at the network edge");
+    }
+}
+
+/// The `Host` check keeps browser pages off the admin listener, not other programs on this
+/// machine: without `admin_token` any of them can read it and curate groups through it.
+fn warn_admin_without_token(address: std::net::SocketAddr, token: bool) {
+    if !token {
+        tracing::warn!(admin_listen=%address, "admin listener has no admin_token; any process on this machine can use it, set PINAKES__ADMIN_TOKEN");
     }
 }
 
@@ -375,6 +384,25 @@ mod tests {
                 "{env}: {logs}"
             );
         }
+    }
+    #[test]
+    fn warns_when_the_admin_listener_has_no_token() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer = LogWriter(output.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            warn_admin_without_token("127.0.0.1:9090".parse().unwrap(), true);
+            assert!(output.lock().unwrap().is_empty());
+            warn_admin_without_token("127.0.0.1:9090".parse().unwrap(), false);
+        });
+        let logs = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert_eq!(logs.matches("admin listener has no admin_token").count(), 1);
+        assert!(logs.contains("127.0.0.1:9090"));
+        assert!(logs.contains("PINAKES__ADMIN_TOKEN"));
     }
     #[test]
     fn warns_for_non_loopback_admin_binds_only() {

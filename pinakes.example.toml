@@ -8,6 +8,7 @@ database_url = "postgresql:///pinakes?host=/var/run/postgresql"
 listen = "127.0.0.1:8090"
 admin_listen = "127.0.0.1:9090"
 # admin_token = "" # Prefer PINAKES__ADMIN_TOKEN; required for a non-loopback admin bind.
+# admin_hosts = [] # Names a scraper reaches the admin listener by, besides localhost and IP addresses.
 nexus_url = "http://127.0.0.1:8080" # No credentials here: a Nexus behind them gets PINAKES_NEXUS_AUTHORIZATION.
 nexus_reach_set = false # The Nexus serves the reach-set route: search takes reach=wot_2 and boost=wot_2.
 

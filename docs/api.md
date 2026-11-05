@@ -1508,7 +1508,9 @@ to know.
 `GET /v1/info` with full ingestion, source and canary state, `GET /v1/resources/{id}/document`
 (the stored document with its internal fields) and group curation (`PUT /v1/groups/{id}`). With
 `admin_token` (or `PINAKES__ADMIN_TOKEN`) every admin route needs `Authorization: Bearer`,
-compared in constant time; a non-loopback bind without a token is refused. It sends no CORS
+compared in constant time; a non-loopback bind without a token is refused. It answers 421 to a
+request whose `Host` is not `localhost`, an IP address or a name in `admin_hosts`, before the token
+is checked. It sends no CORS
 headers. Public `/v1/info` shows only what a client needs (the version, the User-Agent this
 instance's requests carry, the kinds of links it resolves, the lookup sizes, the search page
 limit, the per-IP and preview budgets and the OSM licence); the admin `/v1/info` adds manifests,

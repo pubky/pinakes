@@ -392,7 +392,17 @@ adds `Vary: Origin`. No `Access-Control-Allow-Credentials` is sent, and the admi
 sends CORS headers.
 
 The admin listener (`admin_listen`, default `127.0.0.1:9090`) requires `admin_token` (or
-`PINAKES__ADMIN_TOKEN`) for a non-loopback bind; terminate TLS at a trusted reverse proxy.
+`PINAKES__ADMIN_TOKEN`) for a non-loopback bind; terminate TLS at a trusted reverse proxy. On
+loopback the token is optional, and startup logs a warning without it: the host check below keeps
+browser pages out, but any process on the machine can use a listener without a token.
+
+It answers a request only when its `Host` (or HTTP/2 authority) is `localhost`, an IP address (any
+port) or a name listed in `admin_hosts`; any other gets 421 `admin host not allowed` before the
+token is checked. A request with no `Host` passes, as browsers always send one. This stops a page
+that rebinds its own DNS name to this machine (or to an SSH tunnel's local end) from reading or
+curating through the listener. A scraper that reaches the listener by a name, such as a Prometheus
+in another container scraping `pinakes:9090`, needs `admin_hosts = ["pinakes"]`; each entry is a
+bare lowercase host name, without scheme, port or wildcard.
 
 Swagger UI (`api.swagger_ui`, default on) serves the vendored `utoipa-swagger-ui` bundle (Swagger
 UI 5.17.14) at `/swagger-ui`; builds never download it, and a build environment must not set

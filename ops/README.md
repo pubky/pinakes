@@ -4,8 +4,10 @@ Scrape `/metrics` on the separate admin listener (`admin_listen`, default
 `127.0.0.1:9090`), meant for a local Prometheus or agent. A bind that is not loopback
 (wildcard IPv4/IPv6 binds included) requires `admin_token` (`PINAKES__ADMIN_TOKEN`), and
 startup logs a warning for it. With a token set, every admin request, `/metrics` included,
-needs `Authorization: Bearer <token>` (in Prometheus, `authorization: {credentials: …}`);
-terminate TLS at the network edge.
+needs `Authorization: Bearer <token>` (in Prometheus, `authorization: {credentials_file: …}`);
+terminate TLS at the network edge. The listener answers only a `Host` that is `localhost`, an IP
+address or a name in `admin_hosts` (421 otherwise): a Prometheus that scrapes it by a name, such as
+`pinakes:9090` from another container, needs `admin_hosts = ["pinakes"]`.
 
 ```yaml
 scrape_configs:
