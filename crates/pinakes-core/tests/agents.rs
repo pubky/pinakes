@@ -914,3 +914,39 @@ async fn the_card_tool_names_the_collections_that_hold_a_link(pool: PgPool) {
         assert!(read["card"].get(key).is_none(), "{key}: {read}");
     }
 }
+
+/// The social tool never sends a link that carries a credential to the Nexus: a call naming one
+/// is refused before any batch is asked, and its answer does not hold the secret.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn social_never_sends_a_link_that_carries_a_credential_to_the_nexus(pool: PgPool) {
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = asked.clone();
+    let app = Router::new().route(
+        "/v0/stream/resources/by_ids",
+        post(move |Json(body): Json<Value>| {
+            let seen = seen.clone();
+            async move {
+                seen.lock().unwrap().push(body.to_string());
+                Json(json!([]))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let nexus_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let config = Config {
+        nexus_url,
+        ..Config::default()
+    };
+    let app = api::router(AppState::new(pool, config).unwrap());
+    let (error, answer) = call(
+        &app,
+        "social",
+        json!({"uris": ["https://example.org/concert", "https://example.org/private?token=SECRET"]}),
+    )
+    .await;
+    assert!(error, "{answer}");
+    assert_eq!(answer["status"], 400);
+    assert!(!answer.to_string().contains("SECRET"));
+    assert!(asked.lock().unwrap().is_empty());
+}
