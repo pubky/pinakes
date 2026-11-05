@@ -750,10 +750,11 @@ pub struct Card {
     pub end: Option<DateTime<Utc>>,
     pub group: Option<GroupRef>,
     /// The same thing elsewhere: the other members of its group (tagged links, with their ID),
-    /// then derived links nobody tagged (`derived: true`), by service name. On a search, lookup
-    /// or group card one per service, at most 8; on a resource read (`GET /v1/resources/{id}`,
-    /// `GET /v1/resources/by-uri`, `POST /v1/resolve`) every link, several of one service too,
-    /// up to 256. A hint: every member keeps its own card.
+    /// then derived links nobody tagged (`derived: true`), by service name; one per service, and
+    /// never another link on the card's own service. Of a recording's or an album's links, the one
+    /// on the card's own release, else on the original edition (docs/api.md, Also on). At most 8
+    /// on a search, lookup or group card, 256 on a resource read. A hint: every member keeps its
+    /// own card.
     pub also_on: Vec<AlsoOn>,
     /// The links people referenced on Pubky that resolve to this card: its own `uri` and its
     /// `aliases` that carry references (the 31 most recently referenced), most referenced first
@@ -1425,10 +1426,8 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
             updated_at: None,
         },
     };
-    // The read's card: every link of `also_on` (several of one service too, the card's own
-    // service's other pages included), and up to ten possible duplicates.
+    // The read's card, with up to ten possible duplicates.
     let mut card = card(row)?;
-    card.also_on = also_on_entries(&row["also_on_all"], None);
     card.maybe_same = same_events(row);
     Ok(ResourceDetail { card, details })
 }
@@ -2357,7 +2356,7 @@ async fn read(
         sqlx::query_scalar(&[
             "SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_hint(r.id) END,'maybe_same',",
             &maybe_same_sql("r.id", "r.type_path", 10, "$3", "$4"),
-            ",'also_on',also_on(r.id,r.id,256,$2),'also_on_all',also_on(r.id,r.id,256,$2,false),'aliases',coalesce((SELECT jsonb_agg(uri ORDER BY uri) FROM (SELECT x.uri FROM resource_alias a JOIN resource x ON x.id=a.alias_id WHERE a.root_id=r.id ORDER BY x.uri LIMIT 50) s),'[]'),'keys',coalesce((SELECT jsonb_agg(key ORDER BY key COLLATE \"C\") FROM resource_key WHERE resource_id=r.id AND expires_at>now() AND source NOT IN (SELECT source FROM also_on_source_off)),'[]'),'facts',(SELECT jsonb_object_agg(name,vals) FROM (SELECT name,string_agg(value,'; ' ORDER BY value) AS vals FROM resource_fact WHERE resource_id=r.id AND expires_at>now() AND source NOT IN (SELECT source FROM also_on_source_off) GROUP BY name) f)) FROM resource_document r WHERE r.id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1)",
+            ",'also_on',also_on(r.id,r.id,256,$2),'aliases',coalesce((SELECT jsonb_agg(uri ORDER BY uri) FROM (SELECT x.uri FROM resource_alias a JOIN resource x ON x.id=a.alias_id WHERE a.root_id=r.id ORDER BY x.uri LIMIT 50) s),'[]'),'keys',coalesce((SELECT jsonb_agg(key ORDER BY key COLLATE \"C\") FROM resource_key WHERE resource_id=r.id AND expires_at>now() AND source NOT IN (SELECT source FROM also_on_source_off)),'[]'),'facts',(SELECT jsonb_object_agg(name,vals) FROM (SELECT name,string_agg(value,'; ' ORDER BY value) AS vals FROM resource_fact WHERE resource_id=r.id AND expires_at>now() AND source NOT IN (SELECT source FROM also_on_source_off) GROUP BY name) f)) FROM resource_document r WHERE r.id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1)",
         ]
         .concat())
             .bind(id)
