@@ -72,18 +72,21 @@ pub fn is_capability_url(url: &Url) -> bool {
         })
 }
 
-/// Drops from `value`, a document as it is stored, every URL that carries a credential but `own`
-/// (the link the resource is read by, in any spelling of it): the backstop before anything is
-/// stored, whichever path put it there. The URL goes, or else the list entry or object around it
-/// when a `T` would not read back without the URL; where a `T` cannot do without it, it names `own`
-/// instead. Whether anything went.
+/// Drops from `value`, a document as it is stored, every URL that carries a credential but `own`,
+/// the link the resource is read by, as written (in any spelling of it only when it carries a
+/// credential itself: another spelling of a public link may add one, in its fragment or user
+/// info): the backstop at each write, whichever path put a URL there. The URL goes, or else the
+/// list entry or object around it when a `T` would not read back without the URL; where a `T`
+/// cannot do without it, it names `own` instead. Whether anything went.
 pub fn strip<T: serde::de::DeserializeOwned>(value: &mut serde_json::Value, own: &str) -> bool {
-    let own_id = crate::model::identity(own).ok().map(|(id, _, _)| id);
+    let own_id = Url::parse(own)
+        .is_ok_and(|url| is_capability_url(&url))
+        .then(|| crate::model::identity(own).ok().map(|(id, _, _)| id))
+        .flatten();
     let foreign = |s: &str| {
         s != own
-            && s.contains("://")
             && Url::parse(s).is_ok_and(|url| url.has_host() && is_capability_url(&url))
-            && crate::model::identity(s).ok().map(|(id, _, _)| id) != own_id
+            && (own_id.is_none() || crate::model::identity(s).ok().map(|(id, _, _)| id) != own_id)
     };
     let mut stripped = false;
     while let Some(path) = find(value, &foreign) {
@@ -248,5 +251,32 @@ mod tests {
         ] {
             assert!(!is_capability(plain), "{plain}");
         }
+    }
+
+    /// The store guard keeps only the resource's own link as it is written: another spelling of it
+    /// that carries a credential (a fragment, a password) goes, and so does a URL written without
+    /// its `//`.
+    #[test]
+    fn the_store_guard_keeps_only_the_own_link_as_written() {
+        let mut value = serde_json::json!({
+            "url": "https://s.example/p",
+            "image": "https://s.example/p#access_token=SECRET",
+            "logo": "https://u:SECRET@s.example/p",
+            "author": "https:cdn.example/profile?token=SECRET",
+            "kept": "https://s.example/p",
+        });
+        assert!(strip::<serde_json::Value>(
+            &mut value,
+            "https://s.example/p"
+        ));
+        assert_eq!(
+            value,
+            serde_json::json!({"url": "https://s.example/p", "kept": "https://s.example/p"})
+        );
+        // An own link that carries a credential is kept in any spelling of it.
+        let own = "https://cal.example/feed.ics?token=OWN";
+        let mut value =
+            serde_json::json!({"url": own, "feed": "https://CAL.example/feed.ics?token=OWN"});
+        assert!(!strip::<serde_json::Value>(&mut value, own));
     }
 }
