@@ -1249,14 +1249,14 @@ music_enrichment`, on by default):
   Wikidata's search proposes and the item itself, read back, states at its best rank; two such
   items, or more hits than a search returns, give nothing, and so does an item too large to read.
   The item must be at the entity's level: a recording's names one recording and no work, never
-  a song's; a release's names that one release and no release group or work (an album's item
-  often lists its editions); a release group's names that one release group. For an artist no
-  item carries the MBID of, it is the item the artist's Discogs artist pages on MusicBrainz name
-  (`P1953`, at most two): every page that names one names the same item alone, and that item
-  carries no MusicBrainz artist ID or this artist's. A release uses its own item, never its
-  release group's. A recording also uses the one work it is a performance of, when that work has
-  its own relation, for the description alone (its credit names the work as `subject`). Nothing
-  is matched by name;
+  a song's; a release's names that one release and no release group, Discogs master or work (an
+  album's item often lists its editions); a release group's names that one release group. For an
+  artist no item carries the MBID of, it is the item the artist's Discogs artist pages on
+  MusicBrainz name (`P1953`, at most two): every page that names one names the same item alone,
+  and that item carries no MusicBrainz artist ID or this artist's. A release uses its own item,
+  never its release group's. A recording also uses the one work it is a performance of, when that
+  work has its own relation, for the description alone (its credit names the work as `subject`).
+  Nothing is matched by name;
 - the description is the first of: the summary of the item's English Wikipedia article (plain
   text, at most 2,048 bytes, cut at a sentence or a word); the item's English description on
   Wikidata, as it is (CC0, credited `wikidata`); the summary of the item's article in the first

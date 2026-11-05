@@ -158,15 +158,19 @@ pub fn mbid_property(kind: MbKind) -> &'static str {
 }
 /// Whether `item`, found by `entity`'s MBID, is the entity's own and not one at another level:
 /// a recording's is one recording's (`music_sources::recording_item`: a song's item may carry its
-/// recordings' IDs); a release's carries that one release ID and no release group or work ID (an
-/// album's item often carries its editions'); a release group's carries that one release group
-/// ID (an item with several spans entities).
+/// recordings' IDs); a release's carries that one release ID and no release group, Discogs master
+/// or work ID (an album's item often carries its editions'; `also_on::wikidata` takes a Discogs
+/// master as an album's too); a release group's carries that one release group ID (an item with
+/// several spans entities).
 fn at_own_level(entity: &musicbrainz::Entity, item: &wikidata::Item) -> bool {
     let only = |property: &str| item.id(property) == std::slice::from_ref(&entity.mbid);
     match entity.kind {
         MbKind::Recording => crate::music_sources::recording_item(item),
         MbKind::Release => {
-            only("P5813") && item.id("P436").is_empty() && item.id("P435").is_empty()
+            only("P5813")
+                && ["P436", "P1954", "P435"]
+                    .iter()
+                    .all(|p| item.id(p).is_empty())
         }
         MbKind::ReleaseGroup => only("P436"),
         MbKind::Artist => true,
@@ -1183,8 +1187,8 @@ mod tests {
         assert_eq!(text(&e), wd("work line", Some(&subject)));
     }
     /// A search hit at another level than the entity's is not its item: an album's item carrying
-    /// an edition's release ID (it has a release group or work ID too), or an item carrying
-    /// several release groups. Nothing past the read-back is asked.
+    /// an edition's release ID (it has a release group, Discogs master or work ID too), or an
+    /// item carrying several release groups. Nothing past the read-back is asked.
     #[tokio::test(start_paused = true)]
     async fn an_item_at_another_level_is_not_the_entitys() {
         let mbid = "8e8a594f-2175-38c7-a871-abb68ec363e7";
@@ -1214,6 +1218,11 @@ mod tests {
             (
                 MbKind::Release,
                 serde_json::json!({"P5813": [claim(mbid)], "P435": [claim(other)]}),
+                false,
+            ),
+            (
+                MbKind::Release,
+                serde_json::json!({"P5813": [claim(mbid)], "P1954": [claim("21491")]}),
                 false,
             ),
             (
