@@ -232,6 +232,11 @@ fn episode(item: roxmltree::Node<'_, '_>, feed: &Url) -> Option<Episode> {
     };
     let link = |s: &str| crate::resolver::web::origin_url(feed, s).filter(|u| u.len() <= 2048);
     let identity = item_identity(item, feed)?;
+    // An episode named by its feed item carries the feed's address in its link: none from a feed
+    // read at an address that carries a credential.
+    if identity.page.is_none() && crate::capability::is_capability_url(feed) {
+        return None;
+    }
     let uri = identity.uri(feed);
     if uri.len() > 2048 {
         return None;
@@ -455,6 +460,23 @@ mod tests {
             location: None,
             body: body.as_bytes().to_vec(),
         }
+    }
+
+    /// A feed read at an address that carries a credential lists only the episodes with a page of
+    /// their own: one named by its feed item would carry that address in its public link.
+    #[test]
+    fn a_feed_that_carries_a_credential_lists_only_episodes_with_their_own_page() {
+        let body = feed(concat!(
+            r#"<item><title>Paged</title><guid>ep-1</guid><link>https://show.example/1</link><enclosure url="https://cdn.example/1.mp3" type="audio/mpeg"/></item>"#,
+            r#"<item><title>Keyed</title><guid>ep-2</guid><enclosure url="https://cdn.example/2.mp3" type="audio/mpeg"/></item>"#,
+        ));
+        let mut f = fetched(&body, false);
+        f.url = "https://feeds.example.org/show.xml?auth=SECRET"
+            .parse()
+            .unwrap();
+        let episodes = from_feed(&f).unwrap();
+        let uris: Vec<&str> = episodes.iter().map(|e| e.uri.as_str()).collect();
+        assert_eq!(uris, ["https://show.example/1"]);
     }
 
     #[test]

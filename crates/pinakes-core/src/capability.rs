@@ -30,7 +30,8 @@ pub fn is_capability(uri: &str) -> bool {
 }
 
 /// Whether `url` carries a credential: a password in its user info, a calendar provider's secret
-/// share path, or a query key in [`CREDENTIAL_KEYS`].
+/// share path, or a key in [`CREDENTIAL_KEYS`] in its query or its form-encoded fragment (an OAuth
+/// callback's `#access_token=`).
 pub fn is_capability_url(url: &Url) -> bool {
     if url.password().is_some() {
         return true;
@@ -47,10 +48,12 @@ pub fn is_capability_url(url: &Url) -> bool {
     let path = percent_encoding::percent_decode_str(url.path())
         .decode_utf8_lossy()
         .to_ascii_lowercase();
+    let credential = |key: &str| CREDENTIAL_KEYS.contains(&key.to_ascii_lowercase().as_str());
     secret_share(&host, &path)
-        || url
-            .query_pairs()
-            .any(|(key, _)| CREDENTIAL_KEYS.contains(&key.to_ascii_lowercase().as_str()))
+        || url.query_pairs().any(|(key, _)| credential(&key))
+        || url.fragment().is_some_and(|fragment| {
+            url::form_urlencoded::parse(fragment.as_bytes()).any(|(key, _)| credential(&key))
+        })
 }
 
 /// Whether `url` carries a credential, or names a link that does in one of its query values (an
@@ -87,6 +90,17 @@ fn secret_share(host: &str, path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A credential key in a form-encoded fragment (an OAuth callback's `#access_token=`) counts too.
+    #[test]
+    fn a_credential_key_in_the_fragment_is_one_too() {
+        assert!(is_capability(
+            "https://example.org/cb#access_token=x&state=y"
+        ));
+        assert!(is_capability("https://example.org/cb#Token=x"));
+        assert!(!is_capability("https://example.org/page#section-token"));
+        assert!(!is_capability("https://example.org/page#t=10"));
+    }
 
     #[test]
     fn a_credential_key_is_matched_whole_after_decoding() {

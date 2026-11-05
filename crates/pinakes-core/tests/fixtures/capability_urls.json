@@ -22,7 +22,8 @@
     "https://events.example.org/feed.ics?a=1&api%5Fkey=SECRET",
     "https://bucket.example.org/feed.ics?X-Amz-Signature=SECRET",
     "https://events.example.org/feed.ics?SIG=SECRET",
-    "https://events.example.org/feed.ics?key=SECRET"
+    "https://events.example.org/feed.ics?key=SECRET",
+    "https://events.example.org/feed.ics#access_token=SECRET"
   ],
   "public": [
     "https://calendar.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics",
@@ -31,6 +32,7 @@
     "https://events.example.org/feed.ics?key_art=1",
     "https://events.example.org/token/feed.ics",
     "https://events.example.org/apps/calendar/",
-    "https://www.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics"
+    "https://www.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics",
+    "https://events.example.org/page#section-2"
   ]
 }

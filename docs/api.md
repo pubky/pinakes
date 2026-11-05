@@ -630,8 +630,8 @@ preview caller share one queue entry per normalized URI, with one TTL, retry sch
 dead-letter state. A 202 carries the ID to poll with `GET /v1/resources/{id}`. Unsupported
 schemes or disabled resolvers return 400, and so does a link that carries a credential: a
 calendar provider's secret share link (the patterns `scripts/verify-no-capability-urls` keeps out
-of the repository), a password in the user info, or a query key such as `token`, `key`, `sig` or
-`signature` (`capability::CREDENTIAL_KEYS`). It is not stored, does not count against the preview
+of the repository), a password in the user info, or a query or fragment key such as `token`,
+`access_token`, `key`, `sig` or `signature` (`capability::CREDENTIAL_KEYS`). It is not stored, does not count against the preview
 budget, and its log line names the host only. A card someone's post made for such a link is still
 read by its URI. Such a link is never sent to another service: also-on lookups (the hubs, the
 Wayback Machine) and oEmbed providers skip it, and it is never kept as another link's alias. A
