@@ -1226,7 +1226,9 @@ impl CardResolver {
     }
     async fn media(&self, uri: &str, ttl: u64) -> Result<ResourceMeta> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(9);
-        let endpoint = provider_match(uri);
+        // A link that carries a credential is never sent to an oEmbed provider: its page alone
+        // is read.
+        let endpoint = provider_match(uri).filter(|_| !crate::capability::is_capability(uri));
         let first = endpoint.as_ref().is_some_and(|(_, specific)| {
             *specific || self.config.media.oembed == OembedPolicy::Always
         });
