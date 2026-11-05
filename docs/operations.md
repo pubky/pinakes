@@ -441,7 +441,9 @@ zero; resource documents stay through the grace period. A resource without refer
 deleted `limits.grace_days` after it became orphaned. One nothing ever referenced (a link only
 previewed with `POST /v1/resolve`) goes after `limits.preview_grace_hours` (a day) instead: its
 orphan time is still the instant it was created, as a reference clears it and losing the last
-one sets a later time. A derived child or a venue is kept as before, however it was created.
+one sets a later time. A derived child or a venue is kept as before, however it was created, and
+when what held it is deleted it keeps the full grace counted from its creation, never the preview
+grace.
 The hourly cleanup deletes in batches of 100 until it has caught up, or for two minutes at
 most. A Nexus outage leaves cached data served and polling retries.
 

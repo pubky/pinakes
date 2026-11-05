@@ -1219,3 +1219,59 @@ async fn a_stopped_cleanup_ends_after_its_batch(pool: PgPool) {
     );
     assert_eq!(changes::delete_orphans(&pool, 7).await.unwrap(), 150);
 }
+
+/// A preview nothing referenced goes after the preview grace, but what it held (a calendar's
+/// derived events, its venue, its occurrences' venues) is not taken for a preview once it is
+/// gone: however many cleanup runs follow, they keep the full grace, counted from then.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn what_a_preview_held_keeps_the_full_grace_after_it_goes(pool: PgPool) {
+    let mut ids = std::collections::HashMap::new();
+    for name in ["calendar", "child", "venue", "hall"] {
+        let uri = format!("https://example.org/held/{name}");
+        ids.insert(name, store::ensure_resource(&pool, &uri).await.unwrap());
+    }
+    // Never referenced, all created 25 hours ago.
+    sqlx::query("UPDATE resource SET created_at=now()-interval '25 hours', orphaned_at=now()-interval '25 hours'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource SET venue_id=$2 WHERE id=$1")
+        .bind(&ids["calendar"])
+        .bind(&ids["venue"])
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO resource_derivation(parent_id,child_id,adapter) VALUES($1,$2,'ics')")
+        .bind(&ids["calendar"])
+        .bind(&ids["child"])
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO occurrence(resource_id,uid,start_at,status,venue_id) VALUES($1,'u1',now()+interval '1 day','scheduled',$2)")
+        .bind(&ids["calendar"])
+        .bind(&ids["hall"])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let left = || async {
+        sqlx::query_scalar::<_, String>("SELECT id FROM resource")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+    };
+    for _ in 0..3 {
+        store::cleanup(&pool, 7, 24).await.unwrap();
+    }
+    let kept = left().await;
+    assert!(!kept.contains(&ids["calendar"]));
+    for name in ["child", "venue", "hall"] {
+        assert!(kept.contains(&ids[name]), "{name}");
+    }
+    // They are ordinary orphans now: gone once the full grace has passed.
+    sqlx::query("UPDATE resource SET orphaned_at=orphaned_at-interval '8 days'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    store::cleanup(&pool, 7, 24).await.unwrap();
+    assert!(left().await.is_empty());
+}
