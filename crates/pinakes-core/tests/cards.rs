@@ -75,6 +75,31 @@ impl Transport for TransportMock {
 }
 const RSS: &str = r#"<rss xmlns:podcast="https://podcastindex.org/namespace/1.0"><channel><title>Podcast</title><podcast:guid>channel-id</podcast:guid><item><guid>episode-1</guid><title>Episode One</title><link>https://podcast.example/episode</link><enclosure type="audio/mpeg" url="https://audio.example/one.mp3"/></item><item><guid>episode-2</guid><title>Episode Two</title></item></channel></rss>"#;
 
+/// A feed read through a redirect that lands on a link carrying a credential keeps the link it was
+/// asked for as its `podcast_feed`, never where the fetch ended.
+#[test]
+fn a_podcast_feed_that_lands_on_a_credential_keeps_the_link_asked_for() {
+    let f = Fetched {
+        permanent_redirect: false,
+        truncated: false,
+        url: "https://feeds.example/rss?auth=SECRET".parse().unwrap(),
+        status: 200,
+        body: RSS.as_bytes().to_vec(),
+        content_type: "application/rss+xml".into(),
+        retry_after_secs: 60,
+        location: None,
+        validators: Default::default(),
+    };
+    let doc = cards::podcast("https://podcast.example/feed", &f, 3600, 10)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        doc.attributes["podcast_feed"],
+        "https://podcast.example/feed"
+    );
+    assert!(!serde_json::to_string(&doc).unwrap().contains("SECRET"));
+}
+
 #[test]
 fn namespace_alone_does_not_make_a_podcast_series() {
     for items in ["", "<item><guid>news</guid><title>News</title></item>"] {

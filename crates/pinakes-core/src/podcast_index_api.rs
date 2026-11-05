@@ -62,14 +62,17 @@ pub enum Ask<'a> {
     Guid(&'a str),
     FeedId(u64),
 }
-pub fn pi_request(ask: Ask) -> String {
+/// The request for `ask`. None for a feed whose link carries a credential: Podcast Index is never
+/// sent one.
+pub fn pi_request(ask: Ask) -> Option<String> {
     let enc = |v: &str| url::form_urlencoded::byte_serialize(v.as_bytes()).collect::<String>();
-    match ask {
+    Some(match ask {
         Ask::Apple(id) => format!("{PODCAST_INDEX}/podcasts/byitunesid?id={id}"),
+        Ask::Feed(url) if crate::capability::is_capability(url) => return None,
         Ask::Feed(url) => format!("{PODCAST_INDEX}/podcasts/byfeedurl?url={}", enc(url)),
         Ask::Guid(g) => format!("{PODCAST_INDEX}/podcasts/byguid?guid={}", enc(g)),
         Ask::FeedId(id) => format!("{PODCAST_INDEX}/podcasts/byfeedid?id={id}"),
-    }
+    })
 }
 /// Podcast Index's episode record.
 pub fn pi_episode_request(id: u64) -> String {
@@ -111,18 +114,24 @@ pub fn pi_headers(key: &str, secret: &str, now: i64) -> Vec<(&'static str, Strin
 mod tests {
     use super::*;
 
+    /// Podcast Index is never asked about a feed whose link carries a credential.
+    #[test]
+    fn a_feed_that_carries_a_credential_is_never_asked_about() {
+        assert!(pi_request(Ask::Feed("https://feeds.example/rss?auth=x")).is_none());
+        assert!(pi_request(Ask::Feed("https://feeds.example/rss")).is_some());
+    }
     #[test]
     fn podcast_index_requests_are_signed() {
         assert_eq!(
-            pi_request(Ask::Feed("https://feeds.simplecast.com/54nAGcIl")),
+            pi_request(Ask::Feed("https://feeds.simplecast.com/54nAGcIl")).unwrap(),
             "https://api.podcastindex.org/api/1.0/podcasts/byfeedurl?url=https%3A%2F%2Ffeeds.simplecast.com%2F54nAGcIl"
         );
         assert_eq!(
-            pi_request(Ask::Apple(1200361736)),
+            pi_request(Ask::Apple(1200361736)).unwrap(),
             "https://api.podcastindex.org/api/1.0/podcasts/byitunesid?id=1200361736"
         );
         assert_eq!(
-            pi_request(Ask::Guid("304b84f0-07b0-5265-b6b7-da5cf5aeb56e")),
+            pi_request(Ask::Guid("304b84f0-07b0-5265-b6b7-da5cf5aeb56e")).unwrap(),
             "https://api.podcastindex.org/api/1.0/podcasts/byguid?guid=304b84f0-07b0-5265-b6b7-da5cf5aeb56e"
         );
         assert_eq!(

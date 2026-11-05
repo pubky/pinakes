@@ -1063,8 +1063,13 @@ fn podcast_body(
         .then_some((*n, identity))
     });
     let mut d = ResourceMeta::new(uri, "media", ttl);
-    d.attributes
-        .insert("podcast_feed".into(), f.url.to_string());
+    // Where the fetch ended, unless that carries a credential: then the link asked for.
+    let feed = if crate::capability::is_capability_url(&f.url) {
+        uri.to_owned()
+    } else {
+        f.url.to_string()
+    };
+    d.attributes.insert("podcast_feed".into(), feed);
     let episode = chosen.filter(|_| !direct || guid.is_some());
     let is_podcast = episode
         .as_ref()
