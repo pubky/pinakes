@@ -23,7 +23,8 @@
     "https://bucket.example.org/feed.ics?X-Amz-Signature=SECRET",
     "https://events.example.org/feed.ics?SIG=SECRET",
     "https://events.example.org/feed.ics?key=SECRET",
-    "https://events.example.org/feed.ics#access_token=SECRET"
+    "https://events.example.org/feed.ics#access_token=SECRET",
+    "https://app.example.org/#/reset?token=SECRET"
   ],
   "public": [
     "https://calendar.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics",
@@ -34,6 +35,7 @@
     "https://events.example.org/apps/calendar/",
     "https://www.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics",
     "https://events.example.org/page#section-2",
-    "https://en.wikipedia.org/wiki/Lock_and_key#Key"
+    "https://en.wikipedia.org/wiki/Lock_and_key#Key",
+    "https://app.example.org/#/reset?step=2"
   ]
 }
