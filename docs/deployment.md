@@ -91,9 +91,16 @@ not just `resource`, and budget backup retention separately from the table's sin
 ## Network and secrets
 
 - Terminate TLS at a reverse proxy for the public listener (`listen`, default port 8090).
-  Keep `admin_listen` (default `127.0.0.1:9090`) private; an admin token is required off loopback.
+  Keep `admin_listen` (default `127.0.0.1:9090`) private; an admin token is required off loopback
+  and recommended on it (the daemon warns at startup without one). The admin listener answers only
+  requests whose `Host` is `localhost`, an IP address or a name in `admin_hosts`, and answers 421
+  to any other, so a web page that points its own name at this machine reaches nothing. A scraper
+  that reaches it by a name (another container's `pinakes:9090`) needs that name in
+  `admin_hosts = ["pinakes"]`.
 - The public API ignores forwarded client-IP headers. Behind a proxy its direct-peer budget is
-  shared by that proxy's users; enforce per-client limits at the edge. Do not expose admin routes
+  shared by that proxy's users; enforce per-client limits at the edge. For the same reason leave
+  `limits.preview_new_per_client_per_hour` at 0 behind a proxy: a share of new previews keyed on
+  the proxy's address would cap the whole instance. Do not expose admin routes
   by forwarding the public listener to the admin listener.
 - Public CORS defaults to `["*"]` without cookies or bearer credentials. Use exact origins or
   `[]` where appropriate; admin routes send no CORS headers.

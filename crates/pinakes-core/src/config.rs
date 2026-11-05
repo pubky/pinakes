@@ -13,6 +13,10 @@ pub struct Config {
     pub listen: String,
     pub admin_listen: String,
     pub admin_token: Option<SecretKey>,
+    /// Host names the admin listener answers besides `localhost` and IP addresses, such as the
+    /// name a Prometheus in another container scrapes it by. A request for any other `Host` gets
+    /// 421, so a page that rebinds its own name to this machine reaches nothing.
+    pub admin_hosts: Vec<String>,
     pub nexus_url: String,
     /// The `Authorization` header sent, whole, on every request to the Nexus at `nexus_url`
     /// (`PINAKES_NEXUS_AUTHORIZATION`), for a Nexus behind credentials; `nexus_url` itself never
@@ -60,6 +64,18 @@ pub struct Config {
     pub ingest: IngestConfig,
     #[serde(skip)]
     pub grace_days: u32,
+    /// Hours a resource nothing ever referenced (one only previewed) is kept, at most `grace_days`.
+    #[serde(skip)]
+    pub preview_grace_hours: u32,
+    /// New previews (`POST /v1/resolve` of a link the instance did not know) per hour, for the
+    /// whole instance.
+    #[serde(skip)]
+    pub preview_new_per_hour: usize,
+    /// The share of those one client address may take in an hour; 0 is no share. It is only a
+    /// client's own where clients reach the listener directly: behind a proxy every client has
+    /// its address.
+    #[serde(skip)]
+    pub preview_new_per_client_per_hour: usize,
     #[serde(skip)]
     pub search: SearchConfig,
     #[serde(skip)]
@@ -310,6 +326,7 @@ impl Config {
             listen: "127.0.0.1:8090".into(),
             admin_listen: "127.0.0.1:9090".into(),
             admin_token: None,
+            admin_hosts: Vec::new(),
             refresh: RefreshConfig::default(),
             canary: CanaryConfig::default(),
             also_on: Default::default(),
@@ -321,6 +338,9 @@ impl Config {
             poll_secs: 5,
             ingest: IngestConfig::default(),
             grace_days: 7,
+            preview_grace_hours: 24,
+            preview_new_per_hour: 1000,
+            preview_new_per_client_per_hour: 0,
             // The web route (and the event routes on it) fetches arbitrary hosts: twice the
             // other resolvers' workers and rate.
             web: ResolverConfig {
@@ -957,6 +977,19 @@ impl Config {
         if !admin.ip().is_loopback() && self.admin_token.is_none() {
             bail!("non-loopback admin_listen requires admin_token (PINAKES__ADMIN_TOKEN)");
         }
+        if let Some(host) = self.admin_hosts.iter().find(|h| {
+            h.is_empty()
+                || h.len() > 253
+                || !h.split('.').all(|label| {
+                    !label.is_empty()
+                        && label.len() <= 63
+                        && label
+                            .bytes()
+                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                })
+        }) {
+            bail!("admin_hosts: {host:?} is not a lowercase host name (no scheme, port, path or wildcard)");
+        }
         if !(10000..=100000).contains(&self.groups.max_graph_units)
             || !(1024 * 1024..=128 * 1024 * 1024).contains(&self.groups.max_graph_bytes)
             || !(2..=1000).contains(&self.groups.max_members)
@@ -1162,6 +1195,9 @@ impl Config {
             || self.preview.requests_per_minute == 0
             || self.preview.uri_requests_per_minute == 0
             || !(1..=100000).contains(&self.preview.cache_capacity)
+            || !(1..=87600).contains(&self.preview_grace_hours)
+            || !(1..=1_000_000).contains(&self.preview_new_per_hour)
+            || self.preview_new_per_client_per_hour > 1_000_000
         {
             bail!("invalid queue, preview or polling budget");
         }
@@ -2045,6 +2081,11 @@ mod tests {
             ("max_label_bytes", 1025),
             ("max_object_path_bytes", 0),
             ("max_object_path_bytes", 2049),
+            ("preview_grace_hours", 0),
+            ("preview_grace_hours", 87601),
+            ("preview_new_per_hour", 0),
+            ("preview_new_per_hour", 1_000_001),
+            ("preview_new_per_client_per_hour", 1_000_001),
         ] {
             assert!(
                 with(serde_json::json!({"limits":{key:value}})).is_err(),
@@ -2092,6 +2133,8 @@ limits! {
     poll_secs: u64 = |c| c.poll_secs => [|c, v| c.poll_secs = v],
     /// Days an unreferenced resource is kept before orphan cleanup.
     grace_days: u32 = |c| c.grace_days => [|c, v| c.grace_days = v],
+    /// Hours a resource nothing ever referenced (one only previewed) is kept, at most `grace_days`.
+    preview_grace_hours: u32 = |c| c.preview_grace_hours => [|c, v| c.preview_grace_hours = v],
     /// Resource refresh intervals by tier (seconds).
     refresh_resource_secs: [u64; 4] = |c| c.refresh.resource_secs => [|c, v| c.refresh.resource_secs = v],
     /// Container (calendar, feed) refresh intervals by tier (seconds).
@@ -2191,6 +2234,10 @@ limits! {
     preview_uri_requests_per_minute: usize = |c| c.preview.uri_requests_per_minute => [|c, v| c.preview.uri_requests_per_minute = v],
     /// Preview cache entries.
     preview_cache_capacity: usize = |c| c.preview.cache_capacity => [|c, v| c.preview.cache_capacity = v],
+    /// New previews per hour for the whole instance; over it `POST /v1/resolve` answers 503.
+    preview_new_per_hour: usize = |c| c.preview_new_per_hour => [|c, v| c.preview_new_per_hour = v],
+    /// New previews per hour one client address may take (0: no share); over it `POST /v1/resolve` answers 429.
+    preview_new_per_client_per_hour: usize = |c| c.preview_new_per_client_per_hour => [|c, v| c.preview_new_per_client_per_hour = v],
     /// Podcast feed items read per scan.
     podcast_items: usize = |c| c.cards.podcast_items => [|c, v| c.cards.podcast_items = v],
     /// Most members of one automatic group.

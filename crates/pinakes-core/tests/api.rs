@@ -605,6 +605,211 @@ async fn polls_the_http_feed_and_replays_without_duplicates(pool: PgPool) {
     );
     task.abort();
 }
+/// Log lines a test's subscriber writes.
+#[derive(Clone, Default)]
+struct Lines(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+impl std::io::Write for Lines {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A link that carries a credential is never previewed: `POST /v1/resolve` answers 400 for every
+/// capability probe of the shared fixture and for a password in the user info, stores nothing and
+/// spends no preview budget, and neither an answer nor a log line holds the secret.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_link_that_carries_a_credential_is_never_previewed(pool: PgPool) {
+    let probes: Value =
+        serde_json::from_str(include_str!("fixtures/capability_urls.json")).unwrap();
+    let config = Config {
+        preview: pinakes_core::config::PreviewConfig {
+            requests_per_minute: 2,
+            uri_requests_per_minute: 2,
+            cache_capacity: 100,
+        },
+        ..Default::default()
+    };
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
+    let logs = Lines::default();
+    let writer = logs.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_max_level(tracing::Level::TRACE)
+        .with_writer(move || writer.clone())
+        .finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    let mut refused = probes["providers"].as_array().unwrap().clone();
+    refused.extend(probes["query"].as_array().unwrap().iter().cloned());
+    refused.push(json!("https://user:SECRET@events.example.org/feed.ics"));
+    for probe in &refused {
+        let probe = probe.as_str().unwrap();
+        let shown = probe.replace("SECRET", "…");
+        let (code, answer) = call(&app, "POST", "/v1/resolve", Some(json!({"uri": probe}))).await;
+        assert_eq!(code, 400, "{shown}: {answer}");
+        assert!(!answer.to_string().contains("SECRET"), "{shown}");
+        let (id, _, _) = identity(probe).unwrap();
+        let stored: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource WHERE id=$1)")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(!stored, "{shown}");
+    }
+    // None of them spent the budget of two previews a minute.
+    for uri in ["https://example.org/one", "https://example.org/two"] {
+        let (code, _) = call(&app, "POST", "/v1/resolve", Some(json!({"uri": uri}))).await;
+        assert!(code == 200 || code == 202, "{uri}: {code}");
+    }
+    drop(guard);
+    let logs = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    assert!(!logs.contains("SECRET"));
+    assert!(logs.contains("a link that carries a credential is not previewed"));
+    assert!(logs.contains("events.example.org"));
+}
+
+/// The instance takes at most `limits.preview_new_per_hour` new previews an hour, whoever asks:
+/// over it, `POST /v1/resolve` of a link it does not know answers 503 with `Retry-After` and stores
+/// nothing, a link it knows still reads, and a client over its own budget gets 429 first.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn new_previews_are_capped_for_the_whole_instance(pool: PgPool) {
+    let config = Config::from_value(json!({"limits": {
+        "preview_new_per_hour": 2,
+        "preview_requests_per_minute": 4,
+    }}))
+    .unwrap();
+    let state = AppState::new(pool.clone(), config).unwrap();
+    let refused = state.metrics.preview_refused.clone();
+    let app = api::router(state);
+    for uri in ["https://example.org/one", "https://example.org/two"] {
+        let (code, _) = call(&app, "POST", "/v1/resolve", Some(json!({"uri": uri}))).await;
+        assert!(code == 200 || code == 202, "{uri}: {code}");
+    }
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/v1/resolve")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({"uri": "https://example.org/three"}).to_string(),
+        ))
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.2:1234".parse::<SocketAddr>().unwrap(),
+    ));
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let wait: u64 = response.headers()["retry-after"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((3000..=3600).contains(&wait), "{wait}");
+    assert_eq!(refused.with_label_values(&["instance"]).get(), 1);
+    assert_eq!(refused.with_label_values(&["client"]).get(), 0);
+    let (id, _, _) = identity("https://example.org/three").unwrap();
+    let stored: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource WHERE id=$1)")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(!stored);
+    // A link the instance knows takes no new place.
+    let (code, _) = call(
+        &app,
+        "POST",
+        "/v1/resolve",
+        Some(json!({"uri": "https://example.org/one"})),
+    )
+    .await;
+    assert!(code == 200 || code == 202, "known: {code}");
+    // This client's own budget (four a minute) is spent: 429 comes first.
+    let (code, _) = call(
+        &app,
+        "POST",
+        "/v1/resolve",
+        Some(json!({"uri": "https://example.org/four"})),
+    )
+    .await;
+    assert_eq!(code, 429);
+}
+
+/// `POST /v1/resolve` from `ip` for `uri`: the status, the headers and whether `uri` is stored.
+async fn resolve_from(
+    app: &Router,
+    pool: &PgPool,
+    ip: &str,
+    uri: &str,
+) -> (StatusCode, HeaderMap, bool) {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/v1/resolve")
+        .header("content-type", "application/json")
+        .body(Body::from(json!({ "uri": uri }).to_string()))
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        format!("{ip}:1234").parse::<SocketAddr>().unwrap(),
+    ));
+    let response = app.clone().oneshot(request).await.unwrap();
+    let (id, _, _) = identity(uri).unwrap();
+    let stored: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource WHERE id=$1)")
+        .bind(&id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    (response.status(), response.headers().clone(), stored)
+}
+
+/// One client takes at most `limits.preview_new_per_client_per_hour` of the hour's new previews:
+/// over it, that client gets 429 with `Retry-After` and nothing is stored, while another client
+/// still previews.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn one_client_takes_at_most_its_share_of_new_previews(pool: PgPool) {
+    let config = Config::from_value(json!({"limits": {
+        "preview_new_per_hour": 10,
+        "preview_new_per_client_per_hour": 1,
+    }}))
+    .unwrap();
+    let state = AppState::new(pool.clone(), config).unwrap();
+    let refused = state.metrics.preview_refused.clone();
+    let app = api::router(state);
+    let (code, _, stored) = resolve_from(&app, &pool, "127.0.0.2", "https://example.org/a").await;
+    assert!((code == 200 || code == 202) && stored, "{code}");
+    let (code, headers, stored) =
+        resolve_from(&app, &pool, "127.0.0.2", "https://example.org/b").await;
+    assert_eq!(code, StatusCode::TOO_MANY_REQUESTS);
+    assert!(!stored);
+    let wait: u64 = headers["retry-after"].to_str().unwrap().parse().unwrap();
+    assert!((3000..=3600).contains(&wait), "{wait}");
+    let (code, _, stored) = resolve_from(&app, &pool, "127.0.0.3", "https://example.org/b").await;
+    assert!((code == 200 || code == 202) && stored, "{code}");
+    assert_eq!(refused.with_label_values(&["client"]).get(), 1);
+}
+
+/// The per-client share of new previews is off unless the operator sets it: behind the reverse
+/// proxy the deployment asks for, every client has the proxy's address, and a share would cap the
+/// whole instance.
+#[test]
+fn the_per_client_share_is_off_unless_set() {
+    assert_eq!(Config::default().preview_new_per_client_per_hour, 0);
+    assert!(Config::from_value(json!({"limits": {"preview_new_per_client_per_hour": 0}})).is_ok());
+}
+
+/// `store::ensure_resource_created` says whether its call created the row: a preview keeps its
+/// place in the hour only then, so two first requests for one link take one place between them.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn only_the_request_that_stores_a_link_keeps_its_place(pool: PgPool) {
+    let uri = "https://example.org/once";
+    let (id, created) = store::ensure_resource_created(&pool, uri).await.unwrap();
+    assert!(created);
+    assert_eq!(
+        store::ensure_resource_created(&pool, uri).await.unwrap(),
+        (id, false)
+    );
+}
+
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn preview_pending_cached_completion_and_per_ip_uri_budgets(pool: PgPool) {
     let config = Config {
@@ -1179,6 +1384,154 @@ async fn admin_bearer_and_network_bind_policy(pool: sqlx::PgPool) {
                 assert_eq!(response.status(), 401);
             }
         }
+    }
+}
+
+/// One admin request with an optional `Host` and bearer; its status.
+async fn admin_status(
+    app: &Router,
+    method: &str,
+    path: &str,
+    host: Option<&str>,
+    bearer: Option<&str>,
+    body: &str,
+) -> StatusCode {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("content-type", "application/json");
+    if let Some(host) = host {
+        request = request.header("host", host);
+    }
+    if let Some(token) = bearer {
+        request = request.header("authorization", format!("Bearer {token}"));
+    }
+    app.clone()
+        .oneshot(request.body(Body::from(body.to_owned())).unwrap())
+        .await
+        .unwrap()
+        .status()
+}
+
+/// The admin listener answers only requests for its own host. A page that rebinds its name to this
+/// machine gets 421 on every admin route, with or without a token configured, before a handler or
+/// the credential check runs, and its curation changes nothing; `localhost`, loopback addresses
+/// and `admin_hosts` names pass as before.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn the_admin_listener_refuses_requests_for_other_hosts(pool: PgPool) {
+    let ids = seed(&pool).await;
+    let curation = json!({"members": [
+        {"resource_id": ids[0], "occurrence": null},
+        {"resource_id": ids[1], "occurrence": null},
+    ]})
+    .to_string();
+    let routes = [
+        ("GET", "/v1/info".to_owned()),
+        ("GET", "/metrics".to_owned()),
+        ("GET", format!("/v1/resources/{}/document", ids[0])),
+        ("PUT", format!("/v1/groups/{}", "a".repeat(32))),
+    ];
+    let curated = || async {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM group_override")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    let before = curated().await;
+    // The defaults: loopback, no token.
+    let admin = api::admin_router(AppState::new(pool.clone(), Config::default()).unwrap());
+    for host in [
+        "attacker.example",
+        "attacker.example:9090",
+        "localhost.attacker.example",
+    ] {
+        for (method, path) in &routes {
+            let status = admin_status(&admin, method, path, Some(host), None, &curation).await;
+            assert_eq!(
+                status,
+                StatusCode::MISDIRECTED_REQUEST,
+                "{host} {method} {path}"
+            );
+        }
+    }
+    assert_eq!(curated().await, before);
+    for host in [
+        Some("localhost:9090"),
+        Some("127.0.0.1:9090"),
+        Some("[::1]:9090"),
+        None,
+    ] {
+        let status = admin_status(&admin, "GET", "/v1/info", host, None, "").await;
+        assert_eq!(status, StatusCode::OK, "{host:?}");
+        let status = admin_status(&admin, "GET", "/metrics", host, None, "").await;
+        assert_eq!(status, StatusCode::OK, "{host:?}");
+    }
+    // With a token: the host is checked first, even with the right credential.
+    let config = Config {
+        admin_token: Some("review-only-operator-token".into()),
+        ..Config::default()
+    };
+    let admin = api::admin_router(AppState::new(pool.clone(), config).unwrap());
+    let token = Some("review-only-operator-token");
+    for (method, path) in &routes {
+        let status = admin_status(
+            &admin,
+            method,
+            path,
+            Some("attacker.example"),
+            token,
+            &curation,
+        )
+        .await;
+        assert_eq!(status, StatusCode::MISDIRECTED_REQUEST, "{method} {path}");
+    }
+    assert_eq!(curated().await, before);
+}
+
+/// `admin_hosts` names the hosts a scraper elsewhere reaches the admin listener by; they pass the
+/// host check and then the credential check as before. Each is a bare lowercase host name.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn admin_hosts_names_a_scraper_s_host(pool: PgPool) {
+    let config = Config {
+        admin_token: Some("review-only-operator-token".into()),
+        admin_hosts: vec!["prometheus".into()],
+        ..Config::default()
+    };
+    config.validate().unwrap();
+    let admin = api::admin_router(AppState::new(pool.clone(), config).unwrap());
+    let token = Some("review-only-operator-token");
+    let status = admin_status(
+        &admin,
+        "GET",
+        "/metrics",
+        Some("prometheus.example"),
+        token,
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::MISDIRECTED_REQUEST);
+    for host in ["prometheus:9090", "PROMETHEUS", "127.0.0.1:9090"] {
+        for bearer in [None, Some("wrong")] {
+            let status = admin_status(&admin, "GET", "/metrics", Some(host), bearer, "").await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{host} {bearer:?}");
+        }
+        let status = admin_status(&admin, "GET", "/metrics", Some(host), token, "").await;
+        assert_eq!(status, StatusCode::OK, "{host}");
+    }
+    // Names are bare lowercase host names.
+    for bad in [
+        "prometheus:9090",
+        "http://prometheus",
+        "*.internal",
+        "Prometheus",
+        "a/b",
+        "",
+    ] {
+        let config = Config {
+            admin_hosts: vec![bad.into()],
+            ..Config::default()
+        };
+        assert!(config.validate().is_err(), "{bad}");
     }
 }
 

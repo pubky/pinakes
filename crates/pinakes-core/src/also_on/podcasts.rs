@@ -773,7 +773,10 @@ impl Podcasts {
     }
     /// Podcast Index's feed for `ask`.
     async fn index(cx: &Context, ask: Ask<'_>) -> Result<Option<IndexFeed>> {
-        match Self::index_get(cx, &pi_request(ask)).await? {
+        let Some(request) = pi_request(ask) else {
+            return Ok(None);
+        };
+        match Self::index_get(cx, &request).await? {
             Some(f) => parse_pi(f.status, &f.body, ask),
             None => Ok(None),
         }
@@ -1752,7 +1755,7 @@ mod tests {
         assert!(parse_pi(401, &read("pi-byitunesid-401.json"), Ask::Apple(DAILY)).is_err());
         // By feed ID.
         assert_eq!(
-            pi_request(Ask::FeedId(743229)),
+            pi_request(Ask::FeedId(743229)).unwrap(),
             "https://api.podcastindex.org/api/1.0/podcasts/byfeedid?id=743229"
         );
         assert_eq!(

@@ -628,10 +628,20 @@ person (`limits.related_min_shared`, 2).
 `POST /v1/resolve` queues a supported URI and waits up to three seconds. Ingestion and every
 preview caller share one queue entry per normalized URI, with one TTL, retry schedule and
 dead-letter state. A 202 carries the ID to poll with `GET /v1/resources/{id}`. Unsupported
-schemes or disabled resolvers return 400. A resource only previewed, never referenced, is not
-a search result and expires after the orphan grace period. Previews are limited per client IP
-and per URI (`limits.preview_requests_per_minute`, `limits.preview_uri_requests_per_minute`,
-30 each); a 429 carries `Retry-After: 60`.
+schemes or disabled resolvers return 400, and so does a link that carries a credential: a
+calendar provider's secret share link (the patterns `scripts/verify-no-capability-urls` keeps out
+of the repository), a password in the user info, or a query or fragment key such as `token`,
+`access_token`, `key`, `sig` or `signature` (`capability::CREDENTIAL_KEYS`). It is not stored, does not count against the preview
+budget, and its log line names the host only. A card someone's post made for such a link is still
+read by its URI. Such a link is never sent to another service: also-on lookups (the hubs, the
+Wayback Machine) and oEmbed providers skip it, and it is never kept as another link's alias. A
+resource only previewed, never referenced, is not a search result and expires after `limits.preview_grace_hours` (a day). Previews are limited per
+client IP and per URI (`limits.preview_requests_per_minute`, `limits.preview_uri_requests_per_minute`,
+30 each); a 429 carries `Retry-After: 60`. The instance stores at most
+`limits.preview_new_per_hour` (1000) links it did not know in any hour, and, when the operator sets
+`limits.preview_new_per_client_per_hour` (no share by default), one client address at most that
+many of them: over the first, a new link gets 503, over the second 429, each with `Retry-After`
+(seconds), and nothing is stored, while a known link still reads.
 
 Statuses:
 
@@ -1508,7 +1518,9 @@ to know.
 `GET /v1/info` with full ingestion, source and canary state, `GET /v1/resources/{id}/document`
 (the stored document with its internal fields) and group curation (`PUT /v1/groups/{id}`). With
 `admin_token` (or `PINAKES__ADMIN_TOKEN`) every admin route needs `Authorization: Bearer`,
-compared in constant time; a non-loopback bind without a token is refused. It sends no CORS
+compared in constant time; a non-loopback bind without a token is refused. It answers 421 to a
+request whose `Host` is not `localhost`, an IP address or a name in `admin_hosts`, before the token
+is checked. It sends no CORS
 headers. Public `/v1/info` shows only what a client needs (the version, the User-Agent this
 instance's requests carry, the kinds of links it resolves, the lookup sizes, the search page
 limit, the per-IP and preview budgets and the OSM licence); the admin `/v1/info` adds manifests,

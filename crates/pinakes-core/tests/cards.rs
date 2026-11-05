@@ -75,6 +75,56 @@ impl Transport for TransportMock {
 }
 const RSS: &str = r#"<rss xmlns:podcast="https://podcastindex.org/namespace/1.0"><channel><title>Podcast</title><podcast:guid>channel-id</podcast:guid><item><guid>episode-1</guid><title>Episode One</title><link>https://podcast.example/episode</link><enclosure type="audio/mpeg" url="https://audio.example/one.mp3"/></item><item><guid>episode-2</guid><title>Episode Two</title></item></channel></rss>"#;
 
+/// A feed read through a redirect that lands on a link carrying a credential keeps the link it was
+/// asked for as its `podcast_feed`, never where the fetch ended.
+#[test]
+fn a_podcast_feed_that_lands_on_a_credential_keeps_the_link_asked_for() {
+    let f = Fetched {
+        permanent_redirect: false,
+        truncated: false,
+        url: "https://feeds.example/rss?auth=SECRET".parse().unwrap(),
+        status: 200,
+        body: RSS.as_bytes().to_vec(),
+        content_type: "application/rss+xml".into(),
+        retry_after_secs: 60,
+        location: None,
+        validators: Default::default(),
+    };
+    let doc = cards::podcast("https://podcast.example/feed", &f, 3600, 10)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        doc.attributes["podcast_feed"],
+        "https://podcast.example/feed"
+    );
+    assert!(!serde_json::to_string(&doc).unwrap().contains("SECRET"));
+}
+
+/// An episode card read from a feed that landed on a credential never takes an item's relative
+/// link or image: they resolve to that address.
+#[test]
+fn an_episode_card_never_takes_a_link_that_lands_on_a_credential_feed() {
+    let f = Fetched {
+        permanent_redirect: false,
+        truncated: false,
+        url: "https://feeds.example/rss?auth=SECRET".parse().unwrap(),
+        body: r#"<rss xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel><title>Podcast</title><item><guid>e1</guid><title>Episode One</title><link>#e1</link><itunes:image href=""/><enclosure type="audio/mpeg" url="https://audio.example/one.mp3"/></item></channel></rss>"#.as_bytes().to_vec(),
+        content_type: "application/rss+xml".into(),
+        status: 200,
+        location: None,
+        retry_after_secs: 60,
+        validators: Default::default(),
+    };
+    let d = cards::podcast("https://podcast.example/feed?guid=e1", &f, 3600, 10)
+        .unwrap()
+        .unwrap();
+    assert_eq!(d.name.as_deref(), Some("Episode One"));
+    assert!(
+        !serde_json::to_string(&d).unwrap().contains("SECRET"),
+        "{d:?}"
+    );
+}
+
 #[test]
 fn namespace_alone_does_not_make_a_podcast_series() {
     for items in ["", "<item><guid>news</guid><title>News</title></item>"] {
@@ -257,6 +307,130 @@ async fn optional_fetch_policy_and_metrics() {
             );
         }
     }
+}
+/// The media route never sends a link that carries a credential to an oEmbed provider: not
+/// first (a provider that names the link exactly, or `oembed = "always"`), not as the fallback for
+/// a page without a full card. The page itself is still read from its own site.
+#[tokio::test]
+async fn the_media_route_never_sends_a_link_that_carries_a_credential_to_oembed() {
+    struct Seen(Mutex<Vec<String>>);
+    #[async_trait]
+    impl Transport for Seen {
+        async fn get(&self, u: &Url, _: &[SocketAddr]) -> Result<Fetched> {
+            self.0.lock().unwrap().push(u.to_string());
+            let embed = u.path().contains("oembed");
+            Ok(Fetched {
+                permanent_redirect: false,
+                truncated: false,
+                url: u.clone(),
+                status: 200,
+                body: if embed {
+                    json!({"type":"video","title":"Embed"}).to_string()
+                } else {
+                    "<title>Page</title>".into()
+                }
+                .into_bytes(),
+                content_type: if embed {
+                    "application/json"
+                } else {
+                    "text/html"
+                }
+                .into(),
+                retry_after_secs: 60,
+                location: None,
+                validators: Default::default(),
+            })
+        }
+    }
+    for (policy, uri) in [
+        (
+            cards::OembedPolicy::WhenNeeded,
+            "https://www.youtube.com/watch?v=abc&token=x",
+        ),
+        (cards::OembedPolicy::Always, "https://vimeo.com/123?sig=x"),
+        (
+            cards::OembedPolicy::WhenNeeded,
+            "https://vimeo.com/123?key=x",
+        ),
+    ] {
+        let seen = Arc::new(Seen(Mutex::default()));
+        let mut cfg = Config::default();
+        cfg.media.oembed = policy;
+        let r = CardResolver {
+            kind: "media",
+            config: Arc::new(cfg),
+            web: WebResolver {
+                oembed_policy: Default::default(),
+                cards: None,
+                events: None,
+                config: Default::default(),
+                egress: Egress::with_backends(
+                    Default::default(),
+                    Arc::new(PublicDns),
+                    seen.clone(),
+                ),
+            },
+        };
+        assert!(r.resolve(uri).await.is_ok(), "{uri}");
+        let requests = seen.0.lock().unwrap();
+        assert!(!requests.is_empty(), "{uri}");
+        assert!(
+            requests.iter().all(|r| !r.contains("oembed")),
+            "{uri}: {requests:?}"
+        );
+    }
+}
+/// A page that redirects to a link carrying a credential is read there, but the oEmbed endpoint it
+/// advertises (which names that link) is never asked, whatever the policy.
+#[tokio::test]
+async fn a_redirect_to_a_link_that_carries_a_credential_gets_no_oembed() {
+    struct Seen(Mutex<Vec<String>>);
+    #[async_trait]
+    impl Transport for Seen {
+        async fn get(&self, u: &Url, _: &[SocketAddr]) -> Result<Fetched> {
+            self.0.lock().unwrap().push(u.to_string());
+            let landed = u.query().is_some_and(|q| q.contains("token="));
+            Ok(Fetched {
+                permanent_redirect: false,
+                truncated: false,
+                url: u.clone(),
+                status: if u.path() == "/page" && !landed { 302 } else { 200 },
+                body: if u.path().contains("oembed") {
+                    json!({"type":"video","title":"Embed"}).to_string()
+                } else {
+                    "<head><link rel='alternate' type='application/json+oembed' href='/oembed?url=https%3A%2F%2Fmedia.example%2Fpage%3Ftoken%3Dx'></head><title>Page</title>".into()
+                }
+                .into_bytes(),
+                content_type: if u.path().contains("oembed") {
+                    "application/json"
+                } else {
+                    "text/html"
+                }
+                .into(),
+                retry_after_secs: 60,
+                location: (u.path() == "/page" && !landed).then(|| "/page?token=x".into()),
+                validators: Default::default(),
+            })
+        }
+    }
+    let seen = Arc::new(Seen(Mutex::default()));
+    let web = WebResolver {
+        oembed_policy: cards::OembedPolicy::Always,
+        cards: None,
+        events: None,
+        config: Default::default(),
+        egress: Egress::with_backends(Default::default(), Arc::new(PublicDns), seen.clone()),
+    };
+    assert!(web.resolve("https://media.example/page").await.is_ok());
+    let requests = seen.0.lock().unwrap();
+    assert!(
+        requests.iter().any(|r| r.contains("token=x")),
+        "{requests:?}"
+    );
+    assert!(
+        requests.iter().all(|r| !r.contains("/oembed")),
+        "{requests:?}"
+    );
 }
 fn resolver(kind: &'static str, cfg: Config, transport: Arc<TransportMock>) -> CardResolver {
     CardResolver::new(

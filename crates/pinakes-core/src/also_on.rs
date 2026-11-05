@@ -822,6 +822,11 @@ pub async fn drain_leased(
         .bind(&due)
         .fetch_all(pool)
         .await?;
+    // A link that carries a credential is never sent to another service.
+    let uris: Vec<String> = uris
+        .into_iter()
+        .filter(|uri| !crate::capability::is_capability(uri))
+        .collect();
     for source in sources
         .iter()
         .filter(|s| cfg.source_enabled(s.as_ref()) && s.ready(&cx.config))
@@ -944,6 +949,8 @@ async fn one(
         .doc
         .as_ref()
         .is_some_and(crate::changes::gone_social);
+    // Nor does a link that carries a credential: no other service is ever sent it.
+    let withheld = crate::capability::is_capability(&subject.uri);
     let mut next: Option<Duration> = None;
     let mut partial: Option<Duration> = None;
     let mut failed = None;
@@ -954,7 +961,7 @@ async fn one(
         .iter()
         .filter(|s| cfg.source_enabled(s.as_ref()) && s.ready(&cx.config))
     {
-        if gone || !source.applies(&subject) {
+        if gone || withheld || !source.applies(&subject) {
             // It read the resource before (a key it starts from is gone): its rows go too.
             let had: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource_key WHERE resource_id=$1 AND source=$2) OR EXISTS(SELECT 1 FROM derived_link WHERE resource_id=$1 AND source=$2) OR EXISTS(SELECT 1 FROM resource_fact WHERE resource_id=$1 AND source=$2)")
                 .bind(id)

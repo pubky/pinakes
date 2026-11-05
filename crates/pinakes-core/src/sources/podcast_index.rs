@@ -169,9 +169,11 @@ impl Source for PodcastIndex {
         let Some((key, secret)) = credentials() else {
             return Err(super::Declined.into());
         };
-        let url = match episode {
-            Some(id) => pi_episode_request(id),
+        let Some(url) = (match episode {
+            Some(id) => Some(pi_episode_request(id)),
             None => pi_request(Ask::FeedId(feed)),
+        }) else {
+            return Ok(cx.missing(uri, self));
         };
         let options = FetchOptions {
             accept: Some("application/json".into()),

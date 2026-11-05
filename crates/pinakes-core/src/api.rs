@@ -27,6 +27,39 @@ use std::{
 use tokio::sync::{Mutex, Notify};
 use utoipa::{IntoParams, OpenApi, ToSchema};
 
+/// When each new preview of the last hour was taken and by which client address, oldest first
+/// (`AppState::reserve_preview`).
+type Previews = Arc<std::sync::Mutex<std::collections::VecDeque<(Instant, std::net::IpAddr)>>>;
+/// A place taken in the instance's hour of new previews. It is given back when dropped, unless
+/// kept once the link is stored: a request that fails or is cancelled first frees it.
+struct PreviewSlot {
+    previews: Previews,
+    at: Instant,
+    by: std::net::IpAddr,
+    kept: bool,
+}
+impl PreviewSlot {
+    fn keep(mut self) {
+        self.kept = true;
+    }
+}
+impl Drop for PreviewSlot {
+    fn drop(&mut self) {
+        if self.kept {
+            return;
+        }
+        let mut previews = self
+            .previews
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(at) = previews
+            .iter()
+            .rposition(|taken| *taken == (self.at, self.by))
+        {
+            previews.remove(at);
+        }
+    }
+}
 /// A request clock (`AppState::clock`).
 pub type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 #[derive(Clone)]
@@ -39,6 +72,9 @@ pub struct AppState {
     limiter: Arc<Mutex<HashMap<String, (Instant, usize)>>>,
     /// ODbL dump downloads per client address in the current hour.
     downloads: Arc<Mutex<HashMap<std::net::IpAddr, (Instant, usize)>>>,
+    /// When each new preview of the last hour was taken, oldest first: at most
+    /// `limits.preview_new_per_hour` for the whole instance.
+    previews: Previews,
     info_cache: Arc<Mutex<Option<(Instant, Value)>>>,
     pub(crate) cursor_mac: SimpleHmac<blake3::Hasher>,
     /// The request clock for relative times and search cursors; tests set it, the daemon never
@@ -58,6 +94,7 @@ impl AppState {
             metrics,
             limiter: Arc::default(),
             downloads: Arc::default(),
+            previews: Arc::default(),
             info_cache: Arc::default(),
             cursor_mac: SimpleHmac::<blake3::Hasher>::new_from_slice(&cursor_key)
                 .context("initialize cursor MAC")?,
@@ -135,6 +172,45 @@ impl AppState {
         }
         *count += 1;
         Ok(())
+    }
+    /// A place for one new preview from `by` in the instance's hour; or the refusal and the
+    /// seconds until a place frees: 429 when `by` has taken its share, 503 when the hour is full.
+    fn reserve_preview(&self, by: std::net::IpAddr) -> Result<PreviewSlot, (StatusCode, u64)> {
+        let hour = Duration::from_secs(3600);
+        let wait = |at: &Instant| hour.saturating_sub(at.elapsed()).as_secs().max(1);
+        let mut previews = self
+            .previews
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while previews.front().is_some_and(|(at, _)| at.elapsed() >= hour) {
+            previews.pop_front();
+        }
+        let own: Vec<&Instant> = previews
+            .iter()
+            .filter(|(_, taker)| *taker == by)
+            .map(|(at, _)| at)
+            .collect();
+        let share = self.config.preview_new_per_client_per_hour;
+        if share > 0 && own.len() >= share {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                own.first().map_or(1, |at| wait(at)),
+            ));
+        }
+        if previews.len() >= self.config.preview_new_per_hour {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                previews.front().map_or(1, |(at, _)| wait(at)),
+            ));
+        }
+        let at = Instant::now();
+        previews.push_back((at, by));
+        Ok(PreviewSlot {
+            previews: self.previews.clone(),
+            at,
+            by,
+            kept: false,
+        })
     }
     async fn preview_budget(&self, ip: std::net::IpAddr, id: &str) -> Result<(), ApiError> {
         self.budget(
@@ -2399,18 +2475,69 @@ pub async fn lookup(
     with_refs(&state.pool, cards.iter_mut()).await?;
     Ok(Json(cards))
 }
-#[utoipa::path(post,tag="Previews",path="/v1/resolve",request_body=ResolveRequest,responses((status=200,body=ResourceDetail),(status=202,body=ResourceDetail,description="Queued; poll resource by ID",headers(("Retry-After"=u64,description="Seconds until the next attempt, when it is put off (a missing answer waiting for the fetch that confirms it); absent while the job is queued or running"))),(status=400,description="Unsupported URI or disabled resolver"),(status=429,description="Preview rate limit")))]
+#[utoipa::path(post,tag="Previews",path="/v1/resolve",request_body=ResolveRequest,responses((status=200,body=ResourceDetail),(status=202,body=ResourceDetail,description="Queued; poll resource by ID",headers(("Retry-After"=u64,description="Seconds until the next attempt, when it is put off (a missing answer waiting for the fetch that confirms it); absent while the job is queued or running"))),(status=400,description="Unsupported URI, disabled resolver, or a link that carries a credential"),(status=429,description="Preview rate limit"),(status=503,description="The instance's new previews for this hour are taken; nothing was stored",headers(("Retry-After"=u64,description="Seconds until a new preview can be taken")))))]
 pub async fn resolve(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(body): Json<ResolveRequest>,
 ) -> Result<Response, ApiError> {
     let (id, uri, _) = model::identity(&body.uri).map_err(|e| ApiError::bad(e.to_string()))?;
+    // A link that carries a credential is never previewed, stored or logged; a card someone's
+    // post made is still read by its URI.
+    if crate::capability::is_capability(&body.uri) || crate::capability::is_capability(&uri) {
+        tracing::info!(
+            host = %crate::resolver::log_host(&uri),
+            "a link that carries a credential is not previewed"
+        );
+        return Err(ApiError::bad(
+            "this link carries a credential; it is not previewed",
+        ));
+    }
     // An alias is never fetched: the root's route decides.
     let target = crate::alias::root(&uri).map_or_else(|| uri.clone(), |a| a.root);
     crate::resolver::admit(&target, &state.config).map_err(ApiError::bad)?;
     state.preview_budget(peer.ip(), &id).await?;
-    store::ensure_resource(&state.pool, &uri).await?;
+    // A link the instance does not know yet takes a place in its hour of new previews; when the
+    // hour is full, nothing is stored. Two first requests for one link at once may both take one.
+    let known: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM resource WHERE id=$1) OR EXISTS(SELECT 1 FROM resource_alias WHERE alias_id=$1)",
+    )
+    .bind(&id)
+    .fetch_one(&state.pool)
+    .await?;
+    let slot = if known {
+        None
+    } else {
+        match state.reserve_preview(peer.ip()) {
+            Ok(slot) => Some(slot),
+            Err((status, seconds)) => {
+                let (limit, message) = if status == StatusCode::TOO_MANY_REQUESTS {
+                    (
+                        "client",
+                        "new preview limit for this client reached, try again later",
+                    )
+                } else {
+                    ("instance", "preview capacity reached, try again later")
+                };
+                state
+                    .metrics
+                    .preview_refused
+                    .with_label_values(&[limit])
+                    .inc();
+                let mut response = ApiError(status, message.into()).into_response();
+                response
+                    .headers_mut()
+                    .insert(header::RETRY_AFTER, header::HeaderValue::from(seconds));
+                return Ok(response);
+            }
+        }
+    };
+    let (_, created) = store::ensure_resource_created(&state.pool, &uri).await?;
+    // Stored by this request: the place stays taken for the hour. A request that found the link
+    // just stored by another gives its place back.
+    if let Some(slot) = slot.filter(|_| created) {
+        slot.keep();
+    }
     let id = crate::alias::resolve_id(&state.pool, &id).await?;
     store::expedite(&state.pool, std::slice::from_ref(&id)).await?;
     state.wake.notify_waiters();
@@ -3023,15 +3150,58 @@ pub fn admin_router(state: AppState) -> Router {
     with_admin_layers(routes, state)
 }
 /// The admin listener's layer stack around `routes`: the panic backstop innermost, then the
-/// bearer check, so an unauthenticated request never reaches a handler. No CORS. Public so a test
-/// can mount a route under exactly this stack.
+/// bearer check, then the `Host` check outermost, so a request for another host or without the
+/// credential never reaches a handler. No CORS. Public so a test can mount a route under exactly
+/// this stack.
 pub fn with_admin_layers(routes: Router<AppState>, state: AppState) -> Router {
     panic_backstop(routes, &state, "admin")
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             admin_auth,
         ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            admin_host,
+        ))
         .with_state(state)
+}
+/// Answers 421 to a request whose `Host` (or HTTP/2 authority) the admin listener does not serve
+/// ([`admin_host_allowed`]). A browser always sends one, so a request with neither comes from
+/// another kind of client and passes.
+async fn admin_host(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let authority = match request.headers().get(header::HOST) {
+        Some(value) => Some(value.to_str().unwrap_or_default()),
+        None => request.uri().authority().map(|a| a.as_str()),
+    };
+    if authority.is_some_and(|a| !admin_host_allowed(a, &state.config.admin_hosts)) {
+        return (StatusCode::MISDIRECTED_REQUEST, "admin host not allowed").into_response();
+    }
+    next.run(request).await
+}
+/// Whether the admin listener serves `authority` (`host[:port]`): `localhost`, an IP address, or
+/// one of `admin_hosts`. A page that rebinds its own name to this machine still sends that name;
+/// a browser sends an IP address only for a page this listener itself served.
+fn admin_host_allowed(authority: &str, admin_hosts: &[String]) -> bool {
+    let Ok(authority) = authority.parse::<axum::http::uri::Authority>() else {
+        return false;
+    };
+    if authority.as_str().contains('@') {
+        return false;
+    }
+    let host = authority.host();
+    let literal = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    if literal.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    let host = host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase();
+    host == "localhost" || admin_hosts.contains(&host)
 }
 async fn admin_auth(
     State(state): State<AppState>,
@@ -3193,6 +3363,62 @@ pub async fn curate_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A place in the hour of new previews is given back when its request ends before the link
+    /// is stored (an error, a client gone), and stays once kept.
+    #[test]
+    fn a_preview_place_is_given_back_unless_kept() {
+        let previews: Previews = Arc::default();
+        let by: std::net::IpAddr = "127.0.0.2".parse().unwrap();
+        let take = || {
+            let at = Instant::now();
+            previews.lock().unwrap().push_back((at, by));
+            PreviewSlot {
+                previews: previews.clone(),
+                at,
+                by,
+                kept: false,
+            }
+        };
+        let kept = take();
+        drop(take());
+        assert_eq!(previews.lock().unwrap().len(), 1);
+        kept.keep();
+        assert_eq!(previews.lock().unwrap().len(), 1);
+    }
+    /// The admin listener serves `localhost`, IP addresses and the configured names, on any port,
+    /// and nothing else: not a rebinding page's own name, not one dressed as loopback.
+    #[test]
+    fn the_admin_listener_serves_loopback_addresses_and_its_own_names() {
+        let names = ["metrics.internal".to_owned()];
+        for allowed in [
+            "localhost",
+            "localhost:9090",
+            "LocalHost.:9090",
+            "127.0.0.1",
+            "127.0.0.1:9090",
+            "[::1]:9090",
+            "[::1]",
+            "10.1.2.3:9090",
+            "metrics.internal:9090",
+            "METRICS.internal",
+        ] {
+            assert!(admin_host_allowed(allowed, &names), "{allowed}");
+        }
+        for refused in [
+            "attacker.example",
+            "attacker.example:9090",
+            "localhost.attacker.example",
+            "127.0.0.1.nip.io:9090",
+            "metrics.internal.attacker.example",
+            "user@127.0.0.1:9090",
+            "",
+            "local host",
+            "[::1",
+        ] {
+            assert!(!admin_host_allowed(refused, &names), "{refused}");
+        }
+        assert!(!admin_host_allowed("metrics.internal", &[]));
+    }
     /// Every form of key a registered source records (`also_on::Source::key_forms`) searches
     /// back exactly as recorded: `key=` with the key a read lists finds that key.
     #[test]

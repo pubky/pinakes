@@ -18,6 +18,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | --- | --- | --- |
 | `poll_secs` | `5` | Nexus feed poll interval in seconds. |
 | `grace_days` | `7` | Days an unreferenced resource is kept before orphan cleanup. |
+| `preview_grace_hours` | `24` | Hours a resource nothing ever referenced (one only previewed) is kept, at most `grace_days`. |
 | `refresh_resource_secs` | `[604800, 172800, 21600, 3600]` | Resource refresh intervals by tier (seconds). |
 | `refresh_container_secs` | `[86400, 43200, 21600, 3600]` | Container (calendar, feed) refresh intervals by tier (seconds). |
 | `refresh_cursor_secs` | `300` | Cursor feed refresh interval (seconds). |
@@ -60,6 +61,8 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `preview_requests_per_minute` | `30` | Preview requests per minute per client. |
 | `preview_uri_requests_per_minute` | `30` | Preview requests per minute per URI. |
 | `preview_cache_capacity` | `10000` | Preview cache entries. |
+| `preview_new_per_hour` | `1000` | New previews per hour for the whole instance; over it `POST /v1/resolve` answers 503. |
+| `preview_new_per_client_per_hour` | `0` | New previews per hour one client address may take (0: no share); over it `POST /v1/resolve` answers 429. |
 | `podcast_items` | `1000` | Podcast feed items read per scan. |
 | `group_max_members` | `256` | Most members of one automatic group. |
 | `group_max_distance_m` | `500.0` | Farthest two located members of one group (metres). |
@@ -392,7 +395,17 @@ adds `Vary: Origin`. No `Access-Control-Allow-Credentials` is sent, and the admi
 sends CORS headers.
 
 The admin listener (`admin_listen`, default `127.0.0.1:9090`) requires `admin_token` (or
-`PINAKES__ADMIN_TOKEN`) for a non-loopback bind; terminate TLS at a trusted reverse proxy.
+`PINAKES__ADMIN_TOKEN`) for a non-loopback bind; terminate TLS at a trusted reverse proxy. On
+loopback the token is optional, and startup logs a warning without it: the host check below keeps
+browser pages out, but any process on the machine can use a listener without a token.
+
+It answers a request only when its `Host` (or HTTP/2 authority) is `localhost`, an IP address (any
+port) or a name listed in `admin_hosts`; any other gets 421 `admin host not allowed` before the
+token is checked. A request with no `Host` passes, as browsers always send one. This stops a page
+that rebinds its own DNS name to this machine (or to an SSH tunnel's local end) from reading or
+curating through the listener. A scraper that reaches the listener by a name, such as a Prometheus
+in another container scraping `pinakes:9090`, needs `admin_hosts = ["pinakes"]`; each entry is a
+bare lowercase host name, without scheme, port or wildcard.
 
 Swagger UI (`api.swagger_ui`, default on) serves the vendored `utoipa-swagger-ui` bundle (Swagger
 UI 5.17.14) at `/swagger-ui`; builds never download it, and a build environment must not set
@@ -426,8 +439,29 @@ batch's score update or cursor write, say) is an error: the batch rolls back, th
 `pinakes_ingest_panics_total` counts it and the poll is retried. A feed epoch change, or a
 cursor beyond the feed's length, clears the reference projection and scores and restarts at
 zero; resource documents stay through the grace period. A resource without references is
-deleted `limits.grace_days` after it became orphaned, previews included. A Nexus outage leaves
-cached data served and polling retries.
+deleted `limits.grace_days` after it became orphaned. One nothing ever referenced (a link only
+previewed with `POST /v1/resolve`) goes after `limits.preview_grace_hours` (a day) instead: its
+orphan time is still the instant it was created, as a reference clears it and losing the last
+one sets a later time. A derived child or a venue is kept as before, however it was created, and
+when what held it is deleted it keeps the full grace counted from its creation, never the preview
+grace.
+The hourly cleanup deletes in batches of 100 until it has caught up, or for two minutes at
+most. A Nexus outage leaves cached data served and polling retries.
+
+`POST /v1/resolve` stores at most `limits.preview_new_per_hour` (1000) links the instance did not
+know in any hour, whoever asks. Over it, a new link gets 503 with `Retry-After` (the seconds until
+the oldest of the hour's previews is an hour old) and nothing is stored; a known link still
+reads, and the per-client budget's 429 comes first. With
+`limits.preview_new_per_client_per_hour` set (0, no share, by default), one client address takes
+at most that many of them: over it, that client gets 429 with `Retry-After` and the others go on.
+Set it only where clients reach the listener directly: the share is keyed on the connecting
+address, as the per-IP budgets are, and behind a reverse proxy every client has the proxy's, so a
+share would cap the whole instance. A place is kept only by the request that stored the link; one
+whose request fails or goes away first is given back. The window is in memory and starts empty at
+startup. `pinakes_preview_refused_total{limit}` counts the refusals, `instance` for the hour and
+`client` for a share (alert `PreviewCapacityReached` on either),
+and `pinakes_preview_backlog` the resources nothing ever referenced (not derived children or
+venues).
 
 ### Posts
 
@@ -864,4 +898,8 @@ Any other platform reads its fixed sample, which its `canary_note` says when to 
 
 The capability-URL guard (`scripts/verify-no-capability-urls`, run by the tests) scans every
 tracked and new source file for capability URLs; synthetic fixture URLs are allowed only in
-named test files, and failures print paths without the URLs.
+named test files, and failures print paths without the URLs. The daemon applies the same
+provider patterns, plus credential query keys and a password in the user info, at runtime
+(`crates/pinakes-core/src/capability.rs`): `POST /v1/resolve` refuses such a link, and no
+also-on, archive or oEmbed lookup is sent one. `crates/pinakes-core/tests/fixtures/capability_urls.json`
+holds the probes the guard and the runtime check must agree on; add a pattern to both.

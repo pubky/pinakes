@@ -4,8 +4,10 @@ Scrape `/metrics` on the separate admin listener (`admin_listen`, default
 `127.0.0.1:9090`), meant for a local Prometheus or agent. A bind that is not loopback
 (wildcard IPv4/IPv6 binds included) requires `admin_token` (`PINAKES__ADMIN_TOKEN`), and
 startup logs a warning for it. With a token set, every admin request, `/metrics` included,
-needs `Authorization: Bearer <token>` (in Prometheus, `authorization: {credentials: …}`);
-terminate TLS at the network edge.
+needs `Authorization: Bearer <token>` (in Prometheus, `authorization: {credentials_file: …}`);
+terminate TLS at the network edge. The listener answers only a `Host` that is `localhost`, an IP
+address or a name in `admin_hosts` (421 otherwise): a Prometheus that scrapes it by a name, such as
+`pinakes:9090` from another container, needs `admin_hosts = ["pinakes"]`.
 
 ```yaml
 scrape_configs:
@@ -44,6 +46,8 @@ No messages are sent or contact points provisioned by these files.
 | `pinakes_group_key_conflict_resources` | Resources whose last grouping run refused a join that would put two MusicBrainz IDs, Q-ids or Discogs IDs of one kind in a group (usually a wrong ID on a hub) |
 | `pinakes_resources{resolver,status}` | Current resource totals |
 | `pinakes_api_panics_total` | API requests (public or admin listener) whose handler panicked and were answered 500 |
+| `pinakes_preview_refused_total{limit}` | New previews `POST /v1/resolve` refused: `instance` (503, the hourly capacity `limits.preview_new_per_hour` taken) or `client` (429, one address's share `limits.preview_new_per_client_per_hour`, when set) |
+| `pinakes_preview_backlog` | Resources nothing ever referenced (only previewed), each kept for `limits.preview_grace_hours`; derived children and venues are not counted |
 | `pinakes_discovery_decisions_total{kind,decision}` | Optional metadata discovery decisions (a request may come from cache) |
 | `pinakes_resolution_deferred_total{reason}` | Resolutions put off without a charged attempt, by reason: `missing_unconfirmed` (a missing answer waiting for the fetch that confirms it) |
 | `pinakes_also_on_service_errors_total{service,class}` | Failed also-on requests to a service (`wikidata`, `itunes`, `tidal`, `crossref`, …), by error class; the lookup goes on without that service |
@@ -52,8 +56,8 @@ No messages are sent or contact points provisioned by these files.
 Database metric refreshes are cached for 15 seconds. Overdue excludes dead letters.
 Full JSON diagnostics are on the admin `/v1/info`; public info is redacted.
 
-Fetch counters/histograms, ingestion rejection, API panic, discovery, also-on error and token
-refusal counters reset with the daemon.
+Fetch counters/histograms, ingestion rejection, API panic, preview refusal, discovery, also-on
+error and token refusal counters reset with the daemon.
 Ingestion reset, source and change counters are restored from durable database state
 at scrape time. Sources and modes
 come from manifests; arbitrary user hostnames do not create metric labels. OSM

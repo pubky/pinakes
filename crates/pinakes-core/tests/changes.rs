@@ -284,7 +284,7 @@ async fn paging_lookup_retention_and_deleted_history(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    assert_eq!(store::cleanup(&pool, 7).await.unwrap(), 1);
+    assert_eq!(store::cleanup(&pool, 7, 7 * 24).await.unwrap(), 1);
     assert_eq!(classes(&pool, &other).await, vec!["created", "deleted"]);
     assert_eq!(
         changes_of(&app, &[&other], 0, 100).await.1["lines"]
@@ -852,6 +852,7 @@ async fn maintenance_runs_without_an_idle_ingestion_tick(pool: PgPool) {
     let task = tokio::spawn(pinakes_core::maintenance::run(
         pool.clone(),
         7,
+        7 * 24,
         90,
         Duration::from_millis(20),
         rx,
@@ -1128,4 +1129,149 @@ async fn a_decided_no_event_replaces_a_stored_event_and_a_lost_start_is_still_dr
             .await
             .unwrap();
     assert_eq!((kind.as_str(), start), ("MusicGroup", None));
+}
+
+/// A resource nothing ever referenced (one only previewed) goes after the preview grace; one that
+/// lost its references keeps the full grace, and so do a derived child and a venue of the same age.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_preview_goes_after_its_own_grace(pool: PgPool) {
+    let mut ids = std::collections::HashMap::new();
+    for name in ["preview", "fresh", "dropped", "calendar", "child", "venue"] {
+        let uri = format!("https://example.org/{name}");
+        ids.insert(name, store::ensure_resource(&pool, &uri).await.unwrap());
+    }
+    let age = |name: &str, created: &str, orphaned: Option<&str>| {
+        let id = ids[name].clone();
+        let (created, orphaned) = (created.to_owned(), orphaned.map(str::to_owned));
+        let pool = pool.clone();
+        async move {
+            sqlx::query("UPDATE resource SET created_at=now()-$2::interval, orphaned_at=now()-$3::interval WHERE id=$1")
+                .bind(&id)
+                .bind(&created)
+                .bind(orphaned.as_deref().unwrap_or(&created))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+    // Never referenced: created and orphaned at the same instant.
+    age("preview", "25 hours", None).await;
+    age("fresh", "23 hours", None).await;
+    age("child", "25 hours", None).await;
+    age("venue", "25 hours", None).await;
+    // Referenced once, its last reference gone 25 hours ago.
+    age("dropped", "3 days", Some("25 hours")).await;
+    // The calendar is referenced; it derives the child and is held at the venue.
+    sqlx::query("UPDATE resource SET orphaned_at=NULL, venue_id=$2 WHERE id=$1")
+        .bind(&ids["calendar"])
+        .bind(&ids["venue"])
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO resource_derivation(parent_id,child_id,adapter) VALUES($1,$2,'ics')")
+        .bind(&ids["calendar"])
+        .bind(&ids["child"])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let metrics = Metrics::new().unwrap();
+    metrics.refresh(&pool).await.unwrap();
+    // The preview and the fresh one; the child and the venue are kept for their calendar.
+    assert_eq!(metrics.preview_backlog.get(), 2);
+    assert_eq!(store::cleanup(&pool, 7, 24).await.unwrap(), 1);
+    let left: Vec<String> = sqlx::query_scalar("SELECT id FROM resource")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert!(!left.contains(&ids["preview"]));
+    for name in ["fresh", "dropped", "calendar", "child", "venue"] {
+        assert!(left.contains(&ids[name]), "{name}");
+    }
+}
+
+/// One cleanup run deletes every eligible resource, however many: it no longer stops at a thousand.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn one_cleanup_run_deletes_past_a_thousand(pool: PgPool) {
+    sqlx::query("INSERT INTO resource(id,uri,created_at,orphaned_at) SELECT md5('p'||n),'https://example.org/p'||n,now()-interval '8 days',now()-interval '8 days' FROM generate_series(1,1250) n")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(changes::delete_orphans(&pool, 7).await.unwrap(), 1250);
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM resource")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0);
+}
+
+/// A cleanup told to stop (the daemon shutting down) ends after the batch in hand.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_stopped_cleanup_ends_after_its_batch(pool: PgPool) {
+    sqlx::query("INSERT INTO resource(id,uri,created_at,orphaned_at) SELECT md5('s'||n),'https://example.org/s'||n,now()-interval '8 days',now()-interval '8 days' FROM generate_series(1,250) n")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        changes::delete_orphans_within(&pool, 7, 7 * 24, || true)
+            .await
+            .unwrap(),
+        100
+    );
+    assert_eq!(changes::delete_orphans(&pool, 7).await.unwrap(), 150);
+}
+
+/// A preview nothing referenced goes after the preview grace, but what it held (a calendar's
+/// derived events, its venue, its occurrences' venues) is not taken for a preview once it is
+/// gone: however many cleanup runs follow, they keep the full grace, counted from then.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn what_a_preview_held_keeps_the_full_grace_after_it_goes(pool: PgPool) {
+    let mut ids = std::collections::HashMap::new();
+    for name in ["calendar", "child", "venue", "hall"] {
+        let uri = format!("https://example.org/held/{name}");
+        ids.insert(name, store::ensure_resource(&pool, &uri).await.unwrap());
+    }
+    // Never referenced, all created 25 hours ago.
+    sqlx::query("UPDATE resource SET created_at=now()-interval '25 hours', orphaned_at=now()-interval '25 hours'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource SET venue_id=$2 WHERE id=$1")
+        .bind(&ids["calendar"])
+        .bind(&ids["venue"])
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO resource_derivation(parent_id,child_id,adapter) VALUES($1,$2,'ics')")
+        .bind(&ids["calendar"])
+        .bind(&ids["child"])
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO occurrence(resource_id,uid,start_at,status,venue_id) VALUES($1,'u1',now()+interval '1 day','scheduled',$2)")
+        .bind(&ids["calendar"])
+        .bind(&ids["hall"])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let left = || async {
+        sqlx::query_scalar::<_, String>("SELECT id FROM resource")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+    };
+    for _ in 0..3 {
+        store::cleanup(&pool, 7, 24).await.unwrap();
+    }
+    let kept = left().await;
+    assert!(!kept.contains(&ids["calendar"]));
+    for name in ["child", "venue", "hall"] {
+        assert!(kept.contains(&ids[name]), "{name}");
+    }
+    // They are ordinary orphans now: gone once the full grace has passed.
+    sqlx::query("UPDATE resource SET orphaned_at=orphaned_at-interval '8 days'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    store::cleanup(&pool, 7, 24).await.unwrap();
+    assert!(left().await.is_empty());
 }

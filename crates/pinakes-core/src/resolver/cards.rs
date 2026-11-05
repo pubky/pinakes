@@ -1063,8 +1063,13 @@ fn podcast_body(
         .then_some((*n, identity))
     });
     let mut d = ResourceMeta::new(uri, "media", ttl);
-    d.attributes
-        .insert("podcast_feed".into(), f.url.to_string());
+    // Where the fetch ended, unless that carries a credential: then the link asked for.
+    let feed = if crate::capability::is_capability_url(&f.url) {
+        uri.to_owned()
+    } else {
+        f.url.to_string()
+    };
+    d.attributes.insert("podcast_feed".into(), feed);
     let episode = chosen.filter(|_| !direct || guid.is_some());
     let is_podcast = episode
         .as_ref()
@@ -1096,7 +1101,9 @@ fn podcast_body(
             .children()
             .find(|n| n.tag_name().name() == "image")
             .and_then(|n| n.attribute("href"))
-            .and_then(|s| web::origin_url(&f.url, s));
+            .and_then(|s| web::origin_url(&f.url, s))
+            // Relative to the feed's address, it can land on a link that carries a credential.
+            .filter(|u| !crate::capability::is_capability(u));
     } else {
         if guid.is_some() {
             // An episode past the part of the feed that was read is not missing.
@@ -1201,6 +1208,10 @@ impl CardResolver {
         endpoint: Url,
         ttl: u64,
     ) -> Option<(ResourceMeta, Value, Url)> {
+        // An endpoint that names a link carrying a credential is never asked.
+        if crate::capability::names_capability(&endpoint) {
+            return None;
+        }
         crate::telemetry::discovery("oembed", "requested");
         if let Ok(Ok(f)) = tokio::time::timeout(
             Duration::from_secs(3),
@@ -1226,7 +1237,9 @@ impl CardResolver {
     }
     async fn media(&self, uri: &str, ttl: u64) -> Result<ResourceMeta> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(9);
-        let endpoint = provider_match(uri);
+        // A link that carries a credential is never sent to an oEmbed provider: its page alone
+        // is read.
+        let endpoint = provider_match(uri).filter(|_| !crate::capability::is_capability(uri));
         let first = endpoint.as_ref().is_some_and(|(_, specific)| {
             *specific || self.config.media.oembed == OembedPolicy::Always
         });

@@ -2520,7 +2520,7 @@
             }
           },
           "400": {
-            "description": "Unsupported URI or disabled resolver"
+            "description": "Unsupported URI, disabled resolver, or a link that carries a credential"
           },
           "413": {
             "description": "Body over 2 MB"
@@ -2533,6 +2533,19 @@
           },
           "429": {
             "description": "Preview rate limit"
+          },
+          "503": {
+            "description": "The instance's new previews for this hour are taken; nothing was stored",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds until a new preview can be taken",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "tags": [

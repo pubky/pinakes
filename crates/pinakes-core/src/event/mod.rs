@@ -149,8 +149,15 @@ pub const PERFORMERS_CAP: usize = 2048;
 impl EventFields {
     /// Record that the performers were read from `fetched`: the address its fetch ended on.
     /// Nothing when there are none.
+    /// Only its host is ever read, so one that carries a credential keeps its origin alone.
     pub fn read_from(&mut self, fetched: &crate::resolver::egress::Fetched) {
-        self.performers_from = (!self.performers.is_empty()).then(|| fetched.url.to_string());
+        self.performers_from = (!self.performers.is_empty()).then(|| {
+            if crate::capability::is_capability_url(&fetched.url) {
+                format!("{}/", fetched.url.origin().ascii_serialization())
+            } else {
+                fetched.url.to_string()
+            }
+        });
     }
     /// Where the performers were read ([`EventFields::read_from`]), if recorded.
     pub fn performers_from(&self) -> Option<&str> {
