@@ -636,9 +636,11 @@ form-encoded fragment or any part of it after a `?`, `#` or `;` (a hash router's
 `#/reset?token=…`); a plain anchor such as `#key` is not one. It is not stored, does not count against the preview
 budget, and its log line names the host only. A card someone's post made for such a link is still
 read by its URI. An answer whose fetch ends on such a link (a page, an ActivityPub object, an
-oEmbed answer) is read at that address without its credential (its path, or its origin when the
-path is the secret), so nothing it names relative to that address (an empty `og:image`, a JSON-LD
-`#image`) carries it. Nothing stored names such a link but the resource's own. Such a link is never sent to another service: also-on lookups (the hubs, the
+oEmbed answer) is read in that address's directory without its credential (or at its origin when
+the path is a known secret), so nothing it names relative to that address (an empty `og:image`, a
+JSON-LD `#image`) carries it. Nothing stored names such a link but the resource's own link as
+written: not a document, its change lines, its episodes, a calendar's occurrences and fetch state,
+or the OSM place cache. Such a link is never sent to another service: also-on lookups (the hubs, the
 Wayback Machine) and oEmbed providers skip it, and it is never kept as another link's alias. A
 resource only previewed, never referenced, is not a search result and expires after `limits.preview_grace_hours` (a day). Previews are limited per
 client IP and per URI (`limits.preview_requests_per_minute`, `limits.preview_uri_requests_per_minute`,
