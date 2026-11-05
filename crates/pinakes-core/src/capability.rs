@@ -9,6 +9,8 @@ use url::Url;
 pub const CREDENTIAL_KEYS: &[&str] = &[
     "token",
     "access_token",
+    "id_token",
+    "refresh_token",
     "auth",
     "key",
     "api_key",
@@ -33,7 +35,8 @@ pub fn is_capability(uri: &str) -> bool {
 /// share path, or a key in [`CREDENTIAL_KEYS`] in its query, or with a value in its form-encoded
 /// fragment or in any part of it after a `?`, `#` or `;` (an OAuth callback's `#access_token=…`,
 /// a hash router's `#/reset?token=…` or `#/reset;token=…`, an OAuth answer after a route,
-/// `#/cb#access_token=…`; a plain anchor such as `#key` is a place in the page).
+/// `#/cb#access_token=…`; a key may start with an old hash router's `/` or `!/`, as in
+/// `#/access_token=…`; a plain anchor such as `#key` is a place in the page).
 pub fn is_capability_url(url: &Url) -> bool {
     if url.password().is_some() {
         return true;
@@ -62,8 +65,9 @@ pub fn is_capability_url(url: &Url) -> bool {
                         .map(|(at, _)| &fragment[at + 1..]),
                 )
                 .any(|form| {
-                    url::form_urlencoded::parse(form.as_bytes())
-                        .any(|(key, value)| !value.is_empty() && credential(&key))
+                    url::form_urlencoded::parse(form.as_bytes()).any(|(key, value)| {
+                        !value.is_empty() && credential(key.trim_start_matches(&['/', '!'][..]))
+                    })
                 })
         })
 }
@@ -204,6 +208,16 @@ mod tests {
         assert!(is_capability("https://app.example/#/cb#access_token=x"));
         assert!(is_capability("https://app.example/#/reset;token=x"));
         assert!(!is_capability("https://app.example/#/reset;step=2"));
+        // An OAuth answer read by an old hash router: its keys start with the route's `/` or `#!/`.
+        assert!(is_capability(
+            "https://app.example/#/access_token=x&token_type=Bearer"
+        ));
+        assert!(is_capability("https://app.example/#!/access_token=x"));
+        assert!(!is_capability("https://app.example/#/home"));
+        assert!(!is_capability("https://app.example/#!/home"));
+        // OpenID Connect's sign-in answer and a refresh token.
+        assert!(is_capability("https://app.example/cb#id_token=x"));
+        assert!(is_capability("https://app.example/cb?refresh_token=x"));
         // A plain anchor is a place in the page, not a credential.
         for anchor in ["#Key", "#token", "#auth", "#key="] {
             let url = format!("https://en.wikipedia.org/wiki/Lock_and_key{anchor}");
