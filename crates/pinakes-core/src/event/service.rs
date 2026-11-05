@@ -182,7 +182,7 @@ impl EventService {
             "non-calendar page exceeds 1 MB"
         );
         let input_uri = uri.to_owned();
-        let fetched = crate::resolver::web::as_read(uri, fetched).into_owned();
+        let fetched = crate::resolver::web::as_read(fetched).into_owned();
         let config = self.config.clone();
         let ttl = card.ttl_secs;
         let (mut event, calendar_link, advertised, event_candidate, platform_extra) =
@@ -325,8 +325,10 @@ impl EventService {
                 {
                     if response.status == 200 {
                         let (parsed, matched) = crate::resolver::html::blocking(move || {
-                            let matched = serde_json::from_slice(&response.body)
-                                .is_ok_and(|v| page::activity(&mut event, &v, &response.url));
+                            let matched = serde_json::from_slice(&response.body).is_ok_and(|v| {
+                                let base = crate::resolver::web::read_at(&response.url);
+                                page::activity(&mut event, &v, &base)
+                            });
                             (event, matched)
                         })
                         .await?;

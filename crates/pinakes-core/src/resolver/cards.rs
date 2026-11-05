@@ -738,7 +738,10 @@ pub fn activitypub(uri: &str, v: &Value, base: &Url, ttl: u64) -> Option<Resourc
         return None;
     }
     let mut d = ResourceMeta::new(uri, "activitypub", ttl);
-    d.aliases.push(id.into());
+    // An object's id that carries a credential is never published as an alias.
+    if !crate::capability::is_capability(id) {
+        d.aliases.push(id.into());
+    }
     if matches!(kind, "SocialMediaPosting" | "Article") {
         d.ttl_secs = ttl.min(3600);
         let public = "https://www.w3.org/ns/activitystreams#Public";
@@ -783,7 +786,7 @@ async fn parse_activitypub(uri: &str, f: &Fetched, ttl: u64) -> Result<Option<Re
         let Ok(v) = serde_json::from_slice::<Value>(&f.body) else {
             return Ok(None);
         };
-        activitypub(&uri, &v, &f.url, ttl)
+        activitypub(&uri, &v, &web::read_at(&f.url), ttl)
             .map(|d| d.bounded(web::ATTRIBUTES))
             .transpose()
     })
@@ -806,7 +809,9 @@ pub async fn enrich(
         }
     }
     // One bounded parse for advertised metadata endpoints. Never follow arbitrary links.
-    let (body, base) = (f.body.clone(), f.url.clone());
+    // Read where the page was served, without a credential its address carries (`direct`
+    // below still compares the address itself).
+    let (body, base) = (f.body.clone(), web::read_at(&f.url));
     let (ap, rss) = super::html::blocking(move || -> anyhow::Result<_> {
         let html = crate::resolver::html::document(&String::from_utf8_lossy(&body))?;
         let (mut ap, mut rss) = (None, None);
@@ -838,7 +843,8 @@ pub async fn enrich(
     })
     .await??;
     let ap = ap.or_else(|| {
-        crate::event::service::header_alternate(f.validators.link.as_deref(), &f.url).map(|v| v.0)
+        crate::event::service::header_alternate(f.validators.link.as_deref(), &web::read_at(&f.url))
+            .map(|v| v.0)
     });
     if let Some(url) =
         ap.filter(|url| cfg.activitypub.enabled && crate::group_keys::same_origin(uri, url))
@@ -1224,11 +1230,12 @@ impl CardResolver {
             if f.status == 200 {
                 if let Ok(v) = serde_json::from_slice::<Value>(&f.body) {
                     let mut d = ResourceMeta::new(uri, "web", ttl);
-                    web::apply_oembed(&mut d, &v, &f.url);
+                    let base = web::read_at(&f.url);
+                    web::apply_oembed(&mut d, &v, &base);
                     if d.name.is_some() {
                         d.source = "media".into();
                         media_type(&mut d, uri);
-                        return Some((d, v, f.url));
+                        return Some((d, v, base));
                     }
                 }
             }

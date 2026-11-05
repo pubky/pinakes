@@ -241,7 +241,7 @@ impl PlatformResolver {
                         let (d, uri, page, cfg) = (
                             d.clone(),
                             uri.to_owned(),
-                            crate::resolver::web::as_read(uri, &fetched).into_owned(),
+                            crate::resolver::web::as_read(&fetched).into_owned(),
                             cfg.clone(),
                         );
                         crate::resolver::html::blocking(move || {

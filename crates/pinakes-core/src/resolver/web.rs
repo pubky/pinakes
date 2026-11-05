@@ -355,7 +355,7 @@ impl WebResolver {
             extracted.doc = crate::sources::page_hooks(
                 &self.egress,
                 uri,
-                &as_read(uri, &fetched),
+                &as_read(&fetched),
                 extracted.doc,
                 deadline,
             )
@@ -408,7 +408,7 @@ impl WebResolver {
                 {
                     if response.status == 200 {
                         if let Ok(value) = serde_json::from_slice::<Value>(&response.body) {
-                            apply_oembed(&mut extracted.doc, &value, &response.url);
+                            apply_oembed(&mut extracted.doc, &value, &read_at(&response.url));
                         }
                     }
                 }
@@ -507,7 +507,7 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
             .map(str::to_owned);
         return Ok(out);
     }
-    let read = as_read(uri, fetched);
+    let read = as_read(fetched);
     let fetched = read.as_ref();
     let text = String::from_utf8_lossy(&fetched.body);
     // A feed, on whichever route fetched it: its own title and description.
@@ -1202,12 +1202,29 @@ fn point(lat: f64, lon: f64) -> Option<Point> {
         && (-180.0..=180.0).contains(&lon))
     .then_some(Point { lat, lon })
 }
-/// `fetched` as a page is read: at where the fetch ended, unless that carries a credential; then
-/// at the link asked for (`landed`), so no relative link (`""`, `#x`) resolves back to it.
-pub(crate) fn as_read<'a>(uri: &str, fetched: &'a Fetched) -> std::borrow::Cow<'a, Fetched> {
+/// Where an answer fetched at `url` is read, so that its relative links (`""`, `#x`, `/og.png`)
+/// resolve: `url`, unless that carries a credential; then `url` without its user info, query and
+/// fragment, or its origin when the path is the secret. Either names no secret and is still the
+/// host that served the answer, so ownership and trust checks stay on that host.
+pub(crate) fn read_at(url: &Url) -> Url {
+    if !crate::capability::is_capability_url(url) {
+        return url.clone();
+    }
+    let mut base = url.clone();
+    let _ = base.set_username("");
+    let _ = base.set_password(None);
+    base.set_query(None);
+    base.set_fragment(None);
+    if crate::capability::is_capability_url(&base) {
+        base.set_path("/");
+    }
+    base
+}
+/// `fetched` as a page is read: at [`read_at`] the address its fetch ended on.
+pub(crate) fn as_read(fetched: &Fetched) -> std::borrow::Cow<'_, Fetched> {
     if crate::capability::is_capability_url(&fetched.url) {
         std::borrow::Cow::Owned(Fetched {
-            url: landed(uri, fetched),
+            url: read_at(&fetched.url),
             ..fetched.clone()
         })
     } else {
@@ -2286,6 +2303,28 @@ mod tests {
             .doc;
         let json = serde_json::to_string(&d).unwrap();
         assert!(!json.contains("SECRET"), "{json}");
+    }
+    /// Such a page is read at the origin that served it: its relative links stay on that host,
+    /// never on the host of the link asked for.
+    #[test]
+    fn a_page_reached_at_a_credential_on_another_host_is_read_at_that_host() {
+        let fetched = Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            validators: Default::default(),
+            url: Url::parse("https://b.example/share?token=SECRET").unwrap(),
+            status: 200,
+            retry_after_secs: 60,
+            location: None,
+            content_type: "text/html".into(),
+            body:
+                br#"<head><title>Shared</title><meta property="og:image" content="/og.png"></head>"#
+                    .to_vec(),
+        };
+        let d = extract("https://a.example/s/abc", &fetched, 3600)
+            .unwrap()
+            .doc;
+        assert_eq!(d.image.as_deref(), Some("https://b.example/og.png"));
     }
     #[test]
     fn only_head_canonicals_and_permanent_redirects_are_alias_candidates() {
