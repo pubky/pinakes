@@ -16,13 +16,12 @@ pub async fn run(
     // The search revision sums one row per write transaction since the last fold.
     let mut fold = tokio::time::interval(Duration::from_secs(60));
     fold.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let stop = shutdown.clone();
     loop {
         tokio::select! {
             _=shutdown.changed()=>break,
             _=fold.tick()=>{
-                if let Err(e) = crate::store::compact_search_writes(&pool).await {
-                    tracing::warn!(error=%crate::resolver::log_error(&e),"search revision fold failed");
-                }
+                compact(&pool).await;
                 continue;
             }
             _=tick.tick()=>{}
@@ -30,11 +29,33 @@ pub async fn run(
         if let Err(e) = crate::changes::retain(&pool, retention_days).await {
             tracing::warn!(error=%crate::resolver::log_error(&e),"change retention failed");
         }
-        if let Err(e) = crate::store::cleanup(&pool, grace_days, preview_grace_hours).await {
+        // Cleanup may run for minutes: the fold keeps its minute meanwhile, and shutdown stops it
+        // between two batches.
+        let cleanup =
+            crate::changes::delete_orphans_within(&pool, grace_days, preview_grace_hours, || {
+                *stop.borrow()
+            });
+        tokio::pin!(cleanup);
+        let cleaned = loop {
+            tokio::select! {
+                result=&mut cleanup=>break result,
+                _=fold.tick()=>compact(&pool).await,
+            }
+        };
+        if let Err(e) = cleaned {
             tracing::warn!(error=%crate::resolver::log_error(&e),"cleanup failed");
+        }
+        if *stop.borrow() {
+            break;
         }
         if let Err(e) = crate::also_on::prune(&pool).await {
             tracing::warn!(error=%crate::resolver::log_error(&e),"also-on pruning failed");
         }
+    }
+}
+/// Fold the search revision's rows (`store::compact_search_writes`).
+async fn compact(pool: &PgPool) {
+    if let Err(e) = crate::store::compact_search_writes(pool).await {
+        tracing::warn!(error=%crate::resolver::log_error(&e),"search revision fold failed");
     }
 }

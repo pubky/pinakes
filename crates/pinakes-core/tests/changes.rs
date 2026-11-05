@@ -1202,3 +1202,19 @@ async fn one_cleanup_run_deletes_past_a_thousand(pool: PgPool) {
         .unwrap();
     assert_eq!(left, 0);
 }
+
+/// A cleanup told to stop (the daemon shutting down) ends after the batch in hand.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_stopped_cleanup_ends_after_its_batch(pool: PgPool) {
+    sqlx::query("INSERT INTO resource(id,uri,created_at,orphaned_at) SELECT md5('s'||n),'https://example.org/s'||n,now()-interval '8 days',now()-interval '8 days' FROM generate_series(1,250) n")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        changes::delete_orphans_within(&pool, 7, 7 * 24, || true)
+            .await
+            .unwrap(),
+        100
+    );
+    assert_eq!(changes::delete_orphans(&pool, 7).await.unwrap(), 150);
+}

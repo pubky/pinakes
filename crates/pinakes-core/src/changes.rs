@@ -698,30 +698,35 @@ pub async fn scrub_never_fetched(pool: &PgPool) -> Result<u64> {
 /// How long one cleanup run deletes for at most: it goes on until a batch comes back short or this
 /// runs out, so cleanup keeps up with what the preview cap admits.
 const CLEANUP_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
+/// The pause between two cleanup batches, so the writers waiting on the write order get in.
+const CLEANUP_PAUSE: std::time::Duration = std::time::Duration::from_millis(50);
 /// Delete resources orphaned for `grace_days`. A derived child's grace counts from its link's
 /// expiry, not from its creation: a lapsed link (a calendar that failed for a day, an event link
 /// past its cap) keeps its child, and its row for a later revival, through the same grace.
 pub async fn delete_orphans(pool: &PgPool, grace_days: u32) -> Result<u64> {
-    delete_orphans_within(pool, grace_days, grace_days.saturating_mul(24)).await
+    delete_orphans_within(pool, grace_days, grace_days.saturating_mul(24), || false).await
 }
 /// `delete_orphans`, with a resource nothing ever referenced (one only previewed) kept for
 /// `preview_grace_hours` instead, at most `grace_days`. Such a resource still has the orphan time
 /// it was created with; a reference clears it, and losing the last reference sets a later one.
+/// Between two batches it stops once `stop` says so (the daemon shutting down).
 pub async fn delete_orphans_within(
     pool: &PgPool,
     grace_days: u32,
     preview_grace_hours: u32,
+    stop: impl Fn() -> bool,
 ) -> Result<u64> {
     // 100 to a transaction: every other writer waits while one holds the write order exclusively,
-    // and goes in between two.
+    // and goes in during the pause between two.
     let started = std::time::Instant::now();
     let mut deleted = 0;
     loop {
         let batch = delete_orphan_batch(pool, grace_days, preview_grace_hours, 100).await?;
         deleted += batch;
-        if batch < 100 || started.elapsed() >= CLEANUP_BUDGET {
+        if batch < 100 || started.elapsed() >= CLEANUP_BUDGET || stop() {
             break;
         }
+        tokio::time::sleep(CLEANUP_PAUSE).await;
     }
     Ok(deleted)
 }
