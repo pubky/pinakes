@@ -33,6 +33,7 @@
     "https://events.example.org/token/feed.ics",
     "https://events.example.org/apps/calendar/",
     "https://www.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics",
-    "https://events.example.org/page#section-2"
+    "https://events.example.org/page#section-2",
+    "https://en.wikipedia.org/wiki/Lock_and_key#Key"
   ]
 }

@@ -30,8 +30,9 @@ pub fn is_capability(uri: &str) -> bool {
 }
 
 /// Whether `url` carries a credential: a password in its user info, a calendar provider's secret
-/// share path, or a key in [`CREDENTIAL_KEYS`] in its query or its form-encoded fragment (an OAuth
-/// callback's `#access_token=`).
+/// share path, or a key in [`CREDENTIAL_KEYS`] in its query, or with a value in its form-encoded
+/// fragment (an OAuth callback's `#access_token=…`; a plain anchor such as `#key` is a place in
+/// the page).
 pub fn is_capability_url(url: &Url) -> bool {
     if url.password().is_some() {
         return true;
@@ -52,7 +53,8 @@ pub fn is_capability_url(url: &Url) -> bool {
     secret_share(&host, &path)
         || url.query_pairs().any(|(key, _)| credential(&key))
         || url.fragment().is_some_and(|fragment| {
-            url::form_urlencoded::parse(fragment.as_bytes()).any(|(key, _)| credential(&key))
+            url::form_urlencoded::parse(fragment.as_bytes())
+                .any(|(key, value)| !value.is_empty() && credential(&key))
         })
 }
 
@@ -100,6 +102,11 @@ mod tests {
         assert!(is_capability("https://example.org/cb#Token=x"));
         assert!(!is_capability("https://example.org/page#section-token"));
         assert!(!is_capability("https://example.org/page#t=10"));
+        // A plain anchor is a place in the page, not a credential.
+        for anchor in ["#Key", "#token", "#auth", "#key="] {
+            let url = format!("https://en.wikipedia.org/wiki/Lock_and_key{anchor}");
+            assert!(!is_capability(&url), "{url}");
+        }
     }
 
     #[test]
