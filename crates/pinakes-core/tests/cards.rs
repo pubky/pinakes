@@ -1271,6 +1271,43 @@ async fn nothing_stored_names_a_credential_but_its_own_link(pool: sqlx::PgPool) 
         json!(["https://band.example/"])
     );
 }
+/// A card kept as it was stored (an answer found missing keeps it) is written without a
+/// credential too, and so is its change line: the guard runs at the last write.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_card_kept_as_stored_is_written_without_a_credential(pool: sqlx::PgPool) {
+    use pinakes_core::{model::Status, store};
+    let uri = "https://page.example/kept";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut d = ResourceMeta::new(uri, "web", 3600);
+    d.name = Some("Kept".into());
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    // As an earlier build stored it.
+    sqlx::query("UPDATE resource SET doc=jsonb_set(doc,'{image}',to_jsonb('https://cdn.example/x.png?sig=SECRET'::text)) WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    d.status = Status::Missing;
+    for _ in 0..2 {
+        d.fetched_at += 1;
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+    }
+    let stored: Value = sqlx::query_scalar("SELECT doc FROM resource WHERE id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(stored["status"], "missing");
+    assert_eq!(stored["name"], "Kept");
+    assert!(!stored.to_string().contains("SECRET"), "{stored}");
+    let history: String = sqlx::query_scalar("SELECT coalesce(string_agg(concat_ws(' ',before::text,after::text),' '),'') FROM resource_change WHERE resource_id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(!history.contains("SECRET"), "{history}");
+}
+
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn social_deletion_purges_content_history(pool: sqlx::PgPool) {
     use pinakes_core::{model::Status, store};

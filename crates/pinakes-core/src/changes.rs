@@ -219,6 +219,14 @@ pub(crate) async fn append(
     diff: Diff,
     occurrence: Option<&str>,
 ) -> Result<()> {
+    // A change line names no credential but its document's own link (`capability::strip`).
+    let [before, after] = [before, after].map(|value| {
+        value.map(|mut value| {
+            let own = value["url"].as_str().unwrap_or_default().to_owned();
+            crate::capability::strip::<Value>(&mut value, &own);
+            value
+        })
+    });
     let osm = before
         .as_ref()
         .or(after.as_ref())
@@ -323,6 +331,7 @@ pub async fn save(
     let row=sqlx::query("SELECT r.*,CASE WHEN r.osm_id IS NULL THEN r.doc ELSE o.versions->r.osm_version END AS accepted FROM resource r LEFT JOIN osm_place o ON r.osm_type=o.osm_type AND r.osm_id=o.osm_id WHERE r.id=$1 AND r.generation=$2 FOR UPDATE OF r")
         .bind(id).bind(generation).fetch_optional(&mut *tx).await?;
     let Some(row) = row else { return Ok(()) };
+    let own: String = row.try_get("uri")?;
     let source = adapter_source
         .map(str::to_owned)
         .or(row.try_get::<Option<String>, _>("resolver")?)
@@ -365,11 +374,7 @@ pub async fn save(
     }
     // The transient container is serde-skipped: copy only the small parent document,
     // without cloning thousands of already-prepared occurrence documents.
-    // Nothing stored names a credential but the resource's own link, whatever path put it in
-    // (`capability::strip`).
-    let mut value = serde_json::to_value(doc)?;
-    crate::capability::strip::<ResourceMeta>(&mut value, &row.try_get::<String, _>("uri")?);
-    let mut doc: ResourceMeta = serde_json::from_value(value)?;
+    let mut doc: ResourceMeta = serde_json::from_value(serde_json::to_value(doc)?)?;
     // A show's episodes ride with this reading; a stored document retained below carries none.
     doc.episodes = episodes;
     if let Some(plan) = prepared.as_ref().filter(|p| !p.warnings.is_empty()) {
@@ -517,6 +522,9 @@ pub async fn save(
     let before = before
         .map(|v| serde_json::from_value::<ResourceMeta>(v).map(|d| normalize(&d)))
         .transpose()?;
+    // The last step before the write: nothing stored names a credential but the resource's own
+    // link, whatever put it in (this reading, a kept card, a preserved venue).
+    crate::capability::strip_document(&mut doc, &own)?;
     let after = normalize(&doc);
     crate::store::write_document(&mut tx, id, generation, &doc).await?;
     if social_missing {

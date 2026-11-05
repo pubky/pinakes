@@ -213,7 +213,16 @@ pub async fn prepare(
         validators: container
             .validators
             .as_ref()
-            .map(serde_json::to_value)
+            .map(|validators| {
+                let mut validators = validators.clone();
+                // A `Link` header that names a link carrying a credential is not kept.
+                if validators.link.as_deref().is_some_and(|link| {
+                    crate::capability::link_header_names_capability(link, &source_uri)
+                }) {
+                    validators.link = None;
+                }
+                serde_json::to_value(validators)
+            })
             .transpose()?,
         retention_days: container.limits.retention_days,
         cursor: container.cursor.clone(),
@@ -296,13 +305,7 @@ pub async fn prepare(
         }) {
             continue;
         }
-        // Nothing stored names a credential but the feed's own link (`capability::strip`).
-        let mut value = serde_json::to_value(&item.doc)?;
-        let mut doc = if crate::capability::strip::<ResourceMeta>(&mut value, &source_uri) {
-            serde_json::from_value(value)?
-        } else {
-            item.doc.clone()
-        };
+        let mut doc = item.doc.clone();
         let mut modified = item.modified;
         if let Some((_, _, old, _, _, _, _)) = previous {
             preserve_venue(&mut doc, old);
@@ -321,6 +324,9 @@ pub async fn prepare(
             }
             continue;
         }
+        // The last step before the row is written: nothing in it names a credential but the
+        // feed's own link (`capability::strip_document`), whatever put it in.
+        crate::capability::strip_document(&mut doc, &source_uri)?;
         let mut after = changes::normalize(&doc);
         let before = previous.map(|(_, _, d, _, _, _, _)| changes::normalize(d));
         let supersedes = if previous.is_none() {
@@ -349,6 +355,7 @@ pub async fn prepare(
             continue;
         }
         let mut doc = old.clone();
+        crate::capability::strip_document(&mut doc, &source_uri)?;
         let status = if superseded.contains(key) {
             "superseded"
         } else {

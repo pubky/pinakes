@@ -421,6 +421,10 @@ impl OsmResolver {
         if let Some(s) = &mut display_name {
             crate::model::truncate(s, 2048);
         }
+        // Nothing cached names a credential but the place's own link (`capability::strip_document`).
+        let mut doc = doc.clone();
+        crate::capability::strip_document(&mut doc, &id.uri())?;
+        let doc = &doc;
         let mut tx = self.pool.begin().await?;
         sqlx::query(r#"INSERT INTO osm_place(osm_type,osm_id,point,bbox,name,category,address,tags,display_name,type,type_path,doc,fetched_at,refresh_at,status,fetch_doc,fetch_display_name)
           VALUES($1,$2,CASE WHEN $3::float8 IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint($4,$3),4326) END,$5,$6,$7,$8,$9,$10,$11,$12,$13,to_timestamp($14::float8/1000),to_timestamp($14::float8/1000)+$15*interval '1 second',$16,$13,$10)
@@ -758,5 +762,31 @@ mod tests {
         doc.fetched_at -= 1000;
         doc.name = Some("Stale".into());
         assert_eq!(resolver.save(&id, &doc, None).await.unwrap(), version);
+    }
+    /// The place cache stores no tag or document field that carries a credential.
+    #[sqlx::test(
+        migrations = "../../migrations",
+        fixtures("../../tests/fixtures/require_h3.sql")
+    )]
+    async fn the_place_cache_stores_no_credential(pool: PgPool) {
+        let resolver = OsmResolver::new(pool.clone(), OsmConfig::default()).unwrap();
+        let id = parse_id("https://www.openstreetmap.org/node/124").unwrap();
+        let mut doc = ResourceMeta::new(&id.uri(), "osm", 3600);
+        doc.set_type("Place");
+        doc.osm_id = Some(id.key());
+        doc.name = Some("Shop".into());
+        doc.attributes
+            .insert("website".into(), "https://shop.example/?key=SECRET".into());
+        doc.attributes
+            .insert("phone".into(), "+41 00 000 00 00".into());
+        resolver.save(&id, &doc, None).await.unwrap();
+        let stored: String = sqlx::query_scalar(
+            "SELECT concat_ws(' ',tags::text,doc::text,fetch_doc::text,versions::text) FROM osm_place WHERE osm_id=124",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(!stored.contains("SECRET"), "{stored}");
+        assert!(stored.contains("+41 00 000 00 00"), "{stored}");
     }
 }

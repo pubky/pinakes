@@ -113,6 +113,50 @@ pub fn strip<T: serde::de::DeserializeOwned>(value: &mut serde_json::Value, own:
     stripped
 }
 
+/// [`strip`] over what is stored of `doc`, and over its episodes, stored beside it: the last step
+/// before a document is written. What is never stored (its container, its alias candidates and
+/// the like) stays as it was.
+pub fn strip_document(doc: &mut crate::model::ResourceMeta, own: &str) -> anyhow::Result<()> {
+    if let Some(episodes) = &mut doc.episodes {
+        let mut value = serde_json::to_value(&*episodes)?;
+        if strip::<Vec<crate::episodes::Episode>>(&mut value, own) {
+            *episodes = serde_json::from_value(value)?;
+        }
+    }
+    let mut value = serde_json::to_value(&*doc)?;
+    if strip::<crate::model::ResourceMeta>(&mut value, own) {
+        let stored: crate::model::ResourceMeta = serde_json::from_value(value)?;
+        *doc = crate::model::ResourceMeta {
+            container: doc.container.take(),
+            alias_candidates: std::mem::take(&mut doc.alias_candidates),
+            http_status: doc.http_status,
+            withheld: doc.withheld,
+            refresh_by: doc.refresh_by,
+            source_root: doc.source_root.take(),
+            episodes: doc.episodes.take(),
+            ..stored
+        };
+    }
+    Ok(())
+}
+
+/// Whether an HTTP `Link` header (`<…>; rel=…, <…>`) names a link that carries a credential; a
+/// relative one is read against `base`.
+pub fn link_header_names_capability(header: &str, base: &str) -> bool {
+    let base = Url::parse(base).ok();
+    header
+        .split('<')
+        .skip(1)
+        .filter_map(|part| part.split_once('>').map(|(target, _)| target))
+        .any(|target| {
+            match &base {
+                Some(base) => base.join(target),
+                None => Url::parse(target),
+            }
+            .is_ok_and(|url| is_capability_url(&url))
+        })
+}
+
 /// A step into a JSON value.
 enum Step {
     Key(String),

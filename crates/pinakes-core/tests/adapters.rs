@@ -1316,6 +1316,53 @@ async fn saved_cursor(pool: &PgPool, id: &str) -> Option<String> {
         .await
         .unwrap()
 }
+/// A calendar's occurrences and its fetch state are stored without a credential however one got
+/// there: a new occurrence, one cancelled from what was stored, its change lines, and a `Link`
+/// header the feed answered with.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_calendar_stores_no_credential_in_its_occurrences_or_fetch_state(pool: PgPool) {
+    let uri = "https://example.org/guarded.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let now = Utc::now().timestamp_millis();
+    let mut d = snapshot(uri, 2, now);
+    checkpoint(&mut d, &id, None, "1", false);
+    let container = d.container.as_mut().unwrap();
+    container.validators = Some(pinakes_core::resolver::egress::Validators {
+        link: Some(r#"<https://cal.example/alt?token=SECRET>; rel="alternate""#.into()),
+        etag: Some("e1".into()),
+        last_modified: None,
+    });
+    container.occurrences[0].doc.image = Some("https://img.example/0.png?sig=SECRET".into());
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    // As an earlier build stored it, then cancelled by a delta.
+    sqlx::query("UPDATE occurrence SET doc=jsonb_set(doc,'{image}',to_jsonb('https://img.example/1.png?sig=SECRET'::text)) WHERE resource_id=$1 AND uid='1'")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut delta = snapshot(uri, 0, now + 1);
+    delta.container.as_mut().unwrap().delta = true;
+    delta.container.as_mut().unwrap().deleted_uids = vec!["1".into()];
+    checkpoint(&mut delta, &id, Some("1"), "2", false);
+    store::save_document(&pool, &id, 0, &delta).await.unwrap();
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM occurrence WHERE resource_id=$1 AND uid='1'")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(status, "cancelled");
+    let stored: String = sqlx::query_scalar(
+        "SELECT concat_ws(' ',(SELECT string_agg(doc::text,' ') FROM occurrence WHERE resource_id=$1),(SELECT validators::text FROM event_fetch WHERE resource_id=$1),(SELECT string_agg(concat_ws(' ',before::text,after::text),' ') FROM resource_change WHERE resource_id=$1))",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!stored.contains("SECRET"), "{stored}");
+    assert!(stored.contains("e1"), "{stored}");
+}
+
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn cursor_deltas_tombstones_rollback_hold_reset_and_compare_swap(pool: PgPool) {
     let uri = "https://example.org/cursor.ics";
