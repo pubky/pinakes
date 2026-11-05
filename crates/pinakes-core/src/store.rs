@@ -6,16 +6,20 @@ use anyhow::Result;
 use sqlx::{PgPool, Postgres, Transaction};
 
 pub async fn ensure_resource(pool: &PgPool, uri: &str) -> Result<String> {
+    Ok(ensure_resource_created(pool, uri).await?.0)
+}
+/// `ensure_resource`, and whether this call created the row (another may have just done so).
+pub async fn ensure_resource_created(pool: &PgPool, uri: &str) -> Result<(String, bool)> {
     let (id, uri, _) = identity(uri)?;
     let mut tx = pool.begin().await?;
     if crate::alias::root(&uri).is_some() {
         lock_writers(&mut tx, WriteOrder::Shared).await?;
         crate::alias::lock(&mut tx).await?;
     }
-    let line = insert_resource(&mut tx, &id, &uri).await?;
+    let (line, created) = insert_resource_created(&mut tx, &id, &uri).await?;
     crate::alias::record(&mut tx, line.into_iter().collect()).await?;
     tx.commit().await?;
-    Ok(id)
+    Ok((id, created))
 }
 /// Admit derived identities once per parent, including across subsequent polls.
 /// The lineage survives refreshes so author budgets apply when the child is claimed.
@@ -250,7 +254,15 @@ pub async fn insert_resource(
     id: &str,
     uri: &str,
 ) -> Result<Option<crate::alias::Line>> {
-    insert_plain(tx, id, uri).await?;
+    Ok(insert_resource_created(tx, id, uri).await?.0)
+}
+/// `insert_resource`, and whether it inserted the row.
+async fn insert_resource_created(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &str,
+    uri: &str,
+) -> Result<(Option<crate::alias::Line>, bool)> {
+    let created = insert_plain(tx, id, uri).await?;
     if let Some(alias) = crate::alias::root(uri) {
         let known: bool =
             sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource_alias WHERE alias_id=$1)")
@@ -258,24 +270,24 @@ pub async fn insert_resource(
                 .fetch_one(&mut **tx)
                 .await?;
         if !known {
-            return crate::alias::assign(tx, id, &alias).await;
+            return Ok((crate::alias::assign(tx, id, &alias).await?, created));
         }
     }
-    Ok(None)
+    Ok((None, created))
 }
-/// `insert_resource` without the alias check, for roots.
+/// `insert_resource` without the alias check, for roots; whether it inserted the row.
 pub(crate) async fn insert_plain(
     tx: &mut Transaction<'_, Postgres>,
     id: &str,
     uri: &str,
-) -> Result<()> {
+) -> Result<bool> {
     let host = url::Url::parse(uri)
         .ok()
         .and_then(|u| u.host_str().map(str::to_owned));
     let osm = crate::resolver::osm::parse_id(uri);
-    sqlx::query("INSERT INTO resource(id, uri, host, resolver,osm_type,osm_id,doc,type_path) VALUES($1,$2,$3,$4,$5,$6,CASE WHEN $6::bigint IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('type','Place','url',$2::text,'osm_id',$5::text||'/'||$6::text,'source','osm','status','pending') END,CASE WHEN $6::bigint IS NULL THEN '{}'::text[] ELSE NULL END) ON CONFLICT(id) DO NOTHING")
+    let inserted = sqlx::query("INSERT INTO resource(id, uri, host, resolver,osm_type,osm_id,doc,type_path) VALUES($1,$2,$3,$4,$5,$6,CASE WHEN $6::bigint IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('type','Place','url',$2::text,'osm_id',$5::text||'/'||$6::text,'source','osm','status','pending') END,CASE WHEN $6::bigint IS NULL THEN '{}'::text[] ELSE NULL END) ON CONFLICT(id) DO NOTHING")
         .bind(id).bind(uri).bind(host).bind(classify(uri)).bind(osm.as_ref().map(|o|&o.osm_type)).bind(osm.as_ref().map(|o|o.id)).execute(&mut **tx).await?;
-    Ok(())
+    Ok(inserted.rows_affected() == 1)
 }
 pub async fn recompute_scores(tx: &mut Transaction<'_, Postgres>, ids: &[String]) -> Result<()> {
     // An alias's references count for its root.

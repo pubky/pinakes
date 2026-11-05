@@ -27,13 +27,15 @@ use std::{
 use tokio::sync::{Mutex, Notify};
 use utoipa::{IntoParams, OpenApi, ToSchema};
 
-/// When each new preview of the last hour was taken, oldest first (`AppState::reserve_preview`).
-type Previews = Arc<std::sync::Mutex<std::collections::VecDeque<Instant>>>;
+/// When each new preview of the last hour was taken and by which client address, oldest first
+/// (`AppState::reserve_preview`).
+type Previews = Arc<std::sync::Mutex<std::collections::VecDeque<(Instant, std::net::IpAddr)>>>;
 /// A place taken in the instance's hour of new previews. It is given back when dropped, unless
 /// kept once the link is stored: a request that fails or is cancelled first frees it.
 struct PreviewSlot {
     previews: Previews,
     at: Instant,
+    by: std::net::IpAddr,
     kept: bool,
 }
 impl PreviewSlot {
@@ -50,7 +52,10 @@ impl Drop for PreviewSlot {
             .previews
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(at) = previews.iter().rposition(|at| *at == self.at) {
+        if let Some(at) = previews
+            .iter()
+            .rposition(|taken| *taken == (self.at, self.by))
+        {
             previews.remove(at);
         }
     }
@@ -168,27 +173,41 @@ impl AppState {
         *count += 1;
         Ok(())
     }
-    /// A place for one new preview in the instance's hour, or the seconds until the oldest place
-    /// frees.
-    fn reserve_preview(&self) -> Result<PreviewSlot, u64> {
+    /// A place for one new preview from `by` in the instance's hour; or the refusal and the
+    /// seconds until a place frees: 429 when `by` has taken its share, 503 when the hour is full.
+    fn reserve_preview(&self, by: std::net::IpAddr) -> Result<PreviewSlot, (StatusCode, u64)> {
         let hour = Duration::from_secs(3600);
+        let wait = |at: &Instant| hour.saturating_sub(at.elapsed()).as_secs().max(1);
         let mut previews = self
             .previews
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        while previews.front().is_some_and(|at| at.elapsed() >= hour) {
+        while previews.front().is_some_and(|(at, _)| at.elapsed() >= hour) {
             previews.pop_front();
         }
+        let own: Vec<&Instant> = previews
+            .iter()
+            .filter(|(_, taker)| *taker == by)
+            .map(|(at, _)| at)
+            .collect();
+        if own.len() >= self.config.preview_new_per_client_per_hour {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                own.first().map_or(1, |at| wait(at)),
+            ));
+        }
         if previews.len() >= self.config.preview_new_per_hour {
-            return Err(previews
-                .front()
-                .map_or(1, |at| hour.saturating_sub(at.elapsed()).as_secs().max(1)));
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                previews.front().map_or(1, |(at, _)| wait(at)),
+            ));
         }
         let at = Instant::now();
-        previews.push_back(at);
+        previews.push_back((at, by));
         Ok(PreviewSlot {
             previews: self.previews.clone(),
             at,
+            by,
             kept: false,
         })
     }
@@ -2488,15 +2507,16 @@ pub async fn resolve(
     let slot = if known {
         None
     } else {
-        match state.reserve_preview() {
+        match state.reserve_preview(peer.ip()) {
             Ok(slot) => Some(slot),
-            Err(seconds) => {
-                state.metrics.preview_refused.inc();
-                let mut response = ApiError(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "preview capacity reached, try again later".into(),
-                )
-                .into_response();
+            Err((status, seconds)) => {
+                let message = if status == StatusCode::TOO_MANY_REQUESTS {
+                    "new preview limit for this client reached, try again later"
+                } else {
+                    state.metrics.preview_refused.inc();
+                    "preview capacity reached, try again later"
+                };
+                let mut response = ApiError(status, message.into()).into_response();
                 response
                     .headers_mut()
                     .insert(header::RETRY_AFTER, header::HeaderValue::from(seconds));
@@ -2504,9 +2524,10 @@ pub async fn resolve(
             }
         }
     };
-    store::ensure_resource(&state.pool, &uri).await?;
-    // Stored: the place stays taken for the hour.
-    if let Some(slot) = slot {
+    let (_, created) = store::ensure_resource_created(&state.pool, &uri).await?;
+    // Stored by this request: the place stays taken for the hour. A request that found the link
+    // just stored by another gives its place back.
+    if let Some(slot) = slot.filter(|_| created) {
         slot.keep();
     }
     let id = crate::alias::resolve_id(&state.pool, &id).await?;
@@ -3339,12 +3360,14 @@ mod tests {
     #[test]
     fn a_preview_place_is_given_back_unless_kept() {
         let previews: Previews = Arc::default();
+        let by: std::net::IpAddr = "127.0.0.2".parse().unwrap();
         let take = || {
             let at = Instant::now();
-            previews.lock().unwrap().push_back(at);
+            previews.lock().unwrap().push_back((at, by));
             PreviewSlot {
                 previews: previews.clone(),
                 at,
+                by,
                 kept: false,
             }
         };

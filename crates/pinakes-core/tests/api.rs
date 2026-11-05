@@ -735,6 +735,68 @@ async fn new_previews_are_capped_for_the_whole_instance(pool: PgPool) {
     assert_eq!(code, 429);
 }
 
+/// `POST /v1/resolve` from `ip` for `uri`: the status, the headers and whether `uri` is stored.
+async fn resolve_from(
+    app: &Router,
+    pool: &PgPool,
+    ip: &str,
+    uri: &str,
+) -> (StatusCode, HeaderMap, bool) {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/v1/resolve")
+        .header("content-type", "application/json")
+        .body(Body::from(json!({ "uri": uri }).to_string()))
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        format!("{ip}:1234").parse::<SocketAddr>().unwrap(),
+    ));
+    let response = app.clone().oneshot(request).await.unwrap();
+    let (id, _, _) = identity(uri).unwrap();
+    let stored: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource WHERE id=$1)")
+        .bind(&id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    (response.status(), response.headers().clone(), stored)
+}
+
+/// One client takes at most `limits.preview_new_per_client_per_hour` of the hour's new previews:
+/// over it, that client gets 429 with `Retry-After` and nothing is stored, while another client
+/// still previews.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn one_client_takes_at_most_its_share_of_new_previews(pool: PgPool) {
+    let config = Config::from_value(json!({"limits": {
+        "preview_new_per_hour": 10,
+        "preview_new_per_client_per_hour": 1,
+    }}))
+    .unwrap();
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
+    let (code, _, stored) = resolve_from(&app, &pool, "127.0.0.2", "https://example.org/a").await;
+    assert!((code == 200 || code == 202) && stored, "{code}");
+    let (code, headers, stored) =
+        resolve_from(&app, &pool, "127.0.0.2", "https://example.org/b").await;
+    assert_eq!(code, StatusCode::TOO_MANY_REQUESTS);
+    assert!(!stored);
+    let wait: u64 = headers["retry-after"].to_str().unwrap().parse().unwrap();
+    assert!((3000..=3600).contains(&wait), "{wait}");
+    let (code, _, stored) = resolve_from(&app, &pool, "127.0.0.3", "https://example.org/b").await;
+    assert!((code == 200 || code == 202) && stored, "{code}");
+}
+
+/// `store::ensure_resource_created` says whether its call created the row: a preview keeps its
+/// place in the hour only then, so two first requests for one link take one place between them.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn only_the_request_that_stores_a_link_keeps_its_place(pool: PgPool) {
+    let uri = "https://example.org/once";
+    let (id, created) = store::ensure_resource_created(&pool, uri).await.unwrap();
+    assert!(created);
+    assert_eq!(
+        store::ensure_resource_created(&pool, uri).await.unwrap(),
+        (id, false)
+    );
+}
+
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn preview_pending_cached_completion_and_per_ip_uri_budgets(pool: PgPool) {
     let config = Config {
