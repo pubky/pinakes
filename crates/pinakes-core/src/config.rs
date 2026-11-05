@@ -71,7 +71,9 @@ pub struct Config {
     /// whole instance.
     #[serde(skip)]
     pub preview_new_per_hour: usize,
-    /// The share of those one client address may take in an hour.
+    /// The share of those one client address may take in an hour; 0 is no share. It is only a
+    /// client's own where clients reach the listener directly: behind a proxy every client has
+    /// its address.
     #[serde(skip)]
     pub preview_new_per_client_per_hour: usize,
     #[serde(skip)]
@@ -338,7 +340,7 @@ impl Config {
             grace_days: 7,
             preview_grace_hours: 24,
             preview_new_per_hour: 1000,
-            preview_new_per_client_per_hour: 100,
+            preview_new_per_client_per_hour: 0,
             // The web route (and the event routes on it) fetches arbitrary hosts: twice the
             // other resolvers' workers and rate.
             web: ResolverConfig {
@@ -1195,7 +1197,7 @@ impl Config {
             || !(1..=100000).contains(&self.preview.cache_capacity)
             || !(1..=87600).contains(&self.preview_grace_hours)
             || !(1..=1_000_000).contains(&self.preview_new_per_hour)
-            || !(1..=1_000_000).contains(&self.preview_new_per_client_per_hour)
+            || self.preview_new_per_client_per_hour > 1_000_000
         {
             bail!("invalid queue, preview or polling budget");
         }
@@ -2083,7 +2085,7 @@ mod tests {
             ("preview_grace_hours", 87601),
             ("preview_new_per_hour", 0),
             ("preview_new_per_hour", 1_000_001),
-            ("preview_new_per_client_per_hour", 0),
+            ("preview_new_per_client_per_hour", 1_000_001),
         ] {
             assert!(
                 with(serde_json::json!({"limits":{key:value}})).is_err(),
@@ -2234,7 +2236,7 @@ limits! {
     preview_cache_capacity: usize = |c| c.preview.cache_capacity => [|c, v| c.preview.cache_capacity = v],
     /// New previews per hour for the whole instance; over it `POST /v1/resolve` answers 503.
     preview_new_per_hour: usize = |c| c.preview_new_per_hour => [|c, v| c.preview_new_per_hour = v],
-    /// New previews per hour one client address may take; over it `POST /v1/resolve` answers 429.
+    /// New previews per hour one client address may take (0: no share); over it `POST /v1/resolve` answers 429.
     preview_new_per_client_per_hour: usize = |c| c.preview_new_per_client_per_hour => [|c, v| c.preview_new_per_client_per_hour = v],
     /// Podcast feed items read per scan.
     podcast_items: usize = |c| c.cards.podcast_items => [|c, v| c.cards.podcast_items = v],

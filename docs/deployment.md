@@ -98,7 +98,9 @@ not just `resource`, and budget backup retention separately from the table's sin
   that reaches it by a name (another container's `pinakes:9090`) needs that name in
   `admin_hosts = ["pinakes"]`.
 - The public API ignores forwarded client-IP headers. Behind a proxy its direct-peer budget is
-  shared by that proxy's users; enforce per-client limits at the edge. Do not expose admin routes
+  shared by that proxy's users; enforce per-client limits at the edge. For the same reason leave
+  `limits.preview_new_per_client_per_hour` at 0 behind a proxy: a share of new previews keyed on
+  the proxy's address would cap the whole instance. Do not expose admin routes
   by forwarding the public listener to the admin listener.
 - Public CORS defaults to `["*"]` without cookies or bearer credentials. Use exact origins or
   `[]` where appropriate; admin routes send no CORS headers.

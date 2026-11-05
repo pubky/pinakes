@@ -59,4 +59,4 @@ groups:
         expr: increase(pinakes_preview_refused_total[15m]) > 0
         for: 15m
         labels: {severity: warning}
-        annotations: {summary: "Pinakes refused new previews for fifteen minutes: the instance's hourly preview capacity is taken"}
+        annotations: {summary: "Pinakes refused new previews ({{ $labels.limit }}) for fifteen minutes: the hourly preview capacity or a client's share is taken"}

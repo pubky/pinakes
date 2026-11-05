@@ -62,7 +62,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `preview_uri_requests_per_minute` | `30` | Preview requests per minute per URI. |
 | `preview_cache_capacity` | `10000` | Preview cache entries. |
 | `preview_new_per_hour` | `1000` | New previews per hour for the whole instance; over it `POST /v1/resolve` answers 503. |
-| `preview_new_per_client_per_hour` | `100` | New previews per hour one client address may take; over it `POST /v1/resolve` answers 429. |
+| `preview_new_per_client_per_hour` | `0` | New previews per hour one client address may take (0: no share); over it `POST /v1/resolve` answers 429. |
 | `podcast_items` | `1000` | Podcast feed items read per scan. |
 | `group_max_members` | `256` | Most members of one automatic group. |
 | `group_max_distance_m` | `500.0` | Farthest two located members of one group (metres). |
@@ -451,11 +451,15 @@ most. A Nexus outage leaves cached data served and polling retries.
 `POST /v1/resolve` stores at most `limits.preview_new_per_hour` (1000) links the instance did not
 know in any hour, whoever asks. Over it, a new link gets 503 with `Retry-After` (the seconds until
 the oldest of the hour's previews is an hour old) and nothing is stored; a known link still
-reads, and the per-client budget's 429 comes first. One client address takes at most
-`limits.preview_new_per_client_per_hour` (100) of them: over it, that client gets 429 with
-`Retry-After` and the others go on. A place is kept only by the request that stored the link; one
+reads, and the per-client budget's 429 comes first. With
+`limits.preview_new_per_client_per_hour` set (0, no share, by default), one client address takes
+at most that many of them: over it, that client gets 429 with `Retry-After` and the others go on.
+Set it only where clients reach the listener directly: the share is keyed on the connecting
+address, as the per-IP budgets are, and behind a reverse proxy every client has the proxy's, so a
+share would cap the whole instance. A place is kept only by the request that stored the link; one
 whose request fails or goes away first is given back. The window is in memory and starts empty at
-startup. `pinakes_preview_refused_total` counts the refusals (alert `PreviewCapacityReached`),
+startup. `pinakes_preview_refused_total{limit}` counts the refusals, `instance` for the hour and
+`client` for a share (alert `PreviewCapacityReached` on either),
 and `pinakes_preview_backlog` the resources nothing ever referenced (not derived children or
 venues).
 

@@ -190,7 +190,8 @@ impl AppState {
             .filter(|(_, taker)| *taker == by)
             .map(|(at, _)| at)
             .collect();
-        if own.len() >= self.config.preview_new_per_client_per_hour {
+        let share = self.config.preview_new_per_client_per_hour;
+        if share > 0 && own.len() >= share {
             return Err((
                 StatusCode::TOO_MANY_REQUESTS,
                 own.first().map_or(1, |at| wait(at)),
@@ -2510,12 +2511,19 @@ pub async fn resolve(
         match state.reserve_preview(peer.ip()) {
             Ok(slot) => Some(slot),
             Err((status, seconds)) => {
-                let message = if status == StatusCode::TOO_MANY_REQUESTS {
-                    "new preview limit for this client reached, try again later"
+                let (limit, message) = if status == StatusCode::TOO_MANY_REQUESTS {
+                    (
+                        "client",
+                        "new preview limit for this client reached, try again later",
+                    )
                 } else {
-                    state.metrics.preview_refused.inc();
-                    "preview capacity reached, try again later"
+                    ("instance", "preview capacity reached, try again later")
                 };
+                state
+                    .metrics
+                    .preview_refused
+                    .with_label_values(&[limit])
+                    .inc();
                 let mut response = ApiError(status, message.into()).into_response();
                 response
                     .headers_mut()

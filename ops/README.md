@@ -46,7 +46,7 @@ No messages are sent or contact points provisioned by these files.
 | `pinakes_group_key_conflict_resources` | Resources whose last grouping run refused a join that would put two MusicBrainz IDs, Q-ids or Discogs IDs of one kind in a group (usually a wrong ID on a hub) |
 | `pinakes_resources{resolver,status}` | Current resource totals |
 | `pinakes_api_panics_total` | API requests (public or admin listener) whose handler panicked and were answered 500 |
-| `pinakes_preview_refused_total` | New previews `POST /v1/resolve` refused (503) because the instance's hourly preview capacity (`limits.preview_new_per_hour`) was taken |
+| `pinakes_preview_refused_total{limit}` | New previews `POST /v1/resolve` refused: `instance` (503, the hourly capacity `limits.preview_new_per_hour` taken) or `client` (429, one address's share `limits.preview_new_per_client_per_hour`, when set) |
 | `pinakes_preview_backlog` | Resources nothing ever referenced (only previewed), each kept for `limits.preview_grace_hours`; derived children and venues are not counted |
 | `pinakes_discovery_decisions_total{kind,decision}` | Optional metadata discovery decisions (a request may come from cache) |
 | `pinakes_resolution_deferred_total{reason}` | Resolutions put off without a charged attempt, by reason: `missing_unconfirmed` (a missing answer waiting for the fetch that confirms it) |

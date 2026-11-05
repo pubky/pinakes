@@ -638,10 +638,10 @@ Wayback Machine) and oEmbed providers skip it, and it is never kept as another l
 resource only previewed, never referenced, is not a search result and expires after `limits.preview_grace_hours` (a day). Previews are limited per
 client IP and per URI (`limits.preview_requests_per_minute`, `limits.preview_uri_requests_per_minute`,
 30 each); a 429 carries `Retry-After: 60`. The instance stores at most
-`limits.preview_new_per_hour` (1000) links it did not know in any hour, and one client address at
-most `limits.preview_new_per_client_per_hour` (100) of them: over the first, a new link gets 503,
-over the second 429, each with `Retry-After` (seconds), and nothing is stored, while a known link
-still reads.
+`limits.preview_new_per_hour` (1000) links it did not know in any hour, and, when the operator sets
+`limits.preview_new_per_client_per_hour` (no share by default), one client address at most that
+many of them: over the first, a new link gets 503, over the second 429, each with `Retry-After`
+(seconds), and nothing is stored, while a known link still reads.
 
 Statuses:
 

@@ -707,7 +707,8 @@ async fn new_previews_are_capped_for_the_whole_instance(pool: PgPool) {
         .parse()
         .unwrap();
     assert!((3000..=3600).contains(&wait), "{wait}");
-    assert_eq!(refused.get(), 1);
+    assert_eq!(refused.with_label_values(&["instance"]).get(), 1);
+    assert_eq!(refused.with_label_values(&["client"]).get(), 0);
     let (id, _, _) = identity("https://example.org/three").unwrap();
     let stored: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource WHERE id=$1)")
         .bind(&id)
@@ -771,7 +772,9 @@ async fn one_client_takes_at_most_its_share_of_new_previews(pool: PgPool) {
         "preview_new_per_client_per_hour": 1,
     }}))
     .unwrap();
-    let app = api::router(AppState::new(pool.clone(), config).unwrap());
+    let state = AppState::new(pool.clone(), config).unwrap();
+    let refused = state.metrics.preview_refused.clone();
+    let app = api::router(state);
     let (code, _, stored) = resolve_from(&app, &pool, "127.0.0.2", "https://example.org/a").await;
     assert!((code == 200 || code == 202) && stored, "{code}");
     let (code, headers, stored) =
@@ -782,6 +785,16 @@ async fn one_client_takes_at_most_its_share_of_new_previews(pool: PgPool) {
     assert!((3000..=3600).contains(&wait), "{wait}");
     let (code, _, stored) = resolve_from(&app, &pool, "127.0.0.3", "https://example.org/b").await;
     assert!((code == 200 || code == 202) && stored, "{code}");
+    assert_eq!(refused.with_label_values(&["client"]).get(), 1);
+}
+
+/// The per-client share of new previews is off unless the operator sets it: behind the reverse
+/// proxy the deployment asks for, every client has the proxy's address, and a share would cap the
+/// whole instance.
+#[test]
+fn the_per_client_share_is_off_unless_set() {
+    assert_eq!(Config::default().preview_new_per_client_per_hour, 0);
+    assert!(Config::from_value(json!({"limits": {"preview_new_per_client_per_hour": 0}})).is_ok());
 }
 
 /// `store::ensure_resource_created` says whether its call created the row: a preview keeps its

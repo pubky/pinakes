@@ -48,8 +48,9 @@ pub struct Metrics {
     pub group_key_conflicts: IntGauge,
     /// API handler panics (either listener) answered 500 by the backstop layer.
     pub api_panics: IntCounter,
-    /// New previews `POST /v1/resolve` refused because the instance's hour was full.
-    pub preview_refused: IntCounter,
+    /// New previews `POST /v1/resolve` refused, by the limit that refused them: the instance's
+    /// hour (`instance`) or one client's share of it (`client`).
+    pub preview_refused: IntCounterVec,
     /// Resources nothing ever referenced (only previewed), each kept for the preview grace; not
     /// derived children or venues.
     pub preview_backlog: IntGauge,
@@ -108,11 +109,17 @@ impl Metrics {
             "API requests (public or admin listener) whose handler panicked (answered 500)",
         )?;
         registry.register(Box::new(api_panics.clone()))?;
-        let preview_refused = IntCounter::new(
-            "pinakes_preview_refused_total",
-            "New previews refused because the instance's hourly preview capacity was reached",
+        let preview_refused = IntCounterVec::new(
+            Opts::new(
+                "pinakes_preview_refused_total",
+                "New previews refused, by limit: the instance's hourly capacity or one client's share",
+            ),
+            &["limit"],
         )?;
         registry.register(Box::new(preview_refused.clone()))?;
+        for limit in ["instance", "client"] {
+            preview_refused.with_label_values(&[limit]);
+        }
         let preview_backlog = IntGauge::new(
             "pinakes_preview_backlog",
             "Resources nothing ever referenced (only previewed, not a derived child or a venue), kept for the preview grace",
