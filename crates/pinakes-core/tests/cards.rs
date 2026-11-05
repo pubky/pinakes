@@ -1222,6 +1222,55 @@ async fn a_card_read_at_a_credential_resolves_nothing_back_to_it() {
     assert!(!json.contains("SECRET"), "{json}");
 }
 
+/// Nothing stored names a credential but the resource's own link, whichever field it came in by:
+/// the image, an attribute, an alias, a client link, the stream, a performer's link.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn nothing_stored_names_a_credential_but_its_own_link(pool: sqlx::PgPool) {
+    use pinakes_core::{
+        event::Performer,
+        model::{OpenIn, Stream},
+        store,
+    };
+    let uri = "https://cal.example/feed.ics?token=OWN";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let leaked = "https://cdn.example/x.png?sig=SECRET";
+    let mut d = ResourceMeta::new(uri, "web", 3600);
+    d.name = Some("Calendar".into());
+    d.image = Some(leaked.into());
+    d.attributes.insert("feed".into(), uri.into());
+    d.attributes.insert("author".into(), leaked.into());
+    d.aliases
+        .push("https://cal.example/feed.ics?key=SECRET".into());
+    d.open_in.push(OpenIn {
+        client: "App".into(),
+        url: "https://app.example/#/open?token=SECRET".into(),
+    });
+    d.stream = Some(Stream {
+        url: "https://audio.example/a.mp3?X-Amz-Signature=SECRET".into(),
+        media_type: "audio/mpeg".into(),
+        duration_s: None,
+        preview: false,
+    });
+    d.event.performers.push(Performer {
+        name: "Band".into(),
+        links: vec![leaked.into(), "https://band.example/".into()],
+    });
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    let stored: Value = sqlx::query_scalar("SELECT doc FROM resource WHERE id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let json = stored.to_string();
+    assert!(!json.contains("SECRET"), "{json}");
+    assert_eq!(stored["url"], uri);
+    assert_eq!(stored["attributes"]["feed"], uri);
+    assert_eq!(stored["name"], "Calendar");
+    assert_eq!(
+        stored["performers"][0]["links"],
+        json!(["https://band.example/"])
+    );
+}
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn social_deletion_purges_content_history(pool: sqlx::PgPool) {
     use pinakes_core::{model::Status, store};
