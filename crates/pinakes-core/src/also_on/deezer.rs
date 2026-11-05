@@ -14,6 +14,12 @@ const DEEZER_API: &str = "https://api.deezer.com";
 /// while the source is off, whoever asks: the egress refuses `api.deezer.com` then too
 /// (`also_on::off_hosts`).
 async fn deezer(cx: &Context, path: &str) -> Result<Option<Value>> {
+    Ok(answer(cx, path)
+        .await?
+        .filter(|v| v["id"].as_u64().is_some()))
+}
+/// One Deezer API answer, an object or a list; `None` when Deezer has no data (its error 800).
+async fn answer(cx: &Context, path: &str) -> Result<Option<Value>> {
     if !cx.config.also_on.source_enabled(&DeezerSource) {
         anyhow::bail!("the deezer source is off: its API is not called");
     }
@@ -40,10 +46,33 @@ async fn deezer(cx: &Context, path: &str) -> Result<Option<Value>> {
     let v: Value = serde_json::from_slice(&fetched.body)?;
     // Deezer answers errors with 200: 4 is its quota, 800 "no data".
     match v["error"]["code"].as_u64() {
-        None if v["id"].as_u64().is_some() => Ok(Some(v)),
+        None => Ok(Some(v)),
         Some(4) => Err(busy()),
         _ => Ok(None),
     }
+}
+/// The tracks of a Deezer album, by ID, as its API lists them (up to 100); `None` when Deezer has
+/// no such album. Never while the source is off.
+pub(crate) async fn album_tracks(cx: &Context, album: &str) -> Result<Option<Vec<String>>> {
+    Ok(answer(cx, &format!("album/{album}/tracks?limit=100"))
+        .await?
+        .map(|v| ids(&v["data"])))
+}
+/// The album a Deezer track is on. Never while the source is off.
+pub(crate) async fn track_album(cx: &Context, track: &str) -> Result<Option<String>> {
+    Ok(deezer(cx, &format!("track/{track}"))
+        .await?
+        .and_then(|v| v["album"]["id"].as_u64())
+        .map(|id| id.to_string()))
+}
+/// The IDs of a Deezer list.
+pub fn ids(data: &Value) -> Vec<String> {
+    data.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|t| t["id"].as_u64())
+        .map(|id| id.to_string())
+        .collect()
 }
 
 /// Deezer's public API: its own record of a Deezer link, and its lookups by ISRC and barcode.

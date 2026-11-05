@@ -166,6 +166,65 @@ impl Source for Spotify {
     }
 }
 
+/// The tracks of a Spotify album, by ID, as its public page lists them (`music:song`); `None`
+/// when Spotify has no such page.
+pub(crate) async fn album_tracks(cx: &Context, album: &str) -> Result<Option<Vec<String>>> {
+    page_links(cx, "album", album, "music:song", Level::Track).await
+}
+/// The album a Spotify track is on, as its public page names it (`music:album`).
+pub(crate) async fn track_album(cx: &Context, track: &str) -> Result<Option<String>> {
+    Ok(page_links(cx, "track", track, "music:album", Level::Album)
+        .await?
+        .and_then(|albums| albums.into_iter().next()))
+}
+/// The Spotify objects at `level` a public page names in its `<meta name="{meta}">` tags.
+async fn page_links(
+    cx: &Context,
+    kind: &str,
+    id: &str,
+    meta: &'static str,
+    level: Level,
+) -> Result<Option<Vec<String>>> {
+    let url = format!("https://open.spotify.com/{kind}/{id}");
+    let fetched = cx
+        .egress
+        .discover(
+            &url,
+            &crate::resolver::egress::FetchOptions::default(),
+            3600,
+        )
+        .await?;
+    match fetched.status {
+        200 => {}
+        429 | 500..=599 => {
+            return Err(crate::resolver::RetryLater {
+                class: "spotify_busy",
+                seconds: fetched.retry_after_secs.clamp(60, 3600),
+            }
+            .into())
+        }
+        _ => return Ok(None),
+    }
+    let body = String::from_utf8_lossy(&fetched.body).into_owned();
+    Ok(Some(
+        crate::resolver::html::blocking(move || meta_links(&body, meta, level)).await?,
+    ))
+}
+/// The IDs of the Spotify objects at `level` a page's `<meta name="{meta}">` tags name.
+pub fn meta_links(html: &str, meta: &str, level: Level) -> Vec<String> {
+    let Ok(document) = crate::resolver::html::document(html) else {
+        return vec![];
+    };
+    let selector = scraper::Selector::parse(&format!("meta[name='{meta}'][content]"))
+        .expect("a fixed selector");
+    document
+        .select(&selector)
+        .filter_map(|m| music::parse(m.value().attr("content")?))
+        .filter(|l| l.service == Service::Spotify && l.level == level)
+        .map(|l| l.id)
+        .collect()
+}
+
 /// One album or track of the catalogue (`/v1/{albums|tracks}/{id}`); `None` when Spotify has
 /// none. Its answer is shared for an hour.
 async fn object(cx: &Context, kind: Kind, id: &str) -> Result<Option<Value>> {

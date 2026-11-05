@@ -17,6 +17,7 @@ use crate::{config::Config, model::ResourceMeta, resolver::egress::Egress};
 pub mod books;
 pub mod client_credentials;
 pub mod deezer;
+pub mod editions;
 pub mod films;
 pub mod itunes;
 pub mod media;
@@ -131,7 +132,13 @@ pub struct Subject {
     pub keys: Vec<(String, String)>,
     /// When the resource was first referenced (for an archived copy closest to that time).
     pub first_seen_at: Option<DateTime<Utc>>,
+    /// The links the same thing has elsewhere, as its card may show them: those the sources before
+    /// in this run (and their earlier runs) derived for it and for the other members of its group,
+    /// and those members' own links; at most [`CANDIDATES`]. What `editions` places.
+    pub candidates: Vec<String>,
 }
+/// At most this many links a [`Subject`] carries as candidates.
+pub const CANDIDATES: i64 = 256;
 impl Subject {
     /// The keys in one namespace (`mb:recording`, `wikidata`, …), without the prefix.
     pub fn keys_in<'a>(&'a self, namespace: &'a str) -> impl Iterator<Item = &'a str> + 'a {
@@ -158,6 +165,17 @@ pub struct Found {
     /// failed run (five minutes, doubling to an hour), or after this wait (the one the service
     /// named) when longer; never after the source's lifetime.
     pub retry_after: Option<Duration>,
+    /// Where links of the resource's group sit among its releases (`link_release`).
+    pub editions: Vec<Edition>,
+}
+/// A link placed on a MusicBrainz release, for one card: `rank` 0 when the release is the card's
+/// own, then 1, 2, … for the original edition's releases in the order they were read (at most
+/// 1000); the lowest rank of a service shows (`also_on()`).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Edition {
+    pub uri: String,
+    pub release: String,
+    pub rank: i16,
 }
 /// A fact a source reads for a resource: a lower-case `name` (`[a-z][a-z0-9_]`, at most 32
 /// bytes) and a printable `value` (at most 512 bytes). Several values of one name are kept.
@@ -393,6 +411,10 @@ pub fn registry() -> Vec<Arc<dyn Source>> {
     ];
     own.into_iter()
         .chain(crate::lookups::FAMILIES.iter().flat_map(|f| f.sources()))
+        // Last: it places the links every source before it found.
+        .chain(std::iter::once(
+            Arc::new(editions::Editions) as Arc<dyn Source>
+        ))
         .collect()
 }
 /// Every source this build has, built once: for the questions a source answers from a link alone
@@ -524,6 +546,8 @@ pub fn valid_key(key: &str) -> bool {
 
 /// A derived link as stored: its resource ID, its normalised URI and the link.
 type CheckedLink = (String, String, Link);
+/// A placed link: its stored ID and its place.
+type CheckedEdition = (String, Edition);
 /// A fact's name and value as stored.
 fn valid_fact(f: &Fact) -> bool {
     let name = f.name.as_bytes();
@@ -543,7 +567,7 @@ fn checked(
     resource_id: &str,
     found: Found,
     cfg: &AlsoOnConfig,
-) -> (Vec<Key>, Vec<CheckedLink>, Vec<Fact>) {
+) -> (Vec<Key>, Vec<CheckedLink>, Vec<Fact>, Vec<CheckedEdition>) {
     let mut facts: Vec<Fact> = found
         .facts
         .into_iter()
@@ -604,10 +628,7 @@ fn checked(
             // A link is stored under its root spelling (`alias::root`, when that is a URL): a
             // tagged resource that is the same object under another spelling is its root, and
             // the link names that root.
-            let root = crate::alias::root(&link.uri)
-                .map(|a| a.root)
-                .filter(|r| r.starts_with("http"))
-                .unwrap_or_else(|| link.uri.clone());
+            let root = link_root(&link.uri);
             let Ok((id, uri, scheme)) = crate::model::identity(&root) else {
                 continue;
             };
@@ -627,7 +648,27 @@ fn checked(
             }
         }
     }
-    (keys, links, facts)
+    // Each placed link once, at its best rank, under the ID its link or member card has.
+    let mut editions: Vec<CheckedEdition> = found
+        .editions
+        .into_iter()
+        .filter_map(|mut e| {
+            e.release = crate::hubs::mbid(&e.release)?;
+            let (id, ..) = crate::model::identity(&link_root(&e.uri)).ok()?;
+            ((0..=1000).contains(&e.rank) && id != resource_id).then_some((id, e))
+        })
+        .collect();
+    editions.sort_by(|a, b| (&a.0, a.1.rank, &a.1.release).cmp(&(&b.0, b.1.rank, &b.1.release)));
+    editions.dedup_by(|a, b| a.0 == b.0);
+    editions.truncate(CANDIDATES as usize);
+    (keys, links, facts, editions)
+}
+/// The spelling a link is stored under: its root (`alias::root`) when that is a URL.
+fn link_root(uri: &str) -> String {
+    crate::alias::root(uri)
+        .map(|a| a.root)
+        .filter(|r| r.starts_with("http"))
+        .unwrap_or_else(|| uri.to_owned())
 }
 
 /// ISRCs and barcodes have one stored form (`music::isrc`, `barcode::gtin13`), as keys and facts.
@@ -659,7 +700,7 @@ pub async fn record(
     cfg: &AlsoOnConfig,
 ) -> Result<()> {
     anyhow::ensure!(token(source), "invalid source id {source}");
-    let (mut keys, mut links, mut facts) = checked(resource_id, found, cfg);
+    let (mut keys, mut links, mut facts, mut editions) = checked(resource_id, found, cfg);
     let expires = Utc::now()
         + chrono::Duration::from_std(ttl.saturating_mul(2)).unwrap_or(chrono::Duration::days(60));
     let mut tx = pool.begin().await?;
@@ -695,7 +736,7 @@ pub async fn record(
         .and_then(|(doc, _)| serde_json::from_value::<ResourceMeta>(doc).ok())
         .is_some_and(|doc| crate::changes::gone_social(&doc))
     {
-        (keys, links, facts) = Default::default();
+        (keys, links, facts, editions) = Default::default();
     }
     let key_rows: Vec<Value> = keys
         .iter()
@@ -723,6 +764,14 @@ pub async fn record(
     // A fact another source already reports keeps that source.
     sqlx::query("INSERT INTO resource_fact(resource_id,name,value,source,expires_at) SELECT $1,v->>'name',v->>'value',$2,$4 FROM jsonb_array_elements($3) v ON CONFLICT(resource_id,name,value) DO UPDATE SET seen_at=now(),expires_at=greatest(resource_fact.expires_at,excluded.expires_at) WHERE resource_fact.source=excluded.source")
         .bind(resource_id).bind(source).bind(Value::from(fact_rows)).bind(expires).execute(&mut *tx).await?;
+    let edition_rows: Vec<Value> = editions
+        .iter()
+        .map(|(id, e)| serde_json::json!({"id": id, "release": e.release, "rank": e.rank}))
+        .collect();
+    sqlx::query("DELETE FROM link_release WHERE resource_id=$1 AND source=$2 AND NOT link_id=ANY(SELECT v->>'id' FROM jsonb_array_elements($3) v)")
+        .bind(resource_id).bind(source).bind(Value::from(edition_rows.clone())).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO link_release(resource_id,link_id,release,rank,source,expires_at) SELECT $1,v->>'id',v->>'release',(v->>'rank')::smallint,$2,$4 FROM jsonb_array_elements($3) v ON CONFLICT(resource_id,link_id) DO UPDATE SET release=excluded.release,rank=excluded.rank,seen_at=now(),expires_at=excluded.expires_at WHERE link_release.source=excluded.source")
+        .bind(resource_id).bind(source).bind(Value::from(edition_rows)).bind(expires).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -762,7 +811,11 @@ pub async fn prune(pool: &PgPool) -> Result<u64> {
         .execute(pool)
         .await?
         .rows_affected();
-    Ok(keys + links + facts)
+    let placed = sqlx::query("DELETE FROM link_release WHERE expires_at<=now()")
+        .execute(pool)
+        .await?
+        .rows_affected();
+    Ok(keys + links + facts + placed)
 }
 
 async fn subject(pool: &PgPool, id: &str) -> Result<Option<Subject>> {
@@ -783,7 +836,16 @@ async fn subject(pool: &PgPool, id: &str) -> Result<Option<Subject>> {
             .and_then(|_| serde_json::from_value(row["doc"].clone()).ok()),
         keys: serde_json::from_value(row["keys"].clone()).unwrap_or_default(),
         first_seen_at: row["first_seen_at"].as_str().and_then(|s| s.parse().ok()),
+        candidates: candidates(pool, id).await?,
     }))
+}
+/// The links a card may show besides its own (`Subject::candidates`), by URI.
+async fn candidates(pool: &PgPool, id: &str) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar("WITH owners AS (SELECT $1::text AS id UNION SELECT u.resource_id FROM group_unit g JOIN group_unit u USING(group_id) WHERE g.unit_id=$1 AND g.group_id IS NOT NULL) SELECT uri FROM (SELECT l.uri FROM derived_link l JOIN owners o ON o.id=l.resource_id WHERE l.expires_at>now() AND l.source NOT IN (SELECT source FROM also_on_source_off) UNION SELECT r.uri FROM owners o JOIN resource r ON r.id=o.id WHERE o.id<>$1) x ORDER BY uri LIMIT $2")
+        .bind(id)
+        .bind(CANDIDATES)
+        .fetch_all(pool)
+        .await?)
 }
 
 /// How far ahead a claimed resource's next attempt moves, so a crashed worker's rows come back.
@@ -963,7 +1025,7 @@ async fn one(
     {
         if gone || withheld || !source.applies(&subject) {
             // It read the resource before (a key it starts from is gone): its rows go too.
-            let had: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource_key WHERE resource_id=$1 AND source=$2) OR EXISTS(SELECT 1 FROM derived_link WHERE resource_id=$1 AND source=$2) OR EXISTS(SELECT 1 FROM resource_fact WHERE resource_id=$1 AND source=$2)")
+            let had: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource_key WHERE resource_id=$1 AND source=$2) OR EXISTS(SELECT 1 FROM derived_link WHERE resource_id=$1 AND source=$2) OR EXISTS(SELECT 1 FROM resource_fact WHERE resource_id=$1 AND source=$2) OR EXISTS(SELECT 1 FROM link_release WHERE resource_id=$1 AND source=$2)")
                 .bind(id)
                 .bind(source.id())
                 .fetch_one(pool)
@@ -1002,6 +1064,7 @@ async fn one(
                     .bind(id)
                     .fetch_all(pool)
                     .await?;
+                subject.candidates = candidates(pool, id).await?;
             }
             Err(error) => {
                 // The longest wait any failing source asked for sets the retry.

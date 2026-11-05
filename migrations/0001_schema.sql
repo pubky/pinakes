@@ -772,6 +772,26 @@ CREATE TABLE derived_link (
 CREATE INDEX derived_link_named_idx ON derived_link USING btree (link_id) WHERE key IS NOT NULL;
 CREATE INDEX derived_link_key_idx ON derived_link USING btree (key) WHERE key IS NOT NULL;
 
+-- Where the links of a recording's or an album's card sit among the releases MusicBrainz lists
+-- (the `editions` source), for the card `resource_id`: `rank` 0 for a link on the card's own
+-- release, then 1, 2, … for one on the original edition, in the order the source reads its
+-- releases (worldwide digital first, then the earliest); `release` is that release. A link with
+-- no row is on no release the source could place. `also_on()` shows each service's best link.
+CREATE TABLE link_release (
+    resource_id text NOT NULL REFERENCES resource(id) ON DELETE CASCADE,
+    link_id text NOT NULL,
+    release text NOT NULL,
+    rank smallint NOT NULL,
+    source text NOT NULL,
+    seen_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    PRIMARY KEY (resource_id, link_id),
+    CONSTRAINT link_release_link_id_check CHECK ((link_id ~ '^[0-9a-f]{32}$'::text)),
+    CONSTRAINT link_release_release_check CHECK ((release ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'::text)),
+    CONSTRAINT link_release_rank_check CHECK ((rank BETWEEN 0 AND 1000)),
+    CONSTRAINT link_release_source_check CHECK ((source ~ '^[a-z0-9_]{1,32}$'))
+);
+
 -- The also-on sources the operator has switched off (`[also_on.sources.<id>] enabled = false`,
 -- or off by default and not turned on), written at startup from the configuration
 -- (`also_on::configure`). Their keys, facts and links stay and expire as before, but nothing
@@ -809,6 +829,7 @@ CREATE TRIGGER resource_key_group_revision AFTER INSERT OR DELETE OR UPDATE OF k
 CREATE TRIGGER resource_key_revision BEFORE INSERT OR DELETE OR UPDATE ON resource_key FOR EACH STATEMENT EXECUTE FUNCTION bump_search_revision();
 CREATE TRIGGER resource_fact_revision BEFORE INSERT OR DELETE OR UPDATE ON resource_fact FOR EACH STATEMENT EXECUTE FUNCTION bump_search_revision();
 CREATE TRIGGER derived_link_revision BEFORE INSERT OR DELETE OR UPDATE ON derived_link FOR EACH STATEMENT EXECUTE FUNCTION bump_search_revision();
+CREATE TRIGGER link_release_revision BEFORE INSERT OR DELETE OR UPDATE ON link_release FOR EACH STATEMENT EXECUTE FUNCTION bump_search_revision();
 
 -- A keyed derived link is evidence for the tagged resource it names: a change regroups it.
 CREATE FUNCTION mark_named_group_dirty() RETURNS trigger
@@ -852,13 +873,15 @@ CREATE TRIGGER also_on_source_revision BEFORE INSERT OR DELETE ON also_on_source
 -- own). `members` false (groups switched off) leaves the group out. Read at
 -- request time: OSM-derived values never enter these tables, and a switched-off source's rows
 -- (`also_on_source_off`) are not read.
--- A card (`per_site`) shows one entry per service. A tagged member whose URL is on a service
--- (`doc.service`: a music service, or one a derived link names, such as Wikidata's F-Droid link)
--- takes that service's place ahead of the derived links (on music, the member on the recording's
--- original album first, then by ID); otherwise the derived link most members name. A page that
--- only calls itself after a service (its own `site`) takes no service's place, and other tagged
--- members show one entry each. The card's own service, by its URL, has its link, the card, so it
--- shows no other page there. The details read (`per_site` false) lists them all.
+-- A card (`per_site`) shows one entry per service: the link on the card's own release first, then
+-- one on the original edition (`link_release`, best rank); among links neither places, a tagged
+-- member whose URL is on a service (`doc.service`: a music service, or one a derived link names,
+-- such as Wikidata's F-Droid link) ahead of the derived links (on music, the member on the
+-- recording's original album first), then the derived link most members name; then a page ahead
+-- of a file (a `.pdf`), the shorter link, the link. A page that only calls itself after a service
+-- (its own `site`) takes no service's place, and other tagged members show one entry each. The
+-- card's own service, by its URL, has its link, the card, so it shows no other page there.
+-- `per_site` false lists them all.
 CREATE FUNCTION also_on(unit text, resource text, cap integer, members boolean, per_site boolean DEFAULT true) RETURNS jsonb
     LANGUAGE sql STABLE
     AS $$
@@ -897,14 +920,20 @@ CREATE FUNCTION also_on(unit text, resource text, cap integer, members boolean, 
      AND NOT EXISTS(SELECT 1 FROM owners x WHERE x.resource_id=l.link_id)
      AND NOT EXISTS(SELECT 1 FROM tagged t WHERE t.id=l.link_id)
    ORDER BY l.link_id,l.seen_at DESC,l.via),
+ -- Where each link sits among the card's releases (`link_release`): NULL when unplaced.
+ placed AS (SELECT x.link_id,min(x.rank) AS rank FROM link_release x WHERE x.resource_id=also_on.resource
+   AND x.expires_at>now() AND x.source NOT IN (SELECT source FROM also_on_source_off) GROUP BY x.link_id),
  entries AS (SELECT CASE WHEN mine THEN 1 ELSE 0 END AS o,id AS k1,uri AS k2,
+     (SELECT rank FROM placed p WHERE p.link_id=tagged.id) AS edition,
      CASE WHEN starts_with(lower(album),(SELECT title FROM original)) THEN -1 ELSE 0 END::bigint AS rank,
      CASE WHEN service IS NOT NULL AND (music OR lower(service) IN (SELECT service FROM services)) THEN lower(service) ELSE 'member:'||id END AS service,
      jsonb_build_object('id',id,'uri',uri,'host',host,'site',site) AS e FROM tagged
-   UNION ALL SELECT 2,lower(site),uri,-named,lower(site),jsonb_strip_nulls(jsonb_build_object('uri',uri,'site',site,'derived',true,'via',via,'kind',kind,'at',at)) FROM derived),
+   UNION ALL SELECT 2,lower(site),uri,(SELECT rank FROM placed p WHERE p.link_id=derived.link_id),-named,lower(site),jsonb_strip_nulls(jsonb_build_object('uri',uri,'site',site,'derived',true,'via',via,'kind',kind,'at',at)) FROM derived),
  -- The card's own service, by its URL alone, like a member's.
  own AS (SELECT lower(coalesce(r.doc->>'service',CASE WHEN r.osm_type IS NOT NULL THEN 'OpenStreetMap' END)) AS service FROM resource r WHERE r.id=also_on.resource),
- shown AS (SELECT * FROM (SELECT *,row_number() OVER (PARTITION BY service ORDER BY o,rank,k2) AS nth FROM entries) x
+ shown AS (SELECT * FROM (SELECT *,row_number() OVER (PARTITION BY service ORDER BY coalesce(edition,500),o,rank,
+     e->>'kind' IS NOT DISTINCT FROM 'pdf' OR k2 ~* '\.(pdf|xml|txt|zip|json|csv|epub|mobi|docx?|xlsx?|odt|rtf)([?#]|$)',
+     length(k2),k2) AS nth FROM entries) x
    WHERE NOT per_site OR (nth=1 AND service IS DISTINCT FROM (SELECT service FROM own)))
  SELECT coalesce((SELECT jsonb_agg(e ORDER BY o,k1,k2) FROM (SELECT * FROM shown ORDER BY o,k1,k2 LIMIT cap) x),'[]'::jsonb)
 $$;

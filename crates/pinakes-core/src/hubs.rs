@@ -535,6 +535,38 @@ pub mod musicbrainz {
             .min()
             .map(|(_, title)| title.to_owned())
     }
+    /// The official releases MusicBrainz lists for `query` (`recording={mbid}&type=album`,
+    /// `release-group={mbid}`), each with its release group and media: up to `pages` pages of
+    /// 100, in MusicBrainz's order. A page it doesn't answer ends the list.
+    pub async fn releases(
+        egress: &Egress,
+        base: &str,
+        query: &str,
+        pages: usize,
+    ) -> Result<Vec<Value>> {
+        let mut releases = vec![];
+        for page in 0..pages {
+            let offset = if page == 0 {
+                String::new()
+            } else {
+                format!("&offset={}", page * 100)
+            };
+            let url = format!(
+                "{base}/release?{query}&status=official&inc=release-groups+media&limit=100{offset}&fmt=json"
+            );
+            let Some(v) = get(egress, &url, "musicbrainz").await? else {
+                break;
+            };
+            let batch = v["releases"].as_array().cloned().unwrap_or_default();
+            let count = v["release-count"].as_u64().unwrap_or(0) as usize;
+            let done = batch.len() < 100 || (page + 1) * 100 >= count;
+            releases.extend(batch);
+            if done {
+                break;
+            }
+        }
+        Ok(releases)
+    }
     /// A recording an ISRC is on, with its length when MusicBrainz states one.
     #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
     pub struct IsrcRecording {

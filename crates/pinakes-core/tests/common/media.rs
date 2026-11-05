@@ -286,6 +286,7 @@ pub fn subject(uri: &str, type_name: Option<&str>, doc: Option<ResourceMeta>) ->
         doc,
         keys: Vec::new(),
         first_seen_at: None,
+        candidates: vec![],
     }
 }
 pub fn keys(found: &Found) -> Vec<&str> {

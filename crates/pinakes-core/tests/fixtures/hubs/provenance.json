@@ -1,4 +1,34 @@
 {
+  "deezer-album-6575789-tracks": {
+    "bytes": 10718,
+    "content_type": "application/json",
+    "file": "deezer-album-6575789-tracks.json",
+    "note": "Random Access Memories (original XW digital): its tracks",
+    "recorded_at": "2026-11-05T21:59:47+00:00",
+    "sha256": "09cfdd4d429ea65014f5c2b63993b8d2b5b128543b58aa9e48cef6694cef713b",
+    "status": 200,
+    "url": "https://api.deezer.com/album/6575789/tracks?limit=100"
+  },
+  "itunes-album-1673536063": {
+    "bytes": 36428,
+    "content_type": "text/javascript",
+    "file": "itunes-album-1673536063.json",
+    "note": "Random Access Memories 10th anniversary: its songs",
+    "recorded_at": "2026-11-05T21:59:46+00:00",
+    "sha256": "ef0a969e28a3e3c1c04a3ad48a2932a67eb36fc97b96ab3893430425a11eb8c5",
+    "status": 200,
+    "url": "https://itunes.apple.com/lookup?id=1673536063&entity=song&country=us"
+  },
+  "itunes-album-617154241": {
+    "bytes": 20905,
+    "content_type": "text/javascript",
+    "file": "itunes-album-617154241.json",
+    "note": "Random Access Memories (original, Apple Digital Master): its songs",
+    "recorded_at": "2026-11-05T21:59:46+00:00",
+    "sha256": "b6f2c5b103d21b199d0277a9ef702b306cc87f40ccff8922c749f5ee33307e8b",
+    "status": 200,
+    "url": "https://itunes.apple.com/lookup?id=617154241&entity=song&country=us"
+  },
   "itunes-song-1097861770": {
     "bytes": 1541,
     "content_type": "text/javascript",
@@ -8,5 +38,295 @@
     "sha256": "0f86dd990fecfc887f80833c64224e2fe82a5f5afddd7a68b1ecf81c02d61d3d",
     "status": 200,
     "url": "https://itunes.apple.com/lookup?id=1097861770&entity=song&country=us"
+  },
+  "itunes-song-1673536443": {
+    "bytes": 1656,
+    "content_type": "text/javascript",
+    "file": "itunes-song-1673536443.json",
+    "note": "Get Lucky: Apple track 1673536443 (10th anniversary)",
+    "recorded_at": "2026-11-05T21:59:47+00:00",
+    "sha256": "7e471679461f02166ffd9b8e2a79c4e7577a33c3d790b7df0d9001ffd577abdf",
+    "status": 200,
+    "url": "https://itunes.apple.com/lookup?id=1673536443&entity=song&country=us"
+  },
+  "mb-browse-group-releases-8e8a594f": {
+    "bytes": 110851,
+    "content_type": "application/json",
+    "file": "mb-browse-group-releases-8e8a594f.json",
+    "note": "Kind of Blue: the release group's official releases with their release group and media",
+    "recorded_at": "2026-11-05T22:07:46+00:00",
+    "sha256": "2e880b12816005eaa01d6d9ffa8aafb399d0b20c312d172e6a16a4b3d9f63a2d",
+    "status": 200,
+    "url": "https://musicbrainz.org/ws/2/release?release-group=8e8a594f-2175-38c7-a871-abb68ec363e7&status=official&inc=release-groups+media&limit=100&fmt=json"
+  },
+  "mb-browse-group-releases-8e8a594f-100": {
+    "bytes": 30790,
+    "content_type": "application/json",
+    "file": "mb-browse-group-releases-8e8a594f-100.json",
+    "note": "Kind of Blue: the release group's official releases, offset 100",
+    "recorded_at": "2026-11-05T22:10:40+00:00",
+    "sha256": "1d8ac2ba35c874836a4c29826d578f6af4c0fb7f2d79664d0a2d4a39884472d5",
+    "status": 200,
+    "url": "https://musicbrainz.org/ws/2/release?release-group=8e8a594f-2175-38c7-a871-abb68ec363e7&status=official&inc=release-groups+media&limit=100&offset=100&fmt=json"
+  },
+  "mb-browse-releases-833f00e1-album": {
+    "bytes": 32546,
+    "content_type": "application/json",
+    "file": "mb-browse-releases-833f00e1-album.json",
+    "note": "Get Lucky: official album releases with their media",
+    "recorded_at": "2026-11-05T21:57:05+00:00",
+    "sha256": "4f4a9f273a8c253d2a3a9ef9390bf5ab8525f0eda63ddf7f2e1ec2234c02eef0",
+    "status": 200,
+    "url": "https://musicbrainz.org/ws/2/release?recording=833f00e1-781f-4edd-90e4-e52712618862&type=album&status=official&inc=release-groups+media&limit=100&fmt=json"
+  },
+  "mb-browse-releases-b1a9c0e9-album": {
+    "bytes": 122064,
+    "content_type": "application/json",
+    "file": "mb-browse-releases-b1a9c0e9-album.json",
+    "note": "Bohemian Rhapsody: official album releases, first page",
+    "recorded_at": "2026-11-05T21:55:37+00:00",
+    "sha256": "5e36056acb540b5ea41046d65d30de978b96179ec9e680a7e3210fac47cb3abe",
+    "status": 200,
+    "url": "https://musicbrainz.org/ws/2/release?recording=b1a9c0e9-d987-4042-ae91-78d6a3267d69&type=album&status=official&inc=release-groups+media&limit=100&fmt=json"
+  },
+  "mb-browse-releases-b1a9c0e9-album-100": {
+    "bytes": 138615,
+    "content_type": "application/json",
+    "file": "mb-browse-releases-b1a9c0e9-album-100.json",
+    "note": "Bohemian Rhapsody: official album releases, offset 100",
+    "recorded_at": "2026-11-05T21:56:12+00:00",
+    "sha256": "1b3acbc72480500f50abd89542c72eccf64b3643722a23289fcd626e99d8da00",
+    "status": 200,
+    "url": "https://musicbrainz.org/ws/2/release?recording=b1a9c0e9-d987-4042-ae91-78d6a3267d69&type=album&status=official&inc=release-groups+media&limit=100&offset=100&fmt=json"
+  },
+  "mb-browse-releases-b1a9c0e9-album-200": {
+    "bytes": 135398,
+    "content_type": "application/json",
+    "file": "mb-browse-releases-b1a9c0e9-album-200.json",
+    "note": "Bohemian Rhapsody: official album releases, offset 200",
+    "recorded_at": "2026-11-05T21:56:13+00:00",
+    "sha256": "8d6d04e47ee7c9707413c80e5efe430014ae149cf62741b018c3131663f1cd55",
+    "status": 200,
+    "url": "https://musicbrainz.org/ws/2/release?recording=b1a9c0e9-d987-4042-ae91-78d6a3267d69&type=album&status=official&inc=release-groups+media&limit=100&offset=200&fmt=json"
+  },
+  "mb-browse-releases-b1a9c0e9-album-300": {
+    "bytes": 9743,
+    "content_type": "application/json",
+    "file": "mb-browse-releases-b1a9c0e9-album-300.json",
+    "note": "Bohemian Rhapsody: official album releases, offset 300",
+    "recorded_at": "2026-11-05T21:56:15+00:00",
+    "sha256": "8de4573bf8155b421bc585c67c7d39f73d75fee86ec825158374939bd4dcd037",
+    "status": 200,
+    "url": "https://musicbrainz.org/ws/2/release?recording=b1a9c0e9-d987-4042-ae91-78d6a3267d69&type=album&status=official&inc=release-groups+media&limit=100&offset=300&fmt=json"
+  },
+  "mb-recording-833f00e1": {
+    "bytes": 8905,
+    "content_type": "application/json",
+    "file": "mb-recording-833f00e1.json",
+    "note": "Get Lucky: recording url-rels",
+    "recorded_at": "2026-11-05T21:54:59+00:00",
+    "sha256": "cfe69add2dd096f136384003c21305097e5ad887dd09406c01c734dbd9bce988",
+    "status": 200,
+    "url": "https://musicbrainz.org/ws/2/recording/833f00e1-781f-4edd-90e4-e52712618862?inc=url-rels+isrcs+artist-credits&fmt=json"
+  },
+  "mb-release-08db0e51": {
+    "bytes": 2060,
+    "content_type": "application/json",
+    "file": "mb-release-08db0e51.json",
+    "note": "Bohemian Rhapsody: release 2014-10-27 CA Mastered for iTunes",
+    "recorded_at": "2026-11-05T21:58:04+00:00",
+    "sha256": "d5ef9ca413c9f1dd04f16c9cea98a61f5af11d22038d39806299bdbb05b4f590",
+    "status": 200,
+    "url": "https://musicbrainz.org/ws/2/release/08db0e51-03c0-43ac-bd4b-5625f5787653?inc=url-rels+release-groups+artist-credits&fmt=json"
+  },
+  "mb-release-158f94bf": {
+    "bytes": 1518,
+    "content_type": "application/json",
+    "file": "mb-release-158f94bf.json",
+    "note": "Get Lucky: release 2013-05 BR",
+    "recorded_at": "2026-11-05T21:57:26+00:00",
+    "sha256": "399af5d5a04f437a78d3e405af3c4132cf0d669bed371e5495904ecdc55bd62b",
+    "status": 200,
+    "url": "https://musicbrainz.org/ws/2/release/158f94bf-d77f-4055-afa4-8fc7e0b2a004?inc=url-rels+release-groups+artist-credits&fmt=json"
+  },
+  "mb-release-1f1710cf": {
+    "bytes": 1877,
+    "content_type": "application/json",
+    "file": "mb-release-1f1710cf.json",
+    "note": "Get Lucky: release 2013-05 KR",
+    "recorded_at": "2026-11-05T21:57:29+00:00",
+    "sha256": "371e1e63db280d3742d3f46f3a445c73f9ded7a5b639b005c629c2b7963c8344",
+    "status": 200,
+    "url": "https://musicbrainz.org/ws/2/release/1f1710cf-17cf-4a5e-80df-d39ce2b191b9?inc=url-rels+release-groups+artist-credits&fmt=json"
+  },
+  "mb-release-23c40c6e": {
+    "bytes": 1846,
+    "content_type": "application/json",
+    "file": "mb-release-23c40c6e.json",
+    "note": "Bohemian Rhapsody: release 2011-07-26 US",
+    "recorded_at": "2026-11-05T21:57:54+00:00",
+    "sha256": "a61c2d907e856009abd5b1aa7f5b785d9118803781680caf8bf30698738b0de8",
+    "status": 200,
+    "url": "https://musicbrainz.org/ws/2/release/23c40c6e-7ec2-40a9-8758-fa9f6ca79e3c?inc=url-rels+release-groups+artist-credits&fmt=json"
+  },
+  "mb-release-36e2aede": {
+    "bytes": 3252,
+    "content_type": "application/json",
+    "file": "mb-release-36e2aede.json",
+    "note": "Get Lucky: release 2013-05-17 XW Apple Digital Master",
+    "recorded_at": "2026-11-05T21:57:10+00:00",
+    "sha256": "f718d4e33c3a91867a87c93a4f41cdb41f65ec793b609d336993ae89caadc235",
+    "status": 200,
+    "url": "https://musicbrainz.org/ws/2/release/36e2aede-346d-4931-8565-78d810d167c7?inc=url-rels+release-groups+artist-credits&fmt=json"
+  },
+  "mb-release-4c8af71f": {
+    "bytes": 4446,
+    "content_type": "application/json",
+    "file": "mb-release-4c8af71f.json",
+    "note": "Kind of Blue: release 4c8af71f-5746-4981-92d7-0d6c64db1155",
+    "recorded_at": "2026-11-05T22:00:53+00:00",
+    "sha256": "9700f02cdbc2af7b9d44c41064b703047fb3ec71a5decea57944e487a063629d",
+    "status": 200,
+    "url": "https://musicbrainz.org/ws/2/release/4c8af71f-5746-4981-92d7-0d6c64db1155?inc=url-rels+release-groups+artist-credits&fmt=json"
+  },
+  "mb-release-5000a285": {
+    "bytes": 9082,
+    "content_type": "application/json",
+    "file": "mb-release-5000a285.json",
+    "note": "Get Lucky: release 2013-05-17 XW",
+    "recorded_at": "2026-11-05T21:57:14+00:00",
+    "sha256": "9db54b232ac18bac66f7901b45096815d7666e9b472de2f10833d511f1530e8a",
+    "status": 200,
+    "url": "https://musicbrainz.org/ws/2/release/5000a285-b67e-4cfc-b54b-2b98f1810d2e?inc=url-rels+release-groups+artist-credits&fmt=json"
+  },
+  "mb-release-59c466a7": {
+    "bytes": 3328,
+    "content_type": "application/json",
+    "file": "mb-release-59c466a7.json",
+    "note": "Bohemian Rhapsody: release 2011 XW",
+    "recorded_at": "2026-11-05T21:57:48+00:00",
+    "sha256": "41130f5646f63478e071b49da934e67d961678ffce2d308a8dfa34d215a010f9",
+    "status": 200,
+    "url": "https://musicbrainz.org/ws/2/release/59c466a7-d981-4078-bffb-10bab7b023e6?inc=url-rels+release-groups+artist-credits&fmt=json"
+  },
+  "mb-release-9ebe5c48": {
+    "bytes": 1831,
+    "content_type": "application/json",
+    "file": "mb-release-9ebe5c48.json",
+    "note": "Bohemian Rhapsody: release 2009 MX",
+    "recorded_at": "2026-11-05T21:57:43+00:00",
+    "sha256": "3d129a40e31411369987938c6a251b2b432efef8ba1475b7fa154878526f4d68",
+    "status": 200,
+    "url": "https://musicbrainz.org/ws/2/release/9ebe5c48-9a91-4e55-9ac1-5040a5a22088?inc=url-rels+release-groups+artist-credits&fmt=json"
+  },
+  "mb-release-bee5e0cd": {
+    "bytes": 2236,
+    "content_type": "application/json",
+    "file": "mb-release-bee5e0cd.json",
+    "note": "Kind of Blue: release bee5e0cd-1767-4a8e-9578-6455e87ba60b",
+    "recorded_at": "2026-11-05T22:00:50+00:00",
+    "sha256": "f9d519414b350f559e948f5deeb9c3fe953a8ed87a28fbbf5547a263bc2d8352",
+    "status": 200,
+    "url": "https://musicbrainz.org/ws/2/release/bee5e0cd-1767-4a8e-9578-6455e87ba60b?inc=url-rels+release-groups+artist-credits&fmt=json"
+  },
+  "mb-release-cdb012b3": {
+    "bytes": 2596,
+    "content_type": "application/json",
+    "file": "mb-release-cdb012b3.json",
+    "note": "Bohemian Rhapsody: release 2014 XW Mastered for iTunes",
+    "recorded_at": "2026-11-05T21:58:01+00:00",
+    "sha256": "44a95f59188506a251c2e30ff7badcfc8c911ae611082fd0db30c716f701e3b5",
+    "status": 200,
+    "url": "https://musicbrainz.org/ws/2/release/cdb012b3-be25-49bb-b9f1-4d1652a661ef?inc=url-rels+release-groups+artist-credits&fmt=json"
+  },
+  "mb-release-e65fcfb0": {
+    "bytes": 11004,
+    "content_type": "application/json",
+    "file": "mb-release-e65fcfb0.json",
+    "note": "Get Lucky: release 2023-05-12 XW 10th anniversary edition",
+    "recorded_at": "2026-11-05T21:57:22+00:00",
+    "sha256": "3905ccbc951dba5693e8f82bf973f679e5e61a4585418cad82558e00a5cdbbf5",
+    "status": 200,
+    "url": "https://musicbrainz.org/ws/2/release/e65fcfb0-02dc-407c-ab28-8168dafcb999?inc=url-rels+release-groups+artist-credits&fmt=json"
+  },
+  "mb-release-e8ada6e5": {
+    "bytes": 2024,
+    "content_type": "application/json",
+    "file": "mb-release-e8ada6e5.json",
+    "note": "Bohemian Rhapsody: release 2011 CA",
+    "recorded_at": "2026-11-05T21:57:51+00:00",
+    "sha256": "ca143218308ed88d230d7ab03afeced0ccd66d2ce1919360a6ca41e2ade69ffa",
+    "status": 200,
+    "url": "https://musicbrainz.org/ws/2/release/e8ada6e5-73d6-402b-88f5-0c44e1e48c1f?inc=url-rels+release-groups+artist-credits&fmt=json"
+  },
+  "mb-release-ec116461": {
+    "bytes": 4086,
+    "content_type": "application/json",
+    "file": "mb-release-ec116461.json",
+    "note": "Get Lucky: release 2015-09-08 XW 88.2kHz/24\u2010bit",
+    "recorded_at": "2026-11-05T21:57:17+00:00",
+    "sha256": "0300f7ce15b208c61f332b9641f9ed140273a1b56621e28383ad72901f7e335c",
+    "status": 200,
+    "url": "https://musicbrainz.org/ws/2/release/ec116461-5b0d-4c98-bb44-a4de5de63076?inc=url-rels+release-groups+artist-credits&fmt=json"
+  },
+  "mb-url-spotify-album-1weenld61qoidwYuZ1GESA": {
+    "bytes": 1669,
+    "content_type": "application/json",
+    "file": "mb-url-spotify-album-1weenld61qoidwYuZ1GESA.json",
+    "note": "Kind of Blue: what the Spotify album link is related to",
+    "recorded_at": "2026-11-05T22:00:36+00:00",
+    "sha256": "faf840fe35c3a23f4a7542f4433c8341da22ee99629b1fcc26f2239220bb4c39",
+    "status": 200,
+    "url": "https://musicbrainz.org/ws/2/url?resource=https%3A%2F%2Fopen.spotify.com%2Falbum%2F1weenld61qoidwYuZ1GESA&inc=recording-rels%2Brelease-rels%2Brelease-group-rels%2Bartist-rels&fmt=json"
+  },
+  "mb-url-spotify-album-4m2880jivSbbyEGAKfITCa": {
+    "bytes": 908,
+    "content_type": "application/json",
+    "file": "mb-url-spotify-album-4m2880jivSbbyEGAKfITCa.json",
+    "note": "Random Access Memories: what Spotify's album link is related to",
+    "recorded_at": "2026-11-05T22:10:37+00:00",
+    "sha256": "48b333df42a6b638b515e51474411341368ca61431260353f95276e4cd4a6eaa",
+    "status": 200,
+    "url": "https://musicbrainz.org/ws/2/url?resource=https%3A%2F%2Fopen.spotify.com%2Falbum%2F4m2880jivSbbyEGAKfITCa&inc=recording-rels%2Brelease-rels%2Brelease-group-rels%2Bartist-rels&fmt=json"
+  },
+  "spotify-album-4m2880jivSbbyEGAKfITCa": {
+    "bytes": 271489,
+    "content_type": "text/html",
+    "file": "spotify-album-4m2880jivSbbyEGAKfITCa.html",
+    "note": "Random Access Memories (original): Spotify's album page, its music:song metas",
+    "recorded_at": "2026-11-05T22:00:24+00:00",
+    "sha256": "a9089225e713d7d744fc6e965289085cbae0fd298be7d63c80f8ecfd93388d9b",
+    "status": 200,
+    "url": "https://open.spotify.com/album/4m2880jivSbbyEGAKfITCa"
+  },
+  "spotify-track-69kOkLUCkxIZYexIgSG8rq": {
+    "bytes": 352583,
+    "content_type": "text/html",
+    "file": "spotify-track-69kOkLUCkxIZYexIgSG8rq.html",
+    "note": "Get Lucky: Spotify's track page, its music:album meta",
+    "recorded_at": "2026-11-05T22:00:24+00:00",
+    "sha256": "23cca883ebf01832d22af2f08714cfdbb1e15c7fa585a60756c1e011199dabee",
+    "status": 200,
+    "url": "https://open.spotify.com/track/69kOkLUCkxIZYexIgSG8rq"
+  },
+  "tidal-album-20115556-items": {
+    "bytes": 1073,
+    "content_type": "application/vnd.api+json",
+    "file": "tidal-album-20115556-items.json",
+    "note": "Random Access Memories (original): the album's items",
+    "recorded_at": "2026-11-05T21:59:48+00:00",
+    "sha256": "b16ffdc2d9a93dd8ce3b0058955d1b8acbacb2c89c57bbee136c551d61a11063",
+    "status": 200,
+    "url": "https://openapi.tidal.com/v2/albums/20115556/relationships/items?countryCode=US"
+  },
+  "tidal-track-20115564-albums": {
+    "bytes": 1445,
+    "content_type": "application/vnd.api+json",
+    "file": "tidal-track-20115564-albums.json",
+    "note": "Get Lucky: TIDAL track 20115564 with its albums",
+    "recorded_at": "2026-11-05T21:59:48+00:00",
+    "sha256": "f8b60f3772a1e82e1003f8fbe5ba6ef309fa60b18f065b2404a46f98a9d15b60",
+    "status": 200,
+    "url": "https://openapi.tidal.com/v2/tracks/20115564?countryCode=US&include=albums"
   }
 }

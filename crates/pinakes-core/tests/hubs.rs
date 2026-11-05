@@ -710,6 +710,7 @@ async fn the_deezer_source_off_calls_nothing_even_asked_directly() {
                 doc: None,
                 keys: keys.clone(),
                 first_seen_at: None,
+                candidates: vec![],
             };
             assert!(deezer.applies(&subject), "{uri}");
             let found = deezer.lookup(&cx, &subject).await;
