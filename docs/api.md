@@ -630,10 +630,13 @@ preview caller share one queue entry per normalized URI, with one TTL, retry sch
 dead-letter state. A 202 carries the ID to poll with `GET /v1/resources/{id}`. Unsupported
 schemes or disabled resolvers return 400, and so does a link that carries a credential: a
 calendar provider's secret share link (the patterns `scripts/verify-no-capability-urls` keeps out
-of the repository), a password in the user info, or a query or fragment key such as `token`,
-`access_token`, `key`, `sig` or `signature` (`capability::CREDENTIAL_KEYS`). It is not stored, does not count against the preview
+of the repository), a password in the user info, or a key such as `token`, `access_token`, `key`,
+`sig` or `signature` (`capability::CREDENTIAL_KEYS`) in the query, or with a value in a
+form-encoded fragment or a hash router's route query (`#/reset?token=…`); a plain anchor such as
+`#key` is not one. It is not stored, does not count against the preview
 budget, and its log line names the host only. A card someone's post made for such a link is still
-read by its URI. Such a link is never sent to another service: also-on lookups (the hubs, the
+read by its URI. A page whose fetch ends on such a link is read at the link asked for, so nothing
+it names relative to that address (an empty `og:image`, a JSON-LD `#image`) is kept. Such a link is never sent to another service: also-on lookups (the hubs, the
 Wayback Machine) and oEmbed providers skip it, and it is never kept as another link's alias. A
 resource only previewed, never referenced, is not a search result and expires after `limits.preview_grace_hours` (a day). Previews are limited per
 client IP and per URI (`limits.preview_requests_per_minute`, `limits.preview_uri_requests_per_minute`,
