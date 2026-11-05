@@ -1233,7 +1233,7 @@ enrichment), each value whole and at most 256 bytes, else left out:
 | --- | --- | --- |
 | `disambiguation` | any | MusicBrainz's comment that tells it from others of the name (`frenchcore artist`) |
 | `artist_type` | artist | `Person`, `Group`, `Orchestra`, `Choir`, `Character` or `Other` |
-| `country_code` | artist | ISO 3166-1 code (`NL`) |
+| `country_code` | artist | ISO 3166-1 code (`NL`); the fact named `country` is a place's name elsewhere (Discogs' `Europe`), so a code has this name, as other sources' codes do |
 | `area` | artist | The area's name (`Netherlands`) |
 | `begin_date`, `end_date` | artist | Its life span, as MusicBrainz gives it: `YYYY`, `YYYY-MM` or `YYYY-MM-DD` |
 | `release_type` | release group | Its primary type (`Album`, `Single`, `EP`, …) |

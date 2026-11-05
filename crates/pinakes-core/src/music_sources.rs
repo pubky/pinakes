@@ -230,7 +230,6 @@ pub(crate) fn about_facts(entity: &musicbrainz::Entity) -> Vec<(&'static str, St
     let about = &entity.about;
     let mut genres: Vec<&(String, u64)> = about.genres.iter().filter(|(_, n)| *n >= 1).collect();
     genres.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    genres.dedup_by(|a, b| a.0 == b.0);
     let mut genre = String::new();
     for (name, _) in genres.into_iter().take(GENRES) {
         let next = if genre.is_empty() {
@@ -926,6 +925,24 @@ mod tests {
         assert!(about_facts(&group)
             .iter()
             .all(|(n, _)| !matches!(*n, "artist_type" | "country_code" | "end_date")));
+    }
+
+    /// A genre MusicBrainz lists twice counts once, with its higher count.
+    #[test]
+    fn a_genre_listed_twice_counts_once() {
+        let v = serde_json::json!({
+            "id": "b5416a54-4941-4fcf-b2a0-7f98da6f9344",
+            "genres": [
+                {"name": "b", "count": 2},
+                {"name": "c", "count": 3},
+                {"name": "b", "count": 5},
+                {"name": "a", "count": 1},
+            ],
+        });
+        let entity = musicbrainz::parse_entity(MbKind::Artist, &v).unwrap();
+        let facts: std::collections::BTreeMap<&str, String> =
+            about_facts(&entity).into_iter().collect();
+        assert_eq!(facts["genre"], "b; c; a");
     }
 
     #[test]

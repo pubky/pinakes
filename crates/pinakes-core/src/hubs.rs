@@ -254,7 +254,8 @@ pub mod musicbrainz {
         /// Artists: the ISO 3166-1 code of their country (`NL`), and their area's name.
         pub country: Option<String>,
         pub area: Option<String>,
-        /// Its genres with their vote counts, as MusicBrainz lists them (`inc=genres`).
+        /// Its genres with their vote counts (`inc=genres`), each name once with its highest
+        /// count, by name.
         pub genres: Vec<(String, u64)>,
         /// Artists: the begin and end of their life span, `YYYY`, `YYYY-MM` or `YYYY-MM-DD`.
         pub begin: Option<String>,
@@ -284,13 +285,17 @@ pub mod musicbrainz {
     }
     fn about(kind: MbKind, v: &Value) -> About {
         let artist = kind == MbKind::Artist;
-        let mut genres: Vec<(String, u64)> = v["genres"]
+        let mut genres: BTreeMap<String, u64> = BTreeMap::new();
+        for (name, count) in v["genres"]
             .as_array()
             .into_iter()
             .flatten()
             .filter_map(|g| Some((text(&g["name"])?, g["count"].as_u64()?)))
-            .collect();
-        genres.dedup_by(|a, b| a.0 == b.0);
+        {
+            let most = genres.entry(name).or_default();
+            *most = (*most).max(count);
+        }
+        let genres = genres.into_iter().collect();
         About {
             disambiguation: text(&v["disambiguation"]),
             country: artist
