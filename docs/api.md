@@ -1247,13 +1247,16 @@ music_enrichment`, on by default):
   nothing). Without such a relation, it is the one item that carries the entity's MBID (an
   artist's `P434`, a release group's `P436`, a release's `P5813`, a recording's `P4404`), as
   Wikidata's search proposes and the item itself, read back, states at its best rank; two such
-  items, or more hits than a search returns, give nothing. A recording's item is one that names
-  one recording and no work, never a song's. For an artist no item carries the MBID of, it is the
-  item the artist's Discogs artist pages on MusicBrainz name (`P1953`, at most two): every page
-  that names one names the same item alone, and that item carries no MusicBrainz artist ID or
-  this artist's. A release uses its own item, never its release group's. A recording without
-  an item uses the one work it is a performance of, when that work has its own relation, for
-  the description alone (its credit names the work as `subject`). Nothing is matched by name;
+  items, or more hits than a search returns, give nothing, and so does an item too large to read.
+  The item must be at the entity's level: a recording's names one recording and no work, never
+  a song's; a release's names that one release and no release group or work (an album's item
+  often lists its editions); a release group's names that one release group. For an artist no
+  item carries the MBID of, it is the item the artist's Discogs artist pages on MusicBrainz name
+  (`P1953`, at most two): every page that names one names the same item alone, and that item
+  carries no MusicBrainz artist ID or this artist's. A release uses its own item, never its
+  release group's. A recording also uses the one work it is a performance of, when that work has
+  its own relation, for the description alone (its credit names the work as `subject`). Nothing
+  is matched by name;
 - the description is the first of: the summary of the item's English Wikipedia article (plain
   text, at most 2,048 bytes, cut at a sentence or a word); the item's English description on
   Wikidata, as it is (CC0, credited `wikidata`); the summary of the item's article in the first
@@ -1261,7 +1264,10 @@ music_enrichment`, on by default):
   (credited with that `lang`). Cards have no language negotiation and clients read English: an
   English paragraph is best; a short, exact English line beats a longer paragraph a reader may
   not be able to read; another language is better than nothing, and its credit's `lang` lets a
-  client label or hide it. Nothing is translated. A disambiguation page gives no summary, and
+  client label or hide it. Nothing is translated. For a recording, the order is: its item's
+  English article; its work's English article; its item's English description; its work's; one
+  other Wikipedia's summary, its item's first, else its work's. A song's article tells a reader
+  more than a one-line description of one recording of it. A disambiguation page gives no summary, and
   neither does a sitelink to a redirect (the page it leads to is about something else). The
   summary's thumbnail is never used;
 - the image is the item's image (`P18`) on Wikimedia Commons, a thumbnail asked 640 pixels wide

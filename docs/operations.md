@@ -854,11 +854,18 @@ Wikipedia or Wikidata, from the entity's Wikidata item, each with its credit
 ([api.md](api.md#credits) says which item and which text). It runs inside the card's own read,
 after MusicBrainz answered, through the egress and its pace for those hosts, within
 `limits.music_enrichment_timeout_ms`. At most, per card: MusicBrainz one request more (a
-recording's works, only when no item names the recording); Wikidata one search and one read-back
-for each lookup of an entity without its own `wikidata` relation (its MBID, then for an artist up
-to two Discogs pages: three lookups; hits over the 8 MB cap together are read back one by one),
-one read of the item's pages and English description, and one of its image claim; Wikipedia two
-summaries (English, then one other language); Commons one. A failed or slow request never fails
+recording's works, only when the recording has no item of its own with an English article); Wikidata one
+search and one read-back for each lookup of an entity without its own `wikidata` relation (its
+MBID, then for an artist up to two Discogs pages: three lookups; hits over the 8 MB cap together
+are read back one by one), one read of the item's pages and English description, and one of its
+image claim, and for a recording one read of its work's item's pages; Wikipedia two summaries
+(English, then one other language), for a recording three (its item's English article, its
+work's, then one other language); Commons one. These requests run one after another and share
+each host's pace (`www.wikidata.org` with the also-on sources), so an artist found through its
+Discogs pages makes up to six Wikidata requests before its text and image are asked for. A
+`reextract web` of many such cards at once can leave some of them unread at the timeout; they
+keep their stored image and description and are read again at their retry. Raising
+`limits.music_enrichment_timeout_ms` (up to 13000) for that run leaves fewer unread. A failed or slow request never fails
 the card: the card saves with what it found, and a field a timeout, a 429, a 5xx, Wikidata's
 `maxlag` or any other unexpected status (a 403 refusing this client) left unread keeps its stored
 value and credit; a failed search for the item leaves both fields so. The card is then read

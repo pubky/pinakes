@@ -85,6 +85,8 @@ struct Mode {
     other_mbid: bool,
     /// Sefa's item has no English description.
     no_en_description: bool,
+    /// Get Lucky's work has no `wikidata` relation.
+    work_without_item: bool,
 }
 /// Answers by host, path and query from the recorded fixtures; records each request.
 #[derive(Default)]
@@ -214,7 +216,19 @@ impl Transport for Recorded {
                     }
                     other => panic!("unexpected MusicBrainz request {other}"),
                 };
-                (200, 60, fixture(file))
+                let body = if mode.work_without_item && file == "mb-recording-get-lucky-works.json"
+                {
+                    edited(file, |v| {
+                        for r in v["relations"].as_array_mut().unwrap() {
+                            if let Some(urls) = r["work"]["relations"].as_array_mut() {
+                                urls.retain(|u| u["type"] != "wikidata");
+                            }
+                        }
+                    })
+                } else {
+                    fixture(file)
+                };
+                (200, 60, body)
             }
             ("www.wikidata.org", "/w/api.php") => match query("action").as_str() {
                 "query" => {
@@ -376,8 +390,9 @@ const MILES_IMAGE: &str = "https://thumb.wikimedia.org/wikipedia/commons/thumb/2
 
 /// Each kind of MusicBrainz card takes what its own item has, credited: a person and a group
 /// their portrait and summary, an album its article only (the article's cover thumbnail is never
-/// taken), a recording the item that names it by its MBID (its English description: it has no
-/// article). MusicBrainz's own type, name and facts stay as they are.
+/// taken), a recording whose own item (named by its MBID) has no article the English article of
+/// the one work it is a performance of, naming the work, before its item's one-line English
+/// description. MusicBrainz's own type, name and facts stay as they are.
 #[tokio::test]
 async fn cards_take_credited_content_from_their_own_item() {
     let t = Recorded::new(Mode::default());
@@ -438,18 +453,19 @@ async fn cards_take_credited_content_from_their_own_item() {
         )])
     );
 
-    // The recording's own item (P4404 names it) is the recording's: its work is not asked for.
+    // The recording's own item (P4404 names it) has no article and no image: the work's English
+    // article comes before the item's line, and the work's image is never the recording's.
     let song = card(&web, GET_LUCKY).await;
     assert_eq!(
         (song.type_name.as_str(), song.name.as_deref()),
         ("MusicRecording", Some("Get Lucky"))
     );
-    assert_eq!(song.image, None, "the item has no image");
+    assert_eq!(song.image, None, "a work's image is never its recording's");
     assert_eq!(
         song.description.as_deref(),
-        Some("vocal track by Daft Punk")
+        Some(extract("enwiki-summary-get-lucky-song.json").as_str())
     );
-    assert_eq!(credits(&song), json!([item_credit("Q139827657", None)]));
+    assert_eq!(credits(&song), json!([song_credit()]));
 
     // MusicBrainz's own description of an album or a recording (its artist credit and length)
     // gives way to the enriched one.
@@ -482,8 +498,8 @@ async fn cards_take_credited_content_from_their_own_item() {
     }
     let seen = t.seen();
     assert!(seen.iter().all(|s| !s.contains("upload.wikimedia.org")));
-    // An item named by the entity's own relation is not searched for, and a recording with its
-    // own item never reads its works.
+    // An item named by the entity's own relation is not searched for. A recording whose own item
+    // has no English article reads its works once, and never the work's image.
     assert_eq!(
         t.to("www.wikidata.org")
             .iter()
@@ -492,7 +508,12 @@ async fn cards_take_credited_content_from_their_own_item() {
         1,
         "{seen:?}"
     );
-    assert_eq!(t.to("musicbrainz.org").len(), 4, "{seen:?}");
+    assert_eq!(t.to("musicbrainz.org").len(), 5, "{seen:?}");
+    assert!(
+        seen.iter()
+            .all(|s| !s.contains("wbgetclaims&entity=Q11510350")),
+        "{seen:?}"
+    );
     assert_eq!(
         t.hosts(),
         [
@@ -518,19 +539,61 @@ async fn a_recording_without_an_item_takes_its_works_article() {
         song.description.as_deref(),
         Some(extract("enwiki-summary-get-lucky-song.json").as_str())
     );
-    assert_eq!(
-        credits(&song),
-        json!([article_credit(
-            "https://en.wikipedia.org/wiki/Get_Lucky_(Daft_Punk_song)",
-            Some("https://musicbrainz.org/work/b11bf816-1844-47e5-9075-9239b7609c6a")
-        )])
-    );
+    assert_eq!(credits(&song), json!([song_credit()]));
     // A recording never looks for a Discogs artist.
     assert!(
         t.seen().iter().all(|s| !s.contains("P1953")),
         "{:?}",
         t.seen()
     );
+}
+
+/// The credit of Get Lucky's work's English article on the recording's card.
+fn song_credit() -> Value {
+    article_credit(
+        "https://en.wikipedia.org/wiki/Get_Lucky_(Daft_Punk_song)",
+        Some("https://musicbrainz.org/work/b11bf816-1844-47e5-9075-9239b7609c6a"),
+    )
+}
+/// Get Lucky's card asks exactly: MusicBrainz 2 (the recording, its works), Wikidata 5 (search,
+/// read-back, the recording item's pages and image claim, the work item's pages), English
+/// Wikipedia 1 (the work's article; the recording item has none), nothing of Commons.
+#[tokio::test]
+async fn a_recordings_requests_are_bounded() {
+    let t = Recorded::new(Mode::default());
+    card(&web(t.clone(), true), GET_LUCKY).await;
+    let wd = "www.wikidata.org/w/api.php?action=";
+    let mut expected = vec![
+        "musicbrainz.org/ws/2/recording/833f00e1-781f-4edd-90e4-e52712618862?inc=url-rels+isrcs+artist-credits+genres&fmt=json".to_owned(),
+        "musicbrainz.org/ws/2/recording/833f00e1-781f-4edd-90e4-e52712618862?inc=work-rels+work-level-rels+url-rels&fmt=json".to_owned(),
+        format!("{wd}query&list=search&srsearch=haswbstatement%3AP4404%3D833f00e1-781f-4edd-90e4-e52712618862&srlimit=5&format=json"),
+        format!("{wd}wbgetentities&ids=Q139827657&props=claims%7Csitelinks%2Furls&format=json"),
+        format!("{wd}wbgetentities&ids=Q139827657&props=sitelinks%2Furls%7Cdescriptions&languages=en&format=json"),
+        format!("{wd}wbgetclaims&entity=Q139827657&property=P18&format=json"),
+        format!("{wd}wbgetentities&ids=Q11510350&props=sitelinks%2Furls%7Cdescriptions&languages=en&format=json"),
+        "en.wikipedia.org/api/rest_v1/page/summary/Get_Lucky_(Daft_Punk_song)?".to_owned(),
+    ];
+    expected.sort();
+    assert_eq!(sorted(t.seen()), expected);
+}
+/// A recording whose own item has no article and whose one work has no item of its own takes
+/// its item's English description; nothing of another item.
+#[tokio::test]
+async fn a_recording_whose_work_has_no_item_takes_its_items_line() {
+    let t = Recorded::new(Mode {
+        work_without_item: true,
+        ..Default::default()
+    });
+    let song = card(&web(t.clone(), true), GET_LUCKY).await;
+    assert_eq!(song.image, None);
+    assert_eq!(
+        song.description.as_deref(),
+        Some("vocal track by Daft Punk")
+    );
+    assert_eq!(credits(&song), json!([item_credit("Q139827657", None)]));
+    assert!(song.unread_enriched.is_empty());
+    assert_eq!(t.to("musicbrainz.org").len(), 2, "{:?}", t.seen());
+    assert_eq!(t.to("en.wikipedia.org"), Vec::<String>::new());
 }
 
 const SEFA_IMAGE: &str =
@@ -1199,8 +1262,8 @@ async fn musicbrainz_facts_show_on_the_resource_read(pool: PgPool) {
 async fn an_enriched_recording_keeps_its_length_as_a_fact(pool: PgPool) {
     tag(&pool, &[GET_LUCKY]).await;
     let doc = resolve_once(&pool, &web(Recorded::new(Mode::default()), true), GET_LUCKY).await;
-    let summary = "vocal track by Daft Punk";
-    assert_eq!(doc.description.as_deref(), Some(summary));
+    let summary = extract("enwiki-summary-get-lucky-song.json");
+    assert_eq!(doc.description.as_deref(), Some(summary.as_str()));
     let entity = fixture_json("mb-recording-get-lucky.json");
     let secs = (entity["length"].as_u64().unwrap() + 500) / 1000;
     let artist: String = entity["artist-credit"]
