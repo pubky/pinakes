@@ -27,6 +27,34 @@ use std::{
 use tokio::sync::{Mutex, Notify};
 use utoipa::{IntoParams, OpenApi, ToSchema};
 
+/// When each new preview of the last hour was taken, oldest first (`AppState::reserve_preview`).
+type Previews = Arc<std::sync::Mutex<std::collections::VecDeque<Instant>>>;
+/// A place taken in the instance's hour of new previews. It is given back when dropped, unless
+/// kept once the link is stored: a request that fails or is cancelled first frees it.
+struct PreviewSlot {
+    previews: Previews,
+    at: Instant,
+    kept: bool,
+}
+impl PreviewSlot {
+    fn keep(mut self) {
+        self.kept = true;
+    }
+}
+impl Drop for PreviewSlot {
+    fn drop(&mut self) {
+        if self.kept {
+            return;
+        }
+        let mut previews = self
+            .previews
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(at) = previews.iter().rposition(|at| *at == self.at) {
+            previews.remove(at);
+        }
+    }
+}
 /// A request clock (`AppState::clock`).
 pub type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 #[derive(Clone)]
@@ -41,7 +69,7 @@ pub struct AppState {
     downloads: Arc<Mutex<HashMap<std::net::IpAddr, (Instant, usize)>>>,
     /// When each new preview of the last hour was taken, oldest first: at most
     /// `limits.preview_new_per_hour` for the whole instance.
-    previews: Arc<Mutex<std::collections::VecDeque<Instant>>>,
+    previews: Previews,
     info_cache: Arc<Mutex<Option<(Instant, Value)>>>,
     pub(crate) cursor_mac: SimpleHmac<blake3::Hasher>,
     /// The request clock for relative times and search cursors; tests set it, the daemon never
@@ -141,10 +169,13 @@ impl AppState {
         Ok(())
     }
     /// A place for one new preview in the instance's hour, or the seconds until the oldest place
-    /// frees. `release_preview` gives it back when storing the link failed.
-    async fn reserve_preview(&self) -> Result<(), u64> {
+    /// frees.
+    fn reserve_preview(&self) -> Result<PreviewSlot, u64> {
         let hour = Duration::from_secs(3600);
-        let mut previews = self.previews.lock().await;
+        let mut previews = self
+            .previews
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         while previews.front().is_some_and(|at| at.elapsed() >= hour) {
             previews.pop_front();
         }
@@ -153,11 +184,13 @@ impl AppState {
                 .front()
                 .map_or(1, |at| hour.saturating_sub(at.elapsed()).as_secs().max(1)));
         }
-        previews.push_back(Instant::now());
-        Ok(())
-    }
-    async fn release_preview(&self) {
-        self.previews.lock().await.pop_back();
+        let at = Instant::now();
+        previews.push_back(at);
+        Ok(PreviewSlot {
+            previews: self.previews.clone(),
+            at,
+            kept: false,
+        })
     }
     async fn preview_budget(&self, ip: std::net::IpAddr, id: &str) -> Result<(), ApiError> {
         self.budget(
@@ -2452,25 +2485,29 @@ pub async fn resolve(
     .bind(&id)
     .fetch_one(&state.pool)
     .await?;
-    if !known {
-        if let Err(seconds) = state.reserve_preview().await {
-            state.metrics.preview_refused.inc();
-            let mut response = ApiError(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "preview capacity reached, try again later".into(),
-            )
-            .into_response();
-            response
-                .headers_mut()
-                .insert(header::RETRY_AFTER, header::HeaderValue::from(seconds));
-            return Ok(response);
+    let slot = if known {
+        None
+    } else {
+        match state.reserve_preview() {
+            Ok(slot) => Some(slot),
+            Err(seconds) => {
+                state.metrics.preview_refused.inc();
+                let mut response = ApiError(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "preview capacity reached, try again later".into(),
+                )
+                .into_response();
+                response
+                    .headers_mut()
+                    .insert(header::RETRY_AFTER, header::HeaderValue::from(seconds));
+                return Ok(response);
+            }
         }
-    }
-    if let Err(error) = store::ensure_resource(&state.pool, &uri).await {
-        if !known {
-            state.release_preview().await;
-        }
-        return Err(error.into());
+    };
+    store::ensure_resource(&state.pool, &uri).await?;
+    // Stored: the place stays taken for the hour.
+    if let Some(slot) = slot {
+        slot.keep();
     }
     let id = crate::alias::resolve_id(&state.pool, &id).await?;
     store::expedite(&state.pool, std::slice::from_ref(&id)).await?;
@@ -3297,6 +3334,26 @@ pub async fn curate_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A place in the hour of new previews is given back when its request ends before the link
+    /// is stored (an error, a client gone), and stays once kept.
+    #[test]
+    fn a_preview_place_is_given_back_unless_kept() {
+        let previews: Previews = Arc::default();
+        let take = || {
+            let at = Instant::now();
+            previews.lock().unwrap().push_back(at);
+            PreviewSlot {
+                previews: previews.clone(),
+                at,
+                kept: false,
+            }
+        };
+        let kept = take();
+        drop(take());
+        assert_eq!(previews.lock().unwrap().len(), 1);
+        kept.keep();
+        assert_eq!(previews.lock().unwrap().len(), 1);
+    }
     /// The admin listener serves `localhost`, IP addresses and the configured names, on any port,
     /// and nothing else: not a rebinding page's own name, not one dressed as loopback.
     #[test]
