@@ -1101,7 +1101,9 @@ fn podcast_body(
             .children()
             .find(|n| n.tag_name().name() == "image")
             .and_then(|n| n.attribute("href"))
-            .and_then(|s| web::origin_url(&f.url, s));
+            .and_then(|s| web::origin_url(&f.url, s))
+            // Relative to the feed's address, it can land on a link that carries a credential.
+            .filter(|u| !crate::capability::is_capability(u));
     } else {
         if guid.is_some() {
             // An episode past the part of the feed that was read is not missing.

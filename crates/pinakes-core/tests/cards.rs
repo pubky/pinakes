@@ -100,6 +100,31 @@ fn a_podcast_feed_that_lands_on_a_credential_keeps_the_link_asked_for() {
     assert!(!serde_json::to_string(&doc).unwrap().contains("SECRET"));
 }
 
+/// An episode card read from a feed that landed on a credential never takes an item's relative
+/// link or image: they resolve to that address.
+#[test]
+fn an_episode_card_never_takes_a_link_that_lands_on_a_credential_feed() {
+    let f = Fetched {
+        permanent_redirect: false,
+        truncated: false,
+        url: "https://feeds.example/rss?auth=SECRET".parse().unwrap(),
+        body: r#"<rss xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel><title>Podcast</title><item><guid>e1</guid><title>Episode One</title><link>#e1</link><itunes:image href=""/><enclosure type="audio/mpeg" url="https://audio.example/one.mp3"/></item></channel></rss>"#.as_bytes().to_vec(),
+        content_type: "application/rss+xml".into(),
+        status: 200,
+        location: None,
+        retry_after_secs: 60,
+        validators: Default::default(),
+    };
+    let d = cards::podcast("https://podcast.example/feed?guid=e1", &f, 3600, 10)
+        .unwrap()
+        .unwrap();
+    assert_eq!(d.name.as_deref(), Some("Episode One"));
+    assert!(
+        !serde_json::to_string(&d).unwrap().contains("SECRET"),
+        "{d:?}"
+    );
+}
+
 #[test]
 fn namespace_alone_does_not_make_a_podcast_series() {
     for items in ["", "<item><guid>news</guid><title>News</title></item>"] {
