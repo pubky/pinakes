@@ -103,54 +103,54 @@
     "url": "https://en.wikipedia.org/api/rest_v1/page/summary/Richard_Colburn"
   },
   "mb-artist-daft-punk": {
-    "bytes": 26731,
+    "bytes": 28815,
     "content_type": "application/json",
     "file": "mb-artist-daft-punk.json",
     "note": "Daft Punk (Group, a MusicGroup card), Wikidata Q185828.",
-    "recorded_at": "2026-11-04T15:49:30+00:00",
-    "sha256": "1910b12d715d8cd69134423555e0fd0588ba16b26368f5265e0c676bf8eb03e8",
+    "recorded_at": "2026-11-05T10:36:12+00:00",
+    "sha256": "06e59ad9c7a09360ea414b74c3cfc2a092404ca8480ecc7d508163fc97cb2633",
     "status": 200,
-    "url": "https://musicbrainz.org/ws/2/artist/056e4f3e-d505-4dad-8ec1-d04f521cbb56?inc=url-rels&fmt=json"
+    "url": "https://musicbrainz.org/ws/2/artist/056e4f3e-d505-4dad-8ec1-d04f521cbb56?inc=url-rels+genres&fmt=json"
   },
   "mb-artist-miles-davis": {
-    "bytes": 23079,
+    "bytes": 24212,
     "content_type": "application/json",
     "file": "mb-artist-miles-davis.json",
     "note": "Miles Davis (Person), Wikidata Q93341.",
-    "recorded_at": "2026-11-04T15:49:30+00:00",
-    "sha256": "2acfe9b0a50a84ac6a9ed6d2279245263e64a767b16441b9e3854ee2758935bc",
+    "recorded_at": "2026-11-05T10:36:11+00:00",
+    "sha256": "52ae0f79d4cd3b57809b2eedc27832e314519c0c673ec920ae24265808d786d5",
     "status": 200,
-    "url": "https://musicbrainz.org/ws/2/artist/561d854a-6a28-4aa7-8c99-323e6ce46c2a?inc=url-rels&fmt=json"
+    "url": "https://musicbrainz.org/ws/2/artist/561d854a-6a28-4aa7-8c99-323e6ce46c2a?inc=url-rels+genres&fmt=json"
   },
   "mb-artist-richard-colburn": {
-    "bytes": 2143,
+    "bytes": 2244,
     "content_type": "application/json",
     "file": "mb-artist-richard-colburn.json",
     "note": "Richard Colburn (Person), Wikidata Q3780426, whose English sitelink is to a redirect.",
-    "recorded_at": "2026-11-04T17:13:27+00:00",
-    "sha256": "14023e10f143d4c7a252ff7710cf3c1b1644370908e7a059b9eae6753e1c4665",
+    "recorded_at": "2026-11-05T10:36:14+00:00",
+    "sha256": "291e086c60ce782661d566f56c4586ee0d71872984c8e7d22558a47973d602c4",
     "status": 200,
-    "url": "https://musicbrainz.org/ws/2/artist/e7528aba-c5e2-4917-9a52-9b61d56f9a13?inc=url-rels&fmt=json"
+    "url": "https://musicbrainz.org/ws/2/artist/e7528aba-c5e2-4917-9a52-9b61d56f9a13?inc=url-rels+genres&fmt=json"
   },
   "mb-artist-sefa": {
-    "bytes": 8398,
+    "bytes": 8607,
     "content_type": "application/json",
     "file": "mb-artist-sefa.json",
-    "note": "Sefa (Person): no Wikidata relation, so a sparse card.",
-    "recorded_at": "2026-11-04T15:49:30+00:00",
-    "sha256": "2277179332aa4416c656b208778e606b8e4d0bec4b895b608e08c05caa9d433e",
+    "note": "Sefa (Person): no Wikidata relation, so a sparse card. Recorded with inc=genres: disambiguation \"frenchcore artist\", country NL, area Netherlands, genres frenchcore (5) and uptempo hardcore (1), empty life-span.",
+    "recorded_at": "2026-11-05T10:35:41+00:00",
+    "sha256": "d26db19e2ac320a8dd85e4538aa8d4b0302a38d490d78642c414dfb5aaf246bf",
     "status": 200,
-    "url": "https://musicbrainz.org/ws/2/artist/b5416a54-4941-4fcf-b2a0-7f98da6f9344?inc=url-rels&fmt=json"
+    "url": "https://musicbrainz.org/ws/2/artist/b5416a54-4941-4fcf-b2a0-7f98da6f9344?inc=url-rels+genres&fmt=json"
   },
   "mb-recording-get-lucky": {
-    "bytes": 8905,
+    "bytes": 13444,
     "content_type": "application/json",
     "file": "mb-recording-get-lucky.json",
     "note": "Get Lucky (recording): no Wikidata relation of its own.",
-    "recorded_at": "2026-11-04T15:49:30+00:00",
-    "sha256": "c6e724a9a127d9dedb8cef95da5abece720ac5f1cc67f479735a2b15f86e55da",
+    "recorded_at": "2026-11-05T10:36:15+00:00",
+    "sha256": "99cb231193409d53c99fbb545c9e19a4a9fd77d7f416fcd40d230cec5071d91e",
     "status": 200,
-    "url": "https://musicbrainz.org/ws/2/recording/833f00e1-781f-4edd-90e4-e52712618862?inc=url-rels+isrcs+artist-credits&fmt=json"
+    "url": "https://musicbrainz.org/ws/2/recording/833f00e1-781f-4edd-90e4-e52712618862?inc=url-rels+isrcs+artist-credits+genres&fmt=json"
   },
   "mb-recording-get-lucky-works": {
     "bytes": 11738,
@@ -163,14 +163,14 @@
     "url": "https://musicbrainz.org/ws/2/recording/833f00e1-781f-4edd-90e4-e52712618862?inc=work-rels+work-level-rels+url-rels&fmt=json"
   },
   "mb-release-group-kind-of-blue": {
-    "bytes": 3066,
+    "bytes": 4680,
     "content_type": "application/json",
     "file": "mb-release-group-kind-of-blue.json",
     "note": "Kind of Blue (release group), Wikidata Q283221.",
-    "recorded_at": "2026-11-04T15:49:30+00:00",
-    "sha256": "74f646faa919973b0740efeaa63c9a80c985a7d2c3b86cc02cd8277a1fa05b63",
+    "recorded_at": "2026-11-05T10:36:17+00:00",
+    "sha256": "d6a671cca59bdc654933ea77270446be72d4609a85b69cb251a715902a892d42",
     "status": 200,
-    "url": "https://musicbrainz.org/ws/2/release-group/8e8a594f-2175-38c7-a871-abb68ec363e7?inc=url-rels+artist-credits&fmt=json"
+    "url": "https://musicbrainz.org/ws/2/release-group/8e8a594f-2175-38c7-a871-abb68ec363e7?inc=url-rels+artist-credits+genres&fmt=json"
   },
   "wd-p18-Q11510350": {
     "bytes": 13,

@@ -479,6 +479,7 @@ mod tests {
             artist: None,
             length_ms: None,
             artist_type: None,
+            about: Default::default(),
         };
         let (egress, recorded) = crate::sources::fixture::egress(vec![]);
         assert_eq!(

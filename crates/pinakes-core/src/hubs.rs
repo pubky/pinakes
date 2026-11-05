@@ -242,6 +242,73 @@ pub mod musicbrainz {
         pub length_ms: Option<u64>,
         /// Artists: `Person`, `Group`, `Orchestra`, `Choir`, `Character` or `Other`.
         pub artist_type: Option<String>,
+        /// What MusicBrainz says about the entity beyond its links ([`About`]).
+        pub about: About,
+    }
+    /// What MusicBrainz says about an entity in the same answer: plain text and codes as it
+    /// gives them, each checked for its form and left out otherwise.
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub struct About {
+        /// The comment that tells it from others of the same name ("frenchcore artist").
+        pub disambiguation: Option<String>,
+        /// Artists: the ISO 3166-1 code of their country (`NL`), and their area's name.
+        pub country: Option<String>,
+        pub area: Option<String>,
+        /// Its genres with their vote counts, as MusicBrainz lists them (`inc=genres`).
+        pub genres: Vec<(String, u64)>,
+        /// Artists: the begin and end of their life span, `YYYY`, `YYYY-MM` or `YYYY-MM-DD`.
+        pub begin: Option<String>,
+        pub end: Option<String>,
+        /// Release groups: the primary type (`Album`, `Single`, `EP`, …).
+        pub release_type: Option<String>,
+        /// Release groups and recordings: the date of the first release, as `begin`.
+        pub first_release_date: Option<String>,
+    }
+    /// A partial date as MusicBrainz writes it: `YYYY`, `YYYY-MM` or `YYYY-MM-DD`.
+    fn date(v: &Value) -> Option<String> {
+        let s = v.as_str()?;
+        let parts: Vec<&str> = s.split('-').collect();
+        let digits = |p: &str, n: usize| p.len() == n && p.bytes().all(|b| b.is_ascii_digit());
+        let ok = match parts.as_slice() {
+            [y] => digits(y, 4),
+            [y, m] => digits(y, 4) && digits(m, 2),
+            [y, m, d] => digits(y, 4) && digits(m, 2) && digits(d, 2),
+            _ => false,
+        };
+        ok.then(|| s.to_owned())
+    }
+    /// A short plain-text value: trimmed, not empty, without control characters.
+    fn text(v: &Value) -> Option<String> {
+        let s = v.as_str()?.trim();
+        (!s.is_empty() && !s.chars().any(char::is_control)).then(|| s.to_owned())
+    }
+    fn about(kind: MbKind, v: &Value) -> About {
+        let artist = kind == MbKind::Artist;
+        let mut genres: Vec<(String, u64)> = v["genres"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|g| Some((text(&g["name"])?, g["count"].as_u64()?)))
+            .collect();
+        genres.dedup_by(|a, b| a.0 == b.0);
+        About {
+            disambiguation: text(&v["disambiguation"]),
+            country: artist
+                .then(|| v["country"].as_str())
+                .flatten()
+                .filter(|c| c.len() == 2 && c.bytes().all(|b| b.is_ascii_uppercase()))
+                .map(str::to_owned),
+            area: artist.then(|| text(&v["area"]["name"])).flatten(),
+            genres,
+            begin: artist.then(|| date(&v["life-span"]["begin"])).flatten(),
+            end: artist.then(|| date(&v["life-span"]["end"])).flatten(),
+            release_type: (kind == MbKind::ReleaseGroup)
+                .then(|| text(&v["primary-type"]))
+                .flatten(),
+            first_release_date: matches!(kind, MbKind::ReleaseGroup | MbKind::Recording)
+                .then(|| date(&v["first-release-date"]))
+                .flatten(),
+        }
     }
     /// What a URL is linked to: each current target with its level.
     #[derive(Clone, Debug, Default, PartialEq)]
@@ -331,14 +398,17 @@ pub mod musicbrainz {
                 .flatten()
                 .filter(|t| t.len() <= 32 && t.bytes().all(|b| b.is_ascii_alphabetic()))
                 .map(str::to_owned),
+            about: about(kind, v),
         })
     }
+    /// What an entity read asks for besides the entity: its URL relations and genres, and a
+    /// recording's ISRCs, a release's release group and the artist credit.
     fn inc(kind: MbKind) -> &'static str {
         match kind {
-            MbKind::Recording => "url-rels+isrcs+artist-credits",
-            MbKind::Release => "url-rels+release-groups+artist-credits",
-            MbKind::ReleaseGroup => "url-rels+artist-credits",
-            MbKind::Artist => "url-rels",
+            MbKind::Recording => "url-rels+isrcs+artist-credits+genres",
+            MbKind::Release => "url-rels+release-groups+artist-credits+genres",
+            MbKind::ReleaseGroup => "url-rels+artist-credits+genres",
+            MbKind::Artist => "url-rels+genres",
         }
     }
     /// The URL lookup for `link` at the web service `base` (exact; MusicBrainz stores URLs as

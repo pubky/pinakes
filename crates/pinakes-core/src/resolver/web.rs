@@ -32,6 +32,16 @@ pub const ATTRIBUTES: &[&str] = &[
     "isrc",
     "artist",
     "album",
+    // What MusicBrainz says about its entity (`music_sources::ABOUT_FACTS`).
+    "disambiguation",
+    "artist_type",
+    "country_code",
+    "area",
+    "begin_date",
+    "end_date",
+    "release_type",
+    "first_release_date",
+    "genre",
     // A job posting's facts (`kinds::jobs::FACTS`).
     "hiring_organization",
     "hiring_organization_url",
