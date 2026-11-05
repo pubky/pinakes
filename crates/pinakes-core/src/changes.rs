@@ -763,10 +763,10 @@ async fn delete_orphan_batch(
             )
             .await?;
         }
-        // What it held (its derived links, its venue, its occurrences' venues) was never a preview:
-        // with its derivation and venue rows gone, a held resource nothing referenced keeps the
-        // full grace from its creation, not the preview grace.
-        sqlx::query("UPDATE resource SET orphaned_at=created_at+interval '1 microsecond' WHERE orphaned_at=created_at AND (id IN (SELECT child_id FROM resource_derivation WHERE parent_id=$1) OR id=(SELECT venue_id FROM resource WHERE id=$1) OR id IN (SELECT venue_id FROM occurrence WHERE resource_id=$1))")
+        // What it held (its derived links and their alias roots, its venue, its occurrences'
+        // venues) was never a preview: with its derivation and venue rows gone, a held resource
+        // nothing referenced keeps the full grace from its creation, not the preview grace.
+        sqlx::query("UPDATE resource SET orphaned_at=created_at+interval '1 microsecond' WHERE orphaned_at=created_at AND (id IN (SELECT child_id FROM resource_derivation WHERE parent_id=$1) OR id IN (SELECT a.root_id FROM resource_alias a JOIN resource_derivation d ON d.child_id=a.alias_id WHERE d.parent_id=$1) OR id=(SELECT venue_id FROM resource WHERE id=$1) OR id IN (SELECT venue_id FROM occurrence WHERE resource_id=$1))")
             .bind(&id)
             .execute(&mut *tx)
             .await?;
