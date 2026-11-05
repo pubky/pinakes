@@ -137,6 +137,8 @@ pub enum CreditProvider {
     Wikipedia,
     /// A file on Wikimedia Commons.
     WikimediaCommons,
+    /// A Wikidata item's English description.
+    Wikidata,
 }
 /// Where one of the card's `image` or `description` came from when Pinakes added it from another
 /// source than the link itself, and the licence it is used under (docs/api.md, Credits). Show it
@@ -146,25 +148,27 @@ pub struct Credit {
     /// The card field the value is in.
     pub field: CreditField,
     pub provider: CreditProvider,
-    /// The page the value came from: the Wikipedia article, or the file's page on Commons. An
-    /// `https:` URL of at most 1,024 bytes.
+    /// The page the value came from: the Wikipedia article, the file's page on Commons, or the
+    /// item's page on Wikidata. An `https:` URL of at most 1,024 bytes.
     pub source_url: String,
     /// Who made it, plain text of at most 256 bytes: "Wikipedia contributors" for an article, the
-    /// file's author for an image. Null for a public-domain or CC0 file that names none.
+    /// file's author for an image. Null for a public-domain or CC0 file that names none, and for
+    /// a Wikidata description (CC0).
     pub author: Option<String>,
     /// An SPDX licence ID (`CC-BY-SA-4.0`, `CC-BY-2.0`, `CC0-1.0`), or `public-domain`.
     pub license: String,
     /// The licence's text: an `https:` URL; null when it has none (public domain).
     pub license_url: Option<String>,
-    /// The language of a text (`en`); null for an image.
+    /// The language of a text (`en`, or another Wikipedia's language code, `de`); null for an
+    /// image.
     pub lang: Option<String>,
     /// The text is a part of a longer source: a summary is an article's first paragraphs, and a
-    /// long one is cut at a sentence or a word.
+    /// long one is cut at a sentence or a word. A Wikidata description is whole.
     pub excerpted: bool,
     /// The value was changed beyond cutting it.
     pub modified: bool,
     /// The link of the entity the value is about, when that is not the card's own: a recording's
-    /// description taken from its work's article names the work (`https://musicbrainz.org/work/…`).
+    /// description taken from its work's item names the work (`https://musicbrainz.org/work/…`).
     pub subject: Option<String>,
 }
 impl Credit {

@@ -167,8 +167,8 @@ Which cards carry one (each source's page in [docs/sources](sources/README.md) s
 ### Credits
 
 A MusicBrainz card can show an image from Wikimedia Commons and a description from Wikipedia
-([Cards and resolvers](#cards-and-resolvers)). Each such field has a credit; show it with the
-value, linked:
+or Wikidata ([Cards and resolvers](#cards-and-resolvers)). Each such field has a credit; show it
+with the value, linked:
 
 ```json
 "credits": [
@@ -187,15 +187,24 @@ value, linked:
 | Field | Meaning |
 | --- | --- |
 | `field` | `image` or `description`: the card field the value is in |
-| `provider` | `wikipedia` or `wikimedia_commons` |
-| `source_url` | The article, or the file's page on Commons: `https:`, at most 1,024 bytes |
-| `author` | Plain text, at most 256 bytes: `Wikipedia contributors` for an article, the file's author for an image; `null` for a CC0 or public-domain file that names none |
+| `provider` | `wikipedia` (an article's summary), `wikimedia_commons` (a file) or `wikidata` (an item's English description) |
+| `source_url` | The article, the file's page on Commons, or the item's page on Wikidata (`https://www.wikidata.org/wiki/Q…`): `https:`, at most 1,024 bytes |
+| `author` | Plain text, at most 256 bytes: `Wikipedia contributors` for an article, the file's author for an image; `null` for a CC0 or public-domain file that names none and for a Wikidata description |
 | `license` | An SPDX licence ID (`CC-BY-SA-4.0`, `CC-BY-2.0`, `CC-BY-SA-3.0-DE`, `CC0-1.0`) or `public-domain` |
 | `license_url` | The licence's text (`https:`); `null` for the public domain without a mark |
-| `lang` | The text's language (`en`); `null` for an image |
-| `excerpted` | `true` when the text is a part of a longer source: a summary is the article's first paragraphs, and one over 2,048 bytes is cut at a sentence or a word |
+| `lang` | The text's language: `en`, or another Wikipedia's code (`de`) when only that Wikipedia describes it; `null` for an image. A client may label or hide a text in a language its reader does not read |
+| `excerpted` | `true` when the text is a part of a longer source: a summary is the article's first paragraphs, and one over 2,048 bytes is cut at a sentence or a word. A Wikidata description is whole (`false`) |
 | `modified` | `true` when the value was changed beyond cutting it |
-| `subject` | The link of what the value is about when that is not the card itself: a recording's description taken from its work's article names the work (`https://musicbrainz.org/work/…`); else `null` |
+| `subject` | The link of what the value is about when that is not the card itself: a recording's description taken from its work's item names the work (`https://musicbrainz.org/work/…`); else `null` |
+
+A Wikidata description's credit:
+
+```json
+{"field": "description", "provider": "wikidata",
+ "source_url": "https://www.wikidata.org/wiki/Q55825905", "author": null, "license": "CC0-1.0",
+ "license_url": "https://creativecommons.org/publicdomain/zero/1.0/", "lang": "en",
+ "excerpted": false, "modified": false, "subject": null}
+```
 
 A credit is there only with its value: a card without the image or description has none for it.
 The same credits are on every card of the resource: a search, lookup or group card, a resource
@@ -1232,27 +1241,42 @@ enrichment), each value whole and at most 256 bytes, else left out:
 | `genre` | any | Its top genres: at most three, most votes first, a tie by name, joined with `; ` |
 
 A MusicBrainz artist, release group, release or recording card also takes an image and a
-description from the entity's own Wikidata item, each with its [credit](#credits) (`[web]
+description from the entity's Wikidata item, each with its [credit](#credits) (`[web]
 music_enrichment`, on by default):
-- the item is the one the entity's own `wikidata` relation on MusicBrainz names; a release uses
-  its own, never its release group's. A recording without one uses the one work it is a
-  performance of, when that work has its own relation, for the description alone (its credit
-  names the work as `subject`). Nothing is matched by name;
-- the description is the summary of the item's English Wikipedia article (plain text, at most
-  2,048 bytes, cut at a sentence or a word); a disambiguation page gives none, and neither does a
-  sitelink to a redirect (the page it leads to is about something else). The summary's
-  thumbnail is never used;
+- the item is the one the entity's own `wikidata` relation on MusicBrainz names (several give
+  nothing). Without such a relation, it is the one item that carries the entity's MBID (an
+  artist's `P434`, a release group's `P436`, a release's `P5813`, a recording's `P4404`), as
+  Wikidata's search proposes and the item itself, read back, states at its best rank; two such
+  items, or more hits than a search returns, give nothing. A recording's item is one that names
+  one recording and no work, never a song's. For an artist no item carries the MBID of, it is the
+  item the artist's Discogs artist pages on MusicBrainz name (`P1953`, at most two): every page
+  that names one names the same item alone, and that item carries no MusicBrainz artist ID or
+  this artist's. A release uses its own item, never its release group's. A recording without
+  an item uses the one work it is a performance of, when that work has its own relation, for
+  the description alone (its credit names the work as `subject`). Nothing is matched by name;
+- the description is the first of: the summary of the item's English Wikipedia article (plain
+  text, at most 2,048 bytes, cut at a sentence or a word); the item's English description on
+  Wikidata, as it is (CC0, credited `wikidata`); the summary of the item's article in the first
+  of these Wikipedias it has one in: `de`, `fr`, `es`, `it`, `nl`, `pt`, `sv`, `pl`, `ja`, `ru`
+  (credited with that `lang`). Cards have no language negotiation and clients read English: an
+  English paragraph is best; a short, exact English line beats a longer paragraph a reader may
+  not be able to read; another language is better than nothing, and its credit's `lang` lets a
+  client label or hide it. Nothing is translated. A disambiguation page gives no summary, and
+  neither does a sitelink to a redirect (the page it leads to is about something else). The
+  summary's thumbnail is never used;
 - the image is the item's image (`P18`) on Wikimedia Commons, a thumbnail asked 640 pixels wide
   (Commons serves its next standard size, 960 pixels), shown
   only when the file's own page gives a licence on the list (CC0, the public domain, CC BY or CC
   BY-SA 1.0 to 4.0) and, under CC BY and CC BY-SA, its author.
 
-What it does not find leaves the card as MusicBrainz makes it (an artist without an item, such as
-most small artists, has no image or description: the card is still `ok`). An answer that fails for
-a while (a timeout, a 429, a 5xx, another unexpected status) keeps what the card had of that
+What it does not find leaves the card as MusicBrainz makes it (an artist without an item has no
+image or description: the card is still `ok`). An answer that fails for a while (a timeout, a
+429, a 5xx, Wikidata's `maxlag`, another unexpected status) keeps what the card had of that
 field, and the card is read again after at least an hour and at least twice as long as since its
 last reading, up to its own refresh time (so a failure on a routine refresh waits for the next); a
-definite answer (no article, a refused file) removes it.
+definite answer (no item, no text, a refused file) removes it. A failed text never gives way to
+the next one in the order: a busy English Wikipedia keeps the stored article's summary rather
+than show the shorter line. A failed search for the item leaves both fields as stored.
 
 ## Cards and resolvers
 

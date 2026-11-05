@@ -512,14 +512,14 @@
         "description": "Where one of the card's `image` or `description` came from when Pinakes added it from another\nsource than the link itself, and the licence it is used under (docs/api.md, Credits). Show it\nwith the value: the author, the licence (linked to `license_url`) and the source page.",
         "properties": {
           "author": {
-            "description": "Who made it, plain text of at most 256 bytes: \"Wikipedia contributors\" for an article, the\nfile's author for an image. Null for a public-domain or CC0 file that names none.",
+            "description": "Who made it, plain text of at most 256 bytes: \"Wikipedia contributors\" for an article, the\nfile's author for an image. Null for a public-domain or CC0 file that names none, and for\na Wikidata description (CC0).",
             "type": [
               "string",
               "null"
             ]
           },
           "excerpted": {
-            "description": "The text is a part of a longer source: a summary is an article's first paragraphs, and a\nlong one is cut at a sentence or a word.",
+            "description": "The text is a part of a longer source: a summary is an article's first paragraphs, and a\nlong one is cut at a sentence or a word. A Wikidata description is whole.",
             "type": "boolean"
           },
           "field": {
@@ -527,7 +527,7 @@
             "description": "The card field the value is in."
           },
           "lang": {
-            "description": "The language of a text (`en`); null for an image.",
+            "description": "The language of a text (`en`, or another Wikipedia's language code, `de`); null for an\nimage.",
             "type": [
               "string",
               "null"
@@ -552,11 +552,11 @@
             "$ref": "#/components/schemas/CreditProvider"
           },
           "source_url": {
-            "description": "The page the value came from: the Wikipedia article, or the file's page on Commons. An\n`https:` URL of at most 1,024 bytes.",
+            "description": "The page the value came from: the Wikipedia article, the file's page on Commons, or the\nitem's page on Wikidata. An `https:` URL of at most 1,024 bytes.",
             "type": "string"
           },
           "subject": {
-            "description": "The link of the entity the value is about, when that is not the card's own: a recording's\ndescription taken from its work's article names the work (`https://musicbrainz.org/work/…`).",
+            "description": "The link of the entity the value is about, when that is not the card's own: a recording's\ndescription taken from its work's item names the work (`https://musicbrainz.org/work/…`).",
             "type": [
               "string",
               "null"
@@ -585,7 +585,8 @@
         "description": "The service an enriched value came from.",
         "enum": [
           "wikipedia",
-          "wikimedia_commons"
+          "wikimedia_commons",
+          "wikidata"
         ],
         "type": "string"
       },

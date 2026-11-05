@@ -992,17 +992,25 @@ pub mod wikidata {
         };
         (!value.is_empty()).then_some(value)
     }
-    /// One item's page on one site (`enwiki`) alone.
-    pub fn sitelink_lookup(qid: &str, site: &str) -> String {
-        format!("{API}?action=wbgetentities&ids={qid}&props=sitelinks%2Furls&sitefilter={site}&format=json")
+    /// One item's pages on every site and its English description, alone (no claims).
+    pub fn pages_lookup(qid: &str) -> String {
+        format!("{API}?action=wbgetentities&ids={qid}&props=sitelinks%2Furls%7Cdescriptions&languages=en&format=json")
     }
     /// The badges Wikidata gives a sitelink to a redirect ("sitelink to redirect", "intentional
     /// sitelink to redirect"): the page it names is about something else (a song's redirects to
     /// its album).
     pub const REDIRECT_BADGES: [&str; 2] = ["Q70893996", "Q70894304"];
-    /// The page URL of `site` in a `sitelink_lookup` answer (the one item it holds, which may
-    /// be the item an ID redirects to); `None` for a sitelink to a redirect.
-    pub fn parse_sitelink(v: &Value, site: &str) -> Option<String> {
+    /// An item's pages on other sites and its English description.
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub struct Pages {
+        /// Site (`enwiki`, `dewiki`, …) → page URL; a sitelink to a redirect is left out.
+        pub sitelinks: BTreeMap<String, String>,
+        /// The English description, trimmed; `None` when empty.
+        pub description: Option<String>,
+    }
+    /// A `pages_lookup` answer: the one item it holds (which may be the item an ID redirects
+    /// to); `None` when it holds none, or several.
+    pub fn parse_pages(v: &Value) -> Option<Pages> {
         let entities = v["entities"].as_object()?;
         let mut items = entities
             .values()
@@ -1010,25 +1018,37 @@ pub mod wikidata {
         let (Some(item), None) = (items.next(), items.next()) else {
             return None;
         };
-        let link = &item["sitelinks"][site];
-        let redirect = link["badges"]
-            .as_array()
+        let sitelinks = item["sitelinks"]
+            .as_object()
             .into_iter()
             .flatten()
-            .any(|b| b.as_str().is_some_and(|b| REDIRECT_BADGES.contains(&b)));
-        if redirect {
-            return None;
-        }
-        link["url"].as_str().map(str::to_owned)
+            .filter(|(_, link)| {
+                !link["badges"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|b| b.as_str().is_some_and(|b| REDIRECT_BADGES.contains(&b)))
+            })
+            .filter_map(|(site, link)| Some((site.clone(), link["url"].as_str()?.to_owned())))
+            .collect();
+        let description = item["descriptions"]["en"]["value"]
+            .as_str()
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+            .map(str::to_owned);
+        Some(Pages {
+            sitelinks,
+            description,
+        })
     }
-    /// The page of item `qid` on `site`; `None` when the item is unknown or has none there.
-    pub async fn sitelink(egress: &Egress, qid: &str, site: &str) -> Result<Option<String>> {
+    /// Item `qid`'s pages and English description; `None` when the item is unknown.
+    pub async fn pages(egress: &Egress, qid: &str) -> Result<Option<Pages>> {
         let Some(qid) = super::qid(qid) else {
             return Ok(None);
         };
-        Ok(get(egress, &sitelink_lookup(&qid, site), "wikidata")
+        Ok(get(egress, &pages_lookup(&qid), "wikidata")
             .await?
-            .and_then(|v| parse_sitelink(&v, site)))
+            .and_then(|v| parse_pages(&v)))
     }
     /// One item's claims of one property alone.
     pub fn claims_lookup(qid: &str, property: &str) -> String {
@@ -1146,6 +1166,27 @@ pub mod wikidata {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// An item's pages leave out a sitelink to a redirect; its English description is trimmed,
+    /// and an empty one is none.
+    #[test]
+    fn an_items_pages_and_description() {
+        let v = serde_json::json!({"entities": {"Q3780426": {"type": "item", "id": "Q3780426",
+            "descriptions": {"en": {"language": "en", "value": " British musician "}},
+            "sitelinks": {
+                "enwiki": {"site": "enwiki", "badges": ["Q70893996"], "url": "https://en.wikipedia.org/wiki/Richard_Colburn"},
+                "dewiki": {"site": "dewiki", "badges": ["Q17437798"], "url": "https://de.wikipedia.org/wiki/Richard_Colburn"}}}}});
+        let pages = wikidata::parse_pages(&v).unwrap();
+        assert_eq!(pages.description.as_deref(), Some("British musician"));
+        assert_eq!(
+            pages.sitelinks.keys().collect::<Vec<_>>(),
+            ["dewiki"],
+            "a redirect's page is another's"
+        );
+        let v = serde_json::json!({"entities": {"Q1": {"type": "item", "id": "Q1", "descriptions": {"en": {"value": "  "}}}}});
+        assert_eq!(wikidata::parse_pages(&v), Some(Default::default()));
+        let v = serde_json::json!({"entities": {"Q1": {"id": "Q1", "missing": ""}}});
+        assert_eq!(wikidata::parse_pages(&v), None);
+    }
 
     /// A page's link holds the value its property's URL template has in place of `$1`: in the
     /// path (decoded, with or without a trailing slash, on either scheme, with or without

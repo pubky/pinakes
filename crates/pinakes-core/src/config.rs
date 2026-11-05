@@ -609,7 +609,7 @@ pub struct ResolverConfig {
     #[serde(skip)]
     pub max_period_dates: usize,
     /// `web.music_enrichment` only: a MusicBrainz page's card takes an image and a description,
-    /// with their credits, from its own Wikidata item (`music_enrichment`). Off, the card is
+    /// with their credits, from its Wikidata item (`music_enrichment`). Off, the card is
     /// MusicBrainz's alone.
     #[serde(skip)]
     pub music_enrichment: bool,
