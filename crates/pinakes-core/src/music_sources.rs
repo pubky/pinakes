@@ -187,11 +187,21 @@ pub fn musicbrainz_card(
         });
     }
     doc.description = (!about.is_empty()).then(|| about.join(" · "));
-    if let Some(artist) = &entity.artist {
+    // Only a whole credit: the document keeps 256 bytes of an attribute, and a cut one would be a
+    // second, wrong `artist` fact beside the `musicbrainz_entity` source's full credit.
+    if let Some(artist) = entity
+        .artist
+        .as_ref()
+        .filter(|a| a.len() <= ARTIST_ATTRIBUTE_MAX)
+    {
         doc.attributes.insert("artist".into(), artist.clone());
     }
     doc
 }
+
+/// The longest artist credit a MusicBrainz card stores as its `artist` attribute: what the
+/// document keeps of an attribute (`ResourceMeta::bounded`).
+const ARTIST_ATTRIBUTE_MAX: usize = 256;
 
 /// The facts a MusicBrainz page's own card states (`musicbrainz_card`): its artist credit and
 /// its length (`duration`, in seconds, as the `musicbrainz_entity` source gives it), so a
@@ -716,13 +726,33 @@ mod tests {
             .collect();
         assert_eq!(own, source);
         assert_eq!(own.len(), 2, "{own:?}");
-        assert_eq!(page_duration_of(&card), own["duration"].parse::<i64>().ok());
+        // The same-recording pass reads the card's own length when no source has read it.
+        let unit = crate::same_recording::Unit::new(
+            card.name.as_deref().unwrap(),
+            card.attributes.get("artist").map(String::as_str),
+            None,
+            card.attributes.get("duration").map(String::as_str),
+        );
+        assert_eq!(unit.length_secs, own["duration"].parse::<i64>().ok());
         let mut page = card.clone();
         page.source = "jsonld".into();
         assert_eq!(card_facts(&page), None);
-    }
-    fn page_duration_of(doc: &crate::model::ResourceMeta) -> Option<i64> {
-        duration_secs(doc.attributes.get("duration")?)
+        // A credit longer than the document keeps is no attribute (and no fact) at all.
+        let mut long = recording.clone();
+        long.artist = Some("Artist feat. ".repeat(30));
+        let card = musicbrainz_card(
+            "https://musicbrainz.org/recording/9f9cf187-d6f9-437f-9d98-d59cdbd52757",
+            Some(&long),
+            None,
+            86400,
+        )
+        .bounded(crate::resolver::web::ATTRIBUTES)
+        .unwrap();
+        assert_eq!(card.attributes.get("artist"), None);
+        assert_eq!(
+            card_facts(&card).unwrap().keys().collect::<Vec<_>>(),
+            ["duration"]
+        );
     }
 
     #[test]

@@ -804,4 +804,32 @@ async fn an_enriched_recording_keeps_its_length_as_a_fact(pool: PgPool) {
         );
         assert_eq!(card["facts"]["artist"], json!(artist), "{route}: {card}");
     }
+    // The `musicbrainz_entity` source's facts say the same: each value shows once. With the
+    // source switched off, the card's own still show.
+    for (name, value) in [("artist", artist.clone()), ("duration", secs.to_string())] {
+        sqlx::query("INSERT INTO resource_fact(resource_id,name,value,source,expires_at) VALUES($1,$2,$3,'musicbrainz_entity',now()+interval '1 day')")
+            .bind(&id)
+            .bind(name)
+            .bind(value)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO resource_fact(resource_id,name,value,source,expires_at) VALUES($1,'isrc','USQX91300108','musicbrainz_entity',now()+interval '1 day')")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let read = call(&app, "GET", &format!("/v1/resources/{id}"), None).await;
+    assert_eq!(read["facts"]["duration"], json!(secs.to_string()), "{read}");
+    assert_eq!(read["facts"]["artist"], json!(artist), "{read}");
+    assert_eq!(read["facts"]["isrc"], "USQX91300108", "{read}");
+    sqlx::query("INSERT INTO also_on_source_off(source) VALUES('musicbrainz_entity')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let read = call(&app, "GET", &format!("/v1/resources/{id}"), None).await;
+    assert_eq!(read["facts"]["duration"], json!(secs.to_string()), "{read}");
+    assert_eq!(read["facts"]["artist"], json!(artist), "{read}");
+    assert_eq!(read["facts"]["isrc"], Value::Null, "{read}");
 }
