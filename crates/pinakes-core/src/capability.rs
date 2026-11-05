@@ -43,14 +43,18 @@ pub fn is_capability_url(url: &Url) -> bool {
         .unwrap_or_default()
         .trim_end_matches('.')
         .to_ascii_lowercase();
-    let path = url.path().to_ascii_lowercase();
+    // `/%6Fwa/calendar/` is `/owa/calendar/` to the provider.
+    let path = percent_encoding::percent_decode_str(url.path())
+        .decode_utf8_lossy()
+        .to_ascii_lowercase();
     secret_share(&host, &path)
         || url
             .query_pairs()
             .any(|(key, _)| CREDENTIAL_KEYS.contains(&key.to_ascii_lowercase().as_str()))
 }
 
-/// A calendar provider's share path whose own segment is the secret.
+/// A calendar provider's share path whose own segment is the secret. Nextcloud's may sit below a
+/// prefix (`/index.php/apps/…`, an install in a sub-path).
 fn secret_share(host: &str, path: &str) -> bool {
     let on = |domain: &str| host == domain || host.ends_with(&format!(".{domain}"));
     // What follows `marker` in `path`: the secret, when not empty.
@@ -61,7 +65,7 @@ fn secret_share(host: &str, path: &str) -> bool {
     ((on("outlook.office365.com") || on("outlook.live.com"))
         && (path.starts_with("/owa/calendar/") || path.starts_with("/owa/0/calendar/")))
         || (on("icloud.com") && path.contains("/published/"))
-        || (host == "calendar.google.com"
+        || ((host == "calendar.google.com" || host == "www.google.com")
             && path.starts_with("/calendar/ical/")
             && path.contains("/private-"))
         || after("/remote.php/dav/public-calendars/")

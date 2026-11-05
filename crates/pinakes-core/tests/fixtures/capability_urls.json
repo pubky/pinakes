@@ -10,7 +10,11 @@
     "https://calendar.example.org/apps/calendar/p/SECRET",
     "https://calendar.example.org/apps/calendar/embed/SECRET",
     "https://proton.me/api/calendar/v1/url/SECRET",
-    "webcal://p29-caldav.icloud.com/published/SECRET"
+    "webcal://p29-caldav.icloud.com/published/SECRET",
+    "https://www.google.com/calendar/ical/test/private-SECRET/basic.ics",
+    "https://calendar.example.org/index.php/apps/calendar/p/SECRET",
+    "https://calendar.example.org/nextcloud/remote.php/dav/public-calendars/SECRET/",
+    "https://outlook.office365.com/%6Fwa/calendar/SECRET/calendar.ics"
   ],
   "query": [
     "https://events.example.org/feed.ics?token=SECRET",
@@ -26,6 +30,7 @@
     "https://events.example.org/search?q=token",
     "https://events.example.org/feed.ics?key_art=1",
     "https://events.example.org/token/feed.ics",
-    "https://events.example.org/apps/calendar/"
+    "https://events.example.org/apps/calendar/",
+    "https://www.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics"
   ]
 }

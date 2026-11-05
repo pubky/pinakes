@@ -3,6 +3,7 @@
 import argparse
 import gzip
 import json
+from urllib.parse import unquote
 from pathlib import Path
 import re
 import sys
@@ -12,9 +13,9 @@ import subprocess
 PATTERN = re.compile(
     r"outlook\.(?:office365|live)\.com/owa/(?:0/)?calendar/"
     r"|icloud\.com/published/"
-    r"|calendar\.google\.com/calendar/ical/[^\s\"<>]*/private-"
-    r"|(?:https?|webcals?)://[^\s\"<>/]+/remote\.php/dav/public-calendars/[^\s\"<>]"
-    r"|(?:https?|webcals?)://[^\s\"<>/]+/apps/calendar/(?:p|embed)/[^\s\"<>]"
+    r"|(?:calendar|www)\.google\.com/calendar/ical/[^\s\"<>]*/private-"
+    r"|(?:https?|webcals?)://[^\s\"<>/]+(?:/[^\s\"<>]*)?/remote\.php/dav/public-calendars/[^\s\"<>]"
+    r"|(?:https?|webcals?)://[^\s\"<>/]+(?:/[^\s\"<>]*)?/apps/calendar/(?:p|embed)/[^\s\"<>]"
     r"|proton\.me/api/calendar/v1/url/|calendar\.proton\.me/share/", re.IGNORECASE)
 SYNTHETIC = (
     "https://cloud.example/remote.php/dav/public-calendars/abc?export",
@@ -23,6 +24,7 @@ SYNTHETIC = (
     "https://p29-caldav.icloud.com/published/2/synthetic-fixture",
     "https://calendar.example.org/remote.php/dav/public-calendars/synthetic-fixture?export",
     "https://cloud.example/apps/calendar/p/abc",
+    "https://cloud.example/index.php/apps/calendar/p/abc/",
 )
 # The probes the runtime classifier (crates/pinakes-core/src/capability.rs) checks too: every
 # "providers" probe is a capability to both, so neither can drop a pattern the other keeps.
@@ -62,7 +64,8 @@ for path in paths:
         allowed.extend(GUARD_PROBES)
     for value in allowed:
         text = re.sub(re.escape(value) + r"(?=[\s\"'<>]|$)", "", text)
-    if PATTERN.search(text):
+    # A percent-encoded path (`/%6Fwa/calendar/`) is the same link to its provider.
+    if PATTERN.search(text) or PATTERN.search(unquote(text)):
         print(f"Capability URL pattern in {relative} (value redacted)", file=sys.stderr)
         failed = True
 sys.exit(int(failed))
