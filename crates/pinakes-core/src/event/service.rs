@@ -182,7 +182,7 @@ impl EventService {
             "non-calendar page exceeds 1 MB"
         );
         let input_uri = uri.to_owned();
-        let fetched = fetched.clone();
+        let fetched = crate::resolver::web::as_read(uri, fetched).into_owned();
         let config = self.config.clone();
         let ttl = card.ttl_secs;
         let (mut event, calendar_link, advertised, event_candidate, platform_extra) =

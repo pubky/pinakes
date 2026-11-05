@@ -4542,3 +4542,47 @@ async fn an_event_naming_the_pages_canonical_is_the_pages_event_through_the_whol
         Some("Arena")
     );
 }
+
+/// An event page whose fetch ended on an address that carries a credential names nothing after
+/// it: relative JSON-LD `image` and `url` resolve against it.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn an_event_page_reached_at_a_credential_resolves_nothing_back_to_it(pool: PgPool) {
+    let egress = Egress::with_backends(
+        pinakes_core::config::EgressConfig {
+            host_requests_per_second: 1000.0,
+            ..Default::default()
+        },
+        Arc::new(PublicDns),
+        Arc::new(ProtocolTransport {
+            seen: Mutex::default(),
+        }),
+    );
+    let service = pinakes_core::event::service::EventService {
+        pool: pool.clone(),
+        config: EventConfig {
+            geocoding: false,
+            ..Default::default()
+        },
+        osm: Arc::new(OsmResolver::new(pool.clone(), OsmConfig::default()).unwrap()),
+    };
+    let uri = "https://example.org/e/abc";
+    let fetched = Fetched {
+        permanent_redirect: false,
+        truncated: false,
+        validators: Default::default(),
+        url: "https://events.example/share?token=SECRET".parse().unwrap(),
+        status: 200,
+        retry_after_secs: 60,
+        location: None,
+        content_type: "text/html".into(),
+        body: br##"<title>Gig</title><script type="application/ld+json">{"@type":"Event","name":"Gig","startDate":"2027-01-20T18:00:00Z","image":"#poster","url":""}</script>"##.to_vec(),
+    };
+    let card = ResourceMeta::new(uri, "web", 3600);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let doc = service
+        .page(uri, &fetched, card, &egress, deadline)
+        .await
+        .unwrap();
+    let json = serde_json::to_string(&doc).unwrap();
+    assert!(!json.contains("SECRET"), "{json}");
+}
