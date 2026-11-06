@@ -2559,7 +2559,7 @@ async fn a_card_shows_one_link_per_service(pool: PgPool) {
         sorted(vec![pending.into(), pending_too.into()]),
         "{card}"
     );
-    // A lookup card shows the card's view; a resource read lists every link.
+    // A lookup card shows the card's view, and so does a resource read.
     let looked_up = lookup_card(&app, &ids[0]).await;
     assert_eq!(
         sorted(of(&looked_up["also_on"], "TIDAL")),
@@ -2568,18 +2568,21 @@ async fn a_card_shows_one_link_per_service(pool: PgPool) {
     let read = get(&app, &format!("/v1/resources/{}", ids[0])).await;
     assert_eq!(
         sorted(of(&read["also_on"], "TIDAL")),
-        sorted(vec![tagged.into(), regional.into(), pending_tidal.into()])
+        sorted(vec![tagged.into(), pending_tidal.into()])
     );
-    assert_eq!(of(&read["also_on"], "Spotify").len(), 2);
+    assert_eq!(of(&read["also_on"], "Spotify").len(), 1);
     assert_eq!(
         sorted(of(&looked_up["also_on"], "Apple Music")),
         sorted(vec![pending.into(), pending_too.into()])
     );
-    assert_eq!(of(&read["also_on"], "Apple Music").len(), 3);
+    assert_eq!(
+        sorted(of(&read["also_on"], "Apple Music")),
+        sorted(vec![pending.into(), pending_too.into()])
+    );
 }
 
 /// A card's own service has its link, the card: Radiohead's Discogs artist never shows "On A
-/// Friday", the band's earlier name, which Wikidata lists as another Discogs ID. Its details do.
+/// Friday", the band's earlier name, which Wikidata lists as another Discogs ID, nor does its read.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_card_shows_no_other_page_of_its_own_service(pool: PgPool) {
     let artist = "https://www.discogs.com/artist/3840";
@@ -2615,7 +2618,7 @@ async fn a_card_shows_no_other_page_of_its_own_service(pool: PgPool) {
     };
     let looked_up = lookup_card(&app, &id).await;
     assert_eq!(uris(&looked_up["also_on"]), [spotify], "{looked_up}");
-    assert_eq!(uris(&read["also_on"]), [earlier, spotify]);
+    assert_eq!(uris(&read["also_on"]), [spotify]);
 }
 
 /// A run takes the write order before the resource rows, as saves do: a save holding its

@@ -109,6 +109,7 @@ fn shop(gtin: &str) -> Subject {
         doc: Some(doc),
         keys: vec![],
         first_seen_at: None,
+        candidates: vec![],
     }
 }
 fn links(found: &Found) -> Vec<(&str, &str, Option<&str>)> {

@@ -535,6 +535,42 @@ pub mod musicbrainz {
             .min()
             .map(|(_, title)| title.to_owned())
     }
+    /// The official releases MusicBrainz lists for `query` (`recording={mbid}&type=album`,
+    /// `release-group={mbid}`), each with its release group, media and URL relations: up to
+    /// `pages` pages of 100, in MusicBrainz's order (not by date); and whether that is every one
+    /// (as many as its `release-count` says). A page it doesn't answer, or the page cap, leaves
+    /// the list incomplete.
+    pub async fn releases(
+        egress: &Egress,
+        base: &str,
+        query: &str,
+        pages: usize,
+    ) -> Result<(Vec<Value>, bool)> {
+        let mut releases = vec![];
+        let mut count = None;
+        for page in 0..pages {
+            let offset = if page == 0 {
+                String::new()
+            } else {
+                format!("&offset={}", page * 100)
+            };
+            let url = format!(
+                "{base}/release?{query}&status=official&inc=release-groups+media+url-rels&limit=100{offset}&fmt=json"
+            );
+            let Some(v) = get(egress, &url, "musicbrainz").await? else {
+                return Ok((releases, false));
+            };
+            let batch = v["releases"].as_array().cloned().unwrap_or_default();
+            count = v["release-count"].as_u64().map(|c| c as usize);
+            let empty = batch.is_empty();
+            releases.extend(batch);
+            if empty || count.is_some_and(|c| releases.len() >= c) {
+                break;
+            }
+        }
+        let complete = count.is_some_and(|c| releases.len() >= c);
+        Ok((releases, complete))
+    }
     /// A recording an ISRC is on, with its length when MusicBrainz states one.
     #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
     pub struct IsrcRecording {

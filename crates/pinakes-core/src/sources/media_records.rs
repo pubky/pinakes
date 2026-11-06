@@ -602,6 +602,7 @@ pub mod titles {
                 doc: Some(doc),
                 keys: vec![],
                 first_seen_at: None,
+                candidates: vec![],
             }
         }
 

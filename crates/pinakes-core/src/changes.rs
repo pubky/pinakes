@@ -81,7 +81,12 @@ pub(crate) fn gone_card(doc: &ResourceMeta) -> ResourceMeta {
 /// rows deleted.
 async fn forget_derived(tx: &mut Transaction<'_, Postgres>, ids: &[String]) -> Result<u64> {
     let mut deleted = 0;
-    for table in ["resource_fact", "resource_key", "derived_link"] {
+    for table in [
+        "resource_fact",
+        "resource_key",
+        "derived_link",
+        "link_release",
+    ] {
         deleted += sqlx::query(&format!("DELETE FROM {table} WHERE resource_id=ANY($1)"))
             .bind(ids)
             .execute(&mut **tx)
