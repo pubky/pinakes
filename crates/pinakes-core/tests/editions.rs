@@ -304,51 +304,58 @@ async fn with_deezer_on_its_link_on_the_album_is_placed() {
 /// pages of that release are placed on it; another Deezer album is not.
 #[tokio::test]
 async fn kind_of_blues_album_pages_are_placed_on_its_own_release() {
-    let transport = Captured::new();
-    let cx = context(transport.clone(), config("editions-album", false));
-    let subject = subject(
-        "https://open.spotify.com/album/1weenld61qoidwYuZ1GESA",
+    // Keyed by its releases, or (as MusicBrainz relates the link to two releases of one group) by
+    // the group alone: its own releases are then those its URL is related to.
+    for keys in [
         &[
             "mb:release:bee5e0cd-1767-4a8e-9578-6455e87ba60b",
             "mb:release:4c8af71f-5746-4981-92d7-0d6c64db1155",
-        ],
-        &[
-            "https://www.deezer.com/album/1441464",
-            "https://www.deezer.com/album/7824595",
-            "https://tidal.com/album/655910",
-            "https://music.apple.com/us/album/268443092",
-            "https://open.qobuz.com/album/5099749522428",
-        ],
-    );
-    let found = Editions.lookup(&cx, &subject).await.unwrap();
-    let release = "4c8af71f-5746-4981-92d7-0d6c64db1155";
-    assert_eq!(
-        placed(&found),
-        [
-            (
-                "https://music.apple.com/us/album/268443092".to_owned(),
-                release.to_owned(),
-                0
-            ),
-            (
-                "https://open.qobuz.com/album/5099749522428".to_owned(),
-                release.to_owned(),
-                0
-            ),
-            (
-                "https://tidal.com/album/655910".to_owned(),
-                release.to_owned(),
-                0
-            ),
-            (
-                "https://www.deezer.com/album/1441464".to_owned(),
-                release.to_owned(),
-                0
-            ),
-        ],
-        "{:?}",
-        transport.seen()
-    );
+        ][..],
+        &["mb:release-group:8e8a594f-2175-38c7-a871-abb68ec363e7"][..],
+    ] {
+        let transport = Captured::new();
+        let cx = context(transport.clone(), config("editions-album", false));
+        let subject = subject(
+            "https://open.spotify.com/album/1weenld61qoidwYuZ1GESA",
+            keys,
+            &[
+                "https://www.deezer.com/album/1441464",
+                "https://www.deezer.com/album/7824595",
+                "https://tidal.com/album/655910",
+                "https://music.apple.com/us/album/268443092",
+                "https://open.qobuz.com/album/5099749522428",
+            ],
+        );
+        let found = Editions.lookup(&cx, &subject).await.unwrap();
+        let release = "4c8af71f-5746-4981-92d7-0d6c64db1155";
+        assert_eq!(
+            placed(&found),
+            [
+                (
+                    "https://music.apple.com/us/album/268443092".to_owned(),
+                    release.to_owned(),
+                    0
+                ),
+                (
+                    "https://open.qobuz.com/album/5099749522428".to_owned(),
+                    release.to_owned(),
+                    0
+                ),
+                (
+                    "https://tidal.com/album/655910".to_owned(),
+                    release.to_owned(),
+                    0
+                ),
+                (
+                    "https://www.deezer.com/album/1441464".to_owned(),
+                    release.to_owned(),
+                    0
+                ),
+            ],
+            "{:?}",
+            transport.seen()
+        );
+    }
 }
 
 /// A service that fails while the card's links are placed fails the run: what earlier runs

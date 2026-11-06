@@ -115,6 +115,11 @@ impl Source for Editions {
                     .collect();
                 own_releases.sort();
                 own_releases.truncate(OWN_RELEASES);
+                // A link MusicBrainz relates to several releases of one group is keyed by the
+                // group: its own releases are those its URL is related to.
+                if own_releases.is_empty() {
+                    own_releases = releases_of_page(cx, base, &own.canonical).await?;
+                }
                 // The group: the one its key names, else its own release's.
                 let mut group: Option<String> = match subject
                     .keys_in("mb:release-group")
@@ -346,10 +351,14 @@ pub fn release_pages(entity: &musicbrainz::Entity, rank: i16) -> Vec<Page> {
 /// The release(s) the card's own track's album is a page of, when its service says which album
 /// that is.
 async fn own_track_releases(cx: &Context, base: &str, own: &music::Link) -> Result<Vec<String>> {
-    let Some(album) = album_of(cx, own).await? else {
-        return Ok(vec![]);
-    };
-    let mut releases: Vec<String> = musicbrainz::url(&cx.egress, base, &album.canonical)
+    match album_of(cx, own).await? {
+        Some(album) => releases_of_page(cx, base, &album.canonical).await,
+        None => Ok(vec![]),
+    }
+}
+/// The releases MusicBrainz relates an album page to (at most [`OWN_RELEASES`]).
+async fn releases_of_page(cx: &Context, base: &str, page: &str) -> Result<Vec<String>> {
+    let mut releases: Vec<String> = musicbrainz::url(&cx.egress, base, page)
         .await?
         .map(|t| t.targets)
         .unwrap_or_default()
