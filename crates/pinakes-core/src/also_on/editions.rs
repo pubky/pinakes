@@ -20,7 +20,7 @@
 //! Each link ends a run placed, on another release, unplaced, or kept: a link whose place the run
 //! cannot tell (its service failed or refused the credentials, the release list was cut short, a
 //! cap was reached) keeps the place recorded before. Only MusicBrainz failing fails the run.
-use super::{deezer, itunes, spotify, tidal, Context, Edition, Fact, Found, Source, Subject};
+use super::{deezer, itunes, spotify, tidal, Context, Edition, Fact, Found, Link, Source, Subject};
 use crate::{
     hubs::{self, musicbrainz, MbKind},
     music::{self, Level, Service},
@@ -64,6 +64,9 @@ impl Source for Editions {
     }
     fn reads_candidates(&self) -> bool {
         true
+    }
+    fn key_forms(&self) -> &'static [(&'static str, &'static str)] {
+        crate::music_sources::KEY_FORMS
     }
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
         let Some(own) = music::parse(&subject.uri) else {
@@ -212,6 +215,39 @@ impl Source for Editions {
                         found.retry_after = Some(RETRY);
                     }
                 }
+            }
+        }
+        // An album card's own release's pages on other services are links of its own, placed
+        // first: `musicbrainz` derives none for a link it relates to several releases of a group
+        // (it keys the group, which names no pages). Each is keyed by its release, as
+        // `musicbrainz` keys a release's relations.
+        if own.level == Level::Album {
+            let known: BTreeSet<&str> = candidates
+                .iter()
+                .map(|(_, l)| l.canonical.as_str())
+                .collect();
+            let mut added = BTreeSet::new();
+            for page in pages.iter().filter(|p| {
+                p.rank == 0
+                    && p.album.service != own.service
+                    && !known.contains(p.album.canonical.as_str())
+            }) {
+                if !added.insert(page.album.canonical.clone()) {
+                    continue;
+                }
+                found.links.push(
+                    Link::new(
+                        page.album.canonical.clone(),
+                        page.album.service.name(),
+                        "musicbrainz",
+                    )
+                    .keyed(format!("mb:release:{}", page.release)),
+                );
+                found.editions.push(Edition {
+                    uri: page.album.canonical.clone(),
+                    release: Some(page.release.clone()),
+                    rank: 0,
+                });
             }
         }
         // The releases it reads as the card's own and as the original edition, by MBID.
@@ -513,7 +549,8 @@ pub fn place_album(link: &music::Link, pages: &[Page]) -> Outcome {
 
 /// The outcome of a link on `service` that is on `albums`: placed at the best rank of their pages
 /// in `pages`; on another release when an own or original release has a page on `service` and
-/// none is among `albums`; else unplaced.
+/// none is among `albums`; else unplaced. A Discogs master is the release group itself, never
+/// another release.
 pub fn place(service: Service, albums: &[music::Link], pages: &[Page]) -> Outcome {
     let best = pages
         .iter()
@@ -524,7 +561,10 @@ pub fn place(service: Service, albums: &[music::Link], pages: &[Page]) -> Outcom
             rank: page.rank,
             release: page.release.clone(),
         },
-        None if !albums.is_empty() && pages.iter().any(|p| p.album.service == service) => {
+        None if !albums.is_empty()
+            && pages.iter().any(|p| p.album.service == service)
+            && !albums.iter().any(|a| a.id.starts_with("master/")) =>
+        {
             Outcome::Other
         }
         None => Outcome::Unplaced,

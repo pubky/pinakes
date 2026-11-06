@@ -349,6 +349,14 @@ async fn with_deezer_on_its_link_on_the_album_is_placed() {
         .any(|(uri, ..)| uri.ends_with("/2271581007")));
 }
 
+/// Album links of Kind of Blue: four pages of its 2011 release and another Deezer album.
+const KIND_OF_BLUE_LINKS: &[&str] = &[
+    "https://www.deezer.com/album/1441464",
+    "https://www.deezer.com/album/7824595",
+    "https://tidal.com/album/655910",
+    "https://music.apple.com/us/album/268443092",
+    "https://open.qobuz.com/album/5099749522428",
+];
 /// Kind of Blue's Spotify album is a page of its 2011 worldwide release: the other services'
 /// pages of that release are placed on it; another Deezer album is not.
 #[tokio::test]
@@ -367,18 +375,15 @@ async fn kind_of_blues_album_pages_are_placed_on_its_own_release() {
         let subject = subject(
             "https://open.spotify.com/album/1weenld61qoidwYuZ1GESA",
             keys,
-            &[
-                "https://www.deezer.com/album/1441464",
-                "https://www.deezer.com/album/7824595",
-                "https://tidal.com/album/655910",
-                "https://music.apple.com/us/album/268443092",
-                "https://open.qobuz.com/album/5099749522428",
-            ],
+            KIND_OF_BLUE_LINKS,
         );
         let found = Editions.lookup(&cx, &subject).await.unwrap();
         let release = "4c8af71f-5746-4981-92d7-0d6c64db1155";
         assert_eq!(
-            placed(&found),
+            placed(&found)
+                .into_iter()
+                .filter(|(uri, ..)| KIND_OF_BLUE_LINKS.contains(&uri.as_str()))
+                .collect::<Vec<_>>(),
             [
                 (
                     "https://music.apple.com/us/album/268443092".to_owned(),
@@ -1277,4 +1282,58 @@ async fn an_alias_assignment_places_its_groups_links_again(pool: PgPool) {
     .await
     .unwrap();
     assert!(due.contains(&(card, true)), "{due:?}");
+}
+
+/// Kind of Blue as stable keys it (by its release group) with only Wikidata's album links, one of
+/// them another album ("Miles in the Movies"): the pages of its own release are links of its own,
+/// placed first; Wikidata's other Deezer and TIDAL albums are on another release; the Discogs
+/// master, the group itself, is not.
+#[tokio::test]
+async fn an_album_cards_own_release_pages_are_its_links() {
+    let transport = Captured::new();
+    let cx = context(transport.clone(), config("editions-own-pages", false));
+    let subject = subject(
+        "https://open.spotify.com/album/1weenld61qoidwYuZ1GESA",
+        &["mb:release-group:8e8a594f-2175-38c7-a871-abb68ec363e7"],
+        &[
+            "https://www.deezer.com/album/521185",
+            "https://tidal.com/album/2178485",
+            "https://www.discogs.com/master/5460",
+        ],
+    );
+    let found = Editions.lookup(&cx, &subject).await.unwrap();
+    let own = "4c8af71f-5746-4981-92d7-0d6c64db1155";
+    let mut links: Vec<(String, String, Option<String>)> = found
+        .links
+        .iter()
+        .map(|l| (l.site.clone(), l.uri.clone(), l.key.clone()))
+        .collect();
+    links.sort();
+    let key = Some(format!("mb:release:{own}"));
+    for expected in [
+        ("Apple Music", "https://music.apple.com/album/268443092"),
+        ("Deezer", "https://www.deezer.com/album/1441464"),
+        ("Qobuz", "https://open.qobuz.com/album/5099749522428"),
+        ("TIDAL", "https://tidal.com/album/655910"),
+    ] {
+        assert!(
+            links.contains(&(expected.0.into(), expected.1.into(), key.clone())),
+            "{expected:?} in {links:?}"
+        );
+    }
+    assert!(placed(&found).contains(&(
+        "https://www.deezer.com/album/1441464".to_owned(),
+        own.to_owned(),
+        0
+    )));
+    assert_eq!(
+        others(&found),
+        [
+            "https://tidal.com/album/2178485",
+            "https://www.deezer.com/album/521185"
+        ]
+    );
+    assert!(!placed(&found)
+        .iter()
+        .any(|(uri, ..)| uri.contains("master/5460")));
 }

@@ -50,6 +50,13 @@ release, else on the original edition.
     releases than the pages read: only the card's own release then ranks), or more than eight
     links of one service wait (tagged members first, then the derived links most members name).
   Only MusicBrainz failing (the release list, the card's own album's URL lookup) fails the run.
+- **An album card's own release's pages** on other services (its album on Deezer, TIDAL, Apple
+  Music, …, as MusicBrainz relates them) are derived links of this source, keyed by the release
+  (`mb:release:…`), and placed first. `musicbrainz` derives none for an album link it relates to
+  several releases of one group: it keys the group, which names no pages. So an album another
+  source lists for the same work (Wikidata may list several Deezer albums) never wins over the
+  card's own release's; it is on another release. A Discogs master is the group itself, never
+  another release.
 - **Facts:** `release` (the card's own release or releases, up to four) and `original_release`
   (the original edition's releases with a page on a service, up to four), as MBIDs.
 - **When a group changes** (a member joins or leaves, a link becomes another's alias), the sources
