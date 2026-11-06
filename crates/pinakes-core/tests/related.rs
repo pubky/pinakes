@@ -631,3 +631,127 @@ async fn the_seed_links_sampled_are_the_ones_with_the_newest_tags_up_to_the_cap(
         );
     }
 }
+
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn each_row_says_why_it_is_listed(pool: PgPool) {
+    let seed = save(&pool, "https://example.org/seed", "MusicAlbum").await;
+    let many = save(&pool, "https://example.org/many", "MusicAlbum").await;
+    let few = save(&pool, "https://example.org/few", "MusicAlbum").await;
+    let p = save(&pool, "https://example.org/p-tidal", "MusicAlbum").await;
+    let q = save(&pool, "https://example.org/p-spotify", "MusicAlbum").await;
+    group(&pool, "0123456789abcdef0123456789abcdef", &[&p, &q]).await;
+    // The seed's taggers, 4 the most recent, 1 the oldest.
+    for who in [1, 2, 3, 4] {
+        tag(&pool, &seed, who, 5 - who as i64).await;
+    }
+    for who in [1, 2, 3, 4] {
+        tag(&pool, &many, who, 6).await;
+    }
+    tag(&pool, &few, 1, 6).await;
+    tag(&pool, &few, 2, 6).await;
+    tag(&pool, &p, 1, 7).await;
+    tag(&pool, &q, 3, 7).await;
+    let because = |shared: i64, who: &[usize]| serde_json::json!({"shared": shared, "taggers": who.iter().map(|w| author(*w)).collect::<Vec<_>>()});
+    // The count the row is ranked by, and at most three taggers, the seed's most recent first.
+    let v = related_with(&Config::default(), &pool, &seed, "").await;
+    assert_eq!(rows(&v), [many.clone(), few.clone()], "{v}");
+    assert_eq!(v["items"][0]["because"], because(4, &[4, 3, 2]));
+    assert_eq!(v["items"][1]["because"], because(2, &[2, 1]));
+    // Collapsed: a group's, its members' taggers together.
+    let v = related_with(&Config::default(), &pool, &seed, "&collapse=group").await;
+    let got = rows(&v);
+    assert_eq!(got.len(), 3, "{v}");
+    assert!(got[2] == p || got[2] == q, "{v}");
+    assert_eq!(v["items"][2]["because"], because(2, &[3, 1]));
+    // With one shared tagger allowed, each member alone has its own.
+    let v = related(&pool, &seed, "&type=MusicAlbum").await;
+    let at = |id: &String| {
+        v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == id.as_str())
+            .unwrap()["because"]
+            .clone()
+    };
+    assert_eq!(at(&p), because(1, &[1]));
+    assert_eq!(at(&q), because(1, &[3]));
+    // Within an author's scope, only that tagger counts and is named.
+    let v = related(&pool, &seed, &format!("&author={}", author(3))).await;
+    assert_eq!(rows(&v)[0], many, "{v}");
+    assert_eq!(v["items"][0]["because"], because(1, &[3]));
+    // A later page says it too.
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let page = |path: String| {
+        let app = app.clone();
+        async move {
+            let mut request = Request::get(path).body(Body::empty()).unwrap();
+            request.extensions_mut().insert(ConnectInfo(
+                "127.0.0.1:4000".parse::<std::net::SocketAddr>().unwrap(),
+            ));
+            let response = app.oneshot(request).await.unwrap();
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            serde_json::from_slice::<Value>(&bytes).unwrap()
+        }
+    };
+    let first = page(format!("/v1/search?related={seed}&limit=1")).await;
+    assert_eq!(first["items"][0]["because"], because(4, &[4, 3, 2]));
+    assert!(first["items"][0].get("because_n").is_none(), "{first}");
+    let cursor: String =
+        url::form_urlencoded::byte_serialize(first["cursor"].as_str().unwrap().as_bytes())
+            .collect();
+    let next = page(format!("/v1/search?related={seed}&limit=1&cursor={cursor}")).await;
+    assert_eq!(rows(&next), std::slice::from_ref(&few));
+    assert_eq!(next["items"][0]["because"], because(2, &[2, 1]));
+    // Any other search has none.
+    let (status, v) = get_with(&Config::default(), &pool, "/v1/search?tags=music").await;
+    assert_eq!(status, 200);
+    assert!(!v["items"].as_array().unwrap().is_empty());
+    assert!(
+        v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r.get("because").is_none()),
+        "{v}"
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_related_map_point_says_why_too(pool: PgPool) {
+    let seed = save(&pool, "https://example.org/seed", "MusicAlbum").await;
+    let mut places = vec![];
+    for (n, (lat, lon)) in [(47.37, 8.54), (46.0, 7.0)].into_iter().enumerate() {
+        let uri = format!("https://example.org/venue-{n}");
+        let id = store::ensure_resource(&pool, &uri).await.unwrap();
+        let mut doc = ResourceMeta::new(&uri, "web", 86400);
+        doc.set_type("Place");
+        doc.name = Some(format!("venue {n}"));
+        doc.location = Some(pinakes_core::model::Point { lat, lon });
+        store::save_document(&pool, &id, 0, &doc).await.unwrap();
+        places.push(id);
+    }
+    for who in [1, 2] {
+        tag(&pool, &seed, who, 3 - who as i64).await;
+        for id in &places {
+            tag(&pool, id, who, 5).await;
+        }
+    }
+    let v = related_with(
+        &Config::default(),
+        &pool,
+        &seed,
+        "&bbox=5,45,11,48&cluster=8",
+    )
+    .await;
+    let points = v["points"].as_array().unwrap();
+    assert_eq!(points.len(), 2, "{v}");
+    for point in points {
+        assert_eq!(
+            point["because"],
+            serde_json::json!({"shared": 2, "taggers": [author(2), author(1)]}),
+            "{v}"
+        );
+        assert!(point.get("because_n").is_none() && point.get("because_authors").is_none());
+    }
+}
