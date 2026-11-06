@@ -41,7 +41,9 @@ release, else on the original edition.
   - **placed** on the card's own release (rank 0) or the original edition's (1, 2, …);
   - **on another release** (rank 1000, after unplaced links): its service names another album,
     on a service an own or original release has a page on (a later edition, a compilation);
-  - **unplaced** (no row): its service names no album, or no such release has a page on it;
+  - **gone** (rank 1000, as on another release): its service names no album for it (a track it
+    no longer lists), so it never wins over a link it does;
+  - **unplaced** (no row): no own or original release has a page on its service;
     Qobuz, YouTube and the other services name no album here, and among them the card's order is
     unchanged;
   - **kept**: the place recorded before stays, when this run cannot tell: the service failed (the
@@ -49,6 +51,8 @@ release, else on the original edition.
     app whose owner has no premium plan), the release list was cut short (MusicBrainz names more
     releases than the pages read: only the card's own release then ranks), or more than eight
     links of one service wait (tagged members first, then the derived links most members name).
+    A kept place lasts until it expires, twice the source's lifetime after it was recorded. When
+    the card's own album fails, every link keeps its place.
   Only MusicBrainz failing (the release list, the card's own album's URL lookup) fails the run.
 - **An album card's own release's pages** on other services (its album on Deezer, TIDAL, Apple
   Music, …, as MusicBrainz relates them) are derived links of this source, keyed by the release

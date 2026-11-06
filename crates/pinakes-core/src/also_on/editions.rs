@@ -89,7 +89,7 @@ impl Source for Editions {
         let mut found = Found::default();
         // The frame: the releases, the original edition, the card's own releases. MusicBrainz
         // failing fails the run.
-        let (releases, complete, own_releases) = match own.level {
+        let (releases, complete, own_releases, own_unknown) = match own.level {
             Level::Track => {
                 let recording: Vec<&str> = subject.keys_in("mb:recording").collect();
                 let [recording] = recording.as_slice() else {
@@ -116,24 +116,28 @@ impl Source for Editions {
                 }
                 // The card's own album, as its own service names it: its failing keeps every
                 // place, as it is the rank all others count against.
+                let mut own_unknown = false;
                 let own_album = match album_of(cx, &own, true).await {
                     Ok(albums) => albums,
                     Err(error) => {
-                        found.keep = candidates.iter().map(|(uri, _)| uri.clone()).collect();
+                        own_unknown = true;
                         if !refusal(&error) {
                             found.retry_after = Some(RETRY);
                         }
-                        return Ok(found);
+                        vec![]
                     }
                 };
-                let mut own_releases = vec![];
-                for album in own_album {
-                    own_releases.extend(releases_of_page(cx, base, &album.canonical).await?);
+                // In the service's order (TIDAL's first album first), at most four.
+                let mut own_releases: Vec<String> = vec![];
+                for album in own_album.iter().take(OWN_RELEASES) {
+                    for release in releases_of_page(cx, base, &album.canonical).await? {
+                        if !own_releases.contains(&release) {
+                            own_releases.push(release);
+                        }
+                    }
                 }
-                own_releases.sort();
-                own_releases.dedup();
                 own_releases.truncate(OWN_RELEASES);
-                (releases, complete, own_releases)
+                (releases, complete, own_releases, own_unknown)
             }
             Level::Album => {
                 let mut own_releases: Vec<String> = subject
@@ -175,7 +179,7 @@ impl Source for Editions {
                     }
                     None => (vec![], false),
                 };
-                (releases, complete, own_releases)
+                (releases, complete, own_releases, false)
             }
             _ => return Ok(found),
         };
@@ -187,7 +191,13 @@ impl Source for Editions {
         if !complete {
             pages.retain(|p| p.rank == 0);
         }
+        // The card's own album failing keeps every place: its release is the rank all others
+        // count against.
         let outcomes = match own.level {
+            _ if own_unknown => candidates
+                .iter()
+                .map(|(uri, _)| (uri.clone(), Outcome::Keep { retry: false }))
+                .collect(),
             Level::Track => place_tracks(cx, &candidates, &pages).await,
             _ => candidates
                 .iter()
@@ -203,7 +213,7 @@ impl Source for Editions {
                     release: Some(release),
                     rank,
                 }),
-                Outcome::Other => found.editions.push(Edition {
+                Outcome::Other | Outcome::Gone => found.editions.push(Edition {
                     uri,
                     release: None,
                     rank: OTHER,
@@ -222,16 +232,17 @@ impl Source for Editions {
         // (it keys the group, which names no pages). Each is keyed by its release, as
         // `musicbrainz` keys a release's relations.
         if own.level == Level::Album {
+            // Every run names them all (a link no run names goes), and places those no
+            // candidate already stands for.
             let known: BTreeSet<&str> = candidates
                 .iter()
                 .map(|(_, l)| l.canonical.as_str())
                 .collect();
             let mut added = BTreeSet::new();
-            for page in pages.iter().filter(|p| {
-                p.rank == 0
-                    && p.album.service != own.service
-                    && !known.contains(p.album.canonical.as_str())
-            }) {
+            for page in pages
+                .iter()
+                .filter(|p| p.rank == 0 && p.album.service != own.service)
+            {
                 if !added.insert(page.album.canonical.clone()) {
                     continue;
                 }
@@ -243,11 +254,13 @@ impl Source for Editions {
                     )
                     .keyed(format!("mb:release:{}", page.release)),
                 );
-                found.editions.push(Edition {
-                    uri: page.album.canonical.clone(),
-                    release: Some(page.release.clone()),
-                    rank: 0,
-                });
+                if !known.contains(page.album.canonical.as_str()) {
+                    found.editions.push(Edition {
+                        uri: page.album.canonical.clone(),
+                        release: Some(page.release.clone()),
+                        rank: 0,
+                    });
+                }
             }
         }
         // The releases it reads as the card's own and as the original edition, by MBID.
@@ -280,6 +293,8 @@ pub enum Outcome {
     Other,
     /// On no release its service could name.
     Unplaced,
+    /// Its service names no album for it (gone, delisted): ranked with links on another release.
+    Gone,
     /// Not told: the place recorded before stays (`retry`: its service failed).
     Keep { retry: bool },
 }
@@ -549,9 +564,12 @@ pub fn place_album(link: &music::Link, pages: &[Page]) -> Outcome {
 
 /// The outcome of a link on `service` that is on `albums`: placed at the best rank of their pages
 /// in `pages`; on another release when an own or original release has a page on `service` and
-/// none is among `albums`; else unplaced. A Discogs master is the release group itself, never
-/// another release.
+/// none is among `albums`; gone when its service names no album for it; else unplaced. A Discogs
+/// master is the release group itself, never another release.
 pub fn place(service: Service, albums: &[music::Link], pages: &[Page]) -> Outcome {
+    if albums.is_empty() {
+        return Outcome::Gone;
+    }
     let best = pages
         .iter()
         .filter(|p| albums.iter().any(|a| a.canonical == p.album.canonical))

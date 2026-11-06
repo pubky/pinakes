@@ -416,7 +416,7 @@ async fn kind_of_blues_album_pages_are_placed_on_its_own_release() {
 /// A service that fails while the card's links are placed leaves its links' places as recorded
 /// before (kept), and the run comes back sooner; the other services' links are placed.
 #[tokio::test]
-async fn a_busy_service_fails_the_run_so_its_places_stay() {
+async fn a_busy_service_keeps_its_links_places() {
     let transport = Captured::busy(&["itunes.apple.com"]);
     let cx = context(transport.clone(), config("editions-busy", false));
     let subject = subject(
@@ -963,6 +963,8 @@ async fn links_past_the_cap_keep_their_places() {
     let subject = subject(GET_LUCKY, &[&format!("mb:recording:{RECORDING}")], &links);
     let found = Editions.lookup(&cx, &subject).await.unwrap();
     assert_eq!(found.keep, [apple[8].clone()]);
+    // The eight asked: iTunes names no album for them (gone), ranked with another release's.
+    assert_eq!(others(&found), apple[..8].to_vec());
 }
 
 /// The card's own Spotify track (a link someone referenced) is read for its album where Spotify's
@@ -1336,4 +1338,88 @@ async fn an_album_cards_own_release_pages_are_its_links() {
     assert!(!placed(&found)
         .iter()
         .any(|(uri, ..)| uri.contains("master/5460")));
+}
+
+/// Two runs of an album card keyed by its group: the second names the same links of its own
+/// release and keeps the same places (no link flips off and back), and no regrouping asks for a
+/// third run.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn an_album_cards_own_pages_stay_from_run_to_run(pool: PgPool) {
+    let cfg = Config::default().also_on;
+    let uri = "https://open.spotify.com/album/1weenld61qoidwYuZ1GESA";
+    let card = save(&pool, uri, "MusicAlbum", Some("Spotify")).await;
+    also_on::record(
+        &pool,
+        &card,
+        "musicbrainz",
+        Found {
+            keys: vec![also_on::Key {
+                key: "mb:release-group:8e8a594f-2175-38c7-a871-abb68ec363e7".into(),
+                via: "musicbrainz".into(),
+            }],
+            ..Default::default()
+        },
+        std::time::Duration::from_secs(86_400),
+        &cfg,
+    )
+    .await
+    .unwrap();
+    also_on::record(
+        &pool,
+        &card,
+        "wikidata",
+        found_links(&[
+            ("https://www.deezer.com/album/521185", "Deezer"),
+            ("https://tidal.com/album/2178485", "TIDAL"),
+        ]),
+        std::time::Duration::from_secs(86_400),
+        &cfg,
+    )
+    .await
+    .unwrap();
+    let transport = Captured::new();
+    let cx = context(transport.clone(), config("editions-twice", false));
+    let sources: Vec<Arc<dyn Source>> = vec![Arc::new(Editions)];
+    let state = || async {
+        sqlx::query_scalar::<_, String>(
+            "SELECT 'link '||uri||' '||coalesce(key,'') FROM derived_link WHERE resource_id=$1 AND source='editions' UNION ALL SELECT 'place '||link_id||' '||coalesce(release,'-')||' '||rank FROM link_release WHERE resource_id=$1 ORDER BY 1",
+        )
+        .bind(&card)
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+    let mut runs = vec![];
+    for _ in 0..2 {
+        sqlx::query("INSERT INTO also_on_dirty(resource_id) VALUES($1) ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=now()")
+            .bind(&card)
+            .execute(&pool)
+            .await
+            .unwrap();
+        also_on::drain(&pool, &cx, &sources, 10).await.unwrap();
+        runs.push(state().await);
+    }
+    assert!(
+        runs[0]
+            .iter()
+            .any(|r| r.starts_with("link https://www.deezer.com/album/1441464")),
+        "{:?}",
+        runs[0]
+    );
+    assert_eq!(runs[0], runs[1]);
+    // Its own release's Deezer album shows, not Wikidata's other one.
+    let shown = tails(also_on(&pool, &card, true).await);
+    assert!(shown.contains(&"1441464".to_owned()), "{shown:?}");
+    assert!(!shown.contains(&"521185".to_owned()), "{shown:?}");
+    pinakes_core::groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    let later: bool = sqlx::query_scalar(
+        "SELECT next_attempt_at>now()+interval '1 day' FROM also_on_dirty WHERE resource_id=$1",
+    )
+    .bind(&card)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(later);
 }
