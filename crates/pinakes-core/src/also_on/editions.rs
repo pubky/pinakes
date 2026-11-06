@@ -82,7 +82,8 @@ impl Source for Editions {
             .filter(|(_, l)| l.level == own.level && l.service != own.service)
             .filter(|(_, l)| l.level == Level::Album || placeable(cx, l.service))
             .collect();
-        if candidates.is_empty() {
+        // An album card derives its own release's pages even with nothing else to place.
+        if candidates.is_empty() && own.level != Level::Album {
             return Ok(Found::default());
         }
         let base = cx.config.also_on.musicbrainz_base();
@@ -311,7 +312,9 @@ fn first_type(release: &Value) -> bool {
 /// The original release group among `releases` (MusicBrainz's release objects, each with its
 /// `release-group`): an album, then a single, then an EP, then any other, one with no secondary
 /// type before one with; then the earliest first release, then the ID. A group with secondary
-/// types stays eligible: a song first out on a soundtrack or a live album has no other.
+/// types stays eligible: a song first out on a soundtrack or a live album has no other. Secondary
+/// types come before the kind: by kind first, a greatest-hits compilation album would beat the
+/// original non-album single.
 pub fn original_group(releases: &[Value]) -> Option<String> {
     releases
         .iter()

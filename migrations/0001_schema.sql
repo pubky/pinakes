@@ -888,11 +888,16 @@ CREATE FUNCTION also_on(unit text, resource text, cap integer, members boolean, 
     LANGUAGE sql STABLE
     AS $$
  WITH grp AS (SELECT group_id,resource_id FROM group_unit WHERE members AND unit_id=unit AND group_id IS NOT NULL),
- -- Before any document is read: one unit for each of up to `cap` other resources (by ID), then
+ -- Before any document is read: one unit for each of up to `cap` other resources (those the card
+ -- places first, then by ID), then
  -- up to `cap` more units of the card's own resource (a feed's other occurrences), and the
  -- unit itself. A resource with many units never crowds the others out.
- others AS (SELECT DISTINCT ON (u.resource_id) u.unit_id FROM grp JOIN group_unit u USING(group_id)
-   WHERE u.resource_id<>grp.resource_id ORDER BY u.resource_id,u.unit_id LIMIT cap),
+ -- The members the card places come first (`link_release`), so the cap never cuts one on its own
+ -- or the original release.
+ others AS (SELECT unit_id FROM (SELECT DISTINCT ON (u.resource_id) u.unit_id,u.resource_id FROM grp JOIN group_unit u USING(group_id)
+     WHERE u.resource_id<>grp.resource_id ORDER BY u.resource_id,u.unit_id) d
+   ORDER BY coalesce((SELECT min(x.rank) FROM link_release x WHERE x.resource_id=also_on.resource AND x.link_id=d.resource_id
+     AND x.expires_at>now() AND x.source NOT IN (SELECT source FROM also_on_source_off)),500),d.resource_id LIMIT cap),
  siblings AS (SELECT u.unit_id FROM grp JOIN group_unit u USING(group_id,resource_id)
    WHERE u.unit_id<>unit ORDER BY u.unit_id LIMIT cap),
  picked AS (SELECT unit_id FROM others UNION SELECT unit_id FROM siblings UNION SELECT unit FROM grp),

@@ -1423,3 +1423,85 @@ async fn an_album_cards_own_pages_stay_from_run_to_run(pool: PgPool) {
     .unwrap();
     assert!(later);
 }
+
+/// An album card with no link of another service yet still derives its own release's pages.
+#[tokio::test]
+async fn an_album_card_with_nothing_to_place_derives_its_own_pages() {
+    let transport = Captured::new();
+    let cx = context(transport.clone(), config("editions-alone", false));
+    let subject = subject(
+        "https://open.spotify.com/album/1weenld61qoidwYuZ1GESA",
+        &["mb:release-group:8e8a594f-2175-38c7-a871-abb68ec363e7"],
+        &[],
+    );
+    let found = Editions.lookup(&cx, &subject).await.unwrap();
+    let uris: Vec<&str> = found.links.iter().map(|l| l.uri.as_str()).collect();
+    assert!(
+        uris.contains(&"https://www.deezer.com/album/1441464"),
+        "{uris:?}"
+    );
+    assert!(found.facts.iter().any(|f| f.name == "release"));
+}
+
+/// Of a group of more members than a card shows, the one the card places on its own release is
+/// never cut before the per-service pick.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_placed_member_survives_the_cap(pool: PgPool) {
+    let cfg = Config::default().also_on;
+    let card = save(&pool, GET_LUCKY, "MusicRecording", Some("Spotify")).await;
+    let mut members = vec![];
+    for n in 1..=9 {
+        let uri = format!("https://music.apple.com/song/61715436{n}");
+        members.push((
+            save(&pool, &uri, "MusicRecording", Some("Apple Music")).await,
+            uri,
+        ));
+    }
+    for id in std::iter::once(&card).chain(members.iter().map(|(id, _)| id)) {
+        also_on::record(
+            &pool,
+            id,
+            "musicbrainz",
+            Found {
+                keys: vec![also_on::Key {
+                    key: format!("mb:recording:{RECORDING}"),
+                    via: "musicbrainz".into(),
+                }],
+                ..Default::default()
+            },
+            std::time::Duration::from_secs(86_400),
+            &cfg,
+        )
+        .await
+        .unwrap();
+    }
+    pinakes_core::groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    // The member last by ID is on the card's own release.
+    members.sort();
+    let (_, last) = members.last().unwrap().clone();
+    also_on::record(
+        &pool,
+        &card,
+        "editions",
+        found_editions(&[(&last, RAM, 0)]),
+        std::time::Duration::from_secs(86_400),
+        &cfg,
+    )
+    .await
+    .unwrap();
+    // As a search or lookup card shows it: at most eight.
+    let v: Value = sqlx::query_scalar("SELECT also_on($1,$1,8,true)")
+        .bind(&card)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let shown: Vec<&str> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["uri"].as_str().unwrap())
+        .collect();
+    assert_eq!(shown, [last.as_str()], "{v}");
+}
