@@ -270,15 +270,16 @@ async fn item(cx: &Context, kind: Kind, id: &str) -> Result<Option<Value>> {
     )
 }
 
-/// The album a TIDAL track is on (the first TIDAL names).
-pub(crate) async fn track_album(cx: &Context, track: &str) -> Result<Option<String>> {
+/// The albums a TIDAL track is on, every one TIDAL names (a single and its album may share the
+/// track); none when TIDAL has no such track.
+pub(crate) async fn track_albums(cx: &Context, track: &str) -> Result<Vec<String>> {
     let country = &cx.config.section::<TidalConfig>().country;
     let url = format!("{API}/tracks/{track}?countryCode={country}&include=albums");
-    Ok(api_object(cx, &url).await?.and_then(|v| {
-        items(&v["data"]["relationships"]["albums"], "albums")
-            .into_iter()
-            .next()
-    }))
+    Ok(api_object(cx, &url)
+        .await?
+        .filter(|v| v["data"]["id"].as_str() == Some(track))
+        .map(|v| items(&v["data"]["relationships"]["albums"], "albums"))
+        .unwrap_or_default())
 }
 /// The IDs of the items of `kind` a relationship lists.
 pub fn items(v: &Value, kind: &str) -> Vec<String> {

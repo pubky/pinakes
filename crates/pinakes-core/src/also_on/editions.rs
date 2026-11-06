@@ -9,13 +9,18 @@
 //! edition (in their disambiguation, or in their title past the group's), the earliest first
 //! (digital, then worldwide ones first among those of one date). The album pages MusicBrainz
 //! relates to the card's own release rank 0, then the original edition's 1, 2, … in that order:
-//! a service's link lands on its earliest release with a page there. A track
-//! link is on such an album when its own service says so: its track's album (Apple Music through
-//! iTunes, Spotify by its Web API or, where the operator allows, the track's public page, TIDAL
-//! and Deezer by their APIs, each while its source runs). An album link is on the release whose
-//! album pages name it. A link nothing places stays unplaced. Only the links a card may show are
-//! read, never an album page nobody linked.
-use super::{deezer, itunes, spotify, tidal, Context, Edition, Found, Source, Subject};
+//! a service's link lands on its earliest release with a page there. A track link is on such an
+//! album when its own service says so: its track's album (Apple Music through iTunes, Spotify by
+//! its Web API or, for the card's own track or where the operator allows, the track's public
+//! page, TIDAL and Deezer by their APIs, each while its source runs). An album link is on the
+//! release whose album pages name it. A link its service puts on another album of a service the
+//! original edition has a page on is on another release (rank 1000). Only the links a card may
+//! show are read, never an album page nobody linked.
+//!
+//! Each link ends a run placed, on another release, unplaced, or kept: a link whose place the run
+//! cannot tell (its service failed or refused the credentials, the release list was cut short, a
+//! cap was reached) keeps the place recorded before. Only MusicBrainz failing fails the run.
+use super::{deezer, itunes, spotify, tidal, Context, Edition, Fact, Found, Source, Subject};
 use crate::{
     hubs::{self, musicbrainz, MbKind},
     music::{self, Level, Service},
@@ -24,15 +29,21 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 
 /// Pages of 100 of a recording's album releases read for its original release group.
 const RECORDING_PAGES: usize = 4;
 /// Pages of 100 of a release group's releases read for its original edition.
 const GROUP_PAGES: usize = 2;
-/// Track links of one service whose album is asked.
+/// Track links of one service whose album is asked; the others keep their places.
 const TRACKS_PER_SERVICE: usize = 8;
-/// The card's own releases a link may name (`musicbrainz`'s `MAX_EDITIONS`).
+/// The card's own releases a link may name (`musicbrainz`'s `MAX_EDITIONS`), and the original
+/// edition's named as facts.
 const OWN_RELEASES: usize = 4;
+/// The rank of a link its service puts on another release.
+const OTHER: i16 = 1000;
+/// When a run comes back after a service failed for some of its links.
+const RETRY: Duration = Duration::from_secs(300);
 
 /// Where a recording's or an album's links sit among its releases.
 pub struct Editions;
@@ -54,15 +65,13 @@ impl Source for Editions {
     fn reads_candidates(&self) -> bool {
         true
     }
-    /// A lookup that fails anywhere fails the run, so the places it recorded before stay until
-    /// the retry: a run never records fewer places because a service was busy.
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
         let Some(own) = music::parse(&subject.uri) else {
             return Ok(Found::default());
         };
-        // The links to place: at the card's level, on another service than its own (whose other
-        // pages the card never shows); of tracks, those on a service that says which album a
-        // track is on.
+        // The links to place, in the candidates' order (tagged members first): at the card's
+        // level, on another service than its own (whose other pages the card never shows); of
+        // tracks, those on a service that says which album a track is on.
         let candidates: Vec<(String, music::Link)> = subject
             .candidates
             .iter()
@@ -75,13 +84,15 @@ impl Source for Editions {
         }
         let base = cx.config.also_on.musicbrainz_base();
         let mut found = Found::default();
-        match own.level {
+        // The frame: the releases, the original edition, the card's own releases. MusicBrainz
+        // failing fails the run.
+        let (releases, complete, own_releases) = match own.level {
             Level::Track => {
                 let recording: Vec<&str> = subject.keys_in("mb:recording").collect();
                 let [recording] = recording.as_slice() else {
                     return Ok(found);
                 };
-                let mut releases = musicbrainz::releases(
+                let (mut releases, mut complete) = musicbrainz::releases(
                     &cx.egress,
                     base,
                     &format!("recording={recording}&type=album"),
@@ -90,23 +101,36 @@ impl Source for Editions {
                 .await?;
                 // No album of its own: its singles and EPs come before compilations.
                 if !releases.iter().any(first_type) {
-                    releases.extend(
-                        musicbrainz::releases(
-                            &cx.egress,
-                            base,
-                            &format!("recording={recording}&type=single|ep"),
-                            1,
-                        )
-                        .await?,
-                    );
+                    let (singles, all) = musicbrainz::releases(
+                        &cx.egress,
+                        base,
+                        &format!("recording={recording}&type=single|ep"),
+                        1,
+                    )
+                    .await?;
+                    releases.extend(singles);
+                    complete &= all;
                 }
-                let edition = original_group(&releases)
-                    .map(|g| original_edition(&releases, &g))
-                    .unwrap_or_default();
-                let own_releases = own_track_releases(cx, base, &own).await?;
-                let pages =
-                    album_pages(cx, base, &releases, &ranked(&own_releases, &edition)).await?;
-                found.editions = place_tracks(cx, &candidates, &pages).await?;
+                // The card's own album, as its own service names it: its failing keeps every
+                // place, as it is the rank all others count against.
+                let own_album = match album_of(cx, &own, true).await {
+                    Ok(albums) => albums,
+                    Err(error) => {
+                        found.keep = candidates.iter().map(|(uri, _)| uri.clone()).collect();
+                        if !refusal(&error) {
+                            found.retry_after = Some(RETRY);
+                        }
+                        return Ok(found);
+                    }
+                };
+                let mut own_releases = vec![];
+                for album in own_album {
+                    own_releases.extend(releases_of_page(cx, base, &album.canonical).await?);
+                }
+                own_releases.sort();
+                own_releases.dedup();
+                own_releases.truncate(OWN_RELEASES);
+                (releases, complete, own_releases)
             }
             Level::Album => {
                 let mut own_releases: Vec<String> = subject
@@ -136,7 +160,7 @@ impl Source for Editions {
                             .and_then(|e| e.release_group);
                     }
                 }
-                let releases = match &group {
+                let (releases, complete) = match &group {
                     Some(group) => {
                         musicbrainz::releases(
                             &cx.egress,
@@ -146,19 +170,82 @@ impl Source for Editions {
                         )
                         .await?
                     }
-                    None => vec![],
+                    None => (vec![], false),
                 };
-                let edition = group
-                    .map(|g| original_edition(&releases, &g))
-                    .unwrap_or_default();
-                let pages =
-                    album_pages(cx, base, &releases, &ranked(&own_releases, &edition)).await?;
-                found.editions = place_albums(&candidates, &pages);
+                (releases, complete, own_releases)
             }
-            _ => {}
+            _ => return Ok(found),
+        };
+        let edition = original_group(&releases)
+            .map(|g| original_edition(&releases, &g))
+            .unwrap_or_default();
+        let mut pages = album_pages(cx, base, &releases, &ranked(&own_releases, &edition)).await?;
+        // A list cut short may lack an earlier release: only the card's own release ranks.
+        if !complete {
+            pages.retain(|p| p.rank == 0);
         }
+        let outcomes = match own.level {
+            Level::Track => place_tracks(cx, &candidates, &pages).await,
+            _ => candidates
+                .iter()
+                .map(|(uri, link)| (uri.clone(), place_album(link, &pages)))
+                .collect(),
+        };
+        for (uri, outcome) in outcomes {
+            match outcome {
+                // An unplaced link of a list cut short may be on a release it lacks.
+                Outcome::Unplaced | Outcome::Other if !complete => found.keep.push(uri),
+                Outcome::Placed { rank, release } => found.editions.push(Edition {
+                    uri,
+                    release: Some(release),
+                    rank,
+                }),
+                Outcome::Other => found.editions.push(Edition {
+                    uri,
+                    release: None,
+                    rank: OTHER,
+                }),
+                Outcome::Unplaced => {}
+                Outcome::Keep { retry } => {
+                    found.keep.push(uri);
+                    if retry {
+                        found.retry_after = Some(RETRY);
+                    }
+                }
+            }
+        }
+        // The releases it reads as the card's own and as the original edition, by MBID.
+        found.facts.extend(
+            own_releases
+                .iter()
+                .map(|r| Fact::new("release", r.as_str())),
+        );
+        let mut original: Vec<&str> = vec![];
+        for page in pages.iter().filter(|p| p.rank > 0) {
+            if !original.contains(&page.release.as_str()) && original.len() < OWN_RELEASES {
+                original.push(&page.release);
+            }
+        }
+        found.facts.extend(
+            original
+                .into_iter()
+                .map(|r| Fact::new("original_release", r)),
+        );
         Ok(found)
     }
+}
+
+/// How a run ends for one link.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Outcome {
+    /// On a release of the card's own (rank 0) or of the original edition (1, 2, …).
+    Placed { rank: i16, release: String },
+    /// On another album of a service an own or original release has a page on.
+    Other,
+    /// On no release its service could name.
+    Unplaced,
+    /// Not told: the place recorded before stays (`retry`: its service failed).
+    Keep { retry: bool },
 }
 
 /// Whether a release is on an album with no secondary type: a recording's first kind of group.
@@ -172,7 +259,8 @@ fn first_type(release: &Value) -> bool {
 
 /// The original release group among `releases` (MusicBrainz's release objects, each with its
 /// `release-group`): an album, then a single, then an EP, then any other, one with no secondary
-/// type before one with; then the earliest first release, then the ID.
+/// type before one with; then the earliest first release, then the ID. A group with secondary
+/// types stays eligible: a song first out on a soundtrack or a live album has no other.
 pub fn original_group(releases: &[Value]) -> Option<String> {
     releases
         .iter()
@@ -244,9 +332,11 @@ pub fn later_edition(release: &Value) -> bool {
 }
 
 /// Whether a text names a later edition: deluxe, legacy, anniversary, remastered, expanded,
-/// reissued, special, collector's, bonus tracks, a box set, or hi-res (`hi-res`, `24-bit`,
-/// `96 kHz`); an "edition" alone (standard, original, explicit) is none. "Apple Digital Master"
-/// and "Mastered for iTunes" are none either: they are a store's copy of the original.
+/// reissued, special, collector's, bonus tracks, a box set, or hi-res (`hi-res`, `high
+/// resolution`, a bit depth over 16 or a sample rate over 48 kHz: `24-bit`, `96 kHz`); an
+/// "edition" alone (standard, original, explicit) is none, nor is a CD's `16-bit / 44.1 kHz`.
+/// "Apple Digital Master" and "Mastered for iTunes" are none either: they are a store's copy of
+/// the original.
 pub fn edition(text: &str) -> bool {
     let lower = text.to_lowercase();
     let words: Vec<&str> = lower
@@ -268,15 +358,30 @@ pub fn edition(text: &str) -> bool {
                 | "collectors"
                 | "bonus"
                 | "hires"
-                | "bit"
-        ) || w.ends_with("khz")
-            || (w.ends_with("bit") && w.starts_with(|c: char| c.is_ascii_digit()))
+        )
     }) || words.windows(2).any(|p| {
         p == ["hi", "res"]
+            || p == ["high", "resolution"]
             || p == ["box", "set"]
             || p == ["special", "edition"]
             || p == ["super", "deluxe"]
-    })
+    }) || amounts(&lower, "bit").iter().any(|bits| *bits > 16.0)
+        || amounts(&lower, "khz").iter().any(|khz| *khz > 48.0)
+}
+
+/// The numbers `text` writes before `unit` (`24-bit`, `24 bit`, `88.2kHz`, `96 khz`).
+fn amounts(text: &str, unit: &str) -> Vec<f64> {
+    text.match_indices(unit)
+        .filter_map(|(at, _)| {
+            let before = text[..at].trim_end_matches([' ', '-', '‐', '/']);
+            let start = before
+                .rfind(|c: char| !(c.is_ascii_digit() || c == '.'))
+                .map_or(0, |i| {
+                    i + before[i..].chars().next().map_or(1, char::len_utf8)
+                });
+            before[start..].parse().ok()
+        })
+        .collect()
 }
 
 /// The releases to read, with their ranks: the card's own (0), then the original edition's
@@ -289,7 +394,7 @@ fn ranked(own: &[String], edition: &[String]) -> Vec<(String, i16)> {
             edition
                 .iter()
                 .enumerate()
-                .map(|(n, id)| (id.clone(), (n + 1).min(1000) as i16)),
+                .map(|(n, id)| (id.clone(), (n + 1).min(999) as i16)),
         )
         .filter(|(id, _)| seen.insert(id.clone()))
         .collect()
@@ -348,14 +453,6 @@ pub fn release_pages(entity: &musicbrainz::Entity, rank: i16) -> Vec<Page> {
         .collect()
 }
 
-/// The release(s) the card's own track's album is a page of, when its service says which album
-/// that is.
-async fn own_track_releases(cx: &Context, base: &str, own: &music::Link) -> Result<Vec<String>> {
-    match album_of(cx, own).await? {
-        Some(album) => releases_of_page(cx, base, &album.canonical).await,
-        None => Ok(vec![]),
-    }
-}
 /// The releases MusicBrainz relates an album page to (at most [`OWN_RELEASES`]).
 async fn releases_of_page(cx: &Context, base: &str, page: &str) -> Result<Vec<String>> {
     let mut releases: Vec<String> = musicbrainz::url(&cx.egress, base, page)
@@ -370,85 +467,105 @@ async fn releases_of_page(cx: &Context, base: &str, page: &str) -> Result<Vec<St
     Ok(releases)
 }
 
-/// Each candidate track whose album, as its own service says, is an album page of `pages`, at
-/// that page's best rank; at most [`TRACKS_PER_SERVICE`] tracks of a service are asked.
+/// Each candidate track's outcome, in the candidates' order: placed by the album its own service
+/// names, at that page's best rank; at most [`TRACKS_PER_SERVICE`] tracks of a service are asked,
+/// and the rest keep their places.
 async fn place_tracks(
     cx: &Context,
     candidates: &[(String, music::Link)],
     pages: &[Page],
-) -> Result<Vec<Edition>> {
-    let mut placed: BTreeMap<String, Edition> = BTreeMap::new();
+) -> Vec<(String, Outcome)> {
+    let mut outcomes = vec![];
     let mut asked: BTreeMap<Service, usize> = BTreeMap::new();
     for (uri, link) in candidates {
-        // Only a service an album page names can place its tracks.
+        // A service no page names has nothing to place its tracks on.
         if !pages.iter().any(|p| p.album.service == link.service) {
+            outcomes.push((uri.clone(), Outcome::Unplaced));
             continue;
         }
         let n = asked.entry(link.service).or_default();
         if *n == TRACKS_PER_SERVICE {
+            outcomes.push((uri.clone(), Outcome::Keep { retry: false }));
             continue;
         }
         *n += 1;
-        let Some(album) = album_of(cx, link).await? else {
-            continue;
+        let outcome = match album_of(cx, link, false).await {
+            Ok(albums) => place(link.service, &albums, pages),
+            Err(error) => {
+                tracing::debug!(
+                    kind = crate::resolver::error_class(&error),
+                    "a track's album failed; its place stays"
+                );
+                Outcome::Keep {
+                    retry: !refusal(&error),
+                }
+            }
         };
-        if let Some(page) = pages
-            .iter()
-            .filter(|p| p.album.canonical == album.canonical)
-            .min_by_key(|p| p.rank)
-        {
-            placed.insert(
-                uri.clone(),
-                Edition {
-                    uri: uri.clone(),
-                    release: page.release.clone(),
-                    rank: page.rank,
-                },
-            );
-        }
+        outcomes.push((uri.clone(), outcome));
     }
-    Ok(placed.into_values().collect())
+    outcomes
 }
 
-/// Each candidate album that is a page of a release of `pages`, at its best rank.
-pub fn place_albums(candidates: &[(String, music::Link)], pages: &[Page]) -> Vec<Edition> {
-    candidates
+/// An album link's outcome: placed on the release whose album pages name it, at its best rank.
+pub fn place_album(link: &music::Link, pages: &[Page]) -> Outcome {
+    place(link.service, std::slice::from_ref(link), pages)
+}
+
+/// The outcome of a link on `service` that is on `albums`: placed at the best rank of their pages
+/// in `pages`; on another release when an own or original release has a page on `service` and
+/// none is among `albums`; else unplaced.
+pub fn place(service: Service, albums: &[music::Link], pages: &[Page]) -> Outcome {
+    let best = pages
         .iter()
-        .filter_map(|(uri, link)| {
-            let page = pages
-                .iter()
-                .filter(|p| p.album.canonical == link.canonical)
-                .min_by_key(|p| p.rank)?;
-            Some(Edition {
-                uri: uri.clone(),
-                release: page.release.clone(),
-                rank: page.rank,
-            })
-        })
-        .collect()
+        .filter(|p| albums.iter().any(|a| a.canonical == p.album.canonical))
+        .min_by_key(|p| p.rank);
+    match best {
+        Some(page) => Outcome::Placed {
+            rank: page.rank,
+            release: page.release.clone(),
+        },
+        None if !albums.is_empty() && pages.iter().any(|p| p.album.service == service) => {
+            Outcome::Other
+        }
+        None => Outcome::Unplaced,
+    }
 }
 
-/// The album a track is on, as its own service says ([`placeable`]); `None` when it says none.
-async fn album_of(cx: &Context, track: &music::Link) -> Result<Option<music::Link>> {
-    if !placeable(cx, track.service) {
-        return Ok(None);
+/// The albums a track is on, as its own service says ([`placeable`]); none when it says none.
+/// `own`: the card's own track, whose public Spotify page is read where the API does not answer.
+async fn album_of(cx: &Context, track: &music::Link, own: bool) -> Result<Vec<music::Link>> {
+    let own_spotify = own
+        && track.service == Service::Spotify
+        && cx.config.also_on.source_enabled(&spotify::Spotify);
+    if !placeable(cx, track.service) && !own_spotify {
+        return Ok(vec![]);
     }
-    let album = match track.service {
+    let albums: Vec<String> = match track.service {
         Service::AppleMusic => itunes::track_album(cx, &track.id)
             .await?
-            .map(|id| format!("https://music.apple.com/album/{id}")),
-        Service::Spotify => spotify::track_album(cx, &track.id)
+            .map(|id| format!("https://music.apple.com/album/{id}"))
+            .into_iter()
+            .collect(),
+        Service::Spotify => {
+            spotify::track_album(cx, &track.id, own || cx.config.also_on.spotify_pages)
+                .await?
+                .map(|id| format!("https://open.spotify.com/album/{id}"))
+                .into_iter()
+                .collect()
+        }
+        Service::Tidal => tidal::track_albums(cx, &track.id)
             .await?
-            .map(|id| format!("https://open.spotify.com/album/{id}")),
-        Service::Tidal => tidal::track_album(cx, &track.id)
-            .await?
-            .map(|id| format!("https://tidal.com/album/{id}")),
+            .into_iter()
+            .map(|id| format!("https://tidal.com/album/{id}"))
+            .collect(),
         Service::Deezer => deezer::track_album(cx, &track.id)
             .await?
-            .map(|id| format!("https://www.deezer.com/album/{id}")),
-        _ => None,
+            .map(|id| format!("https://www.deezer.com/album/{id}"))
+            .into_iter()
+            .collect(),
+        _ => vec![],
     };
-    Ok(album.as_deref().and_then(music::parse))
+    Ok(albums.iter().filter_map(|a| music::parse(a)).collect())
 }
 /// Whether `service` says which album a track is on, while its source runs: Apple Music through
 /// iTunes, Spotify by its Web API with the operator's credentials (or its track's public page,
@@ -462,6 +579,13 @@ fn placeable(cx: &Context, service: Service) -> bool {
         Service::Deezer => on(&deezer::DeezerSource),
         _ => false,
     }
+}
+/// Whether an error is a service refusing the operator's credentials (its token or its API): it
+/// lasts, so the run does not come back for it.
+fn refusal(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<crate::resolver::RetryLater>()
+        .is_some_and(|r| r.class.ends_with("_auth"))
 }
 
 #[cfg(test)]
@@ -527,6 +651,33 @@ mod tests {
         );
     }
 
+    /// A song first out on a soundtrack has only groups with secondary types: the earliest of
+    /// them is its original.
+    #[test]
+    fn a_soundtrack_only_recording_takes_its_first_soundtrack() {
+        let release = |id: &str, group: &str, first: &str| {
+            serde_json::json!({"id": id, "status": "Official", "date": first,
+                "release-group": {"id": group, "primary-type": "Album",
+                    "secondary-types": ["Soundtrack"], "first-release-date": first}})
+        };
+        let releases = [
+            release(
+                "11111111-1111-1111-1111-111111111111",
+                "22222222-2222-2222-2222-222222222222",
+                "2001-05-01",
+            ),
+            release(
+                "33333333-3333-3333-3333-333333333333",
+                "44444444-4444-4444-4444-444444444444",
+                "1999-03-01",
+            ),
+        ];
+        assert_eq!(
+            original_group(&releases).as_deref(),
+            Some("44444444-4444-4444-4444-444444444444")
+        );
+    }
+
     #[test]
     fn an_edition_is_named_in_the_disambiguation_alone() {
         for later in [
@@ -567,17 +718,13 @@ mod tests {
         .iter()
         .map(|u| (u.to_string(), music::parse(u).unwrap()))
         .collect();
-        let placed = place_albums(&candidates, &pages);
-        let uris: Vec<&str> = placed.iter().map(|e| e.uri.as_str()).collect();
-        assert_eq!(
-            uris,
-            [
-                "https://www.deezer.com/album/1441464",
-                "https://tidal.com/browse/album/655910"
-            ]
-        );
-        assert!(placed
+        let placed: Vec<Outcome> = candidates
             .iter()
-            .all(|e| e.rank == 0 && e.release == "4c8af71f-5746-4981-92d7-0d6c64db1155"));
+            .map(|(_, link)| place_album(link, &pages))
+            .collect();
+        let release = "4c8af71f-5746-4981-92d7-0d6c64db1155".to_owned();
+        let on = Outcome::Placed { rank: 0, release };
+        // Deezer's other album: Deezer has a page here, so it is on another release.
+        assert_eq!(placed, [on.clone(), Outcome::Other, on]);
     }
 }

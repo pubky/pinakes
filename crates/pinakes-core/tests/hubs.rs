@@ -135,6 +135,20 @@ impl Transport for Recorded {
                 body: body.as_bytes().to_vec(),
             });
         }
+        // Spotify's public pages (`editions` reads a card's own track's for its album): none here.
+        if url.host_str() == Some("open.spotify.com") {
+            return Ok(Fetched {
+                permanent_redirect: false,
+                truncated: false,
+                validators: Default::default(),
+                url: url.clone(),
+                status: 404,
+                retry_after_secs: 60,
+                location: None,
+                content_type: "text/html".into(),
+                body: vec![],
+            });
+        }
         // Spotify's token and Web API (`spotify`): the track REPORT-matching names, written by
         // hand in the API's shape (Spotify refused to answer the owner's app; tests/spotify.rs).
         if let Some(host @ ("accounts.spotify.com" | "api.spotify.com")) = url.host_str() {
@@ -1120,7 +1134,7 @@ async fn editions_of_one_release_group_take_the_group(pool: sqlx::PgPool) {
     );
     // Facts both releases share: the barcode, not either MBID or the differing credits.
     assert_eq!(
-        rows("SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name COLLATE \"C\"").await,
+        rows("SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 AND source<>'editions' ORDER BY name COLLATE \"C\"").await,
         ["upc 0196874054246"]
     );
     let seen = t.seen.lock().unwrap().clone();

@@ -12,6 +12,8 @@ fn edition_alone_names_no_later_edition() {
         "",
         "Apple Digital Master",
         "Mastered for iTunes",
+        "16-bit / 44.1 kHz",
+        "CD, 16bit 44.1khz",
     ] {
         assert!(!edition(original), "{original}");
     }
@@ -21,6 +23,9 @@ fn edition_alone_names_no_later_edition() {
         "special edition",
         "super deluxe",
         "88.2kHz/24‐bit",
+        "24 bit / 96 kHz",
+        "high resolution",
+        "192 kHz",
     ] {
         assert!(edition(later), "{later}");
     }

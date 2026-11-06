@@ -537,14 +537,17 @@ pub mod musicbrainz {
     }
     /// The official releases MusicBrainz lists for `query` (`recording={mbid}&type=album`,
     /// `release-group={mbid}`), each with its release group, media and URL relations: up to
-    /// `pages` pages of 100, in MusicBrainz's order. A page it doesn't answer ends the list.
+    /// `pages` pages of 100, in MusicBrainz's order (not by date); and whether that is every one
+    /// (as many as its `release-count` says). A page it doesn't answer, or the page cap, leaves
+    /// the list incomplete.
     pub async fn releases(
         egress: &Egress,
         base: &str,
         query: &str,
         pages: usize,
-    ) -> Result<Vec<Value>> {
+    ) -> Result<(Vec<Value>, bool)> {
         let mut releases = vec![];
+        let mut count = None;
         for page in 0..pages {
             let offset = if page == 0 {
                 String::new()
@@ -555,17 +558,18 @@ pub mod musicbrainz {
                 "{base}/release?{query}&status=official&inc=release-groups+media+url-rels&limit=100{offset}&fmt=json"
             );
             let Some(v) = get(egress, &url, "musicbrainz").await? else {
-                break;
+                return Ok((releases, false));
             };
             let batch = v["releases"].as_array().cloned().unwrap_or_default();
-            let count = v["release-count"].as_u64().unwrap_or(0) as usize;
-            let done = batch.len() < 100 || (page + 1) * 100 >= count;
+            count = v["release-count"].as_u64().map(|c| c as usize);
+            let empty = batch.is_empty();
             releases.extend(batch);
-            if done {
+            if empty || count.is_some_and(|c| releases.len() >= c) {
                 break;
             }
         }
-        Ok(releases)
+        let complete = count.is_some_and(|c| releases.len() >= c);
+        Ok((releases, complete))
     }
     /// A recording an ISRC is on, with its length when MusicBrainz states one.
     #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]

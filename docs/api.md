@@ -1127,7 +1127,8 @@ edition (the first album that is no compilation, its earliest release with a pag
 service, never a deluxe, anniversary, remastered or hi-res edition), whether tagged or derived. Among links it
 places on neither, a tagged member comes first, because someone used that link (of several, the
 one on the recording's original album, the `original_album` fact), then the derived link most
-group members name, then a page before a file (a `.pdf`), then the shorter link. The card's own
+group members name, then a page before a file (a `.pdf`), then the shorter link; a link its
+service puts on another release (a later edition, a compilation) comes last. The card's own
 service, by its URL, shows nothing else: an artist's card never shows another page of its
 service, such as the band's earlier name, which Wikidata may list as a second ID. A music member
 whose card is not read yet counts by the service its URL names, against derived links only: it

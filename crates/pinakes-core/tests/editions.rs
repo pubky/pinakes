@@ -58,6 +58,8 @@ fn key(url: &url::Url) -> String {
 struct Captured {
     answers: BTreeMap<String, (u16, String, Vec<u8>)>,
     busy: Vec<&'static str>,
+    /// A recording's release browse claims more releases than its pages list (cut short).
+    truncated: bool,
     seen: Mutex<Vec<String>>,
 }
 impl Captured {
@@ -91,8 +93,14 @@ impl Captured {
         Arc::new(Self {
             answers,
             busy: busy.to_vec(),
+            truncated: false,
             seen: Mutex::default(),
         })
+    }
+    fn truncated() -> Arc<Self> {
+        let mut captured = Arc::into_inner(Self::new()).unwrap();
+        captured.truncated = true;
+        Arc::new(captured)
     }
     fn seen(&self) -> Vec<String> {
         self.seen.lock().unwrap().clone()
@@ -135,6 +143,13 @@ impl Transport for Captured {
                 "application/json".into(),
                 b"{}".to_vec(),
             ))
+        };
+        let body = if self.truncated && url.as_str().contains("/ws/2/release?recording=") {
+            let mut v: Value = serde_json::from_slice(&body)?;
+            v["release-count"] = 999.into();
+            serde_json::to_vec(&v)?
+        } else {
+            body
         };
         Ok(Fetched {
             permanent_redirect: false,
@@ -220,14 +235,26 @@ const GET_LUCKY_LINKS: &[&str] = &[
     "https://open.spotify.com/track/118Opfz7qv2KA1g3Pmyk9T",
     "https://www.youtube.com/watch?v=5NV6Rdv1a3I",
 ];
+/// The links placed on a release, with it and their rank, sorted.
 fn placed(found: &Found) -> Vec<(String, String, i16)> {
     let mut placed: Vec<(String, String, i16)> = found
         .editions
         .iter()
-        .map(|e| (e.uri.clone(), e.release.clone(), e.rank))
+        .filter_map(|e| Some((e.uri.clone(), e.release.clone()?, e.rank)))
         .collect();
     placed.sort();
     placed
+}
+/// The links their service puts on another release (rank 1000, no release), sorted.
+fn others(found: &Found) -> Vec<String> {
+    let mut others: Vec<String> = found
+        .editions
+        .iter()
+        .filter(|e| e.release.is_none() && e.rank == 1000)
+        .map(|e| e.uri.clone())
+        .collect();
+    others.sort();
+    others
 }
 
 /// Get Lucky's Spotify card is on Random Access Memories of 2013 (its page names the album,
@@ -264,7 +291,29 @@ async fn get_luckys_links_are_placed_on_random_access_memories() {
         "{:?}",
         transport.seen()
     );
+    // The 10th anniversary's and the soundtrack's Apple links, the hi-res and 10th anniversary
+    // TIDAL links: on another album of a service the original has a page on.
+    assert_eq!(
+        others(&found),
+        [
+            "https://music.apple.com/gb/song/1771867453",
+            "https://music.apple.com/us/song/1673536443",
+            "https://tidal.com/track/211822900",
+            "https://tidal.com/track/293301151",
+        ]
+    );
     assert!(found.retry_after.is_none());
+    assert!(found.keep.is_empty());
+    let facts: Vec<(&str, &str)> = found
+        .facts
+        .iter()
+        .map(|f| (f.name.as_str(), f.value.as_str()))
+        .collect();
+    assert!(facts.contains(&("release", RAM)), "{facts:?}");
+    assert!(
+        facts.contains(&("original_release", RAM_APPLE)),
+        "{facts:?}"
+    );
     assert!(
         transport
             .seen()
@@ -355,11 +404,12 @@ async fn kind_of_blues_album_pages_are_placed_on_its_own_release() {
             "{:?}",
             transport.seen()
         );
+        assert_eq!(others(&found), ["https://www.deezer.com/album/7824595"]);
     }
 }
 
-/// A service that fails while the card's links are placed fails the run: what earlier runs
-/// recorded stays until the retry, never fewer places because a service was busy.
+/// A service that fails while the card's links are placed leaves its links' places as recorded
+/// before (kept), and the run comes back sooner; the other services' links are placed.
 #[tokio::test]
 async fn a_busy_service_fails_the_run_so_its_places_stay() {
     let transport = Captured::busy(&["itunes.apple.com"]);
@@ -369,8 +419,24 @@ async fn a_busy_service_fails_the_run_so_its_places_stay() {
         &[&format!("mb:recording:{RECORDING}")],
         GET_LUCKY_LINKS,
     );
-    let failed = Editions.lookup(&cx, &subject).await;
-    assert!(failed.is_err(), "{:?}", transport.seen());
+    let found = Editions.lookup(&cx, &subject).await.unwrap();
+    // Apple's links keep their places, and the run comes back sooner; TIDAL's are placed.
+    let mut keep = found.keep.clone();
+    keep.sort();
+    assert_eq!(
+        keep,
+        [
+            "https://music.apple.com/gb/song/1771867453",
+            "https://music.apple.com/us/song/1673536443",
+            "https://music.apple.com/us/song/617154366",
+        ]
+    );
+    assert!(found.retry_after.is_some());
+    assert!(placed(&found).contains(&(
+        "https://tidal.com/track/20115564".to_owned(),
+        RAM.to_owned(),
+        0
+    )));
 }
 
 /// A Spotify link is placed by its own page (the album it names, `music:album`), never by an
@@ -423,7 +489,8 @@ async fn a_spotify_link_is_placed_by_its_own_page() {
 }
 
 /// Credentials Spotify refuses (an app whose owner has no premium plan) place nothing and fail
-/// nothing: the run records what the other services placed.
+/// nothing: Spotify's links keep their places, and the run records what the other services
+/// placed.
 #[tokio::test]
 async fn refused_spotify_credentials_place_nothing_and_fail_nothing() {
     let mut config = config("editions-refused", false);
@@ -439,6 +506,9 @@ async fn refused_spotify_credentials_place_nothing_and_fail_nothing() {
         &[GET_LUCKY, "https://tidal.com/track/20115564"],
     );
     let found = Editions.lookup(&cx, &card).await.unwrap();
+    // Spotify's link keeps its place (credentials refused last: no early retry).
+    assert_eq!(found.keep, [GET_LUCKY]);
+    assert!(found.retry_after.is_none());
     assert_eq!(
         placed(&found),
         [(
@@ -525,7 +595,7 @@ fn found_editions(editions: &[(&str, &str, i16)]) -> Found {
             .iter()
             .map(|(uri, release, rank)| Edition {
                 uri: (*uri).into(),
-                release: (*release).into(),
+                release: Some((*release).into()),
                 rank: *rank,
             })
             .collect(),
@@ -555,6 +625,14 @@ async fn also_on(pool: &PgPool, id: &str, per_site: bool) -> Vec<String> {
         .collect()
 }
 async fn read(pool: &PgPool, uri: &str) -> Vec<String> {
+    read_json(pool, uri).await["also_on"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["uri"].as_str().unwrap().to_owned())
+        .collect()
+}
+async fn read_json(pool: &PgPool, uri: &str) -> Value {
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let path = format!("/v1/resources/by-uri?uri={}", urlencoding(uri));
     let mut request = Request::builder().uri(&path).body(Body::empty()).unwrap();
@@ -566,12 +644,7 @@ async fn read(pool: &PgPool, uri: &str) -> Vec<String> {
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     let v: Value = serde_json::from_slice(&bytes).unwrap();
     common::check_response("GET", &path, 200, &v);
-    v["also_on"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|e| e["uri"].as_str().unwrap().to_owned())
-        .collect()
+    v
 }
 fn urlencoding(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
@@ -784,9 +857,15 @@ async fn no_member_on_the_cards_own_service_shows(pool: PgPool) {
     pinakes_core::groups::drain(&pool, &Default::default(), 100)
         .await
         .unwrap();
-    // Grouped: the stored list names the member (its document names no service).
-    assert!(tails(also_on(&pool, &card, true).await).contains(&"118Opfz7qv2KA1g3Pmyk9T".into()));
-    // The card shows it nowhere.
+    // Grouped (its document names no service), it shows on the card's list nowhere.
+    let grouped: Option<String> =
+        sqlx::query_scalar("SELECT group_id FROM group_unit WHERE resource_id=$1")
+            .bind(&member)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(grouped.is_some());
+    assert!(!tails(also_on(&pool, &card, true).await).contains(&"118Opfz7qv2KA1g3Pmyk9T".into()));
     assert!(!tails(read(&pool, GET_LUCKY).await).contains(&"118Opfz7qv2KA1g3Pmyk9T".into()));
 }
 
@@ -836,4 +915,366 @@ async fn a_group_that_changes_places_its_cards_links_again(pool: PgPool) {
     let mut both = vec![card, member];
     both.sort();
     assert_eq!(due, both);
+}
+
+/// A recording's release list cut short (MusicBrainz names more than its pages read) may lack an
+/// earlier original release: only the card's own release ranks, and every other link keeps its
+/// place.
+#[tokio::test]
+async fn a_list_cut_short_ranks_only_the_cards_own_release() {
+    let transport = Captured::truncated();
+    let cx = context(transport.clone(), with_pages(config("editions-cut", false)));
+    let subject = subject(
+        GET_LUCKY,
+        &[&format!("mb:recording:{RECORDING}")],
+        GET_LUCKY_LINKS,
+    );
+    let found = Editions.lookup(&cx, &subject).await.unwrap();
+    assert_eq!(
+        placed(&found),
+        [(
+            "https://tidal.com/track/20115564".to_owned(),
+            RAM.to_owned(),
+            0
+        )],
+        "{:?}",
+        transport.seen()
+    );
+    assert!(others(&found).is_empty());
+    assert!(found
+        .keep
+        .contains(&"https://music.apple.com/us/song/617154366".to_owned()));
+}
+
+/// Of one service, at most eight links are asked about; the rest keep their places.
+#[tokio::test]
+async fn links_past_the_cap_keep_their_places() {
+    let transport = Captured::new();
+    let cx = context(transport.clone(), with_pages(config("editions-cap", false)));
+    let apple: Vec<String> = (1..=9)
+        .map(|n| format!("https://music.apple.com/us/song/90000000{n}"))
+        .collect();
+    let links: Vec<&str> = apple.iter().map(String::as_str).collect();
+    let subject = subject(GET_LUCKY, &[&format!("mb:recording:{RECORDING}")], &links);
+    let found = Editions.lookup(&cx, &subject).await.unwrap();
+    assert_eq!(found.keep, [apple[8].clone()]);
+}
+
+/// The card's own Spotify track (a link someone referenced) is read for its album where Spotify's
+/// API refuses the credentials, the pages switch off: its own release ranks first.
+#[tokio::test]
+async fn a_spotify_cards_own_page_names_its_own_release() {
+    let mut config = config("editions-own-page", false);
+    config.sections.set(
+        "spotify",
+        serde_json::json!({"client_id": "editions-own-page", "client_secret": "editions-own-page-secret"}),
+    );
+    let transport = Captured::new();
+    let cx = context(transport.clone(), config);
+    let subject = subject(
+        GET_LUCKY,
+        &[&format!("mb:recording:{RECORDING}")],
+        &["https://tidal.com/track/20115564"],
+    );
+    let found = Editions.lookup(&cx, &subject).await.unwrap();
+    assert_eq!(
+        placed(&found),
+        [(
+            "https://tidal.com/track/20115564".to_owned(),
+            RAM.to_owned(),
+            0
+        )],
+        "{:?}",
+        transport.seen()
+    );
+    let seen = transport.seen();
+    assert!(seen.iter().any(|u| u == GET_LUCKY), "{seen:?}");
+    assert!(
+        !seen
+            .iter()
+            .any(|u| u.starts_with("https://open.spotify.com/album/")),
+        "{seen:?}"
+    );
+}
+
+/// The worker keeps what a run could not tell: with iTunes and TIDAL failing, the card's earlier
+/// places stay as recorded, and its run comes back sooner.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn the_worker_keeps_the_places_a_failing_service_could_not_tell(pool: PgPool) {
+    let cfg = Config::default().also_on;
+    let card = save(&pool, GET_LUCKY, "MusicRecording", Some("Spotify")).await;
+    also_on::record(
+        &pool,
+        &card,
+        "musicbrainz",
+        Found {
+            keys: vec![also_on::Key {
+                key: format!("mb:recording:{RECORDING}"),
+                via: "musicbrainz".into(),
+            }],
+            links: vec![
+                Link::new(
+                    "https://music.apple.com/us/song/617154366",
+                    "Apple Music",
+                    "musicbrainz",
+                ),
+                Link::new("https://tidal.com/track/20115564", "TIDAL", "musicbrainz"),
+            ],
+            ..Default::default()
+        },
+        std::time::Duration::from_secs(86_400),
+        &cfg,
+    )
+    .await
+    .unwrap();
+    also_on::record(
+        &pool,
+        &card,
+        "editions",
+        found_editions(&[
+            ("https://music.apple.com/us/song/617154366", RAM_APPLE, 3),
+            ("https://tidal.com/track/20115564", RAM, 0),
+        ]),
+        std::time::Duration::from_secs(86_400),
+        &cfg,
+    )
+    .await
+    .unwrap();
+    let rows = || async {
+        sqlx::query_scalar::<_, String>(
+            "SELECT link_id||' '||release||' '||rank FROM link_release WHERE resource_id=$1 ORDER BY 1",
+        )
+        .bind(&card)
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+    let before = rows().await;
+    assert_eq!(before.len(), 2);
+    sqlx::query("INSERT INTO also_on_dirty(resource_id) VALUES($1) ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=now()")
+        .bind(&card)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let transport = Captured::busy(&["itunes.apple.com", "openapi.tidal.com"]);
+    let cx = context(
+        transport.clone(),
+        with_pages(config("editions-worker", false)),
+    );
+    let sources: Vec<Arc<dyn Source>> = vec![Arc::new(Editions)];
+    also_on::drain(&pool, &cx, &sources, 10).await.unwrap();
+    assert_eq!(rows().await, before, "{:?}", transport.seen());
+    let soon: bool = sqlx::query_scalar(
+        "SELECT next_attempt_at<now()+interval '1 hour' FROM also_on_dirty WHERE resource_id=$1",
+    )
+    .bind(&card)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(soon);
+}
+
+/// Of one service, a tagged member its service puts on another release (a later edition) comes
+/// after a derived link nothing placed.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_member_on_another_release_comes_after_an_unplaced_link(pool: PgPool) {
+    let cfg = Config::default().also_on;
+    let card = save(&pool, GET_LUCKY, "MusicRecording", Some("Spotify")).await;
+    let member_uri = "https://music.apple.com/song/1673536443";
+    let member = save(&pool, member_uri, "MusicRecording", Some("Apple Music")).await;
+    for id in [&card, &member] {
+        also_on::record(
+            &pool,
+            id,
+            "musicbrainz",
+            Found {
+                keys: vec![also_on::Key {
+                    key: format!("mb:recording:{RECORDING}"),
+                    via: "musicbrainz".into(),
+                }],
+                ..Default::default()
+            },
+            std::time::Duration::from_secs(86_400),
+            &cfg,
+        )
+        .await
+        .unwrap();
+    }
+    pinakes_core::groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    also_on::record(
+        &pool,
+        &card,
+        "wikidata",
+        found_links(&[("https://music.apple.com/us/song/617154366", "Apple Music")]),
+        std::time::Duration::from_secs(86_400),
+        &cfg,
+    )
+    .await
+    .unwrap();
+    also_on::record(
+        &pool,
+        &card,
+        "editions",
+        Found {
+            editions: vec![Edition {
+                uri: member_uri.into(),
+                release: None,
+                rank: 1000,
+            }],
+            ..Default::default()
+        },
+        std::time::Duration::from_secs(86_400),
+        &cfg,
+    )
+    .await
+    .unwrap();
+    let apple: Vec<String> = tails(also_on(&pool, &card, true).await)
+        .into_iter()
+        .filter(|t| t == "617154366" || t == "1673536443")
+        .collect();
+    assert_eq!(apple, ["617154366"]);
+}
+
+/// The releases `editions` reads as the card's own and as the original edition are facts of its
+/// read.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_read_names_the_releases_as_facts(pool: PgPool) {
+    let cfg = Config::default().also_on;
+    let card = save(&pool, GET_LUCKY, "MusicRecording", Some("Spotify")).await;
+    also_on::record(
+        &pool,
+        &card,
+        "editions",
+        Found {
+            facts: vec![
+                also_on::Fact::new("release", RAM),
+                also_on::Fact::new("original_release", RAM_APPLE),
+            ],
+            ..Default::default()
+        },
+        std::time::Duration::from_secs(86_400),
+        &cfg,
+    )
+    .await
+    .unwrap();
+    let v = read_json(&pool, GET_LUCKY).await;
+    assert_eq!(v["facts"]["release"], RAM, "{v}");
+    assert_eq!(v["facts"]["original_release"], RAM_APPLE, "{v}");
+}
+
+/// Pages of the card's own service whose cards name no service yet never take a card's slots:
+/// with eight of them, a TIDAL link still shows.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn pages_of_the_cards_own_service_take_no_slot(pool: PgPool) {
+    let cfg = Config::default().also_on;
+    let card = save(&pool, GET_LUCKY, "MusicRecording", Some("Spotify")).await;
+    let mut ids = vec![card.clone()];
+    for n in 1..=8 {
+        let uri = format!("https://open.spotify.com/track/aaaaaaaaaaaaaaaaaaaaa{n}");
+        ids.push(save(&pool, &uri, "MusicRecording", None).await);
+    }
+    for id in &ids {
+        also_on::record(
+            &pool,
+            id,
+            "musicbrainz",
+            Found {
+                keys: vec![also_on::Key {
+                    key: format!("mb:recording:{RECORDING}"),
+                    via: "musicbrainz".into(),
+                }],
+                ..Default::default()
+            },
+            std::time::Duration::from_secs(86_400),
+            &cfg,
+        )
+        .await
+        .unwrap();
+    }
+    pinakes_core::groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    also_on::record(
+        &pool,
+        &card,
+        "tidal",
+        found_links(&[("https://tidal.com/track/20115564", "TIDAL")]),
+        std::time::Duration::from_secs(86_400),
+        &cfg,
+    )
+    .await
+    .unwrap();
+    let v: Value = sqlx::query_scalar("SELECT also_on($1,$1,8,true)")
+        .bind(&card)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let uris: Vec<&str> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["uri"].as_str().unwrap())
+        .collect();
+    assert_eq!(uris, ["https://tidal.com/track/20115564"], "{v}");
+}
+
+/// A member that becomes another link's alias runs its group's music cards' sources again, in ten
+/// minutes.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn an_alias_assignment_places_its_groups_links_again(pool: PgPool) {
+    let cfg = Config::default().also_on;
+    let card = save(&pool, GET_LUCKY, "MusicRecording", Some("Spotify")).await;
+    let member = save(
+        &pool,
+        "https://music.apple.com/song/617154366",
+        "MusicRecording",
+        Some("Apple Music"),
+    )
+    .await;
+    for id in [&card, &member] {
+        also_on::record(
+            &pool,
+            id,
+            "musicbrainz",
+            Found {
+                keys: vec![also_on::Key {
+                    key: format!("mb:recording:{RECORDING}"),
+                    via: "musicbrainz".into(),
+                }],
+                ..Default::default()
+            },
+            std::time::Duration::from_secs(86_400),
+            &cfg,
+        )
+        .await
+        .unwrap();
+    }
+    pinakes_core::groups::drain(&pool, &Default::default(), 100)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM also_on_dirty")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    pinakes_core::alias::assign(
+        &mut tx,
+        &member,
+        &pinakes_core::alias::Alias {
+            root: "https://music.apple.com/song/617154367".into(),
+            basis: "canonical",
+        },
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let due: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT resource_id,next_attempt_at>now()+interval '5 minutes' FROM also_on_dirty ORDER BY 1",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(due.contains(&(card, true)), "{due:?}");
 }

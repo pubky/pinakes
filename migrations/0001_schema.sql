@@ -774,20 +774,21 @@ CREATE INDEX derived_link_key_idx ON derived_link USING btree (key) WHERE key IS
 
 -- Where the links of a recording's or an album's card sit among the releases MusicBrainz lists
 -- (the `editions` source), for the card `resource_id`: `rank` 0 for a link on the card's own
--- release, then 1, 2, … for one on the original edition, in the order the source reads its
--- releases (worldwide digital first, then the earliest); `release` is that release. A link with
--- no row is on no release the source could place. `also_on()` shows each service's best link.
+-- release, then 1, 2, … for one on the original edition, its releases by date; `release` is that
+-- release. Rank 1000 with no `release`: its service says it is on another release (a later
+-- edition, a compilation). A link with no row is unplaced, after the placed ones and before those
+-- on another release. `also_on()` shows each service's best link.
 CREATE TABLE link_release (
     resource_id text NOT NULL REFERENCES resource(id) ON DELETE CASCADE,
     link_id text NOT NULL,
-    release text NOT NULL,
+    release text,
     rank smallint NOT NULL,
     source text NOT NULL,
     seen_at timestamp with time zone DEFAULT now() NOT NULL,
     expires_at timestamp with time zone NOT NULL,
     PRIMARY KEY (resource_id, link_id),
     CONSTRAINT link_release_link_id_check CHECK ((link_id ~ '^[0-9a-f]{32}$'::text)),
-    CONSTRAINT link_release_release_check CHECK ((release ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'::text)),
+    CONSTRAINT link_release_release_check CHECK ((release IS NULL OR release ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'::text)),
     CONSTRAINT link_release_rank_check CHECK ((rank BETWEEN 0 AND 1000)),
     CONSTRAINT link_release_source_check CHECK ((source ~ '^[a-z0-9_]{1,32}$'))
 );
@@ -878,7 +879,8 @@ CREATE TRIGGER also_on_source_revision BEFORE INSERT OR DELETE ON also_on_source
 -- member whose URL is on a service (`doc.service`: a music service, or one a derived link names,
 -- such as Wikidata's F-Droid link) ahead of the derived links (on music, the member on the
 -- recording's original album first), then the derived link most members name; then a page ahead
--- of a file (a `.pdf`), the shorter link, the link. A page that only calls itself after a service
+-- of a file (a `.pdf`), the shorter link, the link (a link its service puts on another release
+-- last). A page that only calls itself after a service
 -- (its own `site`) takes no service's place, and other tagged members show one entry each. The
 -- card's own service, by its URL, has its link, the card, so it shows no other page there.
 -- `per_site` false lists them all.
@@ -930,11 +932,16 @@ CREATE FUNCTION also_on(unit text, resource text, cap integer, members boolean, 
      jsonb_build_object('id',id,'uri',uri,'host',host,'site',site) AS e FROM tagged LEFT JOIN placed p ON p.link_id=tagged.id
    UNION ALL SELECT 2,lower(site),uri,p.rank,-named,lower(site),jsonb_strip_nulls(jsonb_build_object('uri',uri,'site',site,'derived',true,'via',via,'kind',kind,'at',at)) FROM derived LEFT JOIN placed p ON p.link_id=derived.link_id),
  -- The card's own service, by its URL alone, like a member's.
- own AS (SELECT lower(coalesce(r.doc->>'service',CASE WHEN r.osm_type IS NOT NULL THEN 'OpenStreetMap' END)) AS service FROM resource r WHERE r.id=also_on.resource),
+ own AS (SELECT lower(coalesce(r.doc->>'service',CASE WHEN r.osm_type IS NOT NULL THEN 'OpenStreetMap' END)) AS service,lower(r.host) AS host,
+   r.type IN ('MusicRecording','MusicAlbum','MusicGroup','MusicPlaylist') AS music FROM resource r WHERE r.id=also_on.resource),
  shown AS (SELECT * FROM (SELECT *,row_number() OVER (PARTITION BY service ORDER BY coalesce(edition,500),o,rank,
      e->>'kind' IS NOT DISTINCT FROM 'pdf' OR lower(right(k2,4))='.pdf',
      length(k2),k2) AS nth FROM entries) x
-   WHERE NOT per_site OR (nth=1 AND service IS DISTINCT FROM (SELECT service FROM own)))
+   WHERE NOT per_site OR (nth=1 AND service IS DISTINCT FROM (SELECT service FROM own)
+     -- Nor, on a music card, a page of its own service whose card names no service yet: one on
+     -- its host, before the cap counts it.
+     AND NOT coalesce((SELECT music AND service IS NOT NULL FROM own)
+       AND lower(split_part(split_part(k2,'://',2),'/',1))=(SELECT host FROM own),false)))
  SELECT coalesce((SELECT jsonb_agg(e ORDER BY o,k1,k2) FROM (SELECT * FROM shown ORDER BY o,k1,k2 LIMIT cap) x),'[]'::jsonb)
 $$;
 

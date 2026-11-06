@@ -170,21 +170,23 @@ impl Source for Spotify {
 }
 
 /// The album a Spotify track is on: the Web API's record of the track (`/v1/tracks/{id}`) with
-/// the operator's credentials, else, where `[also_on] spotify_pages` allows, the album its public
-/// page names (`music:album`); `None` when neither may answer (credentials Spotify refuses
-/// included: the track is then not placed, and nothing fails).
-pub(crate) async fn track_album(cx: &Context, track: &str) -> Result<Option<String>> {
+/// the operator's credentials, else, where `page` allows (a card's own track, a link someone
+/// referenced, or any with `[also_on] spotify_pages`), the album its public page names
+/// (`music:album`). Spotify refusing the credentials, with no page to read, is an error
+/// ([`refused`]): the caller keeps what it knew.
+pub(crate) async fn track_album(cx: &Context, track: &str, page: bool) -> Result<Option<String>> {
+    let mut refusal = None;
     if Spotify.ready(&cx.config) {
         match object(cx, Kind::Track, track).await {
             Ok(record) => {
                 return Ok(record.and_then(|v| v["album"]["id"].as_str().map(str::to_owned)))
             }
-            Err(error) if refused(&error) => {}
+            Err(error) if refused(&error) => refusal = Some(error),
             Err(error) => return Err(error),
         }
     }
-    if !cx.config.also_on.spotify_pages {
-        return Ok(None);
+    if !page {
+        return refusal.map_or(Ok(None), Err);
     }
     Ok(page_links(cx, "track", track, "music:album", Level::Album)
         .await?
@@ -195,7 +197,7 @@ pub(crate) fn places(config: &crate::config::Config) -> bool {
     Spotify.ready(config) || config.also_on.spotify_pages
 }
 /// Whether an error is Spotify refusing the credentials (its token or its API).
-fn refused(error: &anyhow::Error) -> bool {
+pub(crate) fn refused(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<crate::resolver::RetryLater>()
         .is_some_and(|r| r.class == SPOTIFY.auth_class)
