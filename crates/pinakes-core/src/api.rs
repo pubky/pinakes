@@ -794,6 +794,19 @@ pub struct Card {
     /// `[groups] same_recording_hint`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub maybe_same: Option<Vec<SameEvent>>,
+    /// On a `related` search row only: why it is listed, from what its rank counted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub because: Option<Because>,
+}
+/// Why a `related` row is listed: the resource's taggers who also referenced it.
+#[derive(Clone, Serialize, ToSchema)]
+pub struct Because {
+    /// How many of the resource's sampled taggers referenced this row (with `collapse=group`,
+    /// its group's members together, each tagger once): the count the row is ranked by.
+    pub shared: i64,
+    /// Up to three of them (Pubky public keys), those who tagged the resource most recently
+    /// first. Ask Nexus for their names and tags.
+    pub taggers: Vec<String>,
 }
 /// Another event, app or recording that is possibly the same one. An event: it starts together
 /// with this one, near it (or, when either has no place, at the same venue or under the same
@@ -1145,6 +1158,23 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
         occurrence,
         event,
         maybe_same: same_events(row).map(|all| all.into_iter().take(3).collect()),
+        because: because(row),
+    })
+}
+/// A related row's `because`, when the row has one.
+fn because(row: &Value) -> Option<Because> {
+    let b = row.get("because").filter(|v| v.is_object())?;
+    Some(Because {
+        shared: b["shared"].as_i64().unwrap_or(0),
+        taggers: b["taggers"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|t| t.as_str().map(str::to_owned))
+                    .take(BECAUSE_TAGGERS)
+                    .collect()
+            })
+            .unwrap_or_default(),
     })
 }
 /// The most links one card names as `refs`.
@@ -1710,6 +1740,22 @@ fn related_rank(sql: &mut QueryBuilder<'_, Postgres>, counts: &str, since: DateT
     .push(")))::double precision");
 }
 
+/// A related row's `because` from what its rank counted: `shared`, the count (`n`), and of its
+/// taggers (`authors`, space-separated keys, repeats allowed) the [`BECAUSE_TAGGERS`] who tagged
+/// the resource most recently, read from the bounded sample (`related_taggers`), never from the
+/// reference table. Built in the final projection, for the page's rows alone; the rows before it
+/// carry `n` and `authors` as `because_n` and `because_authors`, which the item drops.
+fn related_because(sql: &mut QueryBuilder<'_, Postgres>, item: &str, n: &str, authors: &str) {
+    sql.push(format!(
+        "(({item})-'because_n'-'because_authors')||jsonb_build_object('because',jsonb_build_object('shared',{n},'taggers',to_jsonb(ARRAY(SELECT t.author FROM related_taggers t WHERE t.author IN (SELECT unnest(string_to_array({authors},' '))) ORDER BY t.at DESC,t.author LIMIT {BECAUSE_TAGGERS}))))"
+    ));
+}
+/// The version of a search page's shape, in its ETag: a page cached before a field was added
+/// (`because`) is never answered 304. Move it when a search row gains or loses a field.
+pub const SEARCH_SHAPE: u32 = 1;
+/// The most taggers a related row's `because` names.
+pub const BECAUSE_TAGGERS: usize = 3;
+
 fn scope(
     sql: &mut QueryBuilder<'_, Postgres>,
     q: &SearchQuery,
@@ -1869,11 +1915,8 @@ pub async fn search(
             .push(" ORDER BY f.created_at DESC LIMIT ")
             .push_bind(search.related_refs_per_tagger as i64)
             .push(") x CROSS JOIN LATERAL (SELECT coalesce((SELECT root_id FROM resource_alias WHERE alias_id=x.resource_id),x.resource_id) AS root) a WHERE a.root NOT IN (SELECT resource_id FROM related_seed) GROUP BY 1,t.author), related AS (SELECT resource_id,count(*) AS n,max(at) AS at");
-        if q.collapse.is_some() {
-            // Its taggers, for its group's count (`eligible`).
-            sql.push(",string_agg(author,' ') AS authors");
-        }
-        sql.push(" FROM related_refs GROUP BY resource_id");
+        // Its taggers: for its group's count (`eligible`) and the row's `because`.
+        sql.push(",string_agg(author,' ') AS authors FROM related_refs GROUP BY resource_id");
         if q.collapse.is_none() {
             // A row needs a crowd, so it never mirrors one person's references.
             sql.push(" HAVING count(*)>=")
@@ -1958,6 +2001,10 @@ pub async fn search(
     }
     if !related_groups {
         sql.push(" AS rank");
+    }
+    if related.is_some() && !related_groups {
+        // For `because`, on the page's rows only (`related_because`).
+        sql.push(",rel.n AS because_n,rel.authors AS because_authors");
     }
     if related.is_some() {
         // Each related resource once, as its own card (never once per occurrence or event
@@ -2105,7 +2152,8 @@ pub async fn search(
             .push(UNIT_COLUMNS)
             .push(",");
         related_rank(&mut sql, "g", since);
-        sql.push(" AS rank FROM (SELECT p.*,max(p.rel_at) OVER w AS group_at,string_agg(p.rel_authors,' ') OVER w AS group_authors FROM related_pass p WINDOW w AS (PARTITION BY coalesce(p.rel_group,p.id))) p CROSS JOIN LATERAL (SELECT count(DISTINCT a) AS n,p.group_at AS at FROM unnest(string_to_array(p.group_authors,' ')) a) g WHERE g.n>=")
+        // For `because`, on the page's rows only (`related_because`).
+        sql.push(" AS rank,g.n AS because_n,p.group_authors AS because_authors FROM (SELECT p.*,max(p.rel_at) OVER w AS group_at,string_agg(p.rel_authors,' ') OVER w AS group_authors FROM related_pass p WINDOW w AS (PARTITION BY coalesce(p.rel_group,p.id))) p CROSS JOIN LATERAL (SELECT count(DISTINCT a) AS n,p.group_at AS at FROM unnest(string_to_array(p.group_authors,' ')) a) g WHERE g.n>=")
             .push_bind(state.config.search.related_min_shared as i64);
     }
     if q.collapse.is_some() {
@@ -2135,7 +2183,17 @@ pub async fn search(
             .push_bind((q.limit.unwrap_or(50)+1) as i64)
             .push(") SELECT coalesce((SELECT jsonb_agg(to_jsonb(p)");
         // A point's card is its `item`, built once: `||` replaces a key, it never merges two items.
-        sql.push(" || CASE WHEN p.kind='point' THEN jsonb_build_object('item',p.item");
+        sql.push(" || CASE WHEN p.kind='point' THEN jsonb_build_object('item',");
+        if related.is_some() {
+            related_because(
+                &mut sql,
+                "p.item",
+                "(p.item->>'because_n')::bigint",
+                "p.item->>'because_authors'",
+            );
+        } else {
+            sql.push("p.item");
+        }
         if state.config.groups.enabled {
             sql.push("||jsonb_build_object('group',group_hint(p.unit_id),'also_on',also_on(p.unit_id,p.unit_id,8,true))");
         } else {
@@ -2166,7 +2224,12 @@ pub async fn search(
         }
         sql.push(" ORDER BY rank DESC,unit_id DESC LIMIT ")
             .push_bind((q.limit.unwrap_or(50) + 1) as i64)
-            .push(") SELECT coalesce((SELECT jsonb_agg(to_jsonb(p)");
+            .push(") SELECT coalesce((SELECT jsonb_agg(");
+        if related.is_some() {
+            related_because(&mut sql, "to_jsonb(p)", "p.because_n", "p.because_authors");
+        } else {
+            sql.push("to_jsonb(p)");
+        }
         if state.config.groups.enabled {
             sql.push(" || jsonb_build_object('group',group_hint(p.unit_id),'also_on',also_on(p.unit_id,p.unit_id,8,true))");
         } else {
@@ -2279,7 +2342,8 @@ pub async fn search(
             revision,
             reach_revision,
             spatial.from,
-            spatial.to
+            spatial.to,
+            SEARCH_SHAPE
         ))?)
         .to_hex()
     );

@@ -143,6 +143,10 @@ member with the most references standing for it.
 `sort=recent` by the newest reference; the default `activity` by taggers and references with a
 30-day decay.
 
+**Similar links.** `related=<card id>` lists what the people who tagged a card also referenced,
+most shared taggers first. Each row's `because` says why: `shared` (how many of them) and
+`taggers` (up to three Pubky keys, the most recent first); ask Nexus for their names and tags.
+
 ## Joining with Nexus by URI
 
 Pinakes ranks, Nexus hydrates. Pinakes's `id` is its own: join the two indexes by **URI**, never

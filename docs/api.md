@@ -108,6 +108,7 @@ An IMDb title keeps the type its page gives (it can be either).
 | `occurrence` | Occurrence cards only: `{feed_id, feed_uri, uid, recurrence_id, status}`; `feed_uri` is the feed's URI, the link people tagged |
 | `event` | Pubky event references only (an event post's occurrence at a place; no feed writes them today: social events are Nexus's, see [Pubky events](#calendars-and-occurrences)): `{author, object_path, recurrence_id, start, end, status}`; `object_path` is the post's versionless path, `recurrence_id` the occurrence's local start (`YYYY-MM-DDTHH:MM:SS`) or null for a one-off |
 | `maybe_same` | Event and occurrence cards: other events that are [possibly the same event](#possibly-the-same-event), best first, each `{id, uri, site, start, score}` (`[]` when there are none). An app's store card: store cards that are [possibly the same app](#possibly-the-same-app). `MusicRecording` cards: other recordings that are [possibly the same recording](#possibly-the-same-recording), the same shape (`start` is `null`). Up to three on a search, lookup or group card, up to ten on a resource read. A hint only, like `group`. Absent on other cards, on event and app cards with `[event] same_event_hint = "off"` and on recording cards with `[groups] same_recording_hint = "off"` |
+| `because` | [Related](#related) search rows only: why the row is listed, `{shared, taggers}` (how many of the resource's taggers referenced it, and up to three of them as Pubky public keys). Absent on every other card |
 
 A `pubky://` object of an app Pinakes has a profile for (Loopky, Pubky Rooms,
 the Pubky marketplace) gets that app's card; any other app's object gets a general one. Each is
@@ -598,6 +599,18 @@ every filter it combines with `type`, `tags`, `q`, `reach`/`viewer`, `collapse=g
 
 Related lists only what at least two of a link's taggers referenced, so it never mirrors one
 person (`limits.related_min_shared`, 2).
+
+Each row says why it is listed: `because` is `{"shared": n, "taggers": [...]}`, the count of the
+resource's taggers who referenced it (its rank's first term; with `collapse=group`, its group's
+members' together, each tagger once) and up to three of them as Pubky public keys, those who
+tagged the resource most recently first. Both come from the sample the ranking counted (Bounds,
+below), so `shared` counts sampled taggers within the window. Ask Nexus for their names and tags.
+No other search carries `because`.
+
+```json
+{"id": "…", "uri": "https://example.org/kid-a", "name": "Kid A", "…": "…",
+ "because": {"shared": 3, "taggers": ["<pubky key>", "<pubky key>", "<pubky key>"]}}
+```
 
 - **Groups.** A resource in a [group](#groups) stands for the whole group: its taggers are the
   group's members' taggers, and the group's own members are never listed. With `collapse=group`,
