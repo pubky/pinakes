@@ -85,6 +85,65 @@ fn page_url(doc: &ResourceMeta, id: &str, canonical_id: &str) -> Option<String> 
         .map(|(_, url, _)| url)
 }
 /// Read, bound, hash and diff outside the global write/sequence locks. Apply rechecks the snapshot fence.
+/// Occurrences an earlier build stored under a UID that [`super::stored_uid`] now replaces (a link
+/// that carries a credential) take their stored key in place, and so do the feed's held and
+/// missing keys, before anything is compared: the occurrence goes on under its new key, never lost
+/// and cancelled under the old one. A row whose new key is taken already keeps its old one.
+async fn rekey(pool: &PgPool, id: &str) -> Result<()> {
+    let uids: Vec<String> =
+        sqlx::query_scalar("SELECT DISTINCT uid FROM occurrence WHERE resource_id=$1")
+            .bind(id)
+            .fetch_all(pool)
+            .await?;
+    let renamed: BTreeMap<String, String> = uids
+        .into_iter()
+        .filter(|uid| crate::capability::contains_credential(uid))
+        .map(|uid| (uid.clone(), super::stored_uid(uid)))
+        .collect();
+    if renamed.is_empty() {
+        return Ok(());
+    }
+    let mut tx = pool.begin().await?;
+    crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
+    for (old, new) in &renamed {
+        sqlx::query("UPDATE occurrence o SET uid=$3 WHERE o.resource_id=$1 AND o.uid=$2 AND NOT EXISTS(SELECT 1 FROM occurrence n WHERE n.resource_id=$1 AND n.uid=$3 AND n.recurrence_id=o.recurrence_id)")
+            .bind(id)
+            .bind(old)
+            .bind(new)
+            .execute(&mut *tx)
+            .await?;
+    }
+    let key = |key: String| match serde_json::from_str::<(String, String)>(&key) {
+        Ok((uid, rid)) => renamed
+            .get(&uid)
+            .map_or(Ok(key), |new| serde_json::to_string(&(new, rid))),
+        Err(_) => Ok(key),
+    };
+    if let Some(row) = sqlx::query(
+        "SELECT held_keys,missing_keys FROM event_fetch WHERE resource_id=$1 FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?
+    {
+        let held = row
+            .get::<Option<Vec<String>>, _>("held_keys")
+            .map(|held| held.into_iter().map(key).collect::<Result<Vec<_>, _>>())
+            .transpose()?;
+        let missing = serde_json::from_value::<BTreeMap<String, u32>>(row.get("missing_keys"))?
+            .into_iter()
+            .map(|(k, n)| key(k).map(|k| (k, n)))
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        sqlx::query("UPDATE event_fetch SET held_keys=$2,missing_keys=$3 WHERE resource_id=$1")
+            .bind(id)
+            .bind(held)
+            .bind(json!(missing))
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
 pub async fn prepare(
     pool: &PgPool,
     id: &str,
@@ -100,7 +159,7 @@ pub async fn prepare(
         .iter()
         .map(|o| &o.uid)
         .chain(&container.deleted_uids)
-        .any(|uid| crate::capability::names_credential(uid))
+        .any(|uid| crate::capability::contains_credential(uid))
     {
         let mut c = container.clone();
         for o in &mut c.occurrences {
@@ -112,6 +171,7 @@ pub async fn prepare(
     } else {
         container
     };
+    rekey(pool, id).await?;
     let state=sqlx::query("SELECT last_snapshot_at,held_keys,missing_keys,hold_count FROM event_fetch WHERE resource_id=$1").bind(id).fetch_optional(pool).await?;
     let last = state
         .as_ref()

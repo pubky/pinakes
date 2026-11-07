@@ -1395,6 +1395,86 @@ async fn a_feed_item_id_that_carries_a_credential_is_stored_by_a_stand_in(pool: 
     assert!(!stored.contains("SECRET"), "{stored}");
 }
 
+/// A feed row whose id is a link carrying a credential (an einundzwanzig row without a title, a
+/// Nostr calendar's `kind:author:d-tag`) names no secret: not its UID, not the name made from it.
+#[test]
+fn a_row_id_that_carries_a_credential_names_no_secret() {
+    let cfg = EventConfig::default();
+    let mut doc = cursor::container("https://portal.einundzwanzig.space/api/meetups", &cfg);
+    let row = json!({"id":"https://cal.example/e?token=SECRET","meetup_id":1,"title":null,"start":(Utc::now()+Duration::days(1)).to_rfc3339()});
+    cursor::append(&mut doc, "einundzwanzig", &row, &cfg).unwrap();
+    let c = doc.container.unwrap();
+    let json = format!(
+        "{} {}",
+        c.occurrences[0].uid,
+        serde_json::to_string(&c.occurrences[0].doc).unwrap()
+    );
+    assert!(!json.contains("SECRET"), "{json}");
+    let nostr = pinakes_core::event::stored_uid(
+        "31923:abc123:https://cal.example/item?token=SECRET".into(),
+    );
+    assert!(
+        nostr.starts_with("uid:") && !nostr.contains("SECRET"),
+        "{nostr}"
+    );
+}
+/// An occurrence an earlier build stored under a UID that is a link carrying a credential goes on
+/// under its stand-in when the feed is read again: one row, not cancelled, and nothing stored names
+/// the secret.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn an_occurrence_stored_under_a_credential_uid_goes_on_under_its_stand_in(pool: PgPool) {
+    let uri = "https://example.org/legacy-uid.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let cfg = EventConfig::default();
+    let ics = |uid: &str| {
+        format!("BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:{uid}\nDTSTART:20261220T170000Z\nSUMMARY:Concert\nEND:VEVENT\nEND:VCALENDAR\n")
+    };
+    let secret = "https://cal.example/event?token=SECRET";
+    let doc = pinakes_core::event::calendar::parse(uri, ics("legacy").as_bytes(), &cfg, Utc::now())
+        .unwrap();
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    // As an earlier build stored it: the raw UID in the row and in the feed's fetch state.
+    let old_key = serde_json::to_string(&("legacy", "")).unwrap();
+    let raw_key = serde_json::to_string(&(secret, "")).unwrap();
+    sqlx::query("UPDATE occurrence SET uid=$2 WHERE resource_id=$1 AND uid='legacy'")
+        .bind(&id)
+        .bind(secret)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE event_fetch SET held_keys=array_replace(held_keys,$2,$3),missing_keys=CASE WHEN missing_keys ? $2 THEN (missing_keys - $2) || jsonb_build_object($3,missing_keys->$2) ELSE missing_keys END WHERE resource_id=$1")
+        .bind(&id)
+        .bind(&old_key)
+        .bind(&raw_key)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for at in [1, 2] {
+        let mut doc =
+            pinakes_core::event::calendar::parse(uri, ics(secret).as_bytes(), &cfg, Utc::now())
+                .unwrap();
+        doc.fetched_at += at;
+        store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    }
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT uid,status FROM occurrence WHERE resource_id=$1")
+            .bind(&id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(rows[0].0.starts_with("uid:"), "{rows:?}");
+    assert_ne!(rows[0].1, "cancelled", "{rows:?}");
+    let stored: String = sqlx::query_scalar(
+        "SELECT concat_ws(' ',(SELECT string_agg(concat_ws(' ',uid,doc::text),' ') FROM occurrence WHERE resource_id=$1),(SELECT concat_ws(' ',held_keys::text,missing_keys::text) FROM event_fetch WHERE resource_id=$1),(SELECT string_agg(concat_ws(' ',occurrence_key,before::text,after::text),' ') FROM resource_change WHERE resource_id=$1))",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!stored.contains("SECRET"), "{stored}");
+}
+
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn cursor_deltas_tombstones_rollback_hold_reset_and_compare_swap(pool: PgPool) {
     let uri = "https://example.org/cursor.ics";

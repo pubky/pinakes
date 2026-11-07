@@ -147,9 +147,15 @@ pub fn strip_document(doc: &mut crate::model::ResourceMeta, own: &str) -> anyhow
 
 /// Whether `s`, a string as a document or a row stores it, is a link that carries a credential:
 /// read as written, a scheme-relative one (`//host/p`) on `https:`, and a `webcal:` one written
-/// without its `//`.
+/// without its `//`. What a URL parser drops (control characters and spaces around it, a tab or
+/// newline anywhere, in the scheme too) is dropped first.
 pub fn names_credential(s: &str) -> bool {
-    let s = s.trim();
+    let s: String = s
+        .trim_matches(|c: char| c <= ' ')
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .collect();
+    let s = s.as_str();
     let url = match s.strip_prefix("//") {
         Some(rest) => Url::parse(&format!("https://{rest}")),
         None => Url::parse(s).and_then(|url| match url.scheme() {
@@ -162,6 +168,26 @@ pub fn names_credential(s: &str) -> bool {
         }),
     };
     url.is_ok_and(|url| url.has_host() && is_capability_url(&url))
+}
+
+/// Whether `s` holds a link that carries a credential ([`names_credential`]) anywhere: one that
+/// starts where `s` does, or after a character no scheme holds (a Nostr calendar's
+/// `kind:author:https://…`, a name such as `Meetup https://…`). A link ends at a space.
+pub fn contains_credential(s: &str) -> bool {
+    let s: String = s
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .collect();
+    let scheme = |c: char| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.');
+    s.char_indices()
+        .filter(|&(at, c)| {
+            (c.is_ascii_alphabetic() || c == '/')
+                && s[..at]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|before| !scheme(before) && before != '/')
+        })
+        .any(|(at, _)| names_credential(s[at..].split(' ').next().unwrap_or_default()))
 }
 
 /// Whether an HTTP `Link` header (`<…>; rel=…, <…>`) names a link that carries a credential; a
@@ -369,5 +395,32 @@ mod tests {
         }
         let mut value = serde_json::json!({"url": own, "website": "//cdn.example/x?size=2"});
         assert!(!strip::<serde_json::Value>(&mut value, own));
+    }
+    /// A tab or newline a URL parser drops (inside the scheme, too) does not hide a link.
+    #[test]
+    fn a_tab_or_newline_inside_a_link_hides_nothing() {
+        for stored in [
+            "web\tcal:cal.example/feed.ics?token=SECRET",
+            "webcal:\ncal.example/feed.ics?token=SECRET",
+            "\u{1}https://cdn.example/x?token=SECRET",
+        ] {
+            assert!(names_credential(stored), "{stored:?}");
+        }
+        assert!(!names_credential("web\tcal:cal.example/feed.ics?x=1"));
+    }
+    /// A link that carries a credential counts wherever it starts in a string: a Nostr calendar
+    /// UID (`kind:author:d-tag`) or a name made of a word and an id.
+    #[test]
+    fn a_link_inside_a_string_counts_wherever_it_starts() {
+        for s in [
+            "31923:abc123:https://cal.example/item?token=SECRET",
+            "Meetup https://cal.example/e?token=SECRET",
+            "31923:abc123://cal.example/item?token=SECRET",
+        ] {
+            assert!(contains_credential(s), "{s}");
+        }
+        for s in ["31923:abc123:plain-id", "event-7@cal.example", "Meetup 7"] {
+            assert!(!contains_credential(s), "{s}");
+        }
     }
 }

@@ -163,6 +163,9 @@ fn row_error(error: impl std::fmt::Display) -> anyhow::Error {
 fn append_row(doc: &mut ResourceMeta, adapter: &str, v: &Value) -> Result<()> {
     let id = uid(v).context("event feed row has no identity")?;
     ensure!(id.len() <= 256, "event identity too long");
+    // Its UID, deleted UID, name and derived-link sources: never the id itself when that holds a
+    // link carrying a credential.
+    let id = crate::event::stored_uid(id);
     let c = doc.container.as_mut().context("not a container")?;
     let deleted = v.get("deleted_at").is_some_and(|v| !v.is_null())
         || matches!(
