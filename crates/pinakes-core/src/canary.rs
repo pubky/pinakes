@@ -92,24 +92,25 @@ pub async fn run_manifest(
         .err()
         .is_some_and(crate::resolver::egress::over_cap);
     if !observations.is_empty() && !over_cap {
-        crate::source::outcome(
-            pool,
-            &manifest.source,
-            match &result {
-                Err(e) => Some(crate::resolver::error_class(e).to_owned()),
-                Ok(doc) if matches!(doc.status, Status::Unreachable | Status::Error) => Some(
-                    if doc.status == Status::Unreachable {
-                        "http_4xx"
-                    } else {
-                        "http_5xx"
-                    }
-                    .into(),
-                ),
-                _ => None,
-            }
-            .as_deref(),
-        )
-        .await?;
+        let class = match &result {
+            Err(e) => Some(crate::resolver::error_class(e)),
+            Ok(doc) if doc.status == Status::Unreachable => Some("http_4xx"),
+            Ok(doc) if doc.status == Status::Error => Some("http_5xx"),
+            _ => None,
+        };
+        // The source's health is bookkeeping: when it cannot be written, the canary's own
+        // result is still recorded.
+        if crate::source::outcome(pool, &manifest.source, class)
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                source = %manifest.source,
+                class = class.unwrap_or("ok"),
+                host = manifest.canary.as_ref().and_then(|u| u.host_str()).unwrap_or_default(),
+                "source health not recorded"
+            );
+        }
     }
     record(pool, manifest, generation, &result, config.interval_secs).await
 }

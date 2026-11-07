@@ -866,7 +866,9 @@ policy, too_large for an answer past its size cap, too_complex for a page whose 
 end within its limits; rate_limited for a link waiting for its host's budget). A failed resolve
 is logged at warn as `resolution failed`, with the resource id (`resource_id`), the link's host
 (`host`; its scheme for a link without one, never its path), this class (`kind`) and the
-upstream HTTP status when one was answered (`status`), never the error's text. No log line about
+upstream HTTP status when one was answered (`status`), never the error's text. A source's health
+(`source_state`) that cannot be written is logged at warn as `source health not recorded`, with
+the source, the class and the host; the jobs and the canary still finish. No log line about
 a fetch, a lookup or a parse prints an error's text (what an upstream answered may hold a link);
 the lines about the daemon's own services (the database, Nexus, the dump) print theirs through
 a last guard that cuts every URL before its query or fragment and drops its user info. A
