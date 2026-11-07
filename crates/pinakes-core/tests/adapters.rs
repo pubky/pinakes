@@ -1371,7 +1371,11 @@ async fn a_feed_item_id_that_carries_a_credential_is_stored_by_a_stand_in(pool: 
     let uri = "https://starticket.example/feed.xml";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
     let cfg = EventConfig::default();
-    let xml = br#"<feed xmlns="http://www.w3.org/2005/Atom" xmlns:mc="https://starticket.example/feeds"><title>Atom sample</title><entry><id>https://cal.example/item?token=SECRET</id><title>Concert</title><link href="https://starticket.example/42"/><mc:dates fromdate="2026-12-20T17:00:00Z" todate="2026-12-20T19:00:00Z"/></entry></feed>"#;
+    let day = (Utc::now() + Duration::days(30)).format("%Y-%m-%d");
+    let xml = format!(
+        r#"<feed xmlns="http://www.w3.org/2005/Atom" xmlns:mc="https://starticket.example/feeds"><title>Atom sample</title><entry><id>https://cal.example/item?token=SECRET</id><title>Concert</title><link href="https://starticket.example/42"/><mc:dates fromdate="{day}T17:00:00Z" todate="{day}T19:00:00Z"/></entry></feed>"#
+    );
+    let xml = xml.as_bytes();
     for at in [0, 1] {
         let mut doc = pinakes_core::event::calendar::structured_feed(uri, xml, &cfg, Utc::now())
             .unwrap()
@@ -1427,7 +1431,8 @@ async fn an_occurrence_stored_under_a_credential_uid_goes_on_under_its_stand_in(
     let id = store::ensure_resource(&pool, uri).await.unwrap();
     let cfg = EventConfig::default();
     let ics = |uid: &str| {
-        format!("BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:{uid}\nDTSTART:20261220T170000Z\nSUMMARY:Concert\nEND:VEVENT\nEND:VCALENDAR\n")
+        let day = (Utc::now() + Duration::days(30)).format("%Y%m%d");
+        format!("BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:{uid}\nDTSTART:{day}T170000Z\nSUMMARY:Concert\nEND:VEVENT\nEND:VCALENDAR\n")
     };
     let secret = "https://cal.example/event?token=SECRET";
     let doc = pinakes_core::event::calendar::parse(uri, ics("legacy").as_bytes(), &cfg, Utc::now())
@@ -1485,7 +1490,8 @@ async fn both_spellings_of_a_credential_uid_leave_one_row_and_no_raw_key(pool: P
     let cfg = EventConfig::default();
     let secret = "https://cal.example/event?token=SECRET";
     let gone = "https://cal.example/gone?token=SECRET";
-    let ics = format!("BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:{secret}\nDTSTART:20261220T170000Z\nSUMMARY:Concert\nEND:VEVENT\nEND:VCALENDAR\n");
+    let day = (Utc::now() + Duration::days(30)).format("%Y%m%d");
+    let ics = format!("BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:{secret}\nDTSTART:{day}T170000Z\nSUMMARY:Concert\nEND:VEVENT\nEND:VCALENDAR\n");
     let doc = pinakes_core::event::calendar::parse(uri, ics.as_bytes(), &cfg, Utc::now()).unwrap();
     store::save_document(&pool, &id, 0, &doc).await.unwrap();
     // As an earlier build left it: the same occurrence under the raw UID too, and a raw key in
@@ -1514,6 +1520,38 @@ async fn both_spellings_of_a_credential_uid_leave_one_row_and_no_raw_key(pool: P
             .unwrap();
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_ne!(rows[0].1, "cancelled", "{rows:?}");
+    let stored: String = sqlx::query_scalar(
+        "SELECT concat_ws(' ',(SELECT string_agg(concat_ws(' ',uid,doc::text),' ') FROM occurrence WHERE resource_id=$1),(SELECT concat_ws(' ',held_keys::text,missing_keys::text) FROM event_fetch WHERE resource_id=$1),(SELECT string_agg(concat_ws(' ',occurrence_key,before::text,after::text),' ') FROM resource_change WHERE resource_id=$1))",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!stored.contains("SECRET"), "{stored}");
+}
+
+/// A UID stored by an earlier build that hides its link behind a tab (`web<TAB>cal:…`) moves to
+/// its stand-in too: nothing stored names the secret after the feed is read again.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_credential_uid_hidden_by_a_tab_moves_to_its_stand_in(pool: PgPool) {
+    let uri = "https://example.org/tab-uid.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let cfg = EventConfig::default();
+    let day = (Utc::now() + Duration::days(30)).format("%Y%m%d");
+    let ics = format!("BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:plain-1\nDTSTART:{day}T170000Z\nSUMMARY:Concert\nEND:VEVENT\nEND:VCALENDAR\n");
+    let doc = pinakes_core::event::calendar::parse(uri, ics.as_bytes(), &cfg, Utc::now()).unwrap();
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    // As an earlier build stored it.
+    sqlx::query("UPDATE occurrence SET uid=$2 WHERE resource_id=$1 AND uid='plain-1'")
+        .bind(&id)
+        .bind("web\tcal:cal.example/feed.ics?token=SECRET")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut doc =
+        pinakes_core::event::calendar::parse(uri, ics.as_bytes(), &cfg, Utc::now()).unwrap();
+    doc.fetched_at += 1;
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
     let stored: String = sqlx::query_scalar(
         "SELECT concat_ws(' ',(SELECT string_agg(concat_ws(' ',uid,doc::text),' ') FROM occurrence WHERE resource_id=$1),(SELECT concat_ws(' ',held_keys::text,missing_keys::text) FROM event_fetch WHERE resource_id=$1),(SELECT string_agg(concat_ws(' ',occurrence_key,before::text,after::text),' ') FROM resource_change WHERE resource_id=$1))",
     )

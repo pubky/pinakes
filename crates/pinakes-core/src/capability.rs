@@ -66,46 +66,33 @@ pub fn is_capability_url(url: &Url) -> bool {
             .is_some_and(|fragment| fragment_credential(fragment, &credential))
 }
 
-/// The longest a fragment key is read for `=`: a credential key is short even percent-encoded.
-const FRAGMENT_KEY_BYTES: usize = 64;
-
 /// Whether `fragment`, as a form and in each part of it after a `?`, `#` or `;`, has a key that
-/// `credential` names with a value. A key starts where the fragment does or after one of those or
-/// a `&`, may start with a hash router's `/` or `!`, and ends at its `=`; each start is read once
-/// and only so far, so a long fragment costs its length.
+/// `credential` names with a value. The fragment is read once, in the parts between those and
+/// `&`: a part's key ends at its `=`, is decoded (`%2F`, `+`) and may then start with a hash
+/// router's `/` or `!`; it has a value when something other than `&` follows the `=`. A key never
+/// holds one of those separators, so no credential key is missed.
 fn fragment_credential(fragment: &str, credential: &impl Fn(&str) -> bool) -> bool {
     let bytes = fragment.as_bytes();
-    std::iter::once(0)
-        .chain(
-            fragment
-                .match_indices(&['?', '#', ';', '&'][..])
-                .map(|(at, _)| at + 1),
-        )
-        .any(|start| {
-            let key_start = start
-                + bytes[start..]
-                    .iter()
-                    .take_while(|&&b| b == b'/' || b == b'!')
-                    .count();
-            let Some(equals) = bytes[key_start..]
-                .iter()
-                .take(FRAGMENT_KEY_BYTES)
-                .take_while(|&&b| b != b'&')
-                .position(|&b| b == b'=')
-            else {
-                return false;
-            };
-            let has_value = bytes
-                .get(key_start + equals + 1)
-                .is_some_and(|&b| b != b'&');
-            has_value
-                && credential(
-                    &percent_encoding::percent_decode_str(
-                        &fragment[key_start..key_start + equals].replace('+', " "),
-                    )
-                    .decode_utf8_lossy(),
-                )
-        })
+    let mut start = 0;
+    while start <= bytes.len() {
+        let end = bytes[start..]
+            .iter()
+            .position(|b| matches!(b, b'?' | b'#' | b';' | b'&'))
+            .map_or(bytes.len(), |at| start + at);
+        if let Some(equals) = bytes[start..end].iter().position(|&b| b == b'=') {
+            let has_value = bytes.get(start + equals + 1).is_some_and(|&b| b != b'&');
+            let key = percent_encoding::percent_decode_str(
+                &fragment[start..start + equals].replace('+', " "),
+            )
+            .decode_utf8_lossy()
+            .into_owned();
+            if has_value && credential(key.trim_start_matches(&['/', '!'][..])) {
+                return true;
+            }
+        }
+        start = end + 1;
+    }
+    false
 }
 
 /// Drops from `value`, a document as it is stored, every URL that carries a credential but `own`,
@@ -483,7 +470,29 @@ mod tests {
         let long_fragment = format!("https://h.example/#{}", "?".repeat(60_000));
         assert!(!contains_credential(&long_fragment));
         assert!(!is_capability(&long_fragment));
+        // Sixteen link starts, each with a fragment of separators before an `=`.
+        let separators = format!(
+            "{}{}",
+            "https://h.example/#?".repeat(8),
+            format!("{}=x", "?".repeat(62)).repeat(15)
+        );
+        for _ in 0..1000 {
+            assert!(!contains_credential(&separators));
+        }
+        // Linear: about a second in a test build, against tens of seconds for a scan per suffix.
         let elapsed = started.elapsed();
-        assert!(elapsed < std::time::Duration::from_secs(1), "{elapsed:?}");
+        assert!(elapsed < std::time::Duration::from_secs(5), "{elapsed:?}");
+    }
+    /// A fragment key's percent-encoded `/` or `!` prefix (`#%2Faccess_token=…`) is trimmed as a
+    /// written one is.
+    #[test]
+    fn an_encoded_router_prefix_hides_no_fragment_key() {
+        assert!(is_capability(
+            "https://example.org/cb#%2Faccess_token=SECRET"
+        ));
+        assert!(is_capability(
+            "https://example.org/cb#%21%2Faccess_token=SECRET"
+        ));
+        assert!(!is_capability("https://example.org/cb#%2Fsection"));
     }
 }

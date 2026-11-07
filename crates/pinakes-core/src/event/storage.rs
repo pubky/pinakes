@@ -91,27 +91,32 @@ fn page_url(doc: &ResourceMeta, id: &str, canonical_id: &str) -> Option<String> 
 /// same occurrence, stored again), the old row goes. Locks are taken in `changes::save`'s order:
 /// the writers, the resource, its fetch state, then its occurrences.
 async fn rekey(pool: &PgPool, id: &str) -> Result<()> {
-    // Only a UID or key with a link start can hold such a link.
-    const LINK_START: &str = "(https?|webcals?):|//";
-    let uids: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT uid FROM occurrence WHERE resource_id=$1 AND uid ~* $2",
-    )
-    .bind(id)
-    .bind(LINK_START)
-    .fetch_all(pool)
-    .await?;
+    let uids: Vec<String> =
+        sqlx::query_scalar("SELECT DISTINCT uid FROM occurrence WHERE resource_id=$1")
+            .bind(id)
+            .fetch_all(pool)
+            .await?;
     let renamed: BTreeMap<String, String> = uids
         .into_iter()
         .filter(|uid| crate::capability::contains_credential(uid))
         .map(|uid| (uid.clone(), super::stored_uid(uid)))
         .collect();
-    let keys: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM event_fetch WHERE resource_id=$1 AND (array_to_string(held_keys,' ') ~* $2 OR missing_keys::text ~* $2))",
-    )
-    .bind(id)
-    .bind(LINK_START)
-    .fetch_one(pool)
-    .await?;
+    let moves = |key: &str| {
+        serde_json::from_str::<(String, String)>(key)
+            .is_ok_and(|(uid, _)| crate::capability::contains_credential(&uid))
+    };
+    let state = sqlx::query("SELECT held_keys,missing_keys FROM event_fetch WHERE resource_id=$1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+    let keys = state.as_ref().is_some_and(|row| {
+        row.get::<Option<Vec<String>>, _>("held_keys")
+            .is_some_and(|held| held.iter().any(|k| moves(k)))
+            || row
+                .get::<Value, _>("missing_keys")
+                .as_object()
+                .is_some_and(|missing| missing.keys().any(|k| moves(k)))
+    });
     if renamed.is_empty() && !keys {
         return Ok(());
     }
