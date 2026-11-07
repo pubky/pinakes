@@ -1159,7 +1159,14 @@ pub fn parse(
                 utc_series(&start)
             }
         };
-        let uid = c.text("UID").filter(|s| !s.is_empty());
+        // A UID that is a link carrying a credential is kept by its hash, the same on every read.
+        let uid = c.text("UID").filter(|s| !s.is_empty()).map(|uid| {
+            if crate::capability::names_credential(&uid) {
+                format!("uid:{}", hash(uid.as_bytes()))
+            } else {
+                uid
+            }
+        });
         let uid = if base.host_str().is_some_and(|s| s.starts_with("eventfrog."))
             || doc.url.contains("eventfrog.")
         {

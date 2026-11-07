@@ -1308,6 +1308,33 @@ async fn a_card_kept_as_stored_is_written_without_a_credential(pool: sqlx::PgPoo
     assert!(!history.contains("SECRET"), "{history}");
 }
 
+/// A change line exempts only the resource's own link: a credential an earlier build stored in a
+/// document's `url` (another spelling of a public link) goes from the line too.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_change_line_exempts_only_the_resources_own_link(pool: sqlx::PgPool) {
+    use pinakes_core::store;
+    let uri = "https://page.example/legacy";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut d = ResourceMeta::new(uri, "web", 3600);
+    d.name = Some("First".into());
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    // As an earlier build stored it.
+    sqlx::query("UPDATE resource SET doc=jsonb_set(doc,'{url}',to_jsonb('https://page.example/legacy#access_token=SECRET'::text)) WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    d.name = Some("Second".into());
+    d.fetched_at += 1;
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    let history: String = sqlx::query_scalar("SELECT coalesce(string_agg(concat_ws(' ',before::text,after::text),' '),'') FROM resource_change WHERE resource_id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(history.contains("Second"), "{history}");
+    assert!(!history.contains("SECRET"), "{history}");
+}
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn social_deletion_purges_content_history(pool: sqlx::PgPool) {
     use pinakes_core::{model::Status, store};

@@ -32,7 +32,8 @@ pub fn is_capability(uri: &str) -> bool {
 }
 
 /// Whether `url` carries a credential: a password in its user info, a calendar provider's secret
-/// share path, or a key in [`CREDENTIAL_KEYS`] in its query, or with a value in its form-encoded
+/// share path, or a key in [`CREDENTIAL_KEYS`] in its query (its parameters separated by `&` or
+/// `;`, as in `?x=1;token=…`), or with a value in its form-encoded
 /// fragment or in any part of it after a `?`, `#` or `;` (an OAuth callback's `#access_token=…`,
 /// a hash router's `#/reset?token=…` or `#/reset;token=…`, an OAuth answer after a route,
 /// `#/cb#access_token=…`; a key may start with an old hash router's `/` or `!/`, as in
@@ -55,7 +56,11 @@ pub fn is_capability_url(url: &Url) -> bool {
         .to_ascii_lowercase();
     let credential = |key: &str| CREDENTIAL_KEYS.contains(&key.to_ascii_lowercase().as_str());
     secret_share(&host, &path)
-        || url.query_pairs().any(|(key, _)| credential(&key))
+        || url.query().is_some_and(|query| {
+            query.split(';').any(|form| {
+                url::form_urlencoded::parse(form.as_bytes()).any(|(key, _)| credential(&key))
+            })
+        })
         || url.fragment().is_some_and(|fragment| {
             // The fragment as a form, and each part of it after a `?`, `#` or `;`.
             std::iter::once(fragment)
@@ -85,7 +90,7 @@ pub fn strip<T: serde::de::DeserializeOwned>(value: &mut serde_json::Value, own:
         .flatten();
     let foreign = |s: &str| {
         s != own
-            && Url::parse(s).is_ok_and(|url| url.has_host() && is_capability_url(&url))
+            && names_credential(s)
             && (own_id.is_none() || crate::model::identity(s).ok().map(|(id, _, _)| id) != own_id)
     };
     let mut stripped = false;
@@ -138,6 +143,25 @@ pub fn strip_document(doc: &mut crate::model::ResourceMeta, own: &str) -> anyhow
         };
     }
     Ok(())
+}
+
+/// Whether `s`, a string as a document or a row stores it, is a link that carries a credential:
+/// read as written, a scheme-relative one (`//host/p`) on `https:`, and a `webcal:` one written
+/// without its `//`.
+pub fn names_credential(s: &str) -> bool {
+    let s = s.trim();
+    let url = match s.strip_prefix("//") {
+        Some(rest) => Url::parse(&format!("https://{rest}")),
+        None => Url::parse(s).and_then(|url| match url.scheme() {
+            "webcal" | "webcals" if !url.has_host() => Url::parse(&format!(
+                "{}://{}",
+                url.scheme(),
+                &s[url.scheme().len() + 1..]
+            )),
+            _ => Ok(url),
+        }),
+    };
+    url.is_ok_and(|url| url.has_host() && is_capability_url(&url))
 }
 
 /// Whether an HTTP `Link` header (`<…>; rel=…, <…>`) names a link that carries a credential; a
@@ -321,6 +345,29 @@ mod tests {
         let own = "https://cal.example/feed.ics?token=OWN";
         let mut value =
             serde_json::json!({"url": own, "feed": "https://CAL.example/feed.ics?token=OWN"});
+        assert!(!strip::<serde_json::Value>(&mut value, own));
+    }
+    /// A query read as `;`-separated parameters counts too (`?x=1;token=…`), and so do a
+    /// scheme-relative link and a `webcal:` one written without `//` where a document stores them.
+    #[test]
+    fn semicolon_queries_and_links_without_a_scheme_or_slashes_count() {
+        assert!(is_capability(
+            "https://events.example/feed?x=1;token=SECRET"
+        ));
+        assert!(is_capability(
+            "https://events.example/feed?Token=SECRET;x=1"
+        ));
+        assert!(!is_capability("https://events.example/feed?x=1;y=2"));
+        let own = "https://own.example/p";
+        for stored in [
+            "//cdn.example/x?token=SECRET",
+            "webcal:cal.example/feed.ics?token=SECRET",
+        ] {
+            let mut value = serde_json::json!({"url": own, "website": stored});
+            assert!(strip::<serde_json::Value>(&mut value, own), "{stored}");
+            assert!(!value.to_string().contains("SECRET"), "{value}");
+        }
+        let mut value = serde_json::json!({"url": own, "website": "//cdn.example/x?size=2"});
         assert!(!strip::<serde_json::Value>(&mut value, own));
     }
 }

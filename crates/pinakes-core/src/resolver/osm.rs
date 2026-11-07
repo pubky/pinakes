@@ -417,7 +417,10 @@ impl OsmResolver {
         doc: &ResourceMeta,
         display_name: Option<&str>,
     ) -> Result<String> {
-        let mut display_name = display_name.map(str::to_owned);
+        // A display name is never a link that carries a credential.
+        let mut display_name = display_name
+            .filter(|s| !crate::capability::names_credential(s))
+            .map(str::to_owned);
         if let Some(s) = &mut display_name {
             crate::model::truncate(s, 2048);
         }
@@ -788,5 +791,41 @@ mod tests {
         .unwrap();
         assert!(!stored.contains("SECRET"), "{stored}");
         assert!(stored.contains("+41 00 000 00 00"), "{stored}");
+    }
+    /// A place's display name that is a link carrying a credential is not cached; a name is.
+    #[sqlx::test(
+        migrations = "../../migrations",
+        fixtures("../../tests/fixtures/require_h3.sql")
+    )]
+    async fn the_place_cache_stores_no_credential_display_name(pool: PgPool) {
+        let resolver = OsmResolver::new(pool.clone(), OsmConfig::default()).unwrap();
+        for (osm_id, display_name) in [
+            (125, "https://shop.example/?token=SECRET"),
+            (126, "Shop, Main Street"),
+        ] {
+            let id = parse_id(&format!("https://www.openstreetmap.org/node/{osm_id}")).unwrap();
+            let mut doc = ResourceMeta::new(&id.uri(), "osm", 3600);
+            doc.set_type("Place");
+            doc.osm_id = Some(id.key());
+            doc.name = Some("Shop".into());
+            resolver.save(&id, &doc, Some(display_name)).await.unwrap();
+        }
+        let stored: Vec<(i64, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT osm_id,display_name,fetch_display_name FROM osm_place WHERE osm_id IN(125,126) ORDER BY osm_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            stored,
+            vec![
+                (125, None, None),
+                (
+                    126,
+                    Some("Shop, Main Street".into()),
+                    Some("Shop, Main Street".into())
+                )
+            ]
+        );
     }
 }

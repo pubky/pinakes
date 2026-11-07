@@ -224,10 +224,15 @@ pub(crate) async fn append(
     diff: Diff,
     occurrence: Option<&str>,
 ) -> Result<()> {
-    // A change line names no credential but its document's own link (`capability::strip`).
+    // A change line names no credential but its resource's own link (`capability::strip`): the
+    // link the resource is read by, never a `url` a stored document says.
+    let own: String = sqlx::query_scalar("SELECT uri FROM resource WHERE id=$1")
+        .bind(id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .unwrap_or_default();
     let [before, after] = [before, after].map(|value| {
         value.map(|mut value| {
-            let own = value["url"].as_str().unwrap_or_default().to_owned();
             crate::capability::strip::<Value>(&mut value, &own);
             value
         })

@@ -1204,7 +1204,8 @@ fn point(lat: f64, lon: f64) -> Option<Point> {
 }
 /// Where an answer fetched at `url` is read, so that its relative links (`""`, `#x`, `/og.png`)
 /// resolve: `url`, unless that carries a credential; then the directory of `url` without its user
-/// info, query and fragment (a segment may be a secret too, as in `/files/<id>?token=…`), or its
+/// info, query and fragment (a segment may be a secret too, as in `/files/<id>?token=…` or
+/// `/files/<id>/?token=…`), or its
 /// origin when the path is a known secret. Either names no secret and is still the host that
 /// served the answer, so ownership and trust checks stay on that host.
 pub(crate) fn read_at(url: &Url) -> Url {
@@ -1221,6 +1222,7 @@ pub(crate) fn read_at(url: &Url) -> Url {
     } else {
         let directory = base
             .path()
+            .trim_end_matches('/')
             .rsplit_once('/')
             .map_or("", |(directory, _)| directory)
             .to_owned();
@@ -2356,6 +2358,20 @@ mod tests {
         let json = serde_json::to_string(&d).unwrap();
         assert!(!json.contains("SECRET"), "{json}");
         assert_eq!(d.image.as_deref(), Some("https://b.example/files/"));
+    }
+    /// A path that ends in `/` is read in its parent: its last segment may be the secret too.
+    #[test]
+    fn a_directory_reached_at_a_credential_is_read_in_its_parent() {
+        let at = |u: &str| read_at(&Url::parse(u).unwrap()).to_string();
+        assert_eq!(
+            at("https://b.example/files/SECRETID/?token=SECRET"),
+            "https://b.example/files/"
+        );
+        assert_eq!(
+            at("https://b.example/files/SECRETID?token=SECRET"),
+            "https://b.example/files/"
+        );
+        assert_eq!(at("https://b.example/?token=SECRET"), "https://b.example/");
     }
     #[test]
     fn only_head_canonicals_and_permanent_redirects_are_alias_candidates() {
