@@ -1363,6 +1363,38 @@ async fn a_calendar_stores_no_credential_in_its_occurrences_or_fetch_state(pool:
     assert!(stored.contains("e1"), "{stored}");
 }
 
+/// A feed item whose id is a link carrying a credential (an Atom `<id>`, an RSS `<guid>`, a JSON
+/// Feed `id`) is stored by a stand-in that names no secret, the same on every read: not in its
+/// occurrence, the feed's fetch state or its change lines.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_feed_item_id_that_carries_a_credential_is_stored_by_a_stand_in(pool: PgPool) {
+    let uri = "https://starticket.example/feed.xml";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let cfg = EventConfig::default();
+    let xml = br#"<feed xmlns="http://www.w3.org/2005/Atom" xmlns:mc="https://starticket.example/feeds"><title>Atom sample</title><entry><id>https://cal.example/item?token=SECRET</id><title>Concert</title><link href="https://starticket.example/42"/><mc:dates fromdate="2026-12-20T17:00:00Z" todate="2026-12-20T19:00:00Z"/></entry></feed>"#;
+    for at in [0, 1] {
+        let mut doc = pinakes_core::event::calendar::structured_feed(uri, xml, &cfg, Utc::now())
+            .unwrap()
+            .unwrap();
+        doc.fetched_at += at;
+        store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    }
+    let uids: Vec<String> = sqlx::query_scalar("SELECT uid FROM occurrence WHERE resource_id=$1")
+        .bind(&id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(uids.len(), 1, "{uids:?}");
+    let stored: String = sqlx::query_scalar(
+        "SELECT concat_ws(' ',(SELECT string_agg(concat_ws(' ',uid,doc::text),' ') FROM occurrence WHERE resource_id=$1),(SELECT concat_ws(' ',held_keys::text,missing_keys::text) FROM event_fetch WHERE resource_id=$1),(SELECT string_agg(concat_ws(' ',occurrence_key,before::text,after::text),' ') FROM resource_change WHERE resource_id=$1))",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!stored.contains("SECRET"), "{stored}");
+}
+
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn cursor_deltas_tombstones_rollback_hold_reset_and_compare_swap(pool: PgPool) {
     let uri = "https://example.org/cursor.ics";

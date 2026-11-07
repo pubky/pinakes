@@ -92,6 +92,26 @@ pub async fn prepare(
     fetched_at: i64,
     normal_ttl: u64,
 ) -> Result<Prepared> {
+    // Every source's UIDs as they are stored (`super::stored_uid`), whichever parser or adapter
+    // gave them.
+    let stored;
+    let container = if container
+        .occurrences
+        .iter()
+        .map(|o| &o.uid)
+        .chain(&container.deleted_uids)
+        .any(|uid| crate::capability::names_credential(uid))
+    {
+        let mut c = container.clone();
+        for o in &mut c.occurrences {
+            o.uid = super::stored_uid(std::mem::take(&mut o.uid));
+        }
+        c.deleted_uids = c.deleted_uids.into_iter().map(super::stored_uid).collect();
+        stored = c;
+        &stored
+    } else {
+        container
+    };
     let state=sqlx::query("SELECT last_snapshot_at,held_keys,missing_keys,hold_count FROM event_fetch WHERE resource_id=$1").bind(id).fetch_optional(pool).await?;
     let last = state
         .as_ref()

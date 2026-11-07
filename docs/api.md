@@ -653,8 +653,8 @@ read by its URI. An answer whose fetch ends on such a link (a page, an ActivityP
 oEmbed answer) is read in that address's directory without its credential (or at its origin when
 the path is a known secret), so nothing it names relative to that address (an empty `og:image`, a
 JSON-LD `#image`) carries it. Nothing stored names such a link but the resource's own link as
-written: not a document, its change lines, its episodes, a calendar's occurrences (a UID that is
-such a link is kept by its hash) and fetch state, or the OSM place cache and its display names;
+written: not a document, its change lines, its episodes, a calendar's occurrences (a UID or a
+feed item's id that is such a link is kept by its hash) and fetch state, or the OSM place cache and its display names;
 a link written scheme-relative (`//host/p`) or as `webcal:` without `//` counts too. Such a link is never sent to another service: also-on lookups (the hubs, the
 Wayback Machine) and oEmbed providers skip it, and it is never kept as another link's alias. A
 resource only previewed, never referenced, is not a search result and expires after `limits.preview_grace_hours` (a day). Previews are limited per
