@@ -84,29 +84,61 @@ fn page_url(doc: &ResourceMeta, id: &str, canonical_id: &str) -> Option<String> 
         .filter(|(target, _, _)| target != id && target != canonical_id)
         .map(|(_, url, _)| url)
 }
-/// Read, bound, hash and diff outside the global write/sequence locks. Apply rechecks the snapshot fence.
-/// Occurrences an earlier build stored under a UID that [`super::stored_uid`] now replaces (a link
-/// that carries a credential) take their stored key in place, and so do the feed's held and
-/// missing keys, before anything is compared: the occurrence goes on under its new key, never lost
-/// and cancelled under the old one. A row whose new key is taken already keeps its old one.
+/// Occurrences an earlier build stored under a UID that [`super::stored_uid`] now replaces (one
+/// that holds a link carrying a credential) take their stored key in place, and so do the feed's
+/// held and missing keys, before anything is compared: the occurrence goes on under its new key,
+/// never lost and cancelled under the old one. Where a row under the new key exists already (the
+/// same occurrence, stored again), the old row goes. Locks are taken in `changes::save`'s order:
+/// the writers, the resource, its fetch state, then its occurrences.
 async fn rekey(pool: &PgPool, id: &str) -> Result<()> {
-    let uids: Vec<String> =
-        sqlx::query_scalar("SELECT DISTINCT uid FROM occurrence WHERE resource_id=$1")
-            .bind(id)
-            .fetch_all(pool)
-            .await?;
+    // Only a UID or key with a link start can hold such a link.
+    const LINK_START: &str = "(https?|webcals?):|//";
+    let uids: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT uid FROM occurrence WHERE resource_id=$1 AND uid ~* $2",
+    )
+    .bind(id)
+    .bind(LINK_START)
+    .fetch_all(pool)
+    .await?;
     let renamed: BTreeMap<String, String> = uids
         .into_iter()
         .filter(|uid| crate::capability::contains_credential(uid))
         .map(|uid| (uid.clone(), super::stored_uid(uid)))
         .collect();
-    if renamed.is_empty() {
+    let keys: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM event_fetch WHERE resource_id=$1 AND (array_to_string(held_keys,' ') ~* $2 OR missing_keys::text ~* $2))",
+    )
+    .bind(id)
+    .bind(LINK_START)
+    .fetch_one(pool)
+    .await?;
+    if renamed.is_empty() && !keys {
         return Ok(());
     }
     let mut tx = pool.begin().await?;
     crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
+    if sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR UPDATE")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .is_none()
+    {
+        return Ok(());
+    }
+    let state = sqlx::query(
+        "SELECT held_keys,missing_keys FROM event_fetch WHERE resource_id=$1 FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
     for (old, new) in &renamed {
-        sqlx::query("UPDATE occurrence o SET uid=$3 WHERE o.resource_id=$1 AND o.uid=$2 AND NOT EXISTS(SELECT 1 FROM occurrence n WHERE n.resource_id=$1 AND n.uid=$3 AND n.recurrence_id=o.recurrence_id)")
+        sqlx::query("DELETE FROM occurrence o WHERE o.resource_id=$1 AND o.uid=$2 AND EXISTS(SELECT 1 FROM occurrence n WHERE n.resource_id=$1 AND n.uid=$3 AND n.recurrence_id=o.recurrence_id)")
+            .bind(id)
+            .bind(old)
+            .bind(new)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE occurrence SET uid=$3 WHERE resource_id=$1 AND uid=$2")
             .bind(id)
             .bind(old)
             .bind(new)
@@ -114,26 +146,33 @@ async fn rekey(pool: &PgPool, id: &str) -> Result<()> {
             .await?;
     }
     let key = |key: String| match serde_json::from_str::<(String, String)>(&key) {
-        Ok((uid, rid)) => renamed
-            .get(&uid)
-            .map_or(Ok(key), |new| serde_json::to_string(&(new, rid))),
-        Err(_) => Ok(key),
+        Ok((uid, rid)) if crate::capability::contains_credential(&uid) => {
+            serde_json::to_string(&(super::stored_uid(uid), rid))
+        }
+        _ => Ok(key),
     };
-    if let Some(row) = sqlx::query(
-        "SELECT held_keys,missing_keys FROM event_fetch WHERE resource_id=$1 FOR UPDATE",
-    )
-    .bind(id)
-    .fetch_optional(&mut *tx)
-    .await?
-    {
-        let held = row
-            .get::<Option<Vec<String>>, _>("held_keys")
-            .map(|held| held.into_iter().map(key).collect::<Result<Vec<_>, _>>())
-            .transpose()?;
-        let missing = serde_json::from_value::<BTreeMap<String, u32>>(row.get("missing_keys"))?
-            .into_iter()
-            .map(|(k, n)| key(k).map(|k| (k, n)))
-            .collect::<Result<BTreeMap<_, _>, _>>()?;
+    if let Some(row) = state {
+        // In their order, a key held under both spellings once.
+        let held = match row.get::<Option<Vec<String>>, _>("held_keys") {
+            Some(keys) => {
+                let mut seen = BTreeSet::new();
+                let mut held = vec![];
+                for k in keys {
+                    let k = key(k)?;
+                    if seen.insert(k.clone()) {
+                        held.push(k);
+                    }
+                }
+                Some(held)
+            }
+            None => None,
+        };
+        // A key held under both spellings keeps its higher count.
+        let mut missing = BTreeMap::<String, u32>::new();
+        for (k, n) in serde_json::from_value::<BTreeMap<String, u32>>(row.get("missing_keys"))? {
+            let count = missing.entry(key(k)?).or_default();
+            *count = (*count).max(n);
+        }
         sqlx::query("UPDATE event_fetch SET held_keys=$2,missing_keys=$3 WHERE resource_id=$1")
             .bind(id)
             .bind(held)
@@ -144,6 +183,7 @@ async fn rekey(pool: &PgPool, id: &str) -> Result<()> {
     tx.commit().await?;
     Ok(())
 }
+/// Read, bound, hash and diff outside the global write/sequence locks. Apply rechecks the snapshot fence.
 pub async fn prepare(
     pool: &PgPool,
     id: &str,

@@ -713,6 +713,8 @@ async fn append_batch(
                         if id.len() > 256 {
                             return Err(row_error("tombstone identity cap"));
                         }
+                        // Keyed as the rows it deletes are (`append_row`).
+                        let id = crate::event::stored_uid(id);
                         operations.insert(id.clone(), false);
                         doc.container.as_mut().unwrap().deleted_uids.push(id);
                     } else {
@@ -720,7 +722,7 @@ async fn append_batch(
                             .context("portal row identity")
                             .map_err(row_error)?;
                         append(&mut doc, &adapter, &row["data"], &cfg)?;
-                        operations.insert(id, true);
+                        operations.insert(crate::event::stored_uid(id), true);
                     }
                 } else {
                     if kind == "btcmap" {

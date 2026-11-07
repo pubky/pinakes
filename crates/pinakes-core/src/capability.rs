@@ -61,19 +61,50 @@ pub fn is_capability_url(url: &Url) -> bool {
                 url::form_urlencoded::parse(form.as_bytes()).any(|(key, _)| credential(&key))
             })
         })
-        || url.fragment().is_some_and(|fragment| {
-            // The fragment as a form, and each part of it after a `?`, `#` or `;`.
-            std::iter::once(fragment)
-                .chain(
-                    fragment
-                        .match_indices(&['?', '#', ';'][..])
-                        .map(|(at, _)| &fragment[at + 1..]),
+        || url
+            .fragment()
+            .is_some_and(|fragment| fragment_credential(fragment, &credential))
+}
+
+/// The longest a fragment key is read for `=`: a credential key is short even percent-encoded.
+const FRAGMENT_KEY_BYTES: usize = 64;
+
+/// Whether `fragment`, as a form and in each part of it after a `?`, `#` or `;`, has a key that
+/// `credential` names with a value. A key starts where the fragment does or after one of those or
+/// a `&`, may start with a hash router's `/` or `!`, and ends at its `=`; each start is read once
+/// and only so far, so a long fragment costs its length.
+fn fragment_credential(fragment: &str, credential: &impl Fn(&str) -> bool) -> bool {
+    let bytes = fragment.as_bytes();
+    std::iter::once(0)
+        .chain(
+            fragment
+                .match_indices(&['?', '#', ';', '&'][..])
+                .map(|(at, _)| at + 1),
+        )
+        .any(|start| {
+            let key_start = start
+                + bytes[start..]
+                    .iter()
+                    .take_while(|&&b| b == b'/' || b == b'!')
+                    .count();
+            let Some(equals) = bytes[key_start..]
+                .iter()
+                .take(FRAGMENT_KEY_BYTES)
+                .take_while(|&&b| b != b'&')
+                .position(|&b| b == b'=')
+            else {
+                return false;
+            };
+            let has_value = bytes
+                .get(key_start + equals + 1)
+                .is_some_and(|&b| b != b'&');
+            has_value
+                && credential(
+                    &percent_encoding::percent_decode_str(
+                        &fragment[key_start..key_start + equals].replace('+', " "),
+                    )
+                    .decode_utf8_lossy(),
                 )
-                .any(|form| {
-                    url::form_urlencoded::parse(form.as_bytes()).any(|(key, value)| {
-                        !value.is_empty() && credential(key.trim_start_matches(&['/', '!'][..]))
-                    })
-                })
         })
 }
 
@@ -170,24 +201,37 @@ pub fn names_credential(s: &str) -> bool {
     url.is_ok_and(|url| url.has_host() && is_capability_url(&url))
 }
 
-/// Whether `s` holds a link that carries a credential ([`names_credential`]) anywhere: one that
-/// starts where `s` does, or after a character no scheme holds (a Nostr calendar's
-/// `kind:author:https://…`, a name such as `Meetup https://…`). A link ends at a space.
+/// The most link starts [`contains_credential`] reads in one string; a string with more is taken
+/// to hold a credential (its UID gets a stand-in), so a hostile one costs no more than that.
+const LINK_STARTS: usize = 16;
+
+/// Whether `s` holds a link that carries a credential ([`names_credential`]): `s` as a whole, or
+/// a link that starts inside it at `//` or an `http`, `https`, `webcal` or `webcals` scheme after a
+/// character no scheme holds (a Nostr calendar's `kind:author:https://…`, a name such as
+/// `Meetup https://…`), up to a space.
 pub fn contains_credential(s: &str) -> bool {
+    if names_credential(s) {
+        return true;
+    }
     let s: String = s
         .chars()
         .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
         .collect();
-    let scheme = |c: char| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.');
-    s.char_indices()
-        .filter(|&(at, c)| {
-            (c.is_ascii_alphabetic() || c == '/')
-                && s[..at]
-                    .chars()
-                    .next_back()
-                    .is_none_or(|before| !scheme(before) && before != '/')
+    let lower = s.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let scheme = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.' | b'/');
+    let mut read = 0;
+    (0..bytes.len())
+        .filter(|&at| {
+            ["//", "http:", "https:", "webcal:", "webcals:"]
+                .iter()
+                .any(|start| bytes[at..].starts_with(start.as_bytes()))
+                && (at == 0 || !scheme(bytes[at - 1]))
         })
-        .any(|(at, _)| names_credential(s[at..].split(' ').next().unwrap_or_default()))
+        .any(|at| {
+            read += 1;
+            read > LINK_STARTS || names_credential(s[at..].split(' ').next().unwrap_or_default())
+        })
 }
 
 /// Whether an HTTP `Link` header (`<…>; rel=…, <…>`) names a link that carries a credential; a
@@ -422,5 +466,24 @@ mod tests {
         for s in ["31923:abc123:plain-id", "event-7@cal.example", "Meetup 7"] {
             assert!(!contains_credential(s), "{s}");
         }
+    }
+    /// A link with a space in its path still counts as a whole string.
+    #[test]
+    fn a_spaced_link_counts_as_a_whole() {
+        assert!(contains_credential(
+            "https://cal.example/Team Calendar/e?token=SECRET"
+        ));
+    }
+    /// A long hostile string (many link starts, a long fragment) is read in bounded time.
+    #[test]
+    fn hostile_strings_are_read_quickly() {
+        let started = std::time::Instant::now();
+        let many_starts = format!("{}x?token=SECRET", "://".repeat(21_000));
+        assert!(contains_credential(&many_starts));
+        let long_fragment = format!("https://h.example/#{}", "?".repeat(60_000));
+        assert!(!contains_credential(&long_fragment));
+        assert!(!is_capability(&long_fragment));
+        let elapsed = started.elapsed();
+        assert!(elapsed < std::time::Duration::from_secs(1), "{elapsed:?}");
     }
 }

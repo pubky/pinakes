@@ -1475,6 +1475,55 @@ async fn an_occurrence_stored_under_a_credential_uid_goes_on_under_its_stand_in(
     assert!(!stored.contains("SECRET"), "{stored}");
 }
 
+/// A raw credential UID stored beside its stand-in (both spellings of one occurrence) leaves one
+/// row under the stand-in, and a raw key held only in the feed's fetch state moves to it too:
+/// nothing stored names the secret after the feed is read again.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn both_spellings_of_a_credential_uid_leave_one_row_and_no_raw_key(pool: PgPool) {
+    let uri = "https://example.org/both-uids.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let cfg = EventConfig::default();
+    let secret = "https://cal.example/event?token=SECRET";
+    let gone = "https://cal.example/gone?token=SECRET";
+    let ics = format!("BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:{secret}\nDTSTART:20261220T170000Z\nSUMMARY:Concert\nEND:VEVENT\nEND:VCALENDAR\n");
+    let doc = pinakes_core::event::calendar::parse(uri, ics.as_bytes(), &cfg, Utc::now()).unwrap();
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    // As an earlier build left it: the same occurrence under the raw UID too, and a raw key in
+    // the fetch state whose row is gone.
+    sqlx::query("INSERT INTO occurrence(resource_id,uid,recurrence_id,start_at,end_at,name,venue_id,status,url,doc,point,sequence,modified,content_hash) SELECT resource_id,$2,recurrence_id,start_at,end_at,name,venue_id,status,url,doc,point,sequence,modified,content_hash FROM occurrence WHERE resource_id=$1")
+        .bind(&id)
+        .bind(secret)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE event_fetch SET missing_keys=missing_keys || jsonb_build_object($2::text,1) WHERE resource_id=$1")
+        .bind(&id)
+        .bind(serde_json::to_string(&(gone, "")).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut doc =
+        pinakes_core::event::calendar::parse(uri, ics.as_bytes(), &cfg, Utc::now()).unwrap();
+    doc.fetched_at += 1;
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT uid,status FROM occurrence WHERE resource_id=$1")
+            .bind(&id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_ne!(rows[0].1, "cancelled", "{rows:?}");
+    let stored: String = sqlx::query_scalar(
+        "SELECT concat_ws(' ',(SELECT string_agg(concat_ws(' ',uid,doc::text),' ') FROM occurrence WHERE resource_id=$1),(SELECT concat_ws(' ',held_keys::text,missing_keys::text) FROM event_fetch WHERE resource_id=$1),(SELECT string_agg(concat_ws(' ',occurrence_key,before::text,after::text),' ') FROM resource_change WHERE resource_id=$1))",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!stored.contains("SECRET"), "{stored}");
+}
+
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn cursor_deltas_tombstones_rollback_hold_reset_and_compare_swap(pool: PgPool) {
     let uri = "https://example.org/cursor.ics";
