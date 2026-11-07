@@ -102,12 +102,13 @@ An IMDb title keeps the type its page gives (it can be either).
 | `point` | `{lat, lon}` |
 | `start`, `end` | RFC 3339 instants for events and occurrences |
 | `group` | `{id, size}` when the resource or occurrence is in a [group](#groups), else `null` |
-| `also_on` | The same thing elsewhere ([Also on](#also-on)): the other members of its group as `{id, uri, site}` (other resources first, one entry each by ID, then other occurrences of its own feed), then derived links nobody tagged as `{uri, site, derived: true, via, kind?, at?}`, by service name; one per service, at most 8 on a search, lookup or group card; on a resource read every link, several of one service too, up to 256. A hint only: every member keeps its own card |
+| `also_on` | The same thing elsewhere ([Also on](#also-on)): the other members of its group as `{id, uri, site}` (other resources first, one entry each by ID, then other occurrences of its own feed), then derived links nobody tagged as `{uri, site, derived: true, via, kind?, at?}`, by service name; one per service (of a recording's or an album's links, the one on the card's own release, else on the original edition), never another page of the card's own service, at most 8 on a search, lookup or group card and 256 on a resource read. A hint only: every member keeps its own card |
 | `open_in` | The clients that open a Pubky app's object, `[{client, url}]` (`url` is `https:`): from the app's profile ([Pubky apps](pubky-apps.md)), e.g. Loopky for a deck; on a Pubky event reference's card, those of the event object. `[]` on every other card |
 | `attribution` | Present on OSM cards, events placed at an OSM venue and events whose zone came from coordinates; display it with the card |
 | `occurrence` | Occurrence cards only: `{feed_id, feed_uri, uid, recurrence_id, status}`; `feed_uri` is the feed's URI, the link people tagged |
 | `event` | Pubky event references only (an event post's occurrence at a place; no feed writes them today: social events are Nexus's, see [Pubky events](#calendars-and-occurrences)): `{author, object_path, recurrence_id, start, end, status}`; `object_path` is the post's versionless path, `recurrence_id` the occurrence's local start (`YYYY-MM-DDTHH:MM:SS`) or null for a one-off |
 | `maybe_same` | Event and occurrence cards: other events that are [possibly the same event](#possibly-the-same-event), best first, each `{id, uri, site, start, score}` (`[]` when there are none). An app's store card: store cards that are [possibly the same app](#possibly-the-same-app). `MusicRecording` cards: other recordings that are [possibly the same recording](#possibly-the-same-recording), the same shape (`start` is `null`). Up to three on a search, lookup or group card, up to ten on a resource read. A hint only, like `group`. Absent on other cards, on event and app cards with `[event] same_event_hint = "off"` and on recording cards with `[groups] same_recording_hint = "off"` |
+| `because` | [Related](#related) search rows only: why the row is listed, `{shared, taggers}` (how many of the resource's taggers referenced it, and up to three of them as Pubky public keys). Absent on every other card |
 
 A `pubky://` object of an app Pinakes has a profile for (Loopky, Pubky Rooms,
 the Pubky marketplace) gets that app's card; any other app's object gets a general one. Each is
@@ -167,8 +168,8 @@ Which cards carry one (each source's page in [docs/sources](sources/README.md) s
 
 `GET /v1/resources/{id}`, `GET /v1/resources/by-uri` and `POST /v1/resolve` return the card with
 these fields beside the card's: one flat object (`api_shape: 2` in `/v1/info`; there is no
-`details` object). The read's `also_on` lists every link, up to 256, and its `maybe_same` up to
-ten. The two reads carry `Cache-Control: public, max-age=30` and an `ETag` of the body, and
+`details` object). The read's `also_on` lists one link per service, as every card does, up to
+256, and its `maybe_same` up to ten. The two reads carry `Cache-Control: public, max-age=30` and an `ETag` of the body, and
 answer `If-None-Match` with 304.
 
 | Field | Meaning |
@@ -598,6 +599,18 @@ every filter it combines with `type`, `tags`, `q`, `reach`/`viewer`, `collapse=g
 
 Related lists only what at least two of a link's taggers referenced, so it never mirrors one
 person (`limits.related_min_shared`, 2).
+
+Each row says why it is listed: `because` is `{"shared": n, "taggers": [...]}`, the count of the
+resource's taggers who referenced it (its rank's first term; with `collapse=group`, its group's
+members' together, each tagger once) and up to three of them as Pubky public keys, those who
+tagged the resource most recently first. Both come from the sample the ranking counted (Bounds,
+below), so `shared` counts sampled taggers within the window. Ask Nexus for their names and tags.
+No other search carries `because`.
+
+```json
+{"id": "…", "uri": "https://example.org/kid-a", "name": "Kid A", "…": "…",
+ "because": {"shared": 3, "taggers": ["<pubky key>", "<pubky key>", "<pubky key>"]}}
+```
 
 - **Groups.** A resource in a [group](#groups) stands for the whole group: its taggers are the
   group's members' taggers, and the group's own members are never listed. With `collapse=group`,
@@ -1121,10 +1134,16 @@ A card's `also_on` says where else the same thing is: first the other members of
 `derived: true`, the service's name in `site`, the hub or service it came through in `via`
 (`musicbrainz`, `wikidata`), and for some a `kind` its source's page names (`archived`: a Wayback Machine copy, with
 its capture time in `at`). Derived links are ordered by service name; each URL appears once (a tagged member wins)
-and never the card itself. A card carries at most 8 entries, and one link per service, the
-service a link's URL is on (a derived link's `site`): for a music service a tagged member
-first, because someone used that link (of several, the one on the recording's original album,
-the `original_album` fact), then the derived link most group members name. The card's own
+and never the card itself. Every card, a resource read too, carries one link per service, the
+service a link's URL is on (a derived link's `site`), at most 8 entries (256 on a read). Of a
+recording's or an album's links, the [`editions`](sources/editions.md) source places each on a
+MusicBrainz release: a service shows its link on the card's own release, else on the original
+edition (the first album that is no compilation, its earliest release with a page on that
+service, never a deluxe, anniversary, remastered or hi-res edition), whether tagged or derived. Among links it
+places on neither, a tagged member comes first, because someone used that link (of several, the
+one on the recording's original album, the `original_album` fact), then the derived link most
+group members name, then a page before a file (a `.pdf`), then the shorter link; a link its
+service puts on another release (a later edition, a compilation) comes last. The card's own
 service, by its URL, shows nothing else: an artist's card never shows another page of its
 service, such as the band's earlier name, which Wikidata may list as a second ID. A music member
 whose card is not read yet counts by the service its URL names, against derived links only: it
@@ -1138,8 +1157,7 @@ Wikidata, OpenStreetMap, DOI and the services each source's page names (the ones
 links name). Only an object's own page is on the service, in the forms its source recognizes
 (its page says which). Any other page on those hosts (a topic list, a search, a user's page, a
 page under an object) takes no service's place; its card keeps the name it gives itself, or its
-host. `GET /v1/resources/{id}` lists every link in its `also_on` (several of one service too,
-up to 256). A derived link can be unavailable in
+host. A derived link can be unavailable in
 some countries (a regional release on a streaming service); nothing public says where, so prefer
 a tagged member.
 
@@ -1152,7 +1170,7 @@ seeing the keys the ones before it found: `service`, `tidal`, `spotify`,
 `wikipedia`, `wikidata_item`, `books`, `films`, `podcasts`, `product_keys`, `open_food_facts`,
 `stack_exchange`, `titles`, `federal_register`, `osm_wikidata`, `wikidata_osm`,
 `wikidata_places`, `btcmap`, `unpaywall`, `ncbi`, `datacite`, `huggingface`, `crates`, `npm`,
-`pypi`, `software_heritage`, `steam`, `wikidata_stores`, `app_stores`, `wayback`;
+`pypi`, `software_heritage`, `steam`, `wikidata_stores`, `app_stores`, `wayback`, `editions`;
 `[also_on.sources.<id>] enabled = false` turns one off. A MusicBrainz or Wikidata answer over 8 MB is no answer: the source
 records only what the link's URL proves (a MusicBrainz page's MBID or ISRC, a Wikidata item
 link's Q-id, the Q-id an article's own Wikipedia names), else nothing, until its next run. A

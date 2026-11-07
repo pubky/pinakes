@@ -182,6 +182,7 @@ goes without the others needing a change.
 - [`games`](games.md): `steam` and `wikidata_stores`, a game's other stores.
 - [`apps`](apps.md): `app_stores`, an app's other stores, bridged by Wikidata.
 - [`archive`](archive.md): `wayback`, an archived copy of a gone page.
+- [`editions`](editions.md): which release each link of a recording or an album is on (last).
 
 ## Removing a source
 

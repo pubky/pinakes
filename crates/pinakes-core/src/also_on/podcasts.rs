@@ -1389,6 +1389,7 @@ mod tests {
             doc: Some(doc.clone()),
             keys: Vec::new(),
             first_seen_at: None,
+            candidates: vec![],
         };
         assert_eq!(
             podcast(&s),
@@ -1485,6 +1486,7 @@ mod tests {
                 doc: Some(doc),
                 keys: vec![],
                 first_seen_at: None,
+                candidates: vec![],
             }
         };
         let url = |heard: Heard, subject: &Subject| {
@@ -1812,6 +1814,7 @@ mod tests {
             doc: Some(doc),
             keys: Vec::new(),
             first_seen_at: None,
+            candidates: vec![],
         };
         assert_eq!(
             podcast(&s),

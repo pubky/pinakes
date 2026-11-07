@@ -271,6 +271,13 @@ pub async fn assign(
         .bind(id)
         .execute(&mut **tx)
         .await?;
+    // The members of the group it leaves, and its root, may show other links now.
+    let members: Vec<String> = sqlx::query_scalar("SELECT m.resource_id FROM group_unit u JOIN group_unit m USING(group_id) WHERE u.resource_id=$1 AND m.resource_id<>$1 UNION SELECT $2")
+        .bind(id)
+        .bind(&root_id)
+        .fetch_all(&mut **tx)
+        .await?;
+    crate::also_on::requeue_placed(tx, &members).await?;
     sqlx::query("DELETE FROM group_unit WHERE resource_id=$1")
         .bind(id)
         .execute(&mut **tx)

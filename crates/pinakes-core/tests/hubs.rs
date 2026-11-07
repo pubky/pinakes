@@ -135,6 +135,20 @@ impl Transport for Recorded {
                 body: body.as_bytes().to_vec(),
             });
         }
+        // Spotify's public pages (`editions` reads a card's own track's for its album): none here.
+        if url.host_str() == Some("open.spotify.com") {
+            return Ok(Fetched {
+                permanent_redirect: false,
+                truncated: false,
+                validators: Default::default(),
+                url: url.clone(),
+                status: 404,
+                retry_after_secs: 60,
+                location: None,
+                content_type: "text/html".into(),
+                body: vec![],
+            });
+        }
         // Spotify's token and Web API (`spotify`): the track REPORT-matching names, written by
         // hand in the API's shape (Spotify refused to answer the owner's app; tests/spotify.rs).
         if let Some(host @ ("accounts.spotify.com" | "api.spotify.com")) = url.host_str() {
@@ -710,6 +724,7 @@ async fn the_deezer_source_off_calls_nothing_even_asked_directly() {
                 doc: None,
                 keys: keys.clone(),
                 first_seen_at: None,
+                candidates: vec![],
             };
             assert!(deezer.applies(&subject), "{uri}");
             let found = deezer.lookup(&cx, &subject).await;
@@ -803,11 +818,11 @@ async fn music_links_join_through_the_hubs_and_list_each_other(pool: sqlx::PgPoo
         .unwrap()
         .to_bytes();
     let card: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    // Every link: the details' list (the card shows one per music service).
+    // One link per service, as every card shows: the other edition is a page of the card's own
+    // service (Spotify), so it does not show.
     let also_on = card["also_on"].as_array().unwrap();
-    // The other edition first, as a tagged member with its ID.
-    assert_eq!(also_on[0]["id"], ids[1].as_str(), "{card}");
-    let derived: Vec<(&str, &str, &str)> = also_on[1..]
+    assert!(also_on.iter().all(|e| e["id"] != ids[1].as_str()), "{card}");
+    let derived: Vec<(&str, &str, &str)> = also_on
         .iter()
         .map(|e| {
             assert_eq!(e["derived"], true);
@@ -1119,11 +1134,15 @@ async fn editions_of_one_release_group_take_the_group(pool: sqlx::PgPool) {
     );
     // Facts both releases share: the barcode, not either MBID or the differing credits.
     assert_eq!(
-        rows("SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name COLLATE \"C\"").await,
+        rows("SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 AND source<>'editions' ORDER BY name COLLATE \"C\"").await,
         ["upc 0196874054246"]
     );
     let seen = t.seen.lock().unwrap().clone();
-    let mb: Vec<_> = seen.iter().filter(|s| s.contains("/ws/2/")).collect();
+    // The lookups (`editions` then browses the release group's releases).
+    let mb: Vec<_> = seen
+        .iter()
+        .filter(|s| s.contains("/ws/2/") && !s.contains("/ws/2/release?"))
+        .collect();
     assert_eq!(mb.len(), 3, "{seen:?}");
     assert!(
         mb.iter().all(|s| s.starts_with("mb-mirror.example/ws/2/")),

@@ -259,21 +259,7 @@ fn pair_of(cx: &Context) -> Result<(String, String, [u8; 32])> {
 
 /// The attributes of one album or track; `None` when TIDAL has no such item in the country.
 async fn item(cx: &Context, kind: Kind, id: &str) -> Result<Option<Value>> {
-    let (client_id, secret) = cx
-        .config
-        .section::<TidalConfig>()
-        .pair()
-        .context("no TIDAL credentials")?;
-    let url = item_url(cx, kind, id);
-    let Some(v) = client_credentials::object(
-        &TIDAL,
-        cx,
-        (&client_id, &secret),
-        &url,
-        (JSON_API, &[JSON_API]),
-    )
-    .await?
-    else {
+    let Some(v) = api_object(cx, &item_url(cx, kind, id)).await? else {
         return Ok(None);
     };
     let data = &v["data"];
@@ -282,6 +268,44 @@ async fn item(cx: &Context, kind: Kind, id: &str) -> Result<Option<Value>> {
         (data["id"].as_str() == Some(id) && data["type"].as_str() == Some(kind.collection()))
             .then(|| data["attributes"].clone()),
     )
+}
+
+/// The albums a TIDAL track is on, every one TIDAL names (a single and its album may share the
+/// track); none when TIDAL has no such track.
+pub(crate) async fn track_albums(cx: &Context, track: &str) -> Result<Vec<String>> {
+    let country = &cx.config.section::<TidalConfig>().country;
+    let url = format!("{API}/tracks/{track}?countryCode={country}&include=albums");
+    Ok(api_object(cx, &url)
+        .await?
+        .filter(|v| v["data"]["id"].as_str() == Some(track))
+        .map(|v| items(&v["data"]["relationships"]["albums"], "albums"))
+        .unwrap_or_default())
+}
+/// The IDs of the items of `kind` a relationship lists.
+pub fn items(v: &Value, kind: &str) -> Vec<String> {
+    v["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|i| i["type"] == kind)
+        .filter_map(|i| i["id"].as_str().map(str::to_owned))
+        .collect()
+}
+/// One answer of the API, with the configured pair.
+async fn api_object(cx: &Context, url: &str) -> Result<Option<Value>> {
+    let (client_id, secret) = cx
+        .config
+        .section::<TidalConfig>()
+        .pair()
+        .context("no TIDAL credentials")?;
+    client_credentials::object(
+        &TIDAL,
+        cx,
+        (&client_id, &secret),
+        url,
+        (JSON_API, &[JSON_API]),
+    )
+    .await
 }
 
 /// Up to 20 albums or tracks in one request: each item's own request finds its answer cached,

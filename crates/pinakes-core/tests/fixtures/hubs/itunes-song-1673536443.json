@@ -1,0 +1,11 @@
+
+
+
+{
+ "resultCount":1,
+ "results": [
+{"wrapperType":"track", "kind":"song", "artistId":5468295, "collectionId":1673536063, "trackId":1673536443, "artistName":"Daft Punk, Pharrell Williams & Nile Rodgers", "collectionName":"Random Access Memories (10th Anniversary Edition)", "trackName":"Get Lucky", "collectionCensoredName":"Random Access Memories (10th Anniversary Edition)", "trackCensoredName":"Get Lucky", "collectionArtistName":"Daft Punk", "artistViewUrl":"https://music.apple.com/us/artist/daft-punk/5468295?uo=4", "collectionViewUrl":"https://music.apple.com/us/album/get-lucky/1673536063?i=1673536443&uo=4", "trackViewUrl":"https://music.apple.com/us/album/get-lucky/1673536063?i=1673536443&uo=4", 
+"previewUrl":"https://audio-ssl.itunes.apple.com/itunes-assets/AudioPreview221/v4/72/53/10/725310b8-0e82-9d20-8898-0f1fc47b4cd9/mzaf_13147817334462660235.plus.aac.p.m4a", "artworkUrl30":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/86/b1/92/86b192cf-ceb6-6e51-9361-dc4a35e95d22/196589921154.jpg/30x30bb.jpg", "artworkUrl60":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/86/b1/92/86b192cf-ceb6-6e51-9361-dc4a35e95d22/196589921154.jpg/60x60bb.jpg", "artworkUrl100":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/86/b1/92/86b192cf-ceb6-6e51-9361-dc4a35e95d22/196589921154.jpg/100x100bb.jpg", "collectionPrice":14.99, "trackPrice":1.29, "releaseDate":"2013-05-17T07:00:00Z", "collectionExplicitness":"notExplicit", "trackExplicitness":"notExplicit", "discCount":2, "discNumber":1, "trackCount":13, "trackNumber":8, "trackTimeMillis":369615, "country":"USA", "currency":"USD", "primaryGenreName":"Pop", "isStreamable":true}]
+}
+
+

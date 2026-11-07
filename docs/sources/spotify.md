@@ -57,6 +57,13 @@ look its URL up exactly, never by title or artist, and neither needs this one.
   Drive file that needs a sign-in to read. So there is no API whose terms allow an open indexer
   to store its answers, and Pinakes asks it nothing.
 
+While this source is on, [`editions`](editions.md) asks the Web API which album a Spotify track a
+card may show is on (`/v1/tracks/{id}`); where the API does not answer (no credentials, or
+credentials it refuses, as for an app whose owner has no premium plan), and only with
+`[also_on] spotify_pages = true` (off by default), the track's public page, once an hour at most,
+for the album it names (its `music:album`); a card's own Spotify track, a link someone referenced,
+is read so whatever the switch says. Never an album page.
+
 ## Operations
 
 `spotify` costs a token request when its token expires (a minute before Spotify's

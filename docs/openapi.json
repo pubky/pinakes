@@ -53,11 +53,33 @@
         ],
         "type": "object"
       },
+      "Because": {
+        "description": "Why a `related` row is listed: the resource's taggers who also referenced it.",
+        "properties": {
+          "shared": {
+            "description": "How many of the resource's sampled taggers referenced this row (with `collapse=group`,\nits group's members together, each tagger once): the count the row is ranked by.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "taggers": {
+            "description": "Up to three of them (Pubky public keys), those who tagged the resource most recently\nfirst. Ask Nexus for their names and tags.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "shared",
+          "taggers"
+        ],
+        "type": "object"
+      },
       "Card": {
         "description": "The one card every route returns for a resource, occurrence or reference event. Absent\nvalues are null, never \"\".",
         "properties": {
           "also_on": {
-            "description": "The same thing elsewhere: the other members of its group (tagged links, with their ID),\nthen derived links nobody tagged (`derived: true`), by service name. On a search, lookup\nor group card one per service, at most 8; on a resource read (`GET /v1/resources/{id}`,\n`GET /v1/resources/by-uri`, `POST /v1/resolve`) every link, several of one service too,\nup to 256. A hint: every member keeps its own card.",
+            "description": "The same thing elsewhere: the other members of its group (tagged links, with their ID),\nthen derived links nobody tagged (`derived: true`), by service name; one per service, and\nnever another link on the card's own service. Of a recording's or an album's links, the one\non the card's own release, else on the original edition (docs/api.md, Also on). At most 8\non a search, lookup or group card, 256 on a resource read. A hint: every member keeps its\nown card.",
             "items": {
               "$ref": "#/components/schemas/AlsoOn"
             },
@@ -68,6 +90,17 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "because": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Because",
+                "description": "On a `related` search row only: why it is listed, from what its rank counted."
+              }
             ]
           },
           "collections": {
