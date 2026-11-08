@@ -4687,3 +4687,23 @@ async fn a_page_reached_at_a_credential_on_another_host_claims_no_calendar_of_th
         "{seen:?}"
     );
 }
+/// A UID that is a link carrying a credential is kept by a stand-in that names no secret, the
+/// same on every read; a plain UID is kept as written.
+#[test]
+fn a_uid_that_carries_a_credential_is_kept_by_a_stand_in() {
+    let read = |uid: &str| {
+        let d = parse(&cal(&event(&format!(
+            "UID:{uid}\nDTSTART:20261020T120000Z\nSUMMARY:Meetup"
+        ))));
+        let occurrences = d.container.unwrap().occurrences;
+        assert_eq!(occurrences.len(), 1);
+        let json = serde_json::to_string(&occurrences[0].doc).unwrap();
+        assert!(!json.contains("SECRET"), "{json}");
+        occurrences[0].uid.clone()
+    };
+    let secret = "https://cal.example/event?token=SECRET";
+    let key = read(secret);
+    assert!(!key.contains("SECRET"), "{key}");
+    assert_eq!(read(secret), key);
+    assert_eq!(read("plain-1@cal.example"), "plain-1@cal.example");
+}

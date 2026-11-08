@@ -163,6 +163,9 @@ fn row_error(error: impl std::fmt::Display) -> anyhow::Error {
 fn append_row(doc: &mut ResourceMeta, adapter: &str, v: &Value) -> Result<()> {
     let id = uid(v).context("event feed row has no identity")?;
     ensure!(id.len() <= 256, "event identity too long");
+    // Its UID, deleted UID, name and derived-link sources: never the id itself when that holds a
+    // link carrying a credential.
+    let id = crate::event::stored_uid(id);
     let c = doc.container.as_mut().context("not a container")?;
     let deleted = v.get("deleted_at").is_some_and(|v| !v.is_null())
         || matches!(
@@ -710,6 +713,8 @@ async fn append_batch(
                         if id.len() > 256 {
                             return Err(row_error("tombstone identity cap"));
                         }
+                        // Keyed as the rows it deletes are (`append_row`).
+                        let id = crate::event::stored_uid(id);
                         operations.insert(id.clone(), false);
                         doc.container.as_mut().unwrap().deleted_uids.push(id);
                     } else {
@@ -717,7 +722,7 @@ async fn append_batch(
                             .context("portal row identity")
                             .map_err(row_error)?;
                         append(&mut doc, &adapter, &row["data"], &cfg)?;
-                        operations.insert(id, true);
+                        operations.insert(crate::event::stored_uid(id), true);
                     }
                 } else {
                     if kind == "btcmap" {

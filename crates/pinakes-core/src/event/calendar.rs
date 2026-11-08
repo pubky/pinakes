@@ -1159,7 +1159,10 @@ pub fn parse(
                 utc_series(&start)
             }
         };
-        let uid = c.text("UID").filter(|s| !s.is_empty());
+        let uid = c
+            .text("UID")
+            .filter(|s| !s.is_empty())
+            .map(super::stored_uid);
         let uid = if base.host_str().is_some_and(|s| s.starts_with("eventfrog."))
             || doc.url.contains("eventfrog.")
         {

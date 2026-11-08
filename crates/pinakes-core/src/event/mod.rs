@@ -362,6 +362,17 @@ pub fn bound_item(d: &mut ResourceMeta, modified: &mut Option<DateTime<Utc>>) ->
     clear_instants(d);
     true
 }
+/// The key an occurrence's UID is stored by: the UID as its source gives it (a calendar's `UID`, a
+/// feed item's id, an adapter's), unless it holds a link that carries a credential
+/// (`capability::contains_credential`); then `uid:` and its SHA-256, the same on every read.
+pub fn stored_uid(uid: String) -> String {
+    if crate::capability::contains_credential(&uid) {
+        use sha2::{Digest, Sha256};
+        format!("uid:{:x}", Sha256::digest(uid.as_bytes()))
+    } else {
+        uid
+    }
+}
 #[derive(Clone, Debug, Default)]
 pub struct Container {
     /// Committed with the snapshot, never before parsing or a generation fence.

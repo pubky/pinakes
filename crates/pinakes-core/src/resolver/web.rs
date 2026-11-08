@@ -1203,9 +1203,11 @@ fn point(lat: f64, lon: f64) -> Option<Point> {
     .then_some(Point { lat, lon })
 }
 /// Where an answer fetched at `url` is read, so that its relative links (`""`, `#x`, `/og.png`)
-/// resolve: `url`, unless that carries a credential; then `url` without its user info, query and
-/// fragment, or its origin when the path is the secret. Either names no secret and is still the
-/// host that served the answer, so ownership and trust checks stay on that host.
+/// resolve: `url`, unless that carries a credential; then the directory of `url` without its user
+/// info, query and fragment (a segment may be a secret too, as in `/files/<id>?token=…` or
+/// `/files/<id>/?token=…`), or its
+/// origin when the path is a known secret. Either names no secret and is still the host that
+/// served the answer, so ownership and trust checks stay on that host.
 pub(crate) fn read_at(url: &Url) -> Url {
     if !crate::capability::is_capability_url(url) {
         return url.clone();
@@ -1217,6 +1219,14 @@ pub(crate) fn read_at(url: &Url) -> Url {
     base.set_fragment(None);
     if crate::capability::is_capability_url(&base) {
         base.set_path("/");
+    } else {
+        let directory = base
+            .path()
+            .trim_end_matches('/')
+            .rsplit_once('/')
+            .map_or("", |(directory, _)| directory)
+            .to_owned();
+        base.set_path(&format!("{directory}/"));
     }
     base
 }
@@ -2325,6 +2335,43 @@ mod tests {
             .unwrap()
             .doc;
         assert_eq!(d.image.as_deref(), Some("https://b.example/og.png"));
+    }
+    /// A path segment of such an address may be a secret too (`/files/<id>?token=…`): the page is
+    /// read in its directory, so a link to the page itself names neither.
+    #[test]
+    fn a_page_reached_at_a_credential_is_read_in_its_directory() {
+        let fetched = Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            validators: Default::default(),
+            url: Url::parse("https://b.example/files/SECRETID?token=SECRET").unwrap(),
+            status: 200,
+            retry_after_secs: 60,
+            location: None,
+            content_type: "text/html".into(),
+            body: br#"<head><title>Shared</title><meta property="og:image" content=""><meta property="og:url" content=""></head>"#
+                .to_vec(),
+        };
+        let d = extract("https://a.example/s/abc", &fetched, 3600)
+            .unwrap()
+            .doc;
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(!json.contains("SECRET"), "{json}");
+        assert_eq!(d.image.as_deref(), Some("https://b.example/files/"));
+    }
+    /// A path that ends in `/` is read in its parent: its last segment may be the secret too.
+    #[test]
+    fn a_directory_reached_at_a_credential_is_read_in_its_parent() {
+        let at = |u: &str| read_at(&Url::parse(u).unwrap()).to_string();
+        assert_eq!(
+            at("https://b.example/files/SECRETID/?token=SECRET"),
+            "https://b.example/files/"
+        );
+        assert_eq!(
+            at("https://b.example/files/SECRETID?token=SECRET"),
+            "https://b.example/files/"
+        );
+        assert_eq!(at("https://b.example/?token=SECRET"), "https://b.example/");
     }
     #[test]
     fn only_head_canonicals_and_permanent_redirects_are_alias_candidates() {

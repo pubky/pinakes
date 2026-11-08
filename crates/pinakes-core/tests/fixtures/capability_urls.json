@@ -26,7 +26,11 @@
     "https://events.example.org/feed.ics#access_token=SECRET",
     "https://app.example.org/#/reset?token=SECRET",
     "https://app.example.org/#/cb#access_token=SECRET",
-    "https://app.example.org/#/reset;token=SECRET"
+    "https://app.example.org/#/reset;token=SECRET",
+    "https://app.example.org/#/access_token=SECRET&token_type=Bearer",
+    "https://app.example.org/#!/access_token=SECRET",
+    "https://app.example.org/cb#id_token=SECRET",
+    "https://events.example.org/feed.ics?refresh_token=SECRET"
   ],
   "public": [
     "https://calendar.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics",
@@ -39,6 +43,7 @@
     "https://events.example.org/page#section-2",
     "https://en.wikipedia.org/wiki/Lock_and_key#Key",
     "https://app.example.org/#/reset?step=2",
-    "https://app.example.org/#/reset;step=2"
+    "https://app.example.org/#/reset;step=2",
+    "https://app.example.org/#!/home"
   ]
 }

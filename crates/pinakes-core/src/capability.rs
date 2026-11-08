@@ -9,6 +9,8 @@ use url::Url;
 pub const CREDENTIAL_KEYS: &[&str] = &[
     "token",
     "access_token",
+    "id_token",
+    "refresh_token",
     "auth",
     "key",
     "api_key",
@@ -30,10 +32,12 @@ pub fn is_capability(uri: &str) -> bool {
 }
 
 /// Whether `url` carries a credential: a password in its user info, a calendar provider's secret
-/// share path, or a key in [`CREDENTIAL_KEYS`] in its query, or with a value in its form-encoded
+/// share path, or a key in [`CREDENTIAL_KEYS`] in its query (its parameters separated by `&` or
+/// `;`, as in `?x=1;token=…`), or with a value in its form-encoded
 /// fragment or in any part of it after a `?`, `#` or `;` (an OAuth callback's `#access_token=…`,
 /// a hash router's `#/reset?token=…` or `#/reset;token=…`, an OAuth answer after a route,
-/// `#/cb#access_token=…`; a plain anchor such as `#key` is a place in the page).
+/// `#/cb#access_token=…`; a key may start with an old hash router's `/` or `!/`, as in
+/// `#/access_token=…`; a plain anchor such as `#key` is a place in the page).
 pub fn is_capability_url(url: &Url) -> bool {
     if url.password().is_some() {
         return true;
@@ -52,34 +56,60 @@ pub fn is_capability_url(url: &Url) -> bool {
         .to_ascii_lowercase();
     let credential = |key: &str| CREDENTIAL_KEYS.contains(&key.to_ascii_lowercase().as_str());
     secret_share(&host, &path)
-        || url.query_pairs().any(|(key, _)| credential(&key))
-        || url.fragment().is_some_and(|fragment| {
-            // The fragment as a form, and each part of it after a `?`, `#` or `;`.
-            std::iter::once(fragment)
-                .chain(
-                    fragment
-                        .match_indices(&['?', '#', ';'][..])
-                        .map(|(at, _)| &fragment[at + 1..]),
-                )
-                .any(|form| {
-                    url::form_urlencoded::parse(form.as_bytes())
-                        .any(|(key, value)| !value.is_empty() && credential(&key))
-                })
+        || url.query().is_some_and(|query| {
+            query.split(';').any(|form| {
+                url::form_urlencoded::parse(form.as_bytes()).any(|(key, _)| credential(&key))
+            })
         })
+        || url
+            .fragment()
+            .is_some_and(|fragment| fragment_credential(fragment, &credential))
 }
 
-/// Drops from `value`, a document as it is stored, every URL that carries a credential but `own`
-/// (the link the resource is read by, in any spelling of it): the backstop before anything is
-/// stored, whichever path put it there. The URL goes, or else the list entry or object around it
-/// when a `T` would not read back without the URL; where a `T` cannot do without it, it names `own`
-/// instead. Whether anything went.
+/// Whether `fragment`, as a form and in each part of it after a `?`, `#` or `;`, has a key that
+/// `credential` names with a value. The fragment is read once, in the parts between those and
+/// `&`: a part's key ends at its `=`, is decoded (`%2F`, `+`) and may then start with a hash
+/// router's `/` or `!`; it has a value when something other than `&` follows the `=`. A key never
+/// holds one of those separators, so no credential key is missed.
+fn fragment_credential(fragment: &str, credential: &impl Fn(&str) -> bool) -> bool {
+    let bytes = fragment.as_bytes();
+    let mut start = 0;
+    while start <= bytes.len() {
+        let end = bytes[start..]
+            .iter()
+            .position(|b| matches!(b, b'?' | b'#' | b';' | b'&'))
+            .map_or(bytes.len(), |at| start + at);
+        if let Some(equals) = bytes[start..end].iter().position(|&b| b == b'=') {
+            let has_value = bytes.get(start + equals + 1).is_some_and(|&b| b != b'&');
+            let key = percent_encoding::percent_decode_str(
+                &fragment[start..start + equals].replace('+', " "),
+            )
+            .decode_utf8_lossy()
+            .into_owned();
+            if has_value && credential(key.trim_start_matches(&['/', '!'][..])) {
+                return true;
+            }
+        }
+        start = end + 1;
+    }
+    false
+}
+
+/// Drops from `value`, a document as it is stored, every URL that carries a credential but `own`,
+/// the link the resource is read by, as written (in any spelling of it only when it carries a
+/// credential itself: another spelling of a public link may add one, in its fragment or user
+/// info): the backstop at each write, whichever path put a URL there. The URL goes, or else the
+/// list entry or object around it when a `T` would not read back without the URL; where a `T`
+/// cannot do without it, it names `own` instead. Whether anything went.
 pub fn strip<T: serde::de::DeserializeOwned>(value: &mut serde_json::Value, own: &str) -> bool {
-    let own_id = crate::model::identity(own).ok().map(|(id, _, _)| id);
+    let own_id = Url::parse(own)
+        .is_ok_and(|url| is_capability_url(&url))
+        .then(|| crate::model::identity(own).ok().map(|(id, _, _)| id))
+        .flatten();
     let foreign = |s: &str| {
         s != own
-            && s.contains("://")
-            && Url::parse(s).is_ok_and(|url| url.has_host() && is_capability_url(&url))
-            && crate::model::identity(s).ok().map(|(id, _, _)| id) != own_id
+            && names_credential(s)
+            && (own_id.is_none() || crate::model::identity(s).ok().map(|(id, _, _)| id) != own_id)
     };
     let mut stripped = false;
     while let Some(path) = find(value, &foreign) {
@@ -104,6 +134,108 @@ pub fn strip<T: serde::de::DeserializeOwned>(value: &mut serde_json::Value, own:
         }
     }
     stripped
+}
+
+/// [`strip`] over what is stored of `doc`, and over its episodes, stored beside it: the last step
+/// before a document is written. What is never stored (its container, its alias candidates and
+/// the like) stays as it was.
+pub fn strip_document(doc: &mut crate::model::ResourceMeta, own: &str) -> anyhow::Result<()> {
+    if let Some(episodes) = &mut doc.episodes {
+        let mut value = serde_json::to_value(&*episodes)?;
+        if strip::<Vec<crate::episodes::Episode>>(&mut value, own) {
+            *episodes = serde_json::from_value(value)?;
+        }
+    }
+    let mut value = serde_json::to_value(&*doc)?;
+    if strip::<crate::model::ResourceMeta>(&mut value, own) {
+        let stored: crate::model::ResourceMeta = serde_json::from_value(value)?;
+        *doc = crate::model::ResourceMeta {
+            container: doc.container.take(),
+            alias_candidates: std::mem::take(&mut doc.alias_candidates),
+            http_status: doc.http_status,
+            withheld: doc.withheld,
+            refresh_by: doc.refresh_by,
+            source_root: doc.source_root.take(),
+            episodes: doc.episodes.take(),
+            ..stored
+        };
+    }
+    Ok(())
+}
+
+/// Whether `s`, a string as a document or a row stores it, is a link that carries a credential:
+/// read as written, a scheme-relative one (`//host/p`) on `https:`, and a `webcal:` one written
+/// without its `//`. What a URL parser drops (control characters and spaces around it, a tab or
+/// newline anywhere, in the scheme too) is dropped first.
+pub fn names_credential(s: &str) -> bool {
+    let s: String = s
+        .trim_matches(|c: char| c <= ' ')
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .collect();
+    let s = s.as_str();
+    let url = match s.strip_prefix("//") {
+        Some(rest) => Url::parse(&format!("https://{rest}")),
+        None => Url::parse(s).and_then(|url| match url.scheme() {
+            "webcal" | "webcals" if !url.has_host() => Url::parse(&format!(
+                "{}://{}",
+                url.scheme(),
+                &s[url.scheme().len() + 1..]
+            )),
+            _ => Ok(url),
+        }),
+    };
+    url.is_ok_and(|url| url.has_host() && is_capability_url(&url))
+}
+
+/// The most link starts [`contains_credential`] reads in one string; a string with more is taken
+/// to hold a credential (its UID gets a stand-in), so a hostile one costs no more than that.
+const LINK_STARTS: usize = 16;
+
+/// Whether `s` holds a link that carries a credential ([`names_credential`]): `s` as a whole, or
+/// a link that starts inside it at `//` or an `http`, `https`, `webcal` or `webcals` scheme after a
+/// character no scheme holds (a Nostr calendar's `kind:author:https://…`, a name such as
+/// `Meetup https://…`), up to a space.
+pub fn contains_credential(s: &str) -> bool {
+    if names_credential(s) {
+        return true;
+    }
+    let s: String = s
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .collect();
+    let lower = s.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let scheme = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.' | b'/');
+    let mut read = 0;
+    (0..bytes.len())
+        .filter(|&at| {
+            ["//", "http:", "https:", "webcal:", "webcals:"]
+                .iter()
+                .any(|start| bytes[at..].starts_with(start.as_bytes()))
+                && (at == 0 || !scheme(bytes[at - 1]))
+        })
+        .any(|at| {
+            read += 1;
+            read > LINK_STARTS || names_credential(s[at..].split(' ').next().unwrap_or_default())
+        })
+}
+
+/// Whether an HTTP `Link` header (`<…>; rel=…, <…>`) names a link that carries a credential; a
+/// relative one is read against `base`.
+pub fn link_header_names_capability(header: &str, base: &str) -> bool {
+    let base = Url::parse(base).ok();
+    header
+        .split('<')
+        .skip(1)
+        .filter_map(|part| part.split_once('>').map(|(target, _)| target))
+        .any(|target| {
+            match &base {
+                Some(base) => base.join(target),
+                None => Url::parse(target),
+            }
+            .is_ok_and(|url| is_capability_url(&url))
+        })
 }
 
 /// A step into a JSON value.
@@ -204,6 +336,16 @@ mod tests {
         assert!(is_capability("https://app.example/#/cb#access_token=x"));
         assert!(is_capability("https://app.example/#/reset;token=x"));
         assert!(!is_capability("https://app.example/#/reset;step=2"));
+        // An OAuth answer read by an old hash router: its keys start with the route's `/` or `#!/`.
+        assert!(is_capability(
+            "https://app.example/#/access_token=x&token_type=Bearer"
+        ));
+        assert!(is_capability("https://app.example/#!/access_token=x"));
+        assert!(!is_capability("https://app.example/#/home"));
+        assert!(!is_capability("https://app.example/#!/home"));
+        // OpenID Connect's sign-in answer and a refresh token.
+        assert!(is_capability("https://app.example/cb#id_token=x"));
+        assert!(is_capability("https://app.example/cb?refresh_token=x"));
         // A plain anchor is a place in the page, not a credential.
         for anchor in ["#Key", "#token", "#auth", "#key="] {
             let url = format!("https://en.wikipedia.org/wiki/Lock_and_key{anchor}");
@@ -234,5 +376,123 @@ mod tests {
         ] {
             assert!(!is_capability(plain), "{plain}");
         }
+    }
+
+    /// The store guard keeps only the resource's own link as it is written: another spelling of it
+    /// that carries a credential (a fragment, a password) goes, and so does a URL written without
+    /// its `//`.
+    #[test]
+    fn the_store_guard_keeps_only_the_own_link_as_written() {
+        let mut value = serde_json::json!({
+            "url": "https://s.example/p",
+            "image": "https://s.example/p#access_token=SECRET",
+            "logo": "https://u:SECRET@s.example/p",
+            "author": "https:cdn.example/profile?token=SECRET",
+            "kept": "https://s.example/p",
+        });
+        assert!(strip::<serde_json::Value>(
+            &mut value,
+            "https://s.example/p"
+        ));
+        assert_eq!(
+            value,
+            serde_json::json!({"url": "https://s.example/p", "kept": "https://s.example/p"})
+        );
+        // An own link that carries a credential is kept in any spelling of it.
+        let own = "https://cal.example/feed.ics?token=OWN";
+        let mut value =
+            serde_json::json!({"url": own, "feed": "https://CAL.example/feed.ics?token=OWN"});
+        assert!(!strip::<serde_json::Value>(&mut value, own));
+    }
+    /// A query read as `;`-separated parameters counts too (`?x=1;token=…`), and so do a
+    /// scheme-relative link and a `webcal:` one written without `//` where a document stores them.
+    #[test]
+    fn semicolon_queries_and_links_without_a_scheme_or_slashes_count() {
+        assert!(is_capability(
+            "https://events.example/feed?x=1;token=SECRET"
+        ));
+        assert!(is_capability(
+            "https://events.example/feed?Token=SECRET;x=1"
+        ));
+        assert!(!is_capability("https://events.example/feed?x=1;y=2"));
+        let own = "https://own.example/p";
+        for stored in [
+            "//cdn.example/x?token=SECRET",
+            "webcal:cal.example/feed.ics?token=SECRET",
+        ] {
+            let mut value = serde_json::json!({"url": own, "website": stored});
+            assert!(strip::<serde_json::Value>(&mut value, own), "{stored}");
+            assert!(!value.to_string().contains("SECRET"), "{value}");
+        }
+        let mut value = serde_json::json!({"url": own, "website": "//cdn.example/x?size=2"});
+        assert!(!strip::<serde_json::Value>(&mut value, own));
+    }
+    /// A tab or newline a URL parser drops (inside the scheme, too) does not hide a link.
+    #[test]
+    fn a_tab_or_newline_inside_a_link_hides_nothing() {
+        for stored in [
+            "web\tcal:cal.example/feed.ics?token=SECRET",
+            "webcal:\ncal.example/feed.ics?token=SECRET",
+            "\u{1}https://cdn.example/x?token=SECRET",
+        ] {
+            assert!(names_credential(stored), "{stored:?}");
+        }
+        assert!(!names_credential("web\tcal:cal.example/feed.ics?x=1"));
+    }
+    /// A link that carries a credential counts wherever it starts in a string: a Nostr calendar
+    /// UID (`kind:author:d-tag`) or a name made of a word and an id.
+    #[test]
+    fn a_link_inside_a_string_counts_wherever_it_starts() {
+        for s in [
+            "31923:abc123:https://cal.example/item?token=SECRET",
+            "Meetup https://cal.example/e?token=SECRET",
+            "31923:abc123://cal.example/item?token=SECRET",
+        ] {
+            assert!(contains_credential(s), "{s}");
+        }
+        for s in ["31923:abc123:plain-id", "event-7@cal.example", "Meetup 7"] {
+            assert!(!contains_credential(s), "{s}");
+        }
+    }
+    /// A link with a space in its path still counts as a whole string.
+    #[test]
+    fn a_spaced_link_counts_as_a_whole() {
+        assert!(contains_credential(
+            "https://cal.example/Team Calendar/e?token=SECRET"
+        ));
+    }
+    /// A long hostile string (many link starts, a long fragment) is read in bounded time.
+    #[test]
+    fn hostile_strings_are_read_quickly() {
+        let started = std::time::Instant::now();
+        let many_starts = format!("{}x?token=SECRET", "://".repeat(21_000));
+        assert!(contains_credential(&many_starts));
+        let long_fragment = format!("https://h.example/#{}", "?".repeat(60_000));
+        assert!(!contains_credential(&long_fragment));
+        assert!(!is_capability(&long_fragment));
+        // Sixteen link starts, each with a fragment of separators before an `=`.
+        let separators = format!(
+            "{}{}",
+            "https://h.example/#?".repeat(8),
+            format!("{}=x", "?".repeat(62)).repeat(15)
+        );
+        for _ in 0..1000 {
+            assert!(!contains_credential(&separators));
+        }
+        // Linear: about a second in a test build, against tens of seconds for a scan per suffix.
+        let elapsed = started.elapsed();
+        assert!(elapsed < std::time::Duration::from_secs(5), "{elapsed:?}");
+    }
+    /// A fragment key's percent-encoded `/` or `!` prefix (`#%2Faccess_token=…`) is trimmed as a
+    /// written one is.
+    #[test]
+    fn an_encoded_router_prefix_hides_no_fragment_key() {
+        assert!(is_capability(
+            "https://example.org/cb#%2Faccess_token=SECRET"
+        ));
+        assert!(is_capability(
+            "https://example.org/cb#%21%2Faccess_token=SECRET"
+        ));
+        assert!(!is_capability("https://example.org/cb#%2Fsection"));
     }
 }

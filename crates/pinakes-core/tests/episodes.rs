@@ -62,6 +62,30 @@ async fn rows(pool: &PgPool, id: &str) -> i64 {
         .unwrap()
 }
 
+/// A show's episodes are stored without a link that carries a credential: an episode whose page
+/// does is not kept, and an image or enclosure that does goes from its row.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_shows_episodes_store_no_credential(pool: PgPool) {
+    let mut leaky = episode(2, true);
+    leaky.image = Some("https://img.example/2.png?token=SECRET".into());
+    leaky.stream.as_mut().unwrap().url = "https://cdn.example/2.mp3?key=SECRET".into();
+    let mut page = episode(1, true);
+    page.uri = "https://feeds.example.org/ep-1?auth=SECRET".into();
+    let id = show(
+        &pool,
+        "https://feeds.example.org/guarded.xml",
+        Some(vec![episode(3, true), leaky, page]),
+    )
+    .await;
+    let stored: String = sqlx::query_scalar("SELECT coalesce(string_agg(concat_ws(' ',guid,url,name,image,stream::text),' '),'') FROM podcast_episode WHERE resource_id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(!stored.contains("SECRET"), "{stored}");
+    assert_eq!(rows(&pool, &id).await, 2);
+}
+
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_shows_latest_episodes_are_listed_newest_first_and_name_the_ones_pinakes_has(
     pool: PgPool,
