@@ -415,12 +415,12 @@ pub fn registry() -> Vec<Arc<dyn Source>> {
         Arc::new(musicbrainz_entity::MusicBrainzEntitySource),
         Arc::new(performers::PerformersSource),
         Arc::new(wikidata::WikidataSource),
-        // After every source that keys a track's ISRC (a service's own record, the hubs'),
-        // before `editions` places its links.
-        Arc::new(spotify_isrc::SpotifyIsrc),
         // Before the barcode lookups: a Discogs release's barcodes are keys.
         Arc::new(crate::sources::discogs::also_on::Discogs),
         Arc::new(deezer::DeezerSource),
+        // After every source that keys a track's ISRC (a service's own record, Deezer's, the
+        // hubs'), before `editions` places its links.
+        Arc::new(spotify_isrc::SpotifyIsrc),
         Arc::new(itunes::ItunesSource),
         Arc::new(wikipedia::WikipediaSource),
         Arc::new(wikidata_item::WikidataItemSource),
@@ -780,38 +780,31 @@ pub async fn record(
     {
         (keys, links, facts, placed) = Default::default();
     }
-    // One MusicBrainz recording per resource (`groups::single_object` holds one per group):
-    // every producer keys the recording that stands for a set of duplicates, so a second
-    // recording MBID here is a producer that did not. The run keeps the smallest of its own
-    // and none that differs from one another source stored; each drop is counted.
-    let mut recording: Option<String> = keys
+    // Observed, never decided: every producer keys the recording that stands for a set of
+    // duplicates (`music_sources::recording_key`), so two MusicBrainz recordings on one resource
+    // are sources that truly disagree. Both keys are stored and `groups::single_object` refuses
+    // the join, as for any conflicting single-object key; the run only counts it.
+    let mut recordings: Vec<&str> = keys
         .iter()
         .filter(|k| k.key.starts_with("mb:recording:"))
-        .map(|k| k.key.clone())
-        .min();
-    if keys
-        .iter()
-        .filter(|k| k.key.starts_with("mb:recording:"))
-        .count()
-        > 1
-    {
-        crate::telemetry::also_on_recording_key_conflict(source);
-        tracing::warn!(resource = %resource_id, source, "a run keyed two recordings; the smallest kept");
-    }
-    if let Some(mine) = &recording {
-        let stored: Option<String> = sqlx::query_scalar("SELECT key FROM resource_key WHERE resource_id=$1 AND source<>$2 AND key LIKE 'mb:recording:%' AND key<>$3 AND expires_at>now() LIMIT 1")
+        .map(|k| k.key.as_str())
+        .collect();
+    recordings.sort_unstable();
+    recordings.dedup();
+    let disagrees = match recordings.as_slice() {
+        [] => false,
+        [mine] => sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM resource_key WHERE resource_id=$1 AND source<>$2 AND key LIKE 'mb:recording:%' AND key<>$3 AND expires_at>now() AND source NOT IN (SELECT source FROM also_on_source_off))")
             .bind(resource_id)
             .bind(source)
-            .bind(mine)
-            .fetch_optional(&mut *tx)
-            .await?;
-        if stored.is_some() {
-            crate::telemetry::also_on_recording_key_conflict(source);
-            tracing::warn!(resource = %resource_id, source, "a run keyed another recording than the one stored; its key dropped");
-            recording = None;
-        }
+            .bind(*mine)
+            .fetch_one(&mut *tx)
+            .await?,
+        _ => true,
+    };
+    if disagrees {
+        crate::telemetry::also_on_recording_key_conflict(source);
+        tracing::warn!(resource = %resource_id, source, "sources key different recordings; the resource joins no recording group");
     }
-    keys.retain(|k| !k.key.starts_with("mb:recording:") || Some(&k.key) == recording.as_ref());
     let key_rows: Vec<Value> = keys
         .iter()
         .map(|k| serde_json::json!({"key": k.key, "via": k.via}))

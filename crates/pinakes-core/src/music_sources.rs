@@ -135,10 +135,42 @@ pub(crate) async fn isrc_match(
                 },
                 None => None,
             };
-            settled.unwrap_or_else(|| {
-                picked(several, duration).map_or(IsrcMatch::Shared, IsrcMatch::Picked)
-            })
+            match settled {
+                Some(settled) => settled,
+                // The duration's pick is keyed as every producer keys a recording.
+                None => match picked(several, duration) {
+                    Some(mbid) => IsrcMatch::Picked(recording_key(&cx.egress, base, &mbid).await?),
+                    None => IsrcMatch::Shared,
+                },
+            }
         }
+    })
+}
+/// The recording an ISRC alone names, keyed as every producer keys a recording: the one
+/// recording MusicBrainz gives it (through [`recording_key`]), or the one that stands for the
+/// duplicates it is on; `None` when MusicBrainz does not know it or its recordings disagree.
+pub(crate) async fn isrc_recording(cx: &Context, isrc: &str) -> Result<Option<String>> {
+    let base = cx.config.also_on.musicbrainz_base();
+    Ok(match isrc_match(cx, isrc, None).await? {
+        IsrcMatch::One(mbid) => Some(recording_key(&cx.egress, base, &mbid).await?),
+        IsrcMatch::Duplicates { standing, .. } => Some(standing),
+        IsrcMatch::Unknown | IsrcMatch::Picked(_) | IsrcMatch::Shared => None,
+    })
+}
+/// The MBID every producer keys a recording by (`mb:recording:…`): the recording that stands for
+/// its duplicates ([`standing`]), else its own. The one function behind every recording key: a
+/// service's own ISRC ([`isrc_match`]: duplicates and a duration's pick), a URL relation and a
+/// recording page (`entities_found`), the duplicates' union (`duplicates_found`), and Wikidata's
+/// recording item (P4404). The one exception is a recording page whose read is over
+/// MusicBrainz's cap: it keys its own MBID, as the link alone proves (`musicbrainz_entity`).
+pub(crate) async fn recording_key(
+    egress: &crate::resolver::egress::Egress,
+    base: &str,
+    mbid: &str,
+) -> Result<String> {
+    Ok(match standing(egress, base, mbid).await? {
+        Standing::Of { standing, .. } => standing,
+        Standing::Alone | Standing::Unclear => mbid.to_owned(),
     })
 }
 /// The recordings of one ISRC when they are one recording MusicBrainz has not merged
@@ -229,6 +261,9 @@ pub fn primary(mbids: &[String]) -> Option<&String> {
 /// The most ISRC lookups one [`standing`] makes before it gives up: duplicates share their
 /// ISRCs, so a few reads settle a set; more is a mess, not a duplicate.
 pub const MAX_DUPLICATE_LOOKUPS: usize = 16;
+/// The most recording records one [`standing`] reads (the start's and those its ISRCs name)
+/// before it gives up.
+pub const MAX_DUPLICATE_READS: usize = 32;
 /// What a recording is among its duplicates ([`standing`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Standing {
@@ -240,20 +275,22 @@ pub enum Standing {
         standing: String,
         members: Vec<String>,
     },
-    /// The set could not be settled within [`MAX_DUPLICATES`] recordings and
-    /// [`MAX_DUPLICATE_LOOKUPS`] reads, or a member could not be read: today's rule applies (the
-    /// recording keeps its own MBID, an ISRC on several recordings is a fact), which keys no
-    /// second recording.
+    /// The set could not be settled within [`MAX_DUPLICATES`] recordings,
+    /// [`MAX_DUPLICATE_LOOKUPS`] ISRC lookups and [`MAX_DUPLICATE_READS`] recording reads, a
+    /// member could not be read, or the whole set does not agree (lengths drifting past the
+    /// window along a chain): today's rule applies (the recording keeps its own MBID, an ISRC on
+    /// several recordings is a fact), which keys no second recording.
     Unclear,
 }
 /// The recording that stands for `mbid` and its duplicates: the connected set of recordings that
 /// agree ([`agree`]), reached through their ISRCs (every ISRC of every member is looked up, and
 /// an ISRC's recordings join the set when all of them agree with it), closed under that walk,
-/// its smallest MBID standing for all. The same answer from any member, in whatever order
-/// MusicBrainz lists them, so every source keys one recording for them. Bounded: over
-/// [`MAX_DUPLICATES`] members or [`MAX_DUPLICATE_LOOKUPS`] ISRC reads, or a member MusicBrainz
-/// cannot serve, the set is [`Standing::Unclear`]. Cached reads (each recording's own record,
-/// each ISRC's recordings).
+/// its smallest MBID standing for all, when the whole set agrees ([`agree`] over every member,
+/// not only along the walk). The same answer from any member, in whatever order MusicBrainz lists
+/// them, so every source keys one recording for them. Bounded: over [`MAX_DUPLICATES`] members,
+/// [`MAX_DUPLICATE_LOOKUPS`] ISRC lookups or [`MAX_DUPLICATE_READS`] recording reads, or a member
+/// MusicBrainz cannot serve, the set is [`Standing::Unclear`]. Cached reads (each recording's own
+/// record, each ISRC's recordings).
 pub(crate) async fn standing(
     egress: &crate::resolver::egress::Egress,
     base: &str,
@@ -275,6 +312,8 @@ pub(crate) async fn standing_of(
         std::collections::VecDeque::new();
     let mut seen_isrcs = std::collections::BTreeSet::new();
     let mut lookups = 0usize;
+    // The start's record was read by the caller.
+    let mut reads = 1usize;
     queue.push_back(start);
     while let Some(entity) = queue.pop_front() {
         // A merged MBID answers as the recording it was merged into.
@@ -310,6 +349,10 @@ pub(crate) async fn standing_of(
                 let read = match known {
                     Some(e) => Some(e),
                     None => {
+                        reads += 1;
+                        if reads > MAX_DUPLICATE_READS {
+                            return Ok(Standing::Unclear);
+                        }
                         musicbrainz::entity(egress, base, MbKind::Recording, &recording.mbid)
                             .await?
                     }
@@ -335,6 +378,11 @@ pub(crate) async fn standing_of(
             }
         }
     }
+    // The set agrees as a whole: lengths that drift by 3 s at each step of a chain are not one
+    // recording.
+    if members.len() > 1 && !agree(&members) {
+        return Ok(Standing::Unclear);
+    }
     let mut mbids: Vec<String> = members.into_iter().map(|e| e.mbid).collect();
     mbids.sort();
     mbids.dedup();
@@ -351,7 +399,8 @@ pub(crate) async fn standing_of(
 }
 /// The keys a service's own ISRC gives its track (`via` the service): the ISRC itself; for
 /// duplicates, the ISRC and the recording that stands for them ([`standing`]); for a shared
-/// ISRC, the recording its duration picked, or none when nothing tells them apart.
+/// ISRC, the recording its duration picked (as [`recording_key`] keys it), or none when nothing
+/// tells them apart.
 pub(crate) fn isrc_key(isrc: &str, found: &IsrcMatch, via: &str) -> Vec<crate::also_on::Key> {
     let key = |key: String| crate::also_on::Key {
         key,
@@ -373,7 +422,9 @@ pub(crate) fn isrc_key(isrc: &str, found: &IsrcMatch, via: &str) -> Vec<crate::a
 
 /// What MusicBrainz says about duplicate recordings of one ISRC (`members`, which `standing`
 /// stands for, [`standing`]), as one recording: the ISRC and the standing MBID as keys, the
-/// other ISRCs they carry (up to [`MAX_ISRC_KEYS`]), the union of their facts (the standing MBID
+/// other ISRCs they carry that name the same standing recording on their own ([`isrc_recording`];
+/// up to [`MAX_ISRC_KEYS`]; any other is a fact, never a key, so no exact lookup by it can name
+/// another recording's track), the union of their facts (the standing MBID
 /// as `mbid`, the others as `mbid_was`, so `key=mbid:` finds the card by any of them; one
 /// `duration`; the standing recording's original album), and the union of their current links on
 /// music services at `level`, each keyed by the standing recording. Nothing when one is unknown.
@@ -413,12 +464,11 @@ pub(crate) async fn duplicates_found(
         .collect();
     others.sort_unstable();
     others.dedup();
-    found.keys.extend(
-        others
-            .iter()
-            .take(MAX_ISRC_KEYS)
-            .map(|i| key(format!("isrc:{i}"))),
-    );
+    for other in others.into_iter().take(MAX_ISRC_KEYS) {
+        if isrc_recording(cx, other).await?.as_deref() == Some(standing) {
+            found.keys.push(key(format!("isrc:{other}")));
+        }
+    }
     found
         .facts
         .push(crate::also_on::Fact::new("mbid", standing));
@@ -582,15 +632,35 @@ pub(crate) async fn entities_found(
     };
     let entity = &entities[0];
     // A recording that is one of several agreeing duplicates is keyed by the one that stands
-    // for them (`standing`); its own MBID becomes `mbid_was`. An unsettled set keeps its own.
-    let stands = match (kind, entities.len()) {
+    // for them (`standing`, as `recording_key` keys every recording); its own MBID becomes
+    // `mbid_was`. An unsettled set keeps its own.
+    let duplicates = match (kind, entities.len()) {
         (MbKind::Recording, 1) => match standing_of(&cx.egress, base, entity.clone()).await? {
-            Standing::Of { standing, .. } if standing != entity.mbid => Some(standing),
-            _ => None,
+            Standing::Of { standing, .. } => Some(standing),
+            Standing::Alone | Standing::Unclear => None,
         },
         _ => None,
     };
+    let stands = duplicates.clone().filter(|s| *s != entity.mbid);
     let own = stands.as_deref().unwrap_or(&entity.mbid);
+    // A duplicate's ISRCs are keys only when each names the same standing recording on its own:
+    // one it shares with a recording that disagrees stays a fact.
+    let mut isrcs: Vec<&String> = vec![];
+    for isrc in entity
+        .isrcs
+        .iter()
+        .filter(|i| !shared.contains(i))
+        .take(MAX_ISRC_KEYS)
+    {
+        match &duplicates {
+            Some(standing) => {
+                if isrc_recording(cx, isrc).await?.as_ref() == Some(standing) {
+                    isrcs.push(isrc);
+                }
+            }
+            None => isrcs.push(isrc),
+        }
+    }
     // Several releases: the release group's key alone, so editions stay apart.
     if entities.len() == 1 {
         key(kind, own);
@@ -610,12 +680,7 @@ pub(crate) async fn entities_found(
         _ if entities.len() > 1 => return Ok(Found::default()),
         _ => {}
     }
-    for isrc in entity
-        .isrcs
-        .iter()
-        .filter(|i| !shared.contains(i))
-        .take(MAX_ISRC_KEYS)
-    {
+    for isrc in isrcs {
         found.keys.push(Key {
             key: format!("isrc:{isrc}"),
             via: "musicbrainz".into(),

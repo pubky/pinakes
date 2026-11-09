@@ -35,18 +35,17 @@ impl Source for MusicBrainzEntitySource {
     }
 }
 impl MusicBrainzEntitySource {
-    /// What the page's URL alone proves: the entity's MBID, or the ISRC (with its fact). Not a
-    /// recording's: it may be one of several duplicates another recording stands for, and only
-    /// the read (`standing`) can tell, so an unread recording page keys nothing.
+    /// What the page's URL alone proves: the entity's MBID, or the ISRC (with its fact). A
+    /// recording page keys its own MBID here too, though it may be one of several duplicates
+    /// another recording stands for (only the read, `standing`, could tell): at worst its group
+    /// stays apart from theirs until a read succeeds, never two recording keys on one resource.
     fn own_keys(uri: &str) -> Found {
         let mut found = Found::default();
         if let Some((kind, mbid, _)) = musicbrainz::entity_link(uri) {
-            if kind != MbKind::Recording {
-                found.keys.extend(hubs::key::mb(kind, &mbid).map(|key| Key {
-                    key,
-                    via: "musicbrainz".into(),
-                }));
-            }
+            found.keys.extend(hubs::key::mb(kind, &mbid).map(|key| Key {
+                key,
+                via: "musicbrainz".into(),
+            }));
         } else if let Some((isrc, _)) = musicbrainz::isrc_link(uri) {
             found.keys.push(Key {
                 key: format!("isrc:{isrc}"),

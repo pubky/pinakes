@@ -436,6 +436,7 @@ impl Transport for Recorded {
             }
             // Any other ISRC of a recording read here (a duplicates check): MusicBrainz knows no
             // recording with it.
+            path if synthetic(path).is_some() => synthetic(path).unwrap(),
             path if path.starts_with("/ws/2/isrc/") => (404, fixture("mb-isrc-GBUM72103841.json")),
             "/ws/2/recording/00000000-0000-4000-8000-000000000021"
             | "/ws/2/recording/00000000-0000-4000-8000-000000000022"
@@ -557,6 +558,69 @@ impl Transport for Recorded {
     }
 }
 /// An artist whose MusicBrainz record is over the cap.
+/// Recordings and ISRCs written in MusicBrainz's answer shape for the duplicate rules, by MBID
+/// suffix: (title, length, artist suffix, ISRCs). A drifting chain (…41 200 s, …42 202.5 s, …43
+/// 205 s: each step within 3 s, the ends 5 s apart); a stray ISRC (…51 and …52 agree on one, …52
+/// shares another with …53 by another artist); a duration's pick with a duplicate (…62, picked
+/// against …63 30 s longer, agrees with …61 on another ISRC).
+const SYNTHETIC: &[(&str, &str, u64, &str, &[&str])] = &[
+    ("41", "Drift", 200_000, "a1", &["ZZDRF2600001"]),
+    (
+        "42",
+        "Drift",
+        202_500,
+        "a1",
+        &["ZZDRF2600001", "ZZDRF2600002"],
+    ),
+    ("43", "Drift", 205_000, "a1", &["ZZDRF2600002"]),
+    ("51", "Stray", 190_000, "a1", &["ZZSTR2600001"]),
+    (
+        "52",
+        "Stray",
+        190_500,
+        "a1",
+        &["ZZSTR2600001", "ZZSTR2600002"],
+    ),
+    ("53", "Stray", 190_500, "a2", &["ZZSTR2600002"]),
+    ("61", "Picked", 200_500, "a1", &["ZZPCK2600002"]),
+    (
+        "62",
+        "Picked",
+        200_000,
+        "a1",
+        &["ZZPCK2600001", "ZZPCK2600002"],
+    ),
+    ("63", "Picked", 230_000, "a1", &["ZZPCK2600001"]),
+];
+fn synthetic(path: &str) -> Option<(u16, Vec<u8>)> {
+    let mbid = |n: &str| format!("00000000-0000-4000-8000-0000000000{n}");
+    if let Some(id) = path.strip_prefix("/ws/2/recording/") {
+        let (n, title, length, artist, isrcs) = SYNTHETIC.iter().find(|(n, ..)| mbid(n) == id)?;
+        return Some((
+            200,
+            serde_json::to_vec(&serde_json::json!({
+                "id": mbid(n), "title": title, "length": length, "isrcs": isrcs, "video": false,
+                "artist-credit": [{"name": "Someone", "joinphrase": "",
+                    "artist": {"id": format!("00000000-0000-4000-8000-0000000000{artist}"), "name": "Someone"}}],
+                "relations": [],
+            }))
+            .unwrap(),
+        ));
+    }
+    let isrc = path.strip_prefix("/ws/2/isrc/")?;
+    let recordings: Vec<serde_json::Value> = SYNTHETIC
+        .iter()
+        .filter(|(.., isrcs)| isrcs.contains(&isrc))
+        .map(|(n, title, length, ..)| serde_json::json!({"id": mbid(n), "title": title, "length": length}))
+        .collect();
+    (!recordings.is_empty()).then(|| {
+        (
+            200,
+            serde_json::to_vec(&serde_json::json!({"isrc": isrc, "recordings": recordings}))
+                .unwrap(),
+        )
+    })
+}
 const BIG_BAND: &str = "00000000-0000-4000-8000-00000000000b";
 /// A recording whose record is over MusicBrainz's cap: its page keys nothing, as the read that
 /// tells which recording stands for its duplicates could not be made.
@@ -1698,6 +1762,16 @@ async fn one_recording_stands_for_its_duplicates_on_every_path(pool: sqlx::PgPoo
             .unwrap();
         ids.insert(uri.to_owned(), id);
     }
+    // A resource another source keyed by the over-cap recording (no source reads its link; its
+    // key is written after the drain, as a run of that source would have left it).
+    let elsewhere = "https://example.org/big-recording-elsewhere";
+    let elsewhere_id = store::ensure_resource(&pool, elsewhere).await.unwrap();
+    let mut d = ResourceMeta::new(elsewhere, "jsonld", 86400);
+    d.set_type("MusicRecording");
+    store::save_document(&pool, &elsewhere_id, 0, &d)
+        .await
+        .unwrap();
+    ids.insert(elsewhere.to_owned(), elsewhere_id.clone());
     let t = Arc::new(Recorded {
         seen: Mutex::default(),
     });
@@ -1712,6 +1786,17 @@ async fn one_recording_stands_for_its_duplicates_on_every_path(pool: sqlx::PgPoo
     also_on::drain(&pool, &cx, &also_on::registry(), 100)
         .await
         .unwrap();
+    sqlx::query("INSERT INTO resource_key(resource_id,key,source,via,expires_at) VALUES($1,$2,'wikidata','wikidata',now()+interval '1 day')")
+        .bind(&elsewhere_id)
+        .bind(format!("mb:recording:{BIG_RECORDING}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO group_dirty(resource_id) VALUES($1) ON CONFLICT DO NOTHING")
+        .bind(&elsewhere_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     common::drain_groups(&pool, &Default::default()).await;
     let rows = |sql: &'static str, id: String| {
         let pool = pool.clone();
@@ -1723,6 +1808,7 @@ async fn one_recording_stands_for_its_duplicates_on_every_path(pool: sqlx::PgPoo
                 .unwrap()
         }
     };
+    let group = "SELECT coalesce(group_id,'-') FROM group_unit WHERE resource_id=$1";
     let recording_keys = "SELECT DISTINCT key FROM resource_key WHERE resource_id=$1 AND key LIKE 'mb:recording:%' ORDER BY key";
     // Wikidata's item names 6a5c430a; the track keys 4da0e503 alone, from Wikidata too.
     let keys = "SELECT key||' '||source FROM resource_key WHERE resource_id=$1 ORDER BY key COLLATE \"C\",source";
@@ -1753,10 +1839,15 @@ async fn one_recording_stands_for_its_duplicates_on_every_path(pool: sqlx::PgPoo
             "{uri}"
         );
     }
-    // An over-cap recording page keys no recording at all.
-    assert!(rows(recording_keys, ids[&over_cap].clone())
-        .await
-        .is_empty());
+    // An over-cap recording page keys its own MBID, as its link alone proves, and keeps its group
+    // with a resource another source keyed by that recording.
+    assert_eq!(
+        rows(recording_keys, ids[&over_cap].clone()).await,
+        [format!("mb:recording:{BIG_RECORDING}")]
+    );
+    let big_group = rows(group, ids[&over_cap].clone()).await;
+    assert_ne!(big_group, ["-"]);
+    assert_eq!(rows(group, ids[elsewhere].clone()).await, big_group);
     // Never two recording keys on one resource.
     for (uri, id) in &ids {
         assert!(
@@ -1766,7 +1857,6 @@ async fn one_recording_stands_for_its_duplicates_on_every_path(pool: sqlx::PgPoo
         );
     }
     // One group each: the Walking Disaster track with 6a5c430a's page; the chain's three.
-    let group = "SELECT coalesce(group_id,'-') FROM group_unit WHERE resource_id=$1";
     let walking = rows(group, ids[tidal].clone()).await;
     assert_ne!(walking, ["-"]);
     assert_eq!(rows(group, ids[&page(second)].clone()).await, walking);
@@ -3391,4 +3481,279 @@ async fn a_shared_isrc_names_the_recording_the_tracks_length_picks(pool: sqlx::P
     assert_eq!(pick(&[a.clone(), r("c", None)], Some(214)), None);
     // Two within the window: no decision.
     assert_eq!(pick(&[a.clone(), r("d", Some(211_000))], Some(213)), None);
+}
+
+/// The duplicate rules' edges: a chain whose lengths drift 2.5 s at each step (5 s end to end)
+/// is no set, so its ISRC stays a fact; an ISRC a duplicate shares with a recording that
+/// disagrees is a fact, never a key (an exact lookup by it could name that other recording's
+/// track); a duration's pick that has a duplicate on another ISRC is keyed as the one standing
+/// for both, by every source.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn the_whole_set_agrees_and_only_its_own_isrcs_are_keys(pool: sqlx::PgPool) {
+    if !has(&["service", "musicbrainz"]) {
+        return;
+    }
+    let rec = |n: &str| format!("00000000-0000-4000-8000-0000000000{n}");
+    let drift = "https://tidal.com/track/1000041";
+    let stray = "https://tidal.com/track/1000051";
+    let picked = "https://tidal.com/track/1000061";
+    let mut ids = std::collections::BTreeMap::new();
+    for (uri, isrc, duration) in [
+        (drift, "ZZDRF2600001", None),
+        (stray, "ZZSTR2600001", None),
+        (picked, "ZZPCK2600001", Some("PT3M20S")),
+    ] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut d = ResourceMeta::new(uri, "jsonld", 86400);
+        d.set_type("MusicRecording");
+        d.attributes.insert("isrc".into(), isrc.into());
+        if let Some(duration) = duration {
+            d.attributes.insert("duration".into(), duration.into());
+        }
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        ids.insert(uri, id);
+    }
+    let t = Arc::new(Recorded {
+        seen: Mutex::default(),
+    });
+    let cx = also_on::Context {
+        egress: egress(t.clone()),
+        config: Arc::new(Config::default()),
+    };
+    sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    also_on::drain(&pool, &cx, &also_on::registry(), 100)
+        .await
+        .unwrap();
+    let rows = |sql: &'static str, id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, String>(sql)
+                .bind(id)
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let keys = "SELECT DISTINCT key FROM resource_key WHERE resource_id=$1 ORDER BY key";
+    let facts =
+        "SELECT DISTINCT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY 1";
+    // The drifting chain: no recording and no ISRC key; the ISRC a fact.
+    let drifted = rows(keys, ids[drift].clone()).await;
+    assert!(drifted.is_empty(), "{drifted:?}");
+    assert!(rows(facts, ids[drift].clone())
+        .await
+        .contains(&"isrc ZZDRF2600001".to_owned()));
+    // The stray ISRC: …51 and …52 are one (…51 stands); ZZSTR2600002, which …52 shares with
+    // …53 by another artist, is a fact, not a key.
+    let strayed = rows(keys, ids[stray].clone()).await;
+    assert_eq!(
+        strayed,
+        [
+            "isrc:ZZSTR2600001".to_owned(),
+            format!("mb:recording:{}", rec("51"))
+        ],
+        "{strayed:?}"
+    );
+    assert!(rows(facts, ids[stray].clone())
+        .await
+        .contains(&"isrc ZZSTR2600002".to_owned()));
+    // The duration's pick (…62) has a duplicate (…61) on another ISRC: every source keys …61,
+    // and that other ISRC, which names …61 on its own, is a key too; the shared ISRC the
+    // duration decided between stays a fact.
+    assert_eq!(
+        rows(keys, ids[picked].clone()).await,
+        [
+            "isrc:ZZPCK2600002".to_owned(),
+            format!("mb:recording:{}", rec("61"))
+        ]
+    );
+    assert!(rows(facts, ids[picked].clone())
+        .await
+        .contains(&"isrc ZZPCK2600001".to_owned()));
+}
+
+/// Wikidata's recording item, read alone (no other source keys the track): the MBID it names is
+/// keyed as the recording that stands for its duplicates, and the MBID it replaced stays as
+/// Wikidata's `mbid_was`, so `key=mbid:` with it still finds the track.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn wikidata_alone_keys_the_standing_recording_and_keeps_the_other(pool: sqlx::PgPool) {
+    use tower::ServiceExt;
+    if !has(&["wikidata", "service", "musicbrainz", "musicbrainz_entity"]) {
+        return;
+    }
+    let first = "4da0e503-0cef-4dd7-a5b7-b08bea3db145";
+    let second = "6a5c430a-8035-4217-97ac-ffa395f55bf9";
+    let tidal = "https://tidal.com/track/3524506";
+    let id = store::ensure_resource(&pool, tidal).await.unwrap();
+    let mut d = ResourceMeta::new(tidal, "jsonld", 86400);
+    d.set_type("MusicRecording");
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,object_path,label,created_at) VALUES($1,repeat('a',52),'tag','/pub/test/tags/'||$1,'music',now())")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut config = Config::default();
+    for source in ["service", "musicbrainz", "musicbrainz_entity"] {
+        config.also_on.sources.insert(
+            source.into(),
+            also_on::SourceOptions {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        );
+    }
+    config.validate().unwrap();
+    let t = Arc::new(Recorded {
+        seen: Mutex::default(),
+    });
+    let cx = also_on::Context {
+        egress: egress(t.clone()),
+        config: Arc::new(config.clone()),
+    };
+    also_on::configure(&pool, &config.also_on).await.unwrap();
+    sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    also_on::drain(&pool, &cx, &also_on::registry(), 100)
+        .await
+        .unwrap();
+    let rows = |sql: &'static str| {
+        let pool = pool.clone();
+        let id = id.clone();
+        async move {
+            sqlx::query_scalar::<_, String>(sql)
+                .bind(id)
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(
+        rows("SELECT key FROM resource_key WHERE resource_id=$1 AND source='wikidata' AND key LIKE 'mb:recording:%'").await,
+        [format!("mb:recording:{first}")]
+    );
+    assert_eq!(
+        rows("SELECT value FROM resource_fact WHERE resource_id=$1 AND source='wikidata' AND name='mbid_was'").await,
+        [second]
+    );
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
+    let mut request = axum::http::Request::builder()
+        .uri(format!("/v1/search?key=mbid:{second}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.2:1234".parse::<SocketAddr>().unwrap(),
+    ));
+    let response = app.oneshot(request).await.unwrap();
+    let bytes = http_body_util::BodyExt::collect(response.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let found: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        found["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["id"] == id.as_str()),
+        "{found}"
+    );
+}
+
+/// Sources that key different recordings for one resource truly disagree: the record-time check
+/// only observes it. Both keys are kept, the resource joins no recording group (a group holds
+/// one), and the run is counted.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn disagreeing_recording_keys_are_kept_and_counted(pool: sqlx::PgPool) {
+    let a = "00000000-0000-4000-8000-0000000000e1";
+    let b = "00000000-0000-4000-8000-0000000000e2";
+    let uri = "https://tidal.com/track/1000099";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut d = ResourceMeta::new(uri, "jsonld", 86400);
+    d.set_type("MusicRecording");
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    let other = "https://musicbrainz.org/recording/00000000-0000-4000-8000-0000000000e1";
+    let other_id = store::ensure_resource(&pool, other).await.unwrap();
+    let mut d = ResourceMeta::new(other, "jsonld", 86400);
+    d.set_type("MusicRecording");
+    store::save_document(&pool, &other_id, 0, &d).await.unwrap();
+    let config = Config::default();
+    let key = |mbid: &str, via: &str| also_on::Key {
+        key: format!("mb:recording:{mbid}"),
+        via: via.into(),
+    };
+    let found = |k: also_on::Key| also_on::Found {
+        keys: vec![k],
+        ..Default::default()
+    };
+    let ttl = std::time::Duration::from_secs(86_400);
+    also_on::record(
+        &pool,
+        &other_id,
+        "conflict_probe",
+        found(key(a, "musicbrainz")),
+        ttl,
+        &config.also_on,
+    )
+    .await
+    .unwrap();
+    also_on::record(
+        &pool,
+        &id,
+        "conflict_probe",
+        found(key(a, "musicbrainz")),
+        ttl,
+        &config.also_on,
+    )
+    .await
+    .unwrap();
+    let counted = || {
+        pinakes_core::telemetry::Metrics::new()
+            .unwrap()
+            .encode()
+            .unwrap()
+            .lines()
+            .find(|l| {
+                l.starts_with("pinakes_also_on_recording_key_conflicts_total{")
+                    && l.contains("source=\"conflict_probe_2\"")
+            })
+            .and_then(|l| l.rsplit(' ').next()?.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    assert_eq!(counted(), 0);
+    also_on::record(
+        &pool,
+        &id,
+        "conflict_probe_2",
+        found(key(b, "wikidata")),
+        ttl,
+        &config.also_on,
+    )
+    .await
+    .unwrap();
+    assert_eq!(counted(), 1);
+    let keys: Vec<String> = sqlx::query_scalar(
+        "SELECT key FROM resource_key WHERE resource_id=$1 AND key LIKE 'mb:recording:%' ORDER BY key",
+    )
+    .bind(&id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        keys,
+        [format!("mb:recording:{a}"), format!("mb:recording:{b}")]
+    );
+    common::drain_groups(&pool, &Default::default()).await;
+    let group: Vec<String> =
+        sqlx::query_scalar("SELECT coalesce(group_id,'-') FROM group_unit WHERE resource_id=$1")
+            .bind(&id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(group, ["-"]);
 }
