@@ -52,7 +52,7 @@ impl super::OwnSection for SpotifyConfig {
 
 const API: &str = "https://api.spotify.com/v1";
 /// Spotify's Web API and its token endpoint.
-const SPOTIFY: Api = Api {
+pub(super) const SPOTIFY: Api = Api {
     service: "spotify",
     label: "Spotify",
     auth: "https://accounts.spotify.com/api/token",

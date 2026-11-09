@@ -28,6 +28,7 @@ pub mod podcasts;
 pub mod product_keys;
 pub mod service;
 pub mod spotify;
+pub mod spotify_isrc;
 pub mod tidal;
 pub mod wikidata;
 pub mod wikidata_item;
@@ -409,6 +410,8 @@ pub fn registry() -> Vec<Arc<dyn Source>> {
         Arc::new(service::ServiceSource),
         Arc::new(tidal::Tidal),
         Arc::new(spotify::Spotify),
+        // After the sources that key a track's ISRC, before `editions` places its links.
+        Arc::new(spotify_isrc::SpotifyIsrc),
         Arc::new(musicbrainz::MusicBrainzSource),
         Arc::new(musicbrainz_entity::MusicBrainzEntitySource),
         Arc::new(performers::PerformersSource),

@@ -58,6 +58,8 @@ fn shared_track_body(id: &str, ms: u64) -> Vec<u8> {
     }))
     .unwrap()
 }
+/// A made-up track the ISRC search lists beside Bohemian Rhapsody's, with another ISRC.
+const OTHER_ISRC_TRACK: &str = "0otherIsrcTrack0000000";
 /// `GET /v1/tracks/{TRACK}`: `id`, `type`, `external_ids.isrc` and `duration_ms` (5:54).
 fn track_body() -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
@@ -164,6 +166,36 @@ impl Transport for Recorded {
                     answer(200, shared_track_body(SHARED_PICKED, 214_000), "application/json")
                 } else if path == format!("/v1/tracks/{SHARED_NEITHER}") {
                     answer(200, shared_track_body(SHARED_NEITHER, 196_000), "application/json")
+                } else if path == "/v1/search" {
+                    // The ISRC search (`q=isrc:…&type=track`): Bohemian Rhapsody's ISRC answers
+                    // its track and a track of another ISRC (never Spotify's answer in truth: the
+                    // filter is exact, but the source checks); any other ISRC, nothing.
+                    let q = url
+                        .query_pairs()
+                        .find(|(k, _)| k == "q")
+                        .map(|(_, v)| v.into_owned())
+                        .unwrap_or_default();
+                    assert_eq!(
+                        url.query_pairs()
+                            .find(|(k, _)| k == "type")
+                            .map(|(_, v)| v.into_owned())
+                            .as_deref(),
+                        Some("track")
+                    );
+                    let items = if q == "isrc:GBUM71029604" {
+                        serde_json::json!([
+                            serde_json::from_slice::<serde_json::Value>(&track_body()).unwrap(),
+                            {"id": OTHER_ISRC_TRACK, "type": "track", "name": "Another Song",
+                             "duration_ms": 200_000, "external_ids": {"isrc": "GBUM71029605"}},
+                        ])
+                    } else {
+                        serde_json::json!([])
+                    };
+                    answer(
+                        200,
+                        serde_json::to_vec(&serde_json::json!({"tracks": {"items": items, "limit": 10, "offset": 0}})).unwrap(),
+                        "application/json; charset=utf-8",
+                    )
                 } else {
                     answer(
                         404,
@@ -182,6 +214,26 @@ impl Transport for Recorded {
                 fixture("mb-isrc-GBUM71029604.json"),
                 "application/json",
             ),
+            // The two recordings of the shared ISRC, read to see whether they agree: the album
+            // version and an edit 34 s shorter do not.
+            ("musicbrainz.org", "/ws/2/recording/8f3471b5-7e6a-48da-86a9-c1c07a0f47ae")
+            | ("musicbrainz.org", "/ws/2/recording/e00ebb77-541e-41f3-86ba-a90530414922") => {
+                let album = url.path().ends_with("8f3471b5-7e6a-48da-86a9-c1c07a0f47ae");
+                answer(
+                    200,
+                    serde_json::to_vec(&serde_json::json!({
+                        "id": url.path().trim_start_matches("/ws/2/recording/"),
+                        "title": "Never Gonna Give You Up",
+                        "length": if album { 212946 } else { 178933 },
+                        "isrcs": ["GBARL9300135"],
+                        "artist-credit": [{"name": "Rick Astley", "joinphrase": "",
+                            "artist": {"id": "db92a151-1ac2-438b-bc43-b82e149ddd50", "name": "Rick Astley"}}],
+                        "relations": [],
+                    }))
+                    .unwrap(),
+                    "application/json",
+                )
+            }
             ("itunes.apple.com", "/lookup") => {
                 let upc = url
                     .query_pairs()
@@ -481,4 +533,83 @@ async fn a_shared_isrc_is_never_a_spotify_key(pool: sqlx::PgPool) {
         assert!(rows(&pool, any_isrc_key, id).await.is_empty());
         assert_eq!(rows(&pool, facts, id).await, ["isrc GBARL9300135"]);
     }
+}
+
+/// A track on another service with an ISRC key is looked up on Spotify by it (`spotify_isrc`):
+/// the Spotify tracks carrying exactly that ISRC become links keyed by the ISRC, a track the
+/// search lists with another ISRC is left out, Spotify's own tracks are not asked, a track with
+/// no ISRC key asks nothing, and the switch turns it off.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_track_with_an_isrc_key_gets_its_spotify_link(pool: sqlx::PgPool) {
+    // TIDAL's own page states its ISRC (a key: TIDAL vouches for it) and its length.
+    let tidal = "https://tidal.com/track/534050211";
+    let tidal_id = store::ensure_resource(&pool, tidal).await.unwrap();
+    let mut doc = ResourceMeta::new(tidal, "jsonld", 86400);
+    doc.set_type("MusicRecording");
+    doc.attributes.insert("isrc".into(), "GBUM71029604".into());
+    doc.attributes.insert("duration".into(), "PT5M55S".into());
+    store::save_document(&pool, &tidal_id, 0, &doc)
+        .await
+        .unwrap();
+    // A TIDAL page without an ISRC, and Spotify's own track.
+    let plain = save(&pool, "https://tidal.com/track/551040646", "MusicRecording").await;
+    let own = save(
+        &pool,
+        &format!("https://open.spotify.com/track/{TRACK}"),
+        "MusicRecording",
+    )
+    .await;
+    let seen = run(
+        &pool,
+        config(Some(("isrc-id", "isrc-secret"))),
+        Answers::default(),
+    )
+    .await;
+    let searches: Vec<&String> = seen
+        .iter()
+        .filter(|s| s.starts_with("api.spotify.com/v1/search?"))
+        .collect();
+    assert_eq!(
+        searches,
+        ["api.spotify.com/v1/search?q=isrc%3AGBUM71029604&type=track&limit=10"],
+        "{seen:?}"
+    );
+    let links = rows(
+        &pool,
+        "SELECT uri||' '||coalesce(key,'-')||' '||source||' '||via FROM derived_link WHERE resource_id=$1 AND source='spotify_isrc' ORDER BY uri",
+        &tidal_id,
+    )
+    .await;
+    assert_eq!(
+        links,
+        [format!(
+            "https://open.spotify.com/track/{TRACK} isrc:GBUM71029604 spotify_isrc spotify_isrc"
+        )]
+    );
+    assert!(!links.iter().any(|l| l.contains(OTHER_ISRC_TRACK)));
+    for id in [&plain, &own] {
+        assert!(rows(
+            &pool,
+            "SELECT uri FROM derived_link WHERE resource_id=$1 AND source='spotify_isrc'",
+            id
+        )
+        .await
+        .is_empty());
+    }
+    // Switched off: nothing asks the search, and the rows it found stop showing.
+    let mut off = config(Some(("isrc-id", "isrc-secret")));
+    off.also_on.sources.insert(
+        "spotify_isrc".into(),
+        SourceOptions {
+            enabled: Some(false),
+            ..Default::default()
+        },
+    );
+    off.validate().unwrap();
+    sqlx::query("DELETE FROM derived_link WHERE source='spotify_isrc'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let seen = run(&pool, off, Answers::default()).await;
+    assert!(!seen.iter().any(|s| s.contains("/v1/search?")), "{seen:?}");
 }
