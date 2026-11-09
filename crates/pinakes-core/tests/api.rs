@@ -833,8 +833,10 @@ async fn preview_pending_cached_completion_and_per_ip_uri_budgets(pool: PgPool) 
     assert_eq!(code, 202);
     assert_eq!(preview["status"], "pending");
     assert!(preview.get("score").is_none());
-    // The synchronous window was waited out before the pending answer.
+    // The synchronous window was waited out before the pending answer, and it is a window of
+    // seconds, not tens of them (loose above: a loaded machine never fails it).
     assert!(start.elapsed() >= std::time::Duration::from_secs(3));
+    assert!(start.elapsed() < std::time::Duration::from_secs(20));
     let job = queue::claim(&pool, "web", &config.queue)
         .await
         .unwrap()
@@ -945,6 +947,7 @@ async fn preview_returns_completion_within_synchronous_window(pool: PgPool) {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     });
+    let start = std::time::Instant::now();
     let (code, body) = call(
         &app,
         "POST",
@@ -952,9 +955,11 @@ async fn preview_returns_completion_within_synchronous_window(pool: PgPool) {
         Some(json!({"uri":"https://example.org/fast"})),
     )
     .await;
-    // 200 with the card, not 202 pending: the completion came within the synchronous window.
+    // 200 with the card, not 202 pending: the completion came within the synchronous window,
+    // and the window itself is seconds (loose above: a loaded machine never fails it).
     assert_eq!(code, 200);
     assert_eq!(body["name"], "Fast card");
+    assert!(start.elapsed() < std::time::Duration::from_secs(10));
     worker.await.unwrap();
 }
 
@@ -3169,9 +3174,15 @@ async fn a_boost_over_many_cards_answers_in_time(pool: PgPool) {
         .unwrap();
     sqlx::query("ANALYZE").execute(&pool).await.unwrap();
     let (nexus_url, _task) = graph_nexus(friend, friend).await;
+    // The API's own pool: its five-second statement timeout is the bound. A boost that reads the
+    // set once per card runs past it and answers 500, not 200.
+    let api_pool = api::pool_options()
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .unwrap();
     let app = api::router(
         AppState::new(
-            pool,
+            api_pool.clone(),
             Config {
                 nexus_url,
                 ..Default::default()
@@ -3190,7 +3201,8 @@ async fn a_boost_over_many_cards_answers_in_time(pool: PgPool) {
     .await;
     assert_eq!(code, 200, "{page}");
     assert_eq!(ids_of(&page).len(), 20);
-    // A target, not a bound: a loaded machine never fails it.
+    api_pool.close().await;
+    // A target below the timeout: a loaded machine never fails it.
     if started.elapsed() > std::time::Duration::from_secs(4) {
         eprintln!(
             "SOFT performance target exceeded: boosted search {:?} (target 4 s)",
