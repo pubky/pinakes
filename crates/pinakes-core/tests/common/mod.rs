@@ -313,6 +313,17 @@ pub async fn drain_groups(pool: &sqlx::PgPool, cfg: &pinakes_core::groups::Group
         tx.commit().await.unwrap();
     }
 }
+/// This thread's CPU time, for a bound on the cost of a hostile input: it holds under any load on
+/// the machine, where a wall-clock bound does not.
+pub fn thread_cpu_time() -> std::time::Duration {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `clock_gettime` writes only the `timespec` it is given.
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) };
+    std::time::Duration::new(now.tv_sec as u64, now.tv_nsec as u32)
+}
 /// An egress configuration for a mocked transport: no pacing between requests to one host, the
 /// hosts with a published rate included (a `host_rates` entry wins over the published rate), so
 /// recorded answers come back at once. The pacing itself is proven in `egress::tests` on a paused

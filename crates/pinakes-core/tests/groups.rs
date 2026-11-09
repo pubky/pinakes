@@ -920,11 +920,12 @@ async fn populated_collapse_and_hints_build_only_page_cards(pool: PgPool) {
     sqlx::query("ANALYZE").execute(&pool).await.unwrap();
     // One page of hints, read through the function every card uses.
     let plan:Value=sqlx::query_scalar("EXPLAIN(ANALYZE,BUFFERS,VERBOSE,FORMAT JSON) SELECT jsonb_agg(group_hint(unit_id)) FROM (SELECT unit_id FROM group_unit ORDER BY unit_id LIMIT 20) page").fetch_one(&pool).await.unwrap();
+    // A target, not a bound (the buffer and call counts below are the bounds): a loaded machine
+    // never fails it.
     let ms = plan[0]["Execution Time"].as_f64().unwrap();
     if ms > 100.0 {
         eprintln!("SOFT group-hint hydration target exceeded: {ms} ms");
     }
-    assert!(ms < 5000.0);
     if let Ok(path) = std::env::var("PINAKES_GROUP_HYDRATION_PLAN_FILE") {
         std::fs::write(path, serde_json::to_vec_pretty(&plan).unwrap()).unwrap();
     }

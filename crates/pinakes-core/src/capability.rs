@@ -316,6 +316,19 @@ fn secret_share(host: &str, path: &str) -> bool {
         || (host == "calendar.proton.me" && path.starts_with("/share/"))
 }
 
+/// This thread's CPU time, for a test's bound on the cost of a hostile input: it holds under any
+/// load on the machine, where a wall-clock bound does not.
+#[cfg(test)]
+pub(crate) fn thread_cpu_time() -> std::time::Duration {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `clock_gettime` writes only the `timespec` it is given.
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) };
+    std::time::Duration::new(now.tv_sec as u64, now.tv_nsec as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -464,7 +477,7 @@ mod tests {
     /// A long hostile string (many link starts, a long fragment) is read in bounded time.
     #[test]
     fn hostile_strings_are_read_quickly() {
-        let started = std::time::Instant::now();
+        let started = thread_cpu_time();
         let many_starts = format!("{}x?token=SECRET", "://".repeat(21_000));
         assert!(contains_credential(&many_starts));
         let long_fragment = format!("https://h.example/#{}", "?".repeat(60_000));
@@ -479,9 +492,10 @@ mod tests {
         for _ in 0..1000 {
             assert!(!contains_credential(&separators));
         }
-        // Linear: about a second in a test build, against tens of seconds for a scan per suffix.
-        let elapsed = started.elapsed();
-        assert!(elapsed < std::time::Duration::from_secs(5), "{elapsed:?}");
+        // Linear: about a second of CPU time in a test build, against tens of seconds for a
+        // scan per suffix.
+        let used = thread_cpu_time() - started;
+        assert!(used < std::time::Duration::from_secs(5), "{used:?}");
     }
     /// A fragment key's percent-encoded `/` or `!` prefix (`#%2Faccess_token=…`) is trimmed as a
     /// written one is.

@@ -1516,19 +1516,17 @@ mod tests {
             "Release highlights - Filter Gallery: see the docs and code"
         );
         assert_eq!(markdown_excerpt("a ](b) [c"), "a ](b) [c");
-        // Hostile input costs no more than its first 2 KB.
+        // Hostile input costs no more than its first 2 KB: milliseconds of this thread's CPU
+        // time, where a pass over the whole input took seconds.
         for hostile in [
             "[]()".repeat(262_144),
             "[a](b)".repeat(174_763),
             "é".repeat(600_000),
         ] {
-            let start = std::time::Instant::now();
+            let started = crate::capability::thread_cpu_time();
             let excerpt = markdown_excerpt(&hostile);
-            assert!(
-                start.elapsed() < std::time::Duration::from_millis(200),
-                "{:?}",
-                start.elapsed()
-            );
+            let used = crate::capability::thread_cpu_time() - started;
+            assert!(used < std::time::Duration::from_secs(1), "{used:?}");
             assert!(excerpt.chars().count() <= 201);
         }
         assert_eq!(

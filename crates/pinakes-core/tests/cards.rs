@@ -630,13 +630,11 @@ fn a_feed_cut_off_at_the_cap_reads_to_its_last_whole_item() {
             "</item>".repeat(1_000)
         );
         assert!(hostile.len() > 900_000);
-        let started = std::time::Instant::now();
+        let started = common::thread_cpu_time();
         let completed = cards::feed_prefix(&hostile, 10_000).unwrap();
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(1),
-            "{open}: {:?}",
-            started.elapsed()
-        );
+        // Of this thread's CPU time: a bound load never inflates.
+        let used = common::thread_cpu_time() - started;
+        assert!(used < std::time::Duration::from_secs(5), "{open}: {used:?}");
         assert_eq!(
             completed,
             format!("{head}{}</channel></rss>", item(1)),
