@@ -148,7 +148,16 @@ live, remix or edit tag tells recordings apart), and every two known lengths wit
 ISRC is the track's key and so is the MBID of the one that stands for them all (the smallest
 MBID, `mb:recording:…`, `via` the source; a group holds one recording MBID, so the others are
 facts), a link MusicBrainz relates to any of them is keyed by that one too, and `musicbrainz`
-takes the union of their links and facts; at most eight recordings are read this way. When they disagree, the ISRC alone names none
+takes the union of their links and facts. The set is the whole connected set a recording's ISRCs
+reach (a duplicate that shares one ISRC with one recording and another with a third makes all
+three one), read through MusicBrainz's own records of the exact ISRCs (at most eight recordings
+and sixteen ISRC lookups; past that, or when MusicBrainz cannot serve a member, today's rule
+applies and no second recording is keyed); every path that keys a recording, a URL relation,
+Wikidata's item, an ISRC page, goes through it, and a run that would still key a second
+recording on one resource keeps the stored one and counts the drop
+(`pinakes_also_on_recording_key_conflicts_total`). A MusicBrainz merge, or a new duplicate with a
+smaller MBID, changes the recording that stands for a set: rows heal at each resource's next run
+(within the sources' 30 days; `reextract also-on` sooner). When they disagree, the ISRC alone names none
 of them and the track's duration decides: the one recording whose length is within 3 s of it,
 while every other's length is known and is not, is the track's (its MBID the key, the ISRC a
 fact); when none or two are that close, or the page states no duration, the ISRC is a fact only
@@ -158,7 +167,8 @@ so one goes without the others needing a change.
 
 - [`service`](service.md): the ISRC a music service's own track page states.
 - [`tidal`](tidal.md): TIDAL's own barcodes and ISRCs (with the operator's TIDAL credentials).
-- [`spotify`](spotify.md): Spotify's own barcodes and ISRCs, and `spotify_isrc`, another service's track on Spotify by its ISRC (with the operator's Spotify app credentials).
+- [`spotify`](spotify.md): Spotify's own barcodes and ISRCs (with the operator's Spotify app credentials).
+- [`spotify_isrc`](spotify_isrc.md): another service's track on Spotify by its ISRC (off by default; with the operator's Spotify app credentials).
 - [`musicbrainz`](musicbrainz.md): what MusicBrainz relates a music link to.
 - [`musicbrainz_entity`](musicbrainz_entity.md): a MusicBrainz page as its own hub.
 - [`performers`](performers.md): an event's performers, keyed to the artist on the page's own service.

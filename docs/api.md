@@ -1170,7 +1170,7 @@ anything. Sources read a resource after it is saved and again when their results
 source's lifetime: 30 days, `btcmap` 7); a source's links and keys live twice that, so one
 failed refresh keeps them, and they go when the source stops returning them. The sources run in this order, each
 seeing the keys the ones before it found: `service`, `tidal`, `spotify`,
-`musicbrainz`, `musicbrainz_entity`, `performers`, `wikidata`, `discogs`, `deezer`, `itunes`,
+`musicbrainz`, `musicbrainz_entity`, `performers`, `wikidata`, `spotify_isrc`, `discogs`, `deezer`, `itunes`,
 `wikipedia`, `wikidata_item`, `books`, `films`, `podcasts`, `product_keys`, `open_food_facts`,
 `stack_exchange`, `titles`, `federal_register`, `osm_wikidata`, `wikidata_osm`,
 `wikidata_places`, `btcmap`, `unpaywall`, `ncbi`, `datacite`, `huggingface`, `crates`, `npm`,
@@ -1198,8 +1198,8 @@ merged: the ISRC and the MBID that stands for them (the smallest) are the track'
 other MBIDs facts; recordings that disagree (a live
 version, a remix, an edit, another artist) leave the duration to pick one or the ISRC a fact
 ([an ISRC on several recordings](sources/README.md#an-isrc-on-several-recordings)). A track with
-an ISRC key on another service is looked up on Spotify by it, exactly (`spotify_isrc`, with the
-operator's Spotify credentials): its Spotify track becomes a link keyed by the ISRC. ISRCs are
+an ISRC key on another service is looked up on Spotify by it, exactly (`spotify_isrc`, off by
+default, with the operator's Spotify credentials): its Spotify track becomes a link keyed by the ISRC. ISRCs are
 stored in upper case and barcodes as GTIN-13 (a 12-digit UPC gains a
 leading zero), by every source. The level is exact: a track lists tracks and videos of the
 recording, an album lists albums and YouTube's album playlists, an artist lists artist pages and
@@ -1217,7 +1217,7 @@ MusicBrainz's web service (the entity it names), not from the page (unless that 
 8 MB cap: then the page is read as any page, and the sources record only what its URL proves, the
 MBID or the ISRC): the title, `MusicRecording`, `MusicAlbum`, `MusicGroup` or `Person` (an artist
 MusicBrainz calls a person), the artist credit and a recording's length as its description, `site`
-`MusicBrainz`; an ISRC's page is its one recording's card, else named `ISRC {code}`.
+`MusicBrainz`; an ISRC's page is its one recording's card (agreeing duplicates: the one with the plainest title), else named `ISRC {code}`.
 
 ## Cards and resolvers
 

@@ -14,31 +14,11 @@ else the ISRC a fact only ([an ISRC on several recordings](README.md#an-isrc-on-
 Spotify link Spotify does not know (404)
 gives nothing. Artists, playlists, episodes and shows are not read here.
 
-## `spotify_isrc`: another service's track on Spotify
+## Another service's track on Spotify
 
-`spotify_isrc` (the same credentials; `[also_on.sources.spotify_isrc] enabled = false` turns it
-off alone): for a track on another service with an `isrc:` key (TIDAL's or Deezer's own record,
-a vouching page's, a hub's), the Spotify tracks that carry exactly that ISRC, from the Web API's
-search with its `isrc:` filter (`/v1/search?q=isrc:…&type=track`, an exact lookup, never a
-title), as links `https://open.spotify.com/track/{id}` keyed by the ISRC. The track's own ISRC
-is asked first, then the hubs', two at most; only an ISRC that is a key (a shared one is a fact,
-and Spotify would answer with any of its recordings). Several answers are the recording on
-several releases: [`editions`](editions.md) places them and a card shows one per service. No
-keys and no facts. Spotify's own tracks are not asked.
-
-Spotify's Developer Policy (effective 15 May 2025) asks that metadata be "accompanied by a link
-back to the applicable album, content or playlist on the Spotify Service" (II.4.2) and that
-Spotify content be attributed with the Spotify Marks (II.4.1); the link is all this source
-stores. Its Developer Terms (version 10, 15 May 2025) allow "the temporary caching of: metadata
-and cover art" (IV.3.b) and forbid stored "compilations or databases of Spotify Content, other
-than as strictly necessary to operate your SDA" (IV.3.a): the answers are cached an hour and the
-links live the source's lifetime, like every derived link. The Policy also says "Do not create
-any product or service which is integrated with streams or content from another service"
-(III.5), which the operator weighs for the whole of also-on.
-
-For example, the track `https://open.spotify.com/track/7tFiyTwD0nx5a1eklYtX2J` ("Bohemian
-Rhapsody - Remastered 2011") has the ISRC `GBUM71029604`, which MusicBrainz gives to one
-recording: the track gets `isrc:GBUM71029604` and joins that recording's group.
+The lookup the other way, a Spotify track for another service's track by its ISRC, is the
+`spotify_isrc` source (off by default; its own page in this directory), with the same credentials
+and pace.
 
 ## Without Spotify's API
 
@@ -91,8 +71,7 @@ is read so whatever the switch says. Never an album page.
 
 `spotify` costs a token request when its token expires (a minute before Spotify's
 `expires_in`, an hour), and per Spotify album or track one request (`/v1/albums/{id}`,
-`/v1/tracks/{id}`), shared for an hour; `spotify_isrc` costs one search request per ISRC key of
-a track on another service (two at most), shared for an hour, on the same pace; a track's ISRC also asks MusicBrainz whether several
+`/v1/tracks/{id}`), shared for an hour; a track's ISRC also asks MusicBrainz whether several
 recordings have it (usually cached from `service`). Spotify's API is paced at 2 requests/s
 (Spotify publishes no figure; it limits by a rolling 30-second window).
 
