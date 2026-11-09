@@ -1390,7 +1390,8 @@ async fn reextract_repairs_rows_stored_before_the_credential_rule(pool: PgPool) 
     };
     let before = snapshot().await;
     assert!(before.contains("SECRET"));
-    let done = changes::repair_credentials(&pool).await.unwrap();
+    let lock = pinakes_core::locks::own_database(&pool).await.unwrap();
+    let done = changes::repair_credentials(&pool, &lock).await.unwrap();
     assert_eq!(
         done,
         changes::CredentialRepair {
@@ -1454,7 +1455,7 @@ async fn reextract_repairs_rows_stored_before_the_credential_rule(pool: PgPool) 
     assert_eq!(units[2], (changes::stored_key(&keys[2].0), Some(stand_in)));
     // Idempotent.
     assert_eq!(
-        changes::repair_credentials(&pool).await.unwrap(),
+        changes::repair_credentials(&pool, &lock).await.unwrap(),
         changes::CredentialRepair::default()
     );
     assert_eq!(snapshot().await, after);

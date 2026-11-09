@@ -57,7 +57,7 @@ async fn serve(config: Option<PathBuf>, command: Command) -> Result<()> {
         println!("scrubbed {scrubbed} posts gone or opted out");
         let scrubbed = pinakes_core::changes::scrub_never_fetched(&pool).await?;
         println!("scrubbed {scrubbed} objects never fetched");
-        let repaired = pinakes_core::changes::repair_credentials(&pool).await?;
+        let repaired = pinakes_core::changes::repair_credentials(&pool, &instance_lock).await?;
         println!(
             "credential repair: derived_link -{}, change keys {}, unit keys {}, history rows {}",
             repaired.derived_links, repaired.change_keys, repaired.unit_keys, repaired.history_rows
