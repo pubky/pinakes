@@ -350,6 +350,68 @@ impl Transport for Recorded {
             "/ws/2/isrc/GBUM71029604" => (200, fixture("mb-isrc-GBUM71029604.json")),
             "/ws/2/isrc/GBCEE0100112" => (200, fixture("mb-isrc-GBCEE0100112.json")),
             "/ws/2/isrc/GBUM72103841" => (404, fixture("mb-isrc-GBUM72103841.json")),
+            // The remaster that shares GBCEE0100112 with b1a9c0e9: the same credit (Queen), the
+            // same title once its tags go, 1.5 s shorter: one recording MusicBrainz has not
+            // merged (written in the recorded answer's shape).
+            "/ws/2/recording/dc2f9b64-2e3f-4a13-a89f-6a1bded55c6f" => (
+                200,
+                serde_json::to_vec(&serde_json::json!({
+                    "id": "dc2f9b64-2e3f-4a13-a89f-6a1bded55c6f",
+                    "title": "Bohemian Rhapsody - Digital (remaster)",
+                    "length": 353653,
+                    "isrcs": ["GBCEE0100112"],
+                    "artist-credit": [{"name": "Queen", "joinphrase": "",
+                        "artist": {"id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3", "name": "Queen"}}],
+                    "relations": [],
+                }))
+                .unwrap(),
+            ),
+            // Walking Disaster (Sum 41): an ISRC on two recordings MusicBrainz has not merged,
+            // the same title, credit and album, 0.13 s apart (recorded 2026-11-09).
+            "/ws/2/isrc/USUM70740306" => (200, fixture("mb-isrc-USUM70740306.json")),
+            "/ws/2/recording/4da0e503-0cef-4dd7-a5b7-b08bea3db145" => {
+                (200, fixture("mb-recording-4da0e503.json"))
+            }
+            "/ws/2/recording/6a5c430a-8035-4217-97ac-ffa395f55bf9" => {
+                (200, fixture("mb-recording-6a5c430a.json"))
+            }
+            // Two recordings of one ISRC that disagree: another artist with the same title and
+            // length (…0021, …0022), and the same artist 4.5 s apart (…0023, …0024).
+            "/ws/2/isrc/ZZDIS2600001" => (
+                200,
+                br#"{"isrc":"ZZDIS2600001","recordings":[{"id":"00000000-0000-4000-8000-000000000021","length":286000,"title":"Walking Disaster"},{"id":"00000000-0000-4000-8000-000000000022","length":286000,"title":"Walking Disaster"}]}"#.to_vec(),
+            ),
+            "/ws/2/isrc/ZZDIS2600002" => (
+                200,
+                br#"{"isrc":"ZZDIS2600002","recordings":[{"id":"00000000-0000-4000-8000-000000000023","length":286000,"title":"Walking Disaster"},{"id":"00000000-0000-4000-8000-000000000024","length":290500,"title":"Walking Disaster"}]}"#.to_vec(),
+            ),
+            // Any other ISRC of a recording read here (a duplicates check): MusicBrainz knows no
+            // recording with it.
+            path if path.starts_with("/ws/2/isrc/") => (404, fixture("mb-isrc-GBUM72103841.json")),
+            "/ws/2/recording/00000000-0000-4000-8000-000000000021"
+            | "/ws/2/recording/00000000-0000-4000-8000-000000000022"
+            | "/ws/2/recording/00000000-0000-4000-8000-000000000023"
+            | "/ws/2/recording/00000000-0000-4000-8000-000000000024" => {
+                let id = url.path().trim_start_matches("/ws/2/recording/");
+                let (artist, length) = match &id[id.len() - 2..] {
+                    "21" => ("00000000-0000-4000-8000-0000000000a1", 286000),
+                    "22" => ("00000000-0000-4000-8000-0000000000a2", 286000),
+                    "23" => ("00000000-0000-4000-8000-0000000000a1", 286000),
+                    _ => ("00000000-0000-4000-8000-0000000000a1", 290500),
+                };
+                (
+                    200,
+                    serde_json::to_vec(&serde_json::json!({
+                        "id": id,
+                        "title": "Walking Disaster",
+                        "length": length,
+                        "isrcs": [if id.ends_with('1') || id.ends_with('2') { "ZZDIS2600001" } else { "ZZDIS2600002" }],
+                        "artist-credit": [{"name": "Someone", "joinphrase": "", "artist": {"id": artist, "name": "Someone"}}],
+                        "relations": [],
+                    }))
+                    .unwrap(),
+                )
+            }
             "/ws/2/release/19fc791d-01d1-460d-960a-edb19cad0ee8" => {
                 (200, fixture("mb-release-19fc791d.json"))
             }
@@ -1333,14 +1395,191 @@ async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
         seen.iter().any(|s| s.contains("/ws/2/isrc/GBUM71029604")),
         "{seen:?}"
     );
-    // The seed's ISRC is on two recordings: not its key (its own URL relation joins it).
+    // The seed's ISRC is on two recordings that agree (the album version and its remaster, 1.5 s
+    // apart): one recording, so the ISRC is its key and so is the remaster's MBID, beside the
+    // recording its own URL relation names.
     assert!(
         seen.iter().any(|s| s.contains("/ws/2/isrc/GBCEE0100112")),
         "{seen:?}"
     );
-    assert!(!rows(keys, ids[0].clone())
+    let seed_keys = rows(keys, ids[0].clone()).await;
+    for key in [
+        "isrc:GBCEE0100112 service tidal",
+        "mb:recording:b1a9c0e9-d987-4042-ae91-78d6a3267d69 service tidal",
+    ] {
+        assert!(seed_keys.contains(&key.to_owned()), "{key}: {seed_keys:?}");
+    }
+    assert!(
+        !seed_keys.iter().any(|k| k.contains("dc2f9b64")),
+        "{seed_keys:?}"
+    );
+}
+
+/// An ISRC MusicBrainz gives to several recordings that agree (the same artists, the same title
+/// once the identity-keeping tags go, lengths within 3 s or unknown) names one recording not
+/// yet merged: the ISRC and every MBID are the track's keys, from its own page (`service`), from
+/// `musicbrainz` (a URL MusicBrainz does not relate, with the union of the recordings' links and
+/// facts) and from the ISRC's own MusicBrainz page (`musicbrainz_entity`), so the track, the
+/// recordings' pages and the ISRC page are one group. Recordings that disagree (another artist;
+/// 4.5 s apart) keep today's rule: the duration picks one or the ISRC stays a fact.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn duplicate_recordings_of_one_isrc_are_one_recording(pool: sqlx::PgPool) {
+    if !has(&["service", "musicbrainz", "musicbrainz_entity"]) {
+        return;
+    }
+    let first = "4da0e503-0cef-4dd7-a5b7-b08bea3db145";
+    let second = "6a5c430a-8035-4217-97ac-ffa395f55bf9";
+    let tidal = "https://tidal.com/track/3524506";
+    let pages = [
+        format!("https://musicbrainz.org/recording/{first}"),
+        format!("https://musicbrainz.org/recording/{second}"),
+        "https://musicbrainz.org/isrc/USUM70740306".to_owned(),
+    ];
+    let other_artist = "https://tidal.com/track/1000001";
+    let far_apart = "https://tidal.com/track/1000002";
+    let mut ids = std::collections::BTreeMap::new();
+    for (uri, isrc) in [
+        (tidal, Some("USUM70740306")),
+        (other_artist, Some("ZZDIS2600001")),
+        (far_apart, Some("ZZDIS2600002")),
+        (pages[0].as_str(), None),
+        (pages[1].as_str(), None),
+        (pages[2].as_str(), None),
+    ] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut d = ResourceMeta::new(uri, "jsonld", 86400);
+        d.set_type("MusicRecording");
+        if let Some(isrc) = isrc {
+            // As TIDAL's JSON-LD states them.
+            d.name = Some("Walking Disaster".into());
+            d.attributes.insert("isrc".into(), isrc.into());
+            d.attributes.insert("artist".into(), "Sum 41".into());
+            d.attributes.insert("duration".into(), "PT4M46S".into());
+        }
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        ids.insert(uri.to_owned(), id);
+    }
+    let t = Arc::new(Recorded {
+        seen: Mutex::default(),
+    });
+    let cx = also_on::Context {
+        egress: egress(t.clone()),
+        config: Arc::new(Config::default()),
+    };
+    sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()")
+        .execute(&pool)
         .await
-        .contains(&"isrc:GBCEE0100112 service tidal".to_owned()));
+        .unwrap();
+    also_on::drain(&pool, &cx, &also_on::registry(), 100)
+        .await
+        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
+    let rows = |sql: &'static str, id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, String>(sql)
+                .bind(id)
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let keys = "SELECT key||' '||source||' '||via FROM resource_key WHERE resource_id=$1 ORDER BY key COLLATE \"C\",source";
+    // A key is stored once per resource, under the first source that vouched for it: the page's
+    // own ISRC (`service`, via TIDAL) keys the ISRC and both recordings before `musicbrainz`.
+    let track = rows(keys, ids[tidal].clone()).await;
+    for key in [
+        "isrc:USUM70740306 service tidal".to_owned(),
+        format!("mb:recording:{first} service tidal"),
+    ] {
+        assert!(track.contains(&key), "{key}: {track:?}");
+    }
+    // The recording that stands for the duplicates is the one with the smaller MBID; the other's
+    // MBID is a fact, never a key (a group holds one recording MBID).
+    assert!(
+        !track.iter().any(|k| k.contains(second)),
+        "{second}: {track:?}"
+    );
+    // The union of the recordings' facts, each once.
+    let facts = rows(
+        "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name COLLATE \"C\",value COLLATE \"C\"",
+        ids[tidal].clone(),
+    )
+    .await;
+    for fact in [
+        "artist Sum 41",
+        "isrc USUM70740306",
+        &format!("mbid {first}"),
+        &format!("mbid {second}"),
+    ] {
+        assert!(facts.contains(&fact.to_owned()), "{fact}: {facts:?}");
+    }
+    assert_eq!(
+        facts.iter().filter(|f| *f == "isrc USUM70740306").count(),
+        1,
+        "{facts:?}"
+    );
+    // The ISRC's own page keys the ISRC first, then the recording that stands for both; the
+    // second recording's own page keys that recording too, not itself.
+    let page = rows(keys, ids[&pages[2]].clone()).await;
+    assert_eq!(
+        page,
+        [
+            "isrc:USUM70740306 musicbrainz_entity musicbrainz".to_owned(),
+            format!("mb:recording:{first} musicbrainz_entity musicbrainz"),
+        ],
+        "{page:?}"
+    );
+    let other_page = rows(keys, ids[&pages[1]].clone()).await;
+    assert!(
+        other_page.contains(&format!(
+            "mb:recording:{first} musicbrainz_entity musicbrainz"
+        )) && !other_page.iter().any(|k| k.contains(second)),
+        "{other_page:?}"
+    );
+    assert!(rows(
+        "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1",
+        ids[&pages[1]].clone()
+    )
+    .await
+    .contains(&format!("mbid {second}")),);
+    // One group: the track, both recordings' pages and the ISRC page.
+    let group = "SELECT coalesce(group_id,'-') FROM group_unit WHERE resource_id=$1";
+    let joined = rows(group, ids[tidal].clone()).await;
+    assert_ne!(joined, ["-"]);
+    for page in &pages {
+        assert_eq!(rows(group, ids[page].clone()).await, joined, "{page}");
+    }
+    // Recordings that disagree: another artist, the ISRC a fact only; 4.5 s apart, the page's
+    // 4:46 picks the one within 3 s (…23), keyed by its MBID alone.
+    assert!(
+        !rows(keys, ids[other_artist].clone())
+            .await
+            .iter()
+            .any(|k| k.starts_with("isrc:") || k.starts_with("mb:recording:")),
+        "{:?}",
+        rows(keys, ids[other_artist].clone()).await
+    );
+    let picked = rows(keys, ids[far_apart].clone()).await;
+    assert!(
+        picked.contains(
+            &"mb:recording:00000000-0000-4000-8000-000000000023 service tidal".to_owned()
+        ),
+        "{picked:?}"
+    );
+    assert!(!picked.iter().any(|k| k.starts_with("isrc:")), "{picked:?}");
+    for id in [other_artist, far_apart] {
+        assert_eq!(rows(group, ids[id].clone()).await, ["-"], "{id}");
+    }
+    // MusicBrainz was asked for the ISRC and each recording once (cached for the sources after).
+    let seen = t.seen.lock().unwrap().clone();
+    assert_eq!(
+        seen.iter()
+            .filter(|s| s.contains(&format!("/ws/2/recording/{first}")))
+            .count(),
+        1,
+        "{seen:?}"
+    );
 }
 
 /// With Deezer's API on: a Deezer album's own barcode is a key, iTunes names the one Apple album
@@ -2011,7 +2250,23 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         isrc_keys.contains(&mbid) && isrc_keys.contains(&"isrc:GBUM71029604".to_owned()),
         "{isrc_keys:?}"
     );
-    assert!(rows(keys, ids[shared].clone()).await.is_empty());
+    // An ISRC on two recordings that agree (the album version and its remaster) keys the ISRC
+    // and both recordings.
+    let shared_keys = rows(keys, ids[shared].clone()).await;
+    for key in [
+        "isrc:GBCEE0100112",
+        "mb:recording:b1a9c0e9-d987-4042-ae91-78d6a3267d69",
+    ] {
+        assert!(
+            shared_keys.contains(&key.to_owned()),
+            "{key}: {shared_keys:?}"
+        );
+    }
+    // The remaster's MBID is a fact of the page, never a key: the album version stands for both.
+    assert!(
+        !shared_keys.iter().any(|k| k.contains("dc2f9b64")),
+        "{shared_keys:?}"
+    );
     // A page whose MBID was merged into the recording keys the recording, keeps the old MBID as a
     // fact, joins, and is found by the old MBID.
     assert!(rows(keys, ids[merged].clone()).await.contains(&mbid));
@@ -2066,13 +2321,30 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     assert!(rows(keys, ids[many].clone())
         .await
         .contains(&"isrc:ZZAAA2600010".to_owned()));
+    // The agreeing recordings' facts as one: the ISRC once, both MBIDs.
+    let shared_facts = rows(
+        "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name COLLATE \"C\",value COLLATE \"C\"",
+        ids[shared].clone(),
+    )
+    .await;
+    for fact in [
+        "isrc GBCEE0100112",
+        "mbid b1a9c0e9-d987-4042-ae91-78d6a3267d69",
+        "mbid dc2f9b64-2e3f-4a13-a89f-6a1bded55c6f",
+        "artist Queen",
+    ] {
+        assert!(
+            shared_facts.contains(&fact.to_owned()),
+            "{fact}: {shared_facts:?}"
+        );
+    }
     assert_eq!(
-        rows(
-            "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1",
-            ids[shared].clone()
-        )
-        .await,
-        ["isrc GBCEE0100112"]
+        shared_facts
+            .iter()
+            .filter(|f| *f == "isrc GBCEE0100112")
+            .count(),
+        1,
+        "{shared_facts:?}"
     );
     // The recording's links on services, keyed by it, and its facts.
     let links = rows(
@@ -2099,7 +2371,8 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     assert_eq!(rows(group, ids[single].clone()).await, song);
     assert_eq!(rows(group, ids[merged].clone()).await, song);
     assert_eq!(rows(group, ids[tidal].clone()).await, song);
-    assert_ne!(rows(group, ids[shared].clone()).await, song);
+    // The ISRC on the recording and its remaster keys the recording: its page joins too.
+    assert_eq!(rows(group, ids[shared].clone()).await, song);
     // The artist's page joins the TIDAL artist MusicBrainz lists.
     let band = rows(group, ids[artist].clone()).await;
     assert_ne!(band, ["-"]);
@@ -2369,8 +2642,12 @@ async fn a_musicbrainz_page_card_comes_from_the_entity() {
     let isrc = card("https://musicbrainz.org/isrc/GBUM71029604").await;
     assert_eq!(isrc.name.as_deref(), Some("Bohemian Rhapsody"));
     assert_eq!(isrc.url, "https://musicbrainz.org/isrc/GBUM71029604");
+    // Two recordings that agree (the album version and its remaster) are one: the card of the
+    // one with the plainest title. Two that disagree keep the ISRC's own card.
     let shared = card("https://musicbrainz.org/isrc/GBCEE0100112").await;
-    assert_eq!(shared.name.as_deref(), Some("ISRC GBCEE0100112"));
+    assert_eq!(shared.name.as_deref(), Some("Bohemian Rhapsody"));
+    let disagreeing = card("https://musicbrainz.org/isrc/ZZDIS2600001").await;
+    assert_eq!(disagreeing.name.as_deref(), Some("ISRC ZZDIS2600001"));
     // No page was read: MusicBrainz's web service only.
     let seen = t.seen.lock().unwrap().clone();
     assert!(

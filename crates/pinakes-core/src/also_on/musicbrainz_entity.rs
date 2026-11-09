@@ -12,8 +12,9 @@ use crate::music_sources::*;
 /// A MusicBrainz page as its own hub: a recording's, release's, release group's or artist's page
 /// carries that entity's keys and facts and lists its links on music services at its level, as
 /// the `musicbrainz` source does for a service link MusicBrainz relates to the entity. An ISRC's
-/// page keys the ISRC and the one recording MusicBrainz gives it to; an ISRC several recordings
-/// have names none of them (as a service's page ISRC), so its page keeps it as a fact only.
+/// page keys the ISRC and the one recording MusicBrainz gives it to, or the duplicates that
+/// agree as one recording (`music_sources::agree`); an ISRC on recordings that disagree names
+/// none of them (as a service's page ISRC), so its page keeps it as a fact only.
 pub struct MusicBrainzEntitySource;
 #[async_trait]
 impl Source for MusicBrainzEntitySource {
@@ -106,7 +107,20 @@ impl MusicBrainzEntitySource {
                 found.keys.insert(0, own);
                 found
             }
-            Some(recordings) if recordings.len() > 1 => Found::default(),
+            // Duplicates that agree are one recording; recordings that disagree name none.
+            Some(recordings) if recordings.len() > 1 => {
+                match agreeing(&cx.egress, base, &recordings).await? {
+                    Some(entities) => {
+                        let mbids: Vec<String> = entities.iter().map(|e| e.mbid.clone()).collect();
+                        let mut found =
+                            duplicates_found(cx, base, &mbids, &isrc, Level::Track).await?;
+                        found.keys.retain(|k| k.key != own.key);
+                        found.keys.insert(0, own);
+                        found
+                    }
+                    None => Found::default(),
+                }
+            }
             // An ISRC MusicBrainz doesn't know is still its own key.
             _ => Found {
                 keys: vec![own],

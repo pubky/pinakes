@@ -238,6 +238,8 @@ pub mod musicbrainz {
         pub release_group: Option<String>,
         /// The artist credit as MusicBrainz writes it ("A feat. B").
         pub artist: Option<String>,
+        /// The MBIDs of the artists in the credit, in its order (each once).
+        pub artist_ids: Vec<String>,
         /// Recordings: the length in milliseconds.
         pub length_ms: Option<u64>,
         /// Artists: `Person`, `Group`, `Orchestra`, `Choir`, `Character` or `Other`.
@@ -296,6 +298,18 @@ pub mod musicbrainz {
         let credit = credit.trim();
         (!credit.is_empty()).then(|| credit.to_owned())
     }
+    /// The MBIDs of the artists an entity's credit names, each once, in the credit's order.
+    fn artist_ids(v: &Value) -> Vec<String> {
+        let mut ids: Vec<String> = v["artist-credit"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|c| mbid(c["artist"]["id"].as_str()?))
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        ids.retain(|id| seen.insert(id.clone()));
+        ids
+    }
     /// `GET /{kind}/{mbid}?inc=url-rels…`.
     pub fn parse_entity(kind: MbKind, v: &Value) -> Option<Entity> {
         let mut isrcs: Vec<String> = v["isrcs"]
@@ -323,6 +337,7 @@ pub mod musicbrainz {
                 .map(str::to_owned),
             release_group: v["release-group"]["id"].as_str().and_then(mbid),
             artist: credit(v),
+            artist_ids: artist_ids(v),
             length_ms: v["length"]
                 .as_u64()
                 .filter(|ms| (1..=86_400_000).contains(ms)),
