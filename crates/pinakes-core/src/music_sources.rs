@@ -92,8 +92,12 @@ pub enum IsrcMatch {
     /// Exactly one recording has it: the ISRC is a key, and names that recording.
     One(String),
     /// Several recordings have it and they agree ([`agree`]): one recording MusicBrainz has not
-    /// merged yet. The ISRC and every one of their MBIDs are keys, so their groups are one.
-    Duplicates(Vec<String>),
+    /// merged yet. The ISRC and `standing`, the recording that stands for the `members`
+    /// ([`standing`]), are keys, so their groups are one; the other MBIDs are facts.
+    Duplicates {
+        standing: String,
+        members: Vec<String>,
+    },
     /// Several recordings have it that disagree, and the service's duration picks one: the
     /// recording whose length is within [`LENGTH_WINDOW_SECS`] of it while every other's is
     /// known and is not. The recording's MBID is the key; the ISRC stays a fact.
@@ -114,13 +118,27 @@ pub(crate) async fn isrc_match(
     Ok(match recordings.as_deref() {
         None | Some([]) => IsrcMatch::Unknown,
         Some([one]) => IsrcMatch::One(one.mbid.clone()),
-        Some(several) => match agreeing(&cx.egress, base, several).await? {
-            Some(entities) => match entities.as_slice() {
-                [one] => IsrcMatch::One(one.mbid.clone()),
-                _ => IsrcMatch::Duplicates(entities.into_iter().map(|e| e.mbid).collect()),
-            },
-            None => picked(several, duration).map_or(IsrcMatch::Shared, IsrcMatch::Picked),
-        },
+        Some(several) => {
+            // Recordings that agree are one; the whole connected set decides who stands for
+            // them. A set that cannot be settled keeps today's rule.
+            let settled = match agreeing(&cx.egress, base, several).await? {
+                Some(entities) => match entities.as_slice() {
+                    [one] => Some(IsrcMatch::One(one.mbid.clone())),
+                    [first, ..] => match standing(&cx.egress, base, &first.mbid).await? {
+                        Standing::Of { standing, members } => {
+                            Some(IsrcMatch::Duplicates { standing, members })
+                        }
+                        Standing::Alone => Some(IsrcMatch::One(first.mbid.clone())),
+                        Standing::Unclear => None,
+                    },
+                    [] => None,
+                },
+                None => None,
+            };
+            settled.unwrap_or_else(|| {
+                picked(several, duration).map_or(IsrcMatch::Shared, IsrcMatch::Picked)
+            })
+        }
     })
 }
 /// The recordings of one ISRC when they are one recording MusicBrainz has not merged
@@ -151,9 +169,11 @@ pub(crate) async fn agreeing(
 }
 /// Whether several recordings are one: the same artists (their MBIDs), the same title once
 /// the tags that keep a recording's identity are dropped (`matching::recording_title`: a
-/// remaster or a version tag goes, a live, remix or edit tag stays and tells them apart), and
-/// every two known lengths within [`LENGTH_WINDOW_SECS`] (an unknown length says nothing). One
-/// recording agrees with itself; none without artists or a title.
+/// remaster or a version tag goes, a live, remix or edit tag stays and tells them apart), the
+/// same disambiguation (MusicBrainz keeps a live recording's title bare and says "live, …"
+/// there), all audio or all video, and every two known lengths within [`LENGTH_WINDOW_SECS`]
+/// (an unknown length says nothing). One recording agrees with itself; none without artists or
+/// a title.
 pub fn agree(entities: &[musicbrainz::Entity]) -> bool {
     let Some(first) = entities.first() else {
         return false;
@@ -169,19 +189,22 @@ pub fn agree(entities: &[musicbrainz::Entity]) -> bool {
             .map(crate::matching::recording_title)
             .filter(|t| !t.is_empty())
     };
+    let comment = |e: &musicbrainz::Entity| e.disambiguation.as_deref().map(str::to_lowercase);
     let (ids, name) = (artists(first), title(first));
     if ids.is_empty() || name.is_none() {
         return false;
     }
-    entities
-        .iter()
-        .all(|e| artists(e) == ids && title(e) == name)
-        && entities.iter().all(|a| {
-            entities.iter().all(|b| match (a.length_ms, b.length_ms) {
-                (Some(x), Some(y)) => x.abs_diff(y) <= LENGTH_WINDOW_SECS * 1000,
-                _ => true,
-            })
+    entities.iter().all(|e| {
+        artists(e) == ids
+            && title(e) == name
+            && comment(e) == comment(first)
+            && e.video == first.video
+    }) && entities.iter().all(|a| {
+        entities.iter().all(|b| match (a.length_ms, b.length_ms) {
+            (Some(x), Some(y)) => x.abs_diff(y) <= LENGTH_WINDOW_SECS * 1000,
+            _ => true,
         })
+    })
 }
 /// Of several recordings, the one a track's `duration` picks: its length is within
 /// [`LENGTH_WINDOW_SECS`] of it, and every other recording's length is known and is not.
@@ -203,38 +226,132 @@ pub fn picked(recordings: &[musicbrainz::IsrcRecording], duration: Option<i64>) 
 pub fn primary(mbids: &[String]) -> Option<&String> {
     mbids.iter().min()
 }
-/// The most ISRCs of a recording MusicBrainz relates a link to that are looked up for duplicates
-/// of it ([`duplicate_primary`]): duplicates share their ISRCs, so the first few find them.
-pub const DUPLICATE_ISRCS_CHECKED: usize = 4;
-/// The recording that stands for `entity`'s duplicates when `entity` is one of several that
-/// agree on an ISRC and is not the one that stands for them ([`primary`]); `None` when it stands
-/// for them itself or has no duplicates. Each of its first [`DUPLICATE_ISRCS_CHECKED`] ISRCs is
-/// looked up (cached reads).
-pub(crate) async fn duplicate_primary(
+/// The most ISRC lookups one [`standing`] makes before it gives up: duplicates share their
+/// ISRCs, so a few reads settle a set; more is a mess, not a duplicate.
+pub const MAX_DUPLICATE_LOOKUPS: usize = 16;
+/// What a recording is among its duplicates ([`standing`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Standing {
+    /// No recording agrees with it on any of its ISRCs: it stands for itself.
+    Alone,
+    /// One of several recordings that agree: `standing` (the smallest MBID of `members`, which
+    /// hold it) stands for them all.
+    Of {
+        standing: String,
+        members: Vec<String>,
+    },
+    /// The set could not be settled within [`MAX_DUPLICATES`] recordings and
+    /// [`MAX_DUPLICATE_LOOKUPS`] reads, or a member could not be read: today's rule applies (the
+    /// recording keeps its own MBID, an ISRC on several recordings is a fact), which keys no
+    /// second recording.
+    Unclear,
+}
+/// The recording that stands for `mbid` and its duplicates: the connected set of recordings that
+/// agree ([`agree`]), reached through their ISRCs (every ISRC of every member is looked up, and
+/// an ISRC's recordings join the set when all of them agree with it), closed under that walk,
+/// its smallest MBID standing for all. The same answer from any member, in whatever order
+/// MusicBrainz lists them, so every source keys one recording for them. Bounded: over
+/// [`MAX_DUPLICATES`] members or [`MAX_DUPLICATE_LOOKUPS`] ISRC reads, or a member MusicBrainz
+/// cannot serve, the set is [`Standing::Unclear`]. Cached reads (each recording's own record,
+/// each ISRC's recordings).
+pub(crate) async fn standing(
     egress: &crate::resolver::egress::Egress,
     base: &str,
-    entity: &musicbrainz::Entity,
-) -> Result<Option<String>> {
-    if entity.kind != MbKind::Recording {
-        return Ok(None);
-    }
-    for isrc in entity.isrcs.iter().take(DUPLICATE_ISRCS_CHECKED) {
-        let Some(recordings) = musicbrainz::isrc(egress, base, isrc).await? else {
-            continue;
-        };
-        if recordings.len() < 2 || !recordings.iter().any(|r| r.mbid == entity.mbid) {
+    mbid: &str,
+) -> Result<Standing> {
+    let Some(entity) = musicbrainz::entity(egress, base, MbKind::Recording, mbid).await? else {
+        return Ok(Standing::Unclear);
+    };
+    standing_of(egress, base, entity).await
+}
+/// [`standing`] from a recording's record already read.
+pub(crate) async fn standing_of(
+    egress: &crate::resolver::egress::Egress,
+    base: &str,
+    start: musicbrainz::Entity,
+) -> Result<Standing> {
+    let mut members: Vec<musicbrainz::Entity> = vec![];
+    let mut queue: std::collections::VecDeque<musicbrainz::Entity> =
+        std::collections::VecDeque::new();
+    let mut seen_isrcs = std::collections::BTreeSet::new();
+    let mut lookups = 0usize;
+    queue.push_back(start);
+    while let Some(entity) = queue.pop_front() {
+        // A merged MBID answers as the recording it was merged into.
+        if members.iter().any(|m| m.mbid == entity.mbid) {
             continue;
         }
-        if let Some(entities) = agreeing(egress, base, &recordings).await? {
-            let mbids: Vec<String> = entities.into_iter().map(|e| e.mbid).collect();
-            return Ok(primary(&mbids).filter(|p| **p != entity.mbid).cloned());
+        members.push(entity.clone());
+        if members.len() > MAX_DUPLICATES {
+            return Ok(Standing::Unclear);
+        }
+        for isrc in &entity.isrcs {
+            if !seen_isrcs.insert(isrc.clone()) {
+                continue;
+            }
+            lookups += 1;
+            if lookups > MAX_DUPLICATE_LOOKUPS {
+                return Ok(Standing::Unclear);
+            }
+            let Some(recordings) = musicbrainz::isrc(egress, base, isrc).await? else {
+                continue;
+            };
+            if recordings.len() < 2 {
+                continue;
+            }
+            if recordings.len() > MAX_DUPLICATES {
+                return Ok(Standing::Unclear);
+            }
+            // The ISRC's recordings as a set, with what is known so far: all of them agree, or
+            // this ISRC tells nothing (a wrongly attached ISRC, an edit, a live recording).
+            let mut set: Vec<musicbrainz::Entity> = vec![];
+            for recording in &recordings {
+                let known = members.iter().find(|m| m.mbid == recording.mbid).cloned();
+                let read = match known {
+                    Some(e) => Some(e),
+                    None => {
+                        musicbrainz::entity(egress, base, MbKind::Recording, &recording.mbid)
+                            .await?
+                    }
+                };
+                let Some(e) = read else {
+                    return Ok(Standing::Unclear);
+                };
+                if !set.iter().any(|s| s.mbid == e.mbid) {
+                    set.push(e);
+                }
+            }
+            if !set.iter().any(|s| s.mbid == entity.mbid) {
+                continue;
+            }
+            if agree(&set) {
+                for e in set {
+                    if !members.iter().any(|m| m.mbid == e.mbid)
+                        && !queue.iter().any(|q| q.mbid == e.mbid)
+                    {
+                        queue.push_back(e);
+                    }
+                }
+            }
         }
     }
-    Ok(None)
+    let mut mbids: Vec<String> = members.into_iter().map(|e| e.mbid).collect();
+    mbids.sort();
+    mbids.dedup();
+    if mbids.len() < 2 {
+        return Ok(Standing::Alone);
+    }
+    let Some(standing) = primary(&mbids).cloned() else {
+        return Ok(Standing::Alone);
+    };
+    Ok(Standing::Of {
+        standing,
+        members: mbids,
+    })
 }
 /// The keys a service's own ISRC gives its track (`via` the service): the ISRC itself; for
-/// duplicates, the ISRC and the recording that stands for them ([`primary`]); for a shared ISRC,
-/// the recording its duration picked, or none when nothing tells them apart.
+/// duplicates, the ISRC and the recording that stands for them ([`standing`]); for a shared
+/// ISRC, the recording its duration picked, or none when nothing tells them apart.
 pub(crate) fn isrc_key(isrc: &str, found: &IsrcMatch, via: &str) -> Vec<crate::also_on::Key> {
     let key = |key: String| crate::also_on::Key {
         key,
@@ -246,32 +363,30 @@ pub(crate) fn isrc_key(isrc: &str, found: &IsrcMatch, via: &str) -> Vec<crate::a
             .map(key)
             .into_iter()
             .collect(),
-        IsrcMatch::Duplicates(mbids) => std::iter::once(format!("isrc:{isrc}"))
-            .chain(
-                primary(mbids)
-                    .into_iter()
-                    .filter_map(|m| hubs::key::mb(MbKind::Recording, m)),
-            )
+        IsrcMatch::Duplicates { standing, .. } => std::iter::once(format!("isrc:{isrc}"))
+            .chain(hubs::key::mb(MbKind::Recording, standing))
             .map(key)
             .collect(),
         IsrcMatch::Shared => vec![],
     }
 }
 
-/// What MusicBrainz says about duplicate recordings of one ISRC (`mbids`, [`agree`]ing), as one
-/// recording: the ISRC and the MBID that stands for them ([`primary`]) as keys, the other ISRCs
-/// they carry (up to [`MAX_ISRC_KEYS`]), the union of their facts (every MBID among them, the
-/// first one's original album), and the union of their current links on music services at
-/// `level`, each keyed by the recording that stands for them. Nothing when one is unknown.
+/// What MusicBrainz says about duplicate recordings of one ISRC (`members`, which `standing`
+/// stands for, [`standing`]), as one recording: the ISRC and the standing MBID as keys, the
+/// other ISRCs they carry (up to [`MAX_ISRC_KEYS`]), the union of their facts (the standing MBID
+/// as `mbid`, the others as `mbid_was`, so `key=mbid:` finds the card by any of them; one
+/// `duration`; the standing recording's original album), and the union of their current links on
+/// music services at `level`, each keyed by the standing recording. Nothing when one is unknown.
 pub(crate) async fn duplicates_found(
     cx: &Context,
     base: &str,
-    mbids: &[String],
+    standing: &str,
+    members: &[String],
     isrc: &str,
     level: Level,
 ) -> Result<Found> {
     let mut entities: Vec<musicbrainz::Entity> = vec![];
-    for id in mbids {
+    for id in std::iter::once(standing).chain(members.iter().map(String::as_str)) {
         let Some(entity) = musicbrainz::entity(&cx.egress, base, MbKind::Recording, id).await?
         else {
             return Ok(Found::default());
@@ -289,9 +404,7 @@ pub(crate) async fn duplicates_found(
     };
     let mut found = Found::default();
     found.keys.push(key(format!("isrc:{isrc}")));
-    let all: Vec<String> = entities.iter().map(|e| e.mbid.clone()).collect();
-    let stands = primary(&all).cloned().unwrap_or_else(|| first.mbid.clone());
-    let named = hubs::key::mb(MbKind::Recording, &stands);
+    let named = hubs::key::mb(MbKind::Recording, standing);
     found.keys.extend(named.clone().map(key));
     let mut others: Vec<&str> = entities
         .iter()
@@ -306,8 +419,20 @@ pub(crate) async fn duplicates_found(
             .take(MAX_ISRC_KEYS)
             .map(|i| key(format!("isrc:{i}"))),
     );
+    found
+        .facts
+        .push(crate::also_on::Fact::new("mbid", standing));
     for entity in &entities {
         for fact in facts(entity) {
+            let fact = match fact.name.as_str() {
+                "mbid" if fact.value != standing => {
+                    crate::also_on::Fact::new("mbid_was", &fact.value)
+                }
+                "mbid" => continue,
+                // One length: the standing recording's (the first read), the rest within 3 s.
+                "duration" if found.facts.iter().any(|f| f.name == "duration") => continue,
+                _ => fact,
+            };
             if !found.facts.contains(&fact) {
                 found.facts.push(fact);
             }
@@ -456,10 +581,13 @@ pub(crate) async fn entities_found(
         }
     };
     let entity = &entities[0];
-    // A recording that is one of several agreeing duplicates of an ISRC is keyed by the one
-    // that stands for them (`duplicate_primary`); its own MBID stays a fact.
+    // A recording that is one of several agreeing duplicates is keyed by the one that stands
+    // for them (`standing`); its own MBID becomes `mbid_was`. An unsettled set keeps its own.
     let stands = match (kind, entities.len()) {
-        (MbKind::Recording, 1) => duplicate_primary(&cx.egress, base, entity).await?,
+        (MbKind::Recording, 1) => match standing_of(&cx.egress, base, entity.clone()).await? {
+            Standing::Of { standing, .. } if standing != entity.mbid => Some(standing),
+            _ => None,
+        },
         _ => None,
     };
     let own = stands.as_deref().unwrap_or(&entity.mbid);
@@ -495,6 +623,16 @@ pub(crate) async fn entities_found(
     }
     // What every entity has (one entity: all of it).
     found.facts = facts(entity);
+    if let Some(standing) = &stands {
+        for fact in &mut found.facts {
+            if fact.name == "mbid" {
+                fact.name = "mbid_was".into();
+            }
+        }
+        found
+            .facts
+            .insert(0, crate::also_on::Fact::new("mbid", standing));
+    }
     // A recording's original album ranks the card's links of one service (the track there).
     if kind == MbKind::Recording {
         if let Some(album) = musicbrainz::original_album(&cx.egress, base, &entity.mbid).await? {
@@ -1003,6 +1141,8 @@ mod tests {
                 } else {
                     vec![artist.into()]
                 },
+                disambiguation: None,
+                video: false,
                 length_ms: length,
                 artist_type: None,
             };
@@ -1058,6 +1198,18 @@ mod tests {
                 Some(291_000)
             ),
         ]));
+        // A live recording keeps its bare title and says so in its disambiguation; a video is
+        // not the audio recording.
+        let live = musicbrainz::Entity {
+            disambiguation: Some("live, 2008-06-01: Wembley".into()),
+            ..entity(b, "Walking Disaster", a, Some(286_400))
+        };
+        assert!(!agree(&[one.clone(), live]));
+        let video = musicbrainz::Entity {
+            video: true,
+            ..entity(b, "Walking Disaster", a, Some(286_400))
+        };
+        assert!(!agree(&[one.clone(), video]));
         // No artists or no title: never duplicates; one recording agrees with itself.
         assert!(!agree(&[
             one.clone(),

@@ -350,6 +350,26 @@ pub fn also_on_service_error(service: &'static str, class: &'static str) {
         .with_label_values(&[service, class])
         .inc();
 }
+/// Also-on runs that would have keyed a second MusicBrainz recording on one resource (a group
+/// holds one), by source: the run's recording key was dropped and the stored one kept. Every
+/// producer keys the recording that stands for a set of duplicates, so this counts a producer
+/// that did not. No resource or URL is a label.
+static ALSO_ON_RECORDING_KEY_CONFLICTS: std::sync::LazyLock<IntCounterVec> =
+    std::sync::LazyLock::new(|| {
+        IntCounterVec::new(
+            Opts::new(
+                "pinakes_also_on_recording_key_conflicts_total",
+                "Also-on runs whose second recording MBID for one resource was dropped, by source",
+            ),
+            &["source"],
+        )
+        .expect("static metric")
+    });
+pub fn also_on_recording_key_conflict(source: &str) {
+    ALSO_ON_RECORDING_KEY_CONFLICTS
+        .with_label_values(&[source])
+        .inc();
+}
 /// Resolutions put off without a charged attempt, by reason (the row's `last_error` class): a
 /// missing answer waiting for the fetch that confirms it (`missing_unconfirmed`).
 static RESOLUTION_DEFERRED: std::sync::LazyLock<IntCounterVec> = std::sync::LazyLock::new(|| {

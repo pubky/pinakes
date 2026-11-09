@@ -93,8 +93,8 @@ impl MusicBrainzSource {
             if let Some(isrc) = own_isrc(subject) {
                 match isrc_match(cx, &isrc, page_duration(subject)).await? {
                     IsrcMatch::One(mbid) => ids = vec![mbid],
-                    IsrcMatch::Duplicates(mbids) => {
-                        return duplicates_found(cx, base, &mbids, &isrc, level).await;
+                    IsrcMatch::Duplicates { standing, members } => {
+                        return duplicates_found(cx, base, &standing, &members, &isrc, level).await;
                     }
                     IsrcMatch::Picked(mbid) => {
                         ids = vec![mbid];

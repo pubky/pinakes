@@ -240,6 +240,11 @@ pub mod musicbrainz {
         pub artist: Option<String>,
         /// The MBIDs of the artists in the credit, in its order (each once).
         pub artist_ids: Vec<String>,
+        /// Recordings: the disambiguation comment ("live, 2008-06-01: Wembley"), when there is
+        /// one; MusicBrainz keeps a live recording's title bare and says so here.
+        pub disambiguation: Option<String>,
+        /// Recordings: whether it is a video.
+        pub video: bool,
         /// Recordings: the length in milliseconds.
         pub length_ms: Option<u64>,
         /// Artists: `Person`, `Group`, `Orchestra`, `Choir`, `Character` or `Other`.
@@ -338,6 +343,12 @@ pub mod musicbrainz {
             release_group: v["release-group"]["id"].as_str().and_then(mbid),
             artist: credit(v),
             artist_ids: artist_ids(v),
+            disambiguation: v["disambiguation"]
+                .as_str()
+                .map(str::trim)
+                .filter(|d| !d.is_empty())
+                .map(str::to_owned),
+            video: v["video"].as_bool().unwrap_or(false),
             length_ms: v["length"]
                 .as_u64()
                 .filter(|ms| (1..=86_400_000).contains(ms)),

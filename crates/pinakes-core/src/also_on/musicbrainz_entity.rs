@@ -35,14 +35,18 @@ impl Source for MusicBrainzEntitySource {
     }
 }
 impl MusicBrainzEntitySource {
-    /// What the page's URL alone proves: the entity's MBID, or the ISRC (with its fact).
+    /// What the page's URL alone proves: the entity's MBID, or the ISRC (with its fact). Not a
+    /// recording's: it may be one of several duplicates another recording stands for, and only
+    /// the read (`standing`) can tell, so an unread recording page keys nothing.
     fn own_keys(uri: &str) -> Found {
         let mut found = Found::default();
         if let Some((kind, mbid, _)) = musicbrainz::entity_link(uri) {
-            found.keys.extend(hubs::key::mb(kind, &mbid).map(|key| Key {
-                key,
-                via: "musicbrainz".into(),
-            }));
+            if kind != MbKind::Recording {
+                found.keys.extend(hubs::key::mb(kind, &mbid).map(|key| Key {
+                    key,
+                    via: "musicbrainz".into(),
+                }));
+            }
         } else if let Some((isrc, _)) = musicbrainz::isrc_link(uri) {
             found.keys.push(Key {
                 key: format!("isrc:{isrc}"),
@@ -107,18 +111,26 @@ impl MusicBrainzEntitySource {
                 found.keys.insert(0, own);
                 found
             }
-            // Duplicates that agree are one recording; recordings that disagree name none.
+            // Duplicates that agree are one recording, keyed by the one that stands for them;
+            // recordings that disagree, or a set that cannot be settled, name none.
             Some(recordings) if recordings.len() > 1 => {
-                match agreeing(&cx.egress, base, &recordings).await? {
-                    Some(entities) => {
-                        let mbids: Vec<String> = entities.iter().map(|e| e.mbid.clone()).collect();
+                let settled = match agreeing(&cx.egress, base, &recordings).await? {
+                    Some(entities) => match entities.first() {
+                        Some(first) => standing(&cx.egress, base, &first.mbid).await?,
+                        None => Standing::Unclear,
+                    },
+                    None => Standing::Unclear,
+                };
+                match settled {
+                    Standing::Of { standing, members } => {
                         let mut found =
-                            duplicates_found(cx, base, &mbids, &isrc, Level::Track).await?;
+                            duplicates_found(cx, base, &standing, &members, &isrc, Level::Track)
+                                .await?;
                         found.keys.retain(|k| k.key != own.key);
                         found.keys.insert(0, own);
                         found
                     }
-                    None => Found::default(),
+                    Standing::Alone | Standing::Unclear => Found::default(),
                 }
             }
             // An ISRC MusicBrainz doesn't know is still its own key.

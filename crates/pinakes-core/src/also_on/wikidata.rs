@@ -1,7 +1,7 @@
 //! The `wikidata` also-on source.
 use crate::{
     also_on::{Context, Found, Source, Subject},
-    hubs::wikidata,
+    hubs::{self, wikidata},
     music::{self, discogs},
 };
 use anyhow::Result;
@@ -57,7 +57,21 @@ impl WikidataSource {
         if property == DISCOGS_RELEASE && ["P1954", "P436"].iter().any(|p| !item.id(p).is_empty()) {
             return Ok(Found::default());
         }
-        Ok(found(&item, level, &cx.config.also_on.apple_storefront))
+        let mut found = found(&item, level, &cx.config.also_on.apple_storefront);
+        // A recording item's MBID is keyed as the recording that stands for its duplicates
+        // (`standing`), as every other path keys a recording.
+        let base = cx.config.also_on.musicbrainz_base();
+        for key in &mut found.keys {
+            let Some(mbid) = key.key.strip_prefix("mb:recording:").map(str::to_owned) else {
+                continue;
+            };
+            if let Standing::Of { standing, .. } = standing(&cx.egress, base, &mbid).await? {
+                if let Some(stands) = hubs::key::mb(crate::hubs::MbKind::Recording, &standing) {
+                    key.key = stands;
+                }
+            }
+        }
+        Ok(found)
     }
 }
 
