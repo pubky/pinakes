@@ -14,6 +14,7 @@ use pinakes_core::{
 };
 use serde_json::{json, Value};
 use sqlx::PgPool;
+mod common;
 
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn paginated_nostr_and_inconclusive_queue_retry(pool: PgPool) {
@@ -491,8 +492,11 @@ async fn only_parse_errors_fall_back_and_plain_wikipedia_skips_fetch(pool: PgPoo
             failure,
             calls: Default::default(),
         });
-        let egress =
-            Egress::with_backends(Default::default(), Arc::new(AdapterDns), transport.clone());
+        let egress = Egress::with_backends(
+            common::unpaced_egress_config(),
+            Arc::new(AdapterDns),
+            transport.clone(),
+        );
         let r = platform(
             &pool,
             EventConfig {

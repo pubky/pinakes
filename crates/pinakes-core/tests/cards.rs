@@ -16,6 +16,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use url::Url;
+mod common;
 
 struct PublicDns;
 #[async_trait]
@@ -419,7 +420,11 @@ async fn a_redirect_to_a_link_that_carries_a_credential_gets_no_oembed() {
         cards: None,
         events: None,
         config: Default::default(),
-        egress: Egress::with_backends(Default::default(), Arc::new(PublicDns), seen.clone()),
+        egress: Egress::with_backends(
+            common::unpaced_egress_config(),
+            Arc::new(PublicDns),
+            seen.clone(),
+        ),
     };
     assert!(web.resolve("https://media.example/page").await.is_ok());
     let requests = seen.0.lock().unwrap();
@@ -436,7 +441,11 @@ fn resolver(kind: &'static str, cfg: Config, transport: Arc<TransportMock>) -> C
     CardResolver::new(
         kind,
         Arc::new(cfg),
-        Egress::with_backends(Default::default(), Arc::new(PublicDns), transport),
+        Egress::with_backends(
+            common::unpaced_egress_config(),
+            Arc::new(PublicDns),
+            transport,
+        ),
     )
 }
 #[tokio::test]
@@ -1092,7 +1101,11 @@ async fn oembed_first_keeps_rich_page_types_and_ap_denial_falls_back() {
             cards: None,
             events: None,
             config: Default::default(),
-            egress: Egress::with_backends(Default::default(), Arc::new(PublicDns), Arc::new(Rich)),
+            egress: Egress::with_backends(
+                common::unpaced_egress_config(),
+                Arc::new(PublicDns),
+                Arc::new(Rich),
+            ),
         },
     };
     let d = make("media")
@@ -1195,8 +1208,13 @@ impl Transport for Landing {
 async fn a_card_read_at_a_credential_resolves_nothing_back_to_it() {
     let mut cfg = Config::default();
     cfg.cards.activitypub.enabled = true;
-    let egress =
-        || Egress::with_backends(Default::default(), Arc::new(PublicDns), Arc::new(Landing));
+    let egress = || {
+        Egress::with_backends(
+            common::unpaced_egress_config(),
+            Arc::new(PublicDns),
+            Arc::new(Landing),
+        )
+    };
     let web = WebResolver {
         oembed_policy: cards::OembedPolicy::Always,
         cards: Some(Arc::new(cfg.cards.clone())),
@@ -1477,7 +1495,11 @@ async fn advertised_oembed_uses_policy_and_origin_checks() {
             cards: None,
             events: None,
             config: Default::default(),
-            egress: Egress::with_backends(Default::default(), Arc::new(PublicDns), t.clone()),
+            egress: Egress::with_backends(
+                common::unpaced_egress_config(),
+                Arc::new(PublicDns),
+                t.clone(),
+            ),
         };
         let metrics = pinakes_core::telemetry::Metrics::new().unwrap();
         let (doc, _) = pinakes_core::telemetry::observe(
@@ -1920,7 +1942,11 @@ async fn json_ld_names_the_object_unless_its_provider_names_the_link_exactly() {
             oembed_policy: Default::default(),
             cards: None,
             events: None,
-            egress: Egress::with_backends(Default::default(), Arc::new(PublicDns), Arc::new(Media)),
+            egress: Egress::with_backends(
+                common::unpaced_egress_config(),
+                Arc::new(PublicDns),
+                Arc::new(Media),
+            ),
             config: Default::default(),
         },
     };

@@ -3,7 +3,7 @@
 //! tests are its own file (`also_on_books.rs`, `also_on_films.rs`, `also_on_podcasts.rs`).
 use pinakes_core::{
     also_on::{Context, Found, Subject},
-    config::{Config, EgressConfig},
+    config::Config,
     model::ResourceMeta,
     resolver::egress::{Dns, Egress, FetchOptions, Fetched, Transport},
 };
@@ -273,7 +273,11 @@ impl Transport for Recorded {
 
 pub fn cx(transport: Arc<Recorded>, config: Config) -> Context {
     Context {
-        egress: Egress::with_backends(EgressConfig::default(), Arc::new(PublicDns), transport),
+        egress: Egress::with_backends(
+            super::unpaced_egress_config(),
+            Arc::new(PublicDns),
+            transport,
+        ),
         config: Arc::new(config),
     }
 }

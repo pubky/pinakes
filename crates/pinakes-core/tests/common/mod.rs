@@ -313,6 +313,29 @@ pub async fn drain_groups(pool: &sqlx::PgPool, cfg: &pinakes_core::groups::Group
         tx.commit().await.unwrap();
     }
 }
+/// An egress configuration for a mocked transport: no pacing between requests to one host, the
+/// hosts with a published rate included (a `host_rates` entry wins over the published rate), so
+/// recorded answers come back at once. The pacing itself is proven in `egress::tests` on a paused
+/// clock.
+pub fn unpaced_egress_config() -> pinakes_core::config::EgressConfig {
+    let mut cfg = pinakes_core::config::EgressConfig {
+        host_requests_per_second: 1000.0,
+        ..Default::default()
+    };
+    for (host, _) in pinakes_core::resolver::egress::PUBLISHED_RATES {
+        if !host.starts_with("*.") {
+            cfg.host_rates.insert((*host).to_owned(), 1000.0);
+        }
+    }
+    // The `*.wikipedia.org` rule: the languages the fixtures hold.
+    for language in [
+        "en", "de", "fr", "it", "pt", "ru", "zh", "fa", "es", "ja", "nl", "pl", "sv",
+    ] {
+        cfg.host_rates
+            .insert(format!("{language}.wikipedia.org"), 1000.0);
+    }
+    cfg
+}
 /// An egress that never reaches the network: every host resolves to a fixed public address, so
 /// the egress' own checks (policy, private addresses) run as they would, and every request fails.
 /// For tests whose links are refused, or answered from the store, before anything is fetched.
