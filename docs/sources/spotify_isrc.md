@@ -12,7 +12,8 @@ tracks that carry exactly that ISRC, from the Web API's search with its `isrc:` 
 then the hubs', two at most; only an ISRC that is a key (a shared one is a fact, and Spotify would
 answer with any of its recordings). Several answers are the recording on several releases:
 [`editions`](editions.md) places them and a card shows one per service. No keys and no facts.
-Spotify's own tracks are not asked. It runs after every source that keys a track's ISRC.
+Spotify's own tracks are not asked. It runs after every source that keys a track's ISRC
+(`deezer` among them).
 
 ## Why it is off by default
 

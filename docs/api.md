@@ -1170,7 +1170,7 @@ anything. Sources read a resource after it is saved and again when their results
 source's lifetime: 30 days, `btcmap` 7); a source's links and keys live twice that, so one
 failed refresh keeps them, and they go when the source stops returning them. The sources run in this order, each
 seeing the keys the ones before it found: `service`, `tidal`, `spotify`,
-`musicbrainz`, `musicbrainz_entity`, `performers`, `wikidata`, `spotify_isrc`, `discogs`, `deezer`, `itunes`,
+`musicbrainz`, `musicbrainz_entity`, `performers`, `wikidata`, `discogs`, `deezer`, `spotify_isrc`, `itunes`,
 `wikipedia`, `wikidata_item`, `books`, `films`, `podcasts`, `product_keys`, `open_food_facts`,
 `stack_exchange`, `titles`, `federal_register`, `osm_wikidata`, `wikidata_osm`,
 `wikidata_places`, `btcmap`, `unpaywall`, `ncbi`, `datacite`, `huggingface`, `crates`, `npm`,
@@ -1193,7 +1193,8 @@ album or artist on a music service, [its spellings](#aliases)) is looked up exac
 or name. A key comes from a hub (MusicBrainz, Wikidata) or from a known music service's own record
 of its own object; another host's claim (its JSON-LD `isrcCode`, `sameAs`, a canonical link) is a
 fact at most. An ISRC MusicBrainz gives to several recordings that agree (the same artists, the
-same title once its identity-keeping tags go, lengths within 3 s) names one recording not yet
+same title once its identity-keeping tags go, the same disambiguation, all audio or all video,
+lengths within 3 s, the whole set alike) names one recording not yet
 merged: the ISRC and the MBID that stands for them (the smallest) are the track's keys, the
 other MBIDs facts; recordings that disagree (a live
 version, a remix, an edit, another artist) leave the duration to pick one or the ISRC a fact

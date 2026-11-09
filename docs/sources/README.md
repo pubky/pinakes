@@ -144,18 +144,26 @@ registered source), and in a debug build a source records no other form.
 MusicBrainz gives one ISRC to several recordings at times. When those recordings agree, they
 are one recording MusicBrainz has not merged yet: the same artists (their MBIDs), the same title
 once the tags that keep a recording's identity are dropped (a remaster or a version tag goes; a
-live, remix or edit tag tells recordings apart), and every two known lengths within 3 s. Then the
+live, remix or edit tag tells recordings apart), the same disambiguation (MusicBrainz keeps a
+live recording's title bare and says "live, …" there), all audio or all video, and every two
+known lengths within 3 s. Then the
 ISRC is the track's key and so is the MBID of the one that stands for them all (the smallest
 MBID, `mb:recording:…`, `via` the source; a group holds one recording MBID, so the others are
 facts), a link MusicBrainz relates to any of them is keyed by that one too, and `musicbrainz`
-takes the union of their links and facts. The set is the whole connected set a recording's ISRCs
-reach (a duplicate that shares one ISRC with one recording and another with a third makes all
-three one), read through MusicBrainz's own records of the exact ISRCs (at most eight recordings
-and sixteen ISRC lookups; past that, or when MusicBrainz cannot serve a member, today's rule
-applies and no second recording is keyed); every path that keys a recording, a URL relation,
-Wikidata's item, an ISRC page, goes through it, and a run that would still key a second
-recording on one resource keeps the stored one and counts the drop
-(`pinakes_also_on_recording_key_conflicts_total`). A MusicBrainz merge, or a new duplicate with a
+takes the union of their links and facts; another ISRC they carry is a key only when it names
+the same recording on its own (one shared with a recording that disagrees stays a fact). The set
+is the whole connected set a recording's ISRCs reach (a duplicate that shares one ISRC with one
+recording and another with a third makes all three one), and it must agree as a whole (lengths
+drifting 3 s at each step of a chain are not one recording), read through MusicBrainz's own
+records of the exact ISRCs: at most 8 recordings, 16 ISRC lookups and 32 recording reads per
+walk, all cached; past that, when MusicBrainz cannot serve a member, or when the whole set does
+not agree, today's rule applies. Every path that keys a recording goes through the one function
+(`music_sources::recording_key`): a service's own ISRC and the duration's pick, a URL relation, a
+recording or ISRC page, Wikidata's recording item (whose replaced MBID stays as `mbid_was`); only a
+recording page MusicBrainz answers over its cap keys its own MBID, as its link alone proves.
+Sources that still key different recordings for one resource truly disagree: both keys stay and
+the resource joins no recording group, as for any conflicting key; such runs are counted
+(`pinakes_also_on_recording_key_conflicts_total`) and nothing is dropped. A MusicBrainz merge, or a new duplicate with a
 smaller MBID, changes the recording that stands for a set: rows heal at each resource's next run
 (within the sources' 30 days; `reextract also-on` sooner). When they disagree, the ISRC alone names none
 of them and the track's duration decides: the one recording whose length is within 3 s of it,

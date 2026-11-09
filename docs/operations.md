@@ -736,7 +736,7 @@ upgrade that added it, `reextract also-on` asks for every stored track at once. 
 check of the music sources (an ISRC MusicBrainz gives to several recordings) costs MusicBrainz
 reads on a common path: for a recording MusicBrainz relates a link to, one ISRC lookup per ISRC
 of the recording and, where several recordings share one, each of their records (at most 8
-recordings and 16 ISRC lookups per set), all cached; after an upgrade, `reextract all` is
+recordings, 16 ISRC lookups and 32 recording reads per walk), all cached; after an upgrade, `reextract all` is
 several times the usual MusicBrainz traffic at its 1 request/s for a while.
 
 The also-on worker runs every enabled source that applies to a resource ([the API](api.md#also-on))
