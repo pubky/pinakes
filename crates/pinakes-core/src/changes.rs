@@ -217,15 +217,180 @@ async fn snapshot(
 }
 /// An occurrence key (`["<uid>","<recurrence id>"]`, as change lines, fetch state and group
 /// units hold it) with its UID as it is stored (`event::stored_uid`): the key as written when
-/// its UID holds no link that carries a credential.
+/// its UID holds no link that carries a credential. The recurrence id is kept as written,
+/// whatever its JSON.
 pub fn stored_key(key: &str) -> String {
-    match serde_json::from_str::<(String, String)>(key) {
+    match serde_json::from_str::<(String, Value)>(key) {
         Ok((uid, rid)) if crate::capability::contains_credential(&uid) => {
             serde_json::to_string(&(crate::event::stored_uid(uid), rid))
                 .unwrap_or_else(|_| key.to_owned())
         }
         _ => key.to_owned(),
     }
+}
+/// An occurrence key already under its stand-in (`uid:` and a SHA-256), as a PostgreSQL regular
+/// expression: such a key never holds a credential, so a scan for raw ones leaves it out.
+pub(crate) const STAND_IN_KEY: &str = r#"^\["uid:[0-9a-f]{64}""#;
+/// A change line's documents as [`repair_credentials`] reads them: sequence number, resource,
+/// `before`, `after`, and the resource's own link (empty when the resource is gone).
+type HistoryRow = (i64, String, Option<Value>, Option<Value>, String);
+/// What [`repair_credentials`] changed.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct CredentialRepair {
+    pub derived_links: u64,
+    pub change_keys: u64,
+    pub unit_keys: u64,
+    pub history_rows: u64,
+}
+/// Rows an earlier build stored before the credential rule reached them, brought under the rule
+/// itself (never a pattern): a derived link `also_on::refused_link` refuses goes; a change
+/// line's or group unit's occurrence key (and the UID in the unit's occurrence reference) takes
+/// its stored key ([`stored_key`]); a change line's documents are read through
+/// `capability::strip` with the resource's own link, as `append` writes them. Only a row that
+/// changes is written, so a second run changes nothing. Run by `pinakesd reextract`, with the
+/// daemon stopped or beside it: each resource's rows under `changes::save`'s locks (the writers,
+/// then the resource), one resource per transaction. The counts of what changed, never a value.
+pub async fn repair_credentials(pool: &PgPool) -> Result<CredentialRepair> {
+    let mut done = CredentialRepair::default();
+    // Derived links, in batches by their key.
+    let (mut last_resource, mut last_link) = (String::new(), String::new());
+    loop {
+        let rows: Vec<(String, String, String)> = sqlx::query_as("SELECT resource_id,link_id,uri FROM derived_link WHERE (resource_id,link_id)>($1,$2) ORDER BY resource_id,link_id LIMIT 1000")
+            .bind(&last_resource)
+            .bind(&last_link)
+            .fetch_all(pool)
+            .await?;
+        let Some((resource, link, _)) = rows.last() else {
+            break;
+        };
+        (last_resource, last_link) = (resource.clone(), link.clone());
+        let refused: Vec<&(String, String, String)> = rows
+            .iter()
+            .filter(|(_, _, uri)| crate::also_on::refused_link(uri))
+            .collect();
+        if refused.is_empty() {
+            continue;
+        }
+        let mut tx = pool.begin().await?;
+        crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
+        let mut ids: Vec<&str> = refused.iter().map(|(id, ..)| id.as_str()).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        sqlx::query("SELECT 1 FROM resource WHERE id=ANY($1) ORDER BY id FOR NO KEY UPDATE")
+            .bind(&ids)
+            .execute(&mut *tx)
+            .await?;
+        for (resource, link, uri) in refused {
+            done.derived_links += sqlx::query(
+                "DELETE FROM derived_link WHERE resource_id=$1 AND link_id=$2 AND uri=$3",
+            )
+            .bind(resource)
+            .bind(link)
+            .bind(uri)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        }
+        tx.commit().await?;
+    }
+    // Change lines' keys: each distinct raw key of a resource, under the resource's lock.
+    let keys: Vec<(String, String)> = sqlx::query_as("SELECT DISTINCT resource_id,occurrence_key FROM resource_change WHERE occurrence_key IS NOT NULL AND occurrence_key !~ $1 ORDER BY resource_id,occurrence_key")
+        .bind(STAND_IN_KEY)
+        .fetch_all(pool)
+        .await?;
+    for (resource, key) in keys {
+        let stored = stored_key(&key);
+        if stored == key {
+            continue;
+        }
+        let mut tx = pool.begin().await?;
+        crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
+        sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR UPDATE")
+            .bind(&resource)
+            .execute(&mut *tx)
+            .await?;
+        done.change_keys += sqlx::query(
+            "UPDATE resource_change SET occurrence_key=$3 WHERE resource_id=$1 AND occurrence_key=$2",
+        )
+        .bind(&resource)
+        .bind(&key)
+        .bind(&stored)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        tx.commit().await?;
+    }
+    // Group units' keys, and the UID in each unit's occurrence reference.
+    let units: Vec<(String, String, String)> = sqlx::query_as("SELECT unit_id,resource_id,occurrence_key FROM group_unit WHERE occurrence_key<>'' AND occurrence_key !~ $1 ORDER BY resource_id,unit_id")
+        .bind(STAND_IN_KEY)
+        .fetch_all(pool)
+        .await?;
+    for (unit, resource, key) in units {
+        let stored = stored_key(&key);
+        if stored == key {
+            continue;
+        }
+        let uid = serde_json::from_str::<(String, Value)>(&stored)
+            .map(|(uid, _)| uid)
+            .unwrap_or_default();
+        let mut tx = pool.begin().await?;
+        crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
+        sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR UPDATE")
+            .bind(&resource)
+            .execute(&mut *tx)
+            .await?;
+        done.unit_keys += sqlx::query("UPDATE group_unit SET occurrence_key=$3,occurrence=CASE WHEN occurrence ? 'uid' THEN jsonb_set(occurrence,'{uid}',to_jsonb($4::text)) ELSE occurrence END WHERE unit_id=$1 AND occurrence_key=$2")
+            .bind(&unit)
+            .bind(&key)
+            .bind(&stored)
+            .bind(&uid)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        tx.commit().await?;
+    }
+    // Change lines' documents, in batches by sequence number.
+    let mut last_seq = 0i64;
+    loop {
+        let rows: Vec<HistoryRow> = sqlx::query_as("SELECT c.seq,c.resource_id,c.before,c.after,coalesce(r.uri,'') FROM resource_change c LEFT JOIN resource r ON r.id=c.resource_id WHERE c.seq>$1 AND (c.before IS NOT NULL OR c.after IS NOT NULL) ORDER BY c.seq LIMIT 1000")
+            .bind(last_seq)
+            .fetch_all(pool)
+            .await?;
+        let Some((end, ..)) = rows.last() else {
+            break;
+        };
+        last_seq = *end;
+        for (seq, resource, before, after, own) in rows {
+            let stripped = |value: Option<Value>| {
+                value.map(|mut value| {
+                    let changed = crate::capability::strip::<Value>(&mut value, &own);
+                    (value, changed)
+                })
+            };
+            let (before, after) = (stripped(before), stripped(after));
+            if !before.as_ref().is_some_and(|(_, changed)| *changed)
+                && !after.as_ref().is_some_and(|(_, changed)| *changed)
+            {
+                continue;
+            }
+            let mut tx = pool.begin().await?;
+            crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
+            sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR UPDATE")
+                .bind(&resource)
+                .execute(&mut *tx)
+                .await?;
+            done.history_rows +=
+                sqlx::query("UPDATE resource_change SET before=$2,after=$3 WHERE seq=$1")
+                    .bind(seq)
+                    .bind(before.map(|(value, _)| value))
+                    .bind(after.map(|(value, _)| value))
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected();
+            tx.commit().await?;
+        }
+    }
+    Ok(done)
 }
 pub(crate) async fn append(
     tx: &mut Transaction<'_, Postgres>,
