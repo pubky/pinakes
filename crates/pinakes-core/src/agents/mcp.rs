@@ -284,8 +284,9 @@ impl Tools {
         if uris.iter().any(|u| u.is_empty() || u.len() > 2048) {
             return Err(Failure::bad("`uris` are links of at most 2048 bytes"));
         }
-        // A link that carries a credential is never sent to the Nexus. A card's own link and its
-        // refs, asked below, came from the Nexus.
+        // A link that carries a credential is never sent to the Nexus: a call naming one is
+        // refused, and a card's own link or ref that is one (a link someone's post made, read by
+        // its URI) is left out of what is asked below.
         if uris.iter().any(|u| crate::capability::is_capability(u)) {
             return Err(Failure::bad(
                 "`uris` holds a link that carries a credential; it is never sent on",
@@ -344,6 +345,10 @@ impl Tools {
                             asked.push(r.to_owned());
                         }
                     }
+                }
+                asked.retain(|u| !crate::capability::is_capability(u));
+                if asked.is_empty() {
+                    continue;
                 }
                 asks.push(Ask {
                     id: Some(id.clone()),
