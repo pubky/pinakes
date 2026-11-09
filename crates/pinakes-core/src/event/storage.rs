@@ -86,10 +86,11 @@ fn page_url(doc: &ResourceMeta, id: &str, canonical_id: &str) -> Option<String> 
 }
 /// Occurrences an earlier build stored under a UID that [`super::stored_uid`] now replaces (one
 /// that holds a link carrying a credential) take their stored key in place, and so do the feed's
-/// held and missing keys, before anything is compared: the occurrence goes on under its new key,
-/// never lost and cancelled under the old one. Where a row under the new key exists already (the
-/// same occurrence, stored again), the old row goes. Locks are taken in `changes::save`'s order:
-/// the writers, the resource, its fetch state, then its occurrences.
+/// held and missing keys, its change lines' and its group units' occurrence keys, before anything
+/// is compared: the occurrence goes on under its new key, never lost and cancelled under the old
+/// one. Where a row under the new key exists already (the same occurrence, stored again), the old
+/// row goes. Locks are taken in `changes::save`'s order: the writers, the resource, its fetch
+/// state, then its occurrences.
 async fn rekey(pool: &PgPool, id: &str) -> Result<()> {
     let uids: Vec<String> =
         sqlx::query_scalar("SELECT DISTINCT uid FROM occurrence WHERE resource_id=$1")
@@ -101,8 +102,9 @@ async fn rekey(pool: &PgPool, id: &str) -> Result<()> {
         .filter(|uid| crate::capability::contains_credential(uid))
         .map(|uid| (uid.clone(), super::stored_uid(uid)))
         .collect();
+    // A key is read as `changes::stored_key` reads it: its recurrence id as any JSON.
     let moves = |key: &str| {
-        serde_json::from_str::<(String, String)>(key)
+        serde_json::from_str::<(String, Value)>(key)
             .is_ok_and(|(uid, _)| crate::capability::contains_credential(&uid))
     };
     let state = sqlx::query("SELECT held_keys,missing_keys FROM event_fetch WHERE resource_id=$1")
@@ -117,7 +119,33 @@ async fn rekey(pool: &PgPool, id: &str) -> Result<()> {
                 .as_object()
                 .is_some_and(|missing| missing.keys().any(|k| moves(k)))
     });
-    if renamed.is_empty() && !keys {
+    // The keys of the resource's change lines and group units that still name a raw UID: each
+    // distinct key is read whole and `capability::contains_credential` decides (a pattern on
+    // the stored text would miss a link start split by a tab or a newline, stored escaped); only
+    // a key already under its stand-in is left out.
+    let change_keys: Vec<String> = sqlx::query_scalar("SELECT DISTINCT occurrence_key FROM resource_change WHERE resource_id=$1 AND occurrence_key IS NOT NULL AND occurrence_key !~ $2")
+        .bind(id)
+        .bind(crate::changes::STAND_IN_KEY)
+        .fetch_all(pool)
+        .await?;
+    let unit_keys: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT occurrence_key FROM group_unit WHERE resource_id=$1 AND occurrence_key<>'' AND occurrence_key !~ $2",
+    )
+    .bind(id)
+    .bind(crate::changes::STAND_IN_KEY)
+    .fetch_all(pool)
+    .await?;
+    let change_keys: Vec<&str> = change_keys
+        .iter()
+        .map(String::as_str)
+        .filter(|k| moves(k))
+        .collect();
+    let unit_keys: Vec<&str> = unit_keys
+        .iter()
+        .map(String::as_str)
+        .filter(|k| moves(k))
+        .collect();
+    if renamed.is_empty() && !keys && change_keys.is_empty() && unit_keys.is_empty() {
         return Ok(());
     }
     let mut tx = pool.begin().await?;
@@ -150,12 +178,31 @@ async fn rekey(pool: &PgPool, id: &str) -> Result<()> {
             .execute(&mut *tx)
             .await?;
     }
-    let key = |key: String| match serde_json::from_str::<(String, String)>(&key) {
-        Ok((uid, rid)) if crate::capability::contains_credential(&uid) => {
-            serde_json::to_string(&(super::stored_uid(uid), rid))
-        }
-        _ => Ok(key),
-    };
+    let key = |key: String| crate::changes::stored_key(&key);
+    for old in change_keys {
+        sqlx::query(
+            "UPDATE resource_change SET occurrence_key=$3 WHERE resource_id=$1 AND occurrence_key=$2",
+        )
+        .bind(id)
+        .bind(old)
+        .bind(crate::changes::stored_key(old))
+        .execute(&mut *tx)
+        .await?;
+    }
+    for old in unit_keys {
+        // The unit's occurrence reference names the UID too.
+        let new = crate::changes::stored_key(old);
+        let uid = serde_json::from_str::<(String, Value)>(&new)
+            .map(|(uid, _)| uid)
+            .unwrap_or_default();
+        sqlx::query("UPDATE group_unit SET occurrence_key=$3,occurrence=CASE WHEN occurrence ? 'uid' THEN jsonb_set(occurrence,'{uid}',to_jsonb($4::text)) ELSE occurrence END WHERE resource_id=$1 AND occurrence_key=$2")
+            .bind(id)
+            .bind(old)
+            .bind(&new)
+            .bind(&uid)
+            .execute(&mut *tx)
+            .await?;
+    }
     if let Some(row) = state {
         // In their order, a key held under both spellings once.
         let held = match row.get::<Option<Vec<String>>, _>("held_keys") {
@@ -163,7 +210,7 @@ async fn rekey(pool: &PgPool, id: &str) -> Result<()> {
                 let mut seen = BTreeSet::new();
                 let mut held = vec![];
                 for k in keys {
-                    let k = key(k)?;
+                    let k = key(k);
                     if seen.insert(k.clone()) {
                         held.push(k);
                     }
@@ -175,7 +222,7 @@ async fn rekey(pool: &PgPool, id: &str) -> Result<()> {
         // A key held under both spellings keeps its higher count.
         let mut missing = BTreeMap::<String, u32>::new();
         for (k, n) in serde_json::from_value::<BTreeMap<String, u32>>(row.get("missing_keys"))? {
-            let count = missing.entry(key(k)?).or_default();
+            let count = missing.entry(key(k)).or_default();
             *count = (*count).max(n);
         }
         sqlx::query("UPDATE event_fetch SET held_keys=$2,missing_keys=$3 WHERE resource_id=$1")

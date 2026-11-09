@@ -191,7 +191,12 @@ before the rule: a path an app's profile leaves out, or any path in a namespace 
 fetches (the old Mapky and Eventky layouts among them, [Pubky apps](pubky-apps.md)). Such an
 object's card becomes the card it gets now (a missing `CreativeWork` with only its link), its
 change lines lose their documents, and it is regrouped. It prints `scrubbed N posts gone or
-opted out` and `scrubbed N objects never fetched`, then the re-queued count.
+opted out` and `scrubbed N objects never fetched`. Then it brings what an earlier build stored
+before the credential rule ([the API](api.md#post-v1resolve-a-card-per-link)) reached it under the rule: a derived link
+that carries a credential goes, a change line's or group unit's occurrence key whose UID is such
+a link takes the UID's stand-in, and a change line's documents lose a spelling of the resource's
+own link that adds a credential; it prints `credential repair: derived_link -N, change keys N,
+unit keys N, history rows N` (counts only), then the re-queued count.
 
 **Dead letters.** To retry one by hand:
 

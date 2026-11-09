@@ -636,9 +636,7 @@ fn checked(
                     !(1..=32).contains(&k.len())
                         || !k.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
                 })
-                // Credentials in a link are refused, not stripped.
-                || url::Url::parse(&link.uri)
-                    .map_or(true, |u| !u.username().is_empty() || u.password().is_some())
+                || refused_link(&link.uri)
             {
                 continue;
             }
@@ -692,6 +690,15 @@ fn checked(
     keep.dedup();
     keep.truncate(CANDIDATES as usize);
     (keys, links, facts, Placed { editions, keep })
+}
+/// Whether a source's link is refused for a credential: one that does not parse or has user
+/// info, or that carries a credential as written or under its root spelling (the rule documents
+/// follow, `capability::names_credential`). Refused, never stripped; the rule a stored link is
+/// held to as well (`changes::repair_credentials`).
+pub fn refused_link(uri: &str) -> bool {
+    url::Url::parse(uri).map_or(true, |u| !u.username().is_empty() || u.password().is_some())
+        || crate::capability::names_credential(uri)
+        || crate::capability::names_credential(&link_root(uri))
 }
 /// The spelling a link is stored under: its root (`alias::root`) when that is a URL.
 fn link_root(uri: &str) -> String {

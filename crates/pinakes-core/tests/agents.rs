@@ -950,3 +950,90 @@ async fn social_never_sends_a_link_that_carries_a_credential_to_the_nexus(pool: 
     assert!(!answer.to_string().contains("SECRET"));
     assert!(asked.lock().unwrap().is_empty());
 }
+
+/// A card's own link or ref that carries a credential (a link someone's post made, read by its
+/// URI, here an alias of the card with references) is left out of what `social` asks the Nexus:
+/// the card is asked by its plain links, and nothing sent names the secret.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn social_asks_the_nexus_by_a_cards_plain_links_only(pool: PgPool) {
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = asked.clone();
+    let app = Router::new().route(
+        "/v0/stream/resources/by_ids",
+        post(move |Json(body): Json<Value>| {
+            let seen = seen.clone();
+            async move {
+                seen.lock().unwrap().push(body.to_string());
+                Json(json!([]))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let nexus_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let root = "https://example.org/concert";
+    let private = "https://example.org/private?token=SECRET";
+    // A calendar provider's share link written as `webcal:` without `//`: no host to a URL
+    // parser, a credential to `names_credential`.
+    let probes: Value =
+        serde_json::from_str(include_str!("fixtures/capability_urls.json")).unwrap();
+    let share = probes["providers"][1]
+        .as_str()
+        .unwrap()
+        .replacen("https://", "webcal:", 1);
+    assert!(share.starts_with("webcal:outlook."), "{share}");
+    let root_id = store::ensure_resource(&pool, root).await.unwrap();
+    let private_id = store::ensure_resource(&pool, private).await.unwrap();
+    let share_id = store::ensure_resource(&pool, &share).await.unwrap();
+    let mut doc = ResourceMeta::new(root, "web", 86400);
+    doc.name = Some("Concert".into());
+    doc.set_type("Event");
+    store::save_document(&pool, &root_id, 0, &doc)
+        .await
+        .unwrap();
+    for alias in [&private_id, &share_id] {
+        sqlx::query(
+            "INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'identifier')",
+        )
+        .bind(alias)
+        .bind(&root_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    for id in [&root_id, &private_id, &share_id] {
+        sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','gig','/pub/app/tags/'||$1,now())")
+            .bind(id)
+            .bind(AUTHOR)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let config = Config {
+        nexus_url,
+        ..Config::default()
+    };
+    let app = api::router(AppState::new(pool, config).unwrap());
+    let (_, _, body) = raw(&app, "GET", &format!("/v1/resources/{root_id}"), &[], None).await;
+    let card: Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        card["refs"].as_array().is_some_and(
+            |refs| refs.iter().any(|r| r == private) && refs.iter().any(|r| *r == share)
+        ),
+        "both credential spellings are refs of the card: {}",
+        card["refs"]
+    );
+    let (error, answer) = call(&app, "social", json!({"ids": [root_id]})).await;
+    assert!(!error, "{answer}");
+    let sent = asked.lock().unwrap().concat();
+    assert!(sent.contains(root), "{sent}");
+    assert!(!sent.contains("SECRET"), "{sent}");
+    assert!(!answer.to_string().contains("SECRET"), "{answer}");
+    // Asked by such a link, the tool refuses before any batch.
+    let before = asked.lock().unwrap().len();
+    let (error, answer) = call(&app, "social", json!({"uris": [share]})).await;
+    assert!(error, "{answer}");
+    assert_eq!(answer["status"], 400);
+    assert!(!answer.to_string().contains("SECRET"), "{answer}");
+    assert_eq!(asked.lock().unwrap().len(), before);
+}

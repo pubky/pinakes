@@ -96,20 +96,35 @@ fn fragment_credential(fragment: &str, credential: &impl Fn(&str) -> bool) -> bo
 }
 
 /// Drops from `value`, a document as it is stored, every URL that carries a credential but `own`,
-/// the link the resource is read by, as written (in any spelling of it only when it carries a
-/// credential itself: another spelling of a public link may add one, in its fragment or user
-/// info): the backstop at each write, whichever path put a URL there. The URL goes, or else the
-/// list entry or object around it when a `T` would not read back without the URL; where a `T`
-/// cannot do without it, it names `own` instead. Whether anything went.
+/// the link the resource is read by, as written. Another spelling of `own` (the same identity:
+/// the case of its host, a default port) is kept only when `own` carries a credential itself and
+/// the spelling adds none to it: no user info and no credential key in its fragment, the two
+/// parts an identity leaves out. Another spelling of a public link may add one, and goes. The
+/// backstop at each write, whichever path put a URL there. The URL goes, or else the list entry
+/// or object around it when a `T` would not read back without the URL; where a `T` cannot do
+/// without it, it names `own` instead. Whether anything went.
 pub fn strip<T: serde::de::DeserializeOwned>(value: &mut serde_json::Value, own: &str) -> bool {
     let own_id = Url::parse(own)
         .is_ok_and(|url| is_capability_url(&url))
         .then(|| crate::model::identity(own).ok().map(|(id, _, _)| id))
         .flatten();
+    let adds_nothing = |s: &str| {
+        Url::parse(s).is_ok_and(|url| {
+            url.username().is_empty()
+                && url.password().is_none()
+                && !url.fragment().is_some_and(|fragment| {
+                    fragment_credential(fragment, &|key: &str| {
+                        CREDENTIAL_KEYS.contains(&key.to_ascii_lowercase().as_str())
+                    })
+                })
+        })
+    };
     let foreign = |s: &str| {
         s != own
             && names_credential(s)
-            && (own_id.is_none() || crate::model::identity(s).ok().map(|(id, _, _)| id) != own_id)
+            && !(own_id.is_some()
+                && crate::model::identity(s).ok().map(|(id, _, _)| id) == own_id
+                && adds_nothing(s))
     };
     let mut stripped = false;
     while let Some(path) = find(value, &foreign) {
@@ -415,11 +430,41 @@ mod tests {
             value,
             serde_json::json!({"url": "https://s.example/p", "kept": "https://s.example/p"})
         );
-        // An own link that carries a credential is kept in any spelling of it.
+        // An own link that carries a credential is kept in a spelling that adds nothing to it.
         let own = "https://cal.example/feed.ics?token=OWN";
-        let mut value =
-            serde_json::json!({"url": own, "feed": "https://CAL.example/feed.ics?token=OWN"});
+        let mut value = serde_json::json!({
+            "url": own,
+            "feed": "https://CAL.example/feed.ics?token=OWN",
+            "port": "https://cal.example:443/feed.ics?token=OWN",
+        });
         assert!(!strip::<serde_json::Value>(&mut value, own));
+    }
+    /// A spelling of the own link that adds a credential to the one it carries (a fragment key,
+    /// user info) is not the own link: it goes, while the own link as written stays.
+    #[test]
+    fn a_spelling_of_the_own_link_that_adds_a_credential_goes() {
+        let own = "https://cal.example/feed.ics?token=OWN";
+        for added in [
+            "https://cal.example/feed.ics?token=OWN#access_token=OTHER",
+            "https://u:OTHER@cal.example/feed.ics?token=OWN",
+            "https://OTHER@cal.example/feed.ics?token=OWN#id_token=OTHER",
+        ] {
+            let mut value = serde_json::json!({"url": own, "feed": added, "kept": own});
+            assert!(strip::<serde_json::Value>(&mut value, own), "{added}");
+            assert_eq!(
+                value,
+                serde_json::json!({"url": own, "kept": own}),
+                "{added}"
+            );
+        }
+        // An own link whose credential is in its fragment keeps its own spelling only.
+        let own = "https://app.example/cb#access_token=OWN";
+        let mut value = serde_json::json!({
+            "url": own,
+            "other": "https://app.example/cb#access_token=OTHER",
+        });
+        assert!(strip::<serde_json::Value>(&mut value, own));
+        assert_eq!(value, serde_json::json!({"url": own}));
     }
     /// A query read as `;`-separated parameters counts too (`?x=1;token=…`), and so do a
     /// scheme-relative link and a `webcal:` one written without `//` where a document stores them.
