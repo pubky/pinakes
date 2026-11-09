@@ -1351,21 +1351,30 @@ mod tests {
         "https://classic.clinicaltrials.gov/ct2/show/record/NCT04368728?term=x",
     ];
 
-    /// Every spelling of `link` with one multibyte character in it, at every position: a
-    /// two-byte and a four-byte character inserted (the four-byte one at `p` makes `p+1..p+3`
-    /// non-boundaries, so a slice at any byte offset meets one of the two), the four-byte one
-    /// percent-encoded (a decoded string's offsets differ from the written one's), and the
-    /// four-byte one in place of four ASCII bytes (a length check in bytes passes; only a
-    /// byte-based slice is unsafe).
+    /// Every spelling of `link` with one multibyte character in it, at every position: two-,
+    /// three- and four-byte characters, a combining mark alone and on a letter, and the two- and
+    /// four-byte ones percent-encoded (a decoded string's offsets differ from the written
+    /// one's) inserted; and a character in place of as many ASCII bytes as it is long, so a
+    /// length check in bytes passes and only a byte-based slice is unsafe.
     fn multibyte_spellings(link: &str) -> Vec<String> {
         let mut out = vec![];
         for (at, _) in link.char_indices().chain([(link.len(), ' ')]) {
-            for insert in ["é", "😀", "%F0%9F%98%80"] {
+            for insert in [
+                "é",
+                "€",
+                "😀",
+                "\u{301}",
+                "e\u{301}",
+                "%C3%A9",
+                "%F0%9F%98%80",
+            ] {
                 out.push(format!("{}{insert}{}", &link[..at], &link[at..]));
             }
-            let end = at + "😀".len();
-            if link.get(at..end).is_some_and(|s| s.is_ascii()) {
-                out.push(format!("{}😀{}", &link[..at], &link[end..]));
+            for replace in ["é", "€", "😀"] {
+                let end = at + replace.len();
+                if link.get(at..end).is_some_and(|s| s.is_ascii()) {
+                    out.push(format!("{}{replace}{}", &link[..at], &link[end..]));
+                }
             }
         }
         out
