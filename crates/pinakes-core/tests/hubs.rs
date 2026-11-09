@@ -71,6 +71,16 @@ fn mb_url(resource: &str) -> (u16, Vec<u8>) {
         "https://www.songkick.com/artists/503503" => (503, fixture("mb-503.json")),
         // Dracula: two releases ("Dracula", "Dracula (remix)") of one release group.
         "https://tidal.com/album/495402659" => (200, fixture("mb-url-tidal-495402659.json")),
+        // A track MusicBrainz relates to recording …71, whose one ISRC it shares with a recording
+        // whose record is over MusicBrainz's cap.
+        "https://tidal.com/track/1000071" => (
+            200,
+            serde_json::to_vec(&serde_json::json!({"resource": resource, "relations": [
+                {"type": "streaming", "target-type": "recording", "ended": false,
+                 "recording": {"id": "00000000-0000-4000-8000-000000000071"}}
+            ]}))
+            .unwrap(),
+        ),
         // A track MusicBrainz relates to recording …36, whose fifth ISRC it shares with …35.
         "https://tidal.com/track/1000005" => (
             200,
@@ -436,6 +446,14 @@ impl Transport for Recorded {
             }
             // Any other ISRC of a recording read here (a duplicates check): MusicBrainz knows no
             // recording with it.
+            "/ws/2/isrc/ZZCAP2600001" => (
+                200,
+                serde_json::to_vec(&serde_json::json!({"isrc": "ZZCAP2600001", "recordings": [
+                    {"id": "00000000-0000-4000-8000-000000000071", "length": 210000, "title": "Capped"},
+                    {"id": BIG_RECORDING, "length": 210000, "title": "Capped"}
+                ]}))
+                .unwrap(),
+            ),
             path if synthetic(path).is_some() => synthetic(path).unwrap(),
             path if path.starts_with("/ws/2/isrc/") => (404, fixture("mb-isrc-GBUM72103841.json")),
             "/ws/2/recording/00000000-0000-4000-8000-000000000021"
@@ -514,6 +532,19 @@ impl Transport for Recorded {
                 200,
                 br#"{"batchcomplete":"","query":{"searchinfo":{"totalhits":1},"search":[{"ns":0,"title":"Q77000001","pageid":77000001}]}}"#.to_vec(),
             ),
+            // A track's Wikidata item names a recording whose record is over MusicBrainz's cap.
+            "/w/api.php" if query("list") == "search" && query("srsearch").ends_with("P4578=1000072") => (
+                200,
+                br#"{"batchcomplete":"","query":{"searchinfo":{"totalhits":1},"search":[{"ns":0,"title":"Q77000002","pageid":77000002}]}}"#.to_vec(),
+            ),
+            "/w/api.php" if query("action") == "wbgetentities" && query("ids") == "Q77000002" => (
+                200,
+                serde_json::to_vec(&serde_json::json!({"entities": {"Q77000002": {"type": "item", "id": "Q77000002", "claims": {
+                    "P4404": [{"mainsnak": {"snaktype": "value", "property": "P4404", "datavalue": {"value": BIG_RECORDING, "type": "string"}, "datatype": "external-id"}, "type": "statement", "rank": "normal"}],
+                    "P4578": [{"mainsnak": {"snaktype": "value", "property": "P4578", "datavalue": {"value": "1000072", "type": "string"}, "datatype": "external-id"}, "type": "statement", "rank": "normal"}]
+                }, "sitelinks": {}}}}))
+                .unwrap(),
+            ),
             "/w/api.php" if query("action") == "wbgetentities" && query("ids") == "Q77000001" => (
                 200,
                 serde_json::to_vec(&serde_json::json!({"entities": {"Q77000001": {"type": "item", "id": "Q77000001", "claims": {
@@ -591,15 +622,16 @@ const SYNTHETIC: &[(&str, &str, u64, &str, &[&str])] = &[
         &["ZZPCK2600001", "ZZPCK2600002"],
     ),
     ("63", "Picked", 230_000, "a1", &["ZZPCK2600001"]),
+    ("71", "Capped", 210_000, "a1", &["ZZCAP2600001"]),
 ];
 fn synthetic(path: &str) -> Option<(u16, Vec<u8>)> {
     let mbid = |n: &str| format!("00000000-0000-4000-8000-0000000000{n}");
     if let Some(id) = path.strip_prefix("/ws/2/recording/") {
         let (n, title, length, artist, isrcs) = SYNTHETIC.iter().find(|(n, ..)| mbid(n) == id)?;
-        // The duration's pick (…62) has a link of its own on MusicBrainz.
-        let relations = if *n == "62" {
+        // The duration's pick (…62) and …71 have a link of their own on MusicBrainz.
+        let relations = if ["62", "71"].contains(n) {
             serde_json::json!([{"type": "free streaming", "target-type": "url", "ended": false,
-                "url": {"resource": "https://www.deezer.com/track/6200062"}}])
+                "url": {"resource": format!("https://www.deezer.com/track/{n}000{n}")}}])
         } else {
             serde_json::json!([])
         };
@@ -3808,4 +3840,75 @@ async fn disagreeing_recording_keys_are_kept_and_counted(pool: sqlx::PgPool) {
             .await
             .unwrap();
     assert_eq!(group, ["-"]);
+}
+
+/// A read the duplicate walk makes besides the subject's own, over MusicBrainz's cap, settles
+/// nothing and empties no run: a track MusicBrainz relates to a recording whose ISRC it shares
+/// with a recording over the cap keeps its own MBID and that recording's links, as on main; a
+/// track whose Wikidata item names a recording over the cap keeps Wikidata's own key (the raw
+/// P4404 MBID).
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_secondary_read_over_the_cap_settles_nothing(pool: sqlx::PgPool) {
+    if !has(&["musicbrainz", "wikidata"]) {
+        return;
+    }
+    let related = "https://tidal.com/track/1000071";
+    let wikidata = "https://tidal.com/track/1000072";
+    let mut ids = std::collections::BTreeMap::new();
+    for uri in [related, wikidata] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut d = ResourceMeta::new(uri, "jsonld", 86400);
+        d.set_type("MusicRecording");
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        ids.insert(uri, id);
+    }
+    let t = Arc::new(Recorded {
+        seen: Mutex::default(),
+    });
+    let cx = also_on::Context {
+        egress: egress(t.clone()),
+        config: Arc::new(Config::default()),
+    };
+    sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    also_on::drain(&pool, &cx, &also_on::registry(), 100)
+        .await
+        .unwrap();
+    let rows = |sql: &'static str, id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, String>(sql)
+                .bind(id)
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let own = "mb:recording:00000000-0000-4000-8000-000000000071";
+    assert_eq!(
+        rows(
+            "SELECT key FROM resource_key WHERE resource_id=$1 AND source='musicbrainz' AND key LIKE 'mb:recording:%'",
+            ids[related].clone()
+        )
+        .await,
+        [own]
+    );
+    assert_eq!(
+        rows(
+            "SELECT uri||' '||coalesce(key,'-') FROM derived_link WHERE resource_id=$1 AND source='musicbrainz'",
+            ids[related].clone()
+        )
+        .await,
+        [format!("https://www.deezer.com/track/7100071 {own}")]
+    );
+    assert_eq!(
+        rows(
+            "SELECT key FROM resource_key WHERE resource_id=$1 AND source='wikidata' AND key LIKE 'mb:recording:%'",
+            ids[wikidata].clone()
+        )
+        .await,
+        [format!("mb:recording:{BIG_RECORDING}")]
+    );
 }

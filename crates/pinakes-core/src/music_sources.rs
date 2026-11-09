@@ -192,8 +192,9 @@ pub(crate) async fn agreeing(
     }
     let mut entities: Vec<musicbrainz::Entity> = vec![];
     for recording in recordings {
-        let Some(entity) =
-            musicbrainz::entity(egress, base, MbKind::Recording, &recording.mbid).await?
+        // A record over MusicBrainz's cap tells nothing: the recordings are not known to agree.
+        let Some(Some(entity)) =
+            secondary(musicbrainz::entity(egress, base, MbKind::Recording, &recording.mbid).await)?
         else {
             return Ok(None);
         };
@@ -301,10 +302,23 @@ pub(crate) async fn standing(
     base: &str,
     mbid: &str,
 ) -> Result<Standing> {
-    let Some(entity) = musicbrainz::entity(egress, base, MbKind::Recording, mbid).await? else {
+    let Some(Some(entity)) =
+        secondary(musicbrainz::entity(egress, base, MbKind::Recording, mbid).await)?
+    else {
         return Ok(Standing::Unclear);
     };
     standing_of(egress, base, entity).await
+}
+/// A read the duplicate walk makes besides the subject's own (another recording's record, an
+/// ISRC's recordings): over MusicBrainz's cap it settles nothing (`None`, so the walk is
+/// [`Standing::Unclear`] and today's rule applies), never an error that would empty the
+/// source's run. Any other error is the read's own.
+fn secondary<T>(read: Result<T>) -> Result<Option<T>> {
+    match read {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if crate::resolver::egress::over_cap(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 /// [`standing`] from a recording's record already read.
 pub(crate) async fn standing_of(
@@ -337,7 +351,10 @@ pub(crate) async fn standing_of(
             if lookups > MAX_DUPLICATE_LOOKUPS {
                 return Ok(Standing::Unclear);
             }
-            let Some(recordings) = musicbrainz::isrc(egress, base, isrc).await? else {
+            let Some(recordings) = secondary(musicbrainz::isrc(egress, base, isrc).await)? else {
+                return Ok(Standing::Unclear);
+            };
+            let Some(recordings) = recordings else {
                 continue;
             };
             if recordings.len() < 2 {
@@ -358,8 +375,14 @@ pub(crate) async fn standing_of(
                         if reads > MAX_DUPLICATE_READS {
                             return Ok(Standing::Unclear);
                         }
-                        musicbrainz::entity(egress, base, MbKind::Recording, &recording.mbid)
-                            .await?
+                        let Some(read) = secondary(
+                            musicbrainz::entity(egress, base, MbKind::Recording, &recording.mbid)
+                                .await,
+                        )?
+                        else {
+                            return Ok(Standing::Unclear);
+                        };
+                        read
                     }
                 };
                 let Some(e) = read else {
