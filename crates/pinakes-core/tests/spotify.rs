@@ -278,6 +278,7 @@ fn config(pair: Option<(&str, &str)>) -> Config {
     let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
     for (source, enabled) in [
         ("deezer", true),
+        ("spotify_isrc", true),
         ("musicbrainz", false),
         ("musicbrainz_entity", false),
         ("wikidata", false),
@@ -541,6 +542,10 @@ async fn a_shared_isrc_is_never_a_spotify_key(pool: sqlx::PgPool) {
 /// no ISRC key asks nothing, and the switch turns it off.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_track_with_an_isrc_key_gets_its_spotify_link(pool: sqlx::PgPool) {
+    let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
+    if !registered.contains(&"spotify_isrc") {
+        return;
+    }
     // TIDAL's own page states its ISRC (a key: TIDAL vouches for it) and its length.
     let tidal = "https://tidal.com/track/534050211";
     let tidal_id = store::ensure_resource(&pool, tidal).await.unwrap();
@@ -612,4 +617,109 @@ async fn a_track_with_an_isrc_key_gets_its_spotify_link(pool: sqlx::PgPool) {
         .unwrap();
     let seen = run(&pool, off, Answers::default()).await;
     assert!(!seen.iter().any(|s| s.contains("/v1/search?")), "{seen:?}");
+}
+
+/// `spotify_isrc` is off by default: with the Spotify pair set and no switch, nothing asks the
+/// search. Switched on, a refusal (403) and a rate limit (429) keep the links an earlier run
+/// found; switched off again, those links stop showing on the card while their rows stay.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn spotify_isrc_is_off_by_default_and_keeps_its_rows_through_refusals(pool: sqlx::PgPool) {
+    let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
+    if !registered.contains(&"spotify_isrc") {
+        return;
+    }
+    let tidal = "https://tidal.com/track/534050211";
+    let tidal_id = store::ensure_resource(&pool, tidal).await.unwrap();
+    let mut doc = ResourceMeta::new(tidal, "jsonld", 86400);
+    doc.set_type("MusicRecording");
+    doc.attributes.insert("isrc".into(), "GBUM71029604".into());
+    doc.attributes.insert("duration".into(), "PT5M55S".into());
+    store::save_document(&pool, &tidal_id, 0, &doc)
+        .await
+        .unwrap();
+    // Off by default: the pair alone turns nothing on.
+    let mut by_default = config(Some(("isrc-default-id", "isrc-default-secret")));
+    by_default.also_on.sources.remove("spotify_isrc");
+    by_default.validate().unwrap();
+    let seen = run(&pool, by_default, Answers::default()).await;
+    assert!(!seen.iter().any(|s| s.contains("/v1/search?")), "{seen:?}");
+    let links = |pool: sqlx::PgPool, id: String| async move {
+        sqlx::query_scalar::<_, String>(
+            "SELECT uri FROM derived_link WHERE resource_id=$1 AND source='spotify_isrc' ORDER BY uri",
+        )
+        .bind(id)
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+    assert!(links(pool.clone(), tidal_id.clone()).await.is_empty());
+    // Switched on (the test config), one run finds the link.
+    let on = config(Some(("isrc-default-id", "isrc-default-secret")));
+    run(&pool, on.clone(), Answers::default()).await;
+    let expected = [format!("https://open.spotify.com/track/{TRACK}")];
+    assert_eq!(links(pool.clone(), tidal_id.clone()).await, expected);
+    // A refusal and a rate limit keep it (each with a pair of its own: a refusal holds the
+    // pair's slot for five minutes, a rate limit for the time asked).
+    for (status, pair) in [
+        (403, ("isrc-refused-id", "isrc-refused-secret")),
+        (429, ("isrc-busy-id", "isrc-busy-secret")),
+    ] {
+        let seen = run(
+            &pool,
+            config(Some(pair)),
+            Answers {
+                api_status: Some(status),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(
+            seen.iter().any(|s| s.contains("spotify.com")),
+            "{status}: {seen:?}"
+        );
+        assert_eq!(
+            links(pool.clone(), tidal_id.clone()).await,
+            expected,
+            "{status}"
+        );
+    }
+    // Switched off: the rows stay, the card no longer shows them.
+    let card = |pool: sqlx::PgPool, id: String| async move {
+        let card: serde_json::Value = sqlx::query_scalar("SELECT also_on($1,$1,8,true)")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        card.as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e["uri"].as_str().map(str::to_owned))
+            .collect::<Vec<_>>()
+    };
+    also_on::configure(&pool, &on.also_on).await.unwrap();
+    assert!(
+        card(pool.clone(), tidal_id.clone())
+            .await
+            .contains(&expected[0]),
+        "{:?}",
+        card(pool.clone(), tidal_id.clone()).await
+    );
+    let mut off = config(Some(("isrc-default-id", "isrc-default-secret")));
+    off.also_on.sources.insert(
+        "spotify_isrc".into(),
+        SourceOptions {
+            enabled: Some(false),
+            ..Default::default()
+        },
+    );
+    off.validate().unwrap();
+    also_on::configure(&pool, &off.also_on).await.unwrap();
+    assert_eq!(links(pool.clone(), tidal_id.clone()).await, expected);
+    assert!(
+        !card(pool.clone(), tidal_id.clone())
+            .await
+            .contains(&expected[0]),
+        "{:?}",
+        card(pool.clone(), tidal_id.clone()).await
+    );
 }

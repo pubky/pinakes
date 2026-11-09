@@ -28,6 +28,7 @@ pub mod podcasts;
 pub mod product_keys;
 pub mod service;
 pub mod spotify;
+pub mod spotify_api;
 pub mod spotify_isrc;
 pub mod tidal;
 pub mod wikidata;
@@ -410,12 +411,13 @@ pub fn registry() -> Vec<Arc<dyn Source>> {
         Arc::new(service::ServiceSource),
         Arc::new(tidal::Tidal),
         Arc::new(spotify::Spotify),
-        // After the sources that key a track's ISRC, before `editions` places its links.
-        Arc::new(spotify_isrc::SpotifyIsrc),
         Arc::new(musicbrainz::MusicBrainzSource),
         Arc::new(musicbrainz_entity::MusicBrainzEntitySource),
         Arc::new(performers::PerformersSource),
         Arc::new(wikidata::WikidataSource),
+        // After every source that keys a track's ISRC (a service's own record, the hubs'),
+        // before `editions` places its links.
+        Arc::new(spotify_isrc::SpotifyIsrc),
         // Before the barcode lookups: a Discogs release's barcodes are keys.
         Arc::new(crate::sources::discogs::also_on::Discogs),
         Arc::new(deezer::DeezerSource),
@@ -778,6 +780,38 @@ pub async fn record(
     {
         (keys, links, facts, placed) = Default::default();
     }
+    // One MusicBrainz recording per resource (`groups::single_object` holds one per group):
+    // every producer keys the recording that stands for a set of duplicates, so a second
+    // recording MBID here is a producer that did not. The run keeps the smallest of its own
+    // and none that differs from one another source stored; each drop is counted.
+    let mut recording: Option<String> = keys
+        .iter()
+        .filter(|k| k.key.starts_with("mb:recording:"))
+        .map(|k| k.key.clone())
+        .min();
+    if keys
+        .iter()
+        .filter(|k| k.key.starts_with("mb:recording:"))
+        .count()
+        > 1
+    {
+        crate::telemetry::also_on_recording_key_conflict(source);
+        tracing::warn!(resource = %resource_id, source, "a run keyed two recordings; the smallest kept");
+    }
+    if let Some(mine) = &recording {
+        let stored: Option<String> = sqlx::query_scalar("SELECT key FROM resource_key WHERE resource_id=$1 AND source<>$2 AND key LIKE 'mb:recording:%' AND key<>$3 AND expires_at>now() LIMIT 1")
+            .bind(resource_id)
+            .bind(source)
+            .bind(mine)
+            .fetch_optional(&mut *tx)
+            .await?;
+        if stored.is_some() {
+            crate::telemetry::also_on_recording_key_conflict(source);
+            tracing::warn!(resource = %resource_id, source, "a run keyed another recording than the one stored; its key dropped");
+            recording = None;
+        }
+    }
+    keys.retain(|k| !k.key.starts_with("mb:recording:") || Some(&k.key) == recording.as_ref());
     let key_rows: Vec<Value> = keys
         .iter()
         .map(|k| serde_json::json!({"key": k.key, "via": k.via}))

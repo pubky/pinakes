@@ -4,14 +4,15 @@
 //! keyed by the ISRC. Several answers are the recording on several releases; `editions` places
 //! them and a card shows one per service.
 //!
-//! Asked with the same app credentials as `spotify` (`[spotify]`, or `PINAKES_SPOTIFY_CLIENT_ID`
-//! and `PINAKES_SPOTIFY_CLIENT_SECRET`), through the same token slot: each answer is shared for
-//! an hour by credential pair, a refusal holds five minutes, a rate limit is waited out. The
-//! Spotify Developer Policy asks that metadata shown be accompanied by a link back to Spotify;
-//! the link is all this source stores.
+//! Off by default: Spotify's Developer Policy (III.5) reads against a product "integrated with
+//! streams or content from another service", which an "Also on" list is, so the operator turns
+//! it on only on their own reading of the terms, and only with an app Spotify answers (its
+//! owner's Premium). Asked with the same app credentials as `spotify` (`spotify_api`), through
+//! the same token slot: each answer is shared for an hour by credential pair, a refusal holds
+//! five minutes, a rate limit is waited out. The link is all this source stores.
 use super::{
     client_credentials,
-    spotify::{Spotify, SpotifyConfig, SPOTIFY},
+    spotify_api::{self, SpotifyConfig, API, SPOTIFY},
     Context, Found, Source, Subject,
 };
 use crate::{
@@ -21,7 +22,6 @@ use crate::{
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 
-const API: &str = "https://api.spotify.com/v1";
 /// The most Spotify tracks one ISRC gives a card (the recording on several releases).
 const MAX_LINKS: usize = 5;
 /// The most ISRC keys of one track asked (its own first).
@@ -34,17 +34,20 @@ impl Source for SpotifyIsrc {
         crate::music_sources::KEY_FORMS
     }
     fn budgets(&self) -> &'static [(&'static str, f64)] {
-        // The host's pace is `spotify`'s: one budget, shared.
+        // The host's pace is every Spotify source's: one budget, shared.
         &[("api.spotify.com", 2.0)]
     }
     fn id(&self) -> &'static str {
         "spotify_isrc"
     }
-    fn page(&self) -> &'static str {
-        "spotify"
+    fn section(&self) -> Option<super::Section> {
+        Some(super::Section::of::<SpotifyConfig>())
+    }
+    fn enabled_by_default(&self) -> bool {
+        false
     }
     fn ready(&self, config: &crate::config::Config) -> bool {
-        Spotify.ready(config)
+        spotify_api::configured(config)
     }
     fn applies(&self, subject: &Subject) -> bool {
         music::parse(&subject.uri)

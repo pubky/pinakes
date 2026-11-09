@@ -1,8 +1,9 @@
 //! Spotify's own record of its own album or track, from Spotify's Web API: an album's barcode
 //! (`external_ids.upc`) as the key `upc:…` and a track's ISRC (`external_ids.isrc`) as `isrc:…`,
 //! so the lookups by barcode and ISRC after it (MusicBrainz, Deezer, iTunes) join the rest. An
-//! ISRC MusicBrainz gives to several recordings keys the one the track's duration picks, else is
-//! a fact only, as every service's own ISRC is (`music_sources::isrc_match`).
+//! ISRC MusicBrainz gives to several recordings that agree keys the one that stands for them,
+//! one on recordings that disagree the one the track's duration picks, else is a fact only, as
+//! every service's own ISRC is (`music_sources::isrc_match`).
 //!
 //! The API is asked only with an operator's app credentials (`[spotify]`, or
 //! `PINAKES_SPOTIFY_CLIENT_ID` and `PINAKES_SPOTIFY_CLIENT_SECRET`), through the
@@ -11,54 +12,17 @@
 //! card may show is on; where the API does not answer, and only with `[also_on] spotify_pages`,
 //! the track's public page (its `music:album`).
 use super::{
-    client_credentials::{self, Api},
+    client_credentials,
+    spotify_api::{API, SPOTIFY},
     Context, Fact, Found, Key, Source, Subject,
 };
-use crate::{
-    event::adapters::SecretKey,
-    music::{self, Level, Service},
-};
+use crate::music::{self, Level, Service};
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Spotify's app credentials (`[spotify] client_id` and `client_secret`, or
-/// `PINAKES_SPOTIFY_CLIENT_ID` and `PINAKES_SPOTIFY_CLIENT_SECRET`). Without both, Spotify is
-/// never asked.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct SpotifyConfig {
-    pub client_id: Option<SecretKey>,
-    pub client_secret: Option<SecretKey>,
-}
-impl SpotifyConfig {
-    pub fn pair(&self) -> Option<(String, String)> {
-        match (self.client_id.as_deref(), self.client_secret.as_deref()) {
-            (Some(id), Some(secret)) if !id.trim().is_empty() && !secret.trim().is_empty() => {
-                Some((id.trim().to_owned(), secret.trim().to_owned()))
-            }
-            _ => None,
-        }
-    }
-}
-impl super::OwnSection for SpotifyConfig {
-    const NAME: &'static str = "spotify";
-    const VARIABLES: &'static [(&'static str, &'static str)] = &[
-        ("PINAKES_SPOTIFY_CLIENT_ID", "client_id"),
-        ("PINAKES_SPOTIFY_CLIENT_SECRET", "client_secret"),
-    ];
-}
-
-const API: &str = "https://api.spotify.com/v1";
-/// Spotify's Web API and its token endpoint.
-pub(super) const SPOTIFY: Api = Api {
-    service: "spotify",
-    label: "Spotify",
-    auth: "https://accounts.spotify.com/api/token",
-    auth_class: "spotify_auth",
-    busy_class: "spotify_busy",
-};
+/// The credentials and endpoints every source that asks Spotify shares (`spotify_api`).
+pub use super::spotify_api::SpotifyConfig;
 
 /// An album or a track, as the API names its collection, the external ID read and the key's
 /// namespace.
