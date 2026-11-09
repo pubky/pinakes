@@ -250,7 +250,8 @@ CREATE TABLE source_state (
     canary_due_at timestamp with time zone,
     canary_lease_until timestamp with time zone,
     canary_generation bigint NOT NULL DEFAULT 0,
-    CONSTRAINT source_error_class CHECK (last_error IS NULL OR last_error IN ('dns', 'connect', 'timeout', 'http_4xx', 'http_5xx', 'parse', 'policy'))
+    -- The classes in `source::ERROR_CLASSES`, exactly.
+    CONSTRAINT source_error_class CHECK (last_error IS NULL OR last_error IN ('dns', 'connect', 'timeout', 'http_4xx', 'http_5xx', 'parse', 'policy', 'too_large', 'too_complex'))
 );
 
 
