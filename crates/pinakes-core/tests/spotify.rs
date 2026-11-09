@@ -6,7 +6,7 @@
 //! the album's ID is made up, its barcode HYDRA 3D's (as in the TIDAL tests).
 use pinakes_core::{
     also_on::{self, SourceOptions},
-    config::{Config, EgressConfig},
+    config::Config,
     groups,
     model::ResourceMeta,
     resolver::egress::{Dns, Egress, FetchOptions, Fetched, Transport},
@@ -16,6 +16,7 @@ use std::{
     net::SocketAddr,
     sync::{Arc, Mutex},
 };
+mod common;
 
 struct PublicDns;
 #[async_trait::async_trait]
@@ -256,7 +257,11 @@ async fn run(pool: &sqlx::PgPool, config: Config, answers: Answers) -> Vec<Strin
         seen: Mutex::default(),
         answers,
     });
-    let egress = Egress::with_backends(EgressConfig::default(), Arc::new(PublicDns), t.clone());
+    let egress = Egress::with_backends(
+        common::unpaced_egress_config(),
+        Arc::new(PublicDns),
+        t.clone(),
+    );
     let cx = also_on::Context {
         egress,
         config: Arc::new(config),

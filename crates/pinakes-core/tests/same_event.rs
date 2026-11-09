@@ -13,6 +13,7 @@ use pinakes_core::{
 };
 use serde_json::Value;
 use sqlx::PgPool;
+mod common;
 use tower::ServiceExt;
 
 /// Wattwil, where the Ostschweiz meetup meets.
@@ -1573,7 +1574,7 @@ async fn an_orphan_deleted_while_a_pass_pairs_with_it_leaves_the_partner_to_refi
         let pool = pool.clone();
         tokio::spawn(async move { changes::delete_orphans(&pool, 7).await.unwrap() })
     };
-    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    common::lock_waiters_reach(&pool, 1, "the orphan delete").await;
     assert!(!deleting.is_finished(), "the delete waits for the pass");
     pairing.commit().await.unwrap();
     assert_eq!(deleting.await.unwrap(), 1);

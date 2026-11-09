@@ -8,7 +8,7 @@ use http_body_util::BodyExt;
 use pinakes_core::{
     also_on::{self, editions::Editions, Edition, Found, Link, Source, SourceOptions, Subject},
     api::{self, AppState},
-    config::{Config, EgressConfig},
+    config::Config,
     model::ResourceMeta,
     resolver::egress::{Dns, Egress, FetchOptions, Fetched, Transport},
     store,
@@ -195,10 +195,7 @@ fn with_pages(mut config: Config) -> Config {
 fn context(transport: Arc<Captured>, config: Config) -> also_on::Context {
     also_on::Context {
         egress: Egress::with_backends(
-            EgressConfig {
-                host_requests_per_second: 1000.0,
-                ..Default::default()
-            },
+            common::unpaced_egress_config(),
             Arc::new(PublicDns),
             transport,
         ),

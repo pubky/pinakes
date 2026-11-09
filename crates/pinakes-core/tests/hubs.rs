@@ -3,7 +3,7 @@ mod common;
 use pinakes_core::{
     also_on,
     api::{self, AppState},
-    config::{Config, EgressConfig},
+    config::Config,
     hubs::{musicbrainz, wikidata, MbKind},
     model::ResourceMeta,
     resolver::{
@@ -434,7 +434,11 @@ impl Transport for Recorded {
 /// An artist whose MusicBrainz record is over the cap.
 const BIG_BAND: &str = "00000000-0000-4000-8000-00000000000b";
 fn egress(transport: Arc<Recorded>) -> Egress {
-    Egress::with_backends(EgressConfig::default(), Arc::new(PublicDns), transport)
+    Egress::with_backends(
+        common::unpaced_egress_config(),
+        Arc::new(PublicDns),
+        transport,
+    )
 }
 
 #[tokio::test]

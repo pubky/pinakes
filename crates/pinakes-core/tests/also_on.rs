@@ -2658,8 +2658,8 @@ async fn a_run_takes_the_write_order_as_saves_do(pool: PgPool) {
         .await
         .unwrap();
     let recording = run(pool.clone(), id.clone());
-    // Long enough for the run to reach the resource's row.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // The run has reached the resource's row and waits for it.
+    common::lock_waiters_reach(&pool, 1, "the run").await;
     sqlx::query("UPDATE resource SET doc=jsonb_set(doc,'{fetched_at}','1') WHERE id=$1")
         .bind(&id)
         .execute(&mut *save)
@@ -2739,8 +2739,8 @@ async fn a_run_naming_another_resource_waits_for_an_ingested_batch(pool: PgPool)
             .await
         }
     });
-    // Long enough for the run to reach its first lock.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // The run has reached its first lock and waits for it.
+    common::lock_waiters_reach(&pool, 1, "the run").await;
     sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR NO KEY UPDATE")
         .bind(&a)
         .execute(&mut *batch)

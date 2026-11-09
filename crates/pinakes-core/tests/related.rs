@@ -455,8 +455,11 @@ async fn a_seed_with_many_replies_and_few_tags_samples_its_taggers(pool: PgPool)
     let seed = save(&pool, "https://example.org/seed", "MusicAlbum").await;
     let recent = save(&pool, "https://example.org/recent", "MusicAlbum").await;
     let older = save(&pool, "https://example.org/older", "MusicAlbum").await;
-    // 50,000 replies to the seed in the window, by as many authors, newer than its tags.
-    sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) SELECT $1,rpad('z'||g,52,'x'),'reply',NULL,'/pub/pubky.app/posts/z'||g,now()-g*interval '1 second' FROM generate_series(1,50000) g")
+    // Twenty replies to the seed in the window, by as many authors, newer than its tags: more
+    // than the sample below holds, so a sample of references instead of tags would be replies
+    // alone. (Few on purpose: `reference`'s per-row triggers make tens of thousands of rows on
+    // one resource a minute of inserts.)
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) SELECT $1,rpad('z'||g,52,'x'),'reply',NULL,'/pub/pubky.app/posts/z'||g,now()-g*interval '1 second' FROM generate_series(1,20) g")
         .bind(&seed)
         .execute(&pool)
         .await
@@ -472,6 +475,7 @@ async fn a_seed_with_many_replies_and_few_tags_samples_its_taggers(pool: PgPool)
         tag(&pool, &recent, who, 1).await;
     }
     let mut config = Config::default();
+    config.search.related_tag_sample = 5;
     assert_eq!(
         rows(&related_with(&config, &pool, &seed, "").await),
         [recent.clone(), older.clone()]

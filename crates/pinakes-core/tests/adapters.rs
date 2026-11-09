@@ -14,6 +14,7 @@ use pinakes_core::{
 };
 use serde_json::{json, Value};
 use sqlx::PgPool;
+mod common;
 
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn paginated_nostr_and_inconclusive_queue_retry(pool: PgPool) {
@@ -219,7 +220,8 @@ async fn a_derived_link_and_a_feed_apply_take_locks_in_one_order(pool: PgPool) {
             .await
         }
     });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // The derivation has reached the parent's row and waits for it, holding no adapter lock.
+    common::lock_waiters_reach(&pool, 1, "the derivation").await;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('btcmap',17614))")
         .execute(&mut *apply)
         .await
@@ -491,8 +493,11 @@ async fn only_parse_errors_fall_back_and_plain_wikipedia_skips_fetch(pool: PgPoo
             failure,
             calls: Default::default(),
         });
-        let egress =
-            Egress::with_backends(Default::default(), Arc::new(AdapterDns), transport.clone());
+        let egress = Egress::with_backends(
+            common::unpaced_egress_config(),
+            Arc::new(AdapterDns),
+            transport.clone(),
+        );
         let r = platform(
             &pool,
             EventConfig {
