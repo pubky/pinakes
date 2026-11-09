@@ -215,6 +215,18 @@ async fn snapshot(
         .bind(osm_type).bind(osm_id).bind(&version).bind(value).execute(&mut **tx).await?;
     Ok(json!({"osm_id":format!("{osm_type}/{osm_id}"),"version":version}))
 }
+/// An occurrence key (`["<uid>","<recurrence id>"]`, as change lines, fetch state and group
+/// units hold it) with its UID as it is stored (`event::stored_uid`): the key as written when
+/// its UID holds no link that carries a credential.
+pub fn stored_key(key: &str) -> String {
+    match serde_json::from_str::<(String, String)>(key) {
+        Ok((uid, rid)) if crate::capability::contains_credential(&uid) => {
+            serde_json::to_string(&(crate::event::stored_uid(uid), rid))
+                .unwrap_or_else(|_| key.to_owned())
+        }
+        _ => key.to_owned(),
+    }
+}
 pub(crate) async fn append(
     tx: &mut Transaction<'_, Postgres>,
     id: &str,
@@ -258,9 +270,12 @@ pub(crate) async fn append(
     } else {
         (before, after)
     };
+    // A change line names its occurrence by the UID as it is stored (`stored_key`), whichever
+    // writer passed the key.
+    let occurrence = occurrence.map(stored_key);
     lock_sequence(tx).await?;
     sqlx::query("INSERT INTO resource_change(resource_id,class,fields,before,after,source,osm_type,osm_id,at,occurrence_key) VALUES($1,$2,$3,$4,$5,$6,$7,$8,clock_timestamp(),$9)")
-        .bind(id).bind(diff.class).bind(diff.fields).bind(before).bind(after).bind(source).bind(osm.as_ref().map(|o|&o.osm_type)).bind(osm.as_ref().map(|o|o.id)).bind(occurrence).execute(&mut **tx).await?;
+        .bind(id).bind(diff.class).bind(diff.fields).bind(before).bind(after).bind(source).bind(osm.as_ref().map(|o|&o.osm_type)).bind(osm.as_ref().map(|o|o.id)).bind(occurrence.as_deref()).execute(&mut **tx).await?;
     sqlx::query("INSERT INTO source_state(source,change_totals) VALUES($1,jsonb_build_object($2::text,1)) ON CONFLICT(source) DO UPDATE SET change_totals=source_state.change_totals || jsonb_build_object($2::text,coalesce((source_state.change_totals->>$2)::bigint,0)+1)")
         .bind(source).bind(diff.class).execute(&mut **tx).await?;
     Ok(())
@@ -939,5 +954,53 @@ mod tests {
             diff(Some(&missing), Some(&base)).unwrap().class,
             "uncancelled"
         );
+    }
+    /// A change line names its occurrence by the UID as it is stored, whichever writer passes
+    /// the key: a UID that holds a link carrying a credential is written by its stand-in, a
+    /// plain one as it is.
+    #[sqlx::test(
+        migrations = "../../migrations",
+        fixtures("../tests/fixtures/require_h3.sql")
+    )]
+    async fn a_change_line_names_its_occurrence_by_the_stored_uid(pool: PgPool) {
+        let uri = "https://example.org/feed.ics";
+        let id = crate::store::ensure_resource(&pool, uri).await.unwrap();
+        let secret = "https://cal.example/event?token=SECRET";
+        for uid in [secret, "plain-uid"] {
+            let key = serde_json::to_string(&(uid, "")).unwrap();
+            let mut tx = pool.begin().await.unwrap();
+            append(
+                &mut tx,
+                &id,
+                "ics",
+                None,
+                None,
+                Diff {
+                    class: "created",
+                    fields: vec![],
+                },
+                Some(&key),
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+        }
+        let keys: Vec<String> = sqlx::query_scalar(
+            "SELECT occurrence_key FROM resource_change WHERE resource_id=$1 ORDER BY seq",
+        )
+        .bind(&id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            keys,
+            [
+                stored_key(&serde_json::to_string(&(secret, "")).unwrap()),
+                serde_json::to_string(&("plain-uid", "")).unwrap()
+            ]
+        );
+        assert!(keys[0].starts_with("[\"uid:"), "{keys:?}");
+        assert!(!keys.concat().contains("SECRET"), "{keys:?}");
+        assert_eq!(stored_key("not a key"), "not a key");
     }
 }

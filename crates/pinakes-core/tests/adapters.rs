@@ -1535,6 +1535,77 @@ async fn both_spellings_of_a_credential_uid_leave_one_row_and_no_raw_key(pool: P
     assert!(!stored.contains("SECRET"), "{stored}");
 }
 
+/// A change line and a group unit an earlier build keyed by a raw credential UID take the
+/// stand-in when the feed is read again, in place (the same lines, the same unit), while a line
+/// keyed by a plain UID and another resource's lines stay as written.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn change_lines_and_group_units_keyed_by_a_credential_uid_move_to_its_stand_in(pool: PgPool) {
+    let uri = "https://example.org/legacy-lines.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let other = store::ensure_resource(&pool, "https://example.org/other.ics")
+        .await
+        .unwrap();
+    let cfg = EventConfig::default();
+    let secret = "https://cal.example/event?token=SECRET";
+    let day = (Utc::now() + Duration::days(30)).format("%Y%m%d");
+    let ics = format!("BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:{secret}\nDTSTART:{day}T170000Z\nSUMMARY:Concert\nEND:VEVENT\nEND:VCALENDAR\n");
+    let doc = pinakes_core::event::calendar::parse(uri, ics.as_bytes(), &cfg, Utc::now()).unwrap();
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    // As an earlier build left them: a change line of this feed and of another under the raw
+    // key, one under a plain key, and a group unit of the occurrence under the raw key.
+    let raw_key = serde_json::to_string(&(secret, "")).unwrap();
+    let plain_key = serde_json::to_string(&("plain", "")).unwrap();
+    let mut seqs = vec![];
+    for (resource, key) in [(&id, &raw_key), (&id, &plain_key), (&other, &raw_key)] {
+        let seq: i64 = sqlx::query_scalar("INSERT INTO resource_change(resource_id,class,fields,source,occurrence_key) VALUES($1,'created','{}','ics',$2) RETURNING seq")
+            .bind(resource)
+            .bind(key)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        seqs.push(seq);
+    }
+    let unit = "a".repeat(32);
+    sqlx::query("INSERT INTO group_unit(unit_id,resource_id,occurrence_key,occurrence) VALUES($1,$2,$3,jsonb_build_object('uid',$4::text,'recurrence_id',NULL,'status','scheduled'))")
+        .bind(&unit)
+        .bind(&id)
+        .bind(&raw_key)
+        .bind(secret)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut doc =
+        pinakes_core::event::calendar::parse(uri, ics.as_bytes(), &cfg, Utc::now()).unwrap();
+    doc.fetched_at += 1;
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let stand_in = pinakes_core::event::stored_uid(secret.to_owned());
+    assert!(stand_in.starts_with("uid:"));
+    let new_key = serde_json::to_string(&(&stand_in, "")).unwrap();
+    let keys: Vec<String> = sqlx::query_scalar(
+        "SELECT coalesce(occurrence_key,'') FROM resource_change WHERE seq=ANY($1) ORDER BY seq",
+    )
+    .bind(&seqs)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(keys, [new_key.clone(), plain_key, raw_key.clone()]);
+    let (unit_key, unit_uid): (String, Option<String>) =
+        sqlx::query_as("SELECT occurrence_key,occurrence->>'uid' FROM group_unit WHERE unit_id=$1")
+            .bind(&unit)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((unit_key, unit_uid), (new_key, Some(stand_in)));
+    let stored: String = sqlx::query_scalar(
+        "SELECT concat_ws(' ',(SELECT string_agg(concat_ws(' ',occurrence_key,before::text,after::text),' ') FROM resource_change WHERE resource_id=$1),(SELECT string_agg(concat_ws(' ',occurrence_key,occurrence::text),' ') FROM group_unit WHERE resource_id=$1))",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!stored.contains("SECRET"), "{stored}");
+}
+
 /// A UID stored by an earlier build that hides its link behind a tab (`web<TAB>cal:…`) moves to
 /// its stand-in too: nothing stored names the secret after the feed is read again.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
