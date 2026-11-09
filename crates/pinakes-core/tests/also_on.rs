@@ -460,15 +460,24 @@ async fn answers_are_checked_and_bounded(pool: PgPool) {
                 via: "Not A Token".into(),
             },
         ],
-        links: (0..40)
-            .map(|n| Link::new(format!("https://s{n:02}.example/x"), "S", "wikidata"))
-            .chain([
-                Link::new("ftp://files.example/x", "FTP", "wikidata"),
-                Link::new("https://u:p@cred.example/x", "Cred", "wikidata"),
-                Link::new("https://nosite.example/x", "  ", "wikidata"),
-                Link::new("https://badvia.example/x", "B", "Wiki Data"),
-            ])
-            .collect(),
+        // The refused links first, before the cap is reached.
+        links: [
+            Link::new("ftp://files.example/x", "FTP", "wikidata"),
+            Link::new("https://u:p@cred.example/x", "Cred", "wikidata"),
+            Link::new("https://cred.example/x?token=SECRET", "Cred", "wikidata"),
+            Link::new(
+                "https://cred.example/x#access_token=SECRET",
+                "Cred",
+                "wikidata",
+            ),
+            Link::new("https://cred.example/x?a=1;sig=SECRET", "Cred", "wikidata"),
+            Link::new("//cred.example/x?key=SECRET", "Cred", "wikidata"),
+            Link::new("https://nosite.example/x", "  ", "wikidata"),
+            Link::new("https://badvia.example/x", "B", "Wiki Data"),
+        ]
+        .into_iter()
+        .chain((0..40).map(|n| Link::new(format!("https://s{n:02}.example/x"), "S", "wikidata")))
+        .collect(),
         ..Default::default()
     };
     let config = Config::default();
@@ -496,8 +505,9 @@ async fn answers_are_checked_and_bounded(pool: PgPool) {
         (0..32)
             .map(|n| format!("https://s{n:02}.example/x"))
             .collect::<Vec<_>>(),
-        "the source's first 32 valid links; the credentialed one refused"
+        "the source's first 32 valid links; the credentialed ones refused"
     );
+    assert!(!links.concat().contains("SECRET"), "{links:?}");
     let mut keys_only = Config::default();
     keys_only.also_on.derive_links = false;
     also_on::record(
@@ -539,6 +549,61 @@ async fn answers_are_checked_and_bounded(pool: PgPool) {
     assert!(!also_on::valid_key("doi:"));
     assert!(!also_on::valid_key(":10.1000/x"));
     assert!(!also_on::valid_key("doi:10.1000/a b"));
+}
+
+/// A derived link follows the credential rule documents follow: one that carries a credential
+/// (a key in its query or fragment, user info, written scheme-relative) is refused, not stripped,
+/// so nothing a card shows names it; a link with a key-like word elsewhere is kept.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_derived_link_that_carries_a_credential_is_refused(pool: PgPool) {
+    let id = page(&pool, "https://open.spotify.com/track/c2", "Track").await;
+    let found = Found {
+        links: [
+            "https://cred.example/x?token=SECRET",
+            "https://cred.example/x?a=1&API_KEY=SECRET",
+            "https://cred.example/x#access_token=SECRET",
+            "https://cred.example/x#/reset?token=SECRET",
+            "https://cred.example/x?a=1;sig=SECRET",
+            "https://u:SECRET@cred.example/x",
+            "//cred.example/x?key=SECRET",
+            "https://ok.example/x?key_art=1",
+            "https://ok.example/y?q=token",
+            "https://ok.example/token/z",
+        ]
+        .into_iter()
+        .map(|uri| Link::new(uri, "Site", "wikidata"))
+        .collect(),
+        ..Default::default()
+    };
+    also_on::record(
+        &pool,
+        &id,
+        "music",
+        found,
+        Duration::from_secs(60),
+        &Config::default().also_on,
+    )
+    .await
+    .unwrap();
+    let links: Vec<String> = sqlx::query_scalar("SELECT uri FROM derived_link ORDER BY uri")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        links,
+        [
+            "https://ok.example/token/z",
+            "https://ok.example/x?key_art=1",
+            "https://ok.example/y?q=token",
+        ]
+    );
+    let stored: String = sqlx::query_scalar(
+        "SELECT coalesce(string_agg(concat_ws(' ',uri,site,kind,key),' '),'') FROM derived_link",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!stored.contains("SECRET"), "{stored}");
 }
 
 /// A saved document makes its sources due; an unchanged refetch does not; an alias never runs;

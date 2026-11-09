@@ -636,9 +636,13 @@ fn checked(
                     !(1..=32).contains(&k.len())
                         || !k.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
                 })
-                // Credentials in a link are refused, not stripped.
+                // Credentials in a link are refused, not stripped: user info, and a link that
+                // carries one as written or under its root spelling (the rule documents follow,
+                // `capability::names_credential`).
                 || url::Url::parse(&link.uri)
                     .map_or(true, |u| !u.username().is_empty() || u.password().is_some())
+                || crate::capability::names_credential(&link.uri)
+                || crate::capability::names_credential(&link_root(&link.uri))
             {
                 continue;
             }
