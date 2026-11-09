@@ -15,14 +15,17 @@ fn title(html: &scraper::Html) -> Option<String> {
     let title = scraper::Selector::parse("title").unwrap();
     html.select(&title).next().map(|t| t.text().collect())
 }
-/// Whether a spawned parse has taken a slot (`html::running()` above `before`) within ten
-/// seconds, in place of a sleep that is too short under load.
-async fn running_past(before: usize) -> bool {
+/// Whether a spawned parse has taken a slot (`html::running()` above `before`) and its worker
+/// process is up, within ten seconds: in place of a sleep that is too short under load, and so
+/// that an abort meets a running worker (an abort before the worker started would test nothing).
+async fn worker_started(before: usize) -> bool {
     let started = Instant::now();
-    while html::running() <= before && started.elapsed() < Duration::from_secs(10) {
+    while (html::running() <= before || no_worker_left())
+        && started.elapsed() < Duration::from_secs(10)
+    {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    html::running() > before
+    html::running() > before && !no_worker_left()
 }
 /// Codex's shapes, each with a title before it: misnested `<span><div></span>`, a tag inside
 /// SVG's `<title>` followed by 20,000 `<div>`, 60,000 attributes on an end tag and on a start
@@ -82,10 +85,34 @@ fn no_worker_left() -> bool {
     })
 }
 
+/// The calendar's own parse budget (`parse_timeout_ms`) cuts a parse that outlasts it: the same
+/// calendar with a budget of a millisecond is refused as over its budget, whatever the worker
+/// made of its fragments, and no worker survives.
+#[test]
+fn a_calendar_past_its_parse_budget_is_refused() {
+    let _serial = worker();
+    let ics = thousand_event_calendar();
+    let error = html::off_runtime(|| {
+        pinakes_core::event::calendar::parse(
+            "https://example.org/calendar.ics",
+            ics.as_bytes(),
+            &pinakes_core::config::EventConfig {
+                parse_timeout_ms: 1,
+                ..Default::default()
+            },
+            chrono::Utc::now(),
+        )
+    })
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("budget"), "{error:#}");
+    assert!(no_worker_left());
+}
+
 /// Each shape ends at once: a card with its title when the scan cuts it, `too_complex` when
 /// the worker dies at its limits. No worker survives. (The bounds here are wall time, since
 /// the work is a child process's; the limits they check are seconds, so they are loose: what
-/// they catch is a parse that runs on for minutes.)
+/// they catch is a parse that runs on for minutes. "At once" is the reason: a shape that ran
+/// to the CPU budget or the wall deadline was not cut by the scan.)
 #[test]
 fn codex_s_shapes_end_at_once_with_a_card_or_too_complex() {
     let _serial = worker();
@@ -99,7 +126,14 @@ fn codex_s_shapes_end_at_once_with_a_card_or_too_complex() {
         );
         match out {
             Ok(html) => assert_eq!(title(&html).as_deref(), Some("Kept"), "{name}"),
-            Err(error) => assert!(error.is::<html::TooComplex>(), "{name}: {error:#}"),
+            Err(error) => {
+                assert!(error.is::<html::TooComplex>(), "{name}: {error:#}");
+                let text = format!("{error:#}");
+                assert!(
+                    !text.contains("the CPU budget") && !text.contains("the wall deadline"),
+                    "{name} ran to a limit instead of ending at once: {text}"
+                );
+            }
         }
     }
     assert!(no_worker_left());
@@ -177,7 +211,7 @@ async fn an_abandoned_parse_frees_its_slot_when_its_worker_dies() {
     let parse = tokio::spawn(html::blocking(move || {
         html::document_unscanned(&page, Duration::from_secs(1)).map(|_| ())
     }));
-    assert!(running_past(before).await);
+    assert!(worker_started(before).await);
     parse.abort();
     let started = Instant::now();
     while html::running() != before && started.elapsed() < Duration::from_secs(8) {
@@ -226,7 +260,13 @@ async fn a_cancelled_job_stops_its_loop() {
         let refused = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let parsed_after = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let gone = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (counted, after, cancelled) = (refused.clone(), parsed_after.clone(), gone.clone());
+        let parsed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (counted, after, cancelled, done) = (
+            refused.clone(),
+            parsed_after.clone(),
+            gone.clone(),
+            parsed.clone(),
+        );
         let job = tokio::spawn(html::blocking(move || {
             for n in 0..5_000_000 {
                 let text = fragment.replace("{n}", &n.to_string());
@@ -241,11 +281,25 @@ async fn a_cancelled_job_stops_its_loop() {
                     Ok(_) if cancelled.load(std::sync::atomic::Ordering::SeqCst) => {
                         after.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     }
-                    Ok(_) => {}
+                    Ok(_) => {
+                        done.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
                 }
             }
         }));
-        assert!(running_past(before).await, "{name}");
+        // The job is under way: a parse of its loop went through (in the worker for markup;
+        // plain text needs none) before the caller leaves, so the abort meets a running job.
+        let started = Instant::now();
+        while parsed.load(std::sync::atomic::Ordering::SeqCst) == 0
+            && started.elapsed() < Duration::from_secs(10)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            parsed.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            "{name}: no parse went through"
+        );
+        assert!(html::running() > before, "{name}");
         gone.store(true, std::sync::atomic::Ordering::SeqCst);
         job.abort();
         let started = Instant::now();
@@ -301,12 +355,8 @@ async fn a_cancelled_job_refuses_the_rest_of_a_plain_answer() {
 }
 
 /// A 1,000-event calendar as calendars are written: plain locations and descriptions with a
-/// meeting link, and an HTML description per event. It parses whole, every fragment parse
-/// through the worker, and its conference links are found; the time is reported, not bounded
-/// (the calendar's own budget applies inside the parse).
-#[test]
-fn a_thousand_event_calendar_parses_in_its_budget_with_the_worker() {
-    let _serial = worker();
+/// meeting link, and an HTML description per event (over 150 KB).
+fn thousand_event_calendar() -> String {
     let mut ics = String::from("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\n");
     for n in 0..1_000 {
         ics.push_str(&format!(
@@ -316,6 +366,16 @@ fn a_thousand_event_calendar_parses_in_its_budget_with_the_worker() {
     }
     ics.push_str("END:VCALENDAR\r\n");
     assert!(ics.len() > 150_000);
+    ics
+}
+
+/// The 1,000-event calendar parses whole within its own budget (two seconds by default, kept
+/// inside the parse), every fragment parse through the worker, and its conference links are
+/// found. The outer bound is a hang bound on a child process's work, loose under load.
+#[test]
+fn a_thousand_event_calendar_parses_in_its_budget_with_the_worker() {
+    let _serial = worker();
+    let ics = thousand_event_calendar();
     let started = Instant::now();
     let doc = html::off_runtime(|| {
         pinakes_core::event::calendar::parse(
@@ -326,7 +386,9 @@ fn a_thousand_event_calendar_parses_in_its_budget_with_the_worker() {
         )
     })
     .unwrap();
-    eprintln!("1,000-event calendar: {:?}", started.elapsed());
+    let elapsed = started.elapsed();
+    eprintln!("1,000-event calendar: {elapsed:?}");
+    assert!(elapsed < Duration::from_secs(30), "{elapsed:?}");
     let container = doc.container.expect("a calendar");
     assert_eq!(container.occurrences.len(), 1_000);
     assert!(no_worker_left());
