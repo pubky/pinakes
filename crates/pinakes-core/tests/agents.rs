@@ -973,21 +973,35 @@ async fn social_asks_the_nexus_by_a_cards_plain_links_only(pool: PgPool) {
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let root = "https://example.org/concert";
     let private = "https://example.org/private?token=SECRET";
+    // A calendar provider's share link written as `webcal:` without `//`: no host to a URL
+    // parser, a credential to `names_credential`.
+    let probes: Value =
+        serde_json::from_str(include_str!("fixtures/capability_urls.json")).unwrap();
+    let share = probes["providers"][1]
+        .as_str()
+        .unwrap()
+        .replacen("https://", "webcal:", 1);
+    assert!(share.starts_with("webcal:outlook."), "{share}");
     let root_id = store::ensure_resource(&pool, root).await.unwrap();
     let private_id = store::ensure_resource(&pool, private).await.unwrap();
+    let share_id = store::ensure_resource(&pool, &share).await.unwrap();
     let mut doc = ResourceMeta::new(root, "web", 86400);
     doc.name = Some("Concert".into());
     doc.set_type("Event");
     store::save_document(&pool, &root_id, 0, &doc)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'identifier')")
-        .bind(&private_id)
+    for alias in [&private_id, &share_id] {
+        sqlx::query(
+            "INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'identifier')",
+        )
+        .bind(alias)
         .bind(&root_id)
         .execute(&pool)
         .await
         .unwrap();
-    for id in [&root_id, &private_id] {
+    }
+    for id in [&root_id, &private_id, &share_id] {
         sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','gig','/pub/app/tags/'||$1,now())")
             .bind(id)
             .bind(AUTHOR)
@@ -1003,10 +1017,10 @@ async fn social_asks_the_nexus_by_a_cards_plain_links_only(pool: PgPool) {
     let (_, _, body) = raw(&app, "GET", &format!("/v1/resources/{root_id}"), &[], None).await;
     let card: Value = serde_json::from_slice(&body).unwrap();
     assert!(
-        card["refs"]
-            .as_array()
-            .is_some_and(|refs| refs.iter().any(|r| r == private)),
-        "the private spelling is a ref of the card: {}",
+        card["refs"].as_array().is_some_and(
+            |refs| refs.iter().any(|r| r == private) && refs.iter().any(|r| *r == share)
+        ),
+        "both credential spellings are refs of the card: {}",
         card["refs"]
     );
     let (error, answer) = call(&app, "social", json!({"ids": [root_id]})).await;
@@ -1015,4 +1029,11 @@ async fn social_asks_the_nexus_by_a_cards_plain_links_only(pool: PgPool) {
     assert!(sent.contains(root), "{sent}");
     assert!(!sent.contains("SECRET"), "{sent}");
     assert!(!answer.to_string().contains("SECRET"), "{answer}");
+    // Asked by such a link, the tool refuses before any batch.
+    let before = asked.lock().unwrap().len();
+    let (error, answer) = call(&app, "social", json!({"uris": [share]})).await;
+    assert!(error, "{answer}");
+    assert_eq!(answer["status"], 400);
+    assert!(!answer.to_string().contains("SECRET"), "{answer}");
+    assert_eq!(asked.lock().unwrap().len(), before);
 }

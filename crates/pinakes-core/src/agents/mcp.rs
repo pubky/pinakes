@@ -287,7 +287,9 @@ impl Tools {
         // A link that carries a credential is never sent to the Nexus: a call naming one is
         // refused, and a card's own link or ref that is one (a link someone's post made, read by
         // its URI) is left out of what is asked below.
-        if uris.iter().any(|u| crate::capability::is_capability(u)) {
+        let credential =
+            |u: &str| crate::capability::is_capability(u) || crate::capability::names_credential(u);
+        if uris.iter().any(|u| credential(u)) {
             return Err(Failure::bad(
                 "`uris` holds a link that carries a credential; it is never sent on",
             ));
@@ -346,7 +348,7 @@ impl Tools {
                         }
                     }
                 }
-                asked.retain(|u| !crate::capability::is_capability(u));
+                asked.retain(|u| !credential(u));
                 if asked.is_empty() {
                     continue;
                 }
