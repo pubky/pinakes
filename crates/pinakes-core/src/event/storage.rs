@@ -102,8 +102,9 @@ async fn rekey(pool: &PgPool, id: &str) -> Result<()> {
         .filter(|uid| crate::capability::contains_credential(uid))
         .map(|uid| (uid.clone(), super::stored_uid(uid)))
         .collect();
+    // A key is read as `changes::stored_key` reads it: its recurrence id as any JSON.
     let moves = |key: &str| {
-        serde_json::from_str::<(String, String)>(key)
+        serde_json::from_str::<(String, Value)>(key)
             .is_ok_and(|(uid, _)| crate::capability::contains_credential(&uid))
     };
     let state = sqlx::query("SELECT held_keys,missing_keys FROM event_fetch WHERE resource_id=$1")
@@ -191,7 +192,7 @@ async fn rekey(pool: &PgPool, id: &str) -> Result<()> {
     for old in unit_keys {
         // The unit's occurrence reference names the UID too.
         let new = crate::changes::stored_key(old);
-        let uid = serde_json::from_str::<(String, String)>(&new)
+        let uid = serde_json::from_str::<(String, Value)>(&new)
             .map(|(uid, _)| uid)
             .unwrap_or_default();
         sqlx::query("UPDATE group_unit SET occurrence_key=$3,occurrence=CASE WHEN occurrence ? 'uid' THEN jsonb_set(occurrence,'{uid}',to_jsonb($4::text)) ELSE occurrence END WHERE resource_id=$1 AND occurrence_key=$2")

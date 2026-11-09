@@ -1561,6 +1561,8 @@ async fn change_lines_and_group_units_keyed_by_a_credential_uid_move_to_its_stan
         serde_json::to_string(&("ht\ttps://cal.example/event?%74oken=SECRET", "r")).unwrap();
     let newline_key =
         serde_json::to_string(&("web\ncal:cal.example/feed.ics?token=SECRET", "")).unwrap();
+    // A key whose recurrence id is not a string is read all the same.
+    let null_key = format!("[{},null]", serde_json::to_string(secret).unwrap());
     let mut seqs = vec![];
     for (resource, key) in [
         (&id, &raw_key),
@@ -1568,6 +1570,7 @@ async fn change_lines_and_group_units_keyed_by_a_credential_uid_move_to_its_stan
         (&other, &raw_key),
         (&id, &tab_key),
         (&id, &newline_key),
+        (&id, &null_key),
     ] {
         let seq: i64 = sqlx::query_scalar("INSERT INTO resource_change(resource_id,class,fields,source,occurrence_key) VALUES($1,'created','{}','ics',$2) RETURNING seq")
             .bind(resource)
@@ -1610,9 +1613,11 @@ async fn change_lines_and_group_units_keyed_by_a_credential_uid_move_to_its_stan
             plain_key,
             raw_key.clone(),
             stored_key(&tab_key),
-            stored_key(&newline_key)
+            stored_key(&newline_key),
+            stored_key(&null_key)
         ]
     );
+    assert!(keys[5].ends_with(",null]"), "{}", keys[5]);
     let (unit_key, unit_uid): (String, Option<String>) =
         sqlx::query_as("SELECT occurrence_key,occurrence->>'uid' FROM group_unit WHERE unit_id=$1")
             .bind(&unit)
