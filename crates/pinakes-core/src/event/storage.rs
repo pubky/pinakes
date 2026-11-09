@@ -118,19 +118,20 @@ async fn rekey(pool: &PgPool, id: &str) -> Result<()> {
                 .as_object()
                 .is_some_and(|missing| missing.keys().any(|k| moves(k)))
     });
-    // The keys of the resource's change lines and group units that still name a raw UID: only
-    // a key that holds a link start can (`capability::contains_credential`).
-    let link_start = "//|http:|https:|webcal:|webcals:";
-    let change_keys: Vec<String> = sqlx::query_scalar("SELECT DISTINCT occurrence_key FROM resource_change WHERE resource_id=$1 AND occurrence_key ~* $2")
+    // The keys of the resource's change lines and group units that still name a raw UID: each
+    // distinct key is read whole and `capability::contains_credential` decides (a pattern on
+    // the stored text would miss a link start split by a tab or a newline, stored escaped); only
+    // a key already under its stand-in is left out.
+    let change_keys: Vec<String> = sqlx::query_scalar("SELECT DISTINCT occurrence_key FROM resource_change WHERE resource_id=$1 AND occurrence_key IS NOT NULL AND occurrence_key !~ $2")
         .bind(id)
-        .bind(link_start)
+        .bind(crate::changes::STAND_IN_KEY)
         .fetch_all(pool)
         .await?;
     let unit_keys: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT occurrence_key FROM group_unit WHERE resource_id=$1 AND occurrence_key ~* $2",
+        "SELECT DISTINCT occurrence_key FROM group_unit WHERE resource_id=$1 AND occurrence_key<>'' AND occurrence_key !~ $2",
     )
     .bind(id)
-    .bind(link_start)
+    .bind(crate::changes::STAND_IN_KEY)
     .fetch_all(pool)
     .await?;
     let change_keys: Vec<&str> = change_keys

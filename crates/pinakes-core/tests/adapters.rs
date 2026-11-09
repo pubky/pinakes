@@ -1555,8 +1555,20 @@ async fn change_lines_and_group_units_keyed_by_a_credential_uid_move_to_its_stan
     // key, one under a plain key, and a group unit of the occurrence under the raw key.
     let raw_key = serde_json::to_string(&(secret, "")).unwrap();
     let plain_key = serde_json::to_string(&("plain", "")).unwrap();
+    // A UID whose link start is split by a tab or a newline (stored escaped in the key) or
+    // whose key is percent-encoded counts too.
+    let tab_key =
+        serde_json::to_string(&("ht\ttps://cal.example/event?%74oken=SECRET", "r")).unwrap();
+    let newline_key =
+        serde_json::to_string(&("web\ncal:cal.example/feed.ics?token=SECRET", "")).unwrap();
     let mut seqs = vec![];
-    for (resource, key) in [(&id, &raw_key), (&id, &plain_key), (&other, &raw_key)] {
+    for (resource, key) in [
+        (&id, &raw_key),
+        (&id, &plain_key),
+        (&other, &raw_key),
+        (&id, &tab_key),
+        (&id, &newline_key),
+    ] {
         let seq: i64 = sqlx::query_scalar("INSERT INTO resource_change(resource_id,class,fields,source,occurrence_key) VALUES($1,'created','{}','ics',$2) RETURNING seq")
             .bind(resource)
             .bind(key)
@@ -1588,7 +1600,19 @@ async fn change_lines_and_group_units_keyed_by_a_credential_uid_move_to_its_stan
     .fetch_all(&pool)
     .await
     .unwrap();
-    assert_eq!(keys, [new_key.clone(), plain_key, raw_key.clone()]);
+    let stored_key = |key: &str| pinakes_core::changes::stored_key(key);
+    assert_ne!(stored_key(&tab_key), tab_key);
+    assert_ne!(stored_key(&newline_key), newline_key);
+    assert_eq!(
+        keys,
+        [
+            new_key.clone(),
+            plain_key,
+            raw_key.clone(),
+            stored_key(&tab_key),
+            stored_key(&newline_key)
+        ]
+    );
     let (unit_key, unit_uid): (String, Option<String>) =
         sqlx::query_as("SELECT occurrence_key,occurrence->>'uid' FROM group_unit WHERE unit_id=$1")
             .bind(&unit)
