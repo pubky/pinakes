@@ -325,7 +325,11 @@ pub(crate) fn thread_cpu_time() -> std::time::Duration {
         tv_nsec: 0,
     };
     // SAFETY: `clock_gettime` writes only the `timespec` it is given.
-    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) };
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) };
+    assert_eq!(
+        rc, 0,
+        "clock_gettime failed: a bound on it would hold nothing"
+    );
     std::time::Duration::new(now.tv_sec as u64, now.tv_nsec as u32)
 }
 
