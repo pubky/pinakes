@@ -15,6 +15,15 @@ fn title(html: &scraper::Html) -> Option<String> {
     let title = scraper::Selector::parse("title").unwrap();
     html.select(&title).next().map(|t| t.text().collect())
 }
+/// Whether a spawned parse has taken a slot (`html::running()` above `before`) within ten
+/// seconds, in place of a sleep that is too short under load.
+async fn running_past(before: usize) -> bool {
+    let started = Instant::now();
+    while html::running() <= before && started.elapsed() < Duration::from_secs(10) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    html::running() > before
+}
 /// Codex's shapes, each with a title before it: misnested `<span><div></span>`, a tag inside
 /// SVG's `<title>` followed by 20,000 `<div>`, 60,000 attributes on an end tag and on a start
 /// tag, 20,000 unclosed `<div>`, 30,000 `<span>x`.
@@ -168,8 +177,7 @@ async fn an_abandoned_parse_frees_its_slot_when_its_worker_dies() {
     let parse = tokio::spawn(html::blocking(move || {
         html::document_unscanned(&page, Duration::from_secs(1)).map(|_| ())
     }));
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(html::running() > before);
+    assert!(running_past(before).await);
     parse.abort();
     let started = Instant::now();
     while html::running() != before && started.elapsed() < Duration::from_secs(8) {
@@ -237,8 +245,7 @@ async fn a_cancelled_job_stops_its_loop() {
                 }
             }
         }));
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert!(html::running() > before, "{name}");
+        assert!(running_past(before).await, "{name}");
         gone.store(true, std::sync::atomic::Ordering::SeqCst);
         job.abort();
         let started = Instant::now();

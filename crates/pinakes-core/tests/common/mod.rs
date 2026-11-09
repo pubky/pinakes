@@ -324,6 +324,27 @@ pub fn thread_cpu_time() -> std::time::Duration {
     unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) };
     std::time::Duration::new(now.tv_sec as u64, now.tv_nsec as u32)
 }
+/// How many backends of this database wait for a lock right now.
+pub async fn lock_waiters(pool: &sqlx::PgPool) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+/// Waits until at least `n` backends of this database wait for a lock: the sign that a spawned
+/// writer has reached the row or key it must queue behind, in place of a sleep "long enough"
+/// (short under load, long otherwise). Bounded: `what` names the writer that never got there.
+pub async fn lock_waiters_reach(pool: &sqlx::PgPool, n: i64, what: &str) {
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        while lock_waiters(pool).await < n {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{what} never waited for the lock"));
+}
 /// An egress configuration for a mocked transport: no pacing between requests to one host, the
 /// hosts with a published rate included (a `host_rates` entry wins over the published rate), so
 /// recorded answers come back at once. The pacing itself is proven in `egress::tests` on a paused

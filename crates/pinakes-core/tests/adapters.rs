@@ -220,7 +220,8 @@ async fn a_derived_link_and_a_feed_apply_take_locks_in_one_order(pool: PgPool) {
             .await
         }
     });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // The derivation has reached the parent's row and waits for it, holding no adapter lock.
+    common::lock_waiters_reach(&pool, 1, "the derivation").await;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('btcmap',17614))")
         .execute(&mut *apply)
         .await
