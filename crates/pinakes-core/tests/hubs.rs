@@ -596,13 +596,20 @@ fn synthetic(path: &str) -> Option<(u16, Vec<u8>)> {
     let mbid = |n: &str| format!("00000000-0000-4000-8000-0000000000{n}");
     if let Some(id) = path.strip_prefix("/ws/2/recording/") {
         let (n, title, length, artist, isrcs) = SYNTHETIC.iter().find(|(n, ..)| mbid(n) == id)?;
+        // The duration's pick (…62) has a link of its own on MusicBrainz.
+        let relations = if *n == "62" {
+            serde_json::json!([{"type": "free streaming", "target-type": "url", "ended": false,
+                "url": {"resource": "https://www.deezer.com/track/6200062"}}])
+        } else {
+            serde_json::json!([])
+        };
         return Some((
             200,
             serde_json::to_vec(&serde_json::json!({
                 "id": mbid(n), "title": title, "length": length, "isrcs": isrcs, "video": false,
                 "artist-credit": [{"name": "Someone", "joinphrase": "",
                     "artist": {"id": format!("00000000-0000-4000-8000-0000000000{artist}"), "name": "Someone"}}],
-                "relations": [],
+                "relations": relations,
             }))
             .unwrap(),
         ));
@@ -3490,6 +3497,7 @@ async fn a_shared_isrc_names_the_recording_the_tracks_length_picks(pool: sqlx::P
 /// for both, by every source.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn the_whole_set_agrees_and_only_its_own_isrcs_are_keys(pool: sqlx::PgPool) {
+    use tower::ServiceExt;
     if !has(&["service", "musicbrainz"]) {
         return;
     }
@@ -3511,6 +3519,12 @@ async fn the_whole_set_agrees_and_only_its_own_isrcs_are_keys(pool: sqlx::PgPool
             d.attributes.insert("duration".into(), duration.into());
         }
         store::save_document(&pool, &id, 0, &d).await.unwrap();
+        // Referenced, so search lists it.
+        sqlx::query("INSERT INTO reference(resource_id,author,kind,object_path,label,created_at) VALUES($1,repeat('a',52),'tag','/pub/test/tags/'||$1,'music',now())")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
         ids.insert(uri, id);
     }
     let t = Arc::new(Recorded {
@@ -3573,6 +3587,44 @@ async fn the_whole_set_agrees_and_only_its_own_isrcs_are_keys(pool: sqlx::PgPool
     assert!(rows(facts, ids[picked].clone())
         .await
         .contains(&"isrc ZZPCK2600001".to_owned()));
+    // The pick itself is what MusicBrainz is read about: its own link, keyed by the standing
+    // recording, and its MBID kept as `mbid_was`, so `key=mbid:` with the pick finds the track.
+    assert_eq!(
+        rows(
+            "SELECT uri||' '||coalesce(key,'-') FROM derived_link WHERE resource_id=$1 AND source='musicbrainz'",
+            ids[picked].clone()
+        )
+        .await,
+        [format!(
+            "https://www.deezer.com/track/6200062 mb:recording:{}",
+            rec("61")
+        )]
+    );
+    assert!(rows(facts, ids[picked].clone())
+        .await
+        .contains(&format!("mbid_was {}", rec("62"))));
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let mut request = axum::http::Request::builder()
+        .uri(format!("/v1/search?key=mbid:{}", rec("62")))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.2:1234".parse::<SocketAddr>().unwrap(),
+    ));
+    let response = app.oneshot(request).await.unwrap();
+    let bytes = http_body_util::BodyExt::collect(response.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let found: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        found["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["id"] == ids[picked].as_str()),
+        "{found}"
+    );
 }
 
 /// Wikidata's recording item, read alone (no other source keys the track): the MBID it names is

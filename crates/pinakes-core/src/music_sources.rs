@@ -98,10 +98,12 @@ pub enum IsrcMatch {
         standing: String,
         members: Vec<String>,
     },
-    /// Several recordings have it that disagree, and the service's duration picks one: the
-    /// recording whose length is within [`LENGTH_WINDOW_SECS`] of it while every other's is
-    /// known and is not. The recording's MBID is the key; the ISRC stays a fact.
-    Picked(String),
+    /// Several recordings have it that disagree, and the service's duration picks one: `pick`,
+    /// the recording whose length is within [`LENGTH_WINDOW_SECS`] of it while every other's is
+    /// known and is not. `standing` is the MBID it is keyed by ([`recording_key`]: the pick, or
+    /// the recording that stands for its duplicates); the ISRC stays a fact. The pick itself is
+    /// what MusicBrainz is read about (its links, its MBID as `mbid_was`).
+    Picked { pick: String, standing: String },
     /// Several recordings have it that disagree, and nothing tells them apart: the ISRC is a
     /// fact only, as a key would join whichever of their groups took it first.
     Shared,
@@ -139,7 +141,10 @@ pub(crate) async fn isrc_match(
                 Some(settled) => settled,
                 // The duration's pick is keyed as every producer keys a recording.
                 None => match picked(several, duration) {
-                    Some(mbid) => IsrcMatch::Picked(recording_key(&cx.egress, base, &mbid).await?),
+                    Some(pick) => IsrcMatch::Picked {
+                        standing: recording_key(&cx.egress, base, &pick).await?,
+                        pick,
+                    },
                     None => IsrcMatch::Shared,
                 },
             }
@@ -154,7 +159,7 @@ pub(crate) async fn isrc_recording(cx: &Context, isrc: &str) -> Result<Option<St
     Ok(match isrc_match(cx, isrc, None).await? {
         IsrcMatch::One(mbid) => Some(recording_key(&cx.egress, base, &mbid).await?),
         IsrcMatch::Duplicates { standing, .. } => Some(standing),
-        IsrcMatch::Unknown | IsrcMatch::Picked(_) | IsrcMatch::Shared => None,
+        IsrcMatch::Unknown | IsrcMatch::Picked { .. } | IsrcMatch::Shared => None,
     })
 }
 /// The MBID every producer keys a recording by (`mb:recording:…`): the recording that stands for
@@ -408,7 +413,7 @@ pub(crate) fn isrc_key(isrc: &str, found: &IsrcMatch, via: &str) -> Vec<crate::a
     };
     match found {
         IsrcMatch::Unknown | IsrcMatch::One(_) => vec![key(format!("isrc:{isrc}"))],
-        IsrcMatch::Picked(mbid) => hubs::key::mb(MbKind::Recording, mbid)
+        IsrcMatch::Picked { standing, .. } => hubs::key::mb(MbKind::Recording, standing)
             .map(key)
             .into_iter()
             .collect(),

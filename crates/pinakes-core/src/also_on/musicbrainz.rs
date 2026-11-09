@@ -96,8 +96,10 @@ impl MusicBrainzSource {
                     IsrcMatch::Duplicates { standing, members } => {
                         return duplicates_found(cx, base, &standing, &members, &isrc, level).await;
                     }
-                    IsrcMatch::Picked(mbid) => {
-                        ids = vec![mbid];
+                    // The pick itself is read: its links and facts, keyed (and its MBID kept as
+                    // `mbid_was`) as the recording that stands for its duplicates.
+                    IsrcMatch::Picked { pick, .. } => {
+                        ids = vec![pick];
                         shared.push(isrc);
                     }
                     IsrcMatch::Unknown | IsrcMatch::Shared => {}
