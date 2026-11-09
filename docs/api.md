@@ -1192,7 +1192,15 @@ and finds and what it costs; the index lists them in the order they run. A music
 album or artist on a music service, [its spellings](#aliases)) is looked up exactly, never by title
 or name. A key comes from a hub (MusicBrainz, Wikidata) or from a known music service's own record
 of its own object; another host's claim (its JSON-LD `isrcCode`, `sameAs`, a canonical link) is a
-fact at most. ISRCs are stored in upper case and barcodes as GTIN-13 (a 12-digit UPC gains a
+fact at most. An ISRC MusicBrainz gives to several recordings that agree (the same artists, the
+same title once its identity-keeping tags go, lengths within 3 s) names one recording not yet
+merged: the ISRC and the MBID that stands for them (the smallest) are the track's keys, the
+other MBIDs facts; recordings that disagree (a live
+version, a remix, an edit, another artist) leave the duration to pick one or the ISRC a fact
+([an ISRC on several recordings](sources/README.md#an-isrc-on-several-recordings)). A track with
+an ISRC key on another service is looked up on Spotify by it, exactly (`spotify_isrc`, with the
+operator's Spotify credentials): its Spotify track becomes a link keyed by the ISRC. ISRCs are
+stored in upper case and barcodes as GTIN-13 (a 12-digit UPC gains a
 leading zero), by every source. The level is exact: a track lists tracks and videos of the
 recording, an album lists albums and YouTube's album playlists, an artist lists artist pages and
 channels. Album links group by their release group, while two editions (two MusicBrainz releases)

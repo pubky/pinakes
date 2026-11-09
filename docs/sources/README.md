@@ -141,17 +141,24 @@ registered source), and in a debug build a source records no other form.
 
 ### An ISRC on several recordings
 
-MusicBrainz gives one ISRC to several recordings at times. A source that reads a track's own
-ISRC names none of them by the ISRC alone: the track's duration decides. The one recording whose
-length is within 3 s of it, while every other's length is known and is not, is the track's: its
-MBID is the key (`mb:recording:…`, `via` the source) and the ISRC a fact. When none or two are
-that close, or the page states no duration, the ISRC is a fact only (a key would join whichever
-recording's group took it first). Each music source that reads ISRCs follows this rule, so one
-goes without the others needing a change.
+MusicBrainz gives one ISRC to several recordings at times. When those recordings agree, they
+are one recording MusicBrainz has not merged yet: the same artists (their MBIDs), the same title
+once the tags that keep a recording's identity are dropped (a remaster or a version tag goes; a
+live, remix or edit tag tells recordings apart), and every two known lengths within 3 s. Then the
+ISRC is the track's key and so is the MBID of the one that stands for them all (the smallest
+MBID, `mb:recording:…`, `via` the source; a group holds one recording MBID, so the others are
+facts), a link MusicBrainz relates to any of them is keyed by that one too, and `musicbrainz`
+takes the union of their links and facts; at most eight recordings are read this way. When they disagree, the ISRC alone names none
+of them and the track's duration decides: the one recording whose length is within 3 s of it,
+while every other's length is known and is not, is the track's (its MBID the key, the ISRC a
+fact); when none or two are that close, or the page states no duration, the ISRC is a fact only
+(a key would join whichever recording's group took it first). Only MusicBrainz's own data for the
+exact ISRC decides, never a title search. Each music source that reads ISRCs follows this rule,
+so one goes without the others needing a change.
 
 - [`service`](service.md): the ISRC a music service's own track page states.
 - [`tidal`](tidal.md): TIDAL's own barcodes and ISRCs (with the operator's TIDAL credentials).
-- [`spotify`](spotify.md): Spotify's own barcodes and ISRCs (with the operator's Spotify app credentials).
+- [`spotify`](spotify.md): Spotify's own barcodes and ISRCs, and `spotify_isrc`, another service's track on Spotify by its ISRC (with the operator's Spotify app credentials).
 - [`musicbrainz`](musicbrainz.md): what MusicBrainz relates a music link to.
 - [`musicbrainz_entity`](musicbrainz_entity.md): a MusicBrainz page as its own hub.
 - [`performers`](performers.md): an event's performers, keyed to the artist on the page's own service.

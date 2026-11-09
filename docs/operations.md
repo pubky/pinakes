@@ -729,6 +729,10 @@ it), or after an upgrade that adds or changes also-on sources, run `pinakesd --c
 their last run for up to the source's lifetime (30 days). After an upgrade that changes how links
 are spelled, typed or named (aliases of a canonical link, a card's service in `site`), run
 `reextract all`: stored cards keep what the older build gave them until each is fetched again.
+`spotify_isrc` (on with the Spotify credentials, off with `[also_on.sources.spotify_isrc]
+enabled = false`) costs one Spotify search per ISRC key of a track on another service, cached
+an hour, on Spotify's pace; after the upgrade that added it, `reextract also-on` asks for every
+stored track at once.
 
 The also-on worker runs every enabled source that applies to a resource ([the API](api.md#also-on))
 after a save that changed its document or status, and again when the shortest lifetime among
