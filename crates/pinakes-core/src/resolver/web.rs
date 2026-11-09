@@ -204,6 +204,7 @@ impl WebResolver {
             let recordings = musicbrainz::isrc(&self.egress, base, &isrc)
                 .await?
                 .unwrap_or_default();
+            // One recording's card; duplicates that agree as one recording take the first's.
             let entity = match recordings.as_slice() {
                 [one] => {
                     musicbrainz::entity(
@@ -214,7 +215,14 @@ impl WebResolver {
                     )
                     .await?
                 }
-                _ => None,
+                [] => None,
+                several => crate::music_sources::agreeing(&self.egress, base, several)
+                    .await?
+                    .and_then(|entities| {
+                        entities
+                            .into_iter()
+                            .min_by_key(|e| e.title.as_ref().map_or(usize::MAX, String::len))
+                    }),
             };
             crate::music_sources::musicbrainz_card(uri, entity.as_ref(), Some(&isrc), ttl)
         } else {

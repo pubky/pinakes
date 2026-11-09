@@ -7,15 +7,18 @@ One of the music sources of [also on](../api.md#also-on): links on music service
 [operations](#operations)): a Spotify album's barcode (`external_ids.upc`) and a track's ISRC
 (`external_ids.isrc`) from Spotify's Web API, as the keys `upc:…` and `isrc:…` (`via`
 `spotify`) and as facts, and no links; `musicbrainz`, `deezer` and `itunes` then find the same
-album or track by them. An ISRC MusicBrainz gives to several recordings is decided by the
-track's duration (`duration_ms`), the one recording within 3 s of it keyed by its MBID, else the
-ISRC a fact only ([an ISRC on several recordings](README.md#an-isrc-on-several-recordings)). A
+album or track by them. An ISRC MusicBrainz gives to several recordings that agree is those
+recordings' as one, keyed by the ISRC and the MBID that stands for them; one on recordings that disagree is decided
+by the track's duration (`duration_ms`), the one recording within 3 s of it keyed by its MBID,
+else the ISRC a fact only ([an ISRC on several recordings](README.md#an-isrc-on-several-recordings)). A
 Spotify link Spotify does not know (404)
 gives nothing. Artists, playlists, episodes and shows are not read here.
 
-For example, the track `https://open.spotify.com/track/7tFiyTwD0nx5a1eklYtX2J` ("Bohemian
-Rhapsody - Remastered 2011") has the ISRC `GBUM71029604`, which MusicBrainz gives to one
-recording: the track gets `isrc:GBUM71029604` and joins that recording's group.
+## Another service's track on Spotify
+
+The lookup the other way, a Spotify track for another service's track by its ISRC, is the
+`spotify_isrc` source (off by default; its own page in this directory), with the same credentials
+and pace.
 
 ## Without Spotify's API
 

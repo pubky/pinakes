@@ -258,7 +258,7 @@ derive_links = true # Off: keys and facts only; no derived links on cards, nor j
 [tidal]
 country = "US" # The TIDAL catalogue's country (ISO 3166-1 alpha-2, upper case).
 
-# The spotify source asks Spotify only with an app's client ID and secret: supply them through
+# The Spotify app credentials spotify and spotify_isrc share (spotify_api.rs): set them through
 # PINAKES_SPOTIFY_CLIENT_ID and PINAKES_SPOTIFY_CLIENT_SECRET (see .env.example), or here.
 
 [spotify]

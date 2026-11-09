@@ -126,6 +126,7 @@ impl Metrics {
         )?;
         registry.register(Box::new(preview_backlog.clone()))?;
         registry.register(Box::new(ALSO_ON_SERVICE_ERRORS.clone()))?;
+        registry.register(Box::new(ALSO_ON_RECORDING_KEY_CONFLICTS.clone()))?;
         registry.register(Box::new(RESOLUTION_DEFERRED.clone()))?;
         let out = Self {
             api_panics,
@@ -348,6 +349,27 @@ static ALSO_ON_SERVICE_ERRORS: std::sync::LazyLock<IntCounterVec> = std::sync::L
 pub fn also_on_service_error(service: &'static str, class: &'static str) {
     ALSO_ON_SERVICE_ERRORS
         .with_label_values(&[service, class])
+        .inc();
+}
+/// Also-on runs that keyed a MusicBrainz recording another source keys differently on the same
+/// resource (or two in one run), by source: both keys stay, and the resource joins no recording
+/// group (a group holds one). Every producer keys the recording that stands for a set of
+/// duplicates, so this counts sources that truly disagree. Observed only: nothing is dropped. No
+/// resource or URL is a label.
+static ALSO_ON_RECORDING_KEY_CONFLICTS: std::sync::LazyLock<IntCounterVec> =
+    std::sync::LazyLock::new(|| {
+        IntCounterVec::new(
+            Opts::new(
+                "pinakes_also_on_recording_key_conflicts_total",
+                "Also-on runs that keyed a recording another source keys differently on the same resource, by source",
+            ),
+            &["source"],
+        )
+        .expect("static metric")
+    });
+pub fn also_on_recording_key_conflict(source: &str) {
+    ALSO_ON_RECORDING_KEY_CONFLICTS
+        .with_label_values(&[source])
         .inc();
 }
 /// Resolutions put off without a charged attempt, by reason (the row's `last_error` class): a

@@ -85,15 +85,21 @@ impl MusicBrainzSource {
             },
         };
         // A track MusicBrainz does not relate the URL to: the one recording its page's own ISRC
-        // is on, or the one of several its length picks (`isrc_match`). A picked recording's
-        // shared ISRC stays a fact: it names the other recordings too.
+        // is on, the duplicates that agree as one recording, or the one of several its length
+        // picks (`isrc_match`). A picked recording's shared ISRC stays a fact: it names the
+        // other recordings too.
         let mut shared = vec![];
         if kind == MbKind::Recording && ids.is_empty() {
             if let Some(isrc) = own_isrc(subject) {
                 match isrc_match(cx, &isrc, page_duration(subject)).await? {
                     IsrcMatch::One(mbid) => ids = vec![mbid],
-                    IsrcMatch::Picked(mbid) => {
-                        ids = vec![mbid];
+                    IsrcMatch::Duplicates { standing, members } => {
+                        return duplicates_found(cx, base, &standing, &members, &isrc, level).await;
+                    }
+                    // The pick itself is read: its links and facts, keyed (and its MBID kept as
+                    // `mbid_was`) as the recording that stands for its duplicates.
+                    IsrcMatch::Picked { pick, .. } => {
+                        ids = vec![pick];
                         shared.push(isrc);
                     }
                     IsrcMatch::Unknown | IsrcMatch::Shared => {}

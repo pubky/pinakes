@@ -1,7 +1,8 @@
 //! How two cards' names are compared when nothing exact joins them: a recording's title and an
 //! artist's name in the form the possible-duplicates signal and the duplicates reports read.
-//! Never a key: a normalised name equal to another is a candidate, and only beside facts that
-//! agree (the artist, a length within seconds).
+//! Never a key on its own: a normalised name equal to another is a candidate, and only beside
+//! facts that agree (the artist, a length within seconds). The one place it decides a key is
+//! `music_sources::agree`, where MusicBrainz already ties the recordings by one ISRC.
 //!
 //! The same-recording pass stores each recording's keys (`same_recording_unit`), so a report
 //! can group by them.

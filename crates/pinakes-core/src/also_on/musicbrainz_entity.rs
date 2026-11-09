@@ -12,8 +12,9 @@ use crate::music_sources::*;
 /// A MusicBrainz page as its own hub: a recording's, release's, release group's or artist's page
 /// carries that entity's keys and facts and lists its links on music services at its level, as
 /// the `musicbrainz` source does for a service link MusicBrainz relates to the entity. An ISRC's
-/// page keys the ISRC and the one recording MusicBrainz gives it to; an ISRC several recordings
-/// have names none of them (as a service's page ISRC), so its page keeps it as a fact only.
+/// page keys the ISRC and the one recording MusicBrainz gives it to, or the duplicates that
+/// agree as one recording (`music_sources::agree`); an ISRC on recordings that disagree names
+/// none of them (as a service's page ISRC), so its page keeps it as a fact only.
 pub struct MusicBrainzEntitySource;
 #[async_trait]
 impl Source for MusicBrainzEntitySource {
@@ -34,7 +35,10 @@ impl Source for MusicBrainzEntitySource {
     }
 }
 impl MusicBrainzEntitySource {
-    /// What the page's URL alone proves: the entity's MBID, or the ISRC (with its fact).
+    /// What the page's URL alone proves: the entity's MBID, or the ISRC (with its fact). A
+    /// recording page keys its own MBID here too, though it may be one of several duplicates
+    /// another recording stands for (only the read, `standing`, could tell): at worst its group
+    /// stays apart from theirs until a read succeeds, never two recording keys on one resource.
     fn own_keys(uri: &str) -> Found {
         let mut found = Found::default();
         if let Some((kind, mbid, _)) = musicbrainz::entity_link(uri) {
@@ -106,7 +110,28 @@ impl MusicBrainzEntitySource {
                 found.keys.insert(0, own);
                 found
             }
-            Some(recordings) if recordings.len() > 1 => Found::default(),
+            // Duplicates that agree are one recording, keyed by the one that stands for them;
+            // recordings that disagree, or a set that cannot be settled, name none.
+            Some(recordings) if recordings.len() > 1 => {
+                let settled = match agreeing(&cx.egress, base, &recordings).await? {
+                    Some(entities) => match entities.first() {
+                        Some(first) => standing(&cx.egress, base, &first.mbid).await?,
+                        None => Standing::Unclear,
+                    },
+                    None => Standing::Unclear,
+                };
+                match settled {
+                    Standing::Of { standing, members } => {
+                        let mut found =
+                            duplicates_found(cx, base, &standing, &members, &isrc, Level::Track)
+                                .await?;
+                        found.keys.retain(|k| k.key != own.key);
+                        found.keys.insert(0, own);
+                        found
+                    }
+                    Standing::Alone | Standing::Unclear => Found::default(),
+                }
+            }
             // An ISRC MusicBrainz doesn't know is still its own key.
             _ => Found {
                 keys: vec![own],

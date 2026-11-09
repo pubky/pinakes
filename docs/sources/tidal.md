@@ -7,12 +7,25 @@ One of the music sources of [also on](../api.md#also-on): links on music service
 [operations](#operations)): a TIDAL album's barcode and a track's ISRC from TIDAL's
 own API, as the keys `upc:…` and `isrc:…` (`via` `tidal`) and as facts, and no links;
 `musicbrainz`, `deezer` and `itunes` then find the
-same album or track by them. An ISRC MusicBrainz gives to several recordings is decided by the
-track's duration, the one recording within 3 s of it keyed by its MBID, else the ISRC a fact only
-([an ISRC on several recordings](README.md#an-isrc-on-several-recordings)). TIDAL's catalogue is read in one country (`[tidal] country`,
+same album or track by them. An ISRC MusicBrainz gives to several recordings that agree is those
+recordings' as one, keyed by the ISRC and the MBID that stands for them; one on recordings that disagree is decided by
+the track's duration, the one recording within 3 s of it keyed by its MBID, else the ISRC a fact
+only ([an ISRC on several recordings](README.md#an-isrc-on-several-recordings)). TIDAL's catalogue is read in one country (`[tidal] country`,
 `US`); an item TIDAL does not offer there gives nothing. TIDAL's answers are cached per
 credential pair, so a new token keeps them; a 401 or 403 is never cached, and refused
 credentials are asked again after five minutes.
+
+## No lookup by ISRC
+
+TIDAL's API can find a track by ISRC (`GET /v2/tracks?filter[isrc]=…`), but Pinakes does not ask
+it to: such a lookup would only put a TIDAL link on a card beside other services' links, and
+TIDAL's Developer Guidelines (version 3.0, 6 May 2024) list "Integrating TIDAL content with
+content or streams from another service" among the offerings that are "strictly prohibited unless
+you have TIDAL's express written approval", while its Design Guidelines (version 3.0) say not to
+"display TIDAL content next to content from similar services". Its Developer Terms (version 3.0)
+also allow TIDAL content only "the temporary caching of metadata and cover art" and forbid stored
+"compilations or databases of TIDAL Content". A TIDAL track reaches a card as it does today: a
+link someone tagged, MusicBrainz's or Wikidata's relations.
 
 ## Operations
 
