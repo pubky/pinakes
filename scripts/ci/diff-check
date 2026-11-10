@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Whitespace errors in this change. A CI checkout has no uncommitted edits, so a bare
+# `git diff --check` checks nothing: compare the commits with where they left main.
+set -euo pipefail
+base_ref=${PINAKES_CHECK_BASE:-}
+# PRs and tags give no base, a new ref an all-zero one, and a rewritten base may be gone:
+# then use origin/main (a PR's merge commit has the current main as its first parent).
+if [[ -z "$base_ref" || "$base_ref" =~ ^0+$ ]] || ! git cat-file -e "$base_ref^{commit}" 2>/dev/null; then
+  base_ref=refs/remotes/origin/main
+fi
+head=$(git rev-parse HEAD)
+base=$(git merge-base "$base_ref" "$head")
+# HEAD is already on main (a release tag, a push without a base): check its own commit.
+if [[ "$base" == "$head" ]]; then
+  base=$(git rev-parse "$head^1")
+fi
+# Recorded upstream responses and licence texts stay byte-exact, whitespace included.
+recorded=(':(exclude,glob)crates/*/tests/fixtures/**' ':(exclude,glob)data/LICENSE*')
+printf 'Whitespace check: %s..%s and uncommitted changes\n' "$base" "$head"
+git diff --check "$base" "$head" -- . "${recorded[@]}"
+git diff --check HEAD -- . "${recorded[@]}"

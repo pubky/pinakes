@@ -236,6 +236,9 @@ INSERT INTO same_recording_dirty(resource_id) SELECT resource_id FROM same_recor
 
 ## Deployment and egress
 
+For container commands, config/secret injection and the persistent dump mount, see
+[container deployment](deployment.md#container).
+
 Web fetches bypass environment proxies, validate every DNS answer, pin the checked addresses and
 repeat the policy at every redirect (three hops; HTML meta refresh and literal JavaScript
 redirects count). `egress.allow_hosts` and `egress.deny_hosts` take exact names or

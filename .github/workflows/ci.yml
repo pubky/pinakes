@@ -1,0 +1,195 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  RUSTUP_TOOLCHAIN: 1.98.1
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_INCREMENTAL: '0'
+  # The repository's socket form, user in the query: a user before an empty host is not a URL
+  # (WHATWG/url crate EmptyHost), so sqlx and the tests' url::Url::parse would refuse it.
+  DATABASE_URL: postgresql:///postgres?host=/var/run/postgresql&port=55432&user=pinakes_ci
+
+jobs:
+  quality:
+    name: Full test gate and mock e2e
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          # The whitespace check compares this change with where it left main.
+          fetch-depth: 0
+      - name: Provision PostgreSQL, PostGIS and h3
+        run: scripts/ci/setup-postgres
+      - name: Install Rust
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt,clippy
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: e2e/package-lock.json
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Workflow contracts
+        run: |
+          python3 -m venv "$RUNNER_TEMP/ci-python"
+          "$RUNNER_TEMP/ci-python/bin/pip" install -r scripts/ci/requirements.txt
+          "$RUNNER_TEMP/ci-python/bin/python" scripts/ci/test_contracts.py
+      - name: Workflow, shell and Dockerfile lint
+        env:
+          # Pushes to main give the previous tip. PRs (whose merge commit sits on the current
+          # main), tags (all-zero before) and new refs leave it to diff-check: origin/main.
+          PINAKES_CHECK_BASE: ${{ github.event_name == 'push' && github.event.before || '' }}
+        run: scripts/ci/check
+      - name: Full existing test gate
+        run: scripts/test
+      - name: Deterministic mock e2e
+        run: scripts/e2e --mock
+
+  image:
+    name: Build and smoke image (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Provision PostgreSQL, PostGIS and h3
+        run: scripts/ci/setup-postgres
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Build image without publishing
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          tags: pinakes:ci
+          push: false
+          load: true
+          cache-from: type=gha,scope=pinakes-image-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=pinakes-image-${{ matrix.arch }}
+      - name: Smoke release daemon against PostgreSQL
+        run: scripts/ci/container-smoke pinakes:ci
+
+  publish:
+    name: Publish platform (${{ matrix.arch }})
+    needs: [quality, image]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          # Every branch with full history, so origin/main is fetched in this job.
+          fetch-depth: 0
+      - name: Validate release tag
+        id: release
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python3 scripts/ci/release-tag "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+      - name: Require the tagged commit on main
+        # The one commit this release names (an annotated tag's commit, not its tag object).
+        id: main
+        run: scripts/ci/release-on-main >> "$GITHUB_OUTPUT"
+      # Root package installs run before any registry credential is written to disk.
+      # The pushed bytes come from a separate build: they are smoke-tested before manifest.
+      - name: Provision PostgreSQL, PostGIS and h3
+        run: scripts/ci/setup-postgres
+      - name: Log in to Docker Hub
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
+        with:
+          registry: registry-1.docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Build and publish release platforms
+        uses: pubky/ci-workflows/.github/actions/docker/build_and_push@a57f2ae6382a8519ba4aa09d58b706f6b68a4426
+        with:
+          registry: registry-1.docker.io/synonymsoft
+          image: pinakes
+          context: .
+          push: true
+          # Composite inputs are strings. The action's if: inputs.sha_tag
+          # is truthy even for 'false', but metadata's enable=false omits it.
+          # Platform jobs must not race to overwrite the shared SHA/latest tags.
+          latest: false
+          sha_tag: false
+          # Unique to this run: another run for the same commit (a second tag) cannot
+          # replace the bytes this run smoke-tests and promotes.
+          tags: type=raw,value=${{ steps.main.outputs.commit }}-${{ github.run_id }}-${{ matrix.arch }}
+          platforms: linux/${{ matrix.arch }}
+          cache_from: type=gha,scope=pinakes-release-${{ matrix.arch }}
+          cache_to: type=gha,mode=max,scope=pinakes-release-${{ matrix.arch }}
+      - name: Pull the published platform image
+        env:
+          PUBLISHED_IMAGE: registry-1.docker.io/synonymsoft/pinakes:${{ steps.main.outputs.commit }}-${{ github.run_id }}-${{ matrix.arch }}
+          PUBLISHED_ARCH: ${{ matrix.arch }}
+        run: docker pull --platform "linux/$PUBLISHED_ARCH" "$PUBLISHED_IMAGE"
+      - name: Smoke the published platform image against PostgreSQL
+        env:
+          PUBLISHED_IMAGE: registry-1.docker.io/synonymsoft/pinakes:${{ steps.main.outputs.commit }}-${{ github.run_id }}-${{ matrix.arch }}
+        run: scripts/ci/container-smoke "$PUBLISHED_IMAGE"
+
+  manifest:
+    name: Publish multiarch manifest
+    needs: [publish]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          # Every branch with full history, so origin/main is fetched in this job.
+          fetch-depth: 0
+      - name: Validate release tag
+        id: release
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python3 scripts/ci/release-tag "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+      - name: Require the tagged commit on main
+        id: main
+        run: scripts/ci/release-on-main >> "$GITHUB_OUTPUT"
+      - name: Log in to Docker Hub
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
+        with:
+          registry: registry-1.docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Combine verified platforms and set release tags
+        env:
+          RELEASE_COMMIT: ${{ steps.main.outputs.commit }}
+          RELEASE_LATEST: ${{ steps.release.outputs.latest }}
+          RELEASE_IMAGE_TAG: ${{ steps.release.outputs.tag }}
+        run: scripts/ci/publish-manifest
