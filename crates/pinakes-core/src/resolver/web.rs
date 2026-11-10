@@ -256,8 +256,9 @@ impl WebResolver {
     }
     /// A MusicBrainz entity's image and description with their credits
     /// (`music_enrichment`), within `limits.music_enrichment_timeout_ms` and the card's own
-    /// read (`started`, within `queue::RESOLVE_TIMEOUT`): past either, both fields are unread,
-    /// and the card keeps what it has stored. Never fails the card.
+    /// read (`started`, within `queue::RESOLVE_TIMEOUT`): a part still unread past either is
+    /// unread, and the card keeps what it has stored of it; what the other part found stays
+    /// (`music_enrichment::enrich_within`). Never fails the card.
     async fn enrich_music(
         &self,
         card: &mut ResourceMeta,
@@ -268,24 +269,15 @@ impl WebResolver {
         let deadline = (tokio::time::Instant::now()
             + Duration::from_millis(self.config.music_enrichment_timeout_ms))
         .min(started + crate::queue::RESOLVE_TIMEOUT.saturating_sub(Duration::from_secs(2)));
-        let enrichment = match tokio::time::timeout_at(
-            deadline,
-            crate::music_enrichment::enrich(
-                &self.egress,
-                base,
-                entity,
-                self.config.music_image_width,
-            ),
+        crate::music_enrichment::enrich_within(
+            &self.egress,
+            base,
+            entity,
+            self.config.music_image_width,
+            Some(deadline),
         )
         .await
-        {
-            Ok(enrichment) => enrichment,
-            Err(_) => {
-                tracing::info!(mbid = %entity.mbid, "music enrichment timed out");
-                crate::music_enrichment::Enrichment::unread()
-            }
-        };
-        enrichment.apply(card, self.config.music_enrichment_retry_secs);
+        .apply(card, self.config.music_enrichment_retry_secs);
     }
     pub async fn resolve_with_policy(
         &self,

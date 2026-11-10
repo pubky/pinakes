@@ -827,13 +827,16 @@ English description, and one of its image claim, and for a recording one read-ba
 of its work's item's pages; Wikipedia two summaries
 (English, then one other language), for a recording three (its item's English article, its
 work's, then one other language); Commons one; the Cover Art Archive one (a release or release
-group with no free Commons file; a release only when MusicBrainz says the archive shows its front
-cover), whose redirect to archive.org is kept, never followed (with `egress.allow_hosts` set, allow
-`coverartarchive.org` for covers; archive.org is not needed). These requests run one after another and share
-each host's pace (`www.wikidata.org` with the also-on sources), so an artist found through its
-Discogs pages makes up to six Wikidata requests before its text and image are asked for. A
-`reextract web` of many such cards at once can leave some of them unread at the timeout; they
-keep their stored image and description and are read again at their retry. Raising
+group, used only when it has no free Commons file; a release only when MusicBrainz says the archive
+shows its front cover), whose redirect to archive.org is kept, never followed (with
+`egress.allow_hosts` set, allow `coverartarchive.org` for covers; archive.org is not needed). The
+Wikimedia requests run one after another and share each host's pace (`www.wikidata.org` with the
+also-on sources), so an artist found through its Discogs pages makes up to six Wikidata requests
+before its text and image are asked for. The cover request runs beside them on its own host, so a
+busy Wikidata does not leave an album without its cover: at the timeout only the part that has not
+answered is unread (a cover found while the Commons file is unread shows only on a card with no
+stored image). A `reextract web` of many such cards at once can leave some of them unread at the
+timeout; they keep their stored image and description and are read again at their retry. Raising
 `limits.music_enrichment_timeout_ms` (up to 13000) for that run leaves fewer unread. A failed or slow request never fails
 the card: the card saves with what it found, and a field a timeout, a 429, a 5xx, Wikidata's
 `maxlag` or any other unexpected status (a 403 refusing this client) left unread keeps its stored
