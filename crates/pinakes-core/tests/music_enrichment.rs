@@ -115,7 +115,25 @@ struct Mode {
     album_has_image: bool,
     /// Kind of Blue's release group's `wikidata` relation is a link to a property, no item.
     album_relation_not_an_item: bool,
+    /// Kind of Blue's item (Q283221) read back as another kind of item.
+    album_item: AlbumItem,
+    /// Wikidata answers the read-back of Kind of Blue's item with 503 (Retry-After: 120).
+    album_item_busy: bool,
 }
+/// What Kind of Blue's item (Q283221) is when read back.
+#[derive(Clone, Copy, Default, PartialEq)]
+enum AlbumItem {
+    /// As recorded: the album's (P436, P1954).
+    #[default]
+    Recorded,
+    /// A song's that is its single's too, as Wikidata often makes them: class song (Q7366),
+    /// the release group's P436 and one recording's P4404, no work ID.
+    SongAndAlbum,
+    /// An item with no MusicBrainz or Discogs ID yet: P436 and P1954 removed.
+    Bare,
+}
+/// The recording ID [`AlbumItem::SongAndAlbum`] adds.
+const SONG_RECORDING: &str = "0d0f1e2a-3b4c-4d5e-8f60-718293a4b5c6";
 /// How the Cover Art Archive answers a `front-500` request.
 #[derive(Clone, Copy, Default, PartialEq)]
 enum CoverArt {
@@ -419,6 +437,44 @@ impl Transport for Recorded {
                                 .as_object_mut()
                                 .unwrap()
                                 .remove("P31");
+                        })
+                    } else if mode.album_item_busy && ids == "Q283221" {
+                        return Ok(Fetched {
+                            permanent_redirect: false,
+                            truncated: false,
+                            validators: Default::default(),
+                            url: url.clone(),
+                            status: 503,
+                            retry_after_secs: 120,
+                            location: None,
+                            content_type: "application/json".into(),
+                            body: b"{}".to_vec(),
+                        });
+                    } else if mode.album_item != AlbumItem::Recorded && ids == "Q283221" {
+                        edited(&file, |v| {
+                            let claims = &mut v["entities"][&ids]["claims"];
+                            match mode.album_item {
+                                AlbumItem::SongAndAlbum => {
+                                    let p31 = serde_json::to_string(&claims["P31"])
+                                        .unwrap()
+                                        .replace("Q482994", "Q7366");
+                                    claims["P31"] = serde_json::from_str(&p31).unwrap();
+                                    let recording = serde_json::to_string(&claims["P436"])
+                                        .unwrap()
+                                        .replace("P436", "P4404")
+                                        .replace(
+                                            "8e8a594f-2175-38c7-a871-abb68ec363e7",
+                                            SONG_RECORDING,
+                                        );
+                                    claims["P4404"] = serde_json::from_str(&recording).unwrap();
+                                }
+                                AlbumItem::Bare => {
+                                    let claims = claims.as_object_mut().unwrap();
+                                    claims.remove("P436");
+                                    claims.remove("P1954");
+                                }
+                                AlbumItem::Recorded => {}
+                            }
                         })
                     } else if mode.album_is_a_work && ids == "Q283221" {
                         edited(&file, |v| {
@@ -2236,4 +2292,158 @@ async fn a_musicbrainz_page_keys_its_own_wikidata_item_and_a_disagreeing_one_sta
         "{:?}",
         t.seen()
     );
+}
+
+/// The `musicbrainz_entity` source's answer for `uri`, with answers as `mode` says and the keys
+/// it recorded before (`stored`).
+async fn entity_lookup(
+    uri: &str,
+    mode: Mode,
+    stored: &[&str],
+) -> Option<pinakes_core::also_on::Found> {
+    let source = pinakes_core::also_on::registry()
+        .into_iter()
+        .find(|s| s.id() == "musicbrainz_entity")?;
+    let cx = pinakes_core::also_on::Context {
+        egress: Egress::with_backends(
+            common::unpaced_egress_config(),
+            Arc::new(PublicDns),
+            Recorded::new(mode),
+        ),
+        config: Arc::new(Config::default()),
+    };
+    let subject = pinakes_core::also_on::Subject {
+        id: identity(uri).unwrap().0,
+        uri: uri.into(),
+        status: "ok".into(),
+        type_name: None,
+        doc: None,
+        keys: stored
+            .iter()
+            .map(|k| ((*k).to_owned(), "musicbrainz_entity".to_owned()))
+            .collect(),
+        first_seen_at: None,
+        candidates: vec![],
+    };
+    Some(source.lookup(&cx, &subject).await.unwrap())
+}
+fn keys_of(found: &pinakes_core::also_on::Found) -> Vec<&str> {
+    found.keys.iter().map(|k| k.key.as_str()).collect()
+}
+
+/// A key is stricter than the enrichment: an album's relation keys only an item that is exactly
+/// a release group's and names this one release group (P436), never a song's item that is its
+/// single's too (Wikidata often keys a single's track by it through its streaming IDs, so the
+/// track would join the album) nor an item with no identifier yet. Their text still counts for
+/// the card's description, as before.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn an_album_is_keyed_only_by_an_item_that_is_exactly_its_own(pool: PgPool) {
+    let group = "mb:release-group:8e8a594f-2175-38c7-a871-abb68ec363e7";
+    let Some(own) = entity_lookup(KIND_OF_BLUE, Mode::default(), &[]).await else {
+        return;
+    };
+    assert_eq!(keys_of(&own), [group, "wikidata:Q283221"]);
+    for album_item in [AlbumItem::SongAndAlbum, AlbumItem::Bare] {
+        let mode = Mode {
+            album_item,
+            ..Default::default()
+        };
+        let found = entity_lookup(KIND_OF_BLUE, mode, &[]).await.unwrap();
+        assert_eq!(keys_of(&found), [group]);
+        // The enrichment still takes the item's article.
+        let album = card(&web(Recorded::new(mode), true), KIND_OF_BLUE).await;
+        assert_eq!(
+            album.description.as_deref(),
+            Some(extract("enwiki-summary-kind-of-blue.json").as_str())
+        );
+    }
+    // A track keyed by the song's item (as the `wikidata` source keys a Spotify track whose
+    // P2207 the item holds) and by its recording does not join the album's group.
+    let track = "https://open.spotify.com/track/0000000000000000000001";
+    let recording = format!("mb:recording:{SONG_RECORDING}");
+    let keys = Keys(
+        [(
+            track.to_owned(),
+            vec!["wikidata:Q283221".to_owned(), recording],
+        )]
+        .into_iter()
+        .collect(),
+    );
+    let mut ids = std::collections::BTreeMap::new();
+    for (uri, ty) in [(KIND_OF_BLUE, "MusicAlbum"), (track, "MusicRecording")] {
+        let id = pinakes_core::store::ensure_resource(&pool, uri)
+            .await
+            .unwrap();
+        let mut d = ResourceMeta::new(uri, "web", 86400);
+        d.set_type(ty);
+        d.name = Some("Kind of Blue".into());
+        pinakes_core::store::save_document(&pool, &id, 0, &d)
+            .await
+            .unwrap();
+        ids.insert(uri, id);
+    }
+    let cx = pinakes_core::also_on::Context {
+        egress: Egress::with_backends(
+            common::unpaced_egress_config(),
+            Arc::new(PublicDns),
+            Recorded::new(Mode {
+                album_item: AlbumItem::SongAndAlbum,
+                ..Default::default()
+            }),
+        ),
+        config: Arc::new(Config::default()),
+    };
+    let entity_source = pinakes_core::also_on::registry()
+        .into_iter()
+        .find(|s| s.id() == "musicbrainz_entity")
+        .unwrap();
+    sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let sources: Vec<Arc<dyn pinakes_core::also_on::Source>> = vec![entity_source, Arc::new(keys)];
+    pinakes_core::also_on::drain(&pool, &cx, &sources, 100)
+        .await
+        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
+    let group_of = |uri: &str| {
+        let (pool, id) = (pool.clone(), ids[uri].clone());
+        async move {
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT group_id FROM group_unit WHERE resource_id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let (album, song) = (group_of(KIND_OF_BLUE).await, group_of(track).await);
+    assert!(album.is_none() || album != song, "{album:?} {song:?}");
+}
+
+/// A Wikidata that fails for now (503) never costs a MusicBrainz page its MusicBrainz keys and
+/// links: they stand, the item key this source recorded before is kept, and the run comes back
+/// after the wait Wikidata named.
+#[tokio::test]
+async fn a_busy_wikidata_keeps_the_musicbrainz_keys_and_the_stored_item_key() {
+    let group = "mb:release-group:8e8a594f-2175-38c7-a871-abb68ec363e7";
+    let busy = Mode {
+        album_item_busy: true,
+        ..Default::default()
+    };
+    let Some(found) = entity_lookup(KIND_OF_BLUE, busy, &[group, "wikidata:Q283221"]).await else {
+        return;
+    };
+    assert_eq!(keys_of(&found), [group, "wikidata:Q283221"]);
+    assert_eq!(found.retry_after, Some(std::time::Duration::from_secs(120)));
+    let calm = entity_lookup(KIND_OF_BLUE, Mode::default(), &[])
+        .await
+        .unwrap();
+    assert_eq!(found.links, calm.links);
+    assert_eq!(found.facts, calm.facts);
+    // A page whose item key was never recorded has none yet.
+    let fresh = entity_lookup(KIND_OF_BLUE, busy, &[]).await.unwrap();
+    assert_eq!(keys_of(&fresh), [group]);
+    assert!(fresh.retry_after.is_some());
 }

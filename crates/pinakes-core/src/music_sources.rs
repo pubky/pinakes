@@ -690,12 +690,14 @@ pub(crate) fn own_wikidata_item(entity: &musicbrainz::Entity) -> Option<String> 
     }
 }
 /// The `wikidata:` key of a MusicBrainz artist or release group ([`own_wikidata_item`], made by
-/// `hubs::key::wikidata` as every producer makes it), when that item, read back, is the entity's
-/// own by the rule the enrichment uses (`music_enrichment::is_item_of`: an artist's item for an
-/// artist, a release group's for a release group, naming no other entity of its level), so a
-/// relation to another kind's item (an album's to its artist's) never joins two levels. An item
-/// that is unknown, gone or too large to read keys nothing; a busy Wikidata is an error, so the
-/// source keeps its previous rows.
+/// `hubs::key::wikidata` as every producer makes it), when that item, read back, is exactly an
+/// item of the entity's kind (`music_enrichment::ItemKind::of`: an artist's for an artist, a
+/// release group's for a release group) that names this MBID and no other for its level (P434,
+/// P436). A key is stricter than the enrichment's text and image: an item that is a work's too
+/// (a single's song's, which a track can be keyed by through its streaming IDs) or carries no
+/// identifier yet keys nothing, so a key never joins an album to a song or an artist to anything
+/// but itself. An item that is unknown, gone or too large to read keys nothing; a busy Wikidata
+/// is an error.
 pub(crate) async fn own_wikidata_key(
     egress: &crate::resolver::egress::Egress,
     entity: &musicbrainz::Entity,
@@ -713,14 +715,20 @@ pub(crate) async fn own_wikidata_key(
         }
         Err(e) => return Err(e),
     };
-    use crate::music_enrichment::{is_item_of, ItemKind};
     Ok(item
-        .filter(|item| is_item_of(ItemKind::of_entity(entity.kind), &entity.mbid, item))
+        .filter(|item| keys_entity(entity, item))
         .and_then(|item| hubs::key::wikidata(&item.qid))
         .map(|key| Key {
             key,
             via: "musicbrainz".into(),
         }))
+}
+/// Whether `item` may key `entity` ([`own_wikidata_key`]): exactly of its kind, naming this one
+/// MBID at its level.
+pub(crate) fn keys_entity(entity: &musicbrainz::Entity, item: &wikidata::Item) -> bool {
+    use crate::music_enrichment::{mbid_property, ItemKind};
+    ItemKind::of(item) == ItemKind::of_entity(entity.kind)
+        && item.id(mbid_property(entity.kind)) == [entity.mbid.as_str()]
 }
 
 /// The longest artist credit (or other fact) a MusicBrainz card stores as an attribute: what
