@@ -2081,7 +2081,8 @@ async fn a_free_commons_file_wins_over_the_cover() {
     let album = card(&web_within(t.clone(), 12_000), KIND_OF_BLUE).await;
     assert_eq!(album.image.as_deref(), Some(MILES_IMAGE));
     assert!(album.unread_enriched.is_empty());
-    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    // Well under the egress's own 10 s cap on a request, which the join would wait for.
+    assert!(started.elapsed() < std::time::Duration::from_secs(6));
 }
 
 /// Each part of an album's enrichment ends on its own. A cover that comes after the budget
