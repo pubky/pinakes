@@ -22,7 +22,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `refresh_resource_secs` | `[604800, 172800, 21600, 3600]` | Resource refresh intervals by tier (seconds). |
 | `refresh_container_secs` | `[86400, 43200, 21600, 3600]` | Container (calendar, feed) refresh intervals by tier (seconds). |
 | `refresh_cursor_secs` | `300` | Cursor feed refresh interval (seconds). |
-| `change_retention_days` | `90` | Days change lines are retained. |
+| `change_retention_days` | `90` | Days change lines are retained (at most 120 while a TMDB credential is set). |
 | `canary_interval_secs` | `21600` | Adapter canary interval (seconds). |
 | `web_concurrency` | `4` | Concurrent jobs of the web resolver, which the event routes share. |
 | `web_requests_per_second` | `4.0` | Jobs per second of the web resolver and the event routes. |
@@ -865,14 +865,17 @@ changes a card) and live 60 days from the last read that answered; a card takes 
 from live rows, so a TMDB outage keeps them up to 60 days and the card drops them at its first
 read after. The hourly maintenance brings every stored card that holds TMDB's values back to the
 live rows (`also_on::refill`): a final, dead-lettered or orphaned card that is never read again
-loses a value its rows no longer give (expired, switched off, or another answer now) there, with a
-change line, its schedule untouched; it takes no new value there (only a read does). The same
+loses a value its rows would no longer write (expired, switched off, or another poster or
+overview now; a change to a value the card does not show leaves it alone) there, with a change
+line, its schedule untouched; it takes no new value there (only a read does). The pass reads only
+`Movie` and `TVSeries` cards (by the `type_path` index), and checks a card again under its row
+lock before it rewrites it. The same
 pass takes out the values of a source the build no longer has, as a card's next read does. The
 egress keeps TMDB's answers an hour and paces `api.themoviedb.org` at the default
 `limits.host_requests_per_second` (1/s), and at no more than 4/s when that is raised (TMDB's
 limit is about 40/s). Change lines hold a card's values before and after a change for
-`refresh.retention_days` (90): keep it at 120 days or less while TMDB is on, so no TMDB value
-read more than six months ago stays served by `/v1/changes`.
+`refresh.retention_days` (90): while a TMDB credential is set, startup refuses more than 120
+days, so no TMDB value read more than six months ago stays served by `/v1/changes`.
 
 Sources reach their services through the egress policy and its per-host budgets, one request
 at a time per host. A hub's published limit lowers its host's default pace like a source's own

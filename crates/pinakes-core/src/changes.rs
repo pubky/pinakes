@@ -495,13 +495,14 @@ pub(crate) async fn append(
         .bind(source).bind(diff.class).execute(&mut **tx).await?;
     Ok(())
 }
-/// Rewrite a stored card in place by `change` (whether it changed it), with its change line like
-/// any save's, and nothing else: its schedule stays (a final or dead-lettered card stays so). An
+/// Rewrite a stored card in place by `change` (whether it changed it), given what `read` reads
+/// once the card's row is locked, with its change line like any save's, and nothing else: its schedule stays (a final or dead-lettered card stays so). An
 /// OSM place's card is never rewritten. Whether it was.
-pub(crate) async fn rewrite(
+pub(crate) async fn rewrite<T, F: std::future::Future<Output = Result<T>>>(
     pool: &PgPool,
     id: &str,
-    change: impl FnOnce(&mut ResourceMeta) -> bool,
+    read: impl FnOnce() -> F,
+    change: impl FnOnce(&mut ResourceMeta, T) -> bool,
 ) -> Result<bool> {
     let mut tx = pool.begin().await?;
     crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
@@ -514,8 +515,11 @@ pub(crate) async fn rewrite(
     let Ok(mut doc) = serde_json::from_value::<ResourceMeta>(row.try_get("doc")?) else {
         return Ok(false);
     };
+    // What the change depends on, read now that the row is locked: a writer that changed it
+    // before this lock (a save, a source's run, which lock the row too) is seen.
+    let read = read().await?;
     let before = normalize(&doc);
-    if !change(&mut doc) {
+    if !change(&mut doc, read) {
         return Ok(false);
     }
     let after = normalize(&doc);

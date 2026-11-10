@@ -54,6 +54,9 @@ const FACTS: [&str; 4] = [
     "tmdb_overview",
     "tmdb_overview_cut",
 ];
+/// The longest `refresh.retention_days` while TMDB is on: change lines keep a card's TMDB values
+/// that long, and a value is at most 60 days old when it leaves the card.
+pub const RETENTION_DAYS_CAP: u32 = 120;
 /// The longest overview a fact holds (bytes).
 const FACT_CAP: usize = 512;
 
@@ -307,8 +310,13 @@ fn own(doc: &ResourceMeta, field: CreditField) -> bool {
             .iter()
             .any(|c| c.field == field && c.provider == CreditProvider::Tmdb)
 }
-/// The card types a title fills.
-const TYPES: [&str; 2] = ["Movie", "TVSeries"];
+/// Whether a link is on TMDB itself: its card is TMDB's own page, never filled from TMDB's API.
+fn on_tmdb(uri: &str) -> bool {
+    url::Url::parse(uri).is_ok_and(|u| {
+        u.host_str()
+            .is_some_and(|h| h == "themoviedb.org" || h.ends_with(".themoviedb.org"))
+    })
+}
 
 /// The source.
 pub struct Tmdb;
@@ -365,6 +373,10 @@ impl Source for Tmdb {
     fn fills(&self) -> &'static [&'static str] {
         &FACTS
     }
+    fn retention_days_cap(&self) -> Option<u32> {
+        // A value read up to 60 days ago, kept 120 more: six months.
+        Some(RETENTION_DAYS_CAP)
+    }
     fn fills_as(&self) -> Option<CreditProvider> {
         Some(CreditProvider::Tmdb)
     }
@@ -376,13 +388,16 @@ impl Source for Tmdb {
         })
     }
     /// A resolved film or series card with an IMDb ID or a Wikidata item, and an image or a
-    /// description to fill (one TMDB gave counts as none).
+    /// description to fill (one TMDB gave counts as none); never a card of a TMDB page.
     fn applies(&self, subject: &Subject) -> bool {
         let Some(doc) = &subject.doc else {
             return false;
         };
         subject.status == "ok"
-            && TYPES.contains(&doc.type_name.as_str())
+            && !on_tmdb(&subject.uri)
+            && CreditProvider::Tmdb
+                .filled_types()
+                .contains(&doc.type_name.as_str())
             && !(own(doc, CreditField::Image) && own(doc, CreditField::Description))
             && matches!(ids(subject), Ok((Some(_), _) | (_, Some(_))))
     }

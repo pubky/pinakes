@@ -311,6 +311,12 @@ pub trait Source: Send + Sync {
     fn attribution(&self) -> Option<Attribution> {
         None
     }
+    /// The longest `refresh.retention_days` its values may be kept in change lines while it is
+    /// ready (`Config::validate` refuses more): for a service that limits how long its data is
+    /// cached.
+    fn retention_days_cap(&self) -> Option<u32> {
+        None
+    }
     /// The credit provider of the values it writes ([`fill_card`](Source::fill_card)): one of
     /// `CreditProvider::FROM_FACTS`. A card holding such a value whose source this build lacks
     /// loses it (`media::fill`, [`refill`]).
@@ -932,8 +938,10 @@ async fn lock_writers(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
 /// than its rows live), the source is switched off or gone from the build, or it answers
 /// otherwise now. For cards no reading brings back (final, dead-lettered, orphaned, or not due
 /// yet); a card that is read again takes what the live facts give then. It only removes: a stale
-/// card is rewritten under its row lock with its change line (`changes::rewrite`), nothing else
-/// of it changes, and a card that is current is never locked. In batches of
+/// card is rewritten under its row lock, checked again against the facts read under it, with its
+/// change line (`changes::rewrite`); nothing else of it changes, and a card that is current is
+/// never locked. It reads only cards of the types such values fill
+/// (`CreditProvider::filled_types`, by the `type_path` index), never every card. In batches of
 /// [`REFILL_BATCH`], until none is left or `stop`; the number rewritten.
 pub async fn refill(pool: &PgPool, stop: impl Fn() -> bool) -> Result<u64> {
     let fillers: Vec<&str> = registered()
@@ -941,19 +949,30 @@ pub async fn refill(pool: &PgPool, stop: impl Fn() -> bool) -> Result<u64> {
         .filter(|s| !s.fills().is_empty())
         .map(|s| s.id())
         .collect();
-    // The providers whose values are written from facts, as stored.
-    let providers: Vec<String> = crate::model::CreditProvider::FROM_FACTS
+    // The providers whose values are written from facts, as stored, and the only card types
+    // that can hold them.
+    let from_facts = crate::model::CreditProvider::FROM_FACTS;
+    let providers: Vec<String> = from_facts
         .iter()
         .filter_map(|p| serde_json::to_value(p).ok()?.as_str().map(str::to_owned))
         .collect();
+    let mut types: Vec<&str> = from_facts
+        .iter()
+        .flat_map(|p| p.filled_types())
+        .copied()
+        .collect();
+    types.sort();
+    types.dedup();
     let mut done = 0;
     let mut after = String::new();
-    while !stop() {
-        let rows: Vec<(String, Value)> = sqlx::query_as("SELECT id,doc FROM resource WHERE id>$1 AND osm_id IS NULL AND (doc->'hinted_by' ?| $2 OR EXISTS(SELECT 1 FROM jsonb_array_elements(CASE jsonb_typeof(doc->'credits') WHEN 'array' THEN doc->'credits' ELSE '[]' END) c WHERE c->>'provider'=ANY($3))) ORDER BY id LIMIT $4")
+    while !types.is_empty() && !stop() {
+        // Only cards of those types (the `type_path` index), in ID order.
+        let rows: Vec<(String, Value)> = sqlx::query_as("SELECT id,doc FROM resource WHERE type_path && $5::text[] AND id>$1 AND osm_id IS NULL AND (doc->'hinted_by' ?| $2 OR EXISTS(SELECT 1 FROM jsonb_array_elements(CASE jsonb_typeof(doc->'credits') WHEN 'array' THEN doc->'credits' ELSE '[]' END) c WHERE c->>'provider'=ANY($3))) ORDER BY id LIMIT $4")
             .bind(&after)
             .bind(&fillers)
             .bind(&providers)
             .bind(REFILL_BATCH)
+            .bind(&types)
             .fetch_all(pool)
             .await?;
         let Some((last, _)) = rows.last() else { break };
@@ -969,8 +988,20 @@ pub async fn refill(pool: &PgPool, stop: impl Fn() -> bool) -> Result<u64> {
             if !media::unfill(&hints, &mut doc) {
                 continue;
             }
-            let rewritten =
-                crate::changes::rewrite(pool, &id, |doc| media::unfill(&hints, doc)).await?;
+            // Under the row lock, against the facts as they are then: a fill that landed
+            // meanwhile is not taken out.
+            let rewritten = crate::changes::rewrite(
+                pool,
+                &id,
+                || async {
+                    Ok(media::type_hints(pool, std::slice::from_ref(&id))
+                        .await?
+                        .remove(&id)
+                        .unwrap_or_default())
+                },
+                |doc, hints| media::unfill(&hints, doc),
+            )
+            .await?;
             done += u64::from(rewritten);
         }
     }

@@ -349,6 +349,14 @@ async fn film_and_series_cards_take_tmdb_posters_by_exact_id(pool: PgPool) {
                 description: Some("Own."),
                 keys: &["imdb:tt0133093"],
             },
+            // TMDB's own page: never asked, whatever it lacks.
+            Page {
+                uri: "https://www.themoviedb.org/movie/603-the-matrix",
+                kind: "Movie",
+                image: None,
+                description: None,
+                keys: &["imdb:tt0133093"],
+            },
             // Not a film.
             Page {
                 uri: "https://example.org/soundtrack",
@@ -619,6 +627,63 @@ async fn maintenance_drops_expired_tmdb_values_and_nothing_else(pool: PgPool) {
         .unwrap();
     // Current rows: nothing to do.
     assert_eq!(also_on::refill(&pool, || false).await.unwrap(), 0);
+    // TMDB edits the movie's overview, which its card (its own text) does not show: the poster
+    // it shows is still TMDB's, and stays, with no change line.
+    let movie_lines = || async {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource_change WHERE resource_id=$1")
+            .bind(&ids[1])
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    let lines = movie_lines().await;
+    sqlx::query("UPDATE resource_fact SET value='Another overview.' WHERE source='tmdb' AND name='tmdb_overview' AND resource_id=$1")
+        .bind(&ids[1])
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource SET final=true WHERE id=$1")
+        .bind(&ids[1])
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(also_on::refill(&pool, || false).await.unwrap(), 0);
+    assert_eq!(movie_lines().await, lines);
+    assert_eq!(
+        stored(&pool, &ids[1]).await.2,
+        [(CreditField::Image, CreditProvider::Tmdb)]
+    );
+    // A card of a type TMDB never fills is not read by the pass (it reads Movie and TVSeries
+    // cards alone, by their type's index), even with such a credit in it.
+    let song = store::ensure_resource(&pool, "https://example.org/song")
+        .await
+        .unwrap();
+    let mut odd = ResourceMeta::new("https://example.org/song", "web", 86_400);
+    odd.set_type("MusicRecording");
+    odd.image = Some(format!("{POSTERS}/p.jpg"));
+    odd.credits.push(Credit {
+        field: CreditField::Image,
+        provider: CreditProvider::Tmdb,
+        source_url: "https://www.themoviedb.org/movie/1".into(),
+        author: None,
+        license: String::new(),
+        license_url: None,
+        lang: None,
+        excerpted: false,
+        modified: false,
+        subject: None,
+    });
+    store::save_document(&pool, &song, 0, &odd).await.unwrap();
+    let song_doc = || async {
+        sqlx::query_scalar::<_, Value>("SELECT doc FROM resource WHERE id=$1")
+            .bind(&song)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    let song_before = song_doc().await;
+    assert_eq!(also_on::refill(&pool, || false).await.unwrap(), 0);
+    assert_eq!(song_doc().await, song_before);
     // The series' TMDB rows expire; the movie's stay.
     sqlx::query("UPDATE resource_fact SET expires_at=now()-interval '1 second' WHERE source='tmdb' AND resource_id=$1")
         .bind(&ids[0])
@@ -753,4 +818,33 @@ async fn the_credential_never_leaves_the_request(pool: PgPool) {
     assert!(
         !stored(&pool, &ids[1]).await.2.is_empty() || !stored(&pool, &ids[0]).await.2.is_empty()
     );
+}
+
+/// Change lines keep a card's values for `refresh.retention_days`: while a TMDB credential is
+/// set, more than 120 days is refused (TMDB's six months, from a value up to 60 days old), with a
+/// message naming both settings and never the key; without one, or with TMDB switched off, any
+/// retention stands.
+#[test]
+fn a_long_change_retention_is_refused_while_tmdb_is_on() {
+    for credential in [TOKEN, KEY] {
+        let mut on = config(Some(credential));
+        on.refresh.retention_days = 120;
+        on.validate().unwrap();
+        on.refresh.retention_days = 121;
+        let refused = on.validate().unwrap_err().to_string();
+        assert!(
+            refused.contains("refresh.retention_days") && refused.contains("TMDB_API_KEY"),
+            "{refused}"
+        );
+        assert!(!refused.contains(credential), "{refused}");
+    }
+    let mut off = config(None);
+    off.refresh.retention_days = 3650;
+    off.validate().unwrap();
+    let mut disabled = config(None);
+    disabled
+        .sections
+        .set("tmdb", json!({"api_key": TOKEN, "enabled": false}));
+    disabled.refresh.retention_days = 3650;
+    disabled.validate().unwrap();
 }

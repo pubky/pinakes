@@ -14,8 +14,8 @@ never by title:
 An answer names a title only when it holds exactly one movie or one series (`movie_results` and
 `tv_results` together), of the card's own type: a `Movie` card takes a movie, a `TVSeries` card a
 series. Several IDs of one kind, an answer with none or several, or an IMDb ID and an item that
-name different titles give nothing. A card with its own image and description asks nothing (a
-themoviedb.org card's page usually gives both).
+name different titles give nothing. A card with its own image and description asks nothing,
+and a themoviedb.org card, TMDB's own page, is never looked up: it keeps what its page gives.
 
 What TMDB says is recorded as facts, `tmdb_title` (`movie/{id}` or `tv/{id}`), `tmdb_poster` (the
 poster's path) and `tmdb_overview` (cut at 512 bytes, at a sentence or a word, with
@@ -59,5 +59,6 @@ TMDB lets its data be cached for six months at most. Its rows live 60 days from 
 that answered; a card takes TMDB's values only from live rows, so it drops them at its first read
 after they expire, and the hourly maintenance drops them from cards that are not read again
 (final, dead-lettered or orphaned cards, [operations](../operations.md#also-on)); change lines
-keep a card's earlier values for `refresh.retention_days` (90; keep it at 120 or less). To fill stored
+keep a card's earlier values for `refresh.retention_days` (90), and startup refuses more than 120
+while the credential is set. To fill stored
 cards after the key is set, run `pinakesd reextract also-on` with the daemon stopped.

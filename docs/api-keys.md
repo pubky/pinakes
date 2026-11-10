@@ -83,7 +83,8 @@ TMDB's terms ask for attribution and limit caching: Pinakes credits every TMDB v
 (`credits[]`, provider `tmdb`), `/v1/info` gives TMDB's notice ("This product uses the TMDB API
 but is not endorsed or certified by TMDB.") and logo for clients to show, and no TMDB value is
 kept longer than 60 days after the last read that answered (TMDB allows six months;
-[operations](operations.md#also-on)). Commercial use needs a separate agreement with TMDB.
+[operations](operations.md#also-on)); with the key set, startup refuses a
+`refresh.retention_days` over 120, so change lines keep no TMDB value longer either. Commercial use needs a separate agreement with TMDB.
 
 ## Quotas and operating rules
 

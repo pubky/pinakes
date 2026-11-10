@@ -498,27 +498,57 @@ pub fn fill(hints: &TypeHints, doc: &mut crate::model::ResourceMeta) {
     }
     strip_unowned(doc);
 }
-/// Take out of a card the values a source that fills cards wrote that its live facts no longer
-/// give (its fingerprint in `hinted_by` is not what it finds now: expired, switched off, another
-/// answer), and those of a provider no source of this build writes; whether anything went. It
-/// never writes a value.
+/// Take out of a card the values a source that fills cards wrote that its live facts would no
+/// longer write (`hints`: the live facts; expired, switched off, another poster), field by field:
+/// a value the live facts still give stays, whatever else of them changed (a new overview on a
+/// card with its own text). Also the values of a provider no source of this build writes. Whether
+/// anything went. It never writes a value.
 pub fn unfill(hints: &TypeHints, doc: &mut crate::model::ResourceMeta) -> bool {
+    use crate::model::CreditField;
     let before = (
         doc.image.clone(),
         doc.description.clone(),
         doc.credits.clone(),
-        doc.hinted_by.clone(),
     );
     for source in crate::also_on::registered()
         .iter()
         .filter(|s| !s.fills().is_empty())
     {
-        let stale = doc
-            .hinted_by
+        let Some(provider) = source.fills_as() else {
+            continue;
+        };
+        // What the live facts would make of this card now.
+        let facts = hints
+            .filled
             .get(source.id())
-            .is_some_and(|written| hints.finding(source.id()).as_ref() != Some(written));
-        if stale {
-            source.fill_card(&[], doc);
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let mut now = doc.clone();
+        source.fill_card(facts, &mut now);
+        for field in [CreditField::Image, CreditField::Description] {
+            let credit = |d: &crate::model::ResourceMeta| {
+                d.credits
+                    .iter()
+                    .find(|c| c.field == field && c.provider == provider)
+                    .cloned()
+            };
+            let value = |d: &crate::model::ResourceMeta| match field {
+                CreditField::Image => d.image.clone(),
+                CreditField::Description => d.description.clone(),
+            };
+            let Some(written) = credit(doc) else {
+                continue;
+            };
+            if (Some(written), value(doc)) != (credit(&now), value(&now)) {
+                match field {
+                    CreditField::Image => doc.image = None,
+                    CreditField::Description => doc.description = None,
+                }
+                doc.credits
+                    .retain(|c| !(c.field == field && c.provider == provider));
+            }
+        }
+        if !doc.credits.iter().any(|c| c.provider == provider) {
             doc.hinted_by.remove(source.id());
         }
     }
@@ -527,7 +557,6 @@ pub fn unfill(hints: &TypeHints, doc: &mut crate::model::ResourceMeta) -> bool {
         doc.image.clone(),
         doc.description.clone(),
         doc.credits.clone(),
-        doc.hinted_by.clone(),
     ) != before
 }
 /// Take out the values (and credits) of a provider written from facts that no source of this

@@ -159,6 +159,14 @@ impl CreditProvider {
     }
     /// The providers whose values are written from facts ([`Self::from_facts`]).
     pub const FROM_FACTS: &'static [Self] = &[Self::Tmdb];
+    /// The card types a provider written from facts fills: the only cards that can hold its
+    /// values (`also_on::refill` reads those alone, by the `type_path` index).
+    pub fn filled_types(self) -> &'static [&'static str] {
+        match self {
+            Self::Tmdb => &["Movie", "TVSeries"],
+            _ => &[],
+        }
+    }
 }
 /// Where one of the card's `image` or `description` came from when Pinakes added it from another
 /// source than the link itself, and the licence it is used under (docs/api.md, Credits). Show it
@@ -176,10 +184,12 @@ pub struct Credit {
     /// file's author for an image. Null for a public-domain or CC0 file that names none, for a
     /// Wikidata description (CC0), for a cover from the Cover Art Archive and for TMDB's values.
     pub author: Option<String>,
-    /// An SPDX licence ID (`CC-BY-SA-4.0`, `CC-BY-2.0`, `CC0-1.0`), or `public-domain`. Null for
-    /// a cover from the Cover Art Archive: cover art is its label's, shown as a service shows an
-    /// album's cover, and no licence is given (`license_url` is null too). Null for TMDB's
-    /// poster or overview too, used under TMDB's API terms.
+    /// An SPDX licence ID (`CC-BY-SA-4.0`, `CC-BY-2.0`, `CC0-1.0`, `GPL-3.0-only`,
+    /// `LGPL-2.1-or-later`), `public-domain`, or `Attribution` (Commons' licence of that name,
+    /// which has no SPDX ID). Null for a cover from the Cover Art Archive and for TMDB's poster
+    /// or overview, which carry no licence: cover art is its label's, shown as a service shows an
+    /// album's cover, and TMDB's values are used under TMDB's API terms (`license_url` is null
+    /// too).
     // No licence is the empty string here, and only such a credit holds it (`bounded`).
     #[serde(
         serialize_with = "license_or_null",
