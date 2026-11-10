@@ -649,14 +649,15 @@ by how well `q` matches, the name first, then the tags, then the description, an
 9 * name + 3 * tag + description + a / (1 + a)
 ```
 
-- `name`: 4 when the name equals `q` (any case, spaces collapsed), 3 when it holds `q`'s words as
+- `name`: 4 when the name equals `q` (any case, white space collapsed), 3 when it holds `q`'s words as
   a phrase, 2 when it holds all of them, 1 for a partial or fuzzy match (`musical` for `music`,
   the trigram fallback), else 0;
-- `tag`: 2 when a label on the card equals `q` (any case; for several words joined by a space,
+- `tag`: 2 when a label on the card equals `q` lowercased (for several words joined by a space,
   hyphen, underscore or nothing: `daft-punk` for `daft punk`), 1 when a label holds `q`'s words
-  as a phrase (`electronic-music` for `music`), else 0; labels count as for `tags`, within
-  `author` and `reach`;
-- `description`: 2 when it holds `q`'s words as a phrase, 1 when it holds all of them, else 0;
+  as a phrase (`electronic-music` for `music`), else 0; the labels are the card's and its
+  aliases', within `author` and `reach`, as for `tags`;
+- `description`: 2 when it holds `q`'s words as a phrase, 1 when the name and description
+  together hold all of them, else 0;
 - `a`: the `activity` score (with `boost`'s term when given), mapped into [0, 1) so it only
   breaks ties.
 

@@ -3421,7 +3421,7 @@ async fn a_text_search_ranks_the_best_match_first(pool: PgPool) {
     );
     assert_eq!(
         ids_of(&get("/v1/search?q=music&tags=music".into()).await),
-        [band.clone()]
+        std::slice::from_ref(&band)
     );
     // Facets count the same set under either sort; collapse keeps the order (no groups here).
     let facets = get("/v1/search?q=music&facet=type,tags".into()).await["facets"].clone();

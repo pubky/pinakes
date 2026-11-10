@@ -1695,9 +1695,13 @@ fn label_spellings(text: &str) -> Vec<String> {
 /// `sort=relevance`: how well `text` matches a row, in whole points, so the activity score
 /// (squashed below 1 by the caller) only breaks ties. Lexicographic: the name's match
 /// (exact 4, the whole phrase as words 3, every word 2, a partial or fuzzy match 1) times
-/// [`NAME_WEIGHT`], then a tag label (equal 2, containing the phrase as words 1) times
-/// [`TAG_WEIGHT`], then the description (the whole phrase as words 2, every word 1). Tags count
-/// as the filters do: the effective references in the author/reach scope.
+/// [`NAME_WEIGHT`], then a tag label (equal 2, holding the phrase as words 1) times
+/// [`TAG_WEIGHT`], then the text (the phrase as words in the description 2, every word in the
+/// name and description together 1). Tags count as the filters do: the row's references and its
+/// aliases' (posts' own rows left out), in the author/reach scope. They are read by resource
+/// through the reference index, never through `effective_reference`'s computed root, which no
+/// index serves: a correlated probe of the view in a select list would scan every reference
+/// once per row.
 fn relevance(
     sql: &mut QueryBuilder<'_, Postgres>,
     q: &SearchQuery,
@@ -1715,35 +1719,30 @@ fn relevance(
             .replace('%', "\\%")
             .replace('_', "\\_")
     );
-    let name = "to_tsvector('simple',coalesce(r.name,''))";
-    let description = "to_tsvector('simple',coalesce(r.doc->>'description',''))";
-    sql.push("((CASE WHEN lower(regexp_replace(btrim(coalesce(r.name,'')),'\\s+',' ','g'))=")
+    // The name's words, read once per row.
+    sql.push("(SELECT ((CASE WHEN lower(btrim(regexp_replace(coalesce(r.name,''),'\\s+',' ','g')))=")
         .push_bind(exact)
-        .push(format!(" THEN 4 WHEN {name} @@ phraseto_tsquery('simple',"))
+        .push(" THEN 4 WHEN v.name @@ phraseto_tsquery('simple',")
         .push_bind(text.to_owned())
-        .push(format!(") THEN 3 WHEN {name} @@ websearch_to_tsquery('simple',"))
+        .push(") THEN 3 WHEN v.name @@ websearch_to_tsquery('simple',")
         .push_bind(text.to_owned())
         .push(") THEN 2 WHEN r.name ILIKE ")
         .push_bind(pattern)
         .push(" OR r.name % ")
         .push_bind(text.to_owned())
-        .push(format!(" THEN 1 ELSE 0 END)*{NAME_WEIGHT:.1}+(CASE WHEN EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id=r.id AND lower(f.label)=ANY("))
+        .push(format!(" THEN 1 ELSE 0 END)*{NAME_WEIGHT:.1}+coalesce((SELECT max(CASE WHEN f.label=ANY("))
         .push_bind(label_spellings(text))
-        .push(")");
-    scope(sql, q, reach);
-    sql.push(") THEN 2 WHEN EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id=r.id AND f.label IS NOT NULL AND to_tsvector('simple',f.label) @@ phraseto_tsquery('simple',")
+        .push(") THEN 2 WHEN to_tsvector('simple',f.label) @@ phraseto_tsquery('simple',")
         .push_bind(text.to_owned())
-        .push(")");
+        .push(") THEN 1 ELSE 0 END) FROM reference f WHERE f.resource_id IN (SELECT r.id UNION ALL SELECT a.alias_id FROM resource_alias a WHERE a.root_id=r.id) AND f.kind<>'post' AND f.label IS NOT NULL");
     scope(sql, q, reach);
     sql.push(format!(
-        ") THEN 1 ELSE 0 END)*{TAG_WEIGHT:.1}+(CASE WHEN {description} @@ phraseto_tsquery('simple',"
+        "),0)*{TAG_WEIGHT:.1}+(CASE WHEN to_tsvector('simple',coalesce(r.doc->>'description','')) @@ phraseto_tsquery('simple',"
     ))
     .push_bind(text.to_owned())
-    .push(format!(
-        ") THEN 2 WHEN {description} @@ websearch_to_tsquery('simple',"
-    ))
+    .push(") THEN 2 WHEN r.search_text @@ websearch_to_tsquery('simple',")
     .push_bind(text.to_owned())
-    .push(") THEN 1 ELSE 0 END))::double precision");
+    .push(") THEN 1 ELSE 0 END)) FROM (SELECT to_tsvector('simple',coalesce(r.name,'')) AS name) v)::double precision");
 }
 /// The trending window: `{n}h` or `{n}d` between one hour and 90 days, default seven days.
 pub(crate) fn trend_window(window: Option<&str>) -> Result<chrono::Duration, ApiError> {
@@ -1964,6 +1963,8 @@ pub async fn search(
     let mut fingerprint = q.clone();
     fingerprint.cursor = None;
     fingerprint.limit = None;
+    // The ranking itself, so a cursor never pages another order (`q` alone ranks by relevance).
+    fingerprint.sort = effective_sort(&q).map(str::to_owned);
     let revision_of = |set: &Option<crate::nexus::ReachSet>| {
         set.as_ref().map(|r| {
             let mut authors = r.authors.clone();
