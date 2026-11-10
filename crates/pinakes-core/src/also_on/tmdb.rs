@@ -21,8 +21,9 @@
 //!
 //! Asked only with the operator's credential (`TMDB_API_KEY`): without it, or with
 //! `[tmdb] enabled = false`, the source is switched off (its facts hidden, `api.themoviedb.org`
-//! refused) and `/v1/info` names no TMDB attribution.
-use super::{Attribution, Context, Fact, Found, Source, Subject};
+//! refused); `/v1/info` names TMDB's attribution then only while a stored card still holds a
+//! TMDB value (`api::info`), until a read or the maintenance pass takes it out.
+use super::{Context, Fact, Found, Source, Subject};
 use crate::{
     event::adapters::SecretKey,
     model::{Credit, CreditField, CreditProvider, ResourceMeta},
@@ -42,10 +43,6 @@ const IMAGES: &str = "https://image.tmdb.org/t/p/";
 const POSTER_SIZE: &str = "w500";
 /// How long a TMDB answer stays in the egress cache (seconds): one hour.
 const CACHE_SECS: u64 = 3600;
-/// The notice TMDB's terms ask an application to show, verbatim.
-pub const NOTICE: &str = "This product uses the TMDB API but is not endorsed or certified by TMDB.";
-/// TMDB's logo (its logos and attribution page).
-pub const LOGO: &str = "https://www.themoviedb.org/assets/2/v4/logos/v2/blue_short-8e7b30f73a4020692ccca9c88bafe5dcb6f8a62a4c6bc55cd9ba82bb2cd95f6c.svg";
 const SITE: &str = "https://www.themoviedb.org";
 /// The facts a card takes.
 const FACTS: [&str; 4] = [
@@ -54,9 +51,6 @@ const FACTS: [&str; 4] = [
     "tmdb_overview",
     "tmdb_overview_cut",
 ];
-/// The longest `refresh.retention_days` while TMDB is on: change lines keep a card's TMDB values
-/// that long, and a value is at most 60 days old when it leaves the card.
-pub const RETENTION_DAYS_CAP: u32 = 120;
 /// The longest overview a fact holds (bytes).
 const FACT_CAP: usize = 512;
 
@@ -375,17 +369,10 @@ impl Source for Tmdb {
     }
     fn retention_days_cap(&self) -> Option<u32> {
         // A value read up to 60 days ago, kept 120 more: six months.
-        Some(RETENTION_DAYS_CAP)
+        CreditProvider::Tmdb.change_days_cap()
     }
     fn fills_as(&self) -> Option<CreditProvider> {
         Some(CreditProvider::Tmdb)
-    }
-    fn attribution(&self) -> Option<Attribution> {
-        Some(Attribution {
-            notice: NOTICE,
-            logo: LOGO,
-            url: SITE,
-        })
     }
     /// A resolved film or series card with an IMDb ID or a Wikidata item, and an image or a
     /// description to fill (one TMDB gave counts as none); never a card of a TMDB page.

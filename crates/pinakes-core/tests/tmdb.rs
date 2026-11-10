@@ -848,3 +848,103 @@ fn a_long_change_retention_is_refused_while_tmdb_is_on() {
     disabled.refresh.retention_days = 3650;
     disabled.validate().unwrap();
 }
+
+/// With the key removed, `/v1/info` still lists TMDB's attribution while a stored card holds a
+/// TMDB value (a final card no read reaches); once the maintenance pass has taken the values
+/// out, it lists none.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn the_attribution_stays_while_a_card_holds_a_tmdb_value(pool: PgPool) {
+    let (ids, reader) = pages(&pool, &[MOVIE]).await;
+    let on = config(Some(TOKEN));
+    also_on::configure(&pool, &on).await.unwrap();
+    look_up(&pool, &cx(on, &Api::new())).await;
+    read_again(&pool, &reader).await;
+    assert_eq!(
+        stored(&pool, &ids[0]).await.2,
+        [(CreditField::Image, CreditProvider::Tmdb)]
+    );
+    sqlx::query("UPDATE resource SET final=true WHERE id=$1")
+        .bind(&ids[0])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let off = config(None);
+    also_on::configure(&pool, &off).await.unwrap();
+    let app = api::router(AppState::new(pool.clone(), off.clone()).unwrap());
+    let info = get(&app, "/v1/info").await;
+    assert_eq!(info["attributions"][0]["provider"], "tmdb", "{info}");
+    assert_eq!(
+        info["attributions"][0]["notice"],
+        "This product uses the TMDB API but is not endorsed or certified by TMDB."
+    );
+    assert_eq!(also_on::refill(&pool, || false).await.unwrap(), 1);
+    assert_eq!(stored(&pool, &ids[0]).await.2, vec![]);
+    let app = api::router(AppState::new(pool.clone(), off).unwrap());
+    let info = get(&app, "/v1/info").await;
+    assert!(info.get("attributions").is_none(), "{info}");
+}
+
+/// A change line that holds a TMDB value goes after 120 days, whatever `refresh.retention_days`
+/// says and with TMDB off; a line of the same age without one stays, as does a younger one.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn change_lines_with_tmdb_values_go_after_120_days(pool: PgPool) {
+    let plain = Page {
+        uri: "https://example.org/plain-page",
+        kind: "WebPage",
+        image: None,
+        description: Some("A page."),
+        keys: &[],
+    };
+    let (ids, reader) = pages(&pool, &[MOVIE, plain]).await;
+    let on = config(Some(TOKEN));
+    look_up(&pool, &cx(on, &Api::new())).await;
+    read_again(&pool, &reader).await;
+    let tmdb_lines = || async {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource_change WHERE (before::text LIKE '%\"provider\": \"tmdb\"%' OR after::text LIKE '%\"provider\": \"tmdb\"%')")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    let lines_of = |id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM resource_change WHERE resource_id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert!(tmdb_lines().await > 0);
+    let plain_lines = lines_of(ids[1].clone()).await;
+    assert!(plain_lines > 0);
+    let age = |days: i32| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query("UPDATE resource_change SET at=now()-$1*interval '1 day'")
+                .bind(days as f64)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+    // TMDB off now, every line kept ten years.
+    also_on::configure(&pool, &config(None)).await.unwrap();
+    age(100).await;
+    pinakes_core::changes::retain(&pool, 3650).await.unwrap();
+    assert!(tmdb_lines().await > 0, "younger than 120 days: kept");
+    age(121).await;
+    pinakes_core::changes::retain(&pool, 3650).await.unwrap();
+    assert_eq!(tmdb_lines().await, 0);
+    assert_eq!(
+        lines_of(ids[1].clone()).await,
+        plain_lines,
+        "no TMDB value: kept"
+    );
+    assert!(
+        lines_of(ids[0].clone()).await > 0,
+        "the movie's lines without one stay"
+    );
+}

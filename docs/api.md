@@ -242,7 +242,7 @@ title's page on TMDB and no author or licence; the overview's `lang` is `en`:
 
 A client that shows a value credited to `tmdb` must also show TMDB's logo (smaller and less
 prominent than its own marks) and TMDB's notice, as TMDB's terms ask. `/v1/info` gives both, in
-`attributions`, while the instance uses TMDB:
+`attributions`, while the instance uses TMDB and while a stored card still holds a TMDB value:
 
 ```json
 "attributions": [

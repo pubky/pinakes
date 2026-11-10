@@ -33,7 +33,8 @@ The poster is a link on the card: Pinakes never downloads it.
 
 TMDB's [terms](https://www.themoviedb.org/api-terms-of-use) ask an application that uses its data
 or images to show TMDB's logo, less prominent than its own marks, and a notice that it uses the
-TMDB API but is not endorsed or certified by TMDB. While the source runs, `/v1/info` lists both in
+TMDB API but is not endorsed or certified by TMDB. While the source runs, and after while a
+stored card still holds a TMDB value, `/v1/info` lists both in
 `attributions` (provider `tmdb`: the notice "This product uses the TMDB API but is not endorsed
 or certified by TMDB.", the logo's URL and `https://www.themoviedb.org`); a client that shows a
 value credited to `tmdb` shows them.
@@ -59,6 +60,7 @@ TMDB lets its data be cached for six months at most. Its rows live 60 days from 
 that answered; a card takes TMDB's values only from live rows, so it drops them at its first read
 after they expire, and the hourly maintenance drops them from cards that are not read again
 (final, dead-lettered or orphaned cards, [operations](../operations.md#also-on)); change lines
-keep a card's earlier values for `refresh.retention_days` (90), and startup refuses more than 120
-while the credential is set. To fill stored
+keep a card's earlier values for `refresh.retention_days` (90), startup refuses more than 120
+while the credential is set, and a change line holding a TMDB value goes after 120 days in any
+case. To fill stored
 cards after the key is set, run `pinakesd reextract also-on` with the daemon stopped.

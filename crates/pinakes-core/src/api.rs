@@ -76,6 +76,9 @@ pub struct AppState {
     /// `limits.preview_new_per_hour` for the whole instance.
     previews: Previews,
     info_cache: Arc<Mutex<Option<(Instant, Value)>>>,
+    /// The providers whose values some stored card holds, and when that was read
+    /// ([`shown_providers`]).
+    shown: Arc<Mutex<Option<(Instant, Vec<model::CreditProvider>)>>>,
     pub(crate) cursor_mac: SimpleHmac<blake3::Hasher>,
     /// The request clock for relative times and search cursors; tests set it, the daemon never
     /// does (wall clock).
@@ -96,6 +99,7 @@ impl AppState {
             downloads: Arc::default(),
             previews: Arc::default(),
             info_cache: Arc::default(),
+            shown: Arc::default(),
             cursor_mac: SimpleHmac::<blake3::Hasher>::new_from_slice(&cursor_key)
                 .context("initialize cursor MAC")?,
             clock: None,
@@ -2684,8 +2688,9 @@ pub struct Info {
     pub osm_licence: OsmLicence,
     /// What a client must show while it shows values from these services, each the
     /// `credits[].provider` of the values it gave: the service's notice, verbatim, and its logo
-    /// (less prominent than the client's own marks). Only the services this instance uses;
-    /// absent when it uses none.
+    /// (less prominent than the client's own marks). Listed while this instance uses the
+    /// service, and after, while a stored card still holds one of its values; absent when none
+    /// is.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub attributions: Vec<InfoAttribution>,
 }
@@ -2749,6 +2754,26 @@ fn dump_updated_at(config: &Config) -> Option<DateTime<Utc>> {
 #[utoipa::path(get,tag="Service",path="/v1/info",responses((status=200,body=Info)),description="The version, what this instance resolves and the limits a client must respect. The same path on admin_listen has the operator detail.")]
 pub async fn info(State(state): State<AppState>) -> Json<Info> {
     let c = &state.config;
+    // A provider's attribution shows while its values may show: while a source that writes them
+    // is not switched off (whether or not the worker runs), and after, while a stored card still
+    // holds one (until a read or the maintenance pass takes it out).
+    let mut attributions = vec![];
+    for provider in model::CreditProvider::FROM_FACTS {
+        let Some(a) = provider.attribution() else {
+            continue;
+        };
+        let on = crate::also_on::registered().iter().any(|s| {
+            s.fills_as() == Some(*provider) && !crate::also_on::switched_off(c, s.as_ref())
+        });
+        if on || shown_providers(&state).await.contains(provider) {
+            attributions.push(InfoAttribution {
+                provider: provider.name().into(),
+                notice: a.notice.into(),
+                logo: a.logo.into(),
+                url: a.url.into(),
+            });
+        }
+    }
     let mut resolves: Vec<String> = [
         ("web", c.web.enabled),
         ("pubky", c.pubky.enabled),
@@ -2795,21 +2820,35 @@ pub async fn info(State(state): State<AppState>) -> Json<Info> {
             dump: "/v1/dumps/osm_place.ndjson.gz".into(),
             updated_at: dump_updated_at(c),
         },
-        attributions: crate::also_on::registered()
-            .iter()
-            // While its values may show: not switched off, whether or not the worker runs.
-            .filter(|s| !crate::also_on::switched_off(c, s.as_ref()))
-            .filter_map(|s| {
-                let a = s.attribution()?;
-                Some(InfoAttribution {
-                    provider: s.id().into(),
-                    notice: a.notice.into(),
-                    logo: a.logo.into(),
-                    url: a.url.into(),
-                })
-            })
-            .collect(),
+        attributions,
     })
+}
+/// How long [`shown_providers`] keeps its answer.
+const SHOWN_SECS: u64 = 60;
+/// The providers written from facts whose values some stored card holds: one bounded read per
+/// provider (an `EXISTS` over the cards of the types it fills, by the `type_path` index), kept
+/// [`SHOWN_SECS`]. A failed read counts every provider as shown: an attribution too many, never
+/// one too few.
+async fn shown_providers(state: &AppState) -> Vec<model::CreditProvider> {
+    let mut cache = state.shown.lock().await;
+    if let Some((at, shown)) = &*cache {
+        if at.elapsed() < Duration::from_secs(SHOWN_SECS) {
+            return shown.clone();
+        }
+    }
+    let mut shown = vec![];
+    for provider in model::CreditProvider::FROM_FACTS {
+        let held: Result<bool, sqlx::Error> = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource WHERE type_path && $1::text[] AND osm_id IS NULL AND EXISTS(SELECT 1 FROM jsonb_array_elements(CASE jsonb_typeof(doc->'credits') WHEN 'array' THEN doc->'credits' ELSE '[]' END) c WHERE c->>'provider'=$2))")
+            .bind(provider.filled_types())
+            .bind(provider.name())
+            .fetch_one(&state.pool)
+            .await;
+        if held.unwrap_or(true) {
+            shown.push(*provider);
+        }
+    }
+    *cache = Some((Instant::now(), shown.clone()));
+    shown
 }
 async fn admin_info(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     Ok(Json(full_info(&state).await?))

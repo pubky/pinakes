@@ -859,7 +859,8 @@ Wikidata item. It runs only with a TMDB credential in `TMDB_API_KEY` ([api-keys]
 without one, or with `[tmdb] enabled = false`, it is switched off: no request to
 `api.themoviedb.org` (the egress refuses the host), TMDB's stored rows are hidden at the next
 start, every card that holds them is due at once and drops TMDB's values at that read, and
-`/v1/info` names no TMDB attribution. After setting the key, run
+`/v1/info` lists TMDB's attribution only while a stored card still holds a TMDB value (checked
+at most once a minute, over film and series cards). After setting the key, run
 `pinakesd --config <path> reextract also-on` with the daemon stopped, then start it (or only
 restart it and wait for each card's next also-on run, at most 30 days): the cards take their
 posters at the read that follows. TMDB's terms allow its data to
@@ -878,7 +879,9 @@ egress keeps TMDB's answers an hour and paces `api.themoviedb.org` at the defaul
 `limits.host_requests_per_second` (1/s), and at no more than 4/s when that is raised (TMDB's
 limit is about 40/s). Change lines hold a card's values before and after a change for
 `refresh.retention_days` (90): while a TMDB credential is set, startup refuses more than 120
-days, so no TMDB value read more than six months ago stays served by `/v1/changes`.
+days, and a change line that holds a TMDB value goes after 120 days whatever that setting says,
+with TMDB on or off, so no TMDB value read more than six months ago stays served by
+`/v1/changes`.
 
 Sources reach their services through the egress policy and its per-host budgets, one request
 at a time per host. A hub's published limit lowers its host's default pace like a source's own

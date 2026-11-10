@@ -306,11 +306,6 @@ pub trait Source: Send + Sync {
     fn fill_card(&self, _facts: &[Fact], _doc: &mut ResourceMeta) -> bool {
         false
     }
-    /// What a client showing its values must show while they show (the source is not switched
-    /// off), as `/v1/info` lists it (`attributions`).
-    fn attribution(&self) -> Option<Attribution> {
-        None
-    }
     /// The longest `refresh.retention_days` its values may be kept in change lines while it is
     /// ready (`Config::validate` refuses more): for a service that limits how long its data is
     /// cached.
@@ -390,14 +385,6 @@ pub trait Source: Send + Sync {
     }
 }
 
-/// A source's attribution: the notice and logo a client showing the source's values shows (as
-/// the service's terms ask), and the service's site.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Attribution {
-    pub notice: &'static str,
-    pub logo: &'static str,
-    pub url: &'static str,
-}
 /// Whether `source` runs under `config`: the worker and the source on, and the configuration
 /// lets it ([`Source::ready`]).
 pub fn runs(config: &Config, source: &dyn Source) -> bool {

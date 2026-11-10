@@ -159,6 +159,37 @@ impl CreditProvider {
     }
     /// The providers whose values are written from facts ([`Self::from_facts`]).
     pub const FROM_FACTS: &'static [Self] = &[Self::Tmdb];
+    /// The provider's name as stored and served (`tmdb`).
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Wikipedia => "wikipedia",
+            Self::WikimediaCommons => "wikimedia_commons",
+            Self::Wikidata => "wikidata",
+            Self::CoverArtArchive => "cover_art_archive",
+            Self::Tmdb => "tmdb",
+        }
+    }
+    /// What a client showing the provider's values must show, as its terms ask (`/v1/info`
+    /// `attributions`): TMDB's notice, verbatim, its logo and its site.
+    pub fn attribution(self) -> Option<Attribution> {
+        match self {
+            Self::Tmdb => Some(Attribution {
+                notice: "This product uses the TMDB API but is not endorsed or certified by TMDB.",
+                logo: "https://www.themoviedb.org/assets/2/v4/logos/v2/blue_short-8e7b30f73a4020692ccca9c88bafe5dcb6f8a62a4c6bc55cd9ba82bb2cd95f6c.svg",
+                url: "https://www.themoviedb.org",
+            }),
+            _ => None,
+        }
+    }
+    /// The longest a change line that holds one of the provider's values is kept (days),
+    /// whatever `refresh.retention_days` says and whether or not its source is on now
+    /// (`changes::retain`): TMDB's six months, from a value up to 60 days old.
+    pub fn change_days_cap(self) -> Option<u32> {
+        match self {
+            Self::Tmdb => Some(120),
+            _ => None,
+        }
+    }
     /// The card types a provider written from facts fills: the only cards that can hold its
     /// values (`also_on::refill` reads those alone, by the `type_path` index).
     pub fn filled_types(self) -> &'static [&'static str] {
@@ -167,6 +198,14 @@ impl CreditProvider {
             _ => &[],
         }
     }
+}
+/// A provider's attribution ([`CreditProvider::attribution`]): the notice and logo a client
+/// showing its values shows, and its site.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Attribution {
+    pub notice: &'static str,
+    pub logo: &'static str,
+    pub url: &'static str,
 }
 /// Where one of the card's `image` or `description` came from when Pinakes added it from another
 /// source than the link itself, and the licence it is used under (docs/api.md, Credits). Show it
@@ -691,6 +730,24 @@ pub fn valid_id(id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A provider's name is its stored and served form: the SQL that finds its credits by name
+    /// (`changes::retain`, `api::info`) matches what is stored.
+    #[test]
+    fn a_provider_s_name_is_its_serialized_form() {
+        for p in [
+            CreditProvider::Wikipedia,
+            CreditProvider::WikimediaCommons,
+            CreditProvider::Wikidata,
+            CreditProvider::CoverArtArchive,
+            CreditProvider::Tmdb,
+        ] {
+            assert_eq!(serde_json::to_value(p).unwrap(), p.name());
+        }
+        assert_eq!(CreditProvider::Tmdb.change_days_cap(), Some(120));
+        assert!(CreditProvider::FROM_FACTS
+            .iter()
+            .all(|p| p.attribution().is_some() && !p.filled_types().is_empty()));
+    }
     /// A stream is public, direct audio or video: an episode's enclosure (a tracking redirect is
     /// the publisher's own link) or iTunes' preview, never a signed, expiring or private link.
     #[test]
