@@ -9,11 +9,13 @@
 //! for an artist no item carries the MBID of, the one item its Discogs artist pages on
 //! MusicBrainz (P1953) all name. Several items, or relations that name several, give nothing.
 //! However it was found, by the relation too, the item is read back and is the entity's only when
-//! it is ([`is_own`]): never a Wikimedia page's, such as a disambiguation page's or a list's
-//! ([`NOT_AN_ENTITY`]), and at the entity's level: a recording's is one recording's
-//! (`music_sources::recording_item`), never a song's, a release's no album's, a release group's
-//! one release group's, an artist's names no other artist. Otherwise the card takes nothing from
-//! it, and no other item is looked for. A release and its release group each use their own item.
+//! it is ([`is_item_of`]): one classifier tells what an item is the item of by the MusicBrainz
+//! and Discogs IDs it carries ([`ItemKind::of`]; never a Wikimedia page's, such as a disambiguation
+//! page's or a list's, [`NOT_AN_ENTITY`]), and one table says which kinds each card takes
+//! ([`TAKES`]): an artist an artist's item, a release group a release group's (or one that is a
+//! work's too: a single's song's), a release a release's, a recording one recording's, never a
+//! song's, each naming no other entity of its level. Otherwise the card takes nothing from it, and no other item is
+//! looked for. A release and its release group each use their own item.
 //! An item too large to read verifies nothing. A recording may also take the description of the
 //! one work it is a performance of, when that work has its own relation to an item that is no
 //! Wikimedia page's; the credit then names the work (`subject`), and the work's image is never
@@ -177,38 +179,149 @@ pub const NOT_AN_ENTITY: [&str; 6] = [
     "Q15407973",
     "Q11266439",
 ];
-/// Whether `item` is a Wikimedia page's ([`NOT_AN_ENTITY`]).
-fn is_a_page(item: &wikidata::Item) -> bool {
-    item.instance_of
-        .iter()
-        .any(|class| NOT_AN_ENTITY.contains(&class.as_str()))
+/// The classes (P31) of a song's item, which Wikidata often makes its single's too: a song, a
+/// single, a musical work (both classes).
+pub const SONG_CLASSES: [&str; 4] = ["Q7366", "Q134556", "Q105543609", "Q2188189"];
+/// What a Wikidata item is the item of ([`ItemKind::of`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ItemKind {
+    /// A Wikimedia page's ([`NOT_AN_ENTITY`]), whatever it carries.
+    Page,
+    /// No identifier of any kind below: Wikidata may not name yet what MusicBrainz relates to it.
+    Bare,
+    /// An artist's: a MusicBrainz (P434) or Discogs (P1953) artist ID, and nothing else.
+    Artist,
+    /// A release group's: a MusicBrainz release group (P436) or Discogs master (P1954) ID, maybe
+    /// with its releases' and recordings' IDs.
+    ReleaseGroup,
+    /// A release group's that is a work's too, by a work ID (P435) or a song's class
+    /// ([`SONG_CLASSES`]): a song's item that is its single's, a rock opera's that is its album's.
+    WorkAndGroup,
+    /// A release's: a release ID (P5813), maybe with its recordings', and no release group's.
+    Release,
+    /// A recording's: a recording ID (P4404), of no song's class.
+    Recording,
+    /// A work's: a work ID (P435), maybe with its recordings'; or a song's class with its
+    /// recordings' IDs and no work ID yet.
+    Work,
+    /// An artist's ID with another kind's: no one's.
+    Mixed,
 }
-/// Whether `item`, read back with its claims, is `entity`'s own, however it was found (the
-/// entity's own relation, its MBID, its Discogs pages): never a Wikimedia page's ([`is_a_page`]),
-/// and an item at the entity's level that names no other entity of it. A recording's names that
-/// one recording and is one recording's (`music_sources::recording_item`: a song's item, a work,
-/// may carry its recordings' IDs, and a recording's relation often names it); a release's names
-/// no other release and no release group, Discogs master or work (an album's item often carries
-/// its editions'; `also_on::wikidata` takes a Discogs master as an album's too); a release
-/// group's names that one release group, or, naming none, no release, recording or work either;
-/// an artist's names no other artist. An item found by the entity's MBID names it; one its own
-/// relation names may not yet (Wikidata lags behind MusicBrainz), except a recording's.
-fn is_own(entity: &musicbrainz::Entity, item: &wikidata::Item) -> bool {
-    if is_a_page(item) {
-        return false;
-    }
-    let ids = |property: &str| item.id(property);
-    let none = |properties: &[&str]| properties.iter().all(|p| item.id(p).is_empty());
-    let only = |property: &str| ids(property) == std::slice::from_ref(&entity.mbid);
-    match entity.kind {
-        MbKind::Recording => only("P4404") && crate::music_sources::recording_item(item),
-        MbKind::Release => (only("P5813") || none(&["P5813"])) && none(&["P436", "P1954", "P435"]),
-        MbKind::ReleaseGroup => only("P436") || none(&["P436", "P5813", "P4404", "P435"]),
-        MbKind::Artist => {
-            let artists = ids(mbid_property(MbKind::Artist));
-            artists.is_empty() || artists.contains(&entity.mbid)
+impl ItemKind {
+    /// The kind of `item`, read back with its claims, by the identifiers it carries.
+    pub fn of(item: &wikidata::Item) -> Self {
+        let class = |classes: &[&str]| {
+            item.instance_of
+                .iter()
+                .any(|class| classes.contains(&class.as_str()))
+        };
+        if class(&NOT_AN_ENTITY) {
+            return Self::Page;
+        }
+        let has = |properties: &[&str]| properties.iter().any(|p| !item.id(p).is_empty());
+        let artist = has(&["P434", "P1953"]);
+        let others = has(&["P436", "P1954", "P5813", "P4404", "P435"]);
+        let (group, work, song) = (
+            has(&["P436", "P1954"]),
+            has(&["P435"]),
+            class(&SONG_CLASSES),
+        );
+        match () {
+            _ if artist && others => Self::Mixed,
+            _ if artist => Self::Artist,
+            _ if group && (work || song) => Self::WorkAndGroup,
+            _ if group => Self::ReleaseGroup,
+            _ if work => Self::Work,
+            _ if has(&["P5813"]) => Self::Release,
+            _ if has(&["P4404"]) && song => Self::Work,
+            _ if has(&["P4404"]) => Self::Recording,
+            _ => Self::Bare,
         }
     }
+    /// The kind of item a MusicBrainz entity of `kind` has.
+    pub fn of_entity(kind: MbKind) -> Self {
+        match kind {
+            MbKind::Artist => Self::Artist,
+            MbKind::ReleaseGroup => Self::ReleaseGroup,
+            MbKind::Release => Self::Release,
+            MbKind::Recording => Self::Recording,
+        }
+    }
+}
+/// How an item names the entity whose item it is, by that entity's own property.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Names {
+    /// This one ID, alone.
+    One,
+    /// This one ID alone, or none of its level yet.
+    OneOrNone,
+    /// This ID among others (an artist's duplicates), or none yet.
+    AmongOrNone,
+}
+/// Which kinds of item each subject takes, and how the item names it (by `property`). A
+/// recording's item names it, and is never a song's (a song's item may carry its recordings'
+/// IDs, and a recording's relation often names it); a release's is no album's (the release
+/// group's: a release and its release group each use their own item); a release group's may be
+/// a work's too (its single's song's, a rock opera's); a work's (a recording's song) may be its
+/// single's item, never an album's, a recording's, a release's or an artist's. Every subject but a recording takes an item with no
+/// identifier yet ([`ItemKind::Bare`]): Wikidata lags behind MusicBrainz.
+const TAKES: [(ItemKind, &str, Names, &[ItemKind]); 5] = [
+    (
+        ItemKind::Artist,
+        "P434",
+        Names::AmongOrNone,
+        &[ItemKind::Artist, ItemKind::Bare],
+    ),
+    (
+        ItemKind::ReleaseGroup,
+        "P436",
+        Names::OneOrNone,
+        &[
+            ItemKind::ReleaseGroup,
+            ItemKind::WorkAndGroup,
+            ItemKind::Bare,
+        ],
+    ),
+    (
+        ItemKind::Release,
+        "P5813",
+        Names::OneOrNone,
+        &[ItemKind::Release, ItemKind::Bare],
+    ),
+    (
+        ItemKind::Recording,
+        "P4404",
+        Names::One,
+        &[ItemKind::Recording],
+    ),
+    (
+        ItemKind::Work,
+        "P435",
+        Names::OneOrNone,
+        &[ItemKind::Work, ItemKind::WorkAndGroup, ItemKind::Bare],
+    ),
+];
+/// Whether `item`, read back with its claims, is the item of the `subject` (an entity's kind, or
+/// a work) with MusicBrainz ID `mbid`, however it was found (the entity's own relation, its MBID,
+/// its Discogs pages, a recording's work's relation): of a kind [`TAKES`] lets the subject take,
+/// naming it as it says. An item found by an MBID names it; one a relation names may not yet.
+pub fn is_item_of(subject: ItemKind, mbid: &str, item: &wikidata::Item) -> bool {
+    let Some((_, property, names, kinds)) = TAKES.iter().find(|(s, ..)| *s == subject) else {
+        return false;
+    };
+    if !kinds.contains(&ItemKind::of(item)) {
+        return false;
+    }
+    let ids = item.id(property);
+    match names {
+        Names::One => ids == [mbid],
+        Names::OneOrNone => ids.is_empty() || ids == [mbid],
+        Names::AmongOrNone => ids.is_empty() || ids.iter().any(|id| id == mbid),
+    }
+}
+/// Whether `item` is `entity`'s own ([`is_item_of`]).
+fn is_own(entity: &musicbrainz::Entity, item: &wikidata::Item) -> bool {
+    is_item_of(ItemKind::of_entity(entity.kind), &entity.mbid, item)
 }
 /// Item `qid` read back with its claims (`wikidata::items`); `None` when it is unknown, or too
 /// large to read and so can't be verified. An error is a transient failure.
@@ -379,7 +492,7 @@ async fn source(
     }
 }
 /// The item of the one work `recording` is a current performance of, when the work's own
-/// relations name one and that item, read back, is no Wikimedia page's ([`is_a_page`]) and names
+/// relations name one and that item, read back, is no Wikimedia page's ([`ItemKind::Page`]) and names
 /// no other work (P435); `Err` when unread.
 async fn work_source(egress: &Egress, base: &str, recording: &str) -> Result<Option<Source>, ()> {
     let works = musicbrainz::works(egress, base, recording)
@@ -396,7 +509,8 @@ async fn work_source(egress: &Egress, base: &str, recording: &str) -> Result<Opt
         .map_err(|error| unread(recording, "wikidata_work_item", &error))?;
     let Some(item) = item.filter(|item| {
         let works = item.id("P435");
-        !is_a_page(item) && (works.is_empty() || works == std::slice::from_ref(&work.mbid))
+        ItemKind::of(item) != ItemKind::Page
+            && (works.is_empty() || works == std::slice::from_ref(&work.mbid))
     }) else {
         return Ok(None);
     };
@@ -1153,6 +1267,58 @@ mod tests {
             &item(&[("P434", "m"), ("P434", "n")], &[])
         ));
         assert!(!own(MbKind::Artist, &item(&[("P434", "n")], &[])));
+        // An item of another kind of entity is no card's: one classifier, one table.
+        let album = item(&[("P436", "g"), ("P1954", "5460")], &["Q482994"]);
+        let single = item(&[("P436", "g")], &["Q134556"]);
+        let recording = item(&[("P4404", "r")], &[]);
+        let release = item(&[("P5813", "r")], &[]);
+        let artist = item(&[("P434", "a"), ("P1953", "1")], &["Q5"]);
+        let work = item(&[("P435", "w"), ("P4404", "r")], &["Q7366"]);
+        // A song's item that is its single's too, by its class or its work ID; a rock opera's.
+        let song_single = item(&[("P435", "w"), ("P4404", "r"), ("P436", "g")], &["Q7366"]);
+        let opera = item(&[("P435", "w"), ("P436", "g")], &["Q482994"]);
+        // A song's item with its recordings' IDs and no work ID yet.
+        let song = item(&[("P4404", "m")], &["Q2188189"]);
+        let mixed = item(&[("P434", "m"), ("P436", "m")], &[]);
+        for (it, kind) in [
+            (&album, ItemKind::ReleaseGroup),
+            (&single, ItemKind::WorkAndGroup),
+            (&recording, ItemKind::Recording),
+            (&release, ItemKind::Release),
+            (&artist, ItemKind::Artist),
+            (&work, ItemKind::Work),
+            (&song_single, ItemKind::WorkAndGroup),
+            (&opera, ItemKind::WorkAndGroup),
+            (&song, ItemKind::Work),
+            (&mixed, ItemKind::Mixed),
+            (&item(&[], &["Q5"]), ItemKind::Bare),
+            (&item(&[("P4404", "r")], &["Q4167410"]), ItemKind::Page),
+        ] {
+            assert_eq!(ItemKind::of(it), kind, "{:?}", it.ids);
+        }
+        for other in [&album, &single, &recording, &release, &work, &mixed] {
+            assert!(!own(MbKind::Artist, other), "{:?}", other.ids);
+        }
+        for other in [&artist, &recording, &release, &work, &mixed] {
+            assert!(!own(MbKind::ReleaseGroup, other), "{:?}", other.ids);
+        }
+        for other in [&artist, &album, &single, &recording, &work, &mixed] {
+            assert!(!own(MbKind::Release, other), "{:?}", other.ids);
+        }
+        for other in [&artist, &album, &single, &release, &work, &mixed] {
+            assert!(!own(MbKind::Recording, other), "{:?}", other.ids);
+        }
+        assert!(!own(MbKind::Recording, &song));
+        // A single's item, a rock opera's, is its release group's and its work's.
+        for it in [&single, &song_single, &opera] {
+            assert!(is_item_of(ItemKind::ReleaseGroup, "g", it), "{:?}", it.ids);
+            assert!(!is_item_of(ItemKind::ReleaseGroup, "h", it), "{:?}", it.ids);
+        }
+        for it in [&song_single, &opera, &song] {
+            assert!(is_item_of(ItemKind::Work, "w", it), "{:?}", it.ids);
+        }
+        // A single's item is its release group's.
+        assert!(is_item_of(ItemKind::ReleaseGroup, "g", &single));
         // A Wikimedia page's item is no one's, whatever it names.
         for class in NOT_AN_ENTITY {
             for kind in [MbKind::Artist, MbKind::ReleaseGroup, MbKind::Release] {

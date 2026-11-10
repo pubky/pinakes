@@ -1303,12 +1303,18 @@ music_enrichment`, on by default):
   read back and must be the entity's own, or the card takes nothing from it (and no other item is
   looked for): never a Wikimedia page's item (`P31` a disambiguation page `Q4167410` or
   `Q22808320`, a list article `Q13406463`, a category `Q4167836` or `Q15407973`, a template
-  `Q11266439`), and at the entity's level: a recording's names that one recording (`P4404`) and no
-  work, never a song's; a release's names no other release and no release group, Discogs master
-  or work (an album's item often lists its editions); a release group's names that one release
-  group, or, naming none, no release, recording or work; an artist's names no other artist. An
-  item found by the MBID names the entity; one its own relation names may not name it back yet
-  (Wikidata lags behind MusicBrainz), except a recording's. An item too large to read is not
+  `Q11266439`), and of the entity's kind, told by the identifiers the item carries: an artist's
+  (`P434` or a Discogs artist `P1953`, nothing else), a release group's (`P436` or a Discogs master
+  `P1954`; with a work ID `P435` or a song or single class `P31` a work's too: a single's song's,
+  a rock opera's), a release's (`P5813`, no release group's), a recording's (`P4404`, of no song
+  class), a work's (`P435`; or a song class with recording IDs and no work ID yet); an artist's
+  ID with any other is no one's. An artist takes an artist's item; a release group a release
+  group's, also one that is a work's too; a
+  release a release's, never its release group's (an album's item often lists its editions); a
+  recording a recording's that names that one recording, never a song's; each names no other
+  entity of its level. An item found by the MBID names the entity; one its own relation names
+  may not name it back yet, and may carry no identifier at all yet (Wikidata lags behind
+  MusicBrainz), except a recording's. An item too large to read is not
   verified and gives nothing. A release uses its own item, never its release group's. A recording
   also uses the one work it is a performance of, when that work has its own relation to an item
   that, read back, is no Wikimedia page's and names no other work, for the description alone (its

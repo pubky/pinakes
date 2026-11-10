@@ -98,6 +98,12 @@ struct Mode {
     /// Get Lucky's recording item (Q139827657) has an English sitelink to the "Get Lucky"
     /// disambiguation page.
     recording_item_links_disambiguation: bool,
+    /// Kind of Blue's item (Q283221) read back also carries a work ID (P435), as a rock opera's
+    /// or a single's song's item that is its release group's too does.
+    album_is_a_work: bool,
+    /// `Some((file, qid))`: the `wikidata` relation of MusicBrainz's answer `file` names item
+    /// `qid` (an item of another kind of entity) instead of its own, or is added naming it.
+    relation: Option<(&'static str, &'static str)>,
 }
 /// Answers by host, path and query from the recorded fixtures; records each request.
 #[derive(Default)]
@@ -152,6 +158,22 @@ fn with_wikidata_relation(name: &str, qid: &str) -> Vec<u8> {
             .unwrap()
             .push(serde_json::from_str(&relation).unwrap())
     })
+}
+/// MusicBrainz's answer `file` with its `wikidata` relation's item replaced by `qid`, or, when it
+/// has none, such a relation added ([`with_wikidata_relation`]).
+fn naming(file: &str, qid: &str) -> Vec<u8> {
+    let text = String::from_utf8(fixture(file)).unwrap();
+    let Some(at) = text.find("wikidata.org/wiki/Q") else {
+        return with_wikidata_relation(file, qid);
+    };
+    let start = at + "wikidata.org/wiki/".len();
+    let end = start
+        + 1
+        + text[start + 1..]
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap();
+    assert!(!text[end..].contains("wikidata.org/wiki/Q"), "{file}");
+    format!("{}{qid}{}", &text[..start], &text[end..]).into_bytes()
 }
 /// A recorded JSON answer with one edit.
 fn edited(name: &str, edit: impl FnOnce(&mut Value)) -> Vec<u8> {
@@ -250,7 +272,9 @@ impl Transport for Recorded {
                     }
                     other => panic!("unexpected MusicBrainz request {other}"),
                 };
-                let body = if file == "mb-release-kind-of-blue.json" {
+                let body = if let Some((_, qid)) = mode.relation.filter(|(f, _)| *f == file) {
+                    naming(file, qid)
+                } else if file == "mb-release-kind-of-blue.json" {
                     // The release's relation names its album's item, the release group's.
                     with_wikidata_relation(file, "Q283221")
                 } else if mode.recording_names_its_song && file == "mb-recording-get-lucky.json" {
@@ -294,6 +318,18 @@ impl Transport for Recorded {
                                 .as_object_mut()
                                 .unwrap()
                                 .remove("P31");
+                        })
+                    } else if mode.album_is_a_work && ids == "Q283221" {
+                        edited(&file, |v| {
+                            let claims = &mut v["entities"][&ids]["claims"];
+                            let work = serde_json::to_string(&claims["P436"])
+                                .unwrap()
+                                .replace("P436", "P435")
+                                .replace(
+                                    "8e8a594f-2175-38c7-a871-abb68ec363e7",
+                                    "f4a8b9d2-3c1e-4f5a-9b6c-7d8e9f0a1b2c",
+                                );
+                            claims["P435"] = serde_json::from_str(&work).unwrap();
                         })
                     } else if mode.other_mbid && ids == "Q55825905" {
                         String::from_utf8(fixture(&file))
@@ -976,6 +1012,89 @@ async fn an_item_its_own_relation_names_is_checked_like_a_found_one() {
             "www.wikidata.org/w/api.php?action=wbgetentities&ids=Q283221&props=claims%7Csitelinks%2Furls&format=json",
         ]
     );
+}
+
+/// The card of `uri`, whose answers are as `mode` says, takes nothing of item `qid` (an item of
+/// another kind of entity) and asks nothing of it but its read-back: the card is as MusicBrainz
+/// alone makes it, with no credit and nothing unread.
+async fn takes_nothing_of(uri: &str, mode: Mode, qid: &str) {
+    let plain = card(&web(Recorded::new(Mode::default()), false), uri).await;
+    let t = Recorded::new(mode);
+    let doc = card(&web(t.clone(), true), uri).await;
+    assert_eq!(
+        (&doc.image, &doc.description),
+        (&plain.image, &plain.description),
+        "{uri} took {qid}'s"
+    );
+    assert_eq!(credits(&doc), json!([]), "{uri}, {qid}");
+    assert!(doc.unread_enriched.is_empty());
+    let seen = t.seen();
+    assert!(
+        seen.iter().any(|s| s.contains(&format!(
+            "action=wbgetentities&ids={qid}&props=claims%7Csitelinks%2Furls&"
+        ))),
+        "{seen:?}"
+    );
+    assert!(
+        seen.iter().all(|s| !s.contains("%7Cdescriptions")
+            && !s.contains("wbgetclaims")
+            && !s.contains("wikipedia.org")
+            && !s.starts_with("commons.")),
+        "{seen:?}"
+    );
+}
+/// An item of another kind of entity is no card's, by the identifiers it carries
+/// (`music_enrichment::ItemKind`): an artist whose own relation names an album's item (Kind of
+/// Blue's, P436) takes nothing of it.
+#[tokio::test]
+async fn an_artists_relation_to_an_albums_item_gives_nothing() {
+    let mode = Mode {
+        relation: Some(("mb-artist-daft-punk.json", "Q283221")),
+        ..Default::default()
+    };
+    takes_nothing_of(DAFT_PUNK, mode, "Q283221").await;
+}
+/// A release group's item that is a work's too (a single's song's item, a rock opera's: a work
+/// ID, P435, beside the release group's, P436) is still the release group's: Kind of Blue's item
+/// with a work ID added gives the album its article as without.
+#[tokio::test]
+async fn a_release_groups_item_that_is_a_works_too_is_its_own() {
+    let t = Recorded::new(Mode {
+        album_is_a_work: true,
+        ..Default::default()
+    });
+    let album = card(&web(t.clone(), true), KIND_OF_BLUE).await;
+    assert_eq!(
+        album.description.as_deref(),
+        Some(extract("enwiki-summary-kind-of-blue.json").as_str())
+    );
+    assert_eq!(
+        credits(&album),
+        json!([article_credit(
+            "https://en.wikipedia.org/wiki/Kind_of_Blue",
+            None
+        )])
+    );
+}
+/// A release group whose own relation names an artist's item (Miles Davis's, P434) takes nothing
+/// of it.
+#[tokio::test]
+async fn a_release_groups_relation_to_an_artists_item_gives_nothing() {
+    let mode = Mode {
+        relation: Some(("mb-release-group-kind-of-blue.json", "Q93341")),
+        ..Default::default()
+    };
+    takes_nothing_of(KIND_OF_BLUE, mode, "Q93341").await;
+}
+/// A release whose own relation names a recording's item (Get Lucky's, P4404) takes nothing of
+/// it.
+#[tokio::test]
+async fn a_releases_relation_to_a_recordings_item_gives_nothing() {
+    let mode = Mode {
+        relation: Some(("mb-release-kind-of-blue.json", "Q139827657")),
+        ..Default::default()
+    };
+    takes_nothing_of(KIND_OF_BLUE_RELEASE, mode, "Q139827657").await;
 }
 
 /// An item that is a disambiguation page's (P31 Q4167410; a list article's, Q13406463, alike) is
