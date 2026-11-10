@@ -28,6 +28,8 @@ use tower::ServiceExt;
 const SEFA: &str = "https://musicbrainz.org/artist/b5416a54-4941-4fcf-b2a0-7f98da6f9344";
 const MILES: &str = "https://musicbrainz.org/artist/561d854a-6a28-4aa7-8c99-323e6ce46c2a";
 const DAFT_PUNK: &str = "https://musicbrainz.org/artist/056e4f3e-d505-4dad-8ec1-d04f521cbb56";
+const KIND_OF_BLUE_RELEASE: &str =
+    "https://musicbrainz.org/release/4c8af71f-5746-4981-92d7-0d6c64db1155";
 const KIND_OF_BLUE: &str =
     "https://musicbrainz.org/release-group/8e8a594f-2175-38c7-a871-abb68ec363e7";
 const GET_LUCKY: &str = "https://musicbrainz.org/recording/833f00e1-781f-4edd-90e4-e52712618862";
@@ -87,6 +89,8 @@ struct Mode {
     no_en_description: bool,
     /// Get Lucky's work has no `wikidata` relation.
     work_without_item: bool,
+    /// Get Lucky's recording has a `wikidata` relation to its song's item (Q11510350).
+    recording_names_its_song: bool,
 }
 /// Answers by host, path and query from the recorded fixtures; records each request.
 #[derive(Default)]
@@ -121,6 +125,26 @@ impl Recorded {
             .filter(|s| s.starts_with(&format!("{host}/")))
             .collect()
     }
+}
+/// A MusicBrainz answer with a `wikidata` URL relation to `qid` added, written as MusicBrainz
+/// writes Daft Punk's.
+fn with_wikidata_relation(name: &str, qid: &str) -> Vec<u8> {
+    let relation = fixture_json("mb-artist-daft-punk.json")["relations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["type"] == "wikidata")
+        .unwrap()
+        .clone();
+    let relation = serde_json::to_string(&relation)
+        .unwrap()
+        .replace("Q185828", qid);
+    edited(name, |v| {
+        v["relations"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::from_str(&relation).unwrap())
+    })
 }
 /// A recorded JSON answer with one edit.
 fn edited(name: &str, edit: impl FnOnce(&mut Value)) -> Vec<u8> {
@@ -206,6 +230,9 @@ impl Transport for Recorded {
                     "release-group/8e8a594f-2175-38c7-a871-abb68ec363e7" => {
                         "mb-release-group-kind-of-blue.json"
                     }
+                    "release/4c8af71f-5746-4981-92d7-0d6c64db1155" => {
+                        "mb-release-kind-of-blue.json"
+                    }
                     "recording/833f00e1-781f-4edd-90e4-e52712618862"
                         if query("inc").contains("work-rels") =>
                     {
@@ -216,8 +243,12 @@ impl Transport for Recorded {
                     }
                     other => panic!("unexpected MusicBrainz request {other}"),
                 };
-                let body = if mode.work_without_item && file == "mb-recording-get-lucky-works.json"
-                {
+                let body = if file == "mb-release-kind-of-blue.json" {
+                    // The release's relation names its album's item, the release group's.
+                    with_wikidata_relation(file, "Q283221")
+                } else if mode.recording_names_its_song && file == "mb-recording-get-lucky.json" {
+                    with_wikidata_relation(file, "Q11510350")
+                } else if mode.work_without_item && file == "mb-recording-get-lucky-works.json" {
                     edited(file, |v| {
                         for r in v["relations"].as_array_mut().unwrap() {
                             if let Some(urls) = r["work"]["relations"].as_array_mut() {
@@ -241,7 +272,7 @@ impl Transport for Recorded {
                     };
                     search(&statement, mode)
                 }
-                // An item read back after a search: its claims and sitelinks.
+                // An item read back, however it was found: its claims and sitelinks.
                 "wbgetentities" if query("props") == "claims|sitelinks/urls" => {
                     let ids = query("ids");
                     let file = format!("wd-entities-{ids}.json");
@@ -559,9 +590,9 @@ fn song_credit() -> Value {
         Some("https://musicbrainz.org/work/b11bf816-1844-47e5-9075-9239b7609c6a"),
     )
 }
-/// Get Lucky's card asks exactly: MusicBrainz 2 (the recording, its works), Wikidata 5 (search,
-/// read-back, the recording item's pages and image claim, the work item's pages), English
-/// Wikipedia 1 (the work's article; the recording item has none), nothing of Commons.
+/// Get Lucky's card asks exactly: MusicBrainz 2 (the recording, its works), Wikidata 6 (search,
+/// read-back, the recording item's pages and image claim, the work item's read-back and pages),
+/// English Wikipedia 1 (the work's article; the recording item has none), nothing of Commons.
 #[tokio::test]
 async fn a_recordings_requests_are_bounded() {
     let t = Recorded::new(Mode::default());
@@ -574,6 +605,7 @@ async fn a_recordings_requests_are_bounded() {
         format!("{wd}wbgetentities&ids=Q139827657&props=claims%7Csitelinks%2Furls&format=json"),
         format!("{wd}wbgetentities&ids=Q139827657&props=sitelinks%2Furls%7Cdescriptions&languages=en&format=json"),
         format!("{wd}wbgetclaims&entity=Q139827657&property=P18&format=json"),
+        format!("{wd}wbgetentities&ids=Q11510350&props=claims%7Csitelinks%2Furls&format=json"),
         format!("{wd}wbgetentities&ids=Q11510350&props=sitelinks%2Furls%7Cdescriptions&languages=en&format=json"),
         "en.wikipedia.org/api/rest_v1/page/summary/Get_Lucky_(Daft_Punk_song)?".to_owned(),
     ];
@@ -854,6 +886,61 @@ async fn a_redirect_or_a_disambiguation_page_gives_no_description() {
     );
 }
 
+/// The item an entity's own `wikidata` relation names is read back and checked like a found one
+/// (`is_own`): a recording's relation to its song's item (a single, a work: no recording ID)
+/// gives the recording nothing of that item, and the recording takes its work's article as when
+/// it has no item, naming the work, never an image; a release's relation to its album's item
+/// (the release group's, P436) gives the release nothing. Neither looks for another item.
+#[tokio::test]
+async fn an_item_its_own_relation_names_is_checked_like_a_found_one() {
+    let t = Recorded::new(Mode {
+        recording_names_its_song: true,
+        ..Default::default()
+    });
+    let song = card(&web(t.clone(), true), GET_LUCKY).await;
+    assert_eq!(song.image, None, "a work's image is never its recording's");
+    assert_eq!(
+        song.description.as_deref(),
+        Some(extract("enwiki-summary-get-lucky-song.json").as_str())
+    );
+    assert_eq!(credits(&song), json!([song_credit()]));
+    let wikidata = t.to("www.wikidata.org");
+    assert!(
+        wikidata
+            .iter()
+            .all(|s| !s.contains("action=query") && !s.contains("wbgetclaims")),
+        "{wikidata:?}"
+    );
+    assert!(
+        wikidata
+            .iter()
+            .any(|s| s.contains("ids=Q11510350&props=claims")),
+        "{wikidata:?}"
+    );
+
+    let t = Recorded::new(Mode::default());
+    let plain = card(
+        &web(Recorded::new(Mode::default()), false),
+        KIND_OF_BLUE_RELEASE,
+    )
+    .await;
+    let release = card(&web(t.clone(), true), KIND_OF_BLUE_RELEASE).await;
+    assert_eq!(release.name.as_deref(), Some("Kind of Blue"));
+    assert_eq!(
+        (&release.image, &release.description),
+        (&None, &plain.description)
+    );
+    assert_eq!(credits(&release), json!([]));
+    assert!(release.unread_enriched.is_empty());
+    assert_eq!(
+        sorted(t.seen()),
+        [
+            "musicbrainz.org/ws/2/release/4c8af71f-5746-4981-92d7-0d6c64db1155?inc=url-rels+release-groups+artist-credits+genres&fmt=json",
+            "www.wikidata.org/w/api.php?action=wbgetentities&ids=Q283221&props=claims%7Csitelinks%2Furls&format=json",
+        ]
+    );
+}
+
 /// A Commons file whose page names no author under CC BY is never shown: the card keeps its
 /// description and has no image credit.
 #[tokio::test]
@@ -889,7 +976,8 @@ async fn concurrent_cards_of_one_entity_ask_once() {
     unique.sort();
     unique.dedup();
     assert_eq!(seen.len(), unique.len(), "{seen:?}");
-    assert_eq!(seen.len(), 5, "{seen:?}");
+    // MusicBrainz, the item's read-back, pages and image claim, Wikipedia, Commons.
+    assert_eq!(seen.len(), 6, "{seen:?}");
 }
 
 /// A 503 or a 429 leaves its field unread (kept from the stored card, read again within the

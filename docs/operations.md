@@ -814,10 +814,11 @@ Wikipedia or Wikidata, from the entity's Wikidata item, each with its credit
 after MusicBrainz answered, through the egress and its pace for those hosts, within
 `limits.music_enrichment_timeout_ms`. At most, per card: MusicBrainz one request more (a
 recording's works, only when the recording has no item of its own with an English article); Wikidata one
-search and one read-back for each lookup of an entity without its own `wikidata` relation (its
-MBID, then for an artist up to two Discogs pages: three lookups; hits over the 8 MB cap together
-are read back one by one), one read of the item's pages and English description, and one of its
-image claim, and for a recording one read of its work's item's pages; Wikipedia two summaries
+read-back of the item its own `wikidata` relation names, or, without one, one search and one
+read-back for each lookup (its MBID, then for an artist up to two Discogs pages: three lookups;
+hits over the 8 MB cap together are read back one by one), one read of the item's pages and
+English description, and one of its image claim, and for a recording one read-back and one read
+of its work's item's pages; Wikipedia two summaries
 (English, then one other language), for a recording three (its item's English article, its
 work's, then one other language); Commons one. These requests run one after another and share
 each host's pace (`www.wikidata.org` with the also-on sources), so an artist found through its

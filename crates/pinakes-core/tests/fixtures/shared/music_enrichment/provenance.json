@@ -1,6 +1,6 @@
 {
   "_recorded": {
-    "note": "Recorded with curl, User-Agent 'pinakes-dev/0.1 (+https://pubky.app; info@synonym.to)', at most one request a second to MusicBrainz. Derived and synthetic answers the tests build in code (tests/music_enrichment.rs, one edit each): wd-p18-no-author (Daft Punk's wd-p18-Q185828 answer with its file name replaced by the no-author file's); wd-pages-Q55825905 without its English description (the descriptions object emptied); wd-search-P434-sefa-empty (Sefa's P434 search with no hit: search emptied, totalhits 0), wd-search-P434-sefa-crowded (totalhits set to 6, more than the 5 a search returns), wd-search-P1953-empty (a Discogs search with no hit, built the same way from wd-search-P1953-6743320); wd-search-P4404-get-lucky-empty (Get Lucky's P4404 search with no hit, built the same way); wd-entities-Q55825905-other-mbid (the read-back with its P434 value replaced by another artist's MBID, 561d854a-6a28-4aa7-8c99-323e6ce46c2a); mb-recording-get-lucky-works-no-work-item (Get Lucky's works answer with its work's wikidata URL relation removed); Wikipedia's 503 with Retry-After: 120, Commons' 429, Wikidata's 503 (status and header only, no body recorded) and Wikidata's maxlag error ({\"error\":{\"code\":\"maxlag\"}} with status 200, as Wikidata sends it)."
+    "note": "Recorded with curl, User-Agent 'pinakes-dev/0.1 (+https://pubky.app; info@synonym.to)', at most one request a second to MusicBrainz. Derived and synthetic answers the tests build in code (tests/music_enrichment.rs, one edit each): wd-p18-no-author (Daft Punk's wd-p18-Q185828 answer with its file name replaced by the no-author file's); wd-pages-Q55825905 without its English description (the descriptions object emptied); wd-search-P434-sefa-empty (Sefa's P434 search with no hit: search emptied, totalhits 0), wd-search-P434-sefa-crowded (totalhits set to 6, more than the 5 a search returns), wd-search-P1953-empty (a Discogs search with no hit, built the same way from wd-search-P1953-6743320); wd-search-P4404-get-lucky-empty (Get Lucky's P4404 search with no hit, built the same way); wd-entities-Q55825905-other-mbid (the read-back with its P434 value replaced by another artist's MBID, 561d854a-6a28-4aa7-8c99-323e6ce46c2a); mb-recording-get-lucky-works-no-work-item (Get Lucky's works answer with its work's wikidata URL relation removed); Wikipedia's 503 with Retry-After: 120, Commons' 429, Wikidata's 503 (status and header only, no body recorded) and Wikidata's maxlag error ({\"error\":{\"code\":\"maxlag\"}} with status 200, as Wikidata sends it). Added 2026-11-10 (round 2; recorded with User-Agent 'pinakes/0.1.0 (+https://pubky.app)', at most one request a second): the read-backs of the items the entities' own relations name, and the Kind of Blue release. Derived answers built in code: mb-recording-get-lucky-names-its-song (Get Lucky's recording answer with a wikidata URL relation to its song's item Q11510350 added, as Daft Punk's relation is written); mb-release-kind-of-blue with a wikidata URL relation to the album's item Q283221 added the same way."
   },
   "commons-daft-punk": {
     "bytes": 1791,
@@ -192,6 +192,26 @@
     "status": 200,
     "url": "https://musicbrainz.org/ws/2/release-group/8e8a594f-2175-38c7-a871-abb68ec363e7?inc=url-rels+artist-credits+genres&fmt=json"
   },
+  "mb-release-kind-of-blue": {
+    "bytes": 6072,
+    "content_type": "application/json",
+    "file": "mb-release-kind-of-blue.json",
+    "note": "Kind of Blue, release 4c8af71f (the same answer as tests/fixtures/hubs/mb-release-4c8af71f.json): no wikidata relation of its own; the tests add one (see _recorded).",
+    "recorded_at": "2026-11-10T05:03:48+00:00",
+    "sha256": "9038426b71642c0e682bdd4af23cadb6a6ddff1d8a29539d5c53cccd0089d07e",
+    "status": 200,
+    "url": "https://musicbrainz.org/ws/2/release/4c8af71f-5746-4981-92d7-0d6c64db1155?inc=url-rels+release-groups+artist-credits+genres&fmt=json"
+  },
+  "wd-entities-Q11510350": {
+    "bytes": 27209,
+    "content_type": "application/json",
+    "file": "wd-entities-Q11510350.json",
+    "note": "Get Lucky's single/song item read back (the work's relation names it): P31 Q134556, P436 9b7ce16c-8310-4cc5-aad5-09893a5a8297, no P4404: never a recording's own.",
+    "recorded_at": "2026-11-10T05:06:16+00:00",
+    "sha256": "cb0d99ef1676923db133742a61bfafb927770225d1cf75de61fd8f16f51e9ca5",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q11510350&props=claims%7Csitelinks%2Furls&format=json"
+  },
   "wd-entities-Q139827657": {
     "bytes": 4407,
     "content_type": "application/json",
@@ -202,6 +222,36 @@
     "status": 200,
     "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q139827657&props=claims%7Csitelinks%2Furls&format=json"
   },
+  "wd-entities-Q185828": {
+    "bytes": 132033,
+    "content_type": "application/json",
+    "file": "wd-entities-Q185828.json",
+    "note": "Daft Punk's item read back (its MusicBrainz relation names it): P31 Q71129815/Q215380/Q109288825, P434 056e4f3e-d505-4dad-8ec1-d04f521cbb56.",
+    "recorded_at": "2026-11-10T05:06:10+00:00",
+    "sha256": "918424bb554facee8b22e9bab10c63b43639d555785f16ceff07c78dad8ff5f1",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q185828&props=claims%7Csitelinks%2Furls&format=json"
+  },
+  "wd-entities-Q283221": {
+    "bytes": 43184,
+    "content_type": "application/json",
+    "file": "wd-entities-Q283221.json",
+    "note": "Kind of Blue's album item read back (the release group's relation names it): P31 Q482994 (album), P436 8e8a594f-2175-38c7-a871-abb68ec363e7, P1954 5460, no P5813: never a release's own.",
+    "recorded_at": "2026-11-10T05:06:14+00:00",
+    "sha256": "5e9b90814ca407fa5c47be2344403fc76ff05c62aae536386149ca4e6bce7f6d",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q283221&props=claims%7Csitelinks%2Furls&format=json"
+  },
+  "wd-entities-Q3780426": {
+    "bytes": 16976,
+    "content_type": "application/json",
+    "file": "wd-entities-Q3780426.json",
+    "note": "Richard Colburn's item read back (his MusicBrainz relation names it): P31 Q5, P434 e7528aba-c5e2-4917-9a52-9b61d56f9a13.",
+    "recorded_at": "2026-11-10T05:06:13+00:00",
+    "sha256": "9efff322c8c75454a45349e8249f81b9e3a99db53a7446fdc7c859b5c236a035",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q3780426&props=claims%7Csitelinks%2Furls&format=json"
+  },
   "wd-entities-Q55825905": {
     "bytes": 15493,
     "content_type": "application/json",
@@ -211,6 +261,16 @@
     "sha256": "f56b5a1d2cb5422666ee15d3942feace5a2c385680a30856634dd42f5aca3f02",
     "status": 200,
     "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q55825905&props=claims%7Csitelinks%2Furls&format=json"
+  },
+  "wd-entities-Q93341": {
+    "bytes": 224908,
+    "content_type": "application/json",
+    "file": "wd-entities-Q93341.json",
+    "note": "Miles Davis' item read back (its MusicBrainz relation names it): P31 Q5, P434 561d854a-6a28-4aa7-8c99-323e6ce46c2a.",
+    "recorded_at": "2026-11-10T05:06:11+00:00",
+    "sha256": "6c96591d44b9c18d32ecc9b7bafccc671b7faef0c61370dfbbf121daa7770310",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q93341&props=claims%7Csitelinks%2Furls&format=json"
   },
   "wd-p18-Q11510350": {
     "bytes": 13,

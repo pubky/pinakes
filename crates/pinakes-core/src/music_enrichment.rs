@@ -7,13 +7,15 @@
 //! entity's MBID (an artist's P434, a release group's P436, a release's P5813, a recording's
 //! P4404), found by Wikidata's search and read back to check the claim (`wikidata::item_with`);
 //! for an artist no item carries the MBID of, the one item its Discogs artist pages on
-//! MusicBrainz (P1953) all name, unless that item carries another artist's MBID. Several items,
-//! or relations that name several, give nothing. A release and its release group each use their
-//! own item; an item found by an MBID is the entity's only at its level: a recording's is one
-//! recording's (`music_sources::recording_item`), never a song's, a release's no album's, a
-//! release group's one release group's. An item too large to read verifies nothing. A recording
-//! may also take the description of the one work it is a performance of, when that work has its
-//! own relation; the credit then names the work (`subject`), and the work's image is never the
+//! MusicBrainz (P1953) all name. Several items, or relations that name several, give nothing.
+//! However it was found, by the relation too, the item is read back and is the entity's only when
+//! it is ([`is_own`]): at the entity's level, a recording's is one recording's
+//! (`music_sources::recording_item`), never a song's, a release's no album's, a release group's
+//! one release group's, an artist's names no other artist. Otherwise the card takes nothing from
+//! it, and no other item is looked for. A release and its release group each use their own item.
+//! An item too large to read verifies nothing. A recording may also take the description of the
+//! one work it is a performance of, when that work has its own relation to an item that names no
+//! other work; the credit then names the work (`subject`), and the work's image is never the
 //! recording's.
 //!
 //! The description is, in this order, the first of: the item's English Wikipedia article's summary;
@@ -162,24 +164,37 @@ pub fn mbid_property(kind: MbKind) -> &'static str {
         MbKind::Recording => "P4404",
     }
 }
-/// Whether `item`, found by `entity`'s MBID, is the entity's own and not one at another level:
-/// a recording's is one recording's (`music_sources::recording_item`: a song's item may carry its
-/// recordings' IDs); a release's carries that one release ID and no release group, Discogs master
-/// or work ID (an album's item often carries its editions'; `also_on::wikidata` takes a Discogs
-/// master as an album's too); a release group's carries that one release group ID (an item with
-/// several spans entities).
-fn at_own_level(entity: &musicbrainz::Entity, item: &wikidata::Item) -> bool {
-    let only = |property: &str| item.id(property) == std::slice::from_ref(&entity.mbid);
+/// Whether `item`, read back with its claims, is `entity`'s own, however it was found (the
+/// entity's own relation, its MBID, its Discogs pages): an item at the entity's level that names
+/// no other entity of it. A recording's names that one recording and is one recording's
+/// (`music_sources::recording_item`: a song's item, a work, may carry its recordings' IDs, and a
+/// recording's relation often names it); a release's names no other release and no release
+/// group, Discogs master or work (an album's item often carries its editions';
+/// `also_on::wikidata` takes a Discogs master as an album's too); a release group's names that
+/// one release group, or, naming none, no release, recording or work either; an artist's names no
+/// other artist. An item found by the entity's MBID names it; one its own relation names may not
+/// yet (Wikidata lags behind MusicBrainz), except a recording's.
+fn is_own(entity: &musicbrainz::Entity, item: &wikidata::Item) -> bool {
+    let ids = |property: &str| item.id(property);
+    let none = |properties: &[&str]| properties.iter().all(|p| item.id(p).is_empty());
+    let only = |property: &str| ids(property) == std::slice::from_ref(&entity.mbid);
     match entity.kind {
-        MbKind::Recording => crate::music_sources::recording_item(item),
-        MbKind::Release => {
-            only("P5813")
-                && ["P436", "P1954", "P435"]
-                    .iter()
-                    .all(|p| item.id(p).is_empty())
+        MbKind::Recording => only("P4404") && crate::music_sources::recording_item(item),
+        MbKind::Release => (only("P5813") || none(&["P5813"])) && none(&["P436", "P1954", "P435"]),
+        MbKind::ReleaseGroup => only("P436") || none(&["P436", "P5813", "P4404", "P435"]),
+        MbKind::Artist => {
+            let artists = ids(mbid_property(MbKind::Artist));
+            artists.is_empty() || artists.contains(&entity.mbid)
         }
-        MbKind::ReleaseGroup => only("P436"),
-        MbKind::Artist => true,
+    }
+}
+/// Item `qid` read back with its claims (`wikidata::items`); `None` when it is unknown, or too
+/// large to read and so can't be verified. An error is a transient failure.
+async fn read_back(egress: &Egress, qid: &str) -> anyhow::Result<Option<wikidata::Item>> {
+    match wikidata::items(egress, &[qid.to_owned()]).await {
+        Ok(items) => Ok(items.into_iter().next()),
+        Err(error) if crate::resolver::egress::over_cap(&error) => Ok(None),
+        Err(error) => Err(error),
     }
 }
 /// `wikidata::item_with`, where an item too large to read can't be verified: `None` then.
@@ -202,7 +217,7 @@ async fn named_item(
     entity: &musicbrainz::Entity,
 ) -> anyhow::Result<Option<String>> {
     match verified_item(egress, mbid_property(entity.kind), &entity.mbid).await? {
-        Some(wikidata::Found::One(item)) => Ok(at_own_level(entity, &item).then_some(item.qid)),
+        Some(wikidata::Found::One(item)) => Ok(is_own(entity, &item).then_some(item.qid)),
         Some(wikidata::Found::None) if entity.kind == MbKind::Artist => {
             discogs_item(egress, entity).await
         }
@@ -212,8 +227,7 @@ async fn named_item(
 }
 /// The item an artist's Discogs artist pages (its current `discogs` relations on MusicBrainz, at
 /// most [`DISCOGS_LOOKUPS`]) name: every page that names an item names the same one, alone, and
-/// that item carries no MusicBrainz artist ID or carries this artist's (one with another
-/// artist's is someone else).
+/// that item is the artist's own ([`is_own`]: one with another artist's MBID is someone else).
 async fn discogs_item(
     egress: &Egress,
     entity: &musicbrainz::Entity,
@@ -241,10 +255,7 @@ async fn discogs_item(
         }
     }
     Ok(named
-        .filter(|item| {
-            let artists = item.id(mbid_property(MbKind::Artist));
-            artists.is_empty() || artists.contains(&entity.mbid)
-        })
+        .filter(|item| is_own(entity, item))
         .map(|item| item.qid))
 }
 
@@ -257,7 +268,18 @@ pub async fn enrich(
     width: u32,
 ) -> Enrichment {
     let qid = match own_item(&entity.urls) {
-        Own::Item(qid) => Some(qid),
+        // The item the entity's own relation names is read back like a found one: a recording's
+        // relation may name its song (a work), a release's its album (the release group's item).
+        // Such an item is not the entity's, and none is looked for in its place.
+        Own::Item(qid) => match read_back(egress, &qid).await {
+            Ok(item) => item
+                .filter(|item| is_own(entity, item))
+                .map(|item| item.qid),
+            Err(error) => {
+                unread(&entity.mbid, "wikidata_item", &error);
+                return Enrichment::unread();
+            }
+        },
         // An entity whose own relations are unclear is not looked up otherwise.
         Own::Unclear => return Enrichment::missing(),
         Own::None => match named_item(egress, entity).await {
@@ -327,7 +349,7 @@ async fn source(
     }
 }
 /// The item of the one work `recording` is a current performance of, when the work's own
-/// relations name one; `Err` when unread.
+/// relations name one and that item, read back, names no other work (P435); `Err` when unread.
 async fn work_source(egress: &Egress, base: &str, recording: &str) -> Result<Option<Source>, ()> {
     let works = musicbrainz::works(egress, base, recording)
         .await
@@ -338,8 +360,17 @@ async fn work_source(egress: &Egress, base: &str, recording: &str) -> Result<Opt
     let Own::Item(qid) = own_item(&work.urls) else {
         return Ok(None);
     };
+    let item = read_back(egress, &qid)
+        .await
+        .map_err(|error| unread(recording, "wikidata_work_item", &error))?;
+    let Some(item) = item.filter(|item| {
+        let works = item.id("P435");
+        works.is_empty() || works == std::slice::from_ref(&work.mbid)
+    }) else {
+        return Ok(None);
+    };
     let subject = format!("https://musicbrainz.org/work/{}", work.mbid);
-    source(egress, recording, &qid, Some(subject)).await
+    source(egress, recording, &item.qid, Some(subject)).await
 }
 /// The summary of `source`'s English Wikipedia article.
 async fn english_article(egress: &Egress, mbid: &str, source: &Source) -> Found {
@@ -981,6 +1012,51 @@ mod tests {
         assert_eq!(recorded.asked(), Vec::<String>::new());
     }
 
+    /// An item is an entity's own at its level, however it was found: a recording's names that
+    /// one recording (a song's item, named by the recording's relation, is not); a release's or a
+    /// release group's may name none of its level when no other level either (an item its own
+    /// relation names, not yet named back); an artist's names no other artist.
+    #[test]
+    fn an_item_is_its_entitys_own_at_its_level() {
+        let item = |ids: &[(&str, &str)]| wikidata::Item {
+            qid: "Q1".into(),
+            ids: ids.iter().fold(Default::default(), |mut ids, (p, v)| {
+                ids.entry(p.to_string())
+                    .or_insert_with(Vec::new)
+                    .push(v.to_string());
+                ids
+            }),
+            ..Default::default()
+        };
+        let own = |kind: MbKind, item: &wikidata::Item| is_own(&entity_of(kind, "m", &[]), item);
+        // A recording.
+        assert!(own(MbKind::Recording, &item(&[("P4404", "m")])));
+        assert!(!own(MbKind::Recording, &item(&[])));
+        assert!(!own(MbKind::Recording, &item(&[("P436", "g")])));
+        assert!(!own(
+            MbKind::Recording,
+            &item(&[("P4404", "m"), ("P435", "w")])
+        ));
+        assert!(!own(
+            MbKind::Recording,
+            &item(&[("P4404", "m"), ("P4404", "n")])
+        ));
+        // A release.
+        assert!(own(MbKind::Release, &item(&[("P5813", "m")])));
+        assert!(own(MbKind::Release, &item(&[])));
+        assert!(!own(MbKind::Release, &item(&[("P5813", "n")])));
+        assert!(!own(MbKind::Release, &item(&[("P436", "g")])));
+        // A release group.
+        assert!(own(MbKind::ReleaseGroup, &item(&[("P436", "m")])));
+        assert!(own(MbKind::ReleaseGroup, &item(&[])));
+        assert!(!own(MbKind::ReleaseGroup, &item(&[("P436", "n")])));
+        assert!(!own(MbKind::ReleaseGroup, &item(&[("P5813", "r")])));
+        assert!(!own(MbKind::ReleaseGroup, &item(&[("P4404", "r")])));
+        // An artist.
+        assert!(own(MbKind::Artist, &item(&[])));
+        assert!(own(MbKind::Artist, &item(&[("P434", "m"), ("P434", "n")])));
+        assert!(!own(MbKind::Artist, &item(&[("P434", "n")])));
+    }
     fn entity_of(kind: MbKind, mbid: &str, urls: &[(&str, &str)]) -> musicbrainz::Entity {
         musicbrainz::Entity {
             kind,
@@ -1056,11 +1132,33 @@ mod tests {
         let works = musicbrainz::works_lookup(musicbrainz::BASE, RECORDING);
         let (q1, q2) = (wikidata::pages_lookup("Q1"), wikidata::pages_lookup("Q2"));
         let subject = format!("https://musicbrainz.org/work/{WORK}");
+        // Each item read back: the recording's names it, the work's names nothing.
+        let read_backs = vec![
+            (
+                wikidata::entities_lookup(&["Q1".into()]),
+                200,
+                json(
+                    serde_json::json!({"entities": {"Q1": {"type": "item", "id": "Q1", "claims": {
+                    "P4404": [{"rank": "normal", "mainsnak": {"snaktype": "value",
+                        "datatype": "external-id", "datavalue": {"value": RECORDING}}}]}}}}),
+                ),
+            ),
+            (
+                wikidata::entities_lookup(&["Q2".into()]),
+                200,
+                json(
+                    serde_json::json!({"entities": {"Q2": {"type": "item", "id": "Q2", "claims": {}}}}),
+                ),
+            ),
+        ];
         let found = |routes: Vec<(String, u16, Vec<u8>)>| {
             let recording = recording.clone();
+            let read_backs = read_backs.clone();
             async move {
-                let routes: Vec<(&str, u16, &'static str, Vec<u8>)> = routes
+                // A route given here takes the place of a read-back's.
+                let routes: Vec<(&str, u16, &'static str, Vec<u8>)> = read_backs
                     .iter()
+                    .chain(routes.iter())
                     .map(|(u, s, b)| (u.as_str(), *s, "application/json", b.clone()))
                     .collect();
                 let (egress, recorded) = crate::sources::fixture::egress(routes);
@@ -1238,6 +1336,12 @@ mod tests {
         let (egress, _) = crate::sources::fixture::egress(vec![
             (search.as_str(), 200, "application/json", none),
             (works.as_str(), 200, "application/json", one_work()),
+            (
+                read_backs[1].0.as_str(),
+                200,
+                "application/json",
+                read_backs[1].2.clone(),
+            ),
             (
                 q2.as_str(),
                 200,

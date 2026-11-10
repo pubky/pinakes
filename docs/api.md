@@ -1296,17 +1296,21 @@ music_enrichment`, on by default):
 - the item is the one the entity's own `wikidata` relation on MusicBrainz names (several give
   nothing). Without such a relation, it is the one item that carries the entity's MBID (an
   artist's `P434`, a release group's `P436`, a release's `P5813`, a recording's `P4404`), as
-  Wikidata's search proposes and the item itself, read back, states at its best rank; two such
-  items, or more hits than a search returns, give nothing, and so does an item too large to read.
-  The item must be at the entity's level: a recording's names one recording and no work, never
-  a song's; a release's names that one release and no release group, Discogs master or work (an
-  album's item often lists its editions); a release group's names that one release group. For an
-  artist no item carries the MBID of, it is the item the artist's Discogs artist pages on
-  MusicBrainz name (`P1953`, at most two): every page that names one names the same item alone,
-  and that item carries no MusicBrainz artist ID or this artist's. A release uses its own item,
-  never its release group's. A recording also uses the one work it is a performance of, when that
-  work has its own relation, for the description alone (its credit names the work as `subject`).
-  Nothing is matched by name;
+  Wikidata's search proposes and the item itself states at its best rank; two such items, or more
+  hits than a search returns, give nothing. For an artist no item carries the MBID of, it is the
+  item the artist's Discogs artist pages on MusicBrainz name (`P1953`, at most two): every page
+  that names one names the same item alone. However it was found, by the relation too, the item is
+  read back and must be the entity's own, or the card takes nothing from it (and no other item is
+  looked for): at the entity's level, a recording's names that one recording (`P4404`) and no
+  work, never a song's; a release's names no other release and no release group, Discogs master
+  or work (an album's item often lists its editions); a release group's names that one release
+  group, or, naming none, no release, recording or work; an artist's names no other artist. An
+  item found by the MBID names the entity; one its own relation names may not name it back yet
+  (Wikidata lags behind MusicBrainz), except a recording's. An item too large to read is not
+  verified and gives nothing. A release uses its own item, never its release group's. A recording
+  also uses the one work it is a performance of, when that work has its own relation to an item
+  that, read back, names no other work, for the description alone (its credit names the work as
+  `subject`); so does a recording whose own item gives nothing. Nothing is matched by name;
 - the description is the first of: the summary of the item's English Wikipedia article (plain
   text, at most 2,048 bytes, cut at a sentence or a word); the item's English description on
   Wikidata, as it is (CC0, credited `wikidata`); the summary of the item's article in the first
