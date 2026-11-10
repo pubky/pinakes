@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic feed for tests/episodes.rs (a show card's `episodes`): items out of date order, one
+     without an enclosure, one with a document enclosure, a video, durations missing or written
+     three ways, and more playable items than a card carries. -->
+<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">
+  <channel>
+    <title>Latest Show</title>
+    <link>https://show.example/</link>
+    <item>
+      <title>A note to listeners</title>
+      <guid isPermaLink="false">note-1</guid>
+      <link>https://show.example/note-1</link>
+      <pubDate>Fri, 06 Nov 2026 08:00:00 +0000</pubDate>
+      <description>No audio this week.</description>
+    </item>
+    <item>
+      <title>Episode 3</title>
+      <guid isPermaLink="false">ep-3</guid>
+      <link>https://show.example/episode/3</link>
+      <pubDate>Tue, 03 Nov 2026 08:00:00 +0000</pubDate>
+      <itunes:duration>1:02:03</itunes:duration>
+      <enclosure url="https://cdn.example/3.mp3" type="audio/mpeg" length="1000000"/>
+    </item>
+    <item>
+      <title>Episode 5 (video)</title>
+      <guid isPermaLink="false">ep-5</guid>
+      <link>https://show.example/episode/5</link>
+      <pubDate>Thu, 05 Nov 2026 08:00:00 +0000</pubDate>
+      <itunes:duration>12:00</itunes:duration>
+      <enclosure url="https://cdn.example/5.mp4" type="video/mp4" length="1000000"/>
+    </item>
+    <item>
+      <title>Episode 4</title>
+      <guid isPermaLink="false">ep-4</guid>
+      <link>https://show.example/episode/4</link>
+      <pubDate>Wed, 04 Nov 2026 08:00:00 +0000</pubDate>
+      <enclosure url="https://cdn.example/4.mp3" type="audio/mpeg" length="1000000"/>
+    </item>
+    <item>
+      <title>Show notes (PDF)</title>
+      <guid isPermaLink="false">notes-2</guid>
+      <link>https://show.example/notes-2</link>
+      <pubDate>Mon, 02 Nov 2026 08:00:00 +0000</pubDate>
+      <enclosure url="https://cdn.example/notes-2.pdf" type="application/pdf" length="1000"/>
+    </item>
+    <item>
+      <title>Episode 2</title>
+      <guid isPermaLink="false">ep-2</guid>
+      <link>https://show.example/episode/2</link>
+      <pubDate>Sun, 01 Nov 2026 08:00:00 +0000</pubDate>
+      <itunes:duration>3557</itunes:duration>
+      <enclosure url="https://cdn.example/2.m4a" type="audio/x-m4a" length="1000000"/>
+    </item>
+    <item>
+      <title>Episode 1</title>
+      <guid isPermaLink="false">ep-1</guid>
+      <link>https://show.example/episode/1</link>
+      <pubDate>Sat, 31 Oct 2026 08:00:00 +0000</pubDate>
+      <itunes:duration>59:17</itunes:duration>
+      <enclosure url="https://cdn.example/1.mp3" type="audio/mpeg" length="1000000"/>
+    </item>
+    <item>
+      <title>Episode 0</title>
+      <guid isPermaLink="false">ep-0</guid>
+      <link>https://show.example/episode/0</link>
+      <pubDate>Fri, 30 Oct 2026 08:00:00 +0000</pubDate>
+      <itunes:duration>45:00</itunes:duration>
+      <enclosure url="https://cdn.example/0.mp3" type="audio/mpeg" length="1000000"/>
+    </item>
+  </channel>
+</rss>

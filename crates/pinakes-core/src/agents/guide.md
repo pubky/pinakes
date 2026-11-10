@@ -49,6 +49,9 @@ A link this instance does not know is a 404 there: nobody referenced it, or it h
 - **Groups.** Links that are the same thing on several services (a song on Spotify and on
   Apple Music, a book's editions, an event on two platforms) form a group: `group.id` on each
   card, `also_on` lists the others. Every link keeps its own card.
+- **Podcasts.** A show's card (`PodcastSeries`) carries `episodes`: its latest 5 episodes with
+  audio, newest first, each with `uri`, `name`, `published` and a `stream` (`url`, `type`,
+  `duration_s`) to play. `GET {{BASE}}/v1/resources/{id}/episodes` lists up to 20.
 - **Places and events.** `point` places a card on the map; events have `start`, `end` and, for
   calendars, one card per occurrence.
 - **Identifiers.** Books, papers, music, films, podcasts and OSM objects carry exact keys:

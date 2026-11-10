@@ -746,6 +746,13 @@ pub struct Card {
     /// signed, expiring or behind a login (docs/api.md, Stream). Absent when the card has none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<model::Stream>,
+    /// On a podcast show's card (`PodcastSeries`, status `ok`): its latest episodes that have a
+    /// `stream`, newest first, at most 5, each as `GET /v1/resources/{id}/episodes` lists it (its
+    /// group's list when it has none of its own: an Apple Podcasts or Spotify show grouped with
+    /// its feed). Read from the list the show's last read stored, never from the feed. Absent
+    /// on every other card and on a show without one (docs/api.md, Episodes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub episodes: Option<Vec<crate::episodes::Episode>>,
     /// The publishing site: the app for `pubky://` objects (e.g. `loopky`); the service a
     /// link's URL names (`Apple Music`, `Wikipedia (de)`, `MusicBrainz`, `Wikidata`,
     /// `OpenStreetMap`); else the site name the document gives, else the host. Plain text, like
@@ -1166,6 +1173,7 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
         description,
         image,
         stream: doc.as_ref().and_then(|d| d.stream.clone()),
+        episodes: None,
         point: doc.as_ref().and_then(|d| d.location.clone()),
         start: doc.as_ref().and_then(|d| d.start),
         end: doc.as_ref().and_then(|d| d.end),
@@ -1226,7 +1234,8 @@ const REFS_ALIASES: i64 = 31;
 /// [`REFS_COUNTED`], then by URI), at most [`REFS`]. A gone social post's are its own link's
 /// alone: a spelling's link can carry the post's title. One query for every card of a response,
 /// and one for the missing cards among them. Then each card's `collections`
-/// (`collections::count`), one query more.
+/// (`collections::count`), one query more, and a show's `episodes` (`episodes::on_cards`), only
+/// when the response holds a show.
 pub(crate) async fn with_refs<'a>(
     pool: &PgPool,
     cards: impl IntoIterator<Item = &'a mut Card>,
@@ -1278,7 +1287,8 @@ pub(crate) async fn with_refs<'a>(
             card.refs.clone_from(refs);
         }
     }
-    crate::collections::count(pool, cards).await
+    crate::collections::count(pool, cards.iter_mut().map(|c| &mut **c)).await?;
+    crate::episodes::on_cards(pool, cards).await
 }
 /// A card's `maybe_same` as SQL, over a unit's ID and type path and the two hints' switches (SQL
 /// expressions): with `events`, the same-event hint for an event and, for an app's store card, up

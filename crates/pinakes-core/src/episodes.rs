@@ -3,7 +3,8 @@
 //! feed's own card in `resolver::cards::podcast_body`; a Podcast Index or Apple Podcasts show's
 //! card fetches the feed its record names), kept in `podcast_episode` (the latest [`KEPT`],
 //! replaced whole at each save of the show, so they refresh with it) and served by
-//! `GET /v1/resources/{id}/episodes` (docs/api.md, Episodes).
+//! `GET /v1/resources/{id}/episodes` (docs/api.md, Episodes); every show card carries the first
+//! [`ON_CARD`] that have a stream (`Card::episodes`, filled by [`on_cards`] from the stored rows).
 //!
 //! Why a route and a table, not a fact: a fact is one string of at most 256 bytes per name and a
 //! card's document is bounded at 8 KiB; twenty episodes with their streams are neither. Why not
@@ -357,8 +358,10 @@ async fn replace(tx: &mut Transaction<'_, Postgres>, id: &str, list: &[Episode])
     Ok(())
 }
 
-/// A stored episode's row: GUID, URI, name, image, date and stream (as JSON text).
+/// A stored episode's row with the resource it is listed for: that resource's ID, then the
+/// episode's GUID, URI, name, image, date and stream (as JSON text).
 type Row = (
+    String,
     String,
     String,
     Option<String>,
@@ -405,46 +408,121 @@ pub async fn list(
     // lists nothing, whatever its group has. (`type_path` is null for an OpenStreetMap place,
     // whose card lives in `osm_place`: no show, read as an empty path.)
     let show = is_show(&type_path, &status);
-    let rows: Vec<Row> = sqlx::query_as(
-        "WITH own AS (SELECT $1::text AS id WHERE EXISTS (SELECT 1 FROM podcast_episode WHERE resource_id=$1)),\
-         member AS (SELECT m.resource_id AS id FROM group_unit u JOIN group_unit m ON m.group_id=u.group_id WHERE $3 AND u.unit_id=$1 AND u.group_id IS NOT NULL AND m.resource_id<>$1 AND m.occurrence_key='' AND EXISTS (SELECT 1 FROM podcast_episode e WHERE e.resource_id=m.resource_id) ORDER BY (SELECT max(published) FROM podcast_episode e WHERE e.resource_id=m.resource_id) DESC NULLS LAST,m.resource_id LIMIT 1),\
-         chosen AS (SELECT id FROM own UNION ALL SELECT id FROM member WHERE NOT EXISTS (SELECT 1 FROM own))\
-         SELECT e.guid,e.url,e.name,e.image,e.published,e.stream::text FROM podcast_episode e JOIN chosen c ON c.id=e.resource_id ORDER BY e.position LIMIT $2",
-    )
-    .bind(&root)
-    .bind(limit as i64)
-    .bind(show)
-    .fetch_all(&state.pool)
-    .await?;
-    let mut items: Vec<Episode> = rows
+    let mut items: Vec<Episode> = stored(&state.pool, &[(root, show)], limit, false)
+        .await?
         .into_iter()
-        .map(|(guid, uri, name, image, published, stream)| Episode {
-            id: None,
-            uri,
-            name,
-            image,
-            published,
-            guid,
-            stream: stream.and_then(|s| serde_json::from_str(&s).ok()),
-        })
+        .map(|(_, e)| e)
         .collect();
-    // The episodes Pinakes has as resources, by their page's identity (an alias as its root).
-    let identities: Vec<String> = items
+    with_ids(&state.pool, items.iter_mut()).await?;
+    Ok(axum::Json(EpisodePage { items }))
+}
+
+/// The most episodes a show's card carries (`Card::episodes`); the route lists up to [`KEPT`].
+pub const ON_CARD: usize = 5;
+
+/// Fills `episodes` on the cards that are podcast shows ([`is_show`]): the first [`ON_CARD`] of
+/// the list the route gives, those with a `stream` alone (an item without public audio is left
+/// out). One query for every show card of a response, one more when any has episodes; none for a
+/// response without a show. A show with no such episode, or whose feed was not read yet, gets
+/// none (the field stays absent).
+pub(crate) async fn on_cards<'a>(
+    pool: &sqlx::PgPool,
+    cards: impl IntoIterator<Item = &'a mut crate::api::Card>,
+) -> Result<(), crate::api::ApiError> {
+    let mut shows: Vec<&mut crate::api::Card> = cards
+        .into_iter()
+        .filter(|c| c.occurrence.is_none() && is_show(&c.type_path, &c.status))
+        .collect();
+    if shows.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<(String, bool)> = shows.iter().map(|c| (c.id.clone(), true)).collect();
+    let mut lists: Vec<(String, Episode)> = stored(pool, &ids, ON_CARD, true).await?;
+    with_ids(pool, lists.iter_mut().map(|(_, e)| e)).await?;
+    for card in shows.iter_mut() {
+        let list: Vec<Episode> = lists
+            .iter()
+            .filter(|(id, _)| *id == card.id)
+            .map(|(_, e)| e.clone())
+            .collect();
+        card.episodes = (!list.is_empty()).then_some(list);
+    }
+    Ok(())
+}
+
+/// Each resource's stored list, in order, at most `limit` per resource, as `(resource ID,
+/// episode)`: its own rows, else, when its flag is set (the resource is a show), those of the
+/// member of its group whose newest episode is the newest. With `playable`, only the episodes
+/// that have a `stream` count, for the choice of the list as for its entries.
+async fn stored(
+    pool: &sqlx::PgPool,
+    ids: &[(String, bool)],
+    limit: usize,
+    playable: bool,
+) -> Result<Vec<(String, Episode)>, sqlx::Error> {
+    let (ids, shows): (Vec<&str>, Vec<bool>) = ids.iter().map(|(i, s)| (i.as_str(), *s)).unzip();
+    let rows: Vec<Row> = sqlx::query_as(
+        "WITH asked AS (SELECT DISTINCT ON (id) id,borrow FROM unnest($1::text[],$2::bool[]) AS t(id,borrow) ORDER BY id,borrow DESC),\
+         chosen AS (SELECT a.id AS card,coalesce(\
+           (SELECT a.id WHERE EXISTS (SELECT 1 FROM podcast_episode e WHERE e.resource_id=a.id AND (NOT $4 OR e.stream IS NOT NULL))),\
+           (SELECT m.resource_id FROM group_unit u JOIN group_unit m ON m.group_id=u.group_id WHERE a.borrow AND u.unit_id=a.id AND u.group_id IS NOT NULL AND m.resource_id<>a.id AND m.occurrence_key='' AND EXISTS (SELECT 1 FROM podcast_episode e WHERE e.resource_id=m.resource_id AND (NOT $4 OR e.stream IS NOT NULL)) ORDER BY (SELECT max(published) FROM podcast_episode e WHERE e.resource_id=m.resource_id AND (NOT $4 OR e.stream IS NOT NULL)) DESC NULLS LAST,m.resource_id LIMIT 1)) AS source FROM asked a)\
+         SELECT c.card,e.guid,e.url,e.name,e.image,e.published,e.stream FROM chosen c CROSS JOIN LATERAL \
+           (SELECT e.position,e.guid,e.url,e.name,e.image,e.published,e.stream::text AS stream FROM podcast_episode e WHERE e.resource_id=c.source AND (NOT $4 OR e.stream IS NOT NULL) ORDER BY e.position LIMIT $3) e \
+         ORDER BY c.card,e.position",
+    )
+    .bind(&ids)
+    .bind(&shows)
+    .bind(limit as i64)
+    .bind(playable)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(card, guid, uri, name, image, published, stream)| {
+            let stream: Option<Stream> = stream.and_then(|s| serde_json::from_str(&s).ok());
+            (
+                card,
+                Episode {
+                    id: None,
+                    uri,
+                    name,
+                    image,
+                    published,
+                    guid,
+                    stream,
+                },
+            )
+        })
+        .filter(|(_, e)| !playable || e.stream.is_some())
+        .collect())
+}
+
+/// Names the episodes Pinakes has as resources (`id`), by their page's identity (an alias as its
+/// root): one query.
+async fn with_ids<'a>(
+    pool: &sqlx::PgPool,
+    episodes: impl IntoIterator<Item = &'a mut Episode>,
+) -> Result<(), sqlx::Error> {
+    let mut episodes: Vec<&mut Episode> = episodes.into_iter().collect();
+    let identities: Vec<String> = episodes
         .iter()
         .filter_map(|e| crate::model::identity(&e.uri).ok().map(|v| v.0))
         .collect();
+    if identities.is_empty() {
+        return Ok(());
+    }
     let known: Vec<(String, String)> = sqlx::query_as("SELECT i,r.id FROM unnest($1::text[]) i LEFT JOIN resource_alias a ON a.alias_id=i JOIN resource r ON r.id=coalesce(a.root_id,i)")
         .bind(&identities)
-        .fetch_all(&state.pool)
+        .fetch_all(pool)
         .await?;
-    for e in &mut items {
+    for e in episodes.iter_mut() {
         let identity = crate::model::identity(&e.uri).ok().map(|v| v.0);
         e.id = known
             .iter()
             .find(|(i, _)| Some(i) == identity.as_ref())
             .map(|(_, id)| id.clone());
     }
-    Ok(axum::Json(EpisodePage { items }))
+    Ok(())
 }
 
 #[cfg(test)]
