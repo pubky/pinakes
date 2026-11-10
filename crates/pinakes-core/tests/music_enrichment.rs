@@ -124,6 +124,20 @@ struct Mode {
     wikidata_delay_ms: u64,
     /// The Cover Art Archive answers this many milliseconds late.
     cover_art_delay_ms: u64,
+    /// Daft Punk's Commons file as Commons writes a file under `{{GPL}}`.
+    daft_punk_gpl: GplFile,
+}
+/// Daft Punk's Commons answer under `{{GPL}}`: its License removed, LicenseShortName `GPL` and
+/// LicenseUrl `http://www.gnu.org/licenses/gpl.html`.
+#[derive(Clone, Copy, Default, PartialEq)]
+enum GplFile {
+    /// As recorded (CC BY 4.0).
+    #[default]
+    No,
+    /// With its recorded author.
+    Credited,
+    /// Its Artist removed too.
+    WithoutAuthor,
 }
 /// What Kind of Blue's item (Q283221) is when read back.
 #[derive(Clone, Copy, Default, PartialEq)]
@@ -607,7 +621,28 @@ impl Transport for Recorded {
                             t if t.contains("Lazarett in Engers") => "commons-no-author.json",
                             other => panic!("unexpected Commons file {other}"),
                         };
-                        (200, 60, fixture(file))
+                        let body = match mode.daft_punk_gpl {
+                            GplFile::No => fixture(file),
+                            _ if file != "commons-daft-punk.json" => fixture(file),
+                            gpl => edited(file, |v| {
+                                let meta = v["query"]["pages"][0]["imageinfo"][0]["extmetadata"]
+                                    .as_object_mut()
+                                    .unwrap();
+                                meta.remove("License");
+                                if gpl == GplFile::WithoutAuthor {
+                                    meta.remove("Artist");
+                                }
+                                meta.insert(
+                                    "LicenseShortName".into(),
+                                    json!({"value": "GPL", "source": "commons-desc-page"}),
+                                );
+                                meta.insert(
+                                    "LicenseUrl".into(),
+                                    json!({"value": "http://www.gnu.org/licenses/gpl.html", "source": "commons-desc-page"}),
+                                );
+                            }),
+                        };
+                        (200, 60, body)
                     }
                 }
             }
@@ -1476,6 +1511,50 @@ async fn a_file_without_its_author_is_never_shown() {
     );
     assert!(band.unread_enriched.is_empty(), "a refusal is an answer");
     assert!(t.seen().iter().any(|s| s.contains("Lazarett")));
+}
+
+/// A file under the GNU GPL is shown on a MusicBrainz card as on a Wikidata item's, by the same
+/// rule: credited to its author with the licence Commons' `{{GPL}}` grants (version 2 or
+/// later) and its text; without its author it is refused.
+#[tokio::test]
+async fn a_gpl_file_is_shown_with_its_author_only() {
+    let t = Recorded::new(Mode {
+        daft_punk_gpl: GplFile::Credited,
+        ..Default::default()
+    });
+    let band = card(&web(t, true), DAFT_PUNK).await;
+    assert_eq!(
+        band.image.as_deref(),
+        Some("https://thumb.wikimedia.org/wikipedia/commons/thumb/d/db/Daft_Punk_in_2013.jpg/960px-Daft_Punk_in_2013.jpg")
+    );
+    assert_eq!(
+        credits(&band),
+        json!([
+            {
+                "field": "image", "provider": "wikimedia_commons",
+                "source_url": "https://commons.wikimedia.org/wiki/File:Daft_Punk_in_2013.jpg",
+                "author": "Sony Music Entertainment",
+                "license": "GPL-2.0-or-later",
+                "license_url": "https://www.gnu.org/licenses/old-licenses/gpl-2.0.html",
+                "lang": null, "excerpted": false, "modified": false, "subject": null,
+            },
+            article_credit("https://en.wikipedia.org/wiki/Daft_Punk", None),
+        ])
+    );
+    let t = Recorded::new(Mode {
+        daft_punk_gpl: GplFile::WithoutAuthor,
+        ..Default::default()
+    });
+    let band = card(&web(t, true), DAFT_PUNK).await;
+    assert_eq!(band.image, None);
+    assert_eq!(
+        credits(&band),
+        json!([article_credit(
+            "https://en.wikipedia.org/wiki/Daft_Punk",
+            None
+        )])
+    );
+    assert!(band.unread_enriched.is_empty());
 }
 
 /// Concurrent cards of one entity ask each service once: the egress shares the flight and keeps

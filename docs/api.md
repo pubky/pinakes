@@ -193,12 +193,19 @@ has none.
 | `provider` | `wikipedia` (an article's summary), `wikimedia_commons` (a file), `wikidata` (an item's English description) or `cover_art_archive` (a release's front cover) |
 | `source_url` | The article, the file's page on Commons, the item's page on Wikidata (`https://www.wikidata.org/wiki/Q…`), or for a cover the cover art page of the release it is of on MusicBrainz (`https://musicbrainz.org/release/…/cover-art`): `https:`, at most 1,024 bytes |
 | `author` | Plain text, at most 256 bytes: `Wikipedia contributors` for an article, the file's author for an image; `null` for a CC0 or public-domain file that names none, for a Wikidata description and for a cover |
-| `license` | An SPDX licence ID (`CC-BY-SA-4.0`, `CC-BY-2.0`, `CC-BY-SA-3.0-DE`, `CC0-1.0`) or `public-domain`; `null` for a cover (cover art is its label's; no licence is given) |
-| `license_url` | The licence's text (`https:`); `null` for the public domain without a mark and for a cover |
+| `license` | An SPDX licence ID (`CC-BY-SA-4.0`, `CC-BY-2.0`, `CC-BY-SA-3.0-DE`, `CC0-1.0`, `GPL-3.0-only`, `LGPL-2.1-or-later`), `public-domain`, or `Attribution` (Commons' licence of that name, which has no SPDX ID); `null` for a cover (cover art is its label's; no licence is given) |
+| `license_url` | The licence's text (`https:`): for a GNU licence its version's text on gnu.org, for `Attribution` its template's page on Commons; `null` for the public domain without a mark and for a cover |
 | `lang` | The text's language: `en`, or another Wikipedia's code (`de`) when only that Wikipedia describes it; `null` for an image. A client may label or hide a text in a language its reader does not read |
 | `excerpted` | `true` when the text is a part of a longer source: a summary is the article's first paragraphs, and one over 2,048 bytes is cut at a sentence or a word. A Wikidata description is whole (`false`) |
 | `modified` | `true` when the value was changed beyond cutting it |
 | `subject` | The link of what the value is about when that is not the card itself: a recording's description taken from its work's item names the work (`https://musicbrainz.org/work/…`); else `null` |
+
+A Commons file under a GNU licence is credited with the licence every Commons template
+writing that name grants: `GPLv3` (written for version 3 only and for version 3 or later) is
+`GPL-3.0-only`, `GPL` is `GPL-2.0-or-later`, `AGPL` is `AGPL-3.0-only`, and `LGPL` is
+`LGPL-2.1-or-later` with gnu.org's `licenses/lgpl.html`, `LGPL-3.0-or-later` with its
+`copyleft/lgpl.html` and `LGPL-2.1-only` without a URL. A name that says "or later" (`GPLv3+`)
+is credited so.
 
 A Wikidata description's credit:
 
@@ -1356,7 +1363,8 @@ music_enrichment`, on by default):
 - the image is the item's image (`P18`) on Wikimedia Commons, a thumbnail asked 640 pixels wide
   (Commons serves its next standard size, 960 pixels), shown
   only when the file's own page gives a licence on the list (CC0, the public domain, CC BY or CC
-  BY-SA 1.0 to 4.0) and, under CC BY and CC BY-SA, its author;
+  BY-SA 1.0 to 4.0, the GNU GPL, LGPL or AGPL, Commons' `Attribution`) and, under every licence
+  but CC0 and the public domain, its author;
 - a release or release group with no such file (album covers are seldom free) shows the front
   cover the [Cover Art Archive](https://coverartarchive.org/) holds for its MBID, asked once
   (`GET https://coverartarchive.org/{release|release-group}/{mbid}/front-500`, the redirect kept,
@@ -1428,8 +1436,9 @@ counts by status.
   adapter, and a Wikipedia page about an event or a place that Wikipedia serves no summary of,
   read from the page's item) takes the item's label and description, English when it has one
   (CC0, no credit), and shows its image (`P18`) only when the file's own page on Commons gives a
-  licence on the list (CC0, the public domain, CC BY or CC BY-SA 1.0 to 4.0) and, under CC BY and
-  CC BY-SA, its author: Commons' thumbnail, asked `limits.music_image_width` (640) pixels wide,
+  licence on the list (CC0, the public domain, CC BY or CC BY-SA 1.0 to 4.0, the GNU GPL, LGPL
+  or AGPL, Commons' `Attribution`) and, under every licence but CC0 and the public domain, its
+  author: Commons' thumbnail, asked `limits.music_image_width` (640) pixels wide,
   with its [credit](#credits), never a link to the file itself. Commons is asked once per reading,
   within two seconds and never past the card's own read. A file Commons refuses or does not hold gives no image; an answer that fails for a
   while (a timeout, a 429, a 5xx) keeps the credited image the card had, and the card is read

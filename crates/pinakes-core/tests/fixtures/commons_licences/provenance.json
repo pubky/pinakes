@@ -1,0 +1,65 @@
+{
+  "_recorded": {
+    "note": "Recorded with curl, User-Agent 'pinakes-test-fixture/0.1 (fixture recording)', one request each, 2026-11-10. The Commons answers are as recorded (the query wikimedia::file_query writes). The entity JSON is trimmed with a script that keeps the English label and description (else the multilingual 'mul' one; Q83495 has no English label) and the statements the Wikidata adapter reads (P31, P18, P625, P856, P577, P50, P57, P86, P123, P1113, P580, P585, P582, those the item has) without their references, qualifiers and hashes. Each item's P18 picked by the adapter (a preferred one, else the last normal one) is the file recorded here. What Commons' templates write for these licences (LicenseShortName, LicenseUrl; no License field) was read from the templates' pages on Commons the same day: {{AGPL}} and {{AGPLv3 only}} both write 'AGPL' and the agpl.html URL; {{GPLv3}} ({{GPLv3 only}}) and {{GPLv3+}} both write 'GPLv3' and the gpl-3.0.html URL; {{Attribution}} ({{Attribution only license}}) writes 'Attribution' and no URL. Derived answers the tests build in code (tests/commons_licences.rs, one edit each): each Commons answer with its Artist removed; the Signal and Mindustry answers with their LicenseUrl replaced by the GPL 2.0 text's (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html)."
+  },
+  "commons-signal-android": {
+    "bytes": 1888,
+    "content_type": "application/json",
+    "file": "commons-signal-android.json",
+    "note": "Signal's P18 (preferred): LicenseShortName AGPL, LicenseUrl http://www.gnu.org/licenses/agpl.html, no License; its page's licence is {{Free screenshot|license={{AGPL}}}}; Artist a link to User:Albe.26.1. Accepted as AGPL-3.0-only.",
+    "recorded_at": "2026-11-10T13:47:33+00:00",
+    "sha256": "d7e2b3eaf5747ad9b3ef650a8db3f8c5cf8c377897da8a317abffffc35b2f951",
+    "status": 200,
+    "url": "https://commons.wikimedia.org/w/api.php?action=query&format=json&formatversion=2&prop=imageinfo&iiprop=url%7Cmime%7Cextmetadata&iiurlwidth=640&iiextmetadatafilter=Artist%7CLicenseShortName%7CLicense%7CLicenseUrl%7CNonFree&iiextmetadatalanguage=en&titles=File%3ASignal+Android+7.28.4+blue.png"
+  },
+  "commons-mindustry-screenshot": {
+    "bytes": 1943,
+    "content_type": "application/json",
+    "file": "commons-mindustry-screenshot.json",
+    "note": "Mindustry's P18: LicenseShortName GPLv3, LicenseUrl http://www.gnu.org/licenses/gpl-3.0.html, no License; its page's licence is {{Free screenshot|template=GPLv3}}; Artist a link to User:Mvrt CZ. Accepted as GPL-3.0-only.",
+    "recorded_at": "2026-11-10T13:47:34+00:00",
+    "sha256": "9b7ad9986e80e4b9fcf8a5e7d09d1004e6366fb79ccd4aebd99346e8da52db7c",
+    "status": 200,
+    "url": "https://commons.wikimedia.org/w/api.php?action=query&format=json&formatversion=2&prop=imageinfo&iiprop=url%7Cmime%7Cextmetadata&iiurlwidth=640&iiextmetadatafilter=Artist%7CLicenseShortName%7CLicense%7CLicenseUrl%7CNonFree&iiextmetadatalanguage=en&titles=File%3ASn%C3%ADmek+obrazovky+%2815%29.png"
+  },
+  "commons-glmatrix": {
+    "bytes": 1689,
+    "content_type": "application/json",
+    "file": "commons-glmatrix.json",
+    "note": "The Matrix's P18 (preferred): LicenseShortName 'Attribution' only: no License, no LicenseUrl; Artist 'Jamie Zawinski (program); Church of emacs (screenshot)' with a link. Accepted as Attribution.",
+    "recorded_at": "2026-11-10T13:47:35+00:00",
+    "sha256": "e46fb2d1dbe2b7e8dc468a094229a9ab9d11aec5b94a0ea84ba19134ed3b20d1",
+    "status": 200,
+    "url": "https://commons.wikimedia.org/w/api.php?action=query&format=json&formatversion=2&prop=imageinfo&iiprop=url%7Cmime%7Cextmetadata&iiurlwidth=640&iiextmetadatafilter=Artist%7CLicenseShortName%7CLicense%7CLicenseUrl%7CNonFree&iiextmetadatalanguage=en&titles=File%3AThe.Matrix.glmatrix.1.png"
+  },
+  "wd-entity-Q19718090": {
+    "bytes": 4727,
+    "content_type": "application/json",
+    "file": "wd-entity-Q19718090.json",
+    "note": "Signal (instant messaging software; two P18 files, the preferred one 'Signal Android 7.28.4 blue.png'), trimmed as the note above says; recorded 2,678,320 bytes.",
+    "recorded_at": "2026-11-10T13:47:38+00:00",
+    "sha256": "3923c30b779a483e844850abb4067469dae919e62edb9ff1c1ed028d104f9691",
+    "status": 200,
+    "url": "https://www.wikidata.org/wiki/Special:EntityData/Q19718090.json"
+  },
+  "wd-entity-Q57206016": {
+    "bytes": 2549,
+    "content_type": "application/json",
+    "file": "wd-entity-Q57206016.json",
+    "note": "Mindustry (a video game, P31 Q7889; P18 'Snímek obrazovky (15).png'), trimmed as the note above says; recorded 309,330 bytes.",
+    "recorded_at": "2026-11-10T13:47:40+00:00",
+    "sha256": "0ccc22c535912eb863c9a68f205acf2ba1f59a5627ab10b8f05dde163a4c9b36",
+    "status": 200,
+    "url": "https://www.wikidata.org/wiki/Special:EntityData/Q57206016.json"
+  },
+  "wd-entity-Q83495": {
+    "bytes": 4823,
+    "content_type": "application/json",
+    "file": "wd-entity-Q83495.json",
+    "note": "The Matrix (a film, P31 Q11424; no English label; two P18 files, the preferred one 'The.Matrix.glmatrix.1.png'), trimmed as the note above says; recorded 261,824 bytes.",
+    "recorded_at": "2026-11-10T13:47:42+00:00",
+    "sha256": "35160e5f2a8a19fc6c2c235a54be18ec42a813eee11af81a90e8c69d36963ede",
+    "status": 200,
+    "url": "https://www.wikidata.org/wiki/Special:EntityData/Q83495.json"
+  }
+}
