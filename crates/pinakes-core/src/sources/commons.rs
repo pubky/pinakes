@@ -16,11 +16,10 @@ use super::kit::{
 };
 use super::{Example, Source};
 use crate::model::ResourceMeta;
+use crate::wikimedia::{file_name, file_page};
 use anyhow::{bail, ensure, Context, Result};
 use async_trait::async_trait;
-use percent_encoding::{
-    percent_decode_str, utf8_percent_encode, AsciiSet, CONTROLS, NON_ALPHANUMERIC,
-};
+use percent_encoding::{percent_decode_str, utf8_percent_encode, CONTROLS};
 use serde_json::Value;
 
 pub const SITE: &str = "Wikimedia Commons";
@@ -38,38 +37,6 @@ pub enum Target {
     Title(String),
     /// A page id (`?curid=`), whose title the answer names.
     PageId(u64),
-}
-
-/// A file name in MediaWiki's normal form, with underscores: underscores and runs of spaces
-/// become one, the ends are trimmed and the first letter is upper case. `None` for a name
-/// MediaWiki rejects.
-pub fn file_name(raw: &str) -> Option<String> {
-    let name = raw.replace('_', " ");
-    let name = name
-        .split(' ')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>();
-    let name = name.join("_");
-    let bad = |c: char| c.is_control() || "#<>[]|{}/".contains(c);
-    let escaped = name
-        .as_bytes()
-        .windows(3)
-        .any(|w| w[0] == b'%' && w[1].is_ascii_hexdigit() && w[2].is_ascii_hexdigit());
-    if name.is_empty() || name.len() > 240 || name.contains(bad) || escaped {
-        return None;
-    }
-    // The first letter in upper case, as MediaWiki's `ucfirst` writes it: a letter whose upper
-    // case is two letters (`ß`) stays, and so do Georgian letters, which MediaWiki leaves alone.
-    let mut chars = name.chars();
-    let first = chars.next()?;
-    if matches!(first, '\u{10D0}'..='\u{10FA}' | '\u{10FD}'..='\u{10FF}') {
-        return Some(name);
-    }
-    let mut upper = first.to_uppercase();
-    Some(match (upper.next(), upper.next()) {
-        (Some(u), None) => format!("{u}{}", chars.as_str()),
-        _ => name,
-    })
 }
 
 /// The file a title names (`File:…` or `Image:…`, any case).
@@ -151,30 +118,10 @@ pub fn target(uri: &str) -> Option<Target> {
     from_root(uri).or_else(|| from_uri(uri))
 }
 
-/// What MediaWiki leaves unescaped in a page URL (`wfUrlencode`).
-const TITLE: &AsciiSet = &NON_ALPHANUMERIC
-    .remove(b'-')
-    .remove(b'.')
-    .remove(b'_')
-    .remove(b'~')
-    .remove(b';')
-    .remove(b'@')
-    .remove(b'$')
-    .remove(b'!')
-    .remove(b'*')
-    .remove(b'(')
-    .remove(b')')
-    .remove(b',')
-    .remove(b'/')
-    .remove(b':');
-
 /// The file's description page, as MediaWiki writes its URL.
 pub fn page(target: &Target) -> String {
     match target {
-        Target::Title(name) => format!(
-            "https://commons.wikimedia.org/wiki/{}",
-            utf8_percent_encode(&format!("File:{name}"), TITLE)
-        ),
+        Target::Title(name) => file_page(name),
         Target::PageId(id) => format!("https://commons.wikimedia.org/w/index.php?curid={id}"),
     }
 }

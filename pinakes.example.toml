@@ -16,6 +16,10 @@ nexus_reach_set = false # The Nexus serves the reach-set route: search takes rea
 enabled = true
 # Follow RSS alternates (podcast feeds) on pages without a typed card.
 discover_feeds = false
+# MusicBrainz cards take an image (Wikimedia Commons) and a description (Wikipedia, or the item's
+# English description) from the entity's Wikidata item, with their credits. Off: MusicBrainz's
+# card alone.
+music_enrichment = true
 
 [pubky]
 # Objects of other apps, fetched through the egress policy from the homeserver's public HTTPS

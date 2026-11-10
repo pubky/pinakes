@@ -777,6 +777,12 @@ pub struct Card {
     /// coordinates: the ODbL attribution to display with the card.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attribution: Option<String>,
+    /// Where `image` and `description` came from when Pinakes added them from another source
+    /// than the link itself (a MusicBrainz card's Wikipedia summary and Commons image): one
+    /// credit per such field, with its source page, author and licence, to show with the value
+    /// (docs/api.md, Credits). At most 4; `[]` when none. A field without a credit came from the
+    /// link itself.
+    pub credits: Vec<model::Credit>,
     /// For a calendar occurrence: which feed instance this card is.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub occurrence: Option<OccurrenceKey>,
@@ -897,9 +903,11 @@ pub struct Details {
     /// Where the card's metadata came from when it is not the page itself: the official API
     /// that answered (docs/sources).
     pub from: Option<String>,
-    /// The fields that API names for the object, and the facts the also-on sources read for it
-    /// (such as a music link's `isrc`, `upc` and `mbid`; each source's page in docs/sources lists
-    /// its own), by name; several values are joined with "; ".
+    /// The fields that API names for the object, or a Pubky app profile's facts, or a
+    /// MusicBrainz page's own (`artist`, `duration` in seconds, `genre`, `disambiguation`, an
+    /// artist's `country_code`, an album's `release_type`, …; docs/api.md), then the facts the also-on
+    /// sources read for it (such as a music link's `isrc`, `upc` and `mbid`; each source's page
+    /// in docs/sources lists its own), by name; several values are joined with "; ".
     /// `null` when there are none.
     #[schema(value_type = Option<Object>)]
     pub facts: Option<std::collections::BTreeMap<String, String>>,
@@ -1116,6 +1124,23 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
         (None, Some(d)) => d.open_in.clone(),
         (None, None) => crate::resolver::pubky_apps::open_in(&uri),
     };
+    let description = doc.as_ref().and_then(|d| present(d.description.as_deref()));
+    let image = doc.as_ref().and_then(|d| present(d.image.as_deref()));
+    // A credit goes with its field's value, never without it.
+    let enriched: Vec<model::Credit> = doc
+        .as_ref()
+        .map(|d| {
+            d.credits
+                .iter()
+                .filter(|c| match c.field {
+                    model::CreditField::Image => image.is_some(),
+                    model::CreditField::Description => description.is_some(),
+                })
+                .take(model::CREDITS_CAP)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(Card {
         site: site(
             &uri,
@@ -1129,8 +1154,8 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
         type_path: serde_json::from_value(row["type_path"].clone()).unwrap_or_default(),
         name: present(row["name"].as_str())
             .or_else(|| doc.as_ref().and_then(|d| present(d.name.as_deref()))),
-        description: doc.as_ref().and_then(|d| present(d.description.as_deref())),
-        image: doc.as_ref().and_then(|d| present(d.image.as_deref())),
+        description,
+        image,
         stream: doc.as_ref().and_then(|d| d.stream.clone()),
         point: doc.as_ref().and_then(|d| d.location.clone()),
         start: doc.as_ref().and_then(|d| d.start),
@@ -1155,6 +1180,7 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
             doc.as_ref()
                 .and_then(|d| d.event.timezone_attribution.clone()),
         ),
+        credits: enriched,
         occurrence,
         event,
         maybe_same: same_events(row).map(|all| all.into_iter().take(3).collect()),
@@ -1434,7 +1460,9 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
             from: crate::sources::from(d).map(str::to_owned),
             facts: merge_facts(
                 crate::kinds::facts(
-                    crate::sources::facts(d).or_else(|| crate::resolver::pubky_apps::facts(d)),
+                    crate::sources::facts(d)
+                        .or_else(|| crate::resolver::pubky_apps::facts(d))
+                        .or_else(|| crate::music_sources::card_facts(d)),
                     d,
                     Utc::now(),
                 ),
@@ -1751,8 +1779,9 @@ fn related_because(sql: &mut QueryBuilder<'_, Postgres>, item: &str, n: &str, au
     ));
 }
 /// The version of a search page's shape, in its ETag: a page cached before a field was added
-/// (`because`) is never answered 304. Move it when a search row gains or loses a field.
-pub const SEARCH_SHAPE: u32 = 1;
+/// (`because`, then every card's `credits`) is never answered 304. Move it when a search row
+/// gains or loses a field.
+pub const SEARCH_SHAPE: u32 = 2;
 /// The most taggers a related row's `because` names.
 pub const BECAUSE_TAGGERS: usize = 3;
 
@@ -2819,6 +2848,9 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
         crate::collections::CollectionPage,
         crate::collections::Collection,
         model::Stream,
+        model::Credit,
+        model::CreditField,
+        model::CreditProvider,
         crate::event::storage::ReferenceEvent,
         crate::change_api::ChangeLine,
         crate::change_api::ChangePage,

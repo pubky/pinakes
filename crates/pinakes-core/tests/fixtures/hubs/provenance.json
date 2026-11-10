@@ -130,154 +130,154 @@
     "url": "https://musicbrainz.org/ws/2/release?recording=b1a9c0e9-d987-4042-ae91-78d6a3267d69&type=album&status=official&inc=release-groups+media+url-rels&limit=100&offset=300&fmt=json"
   },
   "mb-recording-833f00e1": {
-    "bytes": 8905,
+    "bytes": 13444,
     "content_type": "application/json",
     "file": "mb-recording-833f00e1.json",
     "note": "Get Lucky: recording url-rels",
-    "recorded_at": "2026-11-05T21:54:59+00:00",
-    "sha256": "cfe69add2dd096f136384003c21305097e5ad887dd09406c01c734dbd9bce988",
+    "recorded_at": "2026-11-10T05:03:38+00:00",
+    "sha256": "84bfbadf52f8becab12a64232a0731a8b12e07bf85fc1092e1683dcdc18c4172",
     "status": 200,
-    "url": "https://musicbrainz.org/ws/2/recording/833f00e1-781f-4edd-90e4-e52712618862?inc=url-rels+isrcs+artist-credits&fmt=json"
+    "url": "https://musicbrainz.org/ws/2/recording/833f00e1-781f-4edd-90e4-e52712618862?inc=url-rels+isrcs+artist-credits+genres&fmt=json"
   },
   "mb-release-08db0e51": {
-    "bytes": 2060,
+    "bytes": 4576,
     "content_type": "application/json",
     "file": "mb-release-08db0e51.json",
     "note": "Bohemian Rhapsody: release 2014-10-27 CA Mastered for iTunes",
-    "recorded_at": "2026-11-05T21:58:04+00:00",
-    "sha256": "d5ef9ca413c9f1dd04f16c9cea98a61f5af11d22038d39806299bdbb05b4f590",
+    "recorded_at": "2026-11-10T05:03:39+00:00",
+    "sha256": "2eebc6e92cdef6ec3cad75cbf082b27f7cf0845ac3b38e5f130872300120d7a3",
     "status": 200,
-    "url": "https://musicbrainz.org/ws/2/release/08db0e51-03c0-43ac-bd4b-5625f5787653?inc=url-rels+release-groups+artist-credits&fmt=json"
+    "url": "https://musicbrainz.org/ws/2/release/08db0e51-03c0-43ac-bd4b-5625f5787653?inc=url-rels+release-groups+artist-credits+genres&fmt=json"
   },
   "mb-release-158f94bf": {
-    "bytes": 1518,
+    "bytes": 5040,
     "content_type": "application/json",
     "file": "mb-release-158f94bf.json",
     "note": "Get Lucky: release 2013-05 BR",
-    "recorded_at": "2026-11-05T21:57:26+00:00",
-    "sha256": "399af5d5a04f437a78d3e405af3c4132cf0d669bed371e5495904ecdc55bd62b",
+    "recorded_at": "2026-11-10T05:03:40+00:00",
+    "sha256": "73a52c8650e3cc18b8f009907502df61b46b3faf5fd9adf25ea4459049f6a21e",
     "status": 200,
-    "url": "https://musicbrainz.org/ws/2/release/158f94bf-d77f-4055-afa4-8fc7e0b2a004?inc=url-rels+release-groups+artist-credits&fmt=json"
+    "url": "https://musicbrainz.org/ws/2/release/158f94bf-d77f-4055-afa4-8fc7e0b2a004?inc=url-rels+release-groups+artist-credits+genres&fmt=json"
   },
   "mb-release-1f1710cf": {
-    "bytes": 1877,
+    "bytes": 5399,
     "content_type": "application/json",
     "file": "mb-release-1f1710cf.json",
     "note": "Get Lucky: release 2013-05 KR",
-    "recorded_at": "2026-11-05T21:57:29+00:00",
-    "sha256": "371e1e63db280d3742d3f46f3a445c73f9ded7a5b639b005c629c2b7963c8344",
+    "recorded_at": "2026-11-10T05:03:42+00:00",
+    "sha256": "70ae98f176c7e32c0a2f9fbd1393bcfc09ba0b78e674f3d6328a5d23ee1938a6",
     "status": 200,
-    "url": "https://musicbrainz.org/ws/2/release/1f1710cf-17cf-4a5e-80df-d39ce2b191b9?inc=url-rels+release-groups+artist-credits&fmt=json"
+    "url": "https://musicbrainz.org/ws/2/release/1f1710cf-17cf-4a5e-80df-d39ce2b191b9?inc=url-rels+release-groups+artist-credits+genres&fmt=json"
   },
   "mb-release-23c40c6e": {
-    "bytes": 1846,
+    "bytes": 4362,
     "content_type": "application/json",
     "file": "mb-release-23c40c6e.json",
     "note": "Bohemian Rhapsody: release 2011-07-26 US",
-    "recorded_at": "2026-11-05T21:57:54+00:00",
-    "sha256": "a61c2d907e856009abd5b1aa7f5b785d9118803781680caf8bf30698738b0de8",
+    "recorded_at": "2026-11-10T05:03:43+00:00",
+    "sha256": "8946a6d4f2de81f05e99848cfdb3c3e1fb78abbfc0e68be287c54763651c6ec4",
     "status": 200,
-    "url": "https://musicbrainz.org/ws/2/release/23c40c6e-7ec2-40a9-8758-fa9f6ca79e3c?inc=url-rels+release-groups+artist-credits&fmt=json"
+    "url": "https://musicbrainz.org/ws/2/release/23c40c6e-7ec2-40a9-8758-fa9f6ca79e3c?inc=url-rels+release-groups+artist-credits+genres&fmt=json"
   },
   "mb-release-36e2aede": {
-    "bytes": 3252,
+    "bytes": 8189,
     "content_type": "application/json",
     "file": "mb-release-36e2aede.json",
     "note": "Get Lucky: release 2013-05-17 XW Apple Digital Master",
-    "recorded_at": "2026-11-05T21:57:10+00:00",
-    "sha256": "f718d4e33c3a91867a87c93a4f41cdb41f65ec793b609d336993ae89caadc235",
+    "recorded_at": "2026-11-10T05:03:46+00:00",
+    "sha256": "78be5e01dc62d32b66e3fbe1e8ebc6ab0d34e0ccab2ec25c98bca45fb66665b4",
     "status": 200,
-    "url": "https://musicbrainz.org/ws/2/release/36e2aede-346d-4931-8565-78d810d167c7?inc=url-rels+release-groups+artist-credits&fmt=json"
+    "url": "https://musicbrainz.org/ws/2/release/36e2aede-346d-4931-8565-78d810d167c7?inc=url-rels+release-groups+artist-credits+genres&fmt=json"
   },
   "mb-release-4c8af71f": {
-    "bytes": 4446,
+    "bytes": 6072,
     "content_type": "application/json",
     "file": "mb-release-4c8af71f.json",
     "note": "Kind of Blue: release 4c8af71f-5746-4981-92d7-0d6c64db1155",
-    "recorded_at": "2026-11-05T22:00:53+00:00",
-    "sha256": "9700f02cdbc2af7b9d44c41064b703047fb3ec71a5decea57944e487a063629d",
+    "recorded_at": "2026-11-10T05:03:48+00:00",
+    "sha256": "9038426b71642c0e682bdd4af23cadb6a6ddff1d8a29539d5c53cccd0089d07e",
     "status": 200,
-    "url": "https://musicbrainz.org/ws/2/release/4c8af71f-5746-4981-92d7-0d6c64db1155?inc=url-rels+release-groups+artist-credits&fmt=json"
+    "url": "https://musicbrainz.org/ws/2/release/4c8af71f-5746-4981-92d7-0d6c64db1155?inc=url-rels+release-groups+artist-credits+genres&fmt=json"
   },
   "mb-release-5000a285": {
-    "bytes": 9082,
+    "bytes": 13929,
     "content_type": "application/json",
     "file": "mb-release-5000a285.json",
     "note": "Get Lucky: release 2013-05-17 XW",
-    "recorded_at": "2026-11-05T21:57:14+00:00",
-    "sha256": "9db54b232ac18bac66f7901b45096815d7666e9b472de2f10833d511f1530e8a",
+    "recorded_at": "2026-11-10T05:03:49+00:00",
+    "sha256": "3079de80f176d4ae5fdab4559ee9e1755376c6aaef38c3a480431fe3231feb31",
     "status": 200,
-    "url": "https://musicbrainz.org/ws/2/release/5000a285-b67e-4cfc-b54b-2b98f1810d2e?inc=url-rels+release-groups+artist-credits&fmt=json"
+    "url": "https://musicbrainz.org/ws/2/release/5000a285-b67e-4cfc-b54b-2b98f1810d2e?inc=url-rels+release-groups+artist-credits+genres&fmt=json"
   },
   "mb-release-59c466a7": {
-    "bytes": 3328,
+    "bytes": 5844,
     "content_type": "application/json",
     "file": "mb-release-59c466a7.json",
     "note": "Bohemian Rhapsody: release 2011 XW",
-    "recorded_at": "2026-11-05T21:57:48+00:00",
-    "sha256": "41130f5646f63478e071b49da934e67d961678ffce2d308a8dfa34d215a010f9",
+    "recorded_at": "2026-11-10T05:03:51+00:00",
+    "sha256": "0e976eaf4320e86e3cc8708793ab1963c491a99aa5f31949e34b007853639631",
     "status": 200,
-    "url": "https://musicbrainz.org/ws/2/release/59c466a7-d981-4078-bffb-10bab7b023e6?inc=url-rels+release-groups+artist-credits&fmt=json"
+    "url": "https://musicbrainz.org/ws/2/release/59c466a7-d981-4078-bffb-10bab7b023e6?inc=url-rels+release-groups+artist-credits+genres&fmt=json"
   },
   "mb-release-9ebe5c48": {
-    "bytes": 1831,
+    "bytes": 4347,
     "content_type": "application/json",
     "file": "mb-release-9ebe5c48.json",
     "note": "Bohemian Rhapsody: release 2009 MX",
-    "recorded_at": "2026-11-05T21:57:43+00:00",
-    "sha256": "3d129a40e31411369987938c6a251b2b432efef8ba1475b7fa154878526f4d68",
+    "recorded_at": "2026-11-10T05:03:52+00:00",
+    "sha256": "fb9b12bf8f51efe224263e072dd0f61b3cfa9a49845c0992536b600813de0de0",
     "status": 200,
-    "url": "https://musicbrainz.org/ws/2/release/9ebe5c48-9a91-4e55-9ac1-5040a5a22088?inc=url-rels+release-groups+artist-credits&fmt=json"
+    "url": "https://musicbrainz.org/ws/2/release/9ebe5c48-9a91-4e55-9ac1-5040a5a22088?inc=url-rels+release-groups+artist-credits+genres&fmt=json"
   },
   "mb-release-bee5e0cd": {
-    "bytes": 2236,
+    "bytes": 4047,
     "content_type": "application/json",
     "file": "mb-release-bee5e0cd.json",
     "note": "Kind of Blue: release bee5e0cd-1767-4a8e-9578-6455e87ba60b",
-    "recorded_at": "2026-11-05T22:00:50+00:00",
-    "sha256": "f9d519414b350f559e948f5deeb9c3fe953a8ed87a28fbbf5547a263bc2d8352",
+    "recorded_at": "2026-11-10T05:03:53+00:00",
+    "sha256": "9849ba61c6602160d47d33afd52b9e7419c4e352584b36565043ad6677c4b48f",
     "status": 200,
-    "url": "https://musicbrainz.org/ws/2/release/bee5e0cd-1767-4a8e-9578-6455e87ba60b?inc=url-rels+release-groups+artist-credits&fmt=json"
+    "url": "https://musicbrainz.org/ws/2/release/bee5e0cd-1767-4a8e-9578-6455e87ba60b?inc=url-rels+release-groups+artist-credits+genres&fmt=json"
   },
   "mb-release-cdb012b3": {
-    "bytes": 2596,
+    "bytes": 5112,
     "content_type": "application/json",
     "file": "mb-release-cdb012b3.json",
     "note": "Bohemian Rhapsody: release 2014 XW Mastered for iTunes",
-    "recorded_at": "2026-11-05T21:58:01+00:00",
-    "sha256": "44a95f59188506a251c2e30ff7badcfc8c911ae611082fd0db30c716f701e3b5",
+    "recorded_at": "2026-11-10T05:03:55+00:00",
+    "sha256": "b1203d712fe9562b7205531cf6c17c3251aff0eabc525bc3e82233210d430f20",
     "status": 200,
-    "url": "https://musicbrainz.org/ws/2/release/cdb012b3-be25-49bb-b9f1-4d1652a661ef?inc=url-rels+release-groups+artist-credits&fmt=json"
+    "url": "https://musicbrainz.org/ws/2/release/cdb012b3-be25-49bb-b9f1-4d1652a661ef?inc=url-rels+release-groups+artist-credits+genres&fmt=json"
   },
   "mb-release-e65fcfb0": {
-    "bytes": 11004,
+    "bytes": 14618,
     "content_type": "application/json",
     "file": "mb-release-e65fcfb0.json",
     "note": "Get Lucky: release 2023-05-12 XW 10th anniversary edition",
-    "recorded_at": "2026-11-05T21:57:22+00:00",
-    "sha256": "3905ccbc951dba5693e8f82bf973f679e5e61a4585418cad82558e00a5cdbbf5",
+    "recorded_at": "2026-11-10T05:03:56+00:00",
+    "sha256": "ec76b45e02b5149f06d7432de3e0bd8be38c2503ffdf3607d52c886fc2a647f8",
     "status": 200,
-    "url": "https://musicbrainz.org/ws/2/release/e65fcfb0-02dc-407c-ab28-8168dafcb999?inc=url-rels+release-groups+artist-credits&fmt=json"
+    "url": "https://musicbrainz.org/ws/2/release/e65fcfb0-02dc-407c-ab28-8168dafcb999?inc=url-rels+release-groups+artist-credits+genres&fmt=json"
   },
   "mb-release-e8ada6e5": {
-    "bytes": 2024,
+    "bytes": 4540,
     "content_type": "application/json",
     "file": "mb-release-e8ada6e5.json",
     "note": "Bohemian Rhapsody: release 2011 CA",
-    "recorded_at": "2026-11-05T21:57:51+00:00",
-    "sha256": "ca143218308ed88d230d7ab03afeced0ccd66d2ce1919360a6ca41e2ade69ffa",
+    "recorded_at": "2026-11-10T05:03:58+00:00",
+    "sha256": "6f046f502c165cca419d64663555aa901b1654d2604776d3373f6a7e7672d6c7",
     "status": 200,
-    "url": "https://musicbrainz.org/ws/2/release/e8ada6e5-73d6-402b-88f5-0c44e1e48c1f?inc=url-rels+release-groups+artist-credits&fmt=json"
+    "url": "https://musicbrainz.org/ws/2/release/e8ada6e5-73d6-402b-88f5-0c44e1e48c1f?inc=url-rels+release-groups+artist-credits+genres&fmt=json"
   },
   "mb-release-ec116461": {
-    "bytes": 4086,
+    "bytes": 7608,
     "content_type": "application/json",
     "file": "mb-release-ec116461.json",
     "note": "Get Lucky: release 2015-09-08 XW 88.2kHz/24\u2010bit",
-    "recorded_at": "2026-11-05T21:57:17+00:00",
-    "sha256": "0300f7ce15b208c61f332b9641f9ed140273a1b56621e28383ad72901f7e335c",
+    "recorded_at": "2026-11-10T05:03:59+00:00",
+    "sha256": "198930c68ea53a2f65b6beb827f9e7f91c35655b6208d98ee19d432d43b45092",
     "status": 200,
-    "url": "https://musicbrainz.org/ws/2/release/ec116461-5b0d-4c98-bb44-a4de5de63076?inc=url-rels+release-groups+artist-credits&fmt=json"
+    "url": "https://musicbrainz.org/ws/2/release/ec116461-5b0d-4c98-bb44-a4de5de63076?inc=url-rels+release-groups+artist-credits+genres&fmt=json"
   },
   "mb-url-spotify-album-1weenld61qoidwYuZ1GESA": {
     "bytes": 1669,

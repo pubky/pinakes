@@ -29,6 +29,9 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `resolver_concurrency` | `2` | Concurrent jobs per pubky or card resolver. |
 | `resolver_requests_per_second` | `2.0` | Jobs per second per pubky or card resolver. |
 | `resolver_ttl_secs` | `86400` | Default document lifetime (seconds) for web, pubky and card resolvers. |
+| `music_enrichment_timeout_ms` | `8000` | How long a MusicBrainz card's enrichment may take, within the card's own read (milliseconds, 100–13000); past it, the card keeps its stored image and description. |
+| `music_enrichment_retry_secs` | `3600` | The earliest a MusicBrainz card whose enrichment failed for a while (a timeout, a 429, a 5xx) is read again (seconds, 60–604800): it waits at least twice as long as since its last reading, up to its own refresh time, so a failure on a routine refresh waits for the next. |
+| `music_image_width` | `640` | The width of the Commons thumbnail an enriched card asks for (pixels, 20–4096); Commons serves the next of its standard sizes (960 for 640). |
 | `host_requests_per_second` | `1.0` | Requests per second to any one upstream host. |
 | `host_rates` | `{}` | Per-host overrides of `host_requests_per_second`. |
 | `html_head_bytes` | `4194304` | How far an HTML page past the 1 MB page cap is read (bytes); nothing in the page stops the read earlier. |
@@ -803,6 +806,40 @@ limit. The worker takes up to 100 due resources at a time and asks MusicBrainz a
 URLs together (50 to a request; MusicBrainz echoes each URL, and an answer applies only to the URL
 it names) and Wikidata for their item links' items together (10 to a request). Each source's page says what it costs per link; requests that
 several sources make (an item, a record) are shared through the discovery cache.
+
+**Music enrichment.** `[web] music_enrichment` (on by default) gives a MusicBrainz artist, release
+group, release or recording card an image from Wikimedia Commons and a description from
+Wikipedia or Wikidata, from the entity's Wikidata item, each with its credit
+([api.md](api.md#credits) says which item and which text). It runs inside the card's own read,
+after MusicBrainz answered, through the egress and its pace for those hosts, within
+`limits.music_enrichment_timeout_ms`. At most, per card: MusicBrainz one request more (a
+recording's works, only when the recording has no item of its own with an English article); Wikidata one
+read-back of the item its own `wikidata` relation names, or, without one, one search and one
+read-back for each lookup (its MBID, then for an artist up to two Discogs pages: three lookups;
+hits over the 8 MB cap together are read back one by one), one read of the item's pages and
+English description, and one of its image claim, and for a recording one read-back and one read
+of its work's item's pages; Wikipedia two summaries
+(English, then one other language), for a recording three (its item's English article, its
+work's, then one other language); Commons one. These requests run one after another and share
+each host's pace (`www.wikidata.org` with the also-on sources), so an artist found through its
+Discogs pages makes up to six Wikidata requests before its text and image are asked for. A
+`reextract web` of many such cards at once can leave some of them unread at the timeout; they
+keep their stored image and description and are read again at their retry. Raising
+`limits.music_enrichment_timeout_ms` (up to 13000) for that run leaves fewer unread. A failed or slow request never fails
+the card: the card saves with what it found, and a field a timeout, a 429, a 5xx, Wikidata's
+`maxlag` or any other unexpected status (a 403 refusing this client) left unread keeps its stored
+value and credit (when this reading's MusicBrainz data with them would pass the 8 KiB document
+bound, the reading gives up its last facts first, as it would for a value read now); a failed search for the item leaves
+both fields so. The card is then read
+again after at least `limits.music_enrichment_retry_secs` and at least twice as long as since its
+last reading, up to its own refresh time (so a failure on a routine refresh waits for the next). A definite answer (no item, no
+text: 404 or 410, a sitelink to a redirect, a refused file) removes the field. The egress shares concurrent requests
+and keeps answers an hour (a busy Wikidata's for a second), and a wait an answer names (`Retry-After`, up to five minutes) for that
+request. Stored cards change at their next read; to apply a change of this switch or of the
+enrichment at once, run `pinakesd reextract web`. Switched off, the cards are MusicBrainz's alone
+from their next read: what they took before goes then. MusicBrainz's own facts about the entity
+(its disambiguation, genres, an artist's country and life span, an album's type and first
+release) come with the entity read whether this is on or off.
 
 Sources reach their services through the egress policy and its per-host budgets, one request
 at a time per host. A hub's published limit lowers its host's default pace like a source's own

@@ -27,6 +27,7 @@ pub mod maintenance;
 pub mod matching;
 pub mod model;
 pub mod music;
+pub mod music_enrichment;
 pub mod music_sources;
 pub mod nexus;
 pub mod osm_dump;
@@ -42,6 +43,7 @@ pub mod sources;
 pub mod spatial;
 pub mod store;
 pub mod telemetry;
+pub mod wikimedia;
 pub mod wikipedia;
 
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");

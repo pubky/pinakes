@@ -574,6 +574,10 @@ pub fn musicbrainz_card(
     let mut about: Vec<String> = entity.artist.iter().cloned().collect();
     if let Some(ms) = entity.length_ms {
         let secs = (ms + 500) / 1000;
+        // Its own attribute too (ISO 8601, as every page's `duration`): an enriched description
+        // takes the place of this line, and the length stays a fact (`card_facts`).
+        doc.attributes
+            .insert("duration".into(), format!("PT{secs}S"));
         about.push(if secs >= 3600 {
             format!("{}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60)
         } else {
@@ -581,10 +585,115 @@ pub fn musicbrainz_card(
         });
     }
     doc.description = (!about.is_empty()).then(|| about.join(" · "));
-    if let Some(artist) = &entity.artist {
+    // Only a whole credit: the document keeps 256 bytes of an attribute, and a cut one would be a
+    // second, wrong `artist` fact beside the `musicbrainz_entity` source's full credit.
+    if let Some(artist) = entity
+        .artist
+        .as_ref()
+        .filter(|a| a.len() <= ARTIST_ATTRIBUTE_MAX)
+    {
         doc.attributes.insert("artist".into(), artist.clone());
     }
+    for (name, value) in about_facts(entity) {
+        doc.attributes.insert(name.into(), value);
+    }
     doc
+}
+
+/// The facts a MusicBrainz card takes from what MusicBrainz says about the entity besides its
+/// title, artist credit and length ([`about_facts`]); each is also an attribute the web route
+/// keeps (`resolver::web::ATTRIBUTES`).
+pub(crate) const ABOUT_FACTS: &[&str] = &[
+    "disambiguation",
+    "artist_type",
+    "country_code",
+    "area",
+    "begin_date",
+    "end_date",
+    "release_type",
+    "first_release_date",
+    "genre",
+];
+/// At most this many genres in the `genre` fact.
+const GENRES: usize = 3;
+/// What MusicBrainz says about `entity` as facts, each value whole and at most
+/// [`ARTIST_ATTRIBUTE_MAX`] bytes (a longer one is left out, never cut): its disambiguation;
+/// an artist's type (`artist_type`, as the `musicbrainz_entity` source names it), country
+/// (`country_code`, ISO 3166-1), area and life span (`begin_date`, `end_date`); a release
+/// group's primary type (`release_type`); a release group's or recording's
+/// `first_release_date` (dates as MusicBrainz gives them: `YYYY`, `YYYY-MM` or `YYYY-MM-DD`);
+/// and its top genres (`genre`: at most three, most votes first, a tie by name, joined with
+/// "; ").
+pub(crate) fn about_facts(entity: &musicbrainz::Entity) -> Vec<(&'static str, String)> {
+    let about = &entity.about;
+    let mut genres: Vec<&(String, u64)> = about.genres.iter().filter(|(_, n)| *n >= 1).collect();
+    genres.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let mut genre = String::new();
+    for (name, _) in genres.into_iter().take(GENRES) {
+        let next = if genre.is_empty() {
+            name.clone()
+        } else {
+            format!("{genre}; {name}")
+        };
+        if next.len() > ARTIST_ATTRIBUTE_MAX {
+            break;
+        }
+        genre = next;
+    }
+    let artist_type = (entity.kind == MbKind::Artist)
+        .then(|| entity.artist_type.clone())
+        .flatten();
+    [
+        ("disambiguation", about.disambiguation.clone()),
+        ("artist_type", artist_type),
+        ("country_code", about.country.clone()),
+        ("area", about.area.clone()),
+        ("begin_date", about.begin.clone()),
+        ("end_date", about.end.clone()),
+        ("release_type", about.release_type.clone()),
+        ("first_release_date", about.first_release_date.clone()),
+        ("genre", Some(genre)),
+    ]
+    .into_iter()
+    .filter_map(|(name, value)| {
+        value
+            .filter(|v| !v.is_empty() && v.len() <= ARTIST_ATTRIBUTE_MAX)
+            .map(|v| (name, v))
+    })
+    .collect()
+}
+
+/// The longest artist credit (or other fact) a MusicBrainz card stores as an attribute: what
+/// the document keeps of an attribute (`ResourceMeta::bounded`).
+const ARTIST_ATTRIBUTE_MAX: usize = 256;
+
+/// The facts a MusicBrainz page's own card states (`musicbrainz_card`): its artist credit and
+/// its length (`duration`, in seconds, as the `musicbrainz_entity` source gives it), so a
+/// resource read keeps them when an enriched description takes the place of MusicBrainz's
+/// "artist · length" line, also before (or without) any also-on source reading the page; and
+/// what MusicBrainz says about the entity ([`about_facts`]). Enrichment plays no part: these are
+/// MusicBrainz's own.
+pub(crate) fn card_facts(
+    doc: &crate::model::ResourceMeta,
+) -> Option<std::collections::BTreeMap<String, String>> {
+    if doc.source != "musicbrainz" {
+        return None;
+    }
+    let mut facts = std::collections::BTreeMap::new();
+    for name in ["artist", "duration"].iter().chain(ABOUT_FACTS) {
+        let Some(value) = doc.attributes.get(*name).filter(|v| !v.trim().is_empty()) else {
+            continue;
+        };
+        let value = match *name {
+            "duration" => match duration_secs(value) {
+                Some(secs) => secs.to_string(),
+                None => continue,
+            },
+            _ => value.clone(),
+        };
+        facts.insert((*name).to_owned(), value);
+    }
+    (!facts.is_empty()).then_some(facts)
 }
 
 /// What a performer's link says about the artist: a MusicBrainz artist page names the MBID
@@ -1096,6 +1205,179 @@ mod tests {
         );
     }
 
+    /// A MusicBrainz card's own facts are the `musicbrainz_entity` source's artist and
+    /// duration, same names and units, so a resource read shows each value once; another
+    /// source's document gives none.
+    #[test]
+    fn a_musicbrainz_card_states_its_artist_and_length() {
+        let recording =
+            musicbrainz::parse_entity(MbKind::Recording, &fixture("mb-recording.json")).unwrap();
+        let card = musicbrainz_card(
+            "https://musicbrainz.org/recording/9f9cf187-d6f9-437f-9d98-d59cdbd52757",
+            Some(&recording),
+            None,
+            86400,
+        );
+        let mut own = card_facts(&card).unwrap();
+        // Besides what MusicBrainz says about the recording (`about_facts`).
+        own.retain(|name, _| !ABOUT_FACTS.contains(&name.as_str()));
+        let source: std::collections::BTreeMap<String, String> = facts(&recording)
+            .into_iter()
+            .filter(|f| f.name == "artist" || f.name == "duration")
+            .map(|f| (f.name, f.value))
+            .collect();
+        assert_eq!(own, source);
+        assert_eq!(own.len(), 2, "{own:?}");
+        // The same-recording pass reads the card's own length when no source has read it.
+        let unit = crate::same_recording::Unit::new(
+            card.name.as_deref().unwrap(),
+            card.attributes.get("artist").map(String::as_str),
+            None,
+            card.attributes.get("duration").map(String::as_str),
+        );
+        assert_eq!(unit.length_secs, own["duration"].parse::<i64>().ok());
+        let mut page = card.clone();
+        page.source = "jsonld".into();
+        assert_eq!(card_facts(&page), None);
+        // A credit longer than the document keeps is no attribute (and no fact) at all.
+        let mut long = recording.clone();
+        long.artist = Some("Artist feat. ".repeat(30));
+        let card = musicbrainz_card(
+            "https://musicbrainz.org/recording/9f9cf187-d6f9-437f-9d98-d59cdbd52757",
+            Some(&long),
+            None,
+            86400,
+        )
+        .bounded(crate::resolver::web::ATTRIBUTES)
+        .unwrap();
+        assert_eq!(card.attributes.get("artist"), None);
+        assert_eq!(
+            card_facts(&card).unwrap().keys().collect::<Vec<_>>(),
+            ["duration", "first_release_date"]
+        );
+    }
+
+    fn enrichment_fixture(name: &str) -> Value {
+        let path = format!(
+            "{}/tests/fixtures/shared/music_enrichment/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    }
+    /// What MusicBrainz says about an artist, an album and a recording, as the card's facts:
+    /// raw codes, dates as MusicBrainz writes them, the top three genres (a tie by name).
+    #[test]
+    fn a_musicbrainz_card_states_what_musicbrainz_says_about_it() {
+        let facts = |kind: MbKind, file: &str| {
+            let entity = musicbrainz::parse_entity(kind, &enrichment_fixture(file)).unwrap();
+            let uri = format!("https://musicbrainz.org/{}/{}", kind.as_str(), entity.mbid);
+            let card = musicbrainz_card(&uri, Some(&entity), None, 86400)
+                .bounded(crate::resolver::web::ATTRIBUTES)
+                .unwrap();
+            let own: Vec<String> = about_facts(&entity).iter().map(|f| f.0.into()).collect();
+            assert!(
+                own.iter().all(|n| ABOUT_FACTS.contains(&n.as_str())),
+                "{own:?}"
+            );
+            card_facts(&card).unwrap()
+        };
+        let map = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        assert_eq!(
+            facts(MbKind::Artist, "mb-artist-sefa.json"),
+            map(&[
+                ("disambiguation", "frenchcore artist"),
+                ("artist_type", "Person"),
+                ("country_code", "NL"),
+                ("area", "Netherlands"),
+                ("genre", "frenchcore; uptempo hardcore"),
+            ])
+        );
+        assert_eq!(
+            facts(MbKind::Artist, "mb-artist-daft-punk.json"),
+            map(&[
+                ("disambiguation", "French electronic duo"),
+                ("artist_type", "Group"),
+                ("country_code", "FR"),
+                ("area", "France"),
+                ("begin_date", "1993"),
+                ("end_date", "2021-02-22"),
+                ("genre", "electronic; house; french house"),
+            ])
+        );
+        assert_eq!(
+            facts(MbKind::ReleaseGroup, "mb-release-group-kind-of-blue.json"),
+            map(&[
+                ("artist", "Miles Davis"),
+                ("release_type", "Album"),
+                ("first_release_date", "1959-08-17"),
+                ("genre", "jazz; cool jazz; modal jazz"),
+            ])
+        );
+        let song = facts(MbKind::Recording, "mb-recording-get-lucky.json");
+        assert_eq!(song["first_release_date"], "2013-05-17");
+        assert_eq!(song["genre"], "disco; funk; electronic", "a tie by name");
+        assert_eq!(song.get("disambiguation"), None, "MusicBrainz's is empty");
+        // Every fact is an attribute the web route keeps.
+        for name in ABOUT_FACTS {
+            assert!(crate::resolver::web::ATTRIBUTES.contains(name), "{name}");
+        }
+    }
+    /// Values out of form are left out; a value over the bound is left out whole, and the genre
+    /// list stops before the bound; a genre without a vote is none.
+    #[test]
+    fn musicbrainz_facts_are_bounded_and_checked() {
+        let v = serde_json::json!({
+            "id": "b5416a54-4941-4fcf-b2a0-7f98da6f9344",
+            "name": "X",
+            "type": "Person",
+            "country": "nl",
+            "disambiguation": "d".repeat(300),
+            "area": {"name": "  "},
+            "life-span": {"begin": "1990-1", "end": "2001-02-03"},
+            "genres": [
+                {"name": "a".repeat(200), "count": 9},
+                {"name": "b".repeat(100), "count": 8},
+                {"name": "c", "count": 0},
+            ],
+        });
+        let entity = musicbrainz::parse_entity(MbKind::Artist, &v).unwrap();
+        let facts: std::collections::BTreeMap<&str, String> =
+            about_facts(&entity).into_iter().collect();
+        assert_eq!(
+            facts.keys().copied().collect::<Vec<_>>(),
+            ["artist_type", "end_date", "genre"]
+        );
+        assert_eq!(facts["genre"], "a".repeat(200));
+        // The same fields on a release group are not an artist's.
+        let group = musicbrainz::parse_entity(MbKind::ReleaseGroup, &v).unwrap();
+        assert!(about_facts(&group)
+            .iter()
+            .all(|(n, _)| !matches!(*n, "artist_type" | "country_code" | "end_date")));
+    }
+
+    /// A genre MusicBrainz lists twice counts once, with its higher count.
+    #[test]
+    fn a_genre_listed_twice_counts_once() {
+        let v = serde_json::json!({
+            "id": "b5416a54-4941-4fcf-b2a0-7f98da6f9344",
+            "genres": [
+                {"name": "b", "count": 2},
+                {"name": "c", "count": 3},
+                {"name": "b", "count": 5},
+                {"name": "a", "count": 1},
+            ],
+        });
+        let entity = musicbrainz::parse_entity(MbKind::Artist, &v).unwrap();
+        let facts: std::collections::BTreeMap<&str, String> =
+            about_facts(&entity).into_iter().collect();
+        assert_eq!(facts["genre"], "b; c; a");
+    }
+
     #[test]
     fn a_recording_says_its_isrcs_artist_and_length() {
         let recording =
@@ -1238,6 +1520,7 @@ mod tests {
                 video: false,
                 length_ms: length,
                 artist_type: None,
+                about: Default::default(),
             };
         let a = "f2eef649-0000-4000-8000-000000000001";
         let b = "f2eef649-0000-4000-8000-000000000002";

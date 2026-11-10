@@ -36,7 +36,9 @@ A link this instance does not know is a 404 there: nobody referenced it, or it h
 - **Cards.** `type` is a schema.org type (`Place`, `Event`, `MusicEvent`, `Book`,
   `ScholarlyArticle`, `MusicRecording`, `VideoObject`, `SocialMediaPosting`, `WebPage`, …).
   `name`, `description`, `image`, `site`, `point` (`lat`, `lon`), `start` and `end` are what the
-  link's page or the service's own API says. `status` is `ok`, `pending`, `missing` (the object
+  link's page or the service's own API says, except where `credits` names another source (a
+  MusicBrainz card's Wikipedia or Wikidata text and Commons image): show each credit's author,
+  licence and source page with its value. `status` is `ok`, `pending`, `missing` (the object
   is gone upstream), `unreachable` or `error`.
 - **Only referenced links.** Search lists links someone tagged, replied to or embedded on Pubky.
   Pinakes holds no posts, users or tags of its own: those are Nexus's (below).

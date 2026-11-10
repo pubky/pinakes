@@ -520,6 +520,23 @@ async fn guarded_finish_job(
         }
         other => other,
     };
+    // An enrichment a transient failure left unread keeps what the stored card has of it.
+    let result = match result {
+        Ok(mut doc) if !doc.unread_enriched.is_empty() => {
+            let stored: Option<serde_json::Value> =
+                sqlx::query_scalar("SELECT doc FROM resource_document WHERE id=$1")
+                    .bind(&job.id)
+                    .fetch_optional(pool)
+                    .await?;
+            match stored.and_then(|v| serde_json::from_value::<crate::model::ResourceMeta>(v).ok())
+            {
+                Some(stored) => doc.keep_enriched(&stored),
+                None => doc.unread_enriched.clear(),
+            }
+            Ok(doc)
+        }
+        other => other,
+    };
     match std::panic::AssertUnwindSafe(finish_job(pool, resolver, cfg, refresh, job, result))
         .catch_unwind()
         .await

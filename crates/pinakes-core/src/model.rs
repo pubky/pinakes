@@ -9,6 +9,10 @@ use utoipa::ToSchema;
 
 pub const DOCUMENT_CAP: usize = 8192;
 pub const ATTRIBUTE_CAP: usize = 32;
+/// The longest description a document keeps (bytes).
+pub const DESCRIPTION_CAP: usize = 2048;
+/// The most credits a document keeps: one per enriched field.
+pub const CREDITS_CAP: usize = 4;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -118,6 +122,91 @@ fn signed(name: &str) -> bool {
         || name.contains("token")
         || name.contains("signature")
 }
+/// The card field a credit is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CreditField {
+    Image,
+    Description,
+}
+/// The service an enriched value came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CreditProvider {
+    /// A Wikipedia article's summary.
+    Wikipedia,
+    /// A file on Wikimedia Commons.
+    WikimediaCommons,
+    /// A Wikidata item's English description.
+    Wikidata,
+}
+/// Where one of the card's `image` or `description` came from when Pinakes added it from another
+/// source than the link itself, and the licence it is used under (docs/api.md, Credits). Show it
+/// with the value: the author, the licence (linked to `license_url`) and the source page.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, ToSchema)]
+pub struct Credit {
+    /// The card field the value is in.
+    pub field: CreditField,
+    pub provider: CreditProvider,
+    /// The page the value came from: the Wikipedia article, the file's page on Commons, or the
+    /// item's page on Wikidata. An `https:` URL of at most 1,024 bytes.
+    pub source_url: String,
+    /// Who made it, plain text of at most 256 bytes: "Wikipedia contributors" for an article, the
+    /// file's author for an image. Null for a public-domain or CC0 file that names none, and for
+    /// a Wikidata description (CC0).
+    pub author: Option<String>,
+    /// An SPDX licence ID (`CC-BY-SA-4.0`, `CC-BY-2.0`, `CC0-1.0`), or `public-domain`.
+    pub license: String,
+    /// The licence's text: an `https:` URL; null when it has none (public domain).
+    pub license_url: Option<String>,
+    /// The language of a text (`en`, or another Wikipedia's language code, `de`); null for an
+    /// image.
+    pub lang: Option<String>,
+    /// The text is a part of a longer source: a summary is an article's first paragraphs, and a
+    /// long one is cut at a sentence or a word. A Wikidata description is whole.
+    pub excerpted: bool,
+    /// The value was changed beyond cutting it.
+    pub modified: bool,
+    /// The link of the entity the value is about, when that is not the card's own: a recording's
+    /// description taken from its work's item names the work (`https://musicbrainz.org/work/…`).
+    pub subject: Option<String>,
+}
+impl Credit {
+    /// The credit within its bounds: every URL `https:` and at most 1,024 bytes, the author at
+    /// most 256 bytes (cut at a character), the licence ID and language at most 64. `None` when
+    /// a URL or ID is out of bounds, when a URL is a link that carries a credential
+    /// (`capability::names_credential`: the store would drop that part of the credit,
+    /// `capability::strip_document`, and leave its value uncredited), or when the author, free
+    /// text, holds such a link anywhere (`capability::contains_credential`: `Jane
+    /// https://…?api_key=…`, which no store rule removes). The value is then not taken at all.
+    pub fn bounded(mut self) -> Option<Self> {
+        let https = |s: &str| {
+            s.len() <= 1024
+                && url::Url::parse(s).is_ok_and(|u| u.scheme() == "https")
+                && !crate::capability::names_credential(s)
+        };
+        let id = |s: &str| {
+            !s.is_empty()
+                && s.len() <= 64
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
+        };
+        if let Some(author) = &mut self.author {
+            truncate(author, 256);
+        }
+        self.author = self.author.filter(|a| !a.trim().is_empty());
+        (https(&self.source_url)
+            && !self
+                .author
+                .as_deref()
+                .is_some_and(crate::capability::contains_credential)
+            && self.license_url.as_deref().is_none_or(https)
+            && self.subject.as_deref().is_none_or(https)
+            && id(&self.license)
+            && self.lang.as_deref().is_none_or(id))
+        .then_some(self)
+    }
+}
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LocationSource {
@@ -169,6 +258,15 @@ pub struct ResourceMeta {
     pub osm_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attribution: Option<String>,
+    /// Where `image` and `description` came from when an enrichment added them (`Credit`, at
+    /// most one per field): stored with the values, and gone with them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credits: Vec<Credit>,
+    /// The enriched fields this reading could not read, for a transient failure: the queue keeps
+    /// their stored values and credits (`keep_enriched`). Never stored.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub unread_enriched: Vec<CreditField>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bbox: Option<[f64; 4]>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -324,7 +422,7 @@ impl ResourceMeta {
         }
         for (value, max) in [
             (&mut self.name, 512),
-            (&mut self.description, 2048),
+            (&mut self.description, DESCRIPTION_CAP),
             (&mut self.category, 128),
         ] {
             if let Some(s) = value {
@@ -345,6 +443,11 @@ impl ResourceMeta {
                 s.preview,
             )
         });
+        self.credits = std::mem::take(&mut self.credits)
+            .into_iter()
+            .filter_map(Credit::bounded)
+            .collect();
+        self.credited();
         self.aliases.truncate(4);
         self.open_in.retain(|o| {
             o.url.len() <= 2048
@@ -353,23 +456,102 @@ impl ResourceMeta {
         });
         self.open_in.truncate(4);
         while self.validate(allowed_attributes).is_err() {
-            if self.attributes.pop_last().is_some()
-                || self.aliases.pop().is_some()
-                || self.open_in.pop().is_some()
-                || self.group_keys.pop().is_some()
-                || self.event.shrink_performers()
-            {
+            if self.shed() {
                 continue;
             }
             if self.description.take().is_some()
                 || self.image.take().is_some()
                 || self.stream.take().is_some()
             {
+                self.credited();
                 continue;
             }
             self.validate(allowed_attributes)?;
         }
         Ok(self)
+    }
+    /// Drops one of the parts a document too large gives up first, before its description and
+    /// image: an attribute (the last), an alias, a client, a group key, a performer. False when
+    /// none is left.
+    fn shed(&mut self) -> bool {
+        self.attributes.pop_last().is_some()
+            || self.aliases.pop().is_some()
+            || self.open_in.pop().is_some()
+            || self.group_keys.pop().is_some()
+            || self.event.shrink_performers()
+    }
+    /// Whether the document fits [`DOCUMENT_CAP`], in both of its stored forms.
+    fn fits(&self) -> bool {
+        serde_json::to_vec(self).is_ok_and(|v| v.len() <= DOCUMENT_CAP)
+            && serde_json::to_string_pretty(self).is_ok_and(|v| v.len() <= DOCUMENT_CAP)
+    }
+    /// Keeps the credits of the fields that hold a value, one per field, at most
+    /// [`CREDITS_CAP`].
+    fn credited(&mut self) {
+        let mut seen = vec![];
+        let (image, description) = (self.image.is_some(), self.description.is_some());
+        self.credits.retain(|c| {
+            let present = match c.field {
+                CreditField::Image => image,
+                CreditField::Description => description,
+            };
+            present && !seen.contains(&c.field) && {
+                seen.push(c.field);
+                true
+            }
+        });
+        self.credits.truncate(CREDITS_CAP);
+    }
+    /// Takes from `stored` (the accepted document) the enriched fields this reading left unread
+    /// (`unread_enriched`): each one's stored value and credit, when the stored document has
+    /// both. A field the stored document holds without a credit was not enriched: this reading's
+    /// own value stays. When this reading with the stored values would no longer fit
+    /// ([`DOCUMENT_CAP`]), it gives up what a reading too large gives up first ([`Self::shed`]:
+    /// the last attributes, then aliases, …), as `bounded` does for a value read now: a transient
+    /// failure never loses a stored value and its credit for fresh data. Should even that not
+    /// fit, the stored document stays whole, as for an unchanged page.
+    ///
+    /// The early read again (`refresh_by`) waits at least twice as long as since the stored
+    /// reading, so a failure that lasts is asked about less and less often, up to the card's own
+    /// refresh time; a card read in full a refresh time ago is not read again sooner.
+    pub fn keep_enriched(&mut self, stored: &ResourceMeta) {
+        if let Some(by) = self.refresh_by {
+            let now = Utc::now();
+            let since = (now.timestamp_millis() - stored.fetched_at).max(0) / 1000;
+            let later = now + chrono::Duration::seconds(since.saturating_mul(2));
+            self.refresh_by = Some(by.max(later));
+        }
+        let mut kept = self.clone();
+        let mut took = false;
+        for field in std::mem::take(&mut kept.unread_enriched) {
+            let Some(credit) = stored.credits.iter().find(|c| c.field == field) else {
+                continue;
+            };
+            let value = match field {
+                CreditField::Image => (&mut kept.image, &stored.image),
+                CreditField::Description => (&mut kept.description, &stored.description),
+            };
+            let Some(stored_value) = value.1 else {
+                continue;
+            };
+            *value.0 = Some(stored_value.clone());
+            kept.credits.retain(|c| c.field != field);
+            kept.credits.push(credit.clone());
+            took = true;
+        }
+        kept.credits.sort_by_key(|c| c.field);
+        while took && !kept.fits() && kept.shed() {}
+        if kept.fits() || !took {
+            *self = kept;
+        } else {
+            // The stored document, accepted as it is (as `queue` takes an unchanged page's), with
+            // this reading's time and early read again.
+            let (fetched_at, refresh_by) = (self.fetched_at, self.refresh_by);
+            *self = stored.clone();
+            self.fetched_at = fetched_at;
+            self.refresh_by = refresh_by;
+            self.unread_enriched.clear();
+        }
     }
 }
 pub fn truncate(s: &mut String, max: usize) {
@@ -536,6 +718,278 @@ mod tests {
             preview: false,
         });
         assert_eq!(doc.bounded(&[]).unwrap().stream, None);
+    }
+    fn credit(field: CreditField, source: &str) -> Credit {
+        Credit {
+            field,
+            provider: CreditProvider::Wikipedia,
+            source_url: source.into(),
+            author: Some("Wikipedia contributors".into()),
+            license: "CC-BY-SA-4.0".into(),
+            license_url: Some("https://creativecommons.org/licenses/by-sa/4.0/".into()),
+            lang: Some("en".into()),
+            excerpted: true,
+            modified: false,
+            subject: None,
+        }
+    }
+    /// A credit is stored only with its field's value, once per field, within its bounds.
+    #[test]
+    fn credits_go_with_their_values_and_stay_bounded() {
+        let mut doc = ResourceMeta::new("https://musicbrainz.org/artist/x", "musicbrainz", 60);
+        doc.description = Some("Text".into());
+        doc.credits = vec![
+            credit(
+                CreditField::Image,
+                "https://commons.wikimedia.org/wiki/File:A.jpg",
+            ),
+            credit(CreditField::Description, "https://en.wikipedia.org/wiki/A"),
+            credit(CreditField::Description, "https://en.wikipedia.org/wiki/B"),
+        ];
+        let bounded = doc.clone().bounded(&[]).unwrap();
+        assert_eq!(
+            bounded.credits,
+            [credit(
+                CreditField::Description,
+                "https://en.wikipedia.org/wiki/A"
+            )]
+        );
+        let mut author = credit(CreditField::Description, "https://en.wikipedia.org/wiki/A");
+        author.author = Some("é".repeat(200));
+        assert_eq!(author.clone().bounded().unwrap().author.unwrap().len(), 256);
+        for bad in [
+            Credit {
+                source_url: "http://en.wikipedia.org/wiki/A".into(),
+                ..author.clone()
+            },
+            Credit {
+                source_url: format!("https://en.wikipedia.org/wiki/{}", "a".repeat(1024)),
+                ..author.clone()
+            },
+            Credit {
+                license: "CC BY SA".into(),
+                ..author.clone()
+            },
+            Credit {
+                license_url: Some("javascript:alert(1)".into()),
+                ..author.clone()
+            },
+            Credit {
+                subject: Some("musicbrainz:work".into()),
+                ..author.clone()
+            },
+            // The credential rule: no part of a credit is a link that carries one.
+            Credit {
+                source_url: "https://commons.wikimedia.org/wiki/File:A.jpg?token=x".into(),
+                ..author.clone()
+            },
+            Credit {
+                license_url: Some(
+                    "https://creativecommons.org/licenses/by/4.0/#access_token=x".into(),
+                ),
+                ..author.clone()
+            },
+            Credit {
+                author: Some("https://www.flickr.com/people/a?api_key=x".into()),
+                ..author.clone()
+            },
+            // An author is free text: a link inside it counts too.
+            Credit {
+                author: Some("Jane https://example.org/p?api_key=SECRET".into()),
+                ..author.clone()
+            },
+            Credit {
+                author: Some("Photo: Jane (https://example.org/p?access_token=x)".into()),
+                ..author.clone()
+            },
+        ] {
+            assert_eq!(bad.clone().bounded(), None, "{bad:?}");
+        }
+        // Trimmed to fit, a document drops a credit with its value.
+        doc.description = Some("é".repeat(1024));
+        doc.attributes = (0..32)
+            .map(|n| (format!("x{n}"), "v".repeat(256)))
+            .collect();
+        let keys: Vec<_> = doc.attributes.keys().cloned().collect();
+        let allowed: Vec<_> = keys.iter().map(String::as_str).collect();
+        let bounded = doc.bounded(&allowed).unwrap();
+        assert!(bounded.description.is_some() || bounded.credits.is_empty());
+    }
+    /// An enriched field a reading left unread keeps the stored value and credit; one the stored
+    /// card holds without a credit is no enrichment, and the reading's own value stays.
+    #[test]
+    fn an_unread_field_keeps_its_stored_value_and_credit() {
+        let mut stored = ResourceMeta::new("https://musicbrainz.org/artist/x", "musicbrainz", 60);
+        stored.image = Some("https://upload.wikimedia.org/a.jpg".into());
+        stored.description = Some("Stored summary".into());
+        stored.credits = vec![
+            credit(
+                CreditField::Image,
+                "https://commons.wikimedia.org/wiki/File:A.jpg",
+            ),
+            credit(CreditField::Description, "https://en.wikipedia.org/wiki/A"),
+        ];
+        let mut fresh = ResourceMeta::new("https://musicbrainz.org/artist/x", "musicbrainz", 60);
+        fresh.description = Some("Artist · 3:00".into());
+        fresh.unread_enriched = vec![CreditField::Image, CreditField::Description];
+        let mut kept = fresh.clone();
+        kept.keep_enriched(&stored);
+        assert_eq!(kept.image, stored.image);
+        assert_eq!(kept.description, stored.description);
+        assert_eq!(kept.credits, stored.credits);
+        assert!(kept.unread_enriched.is_empty());
+        // Stored without credits: nothing was enriched, nothing is kept.
+        let mut plain = stored.clone();
+        plain.credits.clear();
+        let mut kept = fresh.clone();
+        kept.keep_enriched(&plain);
+        assert_eq!(
+            (kept.image, kept.description.as_deref()),
+            (None, Some("Artist · 3:00"))
+        );
+        // Only the unread field is taken: a description read now stays this reading's.
+        let mut one = fresh.clone();
+        one.unread_enriched = vec![CreditField::Image];
+        one.keep_enriched(&stored);
+        assert_eq!(one.image, stored.image);
+        assert_eq!(one.description.as_deref(), Some("Artist · 3:00"));
+        assert_eq!(one.credits, stored.credits[..1]);
+    }
+    /// A transient failure never loses a stored enrichment: when a large fresh reading with the
+    /// stored values would pass the document cap, the reading gives up its last attributes, as
+    /// it would for a value read now, and keeps the stored values and credits, with its own time
+    /// and early read again.
+    #[test]
+    fn an_unread_field_past_the_cap_keeps_its_stored_value() {
+        let uri = "https://musicbrainz.org/artist/x";
+        let mut stored = ResourceMeta::new(uri, "musicbrainz", 60);
+        stored.image = Some("https://upload.wikimedia.org/a.jpg".into());
+        stored.description = Some("d".repeat(2048));
+        stored.attributes = [("genre".to_owned(), "jazz".to_owned())].into();
+        stored.credits = vec![
+            credit(
+                CreditField::Image,
+                "https://commons.wikimedia.org/wiki/File:A.jpg",
+            ),
+            credit(CreditField::Description, "https://en.wikipedia.org/wiki/A"),
+        ];
+        stored.fetched_at -= 3_600_000;
+        assert!(serde_json::to_string_pretty(&stored).unwrap().len() <= DOCUMENT_CAP);
+        let mut full = ResourceMeta::new(uri, "musicbrainz", 60);
+        full.attributes = (0..30)
+            .map(|n| (format!("x{n}"), "v".repeat(200)))
+            .collect();
+        full.unread_enriched = vec![CreditField::Image, CreditField::Description];
+        full.refresh_by = Some(Utc::now() + chrono::Duration::minutes(5));
+        let fetched_at = full.fetched_at;
+        full.keep_enriched(&stored);
+        assert_eq!(full.image, stored.image);
+        assert_eq!(full.description, stored.description);
+        assert_eq!(full.credits, stored.credits);
+        // This reading's facts, the first that fit; none of the stored ones.
+        assert!(full.attributes.len() < 30 && full.attributes.contains_key("x0"));
+        assert!(!full.attributes.contains_key("genre"));
+        assert!(serde_json::to_string_pretty(&full).unwrap().len() <= DOCUMENT_CAP);
+        assert_eq!(full.fetched_at, fetched_at);
+        assert!(full.refresh_by.unwrap() >= Utc::now() + chrono::Duration::minutes(119));
+        assert!(full.unread_enriched.is_empty());
+        // Nothing stored to keep: the reading stays as it is.
+        let mut plain = stored.clone();
+        plain.credits.clear();
+        let mut alone = ResourceMeta::new(uri, "musicbrainz", 60);
+        alone.attributes = [("x0".to_owned(), "fresh".to_owned())].into();
+        alone.unread_enriched = vec![CreditField::Image];
+        alone.keep_enriched(&plain);
+        assert_eq!(
+            (alone.image, alone.attributes["x0"].as_str()),
+            (None, "fresh")
+        );
+        assert!(alone.unread_enriched.is_empty());
+    }
+    /// A field unread again is asked about less and less often: at least twice as long as since
+    /// the stored reading, never sooner than the reading asked.
+    #[test]
+    fn an_unread_field_backs_off() {
+        let now = Utc::now();
+        let mut stored = ResourceMeta::new("https://musicbrainz.org/artist/x", "musicbrainz", 60);
+        let mut fresh = stored.clone();
+        fresh.unread_enriched = vec![CreditField::Image];
+        fresh.refresh_by = Some(now + chrono::Duration::hours(1));
+        // Read just now: the reading's own hour.
+        let mut soon = fresh.clone();
+        soon.keep_enriched(&stored);
+        let by = soon.refresh_by.unwrap();
+        assert!(
+            by >= now + chrono::Duration::minutes(59) && by <= now + chrono::Duration::minutes(61)
+        );
+        // Read three hours ago: six hours from now.
+        stored.fetched_at = (now - chrono::Duration::hours(3)).timestamp_millis();
+        let mut later = fresh.clone();
+        later.keep_enriched(&stored);
+        let by = later.refresh_by.unwrap();
+        assert!(
+            by >= now + chrono::Duration::minutes(359)
+                && by <= now + chrono::Duration::minutes(361)
+        );
+        // No early read asked: none is added.
+        let mut none = fresh.clone();
+        none.refresh_by = None;
+        none.keep_enriched(&stored);
+        assert_eq!(none.refresh_by, None);
+    }
+    /// A recording's card with a 2,048-byte description, an image and both credits at generous
+    /// lengths keeps them all within the document cap; one past it (every URL of both credits
+    /// near its 1,024-byte bound) gives up an enriched field, its credit with it, and still saves.
+    #[test]
+    fn an_enriched_card_fits_the_document() {
+        let card = |url: usize| {
+            let mut doc = ResourceMeta::new(
+                &format!("https://musicbrainz.org/recording/{}", "0".repeat(36)),
+                "musicbrainz",
+                86400,
+            );
+            doc.set_type("MusicRecording");
+            doc.name = Some("n".repeat(512));
+            doc.description = Some("d".repeat(DESCRIPTION_CAP));
+            doc.image = Some(format!("https://upload.wikimedia.org/{}", "i".repeat(url)));
+            doc.attributes.insert("artist".into(), "a".repeat(256));
+            let long = |field| Credit {
+                field,
+                provider: CreditProvider::WikimediaCommons,
+                source_url: format!("https://commons.wikimedia.org/wiki/{}", "s".repeat(url)),
+                author: Some("a".repeat(256)),
+                license: "CC-BY-SA-3.0-DE".into(),
+                // Past the realistic: every URL of the credit near its bound.
+                license_url: Some(format!(
+                    "https://creativecommons.org/licenses/by-sa/3.0/de/{}",
+                    "l".repeat(if url > 300 { url - 60 } else { 0 })
+                )),
+                lang: Some("en".into()),
+                excerpted: true,
+                modified: false,
+                subject: Some(format!(
+                    "https://musicbrainz.org/work/{}",
+                    "w".repeat(if url > 300 { url } else { 36 })
+                )),
+            };
+            doc.credits = vec![long(CreditField::Image), long(CreditField::Description)];
+            doc
+        };
+        let doc = card(300);
+        let bounded = doc.clone().bounded(&["artist"]).unwrap();
+        assert_eq!(bounded.description, doc.description);
+        assert_eq!(bounded.image, doc.image);
+        assert_eq!(bounded.credits, doc.credits);
+        assert!(serde_json::to_string_pretty(&bounded).unwrap().len() <= DOCUMENT_CAP);
+        let past = card(980).bounded(&["artist"]).unwrap();
+        assert!(serde_json::to_string_pretty(&past).unwrap().len() <= DOCUMENT_CAP);
+        assert!(past.description.is_none() || past.image.is_none());
+        for c in &past.credits {
+            match c.field {
+                CreditField::Image => assert!(past.image.is_some()),
+                CreditField::Description => assert!(past.description.is_some()),
+            }
+        }
     }
     #[test]
     fn identity_normalizes_and_hashes() {

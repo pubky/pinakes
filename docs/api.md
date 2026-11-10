@@ -105,6 +105,7 @@ An IMDb title keeps the type its page gives (it can be either).
 | `also_on` | The same thing elsewhere ([Also on](#also-on)): the other members of its group as `{id, uri, site}` (other resources first, one entry each by ID, then other occurrences of its own feed), then derived links nobody tagged as `{uri, site, derived: true, via, kind?, at?}`, by service name; one per service (of a recording's or an album's links, the one on the card's own release, else on the original edition), never another page of the card's own service, at most 8 on a search, lookup or group card and 256 on a resource read. A hint only: every member keeps its own card |
 | `open_in` | The clients that open a Pubky app's object, `[{client, url}]` (`url` is `https:`): from the app's profile ([Pubky apps](pubky-apps.md)), e.g. Loopky for a deck; on a Pubky event reference's card, those of the event object. `[]` on every other card |
 | `attribution` | Present on OSM cards, events placed at an OSM venue and events whose zone came from coordinates; display it with the card |
+| `credits` | Where `image` and `description` came from when Pinakes added them from another source than the link ([Credits](#credits)): one entry per such field, at most 4. `[]` when none: such a field came from the link itself |
 | `occurrence` | Occurrence cards only: `{feed_id, feed_uri, uid, recurrence_id, status}`; `feed_uri` is the feed's URI, the link people tagged |
 | `event` | Pubky event references only (an event post's occurrence at a place; no feed writes them today: social events are Nexus's, see [Pubky events](#calendars-and-occurrences)): `{author, object_path, recurrence_id, start, end, status}`; `object_path` is the post's versionless path, `recurrence_id` the occurrence's local start (`YYYY-MM-DDTHH:MM:SS`) or null for a one-off |
 | `maybe_same` | Event and occurrence cards: other events that are [possibly the same event](#possibly-the-same-event), best first, each `{id, uri, site, start, score}` (`[]` when there are none). An app's store card: store cards that are [possibly the same app](#possibly-the-same-app). `MusicRecording` cards: other recordings that are [possibly the same recording](#possibly-the-same-recording), the same shape (`start` is `null`). Up to three on a search, lookup or group card, up to ten on a resource read. A hint only, like `group`. Absent on other cards, on event and app cards with `[event] same_event_hint = "off"` and on recording cards with `[groups] same_recording_hint = "off"` |
@@ -164,6 +165,55 @@ Which cards carry one (each source's page in [docs/sources](sources/README.md) s
   the card's next read. Deezer's previews are signed and expire, so they are never one;
   Spotify's are not used.
 
+### Credits
+
+A MusicBrainz card can show an image from Wikimedia Commons and a description from Wikipedia
+or Wikidata (which item and which text: [Also on](#also-on), MusicBrainz pages). Each such field has a credit; show it
+with the value, linked:
+
+```json
+"credits": [
+  {"field": "image", "provider": "wikimedia_commons",
+   "source_url": "https://commons.wikimedia.org/wiki/File:Miles_Davis_by_Palumbo_cropped.jpg",
+   "author": "Tom Palumbo from New York City, USA", "license": "CC-BY-SA-2.0",
+   "license_url": "https://creativecommons.org/licenses/by-sa/2.0/", "lang": null,
+   "excerpted": false, "modified": false, "subject": null},
+  {"field": "description", "provider": "wikipedia",
+   "source_url": "https://en.wikipedia.org/wiki/Miles_Davis", "author": "Wikipedia contributors",
+   "license": "CC-BY-SA-4.0", "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+   "lang": "en", "excerpted": true, "modified": false, "subject": null}
+]
+```
+
+| Field | Meaning |
+| --- | --- |
+| `field` | `image` or `description`: the card field the value is in |
+| `provider` | `wikipedia` (an article's summary), `wikimedia_commons` (a file) or `wikidata` (an item's English description) |
+| `source_url` | The article, the file's page on Commons, or the item's page on Wikidata (`https://www.wikidata.org/wiki/Q…`): `https:`, at most 1,024 bytes |
+| `author` | Plain text, at most 256 bytes: `Wikipedia contributors` for an article, the file's author for an image; `null` for a CC0 or public-domain file that names none and for a Wikidata description |
+| `license` | An SPDX licence ID (`CC-BY-SA-4.0`, `CC-BY-2.0`, `CC-BY-SA-3.0-DE`, `CC0-1.0`) or `public-domain` |
+| `license_url` | The licence's text (`https:`); `null` for the public domain without a mark |
+| `lang` | The text's language: `en`, or another Wikipedia's code (`de`) when only that Wikipedia describes it; `null` for an image. A client may label or hide a text in a language its reader does not read |
+| `excerpted` | `true` when the text is a part of a longer source: a summary is the article's first paragraphs, and one over 2,048 bytes is cut at a sentence or a word. A Wikidata description is whole (`false`) |
+| `modified` | `true` when the value was changed beyond cutting it |
+| `subject` | The link of what the value is about when that is not the card itself: a recording's description taken from its work's item names the work (`https://musicbrainz.org/work/…`); else `null` |
+
+A Wikidata description's credit:
+
+```json
+{"field": "description", "provider": "wikidata",
+ "source_url": "https://www.wikidata.org/wiki/Q55825905", "author": null, "license": "CC0-1.0",
+ "license_url": "https://creativecommons.org/publicdomain/zero/1.0/", "lang": "en",
+ "excerpted": false, "modified": false, "subject": null}
+```
+
+A credit is there only with its value: a card without the image or description has none for it.
+No credit, and no image or description it credits, is a link that carries a credential
+([Resolution and status](#resolution-and-status)): such a value is not taken, so nothing the
+store drops can leave a value without its credit.
+The same credits are on every card of the resource: a search, lookup or group card, a resource
+read, the MCP tools' cards.
+
 ### Resource read
 
 `GET /v1/resources/{id}`, `GET /v1/resources/by-uri` and `POST /v1/resolve` return the card with
@@ -184,7 +234,7 @@ answer `If-None-Match` with 304.
 | `venue` | `{name, id}`: the venue's name and, when it resolved to a resource, its ID |
 | `organizer` | `{name, url}` |
 | `from` | Where the card's metadata came from when it is not the page itself: the [source](#sources) whose official API answered, e.g. `federal_register` |
-| `facts` | The fields that API names for the object, by name (`document_type`, `citation`, …), or the facts a [Pubky app's](pubky-apps.md) profile reads (`card_count`, `price`, `rating`, …), then the facts the [also-on](#also-on) sources read for it (such as a music link's `isrc`, `upc` and `mbid`); several values of one name are joined with `; `. Each source keeps at most `limits.also_on_facts_per_source` (32, at least 8) facts per resource, cutting the many values of one name (a recording's ISRCs) before a name's one value (its MBID, artist). Each source's page lists its facts. `null` when there are none. Facts never join anything |
+| `facts` | The fields that API names for the object, by name (`document_type`, `citation`, …), or the facts a [Pubky app's](pubky-apps.md) profile reads (`card_count`, `price`, `rating`, …), or a MusicBrainz page's own facts (its `artist`, `duration` in seconds, `genre`, …: [MusicBrainz facts](#also-on)), then the facts the [also-on](#also-on) sources read for it (such as a music link's `isrc`, `upc` and `mbid`); several values of one name are joined with `; `. Each source keeps at most `limits.also_on_facts_per_source` (32, at least 8) facts per resource, cutting the many values of one name (a recording's ISRCs) before a name's one value (its MBID, artist). Each source's page lists its facts. `null` when there are none. Facts never join anything |
 | `keys` | The public identifiers the resource is keyed by, as `GET /v1/search?key=` takes them (`isrc:…`, `upc:…`, `doi:…`, `isbn:…`, `mb:recording:…`, `wikidata:Q…`, `osm:node/…`): the keys its sources vouch for ([Also on](#also-on)), sorted; `[]` when there are none |
 | `aliases` | Other spellings of this link that resolve to it ([aliases](#aliases)), at most 50; a page's own `url`, `@id`, `sameAs` or canonical claims are not aliases and are not listed. The card's `uri` is the canonical one: an alias is answered with its root's card |
 | `updated_at` | When the current metadata was accepted |
@@ -1217,8 +1267,91 @@ is read as a web page. A MusicBrainz page's card ([its spellings](#aliases)) com
 MusicBrainz's web service (the entity it names), not from the page (unless that answer is over its
 8 MB cap: then the page is read as any page, and the sources record only what its URL proves, the
 MBID or the ISRC): the title, `MusicRecording`, `MusicAlbum`, `MusicGroup` or `Person` (an artist
-MusicBrainz calls a person), the artist credit and a recording's length as its description, `site`
-`MusicBrainz`; an ISRC's page is its one recording's card (agreeing duplicates: the one with the plainest title), else named `ISRC {code}`.
+MusicBrainz calls a person), the artist credit and a recording's length as its description (an
+enriched description below takes the place of this line; the resource read's `facts` still give
+them as `artist` and `duration`, in seconds, from the card itself as soon as it is read, and from
+the `musicbrainz_entity` source), `site`
+`MusicBrainz`; an ISRC's page is its one recording's card (agreeing duplicates: the one with the
+plainest title, whose card states no `duration` of its own: the `musicbrainz_entity` source's is
+the recording's that stands for them), else named `ISRC {code}`.
+
+**MusicBrainz facts.** The resource read's `facts` of a MusicBrainz page also give what
+MusicBrainz says about the entity in the same answer (no further request, with or without
+enrichment), each value whole and at most 256 bytes, else left out:
+
+| Fact | Of | Value |
+| --- | --- | --- |
+| `disambiguation` | any | MusicBrainz's comment that tells it from others of the name (`frenchcore artist`) |
+| `artist_type` | artist | `Person`, `Group`, `Orchestra`, `Choir`, `Character` or `Other` |
+| `country_code` | artist | ISO 3166-1 code (`NL`); the fact named `country` is a place's name elsewhere (Discogs' `Europe`), so a code has this name, as other sources' codes do |
+| `area` | artist | The area's name (`Netherlands`) |
+| `begin_date`, `end_date` | artist | Its life span, as MusicBrainz gives it: `YYYY`, `YYYY-MM` or `YYYY-MM-DD` |
+| `release_type` | release group | Its primary type (`Album`, `Single`, `EP`, …) |
+| `first_release_date` | release group, recording | As `begin_date` |
+| `genre` | any | Its top genres: at most three, most votes first, a tie by name, joined with `; ` |
+
+A MusicBrainz artist, release group, release or recording card also takes an image and a
+description from the entity's Wikidata item, each with its [credit](#credits) (`[web]
+music_enrichment`, on by default):
+- the item is the one the entity's own `wikidata` relation on MusicBrainz names (several give
+  nothing). Without such a relation, it is the one item that carries the entity's MBID (an
+  artist's `P434`, a release group's `P436`, a release's `P5813`, a recording's `P4404`), as
+  Wikidata's search proposes and the item itself states at its best rank; two such items, or more
+  hits than a search returns, give nothing. For an artist no item carries the MBID of, it is the
+  item the artist's Discogs artist pages on MusicBrainz name (`P1953`, at most two): every page
+  that names one names the same item alone. However it was found, by the relation too, the item is
+  read back and must be the entity's own, or the card takes nothing from it (and no other item is
+  looked for): never a Wikimedia page's item (`P31` a disambiguation page `Q4167410` or
+  `Q22808320`, a list article `Q13406463`, a category `Q4167836` or `Q15407973`, a template
+  `Q11266439`), and of the entity's kind, told by the identifiers the item carries: an artist's
+  (`P434` or a Discogs artist `P1953`, nothing else), a release group's (`P436` or a Discogs master
+  `P1954`; with a work ID `P435` or a song or single class `P31` a work's too: a single's song's,
+  a rock opera's), a release's (`P5813`, no release group's), a recording's (`P4404`, of no song
+  class), a work's (`P435`; or a song class with recording IDs and no work ID yet); an artist's
+  ID with any other is no one's. An artist takes an artist's item; a release group a release
+  group's, also one that is a work's too; a
+  release a release's, never its release group's (an album's item often lists its editions); a
+  recording a recording's that names that one recording, never a song's; each names no other
+  entity of its level. An item found by the MBID names the entity; one its own relation names
+  may not name it back yet, and may carry no identifier at all yet (Wikidata lags behind
+  MusicBrainz), except a recording's. An item too large to read is not
+  verified and gives nothing. A release uses its own item, never its release group's. A recording
+  also uses the one work it is a performance of, when that work has its own relation to an item
+  that, read back, is the work's by the same rule (a work's naming no other work, a single's, or
+  one with no identifier yet; never an album's, a recording's, a release's, an artist's or a
+  Wikimedia page's), for the description alone (its
+  credit names the work as `subject`); so does a recording whose own item gives nothing. Nothing
+  is matched by name;
+- the description is the first of: the summary of the item's English Wikipedia article (plain
+  text, at most 2,048 bytes, cut at a sentence or a word); the item's English description on
+  Wikidata, as it is (CC0, credited `wikidata`); the summary of the item's article in the first
+  of these Wikipedias it has one in: `de`, `fr`, `es`, `it`, `nl`, `pt`, `sv`, `pl`, `ja`, `ru`
+  (credited with that `lang`). Cards have no language negotiation and clients read English: an
+  English paragraph is best; a short, exact English line beats a longer paragraph a reader may
+  not be able to read; another language is better than nothing, and its credit's `lang` lets a
+  client label or hide it. Nothing is translated. For a recording, the order is: its item's
+  English article; its work's English article; its item's English description; its work's; one
+  other Wikipedia's summary, its item's first, else its work's. A song's article tells a reader
+  more than a one-line description of one recording of it. An item whose English article (or,
+  read for want of an English text, its other article) is a disambiguation page is no entity's:
+  the card takes nothing of it (no description, not its English one, no image, no other
+  Wikipedia; a recording still takes its work's text, and a work's such item gives no text). A sitelink to a redirect
+  gives no summary (the page it leads to is about something else). The summary's thumbnail is
+  never used;
+- the image is the item's image (`P18`) on Wikimedia Commons, a thumbnail asked 640 pixels wide
+  (Commons serves its next standard size, 960 pixels), shown
+  only when the file's own page gives a licence on the list (CC0, the public domain, CC BY or CC
+  BY-SA 1.0 to 4.0) and, under CC BY and CC BY-SA, its author.
+
+What it does not find leaves the card as MusicBrainz makes it (an artist without an item has no
+image or description: the card is still `ok`). An answer that fails for a while (a timeout, a
+429, a 5xx, Wikidata's `maxlag`, another unexpected status) keeps what the card had of that
+field (should the card then pass its size bound, it gives up its last facts first), and the card is read again after at least an hour and at least twice as long as since its
+last reading, up to its own refresh time (so a failure on a routine refresh waits for the next); a
+definite answer (no item, no text, a 404 or 410 from Wikidata, MusicBrainz or Wikipedia, a
+refused file) removes it. A failed text never gives way to
+the next one in the order: a busy English Wikipedia keeps the stored article's summary rather
+than show the shorter line. A failed search for the item leaves both fields as stored.
 
 ## Cards and resolvers
 
