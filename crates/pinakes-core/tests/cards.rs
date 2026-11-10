@@ -16,6 +16,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use url::Url;
+mod common;
 
 struct PublicDns;
 #[async_trait]
@@ -74,6 +75,56 @@ impl Transport for TransportMock {
     }
 }
 const RSS: &str = r#"<rss xmlns:podcast="https://podcastindex.org/namespace/1.0"><channel><title>Podcast</title><podcast:guid>channel-id</podcast:guid><item><guid>episode-1</guid><title>Episode One</title><link>https://podcast.example/episode</link><enclosure type="audio/mpeg" url="https://audio.example/one.mp3"/></item><item><guid>episode-2</guid><title>Episode Two</title></item></channel></rss>"#;
+
+/// A feed read through a redirect that lands on a link carrying a credential keeps the link it was
+/// asked for as its `podcast_feed`, never where the fetch ended.
+#[test]
+fn a_podcast_feed_that_lands_on_a_credential_keeps_the_link_asked_for() {
+    let f = Fetched {
+        permanent_redirect: false,
+        truncated: false,
+        url: "https://feeds.example/rss?auth=SECRET".parse().unwrap(),
+        status: 200,
+        body: RSS.as_bytes().to_vec(),
+        content_type: "application/rss+xml".into(),
+        retry_after_secs: 60,
+        location: None,
+        validators: Default::default(),
+    };
+    let doc = cards::podcast("https://podcast.example/feed", &f, 3600, 10)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        doc.attributes["podcast_feed"],
+        "https://podcast.example/feed"
+    );
+    assert!(!serde_json::to_string(&doc).unwrap().contains("SECRET"));
+}
+
+/// An episode card read from a feed that landed on a credential never takes an item's relative
+/// link or image: they resolve to that address.
+#[test]
+fn an_episode_card_never_takes_a_link_that_lands_on_a_credential_feed() {
+    let f = Fetched {
+        permanent_redirect: false,
+        truncated: false,
+        url: "https://feeds.example/rss?auth=SECRET".parse().unwrap(),
+        body: r#"<rss xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel><title>Podcast</title><item><guid>e1</guid><title>Episode One</title><link>#e1</link><itunes:image href=""/><enclosure type="audio/mpeg" url="https://audio.example/one.mp3"/></item></channel></rss>"#.as_bytes().to_vec(),
+        content_type: "application/rss+xml".into(),
+        status: 200,
+        location: None,
+        retry_after_secs: 60,
+        validators: Default::default(),
+    };
+    let d = cards::podcast("https://podcast.example/feed?guid=e1", &f, 3600, 10)
+        .unwrap()
+        .unwrap();
+    assert_eq!(d.name.as_deref(), Some("Episode One"));
+    assert!(
+        !serde_json::to_string(&d).unwrap().contains("SECRET"),
+        "{d:?}"
+    );
+}
 
 #[test]
 fn namespace_alone_does_not_make_a_podcast_series() {
@@ -258,11 +309,143 @@ async fn optional_fetch_policy_and_metrics() {
         }
     }
 }
+/// The media route never sends a link that carries a credential to an oEmbed provider: not
+/// first (a provider that names the link exactly, or `oembed = "always"`), not as the fallback for
+/// a page without a full card. The page itself is still read from its own site.
+#[tokio::test]
+async fn the_media_route_never_sends_a_link_that_carries_a_credential_to_oembed() {
+    struct Seen(Mutex<Vec<String>>);
+    #[async_trait]
+    impl Transport for Seen {
+        async fn get(&self, u: &Url, _: &[SocketAddr]) -> Result<Fetched> {
+            self.0.lock().unwrap().push(u.to_string());
+            let embed = u.path().contains("oembed");
+            Ok(Fetched {
+                permanent_redirect: false,
+                truncated: false,
+                url: u.clone(),
+                status: 200,
+                body: if embed {
+                    json!({"type":"video","title":"Embed"}).to_string()
+                } else {
+                    "<title>Page</title>".into()
+                }
+                .into_bytes(),
+                content_type: if embed {
+                    "application/json"
+                } else {
+                    "text/html"
+                }
+                .into(),
+                retry_after_secs: 60,
+                location: None,
+                validators: Default::default(),
+            })
+        }
+    }
+    for (policy, uri) in [
+        (
+            cards::OembedPolicy::WhenNeeded,
+            "https://www.youtube.com/watch?v=abc&token=x",
+        ),
+        (cards::OembedPolicy::Always, "https://vimeo.com/123?sig=x"),
+        (
+            cards::OembedPolicy::WhenNeeded,
+            "https://vimeo.com/123?key=x",
+        ),
+    ] {
+        let seen = Arc::new(Seen(Mutex::default()));
+        let mut cfg = Config::default();
+        cfg.media.oembed = policy;
+        let r = CardResolver {
+            kind: "media",
+            config: Arc::new(cfg),
+            web: WebResolver {
+                oembed_policy: Default::default(),
+                cards: None,
+                events: None,
+                config: Default::default(),
+                egress: Egress::with_backends(
+                    Default::default(),
+                    Arc::new(PublicDns),
+                    seen.clone(),
+                ),
+            },
+        };
+        assert!(r.resolve(uri).await.is_ok(), "{uri}");
+        let requests = seen.0.lock().unwrap();
+        assert!(!requests.is_empty(), "{uri}");
+        assert!(
+            requests.iter().all(|r| !r.contains("oembed")),
+            "{uri}: {requests:?}"
+        );
+    }
+}
+/// A page that redirects to a link carrying a credential is read there, but the oEmbed endpoint it
+/// advertises (which names that link) is never asked, whatever the policy.
+#[tokio::test]
+async fn a_redirect_to_a_link_that_carries_a_credential_gets_no_oembed() {
+    struct Seen(Mutex<Vec<String>>);
+    #[async_trait]
+    impl Transport for Seen {
+        async fn get(&self, u: &Url, _: &[SocketAddr]) -> Result<Fetched> {
+            self.0.lock().unwrap().push(u.to_string());
+            let landed = u.query().is_some_and(|q| q.contains("token="));
+            Ok(Fetched {
+                permanent_redirect: false,
+                truncated: false,
+                url: u.clone(),
+                status: if u.path() == "/page" && !landed { 302 } else { 200 },
+                body: if u.path().contains("oembed") {
+                    json!({"type":"video","title":"Embed"}).to_string()
+                } else {
+                    "<head><link rel='alternate' type='application/json+oembed' href='/oembed?url=https%3A%2F%2Fmedia.example%2Fpage%3Ftoken%3Dx'></head><title>Page</title>".into()
+                }
+                .into_bytes(),
+                content_type: if u.path().contains("oembed") {
+                    "application/json"
+                } else {
+                    "text/html"
+                }
+                .into(),
+                retry_after_secs: 60,
+                location: (u.path() == "/page" && !landed).then(|| "/page?token=x".into()),
+                validators: Default::default(),
+            })
+        }
+    }
+    let seen = Arc::new(Seen(Mutex::default()));
+    let web = WebResolver {
+        oembed_policy: cards::OembedPolicy::Always,
+        cards: None,
+        events: None,
+        config: Default::default(),
+        egress: Egress::with_backends(
+            common::unpaced_egress_config(),
+            Arc::new(PublicDns),
+            seen.clone(),
+        ),
+    };
+    assert!(web.resolve("https://media.example/page").await.is_ok());
+    let requests = seen.0.lock().unwrap();
+    assert!(
+        requests.iter().any(|r| r.contains("token=x")),
+        "{requests:?}"
+    );
+    assert!(
+        requests.iter().all(|r| !r.contains("/oembed")),
+        "{requests:?}"
+    );
+}
 fn resolver(kind: &'static str, cfg: Config, transport: Arc<TransportMock>) -> CardResolver {
     CardResolver::new(
         kind,
         Arc::new(cfg),
-        Egress::with_backends(Default::default(), Arc::new(PublicDns), transport),
+        Egress::with_backends(
+            common::unpaced_egress_config(),
+            Arc::new(PublicDns),
+            transport,
+        ),
     )
 }
 #[tokio::test]
@@ -447,13 +630,11 @@ fn a_feed_cut_off_at_the_cap_reads_to_its_last_whole_item() {
             "</item>".repeat(1_000)
         );
         assert!(hostile.len() > 900_000);
-        let started = std::time::Instant::now();
+        let started = common::thread_cpu_time();
         let completed = cards::feed_prefix(&hostile, 10_000).unwrap();
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(1),
-            "{open}: {:?}",
-            started.elapsed()
-        );
+        // Of this thread's CPU time: a bound load never inflates.
+        let used = common::thread_cpu_time() - started;
+        assert!(used < std::time::Duration::from_secs(5), "{open}: {used:?}");
         assert_eq!(
             completed,
             format!("{head}{}</channel></rss>", item(1)),
@@ -918,7 +1099,11 @@ async fn oembed_first_keeps_rich_page_types_and_ap_denial_falls_back() {
             cards: None,
             events: None,
             config: Default::default(),
-            egress: Egress::with_backends(Default::default(), Arc::new(PublicDns), Arc::new(Rich)),
+            egress: Egress::with_backends(
+                common::unpaced_egress_config(),
+                Arc::new(PublicDns),
+                Arc::new(Rich),
+            ),
         },
     };
     let d = make("media")
@@ -947,6 +1132,224 @@ async fn oembed_first_keeps_rich_page_types_and_ap_denial_falls_back() {
             .as_deref(),
         Some("Public web card")
     );
+}
+/// Each first link here redirects to an address that carries a credential; whatever is read
+/// there names relative links (`""`, `#x`).
+struct Landing;
+#[async_trait]
+impl Transport for Landing {
+    async fn get(&self, u: &Url, a: &[SocketAddr]) -> Result<Fetched> {
+        self.get_with(u, a, &Default::default()).await
+    }
+    async fn get_with(&self, u: &Url, _: &[SocketAddr], o: &FetchOptions) -> Result<Fetched> {
+        let ap = o
+            .accept
+            .as_deref()
+            .is_some_and(|s| s.contains("activity+json"));
+        let landed = u.query().is_some_and(|q| q.contains("token="));
+        let note = |icon: &str| {
+            json!({"type":"Note","id":u.as_str(),"content":"Note","icon":{"url":icon}})
+                .to_string()
+                .into_bytes()
+        };
+        let mut f = Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            url: u.clone(),
+            status: 200,
+            body: b"<title>Fallback</title>".to_vec(),
+            content_type: "text/html".into(),
+            location: None,
+            retry_after_secs: 60,
+            validators: Default::default(),
+        };
+        match u.path() {
+            "/note" | "/alternate" | "/header" | "/oembed" if !landed => {
+                f.status = 302;
+                f.location = Some(format!("{}?token=SECRET", u.path()));
+            }
+            _ if ap => {
+                f.content_type = "application/activity+json".into();
+                f.body = note("#x");
+            }
+            "/note" => {
+                f.content_type = "application/activity+json".into();
+                f.body = note("");
+            }
+            "/alternate" => {
+                f.body = br#"<title>Alternate</title><link rel="alternate" type="application/activity+json" href="">"#.to_vec();
+            }
+            "/header" => {
+                f.body = b"<title>Header</title>".to_vec();
+                f.validators.link =
+                    Some("<>; rel=alternate; type=application/activity+json".into());
+            }
+            "/oembed" => {
+                f.content_type = "application/json".into();
+                f.body = json!({"type":"photo","title":"Embedded","thumbnail_url":"#x"})
+                    .to_string()
+                    .into_bytes();
+            }
+            "/video" => {
+                f.body = br#"<title>Video</title><link rel="alternate" type="application/json+oembed" href="/oembed">"#.to_vec();
+            }
+            _ => {}
+        }
+        Ok(f)
+    }
+}
+
+/// A card read at an address that carries a credential, by a redirect, resolves nothing back to
+/// it: an ActivityPub object's empty icon, an empty alternate link or `Link: <>` (whose object is
+/// then fetched), and an oEmbed answer that landed on one, on the page route and the media route.
+#[tokio::test]
+async fn a_card_read_at_a_credential_resolves_nothing_back_to_it() {
+    let mut cfg = Config::default();
+    cfg.cards.activitypub.enabled = true;
+    let egress = || {
+        Egress::with_backends(
+            common::unpaced_egress_config(),
+            Arc::new(PublicDns),
+            Arc::new(Landing),
+        )
+    };
+    let web = WebResolver {
+        oembed_policy: cards::OembedPolicy::Always,
+        cards: Some(Arc::new(cfg.cards.clone())),
+        events: None,
+        config: Default::default(),
+        egress: egress(),
+    };
+    for uri in [
+        "https://social.example/note",
+        "https://social.example/alternate",
+        "https://social.example/header",
+        "https://social.example/video",
+    ] {
+        let d = web.resolve(uri).await.unwrap();
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(!json.contains("SECRET"), "{uri}: {json}");
+    }
+    let d = CardResolver::new("media", Arc::new(cfg), egress())
+        .resolve("https://www.youtube.com/watch?v=abc")
+        .await
+        .unwrap();
+    let json = serde_json::to_string(&d).unwrap();
+    assert!(!json.contains("SECRET"), "{json}");
+}
+
+/// Nothing stored names a credential but the resource's own link, whichever field it came in by:
+/// the image, an attribute, an alias, a client link, the stream, a performer's link.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn nothing_stored_names_a_credential_but_its_own_link(pool: sqlx::PgPool) {
+    use pinakes_core::{
+        event::Performer,
+        model::{OpenIn, Stream},
+        store,
+    };
+    let uri = "https://cal.example/feed.ics?token=OWN";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let leaked = "https://cdn.example/x.png?sig=SECRET";
+    let mut d = ResourceMeta::new(uri, "web", 3600);
+    d.name = Some("Calendar".into());
+    d.image = Some(leaked.into());
+    d.attributes.insert("feed".into(), uri.into());
+    d.attributes.insert("author".into(), leaked.into());
+    d.aliases
+        .push("https://cal.example/feed.ics?key=SECRET".into());
+    d.open_in.push(OpenIn {
+        client: "App".into(),
+        url: "https://app.example/#/open?token=SECRET".into(),
+    });
+    d.stream = Some(Stream {
+        url: "https://audio.example/a.mp3?X-Amz-Signature=SECRET".into(),
+        media_type: "audio/mpeg".into(),
+        duration_s: None,
+        preview: false,
+    });
+    d.event.performers.push(Performer {
+        name: "Band".into(),
+        links: vec![leaked.into(), "https://band.example/".into()],
+    });
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    let stored: Value = sqlx::query_scalar("SELECT doc FROM resource WHERE id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let json = stored.to_string();
+    assert!(!json.contains("SECRET"), "{json}");
+    assert_eq!(stored["url"], uri);
+    assert_eq!(stored["attributes"]["feed"], uri);
+    assert_eq!(stored["name"], "Calendar");
+    assert_eq!(
+        stored["performers"][0]["links"],
+        json!(["https://band.example/"])
+    );
+}
+/// A card kept as it was stored (an answer found missing keeps it) is written without a
+/// credential too, and so is its change line: the guard runs at the last write.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_card_kept_as_stored_is_written_without_a_credential(pool: sqlx::PgPool) {
+    use pinakes_core::{model::Status, store};
+    let uri = "https://page.example/kept";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut d = ResourceMeta::new(uri, "web", 3600);
+    d.name = Some("Kept".into());
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    // As an earlier build stored it.
+    sqlx::query("UPDATE resource SET doc=jsonb_set(doc,'{image}',to_jsonb('https://cdn.example/x.png?sig=SECRET'::text)) WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    d.status = Status::Missing;
+    for _ in 0..2 {
+        d.fetched_at += 1;
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+    }
+    let stored: Value = sqlx::query_scalar("SELECT doc FROM resource WHERE id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(stored["status"], "missing");
+    assert_eq!(stored["name"], "Kept");
+    assert!(!stored.to_string().contains("SECRET"), "{stored}");
+    let history: String = sqlx::query_scalar("SELECT coalesce(string_agg(concat_ws(' ',before::text,after::text),' '),'') FROM resource_change WHERE resource_id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(!history.contains("SECRET"), "{history}");
+}
+
+/// A change line exempts only the resource's own link: a credential an earlier build stored in a
+/// document's `url` (another spelling of a public link) goes from the line too.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_change_line_exempts_only_the_resources_own_link(pool: sqlx::PgPool) {
+    use pinakes_core::store;
+    let uri = "https://page.example/legacy";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut d = ResourceMeta::new(uri, "web", 3600);
+    d.name = Some("First".into());
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    // As an earlier build stored it.
+    sqlx::query("UPDATE resource SET doc=jsonb_set(doc,'{url}',to_jsonb('https://page.example/legacy#access_token=SECRET'::text)) WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    d.name = Some("Second".into());
+    d.fetched_at += 1;
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    let history: String = sqlx::query_scalar("SELECT coalesce(string_agg(concat_ws(' ',before::text,after::text),' '),'') FROM resource_change WHERE resource_id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(history.contains("Second"), "{history}");
+    assert!(!history.contains("SECRET"), "{history}");
 }
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn social_deletion_purges_content_history(pool: sqlx::PgPool) {
@@ -1090,7 +1493,11 @@ async fn advertised_oembed_uses_policy_and_origin_checks() {
             cards: None,
             events: None,
             config: Default::default(),
-            egress: Egress::with_backends(Default::default(), Arc::new(PublicDns), t.clone()),
+            egress: Egress::with_backends(
+                common::unpaced_egress_config(),
+                Arc::new(PublicDns),
+                t.clone(),
+            ),
         };
         let metrics = pinakes_core::telemetry::Metrics::new().unwrap();
         let (doc, _) = pinakes_core::telemetry::observe(
@@ -1533,7 +1940,11 @@ async fn json_ld_names_the_object_unless_its_provider_names_the_link_exactly() {
             oembed_policy: Default::default(),
             cards: None,
             events: None,
-            egress: Egress::with_backends(Default::default(), Arc::new(PublicDns), Arc::new(Media)),
+            egress: Egress::with_backends(
+                common::unpaced_egress_config(),
+                Arc::new(PublicDns),
+                Arc::new(Media),
+            ),
             config: Default::default(),
         },
     };

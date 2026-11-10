@@ -14,6 +14,7 @@ use pinakes_core::{
 };
 use serde_json::{json, Value};
 use sqlx::PgPool;
+mod common;
 
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn paginated_nostr_and_inconclusive_queue_retry(pool: PgPool) {
@@ -219,7 +220,8 @@ async fn a_derived_link_and_a_feed_apply_take_locks_in_one_order(pool: PgPool) {
             .await
         }
     });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // The derivation has reached the parent's row and waits for it, holding no adapter lock.
+    common::lock_waiters_reach(&pool, 1, "the derivation").await;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('btcmap',17614))")
         .execute(&mut *apply)
         .await
@@ -491,8 +493,11 @@ async fn only_parse_errors_fall_back_and_plain_wikipedia_skips_fetch(pool: PgPoo
             failure,
             calls: Default::default(),
         });
-        let egress =
-            Egress::with_backends(Default::default(), Arc::new(AdapterDns), transport.clone());
+        let egress = Egress::with_backends(
+            common::unpaced_egress_config(),
+            Arc::new(AdapterDns),
+            transport.clone(),
+        );
         let r = platform(
             &pool,
             EventConfig {
@@ -623,7 +628,7 @@ async fn billetto_denied_venue_never_dead_letters(pool: PgPool) {
         OsmResolver::new(
             pool.clone(),
             pinakes_core::config::OsmConfig {
-                nominatim_url: format!("http://{address}"),
+                nominatim_url: format!("http://{address}").into(),
                 ..Default::default()
             },
         )
@@ -898,7 +903,7 @@ async fn slow_optional_venue_keeps_single_event_and_attempts(pool: PgPool) {
         OsmResolver::new(
             pool.clone(),
             pinakes_core::config::OsmConfig {
-                nominatim_url: format!("http://{address}"),
+                nominatim_url: format!("http://{address}").into(),
                 ..Default::default()
             },
         )
@@ -1316,6 +1321,352 @@ async fn saved_cursor(pool: &PgPool, id: &str) -> Option<String> {
         .await
         .unwrap()
 }
+/// A calendar's occurrences and its fetch state are stored without a credential however one got
+/// there: a new occurrence, one cancelled from what was stored, its change lines, and a `Link`
+/// header the feed answered with.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_calendar_stores_no_credential_in_its_occurrences_or_fetch_state(pool: PgPool) {
+    let uri = "https://example.org/guarded.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let now = Utc::now().timestamp_millis();
+    let mut d = snapshot(uri, 2, now);
+    checkpoint(&mut d, &id, None, "1", false);
+    let container = d.container.as_mut().unwrap();
+    container.validators = Some(pinakes_core::resolver::egress::Validators {
+        link: Some(r#"<https://cal.example/alt?token=SECRET>; rel="alternate""#.into()),
+        etag: Some("e1".into()),
+        last_modified: None,
+    });
+    container.occurrences[0].doc.image = Some("https://img.example/0.png?sig=SECRET".into());
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    // As an earlier build stored it, then cancelled by a delta.
+    sqlx::query("UPDATE occurrence SET doc=jsonb_set(doc,'{image}',to_jsonb('https://img.example/1.png?sig=SECRET'::text)) WHERE resource_id=$1 AND uid='1'")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut delta = snapshot(uri, 0, now + 1);
+    delta.container.as_mut().unwrap().delta = true;
+    delta.container.as_mut().unwrap().deleted_uids = vec!["1".into()];
+    checkpoint(&mut delta, &id, Some("1"), "2", false);
+    store::save_document(&pool, &id, 0, &delta).await.unwrap();
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM occurrence WHERE resource_id=$1 AND uid='1'")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(status, "cancelled");
+    let stored: String = sqlx::query_scalar(
+        "SELECT concat_ws(' ',(SELECT string_agg(doc::text,' ') FROM occurrence WHERE resource_id=$1),(SELECT validators::text FROM event_fetch WHERE resource_id=$1),(SELECT string_agg(concat_ws(' ',before::text,after::text),' ') FROM resource_change WHERE resource_id=$1))",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!stored.contains("SECRET"), "{stored}");
+    assert!(stored.contains("e1"), "{stored}");
+}
+
+/// A feed item whose id is a link carrying a credential (an Atom `<id>`, an RSS `<guid>`, a JSON
+/// Feed `id`) is stored by a stand-in that names no secret, the same on every read: not in its
+/// occurrence, the feed's fetch state or its change lines.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_feed_item_id_that_carries_a_credential_is_stored_by_a_stand_in(pool: PgPool) {
+    let uri = "https://starticket.example/feed.xml";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let cfg = EventConfig::default();
+    let day = (Utc::now() + Duration::days(30)).format("%Y-%m-%d");
+    let xml = format!(
+        r#"<feed xmlns="http://www.w3.org/2005/Atom" xmlns:mc="https://starticket.example/feeds"><title>Atom sample</title><entry><id>https://cal.example/item?token=SECRET</id><title>Concert</title><link href="https://starticket.example/42"/><mc:dates fromdate="{day}T17:00:00Z" todate="{day}T19:00:00Z"/></entry></feed>"#
+    );
+    let xml = xml.as_bytes();
+    for at in [0, 1] {
+        let mut doc = pinakes_core::event::calendar::structured_feed(uri, xml, &cfg, Utc::now())
+            .unwrap()
+            .unwrap();
+        doc.fetched_at += at;
+        store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    }
+    let uids: Vec<String> = sqlx::query_scalar("SELECT uid FROM occurrence WHERE resource_id=$1")
+        .bind(&id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(uids.len(), 1, "{uids:?}");
+    let stored: String = sqlx::query_scalar(
+        "SELECT concat_ws(' ',(SELECT string_agg(concat_ws(' ',uid,doc::text),' ') FROM occurrence WHERE resource_id=$1),(SELECT concat_ws(' ',held_keys::text,missing_keys::text) FROM event_fetch WHERE resource_id=$1),(SELECT string_agg(concat_ws(' ',occurrence_key,before::text,after::text),' ') FROM resource_change WHERE resource_id=$1))",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!stored.contains("SECRET"), "{stored}");
+}
+
+/// A feed row whose id is a link carrying a credential (an einundzwanzig row without a title, a
+/// Nostr calendar's `kind:author:d-tag`) names no secret: not its UID, not the name made from it.
+#[test]
+fn a_row_id_that_carries_a_credential_names_no_secret() {
+    let cfg = EventConfig::default();
+    let mut doc = cursor::container("https://portal.einundzwanzig.space/api/meetups", &cfg);
+    let row = json!({"id":"https://cal.example/e?token=SECRET","meetup_id":1,"title":null,"start":(Utc::now()+Duration::days(1)).to_rfc3339()});
+    cursor::append(&mut doc, "einundzwanzig", &row, &cfg).unwrap();
+    let c = doc.container.unwrap();
+    let json = format!(
+        "{} {}",
+        c.occurrences[0].uid,
+        serde_json::to_string(&c.occurrences[0].doc).unwrap()
+    );
+    assert!(!json.contains("SECRET"), "{json}");
+    let nostr = pinakes_core::event::stored_uid(
+        "31923:abc123:https://cal.example/item?token=SECRET".into(),
+    );
+    assert!(
+        nostr.starts_with("uid:") && !nostr.contains("SECRET"),
+        "{nostr}"
+    );
+}
+/// An occurrence an earlier build stored under a UID that is a link carrying a credential goes on
+/// under its stand-in when the feed is read again: one row, not cancelled, and nothing stored names
+/// the secret.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn an_occurrence_stored_under_a_credential_uid_goes_on_under_its_stand_in(pool: PgPool) {
+    let uri = "https://example.org/legacy-uid.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let cfg = EventConfig::default();
+    let ics = |uid: &str| {
+        let day = (Utc::now() + Duration::days(30)).format("%Y%m%d");
+        format!("BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:{uid}\nDTSTART:{day}T170000Z\nSUMMARY:Concert\nEND:VEVENT\nEND:VCALENDAR\n")
+    };
+    let secret = "https://cal.example/event?token=SECRET";
+    let doc = pinakes_core::event::calendar::parse(uri, ics("legacy").as_bytes(), &cfg, Utc::now())
+        .unwrap();
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    // As an earlier build stored it: the raw UID in the row and in the feed's fetch state.
+    let old_key = serde_json::to_string(&("legacy", "")).unwrap();
+    let raw_key = serde_json::to_string(&(secret, "")).unwrap();
+    sqlx::query("UPDATE occurrence SET uid=$2 WHERE resource_id=$1 AND uid='legacy'")
+        .bind(&id)
+        .bind(secret)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE event_fetch SET held_keys=array_replace(held_keys,$2,$3),missing_keys=CASE WHEN missing_keys ? $2 THEN (missing_keys - $2) || jsonb_build_object($3,missing_keys->$2) ELSE missing_keys END WHERE resource_id=$1")
+        .bind(&id)
+        .bind(&old_key)
+        .bind(&raw_key)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for at in [1, 2] {
+        let mut doc =
+            pinakes_core::event::calendar::parse(uri, ics(secret).as_bytes(), &cfg, Utc::now())
+                .unwrap();
+        doc.fetched_at += at;
+        store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    }
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT uid,status FROM occurrence WHERE resource_id=$1")
+            .bind(&id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(rows[0].0.starts_with("uid:"), "{rows:?}");
+    assert_ne!(rows[0].1, "cancelled", "{rows:?}");
+    let stored: String = sqlx::query_scalar(
+        "SELECT concat_ws(' ',(SELECT string_agg(concat_ws(' ',uid,doc::text),' ') FROM occurrence WHERE resource_id=$1),(SELECT concat_ws(' ',held_keys::text,missing_keys::text) FROM event_fetch WHERE resource_id=$1),(SELECT string_agg(concat_ws(' ',occurrence_key,before::text,after::text),' ') FROM resource_change WHERE resource_id=$1))",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!stored.contains("SECRET"), "{stored}");
+}
+
+/// A raw credential UID stored beside its stand-in (both spellings of one occurrence) leaves one
+/// row under the stand-in, and a raw key held only in the feed's fetch state moves to it too:
+/// nothing stored names the secret after the feed is read again.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn both_spellings_of_a_credential_uid_leave_one_row_and_no_raw_key(pool: PgPool) {
+    let uri = "https://example.org/both-uids.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let cfg = EventConfig::default();
+    let secret = "https://cal.example/event?token=SECRET";
+    let gone = "https://cal.example/gone?token=SECRET";
+    let day = (Utc::now() + Duration::days(30)).format("%Y%m%d");
+    let ics = format!("BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:{secret}\nDTSTART:{day}T170000Z\nSUMMARY:Concert\nEND:VEVENT\nEND:VCALENDAR\n");
+    let doc = pinakes_core::event::calendar::parse(uri, ics.as_bytes(), &cfg, Utc::now()).unwrap();
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    // As an earlier build left it: the same occurrence under the raw UID too, and a raw key in
+    // the fetch state whose row is gone.
+    sqlx::query("INSERT INTO occurrence(resource_id,uid,recurrence_id,start_at,end_at,name,venue_id,status,url,doc,point,sequence,modified,content_hash) SELECT resource_id,$2,recurrence_id,start_at,end_at,name,venue_id,status,url,doc,point,sequence,modified,content_hash FROM occurrence WHERE resource_id=$1")
+        .bind(&id)
+        .bind(secret)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE event_fetch SET missing_keys=missing_keys || jsonb_build_object($2::text,1) WHERE resource_id=$1")
+        .bind(&id)
+        .bind(serde_json::to_string(&(gone, "")).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut doc =
+        pinakes_core::event::calendar::parse(uri, ics.as_bytes(), &cfg, Utc::now()).unwrap();
+    doc.fetched_at += 1;
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT uid,status FROM occurrence WHERE resource_id=$1")
+            .bind(&id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_ne!(rows[0].1, "cancelled", "{rows:?}");
+    let stored: String = sqlx::query_scalar(
+        "SELECT concat_ws(' ',(SELECT string_agg(concat_ws(' ',uid,doc::text),' ') FROM occurrence WHERE resource_id=$1),(SELECT concat_ws(' ',held_keys::text,missing_keys::text) FROM event_fetch WHERE resource_id=$1),(SELECT string_agg(concat_ws(' ',occurrence_key,before::text,after::text),' ') FROM resource_change WHERE resource_id=$1))",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!stored.contains("SECRET"), "{stored}");
+}
+
+/// A change line and a group unit an earlier build keyed by a raw credential UID take the
+/// stand-in when the feed is read again, in place (the same lines, the same unit), while a line
+/// keyed by a plain UID and another resource's lines stay as written.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn change_lines_and_group_units_keyed_by_a_credential_uid_move_to_its_stand_in(pool: PgPool) {
+    let uri = "https://example.org/legacy-lines.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let other = store::ensure_resource(&pool, "https://example.org/other.ics")
+        .await
+        .unwrap();
+    let cfg = EventConfig::default();
+    let secret = "https://cal.example/event?token=SECRET";
+    let day = (Utc::now() + Duration::days(30)).format("%Y%m%d");
+    let ics = format!("BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:{secret}\nDTSTART:{day}T170000Z\nSUMMARY:Concert\nEND:VEVENT\nEND:VCALENDAR\n");
+    let doc = pinakes_core::event::calendar::parse(uri, ics.as_bytes(), &cfg, Utc::now()).unwrap();
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    // As an earlier build left them: a change line of this feed and of another under the raw
+    // key, one under a plain key, and a group unit of the occurrence under the raw key.
+    let raw_key = serde_json::to_string(&(secret, "")).unwrap();
+    let plain_key = serde_json::to_string(&("plain", "")).unwrap();
+    // A UID whose link start is split by a tab or a newline (stored escaped in the key) or
+    // whose key is percent-encoded counts too.
+    let tab_key =
+        serde_json::to_string(&("ht\ttps://cal.example/event?%74oken=SECRET", "r")).unwrap();
+    let newline_key =
+        serde_json::to_string(&("web\ncal:cal.example/feed.ics?token=SECRET", "")).unwrap();
+    // A key whose recurrence id is not a string is read all the same.
+    let null_key = format!("[{},null]", serde_json::to_string(secret).unwrap());
+    let mut seqs = vec![];
+    for (resource, key) in [
+        (&id, &raw_key),
+        (&id, &plain_key),
+        (&other, &raw_key),
+        (&id, &tab_key),
+        (&id, &newline_key),
+        (&id, &null_key),
+    ] {
+        let seq: i64 = sqlx::query_scalar("INSERT INTO resource_change(resource_id,class,fields,source,occurrence_key) VALUES($1,'created','{}','ics',$2) RETURNING seq")
+            .bind(resource)
+            .bind(key)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        seqs.push(seq);
+    }
+    let unit = "a".repeat(32);
+    sqlx::query("INSERT INTO group_unit(unit_id,resource_id,occurrence_key,occurrence) VALUES($1,$2,$3,jsonb_build_object('uid',$4::text,'recurrence_id',NULL,'status','scheduled'))")
+        .bind(&unit)
+        .bind(&id)
+        .bind(&raw_key)
+        .bind(secret)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut doc =
+        pinakes_core::event::calendar::parse(uri, ics.as_bytes(), &cfg, Utc::now()).unwrap();
+    doc.fetched_at += 1;
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let stand_in = pinakes_core::event::stored_uid(secret.to_owned());
+    assert!(stand_in.starts_with("uid:"));
+    let new_key = serde_json::to_string(&(&stand_in, "")).unwrap();
+    let keys: Vec<String> = sqlx::query_scalar(
+        "SELECT coalesce(occurrence_key,'') FROM resource_change WHERE seq=ANY($1) ORDER BY seq",
+    )
+    .bind(&seqs)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let stored_key = |key: &str| pinakes_core::changes::stored_key(key);
+    assert_ne!(stored_key(&tab_key), tab_key);
+    assert_ne!(stored_key(&newline_key), newline_key);
+    assert_eq!(
+        keys,
+        [
+            new_key.clone(),
+            plain_key,
+            raw_key.clone(),
+            stored_key(&tab_key),
+            stored_key(&newline_key),
+            stored_key(&null_key)
+        ]
+    );
+    assert!(keys[5].ends_with(",null]"), "{}", keys[5]);
+    let (unit_key, unit_uid): (String, Option<String>) =
+        sqlx::query_as("SELECT occurrence_key,occurrence->>'uid' FROM group_unit WHERE unit_id=$1")
+            .bind(&unit)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((unit_key, unit_uid), (new_key, Some(stand_in)));
+    let stored: String = sqlx::query_scalar(
+        "SELECT concat_ws(' ',(SELECT string_agg(concat_ws(' ',occurrence_key,before::text,after::text),' ') FROM resource_change WHERE resource_id=$1),(SELECT string_agg(concat_ws(' ',occurrence_key,occurrence::text),' ') FROM group_unit WHERE resource_id=$1))",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!stored.contains("SECRET"), "{stored}");
+}
+
+/// A UID stored by an earlier build that hides its link behind a tab (`web<TAB>cal:…`) moves to
+/// its stand-in too: nothing stored names the secret after the feed is read again.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_credential_uid_hidden_by_a_tab_moves_to_its_stand_in(pool: PgPool) {
+    let uri = "https://example.org/tab-uid.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let cfg = EventConfig::default();
+    let day = (Utc::now() + Duration::days(30)).format("%Y%m%d");
+    let ics = format!("BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:plain-1\nDTSTART:{day}T170000Z\nSUMMARY:Concert\nEND:VEVENT\nEND:VCALENDAR\n");
+    let doc = pinakes_core::event::calendar::parse(uri, ics.as_bytes(), &cfg, Utc::now()).unwrap();
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    // As an earlier build stored it.
+    sqlx::query("UPDATE occurrence SET uid=$2 WHERE resource_id=$1 AND uid='plain-1'")
+        .bind(&id)
+        .bind("web\tcal:cal.example/feed.ics?token=SECRET")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut doc =
+        pinakes_core::event::calendar::parse(uri, ics.as_bytes(), &cfg, Utc::now()).unwrap();
+    doc.fetched_at += 1;
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let stored: String = sqlx::query_scalar(
+        "SELECT concat_ws(' ',(SELECT string_agg(concat_ws(' ',uid,doc::text),' ') FROM occurrence WHERE resource_id=$1),(SELECT concat_ws(' ',held_keys::text,missing_keys::text) FROM event_fetch WHERE resource_id=$1),(SELECT string_agg(concat_ws(' ',occurrence_key,before::text,after::text),' ') FROM resource_change WHERE resource_id=$1))",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!stored.contains("SECRET"), "{stored}");
+}
+
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn cursor_deltas_tombstones_rollback_hold_reset_and_compare_swap(pool: PgPool) {
     let uri = "https://example.org/cursor.ics";
@@ -3248,7 +3599,7 @@ async fn public_canary_redaction_unknown_size_and_disabled_nostr(pool: PgPool) {
     use tower::ServiceExt;
     // Public info shows a canary's host only; the admin listener keeps the full URL.
     let cfg = Config::default();
-    let state = AppState::new(pool.clone(), cfg.clone()).await.unwrap();
+    let state = AppState::new(pool.clone(), cfg.clone()).unwrap();
     for (app, private) in [
         (api::router(state.clone()), false),
         (api::admin_router(state), true),
@@ -3360,11 +3711,7 @@ async fn alias_references_scope_search_and_occurrence_reads(pool: PgPool) {
     assert_eq!((mapped.as_str(), resolver), (root.as_str(), None));
     let doc = snapshot(root_uri, 3, Utc::now().timestamp_millis());
     store::save_document(&pool, &root, 0, &doc).await.unwrap();
-    let app = api::router(
-        AppState::new(pool.clone(), Default::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Default::default()).unwrap());
     for path in [
         format!("/v1/resources/{alias}/occurrences?limit=2"),
         "/v1/search?type=Event&tags=review&facet=tags".into(),

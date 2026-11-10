@@ -8,6 +8,7 @@ database_url = "postgresql:///pinakes?host=/var/run/postgresql"
 listen = "127.0.0.1:8090"
 admin_listen = "127.0.0.1:9090"
 # admin_token = "" # Prefer PINAKES__ADMIN_TOKEN; required for a non-loopback admin bind.
+# admin_hosts = [] # Names a scraper reaches the admin listener by, besides localhost and IP addresses.
 nexus_url = "http://127.0.0.1:8080" # No credentials here: a Nexus behind them gets PINAKES_NEXUS_AUTHORIZATION.
 nexus_reach_set = false # The Nexus serves the reach-set route: search takes reach=wot_2 and boost=wot_2.
 
@@ -33,22 +34,14 @@ pkarr_relays = ["https://pkarr.pubky.app", "https://pkarr.pubky.org"]
 enabled = true
 
 # Referenced OSM objects, including aliases; no search/reverse-geocoding proxy.
-# The public Nominatim is for a small development run; deployments use their own URL.
+# The public Nominatim is for a small development run; deployments use their own URL. A hosted
+# Nominatim's URL carries its key: set it as PINAKES__OSM__NOMINATIM_URL in the environment file.
 [osm]
 enabled = true
-# "nominatim" (nominatim_url) or "locationiq" ([osm.locationiq]); one provider, no failover.
-provider = "nominatim"
 nominatim_url = "https://nominatim.openstreetmap.org"
 requests_per_second = 0.5 # The public host allows at most one request per second.
 # The ODbL dump file (osm_place.ndjson.gz), rewritten daily; it needs room for every cached place.
 dump_dir = "/var/lib/pinakes/dumps"
-# LocationIQ, with provider = "locationiq": its key comes from LOCATIONIQ_API_KEY alone, its rate
-# from limits.locationiq_requests_per_second. public_use_authorized states that LocationIQ has
-# given written permission for Pinakes' public API and dump; a key alone does not. It stays needed,
-# whatever the provider, while places LocationIQ answered are stored or in the dump file.
-# [osm.locationiq]
-# region = "us1" # or "eu1"
-# public_use_authorized = false
 
 # Card resolvers; HTTP fallbacks can still use web.
 [cards.media]
@@ -269,7 +262,7 @@ derive_links = true # Off: keys and facts only; no derived links on cards, nor j
 [tidal]
 country = "US" # The TIDAL catalogue's country (ISO 3166-1 alpha-2, upper case).
 
-# The spotify source asks Spotify only with an app's client ID and secret: supply them through
+# The Spotify app credentials spotify and spotify_isrc share (spotify_api.rs): set them through
 # PINAKES_SPOTIFY_CLIENT_ID and PINAKES_SPOTIFY_CLIENT_SECRET (see .env.example), or here.
 
 [spotify]

@@ -837,7 +837,7 @@ async fn run_batch_config(
     }) {
         crate::telemetry::parser_error();
     }
-    let error = results.iter().find_map(|r| match r {
+    let class = results.iter().find_map(|r| match r {
         Err(e) if !e.is::<crate::resolver::NotModified>() => {
             Some(crate::resolver::error_class(e).to_owned())
         }
@@ -851,18 +851,33 @@ async fn run_batch_config(
         ),
         _ => None,
     });
+    // The source's health is bookkeeping: when it cannot be written, the jobs still finish.
     if crate::telemetry::last_fetch().is_some() {
-        crate::source::outcome(
-            pool,
-            &resolver.manifest_for(&jobs[0].uri).source,
-            error.as_deref(),
-        )
-        .await?;
+        let source = resolver.manifest_for(&jobs[0].uri).source;
+        if crate::source::outcome(pool, &source, class.as_deref())
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                source = %source,
+                class = class.as_deref().unwrap_or("ok"),
+                host = %crate::resolver::log_host(&jobs[0].uri),
+                "source health not recorded"
+            );
+        }
     }
+    // Every job of the batch is finished, whichever one fails; the first failure is returned.
+    let mut failure = None;
     for (job, result) in jobs.iter().zip(results) {
-        guarded_finish_job(pool, resolver, cfg, refresh, job, result).await?;
+        if let Err(error) = guarded_finish_job(pool, resolver, cfg, refresh, job, result).await {
+            if failure.is_some() {
+                tracing::error!(resource_id = %job.id, error = %crate::resolver::log_error(&error), "queue persistence failed");
+            } else {
+                failure = Some(error);
+            }
+        }
     }
-    Ok(())
+    failure.map_or(Ok(()), Err)
 }
 /// Limits new work attributable to a public author, across both resolver kinds.
 #[derive(Default)]
@@ -1009,7 +1024,7 @@ pub fn spawn_with_egress(
             osm,
             crate::config::ResolverConfig {
                 concurrency: 1,
-                requests_per_second: config.osm.rate(),
+                requests_per_second: config.osm.requests_per_second,
                 ttl_secs: config.osm.ttl_secs,
                 enabled: true,
                 ..Default::default()

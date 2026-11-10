@@ -46,6 +46,14 @@ async fn deezer(cx: &Context, path: &str) -> Result<Option<Value>> {
     }
 }
 
+/// The album a Deezer track is on. Never while the source is off.
+pub(crate) async fn track_album(cx: &Context, track: &str) -> Result<Option<String>> {
+    Ok(deezer(cx, &format!("track/{track}"))
+        .await?
+        .and_then(|v| v["album"]["id"].as_u64())
+        .map(|id| id.to_string()))
+}
+
 /// Deezer's public API: its own record of a Deezer link, and its lookups by ISRC and barcode.
 pub struct DeezerSource;
 #[async_trait]

@@ -3,6 +3,7 @@
 use pinakes_core::resolver::{egress::Fetched, web};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
+mod common;
 
 /// Counts every byte allocated (not freed) through the global allocator.
 struct Counting;
@@ -66,16 +67,16 @@ fn pruning_a_large_nested_page_copies_nothing() {
     };
     let before = ALLOCATED.load(Ordering::Relaxed);
     PEAK.store(LIVE.load(Ordering::Relaxed), Ordering::Relaxed);
-    let started = std::time::Instant::now();
+    let started = common::thread_cpu_time();
     let doc = web::extract(url, &fetched, 3600).unwrap().doc;
-    let elapsed = started.elapsed();
+    let elapsed = common::thread_cpu_time() - started;
     let allocated = ALLOCATED.load(Ordering::Relaxed) - before;
     let peak = PEAK.load(Ordering::Relaxed)
         - LIVE
             .load(Ordering::Relaxed)
             .min(PEAK.load(Ordering::Relaxed));
     eprintln!(
-        "page {size} bytes: allocated {allocated} bytes ({}x), peak live {peak} bytes, {elapsed:?}",
+        "page {size} bytes: allocated {allocated} bytes ({}x), peak live {peak} bytes, {elapsed:?} of CPU time",
         allocated / size
     );
     // The list entries are left out, and the nested graph was read (its innermost node is the
@@ -91,5 +92,6 @@ fn pruning_a_large_nested_page_copies_nothing() {
         allocated < 40 * size,
         "allocated {allocated} bytes for {size}"
     );
+    // Of this thread's CPU time: a bound load never inflates.
     assert!(elapsed < std::time::Duration::from_secs(5), "{elapsed:?}");
 }

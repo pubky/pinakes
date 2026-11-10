@@ -53,21 +53,54 @@
         ],
         "type": "object"
       },
+      "Because": {
+        "description": "Why a `related` row is listed: the resource's taggers who also referenced it.",
+        "properties": {
+          "shared": {
+            "description": "How many of the resource's sampled taggers referenced this row (with `collapse=group`,\nits group's members together, each tagger once): the count the row is ranked by.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "taggers": {
+            "description": "Up to three of them (Pubky public keys), those who tagged the resource most recently\nfirst. Ask Nexus for their names and tags.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "shared",
+          "taggers"
+        ],
+        "type": "object"
+      },
       "Card": {
         "description": "The one card every route returns for a resource, occurrence or reference event. Absent\nvalues are null, never \"\".",
         "properties": {
           "also_on": {
-            "description": "The same thing elsewhere: the other members of its group (tagged links, with their ID),\nthen derived links nobody tagged (`derived: true`), by service name. On a search, lookup\nor group card one per service, at most 8; on a resource read (`GET /v1/resources/{id}`,\n`GET /v1/resources/by-uri`, `POST /v1/resolve`) every link, several of one service too,\nup to 256. A hint: every member keeps its own card.",
+            "description": "The same thing elsewhere: the other members of its group (tagged links, with their ID),\nthen derived links nobody tagged (`derived: true`), by service name; one per service, and\nnever another link on the card's own service. Of a recording's or an album's links, the one\non the card's own release, else on the original edition (docs/api.md, Also on). At most 8\non a search, lookup or group card, 256 on a resource read. A hint: every member keeps its\nown card.",
             "items": {
               "$ref": "#/components/schemas/AlsoOn"
             },
             "type": "array"
           },
           "attribution": {
-            "description": "OpenStreetMap cards, events placed at an OSM venue and events whose zone was derived from\ncoordinates: the attribution to display with the card. A place's is the credit of the\nservice that answered the version shown (the ODbL credit, and LocationIQ's for a place\nLocationIQ answered).",
+            "description": "OpenStreetMap cards, events placed at an OSM venue and events whose zone was derived from\ncoordinates: the ODbL attribution to display with the card.",
             "type": [
               "string",
               "null"
+            ]
+          },
+          "because": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Because",
+                "description": "On a `related` search row only: why it is listed, from what its rank counted."
+              }
             ]
           },
           "collections": {
@@ -1239,10 +1272,6 @@
           "licence_url": {
             "type": "string"
           },
-          "note": {
-            "description": "What the licence covers: each place's `attribution` names the service that answered\nit, whose terms apply to what it added.",
-            "type": "string"
-          },
           "notice": {
             "type": "string"
           },
@@ -1256,7 +1285,6 @@
           "licence",
           "licence_url",
           "attribution_url",
-          "note",
           "table"
         ],
         "type": "object"
@@ -1266,13 +1294,6 @@
         "properties": {
           "address": {
             "type": "object"
-          },
-          "attribution": {
-            "description": "The credit of the service that answered the place (Nominatim's is the OSM credit alone);\nthat service's terms apply to what it added.",
-            "type": [
-              "string",
-              "null"
-            ]
           },
           "bbox": {
             "description": "`[min_lon, min_lat, max_lon, max_lat]`.",
@@ -1363,7 +1384,6 @@
           "address",
           "tags",
           "display_name",
-          "attribution",
           "status",
           "fetched_at",
           "versions"
@@ -1373,7 +1393,6 @@
       "OsmLicence": {
         "properties": {
           "attribution": {
-            "description": "The credit for places the current provider answers.",
             "type": "string"
           },
           "dump": {
@@ -1382,18 +1401,6 @@
           },
           "licence": {
             "type": "string"
-          },
-          "provider": {
-            "description": "The service that answers OSM lookups and geocoding: `nominatim` or `locationiq`.",
-            "example": "nominatim",
-            "type": "string"
-          },
-          "terms": {
-            "description": "The provider's terms, which apply beside the ODbL to what it adds; absent for\nNominatim.",
-            "type": [
-              "string",
-              "null"
-            ]
           },
           "updated_at": {
             "description": "When the file was last written; `null` before the first.",
@@ -1411,7 +1418,6 @@
           "licence",
           "attribution",
           "url",
-          "provider",
           "dump"
         ],
         "type": "object"
@@ -1894,7 +1900,7 @@
             "description": "Over `limits.osm_dump_downloads_per_hour` transfers (200 or 206) to this address in the last hour; HEAD, 304 and 416 are free"
           },
           "503": {
-            "description": "No dump file written yet, or the file is withheld: it holds places LocationIQ answered and this instance is not authorized to publish them; retry later"
+            "description": "No dump file written yet; retry later"
           }
         },
         "tags": [
@@ -2637,7 +2643,7 @@
             }
           },
           "400": {
-            "description": "Unsupported URI or disabled resolver"
+            "description": "Unsupported URI, disabled resolver, or a link that carries a credential"
           },
           "413": {
             "description": "Body over 2 MB"
@@ -2650,6 +2656,19 @@
           },
           "429": {
             "description": "Preview rate limit"
+          },
+          "503": {
+            "description": "The instance's new previews for this hour are taken; nothing was stored",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds until a new preview can be taken",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "tags": [

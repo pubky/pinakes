@@ -17,7 +17,8 @@ The leftover check (`verify`) does not reuse the deletion's patterns: it looks f
 where an id is an identifier, not a word. A link to its docs page from any Markdown file,
 resolved against that file (inline, with a title or not, or reference-style); its module or
 path in its registry, and an official source's also-on half's registration; a section of the
-example configuration, parsed, or a section header set or commented out, in any spelling; a
+example configuration, parsed, or a section header set or commented out, in any spelling (one
+whose header is a `SHARED` line is the shared code's, as `[spotify]` is `spotify_api.rs`'s); a
 variable of .env.example, set, commented out or exported, and its banner; its id in backticks
 in the docs index and the fixtures' indexes; its id as an identifier (backticks, quotes, a path,
 a section) in scripts other than this one, which names in `SHARED` the ids whose lines may stay;
@@ -70,6 +71,18 @@ SHARED = [
         "files": {".env.example", "pinakes.example.toml"},
         "names": None,
         "why": "the shared Podcast Index client's key and secret (podcast_index_api.rs)",
+    },
+    # `spotify_api.rs`: the Spotify app's client ID and secret and the `[spotify]` section, which
+    # the spotify and spotify_isrc also-on sources both use; removing one leaves the other needing
+    # them.
+    {
+        "pattern": re.compile(
+            r"PINAKES_SPOTIFY_CLIENT_(ID|SECRET)|spotify_api|^\[spotify\]|^# client_(id|secret) = \"\"$"
+            r"|^# --- Spotify -|^# both are needed|^# without either source"
+        ),
+        "files": {".env.example", "pinakes.example.toml"},
+        "names": {"spotify", "spotify_isrc"},
+        "why": "the shared Spotify Web API client's credentials (spotify_api.rs)",
     },
     # The papers family's own huggingface source (a paper's Hugging Face page) shares its id with
     # the official huggingface source (model and dataset pages); the family's index entry names
@@ -312,6 +325,8 @@ def verify(wt, kind, name, title, kept=()):
     with open(os.path.join(wt, "pinakes.example.toml"), "rb") as f:
         config = tomllib.load(f)
     owned = {("sources", name), ("also_on", "sources", name), (name,)}
+    # A section whose header is a shared line (`SHARED`) is the shared code's, not the source's.
+    owned -= {header_path(l) for rel, l in kept if rel == "pinakes.example.toml"}
     for path in owned:
         table = config
         for key in path:

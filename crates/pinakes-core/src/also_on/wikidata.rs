@@ -1,7 +1,7 @@
 //! The `wikidata` also-on source.
 use crate::{
     also_on::{Context, Found, Source, Subject},
-    hubs::wikidata,
+    hubs::{self, wikidata},
     music::{self, discogs},
 };
 use anyhow::Result;
@@ -57,7 +57,30 @@ impl WikidataSource {
         if property == DISCOGS_RELEASE && ["P1954", "P436"].iter().any(|p| !item.id(p).is_empty()) {
             return Ok(Found::default());
         }
-        Ok(found(&item, level, &cx.config.also_on.apple_storefront))
+        let mut found = found(&item, level, &cx.config.also_on.apple_storefront);
+        // A recording item's MBID is keyed as every producer keys a recording (`recording_key`:
+        // the one that stands for its duplicates); a replaced MBID stays as `mbid_was`, so
+        // `key=mbid:` still finds the track by it.
+        let base = cx.config.also_on.musicbrainz_base();
+        let mut replaced = vec![];
+        for key in &mut found.keys {
+            let Some(mbid) = key.key.strip_prefix("mb:recording:").map(str::to_owned) else {
+                continue;
+            };
+            let stands = recording_key(&cx.egress, base, &mbid).await?;
+            if stands != mbid {
+                if let Some(stands) = hubs::key::mb(crate::hubs::MbKind::Recording, &stands) {
+                    key.key = stands;
+                    replaced.push(mbid);
+                }
+            }
+        }
+        for mbid in replaced {
+            found
+                .facts
+                .push(crate::also_on::Fact::new("mbid_was", mbid));
+        }
+        Ok(found)
     }
 }
 

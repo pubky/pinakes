@@ -29,9 +29,14 @@ pub const ALL: [(i64, &str); 6] = [
     (GROUP, "group"),
 ];
 
+/// The instance lock, held on a connection of its own until it is dropped. Only
+/// [`own_database`] makes one, so a function that takes it runs while no daemon does.
+#[derive(Debug)]
+pub struct InstanceLock(#[allow(dead_code)] PoolConnection<Postgres>);
+
 /// Take the instance lock on a connection of its own, held until the connection is dropped.
 /// Host, author and IP budgets are process-local, and the lock keeps their guarantees.
-pub async fn own_database(pool: &PgPool) -> Result<PoolConnection<Postgres>> {
+pub async fn own_database(pool: &PgPool) -> Result<InstanceLock> {
     let mut connection = pool.acquire().await?;
     let owns_database: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
         .bind(INSTANCE)
@@ -40,7 +45,7 @@ pub async fn own_database(pool: &PgPool) -> Result<PoolConnection<Postgres>> {
     if !owns_database {
         bail!("another pinakesd already owns this database");
     }
-    Ok(connection)
+    Ok(InstanceLock(connection))
 }
 
 #[cfg(test)]

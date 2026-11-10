@@ -313,6 +313,65 @@ pub async fn drain_groups(pool: &sqlx::PgPool, cfg: &pinakes_core::groups::Group
         tx.commit().await.unwrap();
     }
 }
+/// This thread's CPU time, for a bound on the cost of a hostile input: it holds under any load on
+/// the machine, where a wall-clock bound does not.
+pub fn thread_cpu_time() -> std::time::Duration {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `clock_gettime` writes only the `timespec` it is given.
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) };
+    assert_eq!(
+        rc, 0,
+        "clock_gettime failed: a bound on it would hold nothing"
+    );
+    std::time::Duration::new(now.tv_sec as u64, now.tv_nsec as u32)
+}
+/// How many backends of this database wait for a lock right now.
+pub async fn lock_waiters(pool: &sqlx::PgPool) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+/// Waits until at least `n` backends of this database wait for a lock: the sign that a spawned
+/// writer has reached the row or key it must queue behind, in place of a sleep "long enough"
+/// (short under load, long otherwise). Bounded: `what` names the writer that never got there.
+pub async fn lock_waiters_reach(pool: &sqlx::PgPool, n: i64, what: &str) {
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        while lock_waiters(pool).await < n {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{what} never waited for the lock"));
+}
+/// An egress configuration for a mocked transport: no pacing between requests to one host, the
+/// hosts with a published rate included (a `host_rates` entry wins over the published rate), so
+/// recorded answers come back at once. The pacing itself is proven in `egress::tests` on a paused
+/// clock.
+pub fn unpaced_egress_config() -> pinakes_core::config::EgressConfig {
+    let mut cfg = pinakes_core::config::EgressConfig {
+        host_requests_per_second: 1000.0,
+        ..Default::default()
+    };
+    for (host, _) in pinakes_core::resolver::egress::PUBLISHED_RATES {
+        if !host.starts_with("*.") {
+            cfg.host_rates.insert((*host).to_owned(), 1000.0);
+        }
+    }
+    // The `*.wikipedia.org` rule: the languages the fixtures hold.
+    for language in [
+        "en", "de", "fr", "it", "pt", "ru", "zh", "fa", "es", "ja", "nl", "pl", "sv",
+    ] {
+        cfg.host_rates
+            .insert(format!("{language}.wikipedia.org"), 1000.0);
+    }
+    cfg
+}
 /// An egress that never reaches the network: every host resolves to a fixed public address, so
 /// the egress' own checks (policy, private addresses) run as they would, and every request fails.
 /// For tests whose links are refused, or answered from the store, before anything is fetched.

@@ -532,6 +532,8 @@ async fn fixture(pool: &PgPool) {
                 Found {
                     reread: false,
                     retry_after: None,
+                    editions: vec![],
+                    keep: vec![],
                     keys: vec![
                         key("openlibrary:edition:OL7353617M", "openlibrary"),
                         key("openlibrary:work:OL45804W", "openlibrary"),
@@ -553,6 +555,8 @@ async fn fixture(pool: &PgPool) {
                 Found {
                     reread: false,
                     retry_after: None,
+                    editions: vec![],
+                    keep: vec![],
                     keys: vec![
                         key("podcast:apple:1200361736", "itunes"),
                         key(
@@ -580,6 +584,8 @@ async fn fixture(pool: &PgPool) {
                 Found {
                     reread: false,
                     retry_after: None,
+                    editions: vec![],
+                    keep: vec![],
                     keys: vec![key("gtin:0840440422266", "page")],
                     links: vec![],
                     facts: vec![],
@@ -591,6 +597,8 @@ async fn fixture(pool: &PgPool) {
                 Found {
                     reread: false,
                     retry_after: None,
+                    editions: vec![],
+                    keep: vec![],
                     keys: vec![key("imdb:tt0111161", "imdb")],
                     facts: vec![
                         Fact::new("wikidata", "Q172241"),
@@ -837,7 +845,6 @@ async fn every_named_example_returns_data(pool: PgPool) {
             config.api.requests_per_minute = 100_000;
             config
         })
-        .await
         .unwrap(),
     );
     let (status, doc) = send(&app, "GET", "/v1/openapi.json", None).await;
@@ -943,7 +950,7 @@ async fn a_recipe_whose_resolver_is_off_is_refused_as_the_endpoint_refuses_it(po
             continue;
         }
         assert_eq!(admit(uri, &off), Err("resolver is disabled"), "{uri}");
-        let app = api::router(AppState::new(pool.clone(), off).await.unwrap());
+        let app = api::router(AppState::new(pool.clone(), off).unwrap());
         let (code, answer) = send(&app, "POST", "/v1/resolve", Some(&json!({ "uri": uri }))).await;
         assert_eq!(
             (code, answer),

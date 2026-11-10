@@ -200,7 +200,11 @@ pub fn item_identity(item: roxmltree::Node<'_, '_>, feed: &Url) -> Option<ItemId
         .map(str::trim)
         .filter(|u| !u.is_empty())
         .and_then(link);
-    let page = text("link").and_then(|l| link(&l));
+    // A relative link resolves against the feed's address: one that lands on a link carrying a
+    // credential is no page.
+    let page = text("link")
+        .and_then(|l| link(&l))
+        .filter(|u| !crate::capability::is_capability(u));
     let guid = text("guid")
         .filter(|g| g.len() <= 2048)
         .or_else(|| page.clone())
@@ -230,8 +234,17 @@ fn episode(item: roxmltree::Node<'_, '_>, feed: &Url) -> Option<Episode> {
             .filter(|t| !t.is_empty())
             .map(str::to_owned)
     };
-    let link = |s: &str| crate::resolver::web::origin_url(feed, s).filter(|u| u.len() <= 2048);
+    // Resolved against the feed's address; never one that lands on a link carrying a credential.
+    let link = |s: &str| {
+        crate::resolver::web::origin_url(feed, s)
+            .filter(|u| u.len() <= 2048 && !crate::capability::is_capability(u))
+    };
     let identity = item_identity(item, feed)?;
+    // An episode named by its feed item carries the feed's address in its link: none from a feed
+    // read at an address that carries a credential.
+    if identity.page.is_none() && crate::capability::is_capability_url(feed) {
+        return None;
+    }
     let uri = identity.uri(feed);
     if uri.len() > 2048 {
         return None;
@@ -455,6 +468,41 @@ mod tests {
             location: None,
             body: body.as_bytes().to_vec(),
         }
+    }
+
+    /// A feed read at an address that carries a credential lists only the episodes with a page of
+    /// their own: one named by its feed item would carry that address in its public link.
+    #[test]
+    fn a_feed_that_carries_a_credential_lists_only_episodes_with_their_own_page() {
+        let body = feed(concat!(
+            r#"<item><title>Paged</title><guid>ep-1</guid><link>https://show.example/1</link><enclosure url="https://cdn.example/1.mp3" type="audio/mpeg"/></item>"#,
+            r#"<item><title>Keyed</title><guid>ep-2</guid><enclosure url="https://cdn.example/2.mp3" type="audio/mpeg"/></item>"#,
+        ));
+        let mut f = fetched(&body, false);
+        f.url = "https://feeds.example.org/show.xml?auth=SECRET"
+            .parse()
+            .unwrap();
+        let episodes = from_feed(&f).unwrap();
+        let uris: Vec<&str> = episodes.iter().map(|e| e.uri.as_str()).collect();
+        assert_eq!(uris, ["https://show.example/1"]);
+    }
+
+    /// An item's relative link or image resolves against the feed's address: from a feed read at
+    /// an address that carries a credential, one that lands on it is dropped, never listed.
+    #[test]
+    fn an_item_link_that_lands_on_a_credential_feed_is_dropped() {
+        let body = feed(concat!(
+            r#"<item><title>Anchored</title><guid>ep-2</guid><link>#ep2</link><enclosure url="https://cdn.example/2.mp3" type="audio/mpeg"/></item>"#,
+            r#"<item><title>Pictured</title><guid>ep-3</guid><link>https://show.example/3</link><itunes:image href=""/><enclosure url="https://cdn.example/3.mp3" type="audio/mpeg"/></item>"#,
+        ));
+        let mut f = fetched(&body, false);
+        f.url = "https://feeds.example.org/show.xml?auth=SECRET"
+            .parse()
+            .unwrap();
+        let episodes = from_feed(&f).unwrap();
+        assert!(!serde_json::to_string(&episodes).unwrap().contains("SECRET"));
+        let uris: Vec<&str> = episodes.iter().map(|e| e.uri.as_str()).collect();
+        assert_eq!(uris, ["https://show.example/3"]);
     }
 
     #[test]

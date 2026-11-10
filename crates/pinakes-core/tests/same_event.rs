@@ -13,6 +13,7 @@ use pinakes_core::{
 };
 use serde_json::Value;
 use sqlx::PgPool;
+mod common;
 use tower::ServiceExt;
 
 /// Wattwil, where the Ostschweiz meetup meets.
@@ -70,7 +71,7 @@ async fn pass(pool: &PgPool, config: &Config) {
 }
 
 async fn get(config: &Config, pool: &PgPool, path: &str) -> Value {
-    let app = api::router(AppState::new(pool.clone(), config.clone()).await.unwrap());
+    let app = api::router(AppState::new(pool.clone(), config.clone()).unwrap());
     let mut request = Request::get(path).body(Body::empty()).unwrap();
     request.extensions_mut().insert(ConnectInfo(
         "127.0.0.1:4000".parse::<std::net::SocketAddr>().unwrap(),
@@ -815,11 +816,7 @@ async fn a_search_page_changes_its_etag_when_its_hint_does(pool: PgPool) {
         .await;
     }
     let etag = || async {
-        let app = api::router(
-            AppState::new(pool.clone(), Config::default())
-                .await
-                .unwrap(),
-        );
+        let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
         let mut request = Request::get("/v1/search?type=Event")
             .body(Body::empty())
             .unwrap();
@@ -1577,7 +1574,7 @@ async fn an_orphan_deleted_while_a_pass_pairs_with_it_leaves_the_partner_to_refi
         let pool = pool.clone();
         tokio::spawn(async move { changes::delete_orphans(&pool, 7).await.unwrap() })
     };
-    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    common::lock_waiters_reach(&pool, 1, "the orphan delete").await;
     assert!(!deleting.is_finished(), "the delete waits for the pass");
     pairing.commit().await.unwrap();
     assert_eq!(deleting.await.unwrap(), 1);

@@ -234,11 +234,7 @@ async fn call(app: &Router, tool: &str, arguments: Value) -> (bool, Value) {
 
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn the_guide_and_the_index_name_the_host_that_asked(pool: PgPool) {
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let host = [("host", "pinakes.example")];
     let (code, headers, body) = raw(&app, "GET", "/llms.txt", &host, None).await;
     assert_eq!(code, 200);
@@ -282,7 +278,7 @@ async fn the_guide_and_the_index_name_the_host_that_asked(pool: PgPool) {
     // With `api.mcp` off, the index names no endpoint and there is none.
     let mut config = Config::default();
     config.api.mcp = false;
-    let off = api::router(AppState::new(pool, config).await.unwrap());
+    let off = api::router(AppState::new(pool, config).unwrap());
     let (_, _, body) = raw(&off, "GET", "/", &host, None).await;
     let index: Value = serde_json::from_slice(&body).unwrap();
     assert!(index["links"].get("mcp").is_none());
@@ -302,7 +298,7 @@ async fn the_mcp_handshake_and_every_tool(pool: PgPool) {
         nexus_url: nexus().await,
         ..Config::default()
     };
-    let app = api::router(AppState::new(pool, config).await.unwrap());
+    let app = api::router(AppState::new(pool, config).unwrap());
     initialize(&app).await;
     let (status, _) = mcp(
         &app,
@@ -477,7 +473,7 @@ async fn social_without_a_nexus_is_a_plain_error(pool: PgPool) {
             nexus_url: nexus_url.clone(),
             ..Config::default()
         };
-        let app = api::router(AppState::new(pool.clone(), config).await.unwrap());
+        let app = api::router(AppState::new(pool.clone(), config).unwrap());
         let (error, answer) = call(&app, "social", json!({"uris": ["https://example.org/"]})).await;
         assert!(error, "{nexus_url}: {answer}");
         assert_eq!(answer["status"], 502, "{nexus_url}");
@@ -490,7 +486,7 @@ async fn a_tool_call_spends_the_same_per_ip_budget(pool: PgPool) {
     seed(&pool).await;
     let mut config = Config::default();
     config.api.requests_per_minute = 1;
-    let app = api::router(AppState::new(pool, config).await.unwrap());
+    let app = api::router(AppState::new(pool, config).unwrap());
     // The MCP message takes the one unit; the tool's search finds the budget spent.
     let (error, answer) = call(&app, "search", json!({"q": "concert"})).await;
     assert!(error);
@@ -518,7 +514,7 @@ async fn no_admin_route_is_reachable_through_mcp(pool: PgPool) {
         admin_token: Some("admin-secret-token".into()),
         ..Config::default()
     };
-    let state = AppState::new(pool, config).await.unwrap();
+    let state = AppState::new(pool, config).unwrap();
     let public = api::router(state.clone());
     let admin = api::admin_router(state);
     // The admin routes answer on their own listener only, with the token.
@@ -562,7 +558,7 @@ async fn no_admin_route_is_reachable_through_mcp(pool: PgPool) {
 
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_browser_opening_mcp_sees_how_to_connect(pool: PgPool) {
-    let app = api::router(AppState::new(pool, Config::default()).await.unwrap());
+    let app = api::router(AppState::new(pool, Config::default()).unwrap());
     let browser = [
         ("host", "pinakes.example"),
         ("accept", "text/html,application/xhtml+xml,*/*;q=0.8"),
@@ -696,7 +692,7 @@ async fn typed_cards_name_the_links_people_wrote_and_social_joins_by_them(pool: 
         nexus_url: nexus().await,
         ..Config::default()
     };
-    let app = api::router(AppState::new(pool.clone(), config).await.unwrap());
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
     let get = |path: String| {
         let app = app.clone();
         async move {
@@ -797,11 +793,7 @@ async fn refs_count_each_link_only_up_to_a_bound(pool: PgPool) {
             .await
             .unwrap();
     }
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let (code, _, body) = raw(&app, "GET", &format!("/v1/resources/{}", ids[2]), &[], None).await;
     assert_eq!(code, 200);
     let card: Value = serde_json::from_slice(&body).unwrap();
@@ -844,11 +836,7 @@ async fn refs_count_only_a_cards_most_recently_referenced_aliases(pool: PgPool) 
         }
     }
     recent.sort();
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let (code, _, body) = raw(&app, "GET", &format!("/v1/resources/{}", ids[2]), &[], None).await;
     assert_eq!(code, 200);
     let card: Value = serde_json::from_slice(&body).unwrap();
@@ -892,7 +880,7 @@ async fn the_card_tool_names_the_collections_that_hold_a_link(pool: PgPool) {
     )
     .await
     .unwrap();
-    let app = api::router(AppState::new(pool, Config::default()).await.unwrap());
+    let app = api::router(AppState::new(pool, Config::default()).unwrap());
     initialize(&app).await;
     let (error, read) = call(&app, "card", json!({"uri": "https://example.org/article"})).await;
     assert!(!error, "{read}");
@@ -925,4 +913,127 @@ async fn the_card_tool_names_the_collections_that_hold_a_link(pool: PgPool) {
     for key in ["collections", "in_collections", "collections_url"] {
         assert!(read["card"].get(key).is_none(), "{key}: {read}");
     }
+}
+
+/// The social tool never sends a link that carries a credential to the Nexus: a call naming one
+/// is refused before any batch is asked, and its answer does not hold the secret.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn social_never_sends_a_link_that_carries_a_credential_to_the_nexus(pool: PgPool) {
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = asked.clone();
+    let app = Router::new().route(
+        "/v0/stream/resources/by_ids",
+        post(move |Json(body): Json<Value>| {
+            let seen = seen.clone();
+            async move {
+                seen.lock().unwrap().push(body.to_string());
+                Json(json!([]))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let nexus_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let config = Config {
+        nexus_url,
+        ..Config::default()
+    };
+    let app = api::router(AppState::new(pool, config).unwrap());
+    let (error, answer) = call(
+        &app,
+        "social",
+        json!({"uris": ["https://example.org/concert", "https://example.org/private?token=SECRET"]}),
+    )
+    .await;
+    assert!(error, "{answer}");
+    assert_eq!(answer["status"], 400);
+    assert!(!answer.to_string().contains("SECRET"));
+    assert!(asked.lock().unwrap().is_empty());
+}
+
+/// A card's own link or ref that carries a credential (a link someone's post made, read by its
+/// URI, here an alias of the card with references) is left out of what `social` asks the Nexus:
+/// the card is asked by its plain links, and nothing sent names the secret.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn social_asks_the_nexus_by_a_cards_plain_links_only(pool: PgPool) {
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = asked.clone();
+    let app = Router::new().route(
+        "/v0/stream/resources/by_ids",
+        post(move |Json(body): Json<Value>| {
+            let seen = seen.clone();
+            async move {
+                seen.lock().unwrap().push(body.to_string());
+                Json(json!([]))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let nexus_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let root = "https://example.org/concert";
+    let private = "https://example.org/private?token=SECRET";
+    // A calendar provider's share link written as `webcal:` without `//`: no host to a URL
+    // parser, a credential to `names_credential`.
+    let probes: Value =
+        serde_json::from_str(include_str!("fixtures/capability_urls.json")).unwrap();
+    let share = probes["providers"][1]
+        .as_str()
+        .unwrap()
+        .replacen("https://", "webcal:", 1);
+    assert!(share.starts_with("webcal:outlook."), "{share}");
+    let root_id = store::ensure_resource(&pool, root).await.unwrap();
+    let private_id = store::ensure_resource(&pool, private).await.unwrap();
+    let share_id = store::ensure_resource(&pool, &share).await.unwrap();
+    let mut doc = ResourceMeta::new(root, "web", 86400);
+    doc.name = Some("Concert".into());
+    doc.set_type("Event");
+    store::save_document(&pool, &root_id, 0, &doc)
+        .await
+        .unwrap();
+    for alias in [&private_id, &share_id] {
+        sqlx::query(
+            "INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'identifier')",
+        )
+        .bind(alias)
+        .bind(&root_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    for id in [&root_id, &private_id, &share_id] {
+        sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','gig','/pub/app/tags/'||$1,now())")
+            .bind(id)
+            .bind(AUTHOR)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let config = Config {
+        nexus_url,
+        ..Config::default()
+    };
+    let app = api::router(AppState::new(pool, config).unwrap());
+    let (_, _, body) = raw(&app, "GET", &format!("/v1/resources/{root_id}"), &[], None).await;
+    let card: Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        card["refs"].as_array().is_some_and(
+            |refs| refs.iter().any(|r| r == private) && refs.iter().any(|r| *r == share)
+        ),
+        "both credential spellings are refs of the card: {}",
+        card["refs"]
+    );
+    let (error, answer) = call(&app, "social", json!({"ids": [root_id]})).await;
+    assert!(!error, "{answer}");
+    let sent = asked.lock().unwrap().concat();
+    assert!(sent.contains(root), "{sent}");
+    assert!(!sent.contains("SECRET"), "{sent}");
+    assert!(!answer.to_string().contains("SECRET"), "{answer}");
+    // Asked by such a link, the tool refuses before any batch.
+    let before = asked.lock().unwrap().len();
+    let (error, answer) = call(&app, "social", json!({"uris": [share]})).await;
+    assert!(error, "{answer}");
+    assert_eq!(answer["status"], 400);
+    assert!(!answer.to_string().contains("SECRET"), "{answer}");
+    assert_eq!(asked.lock().unwrap().len(), before);
 }

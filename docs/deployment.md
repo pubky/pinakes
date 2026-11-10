@@ -10,14 +10,34 @@ Configuration names come from [`pinakes.example.toml`](../pinakes.example.toml);
 | --- | --- | --- | --- |
 | `pinakesd` | Public cards/search API and a separate private admin listener | 2–4 vCPU, 4–8 GB RAM for a small instance; load-test the actual resolver mix | One daemon per database is enforced by the instance lock. Provider budgets are process-local; several instances behind one IP share upstream quotas. |
 | PostgreSQL 16–18 | Documents, references, queues, groups and change journal | See the storage model below | PostGIS 3.4+, `pg_trgm`, h3 4.2.3+; startup checks `h3_latlng_to_cell(point,integer)`. Package upgrades may also need `ALTER EXTENSION h3 UPDATE;`. |
-| Self-hosted Nominatim (default provider alternative) | Venue geocoding and OSM place details when `osm.provider = "nominatim"` (`osm.nominatim_url`); not required if LocationIQ is selected | Global dataset: 64–128 GB RAM (128 GB recommended), about 1 TB NVMe; allow several days for import | [Nominatim hardware guidance](https://nominatim.org/release-docs/5.2/admin/Installation/). Public Nominatim is only for small development runs. |
-| LocationIQ (instead of Nominatim) | Hosted OSM lookups and geocoding (`osm.provider = "locationiq"`) | No hosting; an authorized provider account/plan sized to lookup and geocoding volume, per second, minute and day | Needs LocationIQ's written permission for Pinakes' public API and dump (`osm.locationiq.public_use_authorized`); a key or plan alone is not enough. The permission stays needed while what LocationIQ answered is stored or in the dump, whichever provider is selected: startup is refused without it. No failover between providers. [Operations](operations.md#openstreetmap-provider). |
+| Self-hosted Nominatim | Pinakes hosting dependency for venue geocoding and OSM place details (`osm.nominatim_url`) | Global dataset: 64–128 GB RAM (128 GB recommended), about 1 TB NVMe; allow several days for import | [Nominatim hardware guidance](https://nominatim.org/release-docs/5.2/admin/Installation/). Public Nominatim is only for small development runs. |
 | Nexus | Reference feed and social/reach reads (`nexus_url`) | An existing compatible Nexus deployment | Trusted fixed upstream, not an arbitrary URL from a resource. Optional authorization comes from the environment. |
 | Persistent dump directory | `osm.dump_dir`, served at `/v1/dumps/osm_place.ndjson.gz` | About 1.5 KB per cached place uncompressed; allow two copies during replacement | Keep the compressed dump downloadable and preserve OSM attribution; a CDN can cache it by `ETag`. |
 | Prometheus and Alertmanager | Evaluate admin `/metrics` and the supplied alerts | Small deployment; retention and scrape frequency set disk use | Private scrape path; [ops setup](../ops/README.md) includes alerts and a Grafana dashboard. |
 | MusicBrainz mirror (optional) | Higher music-lookup throughput via `also_on.sources.musicbrainz.base_url` | Size for the chosen mirror/search-index components, not a fixed 100 GB allowance | The hosted API's IP allowance is shared; a mirror is optional, not another provider key. [Server documentation](https://musicbrainz.org/doc/MusicBrainz_Server). |
 | Photon (later, for clients) | Client place-search type-ahead, not called by Pinakes | Regional or planet index; provision against the selected [Photon dump](https://github.com/komoot/photon#setting-photon-up-with-the-release-binaries-and-extracts) | Clients call it directly; do not add a Pinakes autocomplete proxy. |
 | Map tiles (later, for clients) | Client map drawing, not called by Pinakes | A regional/planet PMTiles file plus CDN/static storage; capacity depends on the selected build | MapLibre + self-hosted [Protomaps PMTiles](https://docs.protomaps.com/deploy/) is an option. Do not rely on OSM's donation-funded tile servers for production capacity; their [usage policy](https://operations.osmfoundation.org/policies/tiles/) is not a blanket ban on all production use. |
+
+## Nominatim
+
+Pinakes geocodes venues and reads OSM place details from one Nominatim, at `osm.nominatim_url`;
+there is no other geocoding provider and no failover. Run one of:
+
+- **A self-hosted Nominatim** (sizes above): its URL carries no secret and may stay in the TOML
+  file.
+- **Geofabrik's hosted Nominatim:** a paid, daily-updated service with Nominatim's API
+  ([Geofabrik geocoding](https://geofabrik.de/data/geocoding.html)). Its URL may carry the
+  account's key, so treat the whole URL as a secret: set it as `PINAKES__OSM__NOMINATIM_URL` in
+  the environment file, never in the TOML file. The key must be part of the URL's path (a base
+  with user info, a query or a fragment is refused at startup). Pinakes logs a request by its path
+  below the base alone (`lookup`, `search`), shows the URL as `[REDACTED]` in debug output and
+  serialization, and never in `/v1/info`. Set `osm.requests_per_second` to the plan's allowance.
+  **Its terms for what Pinakes keeps and republishes (cached place documents, the change journal
+  and the ODbL dump) need Geofabrik's written confirmation before staging or production uses
+  it.**
+
+The public `nominatim.openstreetmap.org` is for a small development run only
+([operations](operations.md#deployment-and-egress)).
 
 ## Storage model
 
@@ -71,20 +91,25 @@ not just `resource`, and budget backup retention separately from the table's sin
 ## Network and secrets
 
 - Terminate TLS at a reverse proxy for the public listener (`listen`, default port 8090).
-  Keep `admin_listen` (default `127.0.0.1:9090`) private; an admin token is required off loopback.
+  Keep `admin_listen` (default `127.0.0.1:9090`) private; an admin token is required off loopback
+  and recommended on it (the daemon warns at startup without one). The admin listener answers only
+  requests whose `Host` is `localhost`, an IP address or a name in `admin_hosts`, and answers 421
+  to any other, so a web page that points its own name at this machine reaches nothing. A scraper
+  that reaches it by a name (another container's `pinakes:9090`) needs that name in
+  `admin_hosts = ["pinakes"]`.
 - The public API ignores forwarded client-IP headers. Behind a proxy its direct-peer budget is
-  shared by that proxy's users; enforce per-client limits at the edge. Do not expose admin routes
+  shared by that proxy's users; enforce per-client limits at the edge. For the same reason leave
+  `limits.preview_new_per_client_per_hour` at 0 behind a proxy: a share of new previews keyed on
+  the proxy's address would cap the whole instance. Do not expose admin routes
   by forwarding the public listener to the admin listener.
 - Public CORS defaults to `["*"]` without cookies or bearer credentials. Use exact origins or
   `[]` where appropriate; admin routes send no CORS headers.
 - Allow required public HTTP(S) egress and PKARR relays from `pubky.pkarr_relays`. Deny private,
   loopback, link-local and metadata destinations for resource-controlled fetches at the network
   layer too. Pinakes checks/pins DNS answers and checks redirects itself.
-- Nexus and the OSM provider (Nominatim, or LocationIQ) are deliberately trusted configured
-  upstreams outside that resource-fetch policy. Protect their configuration and DNS; their URLs
-  cannot contain user info, query or fragment. A protected Nexus uses
-  `PINAKES_NEXUS_AUTHORIZATION`, never a credential-bearing URL. LocationIQ is reached only at
-  its regional HTTPS endpoint, with `LOCATIONIQ_API_KEY` from the environment.
+- Nexus and Nominatim are deliberately trusted configured upstreams outside that resource-fetch
+  policy. Protect their configuration and DNS; their URLs cannot contain user info, query or
+  fragment. A protected Nexus uses `PINAKES_NEXUS_AUTHORIZATION`, never a credential-bearing URL.
 - Set an operator contact, inject secrets through a protected environment, and keep tokens out of
   logs. Provision only the optional providers you use: [complete key guide](api-keys.md).
 - Leave the Deezer API off. Links to Deezer from independent sources remain allowed; see
@@ -104,12 +129,7 @@ not just `resource`, and budget backup retention separately from the table's sin
 4. Scrape private `/metrics`, evaluate the [supplied rules](../ops/README.md), and alert on stalled
    ingestion, dead letters, queue backlog and canary failures. `canary.enabled` controls periodic
    real provider requests; review the platform canary notes before enabling them.
-5. Keep OSM attribution and the dump available; with LocationIQ, keep its written permission on
-   file, since the dump and API republish its answers, and keep
-   `osm.locationiq.public_use_authorized` after a switch to Nominatim while the database or the
-   dump holds them. When the permission ends, follow the non-destructive withdrawal in
-   [operations](operations.md#openstreetmap-provider): stop, back up and archive, serve a clean
-   instance from a separate empty database if needed; never drop the retained database. Do not put caches in front of deleted social
+5. Keep OSM attribution and the dump available. Do not put caches in front of deleted social
    excerpts that outlive the service's refresh/purge behaviour. Use source-specific attribution
    and retention rules from the [source catalogue](sources/README.md), not assumptions that every
    provider's data has the same licence.

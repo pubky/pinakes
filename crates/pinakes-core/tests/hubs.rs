@@ -3,7 +3,7 @@ mod common;
 use pinakes_core::{
     also_on,
     api::{self, AppState},
-    config::{Config, EgressConfig},
+    config::Config,
     hubs::{musicbrainz, wikidata, MbKind},
     model::ResourceMeta,
     resolver::{
@@ -71,6 +71,25 @@ fn mb_url(resource: &str) -> (u16, Vec<u8>) {
         "https://www.songkick.com/artists/503503" => (503, fixture("mb-503.json")),
         // Dracula: two releases ("Dracula", "Dracula (remix)") of one release group.
         "https://tidal.com/album/495402659" => (200, fixture("mb-url-tidal-495402659.json")),
+        // A track MusicBrainz relates to recording …71, whose one ISRC it shares with a recording
+        // whose record is over MusicBrainz's cap.
+        "https://tidal.com/track/1000071" => (
+            200,
+            serde_json::to_vec(&serde_json::json!({"resource": resource, "relations": [
+                {"type": "streaming", "target-type": "recording", "ended": false,
+                 "recording": {"id": "00000000-0000-4000-8000-000000000071"}}
+            ]}))
+            .unwrap(),
+        ),
+        // A track MusicBrainz relates to recording …36, whose fifth ISRC it shares with …35.
+        "https://tidal.com/track/1000005" => (
+            200,
+            serde_json::to_vec(&serde_json::json!({"resource": resource, "relations": [
+                {"type": "streaming", "target-type": "recording", "ended": false,
+                 "recording": {"id": "00000000-0000-4000-8000-000000000036"}}
+            ]}))
+            .unwrap(),
+        ),
         _ => (404, fixture("mb-url-unknown.json")),
     }
 }
@@ -87,7 +106,9 @@ impl Transport for Recorded {
         options: &FetchOptions,
     ) -> anyhow::Result<Fetched> {
         // An artist whose record is over MusicBrainz's cap, and its page (the card's fallback).
-        if url.host_str() == Some("musicbrainz.org") && url.path().ends_with(BIG_BAND) {
+        if url.host_str() == Some("musicbrainz.org")
+            && (url.path().ends_with(BIG_BAND) || url.path().ends_with(BIG_RECORDING))
+        {
             self.seen
                 .lock()
                 .unwrap()
@@ -133,6 +154,20 @@ impl Transport for Recorded {
                 location: None,
                 content_type: "text/html".into(),
                 body: body.as_bytes().to_vec(),
+            });
+        }
+        // Spotify's public pages (`editions` reads a card's own track's for its album): none here.
+        if url.host_str() == Some("open.spotify.com") {
+            return Ok(Fetched {
+                permanent_redirect: false,
+                truncated: false,
+                validators: Default::default(),
+                url: url.clone(),
+                status: 404,
+                retry_after_secs: 60,
+                location: None,
+                content_type: "text/html".into(),
+                body: vec![],
             });
         }
         // Spotify's token and Web API (`spotify`): the track REPORT-matching names, written by
@@ -336,6 +371,115 @@ impl Transport for Recorded {
             "/ws/2/isrc/GBUM71029604" => (200, fixture("mb-isrc-GBUM71029604.json")),
             "/ws/2/isrc/GBCEE0100112" => (200, fixture("mb-isrc-GBCEE0100112.json")),
             "/ws/2/isrc/GBUM72103841" => (404, fixture("mb-isrc-GBUM72103841.json")),
+            // The remaster that shares GBCEE0100112 with b1a9c0e9: the same credit (Queen), the
+            // same title once its tags go, 1.5 s shorter: one recording MusicBrainz has not
+            // merged (written in the recorded answer's shape).
+            "/ws/2/recording/dc2f9b64-2e3f-4a13-a89f-6a1bded55c6f" => (
+                200,
+                serde_json::to_vec(&serde_json::json!({
+                    "id": "dc2f9b64-2e3f-4a13-a89f-6a1bded55c6f",
+                    "title": "Bohemian Rhapsody - Digital (remaster)",
+                    "length": 353653,
+                    "isrcs": ["GBCEE0100112"],
+                    "artist-credit": [{"name": "Queen", "joinphrase": "",
+                        "artist": {"id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3", "name": "Queen"}}],
+                    "relations": [],
+                }))
+                .unwrap(),
+            ),
+            // Walking Disaster (Sum 41): an ISRC on two recordings MusicBrainz has not merged,
+            // the same title, credit and album, 0.13 s apart (recorded 2026-11-09).
+            "/ws/2/isrc/USUM70740306" => (200, fixture("mb-isrc-USUM70740306.json")),
+            "/ws/2/recording/4da0e503-0cef-4dd7-a5b7-b08bea3db145" => {
+                (200, fixture("mb-recording-4da0e503.json"))
+            }
+            "/ws/2/recording/6a5c430a-8035-4217-97ac-ffa395f55bf9" => {
+                (200, fixture("mb-recording-6a5c430a.json"))
+            }
+            // Two recordings of one ISRC that disagree: another artist with the same title and
+            // length (…0021, …0022), and the same artist 4.5 s apart (…0023, …0024).
+            "/ws/2/isrc/ZZDIS2600001" => (
+                200,
+                br#"{"isrc":"ZZDIS2600001","recordings":[{"id":"00000000-0000-4000-8000-000000000021","length":286000,"title":"Walking Disaster"},{"id":"00000000-0000-4000-8000-000000000022","length":286000,"title":"Walking Disaster"}]}"#.to_vec(),
+            ),
+            "/ws/2/isrc/ZZDIS2600002" => (
+                200,
+                br#"{"isrc":"ZZDIS2600002","recordings":[{"id":"00000000-0000-4000-8000-000000000023","length":286000,"title":"Walking Disaster"},{"id":"00000000-0000-4000-8000-000000000024","length":290500,"title":"Walking Disaster"}]}"#.to_vec(),
+            ),
+            // Agreeing duplicates in overlapping sets: …32 shares one ISRC with …31 and another
+            // with …33 (one recording, …31 stands for all three); …36 shares its fifth ISRC with
+            // …35 (…35 stands for both). Every ISRC of a member is read, whichever comes first.
+            "/ws/2/isrc/ZZCHN2600001" => (
+                200,
+                br#"{"isrc":"ZZCHN2600001","recordings":[{"id":"00000000-0000-4000-8000-000000000031","length":200000,"title":"Chain"},{"id":"00000000-0000-4000-8000-000000000032","length":200500,"title":"Chain"}]}"#.to_vec(),
+            ),
+            "/ws/2/isrc/ZZCHN2600002" => (
+                200,
+                br#"{"isrc":"ZZCHN2600002","recordings":[{"id":"00000000-0000-4000-8000-000000000032","length":200500,"title":"Chain"},{"id":"00000000-0000-4000-8000-000000000033","length":201000,"title":"Chain"}]}"#.to_vec(),
+            ),
+            "/ws/2/isrc/ZZCHN2600003" => (
+                200,
+                br#"{"isrc":"ZZCHN2600003","recordings":[{"id":"00000000-0000-4000-8000-000000000035","length":180000,"title":"Fifth"},{"id":"00000000-0000-4000-8000-000000000036","length":180900,"title":"Fifth"}]}"#.to_vec(),
+            ),
+            "/ws/2/recording/00000000-0000-4000-8000-000000000031"
+            | "/ws/2/recording/00000000-0000-4000-8000-000000000032"
+            | "/ws/2/recording/00000000-0000-4000-8000-000000000033"
+            | "/ws/2/recording/00000000-0000-4000-8000-000000000035"
+            | "/ws/2/recording/00000000-0000-4000-8000-000000000036" => {
+                let id = url.path().trim_start_matches("/ws/2/recording/");
+                let (title, length, isrcs): (&str, u64, Vec<&str>) = match &id[id.len() - 2..] {
+                    "31" => ("Chain", 200000, vec!["ZZCHN2600001"]),
+                    "32" => ("Chain", 200500, vec!["ZZCHN2600001", "ZZCHN2600002"]),
+                    "33" => ("Chain", 201000, vec!["ZZCHN2600002"]),
+                    "35" => ("Fifth", 180000, vec!["ZZCHN2600003"]),
+                    _ => ("Fifth", 180900, vec!["ZZNON2600001", "ZZNON2600002", "ZZNON2600003", "ZZNON2600004", "ZZCHN2600003"]),
+                };
+                (
+                    200,
+                    serde_json::to_vec(&serde_json::json!({
+                        "id": id, "title": title, "length": length, "isrcs": isrcs,
+                        "artist-credit": [{"name": "Someone", "joinphrase": "", "artist": {"id": "00000000-0000-4000-8000-0000000000a1", "name": "Someone"}}],
+                        "relations": [],
+                    }))
+                    .unwrap(),
+                )
+            }
+            // Any other ISRC of a recording read here (a duplicates check): MusicBrainz knows no
+            // recording with it.
+            "/ws/2/isrc/ZZCAP2600001" => (
+                200,
+                serde_json::to_vec(&serde_json::json!({"isrc": "ZZCAP2600001", "recordings": [
+                    {"id": "00000000-0000-4000-8000-000000000071", "length": 210000, "title": "Capped"},
+                    {"id": BIG_RECORDING, "length": 210000, "title": "Capped"}
+                ]}))
+                .unwrap(),
+            ),
+            path if synthetic(path).is_some() => synthetic(path).unwrap(),
+            path if path.starts_with("/ws/2/isrc/") => (404, fixture("mb-isrc-GBUM72103841.json")),
+            "/ws/2/recording/00000000-0000-4000-8000-000000000021"
+            | "/ws/2/recording/00000000-0000-4000-8000-000000000022"
+            | "/ws/2/recording/00000000-0000-4000-8000-000000000023"
+            | "/ws/2/recording/00000000-0000-4000-8000-000000000024" => {
+                let id = url.path().trim_start_matches("/ws/2/recording/");
+                let (artist, length) = match &id[id.len() - 2..] {
+                    "21" => ("00000000-0000-4000-8000-0000000000a1", 286000),
+                    "22" => ("00000000-0000-4000-8000-0000000000a2", 286000),
+                    "23" => ("00000000-0000-4000-8000-0000000000a1", 286000),
+                    _ => ("00000000-0000-4000-8000-0000000000a1", 290500),
+                };
+                (
+                    200,
+                    serde_json::to_vec(&serde_json::json!({
+                        "id": id,
+                        "title": "Walking Disaster",
+                        "length": length,
+                        "isrcs": [if id.ends_with('1') || id.ends_with('2') { "ZZDIS2600001" } else { "ZZDIS2600002" }],
+                        "artist-credit": [{"name": "Someone", "joinphrase": "", "artist": {"id": artist, "name": "Someone"}}],
+                        "relations": [],
+                    }))
+                    .unwrap(),
+                )
+            }
             "/ws/2/release/19fc791d-01d1-460d-960a-edb19cad0ee8" => {
                 (200, fixture("mb-release-19fc791d.json"))
             }
@@ -382,6 +526,33 @@ impl Transport for Recorded {
                     _ => (200, fixture("enwiki-missing.json")),
                 }
             }
+            // Walking Disaster's Wikidata item, found by its TIDAL ID, names the duplicate that
+            // does not stand for the two (6a5c430a).
+            "/w/api.php" if query("list") == "search" && query("srsearch").ends_with("P4578=3524506") => (
+                200,
+                br#"{"batchcomplete":"","query":{"searchinfo":{"totalhits":1},"search":[{"ns":0,"title":"Q77000001","pageid":77000001}]}}"#.to_vec(),
+            ),
+            // A track's Wikidata item names a recording whose record is over MusicBrainz's cap.
+            "/w/api.php" if query("list") == "search" && query("srsearch").ends_with("P4578=1000072") => (
+                200,
+                br#"{"batchcomplete":"","query":{"searchinfo":{"totalhits":1},"search":[{"ns":0,"title":"Q77000002","pageid":77000002}]}}"#.to_vec(),
+            ),
+            "/w/api.php" if query("action") == "wbgetentities" && query("ids") == "Q77000002" => (
+                200,
+                serde_json::to_vec(&serde_json::json!({"entities": {"Q77000002": {"type": "item", "id": "Q77000002", "claims": {
+                    "P4404": [{"mainsnak": {"snaktype": "value", "property": "P4404", "datavalue": {"value": BIG_RECORDING, "type": "string"}, "datatype": "external-id"}, "type": "statement", "rank": "normal"}],
+                    "P4578": [{"mainsnak": {"snaktype": "value", "property": "P4578", "datavalue": {"value": "1000072", "type": "string"}, "datatype": "external-id"}, "type": "statement", "rank": "normal"}]
+                }, "sitelinks": {}}}}))
+                .unwrap(),
+            ),
+            "/w/api.php" if query("action") == "wbgetentities" && query("ids") == "Q77000001" => (
+                200,
+                serde_json::to_vec(&serde_json::json!({"entities": {"Q77000001": {"type": "item", "id": "Q77000001", "claims": {
+                    "P4404": [{"mainsnak": {"snaktype": "value", "property": "P4404", "datavalue": {"value": "6a5c430a-8035-4217-97ac-ffa395f55bf9", "type": "string"}, "datatype": "external-id"}, "type": "statement", "rank": "normal"}],
+                    "P4578": [{"mainsnak": {"snaktype": "value", "property": "P4578", "datavalue": {"value": "3524506", "type": "string"}, "datatype": "external-id"}, "type": "statement", "rank": "normal"}]
+                }, "sitelinks": {}}}}))
+                .unwrap(),
+            ),
             "/w/api.php" if query("list") == "search" => (200, fixture("wd-search-p436.json")),
             // An item over Wikidata's cap.
             "/w/api.php" if query("action") == "wbgetentities" && query("ids") == "Q999999999" => {
@@ -418,9 +589,87 @@ impl Transport for Recorded {
     }
 }
 /// An artist whose MusicBrainz record is over the cap.
+/// Recordings and ISRCs written in MusicBrainz's answer shape for the duplicate rules, by MBID
+/// suffix: (title, length, artist suffix, ISRCs). A drifting chain (…41 200 s, …42 202.5 s, …43
+/// 205 s: each step within 3 s, the ends 5 s apart); a stray ISRC (…51 and …52 agree on one, …52
+/// shares another with …53 by another artist); a duration's pick with a duplicate (…62, picked
+/// against …63 30 s longer, agrees with …61 on another ISRC).
+const SYNTHETIC: &[(&str, &str, u64, &str, &[&str])] = &[
+    ("41", "Drift", 200_000, "a1", &["ZZDRF2600001"]),
+    (
+        "42",
+        "Drift",
+        202_500,
+        "a1",
+        &["ZZDRF2600001", "ZZDRF2600002"],
+    ),
+    ("43", "Drift", 205_000, "a1", &["ZZDRF2600002"]),
+    ("51", "Stray", 190_000, "a1", &["ZZSTR2600001"]),
+    (
+        "52",
+        "Stray",
+        190_500,
+        "a1",
+        &["ZZSTR2600001", "ZZSTR2600002"],
+    ),
+    ("53", "Stray", 190_500, "a2", &["ZZSTR2600002"]),
+    ("61", "Picked", 200_500, "a1", &["ZZPCK2600002"]),
+    (
+        "62",
+        "Picked",
+        200_000,
+        "a1",
+        &["ZZPCK2600001", "ZZPCK2600002"],
+    ),
+    ("63", "Picked", 230_000, "a1", &["ZZPCK2600001"]),
+    ("71", "Capped", 210_000, "a1", &["ZZCAP2600001"]),
+];
+fn synthetic(path: &str) -> Option<(u16, Vec<u8>)> {
+    let mbid = |n: &str| format!("00000000-0000-4000-8000-0000000000{n}");
+    if let Some(id) = path.strip_prefix("/ws/2/recording/") {
+        let (n, title, length, artist, isrcs) = SYNTHETIC.iter().find(|(n, ..)| mbid(n) == id)?;
+        // The duration's pick (…62) and …71 have a link of their own on MusicBrainz.
+        let relations = if ["62", "71"].contains(n) {
+            serde_json::json!([{"type": "free streaming", "target-type": "url", "ended": false,
+                "url": {"resource": format!("https://www.deezer.com/track/{n}000{n}")}}])
+        } else {
+            serde_json::json!([])
+        };
+        return Some((
+            200,
+            serde_json::to_vec(&serde_json::json!({
+                "id": mbid(n), "title": title, "length": length, "isrcs": isrcs, "video": false,
+                "artist-credit": [{"name": "Someone", "joinphrase": "",
+                    "artist": {"id": format!("00000000-0000-4000-8000-0000000000{artist}"), "name": "Someone"}}],
+                "relations": relations,
+            }))
+            .unwrap(),
+        ));
+    }
+    let isrc = path.strip_prefix("/ws/2/isrc/")?;
+    let recordings: Vec<serde_json::Value> = SYNTHETIC
+        .iter()
+        .filter(|(.., isrcs)| isrcs.contains(&isrc))
+        .map(|(n, title, length, ..)| serde_json::json!({"id": mbid(n), "title": title, "length": length}))
+        .collect();
+    (!recordings.is_empty()).then(|| {
+        (
+            200,
+            serde_json::to_vec(&serde_json::json!({"isrc": isrc, "recordings": recordings}))
+                .unwrap(),
+        )
+    })
+}
 const BIG_BAND: &str = "00000000-0000-4000-8000-00000000000b";
+/// A recording whose record is over MusicBrainz's cap: its page keys nothing, as the read that
+/// tells which recording stands for its duplicates could not be made.
+const BIG_RECORDING: &str = "00000000-0000-4000-8000-00000000000c";
 fn egress(transport: Arc<Recorded>) -> Egress {
-    Egress::with_backends(EgressConfig::default(), Arc::new(PublicDns), transport)
+    Egress::with_backends(
+        common::unpaced_egress_config(),
+        Arc::new(PublicDns),
+        transport,
+    )
 }
 
 #[tokio::test]
@@ -627,7 +876,7 @@ async fn deezer_s_api_stays_off_and_its_links_stay(pool: sqlx::PgPool) {
     .await
     .unwrap();
     assert_eq!(deezer_rows, 0);
-    let app = api::router(AppState::new(pool.clone(), config).await.unwrap());
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
     let get = |path: String| {
         let app = app.clone();
         async move {
@@ -710,6 +959,7 @@ async fn the_deezer_source_off_calls_nothing_even_asked_directly() {
                 doc: None,
                 keys: keys.clone(),
                 first_seen_at: None,
+                candidates: vec![],
             };
             assert!(deezer.applies(&subject), "{uri}");
             let found = deezer.lookup(&cx, &subject).await;
@@ -789,7 +1039,7 @@ async fn music_links_join_through_the_hubs_and_list_each_other(pool: sqlx::PgPoo
         ]
     );
     common::drain_groups(&pool, &Default::default()).await;
-    let app = api::router(AppState::new(pool.clone(), config).await.unwrap());
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
     let mut request = axum::http::Request::builder()
         .uri(format!("/v1/resources/{}", ids[0]))
         .body(axum::body::Body::empty())
@@ -803,11 +1053,11 @@ async fn music_links_join_through_the_hubs_and_list_each_other(pool: sqlx::PgPoo
         .unwrap()
         .to_bytes();
     let card: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    // Every link: the details' list (the card shows one per music service).
+    // One link per service, as every card shows: the other edition is a page of the card's own
+    // service (Spotify), so it does not show.
     let also_on = card["also_on"].as_array().unwrap();
-    // The other edition first, as a tagged member with its ID.
-    assert_eq!(also_on[0]["id"], ids[1].as_str(), "{card}");
-    let derived: Vec<(&str, &str, &str)> = also_on[1..]
+    assert!(also_on.iter().all(|e| e["id"] != ids[1].as_str()), "{card}");
+    let derived: Vec<(&str, &str, &str)> = also_on
         .iter()
         .map(|e| {
             assert_eq!(e["derived"], true);
@@ -929,7 +1179,7 @@ async fn wikipedia_editions_join_through_their_item(pool: sqlx::PgPool) {
         .await
         .unwrap();
     common::drain_groups(&pool, &Default::default()).await;
-    let app = api::router(AppState::new(pool.clone(), config).await.unwrap());
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
     let mut request = axum::http::Request::builder()
         .uri(format!("/v1/resources/{}", ids[1]))
         .body(axum::body::Body::empty())
@@ -1019,7 +1269,7 @@ async fn a_wikidata_item_lists_its_editions_and_encyclopedias(pool: sqlx::PgPool
     let seen = t.seen.lock().unwrap().clone();
     assert_eq!(seen.len(), 1, "one request: {seen:?}");
     assert!(seen[0].contains("action=wbgetentities") && seen[0].contains("ids=Q9312"));
-    let app = api::router(AppState::new(pool.clone(), config).await.unwrap());
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
     let mut request = axum::http::Request::builder()
         .uri(format!("/v1/resources/{id}"))
         .body(axum::body::Body::empty())
@@ -1119,11 +1369,15 @@ async fn editions_of_one_release_group_take_the_group(pool: sqlx::PgPool) {
     );
     // Facts both releases share: the barcode, not either MBID or the differing credits.
     assert_eq!(
-        rows("SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name COLLATE \"C\"").await,
+        rows("SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 AND source<>'editions' ORDER BY name COLLATE \"C\"").await,
         ["upc 0196874054246"]
     );
     let seen = t.seen.lock().unwrap().clone();
-    let mb: Vec<_> = seen.iter().filter(|s| s.contains("/ws/2/")).collect();
+    // The lookups (`editions` then browses the release group's releases).
+    let mb: Vec<_> = seen
+        .iter()
+        .filter(|s| s.contains("/ws/2/") && !s.contains("/ws/2/release?"))
+        .collect();
     assert_eq!(mb.len(), 3, "{seen:?}");
     assert!(
         mb.iter().all(|s| s.starts_with("mb-mirror.example/ws/2/")),
@@ -1310,14 +1564,368 @@ async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
         seen.iter().any(|s| s.contains("/ws/2/isrc/GBUM71029604")),
         "{seen:?}"
     );
-    // The seed's ISRC is on two recordings: not its key (its own URL relation joins it).
+    // The seed's ISRC is on two recordings that agree (the album version and its remaster, 1.5 s
+    // apart): one recording, so the ISRC is its key and so is the remaster's MBID, beside the
+    // recording its own URL relation names.
     assert!(
         seen.iter().any(|s| s.contains("/ws/2/isrc/GBCEE0100112")),
         "{seen:?}"
     );
-    assert!(!rows(keys, ids[0].clone())
+    let seed_keys = rows(keys, ids[0].clone()).await;
+    for key in [
+        "isrc:GBCEE0100112 service tidal",
+        "mb:recording:b1a9c0e9-d987-4042-ae91-78d6a3267d69 service tidal",
+    ] {
+        assert!(seed_keys.contains(&key.to_owned()), "{key}: {seed_keys:?}");
+    }
+    assert!(
+        !seed_keys.iter().any(|k| k.contains("dc2f9b64")),
+        "{seed_keys:?}"
+    );
+}
+
+/// An ISRC MusicBrainz gives to several recordings that agree (the same artists, the same title
+/// once the identity-keeping tags go, lengths within 3 s or unknown) names one recording not
+/// yet merged: the ISRC and every MBID are the track's keys, from its own page (`service`), from
+/// `musicbrainz` (a URL MusicBrainz does not relate, with the union of the recordings' links and
+/// facts) and from the ISRC's own MusicBrainz page (`musicbrainz_entity`), so the track, the
+/// recordings' pages and the ISRC page are one group. Recordings that disagree (another artist;
+/// 4.5 s apart) keep today's rule: the duration picks one or the ISRC stays a fact.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn duplicate_recordings_of_one_isrc_are_one_recording(pool: sqlx::PgPool) {
+    if !has(&["service", "musicbrainz", "musicbrainz_entity"]) {
+        return;
+    }
+    let first = "4da0e503-0cef-4dd7-a5b7-b08bea3db145";
+    let second = "6a5c430a-8035-4217-97ac-ffa395f55bf9";
+    let tidal = "https://tidal.com/track/3524506";
+    let pages = [
+        format!("https://musicbrainz.org/recording/{first}"),
+        format!("https://musicbrainz.org/recording/{second}"),
+        "https://musicbrainz.org/isrc/USUM70740306".to_owned(),
+    ];
+    let other_artist = "https://tidal.com/track/1000001";
+    let far_apart = "https://tidal.com/track/1000002";
+    let mut ids = std::collections::BTreeMap::new();
+    for (uri, isrc) in [
+        (tidal, Some("USUM70740306")),
+        (other_artist, Some("ZZDIS2600001")),
+        (far_apart, Some("ZZDIS2600002")),
+        (pages[0].as_str(), None),
+        (pages[1].as_str(), None),
+        (pages[2].as_str(), None),
+    ] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut d = ResourceMeta::new(uri, "jsonld", 86400);
+        d.set_type("MusicRecording");
+        if let Some(isrc) = isrc {
+            // As TIDAL's JSON-LD states them.
+            d.name = Some("Walking Disaster".into());
+            d.attributes.insert("isrc".into(), isrc.into());
+            d.attributes.insert("artist".into(), "Sum 41".into());
+            d.attributes.insert("duration".into(), "PT4M46S".into());
+        }
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        ids.insert(uri.to_owned(), id);
+    }
+    let t = Arc::new(Recorded {
+        seen: Mutex::default(),
+    });
+    let cx = also_on::Context {
+        egress: egress(t.clone()),
+        config: Arc::new(Config::default()),
+    };
+    sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()")
+        .execute(&pool)
         .await
-        .contains(&"isrc:GBCEE0100112 service tidal".to_owned()));
+        .unwrap();
+    also_on::drain(&pool, &cx, &also_on::registry(), 100)
+        .await
+        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
+    let rows = |sql: &'static str, id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, String>(sql)
+                .bind(id)
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let keys = "SELECT key||' '||source||' '||via FROM resource_key WHERE resource_id=$1 ORDER BY key COLLATE \"C\",source";
+    // A key is stored once per resource, under the first source that vouched for it: the page's
+    // own ISRC (`service`, via TIDAL) keys the ISRC and both recordings before `musicbrainz`.
+    let track = rows(keys, ids[tidal].clone()).await;
+    for key in [
+        "isrc:USUM70740306 service tidal".to_owned(),
+        format!("mb:recording:{first} service tidal"),
+    ] {
+        assert!(track.contains(&key), "{key}: {track:?}");
+    }
+    // The recording that stands for the duplicates is the one with the smaller MBID; the other's
+    // MBID is a fact, never a key (a group holds one recording MBID).
+    assert!(
+        !track.iter().any(|k| k.contains(second)),
+        "{second}: {track:?}"
+    );
+    // The union of the recordings' facts, each once.
+    let facts = rows(
+        "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name COLLATE \"C\",value COLLATE \"C\"",
+        ids[tidal].clone(),
+    )
+    .await;
+    for fact in [
+        "artist Sum 41",
+        "isrc USUM70740306",
+        &format!("mbid {first}"),
+        &format!("mbid_was {second}"),
+    ] {
+        assert!(facts.contains(&fact.to_owned()), "{fact}: {facts:?}");
+    }
+    assert_eq!(
+        facts.iter().filter(|f| *f == "isrc USUM70740306").count(),
+        1,
+        "{facts:?}"
+    );
+    // The ISRC's own page keys the ISRC first, then the recording that stands for both; the
+    // second recording's own page keys that recording too, not itself.
+    let page = rows(keys, ids[&pages[2]].clone()).await;
+    assert_eq!(
+        page,
+        [
+            "isrc:USUM70740306 musicbrainz_entity musicbrainz".to_owned(),
+            format!("mb:recording:{first} musicbrainz_entity musicbrainz"),
+        ],
+        "{page:?}"
+    );
+    let other_page = rows(keys, ids[&pages[1]].clone()).await;
+    assert!(
+        other_page.contains(&format!(
+            "mb:recording:{first} musicbrainz_entity musicbrainz"
+        )) && !other_page.iter().any(|k| k.contains(second)),
+        "{other_page:?}"
+    );
+    assert!(rows(
+        "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1",
+        ids[&pages[1]].clone()
+    )
+    .await
+    .contains(&format!("mbid_was {second}")),);
+    // One group: the track, both recordings' pages and the ISRC page.
+    let group = "SELECT coalesce(group_id,'-') FROM group_unit WHERE resource_id=$1";
+    let joined = rows(group, ids[tidal].clone()).await;
+    assert_ne!(joined, ["-"]);
+    for page in &pages {
+        assert_eq!(rows(group, ids[page].clone()).await, joined, "{page}");
+    }
+    // Recordings that disagree: another artist, the ISRC a fact only; 4.5 s apart, the page's
+    // 4:46 picks the one within 3 s (…23), keyed by its MBID alone.
+    assert!(
+        !rows(keys, ids[other_artist].clone())
+            .await
+            .iter()
+            .any(|k| k.starts_with("isrc:") || k.starts_with("mb:recording:")),
+        "{:?}",
+        rows(keys, ids[other_artist].clone()).await
+    );
+    let picked = rows(keys, ids[far_apart].clone()).await;
+    assert!(
+        picked.contains(
+            &"mb:recording:00000000-0000-4000-8000-000000000023 service tidal".to_owned()
+        ),
+        "{picked:?}"
+    );
+    assert!(!picked.iter().any(|k| k.starts_with("isrc:")), "{picked:?}");
+    for id in [other_artist, far_apart] {
+        assert_eq!(rows(group, ids[id].clone()).await, ["-"], "{id}");
+    }
+    // MusicBrainz was asked for the ISRC and each recording once (cached for the sources after).
+    let seen = t.seen.lock().unwrap().clone();
+    assert_eq!(
+        seen.iter()
+            .filter(|s| s.contains(&format!("/ws/2/recording/{first}")))
+            .count(),
+        1,
+        "{seen:?}"
+    );
+}
+
+/// One recording stands for a set of agreeing duplicates on every path that keys a recording:
+/// a Wikidata item naming the other duplicate (P4404), the overlapping sets a member's ISRCs
+/// reach (…32 shares an ISRC with …31 and another with …33: …31 stands for all three, from a
+/// page with the second ISRC and from each recording's own page), an agreeing ISRC after a
+/// recording's fourth (…36's fifth, shared with …35), and a recording page MusicBrainz answers
+/// over its cap, which keys nothing. No resource carries two recording keys, and `key=mbid:` with
+/// the other duplicate's MBID still finds its page.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn one_recording_stands_for_its_duplicates_on_every_path(pool: sqlx::PgPool) {
+    if !has(&["service", "musicbrainz", "musicbrainz_entity", "wikidata"]) {
+        return;
+    }
+    use tower::ServiceExt;
+    let first = "4da0e503-0cef-4dd7-a5b7-b08bea3db145";
+    let second = "6a5c430a-8035-4217-97ac-ffa395f55bf9";
+    let rec = |n: &str| format!("00000000-0000-4000-8000-0000000000{n}");
+    let page = |mbid: &str| format!("https://musicbrainz.org/recording/{mbid}");
+    let tidal = "https://tidal.com/track/3524506";
+    let chain = "https://tidal.com/track/1000003";
+    let fifth = "https://tidal.com/track/1000005";
+    let over_cap = page(BIG_RECORDING);
+    let mut ids = std::collections::BTreeMap::new();
+    for (uri, isrc) in [
+        (tidal, Some("USUM70740306")),
+        (chain, Some("ZZCHN2600002")),
+        (fifth, None),
+        (page(second).as_str(), None),
+        (page(&rec("32")).as_str(), None),
+        (page(&rec("33")).as_str(), None),
+        (page(&rec("36")).as_str(), None),
+        (over_cap.as_str(), None),
+    ] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut d = ResourceMeta::new(uri, "jsonld", 86400);
+        d.set_type("MusicRecording");
+        if let Some(isrc) = isrc {
+            d.name = Some("A track".into());
+            d.attributes.insert("isrc".into(), isrc.into());
+            d.attributes.insert("artist".into(), "Someone".into());
+            d.attributes.insert("duration".into(), "PT3M20S".into());
+        }
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        // Referenced, so search lists it (a previewed-only resource is no search result).
+        sqlx::query("INSERT INTO reference(resource_id,author,kind,object_path,label,created_at) VALUES($1,repeat('a',52),'tag','/pub/test/tags/'||$1,'music',now())")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        ids.insert(uri.to_owned(), id);
+    }
+    // A resource another source keyed by the over-cap recording (no source reads its link; its
+    // key is written after the drain, as a run of that source would have left it).
+    let elsewhere = "https://example.org/big-recording-elsewhere";
+    let elsewhere_id = store::ensure_resource(&pool, elsewhere).await.unwrap();
+    let mut d = ResourceMeta::new(elsewhere, "jsonld", 86400);
+    d.set_type("MusicRecording");
+    store::save_document(&pool, &elsewhere_id, 0, &d)
+        .await
+        .unwrap();
+    ids.insert(elsewhere.to_owned(), elsewhere_id.clone());
+    let t = Arc::new(Recorded {
+        seen: Mutex::default(),
+    });
+    let cx = also_on::Context {
+        egress: egress(t.clone()),
+        config: Arc::new(Config::default()),
+    };
+    sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    also_on::drain(&pool, &cx, &also_on::registry(), 100)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO resource_key(resource_id,key,source,via,expires_at) VALUES($1,$2,'wikidata','wikidata',now()+interval '1 day')")
+        .bind(&elsewhere_id)
+        .bind(format!("mb:recording:{BIG_RECORDING}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO group_dirty(resource_id) VALUES($1) ON CONFLICT DO NOTHING")
+        .bind(&elsewhere_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
+    let rows = |sql: &'static str, id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, String>(sql)
+                .bind(id)
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let group = "SELECT coalesce(group_id,'-') FROM group_unit WHERE resource_id=$1";
+    let recording_keys = "SELECT DISTINCT key FROM resource_key WHERE resource_id=$1 AND key LIKE 'mb:recording:%' ORDER BY key";
+    // Wikidata's item names 6a5c430a; the track keys 4da0e503 alone, from Wikidata too.
+    let keys = "SELECT key||' '||source FROM resource_key WHERE resource_id=$1 ORDER BY key COLLATE \"C\",source";
+    let track = rows(keys, ids[tidal].clone()).await;
+    assert!(
+        track.contains(&format!("mb:recording:{first} service")),
+        "{track:?}"
+    );
+    assert!(
+        track.contains(&"wikidata:Q77000001 wikidata".to_owned()),
+        "{track:?}"
+    );
+    assert!(!track.iter().any(|k| k.contains(second)), "{track:?}");
+    // Overlapping sets: the page with the second ISRC and both recordings' pages key …31.
+    for uri in [chain, &page(&rec("32")), &page(&rec("33"))] {
+        assert_eq!(
+            rows(recording_keys, ids[uri].clone()).await,
+            [format!("mb:recording:{}", rec("31"))],
+            "{uri}"
+        );
+    }
+    // The agreeing ISRC after the fourth: the track MusicBrainz relates to …36 keys …35, and so
+    // does …36's own page.
+    for uri in [fifth, &page(&rec("36"))] {
+        assert_eq!(
+            rows(recording_keys, ids[uri].clone()).await,
+            [format!("mb:recording:{}", rec("35"))],
+            "{uri}"
+        );
+    }
+    // An over-cap recording page keys its own MBID, as its link alone proves, and keeps its group
+    // with a resource another source keyed by that recording.
+    assert_eq!(
+        rows(recording_keys, ids[&over_cap].clone()).await,
+        [format!("mb:recording:{BIG_RECORDING}")]
+    );
+    let big_group = rows(group, ids[&over_cap].clone()).await;
+    assert_ne!(big_group, ["-"]);
+    assert_eq!(rows(group, ids[elsewhere].clone()).await, big_group);
+    // Never two recording keys on one resource.
+    for (uri, id) in &ids {
+        assert!(
+            rows(recording_keys, id.clone()).await.len() <= 1,
+            "{uri}: {:?}",
+            rows(recording_keys, id.clone()).await
+        );
+    }
+    // One group each: the Walking Disaster track with 6a5c430a's page; the chain's three.
+    let walking = rows(group, ids[tidal].clone()).await;
+    assert_ne!(walking, ["-"]);
+    assert_eq!(rows(group, ids[&page(second)].clone()).await, walking);
+    let chained = rows(group, ids[chain].clone()).await;
+    assert_ne!(chained, ["-"]);
+    for uri in [&page(&rec("32")), &page(&rec("33"))] {
+        assert_eq!(rows(group, ids[uri].clone()).await, chained, "{uri}");
+    }
+    // The other duplicate's MBID still finds its page, as `mbid_was`.
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let mut request = axum::http::Request::builder()
+        .uri(format!("/v1/search?key=mbid:{second}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.2:1234".parse::<SocketAddr>().unwrap(),
+    ));
+    let response = app.oneshot(request).await.unwrap();
+    let bytes = http_body_util::BodyExt::collect(response.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let found: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let hits: Vec<&str> = found["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap())
+        .collect();
+    assert!(hits.contains(&ids[&page(second)].as_str()), "{found}");
 }
 
 /// With Deezer's API on: a Deezer album's own barcode is a key, iTunes names the one Apple album
@@ -1988,7 +2596,23 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
         isrc_keys.contains(&mbid) && isrc_keys.contains(&"isrc:GBUM71029604".to_owned()),
         "{isrc_keys:?}"
     );
-    assert!(rows(keys, ids[shared].clone()).await.is_empty());
+    // An ISRC on two recordings that agree (the album version and its remaster) keys the ISRC
+    // and both recordings.
+    let shared_keys = rows(keys, ids[shared].clone()).await;
+    for key in [
+        "isrc:GBCEE0100112",
+        "mb:recording:b1a9c0e9-d987-4042-ae91-78d6a3267d69",
+    ] {
+        assert!(
+            shared_keys.contains(&key.to_owned()),
+            "{key}: {shared_keys:?}"
+        );
+    }
+    // The remaster's MBID is a fact of the page, never a key: the album version stands for both.
+    assert!(
+        !shared_keys.iter().any(|k| k.contains("dc2f9b64")),
+        "{shared_keys:?}"
+    );
     // A page whose MBID was merged into the recording keys the recording, keeps the old MBID as a
     // fact, joins, and is found by the old MBID.
     assert!(rows(keys, ids[merged].clone()).await.contains(&mbid));
@@ -2008,11 +2632,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
             .execute(&pool)
             .await
             .unwrap();
-        let app = api::router(
-            AppState::new(pool.clone(), Config::default())
-                .await
-                .unwrap(),
-        );
+        let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
         let mut request = axum::http::Request::builder()
             .uri("/v1/search?key=mbid:00000000-0000-4000-8000-00000000000d")
             .body(axum::body::Body::empty())
@@ -2047,13 +2667,30 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     assert!(rows(keys, ids[many].clone())
         .await
         .contains(&"isrc:ZZAAA2600010".to_owned()));
+    // The agreeing recordings' facts as one: the ISRC once, both MBIDs.
+    let shared_facts = rows(
+        "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY name COLLATE \"C\",value COLLATE \"C\"",
+        ids[shared].clone(),
+    )
+    .await;
+    for fact in [
+        "isrc GBCEE0100112",
+        "mbid b1a9c0e9-d987-4042-ae91-78d6a3267d69",
+        "mbid_was dc2f9b64-2e3f-4a13-a89f-6a1bded55c6f",
+        "artist Queen",
+    ] {
+        assert!(
+            shared_facts.contains(&fact.to_owned()),
+            "{fact}: {shared_facts:?}"
+        );
+    }
     assert_eq!(
-        rows(
-            "SELECT name||' '||value FROM resource_fact WHERE resource_id=$1",
-            ids[shared].clone()
-        )
-        .await,
-        ["isrc GBCEE0100112"]
+        shared_facts
+            .iter()
+            .filter(|f| *f == "isrc GBCEE0100112")
+            .count(),
+        1,
+        "{shared_facts:?}"
     );
     // The recording's links on services, keyed by it, and its facts.
     let links = rows(
@@ -2080,7 +2717,8 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     assert_eq!(rows(group, ids[single].clone()).await, song);
     assert_eq!(rows(group, ids[merged].clone()).await, song);
     assert_eq!(rows(group, ids[tidal].clone()).await, song);
-    assert_ne!(rows(group, ids[shared].clone()).await, song);
+    // The ISRC on the recording and its remaster keys the recording: its page joins too.
+    assert_eq!(rows(group, ids[shared].clone()).await, song);
     // The artist's page joins the TIDAL artist MusicBrainz lists.
     let band = rows(group, ids[artist].clone()).await;
     assert_ne!(band, ["-"]);
@@ -2276,11 +2914,7 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
             .execute(&pool)
             .await
             .unwrap();
-        let app = api::router(
-            AppState::new(pool.clone(), Config::default())
-                .await
-                .unwrap(),
-        );
+        let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
         let mut request = axum::http::Request::builder()
             .uri(
                 "/v1/search?key=mbid:a74b1b7f-71a5-4011-9441-d0b5e4122711&type=MusicEvent&from=now",
@@ -2358,8 +2992,12 @@ async fn a_musicbrainz_page_card_comes_from_the_entity() {
     let isrc = card("https://musicbrainz.org/isrc/GBUM71029604").await;
     assert_eq!(isrc.name.as_deref(), Some("Bohemian Rhapsody"));
     assert_eq!(isrc.url, "https://musicbrainz.org/isrc/GBUM71029604");
+    // Two recordings that agree (the album version and its remaster) are one: the card of the
+    // one with the plainest title. Two that disagree keep the ISRC's own card.
     let shared = card("https://musicbrainz.org/isrc/GBCEE0100112").await;
-    assert_eq!(shared.name.as_deref(), Some("ISRC GBCEE0100112"));
+    assert_eq!(shared.name.as_deref(), Some("Bohemian Rhapsody"));
+    let disagreeing = card("https://musicbrainz.org/isrc/ZZDIS2600001").await;
+    assert_eq!(disagreeing.name.as_deref(), Some("ISRC ZZDIS2600001"));
     // No page was read: MusicBrainz's web service only.
     let seen = t.seen.lock().unwrap().clone();
     assert!(
@@ -2886,4 +3524,395 @@ async fn a_shared_isrc_names_the_recording_the_tracks_length_picks(pool: sqlx::P
     assert_eq!(pick(&[a.clone(), r("c", None)], Some(214)), None);
     // Two within the window: no decision.
     assert_eq!(pick(&[a.clone(), r("d", Some(211_000))], Some(213)), None);
+}
+
+/// The duplicate rules' edges: a chain whose lengths drift 2.5 s at each step (5 s end to end)
+/// is no set, so its ISRC stays a fact; an ISRC a duplicate shares with a recording that
+/// disagrees is a fact, never a key (an exact lookup by it could name that other recording's
+/// track); a duration's pick that has a duplicate on another ISRC is keyed as the one standing
+/// for both, by every source.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn the_whole_set_agrees_and_only_its_own_isrcs_are_keys(pool: sqlx::PgPool) {
+    use tower::ServiceExt;
+    if !has(&["service", "musicbrainz"]) {
+        return;
+    }
+    let rec = |n: &str| format!("00000000-0000-4000-8000-0000000000{n}");
+    let drift = "https://tidal.com/track/1000041";
+    let stray = "https://tidal.com/track/1000051";
+    let picked = "https://tidal.com/track/1000061";
+    let mut ids = std::collections::BTreeMap::new();
+    for (uri, isrc, duration) in [
+        (drift, "ZZDRF2600001", None),
+        (stray, "ZZSTR2600001", None),
+        (picked, "ZZPCK2600001", Some("PT3M20S")),
+    ] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut d = ResourceMeta::new(uri, "jsonld", 86400);
+        d.set_type("MusicRecording");
+        d.attributes.insert("isrc".into(), isrc.into());
+        if let Some(duration) = duration {
+            d.attributes.insert("duration".into(), duration.into());
+        }
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        // Referenced, so search lists it.
+        sqlx::query("INSERT INTO reference(resource_id,author,kind,object_path,label,created_at) VALUES($1,repeat('a',52),'tag','/pub/test/tags/'||$1,'music',now())")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        ids.insert(uri, id);
+    }
+    let t = Arc::new(Recorded {
+        seen: Mutex::default(),
+    });
+    let cx = also_on::Context {
+        egress: egress(t.clone()),
+        config: Arc::new(Config::default()),
+    };
+    sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    also_on::drain(&pool, &cx, &also_on::registry(), 100)
+        .await
+        .unwrap();
+    let rows = |sql: &'static str, id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, String>(sql)
+                .bind(id)
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let keys = "SELECT DISTINCT key FROM resource_key WHERE resource_id=$1 ORDER BY key";
+    let facts =
+        "SELECT DISTINCT name||' '||value FROM resource_fact WHERE resource_id=$1 ORDER BY 1";
+    // The drifting chain: no recording and no ISRC key; the ISRC a fact.
+    let drifted = rows(keys, ids[drift].clone()).await;
+    assert!(drifted.is_empty(), "{drifted:?}");
+    assert!(rows(facts, ids[drift].clone())
+        .await
+        .contains(&"isrc ZZDRF2600001".to_owned()));
+    // The stray ISRC: …51 and …52 are one (…51 stands); ZZSTR2600002, which …52 shares with
+    // …53 by another artist, is a fact, not a key.
+    let strayed = rows(keys, ids[stray].clone()).await;
+    assert_eq!(
+        strayed,
+        [
+            "isrc:ZZSTR2600001".to_owned(),
+            format!("mb:recording:{}", rec("51"))
+        ],
+        "{strayed:?}"
+    );
+    assert!(rows(facts, ids[stray].clone())
+        .await
+        .contains(&"isrc ZZSTR2600002".to_owned()));
+    // The duration's pick (…62) has a duplicate (…61) on another ISRC: every source keys …61,
+    // and that other ISRC, which names …61 on its own, is a key too; the shared ISRC the
+    // duration decided between stays a fact.
+    assert_eq!(
+        rows(keys, ids[picked].clone()).await,
+        [
+            "isrc:ZZPCK2600002".to_owned(),
+            format!("mb:recording:{}", rec("61"))
+        ]
+    );
+    assert!(rows(facts, ids[picked].clone())
+        .await
+        .contains(&"isrc ZZPCK2600001".to_owned()));
+    // The pick itself is what MusicBrainz is read about: its own link, keyed by the standing
+    // recording, and its MBID kept as `mbid_was`, so `key=mbid:` with the pick finds the track.
+    assert_eq!(
+        rows(
+            "SELECT uri||' '||coalesce(key,'-') FROM derived_link WHERE resource_id=$1 AND source='musicbrainz'",
+            ids[picked].clone()
+        )
+        .await,
+        [format!(
+            "https://www.deezer.com/track/6200062 mb:recording:{}",
+            rec("61")
+        )]
+    );
+    assert!(rows(facts, ids[picked].clone())
+        .await
+        .contains(&format!("mbid_was {}", rec("62"))));
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let mut request = axum::http::Request::builder()
+        .uri(format!("/v1/search?key=mbid:{}", rec("62")))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.2:1234".parse::<SocketAddr>().unwrap(),
+    ));
+    let response = app.oneshot(request).await.unwrap();
+    let bytes = http_body_util::BodyExt::collect(response.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let found: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        found["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["id"] == ids[picked].as_str()),
+        "{found}"
+    );
+}
+
+/// Wikidata's recording item, read alone (no other source keys the track): the MBID it names is
+/// keyed as the recording that stands for its duplicates, and the MBID it replaced stays as
+/// Wikidata's `mbid_was`, so `key=mbid:` with it still finds the track.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn wikidata_alone_keys_the_standing_recording_and_keeps_the_other(pool: sqlx::PgPool) {
+    use tower::ServiceExt;
+    if !has(&["wikidata", "service", "musicbrainz", "musicbrainz_entity"]) {
+        return;
+    }
+    let first = "4da0e503-0cef-4dd7-a5b7-b08bea3db145";
+    let second = "6a5c430a-8035-4217-97ac-ffa395f55bf9";
+    let tidal = "https://tidal.com/track/3524506";
+    let id = store::ensure_resource(&pool, tidal).await.unwrap();
+    let mut d = ResourceMeta::new(tidal, "jsonld", 86400);
+    d.set_type("MusicRecording");
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,object_path,label,created_at) VALUES($1,repeat('a',52),'tag','/pub/test/tags/'||$1,'music',now())")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut config = Config::default();
+    for source in ["service", "musicbrainz", "musicbrainz_entity"] {
+        config.also_on.sources.insert(
+            source.into(),
+            also_on::SourceOptions {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        );
+    }
+    config.validate().unwrap();
+    let t = Arc::new(Recorded {
+        seen: Mutex::default(),
+    });
+    let cx = also_on::Context {
+        egress: egress(t.clone()),
+        config: Arc::new(config.clone()),
+    };
+    also_on::configure(&pool, &config.also_on).await.unwrap();
+    sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    also_on::drain(&pool, &cx, &also_on::registry(), 100)
+        .await
+        .unwrap();
+    let rows = |sql: &'static str| {
+        let pool = pool.clone();
+        let id = id.clone();
+        async move {
+            sqlx::query_scalar::<_, String>(sql)
+                .bind(id)
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(
+        rows("SELECT key FROM resource_key WHERE resource_id=$1 AND source='wikidata' AND key LIKE 'mb:recording:%'").await,
+        [format!("mb:recording:{first}")]
+    );
+    assert_eq!(
+        rows("SELECT value FROM resource_fact WHERE resource_id=$1 AND source='wikidata' AND name='mbid_was'").await,
+        [second]
+    );
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
+    let mut request = axum::http::Request::builder()
+        .uri(format!("/v1/search?key=mbid:{second}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.2:1234".parse::<SocketAddr>().unwrap(),
+    ));
+    let response = app.oneshot(request).await.unwrap();
+    let bytes = http_body_util::BodyExt::collect(response.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let found: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        found["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["id"] == id.as_str()),
+        "{found}"
+    );
+}
+
+/// Sources that key different recordings for one resource truly disagree: the record-time check
+/// only observes it. Both keys are kept, the resource joins no recording group (a group holds
+/// one), and the run is counted.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn disagreeing_recording_keys_are_kept_and_counted(pool: sqlx::PgPool) {
+    let a = "00000000-0000-4000-8000-0000000000e1";
+    let b = "00000000-0000-4000-8000-0000000000e2";
+    let uri = "https://tidal.com/track/1000099";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut d = ResourceMeta::new(uri, "jsonld", 86400);
+    d.set_type("MusicRecording");
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    let other = "https://musicbrainz.org/recording/00000000-0000-4000-8000-0000000000e1";
+    let other_id = store::ensure_resource(&pool, other).await.unwrap();
+    let mut d = ResourceMeta::new(other, "jsonld", 86400);
+    d.set_type("MusicRecording");
+    store::save_document(&pool, &other_id, 0, &d).await.unwrap();
+    let config = Config::default();
+    let key = |mbid: &str, via: &str| also_on::Key {
+        key: format!("mb:recording:{mbid}"),
+        via: via.into(),
+    };
+    let found = |k: also_on::Key| also_on::Found {
+        keys: vec![k],
+        ..Default::default()
+    };
+    let ttl = std::time::Duration::from_secs(86_400);
+    also_on::record(
+        &pool,
+        &other_id,
+        "conflict_probe",
+        found(key(a, "musicbrainz")),
+        ttl,
+        &config.also_on,
+    )
+    .await
+    .unwrap();
+    also_on::record(
+        &pool,
+        &id,
+        "conflict_probe",
+        found(key(a, "musicbrainz")),
+        ttl,
+        &config.also_on,
+    )
+    .await
+    .unwrap();
+    let counted = || {
+        pinakes_core::telemetry::Metrics::new()
+            .unwrap()
+            .encode()
+            .unwrap()
+            .lines()
+            .find(|l| {
+                l.starts_with("pinakes_also_on_recording_key_conflicts_total{")
+                    && l.contains("source=\"conflict_probe_2\"")
+            })
+            .and_then(|l| l.rsplit(' ').next()?.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    assert_eq!(counted(), 0);
+    also_on::record(
+        &pool,
+        &id,
+        "conflict_probe_2",
+        found(key(b, "wikidata")),
+        ttl,
+        &config.also_on,
+    )
+    .await
+    .unwrap();
+    assert_eq!(counted(), 1);
+    let keys: Vec<String> = sqlx::query_scalar(
+        "SELECT key FROM resource_key WHERE resource_id=$1 AND key LIKE 'mb:recording:%' ORDER BY key",
+    )
+    .bind(&id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        keys,
+        [format!("mb:recording:{a}"), format!("mb:recording:{b}")]
+    );
+    common::drain_groups(&pool, &Default::default()).await;
+    let group: Vec<String> =
+        sqlx::query_scalar("SELECT coalesce(group_id,'-') FROM group_unit WHERE resource_id=$1")
+            .bind(&id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(group, ["-"]);
+}
+
+/// A read the duplicate walk makes besides the subject's own, over MusicBrainz's cap, settles
+/// nothing and empties no run: a track MusicBrainz relates to a recording whose ISRC it shares
+/// with a recording over the cap keeps its own MBID and that recording's links, as on main; a
+/// track whose Wikidata item names a recording over the cap keeps Wikidata's own key (the raw
+/// P4404 MBID).
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_secondary_read_over_the_cap_settles_nothing(pool: sqlx::PgPool) {
+    if !has(&["musicbrainz", "wikidata"]) {
+        return;
+    }
+    let related = "https://tidal.com/track/1000071";
+    let wikidata = "https://tidal.com/track/1000072";
+    let mut ids = std::collections::BTreeMap::new();
+    for uri in [related, wikidata] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut d = ResourceMeta::new(uri, "jsonld", 86400);
+        d.set_type("MusicRecording");
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        ids.insert(uri, id);
+    }
+    let t = Arc::new(Recorded {
+        seen: Mutex::default(),
+    });
+    let cx = also_on::Context {
+        egress: egress(t.clone()),
+        config: Arc::new(Config::default()),
+    };
+    sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    also_on::drain(&pool, &cx, &also_on::registry(), 100)
+        .await
+        .unwrap();
+    let rows = |sql: &'static str, id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, String>(sql)
+                .bind(id)
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let own = "mb:recording:00000000-0000-4000-8000-000000000071";
+    assert_eq!(
+        rows(
+            "SELECT key FROM resource_key WHERE resource_id=$1 AND source='musicbrainz' AND key LIKE 'mb:recording:%'",
+            ids[related].clone()
+        )
+        .await,
+        [own]
+    );
+    assert_eq!(
+        rows(
+            "SELECT uri||' '||coalesce(key,'-') FROM derived_link WHERE resource_id=$1 AND source='musicbrainz'",
+            ids[related].clone()
+        )
+        .await,
+        [format!("https://www.deezer.com/track/7100071 {own}")]
+    );
+    assert_eq!(
+        rows(
+            "SELECT key FROM resource_key WHERE resource_id=$1 AND source='wikidata' AND key LIKE 'mb:recording:%'",
+            ids[wikidata].clone()
+        )
+        .await,
+        [format!("mb:recording:{BIG_RECORDING}")]
+    );
 }

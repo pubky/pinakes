@@ -15,6 +15,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 use std::time::Duration;
 use tower::ServiceExt;
+mod common;
 
 /// A recording's page, saved and tagged once, as its service states it: the title, the artist
 /// and the length (an ISO duration) in its attributes.
@@ -80,7 +81,7 @@ async fn pass(pool: &PgPool, config: &Config) {
 }
 
 async fn response(config: &Config, pool: &PgPool, path: &str) -> (Value, String) {
-    let app = api::router(AppState::new(pool.clone(), config.clone()).await.unwrap());
+    let app = api::router(AppState::new(pool.clone(), config.clone()).unwrap());
     let mut request = Request::get(path).body(Body::empty()).unwrap();
     request.extensions_mut().insert(ConnectInfo(
         "127.0.0.1:4000".parse::<std::net::SocketAddr>().unwrap(),
@@ -1037,7 +1038,7 @@ async fn an_orphan_deleted_while_a_pass_pairs_with_it_leaves_the_partner_to_refi
         let pool = pool.clone();
         tokio::spawn(async move { changes::delete_orphans(&pool, 7).await.unwrap() })
     };
-    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    common::lock_waiters_reach(&pool, 1, "the orphan delete").await;
     assert!(!deleting.is_finished(), "the delete waits for the pass");
     pairing.commit().await.unwrap();
     assert_eq!(deleting.await.unwrap(), 1);
@@ -1281,7 +1282,7 @@ async fn a_pass_and_an_orphan_delete_holding_each_others_unit_never_deadlock(poo
             tx.commit().await.unwrap();
         })
     };
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    common::lock_waiters_reach(&pool, 1, "the delete of B").await;
     assert!(!deleting.is_finished(), "the delete waits for A");
     // The pass takes its candidates: B is held, so it is passed over, and the pass commits.
     let read = tokio::time::timeout(

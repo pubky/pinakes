@@ -1075,6 +1075,9 @@ async fn apply(tx: &mut Transaction<'_, Postgres>, plan: Plan) -> Result<()> {
             .await?;
     }
     for chunk in assignments.chunks(256) {
+        // A unit that moves changes the links its card and the members of both groups may show.
+        let moved: Vec<String> = sqlx::query_scalar("SELECT DISTINCT m.resource_id FROM jsonb_array_elements($1) v JOIN group_unit u ON u.unit_id=v->>'unit' AND u.group_id IS DISTINCT FROM v->>'group' JOIN group_unit m ON m.unit_id=u.unit_id OR m.group_id=u.group_id OR m.group_id=v->>'group'").bind(json!(chunk)).fetch_all(&mut **tx).await?;
+        crate::also_on::requeue_placed(tx, &moved).await?;
         sqlx::query("UPDATE group_unit u SET group_id=v->>'group' FROM jsonb_array_elements($1) v WHERE u.unit_id=v->>'unit'").bind(json!(chunk)).execute(&mut **tx).await?;
         sqlx::query("UPDATE resource_group k SET group_id=v->>'group' FROM jsonb_array_elements($1) v WHERE k.unit_id=v->>'unit'").bind(json!(chunk)).execute(&mut **tx).await?;
     }

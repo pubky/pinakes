@@ -658,14 +658,13 @@ mod tests {
         );
         let (url, server) = server(app).await;
         let nexus = Nexus::with_reach_timeout(&url, None, Duration::from_millis(150)).unwrap();
-        let started = Instant::now();
+        // The deadline cut the read: two or three pages of 60 ms were asked, not all of them.
         assert!(nexus
             .reach(&"b".repeat(52), "following")
             .await
             .unwrap_err()
             .to_string()
             .contains("deadline"));
-        assert!(started.elapsed() < Duration::from_secs(1));
         assert!((2..=3).contains(&calls.load(Ordering::SeqCst)));
         assert!(nexus.cache.lock().await.is_empty());
         server.abort();

@@ -13,6 +13,10 @@ pub struct Config {
     pub listen: String,
     pub admin_listen: String,
     pub admin_token: Option<SecretKey>,
+    /// Host names the admin listener answers besides `localhost` and IP addresses, such as the
+    /// name a Prometheus in another container scrapes it by. A request for any other `Host` gets
+    /// 421, so a page that rebinds its own name to this machine reaches nothing.
+    pub admin_hosts: Vec<String>,
     pub nexus_url: String,
     /// The `Authorization` header sent, whole, on every request to the Nexus at `nexus_url`
     /// (`PINAKES_NEXUS_AUTHORIZATION`), for a Nexus behind credentials; `nexus_url` itself never
@@ -60,6 +64,18 @@ pub struct Config {
     pub ingest: IngestConfig,
     #[serde(skip)]
     pub grace_days: u32,
+    /// Hours a resource nothing ever referenced (one only previewed) is kept, at most `grace_days`.
+    #[serde(skip)]
+    pub preview_grace_hours: u32,
+    /// New previews (`POST /v1/resolve` of a link the instance did not know) per hour, for the
+    /// whole instance.
+    #[serde(skip)]
+    pub preview_new_per_hour: usize,
+    /// The share of those one client address may take in an hour; 0 is no share. It is only a
+    /// client's own where clients reach the listener directly: behind a proxy every client has
+    /// its address.
+    #[serde(skip)]
+    pub preview_new_per_client_per_hour: usize,
     #[serde(skip)]
     pub search: SearchConfig,
     #[serde(skip)]
@@ -310,6 +326,7 @@ impl Config {
             listen: "127.0.0.1:8090".into(),
             admin_listen: "127.0.0.1:9090".into(),
             admin_token: None,
+            admin_hosts: Vec::new(),
             refresh: RefreshConfig::default(),
             canary: CanaryConfig::default(),
             also_on: Default::default(),
@@ -321,6 +338,9 @@ impl Config {
             poll_secs: 5,
             ingest: IngestConfig::default(),
             grace_days: 7,
+            preview_grace_hours: 24,
+            preview_new_per_hour: 1000,
+            preview_new_per_client_per_hour: 0,
             // The web route (and the event routes on it) fetches arbitrary hosts: twice the
             // other resolvers' workers and rate.
             web: ResolverConfig {
@@ -737,13 +757,10 @@ impl Default for PreviewConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct OsmConfig {
     pub enabled: bool,
-    /// Which service answers OSM lookups and venue geocoding: `nominatim` (`nominatim_url`) or
-    /// `locationiq` (`[osm.locationiq]`). Never both: there is no failover.
-    pub provider: OsmProvider,
-    pub nominatim_url: String,
-    /// Nominatim's rate; LocationIQ's is `limits.locationiq_requests_per_second`.
+    /// The Nominatim base. A hosted Nominatim's may carry its key, so `Debug` and serialization
+    /// show `[REDACTED]`; set such a base in the environment file (`PINAKES__OSM__NOMINATIM_URL`).
+    pub nominatim_url: SecretKey,
     pub requests_per_second: f64,
-    pub locationiq: LocationIqConfig,
     #[serde(skip)]
     pub ttl_secs: u64,
     /// Where the daemon writes the ODbL dump file (`osm_place.ndjson.gz`).
@@ -760,10 +777,8 @@ impl Default for OsmConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            provider: OsmProvider::Nominatim,
             nominatim_url: "https://nominatim.openstreetmap.org".into(),
             requests_per_second: 0.5,
-            locationiq: LocationIqConfig::default(),
             ttl_secs: 30 * 86400,
             dump_dir: "dumps".into(),
             dump_every_hours: 24,
@@ -772,115 +787,6 @@ impl Default for OsmConfig {
         }
     }
 }
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum OsmProvider {
-    #[default]
-    Nominatim,
-    #[serde(rename = "locationiq")]
-    LocationIq,
-}
-impl OsmProvider {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Nominatim => "nominatim",
-            Self::LocationIq => "locationiq",
-        }
-    }
-    /// The terms that apply to the provider's answers beside the ODbL: none for Nominatim.
-    pub fn terms(self) -> Option<&'static str> {
-        match self {
-            Self::Nominatim => None,
-            Self::LocationIq => Some("https://locationiq.com/tos"),
-        }
-    }
-}
-impl OsmConfig {
-    /// The provider's request rate.
-    pub fn rate(&self) -> f64 {
-        match self.provider {
-            OsmProvider::Nominatim => self.requests_per_second,
-            OsmProvider::LocationIq => self.locationiq.requests_per_second,
-        }
-    }
-}
-/// LocationIQ, the hosted OSM geocoder. Its key is read from `LOCATIONIQ_API_KEY` alone.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct LocationIqConfig {
-    /// The regional endpoint the key is sent to: `us1` or `eu1`. There is no URL setting.
-    pub region: LocationIqRegion,
-    /// The operator states that LocationIQ has given written permission for this use: its
-    /// answers stored, served by the public API and published in the downloadable dump. A key
-    /// or a paid plan alone does not give it. Off, LocationIQ is refused at startup, and so is
-    /// any startup while places LocationIQ answered are stored or in the dump file
-    /// (`resolver::locationiq::Publication::check`).
-    pub public_use_authorized: bool,
-    /// From `LOCATIONIQ_API_KEY`, read only when LocationIQ is the provider: no file or
-    /// `PINAKES__…` form. `Debug` shows `[REDACTED]`.
-    #[serde(skip)]
-    pub key: Option<SecretKey>,
-    /// `limits.locationiq_requests_per_second`.
-    #[serde(skip)]
-    pub requests_per_second: f64,
-}
-impl Default for LocationIqConfig {
-    fn default() -> Self {
-        Self {
-            region: LocationIqRegion::Us1,
-            public_use_authorized: false,
-            key: None,
-            // The free plan's 60 requests a minute.
-            requests_per_second: 1.0,
-        }
-    }
-}
-impl LocationIqConfig {
-    /// What LocationIQ as the provider needs, checked by the configuration and by every
-    /// resolver built: the authorization, a product key and a rate. The key is never shown.
-    pub fn check(&self) -> Result<()> {
-        if !self.public_use_authorized {
-            bail!("osm.provider = \"locationiq\" needs osm.locationiq.public_use_authorized = true: set it only with LocationIQ's written permission for Pinakes' public API and downloadable data (a key alone does not give it)");
-        }
-        // Never shown: the value is a credential. It goes into a query string.
-        match self.key.as_deref() {
-            None => bail!("osm.provider = \"locationiq\" needs {LOCATIONIQ_API_KEY}"),
-            Some(key) if key.len() > 128 || !key.bytes().all(|b| b.is_ascii_graphic()) => {
-                bail!("invalid {LOCATIONIQ_API_KEY}: at most 128 printable characters")
-            }
-            Some(key) if key.starts_with("sk.") => {
-                bail!("invalid {LOCATIONIQ_API_KEY}: an account token (sk.) cannot call the data APIs; use an API token (pk.)")
-            }
-            Some(_) => {}
-        }
-        self.check_rate()
-    }
-    fn check_rate(&self) -> Result<()> {
-        let rate = self.requests_per_second;
-        if !rate.is_finite() || !(0.001..=1000.0).contains(&rate) {
-            bail!("limits.locationiq_requests_per_second must be 0.001–1000");
-        }
-        Ok(())
-    }
-}
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum LocationIqRegion {
-    #[default]
-    Us1,
-    Eu1,
-}
-impl LocationIqRegion {
-    /// The API base, HTTPS: the only place the key goes.
-    pub fn base(self) -> &'static str {
-        match self {
-            Self::Us1 => "https://us1.locationiq.com/v1",
-            Self::Eu1 => "https://eu1.locationiq.com/v1",
-        }
-    }
-}
-/// The variable LocationIQ's key is read from.
-pub const LOCATIONIQ_API_KEY: &str = "LOCATIONIQ_API_KEY";
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SearchConfig {
@@ -1011,36 +917,21 @@ impl Config {
         }
         apply_env(&mut value, std::env::vars())?;
         apply_named_env(&mut value, std::env::vars())?;
-        Self::from_value_and_env(value, std::env::vars())
+        Self::from_value(value)
     }
     /// The defaults in their file form. Secrets serialize as `[REDACTED]`, so their real defaults
     /// are put back here.
-    fn defaults() -> Result<serde_json::Value> {
+    pub(crate) fn defaults() -> Result<serde_json::Value> {
         let config = Self::default();
         let mut value = serde_json::to_value(&config)?;
         value["database_url"] = (*config.database_url).into();
         value["admin_token"] = config.admin_token.as_deref().into();
+        value["osm"]["nominatim_url"] = (*config.osm.nominatim_url).into();
         Ok(value)
     }
     /// A configuration from its file form (sections plus `[limits]`), validated.
     pub fn from_value(value: serde_json::Value) -> Result<Self> {
-        Self::from_value_and_env(value, std::iter::empty())
-    }
-    /// As `from_value`, with the secrets only a variable of their own holds (`LOCATIONIQ_API_KEY`)
-    /// read from `vars`.
-    pub fn from_value_and_env(
-        value: serde_json::Value,
-        vars: impl IntoIterator<Item = (String, String)>,
-    ) -> Result<Self> {
         let mut cfg: Self = serde_json::from_value(value)?;
-        if cfg.osm.provider == OsmProvider::LocationIq {
-            cfg.osm.locationiq.key = vars
-                .into_iter()
-                .find(|(k, _)| k == LOCATIONIQ_API_KEY)
-                .map(|(_, v)| v)
-                .filter(|v| !v.trim().is_empty())
-                .map(SecretKey::from);
-        }
         cfg.nexus_authorization = cfg
             .nexus_authorization
             .take()
@@ -1143,6 +1034,19 @@ impl Config {
         }
         if !admin.ip().is_loopback() && self.admin_token.is_none() {
             bail!("non-loopback admin_listen requires admin_token (PINAKES__ADMIN_TOKEN)");
+        }
+        if let Some(host) = self.admin_hosts.iter().find(|h| {
+            h.is_empty()
+                || h.len() > 253
+                || !h.split('.').all(|label| {
+                    !label.is_empty()
+                        && label.len() <= 63
+                        && label
+                            .bytes()
+                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                })
+        }) {
+            bail!("admin_hosts: {host:?} is not a lowercase host name (no scheme, port, path or wildcard)");
         }
         if !(10000..=100000).contains(&self.groups.max_graph_units)
             || !(1024 * 1024..=128 * 1024 * 1024).contains(&self.groups.max_graph_bytes)
@@ -1292,10 +1196,6 @@ impl Config {
         if !plain_upstream(&self.osm.nominatim_url)? {
             bail!("invalid OSM upstream URL");
         }
-        self.osm.locationiq.check_rate()?;
-        if self.osm.provider == OsmProvider::LocationIq {
-            self.osm.locationiq.check()?;
-        }
         if !self.osm.requests_per_second.is_finite()
             || !(0.001..=1000.0).contains(&self.osm.requests_per_second)
             || url::Url::parse(&self.osm.nominatim_url)
@@ -1360,6 +1260,9 @@ impl Config {
             || self.preview.requests_per_minute == 0
             || self.preview.uri_requests_per_minute == 0
             || !(1..=100000).contains(&self.preview.cache_capacity)
+            || !(1..=87600).contains(&self.preview_grace_hours)
+            || !(1..=1_000_000).contains(&self.preview_new_per_hour)
+            || self.preview_new_per_client_per_hour > 1_000_000
         {
             bail!("invalid queue, preview or polling budget");
         }
@@ -1747,119 +1650,6 @@ mod tests {
         );
         assert!(!Config::default().web.discover_feeds);
     }
-    /// Nominatim is the default provider. LocationIQ is refused until the operator states that
-    /// LocationIQ's written permission covers Pinakes' public API and downloadable data: a key
-    /// alone is not enough.
-    #[test]
-    fn locationiq_needs_the_public_use_authorization() {
-        let d = Config::default();
-        assert_eq!(d.osm.provider, OsmProvider::Nominatim);
-        assert!(!d.osm.locationiq.public_use_authorized);
-        let refused = with(serde_json::json!({"osm":{"provider":"locationiq"}}))
-            .unwrap_err()
-            .to_string();
-        assert!(
-            refused.contains("osm.locationiq.public_use_authorized"),
-            "{refused}"
-        );
-        assert!(with(serde_json::json!({"osm":{"provider":"photon"}})).is_err());
-        // A key does not stand in for the authorization.
-        let mut value = Config::defaults().unwrap();
-        merge(
-            &mut value,
-            serde_json::json!({"osm":{"provider":"locationiq"}}),
-        );
-        let keyed = Config::from_value_and_env(
-            value,
-            [(LOCATIONIQ_API_KEY.to_owned(), "pk.ABCDEFKEY".to_owned())],
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(
-            keyed.contains("public_use_authorized") && !keyed.contains("ABCDEF"),
-            "{keyed}"
-        );
-    }
-    /// LocationIQ's key comes from `LOCATIONIQ_API_KEY` alone, never the file or a
-    /// `PINAKES__…` variable; it is never shown, and a missing or malformed one stops startup
-    /// without being repeated.
-    #[test]
-    fn the_locationiq_key_comes_from_its_variable_alone_and_stays_secret() {
-        let read = |osm: serde_json::Value, vars: &[(&str, &str)]| {
-            let mut value = Config::defaults().unwrap();
-            merge(&mut value, serde_json::json!({ "osm": osm }));
-            let vars: Vec<_> = vars
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect();
-            apply_env(&mut value, vars.clone())?;
-            apply_named_env(&mut value, vars.clone())?;
-            Config::from_value_and_env(value, vars)
-        };
-        let on = serde_json::json!({"provider":"locationiq","locationiq":{"public_use_authorized":true}});
-        let missing = read(on.clone(), &[]).unwrap_err().to_string();
-        assert!(missing.contains(LOCATIONIQ_API_KEY), "{missing}");
-        let empty = read(on.clone(), &[(LOCATIONIQ_API_KEY, " ")]).unwrap_err();
-        assert!(empty.to_string().contains(LOCATIONIQ_API_KEY), "{empty}");
-        let cfg = read(on.clone(), &[(LOCATIONIQ_API_KEY, "pk.ABCDEFKEY")]).unwrap();
-        assert_eq!(cfg.osm.locationiq.key.as_deref(), Some("pk.ABCDEFKEY"));
-        let shown = format!("{cfg:?} {}", serde_json::to_string(&cfg).unwrap());
-        assert!(!shown.contains("ABCDEF"), "{shown}");
-        // Read only for LocationIQ: Nominatim never holds it.
-        let nominatim = read(
-            serde_json::json!({}),
-            &[(LOCATIONIQ_API_KEY, "pk.ABCDEFKEY")],
-        );
-        assert!(nominatim.unwrap().osm.locationiq.key.is_none());
-        for refused in [
-            read(on.clone(), &[(LOCATIONIQ_API_KEY, "pk.ABCDEF KEY")]),
-            read(on.clone(), &[(LOCATIONIQ_API_KEY, "pk.ABCDEF\u{7f}")]),
-            read(on.clone(), &[(LOCATIONIQ_API_KEY, &"ABCDEF".repeat(50))]),
-            // An account token cannot call the data APIs.
-            read(on.clone(), &[(LOCATIONIQ_API_KEY, "sk.ABCDEFACCOUNT")]),
-            read(
-                serde_json::json!({"provider":"locationiq","locationiq":{"public_use_authorized":true,"key":"pk.ABCDEFFILE"}}),
-                &[(LOCATIONIQ_API_KEY, "pk.ok")],
-            ),
-            read(
-                on.clone(),
-                &[("PINAKES__OSM__LOCATIONIQ__KEY", "pk.ABCDEFPINAKES")],
-            ),
-        ] {
-            let refused = format!("{:#}", refused.unwrap_err());
-            assert!(!refused.contains("ABCDEF"), "{refused}");
-        }
-        let account = read(on.clone(), &[(LOCATIONIQ_API_KEY, "sk.ABCDEFACCOUNT")]);
-        let account = format!("{:#}", account.unwrap_err());
-        assert!(account.contains("pk."), "{account}");
-    }
-    /// LocationIQ is reached at one of its regional HTTPS endpoints, never a configured URL, at
-    /// its own rate.
-    #[test]
-    fn locationiq_has_a_fixed_regional_endpoint_and_its_own_rate() {
-        let d = Config::default();
-        assert_eq!(
-            d.osm.locationiq.region.base(),
-            "https://us1.locationiq.com/v1"
-        );
-        assert_eq!(d.osm.locationiq.requests_per_second, 1.0);
-        assert_eq!(d.limits.locationiq_requests_per_second, 1.0);
-        let eu = with(serde_json::json!({"osm":{"locationiq":{"region":"eu1"}}})).unwrap();
-        assert_eq!(
-            eu.osm.locationiq.region.base(),
-            "https://eu1.locationiq.com/v1"
-        );
-        for refused in [
-            serde_json::json!({"osm":{"locationiq":{"region":"https://evil.example/v1"}}}),
-            serde_json::json!({"osm":{"locationiq":{"url":"https://evil.example/v1"}}}),
-            serde_json::json!({"limits":{"locationiq_requests_per_second":0.0}}),
-            serde_json::json!({"limits":{"locationiq_requests_per_second":1001.0}}),
-        ] {
-            assert!(with(refused.clone()).is_err(), "{refused}");
-        }
-        let fast = with(serde_json::json!({"limits":{"locationiq_requests_per_second":15.0}}));
-        assert_eq!(fast.unwrap().osm.locationiq.requests_per_second, 15.0);
-    }
     /// The Nexus and OSM URLs hold no secret: user info, a query or a fragment is refused.
     #[test]
     fn upstream_urls_with_user_info_query_or_fragment_are_refused() {
@@ -1891,6 +1681,43 @@ mod tests {
             assert!(nexus(url).is_ok(), "{url}");
             assert!(osm(url).is_ok(), "{url}");
         }
+    }
+    /// `osm.nominatim_url` may carry a hosted Nominatim's key: it is read like any setting (the
+    /// file, or `PINAKES__OSM__NOMINATIM_URL` from the environment file), and `Debug` and
+    /// serialization never show it.
+    #[test]
+    fn the_nominatim_url_is_never_shown() {
+        let base = "https://nominatim.example.org/KEY-CANARY";
+        let mut value = Config::defaults().unwrap();
+        assert_eq!(
+            value["osm"]["nominatim_url"],
+            "https://nominatim.openstreetmap.org"
+        );
+        apply_env(
+            &mut value,
+            [("PINAKES__OSM__NOMINATIM_URL".to_owned(), base.to_owned())],
+        )
+        .unwrap();
+        let config = Config::from_value(value).unwrap();
+        assert_eq!(&*config.osm.nominatim_url, base);
+        let shown = format!("{config:?} {}", serde_json::to_string(&config).unwrap());
+        assert!(!shown.contains("KEY-CANARY"), "{shown}");
+    }
+    /// Nominatim at `osm.nominatim_url` is the one OSM provider: a provider setting, in the file
+    /// or as a `PINAKES__…` override, is refused at load, never ignored.
+    #[test]
+    fn an_osm_provider_setting_is_refused() {
+        let refused = with(serde_json::json!({"osm": {"provider": "nominatim"}}))
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("unknown field `provider`"), "{refused}");
+        let mut value = Config::defaults().unwrap();
+        let overridden = apply_env(
+            &mut value,
+            [("PINAKES__OSM__PROVIDER".to_owned(), "nominatim".to_owned())],
+        )
+        .and_then(|()| Config::from_value(value));
+        assert!(overridden.is_err(), "the override was accepted");
     }
     /// The Nexus's `Authorization` header comes from its own variable, is never shown, and is
     /// none when empty; a value that is no header value is refused without being named.
@@ -2337,6 +2164,11 @@ mod tests {
             ("max_label_bytes", 1025),
             ("max_object_path_bytes", 0),
             ("max_object_path_bytes", 2049),
+            ("preview_grace_hours", 0),
+            ("preview_grace_hours", 87601),
+            ("preview_new_per_hour", 0),
+            ("preview_new_per_hour", 1_000_001),
+            ("preview_new_per_client_per_hour", 1_000_001),
         ] {
             assert!(
                 with(serde_json::json!({"limits":{key:value}})).is_err(),
@@ -2384,6 +2216,8 @@ limits! {
     poll_secs: u64 = |c| c.poll_secs => [|c, v| c.poll_secs = v],
     /// Days an unreferenced resource is kept before orphan cleanup.
     grace_days: u32 = |c| c.grace_days => [|c, v| c.grace_days = v],
+    /// Hours a resource nothing ever referenced (one only previewed) is kept, at most `grace_days`.
+    preview_grace_hours: u32 = |c| c.preview_grace_hours => [|c, v| c.preview_grace_hours = v],
     /// Resource refresh intervals by tier (seconds).
     refresh_resource_secs: [u64; 4] = |c| c.refresh.resource_secs => [|c, v| c.refresh.resource_secs = v],
     /// Container (calendar, feed) refresh intervals by tier (seconds).
@@ -2451,8 +2285,6 @@ limits! {
     max_label_bytes: usize = |c| c.ingest.max_label_bytes => [|c, v| c.ingest.max_label_bytes = v],
     /// Longest accepted Pubky object path (bytes).
     max_object_path_bytes: usize = |c| c.ingest.max_object_path_bytes => [|c, v| c.ingest.max_object_path_bytes = v],
-    /// Requests per second to LocationIQ, when it is the OSM provider.
-    locationiq_requests_per_second: f64 = |c| c.osm.locationiq.requests_per_second => [|c, v| c.osm.locationiq.requests_per_second = v],
     /// OSM place cache lifetime (seconds).
     osm_ttl_secs: u64 = |c| c.osm.ttl_secs => [|c, v| c.osm.ttl_secs = v],
     /// Hours between two writes of the ODbL dump file.
@@ -2495,6 +2327,10 @@ limits! {
     preview_uri_requests_per_minute: usize = |c| c.preview.uri_requests_per_minute => [|c, v| c.preview.uri_requests_per_minute = v],
     /// Preview cache entries.
     preview_cache_capacity: usize = |c| c.preview.cache_capacity => [|c, v| c.preview.cache_capacity = v],
+    /// New previews per hour for the whole instance; over it `POST /v1/resolve` answers 503.
+    preview_new_per_hour: usize = |c| c.preview_new_per_hour => [|c, v| c.preview_new_per_hour = v],
+    /// New previews per hour one client address may take (0: no share); over it `POST /v1/resolve` answers 429.
+    preview_new_per_client_per_hour: usize = |c| c.preview_new_per_client_per_hour => [|c, v| c.preview_new_per_client_per_hour = v],
     /// Podcast feed items read per scan.
     podcast_items: usize = |c| c.cards.podcast_items => [|c, v| c.cards.podcast_items = v],
     /// Most members of one automatic group.

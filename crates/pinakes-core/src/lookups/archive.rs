@@ -19,9 +19,13 @@ fn parse_timestamp(value: &str) -> Option<DateTime<Utc>> {
         .map(|t| t.and_utc())
 }
 
-/// Captures of `url` that answered 200, closest to `near` first.
+/// Captures of `url` that answered 200, closest to `near` first. None for a link that carries a
+/// credential: the archive is never sent one.
 pub fn wayback_request(url: &str, near: DateTime<Utc>) -> Option<Request> {
     web_url(url)?;
+    if crate::capability::is_capability(url) {
+        return None;
+    }
     Request::get(&format!(
         "https://web.archive.org/cdx/search/cdx?url={}&output=json&fl=timestamp,original\
          &filter=statuscode:200&closest={}&sort=closest&limit={CAPTURES}",
@@ -155,6 +159,21 @@ pub mod also_on {
             assert!(link.at.is_some() && link.uri.starts_with("https://web.archive.org/web/"));
             // A page that answers is not offered an archived copy.
             assert!(!Wayback.applies(&at("https://example.com/")));
+        }
+
+        /// The archive is never sent a link that carries a credential.
+        #[test]
+        fn a_link_that_carries_a_credential_is_never_sent_to_the_archive() {
+            use crate::lookups::archive::wayback_request;
+            let near = chrono::Utc::now();
+            assert!(wayback_request("https://example.com/feed.ics", near).is_some());
+            for private in [
+                "https://example.com/feed.ics?token=x",
+                "https://example.com/feed.ics?X-Amz-Signature=x",
+                "https://user:pass@example.com/feed.ics",
+            ] {
+                assert!(wayback_request(private, near).is_none(), "{private}");
+            }
         }
 
         /// No link or ID check of this family slices a string inside a multibyte character, and no

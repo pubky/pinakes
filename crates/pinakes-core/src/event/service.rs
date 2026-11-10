@@ -182,7 +182,7 @@ impl EventService {
             "non-calendar page exceeds 1 MB"
         );
         let input_uri = uri.to_owned();
-        let fetched = fetched.clone();
+        let fetched = crate::resolver::web::as_read(fetched).into_owned();
         let config = self.config.clone();
         let ttl = card.ttl_secs;
         let (mut event, calendar_link, advertised, event_candidate, platform_extra) =
@@ -325,8 +325,10 @@ impl EventService {
                 {
                     if response.status == 200 {
                         let (parsed, matched) = crate::resolver::html::blocking(move || {
-                            let matched = serde_json::from_slice(&response.body)
-                                .is_ok_and(|v| page::activity(&mut event, &v, &response.url));
+                            let matched = serde_json::from_slice(&response.body).is_ok_and(|v| {
+                                let base = crate::resolver::web::read_at(&response.url);
+                                page::activity(&mut event, &v, &base)
+                            });
                             (event, matched)
                         })
                         .await?;
@@ -488,38 +490,33 @@ impl EventService {
         let Some(venue) = &mut doc.event.venue else {
             return Ok(());
         };
-        if venue.location.is_some() || venue.osm_id.is_some() {
-            return Ok(());
-        }
-        if !venue.address.contains_key("street")
+        if venue.location.is_some()
+            || venue.osm_id.is_some()
+            || !venue.address.contains_key("street")
             || !(venue.address.contains_key("city") || venue.address.contains_key("postalcode"))
         {
-            // A venue in one line of text: through LocationIQ alone, when the line is a street
-            // address, at the one hit whose house number, street and town or postcode it names.
-            if self.osm.config().provider != crate::config::OsmProvider::LocationIq
-                || !address_line(&venue.text)
-            {
-                return Ok(());
-            }
-            let line = venue.text.clone();
-            let Some(hits) = self.osm.search(&[("q", line.as_str())], false).await? else {
-                return Ok(());
-            };
-            let [hit] = hits.as_slice() else {
-                return Ok(());
-            };
-            if !names_address(&line, hit) {
-                return Ok(());
-            }
-            let place = self.geocoded(venue, hit).await?;
-            zone(&mut doc.event, &place);
             return Ok(());
         }
-        let query: Vec<(&str, &str)> = ["street", "city", "postalcode", "country"]
-            .into_iter()
-            .filter_map(|k| venue.address.get(k).map(|v| (k, v.as_str())))
-            .collect();
-        let Some(hits) = self.osm.search(&query, false).await? else {
+        let mut url: url::Url = format!(
+            "{}/search",
+            self.osm.config.nominatim_url.trim_end_matches('/')
+        )
+        .parse()?;
+        url.query_pairs_mut()
+            .append_pair("format", "jsonv2")
+            .append_pair("addressdetails", "1")
+            .append_pair("namedetails", "1")
+            .append_pair("limit", "2")
+            .append_pair("accept-language", "en");
+        for k in ["street", "city", "postalcode", "country"] {
+            if let Some(v) = venue.address.get(k) {
+                url.query_pairs_mut().append_pair(k, v);
+            }
+        }
+        let Some(value) = self.osm.request(url).await? else {
+            return Ok(());
+        };
+        let Some(hits) = value.as_array() else {
             return Ok(());
         };
         if hits.len() != 1 {
@@ -580,7 +577,15 @@ impl EventService {
             venue.resource_id = Some(id);
             venue.location_source = Some(crate::model::LocationSource::Osm);
         }
-        zone(&mut doc.event, &place);
+        if doc.event.tz.is_none() {
+            doc.event.tz = place
+                .location
+                .as_ref()
+                .and_then(super::time::coordinate_zone);
+            if doc.event.tz.is_some() {
+                doc.event.timezone_attribution = Some(super::time::ATTRIBUTION.into());
+            }
+        }
         Ok(())
     }
     /// Place `venue` at Nominatim's `hit`: the place is saved to `osm_place` and the venue names
@@ -590,7 +595,7 @@ impl EventService {
         venue: &mut super::Venue,
         hit: &serde_json::Value,
     ) -> Result<ResourceMeta> {
-        let mut place = self.osm.place(hit)?;
+        let mut place = crate::resolver::osm::map_place(hit, self.osm.config.ttl_secs)?;
         // Nominatim name can be separate from namedetails on search responses.
         if place.name.is_none() {
             place.name = hit["name"].as_str().map(str::to_owned);
@@ -631,11 +636,22 @@ impl EventService {
         let Some(line) = address.get("city").cloned() else {
             return Ok(());
         };
+        let mut url: url::Url = format!(
+            "{}/search",
+            self.osm.config.nominatim_url.trim_end_matches('/')
+        )
+        .parse()?;
+        url.query_pairs_mut()
+            .append_pair("format", "jsonv2")
+            .append_pair("addressdetails", "1")
+            .append_pair("namedetails", "1")
+            .append_pair("limit", "2")
+            .append_pair("accept-language", "en")
+            .append_pair("featureType", "settlement");
         // "Singapore, Singapore", "San Francisco, CA": a town and what holds it, in one line.
-        let mut query = vec![];
         let (town, country, held) = match line.split_once(',') {
             Some((town, held)) if !address.contains_key("country") => {
-                query.push(("q", line.as_str()));
+                url.query_pairs_mut().append_pair("q", &line);
                 (town.trim().to_owned(), None, held)
             }
             _ => {
@@ -646,7 +662,7 @@ impl EventService {
                     ("country", "country"),
                 ] {
                     if let Some(v) = address.get(k) {
-                        query.push((param, v.as_str()));
+                        url.query_pairs_mut().append_pair(param, v);
                     }
                 }
                 (line.clone(), address.get("country").cloned(), "")
@@ -667,10 +683,10 @@ impl EventService {
             );
             held_postcode = held_postcode.or_else(|| numeric_postcode(&words));
         }
-        let Some(hits) = self.osm.search(&query, true).await? else {
+        let Some(value) = self.osm.request(url).await? else {
             return Ok(());
         };
-        let [hit] = hits.as_slice() else {
+        let [hit] = value.as_array().map(Vec::as_slice).unwrap_or_default() else {
             return Ok(());
         };
         let normalize = |s: &str| {
@@ -784,132 +800,6 @@ const REGION_CODES: &[(&str, &str)] = &[
     ("ACT", "au"), ("NSW", "au"), ("NT", "au"), ("QLD", "au"), ("SA", "au"), ("TAS", "au"),
     ("VIC", "au"), ("WA", "au"),
 ];
-/// The time zone of a geocoded venue's place, for an event that names none.
-fn zone(event: &mut crate::event::EventFields, place: &ResourceMeta) {
-    if event.tz.is_none() {
-        event.tz = place
-            .location
-            .as_ref()
-            .and_then(super::time::coordinate_zone);
-        if event.tz.is_some() {
-            event.timezone_attribution = Some(super::time::ATTRIBUTION.into());
-        }
-    }
-}
-/// The words of `s`, lowercased: its runs of letters and digits.
-fn words(s: &str) -> Vec<String> {
-    s.split(|c: char| !c.is_alphanumeric())
-        .filter(|w| !w.is_empty())
-        .map(str::to_lowercase)
-        .collect()
-}
-/// Whether a venue's one line of text reads as a street address, never a bare name: two parts
-/// or more, and a word with a digit (a house number or a postcode).
-fn address_line(text: &str) -> bool {
-    text.split(',')
-        .filter(|part| !part.trim().is_empty())
-        .count()
-        >= 2
-        && words(text)
-            .iter()
-            .any(|w| w.chars().any(|c| c.is_ascii_digit()))
-}
-/// Whether a geocoding hit's address is the one `line` names. The line's parts (between commas)
-/// are the venue's name, then its street, then its locality: the street part is exactly the hit's
-/// street and house number (either order), parts before it are the name and confirm nothing, and
-/// every word of every part after it is the hit's town, postcode, region (by name or ISO 3166-2
-/// code) or country (by name or code), with the town or the postcode among them. A part the hit
-/// contradicts or cannot confirm ("IL" for a place in Massachusetts, "Old Town") places nothing.
-fn names_address(line: &str, hit: &serde_json::Value) -> bool {
-    let address = &hit["address"];
-    let field = |keys: &[&str]| -> Vec<Vec<String>> {
-        keys.iter()
-            .filter_map(|k| address[*k].as_str())
-            .map(words)
-            .filter(|w| !w.is_empty())
-            .collect()
-    };
-    let Some(number) = field(&["house_number"]).pop() else {
-        return false;
-    };
-    let parts: Vec<Vec<String>> = line
-        .split(',')
-        .map(words)
-        .filter(|w| !w.is_empty())
-        .collect();
-    let Some(street) = parts.iter().position(|part| {
-        field(&["road", "pedestrian", "footway"])
-            .iter()
-            .any(|road| {
-                *part == [road.as_slice(), &number].concat()
-                    || *part == [number.as_slice(), road].concat()
-            })
-    }) else {
-        return false;
-    };
-    let locality = &parts[street + 1..];
-    let towns: Vec<Vec<String>> = field(&[
-        "city",
-        "town",
-        "village",
-        "municipality",
-        "hamlet",
-        "postcode",
-    ]);
-    let mut known = towns.clone();
-    known.extend(field(&[
-        "state",
-        "province",
-        "region",
-        "county",
-        "country",
-        "country_code",
-    ]));
-    // A region's code: the part of its ISO 3166-2 code after the country's ("US-IL": "IL").
-    known.extend(
-        address
-            .as_object()
-            .into_iter()
-            .flatten()
-            .filter(|(k, _)| k.starts_with("ISO3166-2"))
-            .filter_map(|(_, v)| v.as_str()?.split_once('-').map(|(_, code)| words(code))),
-    );
-    // The usual English names of two countries whose answers name them otherwise.
-    let aliases: &[(&str, &[&str])] = &[
-        ("us", &["usa", "united states", "united states of america"]),
-        ("gb", &["uk", "united kingdom", "great britain"]),
-    ];
-    if let Some(code) = address["country_code"].as_str() {
-        for (_, names) in aliases.iter().filter(|(c, _)| code.eq_ignore_ascii_case(c)) {
-            known.extend(names.iter().map(|name| words(name)));
-        }
-    }
-    /// Whether `part` is a run of `known` values, one after another.
-    fn confirmed(part: &[String], known: &[Vec<String>]) -> bool {
-        // Visit each token offset once. Duplicate/overlapping values can reach an offset
-        // again, but never recursively repeat its suffix; empty values cannot advance it.
-        let mut reachable = vec![false; part.len() + 1];
-        reachable[0] = true;
-        for at in 0..part.len() {
-            if !reachable[at] {
-                continue;
-            }
-            for value in known {
-                if !value.is_empty() && part[at..].starts_with(value) {
-                    reachable[at + value.len()] = true;
-                }
-            }
-        }
-        reachable[part.len()]
-    }
-    !locality.is_empty()
-        && locality.iter().all(|part| confirmed(part, &known))
-        && locality.iter().any(|part| {
-            towns
-                .iter()
-                .any(|town| part.windows(town.len()).any(|w| w == town.as_slice()))
-        })
-}
 /// The numeric postcode among a place's words: four digits or more ("90210", "10115",
 /// "94105-1234", "1012" of "1012 AB"), or three and two ("114 55").
 fn numeric_postcode<'a>(words: &[&'a str]) -> Option<&'a str> {
@@ -1035,48 +925,4 @@ pub fn feed_like(fetched: &Fetched) -> bool {
                 | "application/feed+json"
                 | "application/json"
         )
-}
-
-#[cfg(test)]
-mod address_matcher_tests {
-    use super::names_address;
-    use serde_json::json;
-    use std::{sync::mpsc, time::Duration};
-
-    /// Duplicate and overlapping country phrases must not cause exponential suffix retries.
-    #[test]
-    fn repeated_address_components_are_matched_with_bounded_work() {
-        let (send, receive) = mpsc::channel();
-        std::thread::spawn(move || {
-            let mut hit = json!({"address": {
-                "house_number": "5", "road": "Main Street", "city": "Springfield",
-                "country": "United States", "country_code": "us"
-            }});
-            let bad = format!(
-                "5 Main Street, Springfield, {}Old Town",
-                "United States ".repeat(40)
-            );
-            assert!(!names_address(&bad, &hit));
-            // Deduplicating aliases alone is insufficient: different-length overlaps revisit
-            // the same suffix too. Both are ordinary nonempty component values.
-            hit["address"]["state"] = json!("United States United States");
-            assert!(!names_address(&bad, &hit));
-            let good = format!(
-                "5 Main Street, Springfield, {}",
-                "United States ".repeat(40)
-            );
-            assert!(names_address(&good, &hit));
-            // An empty region code must not introduce a zero-length transition/cycle.
-            hit["address"]["ISO3166-2-lvl4"] = json!("US-");
-            assert!(!names_address("5 Main Street, Springfield, Old Town", &hit));
-            assert!(names_address(
-                "5 Main Street, Springfield, United States",
-                &hit
-            ));
-            send.send(()).unwrap();
-        });
-        receive
-            .recv_timeout(Duration::from_secs(2))
-            .expect("address matching retried the same suffix instead of bounding the work");
-    }
 }

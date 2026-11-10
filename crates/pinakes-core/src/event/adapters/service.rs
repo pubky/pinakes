@@ -238,8 +238,12 @@ impl PlatformResolver {
                 {
                     // Calendar-link discovery reads the page: in a parse slot.
                     let found = {
-                        let (d, uri, page, cfg) =
-                            (d.clone(), uri.to_owned(), fetched.clone(), cfg.clone());
+                        let (d, uri, page, cfg) = (
+                            d.clone(),
+                            uri.to_owned(),
+                            crate::resolver::web::as_read(&fetched).into_owned(),
+                            cfg.clone(),
+                        );
                         crate::resolver::html::blocking(move || {
                             endpoint(&d, &uri, Some(&page), &cfg)
                         })

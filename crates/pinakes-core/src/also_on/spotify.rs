@@ -1,61 +1,28 @@
 //! Spotify's own record of its own album or track, from Spotify's Web API: an album's barcode
 //! (`external_ids.upc`) as the key `upc:…` and a track's ISRC (`external_ids.isrc`) as `isrc:…`,
 //! so the lookups by barcode and ISRC after it (MusicBrainz, Deezer, iTunes) join the rest. An
-//! ISRC MusicBrainz gives to several recordings keys the one the track's duration picks, else is
-//! a fact only, as every service's own ISRC is (`music_sources::isrc_match`).
+//! ISRC MusicBrainz gives to several recordings that agree keys the one that stands for them,
+//! one on recordings that disagree the one the track's duration picks, else is a fact only, as
+//! every service's own ISRC is (`music_sources::isrc_match`).
 //!
-//! Asked only with an operator's app credentials (`[spotify]`, or `PINAKES_SPOTIFY_CLIENT_ID`
-//! and `PINAKES_SPOTIFY_CLIENT_SECRET`), through the client-credentials grant
-//! (`client_credentials`): no user signs in, and nothing but the public catalogue is read.
+//! The API is asked only with an operator's app credentials (`[spotify]`, or
+//! `PINAKES_SPOTIFY_CLIENT_ID` and `PINAKES_SPOTIFY_CLIENT_SECRET`), through the
+//! client-credentials grant (`client_credentials`): no user signs in, and nothing but the public
+//! catalogue is read. While this source is on, `editions` asks it which album a Spotify track a
+//! card may show is on; where the API does not answer, and only with `[also_on] spotify_pages`,
+//! the track's public page (its `music:album`).
 use super::{
-    client_credentials::{self, Api},
+    client_credentials,
+    spotify_api::{API, SPOTIFY},
     Context, Fact, Found, Key, Source, Subject,
 };
-use crate::{
-    event::adapters::SecretKey,
-    music::{self, Level, Service},
-};
+use crate::music::{self, Level, Service};
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Spotify's app credentials (`[spotify] client_id` and `client_secret`, or
-/// `PINAKES_SPOTIFY_CLIENT_ID` and `PINAKES_SPOTIFY_CLIENT_SECRET`). Without both, Spotify is
-/// never asked.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct SpotifyConfig {
-    pub client_id: Option<SecretKey>,
-    pub client_secret: Option<SecretKey>,
-}
-impl SpotifyConfig {
-    pub fn pair(&self) -> Option<(String, String)> {
-        match (self.client_id.as_deref(), self.client_secret.as_deref()) {
-            (Some(id), Some(secret)) if !id.trim().is_empty() && !secret.trim().is_empty() => {
-                Some((id.trim().to_owned(), secret.trim().to_owned()))
-            }
-            _ => None,
-        }
-    }
-}
-impl super::OwnSection for SpotifyConfig {
-    const NAME: &'static str = "spotify";
-    const VARIABLES: &'static [(&'static str, &'static str)] = &[
-        ("PINAKES_SPOTIFY_CLIENT_ID", "client_id"),
-        ("PINAKES_SPOTIFY_CLIENT_SECRET", "client_secret"),
-    ];
-}
-
-const API: &str = "https://api.spotify.com/v1";
-/// Spotify's Web API and its token endpoint.
-const SPOTIFY: Api = Api {
-    service: "spotify",
-    label: "Spotify",
-    auth: "https://accounts.spotify.com/api/token",
-    auth_class: "spotify_auth",
-    busy_class: "spotify_busy",
-};
+/// The credentials and endpoints every source that asks Spotify shares (`spotify_api`).
+pub use super::spotify_api::SpotifyConfig;
 
 /// An album or a track, as the API names its collection, the external ID read and the key's
 /// namespace.
@@ -166,6 +133,87 @@ impl Source for Spotify {
     }
 }
 
+/// The album a Spotify track is on: the Web API's record of the track (`/v1/tracks/{id}`) with
+/// the operator's credentials, else, where `page` allows (a card's own track, a link someone
+/// referenced, or any with `[also_on] spotify_pages`), the album its public page names
+/// (`music:album`). Spotify refusing the credentials, with no page to read, is an error
+/// ([`refused`]): the caller keeps what it knew.
+pub(crate) async fn track_album(cx: &Context, track: &str, page: bool) -> Result<Option<String>> {
+    let mut refusal = None;
+    if Spotify.ready(&cx.config) {
+        match object(cx, Kind::Track, track).await {
+            Ok(record) => {
+                return Ok(record.and_then(|v| v["album"]["id"].as_str().map(str::to_owned)))
+            }
+            Err(error) if refused(&error) => refusal = Some(error),
+            Err(error) => return Err(error),
+        }
+    }
+    if !page {
+        return refusal.map_or(Ok(None), Err);
+    }
+    Ok(page_links(cx, "track", track, "music:album", Level::Album)
+        .await?
+        .and_then(|albums| albums.into_iter().next()))
+}
+/// Whether Spotify can say which album a track is on: its credentials, or its pages allowed.
+pub(crate) fn places(config: &crate::config::Config) -> bool {
+    Spotify.ready(config) || config.also_on.spotify_pages
+}
+/// Whether an error is Spotify refusing the credentials (its token or its API).
+pub(crate) fn refused(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<crate::resolver::RetryLater>()
+        .is_some_and(|r| r.class == SPOTIFY.auth_class)
+}
+/// The Spotify objects at `level` a public page names in its `<meta name="{meta}">` tags.
+async fn page_links(
+    cx: &Context,
+    kind: &str,
+    id: &str,
+    meta: &'static str,
+    level: Level,
+) -> Result<Option<Vec<String>>> {
+    let url = format!("https://open.spotify.com/{kind}/{id}");
+    let fetched = cx
+        .egress
+        .discover(
+            &url,
+            &crate::resolver::egress::FetchOptions::default(),
+            3600,
+        )
+        .await?;
+    match fetched.status {
+        200 => {}
+        429 | 500..=599 => {
+            return Err(crate::resolver::RetryLater {
+                class: "spotify_busy",
+                seconds: fetched.retry_after_secs.clamp(60, 3600),
+            }
+            .into())
+        }
+        _ => return Ok(None),
+    }
+    let body = String::from_utf8_lossy(&fetched.body).into_owned();
+    Ok(Some(
+        crate::resolver::html::blocking(move || meta_links(&body, meta, level)).await?,
+    ))
+}
+/// The IDs of the Spotify objects at `level` a page's `<meta name="{meta}">` tags name.
+pub fn meta_links(html: &str, meta: &str, level: Level) -> Vec<String> {
+    let Ok(document) = crate::resolver::html::document(html) else {
+        return vec![];
+    };
+    let selector = scraper::Selector::parse(&format!("meta[name='{meta}'][content]"))
+        .expect("a fixed selector");
+    document
+        .select(&selector)
+        .filter_map(|m| music::parse(m.value().attr("content")?))
+        .filter(|l| l.service == Service::Spotify && l.level == level)
+        .map(|l| l.id)
+        .collect()
+}
+
 /// One album or track of the catalogue (`/v1/{albums|tracks}/{id}`); `None` when Spotify has
 /// none. Its answer is shared for an hour.
 async fn object(cx: &Context, kind: Kind, id: &str) -> Result<Option<Value>> {
@@ -197,7 +245,7 @@ mod tests {
     #[test]
     fn the_spotify_section_takes_its_own_variables_and_stays_secret() {
         use crate::config::{apply_env, apply_named_env, Config};
-        let mut value = serde_json::to_value(Config::default()).unwrap();
+        let mut value = Config::defaults().unwrap();
         let vars = [
             ("PINAKES_SPOTIFY_CLIENT_ID", "ABCDEFID"),
             ("PINAKES_SPOTIFY_CLIENT_SECRET", "ABCDEFSECRET"),

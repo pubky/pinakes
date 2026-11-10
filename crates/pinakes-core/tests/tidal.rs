@@ -3,7 +3,7 @@
 //! Deezer.
 use pinakes_core::{
     also_on::{self, SourceOptions},
-    config::{Config, EgressConfig},
+    config::Config,
     groups,
     model::ResourceMeta,
     resolver::egress::{Dns, Egress, FetchOptions, Fetched, Transport},
@@ -13,6 +13,7 @@ use std::{
     net::SocketAddr,
     sync::{Arc, Mutex},
 };
+mod common;
 
 struct PublicDns;
 #[async_trait::async_trait]
@@ -268,7 +269,11 @@ async fn run(pool: &sqlx::PgPool, config: Config, answers: Answers) -> Vec<Strin
         seen: Mutex::default(),
         answers: Mutex::new(answers),
     });
-    let egress = Egress::with_backends(EgressConfig::default(), Arc::new(PublicDns), t.clone());
+    let egress = Egress::with_backends(
+        common::unpaced_egress_config(),
+        Arc::new(PublicDns),
+        t.clone(),
+    );
     run_with(pool, config, &t, &egress).await
 }
 /// Every resource's sources, once, on `egress` (kept across runs: its cache is the daemon's);
@@ -529,7 +534,11 @@ async fn a_retry_s_batch_skips_cached_items(pool: sqlx::PgPool) {
             ..Default::default()
         }),
     });
-    let egress = Egress::with_backends(EgressConfig::default(), Arc::new(PublicDns), t.clone());
+    let egress = Egress::with_backends(
+        common::unpaced_egress_config(),
+        Arc::new(PublicDns),
+        t.clone(),
+    );
     let seen = run_with(&pool, config.clone(), &t, &egress).await;
     // One batch for both tracks, and no single request: the batch seeded both answers.
     let tidal: Vec<&String> = seen

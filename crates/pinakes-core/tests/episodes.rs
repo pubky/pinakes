@@ -62,15 +62,35 @@ async fn rows(pool: &PgPool, id: &str) -> i64 {
         .unwrap()
 }
 
+/// A show's episodes are stored without a link that carries a credential: an episode whose page
+/// does is not kept, and an image or enclosure that does goes from its row.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_shows_episodes_store_no_credential(pool: PgPool) {
+    let mut leaky = episode(2, true);
+    leaky.image = Some("https://img.example/2.png?token=SECRET".into());
+    leaky.stream.as_mut().unwrap().url = "https://cdn.example/2.mp3?key=SECRET".into();
+    let mut page = episode(1, true);
+    page.uri = "https://feeds.example.org/ep-1?auth=SECRET".into();
+    let id = show(
+        &pool,
+        "https://feeds.example.org/guarded.xml",
+        Some(vec![episode(3, true), leaky, page]),
+    )
+    .await;
+    let stored: String = sqlx::query_scalar("SELECT coalesce(string_agg(concat_ws(' ',guid,url,name,image,stream::text),' '),'') FROM podcast_episode WHERE resource_id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(!stored.contains("SECRET"), "{stored}");
+    assert_eq!(rows(&pool, &id).await, 2);
+}
+
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_shows_latest_episodes_are_listed_newest_first_and_name_the_ones_pinakes_has(
     pool: PgPool,
 ) {
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let id = show(
         &pool,
         "https://feeds.example.org/show.xml",
@@ -183,11 +203,7 @@ async fn the_save_replaces_keeps_or_clears_the_list(pool: PgPool) {
     d.episodes = Some(vec![episode(30, true), episode(29, true)]);
     store::save_document(&pool, &id, 0, &d).await.unwrap();
     assert_eq!(rows(&pool, &id).await, 2);
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
     assert_eq!(page["items"][0]["guid"], "ep-30");
     // No longer a show: nothing to list.
@@ -236,11 +252,7 @@ async fn the_route_shows_nothing_of_a_rejected_enclosure(pool: PgPool) {
     assert_eq!(episodes.len(), 2);
     let id = show(&pool, "https://feeds.example.org/show.xml", Some(episodes)).await;
     assert_eq!(rows(&pool, &id).await, 2);
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let (status, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
     assert_eq!(status, 200, "{page}");
     let text = page.to_string();
@@ -281,11 +293,7 @@ async fn an_oversized_media_type_is_no_stream_and_the_show_saves(pool: PgPool) {
     assert!(episodes[1].stream.is_some());
     let id = show(&pool, "https://feeds.example.org/show.xml", Some(episodes)).await;
     assert_eq!(rows(&pool, &id).await, 2);
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let (status, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
     assert_eq!(status, 200, "{page}");
     assert_eq!(page["items"][0]["stream"], Value::Null);
@@ -318,11 +326,7 @@ async fn a_stream_too_long_for_the_table_is_none_and_the_show_saves(pool: PgPool
         2,
         "the show saved with both episodes"
     );
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let (status, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
     assert_eq!(status, 200, "{page}");
     assert_eq!(page["items"][0]["guid"], "ep-1");
@@ -354,11 +358,7 @@ async fn a_cleared_card_lists_nothing(pool: PgPool) {
         .unwrap();
     assert_eq!(status, "error", "the card was cleared");
     assert_eq!(rows(&pool, &id).await, 0);
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let (status, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
     assert_eq!(status, 200, "{page}");
     assert_eq!(page["items"].as_array().unwrap().len(), 0, "{page}");
@@ -383,11 +383,7 @@ async fn a_place_without_a_type_path_lists_nothing(pool: PgPool) {
             .await
             .unwrap();
     assert_eq!(path, None);
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let (status, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
     assert_eq!(status, 200, "{page}");
     assert_eq!(page["items"].as_array().unwrap().len(), 0, "{page}");
@@ -410,11 +406,7 @@ async fn a_show_without_a_list_lists_a_group_members(pool: PgPool) {
     )
     .await;
     let other = show(&pool, "https://pca.st/itunes/123", None).await;
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let (_, page) = request(&app, &format!("/v1/resources/{apple}/episodes")).await;
     assert_eq!(
         page["items"].as_array().unwrap().len(),

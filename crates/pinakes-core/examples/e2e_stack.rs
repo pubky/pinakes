@@ -425,7 +425,7 @@ async fn run(pool: sqlx::PgPool, f: Fixture) -> Result<()> {
         nexus_url: base.clone(),
         ..Default::default()
     };
-    cfg.osm.nominatim_url = base.clone();
+    cfg.osm.nominatim_url = base.clone().into();
     cfg.osm.requests_per_second = 10.;
     cfg.canary.enabled = false;
     // Services that need a contact (SEC EDGAR) wait without one.
@@ -451,7 +451,7 @@ async fn run(pool: sqlx::PgPool, f: Fixture) -> Result<()> {
     }
     pinakes_core::configure_sources(&cfg);
     pinakes_core::also_on::configure(&pool, &cfg.also_on).await?;
-    let state = AppState::new(pool.clone(), cfg.clone()).await?;
+    let state = AppState::new(pool.clone(), cfg.clone())?;
     let metrics = state.metrics.clone();
     let wake = state.wake.clone();
     let app = api::router(state).merge(
@@ -814,7 +814,7 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let base = format!("http://{}", listener.local_addr()?);
     pinakes_core::also_on::configure(&pool, &cfg.also_on).await?;
-    let state = AppState::new(pool.clone(), cfg.as_ref().clone()).await?;
+    let state = AppState::new(pool.clone(), cfg.as_ref().clone())?;
     let metrics = state.metrics.clone();
     let app = api::router(state);
     let nexus = Nexus::configured(&cfg)?;

@@ -57,6 +57,11 @@ async fn serve(config: Option<PathBuf>, command: Command) -> Result<()> {
         println!("scrubbed {scrubbed} posts gone or opted out");
         let scrubbed = pinakes_core::changes::scrub_never_fetched(&pool).await?;
         println!("scrubbed {scrubbed} objects never fetched");
+        let repaired = pinakes_core::changes::repair_credentials(&pool, &instance_lock).await?;
+        println!(
+            "credential repair: derived_link -{}, change keys {}, unit keys {}, history rows {}",
+            repaired.derived_links, repaired.change_keys, repaired.unit_keys, repaired.history_rows
+        );
         let requeued = queue::reextract(&pool, &routes).await?;
         println!("re-queued {requeued} resources");
         return Ok(());
@@ -64,9 +69,7 @@ async fn serve(config: Option<PathBuf>, command: Command) -> Result<()> {
     pinakes_core::groups::configure(&pool, &config.groups).await?;
     pinakes_core::also_on::configure(&pool, &config.also_on).await?;
     let api_pool = api::pool_options().connect(&config.database_url).await?;
-    // Refused while what LocationIQ answered is stored or in the dump file without its
-    // authorization, whichever provider is selected now (`Publication::check`).
-    let state = AppState::new(api_pool, config.clone()).await?;
+    let state = AppState::new(api_pool, config.clone())?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     // One Egress for the resolvers and the also-on sources: the per-host budgets are shared.
     let egress = pinakes_core::resolver::egress::Egress::new(config.egress.clone());
@@ -149,6 +152,7 @@ async fn serve(config: Option<PathBuf>, command: Command) -> Result<()> {
     let maintenance_task = tokio::spawn(pinakes_core::maintenance::run(
         pool.clone(),
         config.grace_days,
+        config.preview_grace_hours,
         config.refresh.retention_days,
         Duration::from_secs(3600),
         shutdown_rx.clone(),
@@ -157,11 +161,11 @@ async fn serve(config: Option<PathBuf>, command: Command) -> Result<()> {
         pool.clone(),
         PathBuf::from(&config.osm.dump_dir),
         Duration::from_secs(config.osm.dump_every_hours * 3600),
-        state.publication(),
         shutdown_rx.clone(),
     ));
     let admin = tokio::net::TcpListener::bind(&config.admin_listen).await?;
     warn_admin_listener(admin.local_addr()?);
+    warn_admin_without_token(admin.local_addr()?, config.admin_token.is_some());
     let admin_app = api::admin_router(state.clone());
     let mut admin_shutdown = shutdown_rx.clone();
     let admin_task = tokio::spawn(async move {
@@ -209,11 +213,18 @@ fn warn_admin_listener(address: std::net::SocketAddr) {
     }
 }
 
-/// The daemon's JSON log: `filter` (`RUST_LOG`, else the default), except that the MCP and HTTP
-/// libraries log nothing below warn whatever the filter says. rmcp logs whole requests and results
-/// at debug and trace, and notifications at info: a tool's arguments, such as a private calendar
-/// URL, before any validation. reqwest, hyper and h2 name the URL a request was sent to, whose
-/// query may hold a key (LocationIQ's).
+/// The `Host` check keeps browser pages off the admin listener, not other programs on this
+/// machine: without `admin_token` any of them can read it and curate groups through it.
+fn warn_admin_without_token(address: std::net::SocketAddr, token: bool) {
+    if !token {
+        tracing::warn!(admin_listen=%address, "admin listener has no admin_token; any process on this machine can use it, set PINAKES__ADMIN_TOKEN");
+    }
+}
+
+/// The daemon's JSON log: `filter` (`RUST_LOG`, else the default), except that the MCP library
+/// logs nothing below warn whatever the filter says. rmcp logs whole requests and results at debug
+/// and trace, and notifications at info: a tool's arguments, such as a private calendar URL, before
+/// any validation.
 fn subscriber<W>(
     filter: tracing_subscriber::EnvFilter,
     writer: W,
@@ -222,18 +233,15 @@ where
     W: for<'w> tracing_subscriber::fmt::MakeWriter<'w> + Send + Sync + 'static,
 {
     use tracing_subscriber::{filter::FilterExt as _, layer::SubscriberExt as _, Layer as _};
-    let quiet_libraries = tracing_subscriber::filter::filter_fn(|meta| {
+    let quiet_mcp = tracing_subscriber::filter::filter_fn(|meta| {
         let target = meta.target();
-        let quiet = ["rmcp", "reqwest", "hyper", "hyper_util", "h2"]
-            .iter()
-            .any(|lib| target == *lib || target.starts_with(&format!("{lib}::")));
-        !quiet || *meta.level() <= tracing::Level::WARN
+        !(target == "rmcp" || target.starts_with("rmcp::")) || *meta.level() <= tracing::Level::WARN
     });
     tracing_subscriber::registry().with(
         tracing_subscriber::fmt::layer()
             .json()
             .with_writer(writer)
-            .with_filter(filter.and(quiet_libraries)),
+            .with_filter(filter.and(quiet_mcp)),
     )
 }
 
@@ -383,38 +391,24 @@ mod tests {
             );
         }
     }
-    /// Whatever RUST_LOG says, the HTTP libraries log nothing below warn: their debug and trace
-    /// lines name the URL a request was sent to, and LocationIQ's key is in its query.
     #[test]
-    fn http_library_lines_that_name_urls_are_never_logged() {
-        for env in [
-            "debug",
-            "trace",
-            "reqwest=trace,hyper=trace,hyper_util=trace,h2=trace",
-        ] {
-            let output = Arc::new(Mutex::new(Vec::new()));
-            let writer = LogWriter(output.clone());
-            let filter = tracing_subscriber::EnvFilter::new(env);
-            tracing::subscriber::with_default(subscriber(filter, move || writer.clone()), || {
-                let url = "https://us1.locationiq.com/v1/lookup?osm_ids=N1&key=pk.s3cret";
-                tracing::debug!(target: "reqwest::connect", "starting new connection: {url}");
-                tracing::trace!(target: "reqwest::async_impl::client", "response for {url}");
-                tracing::debug!(target: "hyper_util::client::legacy::client", "{url}");
-                tracing::trace!(target: "hyper::proto::h1::role", "{url}");
-                tracing::debug!(target: "h2::codec::framed_write", "{url}");
-                tracing::info!(target: "reqwest", "{url}");
-                tracing::warn!(target: "reqwest::connect", "http warning stays");
-                tracing::debug!(target: "pinakes_core::resolver", "own debug stays");
-            });
-            let logs = String::from_utf8(output.lock().unwrap().clone()).unwrap();
-            assert!(!logs.contains("s3cret"), "{env}: {logs}");
-            assert!(logs.contains("http warning stays"), "{env}: {logs}");
-            assert_eq!(
-                logs.contains("own debug stays"),
-                env != "reqwest=trace,hyper=trace,hyper_util=trace,h2=trace",
-                "{env}: {logs}"
-            );
-        }
+    fn warns_when_the_admin_listener_has_no_token() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer = LogWriter(output.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            warn_admin_without_token("127.0.0.1:9090".parse().unwrap(), true);
+            assert!(output.lock().unwrap().is_empty());
+            warn_admin_without_token("127.0.0.1:9090".parse().unwrap(), false);
+        });
+        let logs = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert_eq!(logs.matches("admin listener has no admin_token").count(), 1);
+        assert!(logs.contains("127.0.0.1:9090"));
+        assert!(logs.contains("PINAKES__ADMIN_TOKEN"));
     }
     #[test]
     fn warns_for_non_loopback_admin_binds_only() {

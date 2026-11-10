@@ -84,6 +84,157 @@ fn page_url(doc: &ResourceMeta, id: &str, canonical_id: &str) -> Option<String> 
         .filter(|(target, _, _)| target != id && target != canonical_id)
         .map(|(_, url, _)| url)
 }
+/// Occurrences an earlier build stored under a UID that [`super::stored_uid`] now replaces (one
+/// that holds a link carrying a credential) take their stored key in place, and so do the feed's
+/// held and missing keys, its change lines' and its group units' occurrence keys, before anything
+/// is compared: the occurrence goes on under its new key, never lost and cancelled under the old
+/// one. Where a row under the new key exists already (the same occurrence, stored again), the old
+/// row goes. Locks are taken in `changes::save`'s order: the writers, the resource, its fetch
+/// state, then its occurrences.
+async fn rekey(pool: &PgPool, id: &str) -> Result<()> {
+    let uids: Vec<String> =
+        sqlx::query_scalar("SELECT DISTINCT uid FROM occurrence WHERE resource_id=$1")
+            .bind(id)
+            .fetch_all(pool)
+            .await?;
+    let renamed: BTreeMap<String, String> = uids
+        .into_iter()
+        .filter(|uid| crate::capability::contains_credential(uid))
+        .map(|uid| (uid.clone(), super::stored_uid(uid)))
+        .collect();
+    // A key is read as `changes::stored_key` reads it: its recurrence id as any JSON.
+    let moves = |key: &str| {
+        serde_json::from_str::<(String, Value)>(key)
+            .is_ok_and(|(uid, _)| crate::capability::contains_credential(&uid))
+    };
+    let state = sqlx::query("SELECT held_keys,missing_keys FROM event_fetch WHERE resource_id=$1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+    let keys = state.as_ref().is_some_and(|row| {
+        row.get::<Option<Vec<String>>, _>("held_keys")
+            .is_some_and(|held| held.iter().any(|k| moves(k)))
+            || row
+                .get::<Value, _>("missing_keys")
+                .as_object()
+                .is_some_and(|missing| missing.keys().any(|k| moves(k)))
+    });
+    // The keys of the resource's change lines and group units that still name a raw UID: each
+    // distinct key is read whole and `capability::contains_credential` decides (a pattern on
+    // the stored text would miss a link start split by a tab or a newline, stored escaped); only
+    // a key already under its stand-in is left out.
+    let change_keys: Vec<String> = sqlx::query_scalar("SELECT DISTINCT occurrence_key FROM resource_change WHERE resource_id=$1 AND occurrence_key IS NOT NULL AND occurrence_key !~ $2")
+        .bind(id)
+        .bind(crate::changes::STAND_IN_KEY)
+        .fetch_all(pool)
+        .await?;
+    let unit_keys: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT occurrence_key FROM group_unit WHERE resource_id=$1 AND occurrence_key<>'' AND occurrence_key !~ $2",
+    )
+    .bind(id)
+    .bind(crate::changes::STAND_IN_KEY)
+    .fetch_all(pool)
+    .await?;
+    let change_keys: Vec<&str> = change_keys
+        .iter()
+        .map(String::as_str)
+        .filter(|k| moves(k))
+        .collect();
+    let unit_keys: Vec<&str> = unit_keys
+        .iter()
+        .map(String::as_str)
+        .filter(|k| moves(k))
+        .collect();
+    if renamed.is_empty() && !keys && change_keys.is_empty() && unit_keys.is_empty() {
+        return Ok(());
+    }
+    let mut tx = pool.begin().await?;
+    crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
+    if sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR UPDATE")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .is_none()
+    {
+        return Ok(());
+    }
+    let state = sqlx::query(
+        "SELECT held_keys,missing_keys FROM event_fetch WHERE resource_id=$1 FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    for (old, new) in &renamed {
+        sqlx::query("DELETE FROM occurrence o WHERE o.resource_id=$1 AND o.uid=$2 AND EXISTS(SELECT 1 FROM occurrence n WHERE n.resource_id=$1 AND n.uid=$3 AND n.recurrence_id=o.recurrence_id)")
+            .bind(id)
+            .bind(old)
+            .bind(new)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE occurrence SET uid=$3 WHERE resource_id=$1 AND uid=$2")
+            .bind(id)
+            .bind(old)
+            .bind(new)
+            .execute(&mut *tx)
+            .await?;
+    }
+    let key = |key: String| crate::changes::stored_key(&key);
+    for old in change_keys {
+        sqlx::query(
+            "UPDATE resource_change SET occurrence_key=$3 WHERE resource_id=$1 AND occurrence_key=$2",
+        )
+        .bind(id)
+        .bind(old)
+        .bind(crate::changes::stored_key(old))
+        .execute(&mut *tx)
+        .await?;
+    }
+    for old in unit_keys {
+        // The unit's occurrence reference names the UID too.
+        let new = crate::changes::stored_key(old);
+        let uid = serde_json::from_str::<(String, Value)>(&new)
+            .map(|(uid, _)| uid)
+            .unwrap_or_default();
+        sqlx::query("UPDATE group_unit SET occurrence_key=$3,occurrence=CASE WHEN occurrence ? 'uid' THEN jsonb_set(occurrence,'{uid}',to_jsonb($4::text)) ELSE occurrence END WHERE resource_id=$1 AND occurrence_key=$2")
+            .bind(id)
+            .bind(old)
+            .bind(&new)
+            .bind(&uid)
+            .execute(&mut *tx)
+            .await?;
+    }
+    if let Some(row) = state {
+        // In their order, a key held under both spellings once.
+        let held = match row.get::<Option<Vec<String>>, _>("held_keys") {
+            Some(keys) => {
+                let mut seen = BTreeSet::new();
+                let mut held = vec![];
+                for k in keys {
+                    let k = key(k);
+                    if seen.insert(k.clone()) {
+                        held.push(k);
+                    }
+                }
+                Some(held)
+            }
+            None => None,
+        };
+        // A key held under both spellings keeps its higher count.
+        let mut missing = BTreeMap::<String, u32>::new();
+        for (k, n) in serde_json::from_value::<BTreeMap<String, u32>>(row.get("missing_keys"))? {
+            let count = missing.entry(key(k)).or_default();
+            *count = (*count).max(n);
+        }
+        sqlx::query("UPDATE event_fetch SET held_keys=$2,missing_keys=$3 WHERE resource_id=$1")
+            .bind(id)
+            .bind(held)
+            .bind(json!(missing))
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
 /// Read, bound, hash and diff outside the global write/sequence locks. Apply rechecks the snapshot fence.
 pub async fn prepare(
     pool: &PgPool,
@@ -92,6 +243,27 @@ pub async fn prepare(
     fetched_at: i64,
     normal_ttl: u64,
 ) -> Result<Prepared> {
+    // Every source's UIDs as they are stored (`super::stored_uid`), whichever parser or adapter
+    // gave them.
+    let stored;
+    let container = if container
+        .occurrences
+        .iter()
+        .map(|o| &o.uid)
+        .chain(&container.deleted_uids)
+        .any(|uid| crate::capability::contains_credential(uid))
+    {
+        let mut c = container.clone();
+        for o in &mut c.occurrences {
+            o.uid = super::stored_uid(std::mem::take(&mut o.uid));
+        }
+        c.deleted_uids = c.deleted_uids.into_iter().map(super::stored_uid).collect();
+        stored = c;
+        &stored
+    } else {
+        container
+    };
+    rekey(pool, id).await?;
     let state=sqlx::query("SELECT last_snapshot_at,held_keys,missing_keys,hold_count FROM event_fetch WHERE resource_id=$1").bind(id).fetch_optional(pool).await?;
     let last = state
         .as_ref()
@@ -213,7 +385,16 @@ pub async fn prepare(
         validators: container
             .validators
             .as_ref()
-            .map(serde_json::to_value)
+            .map(|validators| {
+                let mut validators = validators.clone();
+                // A `Link` header that names a link carrying a credential is not kept.
+                if validators.link.as_deref().is_some_and(|link| {
+                    crate::capability::link_header_names_capability(link, &source_uri)
+                }) {
+                    validators.link = None;
+                }
+                serde_json::to_value(validators)
+            })
             .transpose()?,
         retention_days: container.limits.retention_days,
         cursor: container.cursor.clone(),
@@ -315,6 +496,9 @@ pub async fn prepare(
             }
             continue;
         }
+        // The last step before the row is written: nothing in it names a credential but the
+        // feed's own link (`capability::strip_document`), whatever put it in.
+        crate::capability::strip_document(&mut doc, &source_uri)?;
         let mut after = changes::normalize(&doc);
         let before = previous.map(|(_, _, d, _, _, _, _)| changes::normalize(d));
         let supersedes = if previous.is_none() {
@@ -343,6 +527,7 @@ pub async fn prepare(
             continue;
         }
         let mut doc = old.clone();
+        crate::capability::strip_document(&mut doc, &source_uri)?;
         let status = if superseded.contains(key) {
             "superseded"
         } else {

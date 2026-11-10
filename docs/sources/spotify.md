@@ -7,15 +7,18 @@ One of the music sources of [also on](../api.md#also-on): links on music service
 [operations](#operations)): a Spotify album's barcode (`external_ids.upc`) and a track's ISRC
 (`external_ids.isrc`) from Spotify's Web API, as the keys `upc:…` and `isrc:…` (`via`
 `spotify`) and as facts, and no links; `musicbrainz`, `deezer` and `itunes` then find the same
-album or track by them. An ISRC MusicBrainz gives to several recordings is decided by the
-track's duration (`duration_ms`), the one recording within 3 s of it keyed by its MBID, else the
-ISRC a fact only ([an ISRC on several recordings](README.md#an-isrc-on-several-recordings)). A
+album or track by them. An ISRC MusicBrainz gives to several recordings that agree is those
+recordings' as one, keyed by the ISRC and the MBID that stands for them; one on recordings that disagree is decided
+by the track's duration (`duration_ms`), the one recording within 3 s of it keyed by its MBID,
+else the ISRC a fact only ([an ISRC on several recordings](README.md#an-isrc-on-several-recordings)). A
 Spotify link Spotify does not know (404)
 gives nothing. Artists, playlists, episodes and shows are not read here.
 
-For example, the track `https://open.spotify.com/track/7tFiyTwD0nx5a1eklYtX2J` ("Bohemian
-Rhapsody - Remastered 2011") has the ISRC `GBUM71029604`, which MusicBrainz gives to one
-recording: the track gets `isrc:GBUM71029604` and joins that recording's group.
+## Another service's track on Spotify
+
+The lookup the other way, a Spotify track for another service's track by its ISRC, is the
+`spotify_isrc` source (off by default; its own page in this directory), with the same credentials
+and pace.
 
 ## Without Spotify's API
 
@@ -56,6 +59,13 @@ look its URL up exactly, never by title or artist, and neither needs this one.
   `{"code":"PUBLIC_API_ACCESS_DEPRECATED"}`. Its API terms (song.link/api-terms) are a Google
   Drive file that needs a sign-in to read. So there is no API whose terms allow an open indexer
   to store its answers, and Pinakes asks it nothing.
+
+While this source is on, [`editions`](editions.md) asks the Web API which album a Spotify track a
+card may show is on (`/v1/tracks/{id}`); where the API does not answer (no credentials, or
+credentials it refuses, as for an app whose owner has no premium plan), and only with
+`[also_on] spotify_pages = true` (off by default), the track's public page, once an hour at most,
+for the album it names (its `music:album`); a card's own Spotify track, a link someone referenced,
+is read so whatever the switch says. Never an album page.
 
 ## Operations
 

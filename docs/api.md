@@ -102,13 +102,14 @@ An IMDb title keeps the type its page gives (it can be either).
 | `point` | `{lat, lon}` |
 | `start`, `end` | RFC 3339 instants for events and occurrences |
 | `group` | `{id, size}` when the resource or occurrence is in a [group](#groups), else `null` |
-| `also_on` | The same thing elsewhere ([Also on](#also-on)): the other members of its group as `{id, uri, site}` (other resources first, one entry each by ID, then other occurrences of its own feed), then derived links nobody tagged as `{uri, site, derived: true, via, kind?, at?}`, by service name; one per service, at most 8 on a search, lookup or group card; on a resource read every link, several of one service too, up to 256. A hint only: every member keeps its own card |
+| `also_on` | The same thing elsewhere ([Also on](#also-on)): the other members of its group as `{id, uri, site}` (other resources first, one entry each by ID, then other occurrences of its own feed), then derived links nobody tagged as `{uri, site, derived: true, via, kind?, at?}`, by service name; one per service (of a recording's or an album's links, the one on the card's own release, else on the original edition), never another page of the card's own service, at most 8 on a search, lookup or group card and 256 on a resource read. A hint only: every member keeps its own card |
 | `open_in` | The clients that open a Pubky app's object, `[{client, url}]` (`url` is `https:`): from the app's profile ([Pubky apps](pubky-apps.md)), e.g. Loopky for a deck; on a Pubky event reference's card, those of the event object. `[]` on every other card |
-| `attribution` | Present on OSM cards, events placed at an OSM venue and events whose zone came from coordinates; display it with the card. A place's credit is that of the provider that answered the version shown (LocationIQ's beside the ODbL credit for a place LocationIQ answered) |
+| `attribution` | Present on OSM cards, events placed at an OSM venue and events whose zone came from coordinates; display it with the card |
 | `credits` | Where `image` and `description` came from when Pinakes added them from another source than the link ([Credits](#credits)): one entry per such field, at most 4. `[]` when none: such a field came from the link itself |
 | `occurrence` | Occurrence cards only: `{feed_id, feed_uri, uid, recurrence_id, status}`; `feed_uri` is the feed's URI, the link people tagged |
 | `event` | Pubky event references only (an event post's occurrence at a place; no feed writes them today: social events are Nexus's, see [Pubky events](#calendars-and-occurrences)): `{author, object_path, recurrence_id, start, end, status}`; `object_path` is the post's versionless path, `recurrence_id` the occurrence's local start (`YYYY-MM-DDTHH:MM:SS`) or null for a one-off |
 | `maybe_same` | Event and occurrence cards: other events that are [possibly the same event](#possibly-the-same-event), best first, each `{id, uri, site, start, score}` (`[]` when there are none). An app's store card: store cards that are [possibly the same app](#possibly-the-same-app). `MusicRecording` cards: other recordings that are [possibly the same recording](#possibly-the-same-recording), the same shape (`start` is `null`). Up to three on a search, lookup or group card, up to ten on a resource read. A hint only, like `group`. Absent on other cards, on event and app cards with `[event] same_event_hint = "off"` and on recording cards with `[groups] same_recording_hint = "off"` |
+| `because` | [Related](#related) search rows only: why the row is listed, `{shared, taggers}` (how many of the resource's taggers referenced it, and up to three of them as Pubky public keys). Absent on every other card |
 
 A `pubky://` object of an app Pinakes has a profile for (Loopky, Pubky Rooms,
 the Pubky marketplace) gets that app's card; any other app's object gets a general one. Each is
@@ -214,8 +215,8 @@ read, the MCP tools' cards.
 
 `GET /v1/resources/{id}`, `GET /v1/resources/by-uri` and `POST /v1/resolve` return the card with
 these fields beside the card's: one flat object (`api_shape: 2` in `/v1/info`; there is no
-`details` object). The read's `also_on` lists every link, up to 256, and its `maybe_same` up to
-ten. The two reads carry `Cache-Control: public, max-age=30` and an `ETag` of the body, and
+`details` object). The read's `also_on` lists one link per service, as every card does, up to
+256, and its `maybe_same` up to ten. The two reads carry `Cache-Control: public, max-age=30` and an `ETag` of the body, and
 answer `If-None-Match` with 304.
 
 | Field | Meaning |
@@ -599,10 +600,7 @@ updates are visible between pages; this is not a frozen snapshot.
 **Map clusters.** `cluster=<zoom>` returns `{resolution, clusters, points, truncated, total,
 reach_truncated, facets?}`. A cluster is `{cell, count, lat, lon, top, attribution?}`, where
 `top` holds at most three card IDs by rank, `lat` is the members' mean latitude and `lon` the
-circular mean of their longitudes. `attribution` is present when a member is an OSM place or
-placed at one. A cluster is placed at its members' current points (the place version Pinakes
-holds now, which can be newer than the one a card shows) and carries those versions' credits: the
-OSM credit, or every other credit among them (LocationIQ's). Points are cards. The H3 resolution comes from `limits.h3_resolutions` by floored zoom;
+circular mean of their longitudes. Points are cards. The H3 resolution comes from `limits.h3_resolutions` by floored zoom;
 large viewports coarsen to stay within `limits.max_cluster_cells` and `resolution` reports the
 value used; a viewport that still has more cells returns 400. Singleton cells are points, and when the filtered total fits in `limit` every unit
 is a point. `limit` caps clusters plus points; `truncated` marks omitted units, and otherwise
@@ -649,6 +647,18 @@ every filter it combines with `type`, `tags`, `q`, `reach`/`viewer`, `collapse=g
 Related lists only what at least two of a link's taggers referenced, so it never mirrors one
 person (`limits.related_min_shared`, 2).
 
+Each row says why it is listed: `because` is `{"shared": n, "taggers": [...]}`, the count of the
+resource's taggers who referenced it (its rank's first term; with `collapse=group`, its group's
+members' together, each tagger once) and up to three of them as Pubky public keys, those who
+tagged the resource most recently first. Both come from the sample the ranking counted (Bounds,
+below), so `shared` counts sampled taggers within the window. Ask Nexus for their names and tags.
+No other search carries `because`.
+
+```json
+{"id": "…", "uri": "https://example.org/kid-a", "name": "Kid A", "…": "…",
+ "because": {"shared": 3, "taggers": ["<pubky key>", "<pubky key>", "<pubky key>"]}}
+```
+
 - **Groups.** A resource in a [group](#groups) stands for the whole group: its taggers are the
   group's members' taggers, and the group's own members are never listed. With `collapse=group`,
   each row is one group, its members' taggers counted together; without it, each resource counts
@@ -678,10 +688,31 @@ person (`limits.related_min_shared`, 2).
 `POST /v1/resolve` queues a supported URI and waits up to three seconds. Ingestion and every
 preview caller share one queue entry per normalized URI, with one TTL, retry schedule and
 dead-letter state. A 202 carries the ID to poll with `GET /v1/resources/{id}`. Unsupported
-schemes or disabled resolvers return 400. A resource only previewed, never referenced, is not
-a search result and expires after the orphan grace period. Previews are limited per client IP
-and per URI (`limits.preview_requests_per_minute`, `limits.preview_uri_requests_per_minute`,
-30 each); a 429 carries `Retry-After: 60`.
+schemes or disabled resolvers return 400, and so does a link that carries a credential: a
+calendar provider's secret share link (the patterns `scripts/verify-no-capability-urls` keeps out
+of the repository), a password in the user info, or a key such as `token`, `access_token`, `key`,
+`sig` or `signature` (`capability::CREDENTIAL_KEYS`) in the query (its parameters separated by
+`&` or `;`), or with a value in a
+form-encoded fragment or any part of it after a `?`, `#` or `;` (a hash router's
+`#/reset?token=…`); a plain anchor such as `#key` is not one. It is not stored, does not count against the preview
+budget, and its log line names the host only. A card someone's post made for such a link is still
+read by its URI. An answer whose fetch ends on such a link (a page, an ActivityPub object, an
+oEmbed answer) is read in that address's directory without its credential (or at its origin when
+the path is a known secret), so nothing it names relative to that address (an empty `og:image`, a
+JSON-LD `#image`) carries it. Nothing stored names such a link but the resource's own link as
+written (another spelling of it is kept only when it adds no credential: no user info, no key in
+its fragment): not a document, its change lines, its episodes, its derived links (a source's
+link that carries one is refused), a calendar's occurrences (a UID or a
+feed item's id that is such a link is kept by its hash, and a change line names the occurrence by that hash) and fetch state, or the OSM place cache and its display names;
+a link written scheme-relative (`//host/p`) or as `webcal:` without `//` counts too. Such a link is never sent to another service: also-on lookups (the hubs, the
+Wayback Machine) and oEmbed providers skip it, the `social` tool leaves it out of what it asks the Nexus, and it is never kept as another link's alias. A
+resource only previewed, never referenced, is not a search result and expires after `limits.preview_grace_hours` (a day). Previews are limited per
+client IP and per URI (`limits.preview_requests_per_minute`, `limits.preview_uri_requests_per_minute`,
+30 each); a 429 carries `Retry-After: 60`. The instance stores at most
+`limits.preview_new_per_hour` (1000) links it did not know in any hour, and, when the operator sets
+`limits.preview_new_per_client_per_hour` (no share by default), one client address at most that
+many of them: over the first, a new link gets 503, over the second 429, each with `Retry-After`
+(seconds), and nothing is stored, while a known link still reads.
 
 Statuses:
 
@@ -1154,10 +1185,16 @@ A card's `also_on` says where else the same thing is: first the other members of
 `derived: true`, the service's name in `site`, the hub or service it came through in `via`
 (`musicbrainz`, `wikidata`), and for some a `kind` its source's page names (`archived`: a Wayback Machine copy, with
 its capture time in `at`). Derived links are ordered by service name; each URL appears once (a tagged member wins)
-and never the card itself. A card carries at most 8 entries, and one link per service, the
-service a link's URL is on (a derived link's `site`): for a music service a tagged member
-first, because someone used that link (of several, the one on the recording's original album,
-the `original_album` fact), then the derived link most group members name. The card's own
+and never the card itself. Every card, a resource read too, carries one link per service, the
+service a link's URL is on (a derived link's `site`), at most 8 entries (256 on a read). Of a
+recording's or an album's links, the [`editions`](sources/editions.md) source places each on a
+MusicBrainz release: a service shows its link on the card's own release, else on the original
+edition (the first album that is no compilation, its earliest release with a page on that
+service, never a deluxe, anniversary, remastered or hi-res edition), whether tagged or derived. Among links it
+places on neither, a tagged member comes first, because someone used that link (of several, the
+one on the recording's original album, the `original_album` fact), then the derived link most
+group members name, then a page before a file (a `.pdf`), then the shorter link; a link its
+service puts on another release (a later edition, a compilation) comes last. The card's own
 service, by its URL, shows nothing else: an artist's card never shows another page of its
 service, such as the band's earlier name, which Wikidata may list as a second ID. A music member
 whose card is not read yet counts by the service its URL names, against derived links only: it
@@ -1171,8 +1208,7 @@ Wikidata, OpenStreetMap, DOI and the services each source's page names (the ones
 links name). Only an object's own page is on the service, in the forms its source recognizes
 (its page says which). Any other page on those hosts (a topic list, a search, a user's page, a
 page under an object) takes no service's place; its card keeps the name it gives itself, or its
-host. `GET /v1/resources/{id}` lists every link in its `also_on` (several of one service too,
-up to 256). A derived link can be unavailable in
+host. A derived link can be unavailable in
 some countries (a regional release on a streaming service); nothing public says where, so prefer
 a tagged member.
 
@@ -1181,11 +1217,11 @@ anything. Sources read a resource after it is saved and again when their results
 source's lifetime: 30 days, `btcmap` 7); a source's links and keys live twice that, so one
 failed refresh keeps them, and they go when the source stops returning them. The sources run in this order, each
 seeing the keys the ones before it found: `service`, `tidal`, `spotify`,
-`musicbrainz`, `musicbrainz_entity`, `performers`, `wikidata`, `discogs`, `deezer`, `itunes`,
+`musicbrainz`, `musicbrainz_entity`, `performers`, `wikidata`, `discogs`, `deezer`, `spotify_isrc`, `itunes`,
 `wikipedia`, `wikidata_item`, `books`, `films`, `podcasts`, `product_keys`, `open_food_facts`,
 `stack_exchange`, `titles`, `federal_register`, `osm_wikidata`, `wikidata_osm`,
 `wikidata_places`, `btcmap`, `unpaywall`, `ncbi`, `datacite`, `huggingface`, `crates`, `npm`,
-`pypi`, `software_heritage`, `steam`, `wikidata_stores`, `app_stores`, `wayback`;
+`pypi`, `software_heritage`, `steam`, `wikidata_stores`, `app_stores`, `wayback`, `editions`;
 `[also_on.sources.<id>] enabled = false` turns one off. A MusicBrainz or Wikidata answer over 8 MB is no answer: the source
 records only what the link's URL proves (a MusicBrainz page's MBID or ISRC, a Wikidata item
 link's Q-id, the Q-id an article's own Wikipedia names), else nothing, until its next run. A
@@ -1203,7 +1239,16 @@ and finds and what it costs; the index lists them in the order they run. A music
 album or artist on a music service, [its spellings](#aliases)) is looked up exactly, never by title
 or name. A key comes from a hub (MusicBrainz, Wikidata) or from a known music service's own record
 of its own object; another host's claim (its JSON-LD `isrcCode`, `sameAs`, a canonical link) is a
-fact at most. ISRCs are stored in upper case and barcodes as GTIN-13 (a 12-digit UPC gains a
+fact at most. An ISRC MusicBrainz gives to several recordings that agree (the same artists, the
+same title once its identity-keeping tags go, the same disambiguation, all audio or all video,
+lengths within 3 s, the whole set alike) names one recording not yet
+merged: the ISRC and the MBID that stands for them (the smallest) are the track's keys, the
+other MBIDs facts; recordings that disagree (a live
+version, a remix, an edit, another artist) leave the duration to pick one or the ISRC a fact
+([an ISRC on several recordings](sources/README.md#an-isrc-on-several-recordings)). A track with
+an ISRC key on another service is looked up on Spotify by it, exactly (`spotify_isrc`, off by
+default, with the operator's Spotify credentials): its Spotify track becomes a link keyed by the ISRC. ISRCs are
+stored in upper case and barcodes as GTIN-13 (a 12-digit UPC gains a
 leading zero), by every source. The level is exact: a track lists tracks and videos of the
 recording, an album lists albums and YouTube's album playlists, an artist lists artist pages and
 channels. Album links group by their release group, while two editions (two MusicBrainz releases)
@@ -1223,7 +1268,8 @@ MusicBrainz calls a person), the artist credit and a recording's length as its d
 enriched description below takes the place of this line; the resource read's `facts` still give
 them as `artist` and `duration`, in seconds, from the card itself as soon as it is read, and from
 the `musicbrainz_entity` source), `site`
-`MusicBrainz`; an ISRC's page is its one recording's card, else named `ISRC {code}`.
+`MusicBrainz`; an ISRC's page is its one recording's card (agreeing duplicates: the one with the
+plainest title), else named `ISRC {code}`.
 
 **MusicBrainz facts.** The resource read's `facts` of a MusicBrainz page also give what
 MusicBrainz says about the entity in the same answer (no further request, with or without
@@ -1373,15 +1419,15 @@ described by the start of its text, as plain text.
 - The workplace (`jobLocation`) is the card's venue (`venue`), placed on the map as an
   event's venue is ([OpenStreetMap and locations](#openstreetmap-and-locations)): from the
   page's own coordinates; else, with a street, the address geocoded; else the town, when
-  the OSM provider finds exactly one settlement of that name (and country, when the posting names one),
+  Nominatim finds exactly one settlement of that name (and country, when the posting names one),
   in no other region (state, by name or ISO code) and postal region (a numeric postcode's first
   digit) than the posting names. A one-line place ("Springfield, IL", "Austin, TX 78701") is
   checked too: a US state's, Canadian province's or Australian state's code after the town must
   be the settlement's ("London, ON" is not London, England); any code that is the settlement's
   own ISO 3166-2 code agrees ("Chennai, TN" is Chennai, IN-TN), and a numeric postcode there (four
   digits or more, or three and two: "114 55") its postal region. Other words after a town ("UK",
-  "EU", "HQ", "District 1", a region in full) are left to the provider, which reads the whole line. The card's `point` is then that place's,
-  with the provider's attribution.
+  "EU", "HQ", "District 1", a region in full) are left to Nominatim, which reads the whole line. The card's `point` is then that place's,
+  with OpenStreetMap's attribution.
 - A posting is remote when its `jobLocationType` is `TELECOMMUTE` or its place says "Remote"
   ("Remote - US"); it then names the regions it accepts applicants from
   (`applicantLocationRequirements`, or those its place names after "Remote"), up to 32. A place
@@ -1508,34 +1554,23 @@ honouring a Retry-After of up to one hour.
 links resolve offline as Place points (`geo.enabled`): OSM marker links (`/?mlat=&mlon=`), OSM
 shortlinks without an object, OsmAnd `osmand.net/map?pin=` and `osmand.net/go?lat=&lon=`, and
 Organic Maps `omaps.app/<ge0 code>`. Points are not identities and never group. Pinakes does no
-reverse geocoding and offers no place search; event venues are geocoded through the OSM provider
+reverse geocoding and offers no place search; event venues are geocoded through Nominatim
 (`event.geocoding`).
-
-The OSM provider is Nominatim by default, or LocationIQ when the operator chooses it
-(`osm.provider`; see [operations](operations.md#openstreetmap-provider)). Either way a place is an
-OSM object: a provider's answer without an OSM type and id is never stored, and LocationIQ's own
-`place_id` is never read as one. A place's `attribution` (in the dump, see below) names the
-provider that answered it, and so does the `attribution` of a card that shows the place: an OSM
-card's version, or the venue version of an event or job placed at it. `/v1/info` names the provider in `osm_licence.provider`, with
-`osm_licence.terms` when its terms apply beside the ODbL (LocationIQ's).
 
 `GET /v1/dumps/osm_place.ndjson.gz` is the ODbL derivative database as a static file the daemon
 writes every `limits.osm_dump_every_hours` (24) from one repeatable-read snapshot
 (`application/gzip`, `Content-Disposition: attachment`). `/v1/info` gives its path and
 `updated_at` in `osm_licence`. Decompressed, its first line is the licence notice (`notice`,
-`licence`, `licence_url`, `attribution_url`, `note`, `table`), then one object per cached OSM
-object. The ODbL covers the OpenStreetMap data; `note` says that each place's `attribution`
-names the service that answered it, whose terms apply to what it added.
+`licence`, `licence_url`, `attribution_url`, `table`), then one object per cached OSM object:
 
 | Field | Meaning |
 | --- | --- |
 | `osm_type`, `osm_id` | The OSM object (`node`, `way` or `relation`, positive id) |
 | `name`, `type`, `type_path`, `category` | Current name, schema.org type and its path, OSM `key/value` category |
 | `point`, `bbox` | `{lat, lon}` and `[min_lon, min_lat, max_lon, max_lat]`; null for missing objects |
-| `address`, `tags`, `display_name` | Address parts, allowlisted OSM tags, the provider's display name |
-| `attribution` | The credit of the provider that answered the place: `© OpenStreetMap contributors (ODbL)` for Nominatim, `© OpenStreetMap contributors (ODbL); geocoded by LocationIQ.com under its terms` for LocationIQ |
+| `address`, `tags`, `display_name` | Address parts, allowlisted OSM tags, Nominatim display name |
 | `status` | `ok`, or `missing` for cached missing records |
-| `fetched_at` | When the provider last returned the object |
+| `fetched_at` | When Nominatim last returned the object |
 | `versions` | Every derived document served publicly, keyed by version, so earlier values behind the change journal are in the dump |
 
 The raw fetch, the search vector and the refresh schedule are not exported; a new column is not
@@ -1631,7 +1666,9 @@ to know.
 `GET /v1/info` with full ingestion, source and canary state, `GET /v1/resources/{id}/document`
 (the stored document with its internal fields) and group curation (`PUT /v1/groups/{id}`). With
 `admin_token` (or `PINAKES__ADMIN_TOKEN`) every admin route needs `Authorization: Bearer`,
-compared in constant time; a non-loopback bind without a token is refused. It sends no CORS
+compared in constant time; a non-loopback bind without a token is refused. It answers 421 to a
+request whose `Host` is not `localhost`, an IP address or a name in `admin_hosts`, before the token
+is checked. It sends no CORS
 headers. Public `/v1/info` shows only what a client needs (the version, the User-Agent this
 instance's requests carry, the kinds of links it resolves, the lookup sizes, the search page
 limit, the per-IP and preview budgets and the OSM licence); the admin `/v1/info` adds manifests,

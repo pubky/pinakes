@@ -27,6 +27,39 @@ use std::{
 use tokio::sync::{Mutex, Notify};
 use utoipa::{IntoParams, OpenApi, ToSchema};
 
+/// When each new preview of the last hour was taken and by which client address, oldest first
+/// (`AppState::reserve_preview`).
+type Previews = Arc<std::sync::Mutex<std::collections::VecDeque<(Instant, std::net::IpAddr)>>>;
+/// A place taken in the instance's hour of new previews. It is given back when dropped, unless
+/// kept once the link is stored: a request that fails or is cancelled first frees it.
+struct PreviewSlot {
+    previews: Previews,
+    at: Instant,
+    by: std::net::IpAddr,
+    kept: bool,
+}
+impl PreviewSlot {
+    fn keep(mut self) {
+        self.kept = true;
+    }
+}
+impl Drop for PreviewSlot {
+    fn drop(&mut self) {
+        if self.kept {
+            return;
+        }
+        let mut previews = self
+            .previews
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(at) = previews
+            .iter()
+            .rposition(|taken| *taken == (self.at, self.by))
+        {
+            previews.remove(at);
+        }
+    }
+}
 /// A request clock (`AppState::clock`).
 pub type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 #[derive(Clone)]
@@ -39,22 +72,17 @@ pub struct AppState {
     limiter: Arc<Mutex<HashMap<String, (Instant, usize)>>>,
     /// ODbL dump downloads per client address in the current hour.
     downloads: Arc<Mutex<HashMap<std::net::IpAddr, (Instant, usize)>>>,
+    /// When each new preview of the last hour was taken, oldest first: at most
+    /// `limits.preview_new_per_hour` for the whole instance.
+    previews: Previews,
     info_cache: Arc<Mutex<Option<(Instant, Value)>>>,
     pub(crate) cursor_mac: SimpleHmac<blake3::Hasher>,
     /// The request clock for relative times and search cursors; tests set it, the daemon never
     /// does (wall clock).
     pub clock: Option<Clock>,
-    publication: crate::resolver::locationiq::Publication,
-    /// The last dump file a download checked, by its device, inode, length, modification and
-    /// change times, and whether this instance may serve it.
-    dump_checked: Arc<std::sync::Mutex<Option<(DumpFile, bool)>>>,
 }
-/// A dump file as opened: another file renamed into place, or one changed, is another key.
-type DumpFile = (u64, u64, u64, i64, i64, i64, i64);
 impl AppState {
-    pub async fn new(pool: PgPool, config: Config) -> anyhow::Result<Self> {
-        let publication =
-            crate::resolver::locationiq::Publication::check(&pool, &config.osm).await?;
+    pub fn new(pool: PgPool, config: Config) -> anyhow::Result<Self> {
         let mut cursor_key = [0; 32];
         getrandom::fill(&mut cursor_key).context("cursor key entropy unavailable")?;
         let metrics = Arc::new(crate::telemetry::Metrics::new()?);
@@ -66,17 +94,12 @@ impl AppState {
             metrics,
             limiter: Arc::default(),
             downloads: Arc::default(),
+            previews: Arc::default(),
             info_cache: Arc::default(),
             cursor_mac: SimpleHmac::<blake3::Hasher>::new_from_slice(&cursor_key)
                 .context("initialize cursor MAC")?,
             clock: None,
-            publication,
-            dump_checked: Arc::default(),
         })
-    }
-    /// What this instance may publish (`Publication::check`).
-    pub fn publication(&self) -> crate::resolver::locationiq::Publication {
-        self.publication
     }
     /// Now, for relative times and search cursors.
     pub fn now(&self) -> DateTime<Utc> {
@@ -149,6 +172,45 @@ impl AppState {
         }
         *count += 1;
         Ok(())
+    }
+    /// A place for one new preview from `by` in the instance's hour; or the refusal and the
+    /// seconds until a place frees: 429 when `by` has taken its share, 503 when the hour is full.
+    fn reserve_preview(&self, by: std::net::IpAddr) -> Result<PreviewSlot, (StatusCode, u64)> {
+        let hour = Duration::from_secs(3600);
+        let wait = |at: &Instant| hour.saturating_sub(at.elapsed()).as_secs().max(1);
+        let mut previews = self
+            .previews
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while previews.front().is_some_and(|(at, _)| at.elapsed() >= hour) {
+            previews.pop_front();
+        }
+        let own: Vec<&Instant> = previews
+            .iter()
+            .filter(|(_, taker)| *taker == by)
+            .map(|(at, _)| at)
+            .collect();
+        let share = self.config.preview_new_per_client_per_hour;
+        if share > 0 && own.len() >= share {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                own.first().map_or(1, |at| wait(at)),
+            ));
+        }
+        if previews.len() >= self.config.preview_new_per_hour {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                previews.front().map_or(1, |(at, _)| wait(at)),
+            ));
+        }
+        let at = Instant::now();
+        previews.push_back((at, by));
+        Ok(PreviewSlot {
+            previews: self.previews.clone(),
+            at,
+            by,
+            kept: false,
+        })
     }
     async fn preview_budget(&self, ip: std::net::IpAddr, id: &str) -> Result<(), ApiError> {
         self.budget(
@@ -688,10 +750,11 @@ pub struct Card {
     pub end: Option<DateTime<Utc>>,
     pub group: Option<GroupRef>,
     /// The same thing elsewhere: the other members of its group (tagged links, with their ID),
-    /// then derived links nobody tagged (`derived: true`), by service name. On a search, lookup
-    /// or group card one per service, at most 8; on a resource read (`GET /v1/resources/{id}`,
-    /// `GET /v1/resources/by-uri`, `POST /v1/resolve`) every link, several of one service too,
-    /// up to 256. A hint: every member keeps its own card.
+    /// then derived links nobody tagged (`derived: true`), by service name; one per service, and
+    /// never another link on the card's own service. Of a recording's or an album's links, the one
+    /// on the card's own release, else on the original edition (docs/api.md, Also on). At most 8
+    /// on a search, lookup or group card, 256 on a resource read. A hint: every member keeps its
+    /// own card.
     pub also_on: Vec<AlsoOn>,
     /// The links people referenced on Pubky that resolve to this card: its own `uri` and its
     /// `aliases` that carry references (the 31 most recently referenced), most referenced first
@@ -711,9 +774,7 @@ pub struct Card {
     /// on an event card, those of the event object it names. Empty for every other card.
     pub open_in: Vec<model::OpenIn>,
     /// OpenStreetMap cards, events placed at an OSM venue and events whose zone was derived from
-    /// coordinates: the attribution to display with the card. A place's is the credit of the
-    /// service that answered the version shown (the ODbL credit, and LocationIQ's for a place
-    /// LocationIQ answered).
+    /// coordinates: the ODbL attribution to display with the card.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attribution: Option<String>,
     /// Where `image` and `description` came from when Pinakes added them from another source
@@ -722,10 +783,6 @@ pub struct Card {
     /// (docs/api.md, Credits). At most 4; `[]` when none. A field without a credit came from the
     /// link itself.
     pub credits: Vec<model::Credit>,
-    /// An event card's OSM venue: `with_refs` credits the card with its place version's
-    /// provider.
-    #[serde(skip)]
-    pub(crate) venue_place: Option<VenuePlace>,
     /// For a calendar occurrence: which feed instance this card is.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub occurrence: Option<OccurrenceKey>,
@@ -743,6 +800,19 @@ pub struct Card {
     /// `[groups] same_recording_hint`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub maybe_same: Option<Vec<SameEvent>>,
+    /// On a `related` search row only: why it is listed, from what its rank counted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub because: Option<Because>,
+}
+/// Why a `related` row is listed: the resource's taggers who also referenced it.
+#[derive(Clone, Serialize, ToSchema)]
+pub struct Because {
+    /// How many of the resource's sampled taggers referenced this row (with `collapse=group`,
+    /// its group's members together, each tagger once): the count the row is ranked by.
+    pub shared: i64,
+    /// Up to three of them (Pubky public keys), those who tagged the resource most recently
+    /// first. Ask Nexus for their names and tags.
+    pub taggers: Vec<String>,
 }
 /// Another event, app or recording that is possibly the same one. An event: it starts together
 /// with this one, near it (or, when either has no place, at the same venue or under the same
@@ -1102,42 +1172,36 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
         collections: 0,
         open_in,
         attribution: credits(
-            // An OSM card shows a place version: the credit of the service that answered it.
-            match (
-                row["osm_id"].as_i64(),
-                doc.as_ref().and_then(|d| d.attribution.clone()),
-            ) {
-                (Some(_), credit) => {
-                    Some(credit.unwrap_or_else(|| crate::resolver::osm::ATTRIBUTION.into()))
-                }
-                (None, credit) => credit,
-            },
+            row["osm_id"]
+                .as_i64()
+                .map(|_| crate::resolver::osm::ATTRIBUTION.to_owned())
+                .or_else(|| doc.as_ref().and_then(|d| d.attribution.clone())),
             // A zone derived from coordinates comes from ODbL boundary data: its own credit.
             doc.as_ref()
                 .and_then(|d| d.event.timezone_attribution.clone()),
         ),
         credits: enriched,
-        venue_place: doc
-            .as_ref()
-            .filter(|_| row["osm_id"].as_i64().is_none())
-            .and_then(|d| {
-                let venue = d.event.venue.as_ref()?;
-                Some(VenuePlace {
-                    osm_id: venue.osm_id.clone()?,
-                    version: venue.osm_version.clone()?,
-                    zone: d.event.timezone_attribution.clone(),
-                })
-            }),
         occurrence,
         event,
         maybe_same: same_events(row).map(|all| all.into_iter().take(3).collect()),
+        because: because(row),
     })
 }
-/// The OSM place version an event card's venue shows, and the card's zone credit.
-pub(crate) struct VenuePlace {
-    osm_id: String,
-    version: String,
-    zone: Option<String>,
+/// A related row's `because`, when the row has one.
+fn because(row: &Value) -> Option<Because> {
+    let b = row.get("because").filter(|v| v.is_object())?;
+    Some(Because {
+        shared: b["shared"].as_i64().unwrap_or(0),
+        taggers: b["taggers"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|t| t.as_str().map(str::to_owned))
+                    .take(BECAUSE_TAGGERS)
+                    .collect()
+            })
+            .unwrap_or_default(),
+    })
 }
 /// The most links one card names as `refs`.
 const REFS: usize = 5;
@@ -1205,44 +1269,7 @@ pub(crate) async fn with_refs<'a>(
             card.refs.clone_from(refs);
         }
     }
-    venue_credits(pool, &mut cards).await?;
     crate::collections::count(pool, cards).await
-}
-/// An event card placed at an OSM venue owes the credit of the place version it shows (the read
-/// fills in the venue's location from that version): one query for every such card of a
-/// response.
-async fn venue_credits(pool: &PgPool, cards: &mut [&mut Card]) -> Result<(), ApiError> {
-    let (places, versions): (Vec<String>, Vec<String>) = cards
-        .iter()
-        .filter_map(|c| c.venue_place.as_ref())
-        .map(|v| (v.osm_id.clone(), v.version.clone()))
-        .unzip();
-    if places.is_empty() {
-        return Ok(());
-    }
-    let found: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT p.osm_id,p.version,o.versions->p.version->>'attribution' FROM unnest($1::text[],$2::text[]) p(osm_id,version) \
-         JOIN osm_place o ON o.osm_type=split_part(p.osm_id,'/',1) \
-           AND o.osm_id=CASE WHEN split_part(p.osm_id,'/',2) ~ '^[0-9]{1,18}$' THEN split_part(p.osm_id,'/',2)::bigint END \
-         WHERE o.versions->p.version->>'attribution' IS NOT NULL",
-    )
-    .bind(&places)
-    .bind(&versions)
-    .fetch_all(pool)
-    .await?;
-    let found: BTreeMap<(String, String), String> = found
-        .into_iter()
-        .map(|(osm_id, version, credit)| ((osm_id, version), credit))
-        .collect();
-    for card in cards.iter_mut() {
-        let Some(venue) = &card.venue_place else {
-            continue;
-        };
-        if let Some(credit) = found.get(&(venue.osm_id.clone(), venue.version.clone())) {
-            card.attribution = credits(Some(credit.clone()), venue.zone.clone());
-        }
-    }
-    Ok(())
 }
 /// A card's `maybe_same` as SQL, over a unit's ID and type path and the two hints' switches (SQL
 /// expressions): with `events`, the same-event hint for an event and, for an app's store card, up
@@ -1345,7 +1372,8 @@ fn merge_facts(
 /// A card's `also_on` entries from the `also_on()` rows: a member's site as its card names it, a
 /// derived link's service name. For a card's view (`card`, its own URI), a music member whose
 /// card is not read yet counts for the service its URL names, as the card itself does: no derived
-/// link on that service shows beside it (`also_on()` counts only what the stored cards say).
+/// link on that service shows beside it (`also_on()` counts only what the stored cards say), and
+/// no entry on the card's own service shows at all.
 fn also_on_entries(rows: &Value, card: Option<&str>) -> Vec<AlsoOn> {
     let entries: Vec<AlsoOn> = rows
         .as_array()
@@ -1382,8 +1410,12 @@ fn also_on_entries(rows: &Value, card: Option<&str>) -> Vec<AlsoOn> {
         .filter_map(service_site)
         .map(|s| s.to_lowercase())
         .collect();
+    // The card's own service, by its URL: no other page there shows, tagged or derived, its card
+    // read or not (a member's stored service may not be known yet).
+    let own = service_site(card).map(|s| s.to_lowercase());
     entries
         .into_iter()
+        .filter(|e| own.is_none() || service_site(&e.uri).map(|s| s.to_lowercase()) != own)
         .filter(|e| {
             !e.derived
                 || !e
@@ -1457,10 +1489,8 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
             updated_at: None,
         },
     };
-    // The read's card: every link of `also_on` (several of one service too, the card's own
-    // service's other pages included), and up to ten possible duplicates.
+    // The read's card, with up to ten possible duplicates.
     let mut card = card(row)?;
-    card.also_on = also_on_entries(&row["also_on_all"], None);
     card.maybe_same = same_events(row);
     Ok(ResourceDetail { card, details })
 }
@@ -1738,6 +1768,22 @@ fn related_rank(sql: &mut QueryBuilder<'_, Postgres>, counts: &str, since: DateT
     .push(")))::double precision");
 }
 
+/// A related row's `because` from what its rank counted: `shared`, the count (`n`), and of its
+/// taggers (`authors`, space-separated keys, repeats allowed) the [`BECAUSE_TAGGERS`] who tagged
+/// the resource most recently, read from the bounded sample (`related_taggers`), never from the
+/// reference table. Built in the final projection, for the page's rows alone; the rows before it
+/// carry `n` and `authors` as `because_n` and `because_authors`, which the item drops.
+fn related_because(sql: &mut QueryBuilder<'_, Postgres>, item: &str, n: &str, authors: &str) {
+    sql.push(format!(
+        "(({item})-'because_n'-'because_authors')||jsonb_build_object('because',jsonb_build_object('shared',{n},'taggers',to_jsonb(ARRAY(SELECT t.author FROM related_taggers t WHERE t.author IN (SELECT unnest(string_to_array({authors},' '))) ORDER BY t.at DESC,t.author LIMIT {BECAUSE_TAGGERS}))))"
+    ));
+}
+/// The version of a search page's shape, in its ETag: a page cached before a field was added
+/// (`because`) is never answered 304. Move it when a search row gains or loses a field.
+pub const SEARCH_SHAPE: u32 = 1;
+/// The most taggers a related row's `because` names.
+pub const BECAUSE_TAGGERS: usize = 3;
+
 fn scope(
     sql: &mut QueryBuilder<'_, Postgres>,
     q: &SearchQuery,
@@ -1897,11 +1943,8 @@ pub async fn search(
             .push(" ORDER BY f.created_at DESC LIMIT ")
             .push_bind(search.related_refs_per_tagger as i64)
             .push(") x CROSS JOIN LATERAL (SELECT coalesce((SELECT root_id FROM resource_alias WHERE alias_id=x.resource_id),x.resource_id) AS root) a WHERE a.root NOT IN (SELECT resource_id FROM related_seed) GROUP BY 1,t.author), related AS (SELECT resource_id,count(*) AS n,max(at) AS at");
-        if q.collapse.is_some() {
-            // Its taggers, for its group's count (`eligible`).
-            sql.push(",string_agg(author,' ') AS authors");
-        }
-        sql.push(" FROM related_refs GROUP BY resource_id");
+        // Its taggers: for its group's count (`eligible`) and the row's `because`.
+        sql.push(",string_agg(author,' ') AS authors FROM related_refs GROUP BY resource_id");
         if q.collapse.is_none() {
             // A row needs a crowd, so it never mirrors one person's references.
             sql.push(" HAVING count(*)>=")
@@ -1986,6 +2029,10 @@ pub async fn search(
     }
     if !related_groups {
         sql.push(" AS rank");
+    }
+    if related.is_some() && !related_groups {
+        // For `because`, on the page's rows only (`related_because`).
+        sql.push(",rel.n AS because_n,rel.authors AS because_authors");
     }
     if related.is_some() {
         // Each related resource once, as its own card (never once per occurrence or event
@@ -2133,7 +2180,8 @@ pub async fn search(
             .push(UNIT_COLUMNS)
             .push(",");
         related_rank(&mut sql, "g", since);
-        sql.push(" AS rank FROM (SELECT p.*,max(p.rel_at) OVER w AS group_at,string_agg(p.rel_authors,' ') OVER w AS group_authors FROM related_pass p WINDOW w AS (PARTITION BY coalesce(p.rel_group,p.id))) p CROSS JOIN LATERAL (SELECT count(DISTINCT a) AS n,p.group_at AS at FROM unnest(string_to_array(p.group_authors,' ')) a) g WHERE g.n>=")
+        // For `because`, on the page's rows only (`related_because`).
+        sql.push(" AS rank,g.n AS because_n,p.group_authors AS because_authors FROM (SELECT p.*,max(p.rel_at) OVER w AS group_at,string_agg(p.rel_authors,' ') OVER w AS group_authors FROM related_pass p WINDOW w AS (PARTITION BY coalesce(p.rel_group,p.id))) p CROSS JOIN LATERAL (SELECT count(DISTINCT a) AS n,p.group_at AS at FROM unnest(string_to_array(p.group_authors,' ')) a) g WHERE g.n>=")
             .push_bind(state.config.search.related_min_shared as i64);
     }
     if q.collapse.is_some() {
@@ -2151,17 +2199,9 @@ pub async fn search(
     if let Some(resolution) = spatial.resolution {
         sql.push("), cells AS (SELECT *, h3_latlng_to_cell(point(ST_X(point),ST_Y(point)),")
             .push_bind(i32::from(u8::from(resolution)))
-            // Each place's credit, from the `osm_place` row whose point the cell is computed from
-            // (an OSM card's own place, an event's venue): its current version, which may be newer
-            // than the one a card pins.
-            .push(")::text AS cell,(SELECT o.doc->>'attribution' FROM osm_place o WHERE o.osm_type=coalesce(f.osm_type,split_part(f.doc#>>'{venue,osm_id}','/',1)) AND o.osm_id=coalesce(f.osm_id,CASE WHEN split_part(f.doc#>>'{venue,osm_id}','/',2) ~ '^[0-9]{1,18}$' THEN split_part(f.doc#>>'{venue,osm_id}','/',2)::bigint END)) AS place_credit FROM filtered f WHERE point IS NOT NULL), groups AS (SELECT cell,count(*) AS count,avg(ST_Y(point)) AS lat,degrees(atan2(avg(sin(radians(ST_X(point)))),avg(cos(radians(ST_X(point)))))) AS lon,ARRAY(SELECT id FROM (SELECT DISTINCT ON (id) id,rank,unit_id FROM cells t WHERE t.cell=cells.cell ORDER BY id,rank DESC,unit_id DESC) unique_ids ORDER BY rank DESC,unit_id DESC LIMIT 3) AS top,max(rank) AS rank,CASE WHEN bool_or(osm_id IS NOT NULL OR doc->>'attribution' IS NOT NULL) THEN ")
-            // The OSM credit, or every other credit a place in the cell owes (each names the
-            // OSM data too).
-            .push("coalesce(string_agg(DISTINCT place_credit,'; ' ORDER BY place_credit) FILTER (WHERE place_credit<>")
+            .push(")::text AS cell FROM filtered WHERE point IS NOT NULL), groups AS (SELECT cell,count(*) AS count,avg(ST_Y(point)) AS lat,degrees(atan2(avg(sin(radians(ST_X(point)))),avg(cos(radians(ST_X(point)))))) AS lon,ARRAY(SELECT id FROM (SELECT DISTINCT ON (id) id,rank,unit_id FROM cells t WHERE t.cell=cells.cell ORDER BY id,rank DESC,unit_id DESC) unique_ids ORDER BY rank DESC,unit_id DESC LIMIT 3) AS top,max(rank) AS rank,CASE WHEN bool_or(osm_id IS NOT NULL OR doc->>'attribution' IS NOT NULL) THEN ")
             .push_bind(crate::resolver::osm::ATTRIBUTION)
-            .push("),")
-            .push_bind(crate::resolver::osm::ATTRIBUTION)
-            .push(") ELSE NULL END AS attribution FROM cells GROUP BY cell LIMIT ")
+            .push(" ELSE NULL END AS attribution FROM cells GROUP BY cell LIMIT ")
             .push_bind((state.config.search.max_cluster_cells+1) as i64)
             .push("), entries AS (SELECT 'cluster' AS kind,cell AS id,cell AS unit_id,rank,to_jsonb(g)-'rank' AS item FROM groups g WHERE count>1 AND (SELECT count(*) FROM filtered)>")
             .push_bind(q.limit.unwrap_or(50) as i64)
@@ -2171,7 +2211,17 @@ pub async fn search(
             .push_bind((q.limit.unwrap_or(50)+1) as i64)
             .push(") SELECT coalesce((SELECT jsonb_agg(to_jsonb(p)");
         // A point's card is its `item`, built once: `||` replaces a key, it never merges two items.
-        sql.push(" || CASE WHEN p.kind='point' THEN jsonb_build_object('item',p.item");
+        sql.push(" || CASE WHEN p.kind='point' THEN jsonb_build_object('item',");
+        if related.is_some() {
+            related_because(
+                &mut sql,
+                "p.item",
+                "(p.item->>'because_n')::bigint",
+                "p.item->>'because_authors'",
+            );
+        } else {
+            sql.push("p.item");
+        }
         if state.config.groups.enabled {
             sql.push("||jsonb_build_object('group',group_hint(p.unit_id),'also_on',also_on(p.unit_id,p.unit_id,8,true))");
         } else {
@@ -2202,7 +2252,12 @@ pub async fn search(
         }
         sql.push(" ORDER BY rank DESC,unit_id DESC LIMIT ")
             .push_bind((q.limit.unwrap_or(50) + 1) as i64)
-            .push(") SELECT coalesce((SELECT jsonb_agg(to_jsonb(p)");
+            .push(") SELECT coalesce((SELECT jsonb_agg(");
+        if related.is_some() {
+            related_because(&mut sql, "to_jsonb(p)", "p.because_n", "p.because_authors");
+        } else {
+            sql.push("to_jsonb(p)");
+        }
         if state.config.groups.enabled {
             sql.push(" || jsonb_build_object('group',group_hint(p.unit_id),'also_on',also_on(p.unit_id,p.unit_id,8,true))");
         } else {
@@ -2315,7 +2370,8 @@ pub async fn search(
             revision,
             reach_revision,
             spatial.from,
-            spatial.to
+            spatial.to,
+            SEARCH_SHAPE
         ))?)
         .to_hex()
     );
@@ -2397,7 +2453,7 @@ async fn read(
         sqlx::query_scalar(&[
             "SELECT to_jsonb(r)||jsonb_build_object('group',CASE WHEN $2 THEN group_hint(r.id) END,'maybe_same',",
             &maybe_same_sql("r.id", "r.type_path", 10, "$3", "$4"),
-            ",'also_on',also_on(r.id,r.id,256,$2),'also_on_all',also_on(r.id,r.id,256,$2,false),'aliases',coalesce((SELECT jsonb_agg(uri ORDER BY uri) FROM (SELECT x.uri FROM resource_alias a JOIN resource x ON x.id=a.alias_id WHERE a.root_id=r.id ORDER BY x.uri LIMIT 50) s),'[]'),'keys',coalesce((SELECT jsonb_agg(key ORDER BY key COLLATE \"C\") FROM resource_key WHERE resource_id=r.id AND expires_at>now() AND source NOT IN (SELECT source FROM also_on_source_off)),'[]'),'facts',(SELECT jsonb_object_agg(name,vals) FROM (SELECT name,string_agg(value,'; ' ORDER BY value) AS vals FROM resource_fact WHERE resource_id=r.id AND expires_at>now() AND source NOT IN (SELECT source FROM also_on_source_off) GROUP BY name) f)) FROM resource_document r WHERE r.id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1)",
+            ",'also_on',also_on(r.id,r.id,256,$2),'aliases',coalesce((SELECT jsonb_agg(uri ORDER BY uri) FROM (SELECT x.uri FROM resource_alias a JOIN resource x ON x.id=a.alias_id WHERE a.root_id=r.id ORDER BY x.uri LIMIT 50) s),'[]'),'keys',coalesce((SELECT jsonb_agg(key ORDER BY key COLLATE \"C\") FROM resource_key WHERE resource_id=r.id AND expires_at>now() AND source NOT IN (SELECT source FROM also_on_source_off)),'[]'),'facts',(SELECT jsonb_object_agg(name,vals) FROM (SELECT name,string_agg(value,'; ' ORDER BY value) AS vals FROM resource_fact WHERE resource_id=r.id AND expires_at>now() AND source NOT IN (SELECT source FROM also_on_source_off) GROUP BY name) f)) FROM resource_document r WHERE r.id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1)",
         ]
         .concat())
             .bind(id)
@@ -2515,18 +2571,69 @@ pub async fn lookup(
     with_refs(&state.pool, cards.iter_mut()).await?;
     Ok(Json(cards))
 }
-#[utoipa::path(post,tag="Previews",path="/v1/resolve",request_body=ResolveRequest,responses((status=200,body=ResourceDetail),(status=202,body=ResourceDetail,description="Queued; poll resource by ID",headers(("Retry-After"=u64,description="Seconds until the next attempt, when it is put off (a missing answer waiting for the fetch that confirms it); absent while the job is queued or running"))),(status=400,description="Unsupported URI or disabled resolver"),(status=429,description="Preview rate limit")))]
+#[utoipa::path(post,tag="Previews",path="/v1/resolve",request_body=ResolveRequest,responses((status=200,body=ResourceDetail),(status=202,body=ResourceDetail,description="Queued; poll resource by ID",headers(("Retry-After"=u64,description="Seconds until the next attempt, when it is put off (a missing answer waiting for the fetch that confirms it); absent while the job is queued or running"))),(status=400,description="Unsupported URI, disabled resolver, or a link that carries a credential"),(status=429,description="Preview rate limit"),(status=503,description="The instance's new previews for this hour are taken; nothing was stored",headers(("Retry-After"=u64,description="Seconds until a new preview can be taken")))))]
 pub async fn resolve(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(body): Json<ResolveRequest>,
 ) -> Result<Response, ApiError> {
     let (id, uri, _) = model::identity(&body.uri).map_err(|e| ApiError::bad(e.to_string()))?;
+    // A link that carries a credential is never previewed, stored or logged; a card someone's
+    // post made is still read by its URI.
+    if crate::capability::is_capability(&body.uri) || crate::capability::is_capability(&uri) {
+        tracing::info!(
+            host = %crate::resolver::log_host(&uri),
+            "a link that carries a credential is not previewed"
+        );
+        return Err(ApiError::bad(
+            "this link carries a credential; it is not previewed",
+        ));
+    }
     // An alias is never fetched: the root's route decides.
     let target = crate::alias::root(&uri).map_or_else(|| uri.clone(), |a| a.root);
     crate::resolver::admit(&target, &state.config).map_err(ApiError::bad)?;
     state.preview_budget(peer.ip(), &id).await?;
-    store::ensure_resource(&state.pool, &uri).await?;
+    // A link the instance does not know yet takes a place in its hour of new previews; when the
+    // hour is full, nothing is stored. Two first requests for one link at once may both take one.
+    let known: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM resource WHERE id=$1) OR EXISTS(SELECT 1 FROM resource_alias WHERE alias_id=$1)",
+    )
+    .bind(&id)
+    .fetch_one(&state.pool)
+    .await?;
+    let slot = if known {
+        None
+    } else {
+        match state.reserve_preview(peer.ip()) {
+            Ok(slot) => Some(slot),
+            Err((status, seconds)) => {
+                let (limit, message) = if status == StatusCode::TOO_MANY_REQUESTS {
+                    (
+                        "client",
+                        "new preview limit for this client reached, try again later",
+                    )
+                } else {
+                    ("instance", "preview capacity reached, try again later")
+                };
+                state
+                    .metrics
+                    .preview_refused
+                    .with_label_values(&[limit])
+                    .inc();
+                let mut response = ApiError(status, message.into()).into_response();
+                response
+                    .headers_mut()
+                    .insert(header::RETRY_AFTER, header::HeaderValue::from(seconds));
+                return Ok(response);
+            }
+        }
+    };
+    let (_, created) = store::ensure_resource_created(&state.pool, &uri).await?;
+    // Stored by this request: the place stays taken for the hour. A request that found the link
+    // just stored by another gives its place back.
+    if let Some(slot) = slot.filter(|_| created) {
+        slot.keep();
+    }
     let id = crate::alias::resolve_id(&state.pool, &id).await?;
     store::expedite(&state.pool, std::slice::from_ref(&id)).await?;
     state.wake.notify_waiters();
@@ -2606,16 +2713,8 @@ pub struct InfoLimits {
 #[derive(Serialize, ToSchema)]
 pub struct OsmLicence {
     pub licence: String,
-    /// The credit for places the current provider answers.
     pub attribution: String,
     pub url: String,
-    /// The service that answers OSM lookups and geocoding: `nominatim` or `locationiq`.
-    #[schema(example = "nominatim")]
-    pub provider: String,
-    /// The provider's terms, which apply beside the ODbL to what it adds; absent for
-    /// Nominatim.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub terms: Option<String>,
     /// The share-alike download: the ODbL derivative database as a daily file.
     pub dump: String,
     /// When the file was last written; `null` before the first.
@@ -2668,10 +2767,8 @@ pub async fn info(State(state): State<AppState>) -> Json<Info> {
         },
         osm_licence: OsmLicence {
             licence: "ODbL-1.0".into(),
-            attribution: crate::resolver::osm::attribution(c.osm.provider).into(),
+            attribution: crate::resolver::osm::ATTRIBUTION.into(),
             url: "https://opendatacommons.org/licenses/odbl/1-0/".into(),
-            provider: c.osm.provider.name().into(),
-            terms: c.osm.provider.terms().map(Into::into),
             dump: "/v1/dumps/osm_place.ndjson.gz".into(),
             updated_at: dump_updated_at(c),
         },
@@ -2696,7 +2793,7 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
     let ingestion:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('nexus',nexus,'cursor',cursor,'feed_length',feed_length,'lag',greatest(feed_length-cursor,0),'epoch',epoch,'updated_at',updated_at) FROM feed_cursor ORDER BY nexus").fetch_all(&state.pool).await?;
     // Aliases are answered by their roots and have no queue of their own: counted apart.
     let statuses:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('resolver',resolver,'status',status,'count',count(*),'dead_letter',count(*) FILTER (WHERE dead_letter),'leased',count(*) FILTER (WHERE lease_until>now())) FROM resource r WHERE NOT EXISTS(SELECT 1 FROM resource_alias a WHERE a.alias_id=r.id) GROUP BY resolver,status ORDER BY resolver,status").fetch_all(&state.pool).await?;
-    let mut body = json!({"groups":state.config.groups,"version":env!("CARGO_PKG_VERSION"),"manifests":crate::adapter::configured(&state.config),"sources":sources,"metrics":state.metrics.summary(),"ingestion":ingestion,"counts":{"resources":row.try_get::<i64,_>("resources")?,"aliases":row.try_get::<i64,_>("aliases")?,"references":row.try_get::<i64,_>("references")?,"occurrences":row.try_get::<i64,_>("occurrences")?},"osm_licence":{"licence":"ODbL-1.0","attribution":crate::resolver::osm::attribution(state.config.osm.provider),"url":"https://opendatacommons.org/licenses/odbl/1-0/","provider":state.config.osm.provider.name(),"terms":state.config.osm.provider.terms(),"dump":"/v1/dumps/osm_place.ndjson.gz","updated_at":dump_updated_at(&state.config)},"resolvers":{"event":{"enabled":state.config.event.enabled,"calendar":state.config.event.calendars,"geocoding":state.config.event.geocoding,"months_back":state.config.event.months_back,"months_forward":state.config.event.months_forward},"geo":{"enabled":state.config.geo.enabled,"network":false},"osm":{"enabled":state.config.osm.enabled,"provider":state.config.osm.provider.name(),"concurrency":1,"batch_size":crate::resolver::osm::lookup_max(state.config.osm.provider),"requests_per_second":state.config.osm.rate()},"web":{"enabled":state.config.web.enabled,"concurrency":state.config.web.concurrency},"pubky":{"enabled":state.config.pubky.enabled,"concurrency":state.config.pubky.concurrency},"statuses":statuses}});
+    let mut body = json!({"groups":state.config.groups,"version":env!("CARGO_PKG_VERSION"),"manifests":crate::adapter::configured(&state.config),"sources":sources,"metrics":state.metrics.summary(),"ingestion":ingestion,"counts":{"resources":row.try_get::<i64,_>("resources")?,"aliases":row.try_get::<i64,_>("aliases")?,"references":row.try_get::<i64,_>("references")?,"occurrences":row.try_get::<i64,_>("occurrences")?},"osm_licence":{"licence":"ODbL-1.0","attribution":crate::resolver::osm::ATTRIBUTION,"url":"https://opendatacommons.org/licenses/odbl/1-0/","dump":"/v1/dumps/osm_place.ndjson.gz","updated_at":dump_updated_at(&state.config)},"resolvers":{"event":{"enabled":state.config.event.enabled,"calendar":state.config.event.calendars,"geocoding":state.config.event.geocoding,"months_back":state.config.event.months_back,"months_forward":state.config.event.months_forward},"geo":{"enabled":state.config.geo.enabled,"network":false},"osm":{"enabled":state.config.osm.enabled,"concurrency":1,"batch_size":50,"requests_per_second":state.config.osm.requests_per_second},"web":{"enabled":state.config.web.enabled,"concurrency":state.config.web.concurrency},"pubky":{"enabled":state.config.pubky.enabled,"concurrency":state.config.pubky.concurrency},"statuses":statuses}});
     for kind in crate::resolver::cards::KINDS {
         let c = state.config.cards.resolver(kind);
         body["resolvers"][kind] = json!({"enabled":c.enabled,"concurrency":c.concurrency,"requests_per_second":c.requests_per_second});
@@ -2924,9 +3021,6 @@ pub struct OsmDumpNotice {
     licence: String,
     licence_url: String,
     attribution_url: String,
-    /// What the licence covers: each place's `attribution` names the service that answered
-    /// it, whose terms apply to what it added.
-    note: String,
     #[schema(example = "osm_place")]
     table: String,
 }
@@ -2960,10 +3054,6 @@ pub struct OsmDumpPlace {
     tags: Value,
     #[schema(required = true)]
     display_name: Option<String>,
-    /// The credit of the service that answered the place (Nominatim's is the OSM credit alone);
-    /// that service's terms apply to what it added.
-    #[schema(required = true)]
-    attribution: Option<String>,
     /// `ok` or `missing`.
     status: String,
     fetched_at: chrono::DateTime<chrono::Utc>,
@@ -2984,10 +3074,10 @@ pub enum OsmDumpLine {
 /// until it is added here, to the schema and to docs/api.md.
 pub const OSM_DUMP_LINE: &str = "SELECT jsonb_build_object('osm_type',osm_type,'osm_id',osm_id,'name',name,'type',type,'type_path',type_path,'category',category,\
     'point',CASE WHEN point IS NULL THEN NULL ELSE jsonb_build_object('lat',ST_Y(point),'lon',ST_X(point)) END,\
-    'bbox',bbox,'address',address,'tags',tags,'display_name',display_name,'attribution',doc->>'attribution','status',status,'fetched_at',fetched_at,'versions',versions) \
+    'bbox',bbox,'address',address,'tags',tags,'display_name',display_name,'status',status,'fetched_at',fetched_at,'versions',versions) \
     FROM osm_place ORDER BY osm_type,osm_id";
 
-#[utoipa::path(get,tag="Licensing",path="/v1/dumps/osm_place.ndjson.gz",responses((status=200,description="The ODbL derivative database, written daily, as a gzip file download. Decompressed it is one JSON object per line: the licence notice first (`OsmDumpNotice`), then one cached OSM object per line (`OsmDumpPlace`). Single byte ranges are served (206)",content_type="application/gzip",headers(("Content-Disposition"=String,description="`attachment; filename=\"osm_place.ndjson.gz\"`"),("ETag"=String),("Last-Modified"=String),("Accept-Ranges"=String,description="`bytes`"))),(status=206,description="The requested byte range of the file",content_type="application/gzip"),(status=304,description="ETag or Last-Modified unchanged"),(status=416,description="Range not satisfiable"),(status=429,description="Over `limits.osm_dump_downloads_per_hour` transfers (200 or 206) to this address in the last hour; HEAD, 304 and 416 are free"),(status=503,description="No dump file written yet, or the file is withheld: it holds places LocationIQ answered and this instance is not authorized to publish them; retry later")))]
+#[utoipa::path(get,tag="Licensing",path="/v1/dumps/osm_place.ndjson.gz",responses((status=200,description="The ODbL derivative database, written daily, as a gzip file download. Decompressed it is one JSON object per line: the licence notice first (`OsmDumpNotice`), then one cached OSM object per line (`OsmDumpPlace`). Single byte ranges are served (206)",content_type="application/gzip",headers(("Content-Disposition"=String,description="`attachment; filename=\"osm_place.ndjson.gz\"`"),("ETag"=String),("Last-Modified"=String),("Accept-Ranges"=String,description="`bytes`"))),(status=206,description="The requested byte range of the file",content_type="application/gzip"),(status=304,description="ETag or Last-Modified unchanged"),(status=416,description="Range not satisfiable"),(status=429,description="Over `limits.osm_dump_downloads_per_hour` transfers (200 or 206) to this address in the last hour; HEAD, 304 and 416 are free"),(status=503,description="No dump file written yet; retry later")))]
 async fn osm_dump(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -3014,52 +3104,6 @@ async fn osm_dump(
         Err(e) => return Err(unavailable(e)),
     };
     let meta = file.metadata().await.map_err(unavailable)?;
-    // Without LocationIQ's authorization, the file opened is served only if it holds none of its
-    // answers: another writer sharing the directory may have renamed one into place. Each file
-    // is read once; its verdict is kept by the file's identity, never by its name.
-    if !state.publication.locationiq() {
-        use std::os::unix::fs::MetadataExt;
-        let key = (
-            meta.dev(),
-            meta.ino(),
-            meta.len(),
-            meta.mtime(),
-            meta.mtime_nsec(),
-            meta.ctime(),
-            meta.ctime_nsec(),
-        );
-        let known = state
-            .dump_checked
-            .lock()
-            .expect("dump check lock")
-            .filter(|(checked, _)| *checked == key)
-            .map(|(_, clean)| clean);
-        let clean = match known {
-            Some(clean) => clean,
-            None => {
-                let opened = file
-                    .try_clone()
-                    .await
-                    .map_err(unavailable)?
-                    .into_std()
-                    .await;
-                // An unreadable file is withheld too.
-                let clean = tokio::task::spawn_blocking(move || {
-                    crate::osm_dump::file_credits_beside_osm(&opened).is_ok_and(|beside| !beside)
-                })
-                .await
-                .unwrap_or(false);
-                *state.dump_checked.lock().expect("dump check lock") = Some((key, clean));
-                clean
-            }
-        };
-        if !clean {
-            return Err(ApiError(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "the dump file is withheld: it holds places whose provider this instance may not publish".into(),
-            ));
-        }
-    }
     let (len, modified) = (meta.len(), meta.modified().map_err(unavailable)?);
     let nanos = modified
         .duration_since(std::time::UNIX_EPOCH)
@@ -3205,15 +3249,58 @@ pub fn admin_router(state: AppState) -> Router {
     with_admin_layers(routes, state)
 }
 /// The admin listener's layer stack around `routes`: the panic backstop innermost, then the
-/// bearer check, so an unauthenticated request never reaches a handler. No CORS. Public so a test
-/// can mount a route under exactly this stack.
+/// bearer check, then the `Host` check outermost, so a request for another host or without the
+/// credential never reaches a handler. No CORS. Public so a test can mount a route under exactly
+/// this stack.
 pub fn with_admin_layers(routes: Router<AppState>, state: AppState) -> Router {
     panic_backstop(routes, &state, "admin")
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             admin_auth,
         ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            admin_host,
+        ))
         .with_state(state)
+}
+/// Answers 421 to a request whose `Host` (or HTTP/2 authority) the admin listener does not serve
+/// ([`admin_host_allowed`]). A browser always sends one, so a request with neither comes from
+/// another kind of client and passes.
+async fn admin_host(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let authority = match request.headers().get(header::HOST) {
+        Some(value) => Some(value.to_str().unwrap_or_default()),
+        None => request.uri().authority().map(|a| a.as_str()),
+    };
+    if authority.is_some_and(|a| !admin_host_allowed(a, &state.config.admin_hosts)) {
+        return (StatusCode::MISDIRECTED_REQUEST, "admin host not allowed").into_response();
+    }
+    next.run(request).await
+}
+/// Whether the admin listener serves `authority` (`host[:port]`): `localhost`, an IP address, or
+/// one of `admin_hosts`. A page that rebinds its own name to this machine still sends that name;
+/// a browser sends an IP address only for a page this listener itself served.
+fn admin_host_allowed(authority: &str, admin_hosts: &[String]) -> bool {
+    let Ok(authority) = authority.parse::<axum::http::uri::Authority>() else {
+        return false;
+    };
+    if authority.as_str().contains('@') {
+        return false;
+    }
+    let host = authority.host();
+    let literal = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    if literal.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    let host = host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase();
+    host == "localhost" || admin_hosts.contains(&host)
 }
 async fn admin_auth(
     State(state): State<AppState>,
@@ -3375,6 +3462,62 @@ pub async fn curate_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A place in the hour of new previews is given back when its request ends before the link
+    /// is stored (an error, a client gone), and stays once kept.
+    #[test]
+    fn a_preview_place_is_given_back_unless_kept() {
+        let previews: Previews = Arc::default();
+        let by: std::net::IpAddr = "127.0.0.2".parse().unwrap();
+        let take = || {
+            let at = Instant::now();
+            previews.lock().unwrap().push_back((at, by));
+            PreviewSlot {
+                previews: previews.clone(),
+                at,
+                by,
+                kept: false,
+            }
+        };
+        let kept = take();
+        drop(take());
+        assert_eq!(previews.lock().unwrap().len(), 1);
+        kept.keep();
+        assert_eq!(previews.lock().unwrap().len(), 1);
+    }
+    /// The admin listener serves `localhost`, IP addresses and the configured names, on any port,
+    /// and nothing else: not a rebinding page's own name, not one dressed as loopback.
+    #[test]
+    fn the_admin_listener_serves_loopback_addresses_and_its_own_names() {
+        let names = ["metrics.internal".to_owned()];
+        for allowed in [
+            "localhost",
+            "localhost:9090",
+            "LocalHost.:9090",
+            "127.0.0.1",
+            "127.0.0.1:9090",
+            "[::1]:9090",
+            "[::1]",
+            "10.1.2.3:9090",
+            "metrics.internal:9090",
+            "METRICS.internal",
+        ] {
+            assert!(admin_host_allowed(allowed, &names), "{allowed}");
+        }
+        for refused in [
+            "attacker.example",
+            "attacker.example:9090",
+            "localhost.attacker.example",
+            "127.0.0.1.nip.io:9090",
+            "metrics.internal.attacker.example",
+            "user@127.0.0.1:9090",
+            "",
+            "local host",
+            "[::1",
+        ] {
+            assert!(!admin_host_allowed(refused, &names), "{refused}");
+        }
+        assert!(!admin_host_allowed("metrics.internal", &[]));
+    }
     /// Every form of key a registered source records (`also_on::Source::key_forms`) searches
     /// back exactly as recorded: `key=` with the key a read lists finds that key.
     #[test]

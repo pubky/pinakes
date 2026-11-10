@@ -1,0 +1,49 @@
+{
+  "providers": [
+    "https://calendar.proton.me/share/SECRET",
+    "https://outlook.office365.com/owa/calendar/SECRET/calendar.ics",
+    "https://outlook.live.com/owa/calendar/SECRET/calendar.ics",
+    "https://outlook.office365.com/owa/0/calendar/SECRET/calendar.ics",
+    "https://p29-caldav.icloud.com/published/SECRET",
+    "https://calendar.google.com/calendar/ical/test/private-SECRET/basic.ics",
+    "https://calendar.example.org/remote.php/dav/public-calendars/SECRET/",
+    "https://calendar.example.org/apps/calendar/p/SECRET",
+    "https://calendar.example.org/apps/calendar/embed/SECRET",
+    "https://proton.me/api/calendar/v1/url/SECRET",
+    "webcal://p29-caldav.icloud.com/published/SECRET",
+    "https://www.google.com/calendar/ical/test/private-SECRET/basic.ics",
+    "https://calendar.example.org/index.php/apps/calendar/p/SECRET",
+    "https://calendar.example.org/nextcloud/remote.php/dav/public-calendars/SECRET/",
+    "https://outlook.office365.com/%6Fwa/calendar/SECRET/calendar.ics"
+  ],
+  "query": [
+    "https://events.example.org/feed.ics?token=SECRET",
+    "https://events.example.org/feed.ics?Access_Token=SECRET",
+    "https://events.example.org/feed.ics?a=1&api%5Fkey=SECRET",
+    "https://bucket.example.org/feed.ics?X-Amz-Signature=SECRET",
+    "https://events.example.org/feed.ics?SIG=SECRET",
+    "https://events.example.org/feed.ics?key=SECRET",
+    "https://events.example.org/feed.ics#access_token=SECRET",
+    "https://app.example.org/#/reset?token=SECRET",
+    "https://app.example.org/#/cb#access_token=SECRET",
+    "https://app.example.org/#/reset;token=SECRET",
+    "https://app.example.org/#/access_token=SECRET&token_type=Bearer",
+    "https://app.example.org/#!/access_token=SECRET",
+    "https://app.example.org/cb#id_token=SECRET",
+    "https://events.example.org/feed.ics?refresh_token=SECRET"
+  ],
+  "public": [
+    "https://calendar.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics",
+    "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    "https://events.example.org/search?q=token",
+    "https://events.example.org/feed.ics?key_art=1",
+    "https://events.example.org/token/feed.ics",
+    "https://events.example.org/apps/calendar/",
+    "https://www.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics",
+    "https://events.example.org/page#section-2",
+    "https://en.wikipedia.org/wiki/Lock_and_key#Key",
+    "https://app.example.org/#/reset?step=2",
+    "https://app.example.org/#/reset;step=2",
+    "https://app.example.org/#!/home"
+  ]
+}

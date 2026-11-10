@@ -134,6 +134,10 @@ pub enum Oembed {
 
 /// The oEmbed answer of `endpoint` (which may carry fixed parameters) for `url`.
 pub async fn oembed(cx: &Context<'_>, endpoint: &str, url: &str) -> Result<Oembed> {
+    anyhow::ensure!(
+        !crate::capability::is_capability(url),
+        "a link that carries a credential is not sent to oEmbed"
+    );
     let mut request = url::Url::parse(endpoint)?;
     request.query_pairs_mut().append_pair("url", url);
     let options = FetchOptions {

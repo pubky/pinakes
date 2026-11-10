@@ -181,11 +181,7 @@ async fn hub_keys_join_and_derived_links_reach_the_cards(pool: PgPool) {
     groups::drain(&pool, &Default::default(), 100)
         .await
         .unwrap();
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let card = get(&app, &format!("/v1/resources/{a}")).await;
     assert_eq!(card["group"]["size"], 2, "{card}");
     assert!(card["group"].get("members").is_none());
@@ -286,11 +282,7 @@ async fn a_card_shows_eight_and_the_read_all(pool: PgPool) {
     );
     let sources: Vec<Arc<dyn Source>> = vec![hub];
     drain(&pool, &cx(Config::default()), &sources).await;
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let read = get(&app, &format!("/v1/resources/{id}")).await;
     assert_eq!(read["also_on"].as_array().unwrap().len(), 12);
     let cards = post(&app, "/v1/resources/lookup", json!({"ids": [id]})).await;
@@ -441,11 +433,7 @@ async fn runs_replace_their_rows_failures_keep_them_and_rows_expire(pool: PgPool
         .execute(&pool)
         .await
         .unwrap();
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     assert_eq!(
         get(&app, &format!("/v1/resources/{id}")).await["also_on"],
         json!([]),
@@ -472,15 +460,24 @@ async fn answers_are_checked_and_bounded(pool: PgPool) {
                 via: "Not A Token".into(),
             },
         ],
-        links: (0..40)
-            .map(|n| Link::new(format!("https://s{n:02}.example/x"), "S", "wikidata"))
-            .chain([
-                Link::new("ftp://files.example/x", "FTP", "wikidata"),
-                Link::new("https://u:p@cred.example/x", "Cred", "wikidata"),
-                Link::new("https://nosite.example/x", "  ", "wikidata"),
-                Link::new("https://badvia.example/x", "B", "Wiki Data"),
-            ])
-            .collect(),
+        // The refused links first, before the cap is reached.
+        links: [
+            Link::new("ftp://files.example/x", "FTP", "wikidata"),
+            Link::new("https://u:p@cred.example/x", "Cred", "wikidata"),
+            Link::new("https://cred.example/x?token=SECRET", "Cred", "wikidata"),
+            Link::new(
+                "https://cred.example/x#access_token=SECRET",
+                "Cred",
+                "wikidata",
+            ),
+            Link::new("https://cred.example/x?a=1;sig=SECRET", "Cred", "wikidata"),
+            Link::new("//cred.example/x?key=SECRET", "Cred", "wikidata"),
+            Link::new("https://nosite.example/x", "  ", "wikidata"),
+            Link::new("https://badvia.example/x", "B", "Wiki Data"),
+        ]
+        .into_iter()
+        .chain((0..40).map(|n| Link::new(format!("https://s{n:02}.example/x"), "S", "wikidata")))
+        .collect(),
         ..Default::default()
     };
     let config = Config::default();
@@ -508,8 +505,9 @@ async fn answers_are_checked_and_bounded(pool: PgPool) {
         (0..32)
             .map(|n| format!("https://s{n:02}.example/x"))
             .collect::<Vec<_>>(),
-        "the source's first 32 valid links; the credentialed one refused"
+        "the source's first 32 valid links; the credentialed ones refused"
     );
+    assert!(!links.concat().contains("SECRET"), "{links:?}");
     let mut keys_only = Config::default();
     keys_only.also_on.derive_links = false;
     also_on::record(
@@ -551,6 +549,61 @@ async fn answers_are_checked_and_bounded(pool: PgPool) {
     assert!(!also_on::valid_key("doi:"));
     assert!(!also_on::valid_key(":10.1000/x"));
     assert!(!also_on::valid_key("doi:10.1000/a b"));
+}
+
+/// A derived link follows the credential rule documents follow: one that carries a credential
+/// (a key in its query or fragment, user info, written scheme-relative) is refused, not stripped,
+/// so nothing a card shows names it; a link with a key-like word elsewhere is kept.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_derived_link_that_carries_a_credential_is_refused(pool: PgPool) {
+    let id = page(&pool, "https://open.spotify.com/track/c2", "Track").await;
+    let found = Found {
+        links: [
+            "https://cred.example/x?token=SECRET",
+            "https://cred.example/x?a=1&API_KEY=SECRET",
+            "https://cred.example/x#access_token=SECRET",
+            "https://cred.example/x#/reset?token=SECRET",
+            "https://cred.example/x?a=1;sig=SECRET",
+            "https://u:SECRET@cred.example/x",
+            "//cred.example/x?key=SECRET",
+            "https://ok.example/x?key_art=1",
+            "https://ok.example/y?q=token",
+            "https://ok.example/token/z",
+        ]
+        .into_iter()
+        .map(|uri| Link::new(uri, "Site", "wikidata"))
+        .collect(),
+        ..Default::default()
+    };
+    also_on::record(
+        &pool,
+        &id,
+        "music",
+        found,
+        Duration::from_secs(60),
+        &Config::default().also_on,
+    )
+    .await
+    .unwrap();
+    let links: Vec<String> = sqlx::query_scalar("SELECT uri FROM derived_link ORDER BY uri")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        links,
+        [
+            "https://ok.example/token/z",
+            "https://ok.example/x?key_art=1",
+            "https://ok.example/y?q=token",
+        ]
+    );
+    let stored: String = sqlx::query_scalar(
+        "SELECT coalesce(string_agg(concat_ws(' ',uri,site,kind,key),' '),'') FROM derived_link",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!stored.contains("SECRET"), "{stored}");
 }
 
 /// A saved document makes its sources due; an unchanged refetch does not; an alias never runs;
@@ -704,11 +757,7 @@ async fn facts_are_shown_checked_and_never_join(pool: PgPool) {
     }
     let sources: Vec<Arc<dyn Source>> = vec![hub];
     drain(&pool, &cx(Config::default()), &sources).await;
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let read = get(&app, &format!("/v1/resources/{ia}")).await;
     assert_eq!(
         read["facts"],
@@ -775,11 +824,7 @@ async fn search_by_key_finds_the_same_object_on_every_service(pool: PgPool) {
         .unwrap();
     let sources: Vec<Arc<dyn Source>> = vec![hub];
     drain(&pool, &cx(Config::default()), &sources).await;
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let found = |path: String| {
         let app = app.clone();
         async move {
@@ -967,11 +1012,7 @@ async fn every_key_a_read_lists_searches_back(pool: PgPool) {
             .await
             .unwrap();
     }
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let read = get(&app, &format!("/v1/resources/{id}")).await;
     let listed: Vec<&str> = read["keys"]
         .as_array()
@@ -1044,11 +1085,7 @@ async fn trending_counts_references_inside_the_window(pool: PgPool) {
             .await
             .unwrap();
     }
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let rows = |path: &'static str| {
         let app = app.clone();
         async move {
@@ -1320,11 +1357,7 @@ async fn the_production_queue_types_and_names_music_links(pool: PgPool) {
         }
         queue::run_batch(&pool, &Pages, &cfg, &jobs).await.unwrap();
     }
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     for ((uri, kind, site), id) in expected.iter().zip(&ids) {
         let card = get(&app, &format!("/v1/resources/{id}")).await;
         assert_eq!(
@@ -1704,11 +1737,7 @@ async fn a_tagged_member_and_a_derived_link_of_one_service_show_once(pool: PgPoo
     groups::drain(&pool, &Default::default(), 100)
         .await
         .unwrap();
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let read = lookup_card(&app, &card).await;
     let mut shown: Vec<String> = read["also_on"]
         .as_array()
@@ -1782,11 +1811,7 @@ async fn search_by_doi_finds_the_card_and_its_preprint(pool: PgPool) {
         .unwrap();
     let sources: Vec<Arc<dyn Source>> = vec![datacite];
     drain(&pool, &cx(Config::default()), &sources).await;
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let found = |key: &str| {
         let app = app.clone();
         let path = format!("/v1/search?key={}", urlencoding(key));
@@ -1862,11 +1887,7 @@ async fn two_tagged_spellings_of_a_derived_link_show_once(pool: PgPool) {
     groups::drain(&pool, &Default::default(), 100)
         .await
         .unwrap();
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let read = lookup_card(&app, &card).await;
     let sites: Vec<&str> = read["also_on"]
         .as_array()
@@ -1929,11 +1950,7 @@ async fn a_page_naming_itself_after_a_service_takes_no_slot(pool: PgPool) {
     groups::drain(&pool, &Default::default(), 100)
         .await
         .unwrap();
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let read = get(&app, &format!("/v1/resources/{card}")).await;
     let entries: Vec<(String, bool)> = read["also_on"]
         .as_array()
@@ -2171,11 +2188,7 @@ async fn a_music_typed_impostor_takes_no_slot_and_hides_nothing(pool: PgPool) {
     groups::drain(&pool, &Default::default(), 100)
         .await
         .unwrap();
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     for id in &ids {
         let read = get(&app, &format!("/v1/resources/{id}")).await;
         let entries: Vec<(String, bool)> = read["also_on"]
@@ -2237,11 +2250,7 @@ async fn a_non_object_page_on_a_service_host_takes_no_slot(pool: PgPool) {
     groups::drain(&pool, &Default::default(), 100)
         .await
         .unwrap();
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let read = get(&app, &format!("/v1/resources/{}", ids[0])).await;
     let entries: Vec<(String, bool)> = read["also_on"]
         .as_array()
@@ -2298,11 +2307,7 @@ async fn a_shared_repository_link_with_a_tab_is_the_repository_once(pool: PgPool
     groups::drain(&pool, &Default::default(), 100)
         .await
         .unwrap();
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let read = lookup_card(&app, &ids[0]).await;
     let entries: Vec<(String, String, bool)> = read["also_on"]
         .as_array()
@@ -2479,7 +2484,7 @@ async fn a_link_an_exact_lookup_names_joins_by_its_key(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let app = api::router(AppState::new(pool.clone(), on.clone()).await.unwrap());
+    let app = api::router(AppState::new(pool.clone(), on.clone()).unwrap());
     // Any spelling of the barcode finds both.
     let mut found: Vec<String> = get(&app, "/v1/search?key=upc:602557656527").await["items"]
         .as_array()
@@ -2576,11 +2581,7 @@ async fn a_card_shows_one_link_per_service(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let of = |also: &Value, site: &str| -> Vec<String> {
         also.as_array()
             .unwrap()
@@ -2623,7 +2624,7 @@ async fn a_card_shows_one_link_per_service(pool: PgPool) {
         sorted(vec![pending.into(), pending_too.into()]),
         "{card}"
     );
-    // A lookup card shows the card's view; a resource read lists every link.
+    // A lookup card shows the card's view, and so does a resource read.
     let looked_up = lookup_card(&app, &ids[0]).await;
     assert_eq!(
         sorted(of(&looked_up["also_on"], "TIDAL")),
@@ -2632,18 +2633,21 @@ async fn a_card_shows_one_link_per_service(pool: PgPool) {
     let read = get(&app, &format!("/v1/resources/{}", ids[0])).await;
     assert_eq!(
         sorted(of(&read["also_on"], "TIDAL")),
-        sorted(vec![tagged.into(), regional.into(), pending_tidal.into()])
+        sorted(vec![tagged.into(), pending_tidal.into()])
     );
-    assert_eq!(of(&read["also_on"], "Spotify").len(), 2);
+    assert_eq!(of(&read["also_on"], "Spotify").len(), 1);
     assert_eq!(
         sorted(of(&looked_up["also_on"], "Apple Music")),
         sorted(vec![pending.into(), pending_too.into()])
     );
-    assert_eq!(of(&read["also_on"], "Apple Music").len(), 3);
+    assert_eq!(
+        sorted(of(&read["also_on"], "Apple Music")),
+        sorted(vec![pending.into(), pending_too.into()])
+    );
 }
 
 /// A card's own service has its link, the card: Radiohead's Discogs artist never shows "On A
-/// Friday", the band's earlier name, which Wikidata lists as another Discogs ID. Its details do.
+/// Friday", the band's earlier name, which Wikidata lists as another Discogs ID, nor does its read.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_card_shows_no_other_page_of_its_own_service(pool: PgPool) {
     let artist = "https://www.discogs.com/artist/3840";
@@ -2668,11 +2672,7 @@ async fn a_card_shows_no_other_page_of_its_own_service(pool: PgPool) {
     );
     let sources: Vec<Arc<dyn Source>> = vec![hub];
     drain(&pool, &cx(Config::default()), &sources).await;
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let read = get(&app, &format!("/v1/resources/{id}")).await;
     let uris = |also: &Value| -> Vec<String> {
         also.as_array()
@@ -2683,7 +2683,7 @@ async fn a_card_shows_no_other_page_of_its_own_service(pool: PgPool) {
     };
     let looked_up = lookup_card(&app, &id).await;
     assert_eq!(uris(&looked_up["also_on"]), [spotify], "{looked_up}");
-    assert_eq!(uris(&read["also_on"]), [earlier, spotify]);
+    assert_eq!(uris(&read["also_on"]), [spotify]);
 }
 
 /// A run takes the write order before the resource rows, as saves do: a save holding its
@@ -2723,8 +2723,8 @@ async fn a_run_takes_the_write_order_as_saves_do(pool: PgPool) {
         .await
         .unwrap();
     let recording = run(pool.clone(), id.clone());
-    // Long enough for the run to reach the resource's row.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // The run has reached the resource's row and waits for it.
+    common::lock_waiters_reach(&pool, 1, "the run").await;
     sqlx::query("UPDATE resource SET doc=jsonb_set(doc,'{fetched_at}','1') WHERE id=$1")
         .bind(&id)
         .execute(&mut *save)
@@ -2804,8 +2804,8 @@ async fn a_run_naming_another_resource_waits_for_an_ingested_batch(pool: PgPool)
             .await
         }
     });
-    // Long enough for the run to reach its first lock.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // The run has reached its first lock and waits for it.
+    common::lock_waiters_reach(&pool, 1, "the run").await;
     sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR NO KEY UPDATE")
         .bind(&a)
         .execute(&mut *batch)
@@ -2950,6 +2950,23 @@ async fn a_change_saved_during_a_run_is_read_again(pool: PgPool) {
     .await
     .unwrap();
     assert!(later);
+}
+
+/// A link that carries a credential is never sent to another service: no also-on source looks it
+/// up, while a plain link in the same batch is.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_link_that_carries_a_credential_gets_no_lookups(pool: PgPool) {
+    let private = "https://events.example.org/feed.ics?token=x";
+    let public = "https://events.example.org/feed.ics";
+    page(&pool, private, "Private").await;
+    page(&pool, public, "Public").await;
+    let cx = cx(Config::default());
+    let source = Fake::new("podcasts");
+    source.answer(private, Ok(Found::default()));
+    source.answer(public, Ok(Found::default()));
+    let sources: Vec<Arc<dyn Source>> = vec![source.clone()];
+    drain(&pool, &cx, &sources).await;
+    assert_eq!(*source.calls.lock().unwrap(), [public]);
 }
 
 /// `reextract` queues the re-read resources' also-on lookups too: a card that comes back
@@ -3442,7 +3459,7 @@ async fn a_switched_off_source_shows_nothing_until_it_is_on_again(pool: PgPool) 
         groups::drain(&pool, &Default::default(), 100)
             .await
             .unwrap();
-        let app = api::router(AppState::new(pool.clone(), config).await.unwrap());
+        let app = api::router(AppState::new(pool.clone(), config).unwrap());
         let card = get(&app, &format!("/v1/resources/{}", ids[0])).await;
         let listed = post(&app, "/v1/resources/lookup", json!({"ids": [ids[0]]})).await;
         let found = |key: String| {

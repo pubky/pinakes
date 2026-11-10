@@ -99,13 +99,13 @@ async fn put_delete_replay_retarget_and_grace(pool: PgPool) {
             .as_deref(),
         Some("one")
     );
-    assert_eq!(store::cleanup(&pool, 7).await.unwrap(), 0);
+    assert_eq!(store::cleanup(&pool, 7, 7 * 24).await.unwrap(), 0);
     sqlx::query("UPDATE resource SET orphaned_at=now()-interval '8 days' WHERE id=$1")
         .bind(identity(&edit.uri).unwrap().0)
         .execute(&pool)
         .await
         .unwrap();
-    assert_eq!(store::cleanup(&pool, 7).await.unwrap(), 1);
+    assert_eq!(store::cleanup(&pool, 7, 7 * 24).await.unwrap(), 1);
     assert_eq!(refs(&pool).await, 1);
 }
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
@@ -707,9 +707,7 @@ async fn a_new_link_s_first_missing_answer_is_confirmed_soon(pool: PgPool) {
     );
     // Asked again meanwhile: 202, and when to ask again.
     let app = pinakes_core::api::router(
-        pinakes_core::api::AppState::new(pool.clone(), Default::default())
-            .await
-            .unwrap(),
+        pinakes_core::api::AppState::new(pool.clone(), Default::default()).unwrap(),
     );
     let mut request = axum::http::Request::post("/v1/resolve")
         .header("content-type", "application/json")
@@ -1189,9 +1187,7 @@ async fn a_too_complex_refresh_clears_the_card(pool: PgPool) {
     assert_eq!(changes_after, changes_before + 1);
     // The public card says so too.
     let app = pinakes_core::api::router(
-        pinakes_core::api::AppState::new(pool.clone(), Default::default())
-            .await
-            .unwrap(),
+        pinakes_core::api::AppState::new(pool.clone(), Default::default()).unwrap(),
     );
     let response = tower::ServiceExt::oneshot(
         app,
@@ -2150,7 +2146,6 @@ async fn an_alias_holds_no_failure_of_its_own(pool: PgPool) {
         .unwrap();
     let app = pinakes_core::api::admin_router(
         pinakes_core::api::AppState::new(pool.clone(), pinakes_core::config::Config::default())
-            .await
             .unwrap(),
     );
     let response = tower::ServiceExt::oneshot(
@@ -2292,4 +2287,368 @@ async fn upstream_retries_never_count_toward_dead_letter(pool: PgPool) {
         assert_eq!((row.0, row.1, row.2), (0, 0, false), "{row:?}");
         assert!(row.3 <= 60.0 && row.3 > 58.0, "{row:?}");
     }
+}
+
+fn too_large() -> anyhow::Error {
+    pinakes_core::resolver::egress::BodyTooLarge { cap: 1024 }.into()
+}
+fn too_complex() -> anyhow::Error {
+    pinakes_core::resolver::html::TooComplex {
+        reason: "the CPU budget",
+    }
+    .into()
+}
+/// A web resolver whose fetch answers 200 (one observed fetch, as the worker counts it) and which
+/// then gives each page in turn: a card, or an error.
+struct FetchedResolver(Vec<fn(&str) -> anyhow::Result<ResourceMeta>>);
+#[async_trait::async_trait]
+impl Resolver for FetchedResolver {
+    fn name(&self) -> &'static str {
+        "web"
+    }
+    fn matches(&self, _: &str) -> bool {
+        true
+    }
+    async fn resolve(&self, _: &str) -> anyhow::Result<ResourceMeta> {
+        unreachable!("batched")
+    }
+    fn batch_size(&self) -> usize {
+        self.0.len()
+    }
+    async fn resolve_batch(&self, uris: &[String]) -> Vec<anyhow::Result<ResourceMeta>> {
+        let mut fetch = pinakes_core::telemetry::FetchGuard::start();
+        fetch.status(200);
+        drop(fetch);
+        uris.iter()
+            .zip(&self.0)
+            .map(|(uri, page)| page(uri))
+            .collect()
+    }
+    fn refresh_after(&self, _: &ResourceMeta) -> Duration {
+        Duration::from_secs(86400)
+    }
+}
+fn card(uri: &str) -> anyhow::Result<ResourceMeta> {
+    let mut doc = ResourceMeta::new(uri, "web", 3600);
+    doc.name = Some("A saved card".into());
+    Ok(doc)
+}
+fn over_cap(_: &str) -> anyhow::Result<ResourceMeta> {
+    Err(too_large())
+}
+fn complex(_: &str) -> anyhow::Result<ResourceMeta> {
+    Err(too_complex())
+}
+/// Claims `uris` (due now) as one batch and runs it as a worker does: inside an observed fetch
+/// scope.
+async fn run_observed(
+    pool: &PgPool,
+    resolver: &FetchedResolver,
+    uris: &[&str],
+) -> (anyhow::Result<()>, Vec<queue::Job>) {
+    for uri in uris {
+        let id = store::ensure_resource(pool, uri).await.unwrap();
+        sqlx::query("UPDATE resource SET next_attempt_at=now()-interval '1 second' WHERE id=$1")
+            .bind(&id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+    let cfg = QueueConfig::default();
+    let mut jobs = queue::claim_sources(pool, &["web"], &cfg, uris.len())
+        .await
+        .unwrap();
+    assert_eq!(jobs.len(), uris.len());
+    // The resolver's pages go to the jobs in the order of `uris`.
+    jobs.sort_by_key(|job| uris.iter().position(|uri| *uri == job.uri));
+    let metrics = Metrics::new().unwrap();
+    let (result, observations) = pinakes_core::telemetry::observe(
+        &metrics,
+        &resolver.manifest(),
+        queue::run_batch(pool, resolver, &cfg, &jobs),
+    )
+    .await;
+    assert_eq!(observations.len(), 1);
+    (result, jobs)
+}
+async fn job_row(pool: &PgPool, uri: &str) -> (String, i32, bool, bool, Option<String>) {
+    sqlx::query_as(
+        "SELECT status,attempts,lease_until IS NULL,final,last_error FROM resource WHERE uri=$1",
+    )
+    .bind(uri)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+async fn source_error(pool: &PgPool) -> Option<String> {
+    sqlx::query_scalar("SELECT last_error FROM source_state WHERE source='web'")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+/// A page over its size cap and a page too complex to parse finish their jobs like any failure:
+/// the attempt counts (a too-complex page is final), the lease goes, and the source's health
+/// records the class.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_page_over_its_cap_or_too_complex_finishes_its_job(pool: PgPool) {
+    let uri = "https://over-cap.example.org/page";
+    let (result, _) = run_observed(&pool, &FetchedResolver(vec![over_cap]), &[uri]).await;
+    result.unwrap();
+    assert_eq!(
+        job_row(&pool, uri).await,
+        ("error".into(), 1, true, false, Some("too_large".into()))
+    );
+    assert_eq!(source_error(&pool).await.as_deref(), Some("too_large"));
+
+    let uri = "https://too-complex.example.org/page";
+    let (result, _) = run_observed(&pool, &FetchedResolver(vec![complex]), &[uri]).await;
+    result.unwrap();
+    let (status, _, released, is_final, last_error) = job_row(&pool, uri).await;
+    assert_eq!(
+        (status.as_str(), released, is_final, last_error.as_deref()),
+        ("error", true, true, Some("too_complex"))
+    );
+    assert_eq!(source_error(&pool).await.as_deref(), Some("too_complex"));
+}
+/// One page over its cap in a batch of three: the other two cards are saved, and no job keeps
+/// its lease.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_page_over_its_cap_leaves_the_rest_of_its_batch_saved(pool: PgPool) {
+    let uris = [
+        "https://batch.example.org/first",
+        "https://batch.example.org/over-cap",
+        "https://batch.example.org/third",
+    ];
+    let resolver = FetchedResolver(vec![card, over_cap, card]);
+    let (result, _) = run_observed(&pool, &resolver, &uris).await;
+    result.unwrap();
+    for uri in [uris[0], uris[2]] {
+        let (status, attempts, released, _, _) = job_row(&pool, uri).await;
+        assert_eq!(
+            (status.as_str(), attempts, released),
+            ("ok", 0, true),
+            "{uri}"
+        );
+        let name: Option<String> = sqlx::query_scalar("SELECT name FROM resource WHERE uri=$1")
+            .bind(uri)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(name.as_deref(), Some("A saved card"), "{uri}");
+    }
+    let (_, attempts, released, _, last_error) = job_row(&pool, uris[1]).await;
+    assert_eq!(
+        (attempts, released, last_error.as_deref()),
+        (1, true, Some("too_large"))
+    );
+}
+/// A source's health that cannot be written (here: every write of it refused) is logged by
+/// source, class and host, and the batch's jobs still finish.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn unwritable_source_health_never_blocks_the_jobs(pool: PgPool) {
+    let lines = log_lines();
+    sqlx::query("CREATE FUNCTION refuse_health() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'DATABASE_ERROR_TEXT'; END$$")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Only the health columns: the change totals a saved card counts are not bookkeeping.
+    sqlx::query("CREATE TRIGGER refuse_health BEFORE INSERT ON source_state FOR EACH ROW WHEN (NEW.last_success_at IS NOT NULL OR NEW.last_error IS NOT NULL) EXECUTE FUNCTION refuse_health()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("CREATE TRIGGER refuse_health_update BEFORE UPDATE OF last_success_at,last_error,consecutive_failures ON source_state FOR EACH ROW EXECUTE FUNCTION refuse_health()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let uris = [
+        "https://health-refused.example.org/secret-path",
+        "https://health-refused.example.org/over-cap",
+    ];
+    let resolver = FetchedResolver(vec![card, over_cap]);
+    let (result, _) = run_observed(&pool, &resolver, &uris).await;
+    result.unwrap();
+    assert_eq!(job_row(&pool, uris[0]).await.0, "ok");
+    let (_, attempts, released, _, _) = job_row(&pool, uris[1]).await;
+    assert_eq!((attempts, released), (1, true));
+    let text = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
+    let line = text
+        .lines()
+        .find(|l| {
+            l.contains("source health not recorded") && l.contains("health-refused.example.org")
+        })
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(
+        line.contains("too_large") && line.contains("\"web\""),
+        "{line}"
+    );
+    for secret in ["secret-path", "DATABASE_ERROR_TEXT"] {
+        assert!(!line.contains(secret), "{line}");
+    }
+}
+/// A batch whose first job cannot be finished still finishes the others, and reports the error.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn one_unfinishable_job_leaves_no_other_lease(pool: PgPool) {
+    let uris = [
+        "https://finish.example.org/refused",
+        "https://finish.example.org/second",
+        "https://finish.example.org/third",
+    ];
+    sqlx::query("CREATE FUNCTION refuse_finish() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'finish refused'; END$$")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("CREATE TRIGGER refuse_finish BEFORE UPDATE ON resource FOR EACH ROW WHEN (OLD.uri='https://finish.example.org/refused' AND OLD.lease_until IS NOT NULL) EXECUTE FUNCTION refuse_finish()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let resolver = FetchedResolver(vec![card, card, card]);
+    let (result, _) = run_observed(&pool, &resolver, &uris).await;
+    assert!(result.is_err());
+    for uri in [uris[1], uris[2]] {
+        let (status, _, released, _, _) = job_row(&pool, uri).await;
+        assert_eq!((status.as_str(), released), ("ok", true), "{uri}");
+    }
+}
+/// A canary whose sample is too complex to parse records the failure and its own result.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_too_complex_canary_records_its_outcome(pool: PgPool) {
+    use pinakes_core::{canary, config::CanaryConfig};
+    struct Probe;
+    #[async_trait::async_trait]
+    impl Resolver for Probe {
+        fn name(&self) -> &'static str {
+            "web"
+        }
+        fn matches(&self, _: &str) -> bool {
+            true
+        }
+        async fn resolve(&self, _: &str) -> anyhow::Result<ResourceMeta> {
+            let mut fetch = pinakes_core::telemetry::FetchGuard::start();
+            fetch.status(200);
+            drop(fetch);
+            Err(too_complex())
+        }
+        fn refresh_after(&self, _: &ResourceMeta) -> Duration {
+            Duration::from_secs(86400)
+        }
+    }
+    let mut manifest = pinakes_core::adapter::manifest("web");
+    manifest.canary = Some("https://canary.example.org/sample".parse().unwrap());
+    let config = CanaryConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    let metrics = Metrics::new().unwrap();
+    for refused in [false, true] {
+        assert!(canary::claim(&pool, &manifest, &config)
+            .await
+            .unwrap()
+            .is_none());
+        sqlx::query(
+            "UPDATE source_state SET canary_due_at=now(),last_error=NULL WHERE source='web'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let generation = canary::claim(&pool, &manifest, &config)
+            .await
+            .unwrap()
+            .unwrap();
+        if refused {
+            sqlx::query("CREATE FUNCTION refuse_health() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'source health refused'; END$$")
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("CREATE TRIGGER refuse_health BEFORE UPDATE OF last_error ON source_state FOR EACH ROW EXECUTE FUNCTION refuse_health()")
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        canary::run_manifest(&pool, &Probe, &manifest, &config, &metrics, generation)
+            .await
+            .unwrap();
+        let (last_error, ok, leased): (Option<String>, Option<bool>, bool) = sqlx::query_as(
+            "SELECT last_error,canary_ok,canary_lease_until IS NOT NULL FROM source_state WHERE source='web'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let want = (!refused).then_some("too_complex");
+        assert_eq!(
+            (last_error.as_deref(), ok, leased),
+            (want, Some(false), false),
+            "refused: {refused}"
+        );
+    }
+}
+/// A worker meets a page over its size cap: the job finishes with its attempt counted, the lease
+/// goes at once (no fetch again after a lease), and the worker logs no persistence failure.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_worker_finishes_a_page_over_its_cap(pool: PgPool) {
+    use pinakes_core::resolver::egress::{Dns, Egress, Fetched, Transport};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    struct PublicDns;
+    #[async_trait::async_trait]
+    impl Dns for PublicDns {
+        async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<std::net::SocketAddr>> {
+            Ok(vec![std::net::SocketAddr::new("8.8.8.8".parse()?, port)])
+        }
+    }
+    struct OverCap(AtomicUsize);
+    #[async_trait::async_trait]
+    impl Transport for OverCap {
+        async fn get(&self, _: &url::Url, _: &[std::net::SocketAddr]) -> anyhow::Result<Fetched> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(too_large())
+        }
+    }
+    let lines = log_lines();
+    let uri = "https://worker-over-cap.example.org/page";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    sqlx::query("UPDATE resource SET next_attempt_at=now()-interval '1 second' WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut config = pinakes_core::config::Config::default();
+    config.pubky.enabled = false;
+    config.event.enabled = false;
+    config.canary.enabled = false;
+    let transport = Arc::new(OverCap(AtomicUsize::new(0)));
+    let egress = Egress::with_backends(
+        config.egress.clone(),
+        Arc::new(PublicDns),
+        transport.clone(),
+    );
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let mut workers = queue::spawn_with_egress(
+        pool.clone(),
+        config,
+        Arc::new(tokio::sync::Notify::new()),
+        shutdown,
+        Arc::new(Metrics::new().unwrap()),
+        egress,
+    )
+    .unwrap();
+    let start = std::time::Instant::now();
+    let row = loop {
+        let row = job_row(&pool, uri).await;
+        if row.1 > 0 || start.elapsed() > Duration::from_secs(30) {
+            break row;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    stop.send(true).unwrap();
+    while workers.join_next().await.is_some() {}
+    assert_eq!(
+        row,
+        ("error".into(), 1, true, false, Some("too_large".into()))
+    );
+    assert_eq!(source_error(&pool).await.as_deref(), Some("too_large"));
+    assert!(transport.0.load(Ordering::SeqCst) > 0);
+    let text = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
+    assert!(!text.contains("queue persistence failed"), "{text}");
 }

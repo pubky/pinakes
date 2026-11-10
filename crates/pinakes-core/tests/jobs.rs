@@ -229,7 +229,7 @@ async fn postings_are_placed_found_and_close(pool: PgPool) {
                 OsmResolver::new(
                     pool.clone(),
                     OsmConfig {
-                        nominatim_url: format!("http://{addr}"),
+                        nominatim_url: format!("http://{addr}").into(),
                         requests_per_second: 1000.0,
                         ..Default::default()
                     },
@@ -277,11 +277,7 @@ async fn postings_are_placed_found_and_close(pool: PgPool) {
     assert!(stored.get("location").is_none());
     assert_eq!(stored["venue"]["osm_id"], "relation/188022");
 
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let (code, card) = call(&app, &format!("/v1/resources/{}", saved[BATTERY])).await;
     assert_eq!(code, 200, "{card}");
     assert_eq!(card["type"], "JobPosting");
@@ -382,7 +378,7 @@ async fn a_workplace_is_never_an_ambiguous_or_other_settlement(pool: PgPool) {
             OsmResolver::new(
                 pool.clone(),
                 OsmConfig {
-                    nominatim_url: format!("http://{addr}"),
+                    nominatim_url: format!("http://{addr}").into(),
                     requests_per_second: 1000.0,
                     ..Default::default()
                 },
@@ -451,7 +447,7 @@ async fn a_workplace_is_never_in_another_region_or_postal_region(pool: PgPool) {
             OsmResolver::new(
                 pool.clone(),
                 OsmConfig {
-                    nominatim_url: format!("http://{addr}"),
+                    nominatim_url: format!("http://{addr}").into(),
                     requests_per_second: 1000.0,
                     ..Default::default()
                 },
@@ -549,7 +545,7 @@ async fn a_one_line_place_is_compared_by_its_region_code_and_postcode(pool: PgPo
             OsmResolver::new(
                 pool.clone(),
                 OsmConfig {
-                    nominatim_url: format!("http://{addr}"),
+                    nominatim_url: format!("http://{addr}").into(),
                     requests_per_second: 1000.0,
                     ..Default::default()
                 },

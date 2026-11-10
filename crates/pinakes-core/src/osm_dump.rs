@@ -27,50 +27,7 @@ pub fn path(dir: &Path) -> PathBuf {
 
 /// The first line of the file.
 pub fn notice() -> Value {
-    json!({"notice":crate::resolver::osm::ATTRIBUTION,"licence":"ODbL-1.0","licence_url":"https://opendatacommons.org/licenses/odbl/1-0/","attribution_url":"https://www.openstreetmap.org/copyright","note":NOTE,"table":"osm_place"})
-}
-/// What the licence covers, in the notice.
-pub const NOTE: &str = "The ODbL covers the OpenStreetMap data. Each place's attribution names the service that answered it; that service's terms apply to what it added.";
-
-/// Whether the file in `dir` holds a place credited to a service beside OpenStreetMap: a line's
-/// `attribution`, or one of its `versions`', other than the OSM credit alone. False without a
-/// file. Blocking: it reads the whole file.
-pub fn credits_beside_osm(dir: &Path) -> Result<bool> {
-    match std::fs::File::open(path(dir)) {
-        Ok(file) => file_credits_beside_osm(&file),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(e).context("the dump file"),
-    }
-}
-/// As `credits_beside_osm`, for an open dump file, read from its start whatever its offset.
-pub fn file_credits_beside_osm(file: &std::fs::File) -> Result<bool> {
-    use std::io::BufRead;
-    /// The file from its start, read at positions of its own.
-    struct At<'a>(&'a std::fs::File, u64);
-    impl std::io::Read for At<'_> {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            let n = std::os::unix::fs::FileExt::read_at(self.0, buf, self.1)?;
-            self.1 += n as u64;
-            Ok(n)
-        }
-    }
-    let lines = std::io::BufReader::new(flate2::read::GzDecoder::new(At(file, 0))).lines();
-    for line in lines {
-        if beside_osm(&serde_json::from_str(&line.context("the dump file")?)?) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-/// Whether a dump line credits a service beside OpenStreetMap: its `attribution`, or one of its
-/// `versions`', is other than the OSM credit alone.
-fn beside_osm(line: &Value) -> bool {
-    let osm = crate::resolver::osm::ATTRIBUTION;
-    let beside = |v: &Value| v["attribution"].as_str().is_some_and(|a| a != osm);
-    beside(line)
-        || line["versions"]
-            .as_object()
-            .is_some_and(|versions| versions.values().any(beside))
+    json!({"notice":crate::resolver::osm::ATTRIBUTION,"licence":"ODbL-1.0","licence_url":"https://opendatacommons.org/licenses/odbl/1-0/","attribution_url":"https://www.openstreetmap.org/copyright","table":"osm_place"})
 }
 
 /// When the file was last written, if it exists.
@@ -143,28 +100,16 @@ pub fn remove_leftovers(dir: &Path) -> std::io::Result<usize> {
 /// Write the file from one read-only snapshot and rename it into place; returns the places
 /// written. On any failure the previous file stays and the temporary one is removed. Refused while
 /// another writer holds the directory's lock.
-/// Without LocationIQ's authorization (`publication`), a place it answered stops the write.
-pub async fn write(
-    pool: &PgPool,
-    dir: &Path,
-    publication: crate::resolver::locationiq::Publication,
-) -> Result<usize> {
+pub async fn write(pool: &PgPool, dir: &Path) -> Result<usize> {
     let _one = WRITER.lock().await;
     tokio::fs::create_dir_all(dir)
         .await
         .with_context(|| format!("dump directory {}", dir.display()))?;
-    let _lock = lock(dir)?.context("another writer holds the dump directory's lock")?;
+    let lock = lock(dir)?.context("another writer holds the dump directory's lock")?;
     remove_temps(dir)?;
     let tmp = temp_path(dir);
-    let result = write_to(pool, &tmp, publication).await;
-    match result {
-        Ok(places) => {
-            tokio::fs::rename(&tmp, path(dir)).await?;
-            // The rename is durable once the directory is.
-            let dir = dir.to_owned();
-            tokio::task::spawn_blocking(move || std::fs::File::open(dir)?.sync_all()).await??;
-            Ok(places)
-        }
+    match write_to(pool, &tmp).await {
+        Ok(places) => replace(dir, tmp, lock).await.map(|()| places),
         Err(error) => {
             let _ = tokio::fs::remove_file(&tmp).await;
             Err(error)
@@ -172,11 +117,49 @@ pub async fn write(
     }
 }
 
-async fn write_to(
-    pool: &PgPool,
-    tmp: &Path,
-    publication: crate::resolver::locationiq::Publication,
-) -> Result<usize> {
+/// Rename `tmp` into place and sync the directory, in one blocking task that holds the
+/// directory's `lock` until its last file operation, so a cancelled write never frees the lock
+/// while its rename is still to come. On a failure the temporary file is removed.
+async fn replace(dir: &Path, tmp: PathBuf, lock: std::fs::File) -> Result<()> {
+    let dir = dir.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let _lock = lock;
+        let replaced = (|| -> Result<()> {
+            #[cfg(test)]
+            before_rename(&dir);
+            std::fs::rename(&tmp, path(&dir))?;
+            // The rename is durable once the directory is.
+            std::fs::File::open(&dir)?.sync_all()?;
+            Ok(())
+        })();
+        if replaced.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        replaced
+    })
+    .await?
+}
+
+/// A test's pause before a writer's final rename, by dump directory.
+#[cfg(test)]
+pub(crate) type Pause = std::sync::Arc<dyn Fn() + Send + Sync>;
+#[cfg(test)]
+pub(crate) static BEFORE_RENAME: std::sync::Mutex<Vec<(PathBuf, Pause)>> =
+    std::sync::Mutex::new(Vec::new());
+#[cfg(test)]
+fn before_rename(dir: &Path) {
+    let pause = BEFORE_RENAME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .find(|(at, _)| at == dir)
+        .map(|(_, pause)| pause.clone());
+    if let Some(pause) = pause {
+        pause();
+    }
+}
+
+async fn write_to(pool: &PgPool, tmp: &Path) -> Result<usize> {
     use futures_util::TryStreamExt;
     let (lines, mut received) = tokio::sync::mpsc::channel::<String>(256);
     let file = tmp.to_owned();
@@ -207,10 +190,6 @@ async fn write_to(
         let mut rows = sqlx::query_scalar::<_, Value>(crate::api::OSM_DUMP_LINE).fetch(&mut *tx);
         let mut places = 0;
         while let Some(row) = rows.try_next().await? {
-            anyhow::ensure!(
-                publication.locationiq() || !beside_osm(&row),
-                "the dump holds places LocationIQ answered, and osm.locationiq.public_use_authorized is false"
-            );
             lines.send(row.to_string()).await?;
             places += 1;
         }
@@ -229,13 +208,7 @@ async fn write_to(
 /// directory may have written it), checking again after `every`. A failed write is retried after
 /// five minutes. Shutdown cancels a write in progress: the previous file stays, and the next
 /// start (or the next writer) removes the temporary one.
-pub async fn run(
-    pool: PgPool,
-    dir: PathBuf,
-    every: Duration,
-    publication: crate::resolver::locationiq::Publication,
-    mut shutdown: watch::Receiver<bool>,
-) {
+pub async fn run(pool: PgPool, dir: PathBuf, every: Duration, mut shutdown: watch::Receiver<bool>) {
     let leftovers = dir.clone();
     match tokio::task::spawn_blocking(move || remove_leftovers(&leftovers)).await {
         Ok(Ok(0)) => {}
@@ -255,8 +228,7 @@ pub async fn run(
             wait = due;
             continue;
         }
-        let written =
-            tokio::select! { _=shutdown.changed()=>break, r=write(&pool, &dir, publication)=>r };
+        let written = tokio::select! { _=shutdown.changed()=>break, r=write(&pool, &dir)=>r };
         wait = match written {
             Ok(places) => {
                 tracing::info!(places, file=%path(&dir).display(), "ODbL dump written");
@@ -267,5 +239,76 @@ pub async fn run(
                 Duration::from_secs(300)
             }
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::MetadataExt;
+    use std::sync::{Arc, Mutex};
+
+    /// A write cancelled at its last step (shutdown) keeps the directory's lock until its rename
+    /// is done: another writer can neither take the lock nor publish while the cancelled write's
+    /// rename is still to come, and once it has gone the next writer's file stays in place.
+    #[sqlx::test(
+        migrations = "../../migrations",
+        fixtures("../tests/fixtures/require_h3.sql")
+    )]
+    async fn a_cancelled_write_keeps_the_lock_until_its_rename_is_done(pool: PgPool) {
+        let dir = std::env::temp_dir().join(format!("pinakes-cancelled-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        write(&pool, &dir).await.unwrap();
+        let before = std::fs::read(path(&dir)).unwrap();
+        // Writer A stops before its rename until `go`.
+        let (paused, reached) = std::sync::mpsc::channel::<()>();
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        let wait = Mutex::new(wait);
+        BEFORE_RENAME.lock().unwrap().push((
+            dir.clone(),
+            Arc::new(move || {
+                let _ = paused.send(());
+                let _ = wait.lock().unwrap().recv();
+            }),
+        ));
+        let a = {
+            let (pool, dir) = (pool.clone(), dir.clone());
+            tokio::spawn(async move { write(&pool, &dir).await })
+        };
+        tokio::task::spawn_blocking(move || reached.recv_timeout(Duration::from_secs(10)))
+            .await
+            .unwrap()
+            .expect("writer A reached its rename");
+        a.abort();
+        assert!(a.await.unwrap_err().is_cancelled());
+        // A's rename is still to come: B neither takes the lock nor publishes.
+        assert!(lock(&dir).unwrap().is_none(), "the lock is free");
+        let refused = write(&pool, &dir).await.unwrap_err();
+        assert!(format!("{refused:#}").contains("lock"), "{refused:#}");
+        assert_eq!(std::fs::read(path(&dir)).unwrap(), before);
+        go.send(()).unwrap();
+        BEFORE_RENAME.lock().unwrap().retain(|(at, _)| at != &dir);
+        // A's file work ends, its file in place, and the lock is free again.
+        let mut free = false;
+        for _ in 0..500 {
+            if lock(&dir).unwrap().is_some() {
+                free = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(free, "the lock was never released");
+        let a_file = std::fs::metadata(path(&dir)).unwrap().ino();
+        write(&pool, &dir).await.unwrap();
+        let b_file = std::fs::metadata(path(&dir)).unwrap().ino();
+        assert_ne!(a_file, b_file);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            std::fs::metadata(path(&dir)).unwrap().ino(),
+            b_file,
+            "B's file stays in place"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

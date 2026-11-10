@@ -220,6 +220,7 @@ impl WebResolver {
             let recordings = musicbrainz::isrc(&self.egress, base, &isrc)
                 .await?
                 .unwrap_or_default();
+            // One recording's card; duplicates that agree as one recording take the first's.
             let entity = match recordings.as_slice() {
                 [one] => {
                     musicbrainz::entity(
@@ -230,7 +231,14 @@ impl WebResolver {
                     )
                     .await?
                 }
-                _ => None,
+                [] => None,
+                several => crate::music_sources::agreeing(&self.egress, base, several)
+                    .await?
+                    .and_then(|entities| {
+                        entities
+                            .into_iter()
+                            .min_by_key(|e| e.title.as_ref().map_or(usize::MAX, String::len))
+                    }),
             };
             crate::music_sources::musicbrainz_card(uri, entity.as_ref(), Some(&isrc), ttl)
         } else {
@@ -401,14 +409,26 @@ impl WebResolver {
                 .await?;
             }
             // A service the page names about itself (WordPress, Ghost) may say more.
-            extracted.doc =
-                crate::sources::page_hooks(&self.egress, uri, &fetched, extracted.doc, deadline)
-                    .await;
+            extracted.doc = crate::sources::page_hooks(
+                &self.egress,
+                uri,
+                &as_read(&fetched),
+                extracted.doc,
+                deadline,
+            )
+            .await;
             // Account for the title fallback when deciding whether another request is
             // needed, while retaining oEmbed's established precedence if fetched.
             let mut candidate = extracted.doc.clone();
             fill(&mut candidate.name, extracted.title.clone());
+            // A link that carries a credential is never sent to an oEmbed provider.
             if let Some(endpoint) = extracted.oembed.take().filter(|endpoint| {
+                if crate::capability::is_capability(uri)
+                    || crate::capability::is_capability_url(&fetched.url)
+                    || crate::capability::names_capability(endpoint)
+                {
+                    return false;
+                }
                 let trusted = endpoint.origin() == fetched.url.origin()
                     || super::cards::provider_endpoint(uri).is_some_and(|registered| {
                         registered.origin() == endpoint.origin()
@@ -445,7 +465,7 @@ impl WebResolver {
                 {
                     if response.status == 200 {
                         if let Ok(value) = serde_json::from_slice::<Value>(&response.body) {
-                            apply_oembed(&mut extracted.doc, &value, &response.url);
+                            apply_oembed(&mut extracted.doc, &value, &read_at(&response.url));
                         }
                     }
                 }
@@ -508,7 +528,11 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
         out.doc.aliases.clear();
         return Ok(out);
     }
-    if fetched.permanent_redirect && fetched.url.as_str() != uri {
+    // A redirect to a link that carries a credential is followed, never kept as an alias.
+    if fetched.permanent_redirect
+        && fetched.url.as_str() != uri
+        && !crate::capability::is_capability_url(&fetched.url)
+    {
         add_alias(&mut out.doc, fetched.url.to_string());
         out.doc.alias_candidates.push(fetched.url.to_string());
     }
@@ -530,17 +554,18 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
     }
     if fetched.content_type.starts_with("image/") {
         out.doc.set_type("ImageObject");
-        out.doc.image = Some(fetched.url.to_string());
+        out.doc.image = Some(landed(uri, fetched).to_string());
         return Ok(out);
     }
     if fetched.content_type == "application/pdf" {
-        out.doc.name = fetched
-            .url
+        out.doc.name = landed(uri, fetched)
             .path_segments()
             .and_then(|mut s| s.next_back())
             .map(str::to_owned);
         return Ok(out);
     }
+    let read = as_read(fetched);
+    let fetched = read.as_ref();
     let text = String::from_utf8_lossy(&fetched.body);
     // A feed, on whichever route fetched it: its own title and description.
     if let Some((name, description)) = feed(&fetched.content_type, &text) {
@@ -797,7 +822,7 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
             {
                 if let Some(alias) = origin_url(&fetched.url, href) {
                     add_alias(&mut out.doc, alias.clone());
-                    if !canonical_seen {
+                    if !canonical_seen && !crate::capability::is_capability(&alias) {
                         canonical_seen = true;
                         out.doc.alias_candidates.push(alias);
                     }
@@ -1234,11 +1259,65 @@ fn point(lat: f64, lon: f64) -> Option<Point> {
         && (-180.0..=180.0).contains(&lon))
     .then_some(Point { lat, lon })
 }
+/// Where an answer fetched at `url` is read, so that its relative links (`""`, `#x`, `/og.png`)
+/// resolve: `url`, unless that carries a credential; then the directory of `url` without its user
+/// info, query and fragment (a segment may be a secret too, as in `/files/<id>?token=…` or
+/// `/files/<id>/?token=…`), or its
+/// origin when the path is a known secret. Either names no secret and is still the host that
+/// served the answer, so ownership and trust checks stay on that host.
+pub(crate) fn read_at(url: &Url) -> Url {
+    if !crate::capability::is_capability_url(url) {
+        return url.clone();
+    }
+    let mut base = url.clone();
+    let _ = base.set_username("");
+    let _ = base.set_password(None);
+    base.set_query(None);
+    base.set_fragment(None);
+    if crate::capability::is_capability_url(&base) {
+        base.set_path("/");
+    } else {
+        let directory = base
+            .path()
+            .trim_end_matches('/')
+            .rsplit_once('/')
+            .map_or("", |(directory, _)| directory)
+            .to_owned();
+        base.set_path(&format!("{directory}/"));
+    }
+    base
+}
+/// `fetched` as a page is read: at [`read_at`] the address its fetch ended on.
+pub(crate) fn as_read(fetched: &Fetched) -> std::borrow::Cow<'_, Fetched> {
+    if crate::capability::is_capability_url(&fetched.url) {
+        std::borrow::Cow::Owned(Fetched {
+            url: read_at(&fetched.url),
+            ..fetched.clone()
+        })
+    } else {
+        std::borrow::Cow::Borrowed(fetched)
+    }
+}
+/// The address a fetch ended on, unless it carries a credential: then the link itself stands in
+/// for it, so nothing stored names it.
+fn landed(uri: &str, fetched: &Fetched) -> Url {
+    if !crate::capability::is_capability_url(&fetched.url) {
+        return fetched.url.clone();
+    }
+    Url::parse(uri)
+        .or_else(|_| Url::parse(&fetched.url.origin().ascii_serialization()))
+        .unwrap_or_else(|_| fetched.url.clone())
+}
 /// Another URL the page names for itself (canonical, og:url, its JSON-LD `url`, a permanent
 /// redirect), listed in `details.aliases`; never grouping evidence. Only the head canonical and
 /// a permanent redirect are alias candidates (`alias_candidates`).
+/// A link that carries a credential is never published as another's alias.
 fn add_alias(doc: &mut ResourceMeta, alias: String) {
-    if doc.aliases.len() < 4 && alias != doc.url && !doc.aliases.contains(&alias) {
+    if doc.aliases.len() < 4
+        && alias != doc.url
+        && !doc.aliases.contains(&alias)
+        && !crate::capability::is_capability(&alias)
+    {
         doc.aliases.push(alias);
     }
 }
@@ -2215,6 +2294,142 @@ mod tests {
         );
     }
 
+    /// A link that carries a credential is never an alias: not a permanent redirect's target, not a
+    /// head canonical.
+    #[test]
+    fn a_link_that_carries_a_credential_is_never_an_alias() {
+        let page = |url: &str, body: &str| Fetched {
+            permanent_redirect: true,
+            truncated: false,
+            validators: Default::default(),
+            url: Url::parse(url).unwrap(),
+            status: 200,
+            retry_after_secs: 60,
+            location: None,
+            content_type: "text/html".into(),
+            body: body.as_bytes().to_vec(),
+        };
+        let d = extract(
+            "https://example.org/a",
+            &page(
+                "https://example.org/a?token=x",
+                r#"<head><link rel="canonical" href="/a?sig=x"></head><title>T</title>"#,
+            ),
+            3600,
+        )
+        .unwrap()
+        .doc;
+        assert!(d.aliases.is_empty(), "{:?}", d.aliases);
+        assert!(d.alias_candidates.is_empty(), "{:?}", d.alias_candidates);
+    }
+    /// A fetch that ends on a link carrying a credential names nothing after it: not an image's
+    /// address, not a PDF's name.
+    #[test]
+    fn nothing_read_names_a_redirect_target_that_carries_a_credential() {
+        let landed = |content_type: &str| Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            validators: Default::default(),
+            url: Url::parse("https://cdn.example/files/SECRET-NAME.png?token=SECRET").unwrap(),
+            status: 200,
+            retry_after_secs: 60,
+            location: None,
+            content_type: content_type.into(),
+            body: vec![],
+        };
+        for content_type in ["image/png", "application/pdf"] {
+            let d = extract(
+                "https://example.org/files/a.png",
+                &landed(content_type),
+                3600,
+            )
+            .unwrap()
+            .doc;
+            let json = serde_json::to_string(&d).unwrap();
+            assert!(!json.contains("SECRET"), "{content_type}: {json}");
+        }
+    }
+    /// A page whose fetch ended on an address that carries a credential names nothing after that
+    /// address: an empty og:image, an empty feed link, relative JSON-LD `image` and `url` all
+    /// resolve against it.
+    #[test]
+    fn a_page_reached_at_a_credential_resolves_nothing_back_to_it() {
+        let fetched = Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            validators: Default::default(),
+            url: Url::parse("https://app.example/share?token=SECRET").unwrap(),
+            status: 200,
+            retry_after_secs: 60,
+            location: None,
+            content_type: "text/html".into(),
+            body: br##"<head><title>Shared</title><meta property="og:image" content=""><link rel="alternate" type="application/rss+xml" href=""><script type="application/ld+json">{"@type":"Article","name":"Shared","image":"#img","url":""}</script></head>"##.to_vec(),
+        };
+        let d = extract("https://example.org/s/abc", &fetched, 3600)
+            .unwrap()
+            .doc;
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(!json.contains("SECRET"), "{json}");
+    }
+    /// Such a page is read at the origin that served it: its relative links stay on that host,
+    /// never on the host of the link asked for.
+    #[test]
+    fn a_page_reached_at_a_credential_on_another_host_is_read_at_that_host() {
+        let fetched = Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            validators: Default::default(),
+            url: Url::parse("https://b.example/share?token=SECRET").unwrap(),
+            status: 200,
+            retry_after_secs: 60,
+            location: None,
+            content_type: "text/html".into(),
+            body:
+                br#"<head><title>Shared</title><meta property="og:image" content="/og.png"></head>"#
+                    .to_vec(),
+        };
+        let d = extract("https://a.example/s/abc", &fetched, 3600)
+            .unwrap()
+            .doc;
+        assert_eq!(d.image.as_deref(), Some("https://b.example/og.png"));
+    }
+    /// A path segment of such an address may be a secret too (`/files/<id>?token=…`): the page is
+    /// read in its directory, so a link to the page itself names neither.
+    #[test]
+    fn a_page_reached_at_a_credential_is_read_in_its_directory() {
+        let fetched = Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            validators: Default::default(),
+            url: Url::parse("https://b.example/files/SECRETID?token=SECRET").unwrap(),
+            status: 200,
+            retry_after_secs: 60,
+            location: None,
+            content_type: "text/html".into(),
+            body: br#"<head><title>Shared</title><meta property="og:image" content=""><meta property="og:url" content=""></head>"#
+                .to_vec(),
+        };
+        let d = extract("https://a.example/s/abc", &fetched, 3600)
+            .unwrap()
+            .doc;
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(!json.contains("SECRET"), "{json}");
+        assert_eq!(d.image.as_deref(), Some("https://b.example/files/"));
+    }
+    /// A path that ends in `/` is read in its parent: its last segment may be the secret too.
+    #[test]
+    fn a_directory_reached_at_a_credential_is_read_in_its_parent() {
+        let at = |u: &str| read_at(&Url::parse(u).unwrap()).to_string();
+        assert_eq!(
+            at("https://b.example/files/SECRETID/?token=SECRET"),
+            "https://b.example/files/"
+        );
+        assert_eq!(
+            at("https://b.example/files/SECRETID?token=SECRET"),
+            "https://b.example/files/"
+        );
+        assert_eq!(at("https://b.example/?token=SECRET"), "https://b.example/");
+    }
     #[test]
     fn only_head_canonicals_and_permanent_redirects_are_alias_candidates() {
         let page = |url: &str, permanent: bool, body: &str| Fetched {

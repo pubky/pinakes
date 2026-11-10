@@ -1738,14 +1738,13 @@ mod tests {
     fn cut(text: &str) -> &str {
         bounded(text)
     }
+    /// `f` within a few seconds of this thread's CPU time (a bound load never inflates; the
+    /// shapes here take milliseconds, the quadratic ones they guard against took minutes).
     fn timed<T>(f: impl FnOnce() -> T) -> T {
-        let started = std::time::Instant::now();
+        let started = crate::capability::thread_cpu_time();
         let out = f();
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(1),
-            "{:?}",
-            started.elapsed()
-        );
+        let used = crate::capability::thread_cpu_time() - started;
+        assert!(used < std::time::Duration::from_secs(5), "{used:?}");
         out
     }
     fn title(html: &scraper::Html) -> Option<String> {
@@ -1880,13 +1879,11 @@ mod tests {
         for n in 0..60_000 {
             slashed.push_str(&format!("/a{n}='x'"));
         }
-        let started = std::time::Instant::now();
+        let started = crate::capability::thread_cpu_time();
         let html = parse_in_process(Kind::Document, &slashed, Duration::from_millis(50)).unwrap();
-        assert!(
-            started.elapsed() < Duration::from_secs(3),
-            "{:?}",
-            started.elapsed()
-        );
+        // The budget is of this thread's CPU time: the tree is built soon after it.
+        let used = crate::capability::thread_cpu_time() - started;
+        assert!(used < Duration::from_secs(3), "{used:?}");
         assert_eq!(title(&html).as_deref(), Some("Kept"));
     }
 

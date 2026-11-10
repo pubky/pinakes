@@ -81,7 +81,12 @@ pub(crate) fn gone_card(doc: &ResourceMeta) -> ResourceMeta {
 /// rows deleted.
 async fn forget_derived(tx: &mut Transaction<'_, Postgres>, ids: &[String]) -> Result<u64> {
     let mut deleted = 0;
-    for table in ["resource_fact", "resource_key", "derived_link"] {
+    for table in [
+        "resource_fact",
+        "resource_key",
+        "derived_link",
+        "link_release",
+    ] {
         deleted += sqlx::query(&format!("DELETE FROM {table} WHERE resource_id=ANY($1)"))
             .bind(ids)
             .execute(&mut **tx)
@@ -210,6 +215,233 @@ async fn snapshot(
         .bind(osm_type).bind(osm_id).bind(&version).bind(value).execute(&mut **tx).await?;
     Ok(json!({"osm_id":format!("{osm_type}/{osm_id}"),"version":version}))
 }
+/// An occurrence key (`["<uid>","<recurrence id>"]`, as change lines, fetch state and group
+/// units hold it) with its UID as it is stored (`event::stored_uid`): the key as written when
+/// its UID holds no link that carries a credential. The recurrence id is kept as written,
+/// whatever its JSON.
+pub fn stored_key(key: &str) -> String {
+    match serde_json::from_str::<(String, Value)>(key) {
+        Ok((uid, rid)) if crate::capability::contains_credential(&uid) => {
+            serde_json::to_string(&(crate::event::stored_uid(uid), rid))
+                .unwrap_or_else(|_| key.to_owned())
+        }
+        _ => key.to_owned(),
+    }
+}
+/// An occurrence key already under its stand-in (`uid:` and a SHA-256), as a PostgreSQL regular
+/// expression: such a key never holds a credential, so a scan for raw ones leaves it out.
+pub(crate) const STAND_IN_KEY: &str = r#"^\["uid:[0-9a-f]{64}""#;
+/// A change line's documents as [`repair_credentials`] reads them: sequence number, resource,
+/// `before`, `after`, and the resource's own link (empty when the resource is gone).
+type HistoryRow = (i64, String, Option<Value>, Option<Value>, String);
+/// What [`repair_credentials`] changed.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct CredentialRepair {
+    pub derived_links: u64,
+    pub change_keys: u64,
+    pub unit_keys: u64,
+    pub history_rows: u64,
+}
+/// Rows an earlier build stored before the credential rule reached them, brought under the rule
+/// itself (never a pattern): a derived link `also_on::refused_link` refuses goes; a change
+/// line's or group unit's occurrence key (and the UID in the unit's occurrence reference) takes
+/// its stored key ([`stored_key`]); a change line's documents are read through
+/// `capability::strip` with the resource's own link, as `append` writes them. Only a row that
+/// changes is written, so a second run changes nothing. Run by `pinakesd reextract` with the
+/// daemon stopped: it takes the instance lock (`locks::own_database`), which no daemon shares,
+/// so no writer runs beside it. Each step still takes the writers' locks in their order (the
+/// writers, then the resources, as `record` and `save` do) and writes a change line's documents
+/// only as they were read, so it holds without that lock too. The counts of what changed, never
+/// a value.
+pub async fn repair_credentials(
+    pool: &PgPool,
+    _instance: &crate::locks::InstanceLock,
+) -> Result<CredentialRepair> {
+    let mut done = CredentialRepair::default();
+    // Derived links, in batches by their key.
+    let (mut last_resource, mut last_link) = (String::new(), String::new());
+    loop {
+        let rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as("SELECT resource_id,link_id,uri,key FROM derived_link WHERE (resource_id,link_id)>($1,$2) ORDER BY resource_id,link_id LIMIT 1000")
+            .bind(&last_resource)
+            .bind(&last_link)
+            .fetch_all(pool)
+            .await?;
+        let Some((resource, link, ..)) = rows.last() else {
+            break;
+        };
+        (last_resource, last_link) = (resource.clone(), link.clone());
+        let refused: Vec<&(String, String, String, Option<String>)> = rows
+            .iter()
+            .filter(|(_, _, uri, _)| crate::also_on::refused_link(uri))
+            .collect();
+        if refused.is_empty() {
+            continue;
+        }
+        // `record`'s order: the writers and the alias lock, then the resources the deletions'
+        // triggers update (the owners, and the tagged resources the keyed links name), in id
+        // order.
+        let mut tx = pool.begin().await?;
+        crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
+        crate::alias::lock(&mut tx).await?;
+        let mut ids: Vec<&str> = refused
+            .iter()
+            .flat_map(|(owner, link, _, key)| {
+                std::iter::once(owner.as_str()).chain(key.as_ref().map(|_| link.as_str()))
+            })
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        sqlx::query("SELECT 1 FROM resource WHERE id=ANY($1) ORDER BY id FOR NO KEY UPDATE")
+            .bind(&ids)
+            .execute(&mut *tx)
+            .await?;
+        for (resource, link, uri, _) in refused {
+            done.derived_links += sqlx::query(
+                "DELETE FROM derived_link WHERE resource_id=$1 AND link_id=$2 AND uri=$3",
+            )
+            .bind(resource)
+            .bind(link)
+            .bind(uri)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        }
+        tx.commit().await?;
+    }
+    // Change lines' keys: each distinct raw key of a resource, in batches by (resource, key),
+    // rewritten under the resource's lock.
+    let (mut last_resource, mut last_key) = (String::new(), String::new());
+    loop {
+        let keys: Vec<(String, String)> = sqlx::query_as("SELECT DISTINCT resource_id,occurrence_key FROM resource_change WHERE occurrence_key IS NOT NULL AND occurrence_key !~ $1 AND (resource_id,occurrence_key)>($2,$3) ORDER BY resource_id,occurrence_key LIMIT 1000")
+            .bind(STAND_IN_KEY)
+            .bind(&last_resource)
+            .bind(&last_key)
+            .fetch_all(pool)
+            .await?;
+        let Some((resource, key)) = keys.last() else {
+            break;
+        };
+        (last_resource, last_key) = (resource.clone(), key.clone());
+        for (resource, key) in &keys {
+            let stored = stored_key(key);
+            if &stored == key {
+                continue;
+            }
+            let mut tx = pool.begin().await?;
+            crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
+            sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR UPDATE")
+                .bind(resource)
+                .execute(&mut *tx)
+                .await?;
+            done.change_keys += sqlx::query(
+                "UPDATE resource_change SET occurrence_key=$3 WHERE resource_id=$1 AND occurrence_key=$2",
+            )
+            .bind(resource)
+            .bind(key)
+            .bind(&stored)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            tx.commit().await?;
+        }
+    }
+    // Group units' keys, and the UID in each unit's occurrence reference, in batches by unit.
+    let mut last_unit = String::new();
+    loop {
+        let units: Vec<(String, String, String)> = sqlx::query_as("SELECT unit_id,resource_id,occurrence_key FROM group_unit WHERE occurrence_key<>'' AND occurrence_key !~ $1 AND unit_id>$2 ORDER BY unit_id LIMIT 1000")
+            .bind(STAND_IN_KEY)
+            .bind(&last_unit)
+            .fetch_all(pool)
+            .await?;
+        let Some((unit, ..)) = units.last() else {
+            break;
+        };
+        last_unit = unit.clone();
+        for (unit, resource, key) in &units {
+            let stored = stored_key(key);
+            if &stored == key {
+                continue;
+            }
+            let uid = serde_json::from_str::<(String, Value)>(&stored)
+                .map(|(uid, _)| uid)
+                .unwrap_or_default();
+            let mut tx = pool.begin().await?;
+            crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
+            sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR UPDATE")
+                .bind(resource)
+                .execute(&mut *tx)
+                .await?;
+            done.unit_keys += sqlx::query("UPDATE group_unit SET occurrence_key=$3,occurrence=CASE WHEN occurrence ? 'uid' THEN jsonb_set(occurrence,'{uid}',to_jsonb($4::text)) ELSE occurrence END WHERE unit_id=$1 AND occurrence_key=$2")
+                .bind(unit)
+                .bind(key)
+                .bind(&stored)
+                .bind(&uid)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+            tx.commit().await?;
+        }
+    }
+    // Change lines' documents, in batches by sequence number. A line found to change is read
+    // again under the resource's lock, with the own link as it is then, and written only as it
+    // was read: a line cleared meanwhile (a scrub, a deletion) is never written back.
+    let mut last_seq = 0i64;
+    loop {
+        let rows: Vec<HistoryRow> = sqlx::query_as("SELECT c.seq,c.resource_id,c.before,c.after,coalesce(r.uri,'') FROM resource_change c LEFT JOIN resource r ON r.id=c.resource_id WHERE c.seq>$1 AND (c.before IS NOT NULL OR c.after IS NOT NULL) ORDER BY c.seq LIMIT 1000")
+            .bind(last_seq)
+            .fetch_all(pool)
+            .await?;
+        let Some((end, ..)) = rows.last() else {
+            break;
+        };
+        last_seq = *end;
+        for (seq, resource, before, after, own) in rows {
+            if stripped(before.clone(), &own).is_none() && stripped(after.clone(), &own).is_none() {
+                continue;
+            }
+            let mut tx = pool.begin().await?;
+            crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
+            let own: String = sqlx::query_scalar("SELECT uri FROM resource WHERE id=$1 FOR UPDATE")
+                .bind(&resource)
+                .fetch_optional(&mut *tx)
+                .await?
+                .unwrap_or_default();
+            let Some((before, after)) = sqlx::query_as::<_, (Option<Value>, Option<Value>)>(
+                "SELECT before,after FROM resource_change WHERE seq=$1",
+            )
+            .bind(seq)
+            .fetch_optional(&mut *tx)
+            .await?
+            else {
+                continue;
+            };
+            let (new_before, new_after) = (
+                stripped(before.clone(), &own),
+                stripped(after.clone(), &own),
+            );
+            if new_before.is_none() && new_after.is_none() {
+                continue;
+            }
+            done.history_rows += sqlx::query("UPDATE resource_change SET before=$2,after=$3 WHERE seq=$1 AND before IS NOT DISTINCT FROM $4 AND after IS NOT DISTINCT FROM $5")
+                .bind(seq)
+                .bind(new_before.as_ref().or(before.as_ref()))
+                .bind(new_after.as_ref().or(after.as_ref()))
+                .bind(&before)
+                .bind(&after)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+            tx.commit().await?;
+        }
+    }
+    Ok(done)
+}
+/// A change line's document with every credential link but `own` taken out
+/// (`capability::strip`), when that changes it.
+fn stripped(value: Option<Value>, own: &str) -> Option<Value> {
+    let mut value = value?;
+    crate::capability::strip::<Value>(&mut value, own).then_some(value)
+}
 pub(crate) async fn append(
     tx: &mut Transaction<'_, Postgres>,
     id: &str,
@@ -219,6 +451,19 @@ pub(crate) async fn append(
     diff: Diff,
     occurrence: Option<&str>,
 ) -> Result<()> {
+    // A change line names no credential but its resource's own link (`capability::strip`): the
+    // link the resource is read by, never a `url` a stored document says.
+    let own: String = sqlx::query_scalar("SELECT uri FROM resource WHERE id=$1")
+        .bind(id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .unwrap_or_default();
+    let [before, after] = [before, after].map(|value| {
+        value.map(|mut value| {
+            crate::capability::strip::<Value>(&mut value, &own);
+            value
+        })
+    });
     let osm = before
         .as_ref()
         .or(after.as_ref())
@@ -240,9 +485,12 @@ pub(crate) async fn append(
     } else {
         (before, after)
     };
+    // A change line names its occurrence by the UID as it is stored (`stored_key`), whichever
+    // writer passed the key.
+    let occurrence = occurrence.map(stored_key);
     lock_sequence(tx).await?;
     sqlx::query("INSERT INTO resource_change(resource_id,class,fields,before,after,source,osm_type,osm_id,at,occurrence_key) VALUES($1,$2,$3,$4,$5,$6,$7,$8,clock_timestamp(),$9)")
-        .bind(id).bind(diff.class).bind(diff.fields).bind(before).bind(after).bind(source).bind(osm.as_ref().map(|o|&o.osm_type)).bind(osm.as_ref().map(|o|o.id)).bind(occurrence).execute(&mut **tx).await?;
+        .bind(id).bind(diff.class).bind(diff.fields).bind(before).bind(after).bind(source).bind(osm.as_ref().map(|o|&o.osm_type)).bind(osm.as_ref().map(|o|o.id)).bind(occurrence.as_deref()).execute(&mut **tx).await?;
     sqlx::query("INSERT INTO source_state(source,change_totals) VALUES($1,jsonb_build_object($2::text,1)) ON CONFLICT(source) DO UPDATE SET change_totals=source_state.change_totals || jsonb_build_object($2::text,coalesce((source_state.change_totals->>$2)::bigint,0)+1)")
         .bind(source).bind(diff.class).execute(&mut **tx).await?;
     Ok(())
@@ -323,6 +571,7 @@ pub async fn save(
     let row=sqlx::query("SELECT r.*,CASE WHEN r.osm_id IS NULL THEN r.doc ELSE o.versions->r.osm_version END AS accepted FROM resource r LEFT JOIN osm_place o ON r.osm_type=o.osm_type AND r.osm_id=o.osm_id WHERE r.id=$1 AND r.generation=$2 FOR UPDATE OF r")
         .bind(id).bind(generation).fetch_optional(&mut *tx).await?;
     let Some(row) = row else { return Ok(()) };
+    let own: String = row.try_get("uri")?;
     let source = adapter_source
         .map(str::to_owned)
         .or(row.try_get::<Option<String>, _>("resolver")?)
@@ -513,6 +762,9 @@ pub async fn save(
     let before = before
         .map(|v| serde_json::from_value::<ResourceMeta>(v).map(|d| normalize(&d)))
         .transpose()?;
+    // The last step before the write: nothing stored names a credential but the resource's own
+    // link, whatever put it in (this reading, a kept card, a preserved venue).
+    crate::capability::strip_document(&mut doc, &own)?;
     let after = normalize(&doc);
     crate::store::write_document(&mut tx, id, generation, &doc).await?;
     if social_missing {
@@ -695,29 +947,53 @@ pub async fn scrub_never_fetched(pool: &PgPool) -> Result<u64> {
         }
     }
 }
+/// How long one cleanup run deletes for at most: it goes on until a batch comes back short or this
+/// runs out, so cleanup keeps up with what the preview cap admits.
+const CLEANUP_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
+/// The pause between two cleanup batches, so the writers waiting on the write order get in.
+const CLEANUP_PAUSE: std::time::Duration = std::time::Duration::from_millis(50);
 /// Delete resources orphaned for `grace_days`. A derived child's grace counts from its link's
 /// expiry, not from its creation: a lapsed link (a calendar that failed for a day, an event link
 /// past its cap) keeps its child, and its row for a later revival, through the same grace.
 pub async fn delete_orphans(pool: &PgPool, grace_days: u32) -> Result<u64> {
-    // Up to 1000 a run, 100 to a transaction: every other writer waits while one holds the write
-    // order exclusively.
+    delete_orphans_within(pool, grace_days, grace_days.saturating_mul(24), || false).await
+}
+/// `delete_orphans`, with a resource nothing ever referenced (one only previewed) kept for
+/// `preview_grace_hours` instead, at most `grace_days`. Such a resource still has the orphan time
+/// it was created with; a reference clears it, and losing the last reference sets a later one.
+/// Between two batches it stops once `stop` says so (the daemon shutting down).
+pub async fn delete_orphans_within(
+    pool: &PgPool,
+    grace_days: u32,
+    preview_grace_hours: u32,
+    stop: impl Fn() -> bool,
+) -> Result<u64> {
+    // 100 to a transaction: every other writer waits while one holds the write order exclusively,
+    // and goes in during the pause between two.
+    let started = std::time::Instant::now();
     let mut deleted = 0;
-    for _ in 0..10 {
-        let batch = delete_orphan_batch(pool, grace_days, 100).await?;
+    loop {
+        let batch = delete_orphan_batch(pool, grace_days, preview_grace_hours, 100).await?;
         deleted += batch;
-        if batch < 100 {
+        if batch < 100 || started.elapsed() >= CLEANUP_BUDGET || stop() {
             break;
         }
+        tokio::time::sleep(CLEANUP_PAUSE).await;
     }
     Ok(deleted)
 }
-async fn delete_orphan_batch(pool: &PgPool, grace_days: u32, limit: i64) -> Result<u64> {
+async fn delete_orphan_batch(
+    pool: &PgPool,
+    grace_days: u32,
+    preview_grace_hours: u32,
+    limit: i64,
+) -> Result<u64> {
     let mut tx = pool.begin().await?;
     // Orphans are many resources' rows, and deleting them reaches their references, aliases and
     // links.
     crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Exclusive).await?;
-    let rows=sqlx::query("SELECT r.id,r.resolver,r.ever_existed,d.doc FROM resource r JOIN resource_document d ON d.id=r.id WHERE r.orphaned_at<now()-$1*interval '1 day' AND NOT EXISTS(SELECT 1 FROM effective_reference f WHERE f.resource_id=r.id) AND NOT EXISTS(SELECT 1 FROM resource_derivation d JOIN resource p ON p.id=d.parent_id WHERE (d.child_id=r.id OR d.child_id IN(SELECT alias_id FROM resource_alias WHERE root_id=r.id)) AND (d.expires_at IS NULL OR d.expires_at>now()-$1*interval '1 day') AND (p.orphaned_at IS NULL OR p.orphaned_at>=now()-$1*interval '1 day' OR EXISTS(SELECT 1 FROM effective_reference f WHERE f.resource_id=p.id))) AND NOT EXISTS(SELECT 1 FROM resource v WHERE v.venue_id=r.id) AND NOT EXISTS(SELECT 1 FROM occurrence o WHERE o.venue_id=r.id) AND (r.lease_until IS NULL OR r.lease_until<now()) FOR UPDATE OF r SKIP LOCKED LIMIT $2")
-        .bind(grace_days as f64).bind(limit).fetch_all(&mut *tx).await?;
+    let rows=sqlx::query("SELECT r.id,r.resolver,r.ever_existed,d.doc FROM resource r JOIN resource_document d ON d.id=r.id WHERE r.orphaned_at<now()-least($1*24,$3)*interval '1 hour' AND (r.orphaned_at=r.created_at OR r.orphaned_at<now()-$1*interval '1 day') AND NOT EXISTS(SELECT 1 FROM effective_reference f WHERE f.resource_id=r.id) AND NOT EXISTS(SELECT 1 FROM resource_derivation d JOIN resource p ON p.id=d.parent_id WHERE (d.child_id=r.id OR d.child_id IN(SELECT alias_id FROM resource_alias WHERE root_id=r.id)) AND (d.expires_at IS NULL OR d.expires_at>now()-$1*interval '1 day') AND (p.orphaned_at IS NULL OR p.orphaned_at>=now()-$1*interval '1 day' OR EXISTS(SELECT 1 FROM effective_reference f WHERE f.resource_id=p.id))) AND NOT EXISTS(SELECT 1 FROM resource v WHERE v.venue_id=r.id) AND NOT EXISTS(SELECT 1 FROM occurrence o WHERE o.venue_id=r.id) AND (r.lease_until IS NULL OR r.lease_until<now()) FOR UPDATE OF r SKIP LOCKED LIMIT $2")
+        .bind(grace_days as f64).bind(limit).bind(preview_grace_hours as f64).fetch_all(&mut *tx).await?;
     for row in &rows {
         let id: String = row.try_get("id")?;
         let source: Option<String> = row.try_get("resolver")?;
@@ -739,6 +1015,13 @@ async fn delete_orphan_batch(pool: &PgPool, grace_days: u32, limit: i64) -> Resu
             )
             .await?;
         }
+        // What it held (its derived links and their alias roots, its venue, its occurrences'
+        // venues) was never a preview: with its derivation and venue rows gone, a held resource
+        // nothing referenced keeps the full grace from its creation, not the preview grace.
+        sqlx::query("UPDATE resource SET orphaned_at=created_at+interval '1 microsecond' WHERE orphaned_at=created_at AND (id IN (SELECT child_id FROM resource_derivation WHERE parent_id=$1) OR id IN (SELECT a.root_id FROM resource_alias a JOIN resource_derivation d ON d.child_id=a.alias_id WHERE d.parent_id=$1) OR id=(SELECT venue_id FROM resource WHERE id=$1) OR id IN (SELECT venue_id FROM occurrence WHERE resource_id=$1))")
+            .bind(&id)
+            .execute(&mut *tx)
+            .await?;
         // Its hint pairs cascade away with it: the recordings and units that named them refill.
         crate::same_recording::before_delete(&mut tx, &id).await?;
         crate::same_event::before_delete(&mut tx, &id).await?;
@@ -886,5 +1169,53 @@ mod tests {
             diff(Some(&missing), Some(&base)).unwrap().class,
             "uncancelled"
         );
+    }
+    /// A change line names its occurrence by the UID as it is stored, whichever writer passes
+    /// the key: a UID that holds a link carrying a credential is written by its stand-in, a
+    /// plain one as it is.
+    #[sqlx::test(
+        migrations = "../../migrations",
+        fixtures("../tests/fixtures/require_h3.sql")
+    )]
+    async fn a_change_line_names_its_occurrence_by_the_stored_uid(pool: PgPool) {
+        let uri = "https://example.org/feed.ics";
+        let id = crate::store::ensure_resource(&pool, uri).await.unwrap();
+        let secret = "https://cal.example/event?token=SECRET";
+        for uid in [secret, "plain-uid"] {
+            let key = serde_json::to_string(&(uid, "")).unwrap();
+            let mut tx = pool.begin().await.unwrap();
+            append(
+                &mut tx,
+                &id,
+                "ics",
+                None,
+                None,
+                Diff {
+                    class: "created",
+                    fields: vec![],
+                },
+                Some(&key),
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+        }
+        let keys: Vec<String> = sqlx::query_scalar(
+            "SELECT occurrence_key FROM resource_change WHERE resource_id=$1 ORDER BY seq",
+        )
+        .bind(&id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            keys,
+            [
+                stored_key(&serde_json::to_string(&(secret, "")).unwrap()),
+                serde_json::to_string(&("plain-uid", "")).unwrap()
+            ]
+        );
+        assert!(keys[0].starts_with("[\"uid:"), "{keys:?}");
+        assert!(!keys.concat().contains("SECRET"), "{keys:?}");
+        assert_eq!(stored_key("not a key"), "not a key");
     }
 }
