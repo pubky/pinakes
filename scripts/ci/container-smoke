@@ -7,10 +7,13 @@ name="pinakes-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 volume="${name}-dumps"
 psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -c 'CREATE DATABASE pinakes_container_smoke'
 # A local-only test socket, with no passwords or registry credentials.
-smoke_db='postgresql://pinakes_ci@/pinakes_container_smoke?host=/run/postgresql&port=55432'
+smoke_db='postgresql:///pinakes_container_smoke?host=/run/postgresql&port=55432&user=pinakes_ci'
 cleanup() {
-  docker logs "$name"
-  docker stop --time 30 "$name" >/dev/null
+  local status=$?
+  docker logs "$name" || true
+  docker rm --force "$name" >/dev/null || true
+  docker volume rm "$volume" >/dev/null || true
+  exit "$status"
 }
 trap cleanup EXIT
 printf '[http]\ncontact = "ci@example.invalid"\n' > "$RUNNER_TEMP/pinakes-smoke.toml"
@@ -65,4 +68,8 @@ listeners = [line.split()[1] for line in (p / 'pinakes-tcp.txt').read_text().spl
 assert '0100007F:2382' in listeners, listeners
 assert all(v == '0100007F:2382' for v in listeners if v.endswith(':2382')), listeners
 PY
-printf '%s\n' 'Container smoke passed: nonroot release daemon, real schema/API/dump, loopback admin.'
+# SIGTERM is a graceful shutdown: every task must finish and the daemon exit 0.
+docker stop --time 30 "$name" >/dev/null
+exit_code=$(docker inspect --format '{{.State.ExitCode}}' "$name")
+[[ "$exit_code" == 0 ]] || { printf 'pinakesd exited %s after SIGTERM\n' "$exit_code" >&2; exit 1; }
+printf '%s\n' 'Container smoke passed: nonroot release daemon, real schema/API/dump, loopback admin, clean stop.'

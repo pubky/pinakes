@@ -8,9 +8,13 @@ Configuration names come from [`pinakes.example.toml`](../pinakes.example.toml);
 
 The Dockerfile builds the release `pinakesd` binary for the requested platform. The Debian
 runtime runs as UID/GID `10001:10001`, includes CA certificates, and exposes only port 8090.
-It defaults to `listen = "0.0.0.0:8090"`, `admin_listen = "127.0.0.1:9090"`, and
-`osm.dump_dir = "/var/lib/pinakes/dumps"` through environment overrides. The image contains
-no operator configuration or credentials. PostgreSQL and the other services below run separately.
+The image sets `listen = "0.0.0.0:8090"`, `admin_listen = "127.0.0.1:9090"` and
+`osm.dump_dir = "/var/lib/pinakes/dumps"` as `ENV` variables (`PINAKES__LISTEN`,
+`PINAKES__ADMIN_LISTEN`, `PINAKES__OSM__DUMP_DIR`). Environment variables override the TOML file,
+so these three keys in a mounted TOML file have no effect: change them with
+`--env PINAKES__LISTEN=…`, `--env PINAKES__ADMIN_LISTEN=…` or `--env PINAKES__OSM__DUMP_DIR=…`.
+The image contains no operator configuration or credentials. PostgreSQL and the other services
+below run separately.
 
 Build and check the local image on a machine with Docker and enough build space:
 
@@ -64,9 +68,12 @@ below before upgrades. CLI commands replace the daemon arguments after the image
 ## CI and image publishing
 
 [CI](../.github/workflows/ci.yml) runs on pull requests, pushes to `main`, and `v*.*.*` tags.
-It provisions a disposable PostgreSQL 16 cluster named `pinakesci` from the signed PGDG repository, pins the h3
-package to 4.2.3, checks PostGIS and the h3 function, then runs the full `scripts/test` gate and
-`scripts/e2e --mock`. Workflow contracts, actionlint, ShellCheck and Hadolint also run. Rust is
+It provisions a disposable PostgreSQL 16 cluster named `pinakesci` from the signed PGDG repository.
+h3 stays on the documented minimum, upstream 4.2.3 (the newest PGDG build of it, from the signed
+PGDG archive once the main repository drops it). The cluster must report h3 4.2.3+ and PostGIS
+3.4+, compared as numbers, and run the h3 function; then CI runs the full `scripts/test` gate and
+`scripts/e2e --mock`. Workflow contracts, actionlint, ShellCheck, Hadolint and a whitespace check
+of the change against `main` also run. Rust is
 1.98.1 in CI and the image build. Native amd64 and arm64 image jobs build without registry login
 or publishing and start the actual release daemon against the real database. They check the public API, ODbL
 dump volume, nonroot user and loopback admin binding. No public provider or test identity is needed.
@@ -78,6 +85,23 @@ runners (`ubuntu-24.04` and `ubuntu-24.04-arm`). GitHub supports these runners f
 repositories ([runner support](https://github.blog/changelog/2026-01-29-arm64-standard-runners-are-now-available-in-private-repositories/)).
 The Dockerfile compiles within each target platform's Rust image and ignores the shared action's
 `TARGETARCH` build argument. Both platform jobs must pass their real database/API smoke tests.
+That release build is separate from the PR image build, so each platform job then pulls the image
+it pushed and runs the same smoke test on it; the multiarch tags only move after both pass. A failed
+smoke test leaves its `<full-commit-SHA>-<arch>` tag in the registry, never promoted.
+
+Before any registry login, the publish and manifest jobs check that `main` itself pointed to the
+tagged commit, on its first-parent line (`scripts/ci/release-on-main`). A tag on a feature branch,
+or on a commit that only reached `main` inside a merged branch, publishes nothing. That check lives in
+the tagged commit's own workflow, so it catches mistakes, not someone who can push tags. Owner
+prerequisites, not set by this repository's files:
+
+- A tag ruleset for `refs/tags/v*` that lets only release maintainers create, update or delete
+  those tags.
+- Optionally, a `release` Environment holding the two Docker Hub secrets, limited to `v*` tags
+  (with required reviewers if wanted). Create it first, move the secrets into it, then add
+  `environment: release` to the `publish` and `manifest` jobs: naming an Environment in the
+  workflow creates it with no protection rules. `scripts/ci/test_contracts.py` refuses an
+  `environment:` until then; change that contract in the same commit.
 
 Provision repository or explicitly granted organization Actions secrets before publishing:
 

@@ -1,14 +1,11 @@
-# Only inputs needed to compile pinakesd enter the build context.
+# The build context: the workspace manifests and lockfile, all of crates/ (sources, build
+# scripts, examples, tests and fixtures: Cargo loads every target a manifest declares, and
+# crates/pinakes-core declares the e2e_stack example), and the compile-time inputs in data/
+# and migrations/. Everything else stays out: local config, .env files, target/, e2e/, docs.
+# A rule for a directory covers everything below it; test_contracts.py checks every rule.
 **
 !Cargo.toml
 !Cargo.lock
 !crates/
-!crates/*/
-!crates/*/Cargo.toml
-!crates/*/build.rs
-!crates/*/src/
-!crates/*/src/**
 !data/
-!data/**
 !migrations/
-!migrations/**

@@ -10,11 +10,16 @@ curl --fail --silent --show-error https://www.postgresql.org/media/keys/ACCC4CF8
 fingerprint=$(gpg --show-keys --with-colons "$key" | awk -F: '$1 == "fpr" { print $10; exit }')
 [[ "$fingerprint" == B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8 ]]
 sudo install -m 644 "$key" /usr/share/keyrings/pinakes-pgdg.asc
-printf '%s\n' 'deb [signed-by=/usr/share/keyrings/pinakes-pgdg.asc] https://apt.postgresql.org/pub/repos/apt noble-pgdg main' | sudo tee /etc/apt/sources.list.d/pinakes-pgdg.list >/dev/null
+# PGDG keeps only the newest builds; its archive, signed by the same key, keeps every one.
+printf '%s\n' \
+  'deb [signed-by=/usr/share/keyrings/pinakes-pgdg.asc] https://apt.postgresql.org/pub/repos/apt noble-pgdg main' \
+  'deb [signed-by=/usr/share/keyrings/pinakes-pgdg.asc] https://apt-archive.postgresql.org/pub/repos/apt noble-pgdg-archive main' |
+  sudo tee /etc/apt/sources.list.d/pinakes-pgdg.list >/dev/null
 sudo apt-get update
+# h3 stays on the documented minimum, upstream 4.2.3: apt takes the newest build of it.
 sudo apt-get install -y --no-install-recommends \
   postgresql-16 postgresql-client-16 postgresql-16-postgis-3 postgresql-contrib-16 \
-  postgresql-16-h3=4.2.3-4.pgdg24.04+1 ripgrep prometheus shellcheck python3-venv
+  'postgresql-16-h3=4.2.3-*' ripgrep prometheus shellcheck python3-venv
 # This cluster's local socket accepts the disposable CI role from test containers too.
 # TCP remains on loopback and password-authenticated. No production credentials exist here.
 # Keep the name free of dashes: systemd's %I turns them into path separators.
@@ -24,11 +29,13 @@ sudo -u postgres /usr/lib/postgresql/16/bin/createuser -p 55432 --superuser pina
 CREATE EXTENSION postgis;
 CREATE EXTENSION pg_trgm;
 CREATE EXTENSION h3;
+-- Versions compare as numbers (as text, '3.10' sorts before '3.4'); a missing one fails.
 DO $$ BEGIN
-  IF (SELECT extversion FROM pg_extension WHERE extname = 'h3') <> '4.2.3' THEN
-    RAISE EXCEPTION 'CI requires h3 4.2.3';
+  IF coalesce((SELECT string_to_array(extversion, '.')::int[] FROM pg_extension WHERE extname = 'h3'),
+              '{}') < ARRAY[4, 2, 3] THEN
+    RAISE EXCEPTION 'CI requires h3 >= 4.2.3';
   END IF;
-  IF postgis_lib_version()::text < '3.4' THEN
+  IF coalesce((string_to_array(postgis_lib_version(), '.'))[1:2]::int[], '{}') < ARRAY[3, 4] THEN
     RAISE EXCEPTION 'CI requires PostGIS >= 3.4';
   END IF;
   PERFORM h3_latlng_to_cell(point(52.52, 13.405), 7);

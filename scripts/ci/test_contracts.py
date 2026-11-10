@@ -3,8 +3,10 @@ from pathlib import Path
 import json
 import os
 import tempfile
+import gzip
 import re
 import subprocess
+import tomllib
 import unittest
 
 import yaml
@@ -18,6 +20,93 @@ def workflow():
 
 def steps(job):
     return '\n'.join(step.get('run', '') for step in job['steps'])
+
+
+def step_index(job, predicate, what):
+    found = [i for i, step in enumerate(job['steps']) if predicate(step)]
+    if not found:
+        raise AssertionError(f'no step {what}')
+    return found[0]
+
+
+def git(cwd, *args):
+    return subprocess.run(['git', *args], cwd=cwd, check=True, capture_output=True, text=True,
+                          env={**os.environ, 'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_NOSYSTEM': '1',
+                               'GIT_AUTHOR_NAME': 'ci', 'GIT_AUTHOR_EMAIL': 'ci@example.invalid',
+                               'GIT_COMMITTER_NAME': 'ci', 'GIT_COMMITTER_EMAIL': 'ci@example.invalid'}).stdout.strip()
+
+
+def commit(repo, name, text, message):
+    (Path(repo) / name).write_text(text)
+    git(repo, 'add', name)
+    git(repo, 'commit', '--quiet', '--no-gpg-sign', '-m', message)
+    return git(repo, 'rev-parse', 'HEAD')
+
+
+def dockerignore_rules(text):
+    """Parse .dockerignore the way moby/patternmatcher does (no character classes or escapes)."""
+    rules = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        exclusion = line.startswith('!')
+        pattern = line[1:].strip() if exclusion else line
+        if '[' in pattern or '\\' in pattern:
+            raise AssertionError(f'contract matcher does not model {line!r}')
+        pattern = os.path.normpath(pattern).lstrip('/')
+        regex, i = '^', 0
+        while i < len(pattern):
+            if pattern.startswith('**', i):
+                i += 2
+                if pattern.startswith('/', i):
+                    i += 1
+                regex += '.*' if i == len(pattern) else '(.*/)?'
+                continue
+            ch = pattern[i]
+            regex += '[^/]*' if ch == '*' else '[^/]' if ch == '?' else re.escape(ch)
+            i += 1
+        rules.append((line, exclusion, re.compile(regex + '$')))
+    return rules
+
+
+def in_build_context(rules, path):
+    """Docker's MatchesOrParentMatches: the last rule matching the path or a parent decides."""
+    parts = path.split('/')
+    candidates = ['/'.join(parts[:n]) for n in range(1, len(parts) + 1)]
+    ignored = False
+    for _, exclusion, regex in rules:
+        if any(regex.match(c) for c in candidates):
+            ignored = not exclusion
+    return not ignored
+
+
+def cargo_target_paths():
+    """Every manifest, build script and target file Cargo reads to load the workspace."""
+    workspace = tomllib.loads((ROOT / 'Cargo.toml').read_text())
+    paths = {'Cargo.toml', 'Cargo.lock'}
+    for member in workspace['workspace']['members']:
+        crate = ROOT / member
+        manifest = tomllib.loads((crate / 'Cargo.toml').read_text())
+        paths.add(f'{member}/Cargo.toml')
+        build = manifest['package'].get('build', 'build.rs' if (crate / 'build.rs').exists() else None)
+        if build:
+            paths.add(f'{member}/{build}')
+        lib = manifest.get('lib', {}).get('path', 'src/lib.rs')
+        if (crate / lib).exists():
+            paths.add(f'{member}/{lib}')
+        if (crate / 'src/main.rs').exists():
+            paths.add(f'{member}/src/main.rs')
+        for kind, folder in [('bin', 'src/bin'), ('example', 'examples'), ('test', 'tests'), ('bench', 'benches')]:
+            for target in manifest.get(kind, []):
+                path = target.get('path') or next(
+                    (p for p in [f'{folder}/{target["name"]}.rs', f'{folder}/{target["name"]}/main.rs']
+                     if (crate / p).exists()), f'{folder}/{target["name"]}.rs')
+                paths.add(f'{member}/{path}')
+            # Targets Cargo discovers on its own are read when present.
+            paths.update(str(p.relative_to(ROOT)) for p in (crate / folder).glob('*.rs'))
+            paths.update(str(p.relative_to(ROOT)) for p in (crate / folder).glob('*/main.rs'))
+    return paths
 
 
 class Quality(unittest.TestCase):
@@ -50,6 +139,91 @@ class Quality(unittest.TestCase):
         for required in ['postgresql-16-postgis-3', 'postgresql-16-h3=4.2.3-',
                          'pg_trgm', 'h3_latlng_to_cell', '4.2.3', 'ON_ERROR_STOP=1']:
             self.assertIn(required, s)
+
+    def test_extension_versions_are_numeric_and_survive_pgdg_rotation(self):
+        s = (ROOT / 'scripts/ci/setup-postgres').read_text()
+        # Any PGDG build of upstream h3 4.2.3 (apt prefix match), from the signed archive
+        # once the main repository has rotated it out.
+        self.assertIn("'postgresql-16-h3=4.2.3-*'", s)
+        self.assertNotRegex(s, r'postgresql-16-h3=4\.2\.3-[0-9]')
+        self.assertIn('deb [signed-by=/usr/share/keyrings/pinakes-pgdg.asc] '
+                      'https://apt-archive.postgresql.org/pub/repos/apt noble-pgdg-archive main', s)
+        # The documented requirement, compared as numbers: '3.10' < '3.4' as text.
+        self.assertRegex(s, r"coalesce\(\(SELECT string_to_array\(extversion, '\.'\)::int\[\] FROM pg_extension "
+                            r"WHERE extname = 'h3'\),\s+'\{\}'\) < ARRAY\[4, 2, 3\] THEN")
+        self.assertIn("coalesce((string_to_array(postgis_lib_version(), '.'))[1:2]::int[], '{}') < ARRAY[3, 4]", s)
+        self.assertNotRegex(s, r"(<>|<|>|=) *'[0-9]+(\.[0-9]+)+'")
+        self.assertIn('h3 4.2.3+', (ROOT / 'docs/deployment.md').read_text())
+
+    def test_whitespace_check_covers_the_committed_change(self):
+        quality = workflow()['jobs']['quality']
+        self.assertEqual(quality['steps'][0]['with']['fetch-depth'], '0')
+        lint = quality['steps'][step_index(quality, lambda st: st.get('run') == 'scripts/ci/check', 'running scripts/ci/check')]
+        self.assertEqual(lint['env']['PINAKES_CHECK_BASE'],
+                         "${{ github.event_name == 'push' && github.event.before || '' }}")
+        self.assertIn('scripts/ci/diff-check', (ROOT / 'scripts/ci/check').read_text())
+        (ROOT / '.runtime').mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=ROOT / '.runtime', prefix='ci-diff-') as d:
+            origin, clone = Path(d) / 'origin', Path(d) / 'clone'
+            origin.mkdir()
+            git(origin, 'init', '--quiet', '--initial-branch=main')
+            commit(origin, 'a.txt', 'clean\n', 'base')
+            main = commit(origin, 'b.txt', 'clean\n', 'main')
+            git(origin, 'checkout', '--quiet', '-b', 'feature')
+            commit(origin, 'c.txt', 'trailing \n', 'whitespace')
+            feature = commit(origin, 'd.txt', 'clean\n', 'later clean commit')
+            git(d, 'clone', '--quiet', '--no-checkout', str(origin), str(clone))
+
+            def check(sha, base):
+                git(clone, 'checkout', '--quiet', '--detach', sha)
+                env = {**os.environ, 'PINAKES_CHECK_BASE': base,
+                       'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_NOSYSTEM': '1'}
+                return subprocess.run([str(ROOT / 'scripts/ci/diff-check')], cwd=clone, env=env,
+                                      capture_output=True, text=True)
+            # A clean worktree: plain `git diff --check` would pass. The PR range must not.
+            self.assertNotEqual(check(feature, main).returncode, 0)
+            self.assertNotEqual(check(feature, '').returncode, 0)
+            self.assertEqual(check(main, '').returncode, 0)
+            # A new tag reports an all-zero before: HEAD on main checks its own commit.
+            self.assertEqual(check(main, '0' * 40).returncode, 0)
+            git(origin, 'checkout', '--quiet', 'main')
+            git(origin, 'merge', '--quiet', '--no-ff', '--no-gpg-sign', '-m', 'merge', 'feature')
+            git(clone, 'fetch', '--quiet', 'origin')
+            merged = git(clone, 'rev-parse', 'refs/remotes/origin/main')
+            self.assertNotEqual(check(merged, main).returncode, 0)
+            self.assertNotEqual(check(merged, '0' * 40).returncode, 0)
+            # Recorded fixtures and licence texts stay byte-exact.
+            git(origin, 'checkout', '--quiet', '-b', 'fixtures')
+            (origin / 'crates/core/tests/fixtures/x').mkdir(parents=True)
+            (origin / 'data').mkdir()
+            commit(origin, 'crates/core/tests/fixtures/x/feed.xml', 'recorded \n\n', 'fixture')
+            fixture = commit(origin, 'data/LICENSE.x.md', 'licence \n', 'licence')
+            git(clone, 'fetch', '--quiet', 'origin')
+            self.assertEqual(check(fixture, '').returncode, 0, check(fixture, '').stdout)
+            # A PR merge commit: only its own change counts, not main's other commits.
+            git(origin, 'checkout', '--quiet', 'main')
+            commit(origin, 'e.txt', 'clean\n', 'main moves on')
+            git(origin, 'checkout', '--quiet', '-b', 'pr')
+            commit(origin, 'f.txt', 'clean\n', 'clean PR')
+            git(origin, 'checkout', '--quiet', '--detach', 'main')
+            git(origin, 'merge', '--quiet', '--no-ff', '--no-gpg-sign', '-m', 'pr merge', 'pr')
+            pr_merge = git(origin, 'rev-parse', 'HEAD')
+            git(clone, 'fetch', '--quiet', 'origin', f'+{pr_merge}:refs/remotes/pull/1/merge')
+            self.assertEqual(check(pr_merge, '').returncode, 0)
+
+    def test_ci_database_urls_parse_as_urls(self):
+        # sqlx's PgConnectOptions and the tests' url::Url::parse follow WHATWG: a user before an
+        # empty host is EmptyHost (url 2.5.8 parser.rs after_double_slash). Hosted run
+        # 42741557415 failed 11 sqlx::test tests on exactly that.
+        urls = [workflow()['env']['DATABASE_URL']]
+        urls += re.findall(r"smoke_db='([^']+)'", (ROOT / 'scripts/ci/container-smoke').read_text())
+        self.assertEqual(len(urls), 2)
+        for url in urls:
+            authority = re.match(r'^postgresql://([^/?#]*)', url)
+            self.assertIsNotNone(authority, url)
+            userinfo, at, host = authority[1].rpartition('@')
+            self.assertFalse(at and not host, f'{url}: user before an empty host')
+            self.assertRegex(url, r'^postgresql:///[a-z_]+\?host=/(var/)?run/postgresql&port=55432&user=pinakes_ci$')
 
     def test_cluster_service_resolves_to_its_config_directory(self):
         script = (ROOT / 'scripts/ci/setup-postgres').read_text()
@@ -103,8 +277,32 @@ class Container(unittest.TestCase):
         self.assertNotIn('COPY . ', s)
         context = (ROOT / '.dockerignore').read_text().splitlines()
         self.assertIn('**', context)
-        self.assertIn('!crates/*/build.rs', context)
         self.assertNotIn('!.env', context)
+
+    def test_build_context_holds_every_cargo_target_and_no_dead_rule(self):
+        text = (ROOT / '.dockerignore').read_text()
+        rules = dockerignore_rules(text)
+        tracked = subprocess.run(['git', 'ls-files'], cwd=ROOT, check=True, capture_output=True,
+                                 text=True).stdout.splitlines()
+        # Cargo fails to load a manifest whose declared target file is missing (e2e_stack).
+        targets = cargo_target_paths()
+        self.assertIn('crates/pinakes-core/examples/e2e_stack.rs', targets)
+        for path in sorted(targets) + ['data/type-mappings.json', 'crates/pinakes-core/src/agents/guide.md']:
+            self.assertTrue(in_build_context(rules, path), path)
+        self.assertTrue(any(p.startswith('migrations/') and in_build_context(rules, p) for p in tracked))
+        for path in ['.env', 'pinakes.toml', '.git/config', 'target/release/pinakesd',
+                     'e2e/node_modules/x.js', 'docs/deployment.md', '.runtime/x', 'Dockerfile']:
+            self.assertFalse(in_build_context(rules, path), path)
+        # Every rule changes what is sent: a rule hidden by a broader one is not a boundary.
+        probe = tracked + ['.env', 'target/release/pinakesd']
+        context = {p for p in probe if in_build_context(rules, p)}
+        for i, (line, _, _) in enumerate(rules):
+            without = rules[:i] + rules[i + 1:]
+            changed = {p for p in probe if in_build_context(without, p)} != context
+            self.assertTrue(changed, f'.dockerignore rule {line!r} changes nothing')
+        # The comment must not promise a narrower context than the rules give.
+        self.assertTrue(any(in_build_context(rules, p) for p in tracked if '/tests/' in p))
+        self.assertIn('tests', text.split('**')[0])
 
     def test_smoke_uses_real_database_api_and_dump(self):
         w = workflow()
@@ -121,6 +319,65 @@ class Container(unittest.TestCase):
                          '--config /etc/pinakes/pinakes.toml']:
             self.assertIn(required, s)
 
+
+    def test_smoke_cleans_up_and_requires_a_clean_exit(self):
+        # Recording fakes for docker, curl, psql and sleep: no daemon, database or network.
+        (ROOT / '.runtime').mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=ROOT / '.runtime', prefix='ci-smoke-') as d:
+            p = Path(d)
+            (p / 'bin').mkdir()
+            fakes = {
+                'docker': """#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+a = sys.argv[1:]
+with (Path(os.environ['FAKE_DIR']) / 'docker.jsonl').open('a') as f:
+    f.write(json.dumps(a) + '\\n')
+if a[0] == 'exec' and a[2:] == ['id', '-u']:
+    print('10001')
+elif a[0] == 'exec' and a[2:] == ['cat', '/proc/net/tcp']:
+    print('  sl  local_address rem_address   st')
+    print('   0: 0100007F:2382 00000000:0000 0A')
+    print('   1: 00000000:1F9A 00000000:0000 0A')
+elif a[:2] == ['image', 'inspect']:
+    print(json.dumps({'8090/tcp': {}}, separators=(',', ':')))
+elif a[0] == 'inspect':
+    print(os.environ['FAKE_EXIT'])
+""",
+                'curl': """#!/usr/bin/env python3
+import gzip, json, os, sys
+url = sys.argv[-1]
+if os.environ.get('FAKE_DOWN'):
+    sys.exit(7)
+if url.endswith('/v1/info'):
+    print(json.dumps({'version': '0.1.0'}))
+elif '/v1/search' in url:
+    print(json.dumps({'results': []}))
+elif url.endswith('.ndjson.gz'):
+    sys.stdout.buffer.write(gzip.compress(json.dumps({'licence': 'ODbL-1.0'}).encode() + b'\\n'))
+""",
+                'psql': '#!/bin/sh\nexit 0\n',
+                'sleep': '#!/bin/sh\nexit 0\n',
+            }
+            for name, body in fakes.items():
+                (p / 'bin' / name).write_text(body)
+                (p / 'bin' / name).chmod(0o755)
+            name = 'pinakes-smoke-7-1'
+            for exit_code, down, ok in [('0', '', True), ('143', '', False), ('0', '1', False)]:
+                (p / 'docker.jsonl').write_text('')
+                env = {**os.environ, 'PATH': f'{p / "bin"}{os.pathsep}{os.environ["PATH"]}',
+                       'GITHUB_ACTIONS': 'true', 'RUNNER_TEMP': d, 'FAKE_DIR': d, 'GITHUB_RUN_ID': '7',
+                       'GITHUB_RUN_ATTEMPT': '1', 'DATABASE_URL': 'postgresql://ci@/postgres',
+                       'FAKE_EXIT': exit_code, 'FAKE_DOWN': down}
+                run = subprocess.run(['scripts/ci/container-smoke', 'pinakes:ci'], cwd=ROOT, env=env,
+                                     capture_output=True, text=True)
+                calls = [json.loads(line) for line in (p / 'docker.jsonl').read_text().splitlines()]
+                self.assertEqual(run.returncode == 0, ok, (exit_code, down, run.stdout, run.stderr))
+                # The container and its volume are removed on success and on failure.
+                self.assertEqual(calls[-2:], [['rm', '--force', name], ['volume', 'rm', f'{name}-dumps']])
+                if not down:
+                    stop = calls.index(['stop', '--time', '30', name])
+                    self.assertEqual(calls[stop + 1], ['inspect', '--format', '{{.State.ExitCode}}', name])
 
 class Release(unittest.TestCase):
     def test_release_waits_for_gates_and_only_tags_get_secrets(self):
@@ -142,6 +399,72 @@ class Release(unittest.TestCase):
         self.assertEqual(manifest['if'], job['if'])
         self.assertIn('scripts/ci/publish-manifest', steps(manifest))
         self.assertNotIn('secrets.', str(job.get('env', {})))
+
+    def test_publish_smokes_the_exact_pushed_platform_image(self):
+        job = workflow()['jobs']['publish']
+        pushed = 'registry-1.docker.io/synonymsoft/pinakes:${{ github.sha }}-${{ matrix.arch }}'
+        shared = step_index(job, lambda st: st.get('uses', '').startswith('pubky/ci-workflows/'), 'publishing')
+        postgres = step_index(job, lambda st: st.get('run') == 'scripts/ci/setup-postgres', 'provisioning PostgreSQL')
+        pull = step_index(job, lambda st: 'docker pull' in st.get('run', ''), 'pulling the image')
+        smoke = step_index(job, lambda st: 'scripts/ci/container-smoke' in st.get('run', ''), 'smoking the image')
+        self.assertLess(shared, postgres)
+        self.assertLess(postgres, pull)
+        self.assertLess(pull, smoke)
+        for i in [pull, smoke]:
+            self.assertEqual(job['steps'][i]['env']['PUBLISHED_IMAGE'], pushed)
+            self.assertIn('"$PUBLISHED_IMAGE"', job['steps'][i]['run'])
+        self.assertIn('--platform "linux/$PUBLISHED_ARCH"', job['steps'][pull]['run'])
+        self.assertEqual(job['steps'][pull]['env']['PUBLISHED_ARCH'], '${{ matrix.arch }}')
+        self.assertEqual(job['steps'][smoke]['run'], 'scripts/ci/container-smoke "$PUBLISHED_IMAGE"')
+        # manifest promotes only after every platform job, smoke included, succeeded.
+        self.assertEqual(set(workflow()['jobs']['manifest']['needs']), {'publish'})
+
+    def test_tags_publish_only_commits_on_main(self):
+        w = workflow()
+        for name in ['publish', 'manifest']:
+            job = w['jobs'][name]
+            self.assertNotIn('environment', job)
+            # Full history and every branch (origin/main included) from checkout's own fetch.
+            self.assertEqual(job['steps'][0]['with']['fetch-depth'], '0')
+            check = step_index(job, lambda st: st.get('run') == 'scripts/ci/release-on-main', 'checking main')
+            login = step_index(job, lambda st: st.get('uses', '').startswith('docker/login-action@'), 'logging in')
+            self.assertLess(check, login)
+            self.assertNotIn('secrets.', str(job['steps'][:login]))
+        self.assertTrue(all('environment' not in job for job in w['jobs'].values()))
+        (ROOT / '.runtime').mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=ROOT / '.runtime', prefix='ci-main-') as d:
+            origin, clone = Path(d) / 'origin', Path(d) / 'clone'
+            origin.mkdir()
+            git(origin, 'init', '--quiet', '--initial-branch=main')
+            first = commit(origin, 'a.txt', 'a\n', 'first')
+            on_main = commit(origin, 'b.txt', 'b\n', 'second')
+            git(origin, 'checkout', '--quiet', '-b', 'feature', first)
+            feature = commit(origin, 'c.txt', 'c\n', 'feature only')
+            git(origin, 'checkout', '--quiet', 'main')
+
+            def run(repo, sha):
+                env = {**os.environ, 'GITHUB_SHA': sha, 'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_NOSYSTEM': '1'}
+                return subprocess.run([str(ROOT / 'scripts/ci/release-on-main')], cwd=repo, env=env,
+                                      capture_output=True, text=True)
+            git(origin, 'checkout', '--quiet', '-b', 'merged', on_main)
+            inside = commit(origin, 'd.txt', 'd\n', 'reviewed only as part of the merge')
+            git(origin, 'checkout', '--quiet', 'main')
+            git(origin, 'merge', '--quiet', '--no-ff', '--no-gpg-sign', '-m', 'merge', 'merged')
+            merge = git(origin, 'rev-parse', 'HEAD')
+            git(d, 'clone', '--quiet', '--no-local', str(origin), str(clone))
+            self.assertEqual(run(clone, merge).returncode, 0)
+            self.assertNotEqual(run(clone, inside).returncode, 0)
+            self.assertEqual(run(clone, on_main).returncode, 0)
+            self.assertEqual(run(clone, first).returncode, 0)
+            self.assertNotEqual(run(clone, feature).returncode, 0)
+            self.assertNotEqual(run(clone, 'f' * 40).returncode, 0)
+            self.assertNotEqual(run(clone, 'main').returncode, 0)
+            # Fail closed without main or with shallow history.
+            git(clone, 'update-ref', '-d', 'refs/remotes/origin/main')
+            self.assertNotEqual(run(clone, on_main).returncode, 0)
+            shallow = Path(d) / 'shallow'
+            git(d, 'clone', '--quiet', '--depth=1', '--no-single-branch', f'file://{origin}', str(shallow))
+            self.assertNotEqual(run(shallow, on_main).returncode, 0)
 
     def test_manifest_tags_and_failure_before_promotion(self):
         # A recording Docker CLI tests the actual shell command boundary without

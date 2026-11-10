@@ -18,7 +18,9 @@ env:
   CARGO_PROFILE_DEV_DEBUG: '0'
   CARGO_PROFILE_TEST_DEBUG: '0'
   CARGO_INCREMENTAL: '0'
-  DATABASE_URL: postgresql://pinakes_ci@/postgres?host=/var/run/postgresql&port=55432
+  # The repository's socket form, user in the query: a user before an empty host is not a URL
+  # (WHATWG/url crate EmptyHost), so sqlx and the tests' url::Url::parse would refuse it.
+  DATABASE_URL: postgresql:///postgres?host=/var/run/postgresql&port=55432&user=pinakes_ci
 
 jobs:
   quality:
@@ -29,6 +31,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          # The whitespace check compares this change with where it left main.
+          fetch-depth: 0
       - name: Provision PostgreSQL, PostGIS and h3
         run: scripts/ci/setup-postgres
       - name: Install Rust
@@ -47,6 +51,10 @@ jobs:
           "$RUNNER_TEMP/ci-python/bin/pip" install -r scripts/ci/requirements.txt
           "$RUNNER_TEMP/ci-python/bin/python" scripts/ci/test_contracts.py
       - name: Workflow, shell and Dockerfile lint
+        env:
+          # Pushes to main give the previous tip. PRs (whose merge commit sits on the current
+          # main), tags (all-zero before) and new refs leave it to diff-check: origin/main.
+          PINAKES_CHECK_BASE: ${{ github.event_name == 'push' && github.event.before || '' }}
         run: scripts/ci/check
       - name: Full existing test gate
         run: scripts/test
@@ -103,11 +111,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          # Every branch with full history, so origin/main is fetched in this job.
+          fetch-depth: 0
       - name: Validate release tag
         id: release
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: python3 scripts/ci/release-tag "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+      - name: Require the tagged commit on main
+        run: scripts/ci/release-on-main
       - name: Log in to Docker Hub
         uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
         with:
@@ -130,7 +142,18 @@ jobs:
           platforms: linux/${{ matrix.arch }}
           cache_from: type=gha,scope=pinakes-release-${{ matrix.arch }}
           cache_to: type=gha,mode=max,scope=pinakes-release-${{ matrix.arch }}
-
+      # The pushed bytes come from a separate build: run them before manifest promotes them.
+      - name: Provision PostgreSQL, PostGIS and h3
+        run: scripts/ci/setup-postgres
+      - name: Pull the published platform image
+        env:
+          PUBLISHED_IMAGE: registry-1.docker.io/synonymsoft/pinakes:${{ github.sha }}-${{ matrix.arch }}
+          PUBLISHED_ARCH: ${{ matrix.arch }}
+        run: docker pull --platform "linux/$PUBLISHED_ARCH" "$PUBLISHED_IMAGE"
+      - name: Smoke the published platform image against PostgreSQL
+        env:
+          PUBLISHED_IMAGE: registry-1.docker.io/synonymsoft/pinakes:${{ github.sha }}-${{ matrix.arch }}
+        run: scripts/ci/container-smoke "$PUBLISHED_IMAGE"
 
   manifest:
     name: Publish multiarch manifest
@@ -142,11 +165,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          # Every branch with full history, so origin/main is fetched in this job.
+          fetch-depth: 0
       - name: Validate release tag
         id: release
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: python3 scripts/ci/release-tag "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+      - name: Require the tagged commit on main
+        run: scripts/ci/release-on-main
       - name: Log in to Docker Hub
         uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
         with:

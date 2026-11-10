@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Publish only a commit that main itself pointed to. The tag's workflow comes from the tagged
+# commit, so this stops mistaken tags, not hostile ones: the v* tag ruleset does that
+# (docs/deployment.md). Read-only; runs before any registry login.
+set -euo pipefail
+[[ "${GITHUB_SHA:-}" =~ ^[0-9a-f]{40}$ ]] || { echo '::error::GITHUB_SHA must be a full commit SHA' >&2; exit 1; }
+# checkout's fetch-depth 0 fetched every branch into refs/remotes/origin in this job.
+[[ "$(git rev-parse --is-shallow-repository)" == false ]] || { echo '::error::history is shallow; fetch with depth 0' >&2; exit 1; }
+main=$(git rev-parse --verify --quiet 'refs/remotes/origin/main^{commit}') || { echo '::error::origin/main was not fetched' >&2; exit 1; }
+if ! git merge-base --is-ancestor "$GITHUB_SHA" "$main"; then
+  printf '::error::Tagged commit %s is not on main (%s); nothing is published.\n' "$GITHUB_SHA" "$main" >&2
+  exit 1
+fi
+# Merged branches bring their own commits into main's history; only main's first-parent
+# line holds states main was at. grep reads all input, so pipefail sees no SIGPIPE.
+if ! git rev-list --first-parent "$main" | grep --fixed-strings --line-regexp "$GITHUB_SHA" >/dev/null; then
+  printf '::error::Tagged commit %s only reached main inside a merged branch; tag the merge.\n' "$GITHUB_SHA" >&2
+  exit 1
+fi
+printf 'Tagged commit %s is on main (%s).\n' "$GITHUB_SHA" "$main"

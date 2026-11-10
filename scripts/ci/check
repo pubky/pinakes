@@ -22,6 +22,10 @@ chmod +x "$ci_tools/hadolint"
 export PATH="$ci_tools:$PATH"
 actionlint
 hadolint Dockerfile
-shellcheck scripts/ci/setup-postgres scripts/ci/container-smoke scripts/ci/publish-manifest scripts/ci/check
-bash -n scripts/ci/setup-postgres scripts/ci/container-smoke scripts/ci/publish-manifest scripts/ci/check
-git diff --check
+shell_scripts=(scripts/ci/setup-postgres scripts/ci/container-smoke scripts/ci/publish-manifest
+  scripts/ci/release-on-main scripts/ci/diff-check scripts/ci/check)
+shellcheck "${shell_scripts[@]}"
+for script in "${shell_scripts[@]}"; do
+  bash -n "$script"
+done
+scripts/ci/diff-check
