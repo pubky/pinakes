@@ -64,7 +64,7 @@ below before upgrades. CLI commands replace the daemon arguments after the image
 ## CI and image publishing
 
 [CI](../.github/workflows/ci.yml) runs on pull requests, pushes to `main`, and `v*.*.*` tags.
-It provisions a disposable PostgreSQL 16 cluster from the signed PGDG repository, pins the h3
+It provisions a disposable PostgreSQL 16 cluster named `pinakesci` from the signed PGDG repository, pins the h3
 package to 4.2.3, checks PostGIS and the h3 function, then runs the full `scripts/test` gate and
 `scripts/e2e --mock`. Workflow contracts, actionlint, ShellCheck and Hadolint also run. Rust is
 1.98.1 in CI and the image build. Native amd64 and arm64 image jobs build without registry login

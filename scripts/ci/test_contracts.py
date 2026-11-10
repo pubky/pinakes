@@ -50,7 +50,20 @@ class Quality(unittest.TestCase):
         for required in ['postgresql-16-postgis-3', 'postgresql-16-h3=4.2.3-',
                          'pg_trgm', 'h3_latlng_to_cell', '4.2.3', 'ON_ERROR_STOP=1']:
             self.assertIn(required, s)
-        self.assertIn('pinakes-ci', s)
+
+    def test_cluster_service_resolves_to_its_config_directory(self):
+        script = (ROOT / 'scripts/ci/setup-postgres').read_text()
+        clusters = re.findall(r'^sudo pg_createcluster (\S+) (\S+) ', script, re.MULTILINE)
+        self.assertEqual(len(clusters), 1)
+        version, name = clusters[0]
+        # PostgreSQL's unit uses unescaped %I in AssertPathExists. Verify the
+        # actual systemd mapping without creating or starting a database.
+        instance = subprocess.run(
+            ['systemd-escape', '--unescape', '--instance', f'postgresql@{version}-{name}.service'],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        self.assertEqual(f'/etc/postgresql/{instance}/postgresql.conf',
+                         f'/etc/postgresql/{version}/{name}/postgresql.conf')
 
 
 class NativeImages(unittest.TestCase):

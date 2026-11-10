@@ -17,7 +17,8 @@ sudo apt-get install -y --no-install-recommends \
   postgresql-16-h3=4.2.3-4.pgdg24.04+1 ripgrep prometheus shellcheck python3-venv
 # This cluster's local socket accepts the disposable CI role from test containers too.
 # TCP remains on loopback and password-authenticated. No production credentials exist here.
-sudo pg_createcluster 16 pinakes-ci --port=55432 --start -- --auth-local=trust --auth-host=scram-sha-256
+# Keep the name free of dashes: systemd's %I turns them into path separators.
+sudo pg_createcluster 16 pinakesci --port=55432 --start -- --auth-local=trust --auth-host=scram-sha-256
 sudo -u postgres /usr/lib/postgresql/16/bin/createuser -p 55432 --superuser pinakes_ci
 /usr/lib/postgresql/16/bin/psql -X -v ON_ERROR_STOP=1 -p 55432 -U pinakes_ci -d postgres <<'SQL'
 CREATE EXTENSION postgis;
