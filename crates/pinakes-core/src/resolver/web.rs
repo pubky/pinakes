@@ -240,7 +240,15 @@ impl WebResolver {
                             .min_by_key(|e| e.title.as_ref().map_or(usize::MAX, String::len))
                     }),
             };
-            crate::music_sources::musicbrainz_card(uri, entity.as_ref(), Some(&isrc), ttl)
+            let mut card =
+                crate::music_sources::musicbrainz_card(uri, entity.as_ref(), Some(&isrc), ttl);
+            // Of agreeing duplicates, the card states no length of its own: the
+            // `musicbrainz_entity` source states the one recording's that stands for them, and
+            // the plainest title's may round to another second (two `duration` values).
+            if recordings.len() > 1 {
+                card.attributes.remove("duration");
+            }
+            card
         } else {
             return Ok(None);
         };

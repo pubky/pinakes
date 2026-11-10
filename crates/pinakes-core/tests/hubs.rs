@@ -2992,10 +2992,13 @@ async fn a_musicbrainz_page_card_comes_from_the_entity() {
     let isrc = card("https://musicbrainz.org/isrc/GBUM71029604").await;
     assert_eq!(isrc.name.as_deref(), Some("Bohemian Rhapsody"));
     assert_eq!(isrc.url, "https://musicbrainz.org/isrc/GBUM71029604");
+    assert!(isrc.attributes.contains_key("duration"));
     // Two recordings that agree (the album version and its remaster) are one: the card of the
-    // one with the plainest title. Two that disagree keep the ISRC's own card.
+    // one with the plainest title, which states no length of its own (the source states the
+    // standing recording's). Two that disagree keep the ISRC's own card.
     let shared = card("https://musicbrainz.org/isrc/GBCEE0100112").await;
     assert_eq!(shared.name.as_deref(), Some("Bohemian Rhapsody"));
+    assert_eq!(shared.attributes.get("duration"), None);
     let disagreeing = card("https://musicbrainz.org/isrc/ZZDIS2600001").await;
     assert_eq!(disagreeing.name.as_deref(), Some("ISRC ZZDIS2600001"));
     // No page was read: MusicBrainz's web service only.

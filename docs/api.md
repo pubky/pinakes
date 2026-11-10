@@ -1269,7 +1269,8 @@ enriched description below takes the place of this line; the resource read's `fa
 them as `artist` and `duration`, in seconds, from the card itself as soon as it is read, and from
 the `musicbrainz_entity` source), `site`
 `MusicBrainz`; an ISRC's page is its one recording's card (agreeing duplicates: the one with the
-plainest title), else named `ISRC {code}`.
+plainest title, whose card states no `duration` of its own: the `musicbrainz_entity` source's is
+the recording's that stands for them), else named `ISRC {code}`.
 
 **MusicBrainz facts.** The resource read's `facts` of a MusicBrainz page also give what
 MusicBrainz says about the entity in the same answer (no further request, with or without
