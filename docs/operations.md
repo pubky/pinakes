@@ -810,7 +810,8 @@ several sources make (an item, a record) are shared through the discovery cache.
 **Music enrichment.** `[web] music_enrichment` (on by default) gives a MusicBrainz artist, release
 group, release or recording card an image from Wikimedia Commons and a description from
 Wikipedia or Wikidata, from the entity's Wikidata item, each with its credit
-([api.md](api.md#credits) says which item and which text). It runs inside the card's own read,
+([api.md](api.md#credits) says which item and which text), and a release or release group with
+no free Commons file its front cover from the Cover Art Archive, by its MBID. It runs inside the card's own read,
 after MusicBrainz answered, through the egress and its pace for those hosts, within
 `limits.music_enrichment_timeout_ms`. At most, per card: MusicBrainz one request more (a
 recording's works, only when the recording has no item of its own with an English article); Wikidata one
@@ -820,7 +821,9 @@ hits over the 8 MB cap together are read back one by one), one read of the item'
 English description, and one of its image claim, and for a recording one read-back and one read
 of its work's item's pages; Wikipedia two summaries
 (English, then one other language), for a recording three (its item's English article, its
-work's, then one other language); Commons one. These requests run one after another and share
+work's, then one other language); Commons one; the Cover Art Archive one (a release or release
+group with no free Commons file; a release only when MusicBrainz says the archive shows its front
+cover), whose redirect to archive.org is kept, never followed. These requests run one after another and share
 each host's pace (`www.wikidata.org` with the also-on sources), so an artist found through its
 Discogs pages makes up to six Wikidata requests before its text and image are asked for. A
 `reextract web` of many such cards at once can leave some of them unread at the timeout; they
@@ -844,7 +847,7 @@ release) come with the entity read whether this is on or off.
 Sources reach their services through the egress policy and its per-host budgets, one request
 at a time per host. A hub's published limit lowers its host's default pace like a source's own
 (`limits.host_rates` names a host's rate outright): for the services several sources or the
-resolver read, MusicBrainz 1 request/s, Wikimedia (`www.wikidata.org`, `*.wikipedia.org`,
+resolver read, MusicBrainz and the Cover Art Archive 1 request/s each, Wikimedia (`www.wikidata.org`, `*.wikipedia.org`,
 `commons.wikimedia.org`) 200/min, Open Library 3/s, iTunes about 20/min, the Wayback Machine one
 request every 2 s (its CDX API asks for it; the pace covers the host, so a tagged capture's card
 waits behind the lookups too); a service only one source reads, at the pace its page names. A

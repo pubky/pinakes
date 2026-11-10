@@ -1168,6 +1168,9 @@ impl Egress {
 pub const PUBLISHED_RATES: &[(&str, f64)] = &[
     // MusicBrainz: 1 request/s per IP, 503 above that.
     ("musicbrainz.org", 1.0),
+    // The Cover Art Archive (MusicBrainz's) publishes no limit: MusicBrainz's pace. Its covers'
+    // redirects to archive.org are kept, never followed (`hubs::cover_art`).
+    ("coverartarchive.org", 1.0),
     // Wikimedia: 200 requests/min with a User-Agent naming a contact (at most 3 at once).
     ("www.wikidata.org", 200.0 / 60.0),
     ("*.wikipedia.org", 200.0 / 60.0),

@@ -1,6 +1,36 @@
 {
   "_recorded": {
-    "note": "Recorded with curl, User-Agent 'pinakes-dev/0.1 (+https://pubky.app; info@synonym.to)', at most one request a second to MusicBrainz. Derived and synthetic answers the tests build in code (tests/music_enrichment.rs, one edit each): wd-p18-no-author (Daft Punk's wd-p18-Q185828 answer with its file name replaced by the no-author file's); wd-pages-Q55825905 without its English description (the descriptions object emptied); wd-search-P434-sefa-empty (Sefa's P434 search with no hit: search emptied, totalhits 0), wd-search-P434-sefa-crowded (totalhits set to 6, more than the 5 a search returns), wd-search-P1953-empty (a Discogs search with no hit, built the same way from wd-search-P1953-6743320); wd-search-P4404-get-lucky-empty (Get Lucky's P4404 search with no hit, built the same way); wd-entities-Q55825905-other-mbid (the read-back with its P434 value replaced by another artist's MBID, 561d854a-6a28-4aa7-8c99-323e6ce46c2a); mb-recording-get-lucky-works-no-work-item (Get Lucky's works answer with its work's wikidata URL relation removed); Wikipedia's 503 with Retry-After: 120, Commons' 429, Wikidata's 503 (status and header only, no body recorded) and Wikidata's maxlag error ({\"error\":{\"code\":\"maxlag\"}} with status 200, as Wikidata sends it). Added 2026-11-10 (round 2; recorded with User-Agent 'pinakes/0.1.0 (+https://pubky.app)', at most one request a second): the read-backs of the items the entities' own relations name, and the Kind of Blue release. Derived answers built in code: mb-recording-get-lucky-names-its-song (Get Lucky's recording answer with a wikidata URL relation to its song's item Q11510350 added, as Daft Punk's relation is written); mb-release-kind-of-blue with a wikidata URL relation to the album's item Q283221 added the same way. Also 2026-11-10: the item of English Wikipedia's 'Get Lucky' disambiguation page, Q5554322 (read-back, pages, image claim). Derived: mb-artist-daft-punk-names-disambiguation (Daft Punk's answer with its wikidata relation's Q185828 replaced by Q5554322); wd-entities-Q5554322-unclassed (that item's read-back with its P31 claims removed); wd-pages-Q139827657-disambiguation-sitelink (Get Lucky's recording item's pages with an enwiki sitelink to the 'Get Lucky' disambiguation page added). Round 3 (2026-11-10), derived in code: an MB answer whose wikidata relation names an item of another kind instead of its own, or has one added (Mode::relation: Daft Punk's naming Kind of Blue's album item Q283221, Kind of Blue's release group naming Miles Davis's item Q93341, Kind of Blue's release naming Get Lucky's recording item Q139827657); wd-entities-Q283221-with-work (Kind of Blue's item read back with its P436 claim copied as a P435 claim with a made-up work MBID f4a8b9d2-3c1e-4f5a-9b6c-7d8e9f0a1b2c); Get Lucky's works answer with its work's wikidata relation naming Q139827657, Q283221 or Q93341 instead of Q11510350; Wikidata's and MusicBrainz's 410 Gone (Mode::gone: status only, body {}), for an item read-back, a search, the item's pages and image claim, and a recording's works."
+    "note": "Recorded with curl, User-Agent 'pinakes-dev/0.1 (+https://pubky.app; info@synonym.to)', at most one request a second to MusicBrainz. Derived and synthetic answers the tests build in code (tests/music_enrichment.rs, one edit each): wd-p18-no-author (Daft Punk's wd-p18-Q185828 answer with its file name replaced by the no-author file's); wd-pages-Q55825905 without its English description (the descriptions object emptied); wd-search-P434-sefa-empty (Sefa's P434 search with no hit: search emptied, totalhits 0), wd-search-P434-sefa-crowded (totalhits set to 6, more than the 5 a search returns), wd-search-P1953-empty (a Discogs search with no hit, built the same way from wd-search-P1953-6743320); wd-search-P4404-get-lucky-empty (Get Lucky's P4404 search with no hit, built the same way); wd-entities-Q55825905-other-mbid (the read-back with its P434 value replaced by another artist's MBID, 561d854a-6a28-4aa7-8c99-323e6ce46c2a); mb-recording-get-lucky-works-no-work-item (Get Lucky's works answer with its work's wikidata URL relation removed); Wikipedia's 503 with Retry-After: 120, Commons' 429, Wikidata's 503 (status and header only, no body recorded) and Wikidata's maxlag error ({\"error\":{\"code\":\"maxlag\"}} with status 200, as Wikidata sends it). Added 2026-11-10 (round 2; recorded with User-Agent 'pinakes/0.1.0 (+https://pubky.app)', at most one request a second): the read-backs of the items the entities' own relations name, and the Kind of Blue release. Derived answers built in code: mb-recording-get-lucky-names-its-song (Get Lucky's recording answer with a wikidata URL relation to its song's item Q11510350 added, as Daft Punk's relation is written); mb-release-kind-of-blue with a wikidata URL relation to the album's item Q283221 added the same way. Also 2026-11-10: the item of English Wikipedia's 'Get Lucky' disambiguation page, Q5554322 (read-back, pages, image claim). Derived: mb-artist-daft-punk-names-disambiguation (Daft Punk's answer with its wikidata relation's Q185828 replaced by Q5554322); wd-entities-Q5554322-unclassed (that item's read-back with its P31 claims removed); wd-pages-Q139827657-disambiguation-sitelink (Get Lucky's recording item's pages with an enwiki sitelink to the 'Get Lucky' disambiguation page added). Round 3 (2026-11-10), derived in code: an MB answer whose wikidata relation names an item of another kind instead of its own, or has one added (Mode::relation: Daft Punk's naming Kind of Blue's album item Q283221, Kind of Blue's release group naming Miles Davis's item Q93341, Kind of Blue's release naming Get Lucky's recording item Q139827657); wd-entities-Q283221-with-work (Kind of Blue's item read back with its P436 claim copied as a P435 claim with a made-up work MBID f4a8b9d2-3c1e-4f5a-9b6c-7d8e9f0a1b2c); Get Lucky's works answer with its work's wikidata relation naming Q139827657, Q283221 or Q93341 instead of Q11510350; Wikidata's and MusicBrainz's 410 Gone (Mode::gone: status only, body {}), for an item read-back, a search, the item's pages and image claim, and a recording's works. Added 2026-11-10 (album covers): the four MusicBrainz answers re-recorded with the ratings inc (mb-release-group-kind-of-blue, mb-artist-miles-davis, mb-artist-sefa, mb-recording-get-lucky; only `rating` changed), and the Cover Art Archive's answers to front-500 (caa-*: status, content type and Location, recorded with User-Agent 'pinakes/0.1.0 (+https://pubky.app)', at most one request a second). Derived in code: Kind of Blue's release group answered with the recorded 404 (caa-front-500-unknown); a release's cover-art-archive front set to false; a rating with votes-count 0 or out of range; a wikidata relation that is no item link; Kind of Blue's item read back with an image claim (wd-p18-Q283221 given Miles Davis's recorded P18 claim) for the Commons-wins case."
+  },
+  "caa-front-500-release-group-kind-of-blue": {
+    "bytes": 222,
+    "content_type": "application/json",
+    "file": "caa-front-500-release-group-kind-of-blue.json",
+    "note": "Kind of Blue's release group: a 307 to the front cover's 500-pixel thumbnail of its release e7ba3cb7-a074-45ee-870f-3baeb6d3e8bf (MusicBrainz names that release's release group 8e8a594f, checked the same day). Recorded with curl (Accept: image/*), the redirect not followed; the file holds the answer's status, content type and Location (its body, a 'See: …' line or a short 404 page, is never read).",
+    "recorded_at": "2026-11-10T09:08:31+00:00",
+    "sha256": "62c74ed8b56ce63a4b728675993913eac68069bbd49dd7093a1700f5efa9bff4",
+    "status": 307,
+    "url": "https://coverartarchive.org/release-group/8e8a594f-2175-38c7-a871-abb68ec363e7/front-500"
+  },
+  "caa-front-500-release-kind-of-blue": {
+    "bytes": 222,
+    "content_type": "application/json",
+    "file": "caa-front-500-release-kind-of-blue.json",
+    "note": "The Kind of Blue release (cover-art-archive front: true): a 307 to its own front cover's thumbnail. Recorded with curl (Accept: image/*), the redirect not followed; the file holds the answer's status, content type and Location (its body, a 'See: …' line or a short 404 page, is never read).",
+    "recorded_at": "2026-11-10T09:08:32+00:00",
+    "sha256": "a4dadb99d3853e8bd2043628073e01958a5ebf5aca14dab1f6b0745dfd92926e",
+    "status": 307,
+    "url": "https://coverartarchive.org/release/4c8af71f-5746-4981-92d7-0d6c64db1155/front-500"
+  },
+  "caa-front-500-unknown": {
+    "bytes": 66,
+    "content_type": "application/json",
+    "file": "caa-front-500-unknown.json",
+    "note": "A release group without a cover (an MBID nobody has): 404. The tests serve it as the answer for Kind of Blue's release group in the 404 case (derived). Recorded with curl (Accept: image/*), the redirect not followed; the file holds the answer's status, content type and Location (its body, a 'See: …' line or a short 404 page, is never read).",
+    "recorded_at": "2026-11-10T09:08:34+00:00",
+    "sha256": "5cf069ddc9cdd6761aa40479aec2473947f9ea855bedd425263b30c1dce5a6c5",
+    "status": 404,
+    "url": "https://coverartarchive.org/release-group/00000000-0000-4000-8000-000000000000/front-500"
   },
   "commons-daft-punk": {
     "bytes": 1791,
@@ -133,14 +163,14 @@
     "url": "https://musicbrainz.org/ws/2/artist/056e4f3e-d505-4dad-8ec1-d04f521cbb56?inc=url-rels+genres&fmt=json"
   },
   "mb-artist-miles-davis": {
-    "bytes": 24212,
+    "bytes": 24253,
     "content_type": "application/json",
     "file": "mb-artist-miles-davis.json",
-    "note": "Miles Davis (Person), Wikidata Q93341.",
-    "recorded_at": "2026-11-05T10:36:11+00:00",
-    "sha256": "52ae0f79d4cd3b57809b2eedc27832e314519c0c673ec920ae24265808d786d5",
+    "note": "Miles Davis (Person), Wikidata Q93341. Re-recorded with its rating (4.75, 21 votes); against the earlier recording only `rating` was new.",
+    "recorded_at": "2026-11-10T09:04:00+00:00",
+    "sha256": "7e139d292fc20bc464aabf1427c408b576e6e0b309f0883ba065087bec632ffa",
     "status": 200,
-    "url": "https://musicbrainz.org/ws/2/artist/561d854a-6a28-4aa7-8c99-323e6ce46c2a?inc=url-rels+genres&fmt=json"
+    "url": "https://musicbrainz.org/ws/2/artist/561d854a-6a28-4aa7-8c99-323e6ce46c2a?inc=url-rels+genres+ratings&fmt=json"
   },
   "mb-artist-richard-colburn": {
     "bytes": 2244,
@@ -153,24 +183,24 @@
     "url": "https://musicbrainz.org/ws/2/artist/e7528aba-c5e2-4917-9a52-9b61d56f9a13?inc=url-rels+genres&fmt=json"
   },
   "mb-artist-sefa": {
-    "bytes": 8607,
+    "bytes": 8647,
     "content_type": "application/json",
     "file": "mb-artist-sefa.json",
-    "note": "Sefa: no wikidata URL relation; two Discogs artist relations (4454360, 6743320); disambiguation \"frenchcore artist\", country NL, area Netherlands, genres frenchcore (5) and uptempo hardcore (1), empty life-span.",
-    "recorded_at": "2026-11-05T10:35:41+00:00",
-    "sha256": "d26db19e2ac320a8dd85e4538aa8d4b0302a38d490d78642c414dfb5aaf246bf",
+    "note": "Sefa: no wikidata URL relation; two Discogs artist relations (4454360, 6743320); disambiguation \"frenchcore artist\", country NL, area Netherlands, genres frenchcore (5) and uptempo hardcore (1), empty life-span. Re-recorded with the ratings inc: nobody voted (value null, votes-count 0); against the earlier recording only `rating` was new.",
+    "recorded_at": "2026-11-10T09:04:00+00:00",
+    "sha256": "789b700de0ac00b8e01b6a3edb58a263c980bd8cd51f304b4e8a0ad7e1b5a68d",
     "status": 200,
-    "url": "https://musicbrainz.org/ws/2/artist/b5416a54-4941-4fcf-b2a0-7f98da6f9344?inc=url-rels+genres&fmt=json"
+    "url": "https://musicbrainz.org/ws/2/artist/b5416a54-4941-4fcf-b2a0-7f98da6f9344?inc=url-rels+genres+ratings&fmt=json"
   },
   "mb-recording-get-lucky": {
-    "bytes": 13444,
+    "bytes": 13484,
     "content_type": "application/json",
     "file": "mb-recording-get-lucky.json",
-    "note": "Get Lucky (recording): no Wikidata relation of its own.",
-    "recorded_at": "2026-11-05T10:36:15+00:00",
-    "sha256": "99cb231193409d53c99fbb545c9e19a4a9fd77d7f416fcd40d230cec5071d91e",
+    "note": "Get Lucky (recording): no Wikidata relation of its own. Re-recorded with its rating (3.9, 25 votes); against the earlier recording only `rating` was new.",
+    "recorded_at": "2026-11-10T09:04:00+00:00",
+    "sha256": "8b2788e62ff6e83d4fa99e6e02c48028d1380aeea7e52f5b947a24cfd4385f7f",
     "status": 200,
-    "url": "https://musicbrainz.org/ws/2/recording/833f00e1-781f-4edd-90e4-e52712618862?inc=url-rels+isrcs+artist-credits+genres&fmt=json"
+    "url": "https://musicbrainz.org/ws/2/recording/833f00e1-781f-4edd-90e4-e52712618862?inc=url-rels+isrcs+artist-credits+genres+ratings&fmt=json"
   },
   "mb-recording-get-lucky-works": {
     "bytes": 11738,
@@ -183,14 +213,14 @@
     "url": "https://musicbrainz.org/ws/2/recording/833f00e1-781f-4edd-90e4-e52712618862?inc=work-rels+work-level-rels+url-rels&fmt=json"
   },
   "mb-release-group-kind-of-blue": {
-    "bytes": 4680,
+    "bytes": 4721,
     "content_type": "application/json",
     "file": "mb-release-group-kind-of-blue.json",
-    "note": "Kind of Blue (release group), Wikidata Q283221.",
-    "recorded_at": "2026-11-05T10:36:17+00:00",
-    "sha256": "d6a671cca59bdc654933ea77270446be72d4609a85b69cb251a715902a892d42",
+    "note": "Kind of Blue (release group), Wikidata Q283221. Kind of Blue's release group, re-recorded with its rating (4.45, 43 votes; ratings inc); against the earlier recording only `rating` was new.",
+    "recorded_at": "2026-11-10T09:04:00+00:00",
+    "sha256": "b38fd5b92127eace12617c4c9a88b418d5792acd756c25a425d8c88ac8923116",
     "status": 200,
-    "url": "https://musicbrainz.org/ws/2/release-group/8e8a594f-2175-38c7-a871-abb68ec363e7?inc=url-rels+artist-credits+genres&fmt=json"
+    "url": "https://musicbrainz.org/ws/2/release-group/8e8a594f-2175-38c7-a871-abb68ec363e7?inc=url-rels+artist-credits+genres+ratings&fmt=json"
   },
   "mb-release-kind-of-blue": {
     "bytes": 6072,

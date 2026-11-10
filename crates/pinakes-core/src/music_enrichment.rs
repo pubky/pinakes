@@ -1,6 +1,7 @@
 //! A MusicBrainz card's image and description, from the entity's Wikidata item: its Wikipedia
 //! article's summary or the item's English description, and its image on Wikimedia Commons, each
-//! with its credit (`model::Credit`).
+//! with its credit (`model::Credit`). A release or release group with no free Commons file takes
+//! its front cover from the Cover Art Archive, by its MBID ([`cover`]).
 //!
 //! Only exact identifiers lead there, never a name. The item is the one the entity's own
 //! `wikidata` URL relation names; without such a relation, the one item that carries the
@@ -43,7 +44,10 @@
 //! stored article's. Every request goes through the egress, whose shared flights and cache make
 //! concurrent cards of one entity ask once.
 use crate::{
-    hubs::{musicbrainz, wikidata, MbKind},
+    hubs::{
+        musicbrainz::{self, own_item, OwnItem as Own},
+        wikidata, MbKind,
+    },
     model::{Credit, CreditField, CreditProvider, ResourceMeta},
     resolver::egress::{Egress, FetchOptions},
 };
@@ -130,32 +134,6 @@ impl Enrichment {
             }
         }
         doc.credits.sort_by_key(|c| c.field);
-    }
-}
-
-/// The Wikidata item a list of URL relations names.
-#[derive(Debug, PartialEq)]
-enum Own {
-    /// Exactly one item.
-    Item(String),
-    /// No `wikidata` relation.
-    None,
-    /// `wikidata` relations that name several items, or none that is an item.
-    Unclear,
-}
-fn own_item(urls: &[musicbrainz::UrlRelation]) -> Own {
-    let relations: Vec<&musicbrainz::UrlRelation> =
-        urls.iter().filter(|r| r.kind == "wikidata").collect();
-    let mut items: Vec<String> = relations
-        .iter()
-        .filter_map(|r| wikidata::item_link(&r.url).map(|(qid, _)| qid))
-        .collect();
-    items.sort();
-    items.dedup();
-    match items.as_slice() {
-        [one] => Own::Item(one.clone()),
-        _ if relations.is_empty() => Own::None,
-        _ => Own::Unclear,
     }
 }
 
@@ -405,9 +383,71 @@ async fn discogs_item(
         .map(|item| item.qid))
 }
 
-/// The image and description of `entity` (`base`: the MusicBrainz web service), each
-/// thumbnail `width` pixels wide.
+/// The image and description of `entity` (`base`: the MusicBrainz web service), a Commons
+/// thumbnail `width` pixels wide. A release or release group with no free Commons file takes
+/// its front cover from the Cover Art Archive ([`cover`]); a Commons file that went unread asks
+/// for no cover, so a stored image stays.
 pub async fn enrich(
+    egress: &Egress,
+    base: &str,
+    entity: &musicbrainz::Entity,
+    width: u32,
+) -> Enrichment {
+    let mut enrichment = wikimedia(egress, base, entity, width).await;
+    if enrichment.image == Found::Missing {
+        enrichment.image = cover(egress, entity).await;
+    }
+    enrichment
+}
+
+/// The front cover of a release or release group from the Cover Art Archive, by its MBID alone
+/// (`hubs::cover_art`), in at most one request: a release's only when MusicBrainz says the
+/// archive shows a front cover for it (`About::cover_art_front`), a release group's always (one
+/// of its releases' covers). The credit names the release the cover is of (its cover art page on
+/// MusicBrainz) and no licence or author: cover art is its label's. A 404 is none; a busy
+/// archive, a failed request or an answer that proves nothing (`cover_art::read_front`) leaves
+/// the image unread.
+async fn cover(egress: &Egress, entity: &musicbrainz::Entity) -> Found {
+    let ask = match entity.kind {
+        MbKind::Release => entity.about.cover_art_front,
+        MbKind::ReleaseGroup => true,
+        MbKind::Recording | MbKind::Artist => false,
+    };
+    if !ask {
+        return Found::Missing;
+    }
+    let front = match crate::hubs::cover_art::front(egress, entity.kind, &entity.mbid).await {
+        Ok(Some(front)) => front,
+        Ok(None) => return Found::Missing,
+        Err(error) => {
+            unread(&entity.mbid, "cover_art", &error);
+            return Found::Unread;
+        }
+    };
+    let credit = Credit {
+        field: CreditField::Image,
+        provider: CreditProvider::CoverArtArchive,
+        source_url: format!(
+            "https://musicbrainz.org/release/{}/cover-art",
+            front.release
+        ),
+        author: None,
+        license: String::new(),
+        license_url: None,
+        lang: None,
+        excerpted: false,
+        modified: false,
+        subject: None,
+    };
+    match credit.bounded() {
+        Some(credit) => Found::Value(front.image, credit),
+        None => Found::Missing,
+    }
+}
+
+/// The image and description `entity` takes from its Wikidata item: the item's Commons file,
+/// and its or its work's text ([`description`]).
+async fn wikimedia(
     egress: &Egress,
     base: &str,
     entity: &musicbrainz::Entity,
@@ -1153,6 +1193,13 @@ mod tests {
             let mut expected = vec![search.clone()];
             if kind == MbKind::Artist {
                 expected.push(discogs.clone());
+            }
+            // Without an item, a release group still asks for its cover (here none); a release
+            // whose answer says the archive shows no front cover does not.
+            if kind == MbKind::ReleaseGroup {
+                expected.push(format!(
+                    "https://coverartarchive.org/release-group/{mbid}/front-500"
+                ));
             }
             assert_eq!(recorded.asked(), expected, "{kind:?}");
         }

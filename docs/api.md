@@ -188,11 +188,11 @@ with the value, linked:
 | Field | Meaning |
 | --- | --- |
 | `field` | `image` or `description`: the card field the value is in |
-| `provider` | `wikipedia` (an article's summary), `wikimedia_commons` (a file) or `wikidata` (an item's English description) |
-| `source_url` | The article, the file's page on Commons, or the item's page on Wikidata (`https://www.wikidata.org/wiki/Q…`): `https:`, at most 1,024 bytes |
-| `author` | Plain text, at most 256 bytes: `Wikipedia contributors` for an article, the file's author for an image; `null` for a CC0 or public-domain file that names none and for a Wikidata description |
-| `license` | An SPDX licence ID (`CC-BY-SA-4.0`, `CC-BY-2.0`, `CC-BY-SA-3.0-DE`, `CC0-1.0`) or `public-domain` |
-| `license_url` | The licence's text (`https:`); `null` for the public domain without a mark |
+| `provider` | `wikipedia` (an article's summary), `wikimedia_commons` (a file), `wikidata` (an item's English description) or `cover_art_archive` (a release's front cover) |
+| `source_url` | The article, the file's page on Commons, the item's page on Wikidata (`https://www.wikidata.org/wiki/Q…`), or for a cover the cover art page of the release it is of on MusicBrainz (`https://musicbrainz.org/release/…/cover-art`): `https:`, at most 1,024 bytes |
+| `author` | Plain text, at most 256 bytes: `Wikipedia contributors` for an article, the file's author for an image; `null` for a CC0 or public-domain file that names none, for a Wikidata description and for a cover |
+| `license` | An SPDX licence ID (`CC-BY-SA-4.0`, `CC-BY-2.0`, `CC-BY-SA-3.0-DE`, `CC0-1.0`) or `public-domain`; `null` for a cover (cover art is its label's; no licence is given) |
+| `license_url` | The licence's text (`https:`); `null` for the public domain without a mark and for a cover |
 | `lang` | The text's language: `en`, or another Wikipedia's code (`de`) when only that Wikipedia describes it; `null` for an image. A client may label or hide a text in a language its reader does not read |
 | `excerpted` | `true` when the text is a part of a longer source: a summary is the article's first paragraphs, and one over 2,048 bytes is cut at a sentence or a word. A Wikidata description is whole (`false`) |
 | `modified` | `true` when the value was changed beyond cutting it |
@@ -204,6 +204,17 @@ A Wikidata description's credit:
 {"field": "description", "provider": "wikidata",
  "source_url": "https://www.wikidata.org/wiki/Q55825905", "author": null, "license": "CC0-1.0",
  "license_url": "https://creativecommons.org/publicdomain/zero/1.0/", "lang": "en",
+ "excerpted": false, "modified": false, "subject": null}
+```
+
+A release's or release group's card with no free Commons file shows the front cover the
+[Cover Art Archive](https://coverartarchive.org/) holds for it, credited to the release the cover
+is of (a release group's cover is one of its releases', chosen by the archive):
+
+```json
+{"field": "image", "provider": "cover_art_archive",
+ "source_url": "https://musicbrainz.org/release/e7ba3cb7-a074-45ee-870f-3baeb6d3e8bf/cover-art",
+ "author": null, "license": null, "license_url": null, "lang": null,
  "excerpted": false, "modified": false, "subject": null}
 ```
 
@@ -1289,6 +1300,7 @@ enrichment), each value whole and at most 256 bytes, else left out:
 | `release_type` | release group | Its primary type (`Album`, `Single`, `EP`, …) |
 | `first_release_date` | release group, recording | As `begin_date` |
 | `genre` | any | Its top genres: at most three, most votes first, a tie by name, joined with `; ` |
+| `rating`, `rating_count` | release group, recording, artist | Its rating on MusicBrainz, 0 to 5 with one decimal (`4.5`; half rounds up), and the number of votes; neither when nobody voted. A release has no rating of its own |
 
 A MusicBrainz artist, release group, release or recording card also takes an image and a
 description from the entity's Wikidata item, each with its [credit](#credits) (`[web]
@@ -1341,15 +1353,28 @@ music_enrichment`, on by default):
 - the image is the item's image (`P18`) on Wikimedia Commons, a thumbnail asked 640 pixels wide
   (Commons serves its next standard size, 960 pixels), shown
   only when the file's own page gives a licence on the list (CC0, the public domain, CC BY or CC
-  BY-SA 1.0 to 4.0) and, under CC BY and CC BY-SA, its author.
+  BY-SA 1.0 to 4.0) and, under CC BY and CC BY-SA, its author;
+- a release or release group with no such file (album covers are seldom free) shows the front
+  cover the [Cover Art Archive](https://coverartarchive.org/) holds for its MBID, asked once
+  (`GET https://coverartarchive.org/{release|release-group}/{mbid}/front-500`, the redirect kept,
+  not followed): the archive answers with a redirect to the file of the release the cover is of
+  (`https://archive.org/download/mbid-{release}/mbid-{release}-{id}_thumb500.jpg`, read only in
+  that form; for a release, its own file only; any other answer is an unexpected one, below), and
+  the image is that release's 500-pixel
+  thumbnail on the archive (`https://coverartarchive.org/release/{release}/front-500`), credited
+  `cover_art_archive` to the release's cover art page on MusicBrainz, with no author or licence.
+  A release is asked only when MusicBrainz says the archive shows a front cover for it
+  (`cover-art-archive`: `front`, not `darkened`); a release group always (its cover is one of its
+  releases', chosen by the archive). A 404 is no cover. A free Commons file always wins; a Commons
+  read that failed asks for no cover, so the stored image stays.
 
 What it does not find leaves the card as MusicBrainz makes it (an artist without an item has no
 image or description: the card is still `ok`). An answer that fails for a while (a timeout, a
 429, a 5xx, Wikidata's `maxlag`, another unexpected status) keeps what the card had of that
 field (should the card then pass its size bound, it gives up its last facts first), and the card is read again after at least an hour and at least twice as long as since its
 last reading, up to its own refresh time (so a failure on a routine refresh waits for the next); a
-definite answer (no item, no text, a 404 or 410 from Wikidata, MusicBrainz or Wikipedia, a
-refused file) removes it. A failed text never gives way to
+definite answer (no item, no text, a 404 or 410 from Wikidata, MusicBrainz, Wikipedia or the
+Cover Art Archive, a refused file) removes it. A failed text never gives way to
 the next one in the order: a busy English Wikipedia keeps the stored article's summary rather
 than show the shorter line. A failed search for the item leaves both fields as stored.
 

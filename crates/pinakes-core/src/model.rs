@@ -139,6 +139,8 @@ pub enum CreditProvider {
     WikimediaCommons,
     /// A Wikidata item's English description.
     Wikidata,
+    /// A release's front cover in the Cover Art Archive (MusicBrainz's).
+    CoverArtArchive,
 }
 /// Where one of the card's `image` or `description` came from when Pinakes added it from another
 /// source than the link itself, and the licence it is used under (docs/api.md, Credits). Show it
@@ -148,16 +150,26 @@ pub struct Credit {
     /// The card field the value is in.
     pub field: CreditField,
     pub provider: CreditProvider,
-    /// The page the value came from: the Wikipedia article, the file's page on Commons, or the
-    /// item's page on Wikidata. An `https:` URL of at most 1,024 bytes.
+    /// The page the value came from: the Wikipedia article, the file's page on Commons, the
+    /// item's page on Wikidata, or the cover art page of the release on MusicBrainz. An `https:`
+    /// URL of at most 1,024 bytes.
     pub source_url: String,
     /// Who made it, plain text of at most 256 bytes: "Wikipedia contributors" for an article, the
-    /// file's author for an image. Null for a public-domain or CC0 file that names none, and for
-    /// a Wikidata description (CC0).
+    /// file's author for an image. Null for a public-domain or CC0 file that names none, for a
+    /// Wikidata description (CC0), and for a cover from the Cover Art Archive.
     pub author: Option<String>,
-    /// An SPDX licence ID (`CC-BY-SA-4.0`, `CC-BY-2.0`, `CC0-1.0`), or `public-domain`.
+    /// An SPDX licence ID (`CC-BY-SA-4.0`, `CC-BY-2.0`, `CC0-1.0`), or `public-domain`. Null for
+    /// a cover from the Cover Art Archive: cover art is its label's, shown as a service shows an
+    /// album's cover, and no licence is given (`license_url` is null too).
+    // No licence is the empty string here, and only such a credit holds it (`bounded`).
+    #[serde(
+        serialize_with = "license_or_null",
+        deserialize_with = "license_from_null"
+    )]
+    #[schema(value_type = Option<String>)]
     pub license: String,
-    /// The licence's text: an `https:` URL; null when it has none (public domain).
+    /// The licence's text: an `https:` URL; null when it has none (public domain, a cover from
+    /// the Cover Art Archive).
     pub license_url: Option<String>,
     /// The language of a text (`en`, or another Wikipedia's language code, `de`); null for an
     /// image.
@@ -171,10 +183,22 @@ pub struct Credit {
     /// description taken from its work's item names the work (`https://musicbrainz.org/work/…`).
     pub subject: Option<String>,
 }
+/// A credit's licence as JSON: null for none (the empty string).
+fn license_or_null<S: serde::Serializer>(license: &str, s: S) -> Result<S::Ok, S::Error> {
+    if license.is_empty() {
+        s.serialize_none()
+    } else {
+        s.serialize_str(license)
+    }
+}
+fn license_from_null<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    Ok(Option::<String>::deserialize(d)?.unwrap_or_default())
+}
 impl Credit {
     /// The credit within its bounds: every URL `https:` and at most 1,024 bytes, the author at
     /// most 256 bytes (cut at a character), the licence ID and language at most 64. `None` when
-    /// a URL or ID is out of bounds, when a URL is a link that carries a credential
+    /// a URL or ID is out of bounds, when a cover from the Cover Art Archive names a licence or
+    /// any other value names none, when a URL is a link that carries a credential
     /// (`capability::names_credential`: the store would drop that part of the credit,
     /// `capability::strip_document`, and leave its value uncredited), or when the author, free
     /// text, holds such a link anywhere (`capability::contains_credential`: `Jane
@@ -195,6 +219,12 @@ impl Credit {
             truncate(author, 256);
         }
         self.author = self.author.filter(|a| !a.trim().is_empty());
+        // A cover from the Cover Art Archive has no licence; every other value has one.
+        let licensed = if self.provider == CreditProvider::CoverArtArchive {
+            self.license.is_empty() && self.license_url.is_none()
+        } else {
+            id(&self.license)
+        };
         (https(&self.source_url)
             && !self
                 .author
@@ -202,7 +232,7 @@ impl Credit {
                 .is_some_and(crate::capability::contains_credential)
             && self.license_url.as_deref().is_none_or(https)
             && self.subject.as_deref().is_none_or(https)
-            && id(&self.license)
+            && licensed
             && self.lang.as_deref().is_none_or(id))
         .then_some(self)
     }
@@ -731,6 +761,53 @@ mod tests {
             excerpted: true,
             modified: false,
             subject: None,
+        }
+    }
+    /// A cover from the Cover Art Archive has no licence (JSON null) and no licence URL; every
+    /// other credit has a licence, and a cover's credit has none.
+    #[test]
+    fn a_cover_credit_has_no_licence() {
+        let cover = Credit {
+            field: CreditField::Image,
+            provider: CreditProvider::CoverArtArchive,
+            source_url:
+                "https://musicbrainz.org/release/e7ba3cb7-a074-45ee-870f-3baeb6d3e8bf/cover-art"
+                    .into(),
+            author: None,
+            license: String::new(),
+            license_url: None,
+            lang: None,
+            excerpted: false,
+            modified: false,
+            subject: None,
+        };
+        let json = serde_json::to_value(cover.clone().bounded().unwrap()).unwrap();
+        assert_eq!(json["provider"], "cover_art_archive");
+        assert_eq!(
+            (&json["license"], &json["license_url"]),
+            (&serde_json::Value::Null, &serde_json::Value::Null)
+        );
+        let back: Credit = serde_json::from_value(json).unwrap();
+        assert_eq!(back, cover);
+        // A stored licence reads back as it was.
+        let article = credit(CreditField::Description, "https://en.wikipedia.org/wiki/A");
+        let back: Credit = serde_json::from_value(serde_json::to_value(&article).unwrap()).unwrap();
+        assert_eq!(back.license, "CC-BY-SA-4.0");
+        for bad in [
+            Credit {
+                license: "CC-BY-4.0".into(),
+                ..cover.clone()
+            },
+            Credit {
+                license_url: Some("https://creativecommons.org/licenses/by/4.0/".into()),
+                ..cover.clone()
+            },
+            Credit {
+                license: String::new(),
+                ..article
+            },
+        ] {
+            assert_eq!(bad.clone().bounded(), None, "{bad:?}");
         }
     }
     /// A credit is stored only with its field's value, once per field, within its bounds.
