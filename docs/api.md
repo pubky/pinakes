@@ -168,7 +168,7 @@ Which cards carry one (each source's page in [docs/sources](sources/README.md) s
 ### Credits
 
 A MusicBrainz card can show an image from Wikimedia Commons and a description from Wikipedia
-or Wikidata ([Cards and resolvers](#cards-and-resolvers)). Each such field has a credit; show it
+or Wikidata (which item and which text: [Also on](#also-on), MusicBrainz pages). Each such field has a credit; show it
 with the value, linked:
 
 ```json
@@ -208,6 +208,9 @@ A Wikidata description's credit:
 ```
 
 A credit is there only with its value: a card without the image or description has none for it.
+No credit, and no image or description it credits, is a link that carries a credential
+([Resolution and status](#resolution-and-status)): such a value is not taken, so nothing the
+store drops can leave a value without its credit.
 The same credits are on every card of the resource: a search, lookup or group card, a resource
 read, the MCP tools' cards.
 
