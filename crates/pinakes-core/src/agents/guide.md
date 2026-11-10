@@ -152,6 +152,11 @@ member with the most references standing for it.
 `sort=recent` by the newest reference; the default `activity` by taggers and references with a
 30-day decay.
 
+**Best match first.** With `q`, the default is `sort=relevance`: a name match first (the exact
+name, then the words as a phrase, then all the words, then a partial name), then a tag label
+equal to `q` or holding it, then the description; `activity` breaks ties. Add `sort=activity` for
+the most popular matches instead. `sort=relevance` needs `q`.
+
 **Similar links.** `related=<card id>` lists what the people who tagged a card also referenced,
 most shared taggers first. Each row's `because` says why: `shared` (how many of them) and
 `taggers` (up to three Pubky keys, the most recent first); ask Nexus for their names and tags.

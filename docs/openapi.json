@@ -3523,7 +3523,7 @@
             }
           },
           {
-            "description": "`following`, `friends` or `wot_2` of `viewer`: cards that authors in that set referenced\nrank higher, the more of them and the more recently they did, and nothing is left out\n(with the default ranking or `sort=trending`).",
+            "description": "`following`, `friends` or `wot_2` of `viewer`: cards that authors in that set referenced\nrank higher, the more of them and the more recently they did, and nothing is left out\n(with the default ranking, `sort=relevance` or `sort=trending`).",
             "in": "query",
             "name": "boost",
             "required": false,
@@ -3560,6 +3560,7 @@
             }
           },
           {
+            "description": "`relevance` (how well `q` matches: the name, then tag labels, then the description;\nthe activity score breaks ties; needs `q`), `activity`, `recent`, `distance` (needs\n`near`), `start` or `trending`. Default: `relevance` when `q` is set (not with `related`),\nelse `activity`.",
             "examples": {
               "(none)": {
                 "summary": "(none)",

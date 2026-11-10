@@ -593,7 +593,7 @@ POST /v1/changes/lookup {"resource_ids":["81cefcae5a6a468cfc27ff1c1b420fce","5bc
 
 | Parameter | Meaning |
 | --- | --- |
-| `q` | Full-text name/description search with a trigram/partial-name fallback; at most 256 bytes. A post whose author opted out of search indexing (a read's `facts.opted_out`: Mastodon's `indexable: false` or `noindex`, Bluesky's `!no-unauthenticated`) never matches |
+| `q` | Full-text name/description search with a trigram/partial-name fallback; at most 256 bytes. Ranked by `relevance` unless `sort` says otherwise ([Ranking](#search)). A post whose author opted out of search indexing (a read's `facts.opted_out`: Mastodon's `indexable: false` or `noindex`, Bluesky's `!no-unauthenticated`) never matches |
 | `type` | A schema.org type, ancestors included (`Event` matches `MusicEvent`; `Place` matches cafés and other `LocalBusiness` types), or up to 10 comma-separated: any of them (`type=MusicRecording,MusicAlbum,MusicGroup`). An unknown type is a 400 that names it (only a name of letters and digits is repeated; anything else, such as a URL, gets a general message) |
 | `category`, `host` | Exact filters |
 | `key` | Links carrying one exact identifier, on any service and in any spelling: `mbid:{uuid}` (a MusicBrainz recording, release, release group or artist), `wikidata:{Q-id}`, `isrc:{code}` (any letter case, hyphens allowed), `upc:{barcode}` (a UPC, EAN or GTIN in any of its lengths, check digit verified), `isbn:{ISBN-10 or ISBN-13}` (an edition), `imdb:{tt…}` (a film or series), `podcast:{GUID}` (a show), `podcast:enclosure:{URL}` (an episode, by the file it plays), `osm:{node|way|relation}/{id}`, `doi:{DOI}`, `gtin:{barcode}` (a [product](#products), in any of its lengths), any key exactly as a resource read lists it in `keys` (`mb:recording:{mbid}`, `podcast:guid:{GUID}`, `podcast:apple:{id}`, …), or another namespace a source records (its page in [docs/sources](sources/README.md#also-on) names its namespaces and how each is normalized), as the [also-on](#also-on) sources found them as keys or facts (`mbid:` also the MBID a MusicBrainz page was merged from, its `mbid_was` fact, and with `type=MusicEvent` an artist's events, by their performers), or as an exact lookup by that key named the link; anything else is 400 |
@@ -602,13 +602,13 @@ POST /v1/changes/lookup {"resource_ids":["81cefcae5a6a468cfc27ff1c1b420fce","5bc
 | `match` | `any` (default) or `all` (at most 3 tags) |
 | `author` | Resources referenced by this 52-character z-base-32 public key |
 | `reach`, `viewer` | `following`, `friends` or `wot_2` of the Nexus user `viewer`: only their references and tags count (a filter) |
-| `boost`, `viewer` | `following`, `friends` or `wot_2` of the Nexus user `viewer`: cards they referenced rank higher, the more of them and the more recently they did, and nothing is left out ([Reach](#search)); with the default ranking or `sort=trending` |
+| `boost`, `viewer` | `following`, `friends` or `wot_2` of the Nexus user `viewer`: cards they referenced rank higher, the more of them and the more recently they did, and nothing is left out ([Reach](#search)); with the default ranking, `sort=relevance` or `sort=trending` |
 | `venue` | Events at this venue resource ID |
 | `in_collection` | The cards a public collection holds: the collection post's `pubky://` URI, an item's `uri` from `GET /v1/resources/{id}/collections` ([Collections](#collections)) |
 | `remote` | `true`: [job postings](#jobs) that may be done remotely; `false`: job postings that may not |
 | `closed` | `true`: list [job postings](#jobs) past their closing date too; they are left out otherwise |
 | `ingredient` | [Recipes](#recipes) with these ingredients: up to 3, comma-separated, each of letters, digits, spaces and hyphens, matching whole words of an ingredient's name as the card records it (`flour` matches "all-purpose flour", `mozz` matches nothing); all must match |
-| `sort` | `activity` (default), `recent`, `distance` (requires `near`), `start` or `trending` (by the references made inside `window`; only links referenced in it; with `collapse=group` one song across services is one row, ranked by the references all its links got in the window) |
+| `sort` | `relevance` (requires `q`; the default when `q` is set), `activity` (the default otherwise), `recent`, `distance` (requires `near`), `start` or `trending` (by the references made inside `window`; only links referenced in it; with `collapse=group` one song across services is one row, ranked by the references all its links got in the window) |
 | `window` | With `sort=trending` or `related`: `{n}h` or `{n}d`, from `1h` to `90d` (default `7d` for trending, `limits.related_window_days` for related), counted back from the first page's instant |
 | `limit` | 1–500, default 50 |
 | `cursor` | The signed next-page token of the previous page |
@@ -641,6 +641,30 @@ A posting past its closing date is left out of every search unless it sets `clos
 (log(1 + taggers) + 0.5*log(1 + replies) + 0.3*log(1 + embeds + collections))
   * 2^(-age_of_newest_reference_in_days / 30)
 ```
+
+`relevance`, the default when `q` is set (not with `related`, which ranks its own rows), ranks
+by how well `q` matches, the name first, then the tags, then the description, and only then by
+`activity`:
+
+```text
+9 * name + 3 * tag + description + a / (1 + a)
+```
+
+- `name`: 4 when the name equals `q` (any case, white space collapsed), 3 when it holds `q`'s words as
+  a phrase, 2 when it holds all of them, 1 for a partial or fuzzy match (`musical` for `music`,
+  the trigram fallback), else 0;
+- `tag`: 2 when a label on the card equals `q` lowercased (for several words joined by a space,
+  hyphen, underscore or nothing: `daft-punk` for `daft punk`), 1 when a label holds `q`'s words
+  as a phrase (`electronic-music` for `music`), else 0; the labels are the card's and its
+  aliases', within `author` and `reach`, as for `tags`;
+- `description`: 2 when it holds `q`'s words as a phrase, 1 when the name and description
+  together hold all of them, else 0;
+- `a`: the `activity` score (with `boost`'s term when given), mapped into [0, 1) so it only
+  breaks ties.
+
+Words are whole words (`music` does not match `musical` there), in the `simple` text
+configuration (no stemming). `q` still decides what matches (name and description); tags only
+rank. `sort=relevance` without `q` is 400.
 
 `recent` ranks by the newest reference; `distance` and `start` by negative metres and negative
 Unix seconds, so nearest and earliest come first. Scores are internal and never returned.
@@ -682,7 +706,8 @@ daemon's memory only; nothing per viewer is stored.
 `boost` ranks and never filters: with the default ranking a card gains `2 · ln(1 + n)` for the
 `n` authors in the set who referenced it, halved every 30 days since the newest of their
 references (the card's own score decays the same way, and one recent reference from the set
-weighs about as much as three taggers in it); with `sort=trending` a reference in the window by
+weighs about as much as three taggers in it); with `sort=relevance` that term is added to the activity score that breaks ties between equal
+matches; with `sort=trending` a reference in the window by
 an author in the set counts twice. `boost` takes no other `sort` and no `related`. Both may be
 given, each with its own set.
 
