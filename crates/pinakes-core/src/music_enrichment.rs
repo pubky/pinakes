@@ -34,8 +34,8 @@
 //! there is usually a non-free file of Wikipedia's own). The image is shown only when Commons says
 //! the file is free to show with its credit (`wikimedia::free_file`).
 //!
-//! Each field ends in one of three ways: a value with its credit; missing (no item, an article
-//! that is not there (404, 410), a sitelink to a redirect, a disambiguation page, no image, a
+//! Each field ends in one of three ways: a value with its credit; missing (no item, an item, an
+//! entity or an article that is not there (404, 410), a sitelink to a redirect, a disambiguation page, no image, a
 //! refused file), which leaves the card as MusicBrainz alone makes it; or unread (a timeout, a
 //! 429, a 5xx, Wikidata's `maxlag`, any other status), which keeps what the stored card holds
 //! (`ResourceMeta::keep_enriched`). A missing text gives way to the next in the order; an unread
@@ -323,10 +323,18 @@ pub fn is_item_of(subject: ItemKind, mbid: &str, item: &wikidata::Item) -> bool 
 fn is_own(entity: &musicbrainz::Entity, item: &wikidata::Item) -> bool {
     is_item_of(ItemKind::of_entity(entity.kind), &entity.mbid, item)
 }
+/// A hub's answer where a 410 (`hubs::Gone`: the item or entity is gone for good) is `missing`,
+/// as a 404 is: nothing to read, no transient failure to read again.
+fn gone_is<T>(answer: anyhow::Result<T>, missing: T) -> anyhow::Result<T> {
+    match answer {
+        Err(error) if error.downcast_ref::<crate::hubs::Gone>().is_some() => Ok(missing),
+        answer => answer,
+    }
+}
 /// Item `qid` read back with its claims (`wikidata::items`); `None` when it is unknown, or too
 /// large to read and so can't be verified. An error is a transient failure.
 async fn read_back(egress: &Egress, qid: &str) -> anyhow::Result<Option<wikidata::Item>> {
-    match wikidata::items(egress, &[qid.to_owned()]).await {
+    match gone_is(wikidata::items(egress, &[qid.to_owned()]).await, vec![]) {
         Ok(items) => Ok(items.into_iter().next()),
         Err(error) if crate::resolver::egress::over_cap(&error) => Ok(None),
         Err(error) => Err(error),
@@ -338,7 +346,10 @@ async fn verified_item(
     property: &str,
     value: &str,
 ) -> anyhow::Result<Option<wikidata::Found>> {
-    match wikidata::item_with(egress, property, value).await {
+    match gone_is(
+        wikidata::item_with(egress, property, value).await,
+        wikidata::Found::None,
+    ) {
         Ok(found) => Ok(Some(found)),
         Err(error) if crate::resolver::egress::over_cap(&error) => Ok(None),
         Err(error) => Err(error),
@@ -479,7 +490,7 @@ async fn source(
     qid: &str,
     subject: Option<String>,
 ) -> Result<Option<Source>, ()> {
-    match wikidata::pages(egress, qid).await {
+    match gone_is(wikidata::pages(egress, qid).await, None) {
         Ok(pages) => Ok(pages.map(|pages| Source {
             qid: qid.to_owned(),
             pages,
@@ -496,8 +507,7 @@ async fn source(
 /// [`ItemKind::Work`]: a work's or its single's song's item naming no other work, never an
 /// album's, a recording's, a release's, an artist's or a Wikimedia page's); `Err` when unread.
 async fn work_source(egress: &Egress, base: &str, recording: &str) -> Result<Option<Source>, ()> {
-    let works = musicbrainz::works(egress, base, recording)
-        .await
+    let works = gone_is(musicbrainz::works(egress, base, recording).await, vec![])
         .map_err(|error| unread(recording, "musicbrainz_works", &error))?;
     let [work] = works.as_slice() else {
         return Ok(None);
@@ -775,7 +785,7 @@ pub fn excerpt(text: &str, max: usize) -> (String, bool) {
 
 /// The item's image (`P18`), when Commons says it is free to show.
 async fn image(egress: &Egress, mbid: &str, qid: &str, width: u32) -> Found {
-    let files = match wikidata::files(egress, qid, "P18").await {
+    let files = match gone_is(wikidata::files(egress, qid, "P18").await, vec![]) {
         Ok(files) => files,
         Err(error) => {
             unread(mbid, "wikidata_image", &error);

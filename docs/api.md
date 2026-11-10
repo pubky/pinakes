@@ -1348,7 +1348,8 @@ image or description: the card is still `ok`). An answer that fails for a while 
 429, a 5xx, Wikidata's `maxlag`, another unexpected status) keeps what the card had of that
 field (should the card then pass its size bound, it gives up its last facts first), and the card is read again after at least an hour and at least twice as long as since its
 last reading, up to its own refresh time (so a failure on a routine refresh waits for the next); a
-definite answer (no item, no text, a refused file) removes it. A failed text never gives way to
+definite answer (no item, no text, a 404 or 410 from Wikidata, MusicBrainz or Wikipedia, a
+refused file) removes it. A failed text never gives way to
 the next one in the order: a busy English Wikipedia keeps the stored article's summary rather
 than show the shorter line. A failed search for the item leaves both fields as stored.
 

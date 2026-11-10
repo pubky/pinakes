@@ -104,6 +104,8 @@ struct Mode {
     /// `Some((file, qid))`: the `wikidata` relation of MusicBrainz's answer `file` names item
     /// `qid` (an item of another kind of entity) instead of its own, or is added naming it.
     relation: Option<(&'static str, &'static str)>,
+    /// A request whose host, path and query hold this answers 410 Gone.
+    gone: Option<&'static str>,
 }
 /// Answers by host, path and query from the recorded fixtures; records each request.
 #[derive(Default)]
@@ -421,6 +423,11 @@ impl Transport for Recorded {
                 }
             }
             (host, path) => panic!("unexpected request {host}{path}"),
+        };
+        let asked = format!("{host}{path}?{}", url.query().unwrap_or_default());
+        let (status, body) = match mode.gone {
+            Some(part) if asked.contains(part) => (410, b"{}".to_vec()),
+            _ => (status, body),
         };
         Ok(Fetched {
             permanent_redirect: false,
@@ -1111,6 +1118,76 @@ async fn a_works_relation_to_an_item_of_another_kind_gives_nothing() {
         };
         takes_nothing_of(GET_LUCKY, mode, qid).await;
     }
+}
+
+/// A 410 from Wikidata or MusicBrainz in the enrichment says the item or the work is gone for
+/// good, as a 404 does: the field is missing, never unread (which would keep a stale stored value
+/// and read the card again early, forever). Daft Punk's item read back, Sefa's MBID search, Get
+/// Lucky's works and Sefa's image claim each answer 410 in turn.
+#[tokio::test]
+async fn a_hubs_410_is_missing_never_unread() {
+    let plain = |uri: &'static str| async move {
+        card(&web(Recorded::new(Mode::default()), false), uri).await
+    };
+    for (uri, gone) in [
+        (DAFT_PUNK, "ids=Q185828&props=claims"),
+        (SEFA, "srsearch=haswbstatement"),
+        (GET_LUCKY, "inc=work-rels"),
+    ] {
+        let t = Recorded::new(Mode {
+            gone: Some(gone),
+            mbid_search: if uri == GET_LUCKY {
+                Search::Empty
+            } else {
+                Search::Recorded
+            },
+            discogs_search: Search::Empty,
+            ..Default::default()
+        });
+        let doc = card(&web(t.clone(), true), uri).await;
+        let plain = plain(uri).await;
+        assert!(
+            doc.unread_enriched.is_empty(),
+            "{gone}: {:?}",
+            doc.unread_enriched
+        );
+        assert_eq!(
+            doc.refresh_by.is_some(),
+            plain.refresh_by.is_some(),
+            "{gone}"
+        );
+        assert_eq!(
+            (&doc.image, &doc.description, credits(&doc)),
+            (&plain.image, &plain.description, json!([])),
+            "{gone}"
+        );
+        assert!(t.seen().iter().any(|s| s.contains(gone)), "{gone}");
+    }
+    // The image claim gone: no image, the description as read.
+    let t = Recorded::new(Mode {
+        gone: Some("wbgetclaims&entity=Q55825905"),
+        ..Default::default()
+    });
+    let sefa = card(&web(t.clone(), true), SEFA).await;
+    assert!(sefa.unread_enriched.is_empty());
+    assert_eq!(
+        (sefa.image.as_deref(), sefa.description.as_deref()),
+        (None, Some(SEFA_DESCRIPTION))
+    );
+    assert_eq!(credits(&sefa), json!([item_credit("Q55825905", None)]));
+    // The item's pages gone: no description, the image as read.
+    let t = Recorded::new(Mode {
+        gone: Some("ids=Q55825905&props=sitelinks"),
+        ..Default::default()
+    });
+    let sefa = card(&web(t.clone(), true), SEFA).await;
+    let plain = plain(SEFA).await;
+    assert!(sefa.unread_enriched.is_empty());
+    assert_eq!(
+        (sefa.image.as_deref(), &sefa.description),
+        (Some(SEFA_IMAGE), &plain.description)
+    );
+    assert_eq!(credits(&sefa), json!([sefa_image_credit()]));
 }
 
 /// An item that is a disambiguation page's (P31 Q4167410; a list article's, Q13406463, alike) is

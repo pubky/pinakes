@@ -80,9 +80,23 @@ pub fn qid(s: &str) -> Option<String> {
     .then(|| s.to_owned())
 }
 
+/// A hub's 410: what was asked for is gone for good. An error like any other unexpected status
+/// for every caller ("… answered 410"); the music enrichment alone reads it as a 404
+/// (`music_enrichment`), which leaves its other callers' handling of a hub's answer as it was.
+#[derive(Clone, Copy, Debug)]
+pub struct Gone {
+    pub hub: &'static str,
+}
+impl std::fmt::Display for Gone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} answered 410", self.hub)
+    }
+}
+impl std::error::Error for Gone {}
+
 /// A hub's answer as JSON: `None` for 404, a retry for 429/503 (and other 5xx) and for an API
-/// error Wikidata sends with 200 (`ratelimited`, `maxlag`; an unknown ID is an answer), an error
-/// for anything else that is not 200 JSON.
+/// error Wikidata sends with 200 (`ratelimited`, `maxlag`; an unknown ID is an answer), [`Gone`]
+/// for 410, an error for anything else that is not 200 JSON.
 fn json(fetched: &Fetched, hub: &'static str) -> Result<Option<Value>> {
     let busy = || -> anyhow::Error {
         RetryLater {
@@ -104,6 +118,7 @@ fn json(fetched: &Fetched, hub: &'static str) -> Result<Option<Value>> {
             }
         }
         404 => Ok(None),
+        410 => Err(Gone { hub }.into()),
         429 | 500..=599 => Err(busy()),
         status => bail!("{hub} answered {status}"),
     }
@@ -1546,6 +1561,30 @@ mod tests {
         let unknown = answer(r#"{"error":{"code":"no-such-entity","id":"Q0"}}"#);
         assert!(json(&unknown, "wikidata").unwrap().is_some());
         assert!(json(&limited, "musicbrainz").unwrap().is_some());
+    }
+    /// A 410 is an error for every caller, as before, of its own type ([`Gone`]) so that the music
+    /// enrichment alone can read it as gone; a 404 is no answer.
+    #[test]
+    fn a_hubs_410_is_gone_and_still_an_error() {
+        let answer = |status: u16| Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            validators: Default::default(),
+            url: url::Url::parse("https://musicbrainz.org/ws/2/artist/x").unwrap(),
+            status,
+            retry_after_secs: 0,
+            location: None,
+            content_type: "application/json".into(),
+            body: b"{}".to_vec(),
+        };
+        for hub in ["musicbrainz", "wikidata"] {
+            let err = json(&answer(410), hub).unwrap_err();
+            assert!(err.downcast_ref::<Gone>().is_some(), "{err:#}");
+            assert_eq!(err.to_string(), format!("{hub} answered 410"));
+            assert!(json(&answer(404), hub).unwrap().is_none());
+            let other = json(&answer(403), hub).unwrap_err();
+            assert!(other.downcast_ref::<Gone>().is_none(), "{other:#}");
+        }
     }
 
     #[test]
