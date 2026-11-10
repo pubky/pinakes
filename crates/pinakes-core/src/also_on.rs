@@ -20,6 +20,7 @@ pub mod deezer;
 pub mod editions;
 pub mod films;
 pub mod itunes;
+pub mod itunes_song;
 pub mod media;
 pub mod musicbrainz;
 pub mod musicbrainz_entity;
@@ -470,6 +471,8 @@ pub fn registry() -> Vec<Arc<dyn Source>> {
         // After every source that keys a track's ISRC or an album's barcode, as `spotify_isrc`.
         Arc::new(tidal_isrc::TidalIsrc),
         Arc::new(itunes::ItunesSource),
+        // After `itunes`: a track's Apple Music song, by its album's barcode and its place there.
+        Arc::new(itunes_song::ItunesSong),
         Arc::new(wikipedia::WikipediaSource),
         Arc::new(wikidata_item::WikidataItemSource),
         Arc::new(books::Books),

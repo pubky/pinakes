@@ -13,7 +13,15 @@ const DEEZER_API: &str = "https://api.deezer.com";
 /// One Deezer API object; `None` when Deezer has no data (its error 800) or no such ID. Never
 /// while the source is off, whoever asks: the egress refuses `api.deezer.com` then too
 /// (`also_on::off_hosts`).
-async fn deezer(cx: &Context, path: &str) -> Result<Option<Value>> {
+pub(crate) async fn deezer(cx: &Context, path: &str) -> Result<Option<Value>> {
+    Ok(answer(cx, path)
+        .await?
+        .filter(|v| v["id"].as_u64().is_some()))
+}
+/// One Deezer API answer (`path` under `https://api.deezer.com/`, its query escaped), shared for
+/// an hour; `None` when Deezer answers an error (800: no data) or a client error. Its quota (error
+/// 4, 429) and an outage are retried. Never while the source is off.
+pub(crate) async fn answer(cx: &Context, path: &str) -> Result<Option<Value>> {
     if !cx.config.also_on.source_enabled(&DeezerSource) {
         anyhow::bail!("the deezer source is off: its API is not called");
     }
@@ -40,7 +48,7 @@ async fn deezer(cx: &Context, path: &str) -> Result<Option<Value>> {
     let v: Value = serde_json::from_slice(&fetched.body)?;
     // Deezer answers errors with 200: 4 is its quota, 800 "no data".
     match v["error"]["code"].as_u64() {
-        None if v["id"].as_u64().is_some() => Ok(Some(v)),
+        None if v["error"].is_null() => Ok(Some(v)),
         Some(4) => Err(busy()),
         _ => Ok(None),
     }
