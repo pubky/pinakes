@@ -724,11 +724,15 @@ pub(crate) async fn own_wikidata_key(
         }))
 }
 /// Whether `item` may key `entity` ([`own_wikidata_key`]): exactly of its kind, naming this one
-/// MBID at its level.
+/// MBID at its level; for a release group, naming no recording either (P4404). An album's item
+/// that also carries a recording's ID is a single's track's too: the `wikidata` source keys a
+/// streaming track by it ([`recording_item`]), so as the album's key it would join the track to
+/// the album.
 pub(crate) fn keys_entity(entity: &musicbrainz::Entity, item: &wikidata::Item) -> bool {
     use crate::music_enrichment::{mbid_property, ItemKind};
     ItemKind::of(item) == ItemKind::of_entity(entity.kind)
         && item.id(mbid_property(entity.kind)) == [entity.mbid.as_str()]
+        && (entity.kind != MbKind::ReleaseGroup || item.id("P4404").is_empty())
 }
 
 /// The longest artist credit (or other fact) a MusicBrainz card stores as an attribute: what

@@ -131,6 +131,9 @@ enum AlbumItem {
     SongAndAlbum,
     /// An item with no MusicBrainz or Discogs ID yet: P436 and P1954 removed.
     Bare,
+    /// The album's item (class album, its P436) that also names one recording (P4404) and a
+    /// Spotify track (P2207), as a single's item that is its track's too may.
+    AlbumWithRecording,
 }
 /// The recording ID [`AlbumItem::SongAndAlbum`] adds.
 const SONG_RECORDING: &str = "0d0f1e2a-3b4c-4d5e-8f60-718293a4b5c6";
@@ -467,6 +470,19 @@ impl Transport for Recorded {
                                             SONG_RECORDING,
                                         );
                                     claims["P4404"] = serde_json::from_str(&recording).unwrap();
+                                }
+                                AlbumItem::AlbumWithRecording => {
+                                    let p436 = serde_json::to_string(&claims["P436"]).unwrap();
+                                    let recording = p436.replace("P436", "P4404").replace(
+                                        "8e8a594f-2175-38c7-a871-abb68ec363e7",
+                                        SONG_RECORDING,
+                                    );
+                                    claims["P4404"] = serde_json::from_str(&recording).unwrap();
+                                    let track = p436.replace("P436", "P2207").replace(
+                                        "8e8a594f-2175-38c7-a871-abb68ec363e7",
+                                        "0000000000000000000001",
+                                    );
+                                    claims["P2207"] = serde_json::from_str(&track).unwrap();
                                 }
                                 AlbumItem::Bare => {
                                     let claims = claims.as_object_mut().unwrap();
@@ -2359,6 +2375,13 @@ async fn an_album_is_keyed_only_by_an_item_that_is_exactly_its_own(pool: PgPool)
     }
     // A track keyed by the song's item (as the `wikidata` source keys a Spotify track whose
     // P2207 the item holds) and by its recording does not join the album's group.
+    a_track_of_the_item_stays_apart(&pool, AlbumItem::SongAndAlbum).await;
+}
+
+/// With Kind of Blue's item read back as `album_item`, a Spotify track keyed by that item and by
+/// the recording it names (as the `wikidata` source keys a track whose P2207 the item holds: one
+/// P4404, no P435) is not in the album's group.
+async fn a_track_of_the_item_stays_apart(pool: &PgPool, album_item: AlbumItem) {
     let track = "https://open.spotify.com/track/0000000000000000000001";
     let recording = format!("mb:recording:{SONG_RECORDING}");
     let keys = Keys(
@@ -2371,13 +2394,13 @@ async fn an_album_is_keyed_only_by_an_item_that_is_exactly_its_own(pool: PgPool)
     );
     let mut ids = std::collections::BTreeMap::new();
     for (uri, ty) in [(KIND_OF_BLUE, "MusicAlbum"), (track, "MusicRecording")] {
-        let id = pinakes_core::store::ensure_resource(&pool, uri)
+        let id = pinakes_core::store::ensure_resource(pool, uri)
             .await
             .unwrap();
         let mut d = ResourceMeta::new(uri, "web", 86400);
         d.set_type(ty);
         d.name = Some("Kind of Blue".into());
-        pinakes_core::store::save_document(&pool, &id, 0, &d)
+        pinakes_core::store::save_document(pool, &id, 0, &d)
             .await
             .unwrap();
         ids.insert(uri, id);
@@ -2387,7 +2410,7 @@ async fn an_album_is_keyed_only_by_an_item_that_is_exactly_its_own(pool: PgPool)
             common::unpaced_egress_config(),
             Arc::new(PublicDns),
             Recorded::new(Mode {
-                album_item: AlbumItem::SongAndAlbum,
+                album_item,
                 ..Default::default()
             }),
         ),
@@ -2398,14 +2421,14 @@ async fn an_album_is_keyed_only_by_an_item_that_is_exactly_its_own(pool: PgPool)
         .find(|s| s.id() == "musicbrainz_entity")
         .unwrap();
     sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()")
-        .execute(&pool)
+        .execute(pool)
         .await
         .unwrap();
     let sources: Vec<Arc<dyn pinakes_core::also_on::Source>> = vec![entity_source, Arc::new(keys)];
-    pinakes_core::also_on::drain(&pool, &cx, &sources, 100)
+    pinakes_core::also_on::drain(pool, &cx, &sources, 100)
         .await
         .unwrap();
-    common::drain_groups(&pool, &Default::default()).await;
+    common::drain_groups(pool, &Default::default()).await;
     let group_of = |uri: &str| {
         let (pool, id) = (pool.clone(), ids[uri].clone());
         async move {
@@ -2420,6 +2443,23 @@ async fn an_album_is_keyed_only_by_an_item_that_is_exactly_its_own(pool: PgPool)
     };
     let (album, song) = (group_of(KIND_OF_BLUE).await, group_of(track).await);
     assert!(album.is_none() || album != song, "{album:?} {song:?}");
+}
+
+/// An album's own item that also names one recording (and that recording's Spotify track) is a
+/// single's track's too: it keys no album, so the track the `wikidata` source keys by it stays
+/// out of the album's group.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn an_album_item_that_names_a_recording_keys_no_album(pool: PgPool) {
+    let group = "mb:release-group:8e8a594f-2175-38c7-a871-abb68ec363e7";
+    let mode = Mode {
+        album_item: AlbumItem::AlbumWithRecording,
+        ..Default::default()
+    };
+    let Some(found) = entity_lookup(KIND_OF_BLUE, mode, &[]).await else {
+        return;
+    };
+    assert_eq!(keys_of(&found), [group]);
+    a_track_of_the_item_stays_apart(&pool, AlbumItem::AlbumWithRecording).await;
 }
 
 /// A Wikidata that fails for now (503) never costs a MusicBrainz page its MusicBrainz keys and
