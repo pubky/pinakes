@@ -91,8 +91,9 @@ impl Enrichment {
             description: Found::Unread,
         }
     }
-    /// Writes the found values and their credits into `doc` (a value that is a link carrying a
-    /// credential leaves the field as MusicBrainz makes it). An unread field is listed in
+    /// Writes the found values and their credits into `doc` (a value that is or holds a link
+    /// carrying a credential, `capability::contains_credential`, leaves the field as MusicBrainz
+    /// makes it: a description is free text). An unread field is listed in
     /// `unread_enriched`, and the card is read again early, `retry_secs` from now at the soonest
     /// (`ResourceMeta::keep_enriched` moves that later by how old its stored reading is).
     pub fn apply(self, doc: &mut ResourceMeta, retry_secs: u64) {
@@ -102,8 +103,9 @@ impl Enrichment {
         ] {
             match found {
                 // A value the store would drop (`capability::strip_document`) is not taken: its
-                // credit would stay without it.
-                Found::Value(value, _) if crate::capability::names_credential(&value) => {}
+                // credit would stay without it. Nor is a text with such a link inside, which the
+                // store would keep.
+                Found::Value(value, _) if crate::capability::contains_credential(&value) => {}
                 Found::Value(value, credit) => {
                     match field {
                         CreditField::Image => doc.image = Some(value),
@@ -659,6 +661,20 @@ mod tests {
         }
         .apply(&mut doc, 3600);
         assert_eq!((doc.image, doc.credits), (None, vec![]));
+        // A description is free text: a link inside it that carries a credential counts too.
+        let mut doc = ResourceMeta::new("https://musicbrainz.org/artist/x", "musicbrainz", 60);
+        Enrichment {
+            image: Found::Missing,
+            description: Found::Value(
+                "A band. See https://example.org/p?api_key=SECRET for more.".into(),
+                Credit {
+                    field: CreditField::Description,
+                    ..credit.clone()
+                },
+            ),
+        }
+        .apply(&mut doc, 3600);
+        assert_eq!((doc.description, doc.credits), (None, vec![]));
         let mut doc = ResourceMeta::new("https://musicbrainz.org/artist/x", "musicbrainz", 60);
         Enrichment {
             image: Found::Value("https://upload.wikimedia.org/a.jpg".into(), credit.clone()),

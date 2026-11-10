@@ -174,10 +174,11 @@ pub struct Credit {
 impl Credit {
     /// The credit within its bounds: every URL `https:` and at most 1,024 bytes, the author at
     /// most 256 bytes (cut at a character), the licence ID and language at most 64. `None` when
-    /// a URL or ID is out of bounds, or when a URL or the author is a link that carries a
-    /// credential (`capability::names_credential`): the store would drop that part of the
-    /// credit (`capability::strip_document`) and leave its value uncredited, so the value is not
-    /// taken at all.
+    /// a URL or ID is out of bounds, when a URL is a link that carries a credential
+    /// (`capability::names_credential`: the store would drop that part of the credit,
+    /// `capability::strip_document`, and leave its value uncredited), or when the author, free
+    /// text, holds such a link anywhere (`capability::contains_credential`: `Jane
+    /// https://…?api_key=…`, which no store rule removes). The value is then not taken at all.
     pub fn bounded(mut self) -> Option<Self> {
         let https = |s: &str| {
             s.len() <= 1024
@@ -198,7 +199,7 @@ impl Credit {
             && !self
                 .author
                 .as_deref()
-                .is_some_and(crate::capability::names_credential)
+                .is_some_and(crate::capability::contains_credential)
             && self.license_url.as_deref().is_none_or(https)
             && self.subject.as_deref().is_none_or(https)
             && id(&self.license)
@@ -769,6 +770,15 @@ mod tests {
             },
             Credit {
                 author: Some("https://www.flickr.com/people/a?api_key=x".into()),
+                ..author.clone()
+            },
+            // An author is free text: a link inside it counts too.
+            Credit {
+                author: Some("Jane https://example.org/p?api_key=SECRET".into()),
+                ..author.clone()
+            },
+            Credit {
+                author: Some("Photo: Jane (https://example.org/p?access_token=x)".into()),
                 ..author.clone()
             },
         ] {
