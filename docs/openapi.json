@@ -963,7 +963,7 @@
             "type": "integer"
           },
           "attributions": {
-            "description": "What a client must show while it shows values from these services, each the\n`credits[].provider` of the values it gave: the service's notice, verbatim, and its logo\n(less prominent than the client's own marks). Only the services this instance uses;\nabsent when it uses none.",
+            "description": "What a client must show while it shows values from these services, each the\n`credits[].provider` of the values it gave: the service's notice, verbatim, and its logo\n(less prominent than the client's own marks). Listed while this instance uses the\nservice, and after, while a stored card still holds one of its values; absent when none\nis.",
             "items": {
               "$ref": "#/components/schemas/InfoAttribution"
             },

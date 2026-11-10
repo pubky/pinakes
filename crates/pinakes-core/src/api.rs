@@ -62,6 +62,8 @@ impl Drop for PreviewSlot {
 }
 /// A request clock (`AppState::clock`).
 pub type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
+/// When [`shown_providers`] read, and what it found.
+type Shown = (Instant, Vec<model::CreditProvider>);
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
@@ -78,7 +80,7 @@ pub struct AppState {
     info_cache: Arc<Mutex<Option<(Instant, Value)>>>,
     /// The providers whose values some stored card holds, and when that was read
     /// ([`shown_providers`]).
-    shown: Arc<Mutex<Option<(Instant, Vec<model::CreditProvider>)>>>,
+    shown: Arc<Mutex<Option<Shown>>>,
     pub(crate) cursor_mac: SimpleHmac<blake3::Hasher>,
     /// The request clock for relative times and search cursors; tests set it, the daemon never
     /// does (wall clock).
