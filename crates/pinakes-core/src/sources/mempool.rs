@@ -45,14 +45,6 @@ impl Network {
             Self::Signet => "/signet",
         }
     }
-    fn from_segment(segment: &str) -> Option<Self> {
-        match segment {
-            "testnet" => Some(Self::Testnet),
-            "testnet4" => Some(Self::Testnet4),
-            "signet" => Some(Self::Signet),
-            _ => None,
-        }
-    }
     /// The namespace of on-chain identifiers.
     fn chain(self) -> &'static str {
         match self {
