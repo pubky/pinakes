@@ -823,7 +823,8 @@ of its work's item's pages; Wikipedia two summaries
 (English, then one other language), for a recording three (its item's English article, its
 work's, then one other language); Commons one; the Cover Art Archive one (a release or release
 group with no free Commons file; a release only when MusicBrainz says the archive shows its front
-cover), whose redirect to archive.org is kept, never followed. These requests run one after another and share
+cover), whose redirect to archive.org is kept, never followed (with `egress.allow_hosts` set, allow
+`coverartarchive.org` for covers; archive.org is not needed). These requests run one after another and share
 each host's pace (`www.wikidata.org` with the also-on sources), so an artist found through its
 Discogs pages makes up to six Wikidata requests before its text and image are asked for. A
 `reextract web` of many such cards at once can leave some of them unread at the timeout; they
