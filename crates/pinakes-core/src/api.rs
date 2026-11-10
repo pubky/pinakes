@@ -779,7 +779,8 @@ pub struct Card {
     pub attribution: Option<String>,
     /// Where `image` and `description` came from when Pinakes added them from another source
     /// than the link itself (a MusicBrainz card's Wikipedia or Wikidata text, its Commons image,
-    /// or an album's front cover from the Cover Art Archive): one credit per such field, with its
+    /// or an album's front cover from the Cover Art Archive; a Wikidata item's card's Commons
+    /// image): one credit per such field, with its
     /// source page and, when it has them, its author and licence (a cover has neither: both are
     /// null), to show with the value (docs/api.md, Credits). At most 4; `[]` when none. A field
     /// without a credit came from the link itself.
