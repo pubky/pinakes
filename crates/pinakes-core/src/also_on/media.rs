@@ -177,6 +177,8 @@ pub struct TypeHints {
     pub title_description: Option<String>,
     /// The audio an also-on source heard of for it ([`STREAMS`]), with that source.
     pub stream: Option<(String, crate::model::Stream)>,
+    /// The live facts of each source that fills cards (`also_on::Source::fills`), by source.
+    pub filled: std::collections::BTreeMap<String, Vec<super::Fact>>,
 }
 /// The also-on sources that hear of a stream, as the facts `stream_url`, `stream_type` and
 /// `stream_duration`, first the one a card takes: `podcasts`, an episode's enclosure, and
@@ -268,6 +270,33 @@ pub async fn type_hints(
             hints.title_description = Some(value);
         }
     }
+    let fillers: Vec<&str> = crate::also_on::registered()
+        .iter()
+        .filter(|s| !s.fills().is_empty())
+        .map(|s| s.id())
+        .collect();
+    if !fillers.is_empty() {
+        let filled: Vec<(String, String, String, String)> = sqlx::query_as(&format!(
+            "SELECT resource_id,source,name,value FROM resource_fact WHERE resource_id=ANY($1) AND source=ANY($2) AND expires_at>now() AND {sources} ORDER BY resource_id,source,name,value"
+        ))
+        .bind(ids)
+        .bind(&fillers)
+        .fetch_all(pool)
+        .await?;
+        for (id, source, name, value) in filled {
+            let takes = crate::also_on::registered()
+                .iter()
+                .any(|s| s.id() == source && s.fills().contains(&name.as_str()));
+            if takes {
+                out.entry(id)
+                    .or_default()
+                    .filled
+                    .entry(source)
+                    .or_default()
+                    .push(super::Fact::new(name, value));
+            }
+        }
+    }
     let streams: Vec<(String, String, String, String)> = sqlx::query_as(&format!(
         "SELECT resource_id,source,name,min(value) FROM resource_fact WHERE resource_id=ANY($1) AND source=ANY($2) AND name IN ('stream_url','stream_type','stream_duration') AND expires_at>now() AND {sources} GROUP BY resource_id,source,name"
     ))
@@ -306,8 +335,8 @@ pub async fn type_hints(
 
 impl TypeHints {
     /// What `source` finds for a card now, as one fingerprint of every value it writes into it
-    /// (`titles`: the title and description; `films`: the title type; `podcasts`: the episode);
-    /// `None` when it finds nothing.
+    /// (`titles`: the title and description; `films`: the title type; `podcasts`: the episode;
+    /// a source that fills cards: its facts); `None` when it finds nothing.
     pub fn finding(&self, source: &str) -> Option<String> {
         match source {
             "titles" => self.title.as_deref().map(|title| {
@@ -319,6 +348,14 @@ impl TypeHints {
                 None => self.episode.then(|| fingerprint(&["episode"])),
                 Some(s) => Some(stream_fingerprint(self.episode.then_some("episode"), s)),
             },
+            source if self.filled.contains_key(source) => {
+                let facts = &self.filled[source];
+                let values: Vec<&str> = facts
+                    .iter()
+                    .flat_map(|f| [f.name.as_str(), f.value.as_str()])
+                    .collect();
+                Some(fingerprint(&values))
+            }
             source => self.heard(source).map(|s| stream_fingerprint(None, s)),
         }
     }
@@ -393,6 +430,7 @@ fn work_id(v: &str) -> bool {
 
 /// Type a resolved card by what its media link is ([`link_type`]), or by what the media sources
 /// found ([`TypeHints`]); a card that did not resolve, or a link nothing types, is left alone.
+/// Then the sources that fill cards write what their facts give into it ([`fill`]).
 pub fn type_card(uri: &str, hints: &TypeHints, doc: &mut crate::model::ResourceMeta) {
     if doc.status != crate::model::Status::Ok {
         return;
@@ -433,6 +471,80 @@ pub fn type_card(uri: &str, hints: &TypeHints, doc: &mut crate::model::ResourceM
         doc.stream = Some(stream.clone());
         self::hinted(doc, source, hints.finding(source).unwrap_or_default());
     }
+    fill(hints, doc);
+}
+/// Let each source that fills cards (`also_on::Source::fill_card`) write what its live facts give
+/// into the typed card, after taking out what it wrote before; one with nothing to write (off,
+/// its facts gone, the card has its own values) leaves no fingerprint.
+pub fn fill(hints: &TypeHints, doc: &mut crate::model::ResourceMeta) {
+    for source in crate::also_on::registered()
+        .iter()
+        .filter(|s| !s.fills().is_empty())
+    {
+        let facts = hints
+            .filled
+            .get(source.id())
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if source.fill_card(facts, doc) {
+            self::hinted(
+                doc,
+                source.id(),
+                hints.finding(source.id()).unwrap_or_default(),
+            );
+        } else {
+            doc.hinted_by.remove(source.id());
+        }
+    }
+    strip_unowned(doc);
+}
+/// Take out of a card the values a source that fills cards wrote that its live facts no longer
+/// give (its fingerprint in `hinted_by` is not what it finds now: expired, switched off, another
+/// answer), and those of a provider no source of this build writes; whether anything went. It
+/// never writes a value.
+pub fn unfill(hints: &TypeHints, doc: &mut crate::model::ResourceMeta) -> bool {
+    let before = (
+        doc.image.clone(),
+        doc.description.clone(),
+        doc.credits.clone(),
+        doc.hinted_by.clone(),
+    );
+    for source in crate::also_on::registered()
+        .iter()
+        .filter(|s| !s.fills().is_empty())
+    {
+        let stale = doc
+            .hinted_by
+            .get(source.id())
+            .is_some_and(|written| hints.finding(source.id()).as_ref() != Some(written));
+        if stale {
+            source.fill_card(&[], doc);
+            doc.hinted_by.remove(source.id());
+        }
+    }
+    strip_unowned(doc);
+    (
+        doc.image.clone(),
+        doc.description.clone(),
+        doc.credits.clone(),
+        doc.hinted_by.clone(),
+    ) != before
+}
+/// Take out the values (and credits) of a provider written from facts that no source of this
+/// build writes (`also_on::Source::fills_as`): a removed source's values never outlive it.
+fn strip_unowned(doc: &mut crate::model::ResourceMeta) {
+    let owned: Vec<crate::model::CreditProvider> = crate::also_on::registered()
+        .iter()
+        .filter_map(|s| s.fills_as())
+        .collect();
+    let gone = |p: crate::model::CreditProvider| p.from_facts() && !owned.contains(&p);
+    for credit in doc.credits.iter().filter(|c| gone(c.provider)) {
+        match credit.field {
+            crate::model::CreditField::Image => doc.image = None,
+            crate::model::CreditField::Description => doc.description = None,
+        }
+    }
+    doc.credits.retain(|c| !gone(c.provider));
 }
 
 /// An IMDb title ID.

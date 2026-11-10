@@ -109,7 +109,7 @@
             "type": "integer"
           },
           "credits": {
-            "description": "Where `image` and `description` came from when Pinakes added them from another source\nthan the link itself (a MusicBrainz card's Wikipedia or Wikidata text, its Commons image,\nor an album's front cover from the Cover Art Archive; a Wikidata item's card's Commons\nimage): one credit per such field, with its\nsource page and, when it has them, its author and licence (a cover has neither: both are\nnull), to show with the value (docs/api.md, Credits). At most 4; `[]` when none. A field\nwithout a credit came from the link itself.",
+            "description": "Where `image` and `description` came from when Pinakes added them from another source\nthan the link itself (a MusicBrainz card's Wikipedia or Wikidata text, its Commons image,\nor an album's front cover from the Cover Art Archive; a Wikidata item's card's Commons\nimage; a film's or series' poster or overview from TMDB): one credit per such field, with\nits source page and, when it has them, its author and licence (a cover and TMDB's values\nhave neither: both are null), to show with the value (docs/api.md, Credits; a value\ncredited to `tmdb` also with TMDB's logo and notice, `/v1/info` `attributions`). At most\n4; `[]` when none. A field without a credit came from the link itself.",
             "items": {
               "$ref": "#/components/schemas/Credit"
             },
@@ -545,7 +545,7 @@
         "description": "Where one of the card's `image` or `description` came from when Pinakes added it from another\nsource than the link itself, and the licence it is used under (docs/api.md, Credits). Show it\nwith the value: the author, the licence (linked to `license_url`) and the source page.",
         "properties": {
           "author": {
-            "description": "Who made it, plain text of at most 256 bytes: \"Wikipedia contributors\" for an article, the\nfile's author for an image. Null for a public-domain or CC0 file that names none, for a\nWikidata description (CC0), and for a cover from the Cover Art Archive.",
+            "description": "Who made it, plain text of at most 256 bytes: \"Wikipedia contributors\" for an article, the\nfile's author for an image. Null for a public-domain or CC0 file that names none, for a\nWikidata description (CC0), for a cover from the Cover Art Archive and for TMDB's values.",
             "type": [
               "string",
               "null"
@@ -567,14 +567,14 @@
             ]
           },
           "license": {
-            "description": "An SPDX licence ID (`CC-BY-SA-4.0`, `CC-BY-2.0`, `CC0-1.0`), or `public-domain`. Null for\na cover from the Cover Art Archive: cover art is its label's, shown as a service shows an\nalbum's cover, and no licence is given (`license_url` is null too).",
+            "description": "An SPDX licence ID (`CC-BY-SA-4.0`, `CC-BY-2.0`, `CC0-1.0`), or `public-domain`. Null for\na cover from the Cover Art Archive: cover art is its label's, shown as a service shows an\nalbum's cover, and no licence is given (`license_url` is null too). Null for TMDB's\nposter or overview too, used under TMDB's API terms.",
             "type": [
               "string",
               "null"
             ]
           },
           "license_url": {
-            "description": "The licence's text: an `https:` URL; null when it has none (public domain, a cover from\nthe Cover Art Archive).",
+            "description": "The licence's text: an `https:` URL; null when it has none (public domain, a cover from\nthe Cover Art Archive, TMDB's values).",
             "type": [
               "string",
               "null"
@@ -588,7 +588,7 @@
             "$ref": "#/components/schemas/CreditProvider"
           },
           "source_url": {
-            "description": "The page the value came from: the Wikipedia article, the file's page on Commons, the\nitem's page on Wikidata, or the cover art page of the release on MusicBrainz. An `https:`\nURL of at most 1,024 bytes.",
+            "description": "The page the value came from: the Wikipedia article, the file's page on Commons, the\nitem's page on Wikidata, the cover art page of the release on MusicBrainz, or the title's\npage on TMDB. An `https:` URL of at most 1,024 bytes.",
             "type": "string"
           },
           "subject": {
@@ -622,7 +622,8 @@
           "wikipedia",
           "wikimedia_commons",
           "wikidata",
-          "cover_art_archive"
+          "cover_art_archive",
+          "tmdb"
         ],
         "type": "string"
       },
@@ -961,6 +962,13 @@
             "minimum": 0,
             "type": "integer"
           },
+          "attributions": {
+            "description": "What a client must show while it shows values from these services, each the\n`credits[].provider` of the values it gave: the service's notice, verbatim, and its logo\n(less prominent than the client's own marks). Only the services this instance uses;\nabsent when it uses none.",
+            "items": {
+              "$ref": "#/components/schemas/InfoAttribution"
+            },
+            "type": "array"
+          },
           "limits": {
             "$ref": "#/components/schemas/InfoLimits"
           },
@@ -989,6 +997,35 @@
           "resolves",
           "limits",
           "osm_licence"
+        ],
+        "type": "object"
+      },
+      "InfoAttribution": {
+        "properties": {
+          "logo": {
+            "description": "The service's logo, an `https:` URL.",
+            "type": "string"
+          },
+          "notice": {
+            "example": "This product uses the TMDB API but is not endorsed or certified by TMDB.",
+            "type": "string"
+          },
+          "provider": {
+            "description": "The `credits[].provider` of the service's values (`tmdb`).",
+            "example": "tmdb",
+            "type": "string"
+          },
+          "url": {
+            "description": "The service's site, to link the logo or the notice to.",
+            "example": "https://www.themoviedb.org",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "notice",
+          "logo",
+          "url"
         ],
         "type": "object"
       },

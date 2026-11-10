@@ -49,6 +49,7 @@ private repositories, user libraries or account administration.
 | --- | --- | --- |
 | `PINAKES_SPOTIFY_CLIENT_ID`, `PINAKES_SPOTIFY_CLIENT_SECRET` | Create your application in the [Spotify developer dashboard](https://developer.spotify.com/dashboard). Pinakes uses [client credentials](https://developer.spotify.com/documentation/web-api/tutorials/client-credentials-flow), without user sign-in or user scopes. Development Mode requires the app-owner account to have Premium; see the [migration guide](https://developer.spotify.com/documentation/web-api/tutorials/february-2026-migration-guide). | No Spotify API ISRC/barcode enrichment. Spotify pages can still get web/media cards; exact MusicBrainz URL relations and Wikidata IDs can still join them, with partial coverage. [Source catalogue](sources/README.md#also-on). |
 | `PINAKES_TIDAL_CLIENT_ID`, `PINAKES_TIDAL_CLIENT_SECRET` | Register your app in the [TIDAL developer portal](https://developer.tidal.com/); use client credentials for public catalogue reads, no user-account scopes. [Quick start](https://developer.tidal.com/documentation/api-sdk/api-sdk-quick-start). | No TIDAL API ISRC/barcode enrichment; page cards and independent MusicBrainz/Wikidata links remain. [Source catalogue](sources/README.md#also-on). |
+| `TMDB_API_KEY` | Create a free API key in your TMDB account's [API settings](https://www.themoviedb.org/settings/api) and use its **API Read Access Token** (recommended; sent as `Authorization: Bearer`). The shorter v3 **API Key** also works ([TMDB](#tmdb)). Read-only; no user session. | No TMDB posters or overviews on film and series cards; their own page's image and text, and Commons images, remain. `/v1/info` names no TMDB attribution. [Source catalogue](sources/README.md#also-on). |
 | `PINAKES__ALSO_ON__SOURCES__DISCOGS__TOKEN` **or** `PINAKES_DISCOGS_CONSUMER_KEY` plus `PINAKES_DISCOGS_CONSUMER_SECRET` | [Discogs developer settings](https://www.discogs.com/settings/developers): prefer an app's consumer pair, which grants catalogue images without identifying a user. A personal token is also supported but carries the token holder's account access; keep it private. Pinakes uses only public reads and needs no user OAuth grant. The token wins over the consumer pair. [Authentication reference](https://www.discogs.com/developers/#page:authentication). | Public Discogs records and barcode matching remain, without authenticated images and with the unauthenticated quota. [Source catalogue](sources/README.md). |
 | `PINAKES__PODCAST_INDEX__KEY`, `PINAKES__PODCAST_INDEX__SECRET` | Request the pair from [Podcast Index signup](https://api.podcastindex.org/signup). Use catalogue reads only; Pinakes signs requests with the pair, not a user login. | No Podcast Index API cards or its also-on lookup; RSS/Atom, Apple Podcasts and Wikidata paths remain. [Cards and podcast joins](sources/README.md). |
 | `PINAKES_GITHUB_TOKEN` (alternative: `PINAKES__SOURCES__GITHUB__TOKEN`) | [Create a fine-grained GitHub token](https://github.com/settings/personal-access-tokens/new) with public-repository access and no added permissions. Choose an expiry; do not grant private repositories or write access. [GitHub token guide](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens). | Repository links use the ordinary web resolver; the authenticated official API source is off. [Source catalogue](sources/README.md#sources). |
@@ -64,6 +65,25 @@ For the event adapters the configuration path is
 Their switches, routes and capabilities are defined in
 [`data/event-adapters.json`](../data/event-adapters.json), not inferred from a provider offering an API.
 Keys never enable an otherwise disabled platform automatically.
+
+## TMDB
+
+`TMDB_API_KEY` (no `PINAKES_` prefix; `[tmdb] api_key` in the file is read too, but keep the key
+in the environment) lets the `tmdb` source ([source catalogue](sources/README.md#also-on)) add TMDB's poster and overview to a
+film or series card that has no image or description of its own, by the title's IMDb ID or
+Wikidata item alone. Set it to the **API Read Access Token** from
+[themoviedb.org/settings/api](https://www.themoviedb.org/settings/api): Pinakes sends it as a
+header. A v3 **API Key** (32 hexadecimal digits) works too; TMDB takes that one only in the
+query string, so Pinakes adds it to the request on the wire alone and caches, logs and reports
+the request without it. A value of neither form stops startup (the message never repeats it).
+Unset or empty, or with `[tmdb] enabled = false`, TMDB is off: no request, its stored rows
+hidden, its values gone from cards at their next read.
+
+TMDB's terms ask for attribution and limit caching: Pinakes credits every TMDB value on its card
+(`credits[]`, provider `tmdb`), `/v1/info` gives TMDB's notice ("This product uses the TMDB API
+but is not endorsed or certified by TMDB.") and logo for clients to show, and no TMDB value is
+kept longer than 60 days after the last read that answered (TMDB allows six months;
+[operations](operations.md#also-on)). Commercial use needs a separate agreement with TMDB.
 
 ## Quotas and operating rules
 

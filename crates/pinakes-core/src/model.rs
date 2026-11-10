@@ -141,6 +141,24 @@ pub enum CreditProvider {
     Wikidata,
     /// A release's front cover in the Cover Art Archive (MusicBrainz's).
     CoverArtArchive,
+    /// A film's or series' poster or overview from TMDB (The Movie Database), by the title's
+    /// exact IDs. A client that shows it shows TMDB's logo and notice (`/v1/info`
+    /// `attributions`).
+    Tmdb,
+}
+impl CreditProvider {
+    /// Whether its values carry no licence: a cover from the Cover Art Archive (cover art is its
+    /// label's) and TMDB's poster or overview (used under TMDB's API terms, credited to TMDB).
+    pub fn unlicensed(self) -> bool {
+        matches!(self, Self::CoverArtArchive | Self::Tmdb)
+    }
+    /// Whether its values are written from an also-on source's facts when a card is typed
+    /// (`also_on::Source::fill_card`), not by the card's own reading.
+    pub fn from_facts(self) -> bool {
+        Self::FROM_FACTS.contains(&self)
+    }
+    /// The providers whose values are written from facts ([`Self::from_facts`]).
+    pub const FROM_FACTS: &'static [Self] = &[Self::Tmdb];
 }
 /// Where one of the card's `image` or `description` came from when Pinakes added it from another
 /// source than the link itself, and the licence it is used under (docs/api.md, Credits). Show it
@@ -151,16 +169,17 @@ pub struct Credit {
     pub field: CreditField,
     pub provider: CreditProvider,
     /// The page the value came from: the Wikipedia article, the file's page on Commons, the
-    /// item's page on Wikidata, or the cover art page of the release on MusicBrainz. An `https:`
-    /// URL of at most 1,024 bytes.
+    /// item's page on Wikidata, the cover art page of the release on MusicBrainz, or the title's
+    /// page on TMDB. An `https:` URL of at most 1,024 bytes.
     pub source_url: String,
     /// Who made it, plain text of at most 256 bytes: "Wikipedia contributors" for an article, the
     /// file's author for an image. Null for a public-domain or CC0 file that names none, for a
-    /// Wikidata description (CC0), and for a cover from the Cover Art Archive.
+    /// Wikidata description (CC0), for a cover from the Cover Art Archive and for TMDB's values.
     pub author: Option<String>,
     /// An SPDX licence ID (`CC-BY-SA-4.0`, `CC-BY-2.0`, `CC0-1.0`), or `public-domain`. Null for
     /// a cover from the Cover Art Archive: cover art is its label's, shown as a service shows an
-    /// album's cover, and no licence is given (`license_url` is null too).
+    /// album's cover, and no licence is given (`license_url` is null too). Null for TMDB's
+    /// poster or overview too, used under TMDB's API terms.
     // No licence is the empty string here, and only such a credit holds it (`bounded`).
     #[serde(
         serialize_with = "license_or_null",
@@ -169,7 +188,7 @@ pub struct Credit {
     #[schema(value_type = Option<String>)]
     pub license: String,
     /// The licence's text: an `https:` URL; null when it has none (public domain, a cover from
-    /// the Cover Art Archive).
+    /// the Cover Art Archive, TMDB's values).
     pub license_url: Option<String>,
     /// The language of a text (`en`, or another Wikipedia's language code, `de`); null for an
     /// image.
@@ -197,8 +216,9 @@ fn license_from_null<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D
 impl Credit {
     /// The credit within its bounds: every URL `https:` and at most 1,024 bytes, the author at
     /// most 256 bytes (cut at a character), the licence ID and language at most 64. `None` when
-    /// a URL or ID is out of bounds, when a cover from the Cover Art Archive names a licence or
-    /// any other value names none, when a URL is a link that carries a credential
+    /// a URL or ID is out of bounds, when a value of a provider without licences
+    /// ([`CreditProvider::unlicensed`]) names a licence or any other value names none, when a
+    /// URL is a link that carries a credential
     /// (`capability::names_credential`: the store would drop that part of the credit,
     /// `capability::strip_document`, and leave its value uncredited), or when the author, free
     /// text, holds such a link anywhere (`capability::contains_credential`: `Jane
@@ -219,8 +239,9 @@ impl Credit {
             truncate(author, 256);
         }
         self.author = self.author.filter(|a| !a.trim().is_empty());
-        // A cover from the Cover Art Archive has no licence; every other value has one.
-        let licensed = if self.provider == CreditProvider::CoverArtArchive {
+        // A cover from the Cover Art Archive and TMDB's values have no licence; every other
+        // value has one.
+        let licensed = if self.provider.unlicensed() {
             self.license.is_empty() && self.license_url.is_none()
         } else {
             id(&self.license)
@@ -554,7 +575,13 @@ impl ResourceMeta {
         let mut kept = self.clone();
         let mut took = false;
         for field in std::mem::take(&mut kept.unread_enriched) {
-            let Some(credit) = stored.credits.iter().find(|c| c.field == field) else {
+            // A value an also-on source wrote from its facts (`also_on::Source::fill_card`) is
+            // that source's: its facts keep it or not, never a reading that left the field unread.
+            let Some(credit) = stored
+                .credits
+                .iter()
+                .find(|c| c.field == field && !c.provider.from_facts())
+            else {
                 continue;
             };
             let value = match field {

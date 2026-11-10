@@ -51,6 +51,19 @@ pub async fn run(
         if let Err(e) = crate::also_on::prune(&pool).await {
             tracing::warn!(error=%crate::resolver::log_error(&e),"also-on pruning failed");
         }
+        // After the pruning: a card loses what its sources' expired facts gave it. It reads every
+        // card that holds such values: the fold keeps its minute meanwhile.
+        let refill = crate::also_on::refill(&pool, || *stop.borrow());
+        tokio::pin!(refill);
+        let refilled = loop {
+            tokio::select! {
+                result=&mut refill=>break result,
+                _=fold.tick()=>compact(&pool).await,
+            }
+        };
+        if let Err(e) = refilled {
+            tracing::warn!(error=%crate::resolver::log_error(&e),"taking stale values out of cards failed");
+        }
     }
 }
 /// Fold the search revision's rows (`store::compact_search_writes`).

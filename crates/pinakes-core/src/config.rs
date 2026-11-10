@@ -965,7 +965,7 @@ impl Config {
             .chain(crate::also_on::budgets())
             .map(|(host, rate)| (host.to_owned(), rate))
             .collect();
-        self.egress.off_hosts = crate::also_on::off_hosts(&self.also_on);
+        self.egress.off_hosts = crate::also_on::off_hosts(self);
     }
     pub fn validate(&self) -> Result<()> {
         if self.pubky.enabled {

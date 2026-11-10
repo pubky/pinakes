@@ -495,6 +495,41 @@ pub(crate) async fn append(
         .bind(source).bind(diff.class).execute(&mut **tx).await?;
     Ok(())
 }
+/// Rewrite a stored card in place by `change` (whether it changed it), with its change line like
+/// any save's, and nothing else: its schedule stays (a final or dead-lettered card stays so). An
+/// OSM place's card is never rewritten. Whether it was.
+pub(crate) async fn rewrite(
+    pool: &PgPool,
+    id: &str,
+    change: impl FnOnce(&mut ResourceMeta) -> bool,
+) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
+    let row = sqlx::query("SELECT coalesce(r.resolver,r.doc->>'source','') AS source,r.doc FROM resource r WHERE r.id=$1 AND r.osm_id IS NULL AND r.doc IS NOT NULL FOR UPDATE OF r")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some(row) = row else { return Ok(false) };
+    let source: String = row.try_get("source")?;
+    let Ok(mut doc) = serde_json::from_value::<ResourceMeta>(row.try_get("doc")?) else {
+        return Ok(false);
+    };
+    let before = normalize(&doc);
+    if !change(&mut doc) {
+        return Ok(false);
+    }
+    let after = normalize(&doc);
+    sqlx::query("UPDATE resource SET doc=$2 WHERE id=$1")
+        .bind(id)
+        .bind(serde_json::to_value(&doc)?)
+        .execute(&mut *tx)
+        .await?;
+    if let Some(diff) = diff(Some(&before), Some(&after)) {
+        append(&mut tx, id, &source, Some(before), Some(after), diff, None).await?;
+    }
+    tx.commit().await?;
+    Ok(true)
+}
 /// Clear a resource's card for good: its document becomes an empty one with status `error`,
 /// the change is recorded like any other, and the resource is final with `last_error` (a page
 /// too complex to parse). Unlike `save`, nothing of the old card is kept: no drift guard holds

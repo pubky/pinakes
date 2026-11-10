@@ -3705,7 +3705,7 @@ async fn wikidata_alone_keys_the_standing_recording_and_keeps_the_other(pool: sq
         egress: egress(t.clone()),
         config: Arc::new(config.clone()),
     };
-    also_on::configure(&pool, &config.also_on).await.unwrap();
+    also_on::configure(&pool, &config).await.unwrap();
     sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()")
         .execute(&pool)
         .await

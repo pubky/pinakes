@@ -182,6 +182,11 @@ pub struct FetchOptions {
     /// confirmation replays them as it does a 408, a 429 or a 5xx ([`confirming`]).
     pub waits: &'static [u16],
     pub sensitive: bool,
+    /// A credential an API takes only in its query (TMDB's v3 `api_key=`), as a parameter name
+    /// and value: added to the URL on the wire alone ([`wire_url`]). The URL everything else
+    /// sees (the discovery cache's key, the answer's `url`, a redirect, an error, a log) never
+    /// holds it. Only on a `sensitive` request.
+    pub query_secret: Option<(&'static str, String)>,
     pub accept: Option<String>,
     pub user_agent: Option<String>,
     pub feed_cap: Option<usize>,
@@ -248,6 +253,10 @@ impl std::fmt::Debug for FetchOptions {
             .field("cache_tag", &self.cache_tag.as_ref().map(|_| "[REDACTED]"))
             .field("uncached", &self.uncached)
             .field("sensitive", &self.sensitive)
+            .field(
+                "query_secret",
+                &self.query_secret.as_ref().map(|(k, _)| (*k, "[REDACTED]")),
+            )
             .field("accept", &self.accept)
             .field("user_agent", &self.user_agent)
             .field("feed_cap", &self.feed_cap)
@@ -266,8 +275,22 @@ impl FetchOptions {
         if self.json_body.is_some() && self.form_body.is_some() {
             return Err(refused("a request has one body: JSON or a form"));
         }
+        if self.query_secret.is_some() && !self.sensitive {
+            return Err(refused(
+                "a credential in the query needs a sensitive request",
+            ));
+        }
         Ok(())
     }
+}
+/// The URL a request is sent to: `url` with the request's query credential
+/// ([`FetchOptions::query_secret`]) appended. Only a transport calls it, for the request it sends.
+pub fn wire_url(url: &Url, options: &FetchOptions) -> Url {
+    let mut wire = url.clone();
+    if let Some((name, value)) = &options.query_secret {
+        wire.query_pairs_mut().append_pair(name, value);
+    }
+    wire
 }
 /// The wait a 429 without `Retry-After` stands for: the five minutes a failure is cached.
 pub const UNNAMED_429_WAIT: u64 = 300;
@@ -308,12 +331,14 @@ impl Transport for PinnedTransport {
             .user_agent(options.user_agent.as_deref().unwrap_or(USER_AGENT))
             .resolve_to_addrs(url.host_str().context("missing host")?, addresses)
             .build()?;
+        // The answer is read as the URL's, never the wire's: a query credential stays here.
+        let wire = wire_url(url, options);
         let mut request = if let Some(body) = &options.json_body {
-            client.post(url.clone()).json(body)
+            client.post(wire).json(body)
         } else if let Some(form) = &options.form_body {
-            client.post(url.clone()).form(form)
+            client.post(wire).form(form)
         } else {
-            client.get(url.clone())
+            client.get(wire)
         }
         .header(
             "accept",
@@ -2543,6 +2568,74 @@ mod tests {
             assert!(egress.fetch(uri).await.is_err(), "{uri}");
         }
         assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
+    }
+    /// A credential in the query (`query_secret`) is the wire's alone: the transport is handed
+    /// the URL without it (and the credential, to add), the answer's URL and the cache's key hold
+    /// none, a plain request may not carry one, and its Debug hides it.
+    #[tokio::test]
+    async fn a_query_credential_is_on_the_wire_alone() {
+        #[derive(Default)]
+        struct Seen(std::sync::Mutex<Vec<(String, String)>>);
+        #[async_trait]
+        impl Transport for Seen {
+            async fn get(&self, url: &Url, addresses: &[SocketAddr]) -> Result<Fetched> {
+                self.get_with(url, addresses, &FetchOptions::default())
+                    .await
+            }
+            async fn get_with(
+                &self,
+                url: &Url,
+                _: &[SocketAddr],
+                options: &FetchOptions,
+            ) -> Result<Fetched> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((url.to_string(), wire_url(url, options).to_string()));
+                Ok(Fetched {
+                    permanent_redirect: false,
+                    truncated: false,
+                    url: url.clone(),
+                    status: 200,
+                    content_type: "application/json".into(),
+                    validators: Default::default(),
+                    location: None,
+                    retry_after_secs: 60,
+                    body: b"{}".to_vec(),
+                })
+            }
+        }
+        let transport = Arc::new(Seen::default());
+        let egress = Egress::with_backends(
+            EgressConfig::default(),
+            Arc::new(FakeDns),
+            transport.clone(),
+        );
+        let url = "https://api.example.org/3/find/tt1?external_source=imdb_id";
+        let options = FetchOptions {
+            query_secret: Some(("api_key", "SECRETKEY".into())),
+            sensitive: true,
+            ..Default::default()
+        };
+        let fetched = egress.discover(url, &options, 60).await.unwrap();
+        assert_eq!(
+            *transport.0.lock().unwrap(),
+            [(url.to_owned(), format!("{url}&api_key=SECRETKEY"))]
+        );
+        assert!(!format!("{fetched:?}").contains("SECRETKEY"));
+        assert!(!Egress::discovery_key(url, &options)
+            .unwrap()
+            .contains("SECRETKEY"));
+        assert!(!format!("{options:?}").contains("SECRETKEY"));
+        // Cached by the URL alone: asked once.
+        egress.discover(url, &options, 60).await.unwrap();
+        assert_eq!(transport.0.lock().unwrap().len(), 1);
+        let plain = FetchOptions {
+            sensitive: false,
+            ..options
+        };
+        let error = egress.fetch_with(url, &plain).await.unwrap_err();
+        assert_eq!(super::super::error_class(&error), "policy");
     }
     #[test]
     fn a_sensitive_request_s_debug_hides_its_credentials_and_two_bodies_are_refused() {

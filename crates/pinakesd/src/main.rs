@@ -67,7 +67,7 @@ async fn serve(config: Option<PathBuf>, command: Command) -> Result<()> {
         return Ok(());
     }
     pinakes_core::groups::configure(&pool, &config.groups).await?;
-    pinakes_core::also_on::configure(&pool, &config.also_on).await?;
+    pinakes_core::also_on::configure(&pool, &config).await?;
     let api_pool = api::pool_options().connect(&config.database_url).await?;
     let state = AppState::new(api_pool, config.clone())?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);

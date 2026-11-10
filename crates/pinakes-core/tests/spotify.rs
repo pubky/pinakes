@@ -696,7 +696,7 @@ async fn spotify_isrc_is_off_by_default_and_keeps_its_rows_through_refusals(pool
             .filter_map(|e| e["uri"].as_str().map(str::to_owned))
             .collect::<Vec<_>>()
     };
-    also_on::configure(&pool, &on.also_on).await.unwrap();
+    also_on::configure(&pool, &on).await.unwrap();
     assert!(
         card(pool.clone(), tidal_id.clone())
             .await
@@ -713,7 +713,7 @@ async fn spotify_isrc_is_off_by_default_and_keeps_its_rows_through_refusals(pool
         },
     );
     off.validate().unwrap();
-    also_on::configure(&pool, &off.also_on).await.unwrap();
+    also_on::configure(&pool, &off).await.unwrap();
     assert_eq!(links(pool.clone(), tidal_id.clone()).await, expected);
     assert!(
         !card(pool.clone(), tidal_id.clone())

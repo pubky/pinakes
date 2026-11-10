@@ -780,10 +780,11 @@ pub struct Card {
     /// Where `image` and `description` came from when Pinakes added them from another source
     /// than the link itself (a MusicBrainz card's Wikipedia or Wikidata text, its Commons image,
     /// or an album's front cover from the Cover Art Archive; a Wikidata item's card's Commons
-    /// image): one credit per such field, with its
-    /// source page and, when it has them, its author and licence (a cover has neither: both are
-    /// null), to show with the value (docs/api.md, Credits). At most 4; `[]` when none. A field
-    /// without a credit came from the link itself.
+    /// image; a film's or series' poster or overview from TMDB): one credit per such field, with
+    /// its source page and, when it has them, its author and licence (a cover and TMDB's values
+    /// have neither: both are null), to show with the value (docs/api.md, Credits; a value
+    /// credited to `tmdb` also with TMDB's logo and notice, `/v1/info` `attributions`). At most
+    /// 4; `[]` when none. A field without a credit came from the link itself.
     pub credits: Vec<model::Credit>,
     /// For a calendar occurrence: which feed instance this card is.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2681,6 +2682,25 @@ pub struct Info {
     pub resolves: Vec<String>,
     pub limits: InfoLimits,
     pub osm_licence: OsmLicence,
+    /// What a client must show while it shows values from these services, each the
+    /// `credits[].provider` of the values it gave: the service's notice, verbatim, and its logo
+    /// (less prominent than the client's own marks). Only the services this instance uses;
+    /// absent when it uses none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attributions: Vec<InfoAttribution>,
+}
+#[derive(Serialize, ToSchema)]
+pub struct InfoAttribution {
+    /// The `credits[].provider` of the service's values (`tmdb`).
+    #[schema(example = "tmdb")]
+    pub provider: String,
+    #[schema(example = "This product uses the TMDB API but is not endorsed or certified by TMDB.")]
+    pub notice: String,
+    /// The service's logo, an `https:` URL.
+    pub logo: String,
+    /// The service's site, to link the logo or the notice to.
+    #[schema(example = "https://www.themoviedb.org")]
+    pub url: String,
 }
 #[derive(Serialize, ToSchema)]
 pub struct InfoLimits {
@@ -2775,6 +2795,20 @@ pub async fn info(State(state): State<AppState>) -> Json<Info> {
             dump: "/v1/dumps/osm_place.ndjson.gz".into(),
             updated_at: dump_updated_at(c),
         },
+        attributions: crate::also_on::registered()
+            .iter()
+            // While its values may show: not switched off, whether or not the worker runs.
+            .filter(|s| !crate::also_on::switched_off(c, s.as_ref()))
+            .filter_map(|s| {
+                let a = s.attribution()?;
+                Some(InfoAttribution {
+                    provider: s.id().into(),
+                    notice: a.notice.into(),
+                    logo: a.logo.into(),
+                    url: a.url.into(),
+                })
+            })
+            .collect(),
     })
 }
 async fn admin_info(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {

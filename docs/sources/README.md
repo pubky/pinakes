@@ -188,6 +188,7 @@ so one goes without the others needing a change.
 - [`wikidata_item`](wikidata_item.md): a Wikidata item link as its own hub.
 - [`books`](books.md): Open Library, Amazon, Apple Books and Wikidata for a book.
 - [`films`](films.md): the IMDb title of a film or series.
+- [`tmdb`](tmdb.md): TMDB's poster and overview for a film or series card (with the operator's TMDB credential).
 - [`podcasts`](podcasts.md): Apple Podcasts, Podcast Index and Wikidata for a show.
 - [`product_keys`](product_keys.md): a product's own barcode as its key.
 - [`open_food_facts`](open_food_facts.md#also-on): a product's barcode on Open Food, Beauty,
