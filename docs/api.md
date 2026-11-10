@@ -1317,7 +1317,9 @@ music_enrichment`, on by default):
   MusicBrainz), except a recording's. An item too large to read is not
   verified and gives nothing. A release uses its own item, never its release group's. A recording
   also uses the one work it is a performance of, when that work has its own relation to an item
-  that, read back, is no Wikimedia page's and names no other work, for the description alone (its
+  that, read back, is the work's by the same rule (a work's naming no other work, a single's, or
+  one with no identifier yet; never an album's, a recording's, a release's, an artist's or a
+  Wikimedia page's), for the description alone (its
   credit names the work as `subject`); so does a recording whose own item gives nothing. Nothing
   is matched by name;
 - the description is the first of: the summary of the item's English Wikipedia article (plain

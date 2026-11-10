@@ -1096,6 +1096,22 @@ async fn a_releases_relation_to_a_recordings_item_gives_nothing() {
     };
     takes_nothing_of(KIND_OF_BLUE_RELEASE, mode, "Q139827657").await;
 }
+/// A recording takes its work's text only from the work's item: when the work's relation names
+/// a recording's item (Get Lucky's own, P4404), an album's (Kind of Blue's, P436) or an
+/// artist's (Miles Davis's, P434), the recording, which no item names by its MBID, takes
+/// nothing. Get Lucky's real work item, its song's and single's (P436, class single), still
+/// gives its article (`a_recording_without_an_item_takes_its_works_article`).
+#[tokio::test]
+async fn a_works_relation_to_an_item_of_another_kind_gives_nothing() {
+    for qid in ["Q139827657", "Q283221", "Q93341"] {
+        let mode = Mode {
+            mbid_search: Search::Empty,
+            relation: Some(("mb-recording-get-lucky-works.json", qid)),
+            ..Default::default()
+        };
+        takes_nothing_of(GET_LUCKY, mode, qid).await;
+    }
+}
 
 /// An item that is a disambiguation page's (P31 Q4167410; a list article's, Q13406463, alike) is
 /// no entity's: no description (never Wikidata's "Wikimedia disambiguation page"), no image, no

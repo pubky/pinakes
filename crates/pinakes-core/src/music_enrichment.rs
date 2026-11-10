@@ -17,9 +17,9 @@
 //! song's, each naming no other entity of its level. Otherwise the card takes nothing from it, and no other item is
 //! looked for. A release and its release group each use their own item.
 //! An item too large to read verifies nothing. A recording may also take the description of the
-//! one work it is a performance of, when that work has its own relation to an item that is no
-//! Wikimedia page's; the credit then names the work (`subject`), and the work's image is never
-//! the recording's. An item whose Wikipedia article is a disambiguation page is no entity's
+//! one work it is a performance of, when that work has its own relation to an item that is the
+//! work's by the same table (a song's, or its single's); the credit then names the work
+//! (`subject`), and the work's image is never the recording's. An item whose Wikipedia article is a disambiguation page is no entity's
 //! either: nothing of it is taken.
 //!
 //! The description is, in this order, the first of: the item's English Wikipedia article's summary;
@@ -492,8 +492,9 @@ async fn source(
     }
 }
 /// The item of the one work `recording` is a current performance of, when the work's own
-/// relations name one and that item, read back, is no Wikimedia page's ([`ItemKind::Page`]) and names
-/// no other work (P435); `Err` when unread.
+/// relations name one and that item, read back, is the work's ([`is_item_of`] with
+/// [`ItemKind::Work`]: a work's or its single's song's item naming no other work, never an
+/// album's, a recording's, a release's, an artist's or a Wikimedia page's); `Err` when unread.
 async fn work_source(egress: &Egress, base: &str, recording: &str) -> Result<Option<Source>, ()> {
     let works = musicbrainz::works(egress, base, recording)
         .await
@@ -507,11 +508,7 @@ async fn work_source(egress: &Egress, base: &str, recording: &str) -> Result<Opt
     let item = read_back(egress, &qid)
         .await
         .map_err(|error| unread(recording, "wikidata_work_item", &error))?;
-    let Some(item) = item.filter(|item| {
-        let works = item.id("P435");
-        ItemKind::of(item) != ItemKind::Page
-            && (works.is_empty() || works == std::slice::from_ref(&work.mbid))
-    }) else {
+    let Some(item) = item.filter(|item| is_item_of(ItemKind::Work, &work.mbid, item)) else {
         return Ok(None);
     };
     let subject = format!("https://musicbrainz.org/work/{}", work.mbid);
@@ -1319,6 +1316,14 @@ mod tests {
         }
         // A single's item is its release group's.
         assert!(is_item_of(ItemKind::ReleaseGroup, "g", &single));
+        // A work's item is a work's or its single's song's, naming no other work.
+        assert!(is_item_of(ItemKind::Work, "w", &work));
+        assert!(is_item_of(ItemKind::Work, "w", &single));
+        assert!(is_item_of(ItemKind::Work, "w", &item(&[], &["Q7366"])));
+        assert!(!is_item_of(ItemKind::Work, "v", &work));
+        for other in [&album, &recording, &release, &artist, &mixed] {
+            assert!(!is_item_of(ItemKind::Work, "w", other), "{:?}", other.ids);
+        }
         // A Wikimedia page's item is no one's, whatever it names.
         for class in NOT_AN_ENTITY {
             for kind in [MbKind::Artist, MbKind::ReleaseGroup, MbKind::Release] {
