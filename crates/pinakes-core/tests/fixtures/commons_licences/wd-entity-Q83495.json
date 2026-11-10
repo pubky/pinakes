@@ -1,0 +1,213 @@
+{
+ "entities": {
+  "Q83495": {
+   "type": "item",
+   "id": "Q83495",
+   "lastrevid": 2565027371,
+   "modified": "2026-11-05T13:50:34Z",
+   "labels": {
+    "mul": {
+     "language": "mul",
+     "value": "The Matrix"
+    }
+   },
+   "descriptions": {
+    "en": {
+     "language": "en",
+     "value": "1999 American science fiction action thriller film"
+    }
+   },
+   "claims": {
+    "P31": [
+     {
+      "mainsnak": {
+       "snaktype": "value",
+       "property": "P31",
+       "datavalue": {
+        "value": {
+         "entity-type": "item",
+         "numeric-id": 11424,
+         "id": "Q11424"
+        },
+        "type": "wikibase-entityid"
+       },
+       "datatype": "wikibase-item"
+      },
+      "type": "statement",
+      "id": "q83495$67BDA9D1-B465-4567-A179-7A85EE33B234",
+      "rank": "normal"
+     }
+    ],
+    "P18": [
+     {
+      "mainsnak": {
+       "snaktype": "value",
+       "property": "P18",
+       "datavalue": {
+        "value": "The.Matrix.glmatrix.1.png",
+        "type": "string"
+       },
+       "datatype": "commonsMedia"
+      },
+      "type": "statement",
+      "id": "Q83495$9333DC35-937E-4D82-A419-169C716050E1",
+      "rank": "preferred"
+     },
+     {
+      "mainsnak": {
+       "snaktype": "value",
+       "property": "P18",
+       "datavalue": {
+        "value": "Red and blue pill.jpg",
+        "type": "string"
+       },
+       "datatype": "commonsMedia"
+      },
+      "type": "statement",
+      "id": "Q83495$fcda9ef6-447f-6abc-55db-412474fd67d7",
+      "rank": "normal"
+     }
+    ],
+    "P856": [
+     {
+      "mainsnak": {
+       "snaktype": "value",
+       "property": "P856",
+       "datavalue": {
+        "value": "https://www.warnerbros.com/movies/matrix",
+        "type": "string"
+       },
+       "datatype": "url"
+      },
+      "type": "statement",
+      "id": "Q83495$6913f893-4d97-6224-2c88-dbd258c6d29a",
+      "rank": "normal"
+     }
+    ],
+    "P577": [
+     {
+      "mainsnak": {
+       "snaktype": "value",
+       "property": "P577",
+       "datavalue": {
+        "value": {
+         "time": "+1999-03-31T00:00:00Z",
+         "timezone": 0,
+         "before": 0,
+         "after": 0,
+         "precision": 11,
+         "calendarmodel": "http://www.wikidata.org/entity/Q1985727"
+        },
+        "type": "time"
+       },
+       "datatype": "time"
+      },
+      "type": "statement",
+      "id": "Q83495$4a36080f-4203-539f-a698-365e1475528b",
+      "rank": "normal"
+     },
+     {
+      "mainsnak": {
+       "snaktype": "value",
+       "property": "P577",
+       "datavalue": {
+        "value": {
+         "time": "+1999-07-14T00:00:00Z",
+         "timezone": 0,
+         "before": 0,
+         "after": 0,
+         "precision": 11,
+         "calendarmodel": "http://www.wikidata.org/entity/Q1985727"
+        },
+        "type": "time"
+       },
+       "datatype": "time"
+      },
+      "type": "statement",
+      "id": "Q83495$fed71765-4fd8-ef76-c8d6-3ea6b0336504",
+      "rank": "normal"
+     },
+     {
+      "mainsnak": {
+       "snaktype": "value",
+       "property": "P577",
+       "datavalue": {
+        "value": {
+         "time": "+1999-06-17T00:00:00Z",
+         "timezone": 0,
+         "before": 0,
+         "after": 0,
+         "precision": 11,
+         "calendarmodel": "http://www.wikidata.org/entity/Q1985727"
+        },
+        "type": "time"
+       },
+       "datatype": "time"
+      },
+      "type": "statement",
+      "id": "Q83495$FA78ECA1-E5C6-4FA5-B67C-551299B021BA",
+      "rank": "normal"
+     }
+    ],
+    "P57": [
+     {
+      "mainsnak": {
+       "snaktype": "value",
+       "property": "P57",
+       "datavalue": {
+        "value": {
+         "entity-type": "item",
+         "numeric-id": 9545711,
+         "id": "Q9545711"
+        },
+        "type": "wikibase-entityid"
+       },
+       "datatype": "wikibase-item"
+      },
+      "type": "statement",
+      "id": "Q83495$0C78BC1B-A5B4-49CE-8912-B52C59074FEF",
+      "rank": "normal"
+     },
+     {
+      "mainsnak": {
+       "snaktype": "value",
+       "property": "P57",
+       "datavalue": {
+        "value": {
+         "entity-type": "item",
+         "numeric-id": 9544977,
+         "id": "Q9544977"
+        },
+        "type": "wikibase-entityid"
+       },
+       "datatype": "wikibase-item"
+      },
+      "type": "statement",
+      "id": "Q83495$2054CBDF-6BB6-4381-9542-C36B2CEBB4B9",
+      "rank": "normal"
+     }
+    ],
+    "P86": [
+     {
+      "mainsnak": {
+       "snaktype": "value",
+       "property": "P86",
+       "datavalue": {
+        "value": {
+         "entity-type": "item",
+         "numeric-id": 207859,
+         "id": "Q207859"
+        },
+        "type": "wikibase-entityid"
+       },
+       "datatype": "wikibase-item"
+      },
+      "type": "statement",
+      "id": "Q83495$7131449D-7ED8-471B-90BF-0F3CA1A9AAE3",
+      "rank": "normal"
+     }
+    ]
+   }
+  }
+ }
+}

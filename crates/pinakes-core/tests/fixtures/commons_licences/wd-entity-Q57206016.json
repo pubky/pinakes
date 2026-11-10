@@ -1,0 +1,119 @@
+{
+ "entities": {
+  "Q57206016": {
+   "type": "item",
+   "id": "Q57206016",
+   "lastrevid": 2555007892,
+   "modified": "2026-10-08T11:43:11Z",
+   "labels": {
+    "en": {
+     "language": "en",
+     "value": "Mindustry"
+    }
+   },
+   "descriptions": {
+    "en": {
+     "language": "en",
+     "value": "2017 open source video game"
+    }
+   },
+   "claims": {
+    "P31": [
+     {
+      "mainsnak": {
+       "snaktype": "value",
+       "property": "P31",
+       "datavalue": {
+        "value": {
+         "entity-type": "item",
+         "numeric-id": 7889,
+         "id": "Q7889"
+        },
+        "type": "wikibase-entityid"
+       },
+       "datatype": "wikibase-item"
+      },
+      "type": "statement",
+      "id": "Q57206016$3B7E666B-DA62-4BF0-BAA3-662E2AED58E9",
+      "rank": "normal"
+     }
+    ],
+    "P18": [
+     {
+      "mainsnak": {
+       "snaktype": "value",
+       "property": "P18",
+       "datavalue": {
+        "value": "Snímek obrazovky (15).png",
+        "type": "string"
+       },
+       "datatype": "commonsMedia"
+      },
+      "type": "statement",
+      "id": "Q57206016$3942978d-4406-b866-307b-ea9c662c4e74",
+      "rank": "normal"
+     }
+    ],
+    "P856": [
+     {
+      "mainsnak": {
+       "snaktype": "value",
+       "property": "P856",
+       "datavalue": {
+        "value": "https://mindustrygame.github.io/",
+        "type": "string"
+       },
+       "datatype": "url"
+      },
+      "type": "statement",
+      "id": "Q57206016$6c7266e5-b4f9-4e4f-ac65-2309bb874422",
+      "rank": "normal"
+     }
+    ],
+    "P577": [
+     {
+      "mainsnak": {
+       "snaktype": "value",
+       "property": "P577",
+       "datavalue": {
+        "value": {
+         "time": "+2017-04-30T00:00:00Z",
+         "timezone": 0,
+         "before": 0,
+         "after": 0,
+         "precision": 11,
+         "calendarmodel": "http://www.wikidata.org/entity/Q1985727"
+        },
+        "type": "time"
+       },
+       "datatype": "time"
+      },
+      "type": "statement",
+      "id": "Q57206016$1275b31e-40c5-c700-5d17-b77f22d02c69",
+      "rank": "normal"
+     }
+    ],
+    "P123": [
+     {
+      "mainsnak": {
+       "snaktype": "value",
+       "property": "P123",
+       "datavalue": {
+        "value": {
+         "entity-type": "item",
+         "numeric-id": 92314272,
+         "id": "Q92314272"
+        },
+        "type": "wikibase-entityid"
+       },
+       "datatype": "wikibase-item"
+      },
+      "type": "statement",
+      "id": "Q57206016$edecac2d-448b-e7e6-7d6e-95c7586bfe7d",
+      "rank": "normal"
+     }
+    ]
+   }
+  }
+ }
+}

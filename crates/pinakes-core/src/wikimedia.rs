@@ -208,11 +208,14 @@ pub struct FreeFile {
 /// A licence on the list [`free_file`] accepts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct License {
-    /// An SPDX ID (`CC-BY-SA-4.0`, `CC-BY-3.0-DE`, `CC0-1.0`), or `public-domain`.
+    /// An SPDX ID (`CC-BY-SA-4.0`, `CC-BY-3.0-DE`, `CC0-1.0`, `GPL-3.0-only`,
+    /// `LGPL-2.1-or-later`), `public-domain`, or `Attribution`: Commons' licence of that name,
+    /// which SPDX has no ID for.
     pub id: String,
     /// The licence's text; `None` for the public domain without a mark.
     pub url: Option<String>,
-    /// Whether showing the file needs its author named (CC BY and CC BY-SA).
+    /// Whether showing the file needs its author named: under every licence but CC0 and the
+    /// public domain.
     pub attribution: bool,
 }
 /// What Commons says about a file.
@@ -239,9 +242,10 @@ const IMAGE_TYPES: &[&str] = &[
 const SHOWN_AS_IS: &[&str] = &["image/jpeg", "image/png", "image/gif", "image/webp"];
 
 /// The file in a `file_query` answer for `name`: accepted only when Commons holds it, it is an
-/// image, it is not marked non-free, its licence is CC0, the public domain, CC BY or CC BY-SA
-/// (1.0 to 4.0, ported versions too) by its licence name and URL, and, under CC BY and CC BY-SA,
-/// it names its author. `None` for an answer that is not about this file.
+/// image, it is not marked non-free, its licence is on the list by its licence name and URL
+/// ([`license`]: CC0, the public domain, CC BY or CC BY-SA 1.0 to 4.0 with ported versions, the
+/// GNU GPL, LGPL or AGPL, Commons' `Attribution`), and, under every licence but CC0 and the
+/// public domain, it names its author. `None` for an answer that is not about this file.
 pub fn free_file(v: &Value, name: &str) -> Option<FileCheck> {
     let pages = v["query"]["pages"].as_array()?;
     let [page] = pages.as_slice() else {
@@ -358,9 +362,12 @@ fn upload_url(raw: &str) -> Option<String> {
 }
 
 /// The licence a file's `License` (its template, `cc-by-sa-4.0`), `LicenseShortName`
-/// (`CC BY-SA 4.0`) and `LicenseUrl` name, when it is on the list: CC0 1.0, the public domain,
-/// and CC BY and CC BY-SA 1.0 to 4.0, ported versions too. A Creative Commons licence needs its
-/// URL, and its template or name must name the same licence.
+/// (`CC BY-SA 4.0`, `GPLv3`) and `LicenseUrl` name, when it is on the list: CC0 1.0, the public
+/// domain, CC BY and CC BY-SA 1.0 to 4.0 (ported versions too), the GNU GPL (1.0 to 3.0), LGPL
+/// (2.0 to 3.0) and AGPL (3.0), and Commons' `Attribution` licence (`gnu` and `attribution`
+/// give their IDs). A Creative Commons licence needs its URL, and its template or name must
+/// name the same licence. A GNU licence or `Attribution` needs its name; a URL, when there is
+/// one, must name the same licence, and so must every name.
 pub fn license(template: Option<&str>, short: Option<&str>, url: Option<&str>) -> Option<License> {
     let template = template.map(str::to_ascii_lowercase);
     let short = short.map(|s| s.trim().to_ascii_lowercase());
@@ -401,7 +408,9 @@ pub fn license(template: Option<&str>, short: Option<&str>, url: Option<&str>) -
         port,
     }) = from_url
     else {
-        return None;
+        // No Creative Commons URL: a GNU licence or `Attribution`, or none on the list.
+        let (template, short) = (template.as_deref(), short.as_deref());
+        return gnu(template, short, url).or_else(|| attribution(template, short, url));
     };
     let kind = if share_alike { "by-sa" } else { "by" };
     let port_suffix = port.as_deref().map(|p| format!("-{p}")).unwrap_or_default();
@@ -422,6 +431,209 @@ pub fn license(template: Option<&str>, short: Option<&str>, url: Option<&str>) -
             "https://creativecommons.org/licenses/{kind}/{version}/{}",
             port.as_deref().map(|p| format!("{p}/")).unwrap_or_default()
         )),
+        attribution: true,
+    })
+}
+
+/// A GNU licence family.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Gnu {
+    Gpl,
+    Lgpl,
+    Agpl,
+}
+impl Gnu {
+    fn name(self) -> &'static str {
+        match self {
+            Gnu::Gpl => "GPL",
+            Gnu::Lgpl => "LGPL",
+            Gnu::Agpl => "AGPL",
+        }
+    }
+    /// The version (as SPDX writes it) that `number` (`3`, `3.0`, `2.1`) names in this family;
+    /// `None` for one the family never had.
+    fn version(self, number: &str) -> Option<&'static str> {
+        Some(match (self, number) {
+            (Gnu::Gpl, "1" | "1.0") => "1.0",
+            (Gnu::Gpl | Gnu::Lgpl, "2" | "2.0") => "2.0",
+            (Gnu::Lgpl, "2.1") => "2.1",
+            (_, "3" | "3.0") => "3.0",
+            _ => return None,
+        })
+    }
+    /// The text of `version` on gnu.org.
+    fn text(self, version: &str) -> String {
+        let old = if version == "3.0" {
+            ""
+        } else {
+            "old-licenses/"
+        };
+        format!(
+            "https://www.gnu.org/licenses/{old}{}-{version}.html",
+            self.name().to_ascii_lowercase()
+        )
+    }
+}
+/// A GNU licence as a template or short name writes it (`GPLv3`, `GPLv2+`, `LGPL 3`, `AGPL`,
+/// `GPL-3.0-or-later`; lower case): its family, its version when it names one, and `Some(true)`
+/// when it says "or later", `Some(false)` when it says "only".
+struct GnuName {
+    family: Gnu,
+    version: Option<&'static str>,
+    later: Option<bool>,
+}
+fn gnu_name(name: &str) -> Option<GnuName> {
+    let name = name.replace('_', " ");
+    let name = name
+        .strip_prefix("gnu")
+        .map_or(name.as_str(), |s| s.trim_start_matches([' ', '-']));
+    let (family, rest) = [("agpl", Gnu::Agpl), ("lgpl", Gnu::Lgpl), ("gpl", Gnu::Gpl)]
+        .into_iter()
+        .find_map(|(prefix, family)| name.strip_prefix(prefix).map(|rest| (family, rest)))?;
+    let rest = rest.trim_start_matches([' ', '-']);
+    let (marked, rest) = match rest
+        .strip_prefix("version")
+        .or_else(|| rest.strip_prefix('v'))
+    {
+        Some(rest) => (true, rest.trim_start()),
+        None => (false, rest),
+    };
+    let (number, suffix) = rest.split_at(
+        rest.find(|c: char| !c.is_ascii_digit() && c != '.')
+            .unwrap_or(rest.len()),
+    );
+    let later = match suffix.replace('-', " ").trim() {
+        "" => None,
+        "+" | "or later" | "or any later" | "or any later version" => Some(true),
+        "only" => Some(false),
+        _ => return None,
+    };
+    let version = match number {
+        "" => None,
+        number => Some(family.version(number)?),
+    };
+    // "v" and "or later" or "only" go with a version.
+    if version.is_none() && (marked || later.is_some()) {
+        return None;
+    }
+    Some(GnuName {
+        family,
+        version,
+        later,
+    })
+}
+/// The GNU licence a `gnu.org` URL names (http or https, `www.` or not, under `licenses/`,
+/// `licenses/old-licenses/` or `copyleft/`, with `.html`, `.en.html` or neither, a trailing
+/// slash allowed): its family, its version unless the page is the family's own (`gpl.html`,
+/// `lgpl.html`, `agpl.html`), and whether it is under `copyleft/`.
+fn gnu_url(raw: &str) -> Option<(Gnu, Option<&'static str>, bool)> {
+    let url = url::Url::parse(raw.trim()).ok()?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str()?.trim_start_matches("www.") != "gnu.org"
+    {
+        return None;
+    }
+    let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
+    let (page, copyleft) = match segments.as_slice() {
+        ["copyleft", page] => (*page, true),
+        ["licenses", page] | ["licenses", "old-licenses", page] => (*page, false),
+        _ => return None,
+    };
+    let page = page.strip_suffix(".html").unwrap_or(page);
+    let page = page.strip_suffix(".en").unwrap_or(page);
+    let (family, version) = match page.split_once('-') {
+        Some((family, version)) => (family, Some(version)),
+        None => (page, None),
+    };
+    let family = match family {
+        "gpl" => Gnu::Gpl,
+        "lgpl" => Gnu::Lgpl,
+        "agpl" => Gnu::Agpl,
+        _ => return None,
+    };
+    let version = match version {
+        Some(version) => Some(family.version(version)?),
+        None => None,
+    };
+    Some((family, version, copyleft))
+}
+/// The GNU GPL, LGPL or AGPL a file's template and short name (lower case) and URL name: every
+/// name given is one, of one family, and the URL, when there is one, a `gnu.org` page of that
+/// family; two versions given are the same, and so are two "or later"s or "only"s. The ID is
+/// the licence every Commons template that writes those values grants:
+/// - a name or URL with a version: that version, "or later" only when a name says so
+///   (`GPLv3`, written by both `{{GPLv3 only}}` and `{{GPLv3+}}`, is `GPL-3.0-only`);
+/// - `GPL` (`{{GPL}}`, version 2 or later): `GPL-2.0-or-later`;
+/// - `LGPL` with the family's page: `LGPL-2.1-or-later` under `licenses/` (`{{LGPL}}`, 2.1 or
+///   later), `LGPL-3.0-or-later` under `copyleft/` (`{{LGPLv3}}`, 3 or later); without a URL
+///   (`{{LGPLv2.1}}`, 2.1 only, whose URL Commons does not read): `LGPL-2.1-only`;
+/// - `AGPL` (`{{AGPL}}`, 3 or later, and `{{AGPLv3 only}}`): `AGPL-3.0-only`.
+///
+/// The URL credited is the gnu.org text of the version the ID names.
+fn gnu(template: Option<&str>, short: Option<&str>, url: Option<&str>) -> Option<License> {
+    let names = [template, short]
+        .into_iter()
+        .flatten()
+        .map(gnu_name)
+        .collect::<Option<Vec<_>>>()?;
+    let family = names.first()?.family;
+    let from_url = match url {
+        Some(url) => Some(gnu_url(url)?),
+        None => None,
+    };
+    if names.iter().any(|n| n.family != family) || from_url.is_some_and(|(f, _, _)| f != family) {
+        return None;
+    }
+    let mut versions = names
+        .iter()
+        .filter_map(|n| n.version)
+        .chain(from_url.and_then(|(_, v, _)| v));
+    let version = versions.next();
+    let mut laters = names.iter().filter_map(|n| n.later);
+    let later = laters.next();
+    if versions.any(|v| Some(v) != version) || laters.any(|l| Some(l) != later) {
+        return None;
+    }
+    let (version, later) = match (version, family) {
+        (Some(version), _) => (version, later == Some(true)),
+        (None, Gnu::Gpl) => ("2.0", true),
+        (None, Gnu::Lgpl) => match from_url {
+            Some((_, _, true)) => ("3.0", true),
+            Some((_, _, false)) => ("2.1", true),
+            None => ("2.1", false),
+        },
+        (None, Gnu::Agpl) => ("3.0", false),
+    };
+    Some(License {
+        id: format!(
+            "{}-{version}-{}",
+            family.name(),
+            if later { "or-later" } else { "only" }
+        ),
+        url: Some(family.text(version)),
+        attribution: true,
+    })
+}
+/// Commons' own text of its `Attribution` licence.
+const ATTRIBUTION: &str = "https://commons.wikimedia.org/wiki/Template:Attribution";
+/// Commons' `Attribution` licence (`{{Attribution}}`: any use, the author credited), when every
+/// name given (lower case) is `attribution` and the URL, when there is one, is its template's
+/// page. Its ID is Commons' name for it, which is no SPDX or Creative Commons ID.
+fn attribution(template: Option<&str>, short: Option<&str>, url: Option<&str>) -> Option<License> {
+    let mut names = [template, short].into_iter().flatten().peekable();
+    if names.peek().is_none() || !names.all(|n| n == "attribution") {
+        return None;
+    }
+    let page = |raw: &str| {
+        url::Url::parse(raw.trim()).is_ok_and(|u| {
+            matches!(u.scheme(), "http" | "https")
+                && u.host_str() == Some("commons.wikimedia.org")
+                && u.path() == "/wiki/Template:Attribution"
+        })
+    };
+    url.is_none_or(page).then(|| License {
+        id: "Attribution".into(),
+        url: Some(ATTRIBUTION.into()),
         attribution: true,
     })
 }
@@ -671,5 +883,336 @@ mod tests {
         );
         assert_eq!(upload_url("http://upload.wikimedia.org/x.jpg"), None);
         assert_eq!(upload_url("https://example.org/x.jpg"), None);
+    }
+
+    /// The GNU licences and `Attribution` as Commons writes them (`LicenseShortName` and
+    /// `LicenseUrl` as its templates give them; Commons gives no `License` for these), each
+    /// with the SPDX ID the templates grant and the text of that licence; and names that
+    /// disagree, or name no licence on the list, refused.
+    #[test]
+    fn gnu_licences_and_attribution_by_name_and_url() {
+        let gnu = "https://www.gnu.org/licenses/";
+        for (template, short, url, id, text) in [
+            // {{GPL}}, {{GPLv2+}}: version 2 or later.
+            (
+                None,
+                "GPL",
+                Some("http://www.gnu.org/licenses/gpl.html"),
+                "GPL-2.0-or-later",
+                "old-licenses/gpl-2.0.html",
+            ),
+            // {{GPLv2}}, {{GPLv2 only}}.
+            (
+                None,
+                "GPLv2",
+                Some("https://www.gnu.org/licenses/old-licenses/gpl-2.0.html"),
+                "GPL-2.0-only",
+                "old-licenses/gpl-2.0.html",
+            ),
+            // {{GPLv3}} (that is, {{GPLv3 only}}) and {{GPLv3+}} both write this: version 3 is
+            // what both grant.
+            (
+                None,
+                "GPLv3",
+                Some("http://www.gnu.org/licenses/gpl-3.0.html"),
+                "GPL-3.0-only",
+                "gpl-3.0.html",
+            ),
+            (
+                None,
+                "GPLv3+",
+                Some("https://www.gnu.org/licenses/gpl-3.0.en.html"),
+                "GPL-3.0-or-later",
+                "gpl-3.0.html",
+            ),
+            (
+                None,
+                "GPLv2 or later",
+                Some("https://gnu.org/licenses/old-licenses/gpl-2.0/"),
+                "GPL-2.0-or-later",
+                "old-licenses/gpl-2.0.html",
+            ),
+            (
+                None,
+                "GPLv2+",
+                None,
+                "GPL-2.0-or-later",
+                "old-licenses/gpl-2.0.html",
+            ),
+            (
+                Some("gpl-3.0-or-later"),
+                "GPL v3+",
+                Some("https://www.gnu.org/licenses/gpl.html"),
+                "GPL-3.0-or-later",
+                "gpl-3.0.html",
+            ),
+            (
+                None,
+                "GNU GPL version 1",
+                None,
+                "GPL-1.0-only",
+                "old-licenses/gpl-1.0.html",
+            ),
+            // {{LGPL}} (2.1 or later) and {{LGPLv3}} (3 or later) with the family's page.
+            (
+                None,
+                "LGPL",
+                Some("http://www.gnu.org/licenses/lgpl.html"),
+                "LGPL-2.1-or-later",
+                "old-licenses/lgpl-2.1.html",
+            ),
+            (
+                None,
+                "LGPL",
+                Some("https://www.gnu.org/copyleft/lgpl.html"),
+                "LGPL-3.0-or-later",
+                "lgpl-3.0.html",
+            ),
+            // {{LGPLv2.1}}, {{LGPLv2.1 only}}, whose URL Commons does not read.
+            (
+                None,
+                "LGPL",
+                None,
+                "LGPL-2.1-only",
+                "old-licenses/lgpl-2.1.html",
+            ),
+            (
+                None,
+                "LGPLv2.1",
+                Some("http://www.gnu.org/licenses/old-licenses/lgpl-2.1.html"),
+                "LGPL-2.1-only",
+                "old-licenses/lgpl-2.1.html",
+            ),
+            // {{LGPLv3 only}}.
+            (
+                None,
+                "LGPL 3",
+                Some("https://www.gnu.org/copyleft/lgpl.html"),
+                "LGPL-3.0-only",
+                "lgpl-3.0.html",
+            ),
+            (
+                None,
+                "LGPLv2",
+                None,
+                "LGPL-2.0-only",
+                "old-licenses/lgpl-2.0.html",
+            ),
+            // {{AGPL}} (3 or later) and {{AGPLv3 only}} both write this.
+            (
+                None,
+                "AGPL",
+                Some("http://www.gnu.org/licenses/agpl.html"),
+                "AGPL-3.0-only",
+                "agpl-3.0.html",
+            ),
+            (
+                None,
+                "AGPLv3",
+                Some("https://www.gnu.org/licenses/agpl-3.0.html"),
+                "AGPL-3.0-only",
+                "agpl-3.0.html",
+            ),
+            (
+                None,
+                "AGPL-3.0-or-later",
+                None,
+                "AGPL-3.0-or-later",
+                "agpl-3.0.html",
+            ),
+        ] {
+            let found = license(template, Some(short), url);
+            let expected = License {
+                id: id.into(),
+                url: Some(format!("{gnu}{text}")),
+                attribution: true,
+            };
+            assert_eq!(found, Some(expected), "{template:?} {short} {url:?}");
+        }
+        for (template, url) in [
+            (None, None),
+            (
+                None,
+                Some("https://commons.wikimedia.org/wiki/Template:Attribution"),
+            ),
+            (
+                Some("attribution"),
+                Some("http://commons.wikimedia.org/wiki/Template:Attribution"),
+            ),
+        ] {
+            assert_eq!(
+                license(template, Some("Attribution"), url),
+                Some(License {
+                    id: "Attribution".into(),
+                    url: Some("https://commons.wikimedia.org/wiki/Template:Attribution".into()),
+                    attribution: true,
+                }),
+                "{template:?} {url:?}"
+            );
+        }
+        for (template, short, url) in [
+            // The URL names another family, another version, or no GNU page.
+            (
+                None,
+                Some("GPLv3"),
+                Some("https://www.gnu.org/licenses/lgpl-3.0.html"),
+            ),
+            (
+                None,
+                Some("AGPL"),
+                Some("https://www.gnu.org/licenses/old-licenses/gpl-2.0.html"),
+            ),
+            (
+                None,
+                Some("LGPL"),
+                Some("http://www.gnu.org/licenses/gpl.html"),
+            ),
+            (
+                None,
+                Some("GPLv3"),
+                Some("https://www.gnu.org/licenses/old-licenses/gpl-2.0.html"),
+            ),
+            (
+                None,
+                Some("GPLv3"),
+                Some("https://www.gnu.org/licenses/fdl-1.3.html"),
+            ),
+            (
+                None,
+                Some("GPLv3"),
+                Some("https://example.org/licenses/gpl-3.0.html"),
+            ),
+            (
+                None,
+                Some("GPL"),
+                Some("https://creativecommons.org/licenses/by/4.0/"),
+            ),
+            (
+                None,
+                Some("GPL"),
+                Some("https://creativecommons.org/publicdomain/zero/1.0/"),
+            ),
+            // The names disagree.
+            (Some("gpl-3.0-only"), Some("GPLv3+"), None),
+            (
+                Some("cc-by-sa-4.0"),
+                Some("GPLv3"),
+                Some("http://www.gnu.org/licenses/gpl-3.0.html"),
+            ),
+            (Some("attribution"), Some("GPL"), None),
+            (Some("gfdl"), Some("Attribution"), None),
+            // An "Attribution" name beside another licence's URL.
+            (
+                None,
+                Some("Attribution"),
+                Some("https://creativecommons.org/licenses/by-nc/4.0/"),
+            ),
+            (
+                None,
+                Some("Attribution"),
+                Some("https://creativecommons.org/licenses/by/4.0/"),
+            ),
+            (
+                None,
+                Some("Attribution"),
+                Some("http://www.gnu.org/licenses/gpl.html"),
+            ),
+            // No version the family had, or a name that is not a licence's.
+            (None, Some("GPL 2.1"), None),
+            (None, Some("AGPLv1"), None),
+            (None, Some("GPLv"), None),
+            (None, Some("GPL+"), None),
+            (None, Some("GPL linking exception"), None),
+            (None, Some("Attribution-ShareAlike"), None),
+            // A URL alone names no licence.
+            (
+                None,
+                None,
+                Some("https://www.gnu.org/licenses/gpl-3.0.html"),
+            ),
+            // Off the list.
+            (None, Some("GFDL"), None),
+            (
+                Some("fal"),
+                Some("FAL"),
+                Some("http://artlibre.org/licence/lal/en"),
+            ),
+            (
+                None,
+                Some("CC BY-NC 4.0"),
+                Some("https://creativecommons.org/licenses/by-nc/4.0/"),
+            ),
+        ] {
+            assert_eq!(
+                license(template, short, url),
+                None,
+                "{template:?} {short:?} {url:?}"
+            );
+        }
+    }
+    /// Under a GNU licence or `Attribution`, a file is shown only with its author: without one,
+    /// or with Commons' placeholder, it is refused, and a file marked non-free is refused
+    /// whatever its licence.
+    #[test]
+    fn a_gnu_or_attribution_file_needs_its_author() {
+        let check = |artist: Option<&str>, short: &str, url: Option<&str>, non_free: bool| {
+            let mut meta = serde_json::json!({"LicenseShortName": {"value": short}});
+            if let Some(artist) = artist {
+                meta["Artist"] = serde_json::json!({"value": artist});
+            }
+            if let Some(url) = url {
+                meta["LicenseUrl"] = serde_json::json!({"value": url});
+            }
+            if non_free {
+                meta["NonFree"] = serde_json::json!({"value": "true"});
+            }
+            free_file(
+                &serde_json::json!({"query": {"pages": [{"title": "File:A.png", "ns": 6, "imageinfo": [{
+                    "mime": "image/png",
+                    "url": "https://upload.wikimedia.org/wikipedia/commons/a/aa/A.png",
+                    "extmetadata": meta,
+                }]}]}}),
+                "A.png",
+            )
+        };
+        let agpl = Some("http://www.gnu.org/licenses/agpl.html");
+        let gplv3 = Some("http://www.gnu.org/licenses/gpl-3.0.html");
+        for (short, url, id) in [
+            ("AGPL", agpl, "AGPL-3.0-only"),
+            ("GPLv3", gplv3, "GPL-3.0-only"),
+            ("Attribution", None, "Attribution"),
+        ] {
+            let artist =
+                "<a href=\"//commons.wikimedia.org/wiki/User:A\">Jane Doe</a> (screenshot)";
+            let Some(FileCheck::Free(file)) = check(Some(artist), short, url, false) else {
+                panic!("{short} with its author");
+            };
+            assert_eq!(
+                (file.author.as_deref(), file.license.id.as_str()),
+                (Some("Jane Doe (screenshot)"), id)
+            );
+            assert_eq!(file.page, "https://commons.wikimedia.org/wiki/File:A.png");
+            for artist in [None, Some("Unknown author"), Some("<span>anonymous</span>")] {
+                assert_eq!(
+                    check(artist, short, url, false),
+                    Some(FileCheck::Refused("author")),
+                    "{short} {artist:?}"
+                );
+            }
+            assert_eq!(
+                check(Some("Jane Doe"), short, url, true),
+                Some(FileCheck::Refused("non_free")),
+                "{short}"
+            );
+        }
+        assert_eq!(
+            check(
+                Some("Jane Doe"),
+                "GPLv3",
+                Some("https://www.gnu.org/licenses/lgpl.html"),
+                false
+            ),
+            Some(FileCheck::Refused("license"))
+        );
     }
 }
