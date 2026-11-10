@@ -1520,6 +1520,7 @@ mod tests {
                 video: false,
                 length_ms: length,
                 artist_type: None,
+                about: Default::default(),
             };
         let a = "f2eef649-0000-4000-8000-000000000001";
         let b = "f2eef649-0000-4000-8000-000000000002";

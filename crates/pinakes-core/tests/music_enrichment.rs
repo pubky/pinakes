@@ -345,7 +345,11 @@ fn web(transport: Arc<Recorded>, enrich: bool) -> WebResolver {
         oembed_policy: Default::default(),
         cards: None,
         events: None,
-        egress: Egress::with_backends(Default::default(), Arc::new(PublicDns), transport),
+        egress: Egress::with_backends(
+            common::unpaced_egress_config(),
+            Arc::new(PublicDns),
+            transport,
+        ),
         config: ResolverConfig {
             music_enrichment: enrich,
             ..Default::default()
@@ -1144,11 +1148,7 @@ async fn credits_show_on_every_card_route(pool: PgPool) {
     tag(&pool, &[MILES, SEFA]).await;
     resolve_once(&pool, &web(Recorded::new(Mode::default()), true), MILES).await;
     let (id, _, _) = identity(MILES).unwrap();
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let uri = percent_encoding::utf8_percent_encode(MILES, percent_encoding::NON_ALPHANUMERIC);
     let by_uri = call(
         &app,
@@ -1212,11 +1212,7 @@ async fn credits_show_on_every_card_route(pool: PgPool) {
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn musicbrainz_facts_show_on_the_resource_read(pool: PgPool) {
     tag(&pool, &[SEFA, KIND_OF_BLUE, GET_LUCKY]).await;
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     for enrich in [false, true] {
         let t = Recorded::new(Mode::default());
         for uri in [SEFA, KIND_OF_BLUE, GET_LUCKY] {
@@ -1284,11 +1280,7 @@ async fn an_enriched_recording_keeps_its_length_as_a_fact(pool: PgPool) {
         .unwrap();
     assert_eq!(facts, 0, "no also-on source has read the song");
     let (id, _, _) = identity(GET_LUCKY).unwrap();
-    let app = api::router(
-        AppState::new(pool.clone(), Config::default())
-            .await
-            .unwrap(),
-    );
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let uri = percent_encoding::utf8_percent_encode(GET_LUCKY, percent_encoding::NON_ALPHANUMERIC);
     let by_uri = call(
         &app,
