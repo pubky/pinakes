@@ -169,7 +169,9 @@ Which cards carry one (each source's page in [docs/sources](sources/README.md) s
 
 A MusicBrainz card can show an image from Wikimedia Commons and a description from Wikipedia
 or Wikidata (which item and which text: [Also on](#also-on), MusicBrainz pages). Each such field has a credit; show it
-with the value, linked:
+with the value, linked. A Wikidata item's card shows its item's Commons image with the same
+`image` credit ([event platforms](#cards-and-resolvers)); its description is the item's own and
+has none.
 
 ```json
 "credits": [
@@ -1394,7 +1396,16 @@ counts by status.
   and, where the platform needs one, a `key`; a missing key disables only that adapter and no key
   is ever returned. Its manifest lists the mode, cadence floor, identity, cancellation rule,
   expected fields and canary. BTC Map websites and NIP-52 calendar members are queued as their
-  own resources (`event.adapters.derive_resources`).
+  own resources (`event.adapters.derive_resources`). A Wikidata item's card (the `wikidata`
+  adapter, and a Wikipedia page about an event or a place that Wikipedia serves no summary of,
+  read from the page's item) takes the item's label and description, English when it has one
+  (CC0, no credit), and shows its image (`P18`) only when the file's own page on Commons gives a
+  licence on the list (CC0, the public domain, CC BY or CC BY-SA 1.0 to 4.0) and, under CC BY and
+  CC BY-SA, its author: Commons' thumbnail, asked `limits.music_image_width` (640) pixels wide,
+  with its [credit](#credits), never a link to the file itself. Commons is asked once per reading,
+  within two seconds and never past the card's own read. A file Commons refuses or does not hold gives no image; an answer that fails for a
+  while (a timeout, a 429, a 5xx) keeps the credited image the card had, and the card is read
+  again after at least `limits.music_enrichment_retry_secs`, as an enriched MusicBrainz card is.
 
 - **Official APIs**: the [sources](#sources) below.
 

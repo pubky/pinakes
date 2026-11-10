@@ -4,12 +4,116 @@
 //! A Wikidata item names its image by file name (`P18`), and neither the item nor the file name
 //! licenses the file: each file has its own licence and author on Commons. [`free_file`] reads
 //! them from the file's `extmetadata` and accepts a file only under a licence on its list, with
-//! the author the licence asks to credit.
-use crate::sources::kit::html_text;
+//! the author the licence asks to credit. [`credited_image`] asks Commons about one file and
+//! gives the image with its credit: every card that shows a Wikidata item's image (a MusicBrainz
+//! card's enrichment, a Wikidata item's own card) takes it from there.
+use crate::{
+    model::{Credit, CreditField, CreditProvider},
+    resolver::egress::{Egress, FetchOptions},
+    sources::kit::html_text,
+};
 use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use serde_json::Value;
 
 const API: &str = "https://commons.wikimedia.org/w/api.php";
+/// How long Commons' answer about a file stays in the egress cache (seconds); a card is read
+/// again at its own refresh.
+const CACHE_SECS: u64 = 3600;
+
+/// One field's outcome, read from a Wikimedia project (Wikidata, Commons, Wikipedia).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Found {
+    Value(String, Credit),
+    /// Nothing to show: the card keeps its own source's value.
+    Missing,
+    /// Not read for a transient failure: the card keeps its stored value.
+    Unread,
+}
+
+/// The image of the Commons file `name` (in normal form, [`file_name`]) with its credit, a
+/// thumbnail `width` pixels wide, when Commons says the file is free to show ([`free_file`]).
+/// `Missing` for a file Commons does not hold or refuses; `Unread` for a transient failure (a
+/// timeout, a 429, a 5xx, any other status but 404 and 410, an answer that is not JSON). One
+/// request, through the egress and its cache. `subject` names the card in logs.
+pub async fn credited_image(egress: &Egress, name: &str, width: u32, subject: &str) -> Found {
+    let options = FetchOptions {
+        accept: Some("application/json".into()),
+        ..Default::default()
+    };
+    let fetched = match egress
+        .discover(&file_query(name, width), &options, CACHE_SECS)
+        .await
+    {
+        Ok(fetched) if fetched.status == 200 => fetched,
+        Ok(fetched) if matches!(fetched.status, 404 | 410) => return Found::Missing,
+        // A wait, or a refusal of this client: no answer about the file.
+        Ok(fetched) => {
+            tracing::info!(subject, status = fetched.status, "Commons did not answer");
+            return Found::Unread;
+        }
+        Err(error) => {
+            unread(subject, "commons_file", &error);
+            return Found::Unread;
+        }
+    };
+    // The author is HTML: read off the runtime's threads, as every HTML parse is.
+    let body = fetched.body;
+    let file = name.to_owned();
+    // `None`: not JSON; `Some(None)`: an answer about another file.
+    let check = crate::resolver::html::blocking(move || {
+        serde_json::from_slice::<Value>(&body)
+            .ok()
+            .map(|v| free_file(&v, &file))
+    })
+    .await
+    .unwrap_or_else(|error| {
+        unread(subject, "commons_parse", &error);
+        None
+    });
+    match check {
+        Some(Some(FileCheck::Free(file))) => {
+            let credit = Credit {
+                field: CreditField::Image,
+                provider: CreditProvider::WikimediaCommons,
+                source_url: file.page,
+                author: file.author,
+                license: file.license.id,
+                license_url: file.license.url,
+                lang: None,
+                excerpted: false,
+                modified: false,
+                subject: None,
+            };
+            match credit.bounded() {
+                Some(credit) => Found::Value(file.image, credit),
+                None => Found::Missing,
+            }
+        }
+        Some(Some(FileCheck::Refused(reason))) => {
+            tracing::debug!(subject, reason, "Commons file refused");
+            Found::Missing
+        }
+        Some(Some(FileCheck::Missing)) => Found::Missing,
+        // Nothing verifies the file: no image.
+        Some(None) => {
+            tracing::info!(subject, "Commons answered for another file");
+            Found::Missing
+        }
+        None => {
+            tracing::info!(subject, "Commons' answer is not JSON");
+            Found::Unread
+        }
+    }
+}
+/// Logs a transient failure by its class, with the card and the step; never a URL.
+fn unread(subject: &str, step: &'static str, error: &anyhow::Error) {
+    tracing::info!(
+        subject,
+        step,
+        kind = crate::resolver::error_class(error),
+        "Commons left an image unread"
+    );
+}
 
 /// A file name in MediaWiki's normal form, with underscores: underscores and runs of spaces
 /// become one, the ends are trimmed and the first letter is upper case. `None` for a name

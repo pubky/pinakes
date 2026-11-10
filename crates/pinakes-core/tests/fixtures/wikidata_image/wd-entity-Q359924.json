@@ -1,0 +1,116 @@
+{
+ "entities": {
+  "Q359924": {
+   "type": "item",
+   "id": "Q359924",
+   "lastrevid": 2540940712,
+   "modified": "2026-09-06T07:44:38Z",
+   "labels": {
+    "en": {
+     "language": "en",
+     "value": "Golden Gate Hotel and Casino"
+    }
+   },
+   "descriptions": {
+    "en": {
+     "language": "en",
+     "value": "hotel and casino in Las Vegas, Nevada, United States"
+    }
+   },
+   "claims": {
+    "P31": [
+     {
+      "mainsnak": {
+       "snaktype": "value",
+       "property": "P31",
+       "datavalue": {
+        "value": {
+         "entity-type": "item",
+         "numeric-id": 27686,
+         "id": "Q27686"
+        },
+        "type": "wikibase-entityid"
+       },
+       "datatype": "wikibase-item"
+      },
+      "type": "statement",
+      "id": "Q359924$BC647AD9-623C-42AC-917C-E513CA458D9D",
+      "rank": "normal"
+     },
+     {
+      "mainsnak": {
+       "snaktype": "value",
+       "property": "P31",
+       "datavalue": {
+        "value": {
+         "entity-type": "item",
+         "numeric-id": 133215,
+         "id": "Q133215"
+        },
+        "type": "wikibase-entityid"
+       },
+       "datatype": "wikibase-item"
+      },
+      "type": "statement",
+      "id": "Q359924$ee8da107-4b56-5798-8ad3-ee6924339bff",
+      "rank": "normal"
+     }
+    ],
+    "P625": [
+     {
+      "mainsnak": {
+       "snaktype": "value",
+       "property": "P625",
+       "datavalue": {
+        "value": {
+         "latitude": 36.1714,
+         "longitude": -115.146,
+         "altitude": null,
+         "precision": 0.0001,
+         "globe": "http://www.wikidata.org/entity/Q2"
+        },
+        "type": "globecoordinate"
+       },
+       "datatype": "globe-coordinate"
+      },
+      "type": "statement",
+      "id": "q359924$DA43DA64-B340-438F-AB46-1DCE56D6FBF2",
+      "rank": "normal"
+     }
+    ],
+    "P856": [
+     {
+      "mainsnak": {
+       "snaktype": "value",
+       "property": "P856",
+       "datavalue": {
+        "value": "http://www.goldengatecasino.com/",
+        "type": "string"
+       },
+       "datatype": "url"
+      },
+      "type": "statement",
+      "id": "Q359924$0831662B-3856-47DD-817F-D64C1C9C185A",
+      "rank": "normal"
+     }
+    ],
+    "P18": [
+     {
+      "mainsnak": {
+       "snaktype": "value",
+       "property": "P18",
+       "datavalue": {
+        "value": "M-408116720.jpg",
+        "type": "string"
+       },
+       "datatype": "commonsMedia"
+      },
+      "type": "statement",
+      "id": "Q359924$6DAF4F01-044B-4C16-AF7F-F67A8744400B",
+      "rank": "normal"
+     }
+    ]
+   }
+  }
+ }
+}

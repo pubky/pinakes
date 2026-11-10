@@ -399,7 +399,8 @@ impl WebResolver {
                 .is_some_and(|e| e.config.adapters.enabled)
             {
                 if let Some(doc) =
-                    crate::event::adapters::service::wikipedia(uri, &fetched, &self.egress).await?
+                    crate::event::adapters::service::wikipedia(uri, &fetched, self, deadline)
+                        .await?
                 {
                     extracted.doc = doc;
                 }
