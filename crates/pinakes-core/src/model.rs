@@ -174,10 +174,16 @@ pub struct Credit {
 impl Credit {
     /// The credit within its bounds: every URL `https:` and at most 1,024 bytes, the author at
     /// most 256 bytes (cut at a character), the licence ID and language at most 64. `None` when
-    /// a URL or ID is out of bounds.
+    /// a URL or ID is out of bounds, or when a URL or the author is a link that carries a
+    /// credential (`capability::names_credential`): the store would drop that part of the
+    /// credit (`capability::strip_document`) and leave its value uncredited, so the value is not
+    /// taken at all.
     pub fn bounded(mut self) -> Option<Self> {
-        let https =
-            |s: &str| s.len() <= 1024 && url::Url::parse(s).is_ok_and(|u| u.scheme() == "https");
+        let https = |s: &str| {
+            s.len() <= 1024
+                && url::Url::parse(s).is_ok_and(|u| u.scheme() == "https")
+                && !crate::capability::names_credential(s)
+        };
         let id = |s: &str| {
             !s.is_empty()
                 && s.len() <= 64
@@ -189,6 +195,10 @@ impl Credit {
         }
         self.author = self.author.filter(|a| !a.trim().is_empty());
         (https(&self.source_url)
+            && !self
+                .author
+                .as_deref()
+                .is_some_and(crate::capability::names_credential)
             && self.license_url.as_deref().is_none_or(https)
             && self.subject.as_deref().is_none_or(https)
             && id(&self.license)
@@ -744,6 +754,21 @@ mod tests {
             },
             Credit {
                 subject: Some("musicbrainz:work".into()),
+                ..author.clone()
+            },
+            // The credential rule: no part of a credit is a link that carries one.
+            Credit {
+                source_url: "https://commons.wikimedia.org/wiki/File:A.jpg?token=x".into(),
+                ..author.clone()
+            },
+            Credit {
+                license_url: Some(
+                    "https://creativecommons.org/licenses/by/4.0/#access_token=x".into(),
+                ),
+                ..author.clone()
+            },
+            Credit {
+                author: Some("https://www.flickr.com/people/a?api_key=x".into()),
                 ..author.clone()
             },
         ] {

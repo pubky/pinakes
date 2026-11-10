@@ -91,7 +91,8 @@ impl Enrichment {
             description: Found::Unread,
         }
     }
-    /// Writes the found values and their credits into `doc`. An unread field is listed in
+    /// Writes the found values and their credits into `doc` (a value that is a link carrying a
+    /// credential leaves the field as MusicBrainz makes it). An unread field is listed in
     /// `unread_enriched`, and the card is read again early, `retry_secs` from now at the soonest
     /// (`ResourceMeta::keep_enriched` moves that later by how old its stored reading is).
     pub fn apply(self, doc: &mut ResourceMeta, retry_secs: u64) {
@@ -100,6 +101,9 @@ impl Enrichment {
             (CreditField::Description, self.description),
         ] {
             match found {
+                // A value the store would drop (`capability::strip_document`) is not taken: its
+                // credit would stay without it.
+                Found::Value(value, _) if crate::capability::names_credential(&value) => {}
                 Found::Value(value, credit) => {
                     match field {
                         CreditField::Image => doc.image = Some(value),
@@ -629,6 +633,40 @@ async fn image(egress: &Egress, mbid: &str, qid: &str, width: u32) -> Found {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A found value that is a link carrying a credential is not taken, nor is its credit: the
+    /// store would drop the value and keep the credit, or the reverse.
+    #[test]
+    fn a_value_that_carries_a_credential_is_not_taken() {
+        let credit = Credit {
+            field: CreditField::Image,
+            provider: CreditProvider::WikimediaCommons,
+            source_url: "https://commons.wikimedia.org/wiki/File:A.jpg".into(),
+            author: Some("A".into()),
+            license: "CC-BY-4.0".into(),
+            license_url: Some("https://creativecommons.org/licenses/by/4.0/".into()),
+            lang: None,
+            excerpted: false,
+            modified: false,
+            subject: None,
+        };
+        let mut doc = ResourceMeta::new("https://musicbrainz.org/artist/x", "musicbrainz", 60);
+        Enrichment {
+            image: Found::Value(
+                "https://upload.wikimedia.org/a.jpg?sig=x".into(),
+                credit.clone(),
+            ),
+            description: Found::Missing,
+        }
+        .apply(&mut doc, 3600);
+        assert_eq!((doc.image, doc.credits), (None, vec![]));
+        let mut doc = ResourceMeta::new("https://musicbrainz.org/artist/x", "musicbrainz", 60);
+        Enrichment {
+            image: Found::Value("https://upload.wikimedia.org/a.jpg".into(), credit.clone()),
+            description: Found::Missing,
+        }
+        .apply(&mut doc, 3600);
+        assert_eq!(doc.credits, [credit]);
+    }
     #[test]
     fn long_text_is_cut_at_a_sentence_or_a_word() {
         assert_eq!(excerpt("Short.", 2048), ("Short.".into(), false));
