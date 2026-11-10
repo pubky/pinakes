@@ -497,11 +497,11 @@ pub fn tools() -> Vec<Tool> {
                 "closed":{"type":"boolean","description":"true: list job postings past their closing date too (left out by default)."},
                 "ingredient":{"type":"string","description":"Recipes with these ingredients: up to 3, comma-separated, each matching whole words of an ingredient's name (flour matches all-purpose flour)."},
                 "in_collection":{"type":"string","description":"The links one public collection holds: the collection post's pubky:// URI (from a card tool answer's in_collections)."},
-                "sort":{"type":"string","enum":["activity","recent","distance","start","trending"],"description":"activity (default), recent, distance (needs near), start (earliest first), trending (with window)."},
+                "sort":{"type":"string","enum":["relevance","activity","recent","distance","start","trending"],"description":"relevance (default with q: name match, then tag labels, then description; activity breaks ties; needs q), activity (default without q), recent, distance (needs near), start (earliest first), trending (with window)."},
                 "window":{"type":"string","description":"With sort trending: how far back, 1h to 90d, default 7d."},
                 "collapse":{"type":"string","enum":["group"],"description":"group: one row per group of links that are the same thing."},
                 "reach":{"type":"string","enum":["following","friends"],"description":"Only links that the viewer's follows (or friends) referenced. Needs viewer."},
-                "boost":{"type":"string","enum":["following","friends","wot_2"],"description":"Rank first the links the viewer's follows (or friends, or two steps of follows) referenced, leaving nothing out. Needs viewer; with the default sort or trending. wot_2 only where the instance has it."},
+                "boost":{"type":"string","enum":["following","friends","wot_2"],"description":"Rank first the links the viewer's follows (or friends, or two steps of follows) referenced, leaving nothing out. Needs viewer; with the default sort, relevance or trending. wot_2 only where the instance has it."},
                 "viewer":{"type":"string","description":"With reach or boost: a 52-character pubky public key."},
                 "limit":{"type":"integer","minimum":1,"maximum":500,"description":"Cards per page, default 50."},
                 "cursor":{"type":"string","description":"The cursor of the previous page, with the same filters."}

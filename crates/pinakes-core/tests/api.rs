@@ -3102,6 +3102,12 @@ async fn a_boost_ranks_the_viewers_set_first_and_never_filters(pool: PgPool) {
         ids_of(&get(format!("/v1/search?boost=following&viewer={viewer}")).await),
         plain
     );
+    // With `q` the default is `sort=relevance`: every item matches `rust` alike (the name's
+    // first word, the tag), so the boosted activity score alone orders them, as above.
+    assert_eq!(
+        ids_of(&get(format!("/v1/search?q=rust&boost=friends&viewer={viewer}")).await),
+        boosted
+    );
     // The boost is part of the page's identity: its cursor and ETag differ from the plain ones.
     let (_, page) = call(&app, "GET", "/v1/search?limit=2", None).await;
     let cursor = page["cursor"].as_str().unwrap().to_owned();
@@ -3263,4 +3269,247 @@ async fn an_old_reference_neither_boosts_nor_breaks_a_search(pool: PgPool) {
     )
     .await;
     assert_eq!(ids_of(&page)[0], ids[friend], "{page}");
+}
+
+/// A resource for the relevance tests: its name, description and type, tagged `label` by
+/// `taggers` distinct authors (from `first` on), with its activity score computed.
+async fn relevance_card(
+    pool: &PgPool,
+    n: usize,
+    (name, description, type_name): (&str, &str, &str),
+    (label, first, taggers): (&str, usize, usize),
+) -> String {
+    let uri = format!("https://example.org/relevance/{n}");
+    let id = store::ensure_resource(pool, &uri).await.unwrap();
+    let mut doc = ResourceMeta::new(&uri, "web", 86400);
+    doc.name = Some(name.into());
+    doc.description = Some(description.into());
+    doc.set_type(type_name);
+    store::save_document(pool, &id, 0, &doc).await.unwrap();
+    for a in first..first + taggers {
+        sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag',$3,$4,now())")
+            .bind(&id)
+            .bind(author(a))
+            .bind(label)
+            .bind(format!("/pub/app/tags/{n}-{a}"))
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+    let mut tx = pool.begin().await.unwrap();
+    store::recompute_scores(&mut tx, std::slice::from_ref(&id))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    id
+}
+
+/// `q` ranks by relevance unless `sort` says otherwise: a name match first (exact, then the
+/// words as a phrase, then a partial name), then a tag label (equal, then holding the word),
+/// then the description, and the activity score only among equal matches. So the popular
+/// podcast and media player whose descriptions merely mention music come after the music cards,
+/// which `sort=activity` (the old order) puts behind them. Cursors page the same order, facets
+/// and filters are unchanged, and `sort=relevance` without `q` is refused.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_text_search_ranks_the_best_match_first(pool: PgPool) {
+    let podcast = relevance_card(
+        &pool,
+        1,
+        (
+            "Lex Fridman Podcast",
+            "Conversations about science, technology, history, philosophy and music.",
+            "PodcastSeries",
+        ),
+        ("podcast", 100, 6),
+    )
+    .await;
+    let player = relevance_card(
+        &pool,
+        2,
+        (
+            "VLC media player",
+            "Plays most music and video files.",
+            "SoftwareApplication",
+        ),
+        ("software", 200, 5),
+    )
+    .await;
+    let band = relevance_card(
+        &pool,
+        3,
+        ("Daft Punk", "French electronic music duo.", "MusicGroup"),
+        ("music", 300, 1),
+    )
+    .await;
+    let album = relevance_card(
+        &pool,
+        4,
+        (
+            "Music for Airports",
+            "Ambient album by Brian Eno.",
+            "MusicAlbum",
+        ),
+        ("ambient", 400, 1),
+    )
+    .await;
+    let musicals = relevance_card(
+        &pool,
+        5,
+        ("Musicals Tonight", "Broadway listings.", "WebPage"),
+        ("theatre", 500, 2),
+    )
+    .await;
+    let exact = relevance_card(
+        &pool,
+        6,
+        ("  MUSIC ", "A page.", "WebPage"),
+        ("page", 600, 1),
+    )
+    .await;
+    let kraftwerk = relevance_card(
+        &pool,
+        7,
+        ("Kraftwerk", "German electronic music band.", "MusicGroup"),
+        ("electronic-music", 700, 1),
+    )
+    .await;
+    // Matches nothing: neither its name nor its description holds the word.
+    relevance_card(
+        &pool,
+        8,
+        ("Kind of Blue", "Jazz album.", "MusicAlbum"),
+        ("music", 800, 3),
+    )
+    .await;
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let get = |path: String| {
+        let app = app.clone();
+        async move {
+            let (code, page) = call(&app, "GET", &path, None).await;
+            assert_eq!(code, 200, "{path}: {page}");
+            page
+        }
+    };
+    let relevance = [
+        exact.clone(),     // the name is `music`: 4·9
+        album.clone(),     // the name holds the word: 3·9
+        musicals.clone(),  // a partial name: 1·9
+        band.clone(),      // tagged `music` (2·3) and the word in the description (2)
+        kraftwerk.clone(), // a label holding the word (1·3) and the description (2)
+        podcast.clone(),   // the description alone (2), six taggers
+        player.clone(),    // the description alone (2), five taggers
+    ];
+    assert_eq!(ids_of(&get("/v1/search?q=music".into()).await), relevance);
+    assert_eq!(
+        ids_of(&get("/v1/search?q=music&sort=relevance".into()).await),
+        relevance
+    );
+    // The activity order the default used to be: the most tagged first, whatever the match.
+    let activity = ids_of(&get("/v1/search?q=music&sort=activity".into()).await);
+    assert_eq!(
+        activity[..3],
+        [podcast.clone(), player.clone(), musicals.clone()]
+    );
+    let (mut a, mut b) = (activity.clone(), relevance.to_vec());
+    a.sort();
+    b.sort();
+    assert_eq!(a, b, "the sort never changes what matches");
+    // Filters keep working: the music groups alone, the tagged band first.
+    assert_eq!(
+        ids_of(&get("/v1/search?q=music&type=MusicGroup".into()).await),
+        [band.clone(), kraftwerk.clone()]
+    );
+    assert_eq!(
+        ids_of(&get("/v1/search?q=music&tags=music".into()).await),
+        std::slice::from_ref(&band)
+    );
+    // Facets count the same set under either sort; collapse keeps the order (no groups here).
+    let facets = get("/v1/search?q=music&facet=type,tags".into()).await["facets"].clone();
+    assert_eq!(
+        facets,
+        get("/v1/search?q=music&facet=type,tags&sort=activity".into()).await["facets"]
+    );
+    assert_eq!(
+        ids_of(&get("/v1/search?q=music&collapse=group".into()).await),
+        relevance
+    );
+    // Paging two at a time walks the same order, each card once.
+    let mut paged = vec![];
+    let mut cursor: Option<String> = None;
+    loop {
+        let path = match &cursor {
+            Some(c) => format!("/v1/search?q=music&limit=2&cursor={c}"),
+            None => "/v1/search?q=music&limit=2".into(),
+        };
+        let page = get(path).await;
+        paged.extend(ids_of(&page));
+        match page["cursor"].as_str() {
+            Some(c) => cursor = Some(c.to_owned()),
+            None => break,
+        }
+        assert!(paged.len() < 20, "paging never ends: {paged:?}");
+    }
+    assert_eq!(paged, relevance);
+    // A relevance cursor belongs to its sort: with another one it is refused.
+    let first = get("/v1/search?q=music&limit=2".into()).await;
+    let cursor = first["cursor"].as_str().unwrap();
+    let (code, _) = call(
+        &app,
+        "GET",
+        &format!("/v1/search?q=music&limit=2&sort=activity&cursor={cursor}"),
+        None,
+    )
+    .await;
+    assert_eq!(code, 400);
+    // Several words: the tag `daft-punk` equals `daft punk`; a name with both words first.
+    let single = relevance_card(
+        &pool,
+        9,
+        (
+            "Get Lucky",
+            "A single by Daft Punk with Pharrell Williams.",
+            "MusicRecording",
+        ),
+        ("daft-punk", 900, 1),
+    )
+    .await;
+    let mention = relevance_card(
+        &pool,
+        10,
+        ("Homework", "The first album by daft punk.", "MusicAlbum"),
+        ("house", 1000, 4),
+    )
+    .await;
+    // `Get Lucky` and `Homework` both name the band in the description; the single's tag ranks
+    // it above the album's four taggers.
+    assert_eq!(
+        ids_of(&get("/v1/search?q=daft%20punk".into()).await),
+        [band.clone(), single, mention]
+    );
+    // `sort=relevance` ranks by `q`: without one (or with an empty one) it is a 400 that says so.
+    for path in [
+        "/v1/search?sort=relevance",
+        "/v1/search?q=&sort=relevance",
+        "/v1/search?sort=relevance&tags=music",
+    ] {
+        let (code, body) = call(&app, "GET", path, None).await;
+        assert_eq!(code, 400, "{path}: {body}");
+        assert!(
+            body["error"].as_str().unwrap().contains("needs q"),
+            "{path}: {body}"
+        );
+    }
+    let (code, _) = call(
+        &app,
+        "GET",
+        &format!("/v1/search?q=music&sort=relevance&related={band}"),
+        None,
+    )
+    .await;
+    assert_eq!(code, 400, "related ranks its own rows");
+    // Without `q` the default stays `activity`.
+    assert_eq!(
+        ids_of(&get("/v1/search?type=MusicGroup".into()).await),
+        ids_of(&get("/v1/search?type=MusicGroup&sort=activity".into()).await)
+    );
 }
