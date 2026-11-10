@@ -639,9 +639,13 @@ pub struct SearchQuery {
     pub reach: Option<String>,
     /// `following`, `friends` or `wot_2` of `viewer`: cards that authors in that set referenced
     /// rank higher, the more of them and the more recently they did, and nothing is left out
-    /// (with the default ranking or `sort=trending`).
+    /// (with the default ranking, `sort=relevance` or `sort=trending`).
     pub boost: Option<String>,
     pub viewer: Option<String>,
+    /// `relevance` (how well `q` matches: the name, then tag labels, then the description;
+    /// the activity score breaks ties; needs `q`), `activity`, `recent`, `distance` (needs
+    /// `near`), `start` or `trending`. Default: `relevance` when `q` is set (not with `related`),
+    /// else `activity`.
     pub sort: Option<String>,
     /// With `sort=trending` or `related`: how far back references count, `1h`–`90d` (`{n}h` or
     /// `{n}d`), default `7d` for trending and `limits.related_window_days` for related.
@@ -1580,10 +1584,15 @@ fn validate_search(q: &SearchQuery) -> Result<Vec<String>, ApiError> {
     }
     if !matches!(
         q.sort.as_deref(),
-        None | Some("activity" | "recent" | "distance" | "start" | "trending")
+        None | Some("relevance" | "activity" | "recent" | "distance" | "start" | "trending")
     ) {
         return Err(ApiError::bad(
-            "sort must be activity, recent, distance, start or trending",
+            "sort must be relevance, activity, recent, distance, start or trending",
+        ));
+    }
+    if q.sort.as_deref() == Some("relevance") && query_text(q).is_none() {
+        return Err(ApiError::bad(
+            "sort=relevance ranks by how well q matches; it needs q",
         ));
     }
     if q.related.as_deref().is_some_and(|id| !model::valid_id(id)) {
@@ -1614,9 +1623,14 @@ fn validate_search(q: &SearchQuery) -> Result<Vec<String>, ApiError> {
     if q.boost.is_some() && q.related.is_some() {
         return Err(ApiError::bad("related ranks the rows; it takes no boost"));
     }
-    if q.boost.is_some() && !matches!(q.sort.as_deref(), None | Some("activity" | "trending")) {
+    if q.boost.is_some()
+        && !matches!(
+            q.sort.as_deref(),
+            None | Some("relevance" | "activity" | "trending")
+        )
+    {
         return Err(ApiError::bad(
-            "boost applies to the default ranking or sort=trending",
+            "boost applies to the default ranking, sort=relevance or sort=trending",
         ));
     }
     for id in [&q.viewer, &q.author].into_iter().flatten() {
@@ -1648,6 +1662,88 @@ fn validate_search(q: &SearchQuery) -> Result<Vec<String>, ApiError> {
         ));
     }
     Ok(tags)
+}
+/// The text of `q`, when there is one to match (an empty `q` filters nothing).
+fn query_text(q: &SearchQuery) -> Option<&str> {
+    q.q.as_deref().filter(|s| !s.is_empty())
+}
+/// The ranking a search uses: its `sort`, else `relevance` for a text search (`related` ranks
+/// its own rows), else the activity score (`None`).
+fn effective_sort(q: &SearchQuery) -> Option<&str> {
+    match q.sort.as_deref() {
+        Some(sort) => Some(sort),
+        None if q.related.is_none() && query_text(q).is_some() => Some("relevance"),
+        None => None,
+    }
+}
+/// How much a name match weighs in [`relevance`]: more than the best tag and description
+/// matches together (2·[`TAG_WEIGHT`] + 2), so the name always comes first.
+pub const NAME_WEIGHT: f64 = 9.0;
+/// How much a tag-label match weighs: more than the best description match (2).
+pub const TAG_WEIGHT: f64 = 3.0;
+/// The labels a tag must equal to match `text` exactly: its words lowercased, joined by a
+/// space, a hyphen, an underscore or nothing (`daft punk`, `daft-punk`, `daft_punk`, `daftpunk`).
+fn label_spellings(text: &str) -> Vec<String> {
+    let words: Vec<String> = text.split_whitespace().map(str::to_lowercase).collect();
+    let mut spellings: Vec<String> = [" ", "-", "_", ""]
+        .iter()
+        .map(|joint| words.join(joint))
+        .collect();
+    spellings.dedup();
+    spellings
+}
+/// `sort=relevance`: how well `text` matches a row, in whole points, so the activity score
+/// (squashed below 1 by the caller) only breaks ties. Lexicographic: the name's match
+/// (exact 4, the whole phrase as words 3, every word 2, a partial or fuzzy match 1) times
+/// [`NAME_WEIGHT`], then a tag label (equal 2, containing the phrase as words 1) times
+/// [`TAG_WEIGHT`], then the description (the whole phrase as words 2, every word 1). Tags count
+/// as the filters do: the effective references in the author/reach scope.
+fn relevance(
+    sql: &mut QueryBuilder<'_, Postgres>,
+    q: &SearchQuery,
+    reach: &Option<crate::nexus::ReachSet>,
+    text: &str,
+) {
+    let exact = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    let pattern = format!(
+        "%{}%",
+        text.replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    );
+    let name = "to_tsvector('simple',coalesce(r.name,''))";
+    let description = "to_tsvector('simple',coalesce(r.doc->>'description',''))";
+    sql.push("((CASE WHEN lower(regexp_replace(btrim(coalesce(r.name,'')),'\\s+',' ','g'))=")
+        .push_bind(exact)
+        .push(format!(" THEN 4 WHEN {name} @@ phraseto_tsquery('simple',"))
+        .push_bind(text.to_owned())
+        .push(format!(") THEN 3 WHEN {name} @@ websearch_to_tsquery('simple',"))
+        .push_bind(text.to_owned())
+        .push(") THEN 2 WHEN r.name ILIKE ")
+        .push_bind(pattern)
+        .push(" OR r.name % ")
+        .push_bind(text.to_owned())
+        .push(format!(" THEN 1 ELSE 0 END)*{NAME_WEIGHT:.1}+(CASE WHEN EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id=r.id AND lower(f.label)=ANY("))
+        .push_bind(label_spellings(text))
+        .push(")");
+    scope(sql, q, reach);
+    sql.push(") THEN 2 WHEN EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id=r.id AND f.label IS NOT NULL AND to_tsvector('simple',f.label) @@ phraseto_tsquery('simple',")
+        .push_bind(text.to_owned())
+        .push(")");
+    scope(sql, q, reach);
+    sql.push(format!(
+        ") THEN 1 ELSE 0 END)*{TAG_WEIGHT:.1}+(CASE WHEN {description} @@ phraseto_tsquery('simple',"
+    ))
+    .push_bind(text.to_owned())
+    .push(format!(
+        ") THEN 2 WHEN {description} @@ websearch_to_tsquery('simple',"
+    ))
+    .push_bind(text.to_owned())
+    .push(") THEN 1 ELSE 0 END))::double precision");
 }
 /// The trending window: `{n}h` or `{n}d` between one hour and 90 days, default seven days.
 pub(crate) fn trend_window(window: Option<&str>) -> Result<chrono::Duration, ApiError> {
@@ -1788,9 +1884,10 @@ fn related_because(sql: &mut QueryBuilder<'_, Postgres>, item: &str, n: &str, au
     ));
 }
 /// The version of a search page's shape, in its ETag: a page cached before a field was added
-/// (`because`, then every card's `credits`) is never answered 304. Move it when a search row
-/// gains or loses a field.
-pub const SEARCH_SHAPE: u32 = 2;
+/// (`because`, then every card's `credits`) or before its rows' order changed (`q` ranked by
+/// relevance by default) is never answered 304. Move it when a search row gains or loses a
+/// field, or the same query's rows come in another order.
+pub const SEARCH_SHAPE: u32 = 3;
 /// The most taggers a related row's `because` names.
 pub const BECAUSE_TAGGERS: usize = 3;
 
@@ -1894,7 +1991,8 @@ pub async fn search(
             return Err(ApiError::bad("cursor does not match this search"));
         }
     }
-    let trending = q.sort.as_deref() == Some("trending");
+    let sort = effective_sort(&q);
+    let trending = sort == Some("trending");
     // `related`: the resource's root (an alias reads as it).
     let related: Option<String> = match &q.related {
         Some(id) => Some(
@@ -2011,14 +2109,22 @@ pub async fn search(
         sql.push("coalesce((SELECT g.n FROM group_unit u JOIN group_trend g USING(group_id) WHERE u.unit_id=r.unit_id),t.n)::double precision");
     } else if trending {
         sql.push("t.n::double precision");
-    } else if q.sort.as_deref() == Some("distance") {
+    } else if sort == Some("distance") {
         sql.push("-");
         spatial.distance(&mut sql);
-    } else if q.sort.as_deref() == Some("start") {
+    } else if sort == Some("start") {
         sql.push("-extract(epoch FROM r.start_at)::double precision");
-    } else if q.sort.as_deref() == Some("recent") {
+    } else if sort == Some("recent") {
         sql.push("coalesce(extract(epoch FROM s.newest_at),0)::double precision");
     } else {
+        let text = query_text(&q).filter(|_| sort == Some("relevance"));
+        if let Some(text) = text {
+            // The match's whole points, plus the activity score (with any boost) mapped into
+            // [0, 1) by a/(1+a), which keeps its order: it only breaks ties between matches
+            // that are equally good.
+            relevance(&mut sql, &q, &reach, text);
+            sql.push("+1.0-1.0/(1.0+greatest(0.0,");
+        }
         sql.push("(coalesce(s.score * exp(-ln(2.0)*greatest(0,extract(epoch FROM (")
             .push_bind(at)
             .push("::timestamptz-s.updated_at)))/2592000.0),0)");
@@ -2036,6 +2142,9 @@ pub async fn search(
                 .push("::timestamptz-b.at)))/2592000.0) END,0)");
         }
         sql.push(")::double precision");
+        if text.is_some() {
+            sql.push("))");
+        }
     }
     if !related_groups {
         sql.push(" AS rank");
@@ -2092,7 +2201,7 @@ pub async fn search(
             .push_bind(reach.authors.clone())
             .push("))");
     }
-    if q.sort.as_deref() == Some("start") {
+    if sort == Some("start") {
         sql.push(" AND r.start_at IS NOT NULL");
     }
     if let Some(types) = &q.type_name {
@@ -3540,6 +3649,35 @@ pub async fn curate_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A tag equals a text search when it spells the same words joined by a space, a hyphen, an
+    /// underscore or nothing, in any case; and an empty `q` ranks nothing by relevance.
+    #[test]
+    fn relevance_spellings_and_default() {
+        assert_eq!(
+            label_spellings("  Daft   PUNK "),
+            ["daft punk", "daft-punk", "daft_punk", "daftpunk"]
+        );
+        assert_eq!(label_spellings("Music"), ["music"]);
+        let search = |q: Option<&str>, sort: Option<&str>, related: bool| SearchQuery {
+            q: q.map(Into::into),
+            sort: sort.map(Into::into),
+            related: related.then(|| "a".repeat(32)),
+            ..Default::default()
+        };
+        assert_eq!(
+            effective_sort(&search(Some("music"), None, false)),
+            Some("relevance")
+        );
+        assert_eq!(effective_sort(&search(Some(""), None, false)), None);
+        assert_eq!(effective_sort(&search(None, None, false)), None);
+        assert_eq!(effective_sort(&search(Some("music"), None, true)), None);
+        assert_eq!(
+            effective_sort(&search(Some("music"), Some("recent"), false)),
+            Some("recent")
+        );
+        assert!(validate_search(&search(None, Some("relevance"), false)).is_err());
+        assert!(validate_search(&search(Some("music"), Some("relevance"), false)).is_ok());
+    }
     /// A place in the hour of new previews is given back when its request ends before the link
     /// is stored (an error, a client gone), and stays once kept.
     #[test]
