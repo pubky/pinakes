@@ -79,45 +79,62 @@ const CACHE_SECS: u64 = 3600;
 pub struct Enrichment {
     pub image: Found,
     pub description: Found,
+    /// The front cover the Cover Art Archive holds for a release or release group whose Commons
+    /// file went unread (`image` is `Unread`): shown, with its credit, only where the stored card
+    /// has no enriched image (`ResourceMeta::keep_enriched` puts a stored one back), so a stored
+    /// Commons image never gives way to it; the image stays unread, and the card is read again
+    /// early.
+    pub cover_if_none: Option<(String, Credit)>,
 }
 impl Enrichment {
     pub fn missing() -> Self {
         Self {
             image: Found::Missing,
             description: Found::Missing,
+            cover_if_none: None,
         }
     }
     pub fn unread() -> Self {
         Self {
             image: Found::Unread,
             description: Found::Unread,
+            cover_if_none: None,
         }
     }
     /// Writes the found values and their credits into `doc` (a value that is or holds a link
     /// carrying a credential, `capability::contains_credential`, leaves the field as MusicBrainz
     /// makes it: a description is free text). An unread field is listed in
     /// `unread_enriched`, and the card is read again early, `retry_secs` from now at the soonest
-    /// (`ResourceMeta::keep_enriched` moves that later by how old its stored reading is).
+    /// (`ResourceMeta::keep_enriched` moves that later by how old its stored reading is). An
+    /// unread image with a cover ([`Self::cover_if_none`]) takes the cover, still listed unread.
     pub fn apply(self, doc: &mut ResourceMeta, retry_secs: u64) {
+        let put = |doc: &mut ResourceMeta, field: CreditField, value: String, credit: Credit| {
+            // A value the store would drop (`capability::strip_document`) is not taken: its
+            // credit would stay without it. Nor is a text with such a link inside, which the
+            // store would keep.
+            if crate::capability::contains_credential(&value) {
+                return;
+            }
+            match field {
+                CreditField::Image => doc.image = Some(value),
+                CreditField::Description => doc.description = Some(value),
+            }
+            doc.credits.retain(|c| c.field != field);
+            doc.credits.push(credit);
+        };
         for (field, found) in [
             (CreditField::Image, self.image),
             (CreditField::Description, self.description),
         ] {
             match found {
-                // A value the store would drop (`capability::strip_document`) is not taken: its
-                // credit would stay without it. Nor is a text with such a link inside, which the
-                // store would keep.
-                Found::Value(value, _) if crate::capability::contains_credential(&value) => {}
-                Found::Value(value, credit) => {
-                    match field {
-                        CreditField::Image => doc.image = Some(value),
-                        CreditField::Description => doc.description = Some(value),
-                    }
-                    doc.credits.retain(|c| c.field != field);
-                    doc.credits.push(credit);
-                }
+                Found::Value(value, credit) => put(doc, field, value, credit),
                 Found::Missing => {}
                 Found::Unread => {
+                    if let (CreditField::Image, Some((value, credit))) =
+                        (field, self.cover_if_none.clone())
+                    {
+                        put(doc, field, value, credit);
+                    }
                     doc.unread_enriched.push(field);
                     let at = chrono::Utc::now()
                         + chrono::Duration::seconds(retry_secs.min(i64::MAX as u64) as i64);
@@ -376,20 +393,80 @@ async fn discogs_item(
 }
 
 /// The image and description of `entity` (`base`: the MusicBrainz web service), a Commons
-/// thumbnail `width` pixels wide. A release or release group with no free Commons file takes
-/// its front cover from the Cover Art Archive ([`cover`]); a Commons file that went unread asks
-/// for no cover, so a stored image stays.
+/// thumbnail `width` pixels wide ([`enrich_within`], with no deadline).
 pub async fn enrich(
     egress: &Egress,
     base: &str,
     entity: &musicbrainz::Entity,
     width: u32,
 ) -> Enrichment {
-    let mut enrichment = wikimedia(egress, base, entity, width).await;
-    if enrichment.image == Found::Missing {
-        enrichment.image = cover(egress, entity).await;
+    enrich_within(egress, base, entity, width, None).await
+}
+
+/// The image and description of `entity`, each part read by `deadline` if one is given. A
+/// release or release group with no free Commons file takes its front cover from the Cover Art
+/// Archive ([`cover`]). The cover is asked at the same time as Wikidata, Wikipedia and Commons,
+/// not after them: every host is paced (one request at a time), so behind a busy Wikidata the
+/// cover would come last and miss the deadline with the rest. A free Commons file wins over
+/// it; when the Commons file goes unread (a failure, or past the deadline), the cover shows only
+/// where the stored card has no image ([`Enrichment::cover_if_none`]). A part past the deadline
+/// is unread; the other's findings stay. Once a free Commons file is found, the cover is not
+/// waited for (its request, if still waiting for the archive's turn, is dropped).
+pub async fn enrich_within(
+    egress: &Egress,
+    base: &str,
+    entity: &musicbrainz::Entity,
+    width: u32,
+    deadline: Option<tokio::time::Instant>,
+) -> Enrichment {
+    let wikimedia = within(deadline, wikimedia(egress, base, entity, width));
+    let cover_read = within(deadline, cover(egress, entity));
+    tokio::pin!(wikimedia, cover_read);
+    let mut cover_early = None;
+    let wikimedia = loop {
+        tokio::select! {
+            found = &mut wikimedia => break found,
+            found = &mut cover_read, if cover_early.is_none() => cover_early = Some(found),
+        }
+    };
+    let mut enrichment = wikimedia.unwrap_or_else(|| {
+        timed_out(&entity.mbid, "wikimedia");
+        Enrichment::unread()
+    });
+    // A free Commons file wins: the cover is not waited for.
+    if matches!(enrichment.image, Found::Value(..)) {
+        return enrichment;
+    }
+    let cover = match cover_early {
+        Some(found) => found,
+        None => cover_read.await,
+    }
+    .unwrap_or_else(|| {
+        timed_out(&entity.mbid, "cover_art");
+        Found::Unread
+    });
+    match (&enrichment.image, cover) {
+        (Found::Missing, cover) => enrichment.image = cover,
+        (Found::Unread, Found::Value(image, credit)) => {
+            enrichment.cover_if_none = Some((image, credit));
+        }
+        // A free Commons file wins; nothing of the archive is used.
+        _ => {}
     }
     enrichment
+}
+/// `work`'s outcome, or `None` when `deadline` passes first.
+async fn within<F: std::future::Future>(
+    deadline: Option<tokio::time::Instant>,
+    work: F,
+) -> Option<F::Output> {
+    match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, work).await.ok(),
+        None => Some(work.await),
+    }
+}
+fn timed_out(mbid: &str, step: &'static str) {
+    tracing::info!(mbid, step, "music enrichment timed out");
 }
 
 /// The front cover of a release or release group from the Cover Art Archive, by its MBID alone
@@ -481,12 +558,17 @@ async fn wikimedia(
             }
         });
     match description {
-        Text::Found(description) => Enrichment { image, description },
+        Text::Found(description) => Enrichment {
+            image,
+            description,
+            cover_if_none: None,
+        },
         // The item's article is a disambiguation page: the item is no entity's, and nothing of
         // it (text, image, another Wikipedia) is the card's; a recording keeps its work's text.
         Text::NotOwn(description) => Enrichment {
             image: Found::Missing,
             description,
+            cover_if_none: None,
         },
     }
 }
@@ -857,6 +939,7 @@ mod tests {
                 credit.clone(),
             ),
             description: Found::Missing,
+            cover_if_none: None,
         }
         .apply(&mut doc, 3600);
         assert_eq!((doc.image, doc.credits), (None, vec![]));
@@ -871,6 +954,7 @@ mod tests {
                     ..credit.clone()
                 },
             ),
+            cover_if_none: None,
         }
         .apply(&mut doc, 3600);
         assert_eq!((doc.description, doc.credits), (None, vec![]));
@@ -878,6 +962,7 @@ mod tests {
         Enrichment {
             image: Found::Value("https://upload.wikimedia.org/a.jpg".into(), credit.clone()),
             description: Found::Missing,
+            cover_if_none: None,
         }
         .apply(&mut doc, 3600);
         assert_eq!(doc.credits, [credit]);
@@ -1123,7 +1208,17 @@ mod tests {
                     "https://coverartarchive.org/release-group/{mbid}/front-500"
                 ));
             }
-            assert_eq!(recorded.asked(), expected, "{kind:?}");
+            // The cover is asked at the same time as Wikidata: its place among the other
+            // requests is not fixed.
+            let mut asked = recorded.asked();
+            if let Some(at) = asked
+                .iter()
+                .position(|u| u.starts_with(crate::hubs::cover_art::BASE))
+            {
+                let cover = asked.remove(at);
+                asked.push(cover);
+            }
+            assert_eq!(asked, expected, "{kind:?}");
         }
         // A song's item carrying the recording's ID.
         let search = wikidata::search_lookup("P4404", mbid).unwrap();
