@@ -183,12 +183,21 @@ pub fn free_file(v: &Value, name: &str) -> Option<FileCheck> {
         crate::model::truncate(&mut a, 256);
         a.trim().to_owned()
     });
-    // Commons' placeholders (`{{Unknown|author}}`) name no one.
+    // Commons' placeholders (`{{Unknown|author}}`, `{{Unknown photographer}}`, …) name no one;
+    // matched whole, so a name that starts with one ("Unknown Pleasures …") is a name.
     let author = author.filter(|a| {
         !a.is_empty()
-            && !["unknown", "unknown author", "author unknown", "anonymous"]
-                .iter()
-                .any(|p| a.eq_ignore_ascii_case(p))
+            && ![
+                "unknown",
+                "unknown author",
+                "author unknown",
+                "anonymous",
+                "unknown photographer",
+                "unknown artist",
+                "unknown creator",
+            ]
+            .iter()
+            .any(|p| a.eq_ignore_ascii_case(p))
     });
     if license.attribution && author.is_none() {
         return Some(FileCheck::Refused("author"));
@@ -477,6 +486,9 @@ mod tests {
             "<span class=\"fn\">unknown</span>",
             "Anonymous",
             " Author unknown ",
+            "Unknown photographer",
+            "<span>Unknown artist</span>",
+            "unknown creator",
         ] {
             assert_eq!(
                 by(placeholder),
@@ -487,6 +499,11 @@ mod tests {
         let Some(FileCheck::Free(file)) = by("Unknown Pleasures Photography Ltd") else {
             panic!("a named author");
         };
+        // Exact: a placeholder within a name is part of the name.
+        assert!(matches!(
+            by("Unknown photographer, colourised by Jane Doe"),
+            Some(FileCheck::Free(_))
+        ));
         assert_eq!(
             file.author.as_deref(),
             Some("Unknown Pleasures Photography Ltd")
