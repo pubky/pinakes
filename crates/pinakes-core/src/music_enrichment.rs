@@ -9,14 +9,16 @@
 //! for an artist no item carries the MBID of, the one item its Discogs artist pages on
 //! MusicBrainz (P1953) all name. Several items, or relations that name several, give nothing.
 //! However it was found, by the relation too, the item is read back and is the entity's only when
-//! it is ([`is_own`]): at the entity's level, a recording's is one recording's
+//! it is ([`is_own`]): never a Wikimedia page's, such as a disambiguation page's or a list's
+//! ([`NOT_AN_ENTITY`]), and at the entity's level: a recording's is one recording's
 //! (`music_sources::recording_item`), never a song's, a release's no album's, a release group's
 //! one release group's, an artist's names no other artist. Otherwise the card takes nothing from
 //! it, and no other item is looked for. A release and its release group each use their own item.
 //! An item too large to read verifies nothing. A recording may also take the description of the
-//! one work it is a performance of, when that work has its own relation to an item that names no
-//! other work; the credit then names the work (`subject`), and the work's image is never the
-//! recording's.
+//! one work it is a performance of, when that work has its own relation to an item that is no
+//! Wikimedia page's; the credit then names the work (`subject`), and the work's image is never
+//! the recording's. An item whose Wikipedia article is a disambiguation page is no entity's
+//! either: nothing of it is taken.
 //!
 //! The description is, in this order, the first of: the item's English Wikipedia article's summary;
 //! the item's English description on Wikidata; the summary of the first article the item has in
@@ -164,17 +166,37 @@ pub fn mbid_property(kind: MbKind) -> &'static str {
         MbKind::Recording => "P4404",
     }
 }
+/// The classes (P31) of an item that is a Wikimedia page's, never an entity's: a disambiguation
+/// page (a human name's too), a list article, a category (a disambiguation category too), a
+/// template.
+pub const NOT_AN_ENTITY: [&str; 6] = [
+    "Q4167410",
+    "Q22808320",
+    "Q13406463",
+    "Q4167836",
+    "Q15407973",
+    "Q11266439",
+];
+/// Whether `item` is a Wikimedia page's ([`NOT_AN_ENTITY`]).
+fn is_a_page(item: &wikidata::Item) -> bool {
+    item.instance_of
+        .iter()
+        .any(|class| NOT_AN_ENTITY.contains(&class.as_str()))
+}
 /// Whether `item`, read back with its claims, is `entity`'s own, however it was found (the
-/// entity's own relation, its MBID, its Discogs pages): an item at the entity's level that names
-/// no other entity of it. A recording's names that one recording and is one recording's
-/// (`music_sources::recording_item`: a song's item, a work, may carry its recordings' IDs, and a
-/// recording's relation often names it); a release's names no other release and no release
-/// group, Discogs master or work (an album's item often carries its editions';
-/// `also_on::wikidata` takes a Discogs master as an album's too); a release group's names that
-/// one release group, or, naming none, no release, recording or work either; an artist's names no
-/// other artist. An item found by the entity's MBID names it; one its own relation names may not
-/// yet (Wikidata lags behind MusicBrainz), except a recording's.
+/// entity's own relation, its MBID, its Discogs pages): never a Wikimedia page's ([`is_a_page`]),
+/// and an item at the entity's level that names no other entity of it. A recording's names that
+/// one recording and is one recording's (`music_sources::recording_item`: a song's item, a work,
+/// may carry its recordings' IDs, and a recording's relation often names it); a release's names
+/// no other release and no release group, Discogs master or work (an album's item often carries
+/// its editions'; `also_on::wikidata` takes a Discogs master as an album's too); a release
+/// group's names that one release group, or, naming none, no release, recording or work either;
+/// an artist's names no other artist. An item found by the entity's MBID names it; one its own
+/// relation names may not yet (Wikidata lags behind MusicBrainz), except a recording's.
 fn is_own(entity: &musicbrainz::Entity, item: &wikidata::Item) -> bool {
+    if is_a_page(item) {
+        return false;
+    }
     let ids = |property: &str| item.id(property);
     let none = |properties: &[&str]| properties.iter().all(|p| item.id(p).is_empty());
     let only = |property: &str| ids(property) == std::slice::from_ref(&entity.mbid);
@@ -302,7 +324,15 @@ pub async fn enrich(
                 None => Found::Missing,
             }
         });
-    Enrichment { image, description }
+    match description {
+        Text::Found(description) => Enrichment { image, description },
+        // The item's article is a disambiguation page: the item is no entity's, and nothing of
+        // it (text, image, another Wikipedia) is the card's; a recording keeps its work's text.
+        Text::NotOwn(description) => Enrichment {
+            image: Found::Missing,
+            description,
+        },
+    }
 }
 
 /// Logs a transient failure by its class, with the entity and the step; never a URL.
@@ -349,7 +379,8 @@ async fn source(
     }
 }
 /// The item of the one work `recording` is a current performance of, when the work's own
-/// relations name one and that item, read back, names no other work (P435); `Err` when unread.
+/// relations name one and that item, read back, is no Wikimedia page's ([`is_a_page`]) and names
+/// no other work (P435); `Err` when unread.
 async fn work_source(egress: &Egress, base: &str, recording: &str) -> Result<Option<Source>, ()> {
     let works = musicbrainz::works(egress, base, recording)
         .await
@@ -365,18 +396,25 @@ async fn work_source(egress: &Egress, base: &str, recording: &str) -> Result<Opt
         .map_err(|error| unread(recording, "wikidata_work_item", &error))?;
     let Some(item) = item.filter(|item| {
         let works = item.id("P435");
-        works.is_empty() || works == std::slice::from_ref(&work.mbid)
+        !is_a_page(item) && (works.is_empty() || works == std::slice::from_ref(&work.mbid))
     }) else {
         return Ok(None);
     };
     let subject = format!("https://musicbrainz.org/work/{}", work.mbid);
     source(egress, recording, &item.qid, Some(subject)).await
 }
+/// A text's outcome; `NotOwn` when the entity's own item turned out to be no entity's (its
+/// article is a disambiguation page), with what other sources gave (a recording's work's text).
+#[derive(Debug, PartialEq)]
+enum Text {
+    Found(Found),
+    NotOwn(Found),
+}
 /// The summary of `source`'s English Wikipedia article.
-async fn english_article(egress: &Egress, mbid: &str, source: &Source) -> Found {
+async fn english_article(egress: &Egress, mbid: &str, source: &Source) -> Text {
     match source.pages.sitelinks.get("enwiki") {
         Some(page) => summary(egress, mbid, page, "en", source.subject.clone()).await,
-        None => Found::Missing,
+        None => Text::Found(Found::Missing),
     }
 }
 
@@ -385,45 +423,59 @@ async fn english_article(egress: &Egress, mbid: &str, source: &Source) -> Found 
 /// article's summary; the work's; the item's English description; the work's; the summary of
 /// one article in [`OTHER_WIKIPEDIAS`] (the item's first, else the work's). The works are read
 /// only when the item has no English article. A missing text gives way to the next, an unread
-/// one leaves the description unread.
+/// one leaves the description unread. An article that is a disambiguation page makes its item
+/// no entity's: the entity's own item then gives nothing ([`Text::NotOwn`]; a recording goes on
+/// to its work, as when it has no item), a work's item gives no text.
 async fn description(
     egress: &Egress,
     base: &str,
     entity: &musicbrainz::Entity,
     qid: Option<&str>,
-) -> Found {
+) -> Text {
     let mbid = entity.mbid.as_str();
     let mut sources: Vec<Source> = vec![];
     if let Some(qid) = qid {
         match source(egress, mbid, qid, None).await {
             Ok(own) => sources.extend(own),
-            Err(()) => return Found::Unread,
+            Err(()) => return Text::Found(Found::Unread),
         }
     }
+    // The own item's English article is a disambiguation page: nothing more of the item.
+    let mut not_own = false;
     if let Some(own) = sources.first() {
         match english_article(egress, mbid, own).await {
-            Found::Missing => {}
-            found => return found,
+            Text::Found(Found::Missing) => {}
+            Text::NotOwn(_) if entity.kind == MbKind::Recording => {
+                not_own = true;
+                sources.clear();
+            }
+            text => return text,
         }
     }
+    let outcome = |found: Found| {
+        if not_own {
+            Text::NotOwn(found)
+        } else {
+            Text::Found(found)
+        }
+    };
     if entity.kind == MbKind::Recording {
         match work_source(egress, base, mbid).await {
-            Ok(Some(work)) => {
-                match english_article(egress, mbid, &work).await {
-                    Found::Missing => {}
-                    found => return found,
-                }
-                sources.push(work);
-            }
+            Ok(Some(work)) => match english_article(egress, mbid, &work).await {
+                Text::Found(Found::Missing) => sources.push(work),
+                // The work's item is no work's: nothing of it.
+                Text::NotOwn(_) => {}
+                Text::Found(found) => return outcome(found),
+            },
             Ok(None) => {}
-            Err(()) => return Found::Unread,
+            Err(()) => return outcome(Found::Unread),
         }
     }
     if let Some(found) = sources.iter().find_map(|s| {
         let text = s.pages.description.as_deref()?;
         item_description(&s.qid, text, s.subject.clone())
     }) {
-        return found;
+        return outcome(found);
     }
     let other = sources.iter().find_map(|s| {
         OTHER_WIKIPEDIAS
@@ -431,8 +483,16 @@ async fn description(
             .find_map(|lang| Some((*lang, s.pages.sitelinks.get(&format!("{lang}wiki"))?, s)))
     });
     match other {
-        Some((lang, page, s)) => summary(egress, mbid, page, lang, s.subject.clone()).await,
-        None => Found::Missing,
+        Some((lang, page, s)) => {
+            match summary(egress, mbid, page, lang, s.subject.clone()).await {
+                // Another Wikipedia's disambiguation page: a work's gives no text; the entity's
+                // own item is no entity's.
+                Text::NotOwn(_) if s.subject.is_some() => outcome(Found::Missing),
+                Text::NotOwn(_) => Text::NotOwn(Found::Missing),
+                Text::Found(found) => outcome(found),
+            }
+        }
+        None => outcome(Found::Missing),
     }
 }
 
@@ -459,16 +519,33 @@ fn item_description(qid: &str, text: &str, subject: Option<String>) -> Option<Fo
     credit.bounded().map(|credit| Found::Value(text, credit))
 }
 
-/// The summary of the article `page` (an item's sitelink) in the `lang` Wikipedia.
+/// The summary of the article `page` (an item's sitelink) in the `lang` Wikipedia;
+/// [`Text::NotOwn`] when the article is a disambiguation page.
 async fn summary(
     egress: &Egress,
     mbid: &str,
     page: &str,
     lang: &str,
     subject: Option<String>,
-) -> Found {
+) -> Text {
+    Text::Found(
+        match read_summary(egress, mbid, page, lang, subject).await {
+            Ok(found) => found,
+            Err(Disambiguation) => return Text::NotOwn(Found::Missing),
+        },
+    )
+}
+/// The article is a disambiguation page.
+struct Disambiguation;
+async fn read_summary(
+    egress: &Egress,
+    mbid: &str,
+    page: &str,
+    lang: &str,
+    subject: Option<String>,
+) -> Result<Found, Disambiguation> {
     let Some(article) = crate::wikipedia::parse(page).filter(|a| a.lang == lang) else {
-        return Found::Missing;
+        return Ok(Found::Missing);
     };
     let fetched = match egress
         .discover(
@@ -481,26 +558,29 @@ async fn summary(
         Ok(fetched) => fetched,
         Err(error) => {
             unread(mbid, "wikipedia_summary", &error);
-            return Found::Unread;
+            return Ok(Found::Unread);
         }
     };
     match fetched.status {
         200 => {}
         // No such article.
-        404 | 410 => return Found::Missing,
+        404 | 410 => return Ok(Found::Missing),
         // A wait, or a refusal of this client (a 403 for its User-Agent): no answer about the
         // article.
         status => {
             tracing::info!(mbid, status, "music enrichment: Wikipedia did not answer");
-            return Found::Unread;
+            return Ok(Found::Unread);
         }
     }
     let Ok(v) = serde_json::from_slice::<Value>(&fetched.body) else {
         tracing::info!(mbid, "music enrichment: Wikipedia's summary is not JSON");
-        return Found::Unread;
+        return Ok(Found::Unread);
     };
+    if is_disambiguation(&v, &article.title) {
+        return Err(Disambiguation);
+    }
     let Some(text) = summary_text(&v, &article.title) else {
-        return Found::Missing;
+        return Ok(Found::Missing);
     };
     let (text, _) = excerpt(&text, crate::model::DESCRIPTION_CAP);
     let credit = Credit {
@@ -516,10 +596,15 @@ async fn summary(
         modified: false,
         subject,
     };
-    match credit.bounded() {
+    Ok(match credit.bounded() {
         Some(credit) => Found::Value(text, credit),
         None => Found::Missing,
-    }
+    })
+}
+
+/// Whether a summary is of the disambiguation page `title` (with `_` for spaces) itself.
+pub fn is_disambiguation(v: &Value, title: &str) -> bool {
+    v["type"].as_str() == Some("disambiguation") && v["titles"]["canonical"].as_str() == Some(title)
 }
 
 /// An article summary's plain text: a standard article's `extract`, when the summary is of
@@ -820,7 +905,11 @@ mod tests {
                 .collect();
             let (egress, recorded) = crate::sources::fixture::egress(routes);
             let artist = entity_of(MbKind::Artist, "m", &[]);
-            let found = description(&egress, musicbrainz::BASE, &artist, Some("Q1")).await;
+            let Text::Found(found) =
+                description(&egress, musicbrainz::BASE, &artist, Some("Q1")).await
+            else {
+                panic!("no disambiguation here");
+            };
             (found, recorded.asked())
         };
         let text = |f: &Found| match f {
@@ -1015,10 +1104,11 @@ mod tests {
     /// An item is an entity's own at its level, however it was found: a recording's names that
     /// one recording (a song's item, named by the recording's relation, is not); a release's or a
     /// release group's may name none of its level when no other level either (an item its own
-    /// relation names, not yet named back); an artist's names no other artist.
+    /// relation names, not yet named back); an artist's names no other artist; a Wikimedia page's
+    /// item (a disambiguation page) is no one's.
     #[test]
     fn an_item_is_its_entitys_own_at_its_level() {
-        let item = |ids: &[(&str, &str)]| wikidata::Item {
+        let item = |ids: &[(&str, &str)], classes: &[&str]| wikidata::Item {
             qid: "Q1".into(),
             ids: ids.iter().fold(Default::default(), |mut ids, (p, v)| {
                 ids.entry(p.to_string())
@@ -1026,36 +1116,53 @@ mod tests {
                     .push(v.to_string());
                 ids
             }),
+            instance_of: classes.iter().map(|c| c.to_string()).collect(),
             ..Default::default()
         };
         let own = |kind: MbKind, item: &wikidata::Item| is_own(&entity_of(kind, "m", &[]), item);
         // A recording.
-        assert!(own(MbKind::Recording, &item(&[("P4404", "m")])));
-        assert!(!own(MbKind::Recording, &item(&[])));
-        assert!(!own(MbKind::Recording, &item(&[("P436", "g")])));
+        assert!(own(MbKind::Recording, &item(&[("P4404", "m")], &[])));
+        assert!(!own(MbKind::Recording, &item(&[], &["Q7366"])));
         assert!(!own(
             MbKind::Recording,
-            &item(&[("P4404", "m"), ("P435", "w")])
+            &item(&[("P436", "g")], &["Q134556"])
         ));
         assert!(!own(
             MbKind::Recording,
-            &item(&[("P4404", "m"), ("P4404", "n")])
+            &item(&[("P4404", "m"), ("P435", "w")], &[])
+        ));
+        assert!(!own(
+            MbKind::Recording,
+            &item(&[("P4404", "m"), ("P4404", "n")], &[])
         ));
         // A release.
-        assert!(own(MbKind::Release, &item(&[("P5813", "m")])));
-        assert!(own(MbKind::Release, &item(&[])));
-        assert!(!own(MbKind::Release, &item(&[("P5813", "n")])));
-        assert!(!own(MbKind::Release, &item(&[("P436", "g")])));
+        assert!(own(MbKind::Release, &item(&[("P5813", "m")], &[])));
+        assert!(own(MbKind::Release, &item(&[], &[])));
+        assert!(!own(MbKind::Release, &item(&[("P5813", "n")], &[])));
+        assert!(!own(MbKind::Release, &item(&[("P436", "g")], &["Q482994"])));
         // A release group.
-        assert!(own(MbKind::ReleaseGroup, &item(&[("P436", "m")])));
-        assert!(own(MbKind::ReleaseGroup, &item(&[])));
-        assert!(!own(MbKind::ReleaseGroup, &item(&[("P436", "n")])));
-        assert!(!own(MbKind::ReleaseGroup, &item(&[("P5813", "r")])));
-        assert!(!own(MbKind::ReleaseGroup, &item(&[("P4404", "r")])));
+        assert!(own(MbKind::ReleaseGroup, &item(&[("P436", "m")], &[])));
+        assert!(own(MbKind::ReleaseGroup, &item(&[], &["Q482994"])));
+        assert!(!own(MbKind::ReleaseGroup, &item(&[("P436", "n")], &[])));
+        assert!(!own(MbKind::ReleaseGroup, &item(&[("P5813", "r")], &[])));
+        assert!(!own(MbKind::ReleaseGroup, &item(&[("P4404", "r")], &[])));
         // An artist.
-        assert!(own(MbKind::Artist, &item(&[])));
-        assert!(own(MbKind::Artist, &item(&[("P434", "m"), ("P434", "n")])));
-        assert!(!own(MbKind::Artist, &item(&[("P434", "n")])));
+        assert!(own(MbKind::Artist, &item(&[], &["Q5"])));
+        assert!(own(
+            MbKind::Artist,
+            &item(&[("P434", "m"), ("P434", "n")], &[])
+        ));
+        assert!(!own(MbKind::Artist, &item(&[("P434", "n")], &[])));
+        // A Wikimedia page's item is no one's, whatever it names.
+        for class in NOT_AN_ENTITY {
+            for kind in [MbKind::Artist, MbKind::ReleaseGroup, MbKind::Release] {
+                assert!(!own(kind, &item(&[], &[class])), "{class}");
+            }
+        }
+        assert!(!own(
+            MbKind::Recording,
+            &item(&[("P4404", "m")], &["Q4167410"])
+        ));
     }
     fn entity_of(kind: MbKind, mbid: &str, urls: &[(&str, &str)]) -> musicbrainz::Entity {
         musicbrainz::Entity {

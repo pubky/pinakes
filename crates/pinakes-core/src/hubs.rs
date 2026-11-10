@@ -835,6 +835,9 @@ pub mod wikidata {
         pub replaces: Vec<String>,
         /// The works this one is an edition or translation of (P629), at their best rank.
         pub edition_of: Vec<String>,
+        /// The classes it is an instance of (P31), at their best rank: a disambiguation page's
+        /// item is one of Q4167410.
+        pub instance_of: Vec<String>,
     }
     impl Item {
         pub fn id(&self, property: &str) -> &[String] {
@@ -897,6 +900,7 @@ pub mod wikidata {
                     replaced_by: item_values(&e["claims"]["P1366"]),
                     edition_of: item_values(&e["claims"]["P629"]),
                     replaces: item_values(&e["claims"]["P1365"]),
+                    instance_of: item_values(&e["claims"]["P31"]),
                 })
             })
             .collect();

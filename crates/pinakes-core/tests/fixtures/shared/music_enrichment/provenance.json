@@ -1,6 +1,6 @@
 {
   "_recorded": {
-    "note": "Recorded with curl, User-Agent 'pinakes-dev/0.1 (+https://pubky.app; info@synonym.to)', at most one request a second to MusicBrainz. Derived and synthetic answers the tests build in code (tests/music_enrichment.rs, one edit each): wd-p18-no-author (Daft Punk's wd-p18-Q185828 answer with its file name replaced by the no-author file's); wd-pages-Q55825905 without its English description (the descriptions object emptied); wd-search-P434-sefa-empty (Sefa's P434 search with no hit: search emptied, totalhits 0), wd-search-P434-sefa-crowded (totalhits set to 6, more than the 5 a search returns), wd-search-P1953-empty (a Discogs search with no hit, built the same way from wd-search-P1953-6743320); wd-search-P4404-get-lucky-empty (Get Lucky's P4404 search with no hit, built the same way); wd-entities-Q55825905-other-mbid (the read-back with its P434 value replaced by another artist's MBID, 561d854a-6a28-4aa7-8c99-323e6ce46c2a); mb-recording-get-lucky-works-no-work-item (Get Lucky's works answer with its work's wikidata URL relation removed); Wikipedia's 503 with Retry-After: 120, Commons' 429, Wikidata's 503 (status and header only, no body recorded) and Wikidata's maxlag error ({\"error\":{\"code\":\"maxlag\"}} with status 200, as Wikidata sends it). Added 2026-11-10 (round 2; recorded with User-Agent 'pinakes/0.1.0 (+https://pubky.app)', at most one request a second): the read-backs of the items the entities' own relations name, and the Kind of Blue release. Derived answers built in code: mb-recording-get-lucky-names-its-song (Get Lucky's recording answer with a wikidata URL relation to its song's item Q11510350 added, as Daft Punk's relation is written); mb-release-kind-of-blue with a wikidata URL relation to the album's item Q283221 added the same way."
+    "note": "Recorded with curl, User-Agent 'pinakes-dev/0.1 (+https://pubky.app; info@synonym.to)', at most one request a second to MusicBrainz. Derived and synthetic answers the tests build in code (tests/music_enrichment.rs, one edit each): wd-p18-no-author (Daft Punk's wd-p18-Q185828 answer with its file name replaced by the no-author file's); wd-pages-Q55825905 without its English description (the descriptions object emptied); wd-search-P434-sefa-empty (Sefa's P434 search with no hit: search emptied, totalhits 0), wd-search-P434-sefa-crowded (totalhits set to 6, more than the 5 a search returns), wd-search-P1953-empty (a Discogs search with no hit, built the same way from wd-search-P1953-6743320); wd-search-P4404-get-lucky-empty (Get Lucky's P4404 search with no hit, built the same way); wd-entities-Q55825905-other-mbid (the read-back with its P434 value replaced by another artist's MBID, 561d854a-6a28-4aa7-8c99-323e6ce46c2a); mb-recording-get-lucky-works-no-work-item (Get Lucky's works answer with its work's wikidata URL relation removed); Wikipedia's 503 with Retry-After: 120, Commons' 429, Wikidata's 503 (status and header only, no body recorded) and Wikidata's maxlag error ({\"error\":{\"code\":\"maxlag\"}} with status 200, as Wikidata sends it). Added 2026-11-10 (round 2; recorded with User-Agent 'pinakes/0.1.0 (+https://pubky.app)', at most one request a second): the read-backs of the items the entities' own relations name, and the Kind of Blue release. Derived answers built in code: mb-recording-get-lucky-names-its-song (Get Lucky's recording answer with a wikidata URL relation to its song's item Q11510350 added, as Daft Punk's relation is written); mb-release-kind-of-blue with a wikidata URL relation to the album's item Q283221 added the same way. Also 2026-11-10: the item of English Wikipedia's 'Get Lucky' disambiguation page, Q5554322 (read-back, pages, image claim). Derived: mb-artist-daft-punk-names-disambiguation (Daft Punk's answer with its wikidata relation's Q185828 replaced by Q5554322); wd-entities-Q5554322-unclassed (that item's read-back with its P31 claims removed); wd-pages-Q139827657-disambiguation-sitelink (Get Lucky's recording item's pages with an enwiki sitelink to the 'Get Lucky' disambiguation page added)."
   },
   "commons-daft-punk": {
     "bytes": 1791,
@@ -252,6 +252,16 @@
     "status": 200,
     "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q3780426&props=claims%7Csitelinks%2Furls&format=json"
   },
+  "wd-entities-Q5554322": {
+    "bytes": 3450,
+    "content_type": "application/json",
+    "file": "wd-entities-Q5554322.json",
+    "note": "The item of English Wikipedia's 'Get Lucky' disambiguation page: P31 Q4167410 (Wikimedia disambiguation page).",
+    "recorded_at": "2026-11-10T05:07:38+00:00",
+    "sha256": "bb4feacc8cb13b294ac5eb553be8da036ee31838e73c5fd6387361c2e0eaaed5",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q5554322&props=claims%7Csitelinks%2Furls&format=json"
+  },
   "wd-entities-Q55825905": {
     "bytes": 15493,
     "content_type": "application/json",
@@ -322,6 +332,16 @@
     "status": 200,
     "url": "https://www.wikidata.org/w/api.php?action=wbgetclaims&entity=Q3780426&property=P18&format=json"
   },
+  "wd-p18-Q5554322": {
+    "bytes": 13,
+    "content_type": "application/json",
+    "file": "wd-p18-Q5554322.json",
+    "note": "The disambiguation item has no image claim.",
+    "recorded_at": "2026-11-10T05:07:40+00:00",
+    "sha256": "91eaeaac96fb538eb1fab799f99cb93ace0544197840dbe49c745766fadbfdcb",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=wbgetclaims&entity=Q5554322&property=P18&format=json"
+  },
   "wd-p18-Q55825905": {
     "bytes": 854,
     "content_type": "application/json",
@@ -391,6 +411,16 @@
     "sha256": "0117bbad8101849660a6e37efcbfc5a0d2ef448100a966b59a8fbad62aef7b47",
     "status": 200,
     "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q3780426&props=sitelinks%2Furls%7Cdescriptions&languages=en&format=json"
+  },
+  "wd-pages-Q5554322": {
+    "bytes": 1019,
+    "content_type": "application/json",
+    "file": "wd-pages-Q5554322.json",
+    "note": "The disambiguation item's pages: enwiki Get_Lucky, English description 'Wikimedia disambiguation page'.",
+    "recorded_at": "2026-11-10T05:07:39+00:00",
+    "sha256": "d5d586bfcd48558114e225f1e18f635306614675290456199648502735cb191c",
+    "status": 200,
+    "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q5554322&props=sitelinks%2Furls%7Cdescriptions&languages=en&format=json"
   },
   "wd-pages-Q55825905": {
     "bytes": 764,

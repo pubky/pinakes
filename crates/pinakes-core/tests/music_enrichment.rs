@@ -91,6 +91,13 @@ struct Mode {
     work_without_item: bool,
     /// Get Lucky's recording has a `wikidata` relation to its song's item (Q11510350).
     recording_names_its_song: bool,
+    /// Daft Punk's `wikidata` relation names the "Get Lucky" disambiguation page's item.
+    names_disambiguation: bool,
+    /// That item's read-back has no P31 claims.
+    disambiguation_unclassed: bool,
+    /// Get Lucky's recording item (Q139827657) has an English sitelink to the "Get Lucky"
+    /// disambiguation page.
+    recording_item_links_disambiguation: bool,
 }
 /// Answers by host, path and query from the recorded fixtures; records each request.
 #[derive(Default)]
@@ -248,6 +255,11 @@ impl Transport for Recorded {
                     with_wikidata_relation(file, "Q283221")
                 } else if mode.recording_names_its_song && file == "mb-recording-get-lucky.json" {
                     with_wikidata_relation(file, "Q11510350")
+                } else if mode.names_disambiguation && file == "mb-artist-daft-punk.json" {
+                    String::from_utf8(fixture(file))
+                        .unwrap()
+                        .replace("wiki/Q185828", "wiki/Q5554322")
+                        .into_bytes()
                 } else if mode.work_without_item && file == "mb-recording-get-lucky-works.json" {
                     edited(file, |v| {
                         for r in v["relations"].as_array_mut().unwrap() {
@@ -276,7 +288,14 @@ impl Transport for Recorded {
                 "wbgetentities" if query("props") == "claims|sitelinks/urls" => {
                     let ids = query("ids");
                     let file = format!("wd-entities-{ids}.json");
-                    let body = if mode.other_mbid && ids == "Q55825905" {
+                    let body = if mode.disambiguation_unclassed && ids == "Q5554322" {
+                        edited(&file, |v| {
+                            v["entities"][&ids]["claims"]
+                                .as_object_mut()
+                                .unwrap()
+                                .remove("P31");
+                        })
+                    } else if mode.other_mbid && ids == "Q55825905" {
                         String::from_utf8(fixture(&file))
                             .unwrap()
                             .replace(SEFA_MBID, MILES_MBID)
@@ -292,6 +311,13 @@ impl Transport for Recorded {
                     let file = format!("wd-pages-{ids}.json");
                     let body = if mode.no_en_description && ids == "Q55825905" {
                         edited(&file, |v| v["entities"][&ids]["descriptions"] = json!({}))
+                    } else if mode.recording_item_links_disambiguation && ids == "Q139827657" {
+                        edited(&file, |v| {
+                            v["entities"][&ids]["sitelinks"]["enwiki"] = json!({
+                                "site": "enwiki", "title": "Get Lucky", "badges": [],
+                                "url": "https://en.wikipedia.org/wiki/Get_Lucky",
+                            })
+                        })
                     } else {
                         fixture(&file)
                     };
@@ -331,6 +357,9 @@ impl Transport for Recorded {
                             }
                             ("en.wikipedia.org", "Get_Lucky_(Daft_Punk_song)") => {
                                 "enwiki-summary-get-lucky-song.json"
+                            }
+                            ("en.wikipedia.org", "Get_Lucky") => {
+                                "enwiki-summary-get-lucky-disambiguation.json"
                             }
                             ("de.wikipedia.org", "Sefa_Vlaarkamp") => "dewiki-summary-sefa.json",
                             other => panic!("unexpected article {other:?}"),
@@ -884,6 +913,14 @@ async fn a_redirect_or_a_disambiguation_page_gives_no_description() {
         pinakes_core::music_enrichment::summary_text(&disambiguation, "Get_Lucky"),
         None
     );
+    assert!(pinakes_core::music_enrichment::is_disambiguation(
+        &disambiguation,
+        "Get_Lucky"
+    ));
+    assert!(!pinakes_core::music_enrichment::is_disambiguation(
+        &redirect,
+        "Richard_Colburn"
+    ));
 }
 
 /// The item an entity's own `wikidata` relation names is read back and checked like a found one
@@ -939,6 +976,61 @@ async fn an_item_its_own_relation_names_is_checked_like_a_found_one() {
             "www.wikidata.org/w/api.php?action=wbgetentities&ids=Q283221&props=claims%7Csitelinks%2Furls&format=json",
         ]
     );
+}
+
+/// An item that is a disambiguation page's (P31 Q4167410; a list article's, Q13406463, alike) is
+/// no entity's: no description (never Wikidata's "Wikimedia disambiguation page"), no image, no
+/// other Wikipedia. Read back, it ends there; an item that does not say so but whose English
+/// article is a disambiguation page gives nothing either.
+#[tokio::test]
+async fn a_disambiguation_item_gives_nothing() {
+    let plain = card(&web(Recorded::new(Mode::default()), false), DAFT_PUNK).await;
+    for unclassed in [false, true] {
+        let t = Recorded::new(Mode {
+            names_disambiguation: true,
+            disambiguation_unclassed: unclassed,
+            ..Default::default()
+        });
+        let band = card(&web(t.clone(), true), DAFT_PUNK).await;
+        assert_eq!(band.name.as_deref(), Some("Daft Punk"));
+        assert_eq!(
+            (&band.image, &band.description),
+            (&None, &plain.description),
+            "unclassed: {unclassed}"
+        );
+        assert_eq!(credits(&band), json!([]));
+        assert!(band.unread_enriched.is_empty());
+        let seen = t.seen();
+        assert!(seen.iter().all(|s| !s.contains("Q185828")), "{seen:?}");
+        assert!(
+            seen.iter()
+                .all(|s| !s.starts_with("commons.") && !s.starts_with("de.wikipedia.org")),
+            "{seen:?}"
+        );
+        assert_eq!(
+            t.to("en.wikipedia.org"),
+            if unclassed {
+                vec!["en.wikipedia.org/api/rest_v1/page/summary/Get_Lucky?".to_owned()]
+            } else {
+                vec![]
+            },
+            "{seen:?}"
+        );
+    }
+    // A recording whose own item's English article is a disambiguation page takes nothing of
+    // that item (not its English description), and its work's article as without an item.
+    let t = Recorded::new(Mode {
+        recording_item_links_disambiguation: true,
+        ..Default::default()
+    });
+    let song = card(&web(t.clone(), true), GET_LUCKY).await;
+    assert_eq!(song.image, None);
+    assert_eq!(
+        song.description.as_deref(),
+        Some(extract("enwiki-summary-get-lucky-song.json").as_str())
+    );
+    assert_eq!(credits(&song), json!([song_credit()]));
+    assert!(t.seen().iter().any(|s| s.ends_with("/summary/Get_Lucky?")));
 }
 
 /// A Commons file whose page names no author under CC BY is never shown: the card keeps its

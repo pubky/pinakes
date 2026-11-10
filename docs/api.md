@@ -1301,7 +1301,9 @@ music_enrichment`, on by default):
   item the artist's Discogs artist pages on MusicBrainz name (`P1953`, at most two): every page
   that names one names the same item alone. However it was found, by the relation too, the item is
   read back and must be the entity's own, or the card takes nothing from it (and no other item is
-  looked for): at the entity's level, a recording's names that one recording (`P4404`) and no
+  looked for): never a Wikimedia page's item (`P31` a disambiguation page `Q4167410` or
+  `Q22808320`, a list article `Q13406463`, a category `Q4167836` or `Q15407973`, a template
+  `Q11266439`), and at the entity's level: a recording's names that one recording (`P4404`) and no
   work, never a song's; a release's names no other release and no release group, Discogs master
   or work (an album's item often lists its editions); a release group's names that one release
   group, or, naming none, no release, recording or work; an artist's names no other artist. An
@@ -1309,8 +1311,9 @@ music_enrichment`, on by default):
   (Wikidata lags behind MusicBrainz), except a recording's. An item too large to read is not
   verified and gives nothing. A release uses its own item, never its release group's. A recording
   also uses the one work it is a performance of, when that work has its own relation to an item
-  that, read back, names no other work, for the description alone (its credit names the work as
-  `subject`); so does a recording whose own item gives nothing. Nothing is matched by name;
+  that, read back, is no Wikimedia page's and names no other work, for the description alone (its
+  credit names the work as `subject`); so does a recording whose own item gives nothing. Nothing
+  is matched by name;
 - the description is the first of: the summary of the item's English Wikipedia article (plain
   text, at most 2,048 bytes, cut at a sentence or a word); the item's English description on
   Wikidata, as it is (CC0, credited `wikidata`); the summary of the item's article in the first
@@ -1321,9 +1324,12 @@ music_enrichment`, on by default):
   client label or hide it. Nothing is translated. For a recording, the order is: its item's
   English article; its work's English article; its item's English description; its work's; one
   other Wikipedia's summary, its item's first, else its work's. A song's article tells a reader
-  more than a one-line description of one recording of it. A disambiguation page gives no summary, and
-  neither does a sitelink to a redirect (the page it leads to is about something else). The
-  summary's thumbnail is never used;
+  more than a one-line description of one recording of it. An item whose English article (or,
+  read for want of an English text, its other article) is a disambiguation page is no entity's:
+  the card takes nothing of it (no description, not its English one, no image, no other
+  Wikipedia; a recording still takes its work's text, and a work's such item gives no text). A sitelink to a redirect
+  gives no summary (the page it leads to is about something else). The summary's thumbnail is
+  never used;
 - the image is the item's image (`P18`) on Wikimedia Commons, a thumbnail asked 640 pixels wide
   (Commons serves its next standard size, 960 pixels), shown
   only when the file's own page gives a licence on the list (CC0, the public domain, CC BY or CC
