@@ -15,17 +15,13 @@ only ([an ISRC on several recordings](README.md#an-isrc-on-several-recordings)).
 credential pair, so a new token keeps them; a 401 or 403 is never cached, and refused
 credentials are asked again after five minutes.
 
-## No lookup by ISRC
+## Another service's track on TIDAL
 
-TIDAL's API can find a track by ISRC (`GET /v2/tracks?filter[isrc]=…`), but Pinakes does not ask
-it to: such a lookup would only put a TIDAL link on a card beside other services' links, and
-TIDAL's Developer Guidelines (version 3.0, 6 May 2024) list "Integrating TIDAL content with
-content or streams from another service" among the offerings that are "strictly prohibited unless
-you have TIDAL's express written approval", while its Design Guidelines (version 3.0) say not to
-"display TIDAL content next to content from similar services". Its Developer Terms (version 3.0)
-also allow TIDAL content only "the temporary caching of metadata and cover art" and forbid stored
-"compilations or databases of TIDAL Content". A TIDAL track reaches a card as it does today: a
-link someone tagged, MusicBrainz's or Wikidata's relations.
+`tidal` reads TIDAL's own links only. Finding another service's track or album on TIDAL by its ISRC
+or barcode is `tidal_isrc`'s, a source of its own that is off by default: TIDAL's Developer
+Guidelines forbid integrating TIDAL content with another service's without TIDAL's written
+approval. Without it, a TIDAL track reaches a card as a link someone tagged, or through
+MusicBrainz's or Wikidata's relations.
 
 ## Operations
 

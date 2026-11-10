@@ -31,6 +31,7 @@ pub mod spotify;
 pub mod spotify_api;
 pub mod spotify_isrc;
 pub mod tidal;
+pub mod tidal_isrc;
 pub mod tmdb;
 pub mod wikidata;
 pub mod wikidata_item;
@@ -466,6 +467,8 @@ pub fn registry() -> Vec<Arc<dyn Source>> {
         // After every source that keys a track's ISRC or an album's barcode (a service's own
         // record, Deezer's, the hubs'), before `editions` places its links.
         Arc::new(spotify_isrc::SpotifyIsrc),
+        // After every source that keys a track's ISRC or an album's barcode, as `spotify_isrc`.
+        Arc::new(tidal_isrc::TidalIsrc),
         Arc::new(itunes::ItunesSource),
         Arc::new(wikipedia::WikipediaSource),
         Arc::new(wikidata_item::WikidataItemSource),

@@ -28,9 +28,9 @@ every source that keys a track's ISRC or an album's barcode (`deezer` among them
 
 Spotify's Developer Policy (effective 15 May 2025) says "Do not create any product or service
 which is integrated with streams or content from another service" (III.5), and an "Also on" list
-puts a Spotify link beside other services' links. The same clause's shape in TIDAL's guidelines is
-why there is no TIDAL lookup by ISRC at all. Turning this source on is the operator's reading of
-those terms, and it needs an app Spotify answers: in development mode the app's owner needs an
+puts a Spotify link beside other services' links. TIDAL's guidelines have a clause of the same
+shape, which is why `tidal_isrc` is off by default too. Turning this source on is the operator's
+reading of those terms, and it needs an app Spotify answers: in development mode the app's owner needs an
 active Premium subscription, else every request is refused (403) and the lookup is held five
 minutes (`spotify_auth`), as for `spotify`.
 

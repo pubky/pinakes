@@ -43,7 +43,7 @@ impl Default for TidalConfig {
     }
 }
 impl TidalConfig {
-    fn pair(&self) -> Option<(String, String)> {
+    pub(crate) fn pair(&self) -> Option<(String, String)> {
         match (self.client_id.as_deref(), self.client_secret.as_deref()) {
             (Some(id), Some(secret)) if !id.trim().is_empty() && !secret.trim().is_empty() => {
                 Some((id.trim().to_owned(), secret.trim().to_owned()))
@@ -88,7 +88,7 @@ const COUNTRIES: &[&str] = &[
 ];
 
 const AUTH: &str = "https://auth.tidal.com/v1/oauth2/token";
-const API: &str = "https://openapi.tidal.com/v2";
+pub(crate) const API: &str = "https://openapi.tidal.com/v2";
 /// The most IDs one `filter[id]` request takes.
 const BATCH: usize = 20;
 /// TIDAL's JSON:API answers.
@@ -292,7 +292,7 @@ pub fn items(v: &Value, kind: &str) -> Vec<String> {
         .collect()
 }
 /// One answer of the API, with the configured pair.
-async fn api_object(cx: &Context, url: &str) -> Result<Option<Value>> {
+pub(crate) async fn api_object(cx: &Context, url: &str) -> Result<Option<Value>> {
     let (client_id, secret) = cx
         .config
         .section::<TidalConfig>()
