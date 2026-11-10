@@ -41,7 +41,7 @@ first form of each listed site, so every listed link reads back as the card.
 | Blockstream (`blockstream.info`) | mainnet, `/testnet`, `/testnet4`, `/signet` | `/block/{hash}` | `/block-height/{n}` | `/tx/{txid}` | `/address/{a}` | listed |
 | `mempool.emzy.de` (a mempool instance, language prefix as on mempool.space) | mainnet, `/testnet4`, `/signet` | `/block/{hash or n}` | | `/tx/{txid}` | `/address/{a}` | listed |
 | BTCScan (`btcscan.org`) | mainnet | `/block/{hash}` | `/block-height/{n}` | `/tx/{txid}` | `/address/{a}` | listed |
-| Blockchain.com (`www.blockchain.com`) | `btc`, `btc-testnet` | `/explorer/blocks/{net}/{hash or n}` | | `/explorer/transactions/{net}/{txid}` | `/explorer/addresses/{net}/{a}` | listed (mainnet) |
+| Blockchain.com (`www.blockchain.com`) | `btc` | `/explorer/blocks/btc/{hash or n}` | | `/explorer/transactions/btc/{txid}` | `/explorer/addresses/btc/{a}` | listed |
 | Blockchain.com, older paths | `/btc` | `/btc/block/{hash or n}` | | `/btc/tx/{txid}` | `/btc/address/{a}` | read only |
 | Blockchain.com, `blockchain.info` | mainnet | `/block/{hash or n}` | `/block-height/{n}` | `/tx/{txid}` | `/address/{a}` | read only |
 | OKLink (`www.oklink.com`) | `/bitcoin`, `/btc` | `/{net}/block/{hash or n}` | | `/{net}/tx/{txid}` | `/{net}/address/{a}` | listed |
@@ -56,16 +56,23 @@ first form of each listed site, so every listed link reads back as the card.
 | Amboss (`amboss.space`) | `/node/{key}` | `/edge/{id}` | listed |
 | Lightning Network+ (`lightningnetwork.plus`) | `/nodes/{key}` | | listed |
 
-- Each form was checked on the live site for one block, transaction and address (or node and
-  channel) on 2026-11-10. Blockchair, BlockCypher, bitcoinexplorer.org and 3xpl refuse a plain
-  client or were down, so their forms were checked on archived captures; they are read, not
-  listed. Blockchain.com's testnet pages show no data: read, not listed.
+- How each form was checked (2026-11-10): on the live site for one block, transaction and
+  address (a wrong id answers 404 or names nothing) for Blockstream (mainnet, testnet, signet;
+  testnet4 by its explorer page and API), BTCScan and Blockchain.com (explorer pages, the older
+  paths and `blockchain.info`, which redirect to them); through its API for mempool.emzy.de's
+  networks (its testnet answers 502, so it is left out); as routes only for OKLink, whose pages
+  render client-side (a wrong id also answers 200), and Amboss's `/edge/`; 1ML and LN+ answer
+  404 for a wrong key. Blockchair, BlockCypher, bitcoinexplorer.org and 3xpl refuse a plain
+  client or were down, so their forms were checked on archived captures (3xpl's transaction
+  form on other transactions' captures); they are read, not listed. Blockchain.com's
+  `btc-testnet` pages show no data that names their network, so they are left out.
 - A trailing slash, a query string, a fragment and `www.` change nothing. Language prefixes are
   read only on mempool sites.
 - Other chains on the same sites are not Bitcoin and name nothing: Blockstream's `/liquid/…`,
   Blockchain.com's `/bch/…` and `/eth/…`, Blockchair's `/bitcoin-cash/…` and `/ethereum/…`,
   BlockCypher's `/ltc/…` and `/doge/…`. Neither does a network an explorer doesn't show (BTCScan's
-  testnet, mempool.emzy.de's testnet, any Lightning object on testnet4).
+  testnet, mempool.emzy.de's testnet, Blockchain.com's `btc-testnet`, any Lightning object on
+  testnet4).
 - A block by height on any explorer is read like mempool.space's: an alias only once settled.
 
 An unknown block, transaction or channel is `missing`. mempool.space answers an unknown

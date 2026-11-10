@@ -358,11 +358,12 @@ const MEMPOOL_SPACE: Explorer = Explorer {
     paths: MEMPOOL_PATHS,
 };
 
-/// The explorers whose links name the objects, mempool.space first. Each form here was checked
-/// against the live site (or, for the sites that refuse a plain client, against archived
-/// captures) for a block, a transaction and an address, or a Lightning node and channel; other
-/// chains' paths on the same sites (`/liquid/`, `/bch/`, `/bitcoin-cash/`, `/ltc/`, …) match no
-/// row. docs/sources/mempool.md lists them.
+/// The explorers whose links name the objects, mempool.space first. docs/sources/mempool.md
+/// says how each form was checked: on the live site where it shows the object, as a route
+/// where its pages render client-side, on archived captures for the sites that refuse a plain
+/// client. A network whose pages show nothing that names it (Blockchain.com's `btc-testnet`)
+/// is left out. Other chains' paths on the same sites (`/liquid/`, `/bch/`, `/bitcoin-cash/`,
+/// `/ltc/`, …) match no row.
 pub const EXPLORERS: &[Explorer] = &[
     MEMPOOL_SPACE,
     Explorer {
@@ -401,19 +402,6 @@ pub const EXPLORERS: &[Explorer] = &[
         languages: false,
         networks: &[(Network::Mainnet, "btc")],
         paths: BLOCKCHAIN_COM_PAGES,
-    },
-    // Its testnet pages exist, but show no data: read, not listed.
-    Explorer {
-        site: "Blockchain.com",
-        hosts: &["www.blockchain.com"],
-        listed: false,
-        languages: false,
-        networks: &[(Network::Testnet, "btc-testnet")],
-        paths: &[
-            (Kind::Block, "explorer/blocks/{net}/{id}"),
-            (Kind::Tx, "explorer/transactions/{net}/{id}"),
-            (Kind::Address, "explorer/addresses/{net}/{id}"),
-        ],
     },
     // Blockchain.com's older host: each path redirects to its explorer page.
     Explorer {
@@ -1548,7 +1536,6 @@ mod tests {
                 "btc-testnet:tx/{PIZZA}",
                 &[
                     "https://blockstream.info/testnet/tx/{PIZZA}",
-                    "https://www.blockchain.com/explorer/transactions/btc-testnet/{PIZZA}",
                     "https://blockchair.com/bitcoin/testnet/transaction/{PIZZA}",
                     "https://live.blockcypher.com/btc-testnet/tx/{PIZZA}/",
                 ],
@@ -1644,11 +1631,14 @@ mod tests {
             "https://3xpl.com/litecoin/transaction/{PIZZA}",
             "https://www.oklink.com/eth/tx/{PIZZA}",
             // Networks an explorer doesn't show: mempool.emzy.de's testnet is down, BTCScan and
-            // bitcoinexplorer.org are mainnet only, no Lightning object is on testnet4.
+            // bitcoinexplorer.org are mainnet only, Blockchain.com's testnet pages name no
+            // network, no Lightning object is on testnet4.
             "https://mempool.emzy.de/testnet/tx/{PIZZA}",
             "https://btcscan.org/testnet/tx/{PIZZA}",
             "https://btcscan.org/testnet4/tx/{PIZZA}",
             "https://bitcoinexplorer.org/testnet/tx/{PIZZA}",
+            "https://www.blockchain.com/explorer/transactions/btc-testnet/{PIZZA}",
+            "https://www.blockchain.com/explorer/addresses/btc-testnet/{TB}",
             "https://www.blockchain.com/explorer/transactions/btc-testnet4/{PIZZA}",
             "https://blockchair.com/bitcoin/testnet4/transaction/{PIZZA}",
             "https://1ml.com/testnet/node/{ACINQ}",
