@@ -1991,17 +1991,18 @@ async fn a_free_commons_file_wins_over_the_cover() {
     assert_eq!(credits(&album)[0], miles_credits()[0]);
     assert!(album.unread_enriched.is_empty());
     assert!(t.to("coverartarchive.org").len() <= 1, "{:?}", t.seen());
-    // A cover that comes late does not hold the card: the Commons file is there at once.
+    // A cover that comes late does not hold the card: the Commons file is there at once, long
+    // before the budget ends (the archive's answer would come after it).
     let t = Recorded::new(Mode {
         album_has_image: true,
-        cover_art_delay_ms: 3000,
+        cover_art_delay_ms: 30_000,
         ..Default::default()
     });
     let started = std::time::Instant::now();
-    let album = card(&web_within(t.clone(), 10_000), KIND_OF_BLUE).await;
+    let album = card(&web_within(t.clone(), 12_000), KIND_OF_BLUE).await;
     assert_eq!(album.image.as_deref(), Some(MILES_IMAGE));
     assert!(album.unread_enriched.is_empty());
-    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
 }
 
 /// Each part of an album's enrichment ends on its own. A cover that comes after the budget
@@ -2010,10 +2011,10 @@ async fn a_free_commons_file_wins_over_the_cover() {
 #[tokio::test]
 async fn each_part_of_an_album_reading_ends_on_its_own() {
     let t = Recorded::new(Mode {
-        cover_art_delay_ms: 3000,
+        cover_art_delay_ms: 30_000,
         ..Default::default()
     });
-    let album = card(&web_within(t.clone(), 1000), KIND_OF_BLUE).await;
+    let album = card(&web_within(t.clone(), 2500), KIND_OF_BLUE).await;
     assert_eq!(album.image, None);
     assert_eq!(
         album.description.as_deref(),

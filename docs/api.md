@@ -209,7 +209,8 @@ A Wikidata description's credit:
  "excerpted": false, "modified": false, "subject": null}
 ```
 
-A release's or release group's card with no free Commons file shows the front cover the
+A release's or release group's card with no free Commons file (or whose Commons file could not be
+read just now, while it has no stored image) shows the front cover the
 [Cover Art Archive](https://coverartarchive.org/) holds for it, credited to the release the cover
 is of (a release group's cover is one of its releases', chosen by the archive):
 
