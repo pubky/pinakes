@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Pinned upstream release binaries; downloads stay in a task/runner-local directory.
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+ci_tools="${PINAKES_CI_TOOLS:-${RUNNER_TEMP:?set RUNNER_TEMP or PINAKES_CI_TOOLS}/pinakes-ci-tools}"
+mkdir -p "$ci_tools"
+ci_tools=$(cd "$ci_tools" && pwd)
+fetch() {
+  local url="$1" digest="$2" file="$3"
+  curl --fail --silent --show-error --location "$url" -o "$ci_tools/$file"
+  printf '%s  %s\n' "$digest" "$ci_tools/$file" | sha256sum --check
+}
+fetch https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz \
+  8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8 actionlint.tar.gz
+tar -xzf "$ci_tools/actionlint.tar.gz" -C "$ci_tools" actionlint
+fetch https://github.com/hadolint/hadolint/releases/download/v2.15.1/hadolint-linux-x86_64 \
+  c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507 hadolint
+fetch https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.gz \
+  b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6 shellcheck.tar.gz
+tar -xzf "$ci_tools/shellcheck.tar.gz" -C "$ci_tools" --strip-components=1 shellcheck-v0.11.0/shellcheck
+chmod +x "$ci_tools/hadolint"
+export PATH="$ci_tools:$PATH"
+actionlint
+hadolint Dockerfile
+shellcheck scripts/ci/setup-postgres scripts/ci/container-smoke scripts/ci/publish-manifest scripts/ci/check
+bash -n scripts/ci/setup-postgres scripts/ci/container-smoke scripts/ci/publish-manifest scripts/ci/check
+git diff --check

@@ -4,6 +4,118 @@ A production checklist for the services, storage and network around `pinakesd`.
 Configuration names come from [`pinakes.example.toml`](../pinakes.example.toml);
 [API keys](api-keys.md) covers credentials, and [operations](operations.md) is the detailed runbook.
 
+## Container
+
+The Dockerfile builds the release `pinakesd` binary for the requested platform. The Debian
+runtime runs as UID/GID `10001:10001`, includes CA certificates, and exposes only port 8090.
+It defaults to `listen = "0.0.0.0:8090"`, `admin_listen = "127.0.0.1:9090"`, and
+`osm.dump_dir = "/var/lib/pinakes/dumps"` through environment overrides. The image contains
+no operator configuration or credentials. PostgreSQL and the other services below run separately.
+
+Build and check the local image on a machine with Docker and enough build space:
+
+```sh
+docker build --pull --tag pinakes:local .
+docker run --rm pinakes:local --help
+```
+
+Prepare an absolute-path copy of `pinakes.example.toml`, set the Nexus and Nominatim URLs
+and `[http] contact`, and enable only the sources you use. Create a protected environment file
+from [`.env.example`](../.env.example), readable only by its owner (`chmod 600`). Set
+`PINAKES__DATABASE_URL` to the provisioned PostgreSQL database, `PINAKES__ADMIN_TOKEN`,
+and any provider credentials there. `DATABASE_URL` alone is a test-tool setting; the daemon
+reads `PINAKES__DATABASE_URL`. Container loopback refers to the container itself: use reachable
+service names for PostgreSQL, Nexus and Nominatim. Environment overrides win over the TOML file.
+
+After an image has been published, replace `v0.1.0` below with its verified version or digest.
+For a local build, use `pinakes:local` as `PINAKES_IMAGE`.
+
+```sh
+PINAKES_IMAGE=registry-1.docker.io/synonymsoft/pinakes:v0.1.0
+docker pull "$PINAKES_IMAGE"
+docker volume create pinakes-dumps
+docker run --detach --name pinakes --restart unless-stopped \
+  --read-only --cap-drop ALL --security-opt no-new-privileges \
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+  --publish 127.0.0.1:8090:8090 \
+  --env-file /absolute/path/pinakes.env \
+  --mount type=bind,source=/absolute/path/pinakes.toml,target=/etc/pinakes/pinakes.toml,readonly \
+  --mount type=volume,source=pinakes-dumps,target=/var/lib/pinakes/dumps \
+  "$PINAKES_IMAGE" --config /etc/pinakes/pinakes.toml
+curl --fail http://127.0.0.1:8090/v1/info
+curl --fail 'http://127.0.0.1:8090/v1/search?limit=1'
+```
+
+The config mount must be readable by UID 10001. A new named dump volume inherits the image
+directory's ownership. For an existing volume or bind mount, provision write access for UID/GID
+10001:10001 before starting. Keep that volume across replacements and back it up; the daemon
+writes the ODbL dump through SQL and does not require a PostgreSQL client in the image. Run
+database backups with a separate PostgreSQL client matching the server major version.
+
+Put a TLS proxy in front of the loopback-published public API. Port 9090 remains on loopback
+inside the container; do not publish it or use host networking to reach it. Private monitoring
+needs an explicitly reviewed admin network configuration, bearer token and allowed admin hosts
+as described under [Network and secrets](#network-and-secrets). One daemon owns one database;
+stop the old container before starting its replacement. Follow the schema and backup checklist
+below before upgrades. CLI commands replace the daemon arguments after the image name:
+`--config /etc/pinakes/pinakes.toml --migrate`, or, with the daemon stopped,
+`--config /etc/pinakes/pinakes.toml reextract all`, using the same mounts and environment file.
+
+## CI and image publishing
+
+[CI](../.github/workflows/ci.yml) runs on pull requests, pushes to `main`, and `v*.*.*` tags.
+It provisions a disposable PostgreSQL 16 cluster from the signed PGDG repository, pins the h3
+package to 4.2.3, checks PostGIS and the h3 function, then runs the full `scripts/test` gate and
+`scripts/e2e --mock`. Workflow contracts, actionlint, ShellCheck and Hadolint also run. Rust is
+1.98.1 in CI and the image build. Native amd64 and arm64 image jobs build without registry login
+or publishing and start the actual release daemon against the real database. They check the public API, ODbL
+dump volume, nonroot user and loopback admin binding. No public provider or test identity is needed.
+
+Tag publication waits for both jobs. It uses the org's
+[`build_and_push` action](https://github.com/pubky/ci-workflows/tree/a57f2ae6382a8519ba4aa09d58b706f6b68a4426/.github/actions/docker/build_and_push)
+at an exact commit to build `linux/amd64` and `linux/arm64` on the corresponding standard hosted
+runners (`ubuntu-24.04` and `ubuntu-24.04-arm`). GitHub supports these runners for private
+repositories ([runner support](https://github.blog/changelog/2026-01-29-arm64-standard-runners-are-now-available-in-private-repositories/)).
+The Dockerfile compiles within each target platform's Rust image and ignores the shared action's
+`TARGETARCH` build argument. Both platform jobs must pass their real database/API smoke tests.
+
+Provision repository or explicitly granted organization Actions secrets before publishing:
+
+- `DOCKERHUB_USERNAME`: a Docker Hub account allowed to push `synonymsoft/pinakes`.
+- `DOCKERHUB_TOKEN`: that account's token with write access to the image repository.
+
+Publishing is configured; this document does not establish that an image has been published or
+that the registry credentials are available. PR and `main` jobs need neither secret and never
+write to the registry. The workflow creates no Git tags, release objects or deployments.
+Only a pushed, valid `v`-prefixed SemVer tag (at most 128 characters) can publish:
+
+| Git tag | Image tags under `registry-1.docker.io/synonymsoft/pinakes` |
+| --- | --- |
+| `v1.2.3` | `v1.2.3`, full commit SHA, `latest` |
+| `v1.2.3-rc.1` | `v1.2.3-rc.1`, full commit SHA; leaves `latest` unchanged |
+
+The shared action publishes intermediate `<full-commit-SHA>-amd64` and `<full-commit-SHA>-arm64`
+image tags. Its `latest` and `sha_tag` inputs are literal `false`: metadata's `enable=false`
+suppresses those tags even though the composite action's SHA-computation step treats the string
+as truthy. Raw metadata tags avoid automatic `latest` tagging. After both platform jobs succeed,
+a separate job checks the combined manifest's platforms and publishes the version/full-SHA tags,
+adding `latest` only for a stable version. SemVer build metadata is accepted: `v1.2.3+build.9`
+becomes image tag `v1.2.3_build.9`. The underscore keeps it distinct from prerelease names.
+`latest` follows the last successfully published stable tag, not a
+comparison of version numbers. Use an immutable version/digest for deployments.
+
+For an authorized release, first update the workspace version, complete review and CI on that
+commit, and confirm the registry prerequisites. These commands create and push the signed tag;
+they do not deploy the image:
+
+```sh
+VERSION=v0.1.0
+git tag -s "$VERSION" -m "Pinakes $VERSION"
+git push origin "refs/tags/$VERSION"
+# After the CI publish job succeeds, inspect the manifest for both platforms.
+docker buildx imagetools inspect "registry-1.docker.io/synonymsoft/pinakes:$VERSION"
+```
+
 ## What to host
 
 | Service | Why | Starting capacity / planning estimate | Operational requirement |

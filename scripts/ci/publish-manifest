@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Called only after both native platform publications succeed on an authorized tag.
+set -euo pipefail
+[[ "${GITHUB_ACTIONS:-}" == true && "${GITHUB_EVENT_NAME:-}" == push && "${GITHUB_REF_TYPE:-}" == tag ]]
+[[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+[[ "$RELEASE_IMAGE_TAG" =~ ^v[0-9A-Za-z._-]+$ && ${#RELEASE_IMAGE_TAG} -le 128 ]]
+[[ "$RELEASE_LATEST" == true || "$RELEASE_LATEST" == false ]]
+image=registry-1.docker.io/synonymsoft/pinakes
+tags=(--tag "$image:$RELEASE_IMAGE_TAG" --tag "$image:$GITHUB_SHA")
+if [[ "$RELEASE_LATEST" == true ]]; then
+  tags+=(--tag "$image:latest")
+fi
+validate_manifest() {
+  python3 - "$1" <<'PY'
+import json
+import sys
+with open(sys.argv[1]) as f:
+    manifest = json.load(f)
+platforms = {item['platform']['architecture'] for item in manifest['manifests']
+             if item.get('platform', {}).get('os') == 'linux'}
+assert platforms == {'amd64', 'arm64'}, platforms
+PY
+
+}
+# Check both architectures before moving any version, SHA or latest tag.
+docker buildx imagetools create --dry-run "$image:$GITHUB_SHA-amd64" "$image:$GITHUB_SHA-arm64" > "$RUNNER_TEMP/pinakes-candidate-manifest.json"
+validate_manifest "$RUNNER_TEMP/pinakes-candidate-manifest.json"
+docker buildx imagetools create "${tags[@]}" "$image:$GITHUB_SHA-amd64" "$image:$GITHUB_SHA-arm64"
+docker buildx imagetools inspect --raw "$image:$RELEASE_IMAGE_TAG" > "$RUNNER_TEMP/pinakes-release-manifest.json"
+validate_manifest "$RUNNER_TEMP/pinakes-release-manifest.json"
