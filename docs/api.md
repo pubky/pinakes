@@ -1295,9 +1295,9 @@ anything. Sources read a resource after it is saved and again when their results
 source's lifetime: 30 days, `btcmap` 7); a source's links and keys live twice that, so one
 failed refresh keeps them, and they go when the source stops returning them. The sources run in this order, each
 seeing the keys the ones before it found: `service`, `tidal`, `spotify`,
-`musicbrainz`, `musicbrainz_entity`, `performers`, `wikidata`, `discogs`, `deezer`, `spotify_isrc`, `tidal_isrc`, `itunes`, `itunes_song`,
-`wikipedia`, `wikidata_item`, `books`, `films`, `podcasts`, `product_keys`, `open_food_facts`,
-`stack_exchange`, `titles`, `federal_register`, `osm_wikidata`, `wikidata_osm`,
+`musicbrainz`, `musicbrainz_entity`, `performers`, `wikidata`, `discogs`, `deezer`, `spotify_isrc`,
+`tidal_isrc`, `itunes`, `itunes_song`, `youtube_match`, `wikipedia`, `wikidata_item`, `books`,
+`films`, `podcasts`, `product_keys`, `open_food_facts`, `stack_exchange`, `titles`, `federal_register`, `osm_wikidata`, `wikidata_osm`,
 `wikidata_places`, `btcmap`, `unpaywall`, `ncbi`, `datacite`, `huggingface`, `crates`, `npm`,
 `pypi`, `software_heritage`, `steam`, `wikidata_stores`, `app_stores`, `wayback`, `editions`;
 `[also_on.sources.<id>] enabled = false` turns one off. A MusicBrainz or Wikidata answer over 8 MB is no answer: the source
@@ -1315,19 +1315,33 @@ spellings is one link, kept by the source that found it first.
 **The sources.** Each source's page in [docs/sources](sources/README.md#also-on) says what it reads
 and finds and what it costs; the index lists them in the order they run. A music link (a track,
 album or artist on a music service, [its spellings](#aliases)) is looked up exactly, never by title
-or name. A key comes from a hub (MusicBrainz, Wikidata) or from a known music service's own record
-of its own object; another host's claim (its JSON-LD `isrcCode`, `sameAs`, a canonical link) is a
-fact at most. An ISRC MusicBrainz gives to several recordings that agree (the same artists, the
+or name, except by the two sources that say they match (below). A key comes from a hub
+(MusicBrainz, Wikidata) or from a known music service's own record of its own object; another
+host's claim (its JSON-LD `isrcCode`, `sameAs`, a canonical link) is a fact at most. An ISRC MusicBrainz gives to several recordings that agree (the same artists, the
 same title once its identity-keeping tags go, the same disambiguation, all audio or all video,
 lengths within 3 s, the whole set alike) names one recording not yet
 merged: the ISRC and the MBID that stands for them (the smallest) are the track's keys, the
 other MBIDs facts; recordings that disagree (a live
 version, a remix, an edit, another artist) leave the duration to pick one or the ISRC a fact
 ([an ISRC on several recordings](sources/README.md#an-isrc-on-several-recordings)). A track with
-an ISRC key on another service is looked up on Spotify by it, exactly (`spotify_isrc`, off by
-default, with the operator's Spotify credentials): its Spotify track becomes a link keyed by the ISRC. ISRCs are
-stored in upper case and barcodes as GTIN-13 (a 12-digit UPC gains a
-leading zero), by every source. The level is exact: a track lists tracks and videos of the
+an ISRC key on another service is looked up on Spotify and TIDAL by it, and an album with a barcode
+key by that, exactly (`spotify_isrc` and `tidal_isrc`, off by default, with the operator's
+credentials): the service's own track or album that carries the value becomes a link keyed by it.
+
+**Exact links and matches.** A derived link is exact when an identifier the service owns, or a
+hub, names it: a MusicBrainz relation, a Wikidata claim, or a service's own answer to a lookup by
+ISRC or barcode (`deezer`, `itunes` albums, `spotify_isrc`, `tidal_isrc`). It carries that key, so a
+tagged resource that is the link joins the group. Two sources match by metadata instead, and their
+links (by their `via`) are hints only: never keyed, never joining a group, never making a key of
+the card they are on.
+- `itunes_song` (off by default): Apple Music's song at the same disc and track number on the
+  album with the track's barcode, within 3 s of its length (iTunes answers carry no ISRC).
+- `youtube_match` (off by default): for a label's YouTube upload (a Topic channel, "Provided to
+  YouTube by"), the one Deezer and the one TIDAL track with the same artist and title within 2 s
+  of its length.
+
+ISRCs are stored in upper case and barcodes as GTIN-13 (a 12-digit UPC gains a leading zero), by
+every source. The level is exact: a track lists tracks and videos of the
 recording, an album lists albums and YouTube's album playlists, an artist lists artist pages and
 channels. Album links group by their release group, while two editions (two MusicBrainz releases)
 stay apart. Apple Music links carry no storefront; Apple Books and Apple Podcasts links, and the

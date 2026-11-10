@@ -261,6 +261,8 @@ derive_links = true # Off: keys and facts only; no derived links on cards, nor j
 # enabled = true # Another service's track or album on TIDAL by ISRC or barcode ([tidal] credentials).
 # [also_on.sources.itunes_song]
 # enabled = true # A track's Apple Music song by its album's barcode and place: a match, unkeyed.
+# [also_on.sources.youtube_match]
+# enabled = true # A label's YouTube upload on Deezer and TIDAL by artist, title, length: a match.
 
 # The tidal source asks TIDAL only with a client ID and secret: supply them through
 # PINAKES_TIDAL_CLIENT_ID and PINAKES_TIDAL_CLIENT_SECRET (see .env.example).

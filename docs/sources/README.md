@@ -186,6 +186,7 @@ so one goes without the others needing a change.
 - [`deezer`](deezer.md): Deezer's own ISRCs and barcodes (off by default).
 - [`itunes`](itunes.md): Apple Music albums by barcode, and an Apple Music track's preview.
 - [`itunes_song`](itunes_song.md): Apple Music's song for another service's track, by its album's barcode and place (off by default; a match, unkeyed).
+- [`youtube_match`](youtube_match.md): a label's YouTube upload on Deezer and TIDAL, by artist, title and length (off by default; a match, unkeyed).
 - [`wikipedia`](wikipedia.md): the other editions of a Wikipedia article.
 - [`wikidata_item`](wikidata_item.md): a Wikidata item link as its own hub.
 - [`books`](books.md): Open Library, Amazon, Apple Books and Wikidata for a book.

@@ -37,6 +37,7 @@ pub mod tmdb;
 pub mod wikidata;
 pub mod wikidata_item;
 pub mod wikipedia;
+pub mod youtube_match;
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -473,6 +474,8 @@ pub fn registry() -> Vec<Arc<dyn Source>> {
         Arc::new(itunes::ItunesSource),
         // After `itunes`: a track's Apple Music song, by its album's barcode and its place there.
         Arc::new(itunes_song::ItunesSong),
+        // After `deezer` and `tidal_isrc`, whose services it searches; before `editions`.
+        Arc::new(youtube_match::YoutubeMatch),
         Arc::new(wikipedia::WikipediaSource),
         Arc::new(wikidata_item::WikidataItemSource),
         Arc::new(books::Books),

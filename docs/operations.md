@@ -743,7 +743,14 @@ are spelled, typed or named (aliases of a canonical link, a card's service in `s
 `spotify_isrc` (off by default; `[also_on.sources.spotify_isrc] enabled = true` with the Spotify
 credentials turns it on, the operator's reading of Spotify's terms) costs one Spotify search per
 ISRC key of a track on another service, cached an hour, on Spotify's pace; switched on after the
-upgrade that added it, `reextract also-on` asks for every stored track at once. The duplicate
+upgrade that added it, `reextract also-on` asks for every stored track at once. `tidal_isrc`
+(off by default; `[also_on.sources.tidal_isrc] enabled = true` with the TIDAL credentials, the
+operator's decision on TIDAL's terms) costs one TIDAL request per ISRC or barcode key of a track or
+album on another service, on `tidal`'s pace and token slot. `itunes_song` and `youtube_match` (off
+by default; their links are matches, never keys) cost per track a Deezer, Spotify or TIDAL read
+and an iTunes lookup, and per label upload on YouTube a watch page (up to 3 MB) and a Deezer and a
+TIDAL search; each runs its part only while the source of that service runs (`deezer`, `spotify`,
+`tidal`, `tidal_isrc`). Switched on, `reextract also-on` asks for every stored track at once. The duplicate
 check of the music sources (an ISRC MusicBrainz gives to several recordings) costs MusicBrainz
 reads on a common path: for a recording MusicBrainz relates a link to, one ISRC lookup per ISRC
 of the recording and, where several recordings share one, each of their records (at most 8
