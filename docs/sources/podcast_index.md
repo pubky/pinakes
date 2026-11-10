@@ -43,8 +43,8 @@ else its show's). An episode's [`stream`](../api.md#stream) is its enclosure (`e
 | `page_url` | The Podcast Index page |
 
 A show's latest episodes, from its feed, are listed by `GET /v1/resources/{id}/episodes`
-([Episodes](../api.md#episodes)); the show's card carries the latest 5 that have audio in
-`episodes`. The joins (Apple Podcasts, the feed, Spotify) come from the
+([Episodes](../api.md#episodes)); the show's card carries the latest 5 that have public audio
+or video (a `stream`) in `episodes`. The joins (Apple Podcasts, the feed, Spotify) come from the
 also-on [`podcasts`](../api.md#also-on) source.
 
 ## Examples

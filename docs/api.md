@@ -999,10 +999,10 @@ GET /v1/resources/{id}/episodes?limit=20
 ```
 
 **On the card.** Every card of a show (`PodcastSeries`, status `ok`) carries `episodes`: the
-first 5 entries of this list that have a `stream` (an item without public audio is left out),
-newest first, so a client plays a show's latest episodes from its card with the player it uses
-for an episode's `stream`, without a second request. A show without a list of its own takes its
-group's, as the route does: the Apple Podcasts, Spotify and Podcast Index cards of a show
+first 5 entries of this list that have a `stream` (an item without public audio or video is left
+out), newest first, so a client plays a show's latest episodes from its card with the player it
+uses for an episode's `stream`, without a second request. A show without a list of its own takes
+its group's, as the route does: the Apple Podcasts, Spotify and Podcast Index cards of a show
 grouped with its feed carry the same episodes. They are read from the stored list, never from
 the feed: a card read fetches nothing, and the list changes when the show is read again (its
 card's refresh). A show with no such episode, and every other card, has no `episodes`.

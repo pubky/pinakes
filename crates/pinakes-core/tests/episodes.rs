@@ -630,7 +630,8 @@ async fn a_shows_card_carries_its_latest_episodes_with_audio(pool: PgPool) {
 
 /// A show's card without episodes of its own carries those of a member of its group that has
 /// them (an Apple Podcasts or Spotify show grouped with its feed), as the route lists them; a
-/// show outside the group, and a member cleared after an error, carry none.
+/// show outside the group, a member whose own list has no audio, and a member cleared after an
+/// error, carry none.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_show_card_without_episodes_carries_its_groups(pool: PgPool) {
     let feed = show(
@@ -684,6 +685,29 @@ async fn a_show_card_without_episodes_carries_its_groups(pool: PgPool) {
     assert_eq!(status, 200, "{read}");
     let text = read.to_string();
     assert!(text.contains("https://cdn.example/5.mp4"), "{text}");
+    // A member with a list of its own, none of it playable, lists its own on the route and
+    // carries nothing on its card: the card shows the route's list, never another member's.
+    let silent = show(
+        &pool,
+        "https://feeds.example.org/silent.xml",
+        Some(vec![episode(2, false), episode(1, false)]),
+    )
+    .await;
+    sqlx::query("UPDATE group_unit SET group_id=$1 WHERE resource_id=$2")
+        .bind(group)
+        .bind(&silent)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (_, page) = request(&app, &format!("/v1/resources/{silent}/episodes")).await;
+    assert_eq!(page["items"][0]["guid"], "ep-2", "{page}");
+    let (_, card) = request(&app, &format!("/v1/resources/{silent}")).await;
+    assert!(card.get("episodes").is_none(), "{card}");
+    let (_, card) = request(&app, &format!("/v1/resources/{apple}")).await;
+    assert_eq!(
+        card["episodes"], own["episodes"],
+        "still the feed's: {card}"
+    );
     // Cleared after an error, the Apple card is no show: it carries nothing.
     pinakes_core::changes::clear(&pool, &apple, 0, "too_complex")
         .await

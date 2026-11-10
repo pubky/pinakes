@@ -1798,9 +1798,9 @@ fn related_because(sql: &mut QueryBuilder<'_, Postgres>, item: &str, n: &str, au
     ));
 }
 /// The version of a search page's shape, in its ETag: a page cached before a field was added
-/// (`because`, then every card's `credits`) is never answered 304. Move it when a search row
-/// gains or loses a field.
-pub const SEARCH_SHAPE: u32 = 2;
+/// (`because`, then every card's `credits`, then a show's `episodes`) is never answered 304.
+/// Move it when a search row gains or loses a field.
+pub const SEARCH_SHAPE: u32 = 3;
 /// The most taggers a related row's `because` names.
 pub const BECAUSE_TAGGERS: usize = 3;
 

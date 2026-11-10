@@ -421,10 +421,10 @@ pub async fn list(
 pub const ON_CARD: usize = 5;
 
 /// Fills `episodes` on the cards that are podcast shows ([`is_show`]): the first [`ON_CARD`] of
-/// the list the route gives, those with a `stream` alone (an item without public audio is left
-/// out). One query for every show card of a response, one more when any has episodes; none for a
-/// response without a show. A show with no such episode, or whose feed was not read yet, gets
-/// none (the field stays absent).
+/// the list the route gives, those with a `stream` alone (an item without public audio or video
+/// is left out). One query for every show card of a response, one more when any has episodes;
+/// none for a response without a show. A show with no such episode, or whose feed was not read
+/// yet, gets none (the field stays absent).
 pub(crate) async fn on_cards<'a>(
     pool: &sqlx::PgPool,
     cards: impl IntoIterator<Item = &'a mut crate::api::Card>,
@@ -452,8 +452,9 @@ pub(crate) async fn on_cards<'a>(
 
 /// Each resource's stored list, in order, at most `limit` per resource, as `(resource ID,
 /// episode)`: its own rows, else, when its flag is set (the resource is a show), those of the
-/// member of its group whose newest episode is the newest. With `playable`, only the episodes
-/// that have a `stream` count, for the choice of the list as for its entries.
+/// member of its group whose newest episode is the newest. With `playable`, only that list's
+/// episodes that have a `stream` (the list is chosen as without it, so a card never lists
+/// another member's episodes than the route).
 async fn stored(
     pool: &sqlx::PgPool,
     ids: &[(String, bool)],
@@ -464,8 +465,8 @@ async fn stored(
     let rows: Vec<Row> = sqlx::query_as(
         "WITH asked AS (SELECT DISTINCT ON (id) id,borrow FROM unnest($1::text[],$2::bool[]) AS t(id,borrow) ORDER BY id,borrow DESC),\
          chosen AS (SELECT a.id AS card,coalesce(\
-           (SELECT a.id WHERE EXISTS (SELECT 1 FROM podcast_episode e WHERE e.resource_id=a.id AND (NOT $4 OR e.stream IS NOT NULL))),\
-           (SELECT m.resource_id FROM group_unit u JOIN group_unit m ON m.group_id=u.group_id WHERE a.borrow AND u.unit_id=a.id AND u.group_id IS NOT NULL AND m.resource_id<>a.id AND m.occurrence_key='' AND EXISTS (SELECT 1 FROM podcast_episode e WHERE e.resource_id=m.resource_id AND (NOT $4 OR e.stream IS NOT NULL)) ORDER BY (SELECT max(published) FROM podcast_episode e WHERE e.resource_id=m.resource_id AND (NOT $4 OR e.stream IS NOT NULL)) DESC NULLS LAST,m.resource_id LIMIT 1)) AS source FROM asked a)\
+           (SELECT a.id WHERE EXISTS (SELECT 1 FROM podcast_episode e WHERE e.resource_id=a.id)),\
+           (SELECT m.resource_id FROM group_unit u JOIN group_unit m ON m.group_id=u.group_id WHERE a.borrow AND u.unit_id=a.id AND u.group_id IS NOT NULL AND m.resource_id<>a.id AND m.occurrence_key='' AND EXISTS (SELECT 1 FROM podcast_episode e WHERE e.resource_id=m.resource_id) ORDER BY (SELECT max(published) FROM podcast_episode e WHERE e.resource_id=m.resource_id) DESC NULLS LAST,m.resource_id LIMIT 1)) AS source FROM asked a)\
          SELECT c.card,e.guid,e.url,e.name,e.image,e.published,e.stream FROM chosen c CROSS JOIN LATERAL \
            (SELECT e.position,e.guid,e.url,e.name,e.image,e.published,e.stream::text AS stream FROM podcast_episode e WHERE e.resource_id=c.source AND (NOT $4 OR e.stream IS NOT NULL) ORDER BY e.position LIMIT $3) e \
          ORDER BY c.card,e.position",
