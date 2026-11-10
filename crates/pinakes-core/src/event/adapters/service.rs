@@ -206,7 +206,12 @@ impl PlatformResolver {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
         let parsed: Result<ResourceMeta> = async {
             let mut doc = if d.parser == "wikidata" {
-                wiki(uri, &fetched, &self.web.egress).await?
+                let item = wiki(uri, &fetched, &self.web.egress).await?;
+                let mut doc = item.doc;
+                if !probe {
+                    credit_image(&mut doc, item.image, &self.web, deadline).await;
+                }
+                doc
             } else if let Some(doc) = calendar_blocking(uri, d, &fetched, &local).await? {
                 doc
             } else {
@@ -825,7 +830,15 @@ pub fn ics_link(_id: &str, base: &Url, text: &str) -> Option<String> {
         .map(|u| u.to_string())
 }
 
-async fn wiki(uri: &str, f: &Fetched, egress: &Egress) -> Result<ResourceMeta> {
+/// A Wikidata item's card ([`wiki_value`]) and its image file ([`image_file`]), not yet checked
+/// on Commons ([`credit_image`]).
+struct Item {
+    doc: ResourceMeta,
+    /// The item's ID and its `P18` file name.
+    image: Option<(String, String)>,
+}
+/// The card of the Wikidata item `f` is (an entity's JSON) or names (a Wikipedia page).
+async fn wiki(uri: &str, f: &Fetched, egress: &Egress) -> Result<Item> {
     let f = f.clone();
     let (mut value, qid) = crate::resolver::html::blocking(move || {
         let value: Value = serde_json::from_slice(&f.body).unwrap_or(Value::Null);
@@ -850,7 +863,7 @@ async fn wiki(uri: &str, f: &Fetched, egress: &Egress) -> Result<ResourceMeta> {
         if matches!(f.status, 404 | 410) {
             let mut doc = ResourceMeta::new(uri, "wikidata", 3600);
             doc.status = crate::model::Status::Missing;
-            return Ok(doc);
+            return Ok(Item { doc, image: None });
         }
         if f.status != 200 {
             return Err(crate::resolver::RetryLater {
@@ -864,9 +877,68 @@ async fn wiki(uri: &str, f: &Fetched, egress: &Egress) -> Result<ResourceMeta> {
             .map_err(parse_error)?;
     }
     let uri = uri.to_owned();
-    crate::resolver::html::blocking(move || wiki_value(&uri, &value))
-        .await?
-        .map_err(parse_error)
+    crate::resolver::html::blocking(move || {
+        wiki_value(&uri, &value).map(|doc| Item {
+            doc,
+            image: image_file(&value),
+        })
+    })
+    .await?
+    .map_err(parse_error)
+}
+/// The longest a card waits for Commons' answer about its image, as for its other enrichments
+/// (a venue, an oEmbed answer), within its own deadline.
+const COMMONS_WAIT: Duration = Duration::from_secs(2);
+/// What a card keeps of its deadline for the steps after its image: with less left, Commons is
+/// not asked and the image is unread.
+const COMMONS_RESERVE: Duration = Duration::from_secs(1);
+/// A Wikidata item's image on its card, only when Commons says the file is free to show, with
+/// its credit (`wikimedia::credited_image`): a thumbnail `limits.music_image_width` pixels
+/// wide. Commons is asked once, within [`COMMONS_WAIT`] and [`COMMONS_RESERVE`] before
+/// `deadline`. A transient
+/// failure (or no answer in time) leaves the image unread: the card keeps the credited image it
+/// has stored (`ResourceMeta::keep_enriched`) and is read again early
+/// (`limits.music_enrichment_retry_secs`), as an enriched MusicBrainz card is
+/// (`music_enrichment::Enrichment::apply`). Never fails the card.
+async fn credit_image(
+    doc: &mut ResourceMeta,
+    image: Option<(String, String)>,
+    web: &WebResolver,
+    deadline: tokio::time::Instant,
+) {
+    use crate::wikimedia::Found;
+    let Some((qid, name)) = image else {
+        return;
+    };
+    let now = tokio::time::Instant::now();
+    let latest = deadline.checked_sub(COMMONS_RESERVE).unwrap_or(now);
+    let found = if latest <= now {
+        tracing::info!(subject = %qid, "no time left to ask Commons");
+        Found::Unread
+    } else {
+        match tokio::time::timeout_at(
+            latest.min(now + COMMONS_WAIT),
+            crate::wikimedia::credited_image(
+                &web.egress,
+                &name,
+                web.config.music_image_width,
+                &qid,
+            ),
+        )
+        .await
+        {
+            Ok(found) => found,
+            Err(_) => {
+                tracing::info!(subject = %qid, "Commons timed out");
+                Found::Unread
+            }
+        }
+    };
+    crate::music_enrichment::Enrichment {
+        image: found,
+        description: Found::Missing,
+    }
+    .apply(doc, web.config.music_enrichment_retry_secs);
 }
 pub fn wikipedia_item(text: &str) -> Option<String> {
     let valid = |s: &str| {
@@ -912,7 +984,15 @@ fn wikipedia_candidate(f: &Fetched) -> bool {
         .iter()
         .any(|t| matches!(t.as_str(), "Event" | "Place"))
 }
-pub async fn wikipedia(uri: &str, f: &Fetched, egress: &Egress) -> Result<Option<ResourceMeta>> {
+/// The card of a Wikipedia page about an event or a place, from the page's Wikidata item
+/// ([`wiki`]), with the item's image when Commons says it is free to show ([`credit_image`],
+/// before `deadline`).
+pub async fn wikipedia(
+    uri: &str,
+    f: &Fetched,
+    web: &WebResolver,
+    deadline: tokio::time::Instant,
+) -> Result<Option<ResourceMeta>> {
     let Some(host) = Url::parse(uri)
         .ok()
         .and_then(|u| u.host_str().map(str::to_owned))
@@ -926,14 +1006,19 @@ pub async fn wikipedia(uri: &str, f: &Fetched, egress: &Egress) -> Result<Option
     if !crate::resolver::html::blocking(move || wikipedia_candidate(&input)).await? {
         return Ok(None);
     }
-    let doc = match wiki(uri, f, egress).await {
-        Ok(doc) => doc,
+    let item = match wiki(uri, f, &web.egress).await {
+        Ok(item) => item,
         Err(e) if e.is::<ParseFailure>() => return Ok(None),
         Err(e) => return Err(e),
     };
-    Ok((doc.status != crate::model::Status::Missing
-        && doc.type_path.iter().any(|t| t == "Event" || t == "Place"))
-    .then_some(doc))
+    let mut doc = item.doc;
+    if doc.status == crate::model::Status::Missing
+        || !doc.type_path.iter().any(|t| t == "Event" || t == "Place")
+    {
+        return Ok(None);
+    }
+    credit_image(&mut doc, item.image, web, deadline).await;
+    Ok(Some(doc))
 }
 pub fn wiki_value(uri: &str, v: &Value) -> Result<ResourceMeta> {
     let entity = v["entities"]
@@ -954,16 +1039,7 @@ pub fn wiki_value(uri: &str, v: &Value) -> Result<ResourceMeta> {
     };
     doc.name = label("labels");
     doc.description = label("descriptions");
-    let claim = |p: &str| {
-        entity["claims"][p]
-            .as_array()
-            .and_then(|a| {
-                a.iter()
-                    .filter(|v| v["rank"] != "deprecated")
-                    .max_by_key(|v| v["rank"] == "preferred")
-            })
-            .and_then(|v| v.pointer("/mainsnak/datavalue/value"))
-    };
+    let claim = |p: &str| claim(entity, p);
     // A creative work (a series, a film, a book, an album, a game, a podcast: by what the item
     // is an instance of, P31, else by what only a work carries: a publication date, an author,
     // a director, a composer, a publisher, an episode count; not a broadcaster, which a
@@ -1031,13 +1107,28 @@ pub fn wiki_value(uri: &str, v: &Value) -> Result<ResourceMeta> {
     if let Some(site) = claim("P856").and_then(Value::as_str) {
         doc.aliases.push(site.into());
     }
-    if let Some(file) = claim("P18").and_then(Value::as_str) {
-        doc.image = Some(format!(
-            "https://commons.wikimedia.org/wiki/Special:FilePath/{}",
-            percent_encoding::utf8_percent_encode(file, percent_encoding::NON_ALPHANUMERIC)
-        ));
-    }
+    // The image (`P18`) is shown only once Commons says the file is free ([`credit_image`]).
     Ok(doc)
+}
+/// The value of `entity`'s claim for property `p`: of its statements that are not deprecated, a
+/// preferred one when there is one (of several equal ones, the last).
+fn claim<'a>(entity: &'a Value, p: &str) -> Option<&'a Value> {
+    entity["claims"][p]
+        .as_array()
+        .and_then(|a| {
+            a.iter()
+                .filter(|v| v["rank"] != "deprecated")
+                .max_by_key(|v| v["rank"] == "preferred")
+        })
+        .and_then(|v| v.pointer("/mainsnak/datavalue/value"))
+}
+/// The ID and image file (`P18`, the claim [`claim`] picks, in normal form,
+/// `wikimedia::file_name`) of the Wikidata item an entity's JSON holds.
+fn image_file(v: &Value) -> Option<(String, String)> {
+    let entity = v["entities"].as_object()?.values().next()?;
+    let qid = entity["id"].as_str()?;
+    let file = claim(entity, "P18")?.as_str()?;
+    Some((qid.to_owned(), crate::wikimedia::file_name(file)?))
 }
 
 /// The schema.org type of a Wikidata class a creative work is an instance of (P31).
@@ -1204,5 +1295,32 @@ mod tests {
         let human = item("Q4", "Someone", json!({"P31": id("Q5")}));
         let doc = wiki_value("https://www.wikidata.org/wiki/Q4", &human).unwrap();
         assert_eq!(doc.type_name, "Person");
+    }
+    /// The image file is the P18 statement the card's other claims are picked by (a preferred
+    /// one, never a deprecated one), in MediaWiki's normal form; the card itself carries no image
+    /// until Commons verifies the file.
+    #[test]
+    fn the_image_file_is_the_picked_claim_in_normal_form() {
+        let file =
+            |v: &str, rank: &str| json!({"rank": rank, "mainsnak": {"datavalue": {"value": v}}});
+        let place = item(
+            "Q5",
+            "A Place",
+            json!({"P18": [file("old view.jpg", "deprecated"), file("street view.jpg", "normal"), file("main  view.jpg", "preferred")]}),
+        );
+        assert_eq!(
+            image_file(&place),
+            Some(("Q5".into(), "Main_view.jpg".into()))
+        );
+        assert_eq!(
+            wiki_value("https://www.wikidata.org/wiki/Q5", &place)
+                .unwrap()
+                .image,
+            None
+        );
+        let only_deprecated = item("Q6", "B", json!({"P18": [file("old.jpg", "deprecated")]}));
+        assert_eq!(image_file(&only_deprecated), None);
+        let bad_name = item("Q7", "C", json!({"P18": [file("a|b.jpg", "normal")]}));
+        assert_eq!(image_file(&bad_name), None);
     }
 }
