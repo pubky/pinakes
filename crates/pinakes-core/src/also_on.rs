@@ -463,8 +463,8 @@ pub fn registry() -> Vec<Arc<dyn Source>> {
         // Before the barcode lookups: a Discogs release's barcodes are keys.
         Arc::new(crate::sources::discogs::also_on::Discogs),
         Arc::new(deezer::DeezerSource),
-        // After every source that keys a track's ISRC (a service's own record, Deezer's, the
-        // hubs'), before `editions` places its links.
+        // After every source that keys a track's ISRC or an album's barcode (a service's own
+        // record, Deezer's, the hubs'), before `editions` places its links.
         Arc::new(spotify_isrc::SpotifyIsrc),
         Arc::new(itunes::ItunesSource),
         Arc::new(wikipedia::WikipediaSource),
