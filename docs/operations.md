@@ -30,8 +30,8 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `resolver_requests_per_second` | `2.0` | Jobs per second per pubky or card resolver. |
 | `resolver_ttl_secs` | `86400` | Default document lifetime (seconds) for web, pubky and card resolvers. |
 | `music_enrichment_timeout_ms` | `8000` | How long a MusicBrainz card's enrichment may take, within the card's own read (milliseconds, 100–13000); past it, the card keeps its stored image and description. |
-| `music_enrichment_retry_secs` | `3600` | The earliest a MusicBrainz card whose enrichment failed for a while (a timeout, a 429, a 5xx) is read again (seconds, 60–604800): it waits at least twice as long as since its last reading, up to its own refresh time, so a failure on a routine refresh waits for the next. |
-| `music_image_width` | `640` | The width of the Commons thumbnail an enriched card asks for (pixels, 20–4096); Commons serves the next of its standard sizes (960 for 640). |
+| `music_enrichment_retry_secs` | `3600` | The earliest a MusicBrainz card whose enrichment, or a Wikidata item's card whose Commons image, failed for a while (a timeout, a 429, a 5xx) is read again (seconds, 60–604800): it waits at least twice as long as since its last reading, up to its own refresh time, so a failure on a routine refresh waits for the next. |
+| `music_image_width` | `640` | The width of the Commons thumbnail an enriched card or a Wikidata item's card asks for (pixels, 20–4096); Commons serves the next of its standard sizes (960 for 640). |
 | `host_requests_per_second` | `1.0` | Requests per second to any one upstream host. |
 | `host_rates` | `{}` | Per-host overrides of `host_requests_per_second`. |
 | `html_head_bytes` | `4194304` | How far an HTML page past the 1 MB page cap is read (bytes); nothing in the page stops the read earlier. |
@@ -719,7 +719,12 @@ event, dates and all, as the correction it is, and a later reading that finds an
 simply stores it ([Lists](api.md#lists)). Registry-listed secondary
 denials and GraphQL failures defer, and after three days become `unreachable` with ordinary
 backoff. HTTP 451 and cursor 401/403/404 follow two-observation disappearance. Direct Wikidata
-404/410 do too, and a missing entity never removes a live Wikipedia article.
+404/410 do too, and a missing entity never removes a live Wikipedia article. A Wikidata item's
+card shows its image only with the file's licence verified on Commons and its credit
+([api.md](api.md#credits)): one Commons request per reading at most, none for an item without an
+image, cached an hour. A stored card changes at its next read; `pinakesd reextract
+event_platform` reads every event platform link again at once, Wikidata items among them (a
+Wikipedia page read from its item is on the `web` route).
 
 `cargo run -p pinakes-core --example adapter_probe -- MANIFEST.json REPLAYS.json OUTPUT_DIR`
 (with `DATABASE_URL`) runs a read-only, keyless canary pass and records requests, user-agent

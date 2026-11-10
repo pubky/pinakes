@@ -1,0 +1,25 @@
+{
+  "_recorded": {
+    "note": "Recorded with curl, User-Agent 'pinakes-test-fixture/0.1 (fixture recording)', one request each, 2026-11-10; the entity JSON trimmed with a script that keeps the listed keys. wd-entity-Q359924 is Wikidata's entity JSON for the Golden Gate Hotel and Casino trimmed to what the card reads: the English label and description and the P31, P625, P856 and P18 statements without their references and hashes. commons-M-408116720 is Commons' imageinfo answer for its P18 file as recorded (CC BY 2.0, author bjora857). Derived answers the tests build in code (tests/wikidata_image.rs, one edit each): the item without its P18 statement; the Commons answer marked non-free (NonFree 'true'); the Commons answer under a licence off the list (License 'gfdl', LicenseShortName 'GFDL', LicenseUrl removed); the Commons answer under CC0 (License 'cc0', LicenseShortName 'CC0', LicenseUrl the CC0 1.0 deed, Artist removed); Commons' 503 with Retry-After: 120 (status and header only, body {}); a Commons request that never answers. The English Wikipedia page the Wikipedia test reads is synthetic: a page head naming its item (wgWikibaseItemId) and an infobox with coordinates, as the article's page has."
+  },
+  "commons-M-408116720": {
+    "bytes": 1664,
+    "content_type": "application/json",
+    "file": "commons-M-408116720.json",
+    "note": "CC BY 2.0 with its author (bjora857): accepted.",
+    "recorded_at": "2026-11-10T09:07:00+00:00",
+    "sha256": "af7c80959082b2f0c220c42ee55aa493f633c23431a0597376d66da84fdd0c28",
+    "status": 200,
+    "url": "https://commons.wikimedia.org/w/api.php?action=query&format=json&formatversion=2&prop=imageinfo&iiprop=url%7Cmime%7Cextmetadata&iiurlwidth=640&iiextmetadatafilter=Artist%7CLicenseShortName%7CLicense%7CLicenseUrl%7CNonFree&iiextmetadatalanguage=en&titles=File%3AM-408116720.jpg"
+  },
+  "wd-entity-Q359924": {
+    "bytes": 2539,
+    "content_type": "application/json",
+    "file": "wd-entity-Q359924.json",
+    "note": "Golden Gate Hotel and Casino (a place with coordinates and an image, P18 M-408116720.jpg), trimmed as the note above says; recorded 12,883 bytes.",
+    "recorded_at": "2026-11-10T09:07:00+00:00",
+    "sha256": "48bc2366df90117c57cd379dc8844ceae20cea86736105269ab9d0793697e6ea",
+    "status": 200,
+    "url": "https://www.wikidata.org/wiki/Special:EntityData/Q359924.json"
+  }
+}

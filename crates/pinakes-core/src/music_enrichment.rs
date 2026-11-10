@@ -43,6 +43,7 @@
 //! one ends the description unread, so a busy Wikipedia never puts a shorter text in place of a
 //! stored article's. Every request goes through the egress, whose shared flights and cache make
 //! concurrent cards of one entity ask once.
+pub use crate::wikimedia::Found;
 use crate::{
     hubs::{
         musicbrainz::{self, own_item, OwnItem as Own},
@@ -73,15 +74,6 @@ pub const DISCOGS_LOOKUPS: usize = 2;
 /// refresh.
 const CACHE_SECS: u64 = 3600;
 
-/// One field's outcome.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Found {
-    Value(String, Credit),
-    /// Nothing to show: the card keeps MusicBrainz's own value.
-    Missing,
-    /// Not read for a transient failure: the card keeps its stored value.
-    Unread,
-}
 /// The image and description found for one entity.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Enrichment {
@@ -823,7 +815,8 @@ pub fn excerpt(text: &str, max: usize) -> (String, bool) {
     (format!("{}…", text[..word].trim_end()), true)
 }
 
-/// The item's image (`P18`), when Commons says it is free to show.
+/// The item's image (`P18`), when Commons says it is free to show
+/// (`wikimedia::credited_image`).
 async fn image(egress: &Egress, mbid: &str, qid: &str, width: u32) -> Found {
     let files = match gone_is(wikidata::files(egress, qid, "P18").await, vec![]) {
         Ok(files) => files,
@@ -835,78 +828,7 @@ async fn image(egress: &Egress, mbid: &str, qid: &str, width: u32) -> Found {
     let Some(name) = files.first().and_then(|f| crate::wikimedia::file_name(f)) else {
         return Found::Missing;
     };
-    let fetched = match egress
-        .discover(
-            &crate::wikimedia::file_query(&name, width),
-            &json_options(),
-            CACHE_SECS,
-        )
-        .await
-    {
-        Ok(fetched) if fetched.status == 200 => fetched,
-        Ok(fetched) if matches!(fetched.status, 404 | 410) => return Found::Missing,
-        // A wait, or a refusal of this client: no answer about the file.
-        Ok(fetched) => {
-            tracing::info!(
-                mbid,
-                status = fetched.status,
-                "music enrichment: Commons did not answer"
-            );
-            return Found::Unread;
-        }
-        Err(error) => {
-            unread(mbid, "commons_file", &error);
-            return Found::Unread;
-        }
-    };
-    // The author is HTML: read off the runtime's threads, as every HTML parse is.
-    let body = fetched.body;
-    let file = name.clone();
-    // `None`: not JSON; `Some(None)`: an answer about another file.
-    let check = crate::resolver::html::blocking(move || {
-        serde_json::from_slice::<Value>(&body)
-            .ok()
-            .map(|v| crate::wikimedia::free_file(&v, &file))
-    })
-    .await
-    .unwrap_or_else(|error| {
-        unread(mbid, "commons_parse", &error);
-        None
-    });
-    match check {
-        Some(Some(crate::wikimedia::FileCheck::Free(file))) => {
-            let credit = Credit {
-                field: CreditField::Image,
-                provider: CreditProvider::WikimediaCommons,
-                source_url: file.page,
-                author: file.author,
-                license: file.license.id,
-                license_url: file.license.url,
-                lang: None,
-                excerpted: false,
-                modified: false,
-                subject: None,
-            };
-            match credit.bounded() {
-                Some(credit) => Found::Value(file.image, credit),
-                None => Found::Missing,
-            }
-        }
-        Some(Some(crate::wikimedia::FileCheck::Refused(reason))) => {
-            tracing::debug!(mbid, reason, "music enrichment: Commons file refused");
-            Found::Missing
-        }
-        Some(Some(crate::wikimedia::FileCheck::Missing)) => Found::Missing,
-        // Nothing verifies the file: no image.
-        Some(None) => {
-            tracing::info!(mbid, "music enrichment: Commons answered for another file");
-            Found::Missing
-        }
-        None => {
-            tracing::info!(mbid, "music enrichment: Commons' answer is not JSON");
-            Found::Unread
-        }
-    }
+    crate::wikimedia::credited_image(egress, &name, width, mbid).await
 }
 
 #[cfg(test)]
