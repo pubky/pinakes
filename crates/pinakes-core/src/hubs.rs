@@ -286,6 +286,28 @@ pub mod musicbrainz {
         pub release_type: Option<String>,
         /// Release groups and recordings: the date of the first release, as `begin`.
         pub first_release_date: Option<String>,
+        /// Release groups, recordings and artists: their rating on MusicBrainz (`inc=ratings`).
+        /// A release has none of its own (its answer nests its release group's, which is not
+        /// read as the release's).
+        pub rating: Option<Rating>,
+        /// Releases: whether the Cover Art Archive holds a front cover for it that it shows
+        /// (`cover-art-archive`: `front`, and not `darkened`).
+        pub cover_art_front: bool,
+    }
+    /// A MusicBrainz rating: the average of its users' votes, 0 to 5, and how many voted.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct Rating {
+        pub value: f64,
+        pub votes: u64,
+    }
+    /// An entity's `rating` object: `None` when nobody voted (MusicBrainz then gives a `null`
+    /// value and a count of 0) or the value is missing or not within 0 to 5.
+    fn rating(v: &Value) -> Option<Rating> {
+        let votes = v["votes-count"].as_u64().filter(|n| *n >= 1)?;
+        let value = v["value"]
+            .as_f64()
+            .filter(|x| x.is_finite() && (0.0..=5.0).contains(x))?;
+        Some(Rating { value, votes })
     }
     /// A partial date as MusicBrainz writes it: `YYYY`, `YYYY-MM` or `YYYY-MM-DD`.
     fn date(v: &Value) -> Option<String> {
@@ -335,6 +357,12 @@ pub mod musicbrainz {
             first_release_date: matches!(kind, MbKind::ReleaseGroup | MbKind::Recording)
                 .then(|| date(&v["first-release-date"]))
                 .flatten(),
+            rating: (kind != MbKind::Release)
+                .then(|| rating(&v["rating"]))
+                .flatten(),
+            cover_art_front: kind == MbKind::Release
+                && v["cover-art-archive"]["front"] == true
+                && v["cover-art-archive"]["darkened"] != true,
         }
     }
     /// What a URL is linked to: each current target with its level.
@@ -447,14 +475,44 @@ pub mod musicbrainz {
             about: about(kind, v),
         })
     }
-    /// What an entity read asks for besides the entity: its URL relations and genres, and a
-    /// recording's ISRCs, a release's release group and the artist credit.
+    /// What an entity read asks for besides the entity: its URL relations and genres, a
+    /// recording's ISRCs, a release's release group and the artist credit, and the rating of
+    /// the levels MusicBrainz rates (recordings, release groups, artists; a release has no
+    /// rating of its own).
     fn inc(kind: MbKind) -> &'static str {
         match kind {
-            MbKind::Recording => "url-rels+isrcs+artist-credits+genres",
+            MbKind::Recording => "url-rels+isrcs+artist-credits+genres+ratings",
             MbKind::Release => "url-rels+release-groups+artist-credits+genres",
-            MbKind::ReleaseGroup => "url-rels+artist-credits+genres",
-            MbKind::Artist => "url-rels+genres",
+            MbKind::ReleaseGroup => "url-rels+artist-credits+genres+ratings",
+            MbKind::Artist => "url-rels+genres+ratings",
+        }
+    }
+    /// The Wikidata item an entity's own URL relations name ([`own_item`]).
+    #[derive(Clone, Debug, PartialEq)]
+    pub enum OwnItem {
+        /// Exactly one item.
+        Item(String),
+        /// No `wikidata` relation.
+        None,
+        /// `wikidata` relations that name several items, or none that is an item.
+        Unclear,
+    }
+    /// The item `urls`' current `wikidata` relations name, by its exact Q-id
+    /// (`wikidata::item_link`); a relation that names no item (a property, a lexeme, a
+    /// malformed link) names nothing, and when no relation names an item the answer is
+    /// [`OwnItem::Unclear`].
+    pub fn own_item(urls: &[UrlRelation]) -> OwnItem {
+        let relations: Vec<&UrlRelation> = urls.iter().filter(|r| r.kind == "wikidata").collect();
+        let mut items: Vec<String> = relations
+            .iter()
+            .filter_map(|r| super::wikidata::item_link(&r.url).map(|(qid, _)| qid))
+            .collect();
+        items.sort();
+        items.dedup();
+        match items.as_slice() {
+            [one] => OwnItem::Item(one.clone()),
+            _ if relations.is_empty() => OwnItem::None,
+            _ => OwnItem::Unclear,
         }
     }
     /// The URL lookup for `link` at the web service `base` (exact; MusicBrainz stores URLs as
@@ -825,6 +883,120 @@ pub mod musicbrainz {
         Ok(get(egress, &entity_lookup(base, kind, &id), "musicbrainz")
             .await?
             .and_then(|v| parse_entity(kind, &v)))
+    }
+}
+
+pub mod cover_art {
+    //! The Cover Art Archive (MusicBrainz's): the front cover of a release or a release group,
+    //! by its MBID.
+    //!
+    //! One request a cover: `GET /{release|release-group}/{mbid}/front-500` with the redirect
+    //! kept, not followed. The archive answers a cover it holds with a redirect to the file on
+    //! archive.org, whose name carries the MBID of the release the cover is of
+    //! (`https://archive.org/download/mbid-{release}/mbid-{release}-{image id}_thumb500.jpg`),
+    //! and a release or release group without one with 404. A release group's cover is one of
+    //! its releases', which the archive chooses. The image a card stores is that release's
+    //! `front-500` thumbnail on the archive's own host (its documented address, served over
+    //! https), so the image and its credit name the same release; nothing is downloaded.
+    use super::*;
+
+    /// The archive's API.
+    pub const BASE: &str = "https://coverartarchive.org";
+    /// The address of the `kind` entity `mbid`'s front cover, 500 pixels wide: a release's or a
+    /// release group's (`None` for another kind, or an MBID that is not one).
+    pub fn front_500(kind: MbKind, mbid: &str) -> Option<String> {
+        let mbid = super::mbid(mbid)?;
+        matches!(kind, MbKind::Release | MbKind::ReleaseGroup)
+            .then(|| format!("{BASE}/{}/{mbid}/front-500", kind.as_str()))
+    }
+    /// A front cover the archive holds.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct Front {
+        /// The 500-pixel thumbnail of the release's front cover ([`front_500`]).
+        pub image: String,
+        /// The release the cover is of (for a release, itself).
+        pub release: String,
+    }
+    /// The release a redirect to a front cover's 500-pixel thumbnail names, written exactly as
+    /// `https://archive.org/download/mbid-{release}/mbid-{release}-{image id}_thumb500.jpg`
+    /// (the same canonical MBID twice, an image ID of digits); `None` for any other address.
+    pub fn redirect_release(location: &str) -> Option<String> {
+        let url = url::Url::parse(location).ok()?;
+        if url.scheme() != "https"
+            || url.host_str() != Some("archive.org")
+            || url.port().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return None;
+        }
+        let segments: Vec<&str> = url.path_segments()?.collect();
+        let ["download", item, file] = segments.as_slice() else {
+            return None;
+        };
+        let release = super::mbid(item.strip_prefix("mbid-")?)?;
+        // The item's own name: canonical MBIDs only (an upper-case one is another spelling).
+        if *item != format!("mbid-{release}") {
+            return None;
+        }
+        let image_id = file
+            .strip_prefix(&format!("{item}-"))?
+            .strip_suffix("_thumb500.jpg")?;
+        ((1..=20).contains(&image_id.len()) && image_id.bytes().all(|b| b.is_ascii_digit()))
+            .then_some(release)
+    }
+    /// The archive's answer to a `front_500` request for the `kind` entity `mbid`: a redirect to
+    /// a file of a release ([`redirect_release`]) is its front cover; for a release, a file of
+    /// that release only. 404 (and 410) is none. 429 and 5xx are a retry; any other answer (a
+    /// redirect to another address, another status) proves nothing and is an error, so the
+    /// caller keeps what it had.
+    pub fn read_front(kind: MbKind, mbid: &str, fetched: &Fetched) -> Result<Option<Front>> {
+        match fetched.status {
+            301 | 302 | 303 | 307 | 308 => {}
+            404 | 410 => return Ok(None),
+            429 | 500..=599 => {
+                return Err(RetryLater {
+                    class: "cover_art_busy",
+                    seconds: fetched.retry_after_secs.clamp(60, 3600),
+                }
+                .into())
+            }
+            status => bail!("the Cover Art Archive answered {status}"),
+        }
+        let Some(release) = fetched.location.as_deref().and_then(redirect_release) else {
+            bail!("the Cover Art Archive redirected to an address that names no release's cover");
+        };
+        if kind == MbKind::Release && super::mbid(mbid).as_deref() != Some(release.as_str()) {
+            bail!("the Cover Art Archive redirected to another release's cover");
+        }
+        match front_500(MbKind::Release, &release) {
+            Some(image) => Ok(Some(Front { image, release })),
+            None => bail!("no cover address for release {release}"),
+        }
+    }
+    fn options() -> FetchOptions {
+        FetchOptions {
+            accept: Some("image/*".into()),
+            keep_redirect: true,
+            ..Default::default()
+        }
+    }
+    /// The front cover of release or release group `mbid` ([`read_front`]), in one request; an
+    /// answer is kept an hour. `None` for another kind of entity, without a request.
+    pub async fn front(egress: &Egress, kind: MbKind, mbid: &str) -> Result<Option<Front>> {
+        let Some(url) = front_500(kind, mbid) else {
+            return Ok(None);
+        };
+        let fetched = egress.discover(&url, &options(), 3600).await?;
+        let front = read_front(kind, mbid, &fetched);
+        if front
+            .as_ref()
+            .err()
+            .is_some_and(|e| e.downcast_ref::<RetryLater>().is_some())
+        {
+            egress.shorten_discovery(&url, &options(), 1).await?;
+        }
+        front
     }
 }
 
@@ -1585,6 +1757,219 @@ mod tests {
             let other = json(&answer(403), hub).unwrap_err();
             assert!(other.downcast_ref::<Gone>().is_none(), "{other:#}");
         }
+    }
+
+    /// The archive's redirect names the release a cover is of only when it is written exactly
+    /// as archive.org writes a front cover's 500-pixel thumbnail; the card's image is then that
+    /// release's `front-500` on the archive's own host. A release's cover is its own file only.
+    #[test]
+    fn a_cover_is_the_release_its_redirect_names() {
+        const RG: &str = "8e8a594f-2175-38c7-a871-abb68ec363e7";
+        const R: &str = "e7ba3cb7-a074-45ee-870f-3baeb6d3e8bf";
+        let file = |item: &str, name: &str| format!("https://archive.org/download/{item}/{name}");
+        let recorded = file(
+            &format!("mbid-{R}"),
+            &format!("mbid-{R}-12708426541_thumb500.jpg"),
+        );
+        assert_eq!(cover_art::redirect_release(&recorded).as_deref(), Some(R));
+        let upper = R.to_ascii_uppercase();
+        for refused in [
+            recorded.replace("https:", "http:"),
+            recorded.replace("archive.org", "evil.example"),
+            recorded.replace("archive.org", "ia800.us.archive.org"),
+            recorded.replace("archive.org/", "archive.org:8443/"),
+            format!("{recorded}?x=1"),
+            recorded.replace("_thumb500", "_thumb250"),
+            recorded.replace("12708426541", "12708426541a"),
+            recorded.replace("12708426541", ""),
+            file(
+                &format!("mbid-{R}"),
+                "mbid-00000000-0000-4000-8000-000000000001-1_thumb500.jpg",
+            ),
+            file(
+                &format!("mbid-{upper}"),
+                &format!("mbid-{upper}-1_thumb500.jpg"),
+            ),
+            format!("https://archive.org/download/mbid-{R}/x/mbid-{R}-1_thumb500.jpg"),
+            "not a url".to_owned(),
+        ] {
+            assert_eq!(cover_art::redirect_release(&refused), None, "{refused}");
+        }
+        let answer = |status: u16, location: Option<&str>| Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            validators: Default::default(),
+            url: url::Url::parse("https://coverartarchive.org/x").unwrap(),
+            status,
+            retry_after_secs: 120,
+            location: location.map(str::to_owned),
+            content_type: "text/plain".into(),
+            body: vec![],
+        };
+        let front = cover_art::read_front(MbKind::ReleaseGroup, RG, &answer(307, Some(&recorded)))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            front,
+            cover_art::Front {
+                image: format!("https://coverartarchive.org/release/{R}/front-500"),
+                release: R.to_owned(),
+            }
+        );
+        // A release's cover is its own file, never another release's.
+        assert!(cover_art::read_front(MbKind::Release, RG, &answer(307, Some(&recorded))).is_err());
+        assert!(
+            cover_art::read_front(MbKind::Release, R, &answer(307, Some(&recorded)))
+                .unwrap()
+                .is_some()
+        );
+        for none in [answer(404, None), answer(410, None)] {
+            assert!(cover_art::read_front(MbKind::ReleaseGroup, RG, &none)
+                .unwrap()
+                .is_none());
+        }
+        // An answer that proves nothing is an error (the stored cover stays), not a retry.
+        for unclear in [
+            answer(200, None),
+            answer(403, None),
+            answer(307, None),
+            answer(307, Some("https://example.org/cover.jpg")),
+        ] {
+            let err = cover_art::read_front(MbKind::ReleaseGroup, RG, &unclear).unwrap_err();
+            assert!(err.downcast_ref::<RetryLater>().is_none(), "{err:#}");
+        }
+        for busy in [429, 503] {
+            let err =
+                cover_art::read_front(MbKind::ReleaseGroup, RG, &answer(busy, None)).unwrap_err();
+            assert_eq!(err.downcast_ref::<RetryLater>().unwrap().seconds, 120);
+        }
+        // Only releases and release groups have covers, by a canonical MBID.
+        assert_eq!(
+            cover_art::front_500(MbKind::ReleaseGroup, &RG.to_ascii_uppercase()).as_deref(),
+            Some("https://coverartarchive.org/release-group/8e8a594f-2175-38c7-a871-abb68ec363e7/front-500")
+        );
+        assert_eq!(cover_art::front_500(MbKind::Recording, RG), None);
+        assert_eq!(cover_art::front_500(MbKind::Artist, RG), None);
+        assert_eq!(cover_art::front_500(MbKind::Release, "8e8a594f"), None);
+    }
+
+    /// A rating needs a vote and a value within 0 to 5; a release's answer nests its release
+    /// group's rating, which is not the release's.
+    #[test]
+    fn a_rating_needs_votes_and_a_value_in_range() {
+        let entity = |kind: MbKind, rating: Value| {
+            let mut v =
+                serde_json::json!({"id": "8e8a594f-2175-38c7-a871-abb68ec363e7", "title": "T"});
+            v["rating"] = rating;
+            musicbrainz::parse_entity(kind, &v).unwrap().about.rating
+        };
+        use serde_json::json;
+        assert_eq!(
+            entity(
+                MbKind::ReleaseGroup,
+                json!({"value": 4.45, "votes-count": 43})
+            ),
+            Some(musicbrainz::Rating {
+                value: 4.45,
+                votes: 43
+            })
+        );
+        for kind in [MbKind::Artist, MbKind::Recording] {
+            assert!(entity(kind, json!({"value": 5, "votes-count": 1})).is_some());
+        }
+        for none in [
+            json!({"value": null, "votes-count": 0}),
+            json!({"value": 4.0, "votes-count": 0}),
+            json!({"value": null, "votes-count": 3}),
+            json!({"value": 5.5, "votes-count": 3}),
+            json!({"value": -1, "votes-count": 3}),
+            json!({"value": "4", "votes-count": 3}),
+            json!({"votes-count": 3}),
+            Value::Null,
+        ] {
+            assert_eq!(entity(MbKind::ReleaseGroup, none.clone()), None, "{none}");
+        }
+        assert_eq!(
+            entity(MbKind::Release, json!({"value": 4.45, "votes-count": 43})),
+            None
+        );
+        let release = json!({"id": "4c8af71f-5746-4981-92d7-0d6c64db1155", "title": "T",
+            "release-group": {"id": "8e8a594f-2175-38c7-a871-abb68ec363e7",
+                              "rating": {"value": 4.45, "votes-count": 43}},
+            "cover-art-archive": {"front": true, "darkened": false}});
+        let release = musicbrainz::parse_entity(MbKind::Release, &release).unwrap();
+        assert_eq!(release.about.rating, None);
+        assert!(release.about.cover_art_front);
+    }
+
+    /// The Cover Art Archive shows a release's front cover when MusicBrainz says it has one that
+    /// is not darkened; only a release's answer says so.
+    #[test]
+    fn a_release_says_whether_the_archive_shows_its_front_cover() {
+        use serde_json::json;
+        let front = |kind: MbKind, caa: Value| {
+            let v = json!({"id": "4c8af71f-5746-4981-92d7-0d6c64db1155", "title": "T",
+                           "cover-art-archive": caa});
+            musicbrainz::parse_entity(kind, &v)
+                .unwrap()
+                .about
+                .cover_art_front
+        };
+        assert!(front(
+            MbKind::Release,
+            json!({"front": true, "darkened": false, "count": 2})
+        ));
+        assert!(!front(MbKind::Release, json!({"front": false, "count": 1})));
+        assert!(!front(
+            MbKind::Release,
+            json!({"front": true, "darkened": true})
+        ));
+        assert!(!front(MbKind::Release, Value::Null));
+        assert!(!front(MbKind::ReleaseGroup, json!({"front": true})));
+    }
+
+    /// The Wikidata item an entity's relations name: one item, however often; several, or
+    /// only links to no item, are unclear; no relation is none.
+    #[test]
+    fn an_entitys_own_item_is_one_item_link() {
+        let rel = |kind: &str, url: &str| musicbrainz::UrlRelation {
+            kind: kind.into(),
+            url: url.into(),
+        };
+        use musicbrainz::{own_item, OwnItem};
+        let one = rel("wikidata", "https://www.wikidata.org/wiki/Q283221");
+        assert_eq!(
+            own_item(std::slice::from_ref(&one)),
+            OwnItem::Item("Q283221".into())
+        );
+        assert_eq!(
+            own_item(&[
+                one.clone(),
+                rel("wikidata", "https://m.wikidata.org/wiki/Q283221"),
+                rel("wikidata", "https://www.wikidata.org/wiki/Property:P18"),
+            ]),
+            OwnItem::Item("Q283221".into())
+        );
+        assert_eq!(
+            own_item(&[one, rel("wikidata", "https://www.wikidata.org/wiki/Q1")]),
+            OwnItem::Unclear
+        );
+        for malformed in [
+            "https://www.wikidata.org/wiki/Property:P18",
+            "https://www.wikidata.org/wiki/Q0283221",
+            "https://example.org/wiki/Q283221",
+            "https://www.wikidata.org/wiki/L1",
+        ] {
+            assert_eq!(
+                own_item(&[rel("wikidata", malformed)]),
+                OwnItem::Unclear,
+                "{malformed}"
+            );
+        }
+        assert_eq!(
+            own_item(&[rel("discogs", "https://www.wikidata.org/wiki/Q283221")]),
+            OwnItem::None
+        );
     }
 
     #[test]

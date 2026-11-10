@@ -11,7 +11,9 @@ use crate::music_sources::*;
 
 /// A MusicBrainz page as its own hub: a recording's, release's, release group's or artist's page
 /// carries that entity's keys and facts and lists its links on music services at its level, as
-/// the `musicbrainz` source does for a service link MusicBrainz relates to the entity. An ISRC's
+/// the `musicbrainz` source does for a service link MusicBrainz relates to the entity. An
+/// artist's or release group's page also keys the Wikidata item its own relations name, when
+/// that item, read back, is exactly its own (`own_wikidata_key`). An ISRC's
 /// page keys the ISRC and the one recording MusicBrainz gives it to, or the duplicates that
 /// agree as one recording (`music_sources::agree`); an ISRC on recordings that disagree names
 /// none of them (as a service's page ISRC), so its page keeps it as a fact only.
@@ -73,6 +75,37 @@ impl MusicBrainzEntitySource {
                 &[],
             )
             .await?;
+            // An artist's or release group's own Wikidata item (the entity is the same answer,
+            // from the egress's cache): a key like its MBID. A Wikidata that fails for now leaves
+            // MusicBrainz's part standing, keeps the item key this source recorded before, and
+            // brings the run back after its wait.
+            if !found.keys.is_empty() {
+                if let Some(entity) = musicbrainz::entity(&cx.egress, base, kind, &mbid).await? {
+                    match own_wikidata_key(&cx.egress, &entity).await {
+                        Ok(key) => found.keys.extend(key),
+                        Err(error) => {
+                            let wait = error
+                                .chain()
+                                .find_map(|c| c.downcast_ref::<crate::resolver::RetryLater>())
+                                .map_or(900, |r| r.seconds.max(60));
+                            found.retry_after = Some(std::time::Duration::from_secs(wait));
+                            found.keys.extend(
+                                subject
+                                    .keys
+                                    .iter()
+                                    .filter(|(key, source)| {
+                                        key.starts_with("wikidata:")
+                                            && source == "musicbrainz_entity"
+                                    })
+                                    .map(|(key, _)| Key {
+                                        key: key.clone(),
+                                        via: "musicbrainz".into(),
+                                    }),
+                            );
+                        }
+                    }
+                }
+            }
             // A merged entity answers its old MBID with the one it was merged into: the page keys
             // that one, and keeps the old as a fact, so `key=mbid:{old}` still finds it.
             if found

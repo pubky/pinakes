@@ -613,6 +613,8 @@ pub(crate) const ABOUT_FACTS: &[&str] = &[
     "release_type",
     "first_release_date",
     "genre",
+    "rating",
+    "rating_count",
 ];
 /// At most this many genres in the `genre` fact.
 const GENRES: usize = 3;
@@ -622,8 +624,9 @@ const GENRES: usize = 3;
 /// (`country_code`, ISO 3166-1), area and life span (`begin_date`, `end_date`); a release
 /// group's primary type (`release_type`); a release group's or recording's
 /// `first_release_date` (dates as MusicBrainz gives them: `YYYY`, `YYYY-MM` or `YYYY-MM-DD`);
-/// and its top genres (`genre`: at most three, most votes first, a tie by name, joined with
-/// "; ").
+/// its top genres (`genre`: at most three, most votes first, a tie by name, joined with "; ");
+/// and a release group's, recording's or artist's rating on MusicBrainz (`rating`, 0 to 5 with
+/// one decimal, and `rating_count`, the number of votes; neither when nobody voted).
 pub(crate) fn about_facts(entity: &musicbrainz::Entity) -> Vec<(&'static str, String)> {
     let about = &entity.about;
     let mut genres: Vec<&(String, u64)> = about.genres.iter().filter(|(_, n)| *n >= 1).collect();
@@ -653,6 +656,8 @@ pub(crate) fn about_facts(entity: &musicbrainz::Entity) -> Vec<(&'static str, St
         ("release_type", about.release_type.clone()),
         ("first_release_date", about.first_release_date.clone()),
         ("genre", Some(genre)),
+        ("rating", about.rating.map(|r| rating_text(r.value))),
+        ("rating_count", about.rating.map(|r| r.votes.to_string())),
     ]
     .into_iter()
     .filter_map(|(name, value)| {
@@ -661,6 +666,73 @@ pub(crate) fn about_facts(entity: &musicbrainz::Entity) -> Vec<(&'static str, St
             .map(|v| (name, v))
     })
     .collect()
+}
+
+/// A rating of 0 to 5 with one decimal, rounded half away from zero (`4.45` is `4.5`).
+fn rating_text(value: f64) -> String {
+    let tenths = (value * 10.0).round() as u64;
+    format!("{}.{}", tenths / 10, tenths % 10)
+}
+
+/// The Wikidata item a MusicBrainz artist or release group may be keyed by: the one item its own
+/// current `wikidata` URL relations name (`musicbrainz::own_item`, the item link parsed by
+/// `wikidata::item_link`). Relations that name several items name none. A recording or a
+/// release has none: MusicBrainz relates Wikidata items to artists and release groups (and
+/// works), and an item a recording's or release's relation named would be its song's or its
+/// album's, another level's (a key never crosses levels).
+pub(crate) fn own_wikidata_item(entity: &musicbrainz::Entity) -> Option<String> {
+    if !matches!(entity.kind, MbKind::Artist | MbKind::ReleaseGroup) {
+        return None;
+    }
+    match musicbrainz::own_item(&entity.urls) {
+        musicbrainz::OwnItem::Item(qid) => Some(qid),
+        musicbrainz::OwnItem::None | musicbrainz::OwnItem::Unclear => None,
+    }
+}
+/// The `wikidata:` key of a MusicBrainz artist or release group ([`own_wikidata_item`], made by
+/// `hubs::key::wikidata` as every producer makes it), when that item, read back, is exactly an
+/// item of the entity's kind (`music_enrichment::ItemKind::of`: an artist's for an artist, a
+/// release group's for a release group) that names this MBID and no other for its level (P434,
+/// P436). A key is stricter than the enrichment's text and image: an item that is a work's too
+/// (a single's song's, which a track can be keyed by through its streaming IDs) or carries no
+/// identifier yet keys nothing, so a key never joins an album to a song or an artist to anything
+/// but itself. An item that is unknown, gone or too large to read keys nothing; a busy Wikidata
+/// is an error.
+pub(crate) async fn own_wikidata_key(
+    egress: &crate::resolver::egress::Egress,
+    entity: &musicbrainz::Entity,
+) -> Result<Option<Key>> {
+    let Some(qid) = own_wikidata_item(entity) else {
+        return Ok(None);
+    };
+    let item = match wikidata::items(egress, std::slice::from_ref(&qid)).await {
+        Ok(items) => items.into_iter().find(|i| i.qid == qid),
+        Err(e)
+            if crate::resolver::egress::over_cap(&e)
+                || e.downcast_ref::<crate::hubs::Gone>().is_some() =>
+        {
+            None
+        }
+        Err(e) => return Err(e),
+    };
+    Ok(item
+        .filter(|item| keys_entity(entity, item))
+        .and_then(|item| hubs::key::wikidata(&item.qid))
+        .map(|key| Key {
+            key,
+            via: "musicbrainz".into(),
+        }))
+}
+/// Whether `item` may key `entity` ([`own_wikidata_key`]): exactly of its kind, naming this one
+/// MBID at its level; for a release group, naming no recording either (P4404). An album's item
+/// that also carries a recording's ID is a single's track's too: the `wikidata` source keys a
+/// streaming track by it ([`recording_item`]), so as the album's key it would join the track to
+/// the album.
+pub(crate) fn keys_entity(entity: &musicbrainz::Entity, item: &wikidata::Item) -> bool {
+    use crate::music_enrichment::{mbid_property, ItemKind};
+    ItemKind::of(item) == ItemKind::of_entity(entity.kind)
+        && item.id(mbid_property(entity.kind)) == [entity.mbid.as_str()]
+        && (entity.kind != MbKind::ReleaseGroup || item.id("P4404").is_empty())
 }
 
 /// The longest artist credit (or other fact) a MusicBrainz card stores as an attribute: what
@@ -1265,7 +1337,8 @@ mod tests {
         serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
     }
     /// What MusicBrainz says about an artist, an album and a recording, as the card's facts:
-    /// raw codes, dates as MusicBrainz writes them, the top three genres (a tie by name).
+    /// raw codes, dates as MusicBrainz writes them, the top three genres (a tie by name), the
+    /// rating when people voted (Sefa: nobody did).
     #[test]
     fn a_musicbrainz_card_states_what_musicbrainz_says_about_it() {
         let facts = |kind: MbKind, file: &str| {
@@ -1316,15 +1389,77 @@ mod tests {
                 ("release_type", "Album"),
                 ("first_release_date", "1959-08-17"),
                 ("genre", "jazz; cool jazz; modal jazz"),
+                ("rating", "4.5"),
+                ("rating_count", "43"),
             ])
         );
         let song = facts(MbKind::Recording, "mb-recording-get-lucky.json");
         assert_eq!(song["first_release_date"], "2013-05-17");
         assert_eq!(song["genre"], "disco; funk; electronic", "a tie by name");
         assert_eq!(song.get("disambiguation"), None, "MusicBrainz's is empty");
+        assert_eq!((&*song["rating"], &*song["rating_count"]), ("3.9", "25"));
         // Every fact is an attribute the web route keeps.
         for name in ABOUT_FACTS {
             assert!(crate::resolver::web::ATTRIBUTES.contains(name), "{name}");
+        }
+    }
+    /// A rating is a fact with one decimal, rounded half away from zero, beside its count.
+    #[test]
+    fn a_rating_has_one_decimal() {
+        for (value, text) in [
+            (4.45, "4.5"),
+            (4.75, "4.8"),
+            (3.9, "3.9"),
+            (5.0, "5.0"),
+            (0.0, "0.0"),
+            (2.04, "2.0"),
+        ] {
+            assert_eq!(rating_text(value), text, "{value}");
+        }
+    }
+    /// An artist's or release group's own `wikidata` relation names the item it may be keyed
+    /// by; a recording's or a release's never does, and relations that name no item, or
+    /// several, name none.
+    #[test]
+    fn own_wikidata_items_stay_at_their_level() {
+        let entity = |kind: MbKind, urls: &[&str]| musicbrainz::Entity {
+            kind,
+            mbid: "8e8a594f-2175-38c7-a871-abb68ec363e7".into(),
+            title: None,
+            urls: urls
+                .iter()
+                .map(|u| musicbrainz::UrlRelation {
+                    kind: "wikidata".into(),
+                    url: (*u).into(),
+                })
+                .collect(),
+            isrcs: vec![],
+            barcode: None,
+            release_group: None,
+            artist: None,
+            artist_ids: vec![],
+            disambiguation: None,
+            video: false,
+            length_ms: None,
+            artist_type: None,
+            about: Default::default(),
+        };
+        let item = "https://www.wikidata.org/wiki/Q283221";
+        for kind in [MbKind::Artist, MbKind::ReleaseGroup] {
+            assert_eq!(
+                own_wikidata_item(&entity(kind, &[item])).as_deref(),
+                Some("Q283221")
+            );
+        }
+        for kind in [MbKind::Recording, MbKind::Release] {
+            assert!(own_wikidata_item(&entity(kind, &[item])).is_none());
+        }
+        for urls in [
+            &["https://www.wikidata.org/wiki/Property:P18"][..],
+            &[item, "https://www.wikidata.org/wiki/Q1"][..],
+            &[][..],
+        ] {
+            assert!(own_wikidata_item(&entity(MbKind::ReleaseGroup, urls)).is_none());
         }
     }
     /// Values out of form are left out; a value over the bound is left out whole, and the genre

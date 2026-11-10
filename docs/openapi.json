@@ -109,7 +109,7 @@
             "type": "integer"
           },
           "credits": {
-            "description": "Where `image` and `description` came from when Pinakes added them from another source\nthan the link itself (a MusicBrainz card's Wikipedia summary and Commons image): one\ncredit per such field, with its source page, author and licence, to show with the value\n(docs/api.md, Credits). At most 4; `[]` when none. A field without a credit came from the\nlink itself.",
+            "description": "Where `image` and `description` came from when Pinakes added them from another source\nthan the link itself (a MusicBrainz card's Wikipedia or Wikidata text, its Commons image,\nor an album's front cover from the Cover Art Archive; a Wikidata item's card's Commons\nimage): one credit per such field, with its\nsource page and, when it has them, its author and licence (a cover has neither: both are\nnull), to show with the value (docs/api.md, Credits). At most 4; `[]` when none. A field\nwithout a credit came from the link itself.",
             "items": {
               "$ref": "#/components/schemas/Credit"
             },
@@ -545,7 +545,7 @@
         "description": "Where one of the card's `image` or `description` came from when Pinakes added it from another\nsource than the link itself, and the licence it is used under (docs/api.md, Credits). Show it\nwith the value: the author, the licence (linked to `license_url`) and the source page.",
         "properties": {
           "author": {
-            "description": "Who made it, plain text of at most 256 bytes: \"Wikipedia contributors\" for an article, the\nfile's author for an image. Null for a public-domain or CC0 file that names none, and for\na Wikidata description (CC0).",
+            "description": "Who made it, plain text of at most 256 bytes: \"Wikipedia contributors\" for an article, the\nfile's author for an image. Null for a public-domain or CC0 file that names none, for a\nWikidata description (CC0), and for a cover from the Cover Art Archive.",
             "type": [
               "string",
               "null"
@@ -567,11 +567,14 @@
             ]
           },
           "license": {
-            "description": "An SPDX licence ID (`CC-BY-SA-4.0`, `CC-BY-2.0`, `CC0-1.0`), or `public-domain`.",
-            "type": "string"
+            "description": "An SPDX licence ID (`CC-BY-SA-4.0`, `CC-BY-2.0`, `CC0-1.0`), or `public-domain`. Null for\na cover from the Cover Art Archive: cover art is its label's, shown as a service shows an\nalbum's cover, and no licence is given (`license_url` is null too).",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "license_url": {
-            "description": "The licence's text: an `https:` URL; null when it has none (public domain).",
+            "description": "The licence's text: an `https:` URL; null when it has none (public domain, a cover from\nthe Cover Art Archive).",
             "type": [
               "string",
               "null"
@@ -585,7 +588,7 @@
             "$ref": "#/components/schemas/CreditProvider"
           },
           "source_url": {
-            "description": "The page the value came from: the Wikipedia article, the file's page on Commons, or the\nitem's page on Wikidata. An `https:` URL of at most 1,024 bytes.",
+            "description": "The page the value came from: the Wikipedia article, the file's page on Commons, the\nitem's page on Wikidata, or the cover art page of the release on MusicBrainz. An `https:`\nURL of at most 1,024 bytes.",
             "type": "string"
           },
           "subject": {
@@ -600,7 +603,6 @@
           "field",
           "provider",
           "source_url",
-          "license",
           "excerpted",
           "modified"
         ],
@@ -619,7 +621,8 @@
         "enum": [
           "wikipedia",
           "wikimedia_commons",
-          "wikidata"
+          "wikidata",
+          "cover_art_archive"
         ],
         "type": "string"
       },

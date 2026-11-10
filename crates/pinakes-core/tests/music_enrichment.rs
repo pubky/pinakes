@@ -106,6 +106,98 @@ struct Mode {
     relation: Option<(&'static str, &'static str)>,
     /// A request whose host, path and query hold this answers 410 Gone.
     gone: Option<&'static str>,
+    /// How the Cover Art Archive answers.
+    cover_art: CoverArt,
+    /// Kind of Blue's release says the archive has no front cover for it
+    /// (`cover-art-archive.front` false).
+    release_without_front: bool,
+    /// Kind of Blue's item (Q283221) has an image claim: Miles Davis's recorded one.
+    album_has_image: bool,
+    /// Kind of Blue's release group's `wikidata` relation is a link to a property, no item.
+    album_relation_not_an_item: bool,
+    /// Kind of Blue's item (Q283221) read back as another kind of item.
+    album_item: AlbumItem,
+    /// Wikidata answers the read-back of Kind of Blue's item with 503 (Retry-After: 120).
+    album_item_busy: bool,
+}
+/// What Kind of Blue's item (Q283221) is when read back.
+#[derive(Clone, Copy, Default, PartialEq)]
+enum AlbumItem {
+    /// As recorded: the album's (P436, P1954).
+    #[default]
+    Recorded,
+    /// A song's that is its single's too, as Wikidata often makes them: class song (Q7366),
+    /// the release group's P436 and one recording's P4404, no work ID.
+    SongAndAlbum,
+    /// An item with no MusicBrainz or Discogs ID yet: P436 and P1954 removed.
+    Bare,
+    /// The album's item (class album, its P436) that also names one recording (P4404) and a
+    /// Spotify track (P2207), as a single's item that is its track's too may.
+    AlbumWithRecording,
+}
+/// The recording ID [`AlbumItem::SongAndAlbum`] adds.
+const SONG_RECORDING: &str = "0d0f1e2a-3b4c-4d5e-8f60-718293a4b5c6";
+/// How the Cover Art Archive answers a `front-500` request.
+#[derive(Clone, Copy, Default, PartialEq)]
+enum CoverArt {
+    /// As recorded: a redirect to the front cover's thumbnail.
+    #[default]
+    Recorded,
+    /// The recorded 404 of a release group without a cover.
+    None,
+    /// 503 with Retry-After: 120.
+    Busy,
+}
+const KIND_OF_BLUE_COVER: &str =
+    "https://coverartarchive.org/release/e7ba3cb7-a074-45ee-870f-3baeb6d3e8bf/front-500";
+const KIND_OF_BLUE_RELEASE_COVER: &str =
+    "https://coverartarchive.org/release/4c8af71f-5746-4981-92d7-0d6c64db1155/front-500";
+/// The credit of a cover from the Cover Art Archive: the release's cover art page on
+/// MusicBrainz, no author, no licence.
+fn cover_credit(release: &str) -> Value {
+    json!({
+        "field": "image", "provider": "cover_art_archive",
+        "source_url": format!("https://musicbrainz.org/release/{release}/cover-art"),
+        "author": null, "license": null, "license_url": null,
+        "lang": null, "excerpted": false, "modified": false, "subject": null,
+    })
+}
+fn album_cover_credit() -> Value {
+    cover_credit("e7ba3cb7-a074-45ee-870f-3baeb6d3e8bf")
+}
+/// The archive's answer to `path` (its status, content type and Location as recorded), by
+/// `mode`.
+fn cover_art(path: &str, mode: CoverArt) -> Fetched {
+    let file = match (path, mode) {
+        (_, CoverArt::None) => "caa-front-500-unknown.json",
+        ("/release-group/8e8a594f-2175-38c7-a871-abb68ec363e7/front-500", _) => {
+            "caa-front-500-release-group-kind-of-blue.json"
+        }
+        ("/release/4c8af71f-5746-4981-92d7-0d6c64db1155/front-500", _) => {
+            "caa-front-500-release-kind-of-blue.json"
+        }
+        (other, _) => panic!("unexpected Cover Art Archive request {other}"),
+    };
+    let answer = fixture_json(file);
+    let busy = mode == CoverArt::Busy;
+    Fetched {
+        permanent_redirect: false,
+        truncated: false,
+        validators: Default::default(),
+        url: url::Url::parse(&format!("https://coverartarchive.org{path}")).unwrap(),
+        status: if busy {
+            503
+        } else {
+            answer["status"].as_u64().unwrap() as u16
+        },
+        retry_after_secs: if busy { 120 } else { 60 },
+        location: answer["location"]
+            .as_str()
+            .filter(|_| !busy)
+            .map(str::to_owned),
+        content_type: answer["content_type"].as_str().unwrap().to_owned(),
+        body: vec![],
+    }
 }
 /// Answers by host, path and query from the recorded fixtures; records each request.
 #[derive(Default)]
@@ -232,6 +324,17 @@ impl Transport for Recorded {
         _: &[SocketAddr],
         options: &FetchOptions,
     ) -> anyhow::Result<Fetched> {
+        if url.host_str() == Some("coverartarchive.org") {
+            // A cover's redirect is its answer, never followed.
+            assert_eq!(options.accept.as_deref(), Some("image/*"), "{url}");
+            assert!(options.keep_redirect, "{url}");
+            self.seen
+                .lock()
+                .unwrap()
+                .push(format!("coverartarchive.org{}?", url.path()));
+            let mode = self.mode.lock().unwrap().cover_art;
+            return Ok(cover_art(url.path(), mode));
+        }
         assert_eq!(options.accept.as_deref(), Some("application/json"), "{url}");
         let host = url.host_str().unwrap_or_default().to_owned();
         let path = percent_encoding::percent_decode_str(url.path())
@@ -276,9 +379,26 @@ impl Transport for Recorded {
                 };
                 let body = if let Some((_, qid)) = mode.relation.filter(|(f, _)| *f == file) {
                     naming(file, qid)
+                } else if mode.album_relation_not_an_item
+                    && file == "mb-release-group-kind-of-blue.json"
+                {
+                    String::from_utf8(fixture(file))
+                        .unwrap()
+                        .replace(
+                            "wikidata.org/wiki/Q283221",
+                            "wikidata.org/wiki/Property:P18",
+                        )
+                        .into_bytes()
                 } else if file == "mb-release-kind-of-blue.json" {
                     // The release's relation names its album's item, the release group's.
-                    with_wikidata_relation(file, "Q283221")
+                    let body = with_wikidata_relation(file, "Q283221");
+                    if mode.release_without_front {
+                        let mut v: Value = serde_json::from_slice(&body).unwrap();
+                        v["cover-art-archive"]["front"] = json!(false);
+                        serde_json::to_vec(&v).unwrap()
+                    } else {
+                        body
+                    }
                 } else if mode.recording_names_its_song && file == "mb-recording-get-lucky.json" {
                     with_wikidata_relation(file, "Q11510350")
                 } else if mode.names_disambiguation && file == "mb-artist-daft-punk.json" {
@@ -320,6 +440,57 @@ impl Transport for Recorded {
                                 .as_object_mut()
                                 .unwrap()
                                 .remove("P31");
+                        })
+                    } else if mode.album_item_busy && ids == "Q283221" {
+                        return Ok(Fetched {
+                            permanent_redirect: false,
+                            truncated: false,
+                            validators: Default::default(),
+                            url: url.clone(),
+                            status: 503,
+                            retry_after_secs: 120,
+                            location: None,
+                            content_type: "application/json".into(),
+                            body: b"{}".to_vec(),
+                        });
+                    } else if mode.album_item != AlbumItem::Recorded && ids == "Q283221" {
+                        edited(&file, |v| {
+                            let claims = &mut v["entities"][&ids]["claims"];
+                            match mode.album_item {
+                                AlbumItem::SongAndAlbum => {
+                                    let p31 = serde_json::to_string(&claims["P31"])
+                                        .unwrap()
+                                        .replace("Q482994", "Q7366");
+                                    claims["P31"] = serde_json::from_str(&p31).unwrap();
+                                    let recording = serde_json::to_string(&claims["P436"])
+                                        .unwrap()
+                                        .replace("P436", "P4404")
+                                        .replace(
+                                            "8e8a594f-2175-38c7-a871-abb68ec363e7",
+                                            SONG_RECORDING,
+                                        );
+                                    claims["P4404"] = serde_json::from_str(&recording).unwrap();
+                                }
+                                AlbumItem::AlbumWithRecording => {
+                                    let p436 = serde_json::to_string(&claims["P436"]).unwrap();
+                                    let recording = p436.replace("P436", "P4404").replace(
+                                        "8e8a594f-2175-38c7-a871-abb68ec363e7",
+                                        SONG_RECORDING,
+                                    );
+                                    claims["P4404"] = serde_json::from_str(&recording).unwrap();
+                                    let track = p436.replace("P436", "P2207").replace(
+                                        "8e8a594f-2175-38c7-a871-abb68ec363e7",
+                                        "0000000000000000000001",
+                                    );
+                                    claims["P2207"] = serde_json::from_str(&track).unwrap();
+                                }
+                                AlbumItem::Bare => {
+                                    let claims = claims.as_object_mut().unwrap();
+                                    claims.remove("P436");
+                                    claims.remove("P1954");
+                                }
+                                AlbumItem::Recorded => {}
+                            }
                         })
                     } else if mode.album_is_a_work && ids == "Q283221" {
                         edited(&file, |v| {
@@ -364,7 +535,11 @@ impl Transport for Recorded {
                 "wbgetclaims" => {
                     assert_eq!(query("property"), "P18");
                     let entity = query("entity");
-                    let mut body = fixture(&format!("wd-p18-{entity}.json"));
+                    let mut body = if mode.album_has_image && entity == "Q283221" {
+                        fixture("wd-p18-Q93341.json")
+                    } else {
+                        fixture(&format!("wd-p18-{entity}.json"))
+                    };
                     if mode.no_author && entity == "Q185828" {
                         // The one edit of a recorded answer (provenance.json, wd-p18-no-author).
                         let file = r#"\" \"Gruss\" a. d. Res. Lazarett in Engers a. Rh. 1915.\", Gruppenbild - LABW - Staatsarchiv Sigmaringen N 1-85 T 1 Nr. 159.jpeg"#;
@@ -547,17 +722,19 @@ async fn cards_take_credited_content_from_their_own_item() {
         (album.type_name.as_str(), album.name.as_deref()),
         ("MusicAlbum", Some("Kind of Blue"))
     );
-    assert_eq!(album.image, None, "the article's cover is never the card's");
+    // The article's cover is never the card's: with no free file on Commons, its cover is the
+    // Cover Art Archive's.
+    assert_eq!(album.image.as_deref(), Some(KIND_OF_BLUE_COVER));
     assert_eq!(
         album.description.as_deref(),
         Some(extract("enwiki-summary-kind-of-blue.json").as_str())
     );
     assert_eq!(
         credits(&album),
-        json!([article_credit(
-            "https://en.wikipedia.org/wiki/Kind_of_Blue",
-            None
-        )])
+        json!([
+            album_cover_credit(),
+            article_credit("https://en.wikipedia.org/wiki/Kind_of_Blue", None)
+        ])
     );
 
     // The recording's own item (P4404 names it) has no article and no image: the work's English
@@ -625,10 +802,16 @@ async fn cards_take_credited_content_from_their_own_item() {
         t.hosts(),
         [
             "commons.wikimedia.org",
+            "coverartarchive.org",
             "en.wikipedia.org",
             "musicbrainz.org",
             "www.wikidata.org"
         ]
+    );
+    // The album alone asks the Cover Art Archive, once.
+    assert_eq!(
+        t.to("coverartarchive.org"),
+        ["coverartarchive.org/release-group/8e8a594f-2175-38c7-a871-abb68ec363e7/front-500?"]
     );
 }
 
@@ -671,7 +854,7 @@ async fn a_recordings_requests_are_bounded() {
     card(&web(t.clone(), true), GET_LUCKY).await;
     let wd = "www.wikidata.org/w/api.php?action=";
     let mut expected = vec![
-        "musicbrainz.org/ws/2/recording/833f00e1-781f-4edd-90e4-e52712618862?inc=url-rels+isrcs+artist-credits+genres&fmt=json".to_owned(),
+        "musicbrainz.org/ws/2/recording/833f00e1-781f-4edd-90e4-e52712618862?inc=url-rels+isrcs+artist-credits+genres+ratings&fmt=json".to_owned(),
         "musicbrainz.org/ws/2/recording/833f00e1-781f-4edd-90e4-e52712618862?inc=work-rels+work-level-rels+url-rels&fmt=json".to_owned(),
         format!("{wd}query&list=search&srsearch=haswbstatement%3AP4404%3D833f00e1-781f-4edd-90e4-e52712618862&srlimit=5&format=json"),
         format!("{wd}wbgetentities&ids=Q139827657&props=claims%7Csitelinks%2Furls&format=json"),
@@ -732,7 +915,7 @@ const SEFA_DESCRIPTION: &str = "deejay, producer and musician from the Netherlan
 /// The item's requests for a card of Sefa that the MBID search found, sorted.
 fn sefa_requests() -> Vec<String> {
     let mut asked = vec![
-        "musicbrainz.org/ws/2/artist/b5416a54-4941-4fcf-b2a0-7f98da6f9344?inc=url-rels+genres&fmt=json".to_owned(),
+        "musicbrainz.org/ws/2/artist/b5416a54-4941-4fcf-b2a0-7f98da6f9344?inc=url-rels+genres+ratings&fmt=json".to_owned(),
         "www.wikidata.org/w/api.php?action=query&list=search&srsearch=haswbstatement%3AP434%3Db5416a54-4941-4fcf-b2a0-7f98da6f9344&srlimit=5&format=json".to_owned(),
         "www.wikidata.org/w/api.php?action=wbgetentities&ids=Q55825905&props=claims%7Csitelinks%2Furls&format=json".to_owned(),
         "www.wikidata.org/w/api.php?action=wbgetentities&ids=Q55825905&props=sitelinks%2Furls%7Cdescriptions&languages=en&format=json".to_owned(),
@@ -1006,15 +1189,20 @@ async fn an_item_its_own_relation_names_is_checked_like_a_found_one() {
     .await;
     let release = card(&web(t.clone(), true), KIND_OF_BLUE_RELEASE).await;
     assert_eq!(release.name.as_deref(), Some("Kind of Blue"));
+    // Nothing of the album's item; its own front cover from the Cover Art Archive.
     assert_eq!(
-        (&release.image, &release.description),
-        (&None, &plain.description)
+        (release.image.as_deref(), &release.description),
+        (Some(KIND_OF_BLUE_RELEASE_COVER), &plain.description)
     );
-    assert_eq!(credits(&release), json!([]));
+    assert_eq!(
+        credits(&release),
+        json!([cover_credit("4c8af71f-5746-4981-92d7-0d6c64db1155")])
+    );
     assert!(release.unread_enriched.is_empty());
     assert_eq!(
         sorted(t.seen()),
         [
+            "coverartarchive.org/release/4c8af71f-5746-4981-92d7-0d6c64db1155/front-500?",
             "musicbrainz.org/ws/2/release/4c8af71f-5746-4981-92d7-0d6c64db1155?inc=url-rels+release-groups+artist-credits+genres&fmt=json",
             "www.wikidata.org/w/api.php?action=wbgetentities&ids=Q283221&props=claims%7Csitelinks%2Furls&format=json",
         ]
@@ -1023,10 +1211,14 @@ async fn an_item_its_own_relation_names_is_checked_like_a_found_one() {
 
 /// The card of `uri`, whose answers are as `mode` says, takes nothing of item `qid` (an item of
 /// another kind of entity) and asks nothing of it but its read-back: the card is as MusicBrainz
-/// alone makes it, with no credit and nothing unread.
+/// alone makes it, with no credit and nothing unread (an album's cover, by its MBID alone, is
+/// none here).
 async fn takes_nothing_of(uri: &str, mode: Mode, qid: &str) {
     let plain = card(&web(Recorded::new(Mode::default()), false), uri).await;
-    let t = Recorded::new(mode);
+    let t = Recorded::new(Mode {
+        cover_art: CoverArt::None,
+        ..mode
+    });
     let doc = card(&web(t.clone(), true), uri).await;
     assert_eq!(
         (&doc.image, &doc.description),
@@ -1077,10 +1269,10 @@ async fn a_release_groups_item_that_is_a_works_too_is_its_own() {
     );
     assert_eq!(
         credits(&album),
-        json!([article_credit(
-            "https://en.wikipedia.org/wiki/Kind_of_Blue",
-            None
-        )])
+        json!([
+            album_cover_credit(),
+            article_credit("https://en.wikipedia.org/wiki/Kind_of_Blue", None)
+        ])
     );
 }
 /// A release group whose own relation names an artist's item (Miles Davis's, P434) takes nothing
@@ -1719,4 +1911,579 @@ async fn an_enriched_recording_keeps_its_length_as_a_fact(pool: PgPool) {
     assert_eq!(read["facts"]["duration"], json!(secs.to_string()), "{read}");
     assert_eq!(read["facts"]["artist"], json!(artist), "{read}");
     assert_eq!(read["facts"]["isrc"], Value::Null, "{read}");
+}
+
+/// An album with no free file on Commons (Kind of Blue's item has no image) takes the front cover
+/// the Cover Art Archive holds for it, by its MBID, in one request: a release group the
+/// thumbnail of the release the archive's redirect names, credited to that release's cover art
+/// page; a release whose MusicBrainz answer says the archive shows its front cover, its own. The
+/// redirect is never followed (archive.org is never asked), and nothing else is asked.
+#[tokio::test]
+async fn an_album_without_a_free_file_takes_its_cover_from_the_cover_art_archive() {
+    let t = Recorded::new(Mode::default());
+    let album = card(&web(t.clone(), true), KIND_OF_BLUE).await;
+    assert_eq!(album.image.as_deref(), Some(KIND_OF_BLUE_COVER));
+    assert_eq!(credits(&album)[0], album_cover_credit());
+    assert!(album.unread_enriched.is_empty());
+    assert_eq!(
+        t.to("coverartarchive.org"),
+        ["coverartarchive.org/release-group/8e8a594f-2175-38c7-a871-abb68ec363e7/front-500?"]
+    );
+    assert!(t
+        .hosts()
+        .iter()
+        .all(|h| !h.ends_with("archive.org") || h == "coverartarchive.org"));
+    // The item's image claim was read, and named no file.
+    assert!(t
+        .seen()
+        .iter()
+        .any(|s| s.contains("wbgetclaims&entity=Q283221")));
+
+    let t = Recorded::new(Mode::default());
+    let release = card(&web(t.clone(), true), KIND_OF_BLUE_RELEASE).await;
+    assert_eq!(release.image.as_deref(), Some(KIND_OF_BLUE_RELEASE_COVER));
+    assert_eq!(
+        credits(&release),
+        json!([cover_credit("4c8af71f-5746-4981-92d7-0d6c64db1155")])
+    );
+    assert_eq!(
+        t.to("coverartarchive.org"),
+        ["coverartarchive.org/release/4c8af71f-5746-4981-92d7-0d6c64db1155/front-500?"]
+    );
+    // Artists and recordings have no cover: the archive is not asked.
+    let t = Recorded::new(Mode::default());
+    for uri in [MILES, DAFT_PUNK, GET_LUCKY] {
+        card(&web(t.clone(), true), uri).await;
+    }
+    assert!(t.to("coverartarchive.org").is_empty(), "{:?}", t.seen());
+}
+
+/// A free file on Commons wins: an album whose item names one shows it, and the Cover Art
+/// Archive is not asked.
+#[tokio::test]
+async fn a_free_commons_file_wins_over_the_cover() {
+    let t = Recorded::new(Mode {
+        album_has_image: true,
+        ..Default::default()
+    });
+    let album = card(&web(t.clone(), true), KIND_OF_BLUE).await;
+    assert_eq!(album.image.as_deref(), Some(MILES_IMAGE));
+    assert_eq!(credits(&album)[0], miles_credits()[0]);
+    assert!(t.to("coverartarchive.org").is_empty(), "{:?}", t.seen());
+}
+
+/// A release MusicBrainz says has no front cover in the archive asks the archive nothing. A
+/// release group the archive has no cover for (404) has no image and no image credit, and is
+/// not read again early; a busy archive (503) leaves the image unread, so a stored cover stays.
+#[tokio::test]
+async fn no_cover_is_none_and_a_busy_archive_is_unread() {
+    let t = Recorded::new(Mode {
+        release_without_front: true,
+        ..Default::default()
+    });
+    let release = card(&web(t.clone(), true), KIND_OF_BLUE_RELEASE).await;
+    assert_eq!((&release.image, credits(&release)), (&None, json!([])));
+    assert!(release.unread_enriched.is_empty());
+    assert!(t.to("coverartarchive.org").is_empty(), "{:?}", t.seen());
+
+    let t = Recorded::new(Mode {
+        cover_art: CoverArt::None,
+        ..Default::default()
+    });
+    let album = card(&web(t.clone(), true), KIND_OF_BLUE).await;
+    assert_eq!(album.image, None);
+    assert_eq!(
+        credits(&album),
+        json!([article_credit(
+            "https://en.wikipedia.org/wiki/Kind_of_Blue",
+            None
+        )])
+    );
+    assert!(album.unread_enriched.is_empty() && album.refresh_by.is_none());
+    assert_eq!(t.to("coverartarchive.org").len(), 1);
+
+    let t = Recorded::new(Mode {
+        cover_art: CoverArt::Busy,
+        ..Default::default()
+    });
+    let web = web(t.clone(), true);
+    for _ in 0..2 {
+        let album = card(&web, KIND_OF_BLUE).await;
+        assert_eq!(album.image, None);
+        assert_eq!(
+            serde_json::to_value(&album.unread_enriched).unwrap(),
+            json!(["image"])
+        );
+        assert!(album.refresh_by.is_some());
+    }
+    // The second card, right after the first, takes the answer the egress cached a moment.
+    assert_eq!(t.to("coverartarchive.org").len(), 1, "{:?}", t.seen());
+}
+
+/// A stored cover stays through a busy archive and goes when the archive says there is none.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_stored_cover_stays_while_the_archive_is_busy(pool: PgPool) {
+    tag(&pool, &[KIND_OF_BLUE]).await;
+    let stored = resolve_once(
+        &pool,
+        &web(Recorded::new(Mode::default()), true),
+        KIND_OF_BLUE,
+    )
+    .await;
+    assert_eq!(stored.image.as_deref(), Some(KIND_OF_BLUE_COVER));
+    let busy = Mode {
+        cover_art: CoverArt::Busy,
+        ..Default::default()
+    };
+    let kept = resolve_once(&pool, &web(Recorded::new(busy), true), KIND_OF_BLUE).await;
+    assert_eq!(kept.image.as_deref(), Some(KIND_OF_BLUE_COVER));
+    assert_eq!(
+        serde_json::to_value(&kept.credits).unwrap()[0],
+        album_cover_credit()
+    );
+    let none = Mode {
+        cover_art: CoverArt::None,
+        ..Default::default()
+    };
+    let gone = resolve_once(&pool, &web(Recorded::new(none), true), KIND_OF_BLUE).await;
+    assert_eq!(gone.image, None);
+    assert!(gone
+        .credits
+        .iter()
+        .all(|c| serde_json::to_value(c).unwrap()["field"] != "image"));
+}
+
+/// MusicBrainz's rating comes with the entity read (`inc=ratings`), no other request: a release
+/// group's, an artist's and a recording's, with one decimal (Kind of Blue's 4.45 is 4.5) and the
+/// number of votes. An artist nobody rated (Sefa: a null value, 0 votes) and a release (no
+/// rating of its own) have neither fact, whether or not the card is enriched.
+#[tokio::test]
+async fn musicbrainz_ratings_are_facts_of_the_card() {
+    for enrich in [false, true] {
+        let t = Recorded::new(Mode::default());
+        let web = web(t.clone(), enrich);
+        for (uri, rating) in [
+            (KIND_OF_BLUE, Some(("4.5", "43"))),
+            (MILES, Some(("4.8", "21"))),
+            (GET_LUCKY, Some(("3.9", "25"))),
+            (SEFA, None),
+            (KIND_OF_BLUE_RELEASE, None),
+        ] {
+            let doc = card(&web, uri).await;
+            let facts = (
+                doc.attributes.get("rating").map(String::as_str),
+                doc.attributes.get("rating_count").map(String::as_str),
+            );
+            assert_eq!(
+                facts,
+                rating.map_or((None, None), |(r, n)| (Some(r), Some(n))),
+                "{uri}"
+            );
+        }
+        // One entity read each: the rating asks nothing more.
+        let entity_reads: Vec<String> = t
+            .to("musicbrainz.org")
+            .into_iter()
+            .filter(|s| !s.contains("work-rels"))
+            .collect();
+        assert_eq!(entity_reads.len(), 5, "{entity_reads:?}");
+        assert!(entity_reads
+            .iter()
+            .filter(|s| !s.contains("/release/"))
+            .all(|s| s.contains("+ratings&")));
+        assert!(entity_reads
+            .iter()
+            .filter(|s| s.contains("/release/"))
+            .all(|s| !s.contains("ratings")));
+    }
+}
+
+/// A test source that answers the keys it is given, per link.
+struct Keys(std::collections::BTreeMap<String, Vec<String>>);
+#[async_trait::async_trait]
+impl pinakes_core::also_on::Source for Keys {
+    fn id(&self) -> &'static str {
+        "test_keys"
+    }
+    fn applies(&self, subject: &pinakes_core::also_on::Subject) -> bool {
+        self.0.contains_key(&subject.uri)
+    }
+    async fn lookup(
+        &self,
+        _: &pinakes_core::also_on::Context,
+        subject: &pinakes_core::also_on::Subject,
+    ) -> anyhow::Result<pinakes_core::also_on::Found> {
+        Ok(pinakes_core::also_on::Found {
+            keys: self.0[&subject.uri]
+                .iter()
+                .map(|key| pinakes_core::also_on::Key {
+                    key: key.clone(),
+                    via: "wikidata".into(),
+                })
+                .collect(),
+            ..Default::default()
+        })
+    }
+}
+
+/// A MusicBrainz artist's or release group's page keys the Wikidata item its own `wikidata`
+/// relation names (`wikidata:{Q-id}`), as its MBID, once the item, read back, is its own; a
+/// release's page never does, even when its relation names its album's item (a key never
+/// crosses levels); a relation that names no item, or an item of another kind (the album's
+/// relation to its artist's item), keys nothing. In groups the key is one more single-object
+/// key: a page that names another item for the same release group stays apart from the album's
+/// group (a conflict, counted), and a page with only the item's key joins it.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_musicbrainz_page_keys_its_own_wikidata_item_and_a_disagreeing_one_stays_apart(
+    pool: PgPool,
+) {
+    let Some(entity_source) = pinakes_core::also_on::registry()
+        .into_iter()
+        .find(|s| s.id() == "musicbrainz_entity")
+    else {
+        return;
+    };
+    let other = "https://open.spotify.com/album/0000000000000000000001";
+    let item_only = "https://open.spotify.com/album/0000000000000000000003";
+    let group = "mb:release-group:8e8a594f-2175-38c7-a871-abb68ec363e7";
+    let keys = Keys(
+        [
+            (other, vec![group, "wikidata:Q999999"]),
+            (item_only, vec!["wikidata:Q283221"]),
+        ]
+        .into_iter()
+        .map(|(uri, keys)| {
+            (
+                uri.to_owned(),
+                keys.into_iter().map(str::to_owned).collect(),
+            )
+        })
+        .collect(),
+    );
+    let mut ids = std::collections::BTreeMap::new();
+    for (uri, ty) in [
+        (KIND_OF_BLUE, "MusicAlbum"),
+        (KIND_OF_BLUE_RELEASE, "MusicAlbum"),
+        (DAFT_PUNK, "MusicGroup"),
+        (other, "MusicAlbum"),
+        (item_only, "MusicAlbum"),
+    ] {
+        let id = pinakes_core::store::ensure_resource(&pool, uri)
+            .await
+            .unwrap();
+        let mut d = ResourceMeta::new(uri, "web", 86400);
+        d.set_type(ty);
+        d.name = Some("Kind of Blue".into());
+        pinakes_core::store::save_document(&pool, &id, 0, &d)
+            .await
+            .unwrap();
+        ids.insert(uri, id);
+    }
+    let t = Recorded::new(Mode::default());
+    let cx = pinakes_core::also_on::Context {
+        egress: Egress::with_backends(
+            common::unpaced_egress_config(),
+            Arc::new(PublicDns),
+            t.clone(),
+        ),
+        config: Arc::new(Config::default()),
+    };
+    sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let sources: Vec<Arc<dyn pinakes_core::also_on::Source>> = vec![entity_source, Arc::new(keys)];
+    pinakes_core::also_on::drain(&pool, &cx, &sources, 100)
+        .await
+        .unwrap();
+    let keys_of = |uri: &str| {
+        let (pool, id) = (pool.clone(), ids[uri].clone());
+        async move {
+            sqlx::query_scalar::<_, String>(
+                "SELECT key FROM resource_key WHERE resource_id=$1 AND source='musicbrainz_entity' ORDER BY key COLLATE \"C\"",
+            )
+            .bind(id)
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(keys_of(KIND_OF_BLUE).await, [group, "wikidata:Q283221"]);
+    assert_eq!(
+        keys_of(DAFT_PUNK).await,
+        [
+            "mb:artist:056e4f3e-d505-4dad-8ec1-d04f521cbb56",
+            "wikidata:Q185828"
+        ]
+    );
+    let release = keys_of(KIND_OF_BLUE_RELEASE).await;
+    assert!(release.contains(&group.to_owned()), "{release:?}");
+    assert!(
+        release.iter().all(|k| !k.starts_with("wikidata:")),
+        "{release:?}"
+    );
+    // The entity is read once a page: the key comes from the same answer.
+    let reads = t.to("musicbrainz.org");
+    assert_eq!(reads.len(), 3, "{reads:?}");
+
+    common::drain_groups(&pool, &Default::default()).await;
+    let group_of = |uri: &str| {
+        let (pool, id) = (pool.clone(), ids[uri].clone());
+        async move {
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT group_id FROM group_unit WHERE resource_id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let album = group_of(KIND_OF_BLUE).await;
+    assert!(album.is_some());
+    assert_eq!(group_of(item_only).await, album, "the item alone joins");
+    assert_eq!(
+        group_of(KIND_OF_BLUE_RELEASE).await,
+        album,
+        "its release joins"
+    );
+    assert_ne!(group_of(other).await, album, "another item stays apart");
+    let refused: i64 = sqlx::query_scalar("SELECT count(*) FROM group_input WHERE key_conflicts>0")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(refused > 0);
+
+    // A relation that is no item link keys nothing.
+    let t = Recorded::new(Mode {
+        album_relation_not_an_item: true,
+        ..Default::default()
+    });
+    let cx = pinakes_core::also_on::Context {
+        egress: Egress::with_backends(
+            common::unpaced_egress_config(),
+            Arc::new(PublicDns),
+            t.clone(),
+        ),
+        config: Arc::new(Config::default()),
+    };
+    let entity_source = pinakes_core::also_on::registry()
+        .into_iter()
+        .find(|s| s.id() == "musicbrainz_entity")
+        .unwrap();
+    let subject = pinakes_core::also_on::Subject {
+        id: ids[KIND_OF_BLUE].clone(),
+        uri: KIND_OF_BLUE.into(),
+        status: "ok".into(),
+        type_name: Some("MusicAlbum".into()),
+        doc: None,
+        keys: vec![],
+        first_seen_at: None,
+        candidates: vec![],
+    };
+    let found = entity_source.lookup(&cx, &subject).await.unwrap();
+    let keys: Vec<&str> = found.keys.iter().map(|k| k.key.as_str()).collect();
+    assert_eq!(keys, [group]);
+    // A relation to another kind's item (Miles Davis's, an artist's) keys nothing: it is read
+    // back and is not the album's.
+    let t = Recorded::new(Mode {
+        relation: Some(("mb-release-group-kind-of-blue.json", "Q93341")),
+        ..Default::default()
+    });
+    let cx = pinakes_core::also_on::Context {
+        egress: Egress::with_backends(
+            common::unpaced_egress_config(),
+            Arc::new(PublicDns),
+            t.clone(),
+        ),
+        config: Arc::new(Config::default()),
+    };
+    let found = entity_source.lookup(&cx, &subject).await.unwrap();
+    let keys: Vec<&str> = found.keys.iter().map(|k| k.key.as_str()).collect();
+    assert_eq!(keys, [group]);
+    assert!(
+        t.seen()
+            .iter()
+            .any(|s| s.contains("ids=Q93341&props=claims")),
+        "{:?}",
+        t.seen()
+    );
+}
+
+/// The `musicbrainz_entity` source's answer for `uri`, with answers as `mode` says and the keys
+/// it recorded before (`stored`).
+async fn entity_lookup(
+    uri: &str,
+    mode: Mode,
+    stored: &[&str],
+) -> Option<pinakes_core::also_on::Found> {
+    let source = pinakes_core::also_on::registry()
+        .into_iter()
+        .find(|s| s.id() == "musicbrainz_entity")?;
+    let cx = pinakes_core::also_on::Context {
+        egress: Egress::with_backends(
+            common::unpaced_egress_config(),
+            Arc::new(PublicDns),
+            Recorded::new(mode),
+        ),
+        config: Arc::new(Config::default()),
+    };
+    let subject = pinakes_core::also_on::Subject {
+        id: identity(uri).unwrap().0,
+        uri: uri.into(),
+        status: "ok".into(),
+        type_name: None,
+        doc: None,
+        keys: stored
+            .iter()
+            .map(|k| ((*k).to_owned(), "musicbrainz_entity".to_owned()))
+            .collect(),
+        first_seen_at: None,
+        candidates: vec![],
+    };
+    Some(source.lookup(&cx, &subject).await.unwrap())
+}
+fn keys_of(found: &pinakes_core::also_on::Found) -> Vec<&str> {
+    found.keys.iter().map(|k| k.key.as_str()).collect()
+}
+
+/// A key is stricter than the enrichment: an album's relation keys only an item that is exactly
+/// a release group's and names this one release group (P436), never a song's item that is its
+/// single's too (Wikidata often keys a single's track by it through its streaming IDs, so the
+/// track would join the album) nor an item with no identifier yet. Their text still counts for
+/// the card's description, as before.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn an_album_is_keyed_only_by_an_item_that_is_exactly_its_own(pool: PgPool) {
+    let group = "mb:release-group:8e8a594f-2175-38c7-a871-abb68ec363e7";
+    let Some(own) = entity_lookup(KIND_OF_BLUE, Mode::default(), &[]).await else {
+        return;
+    };
+    assert_eq!(keys_of(&own), [group, "wikidata:Q283221"]);
+    for album_item in [AlbumItem::SongAndAlbum, AlbumItem::Bare] {
+        let mode = Mode {
+            album_item,
+            ..Default::default()
+        };
+        let found = entity_lookup(KIND_OF_BLUE, mode, &[]).await.unwrap();
+        assert_eq!(keys_of(&found), [group]);
+        // The enrichment still takes the item's article.
+        let album = card(&web(Recorded::new(mode), true), KIND_OF_BLUE).await;
+        assert_eq!(
+            album.description.as_deref(),
+            Some(extract("enwiki-summary-kind-of-blue.json").as_str())
+        );
+    }
+    // A track keyed by the song's item (as the `wikidata` source keys a Spotify track whose
+    // P2207 the item holds) and by its recording does not join the album's group.
+    a_track_of_the_item_stays_apart(&pool, AlbumItem::SongAndAlbum).await;
+}
+
+/// With Kind of Blue's item read back as `album_item`, a Spotify track keyed by that item and by
+/// the recording it names (as the `wikidata` source keys a track whose P2207 the item holds: one
+/// P4404, no P435) is not in the album's group.
+async fn a_track_of_the_item_stays_apart(pool: &PgPool, album_item: AlbumItem) {
+    let track = "https://open.spotify.com/track/0000000000000000000001";
+    let recording = format!("mb:recording:{SONG_RECORDING}");
+    let keys = Keys(
+        [(
+            track.to_owned(),
+            vec!["wikidata:Q283221".to_owned(), recording],
+        )]
+        .into_iter()
+        .collect(),
+    );
+    let mut ids = std::collections::BTreeMap::new();
+    for (uri, ty) in [(KIND_OF_BLUE, "MusicAlbum"), (track, "MusicRecording")] {
+        let id = pinakes_core::store::ensure_resource(pool, uri)
+            .await
+            .unwrap();
+        let mut d = ResourceMeta::new(uri, "web", 86400);
+        d.set_type(ty);
+        d.name = Some("Kind of Blue".into());
+        pinakes_core::store::save_document(pool, &id, 0, &d)
+            .await
+            .unwrap();
+        ids.insert(uri, id);
+    }
+    let cx = pinakes_core::also_on::Context {
+        egress: Egress::with_backends(
+            common::unpaced_egress_config(),
+            Arc::new(PublicDns),
+            Recorded::new(Mode {
+                album_item,
+                ..Default::default()
+            }),
+        ),
+        config: Arc::new(Config::default()),
+    };
+    let entity_source = pinakes_core::also_on::registry()
+        .into_iter()
+        .find(|s| s.id() == "musicbrainz_entity")
+        .unwrap();
+    sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()")
+        .execute(pool)
+        .await
+        .unwrap();
+    let sources: Vec<Arc<dyn pinakes_core::also_on::Source>> = vec![entity_source, Arc::new(keys)];
+    pinakes_core::also_on::drain(pool, &cx, &sources, 100)
+        .await
+        .unwrap();
+    common::drain_groups(pool, &Default::default()).await;
+    let group_of = |uri: &str| {
+        let (pool, id) = (pool.clone(), ids[uri].clone());
+        async move {
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT group_id FROM group_unit WHERE resource_id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let (album, song) = (group_of(KIND_OF_BLUE).await, group_of(track).await);
+    assert!(album.is_none() || album != song, "{album:?} {song:?}");
+}
+
+/// An album's own item that also names one recording (and that recording's Spotify track) is a
+/// single's track's too: it keys no album, so the track the `wikidata` source keys by it stays
+/// out of the album's group.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn an_album_item_that_names_a_recording_keys_no_album(pool: PgPool) {
+    let group = "mb:release-group:8e8a594f-2175-38c7-a871-abb68ec363e7";
+    let mode = Mode {
+        album_item: AlbumItem::AlbumWithRecording,
+        ..Default::default()
+    };
+    let Some(found) = entity_lookup(KIND_OF_BLUE, mode, &[]).await else {
+        return;
+    };
+    assert_eq!(keys_of(&found), [group]);
+    a_track_of_the_item_stays_apart(&pool, AlbumItem::AlbumWithRecording).await;
+}
+
+/// A Wikidata that fails for now (503) never costs a MusicBrainz page its MusicBrainz keys and
+/// links: they stand, the item key this source recorded before is kept, and the run comes back
+/// after the wait Wikidata named.
+#[tokio::test]
+async fn a_busy_wikidata_keeps_the_musicbrainz_keys_and_the_stored_item_key() {
+    let group = "mb:release-group:8e8a594f-2175-38c7-a871-abb68ec363e7";
+    let busy = Mode {
+        album_item_busy: true,
+        ..Default::default()
+    };
+    let Some(found) = entity_lookup(KIND_OF_BLUE, busy, &[group, "wikidata:Q283221"]).await else {
+        return;
+    };
+    assert_eq!(keys_of(&found), [group, "wikidata:Q283221"]);
+    assert_eq!(found.retry_after, Some(std::time::Duration::from_secs(120)));
+    let calm = entity_lookup(KIND_OF_BLUE, Mode::default(), &[])
+        .await
+        .unwrap();
+    assert_eq!(found.links, calm.links);
+    assert_eq!(found.facts, calm.facts);
+    // A page whose item key was never recorded has none yet.
+    let fresh = entity_lookup(KIND_OF_BLUE, busy, &[]).await.unwrap();
+    assert_eq!(keys_of(&fresh), [group]);
+    assert!(fresh.retry_after.is_some());
 }
