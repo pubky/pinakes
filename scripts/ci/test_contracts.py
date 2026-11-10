@@ -12,6 +12,9 @@ import unittest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
+# The peeled tagged commit, unique per workflow run: another run for the same commit (two tags on
+# one commit) cannot overwrite the bytes this run smoke-tests and promotes.
+PLATFORM_TAG = '${{ steps.main.outputs.commit }}-${{ github.run_id }}-${{ matrix.arch }}'
 
 
 def workflow():
@@ -392,7 +395,7 @@ class Release(unittest.TestCase):
         self.assertEqual(args['image'], 'pinakes')
         self.assertEqual(args['push'], 'true')
         self.assertEqual(args['latest'], 'false')
-        self.assertEqual(args['tags'], 'type=raw,value=${{ github.sha }}-${{ matrix.arch }}')
+        self.assertEqual(args['tags'], f'type=raw,value={PLATFORM_TAG}')
         self.assertEqual(args['platforms'], 'linux/${{ matrix.arch }}')
         self.assertEqual(args['sha_tag'], 'false')
         manifest = w['jobs']['manifest']
@@ -402,13 +405,16 @@ class Release(unittest.TestCase):
 
     def test_publish_smokes_the_exact_pushed_platform_image(self):
         job = workflow()['jobs']['publish']
-        pushed = 'registry-1.docker.io/synonymsoft/pinakes:${{ github.sha }}-${{ matrix.arch }}'
+        pushed = f'registry-1.docker.io/synonymsoft/pinakes:{PLATFORM_TAG}'
         shared = step_index(job, lambda st: st.get('uses', '').startswith('pubky/ci-workflows/'), 'publishing')
         postgres = step_index(job, lambda st: st.get('run') == 'scripts/ci/setup-postgres', 'provisioning PostgreSQL')
+        login = step_index(job, lambda st: st.get('uses', '').startswith('docker/login-action@'), 'logging in')
         pull = step_index(job, lambda st: 'docker pull' in st.get('run', ''), 'pulling the image')
         smoke = step_index(job, lambda st: 'scripts/ci/container-smoke' in st.get('run', ''), 'smoking the image')
-        self.assertLess(shared, postgres)
-        self.assertLess(postgres, pull)
+        # Root package installs run before the registry credentials are written to disk.
+        self.assertLess(postgres, login)
+        self.assertLess(login, shared)
+        self.assertLess(shared, pull)
         self.assertLess(pull, smoke)
         for i in [pull, smoke]:
             self.assertEqual(job['steps'][i]['env']['PUBLISHED_IMAGE'], pushed)
@@ -426,10 +432,18 @@ class Release(unittest.TestCase):
             self.assertNotIn('environment', job)
             # Full history and every branch (origin/main included) from checkout's own fetch.
             self.assertEqual(job['steps'][0]['with']['fetch-depth'], '0')
-            check = step_index(job, lambda st: st.get('run') == 'scripts/ci/release-on-main', 'checking main')
+            check = step_index(job, lambda st: st.get('run') == 'scripts/ci/release-on-main >> "$GITHUB_OUTPUT"',
+                               'checking main and resolving the commit')
+            self.assertEqual(job['steps'][check]['id'], 'main')
             login = step_index(job, lambda st: st.get('uses', '').startswith('docker/login-action@'), 'logging in')
             self.assertLess(check, login)
             self.assertNotIn('secrets.', str(job['steps'][:login]))
+            # One canonical commit: the raw event SHA (expression or variable) never names an image.
+            self.assertNotIn('github.sha', str(job).lower())
+        manifest = w['jobs']['manifest']
+        promote = manifest['steps'][step_index(manifest, lambda st: st.get('run') == 'scripts/ci/publish-manifest',
+                                               'promoting')]
+        self.assertEqual(promote['env']['RELEASE_COMMIT'], '${{ steps.main.outputs.commit }}')
         self.assertTrue(all('environment' not in job for job in w['jobs'].values()))
         (ROOT / '.runtime').mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=ROOT / '.runtime', prefix='ci-main-') as d:
@@ -442,29 +456,59 @@ class Release(unittest.TestCase):
             feature = commit(origin, 'c.txt', 'c\n', 'feature only')
             git(origin, 'checkout', '--quiet', 'main')
 
-            def run(repo, sha):
+            def run(repo, sha, head):
+                # actions/checkout leaves a detached HEAD at the tagged commit.
+                git(repo, 'checkout', '--quiet', '--detach', head)
                 env = {**os.environ, 'GITHUB_SHA': sha, 'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_NOSYSTEM': '1'}
                 return subprocess.run([str(ROOT / 'scripts/ci/release-on-main')], cwd=repo, env=env,
                                       capture_output=True, text=True)
+
+            def accepted(repo, sha, head, expected):
+                p = run(repo, sha, head)
+                self.assertEqual(p.returncode, 0, p.stderr)
+                # stdout is the step output and nothing else.
+                self.assertEqual(p.stdout, f'commit={expected}\n')
             git(origin, 'checkout', '--quiet', '-b', 'merged', on_main)
             inside = commit(origin, 'd.txt', 'd\n', 'reviewed only as part of the merge')
             git(origin, 'checkout', '--quiet', 'main')
             git(origin, 'merge', '--quiet', '--no-ff', '--no-gpg-sign', '-m', 'merge', 'merged')
             merge = git(origin, 'rev-parse', 'HEAD')
+            # Annotated tags (the documented `git tag -s` makes one): a tag object, a tag of a
+            # tag, a feature-branch tag and a tag of a tree.
+            git(origin, 'tag', '--no-sign', '-a', '-m', 'release', 'v1.0.0', merge)
+            git(origin, 'tag', '--no-sign', '-a', '-m', 'nested', 'v1.0.1', 'v1.0.0')
+            git(origin, 'tag', '--no-sign', '-a', '-m', 'feature', 'v0.9.0', feature)
+            git(origin, 'tag', '--no-sign', '-a', '-m', 'tree', 'v0.0.1', f'{merge}^{{tree}}')
             git(d, 'clone', '--quiet', '--no-local', str(origin), str(clone))
-            self.assertEqual(run(clone, merge).returncode, 0)
-            self.assertNotEqual(run(clone, inside).returncode, 0)
-            self.assertEqual(run(clone, on_main).returncode, 0)
-            self.assertEqual(run(clone, first).returncode, 0)
-            self.assertNotEqual(run(clone, feature).returncode, 0)
-            self.assertNotEqual(run(clone, 'f' * 40).returncode, 0)
-            self.assertNotEqual(run(clone, 'main').returncode, 0)
-            # Fail closed without main or with shallow history.
+            tag_object = git(clone, 'rev-parse', 'refs/tags/v1.0.0')
+            nested = git(clone, 'rev-parse', 'refs/tags/v1.0.1')
+            self.assertEqual(git(clone, 'cat-file', '-t', tag_object), 'tag')
+            self.assertNotEqual(tag_object, merge)
+            accepted(clone, merge, merge, merge)
+            # GitHub documents GITHUB_SHA as the commit; if it ever held the tag object, the
+            # release still names and checks the commit, never the tag object.
+            accepted(clone, merge, 'refs/tags/v1.0.0', merge)
+            accepted(clone, tag_object, 'refs/tags/v1.0.0', merge)
+            accepted(clone, nested, 'refs/tags/v1.0.1', merge)
+            accepted(clone, on_main, on_main, on_main)
+            accepted(clone, first, first, first)
+            self.assertNotEqual(run(clone, inside, inside).returncode, 0)
+            self.assertNotEqual(run(clone, feature, feature).returncode, 0)
+            self.assertNotEqual(run(clone, git(clone, 'rev-parse', 'refs/tags/v0.9.0'), 'refs/tags/v0.9.0').returncode, 0)
+            self.assertNotEqual(run(clone, git(clone, 'rev-parse', 'refs/tags/v0.0.1'), merge).returncode, 0)
+            self.assertNotEqual(run(clone, 'f' * 40, merge).returncode, 0)
+            self.assertNotEqual(run(clone, 'main', merge).returncode, 0)
+            # The checked-out tree (the image's build context) must be the commit published.
+            self.assertNotEqual(run(clone, on_main, merge).returncode, 0)
+            self.assertNotEqual(run(clone, tag_object, on_main).returncode, 0)
+            # Fail closed without main or with shallow history; a refusal writes no output.
             git(clone, 'update-ref', '-d', 'refs/remotes/origin/main')
-            self.assertNotEqual(run(clone, on_main).returncode, 0)
+            refused = run(clone, on_main, on_main)
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertEqual(refused.stdout, '')
             shallow = Path(d) / 'shallow'
             git(d, 'clone', '--quiet', '--depth=1', '--no-single-branch', f'file://{origin}', str(shallow))
-            self.assertNotEqual(run(shallow, on_main).returncode, 0)
+            self.assertNotEqual(run(shallow, merge, merge).returncode, 0)
 
     def test_manifest_tags_and_failure_before_promotion(self):
         # A recording Docker CLI tests the actual shell command boundary without
@@ -484,17 +528,29 @@ if '--raw' in sys.argv or '--dry-run' in sys.argv:
     print(json.dumps({'manifests': [{'platform': {'os': 'linux', 'architecture': a}} for a in arches]}))
 """)
             docker.chmod(0o755)
-            for latest, missing in [('true', False), ('false', False), ('true', True)]:
+            image = 'registry-1.docker.io/synonymsoft/pinakes:'
+            commit_sha, tag_object = 'a' * 40, 'b' * 40
+            cases = [('true', False, {}), ('false', False, {}), ('true', True, {}),
+                     # Fail closed before any registry call on a bad commit or run ID.
+                     ('true', None, {'RELEASE_COMMIT': ''}), ('true', None, {'RELEASE_COMMIT': 'main'}),
+                     ('true', None, {'GITHUB_RUN_ID': ''}), ('true', None, {'GITHUB_RUN_ID': '1-arm64'})]
+            for latest, missing, override in cases:
                 calls = p / 'calls.jsonl'
                 calls.write_text('')
+                # GITHUB_SHA stands for an annotated tag's object: it must name nothing.
                 env = {**os.environ, 'PATH': d + os.pathsep + os.environ['PATH'],
                        'RUNNER_TEMP': d, 'GITHUB_ACTIONS': 'true', 'GITHUB_EVENT_NAME': 'push',
-                       'GITHUB_REF_TYPE': 'tag', 'GITHUB_SHA': 'a' * 40,
+                       'GITHUB_REF_TYPE': 'tag', 'GITHUB_SHA': tag_object, 'RELEASE_COMMIT': commit_sha,
+                       'GITHUB_RUN_ID': '4242',
                        'RELEASE_IMAGE_TAG': 'v1.2.3' if latest == 'true' else 'v1.2.3-rc.1',
-                       'RELEASE_LATEST': latest, 'MISSING_ARM': '1' if missing else ''}
+                       'RELEASE_LATEST': latest, 'MISSING_ARM': '1' if missing else '', **override}
                 run = subprocess.run(['scripts/ci/publish-manifest'], cwd=ROOT, env=env, capture_output=True, text=True)
                 recorded = [json.loads(line) for line in calls.read_text().splitlines()]
                 mutations = [call for call in recorded if call[:3] == ['buildx', 'imagetools', 'create'] and '--dry-run' not in call]
+                if missing is None:
+                    self.assertNotEqual(run.returncode, 0, override)
+                    self.assertEqual(recorded, [], override)
+                    continue
                 if missing:
                     self.assertNotEqual(run.returncode, 0)
                     self.assertEqual(mutations, [])
@@ -503,10 +559,37 @@ if '--raw' in sys.argv or '--dry-run' in sys.argv:
                 self.assertEqual(len(mutations), 1)
                 args = mutations[0]
                 self.assertEqual(any(v.endswith(':latest') for v in args), latest == 'true')
-                self.assertIn('registry-1.docker.io/synonymsoft/pinakes:' + env['RELEASE_IMAGE_TAG'], args)
-                self.assertIn('registry-1.docker.io/synonymsoft/pinakes:' + 'a' * 40, args)
-                for arch in ['amd64', 'arm64']:
-                    self.assertIn('registry-1.docker.io/synonymsoft/pinakes:' + 'a' * 40 + '-' + arch, args)
+                self.assertIn(image + env['RELEASE_IMAGE_TAG'], args)
+                self.assertIn(image + commit_sha, args)
+                # Exactly this run's smoke-tested platform images are combined.
+                sources = [image + f'{commit_sha}-4242-{arch}' for arch in ['amd64', 'arm64']]
+                self.assertEqual(args[-2:], sources)
+                for call in recorded:
+                    if '--dry-run' in call:
+                        self.assertEqual(call[-2:], sources)
+                    self.assertFalse(any(tag_object in v for v in call), call)
+
+    def test_docs_match_the_release_path_and_name_required_checks(self):
+        docs = ' '.join((ROOT / 'docs/deployment.md').read_text().split())
+        # Run-scoped platform tags, under the commit an annotated tag points to.
+        self.assertIn('`<full-commit-SHA>-<run-ID>-amd64`', docs)
+        self.assertIn('`<full-commit-SHA>-<run-ID>-arm64`', docs)
+        self.assertNotRegex(docs, r'<full-commit-SHA>-(amd64|arm64|<arch>)')
+        self.assertIn('git rev-parse "$GITHUB_SHA^{commit}"', docs)
+        self.assertIn('annotated tag, such as the signed one below, the commit-named image tags still name '
+                      'the commit and never the tag object', docs)
+        # main's branch protection must require every PR job, or "all PR hosted jobs must
+        # pass before merge" is a convention, not a rule.
+        prerequisites = re.search(r'Owner prerequisites, not set by this repository\'s files:(.*?)Provision repository',
+                                  docs).group(1)
+        jobs = workflow()['jobs']
+        names = [jobs['quality']['name']] + [jobs['image']['name'].replace('${{ matrix.arch }}', arch)
+                                             for arch in ['amd64', 'arm64']]
+        self.assertEqual(names, ['Full test gate and mock e2e', 'Build and smoke image (amd64)',
+                                 'Build and smoke image (arm64)'])
+        self.assertIn('required status checks, without bypass', prerequisites)
+        for name in names:
+            self.assertIn(f'`{name}`', prerequisites)
 
     def test_semver_classification_and_rejection(self):
         cases = {'v1.2.3': 'true', 'v0.0.0': 'true', 'v1.2.3-rc.1': 'false',

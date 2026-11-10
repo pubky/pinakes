@@ -86,15 +86,28 @@ repositories ([runner support](https://github.blog/changelog/2026-01-29-arm64-st
 The Dockerfile compiles within each target platform's Rust image and ignores the shared action's
 `TARGETARCH` build argument. Both platform jobs must pass their real database/API smoke tests.
 That release build is separate from the PR image build, so each platform job then pulls the image
-it pushed and runs the same smoke test on it; the multiarch tags only move after both pass. A failed
-smoke test leaves its `<full-commit-SHA>-<arch>` tag in the registry, never promoted.
+it pushed and runs the same smoke test on it; the multiarch tags only move after both pass. Each
+platform job provisions that database before it logs in to Docker Hub, so no registry credential is
+on disk during package installs. The pushed tags, `<full-commit-SHA>-<run-ID>-amd64` and
+`<full-commit-SHA>-<run-ID>-arm64`, belong to one workflow run: two tags on the same commit start
+two runs, and neither can replace the bytes the other tested. Re-running failed jobs keeps the run
+ID, so a re-run platform job replaces and re-tests its own tag before the manifest job reads it. A
+failed smoke test leaves its run's tag in the registry, never promoted.
 
 Before any registry login, the publish and manifest jobs check that `main` itself pointed to the
 tagged commit, on its first-parent line (`scripts/ci/release-on-main`). A tag on a feature branch,
-or on a commit that only reached `main` inside a merged branch, publishes nothing. That check lives in
-the tagged commit's own workflow, so it catches mistakes, not someone who can push tags. Owner
-prerequisites, not set by this repository's files:
+or on a commit that only reached `main` inside a merged branch, publishes nothing. In each of those
+jobs the check peels the pushed SHA to its commit (`git rev-parse "$GITHUB_SHA^{commit}"`), requires
+the checked-out tree to be that commit, and hands it on: the full-SHA tag and the per-platform tags
+use only that commit. GitHub documents `GITHUB_SHA` for a tag push as the tagged commit; for an
+annotated tag, such as the signed one below, the commit-named image tags still name the commit and
+never the tag object. That check lives in the tagged commit's
+own workflow, so it catches mistakes, not someone who can push tags. Owner prerequisites, not set by
+this repository's files:
 
+- Branch protection or a ruleset on `main` with these required status checks, without bypass, so
+  every state on `main`'s first-parent line passed them, as `scripts/ci/release-on-main` assumes:
+  `Full test gate and mock e2e`, `Build and smoke image (amd64)` and `Build and smoke image (arm64)`.
 - A tag ruleset for `refs/tags/v*` that lets only release maintainers create, update or delete
   those tags.
 - Optionally, a `release` Environment holding the two Docker Hub secrets, limited to `v*` tags
@@ -118,8 +131,8 @@ Only a pushed, valid `v`-prefixed SemVer tag (at most 128 characters) can publis
 | `v1.2.3` | `v1.2.3`, full commit SHA, `latest` |
 | `v1.2.3-rc.1` | `v1.2.3-rc.1`, full commit SHA; leaves `latest` unchanged |
 
-The shared action publishes intermediate `<full-commit-SHA>-amd64` and `<full-commit-SHA>-arm64`
-image tags. Its `latest` and `sha_tag` inputs are literal `false`: metadata's `enable=false`
+The shared action publishes the intermediate `<full-commit-SHA>-<run-ID>-<arch>` image tags
+described above. Its `latest` and `sha_tag` inputs are literal `false`: metadata's `enable=false`
 suppresses those tags even though the composite action's SHA-computation step treats the string
 as truthy. Raw metadata tags avoid automatic `latest` tagging. After both platform jobs succeed,
 a separate job checks the combined manifest's platforms and publishes the version/full-SHA tags,
