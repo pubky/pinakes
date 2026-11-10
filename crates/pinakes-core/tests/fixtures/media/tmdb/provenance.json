@@ -1,0 +1,72 @@
+{
+  "find-Q1079": {
+    "bytes": 911,
+    "content_type": "application/json;charset=utf-8",
+    "file": "find-Q1079.json",
+    "made": "2026-11-10, by hand from the API reference",
+    "note": "Handmade answers shaped from TMDB's API reference for GET /3/find/{external_id} (https://developer.themoviedb.org/reference/find-by-id, read 2026-11-10): the response object with movie_results, person_results, tv_results, tv_episode_results and tv_season_results, each result as the reference's example shows it. They are NOT live answers: no TMDB key was used to make them. IDs (157336 Interstellar, 603 The Matrix, 1396 Breaking Bad) are TMDB's public title IDs as Wikidata records them (P4947, P4983); poster paths, overviews and the other values are illustrative.",
+    "sha256": "452a00c37f530bef4bf0ded400a37ea7f9c52940f9733582ea40c00ba9e004f5",
+    "status": 200,
+    "url": "https://api.themoviedb.org/3/find/Q1079?external_source=wikidata_id"
+  },
+  "find-Q13417189": {
+    "bytes": 772,
+    "content_type": "application/json;charset=utf-8",
+    "file": "find-Q13417189.json",
+    "made": "2026-11-10, by hand from the API reference",
+    "note": "Handmade answers shaped from TMDB's API reference for GET /3/find/{external_id} (https://developer.themoviedb.org/reference/find-by-id, read 2026-11-10): the response object with movie_results, person_results, tv_results, tv_episode_results and tv_season_results, each result as the reference's example shows it. They are NOT live answers: no TMDB key was used to make them. IDs (157336 Interstellar, 603 The Matrix, 1396 Breaking Bad) are TMDB's public title IDs as Wikidata records them (P4947, P4983); poster paths, overviews and the other values are illustrative.",
+    "sha256": "01020fee2cdf400a9038ca85406527ad720c82a185d317d378d5acc7ae8a2a67",
+    "status": 200,
+    "url": "https://api.themoviedb.org/3/find/Q13417189?external_source=wikidata_id"
+  },
+  "find-none": {
+    "bytes": 120,
+    "content_type": "application/json;charset=utf-8",
+    "file": "find-none.json",
+    "made": "2026-11-10, by hand from the API reference",
+    "note": "Handmade answers shaped from TMDB's API reference for GET /3/find/{external_id} (https://developer.themoviedb.org/reference/find-by-id, read 2026-11-10): the response object with movie_results, person_results, tv_results, tv_episode_results and tv_season_results, each result as the reference's example shows it. They are NOT live answers: no TMDB key was used to make them. IDs (157336 Interstellar, 603 The Matrix, 1396 Breaking Bad) are TMDB's public title IDs as Wikidata records them (P4947, P4983); poster paths, overviews and the other values are illustrative. An ID TMDB does not know.",
+    "sha256": "0f14918f2527a842c87e16d58129d0864b2f5fe5795b365283635cdb2dada8ef",
+    "status": 200,
+    "url": "https://api.themoviedb.org/3/find/tt9999999?external_source=imdb_id"
+  },
+  "find-tt0133093": {
+    "bytes": 745,
+    "content_type": "application/json;charset=utf-8",
+    "file": "find-tt0133093.json",
+    "made": "2026-11-10, by hand from the API reference",
+    "note": "Handmade answers shaped from TMDB's API reference for GET /3/find/{external_id} (https://developer.themoviedb.org/reference/find-by-id, read 2026-11-10): the response object with movie_results, person_results, tv_results, tv_episode_results and tv_season_results, each result as the reference's example shows it. They are NOT live answers: no TMDB key was used to make them. IDs (157336 Interstellar, 603 The Matrix, 1396 Breaking Bad) are TMDB's public title IDs as Wikidata records them (P4947, P4983); poster paths, overviews and the other values are illustrative.",
+    "sha256": "f2fa1086e71e809919159c9cc4d021aee275b4c7cb79990f0a168eec7b9183d1",
+    "status": 200,
+    "url": "https://api.themoviedb.org/3/find/tt0133093?external_source=imdb_id"
+  },
+  "find-tt0816692": {
+    "bytes": 772,
+    "content_type": "application/json;charset=utf-8",
+    "file": "find-tt0816692.json",
+    "made": "2026-11-10, by hand from the API reference",
+    "note": "Handmade answers shaped from TMDB's API reference for GET /3/find/{external_id} (https://developer.themoviedb.org/reference/find-by-id, read 2026-11-10): the response object with movie_results, person_results, tv_results, tv_episode_results and tv_season_results, each result as the reference's example shows it. They are NOT live answers: no TMDB key was used to make them. IDs (157336 Interstellar, 603 The Matrix, 1396 Breaking Bad) are TMDB's public title IDs as Wikidata records them (P4947, P4983); poster paths, overviews and the other values are illustrative.",
+    "sha256": "01020fee2cdf400a9038ca85406527ad720c82a185d317d378d5acc7ae8a2a67",
+    "status": 200,
+    "url": "https://api.themoviedb.org/3/find/tt0816692?external_source=imdb_id"
+  },
+  "find-tt0903747": {
+    "bytes": 911,
+    "content_type": "application/json;charset=utf-8",
+    "file": "find-tt0903747.json",
+    "made": "2026-11-10, by hand from the API reference",
+    "note": "Handmade answers shaped from TMDB's API reference for GET /3/find/{external_id} (https://developer.themoviedb.org/reference/find-by-id, read 2026-11-10): the response object with movie_results, person_results, tv_results, tv_episode_results and tv_season_results, each result as the reference's example shows it. They are NOT live answers: no TMDB key was used to make them. IDs (157336 Interstellar, 603 The Matrix, 1396 Breaking Bad) are TMDB's public title IDs as Wikidata records them (P4947, P4983); poster paths, overviews and the other values are illustrative.",
+    "sha256": "452a00c37f530bef4bf0ded400a37ea7f9c52940f9733582ea40c00ba9e004f5",
+    "status": 200,
+    "url": "https://api.themoviedb.org/3/find/tt0903747?external_source=imdb_id"
+  },
+  "find-two-movies": {
+    "bytes": 1396,
+    "content_type": "application/json;charset=utf-8",
+    "file": "find-two-movies.json",
+    "made": "2026-11-10, by hand from the API reference",
+    "note": "Handmade answers shaped from TMDB's API reference for GET /3/find/{external_id} (https://developer.themoviedb.org/reference/find-by-id, read 2026-11-10): the response object with movie_results, person_results, tv_results, tv_episode_results and tv_season_results, each result as the reference's example shows it. They are NOT live answers: no TMDB key was used to make them. IDs (157336 Interstellar, 603 The Matrix, 1396 Breaking Bad) are TMDB's public title IDs as Wikidata records them (P4947, P4983); poster paths, overviews and the other values are illustrative. A made-up IMDb ID whose answer names two movies.",
+    "sha256": "f8bbffa58abd04e15c411260a9dce68e09bfc08b2b8e11300f5eeffcc5196ef7",
+    "status": 200,
+    "url": "https://api.themoviedb.org/3/find/tt0000001?external_source=imdb_id"
+  }
+}

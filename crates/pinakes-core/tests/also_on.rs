@@ -3455,7 +3455,7 @@ async fn a_switched_off_source_shows_nothing_until_it_is_on_again(pool: PgPool) 
     both.sort();
     for on in [true, false, true] {
         let config = config(on);
-        also_on::configure(&pool, &config.also_on).await.unwrap();
+        also_on::configure(&pool, &config).await.unwrap();
         groups::drain(&pool, &Default::default(), 100)
             .await
             .unwrap();
@@ -3610,9 +3610,7 @@ async fn a_switched_off_source_s_name_leaves_the_card_even_on_a_304(pool: PgPool
             (name, reads)
         }
     };
-    also_on::configure(&pool, &config(true).also_on)
-        .await
-        .unwrap();
+    also_on::configure(&pool, &config(true)).await.unwrap();
     read(&[false]).await;
     let sources: Vec<Arc<dyn Source>> = vec![titles];
     drain(&pool, &cx(config(true)), &sources).await;
@@ -3632,9 +3630,7 @@ async fn a_switched_off_source_s_name_leaves_the_card_even_on_a_304(pool: PgPool
         .await
         .unwrap();
     // Off: due at once, and a 304 is followed by a full read without the name.
-    also_on::configure(&pool, &config(false).also_on)
-        .await
-        .unwrap();
+    also_on::configure(&pool, &config(false)).await.unwrap();
     assert!(due().await);
     assert_eq!(read(&[true, false]).await, (Some("Netflix".into()), 2));
     // Once read without it, a 304 is the card's again.
@@ -3645,9 +3641,7 @@ async fn a_switched_off_source_s_name_leaves_the_card_even_on_a_304(pool: PgPool
         .execute(&pool)
         .await
         .unwrap();
-    also_on::configure(&pool, &config(true).also_on)
-        .await
-        .unwrap();
+    also_on::configure(&pool, &config(true)).await.unwrap();
     assert!(due().await);
     assert_eq!(read(&[true]).await, (Some("The Crown".into()), 1));
 
@@ -3667,7 +3661,7 @@ async fn a_switched_off_source_s_name_leaves_the_card_even_on_a_304(pool: PgPool
     };
     let switch = |on: bool| {
         let (pool, config) = (pool.clone(), config(on));
-        async move { also_on::configure(&pool, &config.also_on).await.unwrap() }
+        async move { also_on::configure(&pool, &config).await.unwrap() }
     };
     // Changed, then off.
     fact("value='The Crown (2016)'").await;

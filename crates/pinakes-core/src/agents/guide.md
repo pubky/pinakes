@@ -38,8 +38,10 @@ A link this instance does not know is a 404 there: nobody referenced it, or it h
   `name`, `description`, `image`, `site`, `point` (`lat`, `lon`), `start` and `end` are what the
   link's page or the service's own API says, except where `credits` names another source (a
   MusicBrainz card's Wikipedia or Wikidata text, its Commons image, or an album's cover from the
-  Cover Art Archive): show each credit's author, licence and source page with its value (a cover
-  has no author or licence: name the Cover Art Archive and link its source page). A MusicBrainz
+  Cover Art Archive, a film's or series' TMDB poster or overview): show each credit's author,
+  licence and source page with its value (a cover has no author or licence: name the Cover Art
+  Archive and link its source page). Cards may carry `credits` with provider `tmdb`: a client
+  showing them must show TMDB's logo and its notice, both in `GET /v1/info` `attributions`. A MusicBrainz
   card's `facts` hold MusicBrainz's `rating` (0 to 5) and `rating_count` when people voted.
   `status` is `ok`, `pending`, `missing` (the object is gone upstream), `unreachable` or `error`.
 - **Only referenced links.** Search lists links someone tagged, replied to or embedded on Pubky.

@@ -965,7 +965,7 @@ impl Config {
             .chain(crate::also_on::budgets())
             .map(|(host, rate)| (host.to_owned(), rate))
             .collect();
-        self.egress.off_hosts = crate::also_on::off_hosts(&self.also_on);
+        self.egress.off_hosts = crate::also_on::off_hosts(self);
     }
     pub fn validate(&self) -> Result<()> {
         if self.pubky.enabled {
@@ -1181,6 +1181,27 @@ impl Config {
             || !(3600..=604800).contains(&self.canary.interval_secs)
         {
             bail!("invalid refresh, canary or admin configuration");
+        }
+        // Change lines hold a card's values for `refresh.retention_days`: no longer than a source
+        // whose values they may hold allows them kept (TMDB: six months, from a read up to 60
+        // days old), while it is ready.
+        for source in crate::also_on::registered() {
+            if let Some(cap) = source.retention_days_cap() {
+                if source.ready(self) && self.refresh.retention_days > cap {
+                    let named: Vec<String> = source
+                        .section()
+                        .map(|s| s.variables.iter().map(|(v, _)| (*v).to_owned()).collect())
+                        .unwrap_or_default();
+                    bail!(
+                        "refresh.retention_days is {}, over the {cap} days change lines may keep the `{}` source's values: lower it, or switch `{}` off ({}[{}] enabled = false)",
+                        self.refresh.retention_days,
+                        source.id(),
+                        source.id(),
+                        named.iter().map(|v| format!("unset {v}, or ")).collect::<String>(),
+                        source.id()
+                    );
+                }
+            }
         }
         if !plain_upstream(&self.nexus_url).unwrap_or(false) {
             bail!("invalid Nexus URL: an http(s) base without user info, query or fragment; send credentials with {NEXUS_AUTHORIZATION}");

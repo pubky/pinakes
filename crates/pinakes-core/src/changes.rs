@@ -495,6 +495,45 @@ pub(crate) async fn append(
         .bind(source).bind(diff.class).execute(&mut **tx).await?;
     Ok(())
 }
+/// Rewrite a stored card in place by `change` (whether it changed it), given what `read` reads
+/// once the card's row is locked, with its change line like any save's, and nothing else: its schedule stays (a final or dead-lettered card stays so). An
+/// OSM place's card is never rewritten. Whether it was.
+pub(crate) async fn rewrite<T, F: std::future::Future<Output = Result<T>>>(
+    pool: &PgPool,
+    id: &str,
+    read: impl FnOnce() -> F,
+    change: impl FnOnce(&mut ResourceMeta, T) -> bool,
+) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
+    let row = sqlx::query("SELECT coalesce(r.resolver,r.doc->>'source','') AS source,r.doc FROM resource r WHERE r.id=$1 AND r.osm_id IS NULL AND r.doc IS NOT NULL FOR UPDATE OF r")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some(row) = row else { return Ok(false) };
+    let source: String = row.try_get("source")?;
+    let Ok(mut doc) = serde_json::from_value::<ResourceMeta>(row.try_get("doc")?) else {
+        return Ok(false);
+    };
+    // What the change depends on, read now that the row is locked: a writer that changed it
+    // before this lock (a save, a source's run, which lock the row too) is seen.
+    let read = read().await?;
+    let before = normalize(&doc);
+    if !change(&mut doc, read) {
+        return Ok(false);
+    }
+    let after = normalize(&doc);
+    sqlx::query("UPDATE resource SET doc=$2 WHERE id=$1")
+        .bind(id)
+        .bind(serde_json::to_value(&doc)?)
+        .execute(&mut *tx)
+        .await?;
+    if let Some(diff) = diff(Some(&before), Some(&after)) {
+        append(&mut tx, id, &source, Some(before), Some(after), diff, None).await?;
+    }
+    tx.commit().await?;
+    Ok(true)
+}
 /// Clear a resource's card for good: its document becomes an empty one with status `error`,
 /// the change is recorded like any other, and the resource is final with `last_error` (a page
 /// too complex to parse). Unlike `save`, nothing of the old card is kept: no drift guard holds
@@ -1033,6 +1072,9 @@ async fn delete_orphan_batch(
     tx.commit().await?;
     Ok(rows.len() as u64)
 }
+/// Delete change lines older than `days`, and those holding a value of a provider whose terms
+/// cap how long it is kept older than that cap; then the OSM versions and occurrences nothing
+/// refers to any more.
 pub async fn retain(pool: &PgPool, days: u32) -> Result<()> {
     // The change history is kept to its days even when an occurrence step fails.
     let occurrences = retain_occurrences(pool).await;
@@ -1045,6 +1087,19 @@ pub async fn retain(pool: &PgPool, days: u32) -> Result<()> {
         .bind(days as f64)
         .execute(&mut *tx)
         .await?;
+    // A line that holds a value of a provider whose terms limit how long it is kept goes after
+    // that many days (`CreditProvider::change_days_cap`; TMDB's 120), whatever `days` says and
+    // whether or not the provider's source is on now.
+    for provider in crate::model::CreditProvider::FROM_FACTS {
+        let Some(cap) = provider.change_days_cap().filter(|cap| *cap < days) else {
+            continue;
+        };
+        sqlx::query("DELETE FROM resource_change WHERE seq IN (SELECT seq FROM resource_change r WHERE at<now()-$1*interval '1 day' AND EXISTS(SELECT 1 FROM jsonb_array_elements(CASE jsonb_typeof(r.before->'credits') WHEN 'array' THEN r.before->'credits' ELSE '[]' END || CASE jsonb_typeof(r.after->'credits') WHEN 'array' THEN r.after->'credits' ELSE '[]' END) c WHERE c->>'provider'=$2) FOR UPDATE SKIP LOCKED)")
+            .bind(cap as f64)
+            .bind(provider.name())
+            .execute(&mut *tx)
+            .await?;
+    }
     tx.commit().await?;
     // Preserve any historical version still referenced by a retained change or accepted resource.
     // Lock candidate rows before inspecting references so a concurrent append cannot lose its snapshot.

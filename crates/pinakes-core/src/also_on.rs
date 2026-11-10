@@ -31,6 +31,7 @@ pub mod spotify;
 pub mod spotify_api;
 pub mod spotify_isrc;
 pub mod tidal;
+pub mod tmdb;
 pub mod wikidata;
 pub mod wikidata_item;
 pub mod wikipedia;
@@ -286,6 +287,37 @@ pub trait Source: Send + Sync {
     fn ready(&self, _config: &Config) -> bool {
         true
     }
+    /// Whether it counts as switched off while it is not [`ready`](Source::ready): its stored
+    /// rows are hidden at once (`also_on_source_off`) and its API hosts refused, as with
+    /// `enabled = false`, instead of being read until they expire. For a service whose data may
+    /// be shown only while the operator uses its API.
+    fn off_until_ready(&self) -> bool {
+        false
+    }
+    /// The facts of its own that a resolved card takes into its fields when it is typed
+    /// ([`fill_card`](Source::fill_card)): loaded with the card's type hints
+    /// (`media::TypeHints::filled`) and fingerprinted in `ResourceMeta::hinted_by`.
+    fn fills(&self) -> &'static [&'static str] {
+        &[]
+    }
+    /// Write into a resolved, typed card what its facts of [`fills`](Source::fills) give
+    /// (`facts`: the live ones, none when it is off), first taking out the values it wrote before
+    /// (those credited to it). Whether it wrote anything. No I/O.
+    fn fill_card(&self, _facts: &[Fact], _doc: &mut ResourceMeta) -> bool {
+        false
+    }
+    /// The longest `refresh.retention_days` its values may be kept in change lines while it is
+    /// ready (`Config::validate` refuses more): for a service that limits how long its data is
+    /// cached.
+    fn retention_days_cap(&self) -> Option<u32> {
+        None
+    }
+    /// The credit provider of the values it writes ([`fill_card`](Source::fill_card)): one of
+    /// `CreditProvider::FROM_FACTS`. A card holding such a value whose source this build lacks
+    /// loses it (`media::fill`, [`refill`]).
+    fn fills_as(&self) -> Option<crate::model::CreditProvider> {
+        None
+    }
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found>;
     /// The key namespaces it records that name one object each: a group holds at most one value
     /// of each (`groups::single_object`).
@@ -351,6 +383,19 @@ pub trait Source: Send + Sync {
     fn app_key_variables(&self) -> Option<(&'static str, &'static str)> {
         None
     }
+}
+
+/// Whether `source` runs under `config`: the worker and the source on, and the configuration
+/// lets it ([`Source::ready`]).
+pub fn runs(config: &Config, source: &dyn Source) -> bool {
+    config.also_on.source_enabled(source) && source.ready(config)
+}
+/// Whether `source` counts as switched off under `config`: by the operator, or for want of what
+/// it needs to run when that switches it off ([`Source::off_until_ready`]). A source that is not
+/// switched off shows its stored rows, and what cards took from them, whether or not the worker
+/// runs.
+pub fn switched_off(config: &Config, source: &dyn Source) -> bool {
+    !config.also_on.source_on(source) || (source.off_until_ready() && !source.ready(config))
 }
 
 /// A top-level section of the config file that one source owns and alone reads (`[tidal]`):
@@ -426,6 +471,8 @@ pub fn registry() -> Vec<Arc<dyn Source>> {
         Arc::new(wikidata_item::WikidataItemSource),
         Arc::new(books::Books),
         Arc::new(films::Films),
+        // After `films`: it starts from the IMDb ID `films` keys.
+        Arc::new(tmdb::Tmdb),
         Arc::new(podcasts::Podcasts),
         Arc::new(product_keys::ProductKeys),
         Arc::new(crate::sources::open_food_facts::also_on::OpenFoodFacts),
@@ -447,7 +494,8 @@ pub fn registered() -> &'static [Arc<dyn Source>] {
     static ALL: std::sync::OnceLock<Vec<Arc<dyn Source>>> = std::sync::OnceLock::new();
     ALL.get_or_init(registry)
 }
-/// Write the sources this build has that the operator switched off to `also_on_source_off`,
+/// Write the sources this build has that are switched off (by the operator, or a source
+/// [`Source::off_until_ready`] that is not ready) to `also_on_source_off`,
 /// which every read of keys, facts and derived links leaves out (cards, `also_on`, search,
 /// grouping): a source switched off stops showing at once, its rows kept until they expire, and
 /// shows again when switched on. A change regroups what its rows name (the table's trigger), and
@@ -455,10 +503,10 @@ pub fn registered() -> &'static [Arc<dyn Source>] {
 /// name, a type) leaves, or comes back, at that read (`media::outdated` keeps a 304 from holding
 /// it). The rows of a source this build no longer has are read as before. Run at
 /// startup, before the workers.
-pub async fn configure(pool: &PgPool, cfg: &AlsoOnConfig) -> Result<()> {
+pub async fn configure(pool: &PgPool, config: &Config) -> Result<()> {
     let off: Vec<&str> = registered()
         .iter()
-        .filter(|s| !cfg.source_on(s.as_ref()))
+        .filter(|s| switched_off(config, s.as_ref()))
         .map(|s| s.id())
         .collect();
     let mut tx = pool.begin().await?;
@@ -492,12 +540,13 @@ pub async fn configure(pool: &PgPool, cfg: &AlsoOnConfig) -> Result<()> {
     }
     Ok(())
 }
-/// The API hosts ([`Source::api_hosts`]) of the sources that do not run under `cfg`: switched
-/// off, or the worker off. The egress refuses them (`EgressConfig::off_hosts`).
-pub fn off_hosts(cfg: &AlsoOnConfig) -> Vec<String> {
+/// The API hosts ([`Source::api_hosts`]) of the sources that do not run under `config`: switched
+/// off (or not ready, for a source [`Source::off_until_ready`]), or the worker off. The egress
+/// refuses them (`EgressConfig::off_hosts`).
+pub fn off_hosts(config: &Config) -> Vec<String> {
     registered()
         .iter()
-        .filter(|s| !cfg.source_enabled(s.as_ref()))
+        .filter(|s| !config.also_on.enabled || switched_off(config, s.as_ref()))
         .flat_map(|s| s.api_hosts().iter().map(|h| (*h).to_owned()))
         .collect()
 }
@@ -870,6 +919,89 @@ async fn lock_writers(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
     crate::store::lock_writers(tx, crate::store::WriteOrder::Shared).await?;
     crate::alias::lock(tx).await
 }
+
+/// Take out of every stored card the values written from facts (`Source::fill_card`) that its
+/// sources' live facts no longer give (`media::unfill`): their rows expired (a TMDB answer older
+/// than its rows live), the source is switched off or gone from the build, or it answers
+/// otherwise now. For cards no reading brings back (final, dead-lettered, orphaned, or not due
+/// yet); a card that is read again takes what the live facts give then. It only removes: a stale
+/// card is rewritten under its row lock, checked again against the facts read under it, with its
+/// change line (`changes::rewrite`); nothing else of it changes, and a card that is current is
+/// never locked. It reads only cards of the types such values fill
+/// (`CreditProvider::filled_types`, by the `type_path` index), never every card. In batches of
+/// [`REFILL_BATCH`], until none is left or `stop`; the number rewritten.
+pub async fn refill(pool: &PgPool, stop: impl Fn() -> bool) -> Result<u64> {
+    let fillers: Vec<&str> = registered()
+        .iter()
+        .filter(|s| !s.fills().is_empty())
+        .map(|s| s.id())
+        .collect();
+    // The providers whose values are written from facts, as stored, and the only card types
+    // that can hold them.
+    let from_facts = crate::model::CreditProvider::FROM_FACTS;
+    let providers: Vec<String> = from_facts
+        .iter()
+        .filter_map(|p| serde_json::to_value(p).ok()?.as_str().map(str::to_owned))
+        .collect();
+    let mut types: Vec<&str> = from_facts
+        .iter()
+        .flat_map(|p| p.filled_types())
+        .copied()
+        .collect();
+    types.sort();
+    types.dedup();
+    let mut done = 0;
+    let mut after = String::new();
+    while !types.is_empty() && !stop() {
+        // Only cards of those types (the `type_path` index), in ID order.
+        let rows: Vec<(String, Value)> = sqlx::query_as("SELECT id,doc FROM resource WHERE type_path && $5::text[] AND id>$1 AND osm_id IS NULL AND (doc->'hinted_by' ?| $2 OR EXISTS(SELECT 1 FROM jsonb_array_elements(CASE jsonb_typeof(doc->'credits') WHEN 'array' THEN doc->'credits' ELSE '[]' END) c WHERE c->>'provider'=ANY($3))) ORDER BY id LIMIT $4")
+            .bind(&after)
+            .bind(&fillers)
+            .bind(&providers)
+            .bind(REFILL_BATCH)
+            .bind(&types)
+            .fetch_all(pool)
+            .await?;
+        let Some((last, _)) = rows.last() else { break };
+        after = last.clone();
+        let ids: Vec<String> = rows.iter().map(|(id, _)| id.clone()).collect();
+        let mut hints = media::type_hints(pool, &ids).await?;
+        for (id, doc) in rows {
+            let hints = hints.remove(&id).unwrap_or_default();
+            let Ok(mut doc) = serde_json::from_value::<ResourceMeta>(doc) else {
+                continue;
+            };
+            // Current: not locked.
+            if !media::unfill(&hints, &mut doc) {
+                continue;
+            }
+            // Under the row lock, against the facts as they are then: a fill that landed
+            // meanwhile is not taken out.
+            let rewritten = crate::changes::rewrite(
+                pool,
+                &id,
+                || async {
+                    Ok(media::type_hints(pool, std::slice::from_ref(&id))
+                        .await?
+                        .remove(&id)
+                        .unwrap_or_default())
+                },
+                |doc, hints| media::unfill(&hints, doc),
+            )
+            .await?;
+            done += u64::from(rewritten);
+        }
+    }
+    if done > 0 {
+        tracing::info!(
+            cards = done,
+            "values their sources' live facts no longer give taken out of cards"
+        );
+    }
+    Ok(done)
+}
+/// The cards [`refill`] reads at once.
+pub const REFILL_BATCH: i64 = 100;
 
 /// Delete keys and links nobody refreshed in time (their deletion regroups as a change would).
 pub async fn prune(pool: &PgPool) -> Result<u64> {

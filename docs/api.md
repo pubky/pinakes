@@ -27,7 +27,7 @@ snapshot; a test fails when it is stale.
 | `POST /v1/occurrences/lookup` | `{resource_ids?, uris?, from?, to?, limit?, cursor?}`: 1–500 feed IDs and links together | `{items: [occurrence card], cursor}` across the feeds, by start |
 | `GET /v1/groups/{id}` | 32-character group ID | `{id, type, curated, keys, members: [card]}`; 404 if unknown |
 | `POST /v1/changes/lookup` | `{resource_ids?, uris?, since?, cursor?, limit?}`: 1–500 IDs and links together | Change page for those resources |
-| `GET /v1/info` | None | `{version, api_shape, user_agent, resolves, limits, osm_licence}`: the shape of its cards (`api_shape: 2`, one flat object per card), what this instance resolves, the limits a client must respect, and the User-Agent its requests carry |
+| `GET /v1/info` | None | `{version, api_shape, user_agent, resolves, limits, osm_licence, attributions}`: the shape of its cards (`api_shape: 2`, one flat object per card), what this instance resolves, the limits a client must respect, the User-Agent its requests carry, and the attributions a client showing its cards' values must show ([Credits](#credits); absent when there are none) |
 | `GET /v1/dumps/osm_place.ndjson.gz` | None | The ODbL derivative database as a daily gzip file ([OSM](#openstreetmap-and-locations)) |
 | `GET /v1/openapi.json` | None | OpenAPI 3.1 |
 | `GET /swagger-ui` | None | Swagger UI (when `api.swagger_ui`) |
@@ -190,11 +190,11 @@ has none.
 | Field | Meaning |
 | --- | --- |
 | `field` | `image` or `description`: the card field the value is in |
-| `provider` | `wikipedia` (an article's summary), `wikimedia_commons` (a file), `wikidata` (an item's English description) or `cover_art_archive` (a release's front cover) |
-| `source_url` | The article, the file's page on Commons, the item's page on Wikidata (`https://www.wikidata.org/wiki/Q…`), or for a cover the cover art page of the release it is of on MusicBrainz (`https://musicbrainz.org/release/…/cover-art`): `https:`, at most 1,024 bytes |
-| `author` | Plain text, at most 256 bytes: `Wikipedia contributors` for an article, the file's author for an image; `null` for a CC0 or public-domain file that names none, for a Wikidata description and for a cover |
-| `license` | An SPDX licence ID (`CC-BY-SA-4.0`, `CC-BY-2.0`, `CC-BY-SA-3.0-DE`, `CC0-1.0`, `GPL-3.0-only`, `LGPL-2.1-or-later`), `public-domain`, or `Attribution` (Commons' licence of that name, which has no SPDX ID); `null` for a cover (cover art is its label's; no licence is given) |
-| `license_url` | The licence's text (`https:`): for a GNU licence its version's text on gnu.org, for `Attribution` its template's page on Commons; `null` for the public domain without a mark and for a cover |
+| `provider` | `wikipedia` (an article's summary), `wikimedia_commons` (a file), `wikidata` (an item's English description), `cover_art_archive` (a release's front cover) or `tmdb` (a film's or series' poster or overview) |
+| `source_url` | The article, the file's page on Commons, the item's page on Wikidata (`https://www.wikidata.org/wiki/Q…`), or for a cover the cover art page of the release it is of on MusicBrainz (`https://musicbrainz.org/release/…/cover-art`), or the title's page on TMDB (`https://www.themoviedb.org/movie/…` or `/tv/…`): `https:`, at most 1,024 bytes |
+| `author` | Plain text, at most 256 bytes: `Wikipedia contributors` for an article, the file's author for an image; `null` for a CC0 or public-domain file that names none, for a Wikidata description, for a cover and for TMDB's values |
+| `license` | An SPDX licence ID (`CC-BY-SA-4.0`, `CC-BY-2.0`, `CC-BY-SA-3.0-DE`, `CC0-1.0`, `GPL-3.0-only`, `LGPL-2.1-or-later`), `public-domain`, or `Attribution` (Commons' licence of that name, which has no SPDX ID); `null` for a cover (cover art is its label's; no licence is given) and for TMDB's values (used under TMDB's API terms) |
+| `license_url` | The licence's text (`https:`): for a GNU licence its version's text on gnu.org, for `Attribution` its template's page on Commons; `null` for the public domain without a mark, for a cover and for TMDB's values |
 | `lang` | The text's language: `en`, or another Wikipedia's code (`de`) when only that Wikipedia describes it; `null` for an image. A client may label or hide a text in a language its reader does not read |
 | `excerpted` | `true` when the text is a part of a longer source: a summary is the article's first paragraphs, and one over 2,048 bytes is cut at a sentence or a word. A Wikidata description is whole (`false`) |
 | `modified` | `true` when the value was changed beyond cutting it |
@@ -227,6 +227,35 @@ is of (a release group's cover is one of its releases', chosen by the archive):
  "author": null, "license": null, "license_url": null, "lang": null,
  "excerpted": false, "modified": false, "subject": null}
 ```
+
+A film's or series' card (`Movie`, `TVSeries`) with no image or no description of its own can
+show TMDB's poster and overview, found by the title's IMDb ID or Wikidata item alone (the
+`tmdb` source, [Also on](sources/README.md#also-on), only on an instance with a TMDB key). The credit names the
+title's page on TMDB and no author or licence; the overview's `lang` is `en`:
+
+```json
+{"field": "image", "provider": "tmdb",
+ "source_url": "https://www.themoviedb.org/movie/157336",
+ "author": null, "license": null, "license_url": null, "lang": null,
+ "excerpted": false, "modified": false, "subject": null}
+```
+
+A client that shows a value credited to `tmdb` must also show TMDB's logo (smaller and less
+prominent than its own marks) and TMDB's notice, as TMDB's terms ask. `/v1/info` gives both, in
+`attributions`, while the instance uses TMDB and while a stored card still holds a TMDB value:
+
+```json
+"attributions": [
+  {"provider": "tmdb",
+   "notice": "This product uses the TMDB API but is not endorsed or certified by TMDB.",
+   "logo": "https://www.themoviedb.org/assets/2/v4/logos/v2/blue_short-8e7b30f73a4020692ccca9c88bafe5dcb6f8a62a4c6bc55cd9ba82bb2cd95f6c.svg",
+   "url": "https://www.themoviedb.org"}
+]
+```
+
+TMDB's values are never older than TMDB's terms allow (six months): a card drops them when they
+were last read 60 days ago and TMDB has not answered since, or when the instance stops using
+TMDB.
 
 A credit is there only with its value: a card without the image or description has none for it.
 No credit, and no image or description it credits, is a link that carries a credential

@@ -141,6 +141,71 @@ pub enum CreditProvider {
     Wikidata,
     /// A release's front cover in the Cover Art Archive (MusicBrainz's).
     CoverArtArchive,
+    /// A film's or series' poster or overview from TMDB (The Movie Database), by the title's
+    /// exact IDs. A client that shows it shows TMDB's logo and notice (`/v1/info`
+    /// `attributions`).
+    Tmdb,
+}
+impl CreditProvider {
+    /// Whether its values carry no licence: a cover from the Cover Art Archive (cover art is its
+    /// label's) and TMDB's poster or overview (used under TMDB's API terms, credited to TMDB).
+    pub fn unlicensed(self) -> bool {
+        matches!(self, Self::CoverArtArchive | Self::Tmdb)
+    }
+    /// Whether its values are written from an also-on source's facts when a card is typed
+    /// (`also_on::Source::fill_card`), not by the card's own reading.
+    pub fn from_facts(self) -> bool {
+        Self::FROM_FACTS.contains(&self)
+    }
+    /// The providers whose values are written from facts ([`Self::from_facts`]).
+    pub const FROM_FACTS: &'static [Self] = &[Self::Tmdb];
+    /// The provider's name as stored and served (`tmdb`).
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Wikipedia => "wikipedia",
+            Self::WikimediaCommons => "wikimedia_commons",
+            Self::Wikidata => "wikidata",
+            Self::CoverArtArchive => "cover_art_archive",
+            Self::Tmdb => "tmdb",
+        }
+    }
+    /// What a client showing the provider's values must show, as its terms ask (`/v1/info`
+    /// `attributions`): TMDB's notice, verbatim, its logo and its site.
+    pub fn attribution(self) -> Option<Attribution> {
+        match self {
+            Self::Tmdb => Some(Attribution {
+                notice: "This product uses the TMDB API but is not endorsed or certified by TMDB.",
+                logo: "https://www.themoviedb.org/assets/2/v4/logos/v2/blue_short-8e7b30f73a4020692ccca9c88bafe5dcb6f8a62a4c6bc55cd9ba82bb2cd95f6c.svg",
+                url: "https://www.themoviedb.org",
+            }),
+            _ => None,
+        }
+    }
+    /// The longest a change line that holds one of the provider's values is kept (days),
+    /// whatever `refresh.retention_days` says and whether or not its source is on now
+    /// (`changes::retain`): TMDB's six months, from a value up to 60 days old.
+    pub fn change_days_cap(self) -> Option<u32> {
+        match self {
+            Self::Tmdb => Some(120),
+            _ => None,
+        }
+    }
+    /// The card types a provider written from facts fills: the only cards that can hold its
+    /// values (`also_on::refill` reads those alone, by the `type_path` index).
+    pub fn filled_types(self) -> &'static [&'static str] {
+        match self {
+            Self::Tmdb => &["Movie", "TVSeries"],
+            _ => &[],
+        }
+    }
+}
+/// A provider's attribution ([`CreditProvider::attribution`]): the notice and logo a client
+/// showing its values shows, and its site.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Attribution {
+    pub notice: &'static str,
+    pub logo: &'static str,
+    pub url: &'static str,
 }
 /// Where one of the card's `image` or `description` came from when Pinakes added it from another
 /// source than the link itself, and the licence it is used under (docs/api.md, Credits). Show it
@@ -151,16 +216,19 @@ pub struct Credit {
     pub field: CreditField,
     pub provider: CreditProvider,
     /// The page the value came from: the Wikipedia article, the file's page on Commons, the
-    /// item's page on Wikidata, or the cover art page of the release on MusicBrainz. An `https:`
-    /// URL of at most 1,024 bytes.
+    /// item's page on Wikidata, the cover art page of the release on MusicBrainz, or the title's
+    /// page on TMDB. An `https:` URL of at most 1,024 bytes.
     pub source_url: String,
     /// Who made it, plain text of at most 256 bytes: "Wikipedia contributors" for an article, the
     /// file's author for an image. Null for a public-domain or CC0 file that names none, for a
-    /// Wikidata description (CC0), and for a cover from the Cover Art Archive.
+    /// Wikidata description (CC0), for a cover from the Cover Art Archive and for TMDB's values.
     pub author: Option<String>,
-    /// An SPDX licence ID (`CC-BY-SA-4.0`, `CC-BY-2.0`, `CC0-1.0`), or `public-domain`. Null for
-    /// a cover from the Cover Art Archive: cover art is its label's, shown as a service shows an
-    /// album's cover, and no licence is given (`license_url` is null too).
+    /// An SPDX licence ID (`CC-BY-SA-4.0`, `CC-BY-2.0`, `CC0-1.0`, `GPL-3.0-only`,
+    /// `LGPL-2.1-or-later`), `public-domain`, or `Attribution` (Commons' licence of that name,
+    /// which has no SPDX ID). Null for a cover from the Cover Art Archive and for TMDB's poster
+    /// or overview, which carry no licence: cover art is its label's, shown as a service shows an
+    /// album's cover, and TMDB's values are used under TMDB's API terms (`license_url` is null
+    /// too).
     // No licence is the empty string here, and only such a credit holds it (`bounded`).
     #[serde(
         serialize_with = "license_or_null",
@@ -169,7 +237,7 @@ pub struct Credit {
     #[schema(value_type = Option<String>)]
     pub license: String,
     /// The licence's text: an `https:` URL; null when it has none (public domain, a cover from
-    /// the Cover Art Archive).
+    /// the Cover Art Archive, TMDB's values).
     pub license_url: Option<String>,
     /// The language of a text (`en`, or another Wikipedia's language code, `de`); null for an
     /// image.
@@ -197,8 +265,9 @@ fn license_from_null<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D
 impl Credit {
     /// The credit within its bounds: every URL `https:` and at most 1,024 bytes, the author at
     /// most 256 bytes (cut at a character), the licence ID and language at most 64. `None` when
-    /// a URL or ID is out of bounds, when a cover from the Cover Art Archive names a licence or
-    /// any other value names none, when a URL is a link that carries a credential
+    /// a URL or ID is out of bounds, when a value of a provider without licences
+    /// ([`CreditProvider::unlicensed`]) names a licence or any other value names none, when a
+    /// URL is a link that carries a credential
     /// (`capability::names_credential`: the store would drop that part of the credit,
     /// `capability::strip_document`, and leave its value uncredited), or when the author, free
     /// text, holds such a link anywhere (`capability::contains_credential`: `Jane
@@ -219,8 +288,9 @@ impl Credit {
             truncate(author, 256);
         }
         self.author = self.author.filter(|a| !a.trim().is_empty());
-        // A cover from the Cover Art Archive has no licence; every other value has one.
-        let licensed = if self.provider == CreditProvider::CoverArtArchive {
+        // A cover from the Cover Art Archive and TMDB's values have no licence; every other
+        // value has one.
+        let licensed = if self.provider.unlicensed() {
             self.license.is_empty() && self.license_url.is_none()
         } else {
             id(&self.license)
@@ -554,7 +624,13 @@ impl ResourceMeta {
         let mut kept = self.clone();
         let mut took = false;
         for field in std::mem::take(&mut kept.unread_enriched) {
-            let Some(credit) = stored.credits.iter().find(|c| c.field == field) else {
+            // A value an also-on source wrote from its facts (`also_on::Source::fill_card`) is
+            // that source's: its facts keep it or not, never a reading that left the field unread.
+            let Some(credit) = stored
+                .credits
+                .iter()
+                .find(|c| c.field == field && !c.provider.from_facts())
+            else {
                 continue;
             };
             let value = match field {
@@ -654,6 +730,24 @@ pub fn valid_id(id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A provider's name is its stored and served form: the SQL that finds its credits by name
+    /// (`changes::retain`, `api::info`) matches what is stored.
+    #[test]
+    fn a_provider_s_name_is_its_serialized_form() {
+        for p in [
+            CreditProvider::Wikipedia,
+            CreditProvider::WikimediaCommons,
+            CreditProvider::Wikidata,
+            CreditProvider::CoverArtArchive,
+            CreditProvider::Tmdb,
+        ] {
+            assert_eq!(serde_json::to_value(p).unwrap(), p.name());
+        }
+        assert_eq!(CreditProvider::Tmdb.change_days_cap(), Some(120));
+        assert!(CreditProvider::FROM_FACTS
+            .iter()
+            .all(|p| p.attribution().is_some() && !p.filled_types().is_empty()));
+    }
     /// A stream is public, direct audio or video: an episode's enclosure (a tracking redirect is
     /// the publisher's own link) or iTunes' preview, never a signed, expiring or private link.
     #[test]
