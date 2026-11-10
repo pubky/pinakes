@@ -937,6 +937,7 @@ async fn credit_image(
     crate::music_enrichment::Enrichment {
         image: found,
         description: Found::Missing,
+        cover_if_none: None,
     }
     .apply(doc, web.config.music_enrichment_retry_secs);
 }

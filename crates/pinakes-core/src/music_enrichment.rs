@@ -410,7 +410,8 @@ pub async fn enrich(
 /// cover would come last and miss the deadline with the rest. A free Commons file wins over
 /// it; when the Commons file goes unread (a failure, or past the deadline), the cover shows only
 /// where the stored card has no image ([`Enrichment::cover_if_none`]). A part past the deadline
-/// is unread; the other's findings stay.
+/// is unread; the other's findings stay. Once a free Commons file is found, the cover is not
+/// waited for (its request, if still waiting for the archive's turn, is dropped).
 pub async fn enrich_within(
     egress: &Egress,
     base: &str,
@@ -418,15 +419,29 @@ pub async fn enrich_within(
     width: u32,
     deadline: Option<tokio::time::Instant>,
 ) -> Enrichment {
-    let (wikimedia, cover) = tokio::join!(
-        within(deadline, wikimedia(egress, base, entity, width)),
-        within(deadline, cover(egress, entity)),
-    );
+    let wikimedia = within(deadline, wikimedia(egress, base, entity, width));
+    let cover_read = within(deadline, cover(egress, entity));
+    tokio::pin!(wikimedia, cover_read);
+    let mut cover_early = None;
+    let wikimedia = loop {
+        tokio::select! {
+            found = &mut wikimedia => break found,
+            found = &mut cover_read, if cover_early.is_none() => cover_early = Some(found),
+        }
+    };
     let mut enrichment = wikimedia.unwrap_or_else(|| {
         timed_out(&entity.mbid, "wikimedia");
         Enrichment::unread()
     });
-    let cover = cover.unwrap_or_else(|| {
+    // A free Commons file wins: the cover is not waited for.
+    if matches!(enrichment.image, Found::Value(..)) {
+        return enrichment;
+    }
+    let cover = match cover_early {
+        Some(found) => found,
+        None => cover_read.await,
+    }
+    .unwrap_or_else(|| {
         timed_out(&entity.mbid, "cover_art");
         Found::Unread
     });

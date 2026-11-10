@@ -122,6 +122,8 @@ struct Mode {
     /// Wikidata answers each request this many milliseconds late, as a busy Wikidata behind the
     /// egress's pacing (one request at a time per host) does.
     wikidata_delay_ms: u64,
+    /// The Cover Art Archive answers this many milliseconds late.
+    cover_art_delay_ms: u64,
 }
 /// What Kind of Blue's item (Q283221) is when read back.
 #[derive(Clone, Copy, Default, PartialEq)]
@@ -335,7 +337,13 @@ impl Transport for Recorded {
                 .lock()
                 .unwrap()
                 .push(format!("coverartarchive.org{}?", url.path()));
-            let mode = self.mode.lock().unwrap().cover_art;
+            let (mode, delay) = {
+                let mode = self.mode.lock().unwrap();
+                (mode.cover_art, mode.cover_art_delay_ms)
+            };
+            if delay > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            }
             return Ok(cover_art(url.path(), mode));
         }
         assert_eq!(options.accept.as_deref(), Some("application/json"), "{url}");
@@ -1971,7 +1979,7 @@ async fn an_album_without_a_free_file_takes_its_cover_from_the_cover_art_archive
 }
 
 /// A free file on Commons wins: an album whose item names one shows it. The Cover Art Archive,
-/// asked at the same time (once), is not used.
+/// asked at the same time (at most once), is not used, nor waited for.
 #[tokio::test]
 async fn a_free_commons_file_wins_over_the_cover() {
     let t = Recorded::new(Mode {
@@ -1982,7 +1990,57 @@ async fn a_free_commons_file_wins_over_the_cover() {
     assert_eq!(album.image.as_deref(), Some(MILES_IMAGE));
     assert_eq!(credits(&album)[0], miles_credits()[0]);
     assert!(album.unread_enriched.is_empty());
-    assert_eq!(t.to("coverartarchive.org").len(), 1, "{:?}", t.seen());
+    assert!(t.to("coverartarchive.org").len() <= 1, "{:?}", t.seen());
+    // A cover that comes late does not hold the card: the Commons file is there at once.
+    let t = Recorded::new(Mode {
+        album_has_image: true,
+        cover_art_delay_ms: 3000,
+        ..Default::default()
+    });
+    let started = std::time::Instant::now();
+    let album = card(&web_within(t.clone(), 10_000), KIND_OF_BLUE).await;
+    assert_eq!(album.image.as_deref(), Some(MILES_IMAGE));
+    assert!(album.unread_enriched.is_empty());
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+}
+
+/// Each part of an album's enrichment ends on its own. A cover that comes after the budget
+/// leaves the image unread and the article found stays; a Wikidata that refuses the album's
+/// item for now (503) leaves the album its cover, the image and description unread.
+#[tokio::test]
+async fn each_part_of_an_album_reading_ends_on_its_own() {
+    let t = Recorded::new(Mode {
+        cover_art_delay_ms: 3000,
+        ..Default::default()
+    });
+    let album = card(&web_within(t.clone(), 1000), KIND_OF_BLUE).await;
+    assert_eq!(album.image, None);
+    assert_eq!(
+        album.description.as_deref(),
+        Some(extract("enwiki-summary-kind-of-blue.json").as_str())
+    );
+    assert_eq!(
+        credits(&album),
+        json!([article_credit(
+            "https://en.wikipedia.org/wiki/Kind_of_Blue",
+            None
+        )])
+    );
+    assert_eq!(
+        serde_json::to_value(&album.unread_enriched).unwrap(),
+        json!(["image"])
+    );
+    let t = Recorded::new(Mode {
+        album_item_busy: true,
+        ..Default::default()
+    });
+    let album = card(&web(t.clone(), true), KIND_OF_BLUE).await;
+    assert_eq!(album.image.as_deref(), Some(KIND_OF_BLUE_COVER));
+    assert_eq!(credits(&album), json!([album_cover_credit()]));
+    assert_eq!(
+        serde_json::to_value(&album.unread_enriched).unwrap(),
+        json!(["image", "description"])
+    );
 }
 
 /// A busy Wikidata leaves an album its cover. Every host is paced (one request at a time), so
