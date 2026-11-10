@@ -7,7 +7,8 @@ card). No key. Public blockchain and Lightning gossip data.
 
 ## Links
 
-Every mempool.space link of one object is one resource, with a root in the object's own scheme:
+Every link of one object, on mempool.space or on another block explorer (below), is one
+resource, with a root in the object's own scheme:
 
 | Object | Links | Root |
 | --- | --- | --- |
@@ -28,11 +29,57 @@ Every mempool.space link of one object is one resource, with a root in the objec
   hash. It becomes an alias of `btc:block/{hash}` only once the block is in the best chain and
   six blocks deep; until then it keeps its own card.
 
+### Other block explorers
+
+The same objects' pages on these explorers are the same resources, and the card is still read
+from mempool.space: a tag on any of them counts on the one card. One table in `mempool.rs`
+(`EXPLORERS`) holds them; it reads every form below and writes the card's Also on from the
+first form of each listed site, so every listed link reads back as the card.
+
+| Explorer | Networks (path prefix) | Block | Block by height | Transaction | Address | Also on |
+| --- | --- | --- | --- | --- | --- | --- |
+| Blockstream (`blockstream.info`) | mainnet, `/testnet`, `/testnet4`, `/signet` | `/block/{hash}` | `/block-height/{n}` | `/tx/{txid}` | `/address/{a}` | listed |
+| `mempool.emzy.de` (a mempool instance, language prefix as on mempool.space) | mainnet, `/testnet4`, `/signet` | `/block/{hash or n}` | | `/tx/{txid}` | `/address/{a}` | listed |
+| BTCScan (`btcscan.org`) | mainnet | `/block/{hash}` | `/block-height/{n}` | `/tx/{txid}` | `/address/{a}` | listed |
+| Blockchain.com (`www.blockchain.com`) | `btc`, `btc-testnet` | `/explorer/blocks/{net}/{hash or n}` | | `/explorer/transactions/{net}/{txid}` | `/explorer/addresses/{net}/{a}` | listed (mainnet) |
+| Blockchain.com, older paths | `/btc` | `/btc/block/{hash or n}` | | `/btc/tx/{txid}` | `/btc/address/{a}` | read only |
+| Blockchain.com, `blockchain.info` | mainnet | `/block/{hash or n}` | `/block-height/{n}` | `/tx/{txid}` | `/address/{a}` | read only |
+| OKLink (`www.oklink.com`) | `/bitcoin`, `/btc` | `/{net}/block/{hash or n}` | | `/{net}/tx/{txid}` | `/{net}/address/{a}` | listed |
+| Blockchair (`blockchair.com`) | `/bitcoin`, `/bitcoin/testnet` | `/{net}/block/{hash or n}` | | `/{net}/transaction/{txid}` | `/bitcoin/address/{a}` | read only |
+| BlockCypher (`live.blockcypher.com`) | `/btc`, `/btc-testnet` | `/{net}/block/{hash}/` | | `/{net}/tx/{txid}/` | `/btc/address/{a}/` | read only |
+| Bitcoin Explorer (`bitcoinexplorer.org`) | mainnet | `/block/{hash}` | `/block-height/{n}` | `/tx/{txid}` | `/address/{a}` | read only |
+| 3xpl (`3xpl.com`) | `/bitcoin` | `/bitcoin/block/{hash or n}` | | `/bitcoin/transaction/{txid}` | `/bitcoin/address/{a}` | read only |
+
+| Lightning explorer | Node | Channel | Also on |
+| --- | --- | --- | --- |
+| 1ML (`1ml.com`) | `/node/{key}` | `/channel/{id}` | listed |
+| Amboss (`amboss.space`) | `/node/{key}` | `/edge/{id}` | listed |
+| Lightning Network+ (`lightningnetwork.plus`) | `/nodes/{key}` | | listed |
+
+- Each form was checked on the live site for one block, transaction and address (or node and
+  channel) on 2026-11-10. Blockchair, BlockCypher, bitcoinexplorer.org and 3xpl refuse a plain
+  client or were down, so their forms were checked on archived captures; they are read, not
+  listed. Blockchain.com's testnet pages show no data: read, not listed.
+- A trailing slash, a query string, a fragment and `www.` change nothing. Language prefixes are
+  read only on mempool sites.
+- Other chains on the same sites are not Bitcoin and name nothing: Blockstream's `/liquid/…`,
+  Blockchain.com's `/bch/…` and `/eth/…`, Blockchair's `/bitcoin-cash/…` and `/ethereum/…`,
+  BlockCypher's `/ltc/…` and `/doge/…`. Neither does a network an explorer doesn't show (BTCScan's
+  testnet, mempool.emzy.de's testnet, any Lightning object on testnet4).
+- A block by height on any explorer is read like mempool.space's: an alias only once settled.
+
 An unknown block, transaction or channel is `missing`. mempool.space answers an unknown
 Lightning node with a server error, as it does on a fault, so a server error on a node's record
 is followed by the Lightning search for its exact key: a node the search doesn't list is
 `missing`, and a listed node whose record keeps failing counts toward the failure limit. A
 429 or 408 on a node's record is only retried later, with no search.
+
+## Also on
+
+`mempool`: a block, transaction or address card lists its pages on Blockstream, mempool.emzy.de,
+BTCScan, Blockchain.com and OKLink (those that show its network), and a Lightning node or
+channel card its pages on 1ML, Amboss and Lightning Network+ (mainnet), from its root alone, with
+no request. Each is a link of the card's own object (above).
 
 ## What it reads
 
