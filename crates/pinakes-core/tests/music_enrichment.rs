@@ -119,6 +119,9 @@ struct Mode {
     album_item: AlbumItem,
     /// Wikidata answers the read-back of Kind of Blue's item with 503 (Retry-After: 120).
     album_item_busy: bool,
+    /// Wikidata answers each request this many milliseconds late, as a busy Wikidata behind the
+    /// egress's pacing (one request at a time per host) does.
+    wikidata_delay_ms: u64,
 }
 /// What Kind of Blue's item (Q283221) is when read back.
 #[derive(Clone, Copy, Default, PartialEq)]
@@ -352,6 +355,9 @@ impl Transport for Recorded {
             .unwrap()
             .push(format!("{host}{path}?{}", url.query().unwrap_or_default()));
         let mode = *self.mode.lock().unwrap();
+        if host == "www.wikidata.org" && mode.wikidata_delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(mode.wikidata_delay_ms)).await;
+        }
         let (status, retry_after, body) = match (host.as_str(), path.as_str()) {
             ("musicbrainz.org", path) => {
                 let file = match path.trim_start_matches("/ws/2/") {
@@ -633,6 +639,12 @@ fn web(transport: Arc<Recorded>, enrich: bool) -> WebResolver {
             ..Default::default()
         },
     }
+}
+/// [`web`] with music enrichment and its time budget (`limits.music_enrichment_timeout_ms`).
+fn web_within(transport: Arc<Recorded>, timeout_ms: u64) -> WebResolver {
+    let mut web = web(transport, true);
+    web.config.music_enrichment_timeout_ms = timeout_ms;
+    web
 }
 async fn card(web: &WebResolver, uri: &str) -> ResourceMeta {
     web.resolve_with_policy(uri, Default::default())
@@ -1958,8 +1970,8 @@ async fn an_album_without_a_free_file_takes_its_cover_from_the_cover_art_archive
     assert!(t.to("coverartarchive.org").is_empty(), "{:?}", t.seen());
 }
 
-/// A free file on Commons wins: an album whose item names one shows it, and the Cover Art
-/// Archive is not asked.
+/// A free file on Commons wins: an album whose item names one shows it. The Cover Art Archive,
+/// asked at the same time (once), is not used.
 #[tokio::test]
 async fn a_free_commons_file_wins_over_the_cover() {
     let t = Recorded::new(Mode {
@@ -1969,7 +1981,82 @@ async fn a_free_commons_file_wins_over_the_cover() {
     let album = card(&web(t.clone(), true), KIND_OF_BLUE).await;
     assert_eq!(album.image.as_deref(), Some(MILES_IMAGE));
     assert_eq!(credits(&album)[0], miles_credits()[0]);
+    assert!(album.unread_enriched.is_empty());
+    assert_eq!(t.to("coverartarchive.org").len(), 1, "{:?}", t.seen());
+}
+
+/// A busy Wikidata leaves an album its cover. Every host is paced (one request at a time), so
+/// the cover is asked at the same time as the album's item, not behind it: here the item's
+/// answers come after the card's enrichment budget, the cover's in time. The card shows the
+/// cover and its credit; image and description stay unread (a stored card's come back), and the
+/// card is read again early.
+#[tokio::test]
+async fn a_busy_wikidata_leaves_the_album_its_cover() {
+    let t = Recorded::new(Mode {
+        wikidata_delay_ms: 3000,
+        ..Default::default()
+    });
+    let album = card(&web_within(t.clone(), 1000), KIND_OF_BLUE).await;
+    assert_eq!(
+        album.image.as_deref(),
+        Some(KIND_OF_BLUE_COVER),
+        "{:?}",
+        t.seen()
+    );
+    assert_eq!(credits(&album), json!([album_cover_credit()]));
+    assert_eq!(
+        serde_json::to_value(&album.unread_enriched).unwrap(),
+        json!(["image", "description"])
+    );
+    assert!(album.refresh_by.is_some());
+    assert_eq!(t.to("coverartarchive.org").len(), 1, "{:?}", t.seen());
+    // Artists and recordings have no cover: a busy Wikidata leaves them unread, as before.
+    let t = Recorded::new(Mode {
+        wikidata_delay_ms: 3000,
+        ..Default::default()
+    });
+    let artist = card(&web_within(t.clone(), 1000), MILES).await;
+    assert_eq!((&artist.image, credits(&artist)), (&None, json!([])));
+    assert_eq!(
+        serde_json::to_value(&artist.unread_enriched).unwrap(),
+        json!(["image", "description"])
+    );
     assert!(t.to("coverartarchive.org").is_empty(), "{:?}", t.seen());
+}
+
+/// Through the queue, while Wikidata is busy: a card with nothing stored keeps the cover; a stored
+/// free Commons image comes back over it with its credit, as does the stored description.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_stored_commons_image_stays_over_the_cover_while_wikidata_is_busy(pool: PgPool) {
+    tag(&pool, &[KIND_OF_BLUE]).await;
+    let busy = |album_has_image| Mode {
+        album_has_image,
+        wikidata_delay_ms: 3000,
+        ..Default::default()
+    };
+    let first = resolve_once(
+        &pool,
+        &web_within(Recorded::new(busy(true)), 1000),
+        KIND_OF_BLUE,
+    )
+    .await;
+    assert_eq!(first.image.as_deref(), Some(KIND_OF_BLUE_COVER));
+    assert_eq!(credits(&first), json!([album_cover_credit()]));
+    let free = Mode {
+        album_has_image: true,
+        ..Default::default()
+    };
+    let stored = resolve_once(&pool, &web(Recorded::new(free), true), KIND_OF_BLUE).await;
+    assert_eq!(stored.image.as_deref(), Some(MILES_IMAGE));
+    let kept = resolve_once(
+        &pool,
+        &web_within(Recorded::new(busy(true)), 1000),
+        KIND_OF_BLUE,
+    )
+    .await;
+    assert_eq!(kept.image.as_deref(), Some(MILES_IMAGE));
+    assert_eq!(kept.description, stored.description);
+    assert_eq!(credits(&kept), credits(&stored));
 }
 
 /// A release MusicBrainz says has no front cover in the archive asks the archive nothing. A

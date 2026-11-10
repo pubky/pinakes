@@ -1367,8 +1367,10 @@ music_enrichment`, on by default):
   `cover_art_archive` to the release's cover art page on MusicBrainz, with no author or licence.
   A release is asked only when MusicBrainz says the archive shows a front cover for it
   (`cover-art-archive`: `front`, not `darkened`); a release group always (its cover is one of its
-  releases', chosen by the archive). A 404 is no cover. A free Commons file always wins; a Commons
-  read that failed asks for no cover, so the stored image stays.
+  releases', chosen by the archive). A 404 is no cover. The archive is asked at the same time as
+  Wikidata, so a busy Wikidata does not leave an album without its cover. A free Commons file
+  always wins; when the Commons read failed or ran out of time, the cover shows only on a card
+  that has no stored image, and a stored image stays.
 
 What it does not find leaves the card as MusicBrainz makes it (an artist without an item has no
 image or description: the card is still `ok`). An answer that fails for a while (a timeout, a
