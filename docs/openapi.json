@@ -109,7 +109,7 @@
             "type": "integer"
           },
           "credits": {
-            "description": "Where `image` and `description` came from when Pinakes added them from another source\nthan the link itself (a MusicBrainz card's Wikipedia summary and Commons image): one\ncredit per such field, with its source page, author and licence, to show with the value\n(docs/api.md, Credits). At most 4; `[]` when none. A field without a credit came from the\nlink itself.",
+            "description": "Where `image` and `description` came from when Pinakes added them from another source\nthan the link itself (a MusicBrainz card's Wikipedia or Wikidata text, its Commons image,\nor an album's front cover from the Cover Art Archive; a Wikidata item's card's Commons\nimage): one credit per such field, with its\nsource page and, when it has them, its author and licence (a cover has neither: both are\nnull), to show with the value (docs/api.md, Credits). At most 4; `[]` when none. A field\nwithout a credit came from the link itself.",
             "items": {
               "$ref": "#/components/schemas/Credit"
             },
