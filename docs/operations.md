@@ -828,7 +828,9 @@ keep their stored image and description and are read again at their retry. Raisi
 `limits.music_enrichment_timeout_ms` (up to 13000) for that run leaves fewer unread. A failed or slow request never fails
 the card: the card saves with what it found, and a field a timeout, a 429, a 5xx, Wikidata's
 `maxlag` or any other unexpected status (a 403 refusing this client) left unread keeps its stored
-value and credit; a failed search for the item leaves both fields so. The card is then read
+value and credit (when this reading's MusicBrainz data with them would pass the 8 KiB document
+bound, the reading gives up its last facts first, as it would for a value read now); a failed search for the item leaves
+both fields so. The card is then read
 again after at least `limits.music_enrichment_retry_secs` and at least twice as long as since its
 last reading, up to its own refresh time (so a failure on a routine refresh waits for the next). A definite answer (no item, no
 text: 404 or 410, a sitelink to a redirect, a refused file) removes the field. The egress shares concurrent requests

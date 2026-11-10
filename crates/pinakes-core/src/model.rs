@@ -456,12 +456,7 @@ impl ResourceMeta {
         });
         self.open_in.truncate(4);
         while self.validate(allowed_attributes).is_err() {
-            if self.attributes.pop_last().is_some()
-                || self.aliases.pop().is_some()
-                || self.open_in.pop().is_some()
-                || self.group_keys.pop().is_some()
-                || self.event.shrink_performers()
-            {
+            if self.shed() {
                 continue;
             }
             if self.description.take().is_some()
@@ -474,6 +469,21 @@ impl ResourceMeta {
             self.validate(allowed_attributes)?;
         }
         Ok(self)
+    }
+    /// Drops one of the parts a document too large gives up first, before its description and
+    /// image: an attribute (the last), an alias, a client, a group key, a performer. False when
+    /// none is left.
+    fn shed(&mut self) -> bool {
+        self.attributes.pop_last().is_some()
+            || self.aliases.pop().is_some()
+            || self.open_in.pop().is_some()
+            || self.group_keys.pop().is_some()
+            || self.event.shrink_performers()
+    }
+    /// Whether the document fits [`DOCUMENT_CAP`], in both of its stored forms.
+    fn fits(&self) -> bool {
+        serde_json::to_vec(self).is_ok_and(|v| v.len() <= DOCUMENT_CAP)
+            && serde_json::to_string_pretty(self).is_ok_and(|v| v.len() <= DOCUMENT_CAP)
     }
     /// Keeps the credits of the fields that hold a value, one per field, at most
     /// [`CREDITS_CAP`].
@@ -495,7 +505,11 @@ impl ResourceMeta {
     /// Takes from `stored` (the accepted document) the enriched fields this reading left unread
     /// (`unread_enriched`): each one's stored value and credit, when the stored document has
     /// both. A field the stored document holds without a credit was not enriched: this reading's
-    /// own value stays. Nothing is taken when the document would no longer fit.
+    /// own value stays. When this reading with the stored values would no longer fit
+    /// ([`DOCUMENT_CAP`]), it gives up what a reading too large gives up first ([`Self::shed`]:
+    /// the last attributes, then aliases, …), as `bounded` does for a value read now: a transient
+    /// failure never loses a stored value and its credit for fresh data. Should even that not
+    /// fit, the stored document stays whole, as for an unchanged page.
     ///
     /// The early read again (`refresh_by`) waits at least twice as long as since the stored
     /// reading, so a failure that lasts is asked about less and less often, up to the card's own
@@ -508,6 +522,7 @@ impl ResourceMeta {
             self.refresh_by = Some(by.max(later));
         }
         let mut kept = self.clone();
+        let mut took = false;
         for field in std::mem::take(&mut kept.unread_enriched) {
             let Some(credit) = stored.credits.iter().find(|c| c.field == field) else {
                 continue;
@@ -522,13 +537,19 @@ impl ResourceMeta {
             *value.0 = Some(stored_value.clone());
             kept.credits.retain(|c| c.field != field);
             kept.credits.push(credit.clone());
+            took = true;
         }
         kept.credits.sort_by_key(|c| c.field);
-        let fits = serde_json::to_vec(&kept).is_ok_and(|v| v.len() <= DOCUMENT_CAP)
-            && serde_json::to_string_pretty(&kept).is_ok_and(|v| v.len() <= DOCUMENT_CAP);
-        if fits {
+        while took && !kept.fits() && kept.shed() {}
+        if kept.fits() || !took {
             *self = kept;
         } else {
+            // The stored document, accepted as it is (as `queue` takes an unchanged page's), with
+            // this reading's time and early read again.
+            let (fetched_at, refresh_by) = (self.fetched_at, self.refresh_by);
+            *self = stored.clone();
+            self.fetched_at = fetched_at;
+            self.refresh_by = refresh_by;
             self.unread_enriched.clear();
         }
     }
@@ -833,16 +854,57 @@ mod tests {
         assert_eq!(one.image, stored.image);
         assert_eq!(one.description.as_deref(), Some("Artist · 3:00"));
         assert_eq!(one.credits, stored.credits[..1]);
-        // Nothing is taken that would not fit.
-        let mut full = fresh.clone();
+    }
+    /// A transient failure never loses a stored enrichment: when a large fresh reading with the
+    /// stored values would pass the document cap, the reading gives up its last attributes, as
+    /// it would for a value read now, and keeps the stored values and credits, with its own time
+    /// and early read again.
+    #[test]
+    fn an_unread_field_past_the_cap_keeps_its_stored_value() {
+        let uri = "https://musicbrainz.org/artist/x";
+        let mut stored = ResourceMeta::new(uri, "musicbrainz", 60);
+        stored.image = Some("https://upload.wikimedia.org/a.jpg".into());
+        stored.description = Some("d".repeat(2048));
+        stored.attributes = [("genre".to_owned(), "jazz".to_owned())].into();
+        stored.credits = vec![
+            credit(
+                CreditField::Image,
+                "https://commons.wikimedia.org/wiki/File:A.jpg",
+            ),
+            credit(CreditField::Description, "https://en.wikipedia.org/wiki/A"),
+        ];
+        stored.fetched_at -= 3_600_000;
+        assert!(serde_json::to_string_pretty(&stored).unwrap().len() <= DOCUMENT_CAP);
+        let mut full = ResourceMeta::new(uri, "musicbrainz", 60);
         full.attributes = (0..30)
             .map(|n| (format!("x{n}"), "v".repeat(200)))
             .collect();
-        let mut big = stored.clone();
-        big.description = Some("d".repeat(2048));
-        full.keep_enriched(&big);
-        assert_eq!(full.image, None);
-        assert!(full.credits.is_empty() && full.unread_enriched.is_empty());
+        full.unread_enriched = vec![CreditField::Image, CreditField::Description];
+        full.refresh_by = Some(Utc::now() + chrono::Duration::minutes(5));
+        let fetched_at = full.fetched_at;
+        full.keep_enriched(&stored);
+        assert_eq!(full.image, stored.image);
+        assert_eq!(full.description, stored.description);
+        assert_eq!(full.credits, stored.credits);
+        // This reading's facts, the first that fit; none of the stored ones.
+        assert!(full.attributes.len() < 30 && full.attributes.contains_key("x0"));
+        assert!(!full.attributes.contains_key("genre"));
+        assert!(serde_json::to_string_pretty(&full).unwrap().len() <= DOCUMENT_CAP);
+        assert_eq!(full.fetched_at, fetched_at);
+        assert!(full.refresh_by.unwrap() >= Utc::now() + chrono::Duration::minutes(119));
+        assert!(full.unread_enriched.is_empty());
+        // Nothing stored to keep: the reading stays as it is.
+        let mut plain = stored.clone();
+        plain.credits.clear();
+        let mut alone = ResourceMeta::new(uri, "musicbrainz", 60);
+        alone.attributes = [("x0".to_owned(), "fresh".to_owned())].into();
+        alone.unread_enriched = vec![CreditField::Image];
+        alone.keep_enriched(&plain);
+        assert_eq!(
+            (alone.image, alone.attributes["x0"].as_str()),
+            (None, "fresh")
+        );
+        assert!(alone.unread_enriched.is_empty());
     }
     /// A field unread again is asked about less and less often: at least twice as long as since
     /// the stored reading, never sooner than the reading asked.

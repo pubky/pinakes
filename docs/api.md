@@ -1346,7 +1346,7 @@ music_enrichment`, on by default):
 What it does not find leaves the card as MusicBrainz makes it (an artist without an item has no
 image or description: the card is still `ok`). An answer that fails for a while (a timeout, a
 429, a 5xx, Wikidata's `maxlag`, another unexpected status) keeps what the card had of that
-field, and the card is read again after at least an hour and at least twice as long as since its
+field (should the card then pass its size bound, it gives up its last facts first), and the card is read again after at least an hour and at least twice as long as since its
 last reading, up to its own refresh time (so a failure on a routine refresh waits for the next); a
 definite answer (no item, no text, a refused file) removes it. A failed text never gives way to
 the next one in the order: a busy English Wikipedia keeps the stored article's summary rather
