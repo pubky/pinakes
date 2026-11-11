@@ -755,6 +755,13 @@ pub struct Card {
     /// itself for the services Pinakes knows, else from the page's oEmbed answer or its own player
     /// tags. Null when there is none, and on a card whose link is gone (`missing`).
     pub embed: Option<crate::embed::Embed>,
+    /// On a podcast show's card (`PodcastSeries`, status `ok`): its latest episodes that have a
+    /// `stream`, newest first, at most 5, each as `GET /v1/resources/{id}/episodes` lists it (its
+    /// group's list when it has none of its own: an Apple Podcasts or Spotify show grouped with
+    /// its feed). Read from the list the show's last read stored, never from the feed. Absent
+    /// on every other card and on a show without one (docs/api.md, Episodes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub episodes: Option<Vec<crate::episodes::Episode>>,
     /// The publishing site: the app for `pubky://` objects (e.g. `loopky`); the service a
     /// link's URL names (`Apple Music`, `Wikipedia (de)`, `MusicBrainz`, `Wikidata`,
     /// `OpenStreetMap`); else the site name the document gives, else the host. Plain text, like
@@ -1206,6 +1213,7 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
         image,
         stream: doc.as_ref().and_then(|d| d.stream.clone()),
         embed,
+        episodes: None,
         point: doc.as_ref().and_then(|d| d.location.clone()),
         start: doc.as_ref().and_then(|d| d.start),
         end: doc.as_ref().and_then(|d| d.end),
@@ -1333,7 +1341,7 @@ const REFS_ALIASES: i64 = 31;
 /// alone: a spelling's link can carry the post's title. One query for every card of a response,
 /// and one for the missing cards among them. Then the stored `embed` of tagged `also_on`
 /// members (`member_embeds`) and each card's `collections` (`collections::count`), one query
-/// more each.
+/// more each, and a show's `episodes` (`episodes::on_cards`), only when the response holds a show.
 pub(crate) async fn with_refs<'a>(
     pool: &PgPool,
     cards: impl IntoIterator<Item = &'a mut Card>,
@@ -1401,7 +1409,8 @@ pub(crate) async fn with_refs<'a>(
         }
     }
     member_embeds(pool, &mut cards).await?;
-    crate::collections::count(pool, cards).await
+    crate::collections::count(pool, cards.iter_mut().map(|c| &mut **c)).await?;
+    crate::episodes::on_cards(pool, cards).await
 }
 /// A tagged member as `member_embeds` reads it: ID, URI, whether it is `missing`, the keys
 /// `EmbedDoc` reads (only when its link names no frame), its type path, whether it is an OSM row.
@@ -2071,10 +2080,10 @@ fn related_because(sql: &mut QueryBuilder<'_, Postgres>, item: &str, n: &str, au
     ));
 }
 /// The version of a search page's shape, in its ETag: a page cached before a field was added
-/// (`because`, then every card's `credits`, then `embed`) or before its rows' order changed (`q`
-/// ranked by relevance by default) is never answered 304. Move it when a search row gains or
-/// loses a field, or the same query's rows come in another order.
-pub const SEARCH_SHAPE: u32 = 4;
+/// (`because`, then every card's `credits`, then `embed`, then a show's `episodes`) or before its
+/// rows' order changed (`q` ranked by relevance by default) is never answered 304. Move it when a
+/// search row gains or loses a field, or the same query's rows come in another order.
+pub const SEARCH_SHAPE: u32 = 5;
 /// The most taggers a related row's `because` names.
 pub const BECAUSE_TAGGERS: usize = 3;
 

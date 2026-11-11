@@ -151,6 +151,16 @@
               "null"
             ]
           },
+          "episodes": {
+            "description": "On a podcast show's card (`PodcastSeries`, status `ok`): its latest episodes that have a\n`stream`, newest first, at most 5, each as `GET /v1/resources/{id}/episodes` lists it (its\ngroup's list when it has none of its own: an Apple Podcasts or Spotify show grouped with\nits feed). Read from the list the show's last read stored, never from the feed. Absent\non every other card and on a show without one (docs/api.md, Episodes).",
+            "items": {
+              "$ref": "#/components/schemas/Episode"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "event": {
             "oneOf": [
               {

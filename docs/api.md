@@ -99,6 +99,7 @@ An IMDb title keeps the type its page gives (it can be either).
 | `name`, `description`, `image` | Display metadata; images point to the origin and are never proxied |
 | `stream` | Audio a client can play, `{url, type, duration_s, preview}` ([Stream](#stream)): a podcast episode's enclosure, a recording's public preview. Absent when the card has none |
 | `embed` | The frame that shows the link as its own site does, `{provider, kind, src, height, aspect, allow, autoplay_param}` ([Embed](#embed)): a service's player, a social post, a map, slides. `null` when there is none and on a `missing` card |
+| `episodes` | A podcast show's card (`PodcastSeries`, status `ok`): its latest episodes that have a `stream`, newest first, at most 5, each `{uri, name, image, published, guid, stream, id?}` as `GET /v1/resources/{id}/episodes` lists it ([Episodes](#episodes)), so a client can play them from the card. Absent on every other card and on a show without one |
 | `site` | The publishing site: the page's own site name (`og:site_name`), else its host; for `pubky://` objects the app path segment (`loopky`), not the public key; for a link whose URL names a known service (a music service, a Wikipedia edition, MusicBrainz, Wikidata, a service the also-on lookups know), that service's name (`Apple Music`, `Wikipedia (de)`, `OpenStreetMap`), whatever the page calls itself and even before its card is read; for a card read from an official API without a host of its own, the service's name (`Federal Register`) |
 | `point` | `{lat, lon}` |
 | `start`, `end` | RFC 3339 instants for events and occurrences |
@@ -1081,7 +1082,8 @@ that rotates its members never runs into its cap and the links of one nobody fet
 
 `GET /v1/resources/{id}/episodes` lists a podcast show's latest episodes as its feed lists them,
 newest first, at most 20 (`limit`, 1–20): `{items: [...]}`, each item
-`{uri, name, image, published, guid, stream, id?}`. `guid` is what names the item: its GUID as
+`{uri, name, image, published, guid, stream, id?}`. A show's card carries the first of them
+in `episodes`: the latest 5 that have a `stream`, in the same shape (below). `guid` is what names the item: its GUID as
 the feed gives it; its page when the feed gives none; else `sha256:` and the hex digest of its
 enclosure's URL (without a fragment), so a link that carries a token shows nothing of itself.
 `uri` is the episode's page (the feed item's link), else its feed item (`{feed}?guid={guid}`);
@@ -1115,6 +1117,25 @@ document of its own here.
 
 ```text
 GET /v1/resources/{id}/episodes?limit=20
+```
+
+**On the card.** Every card of a show (`PodcastSeries`, status `ok`) carries `episodes`: the
+first 5 entries of this list that have a `stream` (an item without public audio or video is left
+out), newest first, so a client plays a show's latest episodes from its card with the player it
+uses for an episode's `stream`, without a second request. A show without a list of its own takes
+its group's, as the route does: the Apple Podcasts, Spotify and Podcast Index cards of a show
+grouped with its feed carry the same episodes. They are read from the stored list, never from
+the feed: a card read fetches nothing, and the list changes when the show is read again (its
+card's refresh). A show with no such episode, and every other card, has no `episodes`.
+
+```json
+"episodes": [
+  {"uri": "https://darknetdiaries.com/episode/182/", "name": "182: Blackshades",
+   "image": "https://f.prxu.org/…/Ep182_BlackshadesSquare.jpg", "published": "2026-11-03T08:00:00Z",
+   "guid": "prx_7057_c0abbff3-ae98-4e23-a389-5ee0fd824f51",
+   "stream": {"url": "https://www.podtrac.com/pts/redirect.mp3/dovetail.prxu.org/…/darknet-diaries-ep182-blackshades.mp3",
+              "type": "audio/mpeg", "duration_s": 2357, "preview": false}}
+]
 ```
 
 ## Collections

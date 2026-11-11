@@ -1,6 +1,7 @@
 //! A show's latest episodes through the store and the route (`episodes`): the save writes a
 //! show's list and keeps or clears it as later saves decide; `GET /v1/resources/{id}/episodes`
-//! lists it, names the episodes Pinakes has as resources, and falls back to a group member's.
+//! lists it, names the episodes Pinakes has as resources, and falls back to a group member's;
+//! a show's card carries the first of them that have audio (`Card::episodes`).
 use axum::{body::Body, http::Request};
 use http_body_util::BodyExt;
 use pinakes_core::{
@@ -481,4 +482,236 @@ async fn a_show_without_a_list_lists_a_group_members(pool: PgPool) {
         .unwrap();
     let (_, page) = request(&app, &format!("/v1/resources/{apple}/episodes")).await;
     assert_eq!(page["items"].as_array().unwrap().len(), 2, "{page}");
+}
+
+async fn lookup(app: &axum::Router, body: Value) -> Value {
+    let path = "/v1/resources/lookup";
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.2:1234".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status().as_u16();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    assert_eq!(status, 200, "{value}");
+    common::check_response("POST", path, status, &value);
+    value
+}
+/// The episodes of the synthetic feed `fixtures/episodes/latest-feed.xml`, as a show's read
+/// parses them.
+fn fixture_episodes() -> Vec<Episode> {
+    let body = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/episodes/latest-feed.xml"
+    ))
+    .unwrap();
+    pinakes_core::episodes::from_feed(&fetched(body)).unwrap()
+}
+
+/// A show's card carries its feed's latest episodes that have audio (`episodes`), from a fixture
+/// feed: newest first whatever the feed's order, a video enclosure as well as audio, a missing
+/// `itunes:duration` as a null length, an item without an enclosure or with a document one left
+/// out, at most five; the same entries the route lists, on a resource read, a read by URI and a
+/// lookup. No other card has the field, nor a show without such an episode.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_shows_card_carries_its_latest_episodes_with_audio(pool: PgPool) {
+    let episodes = fixture_episodes();
+    let names: Vec<&str> = episodes
+        .iter()
+        .map(|e| e.name.as_deref().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "A note to listeners",
+            "Episode 5 (video)",
+            "Episode 4",
+            "Episode 3",
+            "Show notes (PDF)",
+            "Episode 2",
+            "Episode 1",
+            "Episode 0"
+        ],
+        "every item a GUID names, newest first"
+    );
+    let uri = "https://feeds.example.org/show.xml";
+    let id = show(&pool, uri, Some(episodes)).await;
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let (status, card) = request(&app, &format!("/v1/resources/{id}")).await;
+    assert_eq!(status, 200, "{card}");
+    let list = card["episodes"].as_array().expect("a show's episodes");
+    let names: Vec<&str> = list.iter().map(|e| e["name"].as_str().unwrap()).collect();
+    assert_eq!(
+        names,
+        [
+            "Episode 5 (video)",
+            "Episode 4",
+            "Episode 3",
+            "Episode 2",
+            "Episode 1"
+        ],
+        "the latest five with audio or video, newest first: {card}"
+    );
+    assert_eq!(list[0]["uri"], "https://show.example/episode/5");
+    assert_eq!(list[0]["guid"], "ep-5");
+    assert_eq!(list[0]["published"], "2026-11-05T08:00:00Z");
+    assert_eq!(
+        list[0]["stream"],
+        serde_json::json!({"url":"https://cdn.example/5.mp4","type":"video/mp4","duration_s":720,"preview":false})
+    );
+    assert_eq!(
+        list[1]["stream"],
+        serde_json::json!({"url":"https://cdn.example/4.mp3","type":"audio/mpeg","duration_s":null,"preview":false}),
+        "no itunes:duration: a null length"
+    );
+    assert_eq!(list[2]["stream"]["duration_s"], 3723);
+    assert_eq!(
+        list[3]["stream"],
+        serde_json::json!({"url":"https://cdn.example/2.m4a","type":"audio/x-m4a","duration_s":3557,"preview":false})
+    );
+    assert!(list.iter().all(|e| e.get("id").is_none()), "{card}");
+    // The route's entries with a stream, in its order.
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
+    let route: Vec<&Value> = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| !e["stream"].is_null())
+        .take(5)
+        .collect();
+    assert_eq!(list.iter().collect::<Vec<_>>(), route);
+    // An episode Pinakes has as a resource is named by its card's ID, as on the route.
+    let known = store::ensure_resource(&pool, "https://show.example/episode/4")
+        .await
+        .unwrap();
+    let (_, card) = request(&app, &format!("/v1/resources/{id}")).await;
+    assert_eq!(card["episodes"][1]["id"], known);
+    assert!(card["episodes"][0].get("id").is_none());
+    let (status, by_uri) = request(&app, &format!("/v1/resources/by-uri?uri={uri}")).await;
+    assert_eq!(status, 200, "{by_uri}");
+    assert_eq!(by_uri["episodes"], card["episodes"]);
+    // A page, a show not read yet and a show whose items have no audio carry no field.
+    let page_id = store::ensure_resource(&pool, "https://example.org/page")
+        .await
+        .unwrap();
+    let mut d = ResourceMeta::new("https://example.org/page", "web", 86_400);
+    d.name = Some("A page".into());
+    store::save_document(&pool, &page_id, 0, &d).await.unwrap();
+    let unread = show(&pool, "https://feeds.example.org/unread.xml", None).await;
+    let silent = show(
+        &pool,
+        "https://feeds.example.org/silent.xml",
+        Some(vec![episode(2, false), episode(1, false)]),
+    )
+    .await;
+    let (_, silent_page) = request(&app, &format!("/v1/resources/{silent}/episodes")).await;
+    assert_eq!(silent_page["items"].as_array().unwrap().len(), 2);
+    let cards = lookup(
+        &app,
+        serde_json::json!({"ids": [id.clone(), page_id.clone(), unread.clone(), silent.clone()]}),
+    )
+    .await;
+    let cards = cards.as_array().unwrap();
+    assert_eq!(cards.len(), 4, "{cards:?}");
+    for c in cards {
+        if c["id"] == id {
+            assert_eq!(c["episodes"], card["episodes"], "a lookup's card: {c}");
+        } else {
+            assert!(c.get("episodes").is_none(), "{c}");
+        }
+    }
+}
+
+/// A show's card without episodes of its own carries those of a member of its group that has
+/// them (an Apple Podcasts or Spotify show grouped with its feed), as the route lists them; a
+/// show outside the group, a member whose own list has no audio, and a member cleared after an
+/// error, carry none.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_show_card_without_episodes_carries_its_groups(pool: PgPool) {
+    let feed = show(
+        &pool,
+        "https://feeds.example.org/show.xml",
+        Some(fixture_episodes()),
+    )
+    .await;
+    let apple = show(
+        &pool,
+        "https://podcasts.apple.com/us/podcast/show/id123",
+        None,
+    )
+    .await;
+    let spotify = show(&pool, "https://open.spotify.com/show/abc123", None).await;
+    let other = show(&pool, "https://pca.st/itunes/123", None).await;
+    let group = "0123456789abcdef0123456789abcdef";
+    sqlx::query("INSERT INTO \"group\"(id) VALUES($1)")
+        .bind(group)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE group_unit SET group_id=$1 WHERE resource_id=ANY($2)")
+        .bind(group)
+        .bind(vec![feed.clone(), apple.clone(), spotify.clone()])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let (_, own) = request(&app, &format!("/v1/resources/{feed}")).await;
+    assert_eq!(own["episodes"].as_array().map(Vec::len), Some(5), "{own}");
+    for member in [&apple, &spotify] {
+        let (status, card) = request(&app, &format!("/v1/resources/{member}")).await;
+        assert_eq!(status, 200, "{card}");
+        assert_eq!(card["episodes"], own["episodes"], "{card}");
+    }
+    let cards = lookup(
+        &app,
+        serde_json::json!({"ids": [apple.clone(), other.clone()]}),
+    )
+    .await;
+    for c in cards.as_array().unwrap() {
+        if c["id"] == apple {
+            assert_eq!(c["episodes"], own["episodes"], "{c}");
+        } else {
+            assert!(c.get("episodes").is_none(), "outside the group: {c}");
+        }
+    }
+    // The group's read lists each member's card with the same episodes.
+    let (status, read) = request(&app, &format!("/v1/groups/{group}")).await;
+    assert_eq!(status, 200, "{read}");
+    let text = read.to_string();
+    assert!(text.contains("https://cdn.example/5.mp4"), "{text}");
+    // A member with a list of its own, none of it playable, lists its own on the route and
+    // carries nothing on its card: the card shows the route's list, never another member's.
+    let silent = show(
+        &pool,
+        "https://feeds.example.org/silent.xml",
+        Some(vec![episode(2, false), episode(1, false)]),
+    )
+    .await;
+    sqlx::query("UPDATE group_unit SET group_id=$1 WHERE resource_id=$2")
+        .bind(group)
+        .bind(&silent)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (_, page) = request(&app, &format!("/v1/resources/{silent}/episodes")).await;
+    assert_eq!(page["items"][0]["guid"], "ep-2", "{page}");
+    let (_, card) = request(&app, &format!("/v1/resources/{silent}")).await;
+    assert!(card.get("episodes").is_none(), "{card}");
+    let (_, card) = request(&app, &format!("/v1/resources/{apple}")).await;
+    assert_eq!(
+        card["episodes"], own["episodes"],
+        "still the feed's: {card}"
+    );
+    // Cleared after an error, the Apple card is no show: it carries nothing.
+    pinakes_core::changes::clear(&pool, &apple, 0, "too_complex")
+        .await
+        .unwrap();
+    let (_, card) = request(&app, &format!("/v1/resources/{apple}")).await;
+    assert!(card.get("episodes").is_none(), "{card}");
 }
