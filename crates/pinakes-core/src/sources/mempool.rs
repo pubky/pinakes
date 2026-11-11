@@ -814,13 +814,21 @@ pub fn parse_txid(status: u16, raw: &[u8]) -> Result<String> {
     hash(std::str::from_utf8(raw)?.trim()).context("not a transaction id")
 }
 
+/// The largest list of an address's transactions read (`txs_request`): a few dozen whole
+/// transactions, which an exchange's batch payouts can take past the egress default.
+pub const TXS_CAP: usize = 4 * crate::resolver::egress::BODY_CAP;
+
 /// An address's latest transactions, those in the mempool first, then the confirmed ones,
-/// newest first (mempool.space and Esplora list a few dozen; one request).
+/// newest first (mempool.space and Esplora list a few dozen whole; one request of at most
+/// `TXS_CAP`).
 pub fn txs_request(to: Api, network: Network, addr: &str) -> Option<Request> {
-    api(
-        to,
-        network,
-        &format!("address/{}/txs", address(addr, network)?),
+    Some(
+        api(
+            to,
+            network,
+            &format!("address/{}/txs", address(addr, network)?),
+        )?
+        .cap(TXS_CAP),
     )
 }
 
@@ -2771,6 +2779,13 @@ mod tests {
                 .url
                 .as_str(),
             format!("https://mempool.space/api/address/{addr}/txs")
+        );
+        assert_eq!(
+            txs_request(Api::Mempool, Network::Mainnet, addr)
+                .unwrap()
+                .options()
+                .body_cap,
+            Some(4 * 1024 * 1024)
         );
         let txs = parse_address_txs(
             200,

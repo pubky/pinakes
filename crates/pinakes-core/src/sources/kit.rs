@@ -41,6 +41,8 @@ pub struct Request {
     pub headers: Vec<(&'static str, String)>,
     /// Content types the answer may have beyond the page set, e.g. `text/plain`.
     pub extra_types: &'static [&'static str],
+    /// The largest answer taken, in place of the egress default (`FetchOptions::body_cap`).
+    pub body_cap: Option<usize>,
 }
 impl Request {
     pub fn get(url: &str) -> Option<Self> {
@@ -49,6 +51,7 @@ impl Request {
             accept: None,
             headers: vec![],
             extra_types: &[],
+            body_cap: None,
         })
     }
     pub fn accept(mut self, accept: &'static str) -> Self {
@@ -63,12 +66,18 @@ impl Request {
         self.extra_types = types;
         self
     }
+    /// Takes answers up to `bytes` (a larger one is refused), in place of the egress default.
+    pub fn cap(mut self, bytes: usize) -> Self {
+        self.body_cap = Some(bytes);
+        self
+    }
     /// The egress options of this request.
     pub fn options(&self) -> FetchOptions {
         FetchOptions {
             accept: Some(self.accept.unwrap_or("application/json").into()),
             headers: self.headers.clone(),
             extra_types: self.extra_types,
+            body_cap: self.body_cap,
             ..Default::default()
         }
     }

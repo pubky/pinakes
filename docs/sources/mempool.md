@@ -171,6 +171,9 @@ Each card lists the objects it points at in the resource read's `related`
   read) is left out until the card's own refresh. A read again that cannot fetch a part leaves
   it out until the read after. The
   Esplora fallback reads the same parts, but has no pool, no reward and no Lightning.
+- An address's list is read up to 4 MB (a few dozen whole transactions); a larger one (an
+  exchange's batch payouts) is left out. A part put off again and again (a server error, the
+  budget) reads the card again every hour while it lasts.
 - What a spent output was spent by (`/api/tx/{txid}/outspends`) is not read: one more request
   for every transaction card, and it changes after the card is read.
 
