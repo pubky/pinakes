@@ -21,12 +21,17 @@ from:
 
 A service that refuses the operator's credentials leaves the track to its ISRC on Deezer. iTunes
 is then asked for the album's songs (`lookup?upc={barcode}&entity=song`, in the storefront
-`[also_on] apple_storefront`), only while `itunes` runs, as `editions` asks it. The song is taken only when the answer is one collection (iTunes
-answers unrelated collections for some codes: Underclass Hero's barcode lists four, two
-editions of the album and two singles of its title track, so none of its songs is taken), exactly
-one song is at that disc and track number, and its length (`trackTimeMillis`) is within 3 s of the track's (Deezer rounds:
-its Get Lucky is 367 s, Apple's 369.6 s). The link is `https://music.apple.com/song/{trackId}`,
-`via` `itunes_song`.
+`[also_on] apple_storefront`), only while `itunes` runs, as `editions` asks it. The song is taken
+only when the answer is one collection (iTunes answers unrelated collections for some codes:
+Underclass Hero's barcode lists four, two editions of the album and two singles of its title
+track, so none of its songs is taken), exactly one song is at that disc and track number, its
+length (`trackTimeMillis`) is within 3 s of the track's (Deezer rounds: its Get Lucky is 367 s,
+Apple's 369.6 s), and its title (`trackName`) is the track's own (Deezer's `title`, Spotify's
+`name`, TIDAL's `title` with its `version`), compared as `same_recording` compares titles: a
+credit such as "(feat. Pharrell Williams and Nile Rodgers)" and a remaster tag go, a version tag
+such as "Live" stays. A barcode iTunes answers with one wrong collection (a single's barcode with
+its album) so puts no other recording on the card. The link is
+`https://music.apple.com/song/{trackId}`, `via` `itunes_song`.
 
 ## Why it is a match, and off by default
 

@@ -1,6 +1,7 @@
 //! Apple Music's song for another service's track: the track's album barcode and its place on
 //! that album (disc and track number) name one song of the album iTunes answers for the barcode
-//! (`lookup?upc=…&entity=song`), and its length must agree within `LENGTH_WINDOW_SECS`. The album,
+//! (`lookup?upc=…&entity=song`); its length must agree within `LENGTH_WINDOW_SECS` and its title
+//! must be the track's (as `matching::recording_title` compares them). The album,
 //! its barcode and the track's place come from the track's own service record (Deezer's, Spotify's
 //! or TIDAL's, each only while that service's own source runs), else from the Deezer track Deezer
 //! names for the track's ISRC key (only while `deezer` runs).
@@ -18,6 +19,7 @@ use super::{
     Context, Found, Source, Subject,
 };
 use crate::{
+    matching::recording_title,
     music::{self, Level, Service},
     music_sources::{derived, own_isrc, LENGTH_WINDOW_SECS},
 };
@@ -32,14 +34,24 @@ const MAX_ISRCS: usize = 2;
 /// How Spotify's Web API is asked: for JSON.
 const JSON: (&str, &[&str]) = ("application/json", &[]);
 
-/// Where a track is: its album's barcode (GTIN-13), its disc and track number there, and its
-/// length in milliseconds, as its own service records them.
+/// Where a track is: its album's barcode (GTIN-13), its disc and track number there, its length
+/// in milliseconds and its title (with its version), as its own service records them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Place {
     pub upc: String,
     pub disc: u64,
     pub number: u64,
     pub length_ms: u64,
+    pub title: String,
+}
+/// A TIDAL track as `tracks/{id}?include=albums` gives it: its one album, that album's barcode,
+/// its length in milliseconds and its title with its version.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TidalTrack {
+    pub album: String,
+    pub upc: String,
+    pub length_ms: u64,
+    pub title: String,
 }
 
 pub struct ItunesSong;
@@ -174,6 +186,7 @@ pub fn deezer_parse(track: &Value, album: &Value) -> Option<Place> {
         disc: track["disk_number"].as_u64().filter(|n| *n > 0)?,
         number: track["track_position"].as_u64().filter(|n| *n > 0)?,
         length_ms: track["duration"].as_u64().filter(|s| *s > 0)? * 1000,
+        title: track["title"].as_str()?.to_owned(),
     })
 }
 
@@ -209,6 +222,7 @@ pub fn spotify_parse(track: &Value, album: &Value) -> Option<Place> {
         disc: track["disc_number"].as_u64().filter(|n| *n > 0)?,
         number: track["track_number"].as_u64().filter(|n| *n > 0)?,
         length_ms: track["duration_ms"].as_u64().filter(|ms| *ms > 0)?,
+        title: track["name"].as_str()?.to_owned(),
     })
 }
 
@@ -222,9 +236,10 @@ async fn tidal_place(cx: &Context, id: &str) -> Result<Option<Place>> {
     let Some(track) = tidal::api_object(cx, &url).await? else {
         return Ok(None);
     };
-    let Some((album, upc, length_ms)) = tidal_track(&track, id) else {
+    let Some(track) = tidal_track(&track, id) else {
         return Ok(None);
     };
+    let album = &track.album;
     let mut url = format!("{TIDAL_API}/albums/{album}/relationships/items?countryCode={country}");
     for _ in 0..TIDAL_ITEM_PAGES {
         let Some(items) = tidal::api_object(cx, &url).await? else {
@@ -232,10 +247,11 @@ async fn tidal_place(cx: &Context, id: &str) -> Result<Option<Place>> {
         };
         if let Some((disc, number)) = tidal_position(&items, id) {
             return Ok(Some(Place {
-                upc,
+                upc: track.upc,
                 disc,
                 number,
-                length_ms,
+                length_ms: track.length_ms,
+                title: track.title,
             }));
         }
         // The next page's link is relative to the API's root (`/albums/…`).
@@ -246,9 +262,9 @@ async fn tidal_place(cx: &Context, id: &str) -> Result<Option<Place>> {
     }
     Ok(None)
 }
-/// A TIDAL track's one album, that album's barcode and the track's length in milliseconds, from
+/// A TIDAL track's one album, that album's barcode, the track's length and title, from
 /// `tracks/{id}?include=albums`.
-pub fn tidal_track(v: &Value, id: &str) -> Option<(String, String, u64)> {
+pub fn tidal_track(v: &Value, id: &str) -> Option<TidalTrack> {
     let data = &v["data"];
     (data["id"].as_str()? == id && data["type"] == "tracks").then_some(())?;
     let albums = tidal::items(&data["relationships"]["albums"], "albums");
@@ -263,7 +279,17 @@ pub fn tidal_track(v: &Value, id: &str) -> Option<(String, String, u64)> {
     let seconds = data["attributes"]["duration"]
         .as_str()
         .and_then(crate::music_sources::duration_secs)?;
-    Some((album.clone(), upc, u64::try_from(seconds).ok()? * 1000))
+    let title = data["attributes"]["title"].as_str()?;
+    let title = match data["attributes"]["version"].as_str().map(str::trim) {
+        Some(version) if !version.is_empty() => format!("{title} ({version})"),
+        _ => title.to_owned(),
+    };
+    Some(TidalTrack {
+        album: album.clone(),
+        upc,
+        length_ms: u64::try_from(seconds).ok()? * 1000,
+        title,
+    })
 }
 /// A track's volume and number among a TIDAL album's items.
 pub fn tidal_position(items: &Value, id: &str) -> Option<(u64, u64)> {
@@ -278,7 +304,8 @@ pub fn tidal_position(items: &Value, id: &str) -> Option<(u64, u64)> {
 }
 
 /// The one song of an iTunes `lookup?upc=…&entity=song` answer at the place, when the answer is
-/// one collection and the song's length is within the window of the track's: its track ID.
+/// one collection and the song's length is within the window of the track's and its title is the
+/// track's: its track ID.
 pub fn song(answer: &Value, place: &Place) -> Option<u64> {
     let results = answer["results"].as_array()?;
     let mut collections: Vec<u64> = results
@@ -303,6 +330,11 @@ pub fn song(answer: &Value, place: &Place) -> Option<u64> {
     };
     let length = song["trackTimeMillis"].as_u64()?;
     (length.abs_diff(place.length_ms) <= LENGTH_WINDOW_SECS * 1000).then_some(())?;
+    // The same title, as `same_recording` compares titles: a credit (`feat. …`) and the tags that
+    // keep a recording's identity go, a version tag (`Live`, `Remix`) stays. One wrong collection
+    // for a barcode (a single answered with its album) puts another song at the place.
+    let title = recording_title(&place.title);
+    (!title.is_empty() && recording_title(song["trackName"].as_str()?) == title).then_some(())?;
     song["trackId"].as_u64()
 }
 
@@ -337,7 +369,8 @@ mod tests {
                 upc: "0886443927087".into(),
                 disc: 1,
                 number: 8,
-                length_ms: 367_000
+                length_ms: 367_000,
+                title: "Get Lucky (feat. Pharrell Williams and Nile Rodgers)".into()
             }
         );
         let answer = fixture("itunes-upc-0886443927087-songs.json");
@@ -358,6 +391,24 @@ mod tests {
             ..place.clone()
         };
         assert_eq!(song(&answer, &elsewhere), None);
+        // The same place and length with another title (the album a barcode wrongly names):
+        // nothing.
+        let other = Place {
+            title: "Lose Yourself to Dance (feat. Pharrell Williams)".into(),
+            ..place.clone()
+        };
+        assert_eq!(song(&answer, &other), None);
+        // A version tag tells recordings apart; a remaster tag does not.
+        let live = Place {
+            title: "Get Lucky (Live)".into(),
+            ..place.clone()
+        };
+        assert_eq!(song(&answer, &live), None);
+        let remastered = Place {
+            title: "Get Lucky - Remastered".into(),
+            ..place.clone()
+        };
+        assert_eq!(song(&answer, &remastered), Some(617154366));
     }
 
     /// Walking Disaster: Underclass Hero's barcode answers four collections (the album and
@@ -372,7 +423,8 @@ mod tests {
                 upc: "0602517416987".into(),
                 disc: 1,
                 number: 2,
-                length_ms: 286_000
+                length_ms: 286_000,
+                title: "Walking Disaster".into()
             }
         );
         let answer = fixture("itunes-upc-0602517416987-songs.json");
@@ -391,28 +443,39 @@ mod tests {
     /// (track 2 of Underclass Hero).
     #[test]
     fn a_tidal_track_s_place_is_read_from_its_album() {
-        let (album, upc, length) =
-            tidal_track(&fixture("tidal-track-20115564-albums.json"), "20115564").unwrap();
+        let track = tidal_track(&fixture("tidal-track-20115564-albums.json"), "20115564").unwrap();
         assert_eq!(
-            (album.as_str(), upc.as_str(), length),
-            ("20115556", "0886443927087", 370_000)
+            track,
+            TidalTrack {
+                album: "20115556".into(),
+                upc: "0886443927087".into(),
+                length_ms: 370_000,
+                title: "Get Lucky (feat. Pharrell Williams and Nile Rodgers)".into(),
+            }
         );
         let items = fixture("tidal-album-20115556-items.json");
         assert_eq!(tidal_position(&items, "20115564"), Some((1, 8)));
         assert_eq!(tidal_position(&items, "3524506"), None);
         let place = Place {
-            upc,
+            upc: track.upc,
             disc: 1,
             number: 8,
-            length_ms: length,
+            length_ms: track.length_ms,
+            title: track.title,
         };
         assert_eq!(
             song(&fixture("itunes-upc-0886443927087-songs.json"), &place),
             Some(617154366)
         );
-        let (album, upc, _) =
-            tidal_track(&fixture("tidal-track-3524506-albums.json"), "3524506").unwrap();
-        assert_eq!((album.as_str(), upc.as_str()), ("3524504", "0602517416987"));
+        let track = tidal_track(&fixture("tidal-track-3524506-albums.json"), "3524506").unwrap();
+        assert_eq!(
+            (
+                track.album.as_str(),
+                track.upc.as_str(),
+                track.title.as_str()
+            ),
+            ("3524504", "0602517416987", "Walking Disaster")
+        );
         assert_eq!(
             tidal_position(&fixture("tidal-album-3524504-items.json"), "3524506"),
             Some((1, 2))
@@ -436,6 +499,10 @@ mod tests {
         let place = spotify_parse(&track, &album).unwrap();
         assert_eq!(place.upc, "0886443927087");
         assert_eq!((place.disc, place.number, place.length_ms), (1, 8, 369_626));
+        assert_eq!(
+            song(&fixture("itunes-upc-0886443927087-songs.json"), &place),
+            Some(617154366)
+        );
         let mut other = album.clone();
         other["id"] = "0otherUpcAlbum00000000".into();
         assert_eq!(spotify_parse(&track, &other), None);

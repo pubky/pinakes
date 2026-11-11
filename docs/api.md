@@ -1335,7 +1335,8 @@ tagged resource that is the link joins the group. Two sources match by metadata 
 links (by their `via`) are hints only: never keyed, never joining a group, never making a key of
 the card they are on.
 - `itunes_song` (off by default): Apple Music's song at the same disc and track number on the
-  album with the track's barcode, within 3 s of its length (iTunes answers carry no ISRC).
+  album with the track's barcode, with the same title and within 3 s of its length (iTunes
+  answers carry no ISRC).
 - `youtube_match` (off by default): for a label's YouTube upload (a Topic channel, "Provided to
   YouTube by"), the one Deezer and the one TIDAL track with the same artist and title within 2 s
   of its length.
