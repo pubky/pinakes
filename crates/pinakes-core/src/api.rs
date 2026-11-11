@@ -1015,7 +1015,7 @@ pub struct Facets {
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     pub types: Option<Vec<TypeFacet>>,
     /// `facet=host`: the services of the filtered set, most frequent first, at most 100.
-    /// `pubky://` objects have no service host and are not counted here.
+    /// A host `pubky://` objects use (a user's key) is not a service and is left out.
     #[serde(rename = "host", skip_serializing_if = "Option::is_none")]
     pub hosts: Option<Vec<HostFacet>>,
     /// `facet=category`: the OpenStreetMap categories of the filtered set, most frequent
@@ -1025,6 +1025,8 @@ pub struct Facets {
 }
 /// The most entries `facet=host` and `facet=category` list each.
 pub const FACET_LIST_CAP: i64 = 100;
+/// The links per host `facet=host` tries for the service's name (`HostFacet::site`).
+const FACET_SITE_SAMPLE: i32 = 8;
 /// The facets a search asked for.
 #[derive(Clone, Copy, Default)]
 struct FacetsAsked {
@@ -2658,11 +2660,15 @@ pub async fn search(
     }
     sql.push(",'host',");
     if asked.hosts {
-        // One pass over the set: per host its count, one of its links and the site name its
-        // documents give most often, for the service's name (`HostFacet::site`).
-        sql.push("coalesce((SELECT jsonb_agg(to_jsonb(t) ORDER BY count DESC,host) FROM (SELECT r.host,count(DISTINCT r.unit_id) AS count,min(r.uri) AS uri,mode() WITHIN GROUP (ORDER BY nullif(r.doc->>'site','')) AS site FROM ")
+        // One pass over the set: per host its count, a few of its links and the site name its
+        // documents give most often (an event reference's stand-in names only the host), for
+        // the service's name (`HostFacet::site`). A host that `pubky://` objects use is a user's
+        // key, not a service; a value over the filter's 256 bytes could not be filtered by.
+        sql.push("coalesce((SELECT jsonb_agg(to_jsonb(t) ORDER BY count DESC,host) FROM (SELECT r.host,count(DISTINCT r.unit_id) AS count,(array_agg(r.uri ORDER BY r.uri))[1:")
+            .push_bind(FACET_SITE_SAMPLE)
+            .push("] AS uris,mode() WITHIN GROUP (ORDER BY nullif(nullif(r.doc->>'site',''),r.host)) AS site FROM ")
             .push(counted)
-            .push(" r WHERE r.host IS NOT NULL AND r.host<>'' AND r.uri NOT LIKE 'pubky://%' GROUP BY r.host ORDER BY count DESC,r.host LIMIT ")
+            .push(" r WHERE r.host IS NOT NULL AND r.host<>'' AND octet_length(r.host)<=256 GROUP BY r.host HAVING bool_and(r.uri NOT LIKE 'pubky://%') ORDER BY count DESC,r.host LIMIT ")
             .push_bind(FACET_LIST_CAP)
             .push(") t),'[]')");
     } else {
@@ -2672,7 +2678,7 @@ pub async fn search(
     if asked.categories {
         sql.push("coalesce((SELECT jsonb_agg(to_jsonb(t) ORDER BY count DESC,category) FROM (SELECT r.category,count(DISTINCT r.unit_id) AS count FROM ")
             .push(counted)
-            .push(" r WHERE r.category IS NOT NULL GROUP BY r.category ORDER BY count DESC,r.category LIMIT ")
+            .push(" r WHERE r.category IS NOT NULL AND octet_length(r.category)<=256 GROUP BY r.category ORDER BY count DESC,r.category LIMIT ")
             .push_bind(FACET_LIST_CAP)
             .push(") t),'[]')");
     } else {
@@ -2742,9 +2748,11 @@ pub async fn search(
                 v.into_iter()
                     .map(|v| {
                         let host = v["host"].as_str().unwrap_or_default();
-                        let uri = v["uri"].as_str().unwrap_or_default();
+                        let uris = v["uris"].as_array().into_iter().flatten();
                         HostFacet {
-                            site: service_site(uri)
+                            site: uris
+                                .filter_map(|uri| service_site(uri.as_str()?))
+                                .next()
                                 .or_else(|| present(v["site"].as_str()))
                                 .unwrap_or_else(|| host.into()),
                             host: host.into(),

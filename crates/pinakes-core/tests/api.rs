@@ -2889,7 +2889,18 @@ async fn host_and_category_facets_count_what_their_filters_take(pool: PgPool) {
             Some("YouTube"),
         ),
     ];
-    for (i, (uri, kind, category, site)) in links.iter().enumerate() {
+    // A host whose first link (by URI) is not one the service's parser knows, and whose
+    // documents name no site: the name still comes from one of its links.
+    let unread: [(&str, &str, Option<&str>, Option<&str>); 2] = [
+        ("https://music.apple.com/", "WebPage", None, Some("")),
+        (
+            "https://music.apple.com/us/album/x/1440857781",
+            "MusicAlbum",
+            None,
+            Some(""),
+        ),
+    ];
+    for (i, (uri, kind, category, site)) in links.iter().chain(&unread).enumerate() {
         let id = store::ensure_resource(&pool, uri).await.unwrap();
         let mut doc = ResourceMeta::new(uri, "web", 86400);
         doc.name = Some(format!("Link {i}"));
@@ -2925,6 +2936,7 @@ async fn host_and_category_facets_count_what_their_filters_take(pool: PgPool) {
         page["facets"]["host"],
         json!([
             {"host":"www.youtube.com","site":"YouTube","count":3},
+            {"host":"music.apple.com","site":"Apple Music","count":2},
             {"host":"bar.example.com","site":"bar.example.com","count":1},
             {"host":"cafe.example.com","site":"cafe.example.com","count":1},
             {"host":"en.wikipedia.org","site":"Wikipedia (en)","count":1},
@@ -2996,8 +3008,11 @@ async fn host_and_category_facets_count_what_their_filters_take(pool: PgPool) {
     assert_eq!(code, 200, "{all}");
     let (_, alone) = call(&app, "GET", "/v1/search?facet=host", None).await;
     assert_eq!(all["facets"]["host"], alone["facets"]["host"]);
-    assert_eq!(all["facets"]["tags"], json!([{"label":"facets","count":8}]));
-    assert_eq!(all["facets"]["type"].as_array().unwrap().len(), 4, "{all}");
+    assert_eq!(
+        all["facets"]["tags"],
+        json!([{"label":"facets","count":10}])
+    );
+    assert_eq!(all["facets"]["type"].as_array().unwrap().len(), 6, "{all}");
     assert_eq!(all["facets"]["category"].as_array().unwrap().len(), 2);
 }
 

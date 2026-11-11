@@ -952,7 +952,7 @@
             ]
           },
           "host": {
-            "description": "`facet=host`: the services of the filtered set, most frequent first, at most 100.\n`pubky://` objects have no service host and are not counted here.",
+            "description": "`facet=host`: the services of the filtered set, most frequent first, at most 100.\nA host `pubky://` objects use (a user's key) is not a service and is left out.",
             "items": {
               "$ref": "#/components/schemas/HostFacet"
             },
