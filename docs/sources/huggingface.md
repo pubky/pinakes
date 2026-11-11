@@ -59,8 +59,7 @@ description; a model has none.
 
 ## Licence
 
-Each repo's content is under the licence it names (`license`); use of the Hub falls under its
-terms of service.
+Each repo's content is under the licence it names (`license`).
 
 ## Examples
 

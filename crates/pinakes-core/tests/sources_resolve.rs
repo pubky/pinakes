@@ -24,12 +24,19 @@ impl Dns for PublicDns {
 
 /// USGS never answers; mempool.space answers the record of `BUSY` with 429 and that of `SLOW`
 /// with 408, fails every other node record with a server error, and its search lists only
-/// `LISTED`, `BUSY` and `SLOW`.
+/// `LISTED`, `BUSY` and `SLOW`; it answers the record of the address `STALLED` but never its
+/// transaction list.
 struct Scripted;
 const LISTED: &str = "03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f";
 const UNKNOWN: &str = "020000000000000000000000000000000000000000000000000000000000000001";
 const BUSY: &str = "021111111111111111111111111111111111111111111111111111111111111111";
 const SLOW: &str = "022222222222222222222222222222222222222222222222222222222222222222";
+const STALLED: &str = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa";
+/// Blocks whose tip and first-txid requests mempool.space answers 404: `DEEP` has a next block,
+/// `TIP` has none yet.
+const DEEP: &str = "00000000000000000000000000000000000000000000000000000000000000d1";
+const TIP: &str = "00000000000000000000000000000000000000000000000000000000000000d2";
+const NEXT: &str = "00000000000000000000000000000000000000000000000000000000000000d3";
 
 fn answer(url: &Url, status: u16, body: String) -> Fetched {
     Fetched {
@@ -53,6 +60,48 @@ impl Transport for Scripted {
     async fn get_with(&self, u: &Url, _: &[SocketAddr], _: &FetchOptions) -> Result<Fetched> {
         match (u.host_str(), u.path()) {
             (Some("earthquake.usgs.gov"), _) => std::future::pending().await,
+            (Some("mempool.space"), path) if path.strip_prefix("/api/address/") == Some(STALLED) => {
+                Ok(answer(
+                    u,
+                    200,
+                    format!(
+                        r#"{{"address":"{STALLED}","chain_stats":{{"funded_txo_sum":5000000000,"spent_txo_sum":0,"tx_count":1}},"mempool_stats":{{"tx_count":0}}}}"#
+                    ),
+                ))
+            }
+            (Some("mempool.space"), path)
+                if path.strip_prefix("/api/address/").and_then(|p| p.strip_suffix("/txs")) == Some(STALLED) =>
+            {
+                std::future::pending().await
+            }
+            (Some("mempool.space"), path)
+                if path.strip_prefix("/api/v1/block/") == Some(DEEP)
+                    || path.strip_prefix("/api/v1/block/") == Some(TIP) =>
+            {
+                let id = &path["/api/v1/block/".len()..];
+                Ok(answer(
+                    u,
+                    200,
+                    format!(
+                        r#"{{"id":"{id}","height":5,"timestamp":1231006505,"tx_count":1,"size":285,"weight":1140,"previousblockhash":"00000000000000000000000000000000000000000000000000000000000000d0"}}"#
+                    ),
+                ))
+            }
+            (Some("mempool.space"), path) if path.strip_prefix("/api/block/").and_then(|p| p.strip_suffix("/status")) == Some(DEEP) => {
+                Ok(answer(
+                    u,
+                    200,
+                    format!(r#"{{"in_best_chain":true,"height":5,"next_best":"{NEXT}"}}"#),
+                ))
+            }
+            (Some("mempool.space"), path) if path.strip_prefix("/api/block/").and_then(|p| p.strip_suffix("/status")) == Some(TIP) => Ok(
+                answer(u, 200, r#"{"in_best_chain":true,"height":5,"next_best":null}"#.into()),
+            ),
+            (Some("mempool.space"), path)
+                if path == "/api/blocks/tip/height" || path.ends_with("/txid/0") =>
+            {
+                Ok(answer(u, 404, "Not found".into()))
+            }
             (Some("mempool.space"), path) if path.starts_with("/api/v1/lightning/nodes/") => {
                 Ok(if path.ends_with(BUSY) {
                     answer(u, 429, "Too Many Requests".into())
@@ -186,4 +235,50 @@ async fn compound_names_never_merge() {
         .unwrap();
     assert_eq!(several.source, "web");
     assert_eq!(several.name.as_deref(), Some("Glucose"));
+}
+
+/// A card whose `related` part never answers is still read in time: the address card comes back
+/// without its transaction list, to be read again within the hour, never as the route's own
+/// timeout (which counts toward dead letter).
+#[tokio::test(start_paused = true)]
+async fn a_stalled_related_part_leaves_the_card_in_time() {
+    if !has("mempool") {
+        return;
+    }
+    let started = tokio::time::Instant::now();
+    let doc = official()
+        .resolve(&format!("btc:address/{STALLED}"))
+        .await
+        .unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    assert_eq!(doc.status, Status::Ok);
+    assert_eq!(doc.attributes["tx_count"], "1");
+    assert!(doc.related.is_empty());
+    let soon = doc.refresh_by.expect("read again soon") - chrono::Utc::now();
+    assert!(soon <= chrono::Duration::hours(1));
+}
+
+/// A part that fails for good (a 404) is left out without an early read again: a block with a
+/// next block whose tip the API refuses keeps its previous block and is read at its own time. The
+/// best chain's tip itself is read again within the hour, for its next block.
+#[tokio::test(start_paused = true)]
+async fn a_part_refused_for_good_is_not_read_again_soon() {
+    if !has("mempool") {
+        return;
+    }
+    let deep = official()
+        .resolve(&format!("btc:block/{DEEP}"))
+        .await
+        .unwrap();
+    assert_eq!(deep.status, Status::Ok);
+    let rels: Vec<&str> = deep.related.iter().map(|r| r.rel.as_str()).collect();
+    assert_eq!(rels, ["previous"]);
+    assert_eq!(deep.related[0].name.as_deref(), Some("Block 4"));
+    assert_eq!(deep.refresh_by, None);
+    let tip = official()
+        .resolve(&format!("btc:block/{TIP}"))
+        .await
+        .unwrap();
+    assert_eq!(tip.status, Status::Ok);
+    assert!(tip.refresh_by.is_some());
 }

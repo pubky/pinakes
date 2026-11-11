@@ -13,6 +13,8 @@ pub const ATTRIBUTE_CAP: usize = 32;
 pub const DESCRIPTION_CAP: usize = 2048;
 /// The most credits a document keeps: one per enriched field.
 pub const CREDITS_CAP: usize = 4;
+/// The most entries a document's `related` list keeps.
+pub const RELATED_CAP: usize = 32;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -57,6 +59,64 @@ pub struct Stream {
     pub media_type: String,
     pub duration_s: Option<u32>,
     pub preview: bool,
+}
+/// One object a card points at (docs/api.md, Related objects): on a Bitcoin or Lightning card,
+/// the block a transaction is in, its inputs and outputs, a block's neighbours, an address's
+/// latest transactions, a node's channels and peers, a channel's nodes and transactions.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, ToSchema)]
+pub struct Related {
+    /// What it is to this card: `block`, `input`, `output`, `previous`, `next`, `coinbase`,
+    /// `tx`, `channel`, `peer`, `node`, `funding_tx` or `closing_tx`.
+    pub rel: String,
+    /// Its card's URI, a root `POST /v1/resolve` reads (`btc:tx/…`, `btc:address/…`,
+    /// `ln:node/…`); null for an input or output without an address, which `name` labels
+    /// (`OP_RETURN`, `coinbase`).
+    #[serde(default)]
+    pub uri: Option<String>,
+    /// Plain text: a block's "Block 975,251", a node's alias, a channel's peer's alias, or the
+    /// label of an entry without a `uri`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// In satoshis: an input's or output's value, a channel's capacity, a block's reward on its
+    /// coinbase transaction, or what a transaction moved into (positive) or out of (negative)
+    /// an address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount_sat: Option<i64>,
+    /// When it happened: the block time of a transaction or of a transaction's block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<DateTime<Utc>>,
+}
+impl Related {
+    pub fn new(rel: &str, uri: Option<String>) -> Self {
+        Self {
+            rel: rel.into(),
+            uri,
+            name: None,
+            amount_sat: None,
+            at: None,
+        }
+    }
+    /// The entry within its bounds: a `rel` of 1–32 lower-case letters and underscores, a `uri`
+    /// of at most 256 bytes without spaces, a `name` of at most 128 bytes. `None` when one of
+    /// them is out of bounds, or when it has neither a `uri` nor a `name`.
+    fn bounded(mut self) -> Option<Self> {
+        let rel_ok = (1..=32).contains(&self.rel.len())
+            && self
+                .rel
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b == b'_');
+        let uri_ok = self.uri.as_deref().is_none_or(|u| {
+            !u.is_empty() && u.len() <= 256 && !u.chars().any(|c| c.is_whitespace())
+        });
+        self.name = self
+            .name
+            .map(|n| n.trim().to_owned())
+            .filter(|n| !n.is_empty());
+        if let Some(name) = &mut self.name {
+            truncate(name, 128);
+        }
+        (rel_ok && uri_ok && (self.uri.is_some() || self.name.is_some())).then_some(self)
+    }
 }
 impl Stream {
     /// The stream, when `url` is public, direct audio a client may play: `https` or `http` on a
@@ -148,7 +208,7 @@ pub enum CreditProvider {
 }
 impl CreditProvider {
     /// Whether its values carry no licence: a cover from the Cover Art Archive (cover art is its
-    /// label's) and TMDB's poster or overview (used under TMDB's API terms, credited to TMDB).
+    /// label's) and TMDB's poster or overview (credited to TMDB).
     pub fn unlicensed(self) -> bool {
         matches!(self, Self::CoverArtArchive | Self::Tmdb)
     }
@@ -169,8 +229,7 @@ impl CreditProvider {
             Self::Tmdb => "tmdb",
         }
     }
-    /// What a client showing the provider's values must show, as its terms ask (`/v1/info`
-    /// `attributions`): TMDB's notice, verbatim, its logo and its site.
+    /// What a client showing the provider's values shows (`/v1/info` `attributions`): TMDB's notice, verbatim, its logo and its site.
     pub fn attribution(self) -> Option<Attribution> {
         match self {
             Self::Tmdb => Some(Attribution {
@@ -227,8 +286,7 @@ pub struct Credit {
     /// `LGPL-2.1-or-later`), `public-domain`, or `Attribution` (Commons' licence of that name,
     /// which has no SPDX ID). Null for a cover from the Cover Art Archive and for TMDB's poster
     /// or overview, which carry no licence: cover art is its label's, shown as a service shows an
-    /// album's cover, and TMDB's values are used under TMDB's API terms (`license_url` is null
-    /// too).
+    /// album's cover, and TMDB's values carry none either (`license_url` is null too).
     // No licence is the empty string here, and only such a credit holds it (`bounded`).
     #[serde(
         serialize_with = "license_or_null",
@@ -343,6 +401,11 @@ pub struct ResourceMeta {
     /// The audio a client can play ([`Stream`]): an episode's enclosure, a recording's preview.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<Stream>,
+    /// The frame a client may load to show the link ([`crate::embed::Embed`]) that the page
+    /// itself names: its oEmbed answer's `<iframe>` or its own player `<meta>`. An embed that
+    /// follows from the link alone (`embed::link`) is added when the card is served, never stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embed: Option<crate::embed::Embed>,
     pub url: String,
     pub site: String,
     /// The service the link is on, by its URL alone ("Spotify", "F-Droid", "Wikidata"), when
@@ -383,6 +446,14 @@ pub struct ResourceMeta {
     /// The clients that open a Pubky app's object (`resolver::pubky_apps`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub open_in: Vec<OpenIn>,
+    /// The objects the card points at ([`Related`]), at most [`RELATED_CAP`]: a chain card's
+    /// block, inputs and outputs, neighbours, transactions, channels and peers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related: Vec<Related>,
+    /// How many entries of a `rel` there are when `related` holds fewer of them (a transaction's
+    /// 400 inputs, 10 of them listed): only for a `rel` the list holds and cuts.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub related_total: BTreeMap<String, u64>,
     /// URLs that may name this same page: its head canonical and the end of an all-permanent
     /// redirect chain. The only alias candidates (`alias::canonical`); never stored.
     #[serde(skip)]
@@ -543,6 +614,7 @@ impl ResourceMeta {
                 s.preview,
             )
         });
+        self.embed = self.embed.take().and_then(crate::embed::Embed::bounded);
         self.credits = std::mem::take(&mut self.credits)
             .into_iter()
             .filter_map(Credit::bounded)
@@ -555,11 +627,25 @@ impl ResourceMeta {
                 && url::Url::parse(&o.url).is_ok_and(|u| u.scheme() == "https")
         });
         self.open_in.truncate(4);
+        self.related = std::mem::take(&mut self.related)
+            .into_iter()
+            .filter_map(Related::bounded)
+            .collect();
+        while self.related.len() > RELATED_CAP {
+            self.cut_related();
+        }
+        // A total stays only for a `rel` the list holds and cuts.
+        let related = &self.related;
+        self.related_total.retain(|rel, total| {
+            let listed = related.iter().filter(|r| &r.rel == rel).count() as u64;
+            listed > 0 && *total > listed
+        });
         while self.validate(allowed_attributes).is_err() {
             if self.shed() {
                 continue;
             }
-            if self.description.take().is_some()
+            if self.embed.take().is_some()
+                || self.description.take().is_some()
                 || self.image.take().is_some()
                 || self.stream.take().is_some()
             {
@@ -570,11 +656,28 @@ impl ResourceMeta {
         }
         Ok(self)
     }
+    /// Drops the last entry of `related`, counting it in `related_total`: the list of its `rel`
+    /// is cut there. A `rel` it leaves without entries keeps no total (a total is only for a
+    /// `rel` the list holds). False when the list is empty.
+    fn cut_related(&mut self) -> bool {
+        let Some(last) = self.related.pop() else {
+            return false;
+        };
+        let left = self.related.iter().filter(|r| r.rel == last.rel).count() as u64;
+        if left == 0 {
+            self.related_total.remove(&last.rel);
+        } else {
+            let total = self.related_total.entry(last.rel).or_insert(left + 1);
+            *total = (*total).max(left + 1);
+        }
+        true
+    }
     /// Drops one of the parts a document too large gives up first, before its description and
-    /// image: an attribute (the last), an alias, a client, a group key, a performer. False when
-    /// none is left.
+    /// image: an entry of `related` (the last), an attribute (the last), an alias, a client, a
+    /// group key, a performer. False when none is left.
     fn shed(&mut self) -> bool {
-        self.attributes.pop_last().is_some()
+        self.cut_related()
+            || self.attributes.pop_last().is_some()
             || self.aliases.pop().is_some()
             || self.open_in.pop().is_some()
             || self.group_keys.pop().is_some()
@@ -1229,5 +1332,96 @@ mod tests {
         let mut doc = ResourceMeta::new("https://example.org", "web", 100);
         doc.attributes.insert("secret".into(), "x".into());
         assert!(doc.validate(&[]).is_err());
+    }
+
+    fn input(n: usize) -> Related {
+        let mut r = Related::new("input", Some(format!("btc:address/1Addr{n}")));
+        r.amount_sat = Some(n as i64);
+        r
+    }
+
+    /// `related` keeps only well-formed entries, at most `RELATED_CAP`, and counts the entries
+    /// of a `rel` it cuts; a total stays only for a `rel` it lists and cuts.
+    #[test]
+    fn related_is_bounded_and_counts_what_it_cuts() {
+        let mut doc = ResourceMeta::new("btc:tx/x", "mempool", 60);
+        let mut label = Related::new("output", None);
+        label.name = Some(format!("  {}  ", "n".repeat(300)));
+        doc.related = vec![label];
+        doc.related.extend((0..40).map(input));
+        doc.related
+            .push(Related::new("Not A Rel", Some("btc:tx/y".into())));
+        doc.related.push(Related::new("output", None));
+        doc.related
+            .push(Related::new("output", Some("btc:tx/a b".into())));
+        doc.related
+            .push(Related::new("output", Some("x".repeat(257))));
+        doc.related_total = BTreeMap::from([
+            ("input".into(), 400),
+            ("output".into(), 1),
+            ("peer".into(), 9),
+        ]);
+        let bounded = doc.bounded(&[]).unwrap();
+        assert_eq!(bounded.related.len(), RELATED_CAP);
+        assert_eq!(
+            bounded.related[0].name.as_deref(),
+            Some("n".repeat(128).as_str())
+        );
+        assert_eq!(
+            bounded.related[1..],
+            (0..31).map(input).collect::<Vec<_>>()[..]
+        );
+        assert_eq!(
+            bounded.related_total,
+            BTreeMap::from([("input".into(), 400)])
+        );
+
+        // Cut with no total of its own: the count is what it held.
+        let mut doc = ResourceMeta::new("btc:tx/x", "mempool", 60);
+        doc.related = (0..40).map(input).collect();
+        let bounded = doc.bounded(&[]).unwrap();
+        assert_eq!(bounded.related.len(), RELATED_CAP);
+        assert_eq!(
+            bounded.related_total,
+            BTreeMap::from([("input".into(), 40)])
+        );
+
+        // A list too large for the document gives up its last entries, counted, before any
+        // fact; stored and read back, it is the same.
+        let mut doc = ResourceMeta::new("btc:tx/x", "mempool", 60);
+        doc.attributes
+            .insert("page_url".into(), "https://mempool.space/tx/x".into());
+        doc.related = (0..RELATED_CAP)
+            .map(|n| Related::new("output", Some(format!("btc:address/{n:0>240}"))))
+            .collect();
+        let bounded = doc.bounded(&["page_url"]).unwrap();
+        assert!(bounded.related.len() < RELATED_CAP);
+        assert!(!bounded.related.is_empty());
+        assert_eq!(bounded.related_total["output"], RELATED_CAP as u64);
+        assert_eq!(bounded.attributes.len(), 1);
+        // A `rel` whose every entry is given up keeps no total.
+        let mut two = bounded.clone();
+        two.related = vec![input(1), Related::new("block", Some("btc:block/b".into()))];
+        two.related_total = BTreeMap::from([("block".into(), 3), ("input".into(), 5)]);
+        assert!(two.shed());
+        assert_eq!(two.related, [input(1)]);
+        assert_eq!(two.related_total, BTreeMap::from([("input".into(), 5)]));
+        let stored: ResourceMeta =
+            serde_json::from_value(serde_json::to_value(&bounded).unwrap()).unwrap();
+        assert_eq!(
+            (stored.related, stored.related_total),
+            (bounded.related, bounded.related_total)
+        );
+        // An entry without a `uri` is stored with a null one; a document without a list has
+        // neither field.
+        let mut label = Related::new("output", None);
+        label.name = Some("OP_RETURN".into());
+        assert_eq!(
+            serde_json::to_value(&label).unwrap(),
+            serde_json::json!({"rel": "output", "uri": null, "name": "OP_RETURN"})
+        );
+        let plain =
+            serde_json::to_value(ResourceMeta::new("https://example.org", "web", 60)).unwrap();
+        assert!(plain.get("related").is_none() && plain.get("related_total").is_none());
     }
 }

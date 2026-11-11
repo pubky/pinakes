@@ -566,6 +566,15 @@ page's own metadata (its JSON-LD first) names the object and oEmbed fills what i
 where the answer comes first: from a provider whose scheme names the link exactly (it has a path, as
 YouTube's `watch` and `shorts` do), or from any matching provider under `"always"`, its title,
 author and thumbnail come ahead of the page's. A blank field in an answer is no value.
+A card's frame ([`embed`](api.md#embed)) follows from the link alone for the players Pinakes
+knows, X and Mastodon posts and OpenStreetMap cards, added when the card is served. Any other comes
+from the oEmbed answer's `<iframe>` (its address only) or the page head's `twitter:player` /
+HTML `og:video`, stored with the card: a registry provider is then also asked when its page is
+complete but names no player of its own, for its frame alone (one oEmbed request more per read,
+cached for the card's lifetime, counted as `decision="frame"`; an endpoint that refused for want
+of a token is not asked so again for a day, nor is a link refused or answered without a frame). A stored frame never starts by itself: an
+autoplay its address turns on is turned off. Stored cards get those frames at their next read;
+`pinakesd reextract media` reads the registry providers' cards again at once.
 `web.discover_feeds` (web pages) and `cards.media.discover_feeds` (media pages: podcast feed
 scanning) follow RSS alternates on pages without a typed card. Discovery decisions are counted in
 `pinakes_discovery_decisions_total{kind,decision}`. A podcast show's card reads the show's feed
@@ -673,8 +682,7 @@ a script challenge, an "update your browser" page), and a bot wall is never work
 Starticket is off: it is retired, its site redirects to See Tickets. Each platform's
 `canary_note` in the table gives the reason and when it was checked. A platform that is off
 sends its URLs to the web resolver, as `event.adapters.enabled = false` sends every platform's.
-The `browser` and `firefox` user-agent profiles imitate browsers to pass bot walls; consider the
-provider's terms before enabling those platforms.
+The `browser` and `firefox` user-agent profiles imitate browsers to pass bot walls.
 
 Luma, Meetup, Eventbrite, Partiful, Posh, RingCentral, Airmeet, Mobilizon, Gancio, Wikidata,
 Dice, Xceed, Ents24 and Ticketino supplement JSON-LD with bounded state parsing; JavaScript is
@@ -740,10 +748,16 @@ it), or after an upgrade that adds or changes also-on sources, run `pinakesd --c
 their last run for up to the source's lifetime (30 days). After an upgrade that changes how links
 are spelled, typed or named (aliases of a canonical link, a card's service in `site`), run
 `reextract all`: stored cards keep what the older build gave them until each is fetched again.
-`spotify_isrc` (off by default; `[also_on.sources.spotify_isrc] enabled = true` with the Spotify
-credentials turns it on, the operator's reading of Spotify's terms) costs one Spotify search per
-ISRC key of a track on another service, cached an hour, on Spotify's pace; switched on after the
-upgrade that added it, `reextract also-on` asks for every stored track at once. The duplicate
+`spotify_isrc` (with the Spotify credentials) costs one Spotify search per ISRC key of a track on
+another service, and per barcode key of an album a search and up to three album reads, cached an
+hour, on Spotify's pace. `tidal_isrc` (with the TIDAL credentials) costs one TIDAL request per ISRC
+or barcode key of a track or album on another service, on `tidal`'s pace and token slot.
+`itunes_song` and `youtube_match` (their links are maybes, `kind` `maybe`, never keys) cost
+per track a Deezer, Spotify or TIDAL read and an iTunes lookup, and per label upload on YouTube a
+watch page (up to 3 MB) and a Deezer and a TIDAL search; each runs its part only while the source
+of that service runs (`deezer`, `spotify`, `tidal`, `tidal_isrc`, `itunes`). Every one of them is
+on by default (`[also_on.sources.<id>] enabled = false` turns one off); after the upgrade that adds
+them, `reextract also-on` asks for every stored track and album at once. The duplicate
 check of the music sources (an ISRC MusicBrainz gives to several recordings) costs MusicBrainz
 reads on a common path: for a recording MusicBrainz relates a link to, one ISRC lookup per ISRC
 of the recording and, where several recordings share one, each of their records (at most 8
@@ -762,12 +776,10 @@ expired ones (a deleted key regroups its resource). A source keeps at most
 worker; stored keys keep grouping and stored links stay on cards until they expire (up to twice
 the sources' lifetimes). `derive_links = false` keeps keys and facts only: no derived links on
 cards, so a tagged link an exact derivation names no longer joins by it either;
-`[also_on.sources.<id>] enabled = false` turns one source off and `enabled = true` turns on one
-that is off by default (an unknown ID stops startup). Off means no call to its API: a source
+`[also_on.sources.<id>] enabled = false` turns one source off (an unknown ID stops startup). Off means no call to its API: a source
 whose API has a host of its own (Deezer's `api.deezer.com`) has that host refused at the egress
 while it is off, whatever path asks, and its site's pages and the links other sources give to them
-stay. A source that is off (switched off, or off
-by default and not turned on) stops showing at the next start: the daemon writes the sources
+stay. A source that is off (switched off, or not ready for want of what it needs) stops showing at the next start: the daemon writes the sources
 that are off to `also_on_source_off`, and no card, `also_on` list, search, group or later
 source reads their keys, facts or links. Those rows stay in the database and expire as before;
 nothing is deleted, and a source switched on again shows its unexpired rows at once. The
@@ -799,7 +811,7 @@ answers resets it.
 The sources run in the order [docs/sources](sources/README.md#also-on) lists them (each page says
 what its source reads and costs); `[also_on] apple_storefront` (`us`, a
 two-letter country code) is the storefront the iTunes lookups ask and the Apple Books and Apple
-Podcasts links carry (Apple Music links carry none). `[also_on] spotify_pages` (`false`) lets
+Podcasts links carry (Apple Music links carry none). `[also_on] spotify_pages` (`true`) lets
 [`editions`](sources/editions.md) read a Spotify track's public page for its album where Spotify's
 Web API does not answer (no credentials, or credentials it refuses); off, such Spotify links stay
 unplaced (a card's own Spotify track is read for its own album either way). `[also_on.sources.musicbrainz] base_url`
@@ -863,8 +875,7 @@ start, every card that holds them is due at once and drops TMDB's values at that
 at most once a minute, over film and series cards). After setting the key, run
 `pinakesd --config <path> reextract also-on` with the daemon stopped, then start it (or only
 restart it and wait for each card's next also-on run, at most 30 days): the cards take their
-posters at the read that follows. TMDB's terms allow its data to
-be cached for six months at most. Its rows are read again every 30 days (and after each save that
+posters at the read that follows. TMDB's rows are read again every 30 days (and after each save that
 changes a card) and live 60 days from the last read that answered; a card takes TMDB's values only
 from live rows, so a TMDB outage keeps them up to 60 days and the card drops them at its first
 read after. The hourly maintenance brings every stored card that holds TMDB's values back to the

@@ -288,9 +288,23 @@ pub(crate) fn api_options(
 pub(crate) async fn object(
     api: &Api,
     cx: &Context,
+    pair: (&str, &str),
+    url: &str,
+    types: (&'static str, &'static [&'static str]),
+) -> Result<Option<Value>> {
+    object_as(api, cx, pair, url, types, true).await
+}
+/// [`object`], where a 403 refuses the credentials (`refuses`, the slot holding the refusal five
+/// minutes) or only this request: then the slot stays open, and the request's lookup is retried
+/// after the same five minutes (`forbidden_request`). For an endpoint a service may withhold from
+/// an app whose other requests it answers.
+pub(crate) async fn object_as(
+    api: &Api,
+    cx: &Context,
     (id, secret): (&str, &str),
     url: &str,
     (accept, extra_types): (&'static str, &'static [&'static str]),
+    refuses: bool,
 ) -> Result<Option<Value>> {
     let slot = slot_key(api, id, secret);
     let mut s = self::slot(&slot).await;
@@ -307,9 +321,17 @@ pub(crate) async fn object(
         // Never cached (`api_options`): the next request asks with its own token.
         401 => return Err(s.reject(api, &token)),
         // No catalogue scope, a restricted app: the credentials, not the object.
-        403 => {
+        403 if refuses => {
             s.refuse(api, "forbidden", 403);
             return Err(api.refused());
+        }
+        403 => {
+            tracing::warn!("{} refused a request its credentials may make", api.label);
+            return Err(RetryLater {
+                class: "forbidden_request",
+                seconds: REFUSAL_HOLD,
+            }
+            .into());
         }
         404 => return Ok(None),
         429 | 500..=599 => {

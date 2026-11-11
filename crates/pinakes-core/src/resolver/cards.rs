@@ -1232,7 +1232,8 @@ impl CardResolver {
                     let mut d = ResourceMeta::new(uri, "web", ttl);
                     let base = web::read_at(&f.url);
                     web::apply_oembed(&mut d, &v, &base);
-                    if d.name.is_some() {
+                    // An answer with a frame but no title still gives the page its frame.
+                    if d.name.is_some() || d.embed.is_some() {
                         d.source = "media".into();
                         media_type(&mut d, uri);
                         return Some((d, v, base));
@@ -1241,6 +1242,61 @@ impl CardResolver {
             }
         }
         None
+    }
+    /// The frame alone of `endpoint`'s oEmbed answer (`embed::from_oembed`), for a page that is
+    /// complete without one: nothing else of the answer is used, and an answer without a title
+    /// counts. An endpoint that refused for want of a token (401, or an answer naming an access
+    /// token: Facebook's and Instagram's) is not asked again for a day; a link whose answer was
+    /// refused (400, 403: an embed-restricted video) or was a video or rich object without a
+    /// frame is not asked again for a day either (`NO_FRAME`), the provider's other links still
+    /// are.
+    async fn fetch_frame(&self, endpoint: Url, ttl: u64) -> Option<crate::embed::Embed> {
+        let key = format!(
+            "{}{}",
+            endpoint.host_str()?.to_ascii_lowercase(),
+            endpoint.path()
+        );
+        let link_key = endpoint.as_str().to_owned();
+        if crate::capability::names_capability(&endpoint)
+            || NO_FRAME.get(&key) == Some(true)
+            || NO_FRAME.get(&link_key) == Some(true)
+        {
+            crate::telemetry::discovery("oembed", "skipped");
+            return None;
+        }
+        crate::telemetry::discovery("oembed", "frame");
+        let answer = tokio::time::timeout(
+            Duration::from_secs(3),
+            self.web
+                .egress
+                .discover(endpoint.as_str(), &Default::default(), ttl),
+        )
+        .await;
+        let Ok(Ok(f)) = answer else {
+            return None;
+        };
+        if matches!(f.status, 400 | 401 | 403) {
+            let body =
+                String::from_utf8_lossy(&f.body[..f.body.len().min(2048)]).to_ascii_lowercase();
+            let token =
+                f.status == 401 || body.contains("access token") || body.contains("access_token");
+            NO_FRAME.set(if token { &key } else { &link_key }, true);
+            return None;
+        }
+        let answer = (f.status == 200)
+            .then(|| serde_json::from_slice::<Value>(&f.body).ok())
+            .flatten()?;
+        let frame = crate::embed::from_oembed(&answer, &web::read_at(&f.url));
+        // Only a player's answer (video, rich) without a frame says the provider gives none; a
+        // photo or a link answer, or a failed one, may be the link's alone.
+        let player = matches!(
+            answer.get("type").and_then(Value::as_str),
+            Some("video" | "rich")
+        );
+        if frame.is_none() && player {
+            NO_FRAME.set(&link_key, true);
+        }
+        frame
     }
     async fn media(&self, uri: &str, ttl: u64) -> Result<ResourceMeta> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(9);
@@ -1266,6 +1322,7 @@ impl CardResolver {
             self.web.resolve_with_policy(uri, self.config.media.oembed),
         )
         .await;
+        let mut frame = None;
         if let Some((endpoint, _)) = endpoint.filter(|_| !first) {
             if !page
                 .as_ref()
@@ -1279,6 +1336,17 @@ impl CardResolver {
                     crate::telemetry::discovery("oembed", "missing_image");
                 }
                 embed = tokio::time::timeout_at(deadline, self.fetch_embed(uri, endpoint, ttl))
+                    .await
+                    .ok()
+                    .flatten();
+            } else if page
+                .as_ref()
+                .is_ok_and(|r| r.as_ref().is_ok_and(|d| d.embed.is_none()))
+                && crate::embed::link(uri).is_none()
+            {
+                // A complete page that names no frame, for a link whose player does not follow
+                // from the link: the provider is asked for its frame alone.
+                frame = tokio::time::timeout_at(deadline, self.fetch_frame(endpoint, ttl))
                     .await
                     .ok()
                     .flatten();
@@ -1299,11 +1367,15 @@ impl CardResolver {
                         web::apply_oembed(&mut page, &v, &base);
                     }
                 }
+                if frame.is_some() {
+                    page.embed = frame;
+                }
                 media_type(&mut page, uri);
                 page.bounded(web::ATTRIBUTES)
             }
             result => {
-                if let Some((mut d, _, _)) = embed {
+                // The answer alone is the card only when it names the thing.
+                if let Some((mut d, _, _)) = embed.filter(|(d, _, _)| d.name.is_some()) {
                     if let Ok(Ok(page)) = &result {
                         d.event.warnings.extend(page.event.warnings.iter().cloned());
                     }
@@ -1321,6 +1393,11 @@ impl CardResolver {
         }
     }
 }
+/// For a day: the oEmbed endpoints (host and path) that refused a frame-only request
+/// (`fetch_frame`) for want of a token, and the requests (the endpoint with its link) that were
+/// refused or answered a player without a frame.
+static NO_FRAME: std::sync::LazyLock<crate::sources::HostMemo> =
+    std::sync::LazyLock::new(crate::sources::HostMemo::default);
 fn media_type(d: &mut ResourceMeta, uri: &str) {
     if !matches!(d.type_name.as_str(), "WebPage" | "CreativeWork") {
         return;

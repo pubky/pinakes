@@ -16,7 +16,7 @@
 //!   barcode as keys. An album link related to several releases of one release group (editions
 //!   MusicBrainz keeps apart) takes that release group: its key, and the links and facts every
 //!   one of those releases has.
-//! - [`DeezerSource`] (off by default: Deezer's API terms are for non-commercial use): a Deezer
+//! - [`DeezerSource`]: a Deezer
 //!   link's own ISRC or barcode from Deezer's API, as keys; for another service's track or album
 //!   with an ISRC or barcode key, the one Deezer track or album the API names for it, keyed.
 //! - [`ItunesSource`]: for an album with a barcode key, the Apple Music album iTunes'

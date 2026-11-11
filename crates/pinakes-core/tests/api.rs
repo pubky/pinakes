@@ -2557,6 +2557,113 @@ async fn a_card_carries_its_stream(pool: PgPool) {
     assert!(cards[1].get("stream").is_none(), "{cards}");
 }
 
+/// A card's `embed`: the frame its document stores (its oEmbed answer's), settled for its type
+/// (a podcast episode's fixed-height frame is its player), on a read, a lookup and a search; a
+/// card whose link is gone shows none, even when its link names a player.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_card_carries_its_embed(pool: PgPool) {
+    let uri = "https://podcast.example/episodes/1";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut doc = ResourceMeta::new(uri, "web", 86400);
+    doc.set_type("PodcastEpisode");
+    doc.name = Some("Episode One".into());
+    doc.embed = pinakes_core::embed::from_oembed(
+        &json!({"type": "rich", "provider_name": "Podcast Host", "height": 150,
+            "html": "<iframe src=\"https://player.podcast.example.com/e/1\" width=\"100%\" height=\"150\" allow=\"autoplay\"></iframe>"}),
+        &url::Url::parse("https://podcast.example/oembed").unwrap(),
+    );
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let gone = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+    let gone_id = store::ensure_resource(&pool, gone).await.unwrap();
+    let mut missing = ResourceMeta::new(gone, "jsonld", 86400);
+    missing.status = pinakes_core::model::Status::Missing;
+    // Gone once it is found so twice.
+    for _ in 0..2 {
+        missing.fetched_at += 1000;
+        store::save_document(&pool, &gone_id, 0, &missing)
+            .await
+            .unwrap();
+    }
+    // A post Mastodon's API answered for has its server's frame; one read over ActivityPub alone
+    // may be on a server without one.
+    let mut posts = vec![];
+    for (uri, source) in [
+        (
+            "https://mastodon.social/@Mastodon/117466985005297414",
+            "mastodon",
+        ),
+        ("https://pleroma.example/@someone/1", "activitypub"),
+    ] {
+        let post_id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut post = ResourceMeta::new(uri, source, 86400);
+        post.set_type("SocialMediaPosting");
+        post.name = Some("A post".into());
+        store::save_document(&pool, &post_id, 0, &post)
+            .await
+            .unwrap();
+        posts.push(post_id);
+    }
+    // A video found gone whose later read failed: its document stays `missing`, its row says
+    // `error`, and its own link (a referenced one) names a player. No frame comes back.
+    let failed = "https://www.youtube.com/watch?v=9bZkp7q19f0";
+    let failed_id = store::ensure_resource(&pool, failed).await.unwrap();
+    let mut gone_doc = ResourceMeta::new(failed, "jsonld", 86400);
+    gone_doc.status = pinakes_core::model::Status::Missing;
+    for _ in 0..2 {
+        gone_doc.fetched_at += 1000;
+        store::save_document(&pool, &failed_id, 0, &gone_doc)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','videos','/pub/app/tags/gone',now())")
+        .bind(&failed_id)
+        .bind(author(1))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource SET status='error' WHERE id=$1")
+        .bind(&failed_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let embed = json!({
+        "provider": "podcast-host",
+        "kind": "audio",
+        "src": "https://player.podcast.example.com/e/1",
+        "height": 150,
+        "aspect": null,
+        "allow": [],
+        "autoplay_param": null
+    });
+    let (code, card) = call(&app, "GET", &format!("/v1/resources/{id}"), None).await;
+    assert_eq!(code, 200, "{card}");
+    assert_eq!(card["embed"], embed);
+    let (code, cards) = call(
+        &app,
+        "POST",
+        "/v1/resources/lookup",
+        Some(json!({"resource_ids": [id, gone_id, posts[0], posts[1], failed_id]})),
+    )
+    .await;
+    assert_eq!(code, 200, "{cards}");
+    assert_eq!(cards[0]["embed"], embed);
+    assert_eq!(cards[1]["status"], "missing", "{cards}");
+    assert_eq!(cards[1]["embed"], Value::Null, "{cards}");
+    assert_eq!(
+        cards[2]["embed"]["src"], "https://mastodon.social/@Mastodon/117466985005297414/embed",
+        "{cards}"
+    );
+    assert_eq!(
+        (&cards[2]["embed"]["provider"], &cards[2]["embed"]["kind"]),
+        (&json!("mastodon"), &json!("post"))
+    );
+    assert_eq!(cards[3]["embed"], Value::Null, "{cards}");
+    assert_eq!(cards[4]["status"], "error", "{cards}");
+    assert_eq!(cards[4]["refs"], json!([failed]), "{cards}");
+    assert_eq!(cards[4]["embed"], Value::Null, "{cards}");
+}
+
 /// The stored document, with its internal fields, is on the admin listener only; the public
 /// card leaves those fields out.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]

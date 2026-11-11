@@ -51,7 +51,12 @@ async fn itunes_album(cx: &Context, barcode: &str) -> Result<Option<Link>> {
     let storefront = &cx.config.also_on.apple_storefront;
     let url =
         format!("https://itunes.apple.com/lookup?upc={barcode}&entity=album&country={storefront}");
-    let fetched = cx.egress.discover(&url, &itunes_options(), 3600).await?;
+    Ok(answer(cx, &url).await?.and_then(|v| itunes_parse(&v)))
+}
+/// One iTunes Search or Lookup answer (`url` in the configured storefront), shared for an hour;
+/// `None` for an answer that is no result list (4xx). A rate limit or an outage is retried.
+pub(crate) async fn answer(cx: &Context, url: &str) -> Result<Option<Value>> {
+    let fetched = cx.egress.discover(url, &itunes_options(), 3600).await?;
     match fetched.status {
         200 => {}
         429 | 500..=599 => {
@@ -64,8 +69,7 @@ async fn itunes_album(cx: &Context, barcode: &str) -> Result<Option<Link>> {
         _ => return Ok(None),
     }
     // iTunes answers `text/javascript` with leading newlines.
-    let v: Value = serde_json::from_slice(fetched.body.trim_ascii())?;
-    Ok(itunes_parse(&v))
+    Ok(Some(serde_json::from_slice(fetched.body.trim_ascii())?))
 }
 /// The track an Apple Music track link names.
 fn apple_track(uri: &str) -> Option<String> {
@@ -122,19 +126,7 @@ pub(crate) async fn track_album(cx: &Context, track: &str) -> Result<Option<Stri
 async fn lookup(cx: &Context, id: &str) -> Result<Option<Value>> {
     let storefront = &cx.config.also_on.apple_storefront;
     let url = format!("https://itunes.apple.com/lookup?id={id}&entity=song&country={storefront}");
-    let fetched = cx.egress.discover(&url, &itunes_options(), 3600).await?;
-    match fetched.status {
-        200 => {}
-        429 | 500..=599 => {
-            return Err(crate::resolver::RetryLater {
-                class: "itunes_busy",
-                seconds: fetched.retry_after_secs.clamp(60, 3600),
-            }
-            .into())
-        }
-        _ => return Ok(None),
-    }
-    Ok(Some(serde_json::from_slice(fetched.body.trim_ascii())?))
+    answer(cx, &url).await
 }
 /// How iTunes is asked: for JSON, which it serves as `text/javascript`.
 fn itunes_options() -> crate::resolver::egress::FetchOptions {

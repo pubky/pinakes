@@ -12,6 +12,7 @@ pub mod change_api;
 pub mod changes;
 pub mod collections;
 pub mod config;
+pub mod embed;
 pub mod episodes;
 pub mod event;
 pub mod group_keys;

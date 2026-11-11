@@ -1072,8 +1072,8 @@ async fn delete_orphan_batch(
     tx.commit().await?;
     Ok(rows.len() as u64)
 }
-/// Delete change lines older than `days`, and those holding a value of a provider whose terms
-/// cap how long it is kept older than that cap; then the OSM versions and occurrences nothing
+/// Delete change lines older than `days`, and those holding a value of a provider whose values
+/// are kept for less (`CreditProvider::change_days_cap`) older than that cap; then the OSM versions and occurrences nothing
 /// refers to any more.
 pub async fn retain(pool: &PgPool, days: u32) -> Result<()> {
     // The change history is kept to its days even when an occurrence step fails.
@@ -1087,7 +1087,7 @@ pub async fn retain(pool: &PgPool, days: u32) -> Result<()> {
         .bind(days as f64)
         .execute(&mut *tx)
         .await?;
-    // A line that holds a value of a provider whose terms limit how long it is kept goes after
+    // A line that holds a value of a provider whose values are kept for less goes after
     // that many days (`CreditProvider::change_days_cap`; TMDB's 120), whatever `days` says and
     // whether or not the provider's source is on now.
     for provider in crate::model::CreditProvider::FROM_FACTS {

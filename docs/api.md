@@ -98,12 +98,13 @@ An IMDb title keeps the type its page gives (it can be either).
 | `type`, `type_path` | schema.org type (`MusicEvent`, `Book`, `Place`, …), or one of Pinakes's own types for what schema.org has no class for: `BitcoinBlock`, `BitcoinTransaction`, `BitcoinAddress`, `LightningNode` and `LightningChannel` (not schema.org; each a child of `Thing`); `type_path` is the type's ancestors, root first (`["Thing", "Event", "MusicEvent"]`), the types a `type=` search matches it by |
 | `name`, `description`, `image` | Display metadata; images point to the origin and are never proxied |
 | `stream` | Audio a client can play, `{url, type, duration_s, preview}` ([Stream](#stream)): a podcast episode's enclosure, a recording's public preview. Absent when the card has none |
+| `embed` | The frame that shows the link as its own site does, `{provider, kind, src, height, aspect, allow, autoplay_param}` ([Embed](#embed)): a service's player, a social post, a map, slides. `null` when there is none and on a `missing` card |
 | `episodes` | A podcast show's card (`PodcastSeries`, status `ok`): its latest episodes that have a `stream`, newest first, at most 5, each `{uri, name, image, published, guid, stream, id?}` as `GET /v1/resources/{id}/episodes` lists it ([Episodes](#episodes)), so a client can play them from the card. Absent on every other card and on a show without one |
 | `site` | The publishing site: the page's own site name (`og:site_name`), else its host; for `pubky://` objects the app path segment (`loopky`), not the public key; for a link whose URL names a known service (a music service, a Wikipedia edition, MusicBrainz, Wikidata, a service the also-on lookups know), that service's name (`Apple Music`, `Wikipedia (de)`, `OpenStreetMap`), whatever the page calls itself and even before its card is read; for a card read from an official API without a host of its own, the service's name (`Federal Register`) |
 | `point` | `{lat, lon}` |
 | `start`, `end` | RFC 3339 instants for events and occurrences |
 | `group` | `{id, size}` when the resource or occurrence is in a [group](#groups), else `null` |
-| `also_on` | The same thing elsewhere ([Also on](#also-on)): the other members of its group as `{id, uri, site}` (other resources first, one entry each by ID, then other occurrences of its own feed), then derived links nobody tagged as `{uri, site, derived: true, via, kind?, at?}`, by service name; one per service (of a recording's or an album's links, the one on the card's own release, else on the original edition), never another page of the card's own service, at most 8 on a search, lookup or group card and 256 on a resource read. A hint only: every member keeps its own card |
+| `also_on` | The same thing elsewhere ([Also on](#also-on)): the other members of its group as `{id, uri, site}` (other resources first, one entry each by ID, then other occurrences of its own feed), then derived links nobody tagged as `{uri, site, derived: true, via, kind?, at?}`, by service name; each with its `embed` ([Embed](#embed)) or `null`; one per service (of a recording's or an album's links, the one on the card's own release, else on the original edition), never another page of the card's own service, at most 8 on a search, lookup or group card and 256 on a resource read. A hint only: every member keeps its own card |
 | `open_in` | The clients that open a Pubky app's object, `[{client, url}]` (`url` is `https:`): from the app's profile ([Pubky apps](pubky-apps.md)), e.g. Loopky for a deck; on a Pubky event reference's card, those of the event object. `[]` on every other card |
 | `attribution` | Present on OSM cards, events placed at an OSM venue and events whose zone came from coordinates; display it with the card |
 | `credits` | Where `image` and `description` came from when Pinakes added them from another source than the link ([Credits](#credits)): one entry per such field, at most 4. `[]` when none: such a field came from the link itself |
@@ -166,6 +167,61 @@ Which cards carry one (each source's page in [docs/sources](sources/README.md) s
   the card's next read. Deezer's previews are signed and expire, so they are never one;
   Spotify's are not used.
 
+### Embed
+
+The frame a client may load, sandboxed, to show a link the way its own site does, so a client
+needs no list of services to build one:
+
+```json
+"embed": {"provider": "spotify", "kind": "audio", "src": "https://open.spotify.com/embed/track/003vvx7Niy0yvhvHt4a68B",
+          "height": 152, "aspect": null,
+          "allow": ["accelerometer", "autoplay", "clipboard-write", "encrypted-media", "gyroscope", "picture-in-picture", "web-share"],
+          "autoplay_param": null}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `provider` | Who serves the frame: `youtube`, `vimeo`, `spotify`, `soundcloud`, `mixcloud`, `tidal`, `deezer`, `apple-music`, `apple-podcasts`, `x`, `mastodon` or `openstreetmap`; else the oEmbed provider's name in lower case with hyphens (`speaker-deck`), else the frame's host |
+| `kind` | `audio` or `video` (a player), `post` (a social post), `map`, or `rich` (anything else: slides, a document, code, a chart) |
+| `src` | The frame's address. It never starts playing by itself |
+| `height` | CSS pixels, for a frame of fixed height (a player strip, a post, a document); `null` when it scales with its width or the provider gives none |
+| `aspect` | Width divided by height, for a frame that scales with its width (a video, a map, a slide deck; 16:9 when the provider names no size); `null` otherwise |
+| `allow` | The Permissions Policy features for the frame's `allow` attribute (join them with `; `), only from `accelerometer`, `autoplay`, `clipboard-write`, `encrypted-media`, `fullscreen`, `gyroscope`, `picture-in-picture`, `web-share` |
+| `autoplay_param` | A query parameter (`autoplay=1`, `auto_play=true`) that makes the player start once loaded: set it in `src` (replacing that parameter's value there, which is off) only after the viewer pressed play. `null` when the player has none; a player may still take its own start message (Spotify's, TIDAL's) |
+
+Where it comes from, the first that has one:
+1. **The link itself**, when the card is served, so every stored card has it: a YouTube video,
+   playlist or channel (its uploads), a Vimeo video, a Spotify track, album, artist, playlist,
+   show or episode, a SoundCloud track, set or profile, a Mixcloud show, a TIDAL track, album,
+   video or playlist, a Deezer track, album, playlist or artist, an Apple Music song, album or
+   playlist, an Apple Podcasts show or episode, an X post; a Mastodon post on the server it was
+   posted on (`/@{account}/{id}/embed`; one Mastodon's own API answered for); an OpenStreetMap card's map (its bounding box, or the
+   streets around its point, with a marker). `also_on` links get these as well.
+2. **The provider's oEmbed answer**, read with the card: only the `src` of its first `<iframe>`
+   (or a Mastodon-style `data-embed-url`), never its HTML, with the iframe's `width`, `height` and
+   `allow`. Pinakes asks a provider of the pinned registry (`data/oembed-providers.json`) for it
+   when the page names no player of its own (its frame alone: the card keeps the page's fields);
+   another site's oEmbed answer counts when the card reads it anyway. Its `provider` is the
+   answer's `provider_name` as a slug (`speaker-deck`), else the frame's host; an answer takes
+   the name of a service of the first kind only for a frame on that service's own embed host
+   (never Mastodon's).
+3. **The page's own player**: its head's `twitter:player` (with `:width` and `:height`), or an
+   `og:video:secure_url` / `og:video:url` whose `og:video:type` is `text/html`.
+
+A frame from 2. or 3. never starts by itself: an autoplay its address turns on (`autoplay=1`)
+is turned off there and given as `autoplay_param`; one without such a parameter has no
+`autoplay` in `allow`. A card whose link names no frame takes the first of its other links' (its
+`http:` spelling, a short link) that does. A tagged `also_on` member whose link names none shows
+the frame its own card shows. A `missing` card, and a post found gone, have none. A frame
+stored on a card of an audio type (a recording, an album, a podcast or episode) with a fixed
+height is an `audio` player; one on a social post is a `post`.
+
+Only a safe address is an embed: `https` on a public host name (no IP address, `localhost`, single
+label or private suffix such as `.local` or `.internal`), no user, password or port, no credential
+in the query or fragment, at most 2,048 bytes; `javascript:`, `data:` and any other scheme never.
+Frames from 2. and 3. come with a card's next read (`pinakesd reextract media` reads the oEmbed
+providers' cards again at once).
+
 ### Credits
 
 A MusicBrainz card can show an image from Wikimedia Commons and a description from Wikipedia
@@ -194,7 +250,7 @@ has none.
 | `provider` | `wikipedia` (an article's summary), `wikimedia_commons` (a file), `wikidata` (an item's English description), `cover_art_archive` (a release's front cover) or `tmdb` (a film's or series' poster or overview) |
 | `source_url` | The article, the file's page on Commons, the item's page on Wikidata (`https://www.wikidata.org/wiki/Q…`), or for a cover the cover art page of the release it is of on MusicBrainz (`https://musicbrainz.org/release/…/cover-art`), or the title's page on TMDB (`https://www.themoviedb.org/movie/…` or `/tv/…`): `https:`, at most 1,024 bytes |
 | `author` | Plain text, at most 256 bytes: `Wikipedia contributors` for an article, the file's author for an image; `null` for a CC0 or public-domain file that names none, for a Wikidata description, for a cover and for TMDB's values |
-| `license` | An SPDX licence ID (`CC-BY-SA-4.0`, `CC-BY-2.0`, `CC-BY-SA-3.0-DE`, `CC0-1.0`, `GPL-3.0-only`, `LGPL-2.1-or-later`), `public-domain`, or `Attribution` (Commons' licence of that name, which has no SPDX ID); `null` for a cover (cover art is its label's; no licence is given) and for TMDB's values (used under TMDB's API terms) |
+| `license` | An SPDX licence ID (`CC-BY-SA-4.0`, `CC-BY-2.0`, `CC-BY-SA-3.0-DE`, `CC0-1.0`, `GPL-3.0-only`, `LGPL-2.1-or-later`), `public-domain`, or `Attribution` (Commons' licence of that name, which has no SPDX ID); `null` for a cover (cover art is its label's; no licence is given) and for TMDB's values |
 | `license_url` | The licence's text (`https:`): for a GNU licence its version's text on gnu.org, for `Attribution` its template's page on Commons; `null` for the public domain without a mark, for a cover and for TMDB's values |
 | `lang` | The text's language: `en`, or another Wikipedia's code (`de`) when only that Wikipedia describes it; `null` for an image. A client may label or hide a text in a language its reader does not read |
 | `excerpted` | `true` when the text is a part of a longer source: a summary is the article's first paragraphs, and one over 2,048 bytes is cut at a sentence or a word. A Wikidata description is whole (`false`) |
@@ -242,7 +298,7 @@ title's page on TMDB and no author or licence; the overview's `lang` is `en`:
 ```
 
 A client that shows a value credited to `tmdb` must also show TMDB's logo (smaller and less
-prominent than its own marks) and TMDB's notice, as TMDB's terms ask. `/v1/info` gives both, in
+prominent than its own marks) and TMDB's notice. `/v1/info` gives both, in
 `attributions`, while the instance uses TMDB and while a stored card still holds a TMDB value:
 
 ```json
@@ -254,8 +310,7 @@ prominent than its own marks) and TMDB's notice, as TMDB's terms ask. `/v1/info`
 ]
 ```
 
-TMDB's values are never older than TMDB's terms allow (six months): a card drops them when they
-were last read 60 days ago and TMDB has not answered since, or when the instance stops using
+A card drops TMDB's values when they were last read 60 days ago and TMDB has not answered since, or when the instance stops using
 TMDB.
 
 A credit is there only with its value: a card without the image or description has none for it.
@@ -286,6 +341,8 @@ answer `If-None-Match` with 304.
 | `organizer` | `{name, url}` |
 | `from` | Where the card's metadata came from when it is not the page itself: the [source](#sources) whose official API answered, e.g. `federal_register` |
 | `facts` | The fields that API names for the object, by name (`document_type`, `citation`, …), or the facts a [Pubky app's](pubky-apps.md) profile reads (`card_count`, `price`, `rating`, …), or a MusicBrainz page's own facts (its `artist`, `duration` in seconds, `genre`, …: [MusicBrainz facts](#also-on)), then the facts the [also-on](#also-on) sources read for it (such as a music link's `isrc`, `upc` and `mbid`); several values of one name are joined with `; `. Each source keeps at most `limits.also_on_facts_per_source` (32, at least 8) facts per resource, cutting the many values of one name (a recording's ISRCs) before a name's one value (its MBID, artist). Each source's page lists its facts. `null` when there are none. Facts never join anything |
+| `related` | The objects the card points at, each with its own card ([Related objects](#related-objects)): on a Bitcoin or Lightning card, a transaction's block, inputs and outputs, a block's previous and next block and coinbase transaction, an address's latest transactions, a node's biggest channels and their peers, a channel's nodes and funding transaction; `[]` on every other card |
+| `related_total` | How many entries of a `rel` there are when `related` lists fewer of them (`{"input": 400}`); `null` when it lists them all |
 | `keys` | The public identifiers the resource is keyed by, as `GET /v1/search?key=` takes them (`isrc:…`, `upc:…`, `doi:…`, `isbn:…`, `mb:recording:…`, `wikidata:Q…`, `osm:node/…`): the keys its sources vouch for ([Also on](#also-on)), sorted; `[]` when there are none |
 | `aliases` | Other spellings of this link that resolve to it ([aliases](#aliases)), at most 50; a page's own `url`, `@id`, `sameAs` or canonical claims are not aliases and are not listed. The card's `uri` is the canonical one: an alias is answered with its root's card |
 | `updated_at` | When the current metadata was accepted |
@@ -293,6 +350,45 @@ answer `If-None-Match` with 304.
 Nothing that describes the fetch rather than the thing is public (the resolver, TTL, group keys,
 raw attributes, parser warnings, content type and length): operators read the stored document
 with `GET /v1/resources/{id}/document` on the admin listener.
+
+### Related objects
+
+A resource read's `related` lists the objects its card points at, so a client can show them and
+open each one's card. Each entry is `{rel, uri, name?, amount_sat?, at?}`:
+
+- `rel` says what it is to the card; `uri` is its card's root, which `POST /v1/resolve` reads
+  (and `GET /v1/resources/by-uri` answers once it is known), never a page on a site. An input or
+  output without an address has a null `uri` and a `name` that says what it is (`OP_RETURN`,
+  `P2PK`, `coinbase`, or the script type).
+- `name` is plain text (a block's "Block 975,251", a node's alias); `amount_sat` is in
+  satoshis; `at` is an RFC 3339 instant.
+- A `rel` lists at most 10 entries; when there are more, `related_total` gives their number
+  (`{"input": 400}`). Entries come in the order below; inputs, outputs and channels the largest
+  first.
+- The list is read with the card and stored with it ([mempool.space](sources/mempool.md#related)):
+  it changes when the card is read again, never on a read of the resource. It is not the
+  `related=` search ([Related](#related)), which ranks what a link's taggers also referenced.
+
+| Card | `rel` |
+| --- | --- |
+| `BitcoinTransaction` | `block` (with `at`, the block time), `input` and `output` (an address, or null with a label; `amount_sat`) |
+| `BitcoinBlock` | `previous`, `next` (once the next block is six deep in the best chain), `coinbase` (its first transaction; `amount_sat` the block reward) |
+| `BitcoinAddress` | `tx`: its latest transactions, those in the mempool first, with `amount_sat` what each moved into (positive) or out of (negative) the address and `at` once confirmed |
+| `LightningNode` | `channel`: its biggest open channels (`amount_sat` the capacity, `name` the peer's alias); `peer`: those channels' other nodes, each once |
+| `LightningChannel` | `node` (both, with their aliases), `funding_tx` (`amount_sat` the capacity), `closing_tx` once closed |
+
+Roots keep their network: a testnet4 transaction's inputs are `btc-testnet4:address/…`, a signet
+channel's funding transaction `btc-signet:tx/…`.
+
+```json
+"related": [
+  {"rel": "block", "uri": "btc:block/0000000000000000000008dfb288144ec4626cad43656ff2cdd8cb278886fe80",
+   "name": "Block 975,251", "at": "2026-11-10T03:32:51Z"},
+  {"rel": "input", "uri": "btc:address/1FRQ1b96RVdsGbJUHHiqNGVSnuxq1cMBAZ", "amount_sat": 994797},
+  {"rel": "output", "uri": "btc:address/17Hh59K259oHaMtSfeJh9UmkV4seDAQe7x", "amount_sat": 129015985}
+],
+"related_total": {"input": 400}
+```
 
 ### Occurrence
 
@@ -1282,7 +1378,8 @@ A card's `also_on` says where else the same thing is: first the other members of
 [group](#groups) (links someone tagged, each with its resource `id`), by ID and URI, then
 **derived links**: the same thing on services nobody tagged, found by a source, with
 `derived: true`, the service's name in `site`, the hub or service it came through in `via`
-(`musicbrainz`, `wikidata`), and for some a `kind` its source's page names (`archived`: a Wayback Machine copy, with
+(`musicbrainz`, `wikidata`), and for some a `kind` its source's page names (`maybe`: a match
+by metadata, not an exact ID, [below](#also-on); `archived`: a Wayback Machine copy, with
 its capture time in `at`). Derived links are ordered by service name; each URL appears once (a tagged member wins)
 and never the card itself. Every card, a resource read too, carries one link per service, the
 service a link's URL is on (a derived link's `site`), at most 8 entries (256 on a read). Of a
@@ -1316,9 +1413,9 @@ anything. Sources read a resource after it is saved and again when their results
 source's lifetime: 30 days, `btcmap` 7); a source's links and keys live twice that, so one
 failed refresh keeps them, and they go when the source stops returning them. The sources run in this order, each
 seeing the keys the ones before it found: `service`, `tidal`, `spotify`,
-`musicbrainz`, `musicbrainz_entity`, `performers`, `wikidata`, `discogs`, `deezer`, `spotify_isrc`, `itunes`,
-`wikipedia`, `wikidata_item`, `books`, `films`, `podcasts`, `product_keys`, `open_food_facts`,
-`stack_exchange`, `titles`, `federal_register`, `osm_wikidata`, `wikidata_osm`,
+`musicbrainz`, `musicbrainz_entity`, `performers`, `wikidata`, `discogs`, `deezer`, `spotify_isrc`,
+`tidal_isrc`, `itunes`, `itunes_song`, `youtube_match`, `wikipedia`, `wikidata_item`, `books`,
+`films`, `podcasts`, `product_keys`, `open_food_facts`, `stack_exchange`, `titles`, `federal_register`, `mempool`, `osm_wikidata`, `wikidata_osm`,
 `wikidata_places`, `btcmap`, `unpaywall`, `ncbi`, `datacite`, `huggingface`, `crates`, `npm`,
 `pypi`, `software_heritage`, `steam`, `wikidata_stores`, `app_stores`, `wayback`, `editions`;
 `[also_on.sources.<id>] enabled = false` turns one off. A MusicBrainz or Wikidata answer over 8 MB is no answer: the source
@@ -1336,19 +1433,35 @@ spellings is one link, kept by the source that found it first.
 **The sources.** Each source's page in [docs/sources](sources/README.md#also-on) says what it reads
 and finds and what it costs; the index lists them in the order they run. A music link (a track,
 album or artist on a music service, [its spellings](#aliases)) is looked up exactly, never by title
-or name. A key comes from a hub (MusicBrainz, Wikidata) or from a known music service's own record
-of its own object; another host's claim (its JSON-LD `isrcCode`, `sameAs`, a canonical link) is a
-fact at most. An ISRC MusicBrainz gives to several recordings that agree (the same artists, the
+or name, except by the two sources that say they match (below). A key comes from a hub
+(MusicBrainz, Wikidata) or from a known music service's own record of its own object; another
+host's claim (its JSON-LD `isrcCode`, `sameAs`, a canonical link) is a fact at most. An ISRC MusicBrainz gives to several recordings that agree (the same artists, the
 same title once its identity-keeping tags go, the same disambiguation, all audio or all video,
 lengths within 3 s, the whole set alike) names one recording not yet
 merged: the ISRC and the MBID that stands for them (the smallest) are the track's keys, the
 other MBIDs facts; recordings that disagree (a live
 version, a remix, an edit, another artist) leave the duration to pick one or the ISRC a fact
 ([an ISRC on several recordings](sources/README.md#an-isrc-on-several-recordings)). A track with
-an ISRC key on another service is looked up on Spotify by it, exactly (`spotify_isrc`, off by
-default, with the operator's Spotify credentials): its Spotify track becomes a link keyed by the ISRC. ISRCs are
-stored in upper case and barcodes as GTIN-13 (a 12-digit UPC gains a
-leading zero), by every source. The level is exact: a track lists tracks and videos of the
+an ISRC key on another service is looked up on Spotify and TIDAL by it, and an album with a barcode
+key by that, exactly (`spotify_isrc` and `tidal_isrc`, with the operator's credentials): the
+service's own track or album that carries the value becomes a link keyed by it.
+
+**Exact links and matches.** A derived link is exact when an identifier the service owns, or a
+hub, names it: a MusicBrainz relation, a Wikidata claim, or a service's own answer to a lookup by
+ISRC or barcode (`deezer`, `itunes` albums, `spotify_isrc`, `tidal_isrc`). It carries that key, so a
+tagged resource that is the link joins the group; its entry is a plain derived link. Two sources
+match by metadata instead: their links are maybes, marked `kind: "maybe"` on the entry
+(possibly the same thing), still listed so a client can show or play them, but never keyed, never
+joining a group, never making a key of the card they are on.
+- `itunes_song`: Apple Music's song at the same disc and track number on the
+  album with the track's barcode, with the same title and within 3 s of its length (iTunes
+  answers carry no ISRC).
+- `youtube_match`: for a label's YouTube upload (a Topic channel, "Provided to
+  YouTube by"), the one Deezer and the one TIDAL track with the same artist and title within 2 s
+  of its length.
+
+ISRCs are stored in upper case and barcodes as GTIN-13 (a 12-digit UPC gains a leading zero), by
+every source. The level is exact: a track lists tracks and videos of the
 recording, an album lists albums and YouTube's album playlists, an artist lists artist pages and
 channels. Album links group by their release group, while two editions (two MusicBrainz releases)
 stay apart. Apple Music links carry no storefront; Apple Books and Apple Podcasts links, and the
@@ -1775,7 +1888,7 @@ layers, with the caller's address:
 | Tool | Request | Answer |
 | --- | --- | --- |
 | `search` | `GET /v1/search` with `q`, `type` (array), `tags` (array), `match`, `near` (`{lat, lon, radius}`), `bbox` (`[west, south, east, north]`), `from`, `to`, `key`, `sort`, `window`, `collapse`, `reach`, `boost`, `viewer`, `limit`, `cursor` | Compact cards, `cursor`, `facets` |
-| `card` | `GET /v1/resources/by-uri`; with `resolve: true` and an unknown link, `POST /v1/resolve` | One compact card with `category`, `address`, `facts`, `aliases` (at most 10) and the event fields |
+| `card` | `GET /v1/resources/by-uri`; with `resolve: true` and an unknown link, `POST /v1/resolve` | One compact card with `category`, `address`, `facts`, `related` and `related_total` (when it has them), `aliases` (at most 10) and the event fields |
 | `lookup` | `GET /v1/search?key=` | Compact cards |
 | `group` | `GET /v1/groups/{id}` | `id`, `type`, `keys`, every member's compact card, and `best`: the most complete readable member of the group's type |
 | `types` | `GET /v1/search?facet=type&limit=1` and `GET /v1/info` | The card types with their counts, and `resolves` |

@@ -189,6 +189,13 @@ impl Tools {
                 card[key] = detail[key].clone();
             }
         }
+        // The objects a chain card points at, with their counts when the list is cut.
+        if detail["related"].as_array().is_some_and(|r| !r.is_empty()) {
+            card["related"] = detail["related"].clone();
+            if !detail["related_total"].is_null() {
+                card["related_total"] = detail["related_total"].clone();
+            }
+        }
         let aliases: Vec<Value> = detail["aliases"]
             .as_array()
             .map(|a| a.iter().take(10).cloned().collect())
@@ -509,7 +516,7 @@ pub fn tools() -> Vec<Tool> {
         ),
         tool(
             "card",
-            "Read one link by its URI: its card with details (address, facts from official APIs, other spellings, the same thing on other services, the public Pubky collections that hold it). Only links this instance already knows; set resolve to true to have an unknown link read now (it has its own small per-minute budget and may answer pending).",
+            "Read one link by its URI: its card with details (address, facts from official APIs, the objects it points at (`related`: a Bitcoin transaction's block, inputs and outputs, an address's latest transactions, a Lightning node's channels), other spellings, the same thing on other services, the public Pubky collections that hold it). Only links this instance already knows; set resolve to true to have an unknown link read now (it has its own small per-minute budget and may answer pending).",
             json!({"type":"object","required":["uri"],"additionalProperties":false,"properties":{
                 "uri":{"type":"string","description":"The link, in any spelling."},
                 "resolve":{"type":"boolean","description":"Read the link now if it is unknown here. Default false."}

@@ -8,6 +8,24 @@
     "status": 200,
     "url": "https://mempool.space/api/address/bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
   },
+  "address-bech32-1111": {
+    "bytes": 287,
+    "content_type": "application/json",
+    "file": "address-bech32-1111.json",
+    "recorded_at": "2026-11-11T00:49:11+00:00",
+    "sha256": "9fc3b722989d6e8da959444158850f24aa300979d746bdb44d46cb07a5bd94a2",
+    "status": 200,
+    "url": "https://mempool.space/api/address/bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+  },
+  "address-bech32-txs": {
+    "bytes": 177522,
+    "content_type": "application/json",
+    "file": "address-bech32-txs.json.gz",
+    "recorded_at": "2026-11-11T00:49:13+00:00",
+    "sha256": "96aeffd2ada928319fc0d3aa02c0d707940ece9151d271896c04e94fddf9a0d7",
+    "status": 200,
+    "url": "https://mempool.space/api/address/bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq/txs"
+  },
   "address-genesis": {
     "bytes": 285,
     "content_type": "application/json",
@@ -16,6 +34,33 @@
     "sha256": "f150ccb22ae6b12dc4b33ab6f9b4d3deafa7f9cc57c7d3b059e2309d67a51f58",
     "status": 200,
     "url": "https://mempool.space/api/address/1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+  },
+  "block-1": {
+    "bytes": 1438,
+    "content_type": "application/json",
+    "file": "block-1.json",
+    "recorded_at": "2026-11-11T00:48:52+00:00",
+    "sha256": "503e11c5fd310c5dc90474bf04080d0b4bd5f81670947027383922b5e0cd88de",
+    "status": 200,
+    "url": "https://mempool.space/api/v1/block/00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048"
+  },
+  "block-1-status": {
+    "bytes": 112,
+    "content_type": "application/json",
+    "file": "block-1-status.json",
+    "recorded_at": "2026-11-11T00:48:54+00:00",
+    "sha256": "5cbc475f222a3973f358d8271e11da5df2f9771decd8facb690634e098edc62c",
+    "status": 200,
+    "url": "https://mempool.space/api/block/00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048/status"
+  },
+  "block-1-txid-0": {
+    "bytes": 64,
+    "content_type": "text/plain",
+    "file": "block-1-txid-0.txt",
+    "recorded_at": "2026-11-11T00:48:56+00:00",
+    "sha256": "7e607bff20ce11ff64b3945a717bbef22c9eaded04fc00ec84e686cd4b85d328",
+    "status": 200,
+    "url": "https://mempool.space/api/block/00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048/txid/0"
   },
   "block-481824": {
     "bytes": 2151,
@@ -34,6 +79,42 @@
     "sha256": "00acfcc6e6805a0695af079b1972f74268993fae88ead655f9f76d117bcca5df",
     "status": 200,
     "url": "https://mempool.space/api/block/0000000000000000001c8018d9cb3b742ef25114f27563e3fc4a1902167f9893/status"
+  },
+  "block-481824-txid-0": {
+    "bytes": 64,
+    "content_type": "text/plain",
+    "file": "block-481824-txid-0.txt",
+    "recorded_at": "2026-11-11T00:49:04+00:00",
+    "sha256": "e1d3c34f7948f4ef1729e2556bb16b57287a158dc852de796ad4173c341ae235",
+    "status": 200,
+    "url": "https://mempool.space/api/block/0000000000000000001c8018d9cb3b742ef25114f27563e3fc4a1902167f9893/txid/0"
+  },
+  "block-975251": {
+    "bytes": 1729,
+    "content_type": "application/json",
+    "file": "block-975251.json",
+    "recorded_at": "2026-11-11T00:48:58+00:00",
+    "sha256": "b7d141a8534b061e1092233882965b795d7840a55de8f1790d79a6b28aaf0582",
+    "status": 200,
+    "url": "https://mempool.space/api/v1/block/0000000000000000000008dfb288144ec4626cad43656ff2cdd8cb278886fe80"
+  },
+  "block-975251-status": {
+    "bytes": 117,
+    "content_type": "application/json",
+    "file": "block-975251-status.json",
+    "recorded_at": "2026-11-11T00:49:00+00:00",
+    "sha256": "5e3e05b732e2332b5a7b39910bf0061fc1f9356f7c21e81dbea002a7e7c654df",
+    "status": 200,
+    "url": "https://mempool.space/api/block/0000000000000000000008dfb288144ec4626cad43656ff2cdd8cb278886fe80/status"
+  },
+  "block-975251-txid-0": {
+    "bytes": 64,
+    "content_type": "text/plain",
+    "file": "block-975251-txid-0.txt",
+    "recorded_at": "2026-11-11T00:49:02+00:00",
+    "sha256": "b27ba5cb351dc25ff263e2ef390b0846f2b7ff4236d03baa706302f9300092df",
+    "status": 200,
+    "url": "https://mempool.space/api/block/0000000000000000000008dfb288144ec4626cad43656ff2cdd8cb278886fe80/txid/0"
   },
   "block-height-481824": {
     "bytes": 64,
@@ -70,6 +151,15 @@
     "sha256": "7219971719b120c2f8509f02434b7c2f818d8e3974f6233a7e00a7265a215d0a",
     "status": 404,
     "url": "https://mempool.space/api/v1/lightning/channels/1"
+  },
+  "channels-acinq": {
+    "bytes": 2955,
+    "content_type": "application/json",
+    "file": "channels-acinq.json",
+    "recorded_at": "2026-11-11T00:49:15+00:00",
+    "sha256": "12715954e5e81426523e76e8fd481c84ceefcff18ca0dc74d224c4d9d88dceac",
+    "status": 200,
+    "url": "https://mempool.space/api/v1/lightning/channels?public_key=03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f&status=open"
   },
   "node-acinq": {
     "bytes": 2165,
@@ -125,6 +215,24 @@
     "status": 200,
     "url": "https://mempool.space/testnet4/api/v1/block/00000000b747d47c3b38161693ad05e26924b3775a8be669751f969da836311e"
   },
+  "testnet4-block-1000-status": {
+    "bytes": 115,
+    "content_type": "application/json",
+    "file": "testnet4-block-1000-status.json",
+    "recorded_at": "2026-11-11T00:49:17+00:00",
+    "sha256": "abeb5c7f1d528697054a9bc12d8c6200ed1a4fad1c691f913edc2a4b5e3203cc",
+    "status": 200,
+    "url": "https://mempool.space/testnet4/api/block/00000000b747d47c3b38161693ad05e26924b3775a8be669751f969da836311e/status"
+  },
+  "testnet4-block-1000-txid-0": {
+    "bytes": 64,
+    "content_type": "text/plain",
+    "file": "testnet4-block-1000-txid-0.txt",
+    "recorded_at": "2026-11-11T00:49:19+00:00",
+    "sha256": "74fe3a3e89acb198a5f61fe1628f3145f2eabcde4635f448d8074135b7bba1b6",
+    "status": 200,
+    "url": "https://mempool.space/testnet4/api/block/00000000b747d47c3b38161693ad05e26924b3775a8be669751f969da836311e/txid/0"
+  },
   "testnet4-block-height-1000": {
     "bytes": 64,
     "content_type": "text/plain",
@@ -134,6 +242,15 @@
     "status": 200,
     "url": "https://mempool.space/testnet4/api/block-height/1000"
   },
+  "testnet4-tx-coinbase-1000": {
+    "bytes": 1166,
+    "content_type": "application/json",
+    "file": "testnet4-tx-coinbase-1000.json",
+    "recorded_at": "2026-11-11T00:49:21+00:00",
+    "sha256": "2b7062a7388e47945fec99b385f8adf5e2304e1e3e146a65c34e22ddc53ec83f",
+    "status": 200,
+    "url": "https://mempool.space/testnet4/api/tx/5c5d91f2e7251501dccfe0e7ae684a865f499e77620e483760d9f70d1259e958"
+  },
   "tip-height": {
     "bytes": 6,
     "content_type": "text/plain",
@@ -142,6 +259,24 @@
     "sha256": "398ebf0b1ffbbb6686376df9eec75772d4dc4968d93862db6b2f8c4a44de697c",
     "status": 200,
     "url": "https://mempool.space/api/blocks/tip/height"
+  },
+  "tip-height-1111": {
+    "bytes": 6,
+    "content_type": "text/plain",
+    "file": "tip-height-1111.txt",
+    "recorded_at": "2026-11-11T00:49:06+00:00",
+    "sha256": "f6ed52ef33d59760e96342da4749cd827ba6ebfc8e15edf725b05d4fb6d33fd6",
+    "status": 200,
+    "url": "https://mempool.space/api/blocks/tip/height"
+  },
+  "tx-coinbase-481824": {
+    "bytes": 1807,
+    "content_type": "application/json",
+    "file": "tx-coinbase-481824.json",
+    "recorded_at": "2026-11-11T00:49:09+00:00",
+    "sha256": "b09f40e6907db1fe5c34d736c22cdcce0a27b2d0a4b5d67d03122513b33636cd",
+    "status": 200,
+    "url": "https://mempool.space/api/tx/da917699942e4a96272401b534381a75512eeebe8403084500bd637bd47168b3"
   },
   "tx-missing": {
     "bytes": 21,

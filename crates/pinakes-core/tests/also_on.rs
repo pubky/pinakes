@@ -186,10 +186,18 @@ async fn hub_keys_join_and_derived_links_reach_the_cards(pool: PgPool) {
     assert_eq!(card["group"]["size"], 2, "{card}");
     assert!(card["group"].get("members").is_none());
     let also: Vec<Value> = card["also_on"].as_array().unwrap().clone();
+    // Each entry carries its frame (`embed`, docs/api.md): the member's is its Deezer player.
+    let mut first = also[0].clone();
+    let embed = first.as_object_mut().unwrap().remove("embed");
     assert_eq!(
-        also[0],
+        first,
         json!({"id": b, "uri": deezer, "site": "Deezer"}),
         "the tagged member first: {card}"
+    );
+    assert_eq!(
+        embed.unwrap()["src"],
+        "https://widget.deezer.com/widget/dark/track/123",
+        "{card}"
     );
     let derived: Vec<(&str, &str, &str)> = also[1..]
         .iter()
@@ -3764,4 +3772,64 @@ fn an_earlier_list_of_sources_reads_as_unknown_fingerprints() {
         serde_json::to_value(&doc).unwrap()["hinted_by"],
         json!({"titles": "0123456789abcdef"})
     );
+}
+
+/// A maybe (a match by metadata) derived first never holds a link an exact source names later:
+/// the exact row takes it over with its key; the maybe source's next run neither writes it back
+/// nor deletes it.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn an_exact_link_replaces_a_maybe_of_the_same_link(pool: PgPool) {
+    let uri = "https://www.youtube.com/watch?v=bSnlKl_PoQU";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let cfg = Config::default().also_on;
+    let ttl = Duration::from_secs(86_400);
+    let deezer = "https://www.deezer.com/track/4091937401";
+    let found = |link: Link| Found {
+        links: vec![link],
+        ..Default::default()
+    };
+    let maybe = || Link::new(deezer, "Deezer", "maybe_test").maybe();
+    let row = || {
+        let pool = pool.clone();
+        let id = id.clone();
+        async move {
+            sqlx::query_scalar::<_, String>("SELECT source||' '||coalesce(kind,'-')||' '||coalesce(key,'-') FROM derived_link WHERE resource_id=$1 ORDER BY uri")
+                .bind(&id)
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    also_on::record(&pool, &id, "maybe_test", found(maybe()), ttl, &cfg)
+        .await
+        .unwrap();
+    assert_eq!(row().await, ["maybe_test maybe -"]);
+    // A maybe never carries a key, whatever its source sets.
+    also_on::record(
+        &pool,
+        &id,
+        "maybe_test",
+        found(maybe().keyed("isrc:GBUM71029604")),
+        ttl,
+        &cfg,
+    )
+    .await
+    .unwrap();
+    assert_eq!(row().await, ["maybe_test maybe -"]);
+    // The exact source names the same link by an ISRC: its row, with the key.
+    let exact = Link::new(deezer, "Deezer", "exact_test").keyed("isrc:GBUM71029604");
+    also_on::record(&pool, &id, "exact_test", found(exact), ttl, &cfg)
+        .await
+        .unwrap();
+    let taken = ["exact_test - isrc:GBUM71029604"];
+    assert_eq!(row().await, taken);
+    // The maybe source again, and then without the link: the exact row stays.
+    also_on::record(&pool, &id, "maybe_test", found(maybe()), ttl, &cfg)
+        .await
+        .unwrap();
+    assert_eq!(row().await, taken);
+    also_on::record(&pool, &id, "maybe_test", Found::default(), ttl, &cfg)
+        .await
+        .unwrap();
+    assert_eq!(row().await, taken);
 }

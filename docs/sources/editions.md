@@ -34,8 +34,8 @@ release, else on the original edition.
   operator's credentials), TIDAL by its API (with the operator's credentials; every album TIDAL
   names for the track) and Deezer by its API, each while its source is on. The card's own Spotify
   track, a link someone referenced, is read for its album on its public page (`music:album`) where
-  the API does not answer; another Spotify link only with `[also_on] spotify_pages = true` (off by
-  default). An album link is on the release whose album pages name it. Only links a card may show
+  the API does not answer; another Spotify link only while `[also_on] spotify_pages` is on (`true`
+  by default). An album link is on the release whose album pages name it. Only links a card may show
   are read; never an album page nobody linked.
 - **Each link's outcome:**
   - **placed** on the card's own release (rank 0) or the original edition's (1, 2, …);

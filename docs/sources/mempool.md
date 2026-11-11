@@ -7,7 +7,8 @@ card). No key. Public blockchain and Lightning gossip data.
 
 ## Links
 
-Every mempool.space link of one object is one resource, with a root in the object's own scheme:
+Every link of one object, on mempool.space or on another block explorer (below), is one
+resource, with a root in the object's own scheme:
 
 | Object | Links | Root |
 | --- | --- | --- |
@@ -28,11 +29,64 @@ Every mempool.space link of one object is one resource, with a root in the objec
   hash. It becomes an alias of `btc:block/{hash}` only once the block is in the best chain and
   six blocks deep; until then it keeps its own card.
 
+### Other block explorers
+
+The same objects' pages on these explorers are the same resources, and the card is still read
+from mempool.space: a tag on any of them counts on the one card. One table in `mempool.rs`
+(`EXPLORERS`) holds them; it reads every form below and writes the card's Also on from the
+first form of each listed site, so every listed link reads back as the card.
+
+| Explorer | Networks (path prefix) | Block | Block by height | Transaction | Address | Also on |
+| --- | --- | --- | --- | --- | --- | --- |
+| Blockstream (`blockstream.info`) | mainnet, `/testnet`, `/testnet4`, `/signet` | `/block/{hash}` | `/block-height/{n}` | `/tx/{txid}` | `/address/{a}` | listed |
+| `mempool.emzy.de` (a mempool instance, language prefix as on mempool.space) | mainnet, `/testnet4`, `/signet` | `/block/{hash or n}` | | `/tx/{txid}` | `/address/{a}` | listed |
+| BTCScan (`btcscan.org`) | mainnet | `/block/{hash}` | `/block-height/{n}` | `/tx/{txid}` | `/address/{a}` | listed |
+| Blockchain.com (`www.blockchain.com`) | `btc` | `/explorer/blocks/btc/{hash or n}` | | `/explorer/transactions/btc/{txid}` | `/explorer/addresses/btc/{a}` | listed |
+| Blockchain.com, older paths | `/btc` | `/btc/block/{hash or n}` | | `/btc/tx/{txid}` | `/btc/address/{a}` | read only |
+| Blockchain.com, `blockchain.info` | mainnet | `/block/{hash or n}` | `/block-height/{n}` | `/tx/{txid}` | `/address/{a}` | read only |
+| OKLink (`www.oklink.com`) | `/bitcoin`, `/btc` | `/{net}/block/{hash or n}` | | `/{net}/tx/{txid}` | `/{net}/address/{a}` | listed |
+| Blockchair (`blockchair.com`) | `/bitcoin`, `/bitcoin/testnet` | `/{net}/block/{hash or n}` | | `/{net}/transaction/{txid}` | `/bitcoin/address/{a}` | read only |
+| BlockCypher (`live.blockcypher.com`) | `/btc`, `/btc-testnet` | `/{net}/block/{hash}/` | | `/{net}/tx/{txid}/` | `/btc/address/{a}/` | read only |
+| Bitcoin Explorer (`bitcoinexplorer.org`) | mainnet | `/block/{hash}` | `/block-height/{n}` | `/tx/{txid}` | `/address/{a}` | read only |
+| 3xpl (`3xpl.com`) | `/bitcoin` | `/bitcoin/block/{hash or n}` | | `/bitcoin/transaction/{txid}` | `/bitcoin/address/{a}` | read only |
+
+| Lightning explorer | Node | Channel | Also on |
+| --- | --- | --- | --- |
+| 1ML (`1ml.com`) | `/node/{key}` | `/channel/{id}` | listed |
+| Amboss (`amboss.space`) | `/node/{key}` | `/edge/{id}` | listed |
+| Lightning Network+ (`lightningnetwork.plus`) | `/nodes/{key}` | | listed |
+
+- How each form was checked (2026-11-10): on the live site for one block, transaction and
+  address (a wrong id answers 404 or names nothing) for Blockstream (mainnet, testnet, signet;
+  testnet4 by its explorer page and API), BTCScan and Blockchain.com (explorer pages, the older
+  paths and `blockchain.info`, which redirect to them); through its API for mempool.emzy.de's
+  networks (its testnet answers 502, so it is left out); as routes only for OKLink, whose pages
+  render client-side (a wrong id also answers 200), and Amboss's `/edge/`; 1ML and LN+ answer
+  404 for a wrong key. Blockchair, BlockCypher, bitcoinexplorer.org and 3xpl refuse a plain
+  client or were down, so their forms were checked on archived captures (3xpl's transaction
+  form on other transactions' captures); they are read, not listed. Blockchain.com's
+  `btc-testnet` pages show no data that names their network, so they are left out.
+- A trailing slash, a query string, a fragment and `www.` change nothing. Language prefixes are
+  read only on mempool sites.
+- Other chains on the same sites are not Bitcoin and name nothing: Blockstream's `/liquid/…`,
+  Blockchain.com's `/bch/…` and `/eth/…`, Blockchair's `/bitcoin-cash/…` and `/ethereum/…`,
+  BlockCypher's `/ltc/…` and `/doge/…`. Neither does a network an explorer doesn't show (BTCScan's
+  testnet, mempool.emzy.de's testnet, Blockchain.com's `btc-testnet`, any Lightning object on
+  testnet4).
+- A block by height on any explorer is read like mempool.space's: an alias only once settled.
+
 An unknown block, transaction or channel is `missing`. mempool.space answers an unknown
 Lightning node with a server error, as it does on a fault, so a server error on a node's record
 is followed by the Lightning search for its exact key: a node the search doesn't list is
 `missing`, and a listed node whose record keeps failing counts toward the failure limit. A
 429 or 408 on a node's record is only retried later, with no search.
+
+## Also on
+
+`mempool`: a block, transaction or address card lists its pages on Blockstream, mempool.emzy.de,
+BTCScan, Blockchain.com and OKLink (those that show its network), and a Lightning node or
+channel card its pages on 1ML, Amboss and Lightning Network+ (mainnet), from its root alone, with
+no request. Each is a link of the card's own object (above).
 
 ## What it reads
 
@@ -42,6 +96,12 @@ is followed by the Lightning search for its exact key: a node the search doesn't
 - for a block by height, `/api/block-height/{height}` first, then `/api/block/{hash}/status` and
   `/api/blocks/tip/height`;
 - when a node's record answers a server error, `/api/v1/lightning/search?searchText={key}`;
+- for the card's `related` list (below), up to three more requests: for a block
+  `/api/block/{hash}/status` (its next block), `/api/blocks/tip/height` (only when it has a next
+  block, or was read by height) and `/api/block/{hash}/txid/0` (its coinbase transaction); for an
+  address `/api/address/{address}/txs`; for a node
+  `/api/v1/lightning/channels?public_key={key}&status=open`. A transaction's and a channel's
+  come with their own record;
 - the fallback: the same paths (`/api/block/{hash}` for blocks) at
   `https://blockstream.info/api` (`/testnet/api`, `/signet/api`; no testnet4 and no Lightning).
 
@@ -74,6 +134,48 @@ The card types are local, not schema.org: `BitcoinBlock`, `BitcoinTransaction`,
 | `short_id`, `status`, `funding_tx`, `funding_output`, `closing_tx` | A Lightning channel (`active`, `inactive` or `closed`) |
 | `created`, `closed` | When the channel was opened and closed (RFC 3339) |
 | `node1`, `node1_alias`, `node2`, `node2_alias` | The channel's two nodes |
+
+## Related
+
+Each card lists the objects it points at in the resource read's `related`
+([Related objects](../api.md#related-objects)), each by its root, so a client opens their cards:
+
+| Card | `rel` | From |
+| --- | --- | --- |
+| Transaction | `block` (`name` "Block 975,251", `at` the block time), once confirmed | its record |
+| | `input`: the address each input spends from (`amount_sat` its value); a coinbase input has no `uri` and the `name` `coinbase` | its record (`vin[].prevout`) |
+| | `output`: the address each output pays (`amount_sat`); an output without an address has no `uri` and a `name`: `OP_RETURN`, `P2PK` or the script type mempool.space names | its record (`vout[]`) |
+| Block | `previous` (not on the genesis block) | its record |
+| | `next`: the best chain's next block, once that block is six deep (as a block by height becomes an alias); a block in the best chain without one is read again within the hour | `/block/{hash}/status`, the tip |
+| | `coinbase`: its first transaction (`amount_sat` the block reward, when mempool.space gives it) | `/block/{hash}/txid/0` |
+| Address | `tx`: its latest transactions as the API lists them (those in the mempool first, then the newest confirmed), with `amount_sat` what each paid to the address minus what it spent from it, and `at` the block time once confirmed | `/address/{address}/txs` |
+| Lightning node | `channel`: its biggest open channels (`amount_sat` the capacity, `name` the peer's alias), from mempool.space's first page of them; `peer`: those channels' other nodes, each once | `/v1/lightning/channels` |
+| Lightning channel | `node`: its two nodes (`name` the alias); `funding_tx` (`amount_sat` the capacity); `closing_tx` once closed | its record |
+
+- At most 10 inputs, outputs, transactions, channels and peers each, the largest amount first
+  for inputs, outputs and channels (the API's order among equals); `related_total` gives how
+  many inputs, outputs, transactions (the address's `tx_count` plus `unconfirmed_tx_count`) or
+  channels there are when fewer are listed. A node's channel total is its `channels` fact, the
+  channels mempool.space counts as active; the listed ones are its biggest open channels, which
+  can include an inactive one. A transaction with 400 inputs is still one request: its record
+  lists them all.
+- Roots stay on the card's network: `btc-testnet4:address/…`, `ln-signet:node/…`,
+  `btc-signet:tx/…` (a signet channel's funding transaction). An address that is not valid on
+  the card's network is listed as its script type, without a `uri`.
+- The extra requests are part of the read and paced like it, and share a budget of 8 seconds
+  from the start of the read (the route allows 14): a part whose request is still waiting then
+  is left out. Each part is left out when its request fails; a rate limit, a server error or
+  the budget running out reads the card again within the hour, as does a transaction still in
+  the mempool (its block comes later) and a block in the best chain whose next block is not
+  settled yet (or that has none yet). A part refused for good (a 404, an answer that cannot be
+  read) is left out until the card's own refresh. A read again that cannot fetch a part leaves
+  it out until the read after. The
+  Esplora fallback reads the same parts, but has no pool, no reward and no Lightning.
+- An address's list is read up to 4 MB (a few dozen whole transactions); a larger one (an
+  exchange's batch payouts) is left out. A part put off again and again (a server error, the
+  budget) reads the card again every hour while it lasts.
+- What a spent output was spent by (`/api/tx/{txid}/outspends`) is not read: one more request
+  for every transaction card, and it changes after the card is read.
 
 ## Limits
 

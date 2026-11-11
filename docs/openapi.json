@@ -16,6 +16,17 @@
             "description": "A link nobody tagged, found by a source: never fetched, counted or ranked.",
             "type": "boolean"
           },
+          "embed": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Embed",
+                "description": "The frame that shows this link (docs/api.md, Embed), as on a card: from the link itself,\nelse, for a tagged member, the one its own card stores. Null when there is none."
+              }
+            ]
+          },
           "id": {
             "description": "A tagged member's resource ID; absent on a derived link.",
             "type": [
@@ -24,7 +35,7 @@
             ]
           },
           "kind": {
-            "description": "For a derived link, a qualifier (`archived`, `work`, `source`, `submitted`, `published`,\n`pdf`).",
+            "description": "For a derived link, a qualifier (`archived`, `work`, `source`, `submitted`, `published`,\n`pdf`), or `maybe`: a match by metadata (artist, title, length), possibly the same\nthing, never by an exact ID; it joins no group.",
             "type": [
               "string",
               "null"
@@ -120,6 +131,17 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "embed": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Embed",
+                "description": "The frame a client may load, sandboxed, to show the link as its own site does\n(docs/api.md, Embed): a service's player, a social post, a map, slides. From the link\nitself for the services Pinakes knows, else from the page's oEmbed answer or its own player\ntags. Null when there is none, and on a card whose link is gone (`missing`)."
+              }
             ]
           },
           "end": {
@@ -577,7 +599,7 @@
             ]
           },
           "license": {
-            "description": "An SPDX licence ID (`CC-BY-SA-4.0`, `CC-BY-2.0`, `CC0-1.0`, `GPL-3.0-only`,\n`LGPL-2.1-or-later`), `public-domain`, or `Attribution` (Commons' licence of that name,\nwhich has no SPDX ID). Null for a cover from the Cover Art Archive and for TMDB's poster\nor overview, which carry no licence: cover art is its label's, shown as a service shows an\nalbum's cover, and TMDB's values are used under TMDB's API terms (`license_url` is null\ntoo).",
+            "description": "An SPDX licence ID (`CC-BY-SA-4.0`, `CC-BY-2.0`, `CC0-1.0`, `GPL-3.0-only`,\n`LGPL-2.1-or-later`), `public-domain`, or `Attribution` (Commons' licence of that name,\nwhich has no SPDX ID). Null for a cover from the Cover Art Archive and for TMDB's poster\nor overview, which carry no licence: cover art is its label's, shown as a service shows an\nalbum's cover, and TMDB's values carry none either (`license_url` is null too).",
             "type": [
               "string",
               "null"
@@ -718,6 +740,20 @@
               }
             ]
           },
+          "related": {
+            "description": "The objects the card points at, each with its own card (docs/api.md, Related objects): a\nBitcoin transaction's block, inputs and outputs; a block's previous and next block and\ncoinbase transaction; an address's latest transactions; a Lightning node's biggest\nchannels and their peers; a channel's nodes and funding transaction. Each is\n`{rel, uri, name?, amount_sat?, at?}`; `uri` is a root `POST /v1/resolve` reads, or null\nfor an input or output without an address (`name` says what it is). At most 10 of a\n`rel`, read with the card; `[]` on every other card.",
+            "items": {
+              "$ref": "#/components/schemas/Related"
+            },
+            "type": "array"
+          },
+          "related_total": {
+            "description": "How many entries of a `rel` there are when `related` lists fewer of them\n(`{\"input\": 400}`); null when it lists them all.",
+            "type": [
+              "object",
+              "null"
+            ]
+          },
           "tz": {
             "type": [
               "string",
@@ -743,10 +779,76 @@
           }
         },
         "required": [
+          "related",
           "keys",
           "aliases"
         ],
         "type": "object"
+      },
+      "Embed": {
+        "description": "The frame to load for a link (docs/api.md, Embed).",
+        "properties": {
+          "allow": {
+            "description": "The Permissions Policy features the frame may use, for its `allow` attribute (joined with\n`; `), from `accelerometer`, `autoplay`, `clipboard-write`, `encrypted-media`,\n`fullscreen`, `gyroscope`, `picture-in-picture` and `web-share`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "aspect": {
+            "description": "Width divided by height, for a frame that scales with its width (a video, a map, a slide\ndeck); null otherwise.",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "autoplay_param": {
+            "description": "A query parameter (`autoplay=1`, `auto_play=true`) that makes the player start once\nloaded: set it in `src` (replacing that parameter's value there, which is off) only when\nthe viewer pressed play. Null when the player has none.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "height": {
+            "description": "The frame's height in CSS pixels, for a frame of fixed height (a player strip, a post, a\ndocument); null when it scales with its width (`aspect`) or the provider gives none.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "kind": {
+            "$ref": "#/components/schemas/EmbedKind"
+          },
+          "provider": {
+            "description": "Who serves the frame: a service Pinakes knows (`youtube`, `vimeo`, `spotify`,\n`soundcloud`, `mixcloud`, `tidal`, `deezer`, `apple-music`, `apple-podcasts`, `x`,\n`mastodon`, `openstreetmap`), else the oEmbed provider's name in lower case with hyphens\n(`speaker-deck`), else the frame's host.",
+            "type": "string"
+          },
+          "src": {
+            "description": "The frame's address: `https`, on a public host name, without a credential. It never starts\nplaying by itself (see `autoplay_param`).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "kind",
+          "src",
+          "allow"
+        ],
+        "type": "object"
+      },
+      "EmbedKind": {
+        "description": "What a frame shows (docs/api.md, Embed).",
+        "enum": [
+          "audio",
+          "video",
+          "post",
+          "map",
+          "rich"
+        ],
+        "type": "string"
       },
       "Episode": {
         "description": "One of a show's latest episodes, as its feed lists it.",
@@ -1524,6 +1626,49 @@
           "object_path",
           "start",
           "status"
+        ],
+        "type": "object"
+      },
+      "Related": {
+        "description": "One object a card points at (docs/api.md, Related objects): on a Bitcoin or Lightning card,\nthe block a transaction is in, its inputs and outputs, a block's neighbours, an address's\nlatest transactions, a node's channels and peers, a channel's nodes and transactions.",
+        "properties": {
+          "amount_sat": {
+            "description": "In satoshis: an input's or output's value, a channel's capacity, a block's reward on its\ncoinbase transaction, or what a transaction moved into (positive) or out of (negative)\nan address.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "at": {
+            "description": "When it happened: the block time of a transaction or of a transaction's block.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "description": "Plain text: a block's \"Block 975,251\", a node's alias, a channel's peer's alias, or the\nlabel of an entry without a `uri`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rel": {
+            "description": "What it is to this card: `block`, `input`, `output`, `previous`, `next`, `coinbase`,\n`tx`, `channel`, `peer`, `node`, `funding_tx` or `closing_tx`.",
+            "type": "string"
+          },
+          "uri": {
+            "description": "Its card's URI, a root `POST /v1/resolve` reads (`btc:tx/…`, `btc:address/…`,\n`ln:node/…`); null for an input or output without an address, which `name` labels\n(`OP_RETURN`, `coinbase`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "rel"
         ],
         "type": "object"
       },

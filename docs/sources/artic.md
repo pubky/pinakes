@@ -41,9 +41,8 @@ load it; the image's id is a fact. The API gives only years, so the card has no 
 
 ## Licence and attribution
 
-The API's `description` field is CC BY 4.0; all its other data is CC0 1.0 (and the Terms and
-Conditions of artic.edu apply). The card credits "Art Institute of Chicago", with ", CC0 1.0" for
-public-domain works, and "; description CC BY 4.0" when the description is the long one.
+The API's `description` field is CC BY 4.0; all its other data is CC0 1.0. The card credits "Art
+Institute of Chicago", with ", CC0 1.0" for public-domain works, and "; description CC BY 4.0" when the description is the long one.
 
 ## Examples
 
