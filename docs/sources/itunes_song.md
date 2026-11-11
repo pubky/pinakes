@@ -19,8 +19,9 @@ from:
   its own ISRC must be the one asked), while `deezer` runs. The track's own ISRC is asked first,
   then the hubs', two at most.
 
-iTunes is then asked for the album's songs (`lookup?upc={barcode}&entity=song`, in the storefront
-`[also_on] apple_storefront`). The song is taken only when the answer is one collection (iTunes
+A service that refuses the operator's credentials leaves the track to its ISRC on Deezer. iTunes
+is then asked for the album's songs (`lookup?upc={barcode}&entity=song`, in the storefront
+`[also_on] apple_storefront`), only while `itunes` runs, as `editions` asks it. The song is taken only when the answer is one collection (iTunes
 answers unrelated collections for some codes: Underclass Hero's barcode lists four, two
 editions of the album and two singles of its title track, so none of its songs is taken), exactly
 one song is at that disc and track number, and its length (`trackTimeMillis`) is within 3 s of the track's (Deezer rounds:

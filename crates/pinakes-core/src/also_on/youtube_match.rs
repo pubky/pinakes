@@ -9,7 +9,8 @@
 //! Deezer (while `deezer` runs) and TIDAL (while `tidal_isrc` runs, with its credentials) for the
 //! artist and title. Of each service's answers, exactly one track must have the same artist and
 //! title, compared as `same_recording` compares them (`matching`), and a length within
-//! [`MATCH_WINDOW_SECS`]; none or several give nothing for that service. A page YouTube serves
+//! [`MATCH_WINDOW_SECS`]; none or several give nothing for that service (of the first page of
+//! answers). TIDAL refusing the credentials leaves the Deezer match standing. A page YouTube serves
 //! only after a sign-in (`LOGIN_REQUIRED`, which it answers some hosts for some videos) is no
 //! answer: the lookup is retried hours later. It runs after `deezer` and `tidal_isrc`, and before
 //! `editions`.
@@ -154,14 +155,25 @@ impl Source for YoutubeMatch {
                 .append_pair("countryCode", &cx.config.section::<TidalConfig>().country)
                 .append_pair("filter[query]", &query)
                 .append_pair("include", "tracks.artists");
-            if let Some(answer) = tidal::api_object(cx, url.as_str()).await? {
-                if let Some(id) = pick(&tidal_candidates(&answer), &upload) {
-                    found.links.extend(derived(
-                        &format!("https://tidal.com/track/{id}"),
-                        Level::Track,
-                        "youtube_match",
+            match tidal::api_object(cx, url.as_str()).await {
+                Ok(Some(answer)) => {
+                    if let Some(id) = pick(&tidal_candidates(&answer), &upload) {
+                        found.links.extend(derived(
+                            &format!("https://tidal.com/track/{id}"),
+                            Level::Track,
+                            "youtube_match",
+                        ));
+                    }
+                }
+                Ok(None) => {}
+                // Refused credentials last: the Deezer match stands, and the run comes back
+                // when the refusal's hold ends.
+                Err(error) if refused(&error) => {
+                    found.retry_after = Some(std::time::Duration::from_secs(
+                        super::client_credentials::REFUSAL_HOLD,
                     ));
                 }
+                Err(error) => return Err(error),
             }
         }
         Ok(found)
@@ -194,10 +206,19 @@ async fn watch(cx: &Context, id: &str) -> Result<Watch> {
             }
             .into())
         }
+        // YouTube's answer to a host it blocks: no answer either.
+        403 => return Ok(Watch::LoginRequired),
         _ => return Ok(Watch::Nothing),
     }
     let html = String::from_utf8_lossy(&fetched.body);
     Ok(parse_watch(&html))
+}
+
+/// Whether an error is a service refusing the operator's credentials (`tidal_auth`).
+fn refused(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<RetryLater>()
+        .is_some_and(|r| r.class.ends_with("_auth"))
 }
 
 /// What a watch page's player response (`ytInitialPlayerResponse`) says: its `videoDetails`

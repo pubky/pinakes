@@ -63,6 +63,10 @@ impl Source for ItunesSong {
     }
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
         let mut found = Found::default();
+        // Apple is asked only while `itunes` runs, as `editions` asks it.
+        if !super::runs(&cx.config, &super::itunes::ItunesSource) {
+            return Ok(found);
+        }
         let Some(place) = place(cx, subject).await? else {
             return Ok(found);
         };
@@ -92,15 +96,20 @@ async fn place(cx: &Context, subject: &Subject) -> Result<Option<Place>> {
         return Ok(None);
     };
     let deezer_runs = super::runs(&cx.config, &deezer::DeezerSource);
-    match link.service {
-        Service::Deezer if deezer_runs => return deezer_place(cx, &link.id).await,
+    let own = match link.service {
+        Service::Deezer if deezer_runs => Some(deezer_place(cx, &link.id).await),
         Service::Spotify if super::runs(&cx.config, &Spotify) => {
-            return spotify_place(cx, &link.id).await
+            Some(spotify_place(cx, &link.id).await)
         }
-        Service::Tidal if super::runs(&cx.config, &Tidal) => {
-            return tidal_place(cx, &link.id).await
-        }
-        _ => {}
+        Service::Tidal if super::runs(&cx.config, &Tidal) => Some(tidal_place(cx, &link.id).await),
+        _ => None,
+    };
+    match own {
+        Some(Ok(place)) => return Ok(place),
+        // Credentials the service refuses: the track's ISRC may still name its place on Deezer.
+        Some(Err(error)) if refused(&error) => {}
+        Some(Err(error)) => return Err(error),
+        None => {}
     }
     if !deezer_runs {
         return Ok(None);
@@ -127,6 +136,14 @@ async fn place(cx: &Context, subject: &Subject) -> Result<Option<Place>> {
         return deezer_album_place(cx, &track).await;
     }
     Ok(None)
+}
+
+/// Whether an error is a service refusing the operator's credentials (`spotify_auth`,
+/// `tidal_auth`).
+fn refused(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<crate::resolver::RetryLater>()
+        .is_some_and(|r| r.class.ends_with("_auth"))
 }
 
 /// A Deezer track's place (`track/{id}`, then its album's `upc`).

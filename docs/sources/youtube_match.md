@@ -22,7 +22,8 @@ that keep a recording's identity such as a remaster dropped, the first credited 
 
 Of each service's tracks, exactly one must have the same artist (its first) and title (with its
 version, `Bohemian Rhapsody (Live Aid)`) and a length within 2 s of the video's; none or several
-give nothing for that service. Queen's Topic upload of Bohemian Rhapsody (354 s) matches Deezer's
+give nothing for that service. Only the first page of each search is read (25 Deezer tracks, 20
+TIDAL tracks), so a second such track further down goes unseen; the link is a hint, never a join. Queen's Topic upload of Bohemian Rhapsody (354 s) matches Deezer's
 one such track (354 s); TIDAL has two (355 s and 356 s), so it gives no TIDAL link. The links are
 `https://www.deezer.com/track/{id}` and `https://tidal.com/track/{id}`, `via` `youtube_match`.
 
@@ -36,8 +37,8 @@ default too (`deezer` for Deezer's API terms, `tidal_isrc` for TIDAL's).
 
 YouTube sometimes answers a watch page with a sign-in request
 (`playabilityStatus.status` `LOGIN_REQUIRED`, "confirm you're not a bot") and no video details,
-which the egress takes for a wall (as any other wall YouTube puts up). That is no answer: the
-lookup is retried six hours later (`youtube_login`), keeping what an earlier run found.
+which the egress takes for a wall (as any other wall YouTube puts up), or a 403. That is no answer:
+the lookup is retried six hours later (`youtube_login`), keeping what an earlier run found.
 
 ## From other services to YouTube
 
@@ -52,6 +53,7 @@ other exact source of a track's YouTube video is known.
 Per label upload, while Deezer or `tidal_isrc` runs: one watch page (about 1.4 MB, refused above
 3 MB, shared for an hour) at the host's default pace (`limits.host_requests_per_second`, one
 request at a time), then one Deezer search and one TIDAL search, each shared for an hour. A
-rate limit or an outage of any of them (`youtube_busy`, Deezer's quota, `tidal_busy`) and refused
-TIDAL credentials (`tidal_auth`) are retried, keeping the links an earlier run found. Switched on
+rate limit or an outage of any of them (`youtube_busy`, Deezer's quota, `tidal_busy`) is retried,
+keeping the links an earlier run found. Refused TIDAL credentials (`tidal_auth`) keep the run's
+Deezer match, and the run comes back when the five-minute refusal hold ends. Switched on
 after an upgrade, `pinakesd reextract also-on` asks for every stored video at once.

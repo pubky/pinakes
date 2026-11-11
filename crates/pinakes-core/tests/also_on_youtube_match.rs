@@ -45,6 +45,8 @@ fn fixture(name: &str) -> Vec<u8> {
 #[derive(Clone, Copy, Default)]
 struct Answers {
     sign_in: bool,
+    /// TIDAL's search answers this status instead.
+    tidal_status: Option<u16>,
 }
 /// Answers YouTube's watch pages, Deezer's search and TIDAL's (with its token) from the
 /// recordings; records each request.
@@ -113,6 +115,15 @@ impl Transport for Recorded {
                     .to_vec(),
                 "application/json",
             ),
+            ("openapi.tidal.com", "/v2/searchResults") if self.answers.tidal_status.is_some() => {
+                Fetched {
+                    status: self.answers.tidal_status.unwrap(),
+                    ..answer(
+                        br#"{"errors":[{"code":"TOLD"}]}"#.to_vec(),
+                        "application/vnd.api+json",
+                    )
+                }
+            }
             ("openapi.tidal.com", "/v2/searchResults") => {
                 assert_eq!(query("filter[query]"), "queen bohemian rhapsody");
                 assert_eq!(query("include"), "tracks.artists");
@@ -252,7 +263,15 @@ async fn a_topic_upload_matches_one_deezer_track(pool: sqlx::PgPool) {
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_sign_in_page_is_retried_hours_later(pool: sqlx::PgPool) {
     let queen = save(&pool, "bSnlKl_PoQU").await;
-    let seen = run(&pool, config(true, true, None), Answers { sign_in: true }).await;
+    let seen = run(
+        &pool,
+        config(true, true, None),
+        Answers {
+            sign_in: true,
+            ..Default::default()
+        },
+    )
+    .await;
     assert_eq!(seen, ["www.youtube.com/watch?v=bSnlKl_PoQU"]);
     assert!(links(&pool, &queen).await.is_empty());
     let (error, seconds): (Option<String>, f64) = sqlx::query_as("SELECT last_error, extract(epoch FROM next_attempt_at-now())::float8 FROM also_on_dirty WHERE resource_id=$1")
@@ -276,4 +295,39 @@ async fn without_its_switch_or_a_service_to_search_nothing_is_asked(pool: sqlx::
         let seen = run(&pool, config, Answers::default()).await;
         assert!(seen.is_empty(), "{seen:?}");
     }
+}
+
+/// TIDAL refusing the credentials (403) leaves the run's Deezer match standing; the run comes
+/// back when the refusal's hold ends.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_tidal_refusal_keeps_the_deezer_match(pool: sqlx::PgPool) {
+    let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
+    if !registered.contains(&"tidal_isrc") {
+        return;
+    }
+    let queen = save(&pool, "bSnlKl_PoQU").await;
+    run(
+        &pool,
+        config(
+            true,
+            true,
+            Some(("refused-match-id", "refused-match-secret")),
+        ),
+        Answers {
+            tidal_status: Some(403),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(
+        links(&pool, &queen).await,
+        ["https://www.deezer.com/track/4091937401 - youtube_match"]
+    );
+    let (error, seconds): (Option<String>, f64) = sqlx::query_as("SELECT last_error, extract(epoch FROM next_attempt_at-now())::float8 FROM also_on_dirty WHERE resource_id=$1")
+        .bind(&queen)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(error, None);
+    assert!((290.0..=300.0).contains(&seconds), "{seconds}");
 }
