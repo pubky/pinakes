@@ -21,9 +21,9 @@ from:
 
 iTunes is then asked for the album's songs (`lookup?upc={barcode}&entity=song`, in the storefront
 `[also_on] apple_storefront`). The song is taken only when the answer is one collection (iTunes
-answers unrelated singles for some codes: Underclass Hero's barcode lists the album and three
-singles of its title track, so none of its songs is taken), exactly one song is at that disc and
-track number, and its length (`trackTimeMillis`) is within 3 s of the track's (Deezer rounds:
+answers unrelated collections for some codes: Underclass Hero's barcode lists four, two
+editions of the album and two singles of its title track, so none of its songs is taken), exactly
+one song is at that disc and track number, and its length (`trackTimeMillis`) is within 3 s of the track's (Deezer rounds:
 its Get Lucky is 367 s, Apple's 369.6 s). The link is `https://music.apple.com/song/{trackId}`,
 `via` `itunes_song`.
 
@@ -38,9 +38,9 @@ iTunes Search API are those of `itunes` (promotional use, linking to the store).
 
 ## Operations
 
-Per track, while its place's source runs: one or two requests to the service that names the
-place (Deezer: the track and its album; Spotify: the track and its album; TIDAL: the track with
-its albums and up to 5 pages of the album's items), each shared for an hour with the other
-sources' identical requests, then one iTunes lookup at iTunes' pace (about 20 a minute). A
+Per track, while its place's source runs: one to six requests to the service that names the
+place (Deezer: the track, or up to two ISRC lookups, and its album; Spotify: the track and its
+album; TIDAL: the track with its albums and up to 5 pages of the album's items), each shared for
+an hour with the other sources' identical requests, then one iTunes lookup at iTunes' pace (about 20 a minute). A
 rate limit or an outage of any of them is retried, keeping the link an earlier run found. Switched
 on after an upgrade, `pinakesd reextract also-on` asks for every stored track at once.

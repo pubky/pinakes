@@ -10,7 +10,9 @@
 //! Off by default: TIDAL's Developer Guidelines forbid integrating TIDAL content with another
 //! service's without TIDAL's written approval (docs/sources). Asked with the same credentials,
 //! country and token slot as `tidal` (`[tidal]`), one request per value, each answer shared for an
-//! hour by credential pair. TIDAL's own links are not asked.
+//! hour by credential pair. TIDAL's own links are not asked. It runs after every source that keys
+//! an ISRC or a barcode (a service's own record, the hubs, `discogs`, `deezer`) and before
+//! `editions`, which places its links.
 use super::{
     tidal::{self, TidalConfig, API},
     Context, Found, Source, Subject,

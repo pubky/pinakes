@@ -10,8 +10,9 @@
 //! artist and title. Of each service's answers, exactly one track must have the same artist and
 //! title, compared as `same_recording` compares them (`matching`), and a length within
 //! [`MATCH_WINDOW_SECS`]; none or several give nothing for that service. A page YouTube serves
-//! only after a sign-in (`LOGIN_REQUIRED`, which it answers this host for some videos) is no
-//! answer: the lookup is retried hours later.
+//! only after a sign-in (`LOGIN_REQUIRED`, which it answers some hosts for some videos) is no
+//! answer: the lookup is retried hours later. It runs after `deezer` and `tidal_isrc`, and before
+//! `editions`.
 use super::{
     deezer::{self, DeezerSource},
     tidal::{self, TidalConfig, API as TIDAL_API},
@@ -29,7 +30,7 @@ use serde_json::Value;
 
 /// How far a track's length may be from the video's, in seconds.
 pub const MATCH_WINDOW_SECS: i64 = 2;
-/// The largest watch page read (they are about 1.5 MB); a larger one is refused.
+/// The largest watch page read (they are about 1.4 MB); a larger one is refused.
 const WATCH_CAP: usize = 3 * 1024 * 1024;
 /// When a lookup YouTube answered with a sign-in page is tried again.
 const LOGIN_WAIT_SECS: u64 = 6 * 3600;

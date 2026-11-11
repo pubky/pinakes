@@ -5,8 +5,8 @@ One of the music sources of [also on](../api.md#also-on): links on music service
 `tidal_isrc` (**off by default**; on only with `[also_on.sources.tidal_isrc] enabled = true` and
 the operator's TIDAL credentials, `[tidal] client_id` and `client_secret` or
 `PINAKES_TIDAL_CLIENT_ID` and `PINAKES_TIDAL_CLIENT_SECRET`, the same as `tidal`'s): for a track
-on another service with an `isrc:` key (Deezer's or Spotify's own record, a vouching page's, a
-hub's), the TIDAL tracks that carry exactly that ISRC, from TIDAL's API
+(or a video of a recording) on another service with an `isrc:` key (Deezer's or Spotify's own
+record, a vouching page's, a hub's), the TIDAL tracks that carry exactly that ISRC, from TIDAL's API
 (`GET /v2/tracks?countryCode={[tidal] country}&filter[isrc]=…`); for an album on another service
 with a `upc:` key, the TIDAL album that carries exactly that barcode
 (`GET /v2/albums?countryCode=…&filter[barcodeId]=…`). Each answer is read back: only an item whose
@@ -17,9 +17,9 @@ them joins the group.
 
 The track's own ISRC is asked first, then the hubs', two at most; only an ISRC that is a key (a
 shared one is a fact, and TIDAL would answer with any of its recordings). One ISRC may name several
-TIDAL tracks (the recording on several releases): at most 5, those TIDAL offers for streaming
-first, then in TIDAL's order; [`editions`](editions.md) places them and a card shows one per
-service. A barcode several TIDAL albums carry names none of them and gives nothing (TIDAL answers
+TIDAL tracks (the recording on several releases): at most 5 links in all, those TIDAL offers for
+streaming first, then in TIDAL's order; [`editions`](editions.md) places them and a card shows
+one per service. A barcode several TIDAL albums carry names none of them and gives nothing (TIDAL answers
 unrelated albums for a code such as `0000000000000`). No keys of the resource and no facts. TIDAL's
 own tracks and albums are not asked. It runs after every source that keys an ISRC or a barcode
 (the service's own record, `tidal`, `spotify`, the hubs, `discogs`, `deezer`).

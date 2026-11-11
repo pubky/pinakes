@@ -15,8 +15,8 @@ name, else the first artist of the description's "Title · Artist" line.
 
 It then searches, for the artist and title as `same_recording` compares them (lower case, the tags
 that keep a recording's identity such as a remaster dropped, the first credited artist):
-- Deezer (`https://api.deezer.com/search?q={artist} {title}`, the plain form: the advanced
-  `artist:"…" track:"…"` form answered nothing for known tracks), while `deezer` runs;
+- Deezer (`https://api.deezer.com/search?q={artist} {title}`, the plain form, which finds
+  tracks the advanced `artist:"…" track:"…"` form misses), while `deezer` runs;
 - TIDAL (`GET /v2/searchResults?countryCode={[tidal] country}&filter[query]={artist} {title}&include=tracks.artists`,
   with the operator's TIDAL credentials), while `tidal_isrc` runs.
 
@@ -34,7 +34,7 @@ become a key of the video, and a candidate's ISRC is never recorded as the video
 default for that, because it reads YouTube's watch pages, and because its services are off by
 default too (`deezer` for Deezer's API terms, `tidal_isrc` for TIDAL's).
 
-From this host YouTube sometimes answers a watch page with a sign-in request
+YouTube sometimes answers a watch page with a sign-in request
 (`playabilityStatus.status` `LOGIN_REQUIRED`, "confirm you're not a bot") and no video details,
 which the egress takes for a wall (as any other wall YouTube puts up). That is no answer: the
 lookup is retried six hours later (`youtube_login`), keeping what an earlier run found.
@@ -49,7 +49,7 @@ other exact source of a track's YouTube video is known.
 
 ## Operations
 
-Per label upload, while Deezer or `tidal_isrc` runs: one watch page (about 1.5 MB, refused above
+Per label upload, while Deezer or `tidal_isrc` runs: one watch page (about 1.4 MB, refused above
 3 MB, shared for an hour) at the host's default pace (`limits.host_requests_per_second`, one
 request at a time), then one Deezer search and one TIDAL search, each shared for an hour. A
 rate limit or an outage of any of them (`youtube_busy`, Deezer's quota, `tidal_busy`) and refused

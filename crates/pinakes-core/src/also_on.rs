@@ -469,12 +469,9 @@ pub fn registry() -> Vec<Arc<dyn Source>> {
         // After every source that keys a track's ISRC or an album's barcode (a service's own
         // record, Deezer's, the hubs'), before `editions` places its links.
         Arc::new(spotify_isrc::SpotifyIsrc),
-        // After every source that keys a track's ISRC or an album's barcode, as `spotify_isrc`.
         Arc::new(tidal_isrc::TidalIsrc),
         Arc::new(itunes::ItunesSource),
-        // After `itunes`: a track's Apple Music song, by its album's barcode and its place there.
         Arc::new(itunes_song::ItunesSong),
-        // After `deezer` and `tidal_isrc`, whose services it searches; before `editions`.
         Arc::new(youtube_match::YoutubeMatch),
         Arc::new(wikipedia::WikipediaSource),
         Arc::new(wikidata_item::WikidataItemSource),
