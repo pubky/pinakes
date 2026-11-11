@@ -53,7 +53,8 @@ other exact source of a track's YouTube video is known.
 Per label upload, while Deezer or `tidal_isrc` runs: one watch page (about 1.4 MB, refused above
 3 MB, shared for an hour) at the host's default pace (`limits.host_requests_per_second`, one
 request at a time), then one Deezer search and one TIDAL search, each shared for an hour. A
-rate limit or an outage of any of them (`youtube_busy`, Deezer's quota, `tidal_busy`) is retried,
-keeping the links an earlier run found. Refused TIDAL credentials (`tidal_auth`) keep the run's
-Deezer match, and the run comes back when the five-minute refusal hold ends. Switched on
+rate limit or an outage of YouTube or Deezer (`youtube_busy`, Deezer's quota) is retried, keeping
+the links an earlier run found. TIDAL failing (refused credentials, a rate limit, an unexpected
+answer) keeps the run's Deezer match, which is recorded without a TIDAL link, and the run comes
+back after the wait TIDAL named, else after five minutes. Switched on
 after an upgrade, `pinakesd reextract also-on` asks for every stored video at once.

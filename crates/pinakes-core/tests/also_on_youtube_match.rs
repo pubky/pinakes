@@ -297,37 +297,46 @@ async fn without_its_switch_or_a_service_to_search_nothing_is_asked(pool: sqlx::
     }
 }
 
-/// TIDAL refusing the credentials (403) leaves the run's Deezer match standing; the run comes
-/// back when the refusal's hold ends.
+/// TIDAL failing, by refusing the credentials (403) or with an answer the source does not expect
+/// (400), leaves the run's Deezer match standing; the run comes back after five minutes.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
-async fn a_tidal_refusal_keeps_the_deezer_match(pool: sqlx::PgPool) {
+async fn a_tidal_failure_keeps_the_deezer_match(pool: sqlx::PgPool) {
     let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
     if !registered.contains(&"tidal_isrc") {
         return;
     }
     let queen = save(&pool, "bSnlKl_PoQU").await;
-    run(
-        &pool,
-        config(
-            true,
-            true,
-            Some(("refused-match-id", "refused-match-secret")),
-        ),
-        Answers {
-            tidal_status: Some(403),
-            ..Default::default()
-        },
-    )
-    .await;
-    assert_eq!(
-        links(&pool, &queen).await,
-        ["https://www.deezer.com/track/4091937401 - youtube_match"]
-    );
-    let (error, seconds): (Option<String>, f64) = sqlx::query_as("SELECT last_error, extract(epoch FROM next_attempt_at-now())::float8 FROM also_on_dirty WHERE resource_id=$1")
-        .bind(&queen)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(error, None);
-    assert!((290.0..=300.0).contains(&seconds), "{seconds}");
+    // A pair per case: a refusal holds its pair's slot.
+    for (status, pair) in [
+        (403, ("refused-match-id", "refused-match-secret")),
+        (400, ("unexpected-match-id", "unexpected-match-secret")),
+    ] {
+        for sql in [
+            "DELETE FROM derived_link",
+            "UPDATE also_on_dirty SET attempts=0",
+        ] {
+            sqlx::query(sql).execute(&pool).await.unwrap();
+        }
+        run(
+            &pool,
+            config(true, true, Some(pair)),
+            Answers {
+                tidal_status: Some(status),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(
+            links(&pool, &queen).await,
+            ["https://www.deezer.com/track/4091937401 - youtube_match"],
+            "{status}"
+        );
+        let (error, seconds): (Option<String>, f64) = sqlx::query_as("SELECT last_error, extract(epoch FROM next_attempt_at-now())::float8 FROM also_on_dirty WHERE resource_id=$1")
+            .bind(&queen)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(error, None, "{status}");
+        assert!((290.0..=300.0).contains(&seconds), "{status}: {seconds}");
+    }
 }
