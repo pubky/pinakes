@@ -770,7 +770,7 @@ Unix seconds, so nearest and earliest come first. Scores are internal and never 
 
 **Paging.** Pages are keyset-ordered on rank, then one internal key per resource or occurrence. The cursor is signed with a key created at
 daemon startup (HMAC-BLAKE3) and binds the filters, sort and decay instant; keep them unchanged
-(`limit` may change). A tampered cursor, a cursor for other filters or one from a previous
+(`limit` and `facet` may change). A tampered cursor, a cursor for other filters or one from a previous
 daemon returns 400: restart without a cursor. A null cursor ends the results. Concurrent
 updates are visible between pages; this is not a frozen snapshot.
 

@@ -1206,6 +1206,69 @@ async fn cursors_reject_payload_tampering_unsigned_forgery_and_another_daemon_ke
     );
 }
 
+/// Facets never change the rows, so the next page reads the same with any `facet` or none;
+/// a cursor from a search with other filters is still refused.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_search_cursor_pages_the_same_rows_whatever_the_facets(pool: PgPool) {
+    seed(&pool).await;
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let ids = |page: &Value| -> Vec<String> {
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let base = "/v1/search?tags=rust&sort=activity&limit=2";
+    let (code, first) = call(&app, "GET", &format!("{base}&facet=type,tags,host"), None).await;
+    assert_eq!(code, 200, "{first}");
+    let cursor = first["cursor"].as_str().unwrap().to_owned();
+    let (code, plain) = call(&app, "GET", &format!("{base}&cursor={cursor}"), None).await;
+    assert_eq!(code, 200, "{plain}");
+    assert_eq!(ids(&plain).len(), 2);
+    assert!(plain.get("facets").is_none_or(Value::is_null), "{plain}");
+    for facet in ["type,tags,host", "tags", "category"] {
+        let (code, page) = call(
+            &app,
+            "GET",
+            &format!("{base}&facet={facet}&cursor={cursor}"),
+            None,
+        )
+        .await;
+        assert_eq!(code, 200, "{facet}: {page}");
+        assert_eq!(ids(&page), ids(&plain), "{facet}");
+        assert!(page["facets"].is_object(), "{facet}: {page}");
+    }
+    // The cursor of a page without facets serves a faceted next page too.
+    let (_, unfaceted) = call(&app, "GET", base, None).await;
+    let other = unfaceted["cursor"].as_str().unwrap();
+    let (code, page) = call(
+        &app,
+        "GET",
+        &format!("{base}&facet=tags&cursor={other}"),
+        None,
+    )
+    .await;
+    assert_eq!(code, 200, "{page}");
+    assert_eq!(ids(&page), ids(&plain));
+    // Row-changing parameters stay bound.
+    for changed in [
+        "/v1/search?tags=music&sort=activity&limit=2",
+        "/v1/search?tags=rust&sort=recent&limit=2",
+        "/v1/search?tags=rust&sort=activity&limit=2&type=Event",
+    ] {
+        let (code, page) = call(
+            &app,
+            "GET",
+            &format!("{changed}&facet=type,tags,host&cursor={cursor}"),
+            None,
+        )
+        .await;
+        assert_eq!(code, 400, "{changed}: {page}");
+    }
+}
+
 /// The search ETag follows exactly what a reader can see. A write in flight changes neither the
 /// results nor the ETag; its commit changes both. Two writers that commit in the other order
 /// than they began each change it, and folding the counted writes changes nothing.
