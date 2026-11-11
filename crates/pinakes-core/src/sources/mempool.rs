@@ -761,9 +761,18 @@ fn deep(height: u64, tip: u64) -> bool {
     tip.saturating_add(1) >= height.saturating_add(SETTLED_DEPTH)
 }
 
+/// A block's place in the chain (`parse_status`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Place {
+    /// It is in the best chain.
+    pub best: bool,
+    /// The best chain's next block (its hash) and that block's height.
+    pub next: Option<(String, u64)>,
+}
+
 /// A block's place in the chain, from its status: whether it is in the best chain, and the best
 /// chain's next block (`next_best`) with its height. `None` when the API knows no such block.
-pub fn parse_status(status: u16, raw: &[u8]) -> Result<Option<(bool, Option<(String, u64)>)>> {
+pub fn parse_status(status: u16, raw: &[u8]) -> Result<Option<Place>> {
     let Some(v) = json(status, raw, &[404])? else {
         return Ok(None);
     };
@@ -773,7 +782,7 @@ pub fn parse_status(status: u16, raw: &[u8]) -> Result<Option<(bool, Option<(Str
         .and_then(hash)
         .zip(v["height"].as_u64().and_then(|h| h.checked_add(1)))
         .filter(|_| best);
-    Ok(Some((best, next)))
+    Ok(Some(Place { best, next }))
 }
 
 /// The id of a block's first transaction, its coinbase (plain text).
@@ -1352,7 +1361,7 @@ async fn read(cx: &super::Context<'_>, to: Api, target: &Target) -> Result<Optio
                 Some(Err(e)) if by_height => return Err(e),
                 _ => None,
             };
-            let next = place.as_ref().and_then(|(_, next)| next.clone());
+            let next = place.as_ref().and_then(|p| p.next.clone());
             let tip = if by_height || next.is_some() {
                 match read_tip(cx, to, n).await {
                     Ok(tip) => Some(tip),
@@ -1375,7 +1384,7 @@ async fn read(cx: &super::Context<'_>, to: Api, target: &Target) -> Result<Optio
                 }
                 // A best-chain block whose next block is not settled yet (or not there): its
                 // next block comes with a later read.
-                _ if place.as_ref().is_some_and(|(best, _)| *best) => soon = true,
+                _ if place.as_ref().is_some_and(|p| p.best) => soon = true,
                 _ => {}
             }
             let coinbase = match coinbase_request(to, n, hash) {
@@ -2625,7 +2634,7 @@ mod tests {
 
         let tip = parse_tip(200, &read("tip-height-1111.txt")).unwrap();
         assert_eq!(tip, 975364);
-        let (best, next) = parse_status(200, &read("block-1-status.json"))
+        let Place { best, next } = parse_status(200, &read("block-1-status.json"))
             .unwrap()
             .unwrap();
         assert!(best);
@@ -2651,7 +2660,7 @@ mod tests {
             .unwrap();
         assert_eq!(card.related[0].name.as_deref(), Some("Block 975,250"));
         assert_eq!(card.details["pool"], "Braiins Pool");
-        let (_, next) = parse_status(200, &read("block-975251-status.json"))
+        let Place { next, .. } = parse_status(200, &read("block-975251-status.json"))
             .unwrap()
             .unwrap();
         let (next, height) = next.unwrap();
@@ -2669,9 +2678,21 @@ mod tests {
         );
         // A stale block has no next block; the tip has none yet; an unknown block has no status.
         let stale = br#"{"in_best_chain":false,"height":481824,"next_best":null}"#;
-        assert_eq!(parse_status(200, stale).unwrap(), Some((false, None)));
+        assert_eq!(
+            parse_status(200, stale).unwrap(),
+            Some(Place {
+                best: false,
+                next: None
+            })
+        );
         let tip_block = br#"{"in_best_chain":true,"height":975364,"next_best":null}"#;
-        assert_eq!(parse_status(200, tip_block).unwrap(), Some((true, None)));
+        assert_eq!(
+            parse_status(200, tip_block).unwrap(),
+            Some(Place {
+                best: true,
+                next: None
+            })
+        );
         assert_eq!(parse_status(404, b"Block not found").unwrap(), None);
         assert!(parse_txid(200, b"<html>").is_err());
         assert_eq!(
@@ -2858,7 +2879,7 @@ mod tests {
         assert!(parse_status(200, &read("testnet4-block-1000-status.json"))
             .unwrap()
             .unwrap()
-            .1
+            .next
             .is_some());
         // The same record read as mainnet: its testnet address is no mainnet address.
         let mainnet = parse_tx(200, &raw, Network::Mainnet, txid)
