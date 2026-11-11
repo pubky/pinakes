@@ -201,6 +201,8 @@ so one goes without the others needing a change.
   could not name in time.
 - [`federal_register`](federal_register.md#also-on): a Federal Register document's GovInfo,
   regulations.gov and public-inspection copies.
+- [`mempool`](mempool.md#also-on): a Bitcoin block, transaction or address, or a Lightning
+  node or channel, on the other block explorers.
 - [`places`](places.md): `osm_wikidata`, `wikidata_osm`, `wikidata_places` and `btcmap`,
   OpenStreetMap objects and Wikidata items that name each other, and a place's map and review
   pages through its item.

@@ -1,17 +1,18 @@
 //! Bitcoin blocks, transactions and addresses, and Lightning nodes and channels, read from the
 //! mempool.space API by the id in the link.
 //!
-//! Every mempool.space link of one object, with or without a language prefix, is an alias of one
-//! identifier: `btc:block/{hash}`, `btc:tx/{txid}`, `btc:address/{address}`, `ln:node/{key}` and
-//! `ln:channel/{decimal id}`. Test networks are separate objects with their own prefixes
-//! (`btc-testnet4:tx/…`, `ln-signet:node/…`). A block link by height is an alias of the block's
-//! hash once the block is buried six deep in the best chain (`settled`).
+//! Every link of one object, on mempool.space (with or without a language prefix) or on another
+//! block explorer of [`EXPLORERS`], is an alias of one identifier: `btc:block/{hash}`,
+//! `btc:tx/{txid}`, `btc:address/{address}`, `ln:node/{key}` and `ln:channel/{decimal id}`. Test
+//! networks are separate objects with their own prefixes (`btc-testnet4:tx/…`,
+//! `ln-signet:node/…`). A block link by height is an alias of the block's hash once the block is
+//! buried six deep in the best chain (`settled`). The card is always read from mempool.space
+//! (Esplora as the fallback), whichever explorer the link is on.
 //!
 //! No schema.org type fits these objects, so the cards use local types.
 use super::{
     kit::{
-        body, fetch, float, host_and_segments, int, json, plain, text, time, unix, Card, Link,
-        Request,
+        body, fetch, float, host_and_segments, int, json, plain, text, time, unix, Card, Request,
     },
     Budget, Example, Source,
 };
@@ -42,14 +43,6 @@ impl Network {
             Self::Testnet => "/testnet",
             Self::Testnet4 => "/testnet4",
             Self::Signet => "/signet",
-        }
-    }
-    fn from_segment(segment: &str) -> Option<Self> {
-        match segment {
-            "testnet" => Some(Self::Testnet),
-            "testnet4" => Some(Self::Testnet4),
-            "signet" => Some(Self::Signet),
-            _ => None,
         }
     }
     /// The namespace of on-chain identifiers.
@@ -239,29 +232,369 @@ pub fn address(value: &str, network: Network) -> Option<String> {
     segwit_address(value, hrp).or_else(|| base58_address(value, versions))
 }
 
-fn object(kind: &str, id: &str, network: Network) -> Option<Object> {
+/// What a path of an explorer names: its `{id}` read as one kind of object.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    /// A block by hash or by height.
+    Block,
+    /// A block by hash only.
+    Hash,
+    /// A block by height only.
+    Height,
+    Tx,
+    Address,
+    Node,
+    Channel,
+}
+
+/// A block height in a link: up to 8 digits.
+fn height(id: &str) -> Option<u64> {
+    plain(id, 8, |c| c.is_ascii_digit())
+        .then(|| id.parse().ok())
+        .flatten()
+}
+
+fn object(kind: Kind, id: &str, network: Network) -> Option<Object> {
     Some(match kind {
-        "block" => match hash(id) {
-            Some(h) => Object::Block(BlockRef::Hash(h)),
-            None => Object::Block(BlockRef::Height(
-                plain(id, 8, |c| c.is_ascii_digit())
-                    .then(|| id.parse().ok())
-                    .flatten()?,
-            )),
-        },
-        "tx" => Object::Tx(hash(id)?),
-        "address" => Object::Address(address(id, network)?),
-        _ => return None,
+        Kind::Block => Object::Block(match hash(id) {
+            Some(h) => BlockRef::Hash(h),
+            None => BlockRef::Height(height(id)?),
+        }),
+        Kind::Hash => Object::Block(BlockRef::Hash(hash(id)?)),
+        Kind::Height => Object::Block(BlockRef::Height(height(id)?)),
+        Kind::Tx => Object::Tx(hash(id)?),
+        Kind::Address => Object::Address(address(id, network)?),
+        Kind::Node => Object::Node(node_key(id)?),
+        Kind::Channel => Object::Channel(channel_id(id)?),
     })
 }
 
-/// A language prefix of the mempool.space site, e.g. `de` or `zh`.
+/// A language prefix of a mempool site, e.g. `de` or `zh`.
 fn language(segment: &str) -> bool {
     segment.len() == 2 && segment.bytes().all(|b| b.is_ascii_lowercase()) && segment != "tx"
 }
 
-/// What a mempool.space link names: site pages with an optional language and network prefix,
-/// and the API's own URLs. A `bitcoin:` URI names a mainnet address.
+/// A block explorer: where its pages of each object are. This one table drives both directions:
+/// [`from_uri`] reads every path of every row as the object it names, and a card's Also on
+/// ([`links`]) takes each listed row's page of the object.
+pub struct Explorer {
+    /// The site's name as a card shows it.
+    pub site: &'static str,
+    /// Its hosts in lower case; the first writes its links. A leading `www.` is ignored when
+    /// reading, as everywhere.
+    hosts: &'static [&'static str],
+    /// Whether a card lists it in Also on. Sites that refuse a plain client (bot walls) or are
+    /// down are only read.
+    listed: bool,
+    /// Whether a two-letter language may lead its paths (`/de/tx/…`), as on mempool sites.
+    languages: bool,
+    /// The networks it shows and each one's path prefix, `{net}` in its paths (empty for none);
+    /// a network's first prefix writes its links.
+    networks: &'static [(Network, &'static str)],
+    /// Its paths, `{net}` the network's prefix and `{id}` the object's id; the first path of a
+    /// kind writes its links.
+    paths: &'static [(Kind, &'static str)],
+}
+
+/// Pages and API URLs of a mempool site.
+const MEMPOOL_PATHS: &[(Kind, &str)] = &[
+    (Kind::Block, "{net}/block/{id}"),
+    (Kind::Tx, "{net}/tx/{id}"),
+    (Kind::Address, "{net}/address/{id}"),
+    (Kind::Node, "{net}/lightning/node/{id}"),
+    (Kind::Channel, "{net}/lightning/channel/{id}"),
+    (Kind::Hash, "{net}/api/v1/block/{id}"),
+    (Kind::Hash, "{net}/api/block/{id}"),
+    (Kind::Height, "{net}/api/block-height/{id}"),
+    (Kind::Tx, "{net}/api/tx/{id}"),
+    (Kind::Address, "{net}/api/address/{id}"),
+    (Kind::Node, "{net}/api/v1/lightning/nodes/{id}"),
+    (Kind::Channel, "{net}/api/v1/lightning/channels/{id}"),
+];
+/// The on-chain pages of a mempool site.
+const MEMPOOL_PAGES: &[(Kind, &str)] = &[
+    (Kind::Block, "{net}/block/{id}"),
+    (Kind::Tx, "{net}/tx/{id}"),
+    (Kind::Address, "{net}/address/{id}"),
+];
+/// The pages of an Esplora site (Blockstream's explorer and its copies).
+const ESPLORA_PAGES: &[(Kind, &str)] = &[
+    (Kind::Hash, "{net}/block/{id}"),
+    (Kind::Height, "{net}/block-height/{id}"),
+    (Kind::Tx, "{net}/tx/{id}"),
+    (Kind::Address, "{net}/address/{id}"),
+];
+/// Blockchain.com's explorer pages, then its older paths, which redirect to them.
+const BLOCKCHAIN_COM_PAGES: &[(Kind, &str)] = &[
+    (Kind::Block, "explorer/blocks/{net}/{id}"),
+    (Kind::Tx, "explorer/transactions/{net}/{id}"),
+    (Kind::Address, "explorer/addresses/{net}/{id}"),
+    (Kind::Block, "{net}/block/{id}"),
+    (Kind::Tx, "{net}/tx/{id}"),
+    (Kind::Address, "{net}/address/{id}"),
+];
+/// `/block/{hash or height}`, `/transaction/{txid}` and `/address/{address}` under a prefix.
+const TRANSACTION_PAGES: &[(Kind, &str)] = &[
+    (Kind::Block, "{net}/block/{id}"),
+    (Kind::Tx, "{net}/transaction/{id}"),
+    (Kind::Address, "{net}/address/{id}"),
+];
+
+const MAINNET: &[(Network, &str)] = &[(Network::Mainnet, "")];
+const MEMPOOL_NETWORKS: &[(Network, &str)] = &[
+    (Network::Mainnet, ""),
+    (Network::Testnet, "testnet"),
+    (Network::Testnet4, "testnet4"),
+    (Network::Signet, "signet"),
+];
+
+/// mempool.space, the site the cards are read from: their `page_url`.
+const MEMPOOL_SPACE: Explorer = Explorer {
+    site: SITE,
+    hosts: &["mempool.space"],
+    listed: false,
+    languages: true,
+    networks: MEMPOOL_NETWORKS,
+    paths: MEMPOOL_PATHS,
+};
+
+/// The explorers whose links name the objects, mempool.space first. docs/sources/mempool.md
+/// says how each form was checked: on the live site where it shows the object, as a route
+/// where its pages render client-side, on archived captures for the sites that refuse a plain
+/// client. A network whose pages show nothing that names it (Blockchain.com's `btc-testnet`)
+/// is left out. Other chains' paths on the same sites (`/liquid/`, `/bch/`, `/bitcoin-cash/`,
+/// `/ltc/`, …) match no row.
+pub const EXPLORERS: &[Explorer] = &[
+    MEMPOOL_SPACE,
+    Explorer {
+        site: "Blockstream Explorer",
+        hosts: &["blockstream.info"],
+        listed: true,
+        languages: false,
+        networks: MEMPOOL_NETWORKS,
+        paths: ESPLORA_PAGES,
+    },
+    Explorer {
+        site: "mempool.emzy.de",
+        hosts: &["mempool.emzy.de"],
+        listed: true,
+        languages: true,
+        // Its testnet answers 502.
+        networks: &[
+            (Network::Mainnet, ""),
+            (Network::Testnet4, "testnet4"),
+            (Network::Signet, "signet"),
+        ],
+        paths: MEMPOOL_PAGES,
+    },
+    Explorer {
+        site: "BTCScan",
+        hosts: &["btcscan.org"],
+        listed: true,
+        languages: false,
+        networks: MAINNET,
+        paths: ESPLORA_PAGES,
+    },
+    Explorer {
+        site: "Blockchain.com",
+        hosts: &["www.blockchain.com"],
+        listed: true,
+        languages: false,
+        networks: &[(Network::Mainnet, "btc")],
+        paths: BLOCKCHAIN_COM_PAGES,
+    },
+    // Blockchain.com's older host: each path redirects to its explorer page.
+    Explorer {
+        site: "Blockchain.com",
+        hosts: &["blockchain.info"],
+        listed: false,
+        languages: false,
+        networks: MAINNET,
+        paths: &[
+            (Kind::Block, "block/{id}"),
+            (Kind::Height, "block-height/{id}"),
+            (Kind::Tx, "tx/{id}"),
+            (Kind::Address, "address/{id}"),
+        ],
+    },
+    Explorer {
+        site: "OKLink",
+        hosts: &["www.oklink.com"],
+        listed: true,
+        languages: false,
+        // `/btc/…` redirects to `/bitcoin/…`.
+        networks: &[(Network::Mainnet, "bitcoin"), (Network::Mainnet, "btc")],
+        paths: &[
+            (Kind::Block, "{net}/block/{id}"),
+            (Kind::Tx, "{net}/tx/{id}"),
+            (Kind::Address, "{net}/address/{id}"),
+        ],
+    },
+    Explorer {
+        site: "Blockchair",
+        hosts: &["blockchair.com"],
+        listed: false,
+        languages: false,
+        networks: &[(Network::Mainnet, "bitcoin")],
+        paths: TRANSACTION_PAGES,
+    },
+    Explorer {
+        site: "Blockchair",
+        hosts: &["blockchair.com"],
+        listed: false,
+        languages: false,
+        networks: &[(Network::Testnet, "bitcoin/testnet")],
+        paths: &[
+            (Kind::Block, "{net}/block/{id}"),
+            (Kind::Tx, "{net}/transaction/{id}"),
+        ],
+    },
+    Explorer {
+        site: "BlockCypher",
+        hosts: &["live.blockcypher.com"],
+        listed: false,
+        languages: false,
+        networks: &[(Network::Mainnet, "btc")],
+        paths: &[
+            (Kind::Hash, "{net}/block/{id}"),
+            (Kind::Tx, "{net}/tx/{id}"),
+            (Kind::Address, "{net}/address/{id}"),
+        ],
+    },
+    Explorer {
+        site: "BlockCypher",
+        hosts: &["live.blockcypher.com"],
+        listed: false,
+        languages: false,
+        networks: &[(Network::Testnet, "btc-testnet")],
+        paths: &[
+            (Kind::Hash, "{net}/block/{id}"),
+            (Kind::Tx, "{net}/tx/{id}"),
+        ],
+    },
+    Explorer {
+        site: "Bitcoin Explorer",
+        hosts: &["bitcoinexplorer.org"],
+        listed: false,
+        languages: false,
+        networks: MAINNET,
+        paths: ESPLORA_PAGES,
+    },
+    Explorer {
+        site: "3xpl",
+        hosts: &["3xpl.com"],
+        listed: false,
+        languages: false,
+        networks: &[(Network::Mainnet, "bitcoin")],
+        paths: TRANSACTION_PAGES,
+    },
+    Explorer {
+        site: "1ML",
+        hosts: &["1ml.com"],
+        listed: true,
+        languages: false,
+        networks: MAINNET,
+        paths: &[(Kind::Node, "node/{id}"), (Kind::Channel, "channel/{id}")],
+    },
+    Explorer {
+        site: "Amboss",
+        hosts: &["amboss.space"],
+        listed: true,
+        languages: false,
+        networks: MAINNET,
+        paths: &[(Kind::Node, "node/{id}"), (Kind::Channel, "edge/{id}")],
+    },
+    Explorer {
+        site: "Lightning Network+",
+        hosts: &["lightningnetwork.plus"],
+        listed: true,
+        languages: false,
+        networks: MAINNET,
+        paths: &[(Kind::Node, "nodes/{id}")],
+    },
+];
+
+/// A path template's segments on a network prefix: `{net}` stands for the prefix's segments
+/// (none when it is empty), `{id}` stays.
+fn expand<'a>(template: &'a str, prefix: &'a str) -> Vec<&'a str> {
+    let mut out = vec![];
+    for segment in template.split('/') {
+        if segment == "{net}" {
+            out.extend(prefix.split('/').filter(|s| !s.is_empty()));
+        } else {
+            out.push(segment);
+        }
+    }
+    out
+}
+
+/// The `{id}` of a path whose segments are the template's on the prefix, exactly.
+fn matched<'a>(template: &str, prefix: &str, segments: &[&'a str]) -> Option<&'a str> {
+    let want = expand(template, prefix);
+    if want.len() != segments.len() {
+        return None;
+    }
+    let mut id = None;
+    for (w, s) in want.iter().zip(segments) {
+        match *w {
+            "{id}" => id = Some(*s),
+            w if w == *s => {}
+            _ => return None,
+        }
+    }
+    id
+}
+
+impl Explorer {
+    fn on(&self, host: &str) -> bool {
+        self.hosts
+            .iter()
+            .any(|h| h.strip_prefix("www.").unwrap_or(h) == host)
+    }
+
+    /// What a path on this explorer names: the first network and path it matches whose id is
+    /// valid there. No Lightning object is on testnet4.
+    fn read(&self, segments: &[&str]) -> Option<Target> {
+        let segments = match segments {
+            [l, rest @ ..] if self.languages && language(l) => rest,
+            all => all,
+        };
+        self.networks.iter().find_map(|(network, prefix)| {
+            self.paths.iter().find_map(|(kind, template)| {
+                let object = object(*kind, matched(template, prefix, segments)?, *network)?;
+                let lightning = matches!(object, Object::Node(_) | Object::Channel(_));
+                (!(lightning && *network == Network::Testnet4)).then_some(Target {
+                    network: *network,
+                    object,
+                })
+            })
+        })
+    }
+
+    /// The object's page here, or `None` when this explorer doesn't show its kind on its
+    /// network.
+    pub fn page(&self, target: &Target) -> Option<String> {
+        let prefix = self.networks.iter().find(|(n, _)| *n == target.network)?.1;
+        let (kinds, id): (&[Kind], String) = match &target.object {
+            Object::Block(BlockRef::Hash(h)) => (&[Kind::Block, Kind::Hash], h.clone()),
+            Object::Block(BlockRef::Height(h)) => (&[Kind::Block, Kind::Height], h.to_string()),
+            Object::Tx(id) => (&[Kind::Tx], id.clone()),
+            Object::Address(a) => (&[Kind::Address], a.clone()),
+            Object::Node(k) => (&[Kind::Node], k.clone()),
+            Object::Channel(c) => (&[Kind::Channel], c.to_string()),
+        };
+        let template = self.paths.iter().find(|(k, _)| kinds.contains(k))?.1;
+        let path: Vec<&str> = expand(template, prefix)
+            .into_iter()
+            .map(|s| if s == "{id}" { id.as_str() } else { s })
+            .collect();
+        Some(format!("https://{}/{}", self.hosts[0], path.join("/")))
+    }
+}
+
+/// What a link names: a page or API URL on an explorer of [`EXPLORERS`] (with an optional
+/// language and network prefix where the explorer has them), or a `bitcoin:` URI, which names a
+/// mainnet address.
 pub fn from_uri(uri: &str) -> Option<Target> {
     if let Some(rest) = uri
         .get(..8)
@@ -275,36 +608,21 @@ pub fn from_uri(uri: &str) -> Option<Target> {
         });
     }
     let (host, segments) = host_and_segments(uri)?;
-    if host != "mempool.space" {
-        return None;
-    }
-    let mut s: &[String] = &segments;
-    if s.first().is_some_and(|l| language(l)) {
-        s = &s[1..];
-    }
-    let mut network = Network::Mainnet;
-    if let Some(n) = s.first().and_then(|n| Network::from_segment(n)) {
-        network = n;
-        s = &s[1..];
-    }
-    let s: Vec<&str> = s.iter().map(String::as_str).collect();
-    let object = match s.as_slice() {
-        ["lightning", "node", key] => Object::Node(node_key(key)?),
-        ["lightning", "channel", id] => Object::Channel(channel_id(id)?),
-        ["api", "v1", "lightning", "nodes", key] => Object::Node(node_key(key)?),
-        ["api", "v1", "lightning", "channels", id] => Object::Channel(channel_id(id)?),
-        ["api", "v1", "block", id] | ["api", "block", id] => {
-            Object::Block(BlockRef::Hash(hash(id)?))
-        }
-        ["api", "block-height", h] => object("block", h, network)?,
-        ["api", kind @ ("tx" | "address"), id] => object(kind, id, network)?,
-        [kind @ ("block" | "tx" | "address"), id] => object(kind, id, network)?,
-        _ => return None,
-    };
-    if matches!(object, Object::Node(_) | Object::Channel(_)) && network == Network::Testnet4 {
-        return None;
-    }
-    Some(Target { network, object })
+    let segments: Vec<&str> = segments.iter().map(String::as_str).collect();
+    EXPLORERS
+        .iter()
+        .filter(|e| e.on(&host))
+        .find_map(|e| e.read(&segments))
+}
+
+/// The object's pages on the other explorers a card lists in Also on, in the table's order, as
+/// `(site, page)`: each reads back ([`from_uri`]) as the object.
+pub fn links(target: &Target) -> Vec<(&'static str, String)> {
+    EXPLORERS
+        .iter()
+        .filter(|e| e.listed)
+        .filter_map(|e| Some((e.site, e.page(target)?)))
+        .collect()
 }
 
 /// The identifier every link form of the object is an alias of, or `None` for a block by height
@@ -323,15 +641,9 @@ pub fn identifier(target: &Target) -> Option<String> {
 
 /// The object's page on mempool.space.
 pub fn page(target: &Target) -> String {
-    let net = target.network.path();
-    match &target.object {
-        Object::Block(BlockRef::Hash(h)) => format!("https://mempool.space{net}/block/{h}"),
-        Object::Block(BlockRef::Height(h)) => format!("https://mempool.space{net}/block/{h}"),
-        Object::Tx(id) => format!("https://mempool.space{net}/tx/{id}"),
-        Object::Address(a) => format!("https://mempool.space{net}/address/{a}"),
-        Object::Node(k) => format!("https://mempool.space{net}/lightning/node/{k}"),
-        Object::Channel(id) => format!("https://mempool.space{net}/lightning/channel/{id}"),
-    }
+    MEMPOOL_SPACE
+        .page(target)
+        .expect("mempool.space shows every kind of object on every network")
 }
 
 /// Where a request goes: mempool.space, or the Esplora API at blockstream.info, the fallback
@@ -438,46 +750,6 @@ pub fn settled(status: u16, raw: &[u8], tip: u64) -> Result<bool> {
         && tip.saturating_add(1) >= height.saturating_add(SETTLED_DEPTH))
 }
 
-/// Explorers that show the same on-chain object.
-fn chain_mirrors(card: &mut Card, network: Network, kind: &str, id: &str) {
-    let blockstream = match network {
-        Network::Mainnet => Some(""),
-        Network::Testnet => Some("/testnet"),
-        Network::Signet => Some("/signet"),
-        Network::Testnet4 => None,
-    };
-    if let Some(net) = blockstream {
-        card.link(Link::new(
-            "Blockstream Explorer",
-            format!("https://blockstream.info{net}/{kind}/{id}"),
-            VIA,
-        ));
-    }
-    if network != Network::Mainnet {
-        return;
-    }
-    card.link(Link::new(
-        "mempool.emzy.de",
-        format!("https://mempool.emzy.de/{kind}/{id}"),
-        VIA,
-    ));
-    card.link(Link::new(
-        "BTCScan",
-        format!("https://btcscan.org/{kind}/{id}"),
-        VIA,
-    ));
-    let plural = match kind {
-        "block" => "blocks",
-        "tx" => "transactions",
-        _ => "addresses",
-    };
-    card.link(Link::new(
-        "Blockchain.com",
-        format!("https://www.blockchain.com/explorer/{plural}/btc/{id}"),
-        VIA,
-    ));
-}
-
 fn on(network: Network, object: Object) -> Target {
     Target { network, object }
 }
@@ -516,7 +788,6 @@ pub(crate) fn block_card(v: &Value, network: Network, hash: &str) -> Result<Card
     card.detail("total_fees", extras["totalFees"].as_u64());
     card.detail("reward", extras["reward"].as_u64());
     card.detail("median_fee_rate", float(&extras["medianFee"]));
-    chain_mirrors(&mut card, network, "block", hash);
     Ok(card)
 }
 
@@ -554,7 +825,6 @@ pub(crate) fn tx_card(v: &Value, network: Network, txid: &str) -> Result<Card> {
         vin.and_then(|i| i.first())
             .and_then(|i| i["is_coinbase"].as_bool()),
     );
-    chain_mirrors(&mut card, network, "tx", txid);
     Ok(card)
 }
 
@@ -586,7 +856,6 @@ pub(crate) fn address_card(v: &Value, network: Network, addr: &str) -> Result<Ca
         "unconfirmed_tx_count",
         v["mempool_stats"]["tx_count"].as_u64(),
     );
-    chain_mirrors(&mut card, network, "address", addr);
     Ok(card)
 }
 
@@ -637,18 +906,6 @@ pub fn parse_node(status: u16, raw: &[u8], network: Network, key: &str) -> Resul
     card.detail("capacity", int(&v["capacity"]));
     card.detail("channels", v["active_channel_count"].as_u64());
     card.detail("updated_at", unix(&v["updated_at"]).map(|t| t.to_rfc3339()));
-    if network == Network::Mainnet {
-        for (site, uri) in [
-            ("1ML", format!("https://1ml.com/node/{key}")),
-            ("Amboss", format!("https://amboss.space/node/{key}")),
-            (
-                "Lightning Network+",
-                format!("https://lightningnetwork.plus/nodes/{key}"),
-            ),
-        ] {
-            card.link(Link::new(site, uri, VIA));
-        }
-    }
     Ok(Some(card))
 }
 
@@ -693,18 +950,6 @@ pub fn parse_channel(status: u16, raw: &[u8], network: Network, id: u64) -> Resu
     ] {
         card.detail(name, v[side]["public_key"].as_str().and_then(node_key));
         card.detail(alias, text(&v[side]["alias"]));
-    }
-    if network == Network::Mainnet {
-        card.link(Link::new(
-            "1ML",
-            format!("https://1ml.com/channel/{id}"),
-            VIA,
-        ));
-        card.link(Link::new(
-            "Amboss",
-            format!("https://amboss.space/edge/{id}"),
-            VIA,
-        ));
     }
     Ok(Some(card))
 }
@@ -970,6 +1215,89 @@ fn grouped(n: u64) -> String {
     out
 }
 
+/// The also-on half of this source, `mempool`: a Bitcoin or Lightning object's pages on the other
+/// explorers a card lists (`links`), from its root alone, with no request.
+pub mod also_on {
+    use crate::also_on::{self, Context, Source, Subject};
+    use anyhow::Result;
+    use async_trait::async_trait;
+
+    /// The pages of a block, transaction, address, Lightning node or channel on the listed
+    /// explorers of `EXPLORERS`, for the card of its root (`btc:…`, `ln:…`) once it
+    /// is read: each is a link the object's card is the alias root of.
+    pub struct Explorers;
+
+    #[async_trait]
+    impl Source for Explorers {
+        fn id(&self) -> &'static str {
+            "mempool"
+        }
+        fn applies(&self, subject: &Subject) -> bool {
+            subject.status == "ok" && super::from_root(&subject.uri).is_some()
+        }
+        async fn lookup(&self, _cx: &Context, subject: &Subject) -> Result<also_on::Found> {
+            let links = super::from_root(&subject.uri)
+                .map(|t| super::links(&t))
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(site, uri)| also_on::Link::new(uri, site, super::VIA))
+                .collect();
+            Ok(also_on::Found {
+                links,
+                ..Default::default()
+            })
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::lookups::fixture::{at, context, sites};
+
+        const HASH: &str = "0000000000000000001c8018d9cb3b742ef25114f27563e3fc4a1902167f9893";
+
+        #[tokio::test]
+        async fn a_block_lists_the_explorers_and_each_reads_back_as_it() {
+            let root = format!("btc:block/{HASH}");
+            let subject = at(&root);
+            assert!(Explorers.applies(&subject));
+            let found = Explorers.lookup(&context(vec![]), &subject).await.unwrap();
+            assert_eq!(
+                sites(&found),
+                [
+                    format!("Blockstream Explorer https://blockstream.info/block/{HASH}"),
+                    format!("mempool.emzy.de https://mempool.emzy.de/block/{HASH}"),
+                    format!("BTCScan https://btcscan.org/block/{HASH}"),
+                    format!("Blockchain.com https://www.blockchain.com/explorer/blocks/btc/{HASH}"),
+                    format!("OKLink https://www.oklink.com/bitcoin/block/{HASH}"),
+                ]
+            );
+            for link in &found.links {
+                assert_eq!(link.via, "mempool");
+                assert_eq!(
+                    super::super::from_uri(&link.uri)
+                        .as_ref()
+                        .and_then(super::super::identifier),
+                    Some(root.clone()),
+                    "{}",
+                    link.uri
+                );
+            }
+            // Only a card that was read; never a link, a missing object or another scheme.
+            let mut missing = at(&root);
+            missing.status = "missing".into();
+            assert!(!Explorers.applies(&missing));
+            for uri in [
+                format!("https://mempool.space/block/{HASH}"),
+                "btc:block/481824".to_owned(),
+                format!("https://blockstream.info/block/{HASH}"),
+            ] {
+                assert!(!Explorers.applies(&at(&uri)), "{uri}");
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1130,7 +1458,6 @@ mod tests {
             "https://mempool.space/lightning/channel/811984x2037x70000",
             "https://mempool.space/mining/pool/foundryusa",
             "https://mempool.space/xx/yy/tx/abc",
-            "https://mempool.emzy.de/tx/a1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d",
         ] {
             assert_eq!(from_uri(uri), None, "{uri}");
         }
@@ -1140,6 +1467,278 @@ mod tests {
             )),
             None
         );
+    }
+
+    /// A link template with the test objects' ids in it.
+    fn fill(template: &str) -> String {
+        template
+            .replace("{HASH}", HASH)
+            .replace("{PIZZA}", PIZZA)
+            .replace("{GENESIS}", GENESIS)
+            .replace("{ACINQ}", ACINQ)
+            .replace("{TB}", "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx")
+    }
+
+    /// Each explorer's link of an object names the same identifier as its mempool.space link.
+    #[test]
+    fn every_explorer_names_the_one_object() {
+        let cases: &[(&str, &[&str])] = &[
+            (
+                "btc:block/{HASH}",
+                &[
+                    "https://blockstream.info/block/{HASH}",
+                    "https://mempool.emzy.de/de/block/{HASH}/",
+                    "https://btcscan.org/block/{HASH}",
+                    "https://www.blockchain.com/explorer/blocks/btc/{HASH}",
+                    "https://www.blockchain.com/btc/block/{HASH}",
+                    "https://blockchain.info/block/{HASH}",
+                    "https://www.oklink.com/bitcoin/block/{HASH}",
+                    "https://blockchair.com/bitcoin/block/{HASH}",
+                    "https://live.blockcypher.com/btc/block/{HASH}/",
+                    "https://bitcoinexplorer.org/block/{HASH}",
+                    "https://3xpl.com/bitcoin/block/{HASH}",
+                ],
+            ),
+            (
+                "btc:tx/{PIZZA}",
+                &[
+                    "https://blockstream.info/tx/{PIZZA}",
+                    "https://mempool.emzy.de/tx/{PIZZA}",
+                    "https://btcscan.org/tx/{PIZZA}",
+                    "https://www.blockchain.com/explorer/transactions/btc/{PIZZA}?x=1",
+                    "https://www.blockchain.com/btc/tx/{PIZZA}",
+                    "https://blockchain.info/tx/{PIZZA}",
+                    "https://www.oklink.com/btc/tx/{PIZZA}",
+                    "https://blockchair.com/bitcoin/transaction/{PIZZA}",
+                    "https://live.blockcypher.com/btc/tx/{PIZZA}/",
+                    "https://bitcoinexplorer.org/tx/{PIZZA}#JSON",
+                    "https://3xpl.com/bitcoin/transaction/{PIZZA}",
+                ],
+            ),
+            (
+                "btc:address/{GENESIS}",
+                &[
+                    "https://blockstream.info/address/{GENESIS}",
+                    "https://mempool.emzy.de/address/{GENESIS}",
+                    "https://btcscan.org/address/{GENESIS}",
+                    "https://blockchain.com/explorer/addresses/btc/{GENESIS}",
+                    "https://www.blockchain.com/btc/address/{GENESIS}",
+                    "https://www.blockchain.info/address/{GENESIS}",
+                    "https://oklink.com/bitcoin/address/{GENESIS}",
+                    "https://blockchair.com/bitcoin/address/{GENESIS}",
+                    "https://live.blockcypher.com/btc/address/{GENESIS}/",
+                    "https://bitcoinexplorer.org/address/{GENESIS}",
+                    "https://3xpl.com/bitcoin/address/{GENESIS}",
+                ],
+            ),
+            // Test networks, where the explorer has them.
+            (
+                "btc-testnet:tx/{PIZZA}",
+                &[
+                    "https://blockstream.info/testnet/tx/{PIZZA}",
+                    "https://blockchair.com/bitcoin/testnet/transaction/{PIZZA}",
+                    "https://live.blockcypher.com/btc-testnet/tx/{PIZZA}/",
+                ],
+            ),
+            (
+                "btc-testnet:address/{TB}",
+                &["https://blockstream.info/testnet/address/{TB}"],
+            ),
+            (
+                "btc-testnet4:tx/{PIZZA}",
+                &[
+                    "https://blockstream.info/testnet4/tx/{PIZZA}",
+                    "https://mempool.emzy.de/testnet4/tx/{PIZZA}",
+                ],
+            ),
+            (
+                "btc-signet:block/{HASH}",
+                &[
+                    "https://blockstream.info/signet/block/{HASH}",
+                    "https://mempool.emzy.de/signet/block/{HASH}",
+                ],
+            ),
+            // Lightning.
+            (
+                "ln:node/{ACINQ}",
+                &[
+                    "https://1ml.com/node/{ACINQ}",
+                    "https://amboss.space/node/{ACINQ}",
+                    "https://lightningnetwork.plus/nodes/{ACINQ}",
+                ],
+            ),
+            (
+                "ln:channel/892785849701564416",
+                &[
+                    "https://1ml.com/channel/892785849701564416",
+                    "https://amboss.space/edge/892785849701564416",
+                ],
+            ),
+        ];
+        let m = Mempool;
+        for (root, uris) in cases {
+            let root = fill(root);
+            for uri in uris.iter().map(|u| fill(u)) {
+                assert_eq!(id(&uri).as_ref(), Some(&root), "{uri}");
+                assert!(m.reads(&uri), "{uri}");
+                assert_eq!(m.alias_root(&uri).as_ref(), Some(&root), "{uri}");
+                // Read from mempool.space, whichever explorer the link is on.
+                assert!(page(&from_uri(&uri).unwrap()).starts_with("https://mempool.space/"));
+            }
+        }
+        // A block by height takes the height path on every explorer that has one: aliased only
+        // once settled.
+        for uri in [
+            "https://blockstream.info/block-height/481824",
+            "https://mempool.emzy.de/block/481824",
+            "https://btcscan.org/block-height/481824",
+            "https://www.blockchain.com/explorer/blocks/btc/481824",
+            "https://www.blockchain.com/btc/block/481824",
+            "https://blockchain.info/block/481824",
+            "https://blockchain.info/block-height/481824",
+            "https://www.oklink.com/bitcoin/block/481824",
+            "https://blockchair.com/bitcoin/block/481824",
+            "https://bitcoinexplorer.org/block-height/481824",
+            "https://3xpl.com/bitcoin/block/481824",
+        ] {
+            let t = from_uri(uri).unwrap_or_else(|| panic!("{uri}"));
+            assert_eq!(t.object, Object::Block(BlockRef::Height(481824)), "{uri}");
+            assert_eq!(identifier(&t), None, "{uri}");
+            assert_eq!(m.alias_root(uri), None, "{uri}");
+            assert_eq!(
+                request(Api::Mempool, &t).unwrap().url.as_str(),
+                "https://mempool.space/api/block-height/481824"
+            );
+        }
+    }
+
+    /// Other chains on the same sites, networks an explorer doesn't show and malformed ids name
+    /// nothing.
+    #[test]
+    fn other_chains_and_unshown_networks_name_nothing() {
+        for uri in [
+            // Other chains.
+            "https://blockchair.com/bitcoin-cash/block/{HASH}",
+            "https://blockchair.com/bitcoin-cash/transaction/{PIZZA}",
+            "https://blockchair.com/ethereum/transaction/{PIZZA}",
+            "https://www.blockchain.com/explorer/transactions/bch/{PIZZA}",
+            "https://www.blockchain.com/explorer/transactions/eth/{PIZZA}",
+            "https://www.blockchain.com/bch/tx/{PIZZA}",
+            "https://blockstream.info/liquid/tx/{PIZZA}",
+            "https://blockstream.info/liquidtestnet/block/{HASH}",
+            "https://live.blockcypher.com/ltc/tx/{PIZZA}/",
+            "https://live.blockcypher.com/doge/block/{HASH}/",
+            "https://3xpl.com/litecoin/transaction/{PIZZA}",
+            "https://www.oklink.com/eth/tx/{PIZZA}",
+            // Networks an explorer doesn't show: mempool.emzy.de's testnet is down, BTCScan and
+            // bitcoinexplorer.org are mainnet only, Blockchain.com's testnet pages name no
+            // network, no Lightning object is on testnet4.
+            "https://mempool.emzy.de/testnet/tx/{PIZZA}",
+            "https://btcscan.org/testnet/tx/{PIZZA}",
+            "https://btcscan.org/testnet4/tx/{PIZZA}",
+            "https://bitcoinexplorer.org/testnet/tx/{PIZZA}",
+            "https://www.blockchain.com/explorer/transactions/btc-testnet/{PIZZA}",
+            "https://www.blockchain.com/explorer/addresses/btc-testnet/{TB}",
+            "https://www.blockchain.com/explorer/transactions/btc-testnet4/{PIZZA}",
+            "https://blockchair.com/bitcoin/testnet4/transaction/{PIZZA}",
+            "https://1ml.com/testnet/node/{ACINQ}",
+            // Malformed ids, and an id of another kind or network.
+            "https://blockstream.info/tx/abc",
+            "https://blockstream.info/block/1c8018d9cb3b742ef25114f27563e3fc4a1902167f9893",
+            "https://blockstream.info/block/481824",
+            "https://blockstream.info/block-height/abc",
+            "https://blockstream.info/block-height/{HASH}",
+            "https://www.blockchain.com/explorer/addresses/btc/1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNb",
+            "https://blockchair.com/bitcoin/address/bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdx",
+            "https://btcscan.org/address/{TB}",
+            "https://blockstream.info/testnet/address/{GENESIS}",
+            "https://1ml.com/node/04864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f",
+            "https://amboss.space/edge/0",
+            "https://lightningnetwork.plus/node/{ACINQ}",
+            // Other pages, hosts and paths.
+            "https://blockstream.info/tx/{PIZZA}/extra",
+            "https://blockstream.info/de/tx/{PIZZA}",
+            "https://btcscan.org.example.com/tx/{PIZZA}",
+            "https://example.com/blockstream.info/tx/{PIZZA}",
+            "https://blockstream.info:8443/tx/{PIZZA}",
+            "https://www.blockchain.com/explorer/blocks/{HASH}",
+            "https://www.oklink.com/bitcoin/{PIZZA}",
+            "https://1ml.com/statistics",
+        ]
+        .map(fill)
+        {
+            assert_eq!(from_uri(&uri), None, "{uri}");
+            assert!(!Mempool.reads(&uri), "{uri}");
+        }
+    }
+
+    /// Every page the table writes, for every object kind on every network, reads back as the
+    /// object; mempool.space's is the card's own page.
+    #[test]
+    fn every_page_reads_back_as_its_object() {
+        let tb = "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx";
+        let networks = [
+            Network::Mainnet,
+            Network::Testnet,
+            Network::Testnet4,
+            Network::Signet,
+        ];
+        let mut written = 0;
+        for network in networks {
+            let addr = if network == Network::Mainnet {
+                GENESIS
+            } else {
+                tb
+            };
+            let mut objects = vec![
+                Object::Block(BlockRef::Hash(HASH.into())),
+                Object::Block(BlockRef::Height(481824)),
+                Object::Tx(PIZZA.into()),
+                Object::Address(addr.into()),
+            ];
+            if network != Network::Testnet4 {
+                objects.push(Object::Node(ACINQ.into()));
+                objects.push(Object::Channel(892785849701564416));
+            }
+            for object in objects {
+                let t = Target { network, object };
+                for explorer in EXPLORERS {
+                    if let Some(uri) = explorer.page(&t) {
+                        assert_eq!(from_uri(&uri).as_ref(), Some(&t), "{uri}");
+                        written += 1;
+                    }
+                }
+                assert_eq!(MEMPOOL_SPACE.page(&t).as_deref(), Some(page(&t).as_str()));
+                if identifier(&t).is_some() {
+                    for (_, uri) in links(&t) {
+                        assert!(!uri.starts_with("https://mempool.space/"), "{uri}");
+                        assert_eq!(id(&uri), identifier(&t), "{uri}");
+                    }
+                }
+            }
+        }
+        assert!(written >= 90, "{written}");
+        // Each site a card lists is listed once per object.
+        let sites: Vec<_> = links(&from_root(&format!("btc:tx/{PIZZA}")).unwrap())
+            .into_iter()
+            .map(|(site, _)| site)
+            .collect();
+        assert_eq!(
+            sites,
+            [
+                "Blockstream Explorer",
+                "mempool.emzy.de",
+                "BTCScan",
+                "Blockchain.com",
+                "OKLink"
+            ]
+        );
+        let sites: Vec<_> = links(&from_root("ln:channel/892785849701564416").unwrap())
+            .into_iter()
+            .map(|(site, _)| site)
+            .collect();
+        assert_eq!(sites, ["1ML", "Amboss"]);
+        assert!(links(&from_root(&format!("ln-signet:node/{ACINQ}")).unwrap()).is_empty());
     }
 
     #[test]
@@ -1198,7 +1797,12 @@ mod tests {
         assert_eq!(card.details["pool"], "BTCC");
         assert_eq!(card.details["total_fees"], 212514269u64);
         assert_eq!(card.details["reward"], 1462514269u64);
-        let links: Vec<_> = card.also_on.iter().map(|l| l.uri.as_str()).collect();
+        // The other explorers are the also-on half's (`also_on`), not the card's.
+        assert!(card.also_on.is_empty());
+        let links: Vec<_> = links(&from_root(&card.id).unwrap())
+            .into_iter()
+            .map(|(_, uri)| uri)
+            .collect();
         assert_eq!(
             links,
             [
@@ -1206,6 +1810,7 @@ mod tests {
                 format!("https://mempool.emzy.de/block/{HASH}"),
                 format!("https://btcscan.org/block/{HASH}"),
                 format!("https://www.blockchain.com/explorer/blocks/btc/{HASH}"),
+                format!("https://www.oklink.com/bitcoin/block/{HASH}"),
             ]
         );
         let other = "00000000b747d47c3b38161693ad05e26924b3775a8be669751f969da836311e";
@@ -1232,7 +1837,19 @@ mod tests {
             format!("https://mempool.space/testnet4/block/{hash}")
         );
         assert_eq!(card.details["pool"], "wiz");
-        assert!(card.also_on.is_empty(), "no mirror shows testnet4");
+        assert_eq!(
+            links(&from_root(&card.id).unwrap()),
+            [
+                (
+                    "Blockstream Explorer",
+                    format!("https://blockstream.info/testnet4/block/{hash}")
+                ),
+                (
+                    "mempool.emzy.de",
+                    format!("https://mempool.emzy.de/testnet4/block/{hash}")
+                ),
+            ]
+        );
         assert_eq!(
             parse_height(200, &read("signet-block-height-1000.txt"))
                 .unwrap()
@@ -1260,7 +1877,7 @@ mod tests {
         assert_eq!(card.details["output_value"], 1000000000000u64);
         assert_eq!(card.details["vsize"], 23620);
         assert_eq!(card.details["coinbase"], false);
-        assert_eq!(card.also_on.len(), 4);
+        assert_eq!(links(&from_root(&card.id).unwrap()).len(), 5);
         assert_eq!(
             parse_tx(404, &read("tx-missing.txt"), Network::Mainnet, PIZZA).unwrap(),
             None
@@ -1282,8 +1899,11 @@ mod tests {
         assert_eq!(card.details["tx_count"], 67019);
         assert_eq!(card.details["balance"], 5767070988u64);
         assert_eq!(
-            card.also_on.last().unwrap().uri,
-            format!("https://www.blockchain.com/explorer/addresses/btc/{GENESIS}")
+            links(&from_root(&card.id).unwrap())[3],
+            (
+                "Blockchain.com",
+                format!("https://www.blockchain.com/explorer/addresses/btc/{GENESIS}")
+            )
         );
         let bech = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq";
         let card = parse_address(200, &read("address-bech32.json"), Network::Mainnet, bech)
@@ -1311,8 +1931,9 @@ mod tests {
         assert_eq!(card.details["first_seen"], "2019-01-02T18:13:39+00:00");
         assert_eq!(card.details["capacity"], 36108321892i64);
         assert_eq!(card.details["channels"], 1834);
-        assert_eq!(card.also_on.len(), 3);
-        assert_eq!(card.also_on[0].uri, format!("https://1ml.com/node/{ACINQ}"));
+        let on = links(&from_root(&card.id).unwrap());
+        assert_eq!(on.len(), 3);
+        assert_eq!(on[0], ("1ML", format!("https://1ml.com/node/{ACINQ}")));
         // An unknown key and a fault look the same; the search tells them apart.
         assert!(parse_node(500, &read("node-missing.json"), Network::Mainnet, ACINQ).is_err());
         let missing = "020000000000000000000000000000000000000000000000000000000000000001";
@@ -1362,8 +1983,11 @@ mod tests {
         assert_eq!(card.details["node1_alias"], "ACINQ");
         assert_eq!(card.details["node2_alias"], "bfx-lnd0");
         assert_eq!(
-            card.also_on[1].uri,
-            "https://amboss.space/edge/892785849701564416"
+            links(&from_root(&card.id).unwrap())[1],
+            (
+                "Amboss",
+                "https://amboss.space/edge/892785849701564416".to_owned()
+            )
         );
         assert_eq!(
             parse_channel(404, &read("channel-missing.html"), Network::Mainnet, id).unwrap(),

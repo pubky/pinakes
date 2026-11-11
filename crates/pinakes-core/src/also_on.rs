@@ -485,6 +485,7 @@ pub fn registry() -> Vec<Arc<dyn Source>> {
         Arc::new(crate::sources::stack_exchange::also_on::StackExchange),
         Arc::new(crate::sources::media_records::titles::Titles),
         Arc::new(crate::sources::federal_register::also_on::FederalRegister),
+        Arc::new(crate::sources::mempool::also_on::Explorers),
     ];
     own.into_iter()
         .chain(crate::lookups::FAMILIES.iter().flat_map(|f| f.sources()))
