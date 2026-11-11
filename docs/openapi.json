@@ -301,6 +301,23 @@
         ],
         "type": "object"
       },
+      "CategoryFacet": {
+        "properties": {
+          "category": {
+            "description": "An OpenStreetMap category, `key/value` (`amenity/cafe`), as `category` takes it.",
+            "type": "string"
+          },
+          "count": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "category",
+          "count"
+        ],
+        "type": "object"
+      },
       "ChangeLine": {
         "description": "One change: which resource (and occurrence) changed, when, how and in which fields. Clients\nread the current facts from the resource itself.",
         "properties": {
@@ -924,6 +941,26 @@
       "Facets": {
         "description": "The facets `facet` asked for, over the whole filtered set.",
         "properties": {
+          "category": {
+            "description": "`facet=category`: the OpenStreetMap categories of the filtered set, most frequent\nfirst, at most 100.",
+            "items": {
+              "$ref": "#/components/schemas/CategoryFacet"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "host": {
+            "description": "`facet=host`: the services of the filtered set, most frequent first, at most 100.\n`pubky://` objects have no service host and are not counted here.",
+            "items": {
+              "$ref": "#/components/schemas/HostFacet"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "tags": {
             "description": "`facet=tags`: the labels the filtered links carry, most frequent first.",
             "items": {
@@ -1002,6 +1039,28 @@
         "required": [
           "id",
           "size"
+        ],
+        "type": "object"
+      },
+      "HostFacet": {
+        "properties": {
+          "count": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "host": {
+            "description": "The host as `host` takes it: exactly as the links' URLs name it (`www.youtube.com` and\n`youtube.com` are two hosts).",
+            "type": "string"
+          },
+          "site": {
+            "description": "The service's name as its cards show it in `site` (`YouTube`, `Wikipedia (en)`), else\nthe host. Plain text.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "host",
+          "site",
+          "count"
         ],
         "type": "object"
       },
@@ -3397,6 +3456,10 @@
                 "summary": "ScholarlyArticle, collapse=group",
                 "value": "ScholarlyArticle"
               },
+              "facet-category": {
+                "summary": "Place, facet=category",
+                "value": "Place"
+              },
               "jobposting-closed-too": {
                 "summary": "JobPosting, closed=true",
                 "value": "JobPosting"
@@ -3802,11 +3865,19 @@
             }
           },
           {
-            "description": "Counts over the whole filtered set: `tags` (labels), `type` (card types) or both\n(`type,tags`); `collapse` changes the rows, not the counts.",
+            "description": "Counts over the whole filtered set, comma-separated, any of: `type` (card types), `tags`\n(labels), `host` (services, as `host` takes them), `category` (OpenStreetMap categories,\nas `category` takes them); `collapse` changes the rows, not the counts.",
             "examples": {
               "(none)": {
                 "summary": "(none)",
                 "value": ""
+              },
+              "facet-category": {
+                "summary": "category, type=Place",
+                "value": "category"
+              },
+              "facet-host": {
+                "summary": "host",
+                "value": "host"
               },
               "facet-tags": {
                 "summary": "tags",

@@ -1375,7 +1375,11 @@
         "facet": "category",
         "type": "Place"
       },
-      "expect": "items"
+      "expect": "items",
+      "labels": {
+        "type": "Place, facet=category",
+        "facet": "category, type=Place"
+      }
     },
     {
       "name": "near-lugano",
