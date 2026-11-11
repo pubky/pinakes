@@ -597,14 +597,22 @@ that is the card. Its last accepted document, event dates and feed occurrences s
 toward a disappearance. Fetches that hit one count as outcome `blocked` in
 `pinakes_fetch_total`.
 
-The markers are the built-in `data/interstitial-markers.json` (text markers, placeholder
-titles, captcha selectors, wall host prefixes, sign-in paths). A page on a site's own
+The markers are the built-in `data/interstitial-markers.json` (text markers such as "just a
+moment", "verifying your browser" or Anubis' "making sure you're not a bot", placeholder
+titles, captcha selectors, wall host prefixes, sign-in paths): a wall's title never becomes a
+card's name. A page on a site's own
 host titled only with its name (`- YouTube`, `YouTube` on `youtube.com`, `youtu.be` and their
 subdomains: placeholder titles are listed per domain), below the site's root, is the service's
 stand-in for the object, a wall, at any length. Where the fetch ended decides: a short link that
 redirects to such a page is a wall, and the same title on any other host is just a title. Visible text excludes `script`, `style`, `noscript` and
 `template`. Title, heading and captcha markers count only on short pages (under 2,000 visible
-bytes) or challenge statuses (403, 429, 503). An HTML answer with status 202 that is empty or
+bytes) or challenge statuses (403, 429, 503). Challenge vendors' own wording that a work could
+also be named ("verifying your browser", "making sure you're not a bot", "pardon our
+interruption": `challenge_text`) counts in the title or first heading on a challenge status. On
+a 200 page it counts only on a short page that shows a challenge running (a vendor's challenge
+script, `challenge_signatures`, or a `noscript` asking for JavaScript on a page without links, as
+on MusicBrainz' proof-of-work gate) and describes no object (no `og:title`, `twitter:title`,
+JSON-LD or microformat name): a short film page named so is content. An HTML answer with status 202 that is empty or
 has no visible text is a challenge (AWS WAF answers bots so); an empty 202 of another type is
 content. A redirect of the requested path to a listed
 sign-in path (`/login`, `/authwall`, `/signin`, `/checkpoint`, …) is a wall unless the

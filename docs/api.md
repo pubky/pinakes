@@ -1622,8 +1622,8 @@ counts by status.
   expected fields and canary. BTC Map websites and NIP-52 calendar members are queued as their
   own resources (`event.adapters.derive_resources`). A Wikidata item's card (the `wikidata`
   adapter, and a Wikipedia page about an event or a place that Wikipedia serves no summary of,
-  read from the page's item) takes the item's label and description, English when it has one
-  (CC0, no credit), and shows its image (`P18`) only when the file's own page on Commons gives a
+  read from the page's item) takes the item's label and description, English when it has one,
+  else the item's language-independent (`mul`) value, else any language (CC0, no credit), and shows its image (`P18`) only when the file's own page on Commons gives a
   licence on the list (CC0, the public domain, CC BY or CC BY-SA 1.0 to 4.0, the GNU GPL, LGPL
   or AGPL, Commons' `Attribution`) and, under every licence but CC0 and the public domain, its
   author: Commons' thumbnail, asked `limits.music_image_width` (640) pixels wide,
