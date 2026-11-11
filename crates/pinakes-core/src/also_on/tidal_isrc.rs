@@ -151,8 +151,9 @@ impl Source for TidalIsrc {
                 continue;
             };
             let ids = matching(&answer, kind, &value);
-            // One barcode on several albums names none of them.
-            if kind == Kind::Album && ids.len() != 1 {
+            // One barcode on several albums names none of them, nor does an answer with a further
+            // page, which may hold another.
+            if kind == Kind::Album && (ids.len() != 1 || paged(&answer)) {
                 continue;
             }
             for id in ids {
@@ -170,6 +171,11 @@ impl Source for TidalIsrc {
         }
         Ok(found)
     }
+}
+
+/// Whether an answer has a further page (`links.next`).
+fn paged(answer: &Value) -> bool {
+    answer["links"]["next"].as_str().is_some()
 }
 
 /// The IDs of the items of an answer that carry exactly `value` (normalised), in TIDAL's order
@@ -288,5 +294,13 @@ mod tests {
         assert_eq!(matching(&v, Kind::Album, "0886443927087"), ["20115556"]);
         let several = fixture("albums-barcode-0000000000000.json");
         assert!(matching(&several, Kind::Album, "0000000000000").len() > 1);
+        // One match on a first page with a next one: the lookup refuses it (`paged`).
+        let one = fixture("albums-barcode-0602517416987.json");
+        assert!(!paged(&one));
+        let mut first = one.clone();
+        first["links"]["next"] =
+            "/albums?filter%5BbarcodeId%5D=0602517416987&countryCode=US&page%5Bcursor%5D=x".into();
+        assert!(paged(&first));
+        assert_eq!(matching(&first, Kind::Album, "0602517416987"), ["3524504"]);
     }
 }
