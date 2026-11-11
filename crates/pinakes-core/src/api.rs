@@ -1152,8 +1152,12 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
     let embed = if status == "missing" {
         None
     } else {
-        card_embed(&uri, doc.as_ref(), row["osm_id"].as_i64().is_some())
-            .map(|e| e.settled(&type_path))
+        card_embed(
+            &uri,
+            doc.as_ref().map(EmbedDoc::from).as_ref(),
+            row["osm_id"].as_i64().is_some(),
+        )
+        .map(|e| e.settled(&type_path))
     };
     let event = row.get("event").filter(|v| !v.is_null()).cloned();
     // An event card's clients are its event object's; a read object's are its own, and an object
@@ -1235,10 +1239,10 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
 /// A card's `embed` (docs/api.md, Embed): the player its link names (`embed::link`), else a
 /// Mastodon post's own frame, else an OpenStreetMap card's map (`osm`: the row is an OSM
 /// object), else the frame its document stores (its oEmbed answer's or its page's own).
-fn card_embed(uri: &str, doc: Option<&ResourceMeta>, osm: bool) -> Option<crate::embed::Embed> {
-    // A link found gone, a post among them while a later read fails (`changes::gone_social`),
-    // shows nothing of its own.
-    if doc.is_some_and(|d| d.status == model::Status::Missing || crate::changes::gone_social(d)) {
+fn card_embed(uri: &str, doc: Option<&EmbedDoc>, osm: bool) -> Option<crate::embed::Embed> {
+    // A link found gone, a post among them while a later read fails (`changes::gone_social`: its
+    // document stays `missing`), shows nothing of its own.
+    if doc.is_some_and(|d| d.status == Some(model::Status::Missing)) {
         return None;
     }
     if let Some(embed) = crate::embed::link(uri) {
@@ -1246,7 +1250,9 @@ fn card_embed(uri: &str, doc: Option<&ResourceMeta>, osm: bool) -> Option<crate:
     }
     let doc = doc?;
     // A post that Mastodon's own API answered for: another fediverse server may have no `/embed`.
-    if doc.source == "mastodon" && doc.type_name == "SocialMediaPosting" {
+    if doc.source.as_deref() == Some("mastodon")
+        && doc.type_name.as_deref() == Some("SocialMediaPosting")
+    {
         if let Some(embed) = crate::embed::mastodon(uri) {
             return Some(embed);
         }
@@ -1262,6 +1268,40 @@ fn card_embed(uri: &str, doc: Option<&ResourceMeta>, osm: bool) -> Option<crate:
     }
     doc.embed.clone()
 }
+/// What `card_embed` reads of a stored document: a card's whole one, only these keys of a tagged
+/// `also_on` member's (`member_embeds`, `EMBED_DOC`).
+#[derive(Default, Deserialize)]
+struct EmbedDoc {
+    #[serde(default)]
+    status: Option<model::Status>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(rename = "type", default)]
+    type_name: Option<String>,
+    #[serde(default)]
+    location: Option<model::Point>,
+    #[serde(default)]
+    bbox: Option<[f64; 4]>,
+    #[serde(default)]
+    embed: Option<crate::embed::Embed>,
+}
+impl From<&ResourceMeta> for EmbedDoc {
+    fn from(d: &ResourceMeta) -> Self {
+        Self {
+            status: Some(d.status.clone()),
+            source: Some(d.source.clone()),
+            type_name: Some(d.type_name.clone()),
+            location: d.location.clone(),
+            bbox: d.bbox,
+            embed: d.embed.clone(),
+        }
+    }
+}
+/// The keys of a document `EmbedDoc` reads, as SQL over `resource_document` (an OSM object's
+/// document is its `osm_place` version's there).
+const EMBED_DOC: &str =
+    "jsonb_strip_nulls(jsonb_build_object('status',doc->'status','source',doc->'source',\
+'type',doc->'type','location',doc->'location','bbox',doc->'bbox','embed',doc->'embed'))";
 /// A related row's `because`, when the row has one.
 fn because(row: &Value) -> Option<Because> {
     let b = row.get("because").filter(|v| v.is_object())?;
@@ -1308,6 +1348,10 @@ pub(crate) async fn with_refs<'a>(
             .bind(&ids)
             .fetch_all(pool)
             .await?;
+    // A card whose document is `missing` (a link found gone, while a later read failed) takes no
+    // frame from its referenced links either: they are its own link's spellings.
+    let doc_missing: std::collections::BTreeSet<String> =
+        missing.iter().map(|(id, _)| id.clone()).collect();
     let gone: Vec<String> = missing
         .into_iter()
         .filter(|(_, doc)| {
@@ -1348,7 +1392,7 @@ pub(crate) async fn with_refs<'a>(
     // A card whose canonical link names no player may be read through another link that does
     // (an `http:` spelling's card, a short link): its first referenced link that names one.
     for card in cards.iter_mut() {
-        if card.embed.is_none() && card.status != "missing" {
+        if card.embed.is_none() && card.status != "missing" && !doc_missing.contains(&card.id) {
             card.embed = card
                 .refs
                 .iter()
@@ -1359,39 +1403,65 @@ pub(crate) async fn with_refs<'a>(
     member_embeds(pool, &mut cards).await?;
     crate::collections::count(pool, cards).await
 }
+/// A tagged member as `member_embeds` reads it: ID, URI, whether it is `missing`, the keys
+/// `EmbedDoc` reads (only when its link names no frame), its type path, whether it is an OSM row.
+type MemberRow = (String, String, bool, Option<Value>, Vec<String>, bool);
 /// Fills the `embed` of each tagged `also_on` member whose link names none (`embed::link`) as its
 /// own card shows it (`card_embed`: a Mastodon post's or a map's frame, else the one it stores;
-/// docs/api.md, Embed). One query, and none when no card has such a member.
+/// docs/api.md, Embed); a `missing` member has none, not even its link's. One query over the
+/// tagged members, reading only the keys `card_embed` needs (`EMBED_DOC`) of those whose link
+/// names none, and none when no card has a tagged member.
 async fn member_embeds(pool: &PgPool, cards: &mut [&mut Card]) -> Result<(), ApiError> {
-    let ids: Vec<String> = cards
+    let tagged: Vec<String> = cards
+        .iter()
+        .flat_map(|c| c.also_on.iter())
+        .filter_map(|e| e.id.clone())
+        .collect();
+    if tagged.is_empty() {
+        return Ok(());
+    }
+    let unframed: Vec<String> = cards
         .iter()
         .flat_map(|c| c.also_on.iter())
         .filter(|e| e.embed.is_none())
         .filter_map(|e| e.id.clone())
         .collect();
-    if ids.is_empty() {
-        return Ok(());
-    }
-    let rows: Vec<(String, String, Value, Vec<String>, bool)> = sqlx::query_as(
-        "SELECT id, uri, doc, coalesce(type_path, '{}'), osm_id IS NOT NULL FROM resource \
-         WHERE id = ANY($1) AND status <> 'missing'",
-    )
-    .bind(&ids)
+    // Every tagged member's status (a gone one shows no frame, not even its link's), and the
+    // keys `card_embed` reads of those whose link names none.
+    let rows: Vec<MemberRow> = sqlx::query_as(&format!(
+        "SELECT id, uri, coalesce(status = 'missing' OR doc->>'status' = 'missing', false), \
+             CASE WHEN id = ANY($2) THEN {EMBED_DOC} END, coalesce(type_path, '{{}}'), \
+             osm_id IS NOT NULL FROM resource_document WHERE id = ANY($1)"
+    ))
+    .bind(&tagged)
+    .bind(&unframed)
     .fetch_all(pool)
     .await?;
-    let stored: BTreeMap<String, crate::embed::Embed> = rows
-        .into_iter()
-        .filter_map(|(id, uri, doc, type_path, osm)| {
-            let doc: ResourceMeta = serde_json::from_value(doc).ok()?;
-            let embed = card_embed(&uri, Some(&doc), osm)?;
-            Some((id, embed.bounded()?.settled(&type_path)))
-        })
-        .collect();
+    let mut gone = std::collections::BTreeSet::new();
+    let mut stored: BTreeMap<String, crate::embed::Embed> = BTreeMap::new();
+    for (id, uri, missing, doc, type_path, osm) in rows {
+        if missing {
+            gone.insert(id);
+            continue;
+        }
+        let Some(doc) = doc.and_then(|d| serde_json::from_value::<EmbedDoc>(d).ok()) else {
+            continue;
+        };
+        if let Some(embed) = card_embed(&uri, Some(&doc), osm)
+            .and_then(|e| e.bounded())
+            .map(|e| e.settled(&type_path))
+        {
+            stored.insert(id, embed);
+        }
+    }
     for entry in cards.iter_mut().flat_map(|c| c.also_on.iter_mut()) {
-        if entry.embed.is_none() {
-            if let Some(embed) = entry.id.as_ref().and_then(|id| stored.get(id)) {
-                entry.embed = Some(embed.clone());
-            }
+        let Some(id) = entry.id.as_ref() else {
+            continue;
+        };
+        if gone.contains(id) {
+            entry.embed = None;
+        } else if entry.embed.is_none() {
+            entry.embed = stored.get(id).cloned();
         }
     }
     Ok(())

@@ -186,10 +186,18 @@ async fn hub_keys_join_and_derived_links_reach_the_cards(pool: PgPool) {
     assert_eq!(card["group"]["size"], 2, "{card}");
     assert!(card["group"].get("members").is_none());
     let also: Vec<Value> = card["also_on"].as_array().unwrap().clone();
+    // Each entry carries its frame (`embed`, docs/api.md): the member's is its Deezer player.
+    let mut first = also[0].clone();
+    let embed = first.as_object_mut().unwrap().remove("embed");
     assert_eq!(
-        also[0],
+        first,
         json!({"id": b, "uri": deezer, "site": "Deezer"}),
         "the tagged member first: {card}"
+    );
+    assert_eq!(
+        embed.unwrap()["src"],
+        "https://widget.deezer.com/widget/dark/track/123",
+        "{card}"
     );
     let derived: Vec<(&str, &str, &str)> = also[1..]
         .iter()

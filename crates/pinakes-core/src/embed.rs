@@ -193,7 +193,8 @@ const POSTS: &[&str] = &["SocialMediaPosting", "DiscussionForumPosting", "Commen
 
 /// `value` as a frame's address: `https`, no user or password, no port, a host name with a dot
 /// that is no IP address, `localhost` or a private suffix (`.local`, `.localdomain`, `.internal`,
-/// `.lan`, `.home.arpa`), no credential anywhere in it, a link in its query included
+/// `.lan`, `.home.arpa`) and is under a public suffix (the Public Suffix List: not `router.corp`),
+/// no credential anywhere in it, a link in its query included
 /// (`capability::names_capability`), at most 2,048 bytes. `javascript:`,
 /// `data:` and every other scheme are refused.
 pub fn safe_src(value: &str) -> Option<String> {
@@ -223,6 +224,8 @@ pub fn safe_src(value: &str) -> Option<String> {
         .iter()
         .any(|s| host.ends_with(s))
         || host.parse::<std::net::IpAddr>().is_ok()
+        // A name under no public suffix (`router.corp`, `printer.home`) is a network's own.
+        || !psl::domain(host.as_bytes()).is_some_and(|d| d.suffix().is_known())
     {
         return None;
     }
@@ -858,13 +861,19 @@ pub fn from_oembed(v: &Value, base: &Url) -> Option<Embed> {
         .and_then(|h| pixels(Some(&Value::String(h.into()))))
         .or_else(|| pixels(v.get("height")));
     // A name Pinakes gives a service of its own (`KNOWN`) is that service's alone: an answer that
-    // claims it is named by its frame's host.
+    // claims it for a frame on another host is named by its frame's host.
+    let host = Url::parse(&src).ok()?.host_str()?.to_owned();
     let provider = v
         .get("provider_name")
         .and_then(Value::as_str)
         .and_then(slug)
-        .filter(|p| !KNOWN.contains(&p.as_str()))
-        .or_else(|| Url::parse(&src).ok()?.host_str().map(str::to_owned))?;
+        .filter(|p| {
+            KNOWN
+                .iter()
+                .find(|(name, _)| *name == p.as_str())
+                .is_none_or(|(_, hosts)| hosts.contains(&host.as_str()))
+        })
+        .unwrap_or(host);
     let mut embed = Embed::new(&provider, kind, src, &[]);
     embed.allow = frame.allow;
     match (width, height) {
@@ -886,20 +895,28 @@ pub fn from_oembed(v: &Value, base: &Url) -> Option<Embed> {
     quiet(embed).bounded()
 }
 /// The provider names of the services whose frames follow from their links (`link`, `mastodon`,
-/// `map`): never taken from what a page or an answer says.
-const KNOWN: &[&str] = &[
-    "youtube",
-    "vimeo",
-    "spotify",
-    "soundcloud",
-    "mixcloud",
-    "tidal",
-    "deezer",
-    "apple-music",
-    "apple-podcasts",
-    "x",
-    "mastodon",
-    "openstreetmap",
+/// `map`), each with the hosts of its own frames: an answer's name is taken only for a frame on
+/// one of them (SoundCloud's answer for a short link), never for another host. Any server can
+/// be a Mastodon one, so that name is never taken.
+const KNOWN: &[(&str, &[&str])] = &[
+    (
+        "youtube",
+        &["www.youtube.com", "youtube.com", "www.youtube-nocookie.com"],
+    ),
+    ("vimeo", &["player.vimeo.com"]),
+    ("spotify", &["open.spotify.com"]),
+    ("soundcloud", &["w.soundcloud.com"]),
+    (
+        "mixcloud",
+        &["www.mixcloud.com", "player-widget.mixcloud.com"],
+    ),
+    ("tidal", &["embed.tidal.com"]),
+    ("deezer", &["widget.deezer.com"]),
+    ("apple-music", &["embed.music.apple.com"]),
+    ("apple-podcasts", &["embed.podcasts.apple.com"]),
+    ("x", &["platform.twitter.com"]),
+    ("mastodon", &[]),
+    ("openstreetmap", &["www.openstreetmap.org"]),
 ];
 /// A frame address a page or an oEmbed answer gives (`raw`), resolved against `base` and safe
 /// ([`safe_src`]); never an empty or fragment-only one, which would name `base` itself.
@@ -929,25 +946,16 @@ fn quiet(mut embed: Embed) -> Embed {
         return embed;
     };
     let mut started = None;
-    let pairs: Vec<(String, String)> = url
-        .query_pairs()
-        .map(|(k, v)| {
-            let on = match v.to_ascii_lowercase().as_str() {
-                "1" => Some("0"),
-                "true" | "yes" => Some("false"),
-                _ => None,
-            };
-            match on {
-                Some(off) if AUTOPLAY_PARAMS.contains(&k.to_ascii_lowercase().as_str()) => {
-                    started.get_or_insert_with(|| format!("{k}={v}"));
-                    (k.into_owned(), off.to_owned())
-                }
-                _ => (k.into_owned(), v.into_owned()),
-            }
-        })
-        .collect();
-    if started.is_some() {
-        url.query_pairs_mut().clear().extend_pairs(pairs);
+    let query = url.query().and_then(|q| quiet_pairs(q, &mut started));
+    // A player that reads its fragment is turned off there too; Play sets only the query.
+    let fragment = url.fragment().and_then(|f| quiet_pairs(f, &mut None));
+    if query.is_some() || fragment.is_some() {
+        if let Some(query) = query {
+            url.set_query(Some(&query));
+        }
+        if let Some(fragment) = fragment {
+            url.set_fragment(Some(&fragment));
+        }
         embed.src = url.into();
     }
     embed.autoplay_param = started;
@@ -955,6 +963,51 @@ fn quiet(mut embed: Embed) -> Embed {
         embed.allow.retain(|f| f != "autoplay");
     }
     embed
+}
+/// `part` (a query or a fragment) with every autoplay parameter (`AUTOPLAY_PARAMS`, any case)
+/// that is not already off (`0`, `false`, `no`, `off`) turned off, a bare flag included; pairs
+/// split on `&` or `;`, and every other pair left as written (a signed query stays valid). The
+/// first one turned off is kept in `started` as `name=value` (`name=true` for a bare flag).
+/// `None` when nothing was on.
+fn quiet_pairs(part: &str, started: &mut Option<String>) -> Option<String> {
+    let mut out = String::with_capacity(part.len() + 8);
+    let mut changed = false;
+    for piece in part.split_inclusive(['&', ';']) {
+        let (pair, end) = match piece.char_indices().last() {
+            Some((i, '&' | ';')) => piece.split_at(i),
+            _ => (piece, ""),
+        };
+        let (raw_key, raw_value) = pair.split_once('=').unwrap_or((pair, ""));
+        let decode = |s: &str| {
+            url::form_urlencoded::parse(format!("x={s}").as_bytes())
+                .next()
+                .map(|(_, v)| v.into_owned())
+                .unwrap_or_default()
+        };
+        let (key, value) = (decode(raw_key), decode(raw_value).to_ascii_lowercase());
+        let on = AUTOPLAY_PARAMS.contains(&key.to_ascii_lowercase().as_str())
+            && !matches!(value.as_str(), "0" | "false" | "no" | "off");
+        if !on {
+            out.push_str(piece);
+            continue;
+        }
+        let off = match value.as_str() {
+            "1" => "0",
+            "on" => "off",
+            "true" | "yes" | "" => "false",
+            _ => "0",
+        };
+        started.get_or_insert_with(|| {
+            let shown = decode(raw_value);
+            format!("{key}={}", if shown.is_empty() { "true" } else { &shown })
+        });
+        out.push_str(raw_key);
+        out.push('=');
+        out.push_str(off);
+        out.push_str(end);
+        changed = true;
+    }
+    changed.then_some(out)
 }
 struct Frame {
     src: String,
@@ -1072,22 +1125,31 @@ impl Iterator for StartTags<'_> {
                     value = decode_refs(raw);
                     self.rest = rest;
                 }
-                if !attrs.iter().any(|(k, _): &(String, String)| *k == key) {
+                // The first `ATTRS` of a tag count: a duplicate check over more would cost a
+                // hostile answer's tag a quadratic scan.
+                if attrs.len() < ATTRS && !attrs.iter().any(|(k, _): &(String, String)| *k == key) {
                     attrs.push((key, value));
                 }
             }
         }
     }
 }
+/// The attributes of one start tag `StartTags` keeps.
+const ATTRS: usize = 64;
 /// An attribute value with its character references decoded: the named ones an address carries
 /// (`&amp;`, `&quot;`, `&apos;`, `&lt;`, `&gt;`) and numeric ones; any other is left as written.
+/// A reference's `;` is looked for in its next 10 bytes only.
 fn decode_refs(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut rest = raw;
     while let Some(at) = rest.find('&') {
         out.push_str(&rest[..at]);
         rest = &rest[at..];
-        let Some(end) = rest[1..].find(';').map(|e| e + 1).filter(|e| *e <= 10) else {
+        let Some(end) = rest.as_bytes()[1..rest.len().min(11)]
+            .iter()
+            .position(|b| *b == b';')
+            .map(|e| e + 1)
+        else {
             out.push('&');
             rest = &rest[1..];
             continue;
@@ -1610,6 +1672,17 @@ mod tests {
             let _ = first_frame(broken);
         }
         assert_eq!(decode_refs("a&amp;b&#38;c&#x26;d&nope;&"), "a&b&c&d&nope;&");
+        assert_eq!(decode_refs("&aaaaaaaaaaaa;&amp;"), "&aaaaaaaaaaaa;&");
+        // Attributes past the first `ATTRS` of a tag are not read.
+        let many: String = (0..ATTRS).map(|i| format!(" a{i}=1")).collect();
+        assert!(first_frame(&format!("<iframe{many} src=\"https://a.example/1\">")).is_none());
+        let few: String = (0..ATTRS - 1).map(|i| format!(" a{i}=1")).collect();
+        assert_eq!(
+            first_frame(&format!("<iframe{few} src=\"https://a.example/1\">"))
+                .unwrap()
+                .src,
+            "https://a.example/1"
+        );
     }
 
     /// A stored frame never starts by itself: an autoplay its address turns on is turned off and
@@ -1634,8 +1707,47 @@ mod tests {
         );
         assert_eq!(embed.autoplay_param.as_deref(), Some("autoplay=true"));
         assert!(embed.allow.contains(&"autoplay".into()));
+        // Only that pair is rewritten: the rest of the query stays as written.
+        let signed = json!({"type": "video", "provider_name": "Clips",
+            "html": "<iframe src=\"https://clips.example.com/v?t=a%20b+c&p=/x/y&Autoplay=1&r=AB%2FC\"></iframe>"});
+        let embed = from_oembed(&signed, &base).unwrap();
+        assert_eq!(
+            embed.src,
+            "https://clips.example.com/v?t=a%20b+c&p=/x/y&Autoplay=0&r=AB%2FC"
+        );
+        assert_eq!(embed.autoplay_param.as_deref(), Some("Autoplay=1"));
+        // Every form is turned off: other values, a bare flag, `;` pairs, the fragment.
+        for (raw, quiet, param) in [
+            ("v?autoplay=on", "v?autoplay=off", Some("autoplay=on")),
+            (
+                "v?a=1;autostart",
+                "v?a=1;autostart=false",
+                Some("autostart=true"),
+            ),
+            (
+                "v?auto_play=muted&x=1",
+                "v?auto_play=0&x=1",
+                Some("auto_play=muted"),
+            ),
+            (
+                "v?autoplay=0#autoplay=true",
+                "v?autoplay=0#autoplay=false",
+                None,
+            ),
+            ("v?autoplay=false", "v?autoplay=false", None),
+        ] {
+            let v = json!({"type": "video", "provider_name": "Clips",
+                "html": format!("<iframe src=\"https://clips.example.com/{raw}\"></iframe>")});
+            let embed = from_oembed(&v, &base).unwrap();
+            assert_eq!(
+                embed.src,
+                format!("https://clips.example.com/{quiet}"),
+                "{raw}"
+            );
+            assert_eq!(embed.autoplay_param.as_deref(), param, "{raw}");
+        }
         let deck = json!({"type": "video", "provider_name": "Clips",
-            "html": "<iframe src=\"https://clips.example/embed/1\"></iframe>"});
+            "html": "<iframe src=\"https://clips.example.com/embed/1\"></iframe>"});
         let embed = from_oembed(&deck, &base).unwrap();
         assert_eq!(embed.autoplay_param, None);
         assert!(
@@ -1648,16 +1760,26 @@ mod tests {
     /// An answer cannot take a service's name, and an empty frame address is no frame.
     #[test]
     fn an_answer_names_no_service_of_pinakes_and_no_empty_frame() {
-        let base = Url::parse("https://pages.example/oembed").unwrap();
+        let base = Url::parse("https://pages.example.com/oembed").unwrap();
         let spoof = json!({"type": "rich", "provider_name": "Spotify",
-            "html": "<iframe src=\"https://player.pages.example/1\" height=\"152\"></iframe>"});
+            "html": "<iframe src=\"https://player.pages.example.com/1\" height=\"152\"></iframe>"});
         assert_eq!(
             from_oembed(&spoof, &base).unwrap().provider,
-            "player.pages.example"
+            "player.pages.example.com"
+        );
+        // The service's own answer, for a frame on its own host, keeps its name.
+        let own = json!({"type": "rich", "provider_name": "SoundCloud",
+            "html": "<iframe src=\"https://w.soundcloud.com/player/?url=https%3A%2F%2Fapi.soundcloud.com%2Ftracks%2F1\" height=\"400\"></iframe>"});
+        assert_eq!(from_oembed(&own, &base).unwrap().provider, "soundcloud");
+        let toot = json!({"type": "rich", "provider_name": "Mastodon",
+            "html": "<iframe src=\"https://social.example.com/@a/1/embed\"></iframe>"});
+        assert_eq!(
+            from_oembed(&toot, &base).unwrap().provider,
+            "social.example.com"
         );
         for raw in ["", " ", "#", "#x", "?url=1&format=json"] {
             let v = json!({"type": "rich", "html": format!("<iframe src=\"{raw}\"></iframe>")});
-            let page = Url::parse("https://pages.example/oembed?url=1&format=json").unwrap();
+            let page = Url::parse("https://pages.example.com/oembed?url=1&format=json").unwrap();
             assert_eq!(from_oembed(&v, &page), None, "{raw:?}");
         }
         let meta: HashMap<String, String> = [("twitter:player".to_owned(), String::new())].into();

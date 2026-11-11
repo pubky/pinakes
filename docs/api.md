@@ -186,7 +186,7 @@ needs no list of services to build one:
 | `height` | CSS pixels, for a frame of fixed height (a player strip, a post, a document); `null` when it scales with its width or the provider gives none |
 | `aspect` | Width divided by height, for a frame that scales with its width (a video, a map, a slide deck; 16:9 when the provider names no size); `null` otherwise |
 | `allow` | The Permissions Policy features for the frame's `allow` attribute (join them with `; `), only from `accelerometer`, `autoplay`, `clipboard-write`, `encrypted-media`, `fullscreen`, `gyroscope`, `picture-in-picture`, `web-share` |
-| `autoplay_param` | A query parameter (`autoplay=1`, `auto_play=true`) that makes the player start once loaded: add it to `src` only after the viewer pressed play. `null` when the player has none; a player may still take its own start message (Spotify's, TIDAL's) |
+| `autoplay_param` | A query parameter (`autoplay=1`, `auto_play=true`) that makes the player start once loaded: set it in `src` (replacing that parameter's value there, which is off) only after the viewer pressed play. `null` when the player has none; a player may still take its own start message (Spotify's, TIDAL's) |
 
 Where it comes from, the first that has one:
 1. **The link itself**, when the card is served, so every stored card has it: a YouTube video,

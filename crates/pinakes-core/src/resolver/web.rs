@@ -3369,20 +3369,24 @@ mod tests {
             .doc
         };
         let head = r#"<head><title>Clip</title><meta name="twitter:player" content="/embed/clip-1"><meta name="twitter:player:width" content="640"><meta name="twitter:player:height" content="360"></head><body><meta name="twitter:player" content="https://attacker.example/x"></body>"#;
-        let mut doc = page("https://video.example/clip-1", head);
+        let mut doc = page("https://video.example.com/clip-1", head);
         let embed = doc.embed.clone().unwrap();
-        assert_eq!(embed.src, "https://video.example/embed/clip-1");
+        assert_eq!(embed.src, "https://video.example.com/embed/clip-1");
         assert_eq!(embed.aspect, Some(1.7778));
         apply_oembed(
             &mut doc,
             &serde_json::json!({"type": "rich", "provider_name": "Video Example",
-                "html": "<div><iframe src=\"https://player.video.example/1\" height=\"300\"></iframe></div><script>bad</script>"}),
-            &Url::parse("https://video.example/oembed").unwrap(),
+                "html": "<div><iframe src=\"https://player.video.example.com/1\" height=\"300\"></iframe></div><script>bad</script>"}),
+            &Url::parse("https://video.example.com/oembed").unwrap(),
         );
         let embed = doc.embed.clone().unwrap();
         assert_eq!(
             (embed.provider.as_str(), embed.src.as_str(), embed.height),
-            ("video-example", "https://player.video.example/1", Some(300))
+            (
+                "video-example",
+                "https://player.video.example.com/1",
+                Some(300)
+            )
         );
         assert!(!serde_json::to_string(&doc).unwrap().contains("<script>"));
         let yt = page("https://www.youtube.com/watch?v=dQw4w9WgXcQ", head);

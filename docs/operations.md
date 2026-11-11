@@ -571,8 +571,8 @@ knows, X and Mastodon posts and OpenStreetMap cards, added when the card is serv
 from the oEmbed answer's `<iframe>` (its address only) or the page head's `twitter:player` /
 HTML `og:video`, stored with the card: a registry provider is then also asked when its page is
 complete but names no player of its own, for its frame alone (one oEmbed request more per read,
-cached for the card's lifetime, counted as `decision="frame"`; a provider host that answered
-without a frame is not asked so again for a day). A stored frame never starts by itself: an
+cached for the card's lifetime, counted as `decision="frame"`; an endpoint that refused (400,
+401, 403) or answered a player without a frame is not asked so again for a day). A stored frame never starts by itself: an
 autoplay its address turns on is turned off. Stored cards get those frames at their next read;
 `pinakesd reextract media` reads the registry providers' cards again at once.
 `web.discover_feeds` (web pages) and `cards.media.discover_feeds` (media pages: podcast feed

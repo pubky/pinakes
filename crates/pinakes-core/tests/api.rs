@@ -2569,7 +2569,7 @@ async fn a_card_carries_its_embed(pool: PgPool) {
     doc.name = Some("Episode One".into());
     doc.embed = pinakes_core::embed::from_oembed(
         &json!({"type": "rich", "provider_name": "Podcast Host", "height": 150,
-            "html": "<iframe src=\"https://player.podcast.example/e/1\" width=\"100%\" height=\"150\" allow=\"autoplay\"></iframe>"}),
+            "html": "<iframe src=\"https://player.podcast.example.com/e/1\" width=\"100%\" height=\"150\" allow=\"autoplay\"></iframe>"}),
         &url::Url::parse("https://podcast.example/oembed").unwrap(),
     );
     store::save_document(&pool, &id, 0, &doc).await.unwrap();
@@ -2603,11 +2603,34 @@ async fn a_card_carries_its_embed(pool: PgPool) {
             .unwrap();
         posts.push(post_id);
     }
+    // A video found gone whose later read failed: its document stays `missing`, its row says
+    // `error`, and its own link (a referenced one) names a player. No frame comes back.
+    let failed = "https://www.youtube.com/watch?v=9bZkp7q19f0";
+    let failed_id = store::ensure_resource(&pool, failed).await.unwrap();
+    let mut gone_doc = ResourceMeta::new(failed, "jsonld", 86400);
+    gone_doc.status = pinakes_core::model::Status::Missing;
+    for _ in 0..2 {
+        gone_doc.fetched_at += 1000;
+        store::save_document(&pool, &failed_id, 0, &gone_doc)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','videos','/pub/app/tags/gone',now())")
+        .bind(&failed_id)
+        .bind(author(1))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource SET status='error' WHERE id=$1")
+        .bind(&failed_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let embed = json!({
         "provider": "podcast-host",
         "kind": "audio",
-        "src": "https://player.podcast.example/e/1",
+        "src": "https://player.podcast.example.com/e/1",
         "height": 150,
         "aspect": null,
         "allow": [],
@@ -2620,7 +2643,7 @@ async fn a_card_carries_its_embed(pool: PgPool) {
         &app,
         "POST",
         "/v1/resources/lookup",
-        Some(json!({"resource_ids": [id, gone_id, posts[0], posts[1]]})),
+        Some(json!({"resource_ids": [id, gone_id, posts[0], posts[1], failed_id]})),
     )
     .await;
     assert_eq!(code, 200, "{cards}");
@@ -2636,6 +2659,9 @@ async fn a_card_carries_its_embed(pool: PgPool) {
         (&json!("mastodon"), &json!("post"))
     );
     assert_eq!(cards[3]["embed"], Value::Null, "{cards}");
+    assert_eq!(cards[4]["status"], "error", "{cards}");
+    assert_eq!(cards[4]["refs"], json!([failed]), "{cards}");
+    assert_eq!(cards[4]["embed"], Value::Null, "{cards}");
 }
 
 /// The stored document, with its internal fields, is on the admin listener only; the public
