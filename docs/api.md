@@ -187,7 +187,7 @@ needs no list of services to build one:
 | `height` | CSS pixels, for a frame of fixed height (a player strip, a post, a document); `null` when it scales with its width or the provider gives none |
 | `aspect` | Width divided by height, for a frame that scales with its width (a video, a map, a slide deck; 16:9 when the provider names no size); `null` otherwise |
 | `allow` | The Permissions Policy features for the frame's `allow` attribute (join them with `; `), only from `accelerometer`, `autoplay`, `clipboard-write`, `encrypted-media`, `fullscreen`, `gyroscope`, `picture-in-picture`, `web-share` |
-| `autoplay_param` | A query parameter (`autoplay=1`, `auto_play=true`) that makes the player start once loaded: set it in `src` (replacing that parameter's value there, which is off) only after the viewer pressed play. `null` when the player has none; a player may still take its own start message (Spotify's, TIDAL's) |
+| `autoplay_param` | A query parameter (`autoplay=1`, `auto_play=true`) that makes the player start once loaded: set it in `src` (add it, or replace that parameter's value there, which is off) only after the viewer pressed play. `null` when the player has none; a player may still take its own start message (Spotify's, TIDAL's) |
 
 Where it comes from, the first that has one:
 1. **The link itself**, when the card is served, so every stored card has it: a YouTube video,
@@ -217,7 +217,8 @@ stored on a card of an audio type (a recording, an album, a podcast or episode) 
 height is an `audio` player; one on a social post is a `post`.
 
 Only a safe address is an embed: `https` on a public host name (no IP address, `localhost`, single
-label or private suffix such as `.local` or `.internal`), no user, password or port, no credential
+label, private suffix such as `.local` or `.internal`, or name on a well-known service that
+resolves names to private addresses such as `nip.io` or `localtest.me`), no user, password or port, no credential
 in the query or fragment, at most 2,048 bytes; `javascript:`, `data:` and any other scheme never.
 Frames from 2. and 3. come with a card's next read (`pinakesd reextract media` reads the oEmbed
 providers' cards again at once).
@@ -1644,8 +1645,8 @@ counts by status.
   expected fields and canary. BTC Map websites and NIP-52 calendar members are queued as their
   own resources (`event.adapters.derive_resources`). A Wikidata item's card (the `wikidata`
   adapter, and a Wikipedia page about an event or a place that Wikipedia serves no summary of,
-  read from the page's item) takes the item's label and description, English when it has one
-  (CC0, no credit), and shows its image (`P18`) only when the file's own page on Commons gives a
+  read from the page's item) takes the item's label and description, English when it has one,
+  else the item's language-independent (`mul`) value, else any language (CC0, no credit), and shows its image (`P18`) only when the file's own page on Commons gives a
   licence on the list (CC0, the public domain, CC BY or CC BY-SA 1.0 to 4.0, the GNU GPL, LGPL
   or AGPL, Commons' `Attribution`) and, under every licence but CC0 and the public domain, its
   author: Commons' thumbnail, asked `limits.music_image_width` (640) pixels wide,

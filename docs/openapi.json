@@ -821,7 +821,7 @@
             ]
           },
           "autoplay_param": {
-            "description": "A query parameter (`autoplay=1`, `auto_play=true`) that makes the player start once\nloaded: set it in `src` (replacing that parameter's value there, which is off) only when\nthe viewer pressed play. Null when the player has none.",
+            "description": "A query parameter (`autoplay=1`, `auto_play=true`) that makes the player start once\nloaded: set it in `src` (add it, or replace that parameter's value there, which is off)\nonly when the viewer pressed play. Null when the player has none.",
             "type": [
               "string",
               "null"

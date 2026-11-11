@@ -1027,9 +1027,12 @@ pub fn wiki_value(uri: &str, v: &Value) -> Result<ResourceMeta> {
         .and_then(|m| m.values().next())
         .context("missing Wikidata entity")?;
     let mut doc = ResourceMeta::new(uri, "wikidata", 86400);
+    // English, else the item's language-independent (`mul`) value, which Wikidata holds in
+    // place of an English one for many names (The Matrix, Q83495), else any language.
     let label = |key: &str| {
         entity[key]["en"]["value"]
             .as_str()
+            .or_else(|| entity[key]["mul"]["value"].as_str())
             .or_else(|| {
                 entity[key]
                     .as_object()?
@@ -1249,6 +1252,28 @@ mod tests {
     }
     fn id(q: &str) -> Value {
         json!([{"rank":"normal","mainsnak":{"datavalue":{"value":{"id":q}}}}])
+    }
+    #[test]
+    fn a_name_without_english_takes_the_mul_label_before_other_languages() {
+        // The Matrix (Q83495): no `en` label, `mul` "The Matrix", and 76 others before it.
+        let matrix = json!({"entities": {"Q83495": {"id": "Q83495",
+            "labels": {"am": {"language": "am", "value": "ማትሪክስ"}, "zh": {"language": "zh", "value": "黑客帝国"}, "mul": {"language": "mul", "value": "The Matrix"}},
+            "descriptions": {"de": {"language": "de", "value": "Film"}, "mul": {"language": "mul", "value": "1999 film"}},
+            "claims": {"P31": id("Q11424")}}}});
+        let doc = wiki_value("https://www.wikidata.org/wiki/Q83495", &matrix).unwrap();
+        assert_eq!(doc.name.as_deref(), Some("The Matrix"));
+        assert_eq!(doc.description.as_deref(), Some("1999 film"));
+        // English still comes first, and any language is the last resort.
+        let mut both = matrix.clone();
+        both["entities"]["Q83495"]["labels"]["en"] =
+            json!({"language": "en", "value": "Matrix (film)"});
+        let doc = wiki_value("https://www.wikidata.org/wiki/Q83495", &both).unwrap();
+        assert_eq!(doc.name.as_deref(), Some("Matrix (film)"));
+        let mut neither = matrix;
+        neither["entities"]["Q83495"]["labels"] =
+            json!({"zh": {"language": "zh", "value": "黑客帝国"}});
+        let doc = wiki_value("https://www.wikidata.org/wiki/Q83495", &neither).unwrap();
+        assert_eq!(doc.name.as_deref(), Some("黑客帝国"));
     }
     #[test]
     fn a_creative_work_with_a_run_is_no_event() {

@@ -58,8 +58,8 @@ pub struct Embed {
     /// `fullscreen`, `gyroscope`, `picture-in-picture` and `web-share`.
     pub allow: Vec<String>,
     /// A query parameter (`autoplay=1`, `auto_play=true`) that makes the player start once
-    /// loaded: set it in `src` (replacing that parameter's value there, which is off) only when
-    /// the viewer pressed play. Null when the player has none.
+    /// loaded: set it in `src` (add it, or replace that parameter's value there, which is off)
+    /// only when the viewer pressed play. Null when the player has none.
     pub autoplay_param: Option<String>,
 }
 
@@ -192,9 +192,26 @@ const AUDIO: &[&str] = &[
 /// The card types that are someone's post.
 const POSTS: &[&str] = &["SocialMediaPosting", "DiscussionForumPosting", "Comment"];
 
+/// Public names whose subdomains resolve to whatever address they spell (`10.0.0.1.nip.io`) or to
+/// the viewer's own machine (`localtest.me`): a frame there may reach the viewer's network.
+/// A name-only check cannot catch every such name; these are the well-known services.
+const LOOPBACK_DNS: &[&str] = &[
+    "nip.io",
+    "sslip.io",
+    "xip.io",
+    "localtest.me",
+    "lvh.me",
+    "vcap.me",
+    "lacolhost.com",
+    "localhost.direct",
+    "traefik.me",
+    "local.gd",
+];
 /// `value` as a frame's address: `https`, no user or password, no port, a host name with a dot
 /// that is no IP address, `localhost` or a private suffix (`.local`, `.localdomain`, `.internal`,
-/// `.lan`, `.home.arpa`) and is under a public suffix (the Public Suffix List: not `router.corp`),
+/// `.lan`, `.home.arpa`) or a name on a well-known service that resolves names to private
+/// addresses (`LOOPBACK_DNS`: `nip.io`, `localtest.me`, …) and is under a public suffix (the
+/// Public Suffix List: not `router.corp`),
 /// no credential anywhere in it, a link in its query included
 /// (`capability::names_capability`), at most 2,048 bytes. `javascript:`,
 /// `data:` and every other scheme are refused.
@@ -224,6 +241,9 @@ pub fn safe_src(value: &str) -> Option<String> {
         ]
         .iter()
         .any(|s| host.ends_with(s))
+        || LOOPBACK_DNS
+            .iter()
+            .any(|d| host == *d || host.strip_suffix(d).is_some_and(|h| h.ends_with('.')))
         || host.parse::<std::net::IpAddr>().is_ok()
         // A name under no public suffix (`router.corp`, `printer.home`) is a network's own.
         || !psl::domain(host.as_bytes()).is_some_and(|d| d.suffix().is_known())
@@ -952,9 +972,7 @@ fn quiet(mut embed: Embed) -> Embed {
         .and_then(|q| quiet_pairs(q, QUERY_SEPARATORS, &mut started));
     // A player that reads its fragment (a hash route: `#/v?autoplay=1`) is turned off there too;
     // Play sets only the query.
-    let fragment = url
-        .fragment()
-        .and_then(|f| quiet_pairs(f, FRAGMENT_SEPARATORS, &mut None));
+    let fragment = url.fragment().and_then(quiet_fragment);
     if query.is_some() || fragment.is_some() {
         if let Some(query) = query {
             url.set_query(Some(&query));
@@ -970,14 +988,24 @@ fn quiet(mut embed: Embed) -> Embed {
     }
     embed
 }
-/// Where a query's pairs end.
+/// Where a query's (and a fragment's) pairs end.
 const QUERY_SEPARATORS: &[char] = &['&', ';'];
-/// Where a fragment's pairs end: a hash route's path and query marks too (`#/v?autoplay=1`,
-/// `#!/autoplay=1`).
-const FRAGMENT_SEPARATORS: &[char] = &['&', ';', '?', '/', '!', '#'];
-/// `part` (a query or a fragment) with every autoplay parameter (`AUTOPLAY_PARAMS`, any case)
-/// that is not already off (`0`, `false`, `no`, `off`) turned off, a bare flag included; pairs
-/// split on `separators`, and every other pair left as written (a signed query stays valid).
+/// A fragment with its autoplay parameters turned off (`quiet_pairs`). A hash route's parameters
+/// follow its first `?` (`#/player?a=b&autoplay=1`); without one, the whole fragment is pairs
+/// (`#autoplay=1`), a route's leading `/` and `!` not part of the first key (`#!/autoplay=1`).
+/// Only parameter boundaries split it: an address in a value
+/// (`#/player?next=https://cdn.example/autoplay=1`) is left as written.
+fn quiet_fragment(fragment: &str) -> Option<String> {
+    let (route, pairs) = match fragment.find('?') {
+        Some(i) => fragment.split_at(i + 1),
+        None => ("", fragment),
+    };
+    quiet_pairs(pairs, QUERY_SEPARATORS, &mut None).map(|pairs| format!("{route}{pairs}"))
+}
+/// `part` (a query or a fragment's pairs) with every autoplay parameter (`AUTOPLAY_PARAMS`, any
+/// case) that is not already off (`0`, `false`, `no`, `off`) turned off, a bare flag included;
+/// pairs split on `separators`, a key read without leading `/` and `!` (a hash route's), and
+/// every other pair left as written (a signed query stays valid).
 /// The first one turned off is kept in `started` as `name=value` (`name=true` for a bare flag).
 /// `None` when nothing was on.
 fn quiet_pairs(part: &str, separators: &[char], started: &mut Option<String>) -> Option<String> {
@@ -995,7 +1023,8 @@ fn quiet_pairs(part: &str, separators: &[char], started: &mut Option<String>) ->
                 .map(|(_, v)| v.into_owned())
                 .unwrap_or_default()
         };
-        let (key, value) = (decode(raw_key), decode(raw_value).to_ascii_lowercase());
+        let key = decode(raw_key).trim_start_matches(['/', '!']).to_owned();
+        let value = decode(raw_value).to_ascii_lowercase();
         let on = AUTOPLAY_PARAMS.contains(&key.to_ascii_lowercase().as_str())
             && !matches!(value.as_str(), "0" | "false" | "no" | "off");
         if !on {
@@ -1448,9 +1477,19 @@ mod tests {
             "https://player.example.com/embed?url=https%3A%2F%2Fsite.example%2Ffeed%3Ftoken%3DSECRET",
             "https://localhost.localdomain/embed",
             "https://box.localdomain./embed",
+            "https://10.0.0.1.nip.io/embed",
+            "https://192-168-1-1.sslip.io/embed",
+            "https://NIP.IO./embed",
+            "https://app.localtest.me/embed",
+            "https://lvh.me/embed",
         ] {
             assert_eq!(safe_src(bad), None, "{bad}");
         }
+        // Only those services' names: a name that merely ends in the same letters is public.
+        assert_eq!(
+            safe_src("https://snip.io/embed"),
+            Some("https://snip.io/embed".into())
+        );
         assert_eq!(
             safe_src("https://Player.Example.com/embed/1"),
             Some("https://player.example.com/embed/1".into())
@@ -1757,7 +1796,20 @@ mod tests {
                 None,
             ),
             ("v#!/autoplay=yes", "v#!/autoplay=false", None),
+            ("v#/autoplay=1", "v#/autoplay=0", None),
             ("v#t=1/2", "v#t=1/2", None),
+            // An address in a value is not split: its own parameters are left as written.
+            (
+                "v#/player?next=https://cdn.example/autoplay=1",
+                "v#/player?next=https://cdn.example/autoplay=1",
+                None,
+            ),
+            (
+                "v#/player?next=https://cdn.example/x?autoplay=1&autoplay=1",
+                "v#/player?next=https://cdn.example/x?autoplay=1&autoplay=0",
+                None,
+            ),
+            ("v#/player/autoplay=1", "v#/player/autoplay=1", None),
         ] {
             let v = json!({"type": "video", "provider_name": "Clips",
                 "html": format!("<iframe src=\"https://clips.example.com/{raw}\"></iframe>")});

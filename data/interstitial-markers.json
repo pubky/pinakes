@@ -15,6 +15,21 @@
     "press & hold",
     "checking your browser"
   ],
+  "challenge_text": [
+    "verifying your browser",
+    "verifying you are human",
+    "making sure you're not a bot",
+    "making sure you’re not a bot",
+    "pardon our interruption",
+    "vercel security checkpoint"
+  ],
+  "challenge_signatures": [
+    "_cf_chl_opt",
+    "/.within.website/",
+    "anubis_challenge",
+    "/.well-known/vercel/security/",
+    "/__meb_verify"
+  ],
   "placeholder_titles": {
     "youtube.com": ["- YouTube", "YouTube"],
     "youtu.be": ["- YouTube", "YouTube"]

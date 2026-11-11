@@ -25,6 +25,15 @@ pub enum Page {
 #[serde(deny_unknown_fields)]
 struct Walls {
     text: Vec<String>,
+    /// Challenge vendors' wording that a real work could also carry as its name ("Pardon Our
+    /// Interruption"): evidence in the title or first heading on a challenge status. On a short
+    /// page it counts only with a sign that the page runs a challenge (`challenge_signatures`,
+    /// or a `noscript` asking for JavaScript on a page without links) and describes no object
+    /// (no `og:title`, `twitter:title`, JSON-LD or microformat name).
+    challenge_text: Vec<String>,
+    /// Lower-case strings in the page source that only a challenge page carries: the vendors'
+    /// challenge script paths and ids, never a script a vendor also adds to ordinary pages.
+    challenge_signatures: Vec<String>,
     /// Whole page titles that name only the site, never an object, by the site's domain: the
     /// page a service shows in place of the object (YouTube's regional or consent page is titled
     /// "- YouTube"). A title counts only on its domain and the domain's subdomains.
@@ -41,6 +50,12 @@ impl Walls {
     fn marked(&self, text: &str) -> bool {
         let text = text.to_lowercase();
         self.text
+            .iter()
+            .any(|marker| text.contains(marker.as_str()))
+    }
+    fn challenge_marked(&self, text: &str) -> bool {
+        let text = text.to_lowercase();
+        self.challenge_text
             .iter()
             .any(|marker| text.contains(marker.as_str()))
     }
@@ -180,8 +195,53 @@ pub fn inspect(requested: &Url, f: &Fetched) -> anyhow::Result<Page> {
         return Ok(Page::Blocked);
     }
     let title_marked = walls.marked(&title);
+    let vendor_marked =
+        walls.challenge_marked(&title) || (heading.len() < 200 && walls.challenge_marked(&heading));
+    // What the page reader names a card from: `og:title` or `twitter:title` (by `property` or
+    // `name`, any case), JSON-LD, or a microformat name.
+    let describes_object = || {
+        html.select(&select("meta")).any(|el| {
+            let v = el.value();
+            v.attr("property")
+                .or_else(|| v.attr("name"))
+                .is_some_and(|k| {
+                    k.eq_ignore_ascii_case("og:title") || k.eq_ignore_ascii_case("twitter:title")
+                })
+                && v.attr("content").is_some_and(|c| !c.trim().is_empty())
+        }) || html.select(&select("script[type]")).any(|el| {
+            el.value()
+                .attr("type")
+                .is_some_and(|t| t.trim().eq_ignore_ascii_case("application/ld+json"))
+        }) || html
+            .select(&select(
+                ".h-entry .p-name, .h-card .p-name, .h-event .p-name",
+            ))
+            .next()
+            .is_some()
+    };
+    // Positive signs of a challenge: a vendor's challenge script in the source, or a page whose
+    // only other content asks for JavaScript (MusicBrainz' proof-of-work gate) and links nowhere.
+    let runs_challenge = || {
+        let source = text.to_lowercase();
+        walls
+            .challenge_signatures
+            .iter()
+            .any(|sig| source.contains(sig.as_str()))
+            || (html.select(&select("noscript")).any(|n| {
+                // The parser keeps a noscript's body as raw text (markup included).
+                n.text()
+                    .collect::<String>()
+                    .to_lowercase()
+                    .contains("javascript")
+            }) && html.select(&select("body a[href]")).next().is_none())
+    };
     if ((challenge || short) && (title_marked || (heading.len() < 200 && walls.marked(&heading))))
         || (short && walls.marked(&visible))
+        || (challenge && vendor_marked)
+        || (short
+            && (vendor_marked || walls.challenge_marked(&visible))
+            && runs_challenge()
+            && !describes_object())
         || ((challenge || short || title_marked)
             && walls
                 .captcha_selectors
@@ -253,6 +313,8 @@ mod tests {
         let w = &*WALLS;
         for list in [
             &w.text,
+            &w.challenge_text,
+            &w.challenge_signatures,
             &w.captcha_selectors,
             &w.wall_host_prefixes,
             &w.wall_paths,
@@ -263,6 +325,8 @@ mod tests {
         for v in w
             .text
             .iter()
+            .chain(&w.challenge_text)
+            .chain(&w.challenge_signatures)
             .chain(&w.wall_host_prefixes)
             .chain(&w.wall_paths)
         {
@@ -311,6 +375,87 @@ mod tests {
             Page::Content,
             "an API's empty 202"
         );
+    }
+    #[test]
+    fn verification_pages_are_walls_never_names() {
+        let url =
+            Url::parse("https://musicbrainz.org/recording/833f00e1-781f-4edd-90e4-e52712618862")
+                .unwrap();
+        let fetched = |status: u16, body: &str| Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            url: url.clone(),
+            body: body.as_bytes().to_vec(),
+            content_type: "text/html; charset=utf-8".into(),
+            status,
+            location: None,
+            retry_after_secs: 60,
+            validators: Default::default(),
+        };
+        // MusicBrainz' proof-of-work gate (2026-11-10), answered with 200 to a plain client.
+        let musicbrainz = "<!DOCTYPE html><html><head><meta charset=\"utf-8\">\n<title>Verifying your browser</title>\n<style>body{display:flex}</style>\n</head><body><div class=\"box\"><div class=\"spinner\"></div>\n<p>Verifying your browser, please wait…</p>\n<noscript><p><b>JavaScript is required to access this page.</b></p></noscript>\n</div><script>\n(async()=>{const f=document.createElement(\"form\");f.method=\"POST\";f.action=\"/__meb_verify\";})()\n</script></body></html>";
+        assert_eq!(
+            inspect(&url, &fetched(200, musicbrainz)).unwrap(),
+            Page::Blocked
+        );
+        // Anubis, Cloudflare's newer wording and Vercel, each with its challenge script: by title
+        // or by heading.
+        for page in [
+            "<html><head><title>Making sure you&#39;re not a bot!</title><script id=\"anubis_challenge\" type=\"application/json\">{}</script></head><body><h1>Making sure you&#39;re not a bot!</h1><p>Loading...</p><p>Protected by <a href=\"https://github.com/TecharoHQ/anubis\">Anubis</a></p><script src=\"/.within.website/x/cmd/anubis/static/js/main.mjs\"></script></body></html>",
+            "<html><head><title>Making sure you’re not a bot!</title></head><body><p>Loading...</p><script src=\"/.within.website/x/cmd/anubis/static/js/main.mjs\"></script></body></html>",
+            "<html><head><title>example.org</title></head><body><h1>Verifying you are human. This may take a few seconds.</h1><script>window._cf_chl_opt={cvId:'3',cType:'managed'};</script></body></html>",
+            "<html><head><title>Vercel Security Checkpoint</title></head><body><p>We're verifying your browser</p><script src=\"/.well-known/vercel/security/static/challenge.v2.min.js\"></script></body></html>",
+        ] {
+            assert_eq!(inspect(&url, &fetched(200, page)).unwrap(), Page::Blocked, "{page}");
+            assert_eq!(inspect(&url, &fetched(429, page)).unwrap(), Page::Blocked, "{page}");
+        }
+        // A real page that only carries such words in its title (a long article) is content.
+        let article = format!(
+            "<html><head><title>Verifying your browser: how bot walls work</title></head><body><p>{}</p></body></html>",
+            "A long article about challenge pages. ".repeat(80)
+        );
+        assert_eq!(
+            inspect(&url, &fetched(200, &article)).unwrap(),
+            Page::Content
+        );
+        // Short real pages that carry the wording and ask for JavaScript but describe an object: a
+        // film named "Pardon Our Interruption", a news brief about MusicBrainz' new gate. They are
+        // content, unless the answer is itself a challenge status.
+        for page in [
+            "<html><head><title>Pardon Our Interruption (2019)</title><meta property=\"og:title\" content=\"Pardon Our Interruption\"></head><body><h1>Pardon Our Interruption</h1><p>A short film.</p><noscript>JavaScript is required.</noscript></body></html>",
+            "<html><head><title>MusicBrainz now shows Verifying your browser</title><meta name=\"twitter:title\" content=\"MusicBrainz gate\"></head><body><p>Plain clients now see a page saying verifying your browser.</p><noscript>JavaScript is required.</noscript></body></html>",
+            "<html><head><title>Making sure you're not a bot</title><script type=\"application/ld+json\">{\"@type\":\"MusicRecording\"}</script></head><body><p>A song.</p><noscript>JavaScript is required.</noscript></body></html>",
+            "<html><head><title>Pardon Our Interruption</title><meta name=\"OG:Title\" content=\"Pardon Our Interruption\"></head><body><p>A short film.</p><noscript>JavaScript is required.</noscript></body></html>",
+            "<html><head><title>Pardon Our Interruption</title></head><body><article class=\"h-entry\"><h1 class=\"p-name\">Pardon Our Interruption</h1></article><noscript>JavaScript is required.</noscript></body></html>",
+        ] {
+            assert_eq!(inspect(&url, &fetched(200, page)).unwrap(), Page::Content, "{page}");
+            assert_eq!(inspect(&url, &fetched(429, page)).unwrap(), Page::Blocked, "{page}");
+        }
+        // Imperva's page and Incapsula's script, which Incapsula adds to ordinary pages too: a wall
+        // on a challenge status, not by itself at 200.
+        let imperva = "<html><head><title>Pardon Our Interruption</title><script src=\"/_Incapsula_Resource?SWJIYLWA=719d34d31c8e3a6e\"></script></head><body><p>As you were browsing something about your browser made us think you were a bot.</p></body></html>";
+        assert_eq!(
+            inspect(&url, &fetched(200, imperva)).unwrap(),
+            Page::Content
+        );
+        assert_eq!(
+            inspect(&url, &fetched(403, imperva)).unwrap(),
+            Page::Blocked
+        );
+        let empty = "<html><head><title>Verifying your browser</title><meta property=\"og:title\" content=\" \"></head><body><p>Please wait</p><noscript>JavaScript is required.</noscript></body></html>";
+        assert_eq!(inspect(&url, &fetched(200, empty)).unwrap(), Page::Blocked);
+        // Without a sign of a challenge the wording alone never makes a wall at 200: a plain film
+        // page, a microdata page, a page that only runs its own script, a page that asks for
+        // JavaScript but links on.
+        for page in [
+            "<html><head><title>Pardon Our Interruption</title></head><body><p>A short film.</p></body></html>",
+            "<html><head><title>Pardon Our Interruption</title></head><body><div itemscope itemtype=\"https://schema.org/Movie\"><h1 itemprop=\"name\">Pardon Our Interruption</h1></div></body></html>",
+            "<html><head><title>Verifying your browser</title><script src=\"/app.js\"></script></head><body><p>A song.</p></body></html>",
+            "<html><head><title>Making sure you're not a bot</title></head><body><noscript>Enable JavaScript for the player.</noscript><a href=\"/album\">Album</a></body></html>",
+        ] {
+            assert_eq!(inspect(&url, &fetched(200, page)).unwrap(), Page::Content, "{page}");
+            assert_eq!(inspect(&url, &fetched(503, page)).unwrap(), Page::Blocked, "{page}");
+        }
     }
     #[test]
     fn refresh_parsing_survives_multi_byte_content() {
