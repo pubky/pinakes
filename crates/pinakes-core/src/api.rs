@@ -924,6 +924,18 @@ pub struct Details {
     /// `null` when there are none.
     #[schema(value_type = Option<Object>)]
     pub facts: Option<std::collections::BTreeMap<String, String>>,
+    /// The objects the card points at, each with its own card (docs/api.md, Related objects): a
+    /// Bitcoin transaction's block, inputs and outputs; a block's previous and next block and
+    /// coinbase transaction; an address's latest transactions; a Lightning node's biggest
+    /// channels and their peers; a channel's nodes and funding transaction. Each is
+    /// `{rel, uri, name?, amount_sat?, at?}`; `uri` is a root `POST /v1/resolve` reads, or null
+    /// for an input or output without an address (`name` says what it is). At most 10 of a
+    /// `rel`, read with the card; `[]` on every other card.
+    pub related: Vec<model::Related>,
+    /// How many entries of a `rel` there are when `related` lists fewer of them
+    /// (`{"input": 400}`); null when it lists them all.
+    #[schema(value_type = Option<Object>)]
+    pub related_total: Option<std::collections::BTreeMap<String, u64>>,
     /// The public identifiers this resource is keyed by, as `GET /v1/search?key=` takes them
     /// (`isrc:…`, `upc:…`, `doi:…`, `isbn:…`, `mb:recording:…`, `wikidata:Q…`, `osm:node/…`):
     /// the keys its sources vouch for, sorted; `[]` when there are none.
@@ -1481,6 +1493,8 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
                 ),
                 facts.clone(),
             ),
+            related: d.related.clone(),
+            related_total: (!d.related_total.is_empty()).then(|| d.related_total.clone()),
             keys: keys.clone(),
             aliases: aliases.clone(),
             updated_at: row["resolved_at"].as_str().and_then(|s| s.parse().ok()),
@@ -1497,6 +1511,8 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
             organizer: None,
             from: None,
             facts,
+            related: vec![],
+            related_total: None,
             keys,
             aliases,
             updated_at: None,
@@ -3035,6 +3051,7 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
         crate::collections::CollectionPage,
         crate::collections::Collection,
         model::Stream,
+        model::Related,
         model::Credit,
         model::CreditField,
         model::CreditProvider,

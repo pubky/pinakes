@@ -1,6 +1,8 @@
 //! The `mempool` source's also-on half on a stored card: a block card read through the API lists
 //! the other explorers in `also_on`, each of those links reads back as the card, and the block's
-//! links on other explorers that people tag are aliases of it.
+//! links on other explorers that people tag are aliases of it. And a chain card's `related` list,
+//! read with the card from recorded answers (mempool.space, or Esplora when it fails), on the
+//! resource read.
 use axum::{body::Body, http::Request};
 use http_body_util::BodyExt;
 use pinakes_core::{
@@ -124,4 +126,183 @@ async fn a_block_card_lists_the_explorers_and_their_links_are_its_aliases(pool: 
             "{read}"
         );
     }
+}
+
+/// The answers `source_card` serves for a read of the example block by hash: on `host`'s API
+/// (mempool.space's v1 record, or Esplora's), with the files of `dir`.
+fn block_answers(api: &str, record: &str, dir: &str) -> Vec<(String, u16, &'static str, String)> {
+    vec![
+        (
+            format!("{api}/{record}/{HASH}"),
+            200,
+            "application/json",
+            format!("{dir}block-481824.json"),
+        ),
+        (
+            format!("{api}/block/{HASH}/status"),
+            200,
+            "application/json",
+            format!("{dir}block-481824-status.json"),
+        ),
+        // The tip as mempool.space gave it (Esplora's is the same chain's).
+        (
+            format!("{api}/blocks/tip/height"),
+            200,
+            "text/plain",
+            "tip-height-1111.txt".into(),
+        ),
+        (
+            format!("{api}/block/{HASH}/txid/0"),
+            200,
+            "text/plain",
+            format!("{dir}block-481824-txid-0.txt"),
+        ),
+    ]
+}
+
+async fn read_card(uri: &str, answers: &[(String, u16, &'static str, String)]) -> ResourceMeta {
+    let answers: Vec<(&str, u16, &str, &str)> = answers
+        .iter()
+        .map(|(u, s, k, f)| (u.as_str(), *s, *k, f.as_str()))
+        .collect();
+    common::source_card("mempool", uri, &answers).await.unwrap()
+}
+
+/// A block card read from mempool.space lists its previous block, its settled next block and its
+/// coinbase transaction (with the reward), and the resource read serves them as the OpenAPI
+/// document says; each entry is a root the source reads. When mempool.space fails, Esplora's
+/// answers give the same list, without the reward it does not know.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_block_card_lists_its_neighbours_and_coinbase(pool: PgPool) {
+    let root = format!("btc:block/{HASH}");
+    let doc = read_card(
+        &root,
+        &block_answers("https://mempool.space/api", "v1/block", ""),
+    )
+    .await;
+    assert_eq!(doc.status, pinakes_core::model::Status::Ok);
+    let coinbase = "da917699942e4a96272401b534381a75512eeebe8403084500bd637bd47168b3";
+    let expected = serde_json::json!([
+        {"rel": "previous", "uri": "btc:block/000000000000000000cbeff0b533f8e1189cf09dfbebf57a8ebe349362811b80", "name": "Block 481,823"},
+        {"rel": "next", "uri": "btc:block/000000000000000000daf7a26d903543377d5cdddb962077e58fd11212479eea", "name": "Block 481,825"},
+        {"rel": "coinbase", "uri": format!("btc:tx/{coinbase}"), "amount_sat": 1462514269},
+    ]);
+    assert_eq!(serde_json::to_value(&doc.related).unwrap(), expected);
+    assert!(doc.related_total.is_empty());
+    // Settled and complete: no early read again.
+    assert_eq!(doc.refresh_by, None);
+    let source = pinakes_core::sources::by_name("mempool").unwrap();
+    for r in &doc.related {
+        let uri = r.uri.as_deref().unwrap();
+        assert!(source.reads(uri) && !source.invalid(uri), "{uri}");
+    }
+
+    let id = store::ensure_resource(&pool, &root).await.unwrap();
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let read = by_uri(&app, &root).await;
+    assert_eq!(read["related"], expected, "{read}");
+    assert_eq!(read["related_total"], Value::Null);
+    assert_eq!(read["facts"]["pool"], "BTCC");
+
+    // mempool.space answers a server error (any body): the fallback reads the same parts.
+    let mut answers = block_answers("https://blockstream.info/api", "block", "esplora/");
+    answers.push((
+        format!("https://mempool.space/api/v1/block/{HASH}"),
+        503,
+        "application/json",
+        "tx-missing.txt".into(),
+    ));
+    let esplora = read_card(&root, &answers).await;
+    let mut without_reward = expected.clone();
+    without_reward[2]
+        .as_object_mut()
+        .unwrap()
+        .remove("amount_sat");
+    assert_eq!(
+        serde_json::to_value(&esplora.related).unwrap(),
+        without_reward
+    );
+}
+
+/// An address card lists its latest 10 transactions and counts them all; when the list's request
+/// is put off (a server error), the card is still read and comes back within the hour; a list
+/// the API refuses (404) is left out until the card's own refresh.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn an_address_card_lists_its_latest_transactions(pool: PgPool) {
+    let addr = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq";
+    let root = format!("btc:address/{addr}");
+    let record = (
+        format!("https://mempool.space/api/address/{addr}"),
+        200,
+        "application/json",
+        "address-bech32-1111.json".to_owned(),
+    );
+    let txs = format!("https://mempool.space/api/address/{addr}/txs");
+    let doc = read_card(
+        &root,
+        &[
+            record.clone(),
+            (
+                txs.clone(),
+                200,
+                "application/json",
+                "address-bech32-txs.json.gz".into(),
+            ),
+        ],
+    )
+    .await;
+    assert_eq!(doc.related.len(), 10);
+    assert!(doc.related.iter().all(|r| r.rel == "tx" && r.at.is_some()));
+    assert_eq!(doc.related[0].amount_sat, Some(100000));
+    assert_eq!(doc.related_total.get("tx"), Some(&125));
+    assert_eq!(doc.refresh_by, None);
+
+    let id = store::ensure_resource(&pool, &root).await.unwrap();
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let read = by_uri(&app, &root).await;
+    assert_eq!(read["related"].as_array().unwrap().len(), 10, "{read}");
+    assert_eq!(
+        read["related"][0]["uri"],
+        "btc:tx/d54945326574a95dab44fafcb1c3b04d239f2de106a8b1aa9313208ee2cfa80a"
+    );
+    assert_eq!(read["related_total"], serde_json::json!({"tx": 125}));
+    assert_eq!(read["facts"]["tx_count"], "125");
+
+    let put_off = read_card(
+        &root,
+        &[
+            record.clone(),
+            (
+                txs.clone(),
+                503,
+                "application/json",
+                "tx-missing.txt".into(),
+            ),
+        ],
+    )
+    .await;
+    assert_eq!(put_off.status, pinakes_core::model::Status::Ok);
+    assert!(put_off.related.is_empty());
+    let soon = put_off.refresh_by.unwrap() - chrono::Utc::now();
+    assert!(soon <= chrono::Duration::hours(1) && soon > chrono::Duration::minutes(50));
+    let refused = read_card(&root, &[record]).await;
+    assert_eq!(refused.status, pinakes_core::model::Status::Ok);
+    assert!(refused.related.is_empty());
+    assert_eq!(refused.refresh_by, None);
+}
+
+/// Other cards' reads carry an empty list and no totals.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn other_cards_have_no_related_objects(pool: PgPool) {
+    let uri = "https://example.org/page";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut doc = ResourceMeta::new(uri, "web", 3600);
+    doc.name = Some("A page".into());
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let read = by_uri(&app, uri).await;
+    assert_eq!(read["related"], serde_json::json!([]));
+    assert_eq!(read["related_total"], Value::Null);
 }

@@ -71,8 +71,11 @@ curl -s '{{BASE}}/v1/resources/by-uri?uri=https://www.imdb.com/title/tt0111161/'
 Any spelling works (`http`, `www.`, a trailing slash, tracking parameters, a short link the
 index knows as an alias). A read is one flat object: the card's fields, and beside them the
 address, facts from official APIs, `also_on` (one link per service, as on every card), the keys
-`key=` takes (`keys`) and the other spellings (`aliases`). To have an unknown link read, see
-`POST /v1/resolve` under Limits.
+`key=` takes (`keys`) and the other spellings (`aliases`). A Bitcoin or Lightning card also lists
+the objects it points at in `related` (a transaction's block, inputs and outputs, an address's
+latest transactions, a node's channels: `{rel, uri, name, amount_sat, at}`, each `uri` a card
+root you can read the same way). To have an unknown link read, see `POST /v1/resolve` under
+Limits.
 
 **Places near a point, tagged something.**
 
