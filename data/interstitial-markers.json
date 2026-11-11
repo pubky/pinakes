@@ -23,6 +23,15 @@
     "pardon our interruption",
     "vercel security checkpoint"
   ],
+  "challenge_signatures": [
+    "/cdn-cgi/challenge-platform/",
+    "_cf_chl_opt",
+    "/.within.website/",
+    "anubis_challenge",
+    "_incapsula_resource",
+    "/.well-known/vercel/security/",
+    "/__meb_verify"
+  ],
   "placeholder_titles": {
     "youtube.com": ["- YouTube", "YouTube"],
     "youtu.be": ["- YouTube", "YouTube"]

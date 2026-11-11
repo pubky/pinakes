@@ -26,10 +26,14 @@ pub enum Page {
 struct Walls {
     text: Vec<String>,
     /// Challenge vendors' wording that a real work could also carry as its name ("Pardon Our
-    /// Interruption"): evidence in the title or first heading on a challenge status, or anywhere
-    /// on a short page that describes no object (no `og:title`, `twitter:title`, JSON-LD or
-    /// microformat name, which challenge pages rarely carry).
+    /// Interruption"): evidence in the title or first heading on a challenge status. On a short
+    /// page it counts only with a sign that the page runs a challenge (`challenge_signatures`,
+    /// or a `noscript` asking for JavaScript on a page without links) and describes no object
+    /// (no `og:title`, `twitter:title`, JSON-LD or microformat name).
     challenge_text: Vec<String>,
+    /// Lower-case strings in the page source that only a challenge page carries: the vendors'
+    /// challenge script paths and ids.
+    challenge_signatures: Vec<String>,
     /// Whole page titles that name only the site, never an object, by the site's domain: the
     /// page a service shows in place of the object (YouTube's regional or consent page is titled
     /// "- YouTube"). A title counts only on its domain and the domain's subdomains.
@@ -215,10 +219,29 @@ pub fn inspect(requested: &Url, f: &Fetched) -> anyhow::Result<Page> {
             .next()
             .is_some()
     };
+    // Positive signs of a challenge: a vendor's challenge script in the source, or a page whose
+    // only other content asks for JavaScript (MusicBrainz' proof-of-work gate) and links nowhere.
+    let runs_challenge = || {
+        let source = text.to_lowercase();
+        walls
+            .challenge_signatures
+            .iter()
+            .any(|sig| source.contains(sig.as_str()))
+            || (html.select(&select("noscript")).any(|n| {
+                // The parser keeps a noscript's body as raw text (markup included).
+                n.text()
+                    .collect::<String>()
+                    .to_lowercase()
+                    .contains("javascript")
+            }) && html.select(&select("body a[href]")).next().is_none())
+    };
     if ((challenge || short) && (title_marked || (heading.len() < 200 && walls.marked(&heading))))
         || (short && walls.marked(&visible))
         || (challenge && vendor_marked)
-        || (short && (vendor_marked || walls.challenge_marked(&visible)) && !describes_object())
+        || (short
+            && (vendor_marked || walls.challenge_marked(&visible))
+            && runs_challenge()
+            && !describes_object())
         || ((challenge || short || title_marked)
             && walls
                 .captcha_selectors
@@ -291,6 +314,7 @@ mod tests {
         for list in [
             &w.text,
             &w.challenge_text,
+            &w.challenge_signatures,
             &w.captcha_selectors,
             &w.wall_host_prefixes,
             &w.wall_paths,
@@ -302,6 +326,7 @@ mod tests {
             .text
             .iter()
             .chain(&w.challenge_text)
+            .chain(&w.challenge_signatures)
             .chain(&w.wall_host_prefixes)
             .chain(&w.wall_paths)
         {
@@ -373,13 +398,14 @@ mod tests {
             inspect(&url, &fetched(200, musicbrainz)).unwrap(),
             Page::Blocked
         );
-        // Anubis, Cloudflare's newer wording, Imperva and Vercel: by title or by heading.
+        // Anubis, Cloudflare's newer wording, Imperva and Vercel, each with its challenge script:
+        // by title or by heading.
         for page in [
-            "<html><head><title>Making sure you&#39;re not a bot!</title></head><body><h1>Making sure you&#39;re not a bot!</h1><p>Loading...</p></body></html>",
-            "<html><head><title>Making sure you’re not a bot!</title></head><body><p>Loading...</p></body></html>",
-            "<html><head><title>example.org</title></head><body><h1>Verifying you are human. This may take a few seconds.</h1></body></html>",
-            "<html><head><title>Pardon Our Interruption</title></head><body><p>As you were browsing something about your browser made us think you were a bot.</p></body></html>",
-            "<html><head><title>Vercel Security Checkpoint</title></head><body><p>We're verifying your browser</p></body></html>",
+            "<html><head><title>Making sure you&#39;re not a bot!</title><script id=\"anubis_challenge\" type=\"application/json\">{}</script></head><body><h1>Making sure you&#39;re not a bot!</h1><p>Loading...</p><p>Protected by <a href=\"https://github.com/TecharoHQ/anubis\">Anubis</a></p><script src=\"/.within.website/x/cmd/anubis/static/js/main.mjs\"></script></body></html>",
+            "<html><head><title>Making sure you’re not a bot!</title></head><body><p>Loading...</p><script src=\"/.within.website/x/cmd/anubis/static/js/main.mjs\"></script></body></html>",
+            "<html><head><title>example.org</title></head><body><h1>Verifying you are human. This may take a few seconds.</h1><script src=\"/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1?ray=1\"></script></body></html>",
+            "<html><head><title>Pardon Our Interruption</title><script src=\"/_Incapsula_Resource?SWJIYLWA=719d34d31c8e3a6e\"></script></head><body><p>As you were browsing something about your browser made us think you were a bot.</p></body></html>",
+            "<html><head><title>Vercel Security Checkpoint</title></head><body><p>We're verifying your browser</p><script src=\"/.well-known/vercel/security/static/challenge.v2.min.js\"></script></body></html>",
         ] {
             assert_eq!(inspect(&url, &fetched(200, page)).unwrap(), Page::Blocked, "{page}");
             assert_eq!(inspect(&url, &fetched(429, page)).unwrap(), Page::Blocked, "{page}");
@@ -406,8 +432,20 @@ mod tests {
             assert_eq!(inspect(&url, &fetched(200, page)).unwrap(), Page::Content, "{page}");
             assert_eq!(inspect(&url, &fetched(429, page)).unwrap(), Page::Blocked, "{page}");
         }
-        let empty = "<html><head><title>Verifying your browser</title><meta property=\"og:title\" content=\" \"></head><body><p>Please wait</p></body></html>";
+        let empty = "<html><head><title>Verifying your browser</title><meta property=\"og:title\" content=\" \"></head><body><p>Please wait</p><noscript>JavaScript is required.</noscript></body></html>";
         assert_eq!(inspect(&url, &fetched(200, empty)).unwrap(), Page::Blocked);
+        // Without a sign of a challenge the wording alone never makes a wall at 200: a plain film
+        // page, a microdata page, a page that only runs its own script, a page that asks for
+        // JavaScript but links on.
+        for page in [
+            "<html><head><title>Pardon Our Interruption</title></head><body><p>A short film.</p></body></html>",
+            "<html><head><title>Pardon Our Interruption</title></head><body><div itemscope itemtype=\"https://schema.org/Movie\"><h1 itemprop=\"name\">Pardon Our Interruption</h1></div></body></html>",
+            "<html><head><title>Verifying your browser</title><script src=\"/app.js\"></script></head><body><p>A song.</p></body></html>",
+            "<html><head><title>Making sure you're not a bot</title></head><body><noscript>Enable JavaScript for the player.</noscript><a href=\"/album\">Album</a></body></html>",
+        ] {
+            assert_eq!(inspect(&url, &fetched(200, page)).unwrap(), Page::Content, "{page}");
+            assert_eq!(inspect(&url, &fetched(503, page)).unwrap(), Page::Blocked, "{page}");
+        }
     }
     #[test]
     fn refresh_parsing_survives_multi_byte_content() {
