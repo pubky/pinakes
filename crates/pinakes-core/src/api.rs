@@ -2206,6 +2206,9 @@ pub async fn search(
     let mut fingerprint = q.clone();
     fingerprint.cursor = None;
     fingerprint.limit = None;
+    // Facets count the filtered set and never change the rows, so a later page may ask for
+    // other facets or none.
+    fingerprint.facet = None;
     // The ranking itself, so a cursor never pages another order (`q` alone ranks by relevance).
     fingerprint.sort = effective_sort(&q).map(str::to_owned);
     let revision_of = |set: &Option<crate::nexus::ReachSet>| {
