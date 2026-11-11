@@ -321,7 +321,15 @@ where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
-    let permit = permit(&PARSES).await?;
+    blocking_with(&PARSES, parse).await
+}
+/// [`blocking`] with a permit of `parses`.
+async fn blocking_with<T, F>(parses: &Arc<Semaphore>, parse: F) -> anyhow::Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let permit = permit(parses).await?;
     let cancelled = Arc::new(AtomicBool::new(false));
     let _cancel = Cancel(cancelled.clone());
     Ok(tokio::task::spawn_blocking(move || {
@@ -2202,29 +2210,36 @@ mod tests {
         timed(|| interstitial::inspect(&url, &fetched(503, "text/plain", plain)).unwrap());
     }
 
+    /// The semaphore is the test's own: other tests' parses don't move its count.
     #[tokio::test]
     async fn a_parse_holds_its_permit_until_it_ends() {
-        let before = running();
+        let parses = Arc::new(Semaphore::new(1));
         let (started, wait) = std::sync::mpsc::channel();
         let (finish, done) = std::sync::mpsc::channel::<()>();
-        let parse = tokio::spawn(blocking(move || {
-            started.send(()).unwrap();
-            done.recv().unwrap();
-        }));
+        let parse = tokio::spawn({
+            let parses = parses.clone();
+            async move {
+                blocking_with(&parses, move || {
+                    started.send(()).unwrap();
+                    done.recv().unwrap();
+                })
+                .await
+            }
+        });
         tokio::task::spawn_blocking(move || wait.recv().unwrap())
             .await
             .unwrap();
         // The caller stops waiting; the parse still runs and still holds its permit.
         parse.abort();
-        assert!(running() > before);
+        assert_eq!(parses.available_permits(), 0);
         finish.send(()).unwrap();
         for _ in 0..200 {
-            if running() == before {
+            if parses.available_permits() == 1 {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
-        assert_eq!(running(), before);
+        assert_eq!(parses.available_permits(), 1);
     }
 
     /// While no permit is free (another test's parses hold them all), a paused test waits for
@@ -2239,9 +2254,12 @@ mod tests {
             freed.add_permits(1);
         });
         let start = tokio::time::Instant::now();
-        let waited =
-            tokio::time::timeout(std::time::Duration::from_secs(10), permit(&parses)).await;
-        assert!(waited.expect("the wait passed the timeout").is_ok());
+        let parsed = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            blocking_with(&parses, || 1),
+        )
+        .await;
+        assert_eq!(parsed.expect("the wait passed the timeout").unwrap(), 1);
         assert!(start.elapsed() < std::time::Duration::from_secs(10));
         holder.join().unwrap();
     }
