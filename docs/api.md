@@ -193,7 +193,7 @@ has none.
 | `provider` | `wikipedia` (an article's summary), `wikimedia_commons` (a file), `wikidata` (an item's English description), `cover_art_archive` (a release's front cover) or `tmdb` (a film's or series' poster or overview) |
 | `source_url` | The article, the file's page on Commons, the item's page on Wikidata (`https://www.wikidata.org/wiki/Q…`), or for a cover the cover art page of the release it is of on MusicBrainz (`https://musicbrainz.org/release/…/cover-art`), or the title's page on TMDB (`https://www.themoviedb.org/movie/…` or `/tv/…`): `https:`, at most 1,024 bytes |
 | `author` | Plain text, at most 256 bytes: `Wikipedia contributors` for an article, the file's author for an image; `null` for a CC0 or public-domain file that names none, for a Wikidata description, for a cover and for TMDB's values |
-| `license` | An SPDX licence ID (`CC-BY-SA-4.0`, `CC-BY-2.0`, `CC-BY-SA-3.0-DE`, `CC0-1.0`, `GPL-3.0-only`, `LGPL-2.1-or-later`), `public-domain`, or `Attribution` (Commons' licence of that name, which has no SPDX ID); `null` for a cover (cover art is its label's; no licence is given) and for TMDB's values (used under TMDB's API terms) |
+| `license` | An SPDX licence ID (`CC-BY-SA-4.0`, `CC-BY-2.0`, `CC-BY-SA-3.0-DE`, `CC0-1.0`, `GPL-3.0-only`, `LGPL-2.1-or-later`), `public-domain`, or `Attribution` (Commons' licence of that name, which has no SPDX ID); `null` for a cover (cover art is its label's; no licence is given) and for TMDB's values |
 | `license_url` | The licence's text (`https:`): for a GNU licence its version's text on gnu.org, for `Attribution` its template's page on Commons; `null` for the public domain without a mark, for a cover and for TMDB's values |
 | `lang` | The text's language: `en`, or another Wikipedia's code (`de`) when only that Wikipedia describes it; `null` for an image. A client may label or hide a text in a language its reader does not read |
 | `excerpted` | `true` when the text is a part of a longer source: a summary is the article's first paragraphs, and one over 2,048 bytes is cut at a sentence or a word. A Wikidata description is whole (`false`) |
@@ -241,7 +241,7 @@ title's page on TMDB and no author or licence; the overview's `lang` is `en`:
 ```
 
 A client that shows a value credited to `tmdb` must also show TMDB's logo (smaller and less
-prominent than its own marks) and TMDB's notice, as TMDB's terms ask. `/v1/info` gives both, in
+prominent than its own marks) and TMDB's notice. `/v1/info` gives both, in
 `attributions`, while the instance uses TMDB and while a stored card still holds a TMDB value:
 
 ```json
@@ -253,8 +253,7 @@ prominent than its own marks) and TMDB's notice, as TMDB's terms ask. `/v1/info`
 ]
 ```
 
-TMDB's values are never older than TMDB's terms allow (six months): a card drops them when they
-were last read 60 days ago and TMDB has not answered since, or when the instance stops using
+A card drops TMDB's values when they were last read 60 days ago and TMDB has not answered since, or when the instance stops using
 TMDB.
 
 A credit is there only with its value: a card without the image or description has none for it.

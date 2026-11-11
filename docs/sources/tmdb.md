@@ -31,10 +31,9 @@ The poster is a link on the card: Pinakes never downloads it.
 
 ## Attribution
 
-TMDB's [terms](https://www.themoviedb.org/api-terms-of-use) ask an application that uses its data
-or images to show TMDB's logo, less prominent than its own marks, and a notice that it uses the
-TMDB API but is not endorsed or certified by TMDB. While the source runs, and after while a
-stored card still holds a TMDB value, `/v1/info` lists both in
+A client that shows TMDB's data or images shows TMDB's logo, less prominent than its own marks,
+and a notice that it uses the TMDB API but is not endorsed or certified by TMDB. While the source
+runs, and after while a stored card still holds a TMDB value, `/v1/info` lists both in
 `attributions` (provider `tmdb`: the notice "This product uses the TMDB API but is not endorsed
 or certified by TMDB.", the logo's URL and `https://www.themoviedb.org`); a client that shows a
 value credited to `tmdb` shows them.

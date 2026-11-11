@@ -148,7 +148,7 @@ pub enum CreditProvider {
 }
 impl CreditProvider {
     /// Whether its values carry no licence: a cover from the Cover Art Archive (cover art is its
-    /// label's) and TMDB's poster or overview (used under TMDB's API terms, credited to TMDB).
+    /// label's) and TMDB's poster or overview (credited to TMDB).
     pub fn unlicensed(self) -> bool {
         matches!(self, Self::CoverArtArchive | Self::Tmdb)
     }
@@ -169,8 +169,7 @@ impl CreditProvider {
             Self::Tmdb => "tmdb",
         }
     }
-    /// What a client showing the provider's values must show, as its terms ask (`/v1/info`
-    /// `attributions`): TMDB's notice, verbatim, its logo and its site.
+    /// What a client showing the provider's values shows (`/v1/info` `attributions`): TMDB's notice, verbatim, its logo and its site.
     pub fn attribution(self) -> Option<Attribution> {
         match self {
             Self::Tmdb => Some(Attribution {
@@ -227,8 +226,7 @@ pub struct Credit {
     /// `LGPL-2.1-or-later`), `public-domain`, or `Attribution` (Commons' licence of that name,
     /// which has no SPDX ID). Null for a cover from the Cover Art Archive and for TMDB's poster
     /// or overview, which carry no licence: cover art is its label's, shown as a service shows an
-    /// album's cover, and TMDB's values are used under TMDB's API terms (`license_url` is null
-    /// too).
+    /// album's cover, and TMDB's values carry none either (`license_url` is null too).
     // No licence is the empty string here, and only such a credit holds it (`bounded`).
     #[serde(
         serialize_with = "license_or_null",

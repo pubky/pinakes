@@ -2,7 +2,7 @@
 
 Apps on Apple's App Store, read from the iTunes Lookup API by the app's ID. No key, no account;
 Apple asks for about 20 calls a minute (one every three seconds). The descriptions and icons are
-the developers' and Apple's, shown under the App Store's terms; Apple states no data licence.
+the developers' and Apple's; Apple states no data licence.
 
 ## Links
 

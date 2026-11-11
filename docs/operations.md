@@ -673,8 +673,7 @@ a script challenge, an "update your browser" page), and a bot wall is never work
 Starticket is off: it is retired, its site redirects to See Tickets. Each platform's
 `canary_note` in the table gives the reason and when it was checked. A platform that is off
 sends its URLs to the web resolver, as `event.adapters.enabled = false` sends every platform's.
-The `browser` and `firefox` user-agent profiles imitate browsers to pass bot walls; consider the
-provider's terms before enabling those platforms.
+The `browser` and `firefox` user-agent profiles imitate browsers to pass bot walls.
 
 Luma, Meetup, Eventbrite, Partiful, Posh, RingCentral, Airmeet, Mobilizon, Gancio, Wikidata,
 Dice, Xceed, Ents24 and Ticketino supplement JSON-LD with bounded state parsing; JavaScript is
@@ -768,12 +767,10 @@ expired ones (a deleted key regroups its resource). A source keeps at most
 worker; stored keys keep grouping and stored links stay on cards until they expire (up to twice
 the sources' lifetimes). `derive_links = false` keeps keys and facts only: no derived links on
 cards, so a tagged link an exact derivation names no longer joins by it either;
-`[also_on.sources.<id>] enabled = false` turns one source off and `enabled = true` turns on one
-that is off by default (an unknown ID stops startup). Off means no call to its API: a source
+`[also_on.sources.<id>] enabled = false` turns one source off (an unknown ID stops startup). Off means no call to its API: a source
 whose API has a host of its own (Deezer's `api.deezer.com`) has that host refused at the egress
 while it is off, whatever path asks, and its site's pages and the links other sources give to them
-stay. A source that is off (switched off, or off
-by default and not turned on) stops showing at the next start: the daemon writes the sources
+stay. A source that is off (switched off, or not ready for want of what it needs) stops showing at the next start: the daemon writes the sources
 that are off to `also_on_source_off`, and no card, `also_on` list, search, group or later
 source reads their keys, facts or links. Those rows stay in the database and expire as before;
 nothing is deleted, and a source switched on again shows its unexpired rows at once. The
@@ -869,8 +866,7 @@ start, every card that holds them is due at once and drops TMDB's values at that
 at most once a minute, over film and series cards). After setting the key, run
 `pinakesd --config <path> reextract also-on` with the daemon stopped, then start it (or only
 restart it and wait for each card's next also-on run, at most 30 days): the cards take their
-posters at the read that follows. TMDB's terms allow its data to
-be cached for six months at most. Its rows are read again every 30 days (and after each save that
+posters at the read that follows. TMDB's rows are read again every 30 days (and after each save that
 changes a card) and live 60 days from the last read that answered; a card takes TMDB's values only
 from live rows, so a TMDB outage keeps them up to 60 days and the card drops them at its first
 read after. The hourly maintenance brings every stored card that holds TMDB's values back to the

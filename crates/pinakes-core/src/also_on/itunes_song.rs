@@ -6,9 +6,8 @@
 //! or TIDAL's, each only while that service's own source runs), else from the Deezer track Deezer
 //! names for the track's ISRC key (only while `deezer` runs).
 //!
-//! iTunes answers carry no ISRC, so the song is a match on the album, the place and the length,
-//! not an exact ID: the link is unkeyed (it joins no group), never a key, and the source is off by
-//! default. An answer with more than one collection (iTunes answers unrelated singles for some
+//! iTunes answers carry no ISRC, so the song is a match on the album, the place, the title and the
+//! length, not an exact ID: the link is a maybe (`Link::maybe`), never a key. An answer with more than one collection (iTunes answers unrelated singles for some
 //! codes), a place with no song or with several, or a length outside the window gives nothing.
 //! It runs after the sources that key a track's ISRC and before `editions`.
 use super::{
