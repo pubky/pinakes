@@ -96,6 +96,12 @@ no request. Each is a link of the card's own object (above).
 - for a block by height, `/api/block-height/{height}` first, then `/api/block/{hash}/status` and
   `/api/blocks/tip/height`;
 - when a node's record answers a server error, `/api/v1/lightning/search?searchText={key}`;
+- for the card's `related` list (below), up to three more requests: for a block
+  `/api/block/{hash}/status` (its next block), `/api/blocks/tip/height` (only when it has a next
+  block, or was read by height) and `/api/block/{hash}/txid/0` (its coinbase transaction); for an
+  address `/api/address/{address}/txs`; for a node
+  `/api/v1/lightning/channels?public_key={key}&status=open`. A transaction's and a channel's
+  come with their own record;
 - the fallback: the same paths (`/api/block/{hash}` for blocks) at
   `https://blockstream.info/api` (`/testnet/api`, `/signet/api`; no testnet4 and no Lightning).
 
@@ -128,6 +134,48 @@ The card types are local, not schema.org: `BitcoinBlock`, `BitcoinTransaction`,
 | `short_id`, `status`, `funding_tx`, `funding_output`, `closing_tx` | A Lightning channel (`active`, `inactive` or `closed`) |
 | `created`, `closed` | When the channel was opened and closed (RFC 3339) |
 | `node1`, `node1_alias`, `node2`, `node2_alias` | The channel's two nodes |
+
+## Related
+
+Each card lists the objects it points at in the resource read's `related`
+([Related objects](../api.md#related-objects)), each by its root, so a client opens their cards:
+
+| Card | `rel` | From |
+| --- | --- | --- |
+| Transaction | `block` (`name` "Block 975,251", `at` the block time), once confirmed | its record |
+| | `input`: the address each input spends from (`amount_sat` its value); a coinbase input has no `uri` and the `name` `coinbase` | its record (`vin[].prevout`) |
+| | `output`: the address each output pays (`amount_sat`); an output without an address has no `uri` and a `name`: `OP_RETURN`, `P2PK` or the script type mempool.space names | its record (`vout[]`) |
+| Block | `previous` (not on the genesis block) | its record |
+| | `next`: the best chain's next block, once that block is six deep (as a block by height becomes an alias); a block in the best chain without one is read again within the hour | `/block/{hash}/status`, the tip |
+| | `coinbase`: its first transaction (`amount_sat` the block reward, when mempool.space gives it) | `/block/{hash}/txid/0` |
+| Address | `tx`: its latest transactions as the API lists them (those in the mempool first, then the newest confirmed), with `amount_sat` what each paid to the address minus what it spent from it, and `at` the block time once confirmed | `/address/{address}/txs` |
+| Lightning node | `channel`: its biggest open channels (`amount_sat` the capacity, `name` the peer's alias), from mempool.space's first page of them; `peer`: those channels' other nodes, each once | `/v1/lightning/channels` |
+| Lightning channel | `node`: its two nodes (`name` the alias); `funding_tx` (`amount_sat` the capacity); `closing_tx` once closed | its record |
+
+- At most 10 inputs, outputs, transactions, channels and peers each, the largest amount first
+  for inputs, outputs and channels (the API's order among equals); `related_total` gives how
+  many inputs, outputs, transactions (the address's `tx_count` plus `unconfirmed_tx_count`) or
+  channels there are when fewer are listed. A node's channel total is its `channels` fact, the
+  channels mempool.space counts as active; the listed ones are its biggest open channels, which
+  can include an inactive one. A transaction with 400 inputs is still one request: its record
+  lists them all.
+- Roots stay on the card's network: `btc-testnet4:address/…`, `ln-signet:node/…`,
+  `btc-signet:tx/…` (a signet channel's funding transaction). An address that is not valid on
+  the card's network is listed as its script type, without a `uri`.
+- The extra requests are part of the read and paced like it, and share a budget of 8 seconds
+  from the start of the read (the route allows 14): a part whose request is still waiting then
+  is left out. Each part is left out when its request fails; a rate limit, a server error or
+  the budget running out reads the card again within the hour, as does a transaction still in
+  the mempool (its block comes later) and a block in the best chain whose next block is not
+  settled yet (or that has none yet). A part refused for good (a 404, an answer that cannot be
+  read) is left out until the card's own refresh. A read again that cannot fetch a part leaves
+  it out until the read after. The
+  Esplora fallback reads the same parts, but has no pool, no reward and no Lightning.
+- An address's list is read up to 4 MB (a few dozen whole transactions); a larger one (an
+  exchange's batch payouts) is left out. A part put off again and again (a server error, the
+  budget) reads the card again every hour while it lasts.
+- What a spent output was spent by (`/api/tx/{txid}/outspends`) is not read: one more request
+  for every transaction card, and it changes after the card is read.
 
 ## Limits
 

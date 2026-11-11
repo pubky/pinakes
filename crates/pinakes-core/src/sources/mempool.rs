@@ -16,7 +16,10 @@ use super::{
     },
     Budget, Example, Source,
 };
-use crate::model::ResourceMeta;
+use crate::{
+    model::{Related, ResourceMeta},
+    resolver::egress::Fetched,
+};
 use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use serde_json::Value;
@@ -26,6 +29,16 @@ pub const SITE: &str = "mempool.space";
 const VIA: &str = "mempool";
 /// How deep a block must be before its height names it for good.
 pub const SETTLED_DEPTH: u64 = 6;
+/// How many entries of one `rel` a card's `related` list keeps: a transaction's inputs and
+/// outputs, an address's transactions, a node's channels and peers.
+pub const RELATED_EACH: usize = 10;
+/// When a card with a part not there yet (a block's next block, a transaction's block) or not
+/// read (its request was put off) is read again, at the latest.
+const READ_AGAIN_SECS: i64 = 3600;
+/// How long the requests for a card's `related` parts may take, from the start of its read: the
+/// rest of the official route's limit (`resolver::cards`, 14 s) stays for the card's own record
+/// and the Esplora fallback.
+const PARTS_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
 
 /// A Bitcoin network. Each one is a separate set of objects.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -746,12 +759,258 @@ pub fn settled(status: u16, raw: &[u8], tip: u64) -> Result<bool> {
         return Ok(false);
     };
     let height = v["height"].as_u64().context("no height")?;
-    Ok(v["in_best_chain"].as_bool() == Some(true)
-        && tip.saturating_add(1) >= height.saturating_add(SETTLED_DEPTH))
+    Ok(v["in_best_chain"].as_bool() == Some(true) && deep(height, tip))
+}
+
+/// Whether a best-chain block at `height` is `SETTLED_DEPTH` blocks deep at `tip` (its own
+/// block counts as one).
+fn deep(height: u64, tip: u64) -> bool {
+    tip.saturating_add(1) >= height.saturating_add(SETTLED_DEPTH)
+}
+
+/// A block's place in the chain (`parse_status`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Place {
+    /// It is in the best chain.
+    pub best: bool,
+    /// The best chain's next block (its hash) and that block's height.
+    pub next: Option<(String, u64)>,
+}
+
+/// A block's place in the chain, from its status: whether it is in the best chain, and the best
+/// chain's next block (`next_best`) with its height. `None` when the API knows no such block; an
+/// error for a `next_best` that is not a block hash, or one without the block's height.
+pub fn parse_status(status: u16, raw: &[u8]) -> Result<Option<Place>> {
+    let Some(v) = json(status, raw, &[404])? else {
+        return Ok(None);
+    };
+    let best = v["in_best_chain"].as_bool() == Some(true);
+    let next = match &v["next_best"] {
+        Value::Null => None,
+        next => Some((
+            next.as_str()
+                .and_then(hash)
+                .context("next_best is not a block hash")?,
+            v["height"]
+                .as_u64()
+                .and_then(|h| h.checked_add(1))
+                .context("no height")?,
+        )),
+    };
+    Ok(Some(Place {
+        best,
+        next: next.filter(|_| best),
+    }))
+}
+
+/// The id of a block's first transaction, its coinbase (plain text).
+pub fn coinbase_request(to: Api, network: Network, hash: &str) -> Option<Request> {
+    Some(api(to, network, &format!("block/{}/txid/0", self::hash(hash)?))?.admit(PLAIN))
+}
+
+/// A transaction id answered as plain text.
+pub fn parse_txid(status: u16, raw: &[u8]) -> Result<String> {
+    let raw = body(status, raw, &[])?.context("no transaction id")?;
+    hash(std::str::from_utf8(raw)?.trim()).context("not a transaction id")
+}
+
+/// The largest list of an address's transactions read (`txs_request`): a few dozen whole
+/// transactions, which an exchange's batch payouts can take past the egress default.
+pub const TXS_CAP: usize = 4 * crate::resolver::egress::BODY_CAP;
+
+/// An address's latest transactions, those in the mempool first, then the confirmed ones,
+/// newest first (mempool.space and Esplora list a few dozen whole; one request of at most
+/// `TXS_CAP`).
+pub fn txs_request(to: Api, network: Network, addr: &str) -> Option<Request> {
+    Some(
+        api(
+            to,
+            network,
+            &format!("address/{}/txs", address(addr, network)?),
+        )?
+        .cap(TXS_CAP),
+    )
+}
+
+/// The first `RELATED_EACH` transactions of an address's list (`txs_request`), in its order:
+/// each `tx` with what it moved into (positive) or out of (negative) the address, and its block
+/// time once confirmed.
+pub fn parse_address_txs(
+    status: u16,
+    raw: &[u8],
+    network: Network,
+    addr: &str,
+) -> Result<Vec<Related>> {
+    let v = json(status, raw, &[])?.context("no transactions")?;
+    let txs = v.as_array().context("not a list of transactions")?;
+    let mut out = vec![];
+    for tx in txs {
+        let (Some(txid), Some(vin), Some(vout)) = (
+            tx["txid"].as_str().and_then(hash),
+            tx["vin"].as_array(),
+            tx["vout"].as_array(),
+        ) else {
+            continue;
+        };
+        let received = paid_to(vout.iter(), network, addr);
+        let sent = paid_to(vin.iter().map(|i| &i["prevout"]), network, addr);
+        let mut r = Related::new("tx", root(network, Object::Tx(txid)));
+        r.amount_sat = Some(received.saturating_sub(sent));
+        let status = &tx["status"];
+        r.at = if status["confirmed"].as_bool() == Some(true) {
+            unix(&status["block_time"])
+        } else {
+            None
+        };
+        out.push(r);
+        if out.len() == RELATED_EACH {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// The value of the coins among `outs` (outputs, or the coins inputs spend) paid to `addr`.
+fn paid_to<'a>(outs: impl Iterator<Item = &'a Value>, network: Network, addr: &str) -> i64 {
+    outs.filter(|o| {
+        o["scriptpubkey_address"]
+            .as_str()
+            .and_then(|a| address(a, network))
+            .as_deref()
+            == Some(addr)
+    })
+    .filter_map(|o| o["value"].as_u64().and_then(|v| i64::try_from(v).ok()))
+    .fold(0i64, i64::saturating_add)
+}
+
+/// A node's open channels on mempool.space: its first page of them, the biggest by capacity
+/// (10).
+pub fn channels_request(network: Network, key: &str) -> Option<Request> {
+    api(
+        Api::Mempool,
+        network,
+        &format!(
+            "v1/lightning/channels?public_key={}&status=open",
+            node_key(key)?
+        ),
+    )
+}
+
+/// A node's channels (`channel`: the channel's root, its capacity and the peer's alias) and
+/// their peers (`peer`: the node's root and alias, each once), the biggest channel first, at
+/// most `RELATED_EACH` of each.
+pub fn parse_channels(
+    status: u16,
+    raw: &[u8],
+    network: Network,
+    key: &str,
+) -> Result<(Vec<Related>, Vec<Related>)> {
+    let v = json(status, raw, &[])?.context("no channels")?;
+    let list = v.as_array().context("not a list of channels")?;
+    let mut channels = vec![];
+    for c in list {
+        let id = match &c["id"] {
+            Value::String(s) => s.parse::<u64>().ok(),
+            n => n.as_u64(),
+        };
+        let Some(id) = id.filter(|id| *id > 0) else {
+            continue;
+        };
+        let peer = c["node"]["public_key"]
+            .as_str()
+            .and_then(node_key)
+            .filter(|p| p != key);
+        let mut r = Related::new("channel", root(network, Object::Channel(id)));
+        r.name = text(&c["node"]["alias"]);
+        r.amount_sat = c["capacity"].as_u64().and_then(|v| i64::try_from(v).ok());
+        channels.push((r, peer));
+    }
+    // Biggest first; the API's order among equals.
+    channels.sort_by_key(|(r, _)| std::cmp::Reverse(r.amount_sat));
+    channels.truncate(RELATED_EACH);
+    let mut peers: Vec<Related> = vec![];
+    for (channel, peer) in &channels {
+        let Some(peer) = peer else { continue };
+        let uri = root(network, Object::Node(peer.clone()));
+        if !peers.iter().any(|p| p.uri == uri) {
+            let mut p = Related::new("peer", uri);
+            p.name.clone_from(&channel.name);
+            peers.push(p);
+        }
+    }
+    Ok((channels.into_iter().map(|(r, _)| r).collect(), peers))
 }
 
 fn on(network: Network, object: Object) -> Target {
     Target { network, object }
+}
+
+/// The root of an object on a network (`None` only for a block by height).
+fn root(network: Network, object: Object) -> Option<String> {
+    identifier(&on(network, object))
+}
+
+/// A block's entry in a card's `related` list, named by its height when it is known.
+fn block_entry(rel: &str, network: Network, hash: &str, height: Option<u64>) -> Related {
+    let mut r = Related::new(
+        rel,
+        root(network, Object::Block(BlockRef::Hash(hash.into()))),
+    );
+    r.name = height.map(|h| format!("Block {}", grouped(h)));
+    r
+}
+
+/// The first `RELATED_EACH` of `entries` into the card's `related` list, and `total` as their
+/// `rel`'s count when the list holds fewer.
+fn relate_first(card: &mut Card, rel: &str, entries: Vec<Related>, total: u64) {
+    let listed = entries.len().min(RELATED_EACH);
+    card.related.extend(entries.into_iter().take(RELATED_EACH));
+    if total > listed as u64 {
+        card.related_total.insert(rel.into(), total);
+    }
+}
+
+/// `entries` of one `rel`, the largest amount first (in the API's order among equals), as
+/// `relate_first` takes them, with all of them as the count.
+fn relate_largest(card: &mut Card, rel: &str, mut entries: Vec<Related>) {
+    let total = entries.len() as u64;
+    entries.sort_by_key(|r| std::cmp::Reverse(r.amount_sat));
+    relate_first(card, rel, entries, total);
+}
+
+/// What a coin is paid to: the address's root, or, for a script without an address, no root and
+/// a label (`OP_RETURN`, `P2PK`, or the API's name of the script type); with its value.
+fn coin(rel: &str, out: &Value, network: Network) -> Related {
+    let addr = out["scriptpubkey_address"]
+        .as_str()
+        .and_then(|a| address(a, network));
+    let mut r = Related::new(rel, addr.and_then(|a| root(network, Object::Address(a))));
+    if r.uri.is_none() {
+        r.name = Some(match out["scriptpubkey_type"].as_str().map(str::trim) {
+            Some("op_return") => "OP_RETURN".into(),
+            Some("p2pk") => "P2PK".into(),
+            Some(kind)
+                if (1..=32).contains(&kind.len())
+                    && kind.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') =>
+            {
+                kind.into()
+            }
+            _ => "unknown".into(),
+        });
+    }
+    r.amount_sat = out["value"].as_u64().and_then(|v| i64::try_from(v).ok());
+    r
+}
+
+/// What an input spends: the coin it spends (`coin`), or, for a coinbase input, no root and the
+/// label `coinbase`.
+fn input(vin: &Value, network: Network) -> Related {
+    if vin["is_coinbase"].as_bool() == Some(true) {
+        let mut r = Related::new("input", None);
+        r.name = Some("coinbase".into());
+        return r;
+    }
+    coin("input", &vin["prevout"], network)
 }
 
 fn new_card(type_name: &'static str, t: &Target) -> Card {
@@ -783,6 +1042,14 @@ pub(crate) fn block_card(v: &Value, network: Network, hash: &str) -> Result<Card
         card.detail(name, v[field].as_u64());
     }
     card.detail("previous_block", text(&v["previousblockhash"]));
+    if let Some(previous) = v["previousblockhash"].as_str().and_then(self::hash) {
+        card.related.push(block_entry(
+            "previous",
+            network,
+            &previous,
+            height.checked_sub(1),
+        ));
+    }
     let extras = &v["extras"];
     card.detail("pool", text(&extras["pool"]["name"]));
     card.detail("total_fees", extras["totalFees"].as_u64());
@@ -825,6 +1092,24 @@ pub(crate) fn tx_card(v: &Value, network: Network, txid: &str) -> Result<Card> {
         vin.and_then(|i| i.first())
             .and_then(|i| i["is_coinbase"].as_bool()),
     );
+    // The block it is in, then its inputs and outputs, the largest first.
+    if let Some(block) = status["block_hash"]
+        .as_str()
+        .and_then(hash)
+        .filter(|_| confirmed)
+    {
+        let mut r = block_entry("block", network, &block, status["block_height"].as_u64());
+        r.at = unix(&status["block_time"]);
+        card.related.push(r);
+    }
+    if let Some(vin) = vin {
+        let inputs = vin.iter().map(|i| input(i, network)).collect();
+        relate_largest(&mut card, "input", inputs);
+    }
+    if let Some(vout) = vout {
+        let outputs = vout.iter().map(|o| coin("output", o, network)).collect();
+        relate_largest(&mut card, "output", outputs);
+    }
     Ok(card)
 }
 
@@ -951,6 +1236,26 @@ pub fn parse_channel(status: u16, raw: &[u8], network: Network, id: u64) -> Resu
         card.detail(name, v[side]["public_key"].as_str().and_then(node_key));
         card.detail(alias, text(&v[side]["alias"]));
     }
+    // Its two nodes, and the transactions that opened and closed it.
+    for side in ["node_left", "node_right"] {
+        if let Some(key) = v[side]["public_key"].as_str().and_then(node_key) {
+            let mut r = Related::new("node", root(network, Object::Node(key)));
+            r.name = text(&v[side]["alias"]);
+            card.related.push(r);
+        }
+    }
+    for (rel, field) in [
+        ("funding_tx", "transaction_id"),
+        ("closing_tx", "closing_transaction_id"),
+    ] {
+        if let Some(tx) = v[field].as_str().and_then(hash) {
+            let mut r = Related::new(rel, root(network, Object::Tx(tx)));
+            if rel == "funding_tx" {
+                r.amount_sat = v["capacity"].as_u64().and_then(|c| i64::try_from(c).ok());
+            }
+            card.related.push(r);
+        }
+    }
     Ok(Some(card))
 }
 
@@ -1020,10 +1325,61 @@ const ROOTS: &[&str] = &[
 /// The source: mempool.space, with Esplora as the fallback for on-chain objects.
 pub struct Mempool;
 
-/// Reads the object from one API: a block by height through its hash. The flag says whether
-/// the card's root names the link for good (always, except for a block by height that is not
-/// yet `settled`).
-async fn read(cx: &super::Context<'_>, to: Api, target: &Target) -> Result<Option<(Card, bool)>> {
+/// What `read` found: the card; whether its root names the link for good (always, except for a
+/// block by height that is not yet `settled`); and whether to read it again within the hour
+/// (`READ_AGAIN_SECS`): a part of it is not there yet (a best-chain block's settled next block,
+/// a transaction's block) or a request for one was put off (`RetryLater`).
+struct Read {
+    card: Card,
+    named: bool,
+    soon: bool,
+}
+
+/// Whether a failed request for a part of a card is only put off (a rate limit, a server
+/// error): the card is read again soon. Any other failure leaves the part out until the card's
+/// own refresh.
+fn put_off(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<crate::resolver::RetryLater>()
+        .is_some()
+}
+
+/// A request for a part of a card, answered by `by`: one still waiting then is put off
+/// (`RetryLater`), as a rate limit is.
+async fn part(
+    cx: &super::Context<'_>,
+    request: Option<Request>,
+    by: tokio::time::Instant,
+) -> Result<Fetched> {
+    let request = request.context("no reader for this part")?;
+    match tokio::time::timeout_at(by, fetch(cx, &request)).await {
+        Ok(fetched) => fetched,
+        Err(_) => Err(crate::resolver::RetryLater {
+            class: "timeout",
+            seconds: 60,
+        }
+        .into()),
+    }
+}
+
+/// The tip height.
+async fn read_tip(cx: &super::Context<'_>, to: Api, network: Network) -> Result<u64> {
+    let tip = fetch(cx, &tip_request(to, network).context("tip")?).await?;
+    parse_tip(tip.status, &tip.body)
+}
+
+/// Reads the object from one API: a block by height through its hash. Then what its card points
+/// at beyond its own record (`related`), one request per part (`part`, answered by `by`), each
+/// left out when it fails: a block's next block (its status, and the tip when it has one) and
+/// its coinbase transaction; an address's latest transactions; a node's biggest channels. A
+/// block read by height needs its status and the tip whatever the time: their failure fails the
+/// read, as before.
+async fn read(
+    cx: &super::Context<'_>,
+    to: Api,
+    target: &Target,
+    by: tokio::time::Instant,
+) -> Result<Option<Read>> {
     let mut target = target.clone();
     let by_height = matches!(target.object, Object::Block(BlockRef::Height(_)));
     if by_height {
@@ -1034,21 +1390,107 @@ async fn read(cx: &super::Context<'_>, to: Api, target: &Target) -> Result<Optio
         target.object = Object::Block(BlockRef::Hash(hash));
     }
     let f = fetch(cx, &request(to, &target).context("no reader")?).await?;
-    let Some(card) = parse(f.status, &f.body, &target)? else {
+    let Some(mut card) = parse(f.status, &f.body, &target)? else {
         return Ok(None);
     };
-    let mut named = true;
-    if let (true, Object::Block(BlockRef::Hash(hash))) = (by_height, &target.object) {
-        let status = status_request(to, target.network, hash).context("block status")?;
-        let tip = tip_request(to, target.network).context("tip")?;
-        let (status, tip) = (fetch(cx, &status).await?, fetch(cx, &tip).await?);
-        named = settled(
-            status.status,
-            &status.body,
-            parse_tip(tip.status, &tip.body)?,
-        )?;
+    let (n, mut named, mut soon) = (target.network, true, false);
+    match &target.object {
+        Object::Block(BlockRef::Hash(hash)) => {
+            // Its place in the best chain: whether its height names it (read by height, which
+            // needs both), and its next block, linked once that is settled too.
+            let status = if by_height {
+                Some(fetch(cx, &status_request(to, n, hash).context("block status")?).await?)
+            } else {
+                match part(cx, status_request(to, n, hash), by).await {
+                    Ok(status) => Some(status),
+                    Err(e) => {
+                        soon |= put_off(&e);
+                        None
+                    }
+                }
+            };
+            let place = match status.as_ref().map(|s| parse_status(s.status, &s.body)) {
+                Some(Ok(place)) => place,
+                Some(Err(e)) if by_height => return Err(e),
+                _ => None,
+            };
+            let next = place.as_ref().and_then(|p| p.next.clone());
+            let tip = if by_height {
+                Some(read_tip(cx, to, n).await?)
+            } else if next.is_some() {
+                match part(cx, tip_request(to, n), by)
+                    .await
+                    .and_then(|f| parse_tip(f.status, &f.body))
+                {
+                    Ok(tip) => Some(tip),
+                    Err(e) => {
+                        soon |= put_off(&e);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            if let (true, Some(status), Some(tip)) = (by_height, &status, tip) {
+                named = settled(status.status, &status.body, tip)?;
+            }
+            match (next, tip) {
+                (Some((next, height)), Some(tip)) if deep(height, tip) => {
+                    card.related
+                        .push(block_entry("next", n, &next, Some(height)));
+                }
+                // Its next block is not settled yet, or it is the best chain's tip: the next block
+                // comes with a later read.
+                (Some(_), Some(_)) => soon = true,
+                (None, _) if place.as_ref().is_some_and(|p| p.best) => soon = true,
+                // A status or tip that failed was put off (`put_off`), or is left out for good.
+                _ => {}
+            }
+            let coinbase = part(cx, coinbase_request(to, n, hash), by)
+                .await
+                .and_then(|f| parse_txid(f.status, &f.body));
+            match coinbase {
+                Ok(txid) => {
+                    let mut r = Related::new("coinbase", root(n, Object::Tx(txid)));
+                    r.amount_sat = card.details.get("reward").and_then(Value::as_i64);
+                    card.related.push(r);
+                }
+                Err(e) => soon |= put_off(&e),
+            }
+        }
+        Object::Address(addr) => {
+            let txs = part(cx, txs_request(to, n, addr), by)
+                .await
+                .and_then(|f| parse_address_txs(f.status, &f.body, n, addr));
+            match txs {
+                Ok(txs) => {
+                    let count = |name: &str| card.details.get(name).and_then(Value::as_u64);
+                    let total = count("tx_count")
+                        .unwrap_or(0)
+                        .saturating_add(count("unconfirmed_tx_count").unwrap_or(0));
+                    relate_first(&mut card, "tx", txs, total);
+                }
+                Err(e) => soon |= put_off(&e),
+            }
+        }
+        Object::Node(key) => {
+            let channels = part(cx, channels_request(n, key), by)
+                .await
+                .and_then(|f| parse_channels(f.status, &f.body, n, key));
+            match channels {
+                Ok((channels, peers)) => {
+                    let total = card.details.get("channels").and_then(Value::as_u64);
+                    relate_first(&mut card, "channel", channels, total.unwrap_or(0));
+                    relate_first(&mut card, "peer", peers, 0);
+                }
+                Err(e) => soon |= put_off(&e),
+            }
+        }
+        // An unconfirmed transaction's block comes with a later read.
+        Object::Tx(_) => soon = card.details.get("confirmed") == Some(&Value::Bool(false)),
+        Object::Block(BlockRef::Height(_)) | Object::Channel(_) => {}
     }
-    Ok(Some((card, named)))
+    Ok(Some(Read { card, named, soon }))
 }
 
 #[async_trait]
@@ -1075,6 +1517,20 @@ impl Source for Mempool {
                     header: None,
                     content_type: "application/json",
                     file: "node-acinq.json",
+                },
+                E2eAnswer {
+                    host: "mempool.space",
+                    path: "/api/v1/lightning/channels",
+                    query: &[
+                        (
+                            "public_key",
+                            "03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f",
+                        ),
+                        ("status", "open"),
+                    ],
+                    header: None,
+                    content_type: "application/json",
+                    file: "channels-acinq.json",
                 },
             ],
         })
@@ -1164,10 +1620,13 @@ impl Source for Mempool {
         let Some(target) = target(uri) else {
             return Ok(cx.missing(uri, self));
         };
-        let read = match read(cx, Api::Mempool, &target).await {
+        // The parts' requests share one budget, the fallback's too.
+        let by = tokio::time::Instant::now() + PARTS_BUDGET;
+        let by = cx.deadline().map_or(by, |d| d.min(by));
+        let read = match read(cx, Api::Mempool, &target, by).await {
             Ok(read) => read,
             Err(e) if request(Api::Esplora, &target).is_some() => {
-                read(cx, Api::Esplora, &target).await.map_err(|_| e)?
+                read(cx, Api::Esplora, &target, by).await.map_err(|_| e)?
             }
             Err(e) => match (
                 &target.object,
@@ -1190,10 +1649,14 @@ impl Source for Mempool {
             },
         };
         Ok(match read {
-            Some((card, named)) => {
+            Some(Read { card, named, soon }) => {
                 let mut doc = card.into_doc(cx.card(uri, self), SITE);
                 if !named {
                     doc.source_root = None;
+                }
+                if soon {
+                    doc.refresh_by =
+                        Some(chrono::Utc::now() + chrono::Duration::seconds(READ_AGAIN_SECS));
                 }
                 doc
             }
@@ -2079,6 +2542,446 @@ mod tests {
         }
     }
 
+    /// Every entry of a card's `related` list with a `uri` names a root that reads back as itself
+    /// (`POST /v1/resolve` reads it), on the card's own network.
+    fn roots_read_back(card: &Card, prefixes: &[&str]) {
+        for r in &card.related {
+            let Some(uri) = &r.uri else { continue };
+            assert!(Mempool.reads(uri) && !Mempool.invalid(uri), "{uri}");
+            assert_eq!(
+                from_root(uri).as_ref().and_then(identifier).as_ref(),
+                Some(uri),
+                "{uri}"
+            );
+            assert!(prefixes.iter().any(|p| uri.starts_with(p)), "{uri}");
+        }
+    }
+    fn rels(card: &Card) -> Vec<&str> {
+        card.related.iter().map(|r| r.rel.as_str()).collect()
+    }
+
+    /// A transaction with many inputs lists its block, the 10 largest inputs and its output, and
+    /// counts the 131 inputs; the whole list fits the card.
+    #[test]
+    fn transaction_related() {
+        let card = parse_tx(200, &read("tx-pizza.json.gz"), Network::Mainnet, PIZZA)
+            .unwrap()
+            .unwrap();
+        let block = &card.related[0];
+        assert_eq!(block.rel, "block");
+        assert_eq!(
+            block.uri.as_deref(),
+            Some("btc:block/00000000152340ca42227603908689183edc47355204e7aca59383b0aaac1fd8")
+        );
+        assert_eq!(block.name.as_deref(), Some("Block 57,043"));
+        assert_eq!(block.at.unwrap().to_rfc3339(), "2010-05-22T18:16:31+00:00");
+        let inputs: Vec<_> = card.related.iter().filter(|r| r.rel == "input").collect();
+        assert_eq!(inputs.len(), RELATED_EACH);
+        assert_eq!(card.related_total["input"], 131);
+        assert_eq!(
+            inputs[0].uri.as_deref(),
+            Some("btc:address/1XPTgDRhN8RFnzniWCddobD9iKZatrvH4")
+        );
+        assert_eq!(inputs[0].amount_sat, Some(375388000000));
+        assert_eq!(inputs[9].amount_sat, Some(25000000000));
+        assert!(inputs
+            .windows(2)
+            .all(|w| w[0].amount_sat >= w[1].amount_sat));
+        let output = card.related.last().unwrap();
+        assert_eq!(output.rel, "output");
+        assert_eq!(
+            output.uri.as_deref(),
+            Some("btc:address/17SkEw2md5avVNyYgj6RiXuQKNwkXaxFyQ")
+        );
+        assert_eq!(output.amount_sat, Some(1000000000000));
+        assert!(
+            !card.related_total.contains_key("output"),
+            "one output, all listed"
+        );
+        assert_eq!(card.related.len(), 1 + RELATED_EACH + 1);
+        roots_read_back(&card, &["btc:"]);
+        let doc = crate::sources::kit::checked(&Mempool, &card);
+        assert_eq!(doc.related, card.related);
+        assert_eq!(doc.related_total["input"], 131);
+        // The Esplora fallback's record gives the same list.
+        let esplora = parse_tx(
+            200,
+            &fixture::read("mempool", "esplora/tx-pizza.json.gz"),
+            Network::Mainnet,
+            PIZZA,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            (&esplora.related, &esplora.related_total),
+            (&card.related, &card.related_total)
+        );
+    }
+
+    /// A coinbase transaction's input has no address (`coinbase`), and its OP_RETURN output none
+    /// either: both are listed without a `uri`, labelled.
+    #[test]
+    fn coinbase_and_op_return() {
+        let txid = "da917699942e4a96272401b534381a75512eeebe8403084500bd637bd47168b3";
+        let card = parse_tx(
+            200,
+            &read("tx-coinbase-481824.json"),
+            Network::Mainnet,
+            txid,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(rels(&card), ["block", "input", "output", "output"]);
+        assert_eq!(
+            card.related[0].uri.as_deref(),
+            Some(format!("btc:block/{HASH}").as_str())
+        );
+        let input = &card.related[1];
+        assert_eq!(
+            (
+                input.uri.as_deref(),
+                input.name.as_deref(),
+                input.amount_sat
+            ),
+            (None, Some("coinbase"), None)
+        );
+        let (paid, op_return) = (&card.related[2], &card.related[3]);
+        assert_eq!(
+            paid.uri.as_deref(),
+            Some("btc:address/152f1muMCNa7goXYhYAQC61hxEgGacmncB")
+        );
+        assert_eq!(paid.amount_sat, Some(1462514269));
+        assert_eq!(
+            (
+                op_return.uri.as_deref(),
+                op_return.name.as_deref(),
+                op_return.amount_sat
+            ),
+            (None, Some("OP_RETURN"), Some(0))
+        );
+        assert!(card.related_total.is_empty());
+        crate::sources::kit::checked(&Mempool, &card);
+    }
+
+    /// A block lists its previous block from its record (none on the genesis block), its next
+    /// block from its status once that is settled, and its coinbase transaction.
+    #[test]
+    fn block_neighbours() {
+        let block1 = "00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048";
+        let card = parse_block(200, &read("block-1.json"), Network::Mainnet, block1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(rels(&card), ["previous"]);
+        assert_eq!(
+            card.related[0].uri.as_deref(),
+            Some("btc:block/000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f")
+        );
+        assert_eq!(card.related[0].name.as_deref(), Some("Block 0"));
+        // The genesis block has none.
+        let mut genesis: Value = serde_json::from_slice(&read("block-1.json")).unwrap();
+        genesis["previousblockhash"] = Value::Null;
+        assert!(block_card(&genesis, Network::Mainnet, block1)
+            .unwrap()
+            .related
+            .is_empty());
+
+        let tip = parse_tip(200, &read("tip-height-1111.txt")).unwrap();
+        assert_eq!(tip, 975364);
+        let Place { best, next } = parse_status(200, &read("block-1-status.json"))
+            .unwrap()
+            .unwrap();
+        assert!(best);
+        let (next, height) = next.unwrap();
+        assert_eq!(
+            (next.as_str(), height),
+            (
+                "000000006a625f06636b8bb6ac7b960a8d03705d1ace08b1a19da3fdcc99ddbd",
+                2
+            )
+        );
+        assert!(deep(height, tip));
+        assert_eq!(
+            parse_txid(200, &read("block-1-txid-0.txt")).unwrap(),
+            "0e3e2357e806b6cdb1f70b54c3a3a17b6714ee1f0e68bebb44a74b1efd512098"
+        );
+
+        // A recent block: its next block is settled at the recorded tip, and would not be four
+        // blocks after it.
+        let recent = "0000000000000000000008dfb288144ec4626cad43656ff2cdd8cb278886fe80";
+        let card = parse_block(200, &read("block-975251.json"), Network::Mainnet, recent)
+            .unwrap()
+            .unwrap();
+        assert_eq!(card.related[0].name.as_deref(), Some("Block 975,250"));
+        assert_eq!(card.details["pool"], "Braiins Pool");
+        let Place { next, .. } = parse_status(200, &read("block-975251-status.json"))
+            .unwrap()
+            .unwrap();
+        let (next, height) = next.unwrap();
+        assert_eq!(
+            next,
+            "00000000000000000001066efcc7a56714f7d79f27a2dfd71cef047ff25dfefb"
+        );
+        assert_eq!(height, 975252);
+        assert!(deep(height, tip));
+        assert!(!deep(height, height + 4));
+        assert!(deep(height, height + 5));
+        assert_eq!(
+            parse_txid(200, &read("block-975251-txid-0.txt")).unwrap(),
+            "c2ffe82fbb08c0f6a1e62272fd80b22f36a3fcc166778969d3764617a3de2fbf"
+        );
+        // A stale block has no next block; the tip has none yet; an unknown block has no status.
+        let stale = br#"{"in_best_chain":false,"height":481824,"next_best":null}"#;
+        assert_eq!(
+            parse_status(200, stale).unwrap(),
+            Some(Place {
+                best: false,
+                next: None
+            })
+        );
+        let tip_block = br#"{"in_best_chain":true,"height":975364,"next_best":null}"#;
+        assert_eq!(
+            parse_status(200, tip_block).unwrap(),
+            Some(Place {
+                best: true,
+                next: None
+            })
+        );
+        assert_eq!(parse_status(404, b"Block not found").unwrap(), None);
+        // A next block that is no block hash, or without a height, is no answer.
+        assert!(parse_status(
+            200,
+            br#"{"in_best_chain":true,"height":1,"next_best":"zz"}"#
+        )
+        .is_err());
+        assert!(parse_status(
+            200,
+            br#"{"in_best_chain":true,"next_best":"000000006a625f06636b8bb6ac7b960a8d03705d1ace08b1a19da3fdcc99ddbd"}"#
+        )
+        .is_err());
+        assert!(parse_txid(200, b"<html>").is_err());
+        assert_eq!(
+            coinbase_request(Api::Mempool, Network::Mainnet, HASH)
+                .unwrap()
+                .url
+                .as_str(),
+            format!("https://mempool.space/api/block/{HASH}/txid/0")
+        );
+    }
+
+    /// An address lists its latest 10 transactions, each with what it moved into or out of the
+    /// address, and counts them all; a transaction that spends from it is negative.
+    #[test]
+    fn address_transactions() {
+        let addr = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq";
+        assert_eq!(
+            txs_request(Api::Mempool, Network::Mainnet, addr)
+                .unwrap()
+                .url
+                .as_str(),
+            format!("https://mempool.space/api/address/{addr}/txs")
+        );
+        assert_eq!(
+            txs_request(Api::Mempool, Network::Mainnet, addr)
+                .unwrap()
+                .options()
+                .body_cap,
+            Some(4 * 1024 * 1024)
+        );
+        let txs = parse_address_txs(
+            200,
+            &read("address-bech32-txs.json.gz"),
+            Network::Mainnet,
+            addr,
+        )
+        .unwrap();
+        assert_eq!(txs.len(), RELATED_EACH);
+        assert!(txs.iter().all(|r| r.rel == "tx"));
+        assert_eq!(
+            txs[0].uri.as_deref(),
+            Some("btc:tx/d54945326574a95dab44fafcb1c3b04d239f2de106a8b1aa9313208ee2cfa80a")
+        );
+        assert_eq!(txs[0].amount_sat, Some(100000));
+        assert_eq!(txs[0].at.unwrap().timestamp(), 1794217667);
+        assert_eq!(
+            txs[9].uri.as_deref(),
+            Some("btc:tx/1d51c696eab35d7dad7631516cc0845aaab317fe67cb182782752547541d30ea")
+        );
+        let mut card = parse_address(
+            200,
+            &read("address-bech32-1111.json"),
+            Network::Mainnet,
+            addr,
+        )
+        .unwrap()
+        .unwrap();
+        relate_first(&mut card, "tx", txs, 125);
+        assert_eq!(card.related_total["tx"], 125);
+        roots_read_back(&card, &["btc:tx/"]);
+        crate::sources::kit::checked(&Mempool, &card);
+        // The pizza transaction spent everything its one input address held, and paid one other.
+        let pizza = format!("[{}]", String::from_utf8(read("tx-pizza.json.gz")).unwrap());
+        let spent = parse_address_txs(
+            200,
+            pizza.as_bytes(),
+            Network::Mainnet,
+            "1XPTgDRhN8RFnzniWCddobD9iKZatrvH4",
+        )
+        .unwrap();
+        assert_eq!(spent[0].amount_sat, Some(-1000099000000));
+        let paid = parse_address_txs(
+            200,
+            pizza.as_bytes(),
+            Network::Mainnet,
+            "17SkEw2md5avVNyYgj6RiXuQKNwkXaxFyQ",
+        )
+        .unwrap();
+        assert_eq!(paid[0].amount_sat, Some(1000000000000));
+        assert!(parse_address_txs(200, b"{}", Network::Mainnet, addr).is_err());
+    }
+
+    /// A node lists its 10 biggest channels with their peers' aliases, and each peer once; a
+    /// channel lists its two nodes and its funding transaction.
+    #[test]
+    fn lightning_related() {
+        assert_eq!(
+            channels_request(Network::Mainnet, ACINQ)
+                .unwrap()
+                .url
+                .as_str(),
+            format!(
+                "https://mempool.space/api/v1/lightning/channels?public_key={ACINQ}&status=open"
+            )
+        );
+        let (channels, peers) =
+            parse_channels(200, &read("channels-acinq.json"), Network::Mainnet, ACINQ).unwrap();
+        assert_eq!(channels.len(), RELATED_EACH);
+        assert_eq!(
+            channels[0].uri.as_deref(),
+            Some("ln:channel/892785849701564416")
+        );
+        assert_eq!(channels[0].name.as_deref(), Some("bfx-lnd0"));
+        assert_eq!(channels[0].amount_sat, Some(500000000));
+        let peers: Vec<_> = peers
+            .iter()
+            .map(|p| (p.uri.as_deref().unwrap(), p.name.as_deref().unwrap()))
+            .collect();
+        assert_eq!(
+            peers,
+            [
+                (
+                    "ln:node/033d8656219478701227199cbd6f670335c8d408a92ae88b962c49d4dc0e83e025",
+                    "bfx-lnd0"
+                ),
+                (
+                    "ln:node/037f990e61acee8a7697966afd29dd88f3b1f8a7b14d625c4f8742bd952003a590",
+                    "fixedfloat.com"
+                ),
+                (
+                    "ln:node/0294ac3e099def03c12a37e30fe5364b1223fd60069869142ef96580c8439c2e0a",
+                    "okx"
+                ),
+            ]
+        );
+        let mut node = parse_node(200, &read("node-acinq.json"), Network::Mainnet, ACINQ)
+            .unwrap()
+            .unwrap();
+        let (channels, peers) =
+            parse_channels(200, &read("channels-acinq.json"), Network::Mainnet, ACINQ).unwrap();
+        relate_first(&mut node, "channel", channels, 1834);
+        relate_first(&mut node, "peer", peers, 0);
+        assert_eq!(node.related.len(), RELATED_EACH + 3);
+        assert_eq!(
+            node.related_total,
+            std::collections::BTreeMap::from([("channel".to_owned(), 1834)])
+        );
+        roots_read_back(&node, &["ln:"]);
+        crate::sources::kit::checked(&Mempool, &node);
+
+        let channel = parse_channel(
+            200,
+            &read("channel-892785849701564416.json"),
+            Network::Mainnet,
+            892785849701564416,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(rels(&channel), ["node", "node", "funding_tx"]);
+        assert_eq!(
+            channel.related[0].uri.as_deref(),
+            Some(format!("ln:node/{ACINQ}").as_str())
+        );
+        assert_eq!(channel.related[0].name.as_deref(), Some("ACINQ"));
+        assert_eq!(channel.related[1].name.as_deref(), Some("bfx-lnd0"));
+        assert_eq!(
+            channel.related[2].uri.as_deref(),
+            Some("btc:tx/a7f10c2595c8ea0cc85c3183709d10aada60c7b87fe0c405f3f5b8a44150d4f5")
+        );
+        assert_eq!(channel.related[2].amount_sat, Some(500000000));
+        roots_read_back(&channel, &["ln:", "btc:tx/"]);
+        crate::sources::kit::checked(&Mempool, &channel);
+    }
+
+    /// Roots stay on the card's network: a testnet4 transaction names testnet4 blocks and
+    /// addresses, a signet channel signet nodes and transactions; an address of another network
+    /// names nothing.
+    #[test]
+    fn related_roots_keep_their_network() {
+        let txid = "5c5d91f2e7251501dccfe0e7ae684a865f499e77620e483760d9f70d1259e958";
+        let raw = read("testnet4-tx-coinbase-1000.json");
+        let card = parse_tx(200, &raw, Network::Testnet4, txid)
+            .unwrap()
+            .unwrap();
+        assert_eq!(rels(&card), ["block", "input", "output", "output"]);
+        assert_eq!(
+            card.related[0].uri.as_deref(),
+            Some(
+                "btc-testnet4:block/00000000b747d47c3b38161693ad05e26924b3775a8be669751f969da836311e"
+            )
+        );
+        assert_eq!(
+            card.related[2].uri.as_deref(),
+            Some("btc-testnet4:address/tb1q548z58kqvwyjqwy8vc2ntmg33d7s2wyfv7ukq4")
+        );
+        roots_read_back(&card, &["btc-testnet4:"]);
+        assert_eq!(
+            parse_txid(200, &read("testnet4-block-1000-txid-0.txt")).unwrap(),
+            txid
+        );
+        assert!(parse_status(200, &read("testnet4-block-1000-status.json"))
+            .unwrap()
+            .unwrap()
+            .next
+            .is_some());
+        // The same record read as mainnet: its testnet address is no mainnet address.
+        let mainnet = parse_tx(200, &raw, Network::Mainnet, txid)
+            .unwrap()
+            .unwrap();
+        assert_eq!(mainnet.related[2].uri, None);
+        assert_eq!(mainnet.related[2].name.as_deref(), Some("v0_p2wpkh"));
+        assert!(mainnet.related[0]
+            .uri
+            .as_deref()
+            .unwrap()
+            .starts_with("btc:block/"));
+
+        let signet = parse_channel(
+            200,
+            &read("channel-892785849701564416.json"),
+            Network::Signet,
+            892785849701564416,
+        )
+        .unwrap()
+        .unwrap();
+        roots_read_back(&signet, &["ln-signet:node/", "btc-signet:tx/"]);
+        let (channels, peers) =
+            parse_channels(200, &read("channels-acinq.json"), Network::Signet, ACINQ).unwrap();
+        assert!(channels.iter().chain(&peers).all(|r| r
+            .uri
+            .as_deref()
+            .unwrap()
+            .starts_with("ln-signet:")));
+    }
+
     #[test]
     fn heights_are_grouped() {
         assert_eq!(grouped(0), "0");
@@ -2175,6 +3078,62 @@ mod tests {
                 .unwrap();
             assert_eq!(card.id, format!("btc:address/{GENESIS}"));
             assert_eq!(card.url, format!("https://mempool.space/address/{GENESIS}"));
+        }
+
+        /// The fallback reads a block's next block and coinbase and an address's transactions
+        /// from the same routes on Esplora, with the same answers.
+        #[test]
+        fn related_from_esplora() {
+            use super::super::{
+                coinbase_request, parse_address_txs, parse_status, parse_txid, status_request,
+                txs_request,
+            };
+            assert_eq!(
+                coinbase_request(Api::Esplora, Network::Mainnet, HASH)
+                    .unwrap()
+                    .url
+                    .as_str(),
+                format!("https://blockstream.info/api/block/{HASH}/txid/0")
+            );
+            assert_eq!(
+                status_request(Api::Esplora, Network::Signet, HASH)
+                    .unwrap()
+                    .url
+                    .as_str(),
+                format!("https://blockstream.info/signet/api/block/{HASH}/status")
+            );
+            assert!(coinbase_request(Api::Esplora, Network::Testnet4, HASH).is_none());
+            assert_eq!(
+                parse_txid(200, &read("block-481824-txid-0.txt")).unwrap(),
+                "da917699942e4a96272401b534381a75512eeebe8403084500bd637bd47168b3"
+            );
+            assert_eq!(
+                parse_status(200, &read("block-481824-status.json")).unwrap(),
+                parse_status(200, &fixture::read("mempool", "block-481824-status.json")).unwrap()
+            );
+            let addr = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq";
+            assert_eq!(
+                txs_request(Api::Esplora, Network::Mainnet, addr)
+                    .unwrap()
+                    .url
+                    .as_str(),
+                format!("https://blockstream.info/api/address/{addr}/txs")
+            );
+            let esplora = parse_address_txs(
+                200,
+                &read("address-bech32-txs.json.gz"),
+                Network::Mainnet,
+                addr,
+            )
+            .unwrap();
+            let mempool = parse_address_txs(
+                200,
+                &fixture::read("mempool", "address-bech32-txs.json.gz"),
+                Network::Mainnet,
+                addr,
+            )
+            .unwrap();
+            assert_eq!(esplora, mempool);
         }
     }
 }

@@ -6,3 +6,6 @@ requests.
 `provenance.json` lists each fixture's request URL, status, content type, recording time, and the
 size and SHA-256 of the body as served. Bodies over 64 KB are stored gzip-compressed (`.gz`).
 The data is public blockchain data.
+
+More answers were recorded on 2026-11-11 the same way for the cards' `related` lists (a block's
+status and coinbase id, an address's transaction list); `provenance.json` lists them.
