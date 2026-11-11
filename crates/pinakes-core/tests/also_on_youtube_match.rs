@@ -285,15 +285,20 @@ async fn a_sign_in_page_is_retried_hours_later(pool: sqlx::PgPool) {
     assert!(seconds > 5.0 * 3600.0, "{seconds}");
 }
 
-/// Off by default; on, with neither Deezer nor `tidal_isrc` running, it asks nothing (not even
-/// YouTube).
+/// On by default; switched off, or on with neither Deezer nor `tidal_isrc` running, it asks
+/// nothing (not even YouTube).
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn without_its_switch_or_a_service_to_search_nothing_is_asked(pool: sqlx::PgPool) {
     save(&pool, "bSnlKl_PoQU").await;
     let mut by_default = config(true, true, None);
     by_default.also_on.sources.remove("youtube_match");
     by_default.validate().unwrap();
-    for config in [by_default, config(true, false, None)] {
+    let seen = run(&pool, by_default, Answers::default()).await;
+    assert!(
+        seen.iter().any(|s| s.starts_with("www.youtube.com")),
+        "{seen:?}"
+    );
+    for config in [config(false, true, None), config(true, false, None)] {
         let seen = run(&pool, config, Answers::default()).await;
         assert!(seen.is_empty(), "{seen:?}");
     }

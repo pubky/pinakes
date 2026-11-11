@@ -7,15 +7,13 @@
 //! three candidates, and as its album objects carry no barcode, each is read back with
 //! `/v1/albums/{id}` (`external_ids.upc`; the request `spotify` makes, shared with it: Spotify
 //! answers no batch read to an app in development mode); a barcode several albums carry names
-//! none of them. A 403 on one album's read is that read's: the lookup is retried, the token slot
-//! stays open.
+//! none of them, and a search that found more albums than it lists names none either. A 403 on
+//! one album's read is that read's: the lookup is retried, the token slot stays open.
 //!
-//! Off by default: Spotify's Developer Policy (III.5) reads against a product "integrated with
-//! streams or content from another service", which an "Also on" list is, so the operator turns
-//! it on only on their own reading of the terms, and only with an app Spotify answers (its
-//! owner's Premium). Asked with the same app credentials as `spotify` (`spotify_api`), through
-//! the same token slot: each answer is shared for an hour by credential pair, a refusal holds
-//! five minutes, a rate limit is waited out. The link is all this source stores.
+//! It runs only with an app Spotify answers (its owner's Premium). Asked with the same app
+//! credentials as `spotify` (`spotify_api`), through the same token slot: each answer is shared
+//! for an hour by credential pair, a refusal holds five minutes, a rate limit is waited out. The
+//! link is all this source stores.
 use super::{
     client_credentials,
     spotify_api::{self, SpotifyConfig, API, SPOTIFY},
@@ -51,9 +49,6 @@ impl Source for SpotifyIsrc {
     }
     fn section(&self) -> Option<super::Section> {
         Some(super::Section::of::<SpotifyConfig>())
-    }
-    fn enabled_by_default(&self) -> bool {
-        false
     }
     fn ready(&self, config: &crate::config::Config) -> bool {
         spotify_api::configured(config)

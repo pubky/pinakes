@@ -18,10 +18,8 @@ credentials are asked again after five minutes.
 ## Another service's track on TIDAL
 
 `tidal` reads TIDAL's own links only. Finding another service's track or album on TIDAL by its ISRC
-or barcode is `tidal_isrc`'s, a source of its own that is off by default: TIDAL's Developer
-Guidelines forbid integrating TIDAL content with another service's without TIDAL's written
-approval. Without it, a TIDAL track reaches a card as a link someone tagged, or through
-MusicBrainz's or Wikidata's relations.
+or barcode is `tidal_isrc`'s, a source of its own with the same credentials. Without it, a TIDAL
+track reaches a card as a link someone tagged, or through MusicBrainz's or Wikidata's relations.
 
 ## Operations
 

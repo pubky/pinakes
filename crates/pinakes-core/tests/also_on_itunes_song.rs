@@ -258,8 +258,8 @@ async fn a_tidal_track_s_place_names_its_apple_song(pool: sqlx::PgPool) {
     assert!(links(&pool, &walking).await.is_empty());
 }
 
-/// Off by default; on, without the source of a track's place (Deezer off, no TIDAL pair) or with
-/// `itunes` off, it asks nothing.
+/// On by default; switched off, without the source of a track's place (Deezer off, no TIDAL
+/// pair) or with `itunes` off, it asks nothing.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn without_its_switch_or_a_place_s_source_nothing_is_asked(pool: sqlx::PgPool) {
     save(&pool, "https://www.deezer.com/track/67238735", None).await;
@@ -273,6 +273,11 @@ async fn without_its_switch_or_a_place_s_source_nothing_is_asked(pool: sqlx::PgP
     let mut by_default = config(true, true, None);
     by_default.also_on.sources.remove("itunes_song");
     by_default.validate().unwrap();
+    let seen = run(&pool, by_default, Answers::default()).await;
+    assert!(
+        seen.iter().any(|s| s.starts_with("itunes.apple.com")),
+        "{seen:?}"
+    );
     // `itunes` off: Apple is not asked, nor anything for it.
     let mut no_itunes = config(true, true, None);
     no_itunes.also_on.sources.insert(
@@ -283,7 +288,11 @@ async fn without_its_switch_or_a_place_s_source_nothing_is_asked(pool: sqlx::PgP
         },
     );
     no_itunes.validate().unwrap();
-    for config in [by_default, config(true, false, None), no_itunes] {
+    for config in [
+        config(false, true, None),
+        config(true, false, None),
+        no_itunes,
+    ] {
         let seen = run(&pool, config, Answers::default()).await;
         assert!(seen.is_empty(), "{seen:?}");
     }

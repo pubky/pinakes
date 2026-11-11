@@ -1,9 +1,9 @@
 # `youtube_match`: a label's YouTube upload on Deezer and TIDAL, by artist, title and length
 
 One of the music sources of [also on](../api.md#also-on). Unlike the exact lookups, its links are
-matches by artist, title and length, never keys.
+matches by artist, title and length: maybes (`kind` `maybe_same`), never keys.
 
-`youtube_match` (**off by default**; on with `[also_on.sources.youtube_match] enabled = true`):
+`youtube_match` (on by default; `[also_on.sources.youtube_match] enabled = false` turns it off):
 for a YouTube or YouTube Music video that is a label's upload, the same recording on Deezer and on
 TIDAL. A video is a label's upload when its stored card shows one: its channel (the oEmbed
 `author`) is an artist's Topic channel, `<Artist> - Topic`, or its description starts "Provided to
@@ -23,17 +23,18 @@ that keep a recording's identity such as a remaster dropped, the first credited 
 Of each service's tracks, exactly one must have the same artist (its first) and title (with its
 version, `Bohemian Rhapsody (Live Aid)`) and a length within 2 s of the video's; none or several
 give nothing for that service. Only the first page of each search is read (25 Deezer tracks, 20
-TIDAL tracks), so a second such track further down goes unseen; the link is a hint, never a join. Queen's Topic upload of Bohemian Rhapsody (354 s) matches Deezer's
-one such track (354 s); TIDAL has two (355 s and 356 s), so it gives no TIDAL link. The links are
-`https://www.deezer.com/track/{id}` and `https://tidal.com/track/{id}`, `via` `youtube_match`.
+TIDAL tracks), so a second such track further down goes unseen; the link is a maybe, never a
+join. Queen's Topic upload of Bohemian Rhapsody (354 s) matches Deezer's one such track (354 s);
+TIDAL has two (355 s and 356 s), so it gives no TIDAL link. The links are
+`https://www.deezer.com/track/{id}` and `https://tidal.com/track/{id}`, `via` `youtube_match`,
+`kind` `maybe_same`.
 
-## Why it is a match, and off by default
+## Why it is a maybe
 
 Nothing YouTube publishes ties a video to an ISRC or another service's ID: the artist, title and
-length are a metadata match. Its links are derived but unkeyed: they never join a group, never
-become a key of the video, and a candidate's ISRC is never recorded as the video's. It is off by
-default for that, because it reads YouTube's watch pages, and because its services are off by
-default too (`deezer` for Deezer's API terms, `tidal_isrc` for TIDAL's).
+length are a metadata match. Its links are derived but unkeyed and marked `maybe_same`: they never
+join a group, never become a key of the video, and a candidate's ISRC is never recorded as the
+video's.
 
 YouTube sometimes answers a watch page with a sign-in request
 (`playabilityStatus.status` `LOGIN_REQUIRED`, "confirm you're not a bot") and no video details,

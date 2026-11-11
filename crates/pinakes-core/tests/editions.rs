@@ -169,9 +169,11 @@ impl Transport for Captured {
 fn config(pair: &str, deezer: bool) -> Config {
     switched(pair, &[("deezer", deezer)])
 }
-/// TIDAL with a pair, and these sources on or off.
+/// TIDAL with a pair, and these sources on or off; Spotify's public pages off unless a test reads
+/// them (`with_pages`).
 fn switched(pair: &str, sources: &[(&str, bool)]) -> Config {
     let mut config = Config::default();
+    config.also_on.spotify_pages = false;
     config.sections.set(
         "tidal",
         serde_json::json!({"client_id": pair, "client_secret": format!("{pair}-secret")}),

@@ -5,14 +5,12 @@
 //! barcode is the value asked counts. The links are keyed by the ISRC or barcode, as TIDAL's own
 //! record of its own item is an exact source of it. Several tracks are the recording on several
 //! releases (`editions` places them, a card shows one per service); several albums for one
-//! barcode name no one album, and give nothing.
+//! barcode, or an answer with a further page, name no one album and give nothing.
 //!
-//! Off by default: TIDAL's Developer Guidelines forbid integrating TIDAL content with another
-//! service's without TIDAL's written approval (docs/sources). Asked with the same credentials,
-//! country and token slot as `tidal` (`[tidal]`), one request per value, each answer shared for an
-//! hour by credential pair. TIDAL's own links are not asked. It runs after every source that keys
-//! an ISRC or a barcode (a service's own record, the hubs, `discogs`, `deezer`) and before
-//! `editions`, which places its links.
+//! Asked with the same credentials, country and token slot as `tidal` (`[tidal]`), one request per
+//! value, each answer shared for an hour by credential pair. TIDAL's own links are not asked. It
+//! runs after every source that keys an ISRC or a barcode (a service's own record, the hubs,
+//! `discogs`, `deezer`) and before `editions`, which places its links.
 use super::{
     tidal::{self, TidalConfig, API},
     Context, Found, Source, Subject,
@@ -109,9 +107,6 @@ impl Source for TidalIsrc {
     }
     fn section(&self) -> Option<super::Section> {
         Some(super::Section::of::<TidalConfig>())
-    }
-    fn enabled_by_default(&self) -> bool {
-        false
     }
     fn ready(&self, config: &crate::config::Config) -> bool {
         config.section::<TidalConfig>().pair().is_some()

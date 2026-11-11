@@ -1326,8 +1326,8 @@ other MBIDs facts; recordings that disagree (a live
 version, a remix, an edit, another artist) leave the duration to pick one or the ISRC a fact
 ([an ISRC on several recordings](sources/README.md#an-isrc-on-several-recordings)). A track with
 an ISRC key on another service is looked up on Spotify and TIDAL by it, and an album with a barcode
-key by that, exactly (`spotify_isrc` and `tidal_isrc`, off by default, with the operator's
-credentials): the service's own track or album that carries the value becomes a link keyed by it.
+key by that, exactly (`spotify_isrc` and `tidal_isrc`, with the operator's credentials): the
+service's own track or album that carries the value becomes a link keyed by it.
 
 **Exact links and matches.** A derived link is exact when an identifier the service owns, or a
 hub, names it: a MusicBrainz relation, a Wikidata claim, or a service's own answer to a lookup by

@@ -79,9 +79,6 @@ impl Source for DeezerSource {
     fn id(&self) -> &'static str {
         "deezer"
     }
-    fn enabled_by_default(&self) -> bool {
-        false
-    }
     fn applies(&self, subject: &Subject) -> bool {
         music::parse(&subject.uri).is_some_and(|l| match (l.service, l.level) {
             (Service::Deezer, Level::Track | Level::Album) => true,

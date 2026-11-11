@@ -62,7 +62,7 @@ pub struct AlsoOnConfig {
     /// Music links carry no storefront (`music::parse`).
     pub apple_storefront: String,
     /// Read the public page of a Spotify track a card may show for the album it is on
-    /// (`editions`), where Spotify's Web API does not answer for it: off by default.
+    /// (`editions`), where Spotify's Web API does not answer for it: on by default.
     pub spotify_pages: bool,
     #[serde(skip)]
     pub links_per_source: usize,
@@ -82,7 +82,7 @@ impl Default for AlsoOnConfig {
             derive_links: true,
             sources: BTreeMap::new(),
             apple_storefront: "us".into(),
-            spotify_pages: false,
+            spotify_pages: true,
             links_per_source: 32,
             keys_per_source: 16,
             facts_per_source: 32,
@@ -291,8 +291,7 @@ pub trait Source: Send + Sync {
     /// Before a batch of resources (their URIs): ask the service, in as few requests as it
     /// allows, what this source will ask for each, so their lookups find it cached. Best effort.
     async fn prefetch(&self, _cx: &Context, _uris: &[String]) {}
-    /// Whether it runs without `[also_on.sources.<id>] enabled = true` (a service whose terms
-    /// the operator should accept first is off by default).
+    /// Whether it runs without `[also_on.sources.<id>] enabled = true`.
     fn enabled_by_default(&self) -> bool {
         true
     }

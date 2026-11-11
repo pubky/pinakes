@@ -17,8 +17,7 @@ gives nothing. Artists, playlists, episodes and shows are not read here.
 ## Another service's track on Spotify
 
 The lookup the other way, a Spotify track for another service's track by its ISRC, is the
-`spotify_isrc` source (off by default; its own page in this directory), with the same credentials
-and pace.
+`spotify_isrc` source (its own page in this directory), with the same credentials and pace.
 
 ## Without Spotify's API
 
@@ -56,16 +55,14 @@ look its URL up exactly, never by title or artist, and neither needs this one.
 - **No Odesli (song.link).** Its API documentation says: "The entire v1-alpha.1 API namespace
   is deprecated and will be retired on July 31, 2026", and "We have stopped giving out API keys"
   (access only by allowlisting). Asked without a key on 30 October 2026, it answers 401
-  `{"code":"PUBLIC_API_ACCESS_DEPRECATED"}`. Its API terms (song.link/api-terms) are a Google
-  Drive file that needs a sign-in to read. So there is no API whose terms allow an open indexer
-  to store its answers, and Pinakes asks it nothing.
+  `{"code":"PUBLIC_API_ACCESS_DEPRECATED"}`. Pinakes asks it nothing.
 
 While this source is on, [`editions`](editions.md) asks the Web API which album a Spotify track a
 card may show is on (`/v1/tracks/{id}`); where the API does not answer (no credentials, or
-credentials it refuses, as for an app whose owner has no premium plan), and only with
-`[also_on] spotify_pages = true` (off by default), the track's public page, once an hour at most,
-for the album it names (its `music:album`); a card's own Spotify track, a link someone referenced,
-is read so whatever the switch says. Never an album page.
+credentials it refuses, as for an app whose owner has no premium plan), and while
+`[also_on] spotify_pages` is on (`true` by default), the track's public page, once an hour at
+most, for the album it names (its `music:album`); a card's own Spotify track, a link someone
+referenced, is read so whatever the switch says. Never an album page.
 
 ## Operations
 

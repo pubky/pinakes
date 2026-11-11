@@ -60,9 +60,6 @@ impl Source for ItunesSong {
     fn id(&self) -> &'static str {
         "itunes_song"
     }
-    fn enabled_by_default(&self) -> bool {
-        false
-    }
     fn applies(&self, subject: &Subject) -> bool {
         music::parse(&subject.uri).is_some_and(|l| {
             l.level == Level::Track

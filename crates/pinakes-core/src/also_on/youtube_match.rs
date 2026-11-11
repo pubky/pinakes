@@ -84,9 +84,6 @@ impl Source for YoutubeMatch {
     fn id(&self) -> &'static str {
         "youtube_match"
     }
-    fn enabled_by_default(&self) -> bool {
-        false
-    }
     fn applies(&self, subject: &Subject) -> bool {
         let video = music::parse(&subject.uri)
             .is_some_and(|l| l.service == Service::YouTube && l.level == Level::Video);

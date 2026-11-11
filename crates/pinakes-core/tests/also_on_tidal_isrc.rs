@@ -133,8 +133,9 @@ impl Transport for Recorded {
     }
 }
 
-/// TIDAL's pair (one per test: tokens and refusals are kept per pair) and the source's switch.
-fn config(pair: Option<(&str, &str)>, on: bool) -> Config {
+/// TIDAL's pair (one per test: tokens and refusals are kept per pair) and the source's switch
+/// (`None`: its default).
+fn config(pair: Option<(&str, &str)>, on: impl Into<Option<bool>>) -> Config {
     let mut config = Config::default();
     if let Some((id, secret)) = pair {
         config.sections.set(
@@ -142,11 +143,11 @@ fn config(pair: Option<(&str, &str)>, on: bool) -> Config {
             serde_json::json!({"client_id": id, "client_secret": secret}),
         );
     }
-    if on {
+    if let Some(on) = on.into() {
         config.also_on.sources.insert(
             "tidal_isrc".into(),
             SourceOptions {
-                enabled: Some(true),
+                enabled: Some(on),
                 ..Default::default()
             },
         );
@@ -291,7 +292,7 @@ async fn tracks_and_albums_are_found_on_tidal_by_their_keys(pool: sqlx::PgPool) 
     }
 }
 
-/// Off by default, and asking nothing without TIDAL's pair.
+/// On by default with TIDAL's pair; switched off, or without the pair, it asks TIDAL nothing.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn off_or_without_credentials_nothing_asks_tidal(pool: sqlx::PgPool) {
     let track = save(
@@ -302,13 +303,24 @@ async fn off_or_without_credentials_nothing_asks_tidal(pool: sqlx::PgPool) {
     )
     .await;
     for config in [
-        config(Some(("default-id", "default-secret")), false),
+        config(Some(("off-id", "off-secret")), false),
         config(None, true),
     ] {
         let seen = run(&pool, config, Answers::default()).await;
         assert!(!seen.iter().any(|s| s.contains("tidal.com")), "{seen:?}");
         assert!(links(&pool, &track).await.is_empty());
     }
+    let seen = run(
+        &pool,
+        config(Some(("default-id", "default-secret")), None),
+        Answers::default(),
+    )
+    .await;
+    assert!(
+        seen.iter().any(|s| s.contains("openapi.tidal.com")),
+        "{seen:?}"
+    );
+    assert!(!links(&pool, &track).await.is_empty());
 }
 
 /// A refusal of the credentials (at the token endpoint, or a 403 from the API) and a rate limit

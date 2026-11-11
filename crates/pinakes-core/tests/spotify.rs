@@ -660,11 +660,11 @@ async fn a_track_with_an_isrc_key_gets_its_spotify_link(pool: sqlx::PgPool) {
     assert!(!seen.iter().any(|s| s.contains("/v1/search?")), "{seen:?}");
 }
 
-/// `spotify_isrc` is off by default: with the Spotify pair set and no switch, nothing asks the
-/// search. Switched on, a refusal (403) and a rate limit (429) keep the links an earlier run
-/// found; switched off again, those links stop showing on the card while their rows stay.
+/// `spotify_isrc` is on by default: with the Spotify pair set and no switch, it asks the search.
+/// A refusal (403) and a rate limit (429) keep the links an earlier run found; switched off, those
+/// links stop showing on the card while their rows stay.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
-async fn spotify_isrc_is_off_by_default_and_keeps_its_rows_through_refusals(pool: sqlx::PgPool) {
+async fn spotify_isrc_is_on_by_default_and_keeps_its_rows_through_refusals(pool: sqlx::PgPool) {
     let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
     if !registered.contains(&"spotify_isrc") {
         return;
@@ -678,12 +678,12 @@ async fn spotify_isrc_is_off_by_default_and_keeps_its_rows_through_refusals(pool
     store::save_document(&pool, &tidal_id, 0, &doc)
         .await
         .unwrap();
-    // Off by default: the pair alone turns nothing on.
+    // On by default: the pair alone turns it on.
     let mut by_default = config(Some(("isrc-default-id", "isrc-default-secret")));
     by_default.also_on.sources.remove("spotify_isrc");
     by_default.validate().unwrap();
     let seen = run(&pool, by_default, Answers::default()).await;
-    assert!(!seen.iter().any(|s| s.contains("/v1/search?")), "{seen:?}");
+    assert!(seen.iter().any(|s| s.contains("/v1/search?")), "{seen:?}");
     let links = |pool: sqlx::PgPool, id: String| async move {
         sqlx::query_scalar::<_, String>(
             "SELECT uri FROM derived_link WHERE resource_id=$1 AND source='spotify_isrc' ORDER BY uri",
@@ -693,8 +693,7 @@ async fn spotify_isrc_is_off_by_default_and_keeps_its_rows_through_refusals(pool
         .await
         .unwrap()
     };
-    assert!(links(pool.clone(), tidal_id.clone()).await.is_empty());
-    // Switched on (the test config), one run finds the link.
+    // The test config (switched on explicitly) finds the same.
     let on = config(Some(("isrc-default-id", "isrc-default-secret")));
     run(&pool, on.clone(), Answers::default()).await;
     let expected = [format!("https://open.spotify.com/track/{TRACK}")];

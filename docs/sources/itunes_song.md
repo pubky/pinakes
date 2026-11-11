@@ -1,9 +1,10 @@
 # `itunes_song`: Apple Music's song for another service's track, by its album and place
 
 One of the music sources of [also on](../api.md#also-on). Unlike the exact lookups, its link is a
-match (the album, the place on it and the length), never a key.
+match (the album, the place on it, the title and the length): a maybe (`kind` `maybe_same`),
+never a key.
 
-`itunes_song` (**off by default**; on with `[also_on.sources.itunes_song] enabled = true`): for a
+`itunes_song` (on by default; `[also_on.sources.itunes_song] enabled = false` turns it off): for a
 track on Deezer, Spotify or TIDAL, or any track with an `isrc:` key, the Apple Music song at the
 same place on the same album. The track's album barcode, disc and track number and length come
 from:
@@ -31,16 +32,15 @@ Apple's 369.6 s), and its title (`trackName`) is the track's own (Deezer's `titl
 credit such as "(feat. Pharrell Williams and Nile Rodgers)" and a remaster tag go, a version tag
 such as "Live" stays. A barcode iTunes answers with one wrong collection (a single's barcode with
 its album) so puts no other recording on the card. The link is
-`https://music.apple.com/song/{trackId}`, `via` `itunes_song`.
+`https://music.apple.com/song/{trackId}`, `via` `itunes_song`, `kind` `maybe_same`.
 
-## Why it is a match, and off by default
+## Why it is a maybe
 
 iTunes' answers carry no ISRC, so nothing Apple says ties its song to the track's recording: the
 album's barcode and the place on it are exact, the song at that place is inferred. The link is
-derived but unkeyed: it never joins a group and is never a key of the track, and a tagged Apple
-Music link stays a separate card unless MusicBrainz or Wikidata relate it. It is off by default
-for that reason; the operator turns it on knowing its links are matches. Apple's terms for the
-iTunes Search API are those of `itunes` (promotional use, linking to the store).
+derived but unkeyed and marked `maybe_same`: it never joins a group and is never a key of the
+track, and a tagged Apple Music link stays a separate card unless MusicBrainz or Wikidata relate
+it.
 
 ## Operations
 
