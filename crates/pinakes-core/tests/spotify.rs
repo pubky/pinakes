@@ -58,8 +58,11 @@ fn shared_track_body(id: &str, ms: u64) -> Vec<u8> {
     }))
     .unwrap()
 }
-/// A made-up album the barcode search lists beside HYDRA 3D's, which Spotify has no album for.
+/// A made-up album the barcode search lists beside HYDRA 3D's, whose own record carries
+/// Underclass Hero's barcode.
 const OTHER_UPC_ALBUM: &str = "0otherUpcAlbum00000000";
+/// A made-up album a barcode search lists, which Spotify has no album for (404).
+const MISSING_UPC_ALBUM: &str = "0missingUpcAlbum000000";
 /// A made-up album that carries Random Access Memories' barcode, listed by a search that found
 /// more albums than it lists.
 const PAGED_UPC_ALBUM: &str = "0ramUpcAlbum0000000000";
@@ -178,6 +181,16 @@ impl Transport for Recorded {
                 }
                 if path == format!("/v1/albums/{ALBUM}") {
                     answer(200, album_body(), "application/json; charset=utf-8")
+                } else if path == format!("/v1/albums/{OTHER_UPC_ALBUM}") {
+                    answer(
+                        200,
+                        serde_json::to_vec(&serde_json::json!({
+                            "album_type": "album", "id": OTHER_UPC_ALBUM, "type": "album",
+                            "name": "Underclass Hero", "external_ids": {"upc": "602517416987"},
+                        }))
+                        .unwrap(),
+                        "application/json; charset=utf-8",
+                    )
                 } else if path == format!("/v1/tracks/{TRACK}") {
                     answer(200, track_body(), "application/json; charset=utf-8")
                 } else if path == format!("/v1/tracks/{SHARED_PICKED}") {
@@ -197,13 +210,19 @@ impl Transport for Recorded {
                         .unwrap_or_default();
                     // The barcode search (`q=upc:…&type=album`), whose albums carry no barcode:
                     // HYDRA 3D's UPC-A lists its album and a made-up one the read-back drops;
-                    // Random Access Memories' lists one album that carries it, of 4 found (a next
-                    // page), which the source refuses unread.
+                    // Underclass Hero's lists the album that carries it and one Spotify has no
+                    // record of (so no link); Random Access Memories' lists one album that carries
+                    // it, of 4 found (a next page), which the source refuses unread.
                     if kind == "album" {
                         let albums = if q == "upc:4018939306052" {
                             serde_json::json!({"items": [
                                 {"album_type": "album", "id": ALBUM, "type": "album", "name": "HYDRA 3D"},
                                 {"album_type": "album", "id": OTHER_UPC_ALBUM, "type": "album", "name": "HYDRA 3D"},
+                            ], "limit": 3, "offset": 0, "total": 2, "next": null})
+                        } else if q == "upc:602517416987" {
+                            serde_json::json!({"items": [
+                                {"album_type": "album", "id": OTHER_UPC_ALBUM, "type": "album", "name": "Underclass Hero"},
+                                {"album_type": "album", "id": MISSING_UPC_ALBUM, "type": "album", "name": "Underclass Hero"},
                             ], "limit": 3, "offset": 0, "total": 2, "next": null})
                         } else if q == "upc:886443927087" {
                             serde_json::json!({"items": [
@@ -796,6 +815,9 @@ async fn an_album_with_a_barcode_key_gets_its_spotify_album(pool: sqlx::PgPool) 
     )
     .await;
     let ram = keyed("https://www.deezer.com/album/6575789", "upc:0886443927087").await;
+    // Underclass Hero on Deezer: of its two candidates, one carries the barcode and one gives no
+    // album (404), which might have been another: no link.
+    let underclass = keyed("https://www.deezer.com/album/125431", "upc:0602517416987").await;
     let seen = run(
         &pool,
         config(Some(("upc-id", "upc-secret"))),
@@ -815,8 +837,10 @@ async fn an_album_with_a_barcode_key_gets_its_spotify_album(pool: sqlx::PgPool) 
         asked,
         [
             format!("api.spotify.com/v1/albums/{ALBUM}?"),
+            format!("api.spotify.com/v1/albums/{MISSING_UPC_ALBUM}?"),
             format!("api.spotify.com/v1/albums/{OTHER_UPC_ALBUM}?"),
             "api.spotify.com/v1/search?q=upc%3A4018939306052&type=album&limit=3".to_owned(),
+            "api.spotify.com/v1/search?q=upc%3A602517416987&type=album&limit=3".to_owned(),
             "api.spotify.com/v1/search?q=upc%3A886443927087&type=album&limit=3".to_owned(),
         ],
         "{seen:?}"
@@ -829,6 +853,7 @@ async fn an_album_with_a_barcode_key_gets_its_spotify_album(pool: sqlx::PgPool) 
     // Random Access Memories: a search that found more albums than it lists names none, and its
     // album is not read.
     assert!(rows(&pool, links, &ram).await.is_empty());
+    assert!(rows(&pool, links, &underclass).await.is_empty());
     assert!(
         !seen.iter().any(|s| s.contains(PAGED_UPC_ALBUM)),
         "{seen:?}"

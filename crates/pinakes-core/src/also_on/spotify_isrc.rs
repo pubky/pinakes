@@ -154,6 +154,9 @@ async fn albums(cx: &Context, pair: (&str, &str), subject: &Subject) -> Result<F
             continue;
         }
         let mut carried = Vec::new();
+        // Every candidate must be read: one that gives no album (a 404) may be the other album
+        // with the barcode.
+        let mut unread = false;
         for id in &candidates {
             let url = format!("{API}/albums/{id}");
             let album = client_credentials::object_as(
@@ -165,13 +168,18 @@ async fn albums(cx: &Context, pair: (&str, &str), subject: &Subject) -> Result<F
                 false,
             )
             .await?;
-            if album.is_some_and(|a| carries(&a, id, &upc)) {
-                carried.push(id);
+            match album {
+                Some(album) if carries(&album, id, &upc) => carried.push(id),
+                Some(_) => {}
+                None => unread = true,
             }
         }
         let [id] = carried.as_slice() else {
             continue;
         };
+        if unread {
+            continue;
+        }
         if let Some(link) = derived(
             &format!("https://open.spotify.com/album/{id}"),
             Level::Album,
