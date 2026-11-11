@@ -59,7 +59,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub const MAX_TAGS: usize = 50_000;
 pub const MAX_DEPTH: usize = 256;
@@ -321,7 +321,15 @@ where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
-    let permit = PARSES.clone().acquire_owned().await?;
+    blocking_with(&PARSES, parse).await
+}
+/// [`blocking`] with a permit of `parses`.
+async fn blocking_with<T, F>(parses: &Arc<Semaphore>, parse: F) -> anyhow::Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let permit = permit(parses).await?;
     let cancelled = Arc::new(AtomicBool::new(false));
     let _cancel = Cancel(cancelled.clone());
     Ok(tokio::task::spawn_blocking(move || {
@@ -329,6 +337,39 @@ where
         in_job(Job::new(PARSE_BUDGET, cancelled), parse)
     })
     .await?)
+}
+
+/// A permit of `parses`, waited for on the runtime.
+#[cfg(not(test))]
+async fn permit(parses: &Arc<Semaphore>) -> anyhow::Result<OwnedSemaphorePermit> {
+    Ok(parses.clone().acquire_owned().await?)
+}
+/// A permit of `parses`. This crate's tests run on paused clocks, which tokio moves on whenever
+/// a test's runtime has nothing to do, and every test in the process shares the parse permits:
+/// a wait on the runtime for a permit another test holds would pass the test's timeouts at once
+/// (a recorded fetch "exceeded 10 seconds" in no time, a card part unread). The wait runs on the
+/// blocking pool instead, which keeps a paused clock where it is. A caller that stops waiting
+/// takes the wait out of the queue.
+#[cfg(test)]
+async fn permit(parses: &Arc<Semaphore>) -> anyhow::Result<OwnedSemaphorePermit> {
+    if let Ok(permit) = parses.clone().try_acquire_owned() {
+        return Ok(permit);
+    }
+    let runtime = tokio::runtime::Handle::current();
+    let parses = parses.clone();
+    // Dropped with this future: the wait ends without a permit.
+    let (_waiting, gone) = tokio::sync::oneshot::channel::<()>();
+    let permit = tokio::task::spawn_blocking(move || {
+        runtime.block_on(async {
+            tokio::select! {
+                biased;
+                permit = parses.acquire_owned() => Some(permit),
+                _ = gone => None,
+            }
+        })
+    })
+    .await?;
+    Ok(permit.context("the caller stopped waiting")??)
 }
 
 /// Run a parse on a thread of its own, outside the runtime and its permits, as one parse job,
@@ -2169,29 +2210,58 @@ mod tests {
         timed(|| interstitial::inspect(&url, &fetched(503, "text/plain", plain)).unwrap());
     }
 
+    /// The semaphore is the test's own: other tests' parses don't move its count.
     #[tokio::test]
     async fn a_parse_holds_its_permit_until_it_ends() {
-        let before = running();
+        let parses = Arc::new(Semaphore::new(1));
         let (started, wait) = std::sync::mpsc::channel();
         let (finish, done) = std::sync::mpsc::channel::<()>();
-        let parse = tokio::spawn(blocking(move || {
-            started.send(()).unwrap();
-            done.recv().unwrap();
-        }));
+        let parse = tokio::spawn({
+            let parses = parses.clone();
+            async move {
+                blocking_with(&parses, move || {
+                    started.send(()).unwrap();
+                    done.recv().unwrap();
+                })
+                .await
+            }
+        });
         tokio::task::spawn_blocking(move || wait.recv().unwrap())
             .await
             .unwrap();
         // The caller stops waiting; the parse still runs and still holds its permit.
         parse.abort();
-        assert!(running() > before);
+        assert_eq!(parses.available_permits(), 0);
         finish.send(()).unwrap();
         for _ in 0..200 {
-            if running() == before {
+            if parses.available_permits() == 1 {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
-        assert_eq!(running(), before);
+        assert_eq!(parses.available_permits(), 1);
+    }
+
+    /// While no permit is free (another test's parses hold them all), a paused test waits for
+    /// one without its clock moving: a fetch timeout around the wait doesn't pass in no time.
+    /// The semaphore is the test's own, so no other test waits.
+    #[tokio::test(start_paused = true)]
+    async fn a_wait_for_a_permit_leaves_a_paused_clock_alone() {
+        let parses = Arc::new(Semaphore::new(0));
+        let freed = parses.clone();
+        let holder = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            freed.add_permits(1);
+        });
+        let start = tokio::time::Instant::now();
+        let parsed = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            blocking_with(&parses, || 1),
+        )
+        .await;
+        assert_eq!(parsed.expect("the wait passed the timeout").unwrap(), 1);
+        assert!(start.elapsed() < std::time::Duration::from_secs(10));
+        holder.join().unwrap();
     }
 
     /// No code but this module names the HTML parser's entry points.
