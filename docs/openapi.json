@@ -24,7 +24,7 @@
             ]
           },
           "kind": {
-            "description": "For a derived link, a qualifier (`archived`, `work`, `source`, `submitted`, `published`,\n`pdf`), or `maybe_same`: a match by metadata (artist, title, length), possibly the same\nthing, never by an exact ID; it joins no group.",
+            "description": "For a derived link, a qualifier (`archived`, `work`, `source`, `submitted`, `published`,\n`pdf`), or `maybe`: a match by metadata (artist, title, length), possibly the same\nthing, never by an exact ID; it joins no group.",
             "type": [
               "string",
               "null"
@@ -567,7 +567,7 @@
             ]
           },
           "license": {
-            "description": "An SPDX licence ID (`CC-BY-SA-4.0`, `CC-BY-2.0`, `CC0-1.0`, `GPL-3.0-only`,\n`LGPL-2.1-or-later`), `public-domain`, or `Attribution` (Commons' licence of that name,\nwhich has no SPDX ID). Null for a cover from the Cover Art Archive and for TMDB's poster\nor overview, which carry no licence: cover art is its label's, shown as a service shows an\nalbum's cover, and TMDB's values are used under TMDB's API terms (`license_url` is null\ntoo).",
+            "description": "An SPDX licence ID (`CC-BY-SA-4.0`, `CC-BY-2.0`, `CC0-1.0`, `GPL-3.0-only`,\n`LGPL-2.1-or-later`), `public-domain`, or `Attribution` (Commons' licence of that name,\nwhich has no SPDX ID). Null for a cover from the Cover Art Archive and for TMDB's poster\nor overview, which carry no licence: cover art is its label's, shown as a service shows an\nalbum's cover, and TMDB's values carry none either (`license_url` is null too).",
             "type": [
               "string",
               "null"
