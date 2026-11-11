@@ -205,8 +205,8 @@ async fn links(pool: &sqlx::PgPool, id: &str) -> Vec<String> {
         .await
         .unwrap()
 }
-/// A maybe: no key, `kind` `maybe_same`.
-const GET_LUCKY: &str = "https://music.apple.com/song/617154366 - itunes_song maybe_same";
+/// A maybe: no key, `kind` `maybe`.
+const GET_LUCKY: &str = "https://music.apple.com/song/617154366 - itunes_song maybe";
 
 /// Get Lucky on Deezer (367 s, disc 1 track 8 of Random Access Memories) is Apple's song
 /// 617154366 (369.6 s), unkeyed. Walking Disaster, by its ISRC key on another service, is

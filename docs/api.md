@@ -1261,7 +1261,7 @@ A card's `also_on` says where else the same thing is: first the other members of
 [group](#groups) (links someone tagged, each with its resource `id`), by ID and URI, then
 **derived links**: the same thing on services nobody tagged, found by a source, with
 `derived: true`, the service's name in `site`, the hub or service it came through in `via`
-(`musicbrainz`, `wikidata`), and for some a `kind` its source's page names (`maybe_same`: a match
+(`musicbrainz`, `wikidata`), and for some a `kind` its source's page names (`maybe`: a match
 by metadata, not an exact ID, [below](#also-on); `archived`: a Wayback Machine copy, with
 its capture time in `at`). Derived links are ordered by service name; each URL appears once (a tagged member wins)
 and never the card itself. Every card, a resource read too, carries one link per service, the
@@ -1333,7 +1333,7 @@ service's own track or album that carries the value becomes a link keyed by it.
 hub, names it: a MusicBrainz relation, a Wikidata claim, or a service's own answer to a lookup by
 ISRC or barcode (`deezer`, `itunes` albums, `spotify_isrc`, `tidal_isrc`). It carries that key, so a
 tagged resource that is the link joins the group; its entry is a plain derived link. Two sources
-match by metadata instead: their links are maybes, marked `kind: "maybe_same"` on the entry
+match by metadata instead: their links are maybes, marked `kind: "maybe"` on the entry
 (possibly the same thing), still listed so a client can show or play them, but never keyed, never
 joining a group, never making a key of the card they are on.
 - `itunes_song`: Apple Music's song at the same disc and track number on the

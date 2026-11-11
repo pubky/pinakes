@@ -1,7 +1,7 @@
 # `itunes_song`: Apple Music's song for another service's track, by its album and place
 
 One of the music sources of [also on](../api.md#also-on). Unlike the exact lookups, its link is a
-match (the album, the place on it, the title and the length): a maybe (`kind` `maybe_same`),
+match (the album, the place on it, the title and the length): a maybe (`kind` `maybe`),
 never a key.
 
 `itunes_song` (on by default; `[also_on.sources.itunes_song] enabled = false` turns it off): for a
@@ -32,13 +32,13 @@ Apple's 369.6 s), and its title (`trackName`) is the track's own (Deezer's `titl
 credit such as "(feat. Pharrell Williams and Nile Rodgers)" and a remaster tag go, a version tag
 such as "Live" stays. A barcode iTunes answers with one wrong collection (a single's barcode with
 its album) so puts no other recording on the card. The link is
-`https://music.apple.com/song/{trackId}`, `via` `itunes_song`, `kind` `maybe_same`.
+`https://music.apple.com/song/{trackId}`, `via` `itunes_song`, `kind` `maybe`.
 
 ## Why it is a maybe
 
 iTunes' answers carry no ISRC, so nothing Apple says ties its song to the track's recording: the
 album's barcode and the place on it are exact, the song at that place is inferred. The link is
-derived but unkeyed and marked `maybe_same`: it never joins a group and is never a key of the
+derived but unkeyed and marked `maybe`: it never joins a group and is never a key of the
 track, and a tagged Apple Music link stays a separate card unless MusicBrainz or Wikidata relate
 it.
 

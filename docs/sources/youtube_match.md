@@ -1,7 +1,7 @@
 # `youtube_match`: a label's YouTube upload on Deezer and TIDAL, by artist, title and length
 
 One of the music sources of [also on](../api.md#also-on). Unlike the exact lookups, its links are
-matches by artist, title and length: maybes (`kind` `maybe_same`), never keys.
+matches by artist, title and length: maybes (`kind` `maybe`), never keys.
 
 `youtube_match` (on by default; `[also_on.sources.youtube_match] enabled = false` turns it off):
 for a YouTube or YouTube Music video that is a label's upload, the same recording on Deezer and on
@@ -27,12 +27,12 @@ TIDAL tracks), so a second such track further down goes unseen; the link is a ma
 join. Queen's Topic upload of Bohemian Rhapsody (354 s) matches Deezer's one such track (354 s);
 TIDAL has two (355 s and 356 s), so it gives no TIDAL link. The links are
 `https://www.deezer.com/track/{id}` and `https://tidal.com/track/{id}`, `via` `youtube_match`,
-`kind` `maybe_same`.
+`kind` `maybe`.
 
 ## Why it is a maybe
 
 Nothing YouTube publishes ties a video to an ISRC or another service's ID: the artist, title and
-length are a metadata match. Its links are derived but unkeyed and marked `maybe_same`: they never
+length are a metadata match. Its links are derived but unkeyed and marked `maybe`: they never
 join a group, never become a key of the video, and a candidate's ISRC is never recorded as the
 video's.
 

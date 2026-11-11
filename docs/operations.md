@@ -744,7 +744,7 @@ are spelled, typed or named (aliases of a canonical link, a card's service in `s
 another service, and per barcode key of an album a search and up to three album reads, cached an
 hour, on Spotify's pace. `tidal_isrc` (with the TIDAL credentials) costs one TIDAL request per ISRC
 or barcode key of a track or album on another service, on `tidal`'s pace and token slot.
-`itunes_song` and `youtube_match` (their links are maybes, `kind` `maybe_same`, never keys) cost
+`itunes_song` and `youtube_match` (their links are maybes, `kind` `maybe`, never keys) cost
 per track a Deezer, Spotify or TIDAL read and an iTunes lookup, and per label upload on YouTube a
 watch page (up to 3 MB) and a Deezer and a TIDAL search; each runs its part only while the source
 of that service runs (`deezer`, `spotify`, `tidal`, `tidal_isrc`, `itunes`). Every one of them is
