@@ -158,6 +158,28 @@ class Quality(unittest.TestCase):
         self.assertNotRegex(s, r"(<>|<|>|=) *'[0-9]+(\.[0-9]+)+'")
         self.assertIn('h3 4.2.3+', (ROOT / 'docs/deployment.md').read_text())
 
+    def test_apt_falls_back_to_a_mirror_only_for_unresolvable_ubuntu_hosts(self):
+        s = (ROOT / 'scripts/ci/setup-postgres').read_text()
+        # Probed and rewritten before the first apt-get, in every apt source format the runner uses.
+        self.assertLess(s.index('getent hosts'), s.index('sudo apt-get update'))
+        for source in ['/etc/apt/apt-mirrors.txt', '/etc/apt/sources.list',
+                       '/etc/apt/sources.list.d/*.sources']:
+            self.assertIn(source, s)
+        archive = re.search(r"^ubuntu_archive='(.+)'$", s, re.M).group(1)
+
+        def rewrite(line):
+            return subprocess.run(['sed', '-E', f's#{archive}#MIRROR/#g'], input=line, check=True,
+                                  capture_output=True, text=True).stdout
+        for line, expected in [
+            ('http://azure.archive.ubuntu.com/ubuntu/\tpriority:1\n', 'MIRROR/\tpriority:1\n'),
+            ('URIs: http://security.ubuntu.com/ubuntu\n', 'URIs: MIRROR/\n'),
+            ('URIs: http://ports.ubuntu.com/ubuntu-ports/\n', 'URIs: MIRROR/\n'),
+            ('deb https://apt.postgresql.org/pub/repos/apt noble-pgdg main\n', None),
+            ('deb https://esm.ubuntu.com/apps/ubuntu noble-apps-security main\n', None),
+            ('deb http://notubuntu.com/ubuntu noble main\n', None),
+        ]:
+            self.assertEqual(rewrite(line), expected or line)
+
     def test_whitespace_check_covers_the_committed_change(self):
         quality = workflow()['jobs']['quality']
         self.assertEqual(quality['steps'][0]['with']['fetch-depth'], '0')

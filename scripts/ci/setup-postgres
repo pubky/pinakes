@@ -5,6 +5,46 @@ set -euo pipefail
 # shellcheck source=/dev/null
 . /etc/os-release
 [[ "$ID" == ubuntu && "$VERSION_ID" == 24.04 ]]
+# When the runner cannot resolve its Ubuntu archive hosts (a DNS incident on hosted runners),
+# point apt's Ubuntu sources at a mirror outside ubuntu.com. A no-op while they resolve; packages
+# are still checked against the archive keyring the sources name. PGDG below is not touched.
+ubuntu_archive='https?://([A-Za-z0-9-]+\.)*ubuntu\.com/ubuntu(-ports)?/?'
+apt_files=()
+for file in /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/*.sources \
+  /etc/apt/sources.list.d/*.list; do
+  if [[ -f "$file" ]]; then apt_files+=("$file"); fi
+done
+unresolved=()
+if ((${#apt_files[@]})); then
+  while read -r host; do
+    timeout 10 getent hosts "$host" >/dev/null || unresolved+=("$host")
+  done < <(grep -ohE "$ubuntu_archive" "${apt_files[@]}" | sed -E 's#^https?://##; s#/.*##' | sort -u)
+fi
+if ((${#unresolved[@]})); then
+  case "$(dpkg --print-architecture)" in
+    amd64 | i386) archive=ubuntu ;;
+    *) archive=ubuntu-ports ;;
+  esac
+  mirror=
+  for base in https://mirrors.edge.kernel.org https://mirrors.mit.edu https://mirrors.ocf.berkeley.edu; do
+    for suite in "$VERSION_CODENAME" "$VERSION_CODENAME-updates" "$VERSION_CODENAME-security"; do
+      curl --fail --silent --head --max-time 20 -o /dev/null "$base/$archive/dists/$suite/InRelease" ||
+        continue 2
+    done
+    mirror="$base/$archive/"
+    break
+  done
+  if [[ -n "$mirror" ]]; then
+    echo "::warning::apt: cannot resolve ${unresolved[*]}; using the Ubuntu mirror $mirror"
+    for file in "${apt_files[@]}"; do
+      sudo sed -i -E "s#$ubuntu_archive#$mirror#g" "$file"
+    done
+  else
+    echo "::warning::apt: cannot resolve ${unresolved[*]} and no fallback mirror answers; keeping the runner's sources"
+  fi
+else
+  echo "apt: using the runner's Ubuntu sources"
+fi
 key="$RUNNER_TEMP/pgdg.asc"
 curl --fail --silent --show-error https://www.postgresql.org/media/keys/ACCC4CF8.asc -o "$key"
 fingerprint=$(gpg --show-keys --with-colons "$key" | awk -F: '$1 == "fpr" { print $10; exit }')
