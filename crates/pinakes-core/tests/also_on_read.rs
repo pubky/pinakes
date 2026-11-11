@@ -80,3 +80,78 @@ async fn a_read_shows_one_link_per_service_and_none_of_its_own(pool: PgPool) {
     sites.sort();
     assert_eq!(sites, ["Apple Music", "Deezer", "TIDAL"], "{v}");
 }
+
+/// A card and each of its `also_on` links carry the frame that shows them (docs/api.md, Embed):
+/// a service's player from the link alone, `null` for a link without one.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_card_and_its_also_on_links_carry_their_embed(pool: PgPool) {
+    let uri = "https://open.spotify.com/track/69kOkLUCkxIZYexIgSG8rq";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut doc = ResourceMeta::new(uri, "jsonld", 86400);
+    doc.set_type("MusicRecording");
+    doc.name = Some("Get Lucky".into());
+    doc.service = Some("Spotify".into());
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let links = [
+        ("https://tidal.com/track/20115564", "TIDAL"),
+        ("https://www.deezer.com/track/67238735", "Deezer"),
+        ("https://www.discogs.com/master/1234", "Discogs"),
+    ];
+    also_on::record(
+        &pool,
+        &id,
+        "musicbrainz",
+        Found {
+            links: links
+                .iter()
+                .map(|(u, s)| Link::new(*u, *s, "musicbrainz"))
+                .collect(),
+            ..Default::default()
+        },
+        std::time::Duration::from_secs(86_400),
+        &Config::default().also_on,
+    )
+    .await
+    .unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let path = format!(
+        "/v1/resources/by-uri?uri={}",
+        url::form_urlencoded::byte_serialize(uri.as_bytes()).collect::<String>()
+    );
+    let mut request = Request::builder().uri(&path).body(Body::empty()).unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.2:1234".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), 200);
+    let v: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    common::check_response("GET", &path, 200, &v);
+    assert_eq!(
+        v["embed"],
+        serde_json::json!({
+            "provider": "spotify",
+            "kind": "audio",
+            "src": "https://open.spotify.com/embed/track/69kOkLUCkxIZYexIgSG8rq",
+            "height": 152,
+            "aspect": null,
+            "allow": ["accelerometer", "autoplay", "clipboard-write", "encrypted-media", "gyroscope", "picture-in-picture", "web-share"],
+            "autoplay_param": null
+        })
+    );
+    let src = |site: &str| {
+        v["also_on"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["site"] == site)
+            .map(|e| e["embed"]["src"].clone())
+            .unwrap_or_else(|| panic!("{site}: {v}"))
+    };
+    assert_eq!(src("TIDAL"), "https://embed.tidal.com/tracks/20115564");
+    assert_eq!(
+        src("Deezer"),
+        "https://widget.deezer.com/widget/dark/track/67238735"
+    );
+    assert_eq!(src("Discogs"), Value::Null);
+}

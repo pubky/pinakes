@@ -159,8 +159,10 @@ async fn optional_fetch_policy_and_metrics() {
                 json!({"type":"video","title":"Embed fallback","thumbnail_url":"https://images.example/embed.jpg"}).to_string()
             } else if u.path() == "/incomplete" {
                 "<title>Incomplete</title>".into()
-            } else {
+            } else if u.path() == "/no-player" {
                 r#"<script type="application/ld+json">{"@type":"Article","name":"Complete","image":"https://images.example/page.jpg"}</script>"#.into()
+            } else {
+                r#"<head><meta name="twitter:player" content="https://player.vimeo.com/video/1"></head><script type="application/ld+json">{"@type":"Article","name":"Complete","image":"https://images.example/page.jpg"}</script>"#.into()
             };
             Ok(Fetched {
                 permanent_redirect: false,
@@ -192,6 +194,13 @@ async fn optional_fetch_policy_and_metrics() {
             "https://vimeo.com/complete",
             2,
             true,
+        ),
+        // A complete page that names no player of its own: the provider is asked for its frame.
+        (
+            cards::OembedPolicy::WhenNeeded,
+            "https://vimeo.com/no-player",
+            2,
+            false,
         ),
         (
             cards::OembedPolicy::WhenNeeded,
@@ -254,7 +263,16 @@ async fn optional_fetch_policy_and_metrics() {
         assert_eq!(
             metrics
                 .discovery
-                .with_label_values(&["oembed", if count == 1 { "skipped" } else { "requested" }])
+                .with_label_values(&[
+                    "oembed",
+                    if count == 1 {
+                        "skipped"
+                    } else if uri.ends_with("/no-player") {
+                        "frame"
+                    } else {
+                        "requested"
+                    }
+                ])
                 .get(),
             1
         );

@@ -128,7 +128,7 @@ async fn status(app: &axum::Router, path: &str) -> u16 {
 }
 /// The `{id, uri, site}` a card's group hint names `id` by.
 fn named(id: &str, name: &str) -> Value {
-    json!({"id": id, "uri": format!("https://example.org/{name}"), "site": "example.org"})
+    json!({"id": id, "uri": format!("https://example.org/{name}"), "site": "example.org", "embed": null})
 }
 fn ids(page: &Value) -> Vec<String> {
     page["items"]
@@ -352,7 +352,7 @@ async fn members_keep_their_own_cards_and_counts_and_collapse_is_a_view(pool: Pg
     assert_eq!(other["name"], "other", "{other}");
     assert_eq!(
         other["also_on"],
-        json!([{"id": a, "uri": "doi:10.5555/joined", "site": card["site"]}])
+        json!([{"id": a, "uri": "doi:10.5555/joined", "site": card["site"], "embed": null}])
     );
     let mut disabled = Config::default();
     disabled.groups.enabled = false;
@@ -1283,7 +1283,7 @@ async fn registry_landing_pages_need_the_page_to_cite_the_identifier(pool: PgPoo
     assert_eq!(card["group"]["id"], group.as_str());
     assert_eq!(
         card["also_on"],
-        json!([{"id": publisher, "uri": landing, "site": "www.nature.com"}]),
+        json!([{"id": publisher, "uri": landing, "site": "www.nature.com", "embed": null}]),
         "{card}"
     );
 }

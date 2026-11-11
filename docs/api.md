@@ -98,11 +98,12 @@ An IMDb title keeps the type its page gives (it can be either).
 | `type`, `type_path` | schema.org type (`MusicEvent`, `Book`, `Place`, …), or one of Pinakes's own types for what schema.org has no class for: `BitcoinBlock`, `BitcoinTransaction`, `BitcoinAddress`, `LightningNode` and `LightningChannel` (not schema.org; each a child of `Thing`); `type_path` is the type's ancestors, root first (`["Thing", "Event", "MusicEvent"]`), the types a `type=` search matches it by |
 | `name`, `description`, `image` | Display metadata; images point to the origin and are never proxied |
 | `stream` | Audio a client can play, `{url, type, duration_s, preview}` ([Stream](#stream)): a podcast episode's enclosure, a recording's public preview. Absent when the card has none |
+| `embed` | The frame that shows the link as its own site does, `{provider, kind, src, height, aspect, allow, autoplay_param}` ([Embed](#embed)): a service's player, a social post, a map, slides. `null` when there is none and on a `missing` card |
 | `site` | The publishing site: the page's own site name (`og:site_name`), else its host; for `pubky://` objects the app path segment (`loopky`), not the public key; for a link whose URL names a known service (a music service, a Wikipedia edition, MusicBrainz, Wikidata, a service the also-on lookups know), that service's name (`Apple Music`, `Wikipedia (de)`, `OpenStreetMap`), whatever the page calls itself and even before its card is read; for a card read from an official API without a host of its own, the service's name (`Federal Register`) |
 | `point` | `{lat, lon}` |
 | `start`, `end` | RFC 3339 instants for events and occurrences |
 | `group` | `{id, size}` when the resource or occurrence is in a [group](#groups), else `null` |
-| `also_on` | The same thing elsewhere ([Also on](#also-on)): the other members of its group as `{id, uri, site}` (other resources first, one entry each by ID, then other occurrences of its own feed), then derived links nobody tagged as `{uri, site, derived: true, via, kind?, at?}`, by service name; one per service (of a recording's or an album's links, the one on the card's own release, else on the original edition), never another page of the card's own service, at most 8 on a search, lookup or group card and 256 on a resource read. A hint only: every member keeps its own card |
+| `also_on` | The same thing elsewhere ([Also on](#also-on)): the other members of its group as `{id, uri, site}` (other resources first, one entry each by ID, then other occurrences of its own feed), then derived links nobody tagged as `{uri, site, derived: true, via, kind?, at?}`, by service name; each with its `embed` ([Embed](#embed)) or `null`; one per service (of a recording's or an album's links, the one on the card's own release, else on the original edition), never another page of the card's own service, at most 8 on a search, lookup or group card and 256 on a resource read. A hint only: every member keeps its own card |
 | `open_in` | The clients that open a Pubky app's object, `[{client, url}]` (`url` is `https:`): from the app's profile ([Pubky apps](pubky-apps.md)), e.g. Loopky for a deck; on a Pubky event reference's card, those of the event object. `[]` on every other card |
 | `attribution` | Present on OSM cards, events placed at an OSM venue and events whose zone came from coordinates; display it with the card |
 | `credits` | Where `image` and `description` came from when Pinakes added them from another source than the link ([Credits](#credits)): one entry per such field, at most 4. `[]` when none: such a field came from the link itself |
@@ -164,6 +165,61 @@ Which cards carry one (each source's page in [docs/sources](sources/README.md) s
 - an Apple Music track: iTunes' 30-second preview, `preview: true` (the `itunes` source), from
   the card's next read. Deezer's previews are signed and expire, so they are never one;
   Spotify's are not used.
+
+### Embed
+
+The frame a client may load, sandboxed, to show a link the way its own site does, so a client
+needs no list of services to build one:
+
+```json
+"embed": {"provider": "spotify", "kind": "audio", "src": "https://open.spotify.com/embed/track/003vvx7Niy0yvhvHt4a68B",
+          "height": 152, "aspect": null,
+          "allow": ["accelerometer", "autoplay", "clipboard-write", "encrypted-media", "gyroscope", "picture-in-picture", "web-share"],
+          "autoplay_param": null}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `provider` | Who serves the frame: `youtube`, `vimeo`, `spotify`, `soundcloud`, `mixcloud`, `tidal`, `deezer`, `apple-music`, `apple-podcasts`, `x`, `mastodon` or `openstreetmap`; else the oEmbed provider's name in lower case with hyphens (`speaker-deck`), else the frame's host |
+| `kind` | `audio` or `video` (a player), `post` (a social post), `map`, or `rich` (anything else: slides, a document, code, a chart) |
+| `src` | The frame's address. It never starts playing by itself |
+| `height` | CSS pixels, for a frame of fixed height (a player strip, a post, a document); `null` when it scales with its width or the provider gives none |
+| `aspect` | Width divided by height, for a frame that scales with its width (a video, a map, a slide deck; 16:9 when the provider names no size); `null` otherwise |
+| `allow` | The Permissions Policy features for the frame's `allow` attribute (join them with `; `), only from `accelerometer`, `autoplay`, `clipboard-write`, `encrypted-media`, `fullscreen`, `gyroscope`, `picture-in-picture`, `web-share` |
+| `autoplay_param` | A query parameter (`autoplay=1`, `auto_play=true`) that makes the player start once loaded: set it in `src` (replacing that parameter's value there, which is off) only after the viewer pressed play. `null` when the player has none; a player may still take its own start message (Spotify's, TIDAL's) |
+
+Where it comes from, the first that has one:
+1. **The link itself**, when the card is served, so every stored card has it: a YouTube video,
+   playlist or channel (its uploads), a Vimeo video, a Spotify track, album, artist, playlist,
+   show or episode, a SoundCloud track, set or profile, a Mixcloud show, a TIDAL track, album,
+   video or playlist, a Deezer track, album, playlist or artist, an Apple Music song, album or
+   playlist, an Apple Podcasts show or episode, an X post; a Mastodon post on the server it was
+   posted on (`/@{account}/{id}/embed`; one Mastodon's own API answered for); an OpenStreetMap card's map (its bounding box, or the
+   streets around its point, with a marker). `also_on` links get these as well.
+2. **The provider's oEmbed answer**, read with the card: only the `src` of its first `<iframe>`
+   (or a Mastodon-style `data-embed-url`), never its HTML, with the iframe's `width`, `height` and
+   `allow`. Pinakes asks a provider of the pinned registry (`data/oembed-providers.json`) for it
+   when the page names no player of its own (its frame alone: the card keeps the page's fields);
+   another site's oEmbed answer counts when the card reads it anyway. Its `provider` is the
+   answer's `provider_name` as a slug (`speaker-deck`), else the frame's host; an answer takes
+   the name of a service of the first kind only for a frame on that service's own embed host
+   (never Mastodon's).
+3. **The page's own player**: its head's `twitter:player` (with `:width` and `:height`), or an
+   `og:video:secure_url` / `og:video:url` whose `og:video:type` is `text/html`.
+
+A frame from 2. or 3. never starts by itself: an autoplay its address turns on (`autoplay=1`)
+is turned off there and given as `autoplay_param`; one without such a parameter has no
+`autoplay` in `allow`. A card whose link names no frame takes the first of its other links' (its
+`http:` spelling, a short link) that does. A tagged `also_on` member whose link names none shows
+the frame its own card shows. A `missing` card, and a post found gone, have none. A frame
+stored on a card of an audio type (a recording, an album, a podcast or episode) with a fixed
+height is an `audio` player; one on a social post is a `post`.
+
+Only a safe address is an embed: `https` on a public host name (no IP address, `localhost`, single
+label or private suffix such as `.local` or `.internal`), no user, password or port, no credential
+in the query or fragment, at most 2,048 bytes; `javascript:`, `data:` and any other scheme never.
+Frames from 2. and 3. come with a card's next read (`pinakesd reextract media` reads the oEmbed
+providers' cards again at once).
 
 ### Credits
 

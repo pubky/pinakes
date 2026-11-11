@@ -810,6 +810,10 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
     {
         add_alias(&mut out.doc, alias);
     }
+    // The page's own player, from its head alone, unless its link names one (`embed::link`).
+    if crate::embed::link(uri).is_none() {
+        out.doc.embed = crate::embed::from_meta(&meta_head, &fetched.url);
+    }
     // canonical, alternate and oEmbed links belong in the head (they are not body-ok); a body
     // `<link>` may come from user content and must not claim identity or advertise endpoints.
     // Only the first head canonical is an alias candidate, beside a permanent redirect's target.
@@ -2062,6 +2066,13 @@ pub fn apply_oembed(doc: &mut ResourceMeta, v: &Value, base: &Url) {
     for (key, field) in [("author", "author_name"), ("provider", "provider_name")] {
         if let Some(v) = oembed_field(v, field) {
             doc.attributes.entry(key.into()).or_insert(v);
+        }
+    }
+    // The provider's frame comes before the page's own player, unless the link names one
+    // (`embed::link`); only its address is kept, never the answer's HTML.
+    if crate::embed::link(&doc.url).is_none() {
+        if let Some(embed) = crate::embed::from_oembed(v, base) {
+            doc.embed = Some(embed);
         }
     }
 }
@@ -3332,6 +3343,54 @@ mod tests {
         assert_eq!(doc.name.as_deref(), Some("OG wins"));
         assert_eq!(doc.type_name, "VideoObject");
         assert!(!serde_json::to_string(&doc).unwrap().contains("<script>"));
+    }
+    /// A page's card keeps the frame its oEmbed answer names (its `<iframe>` alone), before the
+    /// player its head `<meta>` names; a link whose player follows from the link stores none.
+    #[test]
+    fn a_page_card_keeps_its_frame_never_the_html() {
+        let page = |uri: &str, body: &str| {
+            let url = Url::parse(uri).unwrap();
+            extract(
+                uri,
+                &Fetched {
+                    permanent_redirect: false,
+                    truncated: false,
+                    validators: Default::default(),
+                    url,
+                    status: 200,
+                    retry_after_secs: 60,
+                    location: None,
+                    content_type: "text/html".into(),
+                    body: body.as_bytes().to_vec(),
+                },
+                100,
+            )
+            .unwrap()
+            .doc
+        };
+        let head = r#"<head><title>Clip</title><meta name="twitter:player" content="/embed/clip-1"><meta name="twitter:player:width" content="640"><meta name="twitter:player:height" content="360"></head><body><meta name="twitter:player" content="https://attacker.example/x"></body>"#;
+        let mut doc = page("https://video.example.com/clip-1", head);
+        let embed = doc.embed.clone().unwrap();
+        assert_eq!(embed.src, "https://video.example.com/embed/clip-1");
+        assert_eq!(embed.aspect, Some(1.7778));
+        apply_oembed(
+            &mut doc,
+            &serde_json::json!({"type": "rich", "provider_name": "Video Example",
+                "html": "<div><iframe src=\"https://player.video.example.com/1\" height=\"300\"></iframe></div><script>bad</script>"}),
+            &Url::parse("https://video.example.com/oembed").unwrap(),
+        );
+        let embed = doc.embed.clone().unwrap();
+        assert_eq!(
+            (embed.provider.as_str(), embed.src.as_str(), embed.height),
+            (
+                "video-example",
+                "https://player.video.example.com/1",
+                Some(300)
+            )
+        );
+        assert!(!serde_json::to_string(&doc).unwrap().contains("<script>"));
+        let yt = page("https://www.youtube.com/watch?v=dQw4w9WgXcQ", head);
+        assert_eq!(yt.embed, None, "the link's own player is added when served");
     }
     #[test]
     fn schema_graph_prefers_the_page_entity_over_its_publisher() {
