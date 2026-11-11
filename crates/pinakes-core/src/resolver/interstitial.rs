@@ -26,8 +26,9 @@ pub enum Page {
 struct Walls {
     text: Vec<String>,
     /// Challenge vendors' wording that a real work could also carry as its name ("Pardon Our
-    /// Interruption"): evidence on a challenge status, or on a short page that describes no
-    /// object (no `og:title`, `twitter:title` or JSON-LD, which challenge pages never carry).
+    /// Interruption"): evidence in the title or first heading on a challenge status, or anywhere
+    /// on a short page that describes no object (no `og:title`, `twitter:title`, JSON-LD or
+    /// microformat name, which challenge pages rarely carry).
     challenge_text: Vec<String>,
     /// Whole page titles that name only the site, never an object, by the site's domain: the
     /// page a service shows in place of the object (YouTube's regional or consent page is titled
@@ -192,19 +193,32 @@ pub fn inspect(requested: &Url, f: &Fetched) -> anyhow::Result<Page> {
     let title_marked = walls.marked(&title);
     let vendor_marked =
         walls.challenge_marked(&title) || (heading.len() < 200 && walls.challenge_marked(&heading));
+    // What the page reader names a card from: `og:title` or `twitter:title` (by `property` or
+    // `name`, any case), JSON-LD, or a microformat name.
     let describes_object = || {
-        html.select(&select(
-            "meta[property=\"og:title\"], meta[name=\"twitter:title\"], script[type=\"application/ld+json\"]",
-        ))
-        .next()
-        .is_some()
+        html.select(&select("meta")).any(|el| {
+            let v = el.value();
+            v.attr("property")
+                .or_else(|| v.attr("name"))
+                .is_some_and(|k| {
+                    k.eq_ignore_ascii_case("og:title") || k.eq_ignore_ascii_case("twitter:title")
+                })
+                && v.attr("content").is_some_and(|c| !c.trim().is_empty())
+        }) || html.select(&select("script[type]")).any(|el| {
+            el.value()
+                .attr("type")
+                .is_some_and(|t| t.trim().eq_ignore_ascii_case("application/ld+json"))
+        }) || html
+            .select(&select(
+                ".h-entry .p-name, .h-card .p-name, .h-event .p-name",
+            ))
+            .next()
+            .is_some()
     };
     if ((challenge || short) && (title_marked || (heading.len() < 200 && walls.marked(&heading))))
         || (short && walls.marked(&visible))
         || (challenge && vendor_marked)
-        || (short
-            && (vendor_marked || walls.challenge_marked(&visible))
-            && !describes_object())
+        || (short && (vendor_marked || walls.challenge_marked(&visible)) && !describes_object())
         || ((challenge || short || title_marked)
             && walls
                 .captcha_selectors
@@ -386,10 +400,14 @@ mod tests {
             "<html><head><title>Pardon Our Interruption (2019)</title><meta property=\"og:title\" content=\"Pardon Our Interruption\"></head><body><h1>Pardon Our Interruption</h1><p>A short film.</p></body></html>",
             "<html><head><title>MusicBrainz now shows Verifying your browser</title><meta name=\"twitter:title\" content=\"MusicBrainz gate\"></head><body><p>Plain clients now see a page saying verifying your browser.</p></body></html>",
             "<html><head><title>Making sure you're not a bot</title><script type=\"application/ld+json\">{\"@type\":\"MusicRecording\"}</script></head><body><p>A song.</p></body></html>",
+            "<html><head><title>Pardon Our Interruption</title><meta name=\"OG:Title\" content=\"Pardon Our Interruption\"></head><body><p>A short film.</p></body></html>",
+            "<html><head><title>Pardon Our Interruption</title></head><body><article class=\"h-entry\"><h1 class=\"p-name\">Pardon Our Interruption</h1></article></body></html>",
         ] {
             assert_eq!(inspect(&url, &fetched(200, page)).unwrap(), Page::Content, "{page}");
             assert_eq!(inspect(&url, &fetched(429, page)).unwrap(), Page::Blocked, "{page}");
         }
+        let empty = "<html><head><title>Verifying your browser</title><meta property=\"og:title\" content=\" \"></head><body><p>Please wait</p></body></html>";
+        assert_eq!(inspect(&url, &fetched(200, empty)).unwrap(), Page::Blocked);
     }
     #[test]
     fn refresh_parsing_survives_multi_byte_content() {
