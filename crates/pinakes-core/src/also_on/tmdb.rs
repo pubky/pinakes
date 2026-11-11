@@ -12,7 +12,7 @@
 //! TMDB (`credits[]`, provider `tmdb`), and only when its type agrees (a `Movie` card a movie, a
 //! `TVSeries` card a series).
 //!
-//! TMDB's terms let its data be cached for six months at most. Its facts are read again with the
+//! Its facts are read again with the
 //! source's lifetime (30 days) and expire 60 days after the last read that answered, so a card
 //! never holds a TMDB value read longer ago than that: a transient failure keeps them until then,
 //! the card's next reading drops them after, and the maintenance pass

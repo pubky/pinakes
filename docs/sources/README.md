@@ -176,14 +176,17 @@ so one goes without the others needing a change.
 - [`service`](service.md): the ISRC a music service's own track page states.
 - [`tidal`](tidal.md): TIDAL's own barcodes and ISRCs (with the operator's TIDAL credentials).
 - [`spotify`](spotify.md): Spotify's own barcodes and ISRCs (with the operator's Spotify app credentials).
-- [`spotify_isrc`](spotify_isrc.md): another service's track on Spotify by its ISRC (off by default; with the operator's Spotify app credentials).
 - [`musicbrainz`](musicbrainz.md): what MusicBrainz relates a music link to.
 - [`musicbrainz_entity`](musicbrainz_entity.md): a MusicBrainz page as its own hub.
 - [`performers`](performers.md): an event's performers, keyed to the artist on the page's own service.
 - [`wikidata`](wikidata.md): the Wikidata item of a music link.
 - [`discogs`](discogs.md#also-on): a Discogs object's key and a release's barcodes.
-- [`deezer`](deezer.md): Deezer's own ISRCs and barcodes (off by default).
+- [`deezer`](deezer.md): Deezer's own ISRCs and barcodes, and another service's track or album on Deezer by its ISRC or barcode.
+- [`spotify_isrc`](spotify_isrc.md): another service's track or album on Spotify by its ISRC or barcode (with the operator's Spotify app credentials).
+- [`tidal_isrc`](tidal_isrc.md): another service's track or album on TIDAL by its ISRC or barcode (with the operator's TIDAL credentials).
 - [`itunes`](itunes.md): Apple Music albums by barcode, and an Apple Music track's preview.
+- [`itunes_song`](itunes_song.md): Apple Music's song for another service's track, by its album's barcode, place and title (a maybe: a match, unkeyed).
+- [`youtube_match`](youtube_match.md): a label's YouTube upload on Deezer and TIDAL, by artist, title and length (a maybe: a match, unkeyed).
 - [`wikipedia`](wikipedia.md): the other editions of a Wikipedia article.
 - [`wikidata_item`](wikidata_item.md): a Wikidata item link as its own hub.
 - [`books`](books.md): Open Library, Amazon, Apple Books and Wikidata for a book.

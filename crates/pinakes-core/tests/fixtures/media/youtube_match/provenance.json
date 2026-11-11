@@ -1,0 +1,72 @@
+{
+  "deezer-search-none": {
+    "bytes": 21,
+    "content_type": "application/json",
+    "file": "deezer-search-none.json",
+    "note": "a search with no answer",
+    "recorded_at": "2026-11-10T23:31:26+00:00",
+    "sha256": "93fd5b4feec7a9fd7bd879aabf27c59c8638cfeb001d4a78c2fc033d5b813868",
+    "status": 200,
+    "url": "https://api.deezer.com/search?q=qzxv+wqpzl+nonesuch"
+  },
+  "deezer-search-queen-bohemian-rhapsody": {
+    "bytes": 54400,
+    "content_type": "application/json",
+    "file": "deezer-search-queen-bohemian-rhapsody.json",
+    "note": "Deezer's plain search for the Topic upload's artist and title",
+    "recorded_at": "2026-11-10T23:31:25+00:00",
+    "sha256": "2fd4a5551cc6f775b00701830f27bdeaddb33fa4b0fed69806a702b4809292be",
+    "status": 200,
+    "url": "https://api.deezer.com/search?q=queen+bohemian+rhapsody"
+  },
+  "oembed-5NV6Rdv1a3I": {
+    "bytes": 881,
+    "content_type": "application/json",
+    "file": "oembed-5NV6Rdv1a3I.json",
+    "note": "Daft Punk's Get Lucky (Official Audio) on its VEVO channel: oEmbed",
+    "recorded_at": "2026-11-10T23:28:11+00:00",
+    "sha256": "c2885cc1a42c2c1392b9cb8e2bebe73257455bc3ddfc0a404439dee0192cba14",
+    "status": 200,
+    "url": "https://www.youtube.com/oembed?url=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3D5NV6Rdv1a3I&format=json"
+  },
+  "oembed-bSnlKl_PoQU": {
+    "bytes": 823,
+    "content_type": "application/json",
+    "file": "oembed-bSnlKl_PoQU.json",
+    "note": "Queen's Bohemian Rhapsody on Queen - Topic: oEmbed",
+    "recorded_at": "2026-11-10T23:28:09+00:00",
+    "sha256": "959dcbf29b36356432638d36c51c7aa7cfc0ed06b6fe35f962cf246d7b12d47c",
+    "status": 200,
+    "url": "https://www.youtube.com/oembed?url=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3DbSnlKl_PoQU&format=json"
+  },
+  "tidal-search-queen-bohemian-rhapsody": {
+    "bytes": 16864,
+    "content_type": "application/vnd.api+json",
+    "file": "tidal-search-queen-bohemian-rhapsody.json",
+    "note": "TIDAL's search for the same, with the tracks' artists",
+    "recorded_at": "2026-11-10T23:31:28+00:00",
+    "sha256": "7b085e73839a802484c726c90e547acdb25cb241309072f2a2ef18cf862dafa3",
+    "status": 200,
+    "url": "https://openapi.tidal.com/v2/searchResults?countryCode=US&filter%5Bquery%5D=queen+bohemian+rhapsody&include=tracks.artists"
+  },
+  "watch-5NV6Rdv1a3I": {
+    "bytes": 1400702,
+    "content_type": "text/html",
+    "file": "watch-5NV6Rdv1a3I.html.gz",
+    "note": "the watch page YouTube served this host: LOGIN_REQUIRED, no videoDetails. Size and sha256 are of the decompressed page, after the recording host's address was replaced by 192.0.2.1 (63 places).",
+    "recorded_at": "2026-11-10T23:26:31+00:00",
+    "sha256": "57c7dab161f397ce9eeae093fc7cd8b2861d62bf6bbec9bdb925f01f59dcf01e",
+    "status": 200,
+    "url": "https://www.youtube.com/watch?v=5NV6Rdv1a3I"
+  },
+  "watch-bSnlKl_PoQU": {
+    "bytes": 1319848,
+    "content_type": "text/html",
+    "file": "watch-bSnlKl_PoQU.html.gz",
+    "note": "the watch page: videoDetails with lengthSeconds 354 (playability UNPLAYABLE here). Size and sha256 are of the decompressed page, after the recording host's address was replaced by 192.0.2.1 (98 places).",
+    "recorded_at": "2026-11-10T23:26:29+00:00",
+    "sha256": "19b7b1266ad947105358bb1b9ff6c99ad06e19c3ab05674e1551fb6836bcf2ca",
+    "status": 200,
+    "url": "https://www.youtube.com/watch?v=bSnlKl_PoQU"
+  }
+}

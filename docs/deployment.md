@@ -181,9 +181,6 @@ there is no other geocoding provider and no failover. Run one of:
   with user info, a query or a fragment is refused at startup). Pinakes logs a request by its path
   below the base alone (`lookup`, `search`), shows the URL as `[REDACTED]` in debug output and
   serialization, and never in `/v1/info`. Set `osm.requests_per_second` to the plan's allowance.
-  **Its terms for what Pinakes keeps and republishes (cached place documents, the change journal
-  and the ODbL dump) need Geofabrik's written confirmation before staging or production uses
-  it.**
 
 The public `nominatim.openstreetmap.org` is for a small development run only
 ([operations](operations.md#deployment-and-egress)).
@@ -261,7 +258,8 @@ not just `resource`, and budget backup retention separately from the table's sin
   fragment. A protected Nexus uses `PINAKES_NEXUS_AUTHORIZATION`, never a credential-bearing URL.
 - Set an operator contact, inject secrets through a protected environment, and keep tokens out of
   logs. Provision only the optional providers you use: [complete key guide](api-keys.md).
-- Leave the Deezer API off. Links to Deezer from independent sources remain allowed; see
+- The Deezer API is on by default; `[also_on.sources.deezer] enabled = false` turns it off. Links
+  to Deezer from independent sources stay either way; see
   [source-off behaviour](operations.md#also-on).
 
 ## Day-two checklist

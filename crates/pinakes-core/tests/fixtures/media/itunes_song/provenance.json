@@ -1,0 +1,92 @@
+{
+  "deezer-album-125431": {
+    "bytes": 23417,
+    "content_type": "application/json",
+    "file": "deezer-album-125431.json",
+    "note": "Underclass Hero: Deezer album and its upc",
+    "recorded_at": "2026-11-10T23:26:37+00:00",
+    "sha256": "341d35947ef952666a64d930bd108c2240bea631bc3a65b0fb4ed0650dd4735f",
+    "status": 200,
+    "url": "https://api.deezer.com/album/125431"
+  },
+  "deezer-album-6575789": {
+    "bytes": 22336,
+    "content_type": "application/json",
+    "file": "deezer-album-6575789.json",
+    "note": "Random Access Memories: Deezer album and its upc",
+    "recorded_at": "2026-11-10T23:28:02+00:00",
+    "sha256": "710da8399b04407d66cf287e92e3843da568d2bb5d24117ba47e4d158c08b90c",
+    "status": 200,
+    "url": "https://api.deezer.com/album/6575789"
+  },
+  "deezer-track-isrc-USUM70740306": {
+    "bytes": 4881,
+    "content_type": "application/json",
+    "file": "deezer-track-isrc-USUM70740306.json",
+    "note": "Walking Disaster: the Deezer track of its ISRC",
+    "recorded_at": "2026-11-10T23:26:35+00:00",
+    "sha256": "29de0e427add635bd088665be277725fb59c5ccc9e53d2d5679a374fb4c60b4b",
+    "status": 200,
+    "url": "https://api.deezer.com/track/isrc:USUM70740306"
+  },
+  "itunes-upc-0602517416987-songs": {
+    "bytes": 53976,
+    "content_type": "text/javascript",
+    "file": "itunes-upc-0602517416987-songs.json",
+    "note": "Underclass Hero's barcode: four collections answer",
+    "recorded_at": "2026-11-10T23:31:23+00:00",
+    "sha256": "c537e66a877510efd66e8c8267f75ffb7fe36ec93e0d3889ac40b76810f64f47",
+    "status": 200,
+    "url": "https://itunes.apple.com/lookup?upc=0602517416987&entity=song&country=us"
+  },
+  "itunes-upc-0886443927087-songs": {
+    "bytes": 20905,
+    "content_type": "text/javascript",
+    "file": "itunes-upc-0886443927087-songs.json",
+    "note": "Random Access Memories: one collection, Get Lucky disc 1 track 8",
+    "recorded_at": "2026-11-10T23:31:22+00:00",
+    "sha256": "b6f2c5b103d21b199d0277a9ef702b306cc87f40ccff8922c749f5ee33307e8b",
+    "status": 200,
+    "url": "https://itunes.apple.com/lookup?upc=0886443927087&entity=song&country=us"
+  },
+  "tidal-album-20115556-items": {
+    "bytes": 1073,
+    "content_type": "application/vnd.api+json",
+    "file": "tidal-album-20115556-items.json",
+    "note": "Random Access Memories on TIDAL: volume and track numbers",
+    "recorded_at": "2026-11-10T23:28:26+00:00",
+    "sha256": "b16ffdc2d9a93dd8ce3b0058955d1b8acbacb2c89c57bbee136c551d61a11063",
+    "status": 200,
+    "url": "https://openapi.tidal.com/v2/albums/20115556/relationships/items?countryCode=US"
+  },
+  "tidal-album-3524504-items": {
+    "bytes": 1135,
+    "content_type": "application/vnd.api+json",
+    "file": "tidal-album-3524504-items.json",
+    "note": "Underclass Hero on TIDAL: volume and track numbers",
+    "recorded_at": "2026-11-10T23:28:08+00:00",
+    "sha256": "eef24b3ebec07b3d8c9ad723ea81d82573d387528f5dfc022a93cf0b74a0bcce",
+    "status": 200,
+    "url": "https://openapi.tidal.com/v2/albums/3524504/relationships/items?countryCode=US"
+  },
+  "tidal-track-20115564-albums": {
+    "bytes": 1445,
+    "content_type": "application/vnd.api+json",
+    "file": "tidal-track-20115564-albums.json",
+    "note": "Get Lucky on TIDAL with its album and barcode",
+    "recorded_at": "2026-11-10T23:28:24+00:00",
+    "sha256": "f8b60f3772a1e82e1003f8fbe5ba6ef309fa60b18f065b2404a46f98a9d15b60",
+    "status": 200,
+    "url": "https://openapi.tidal.com/v2/tracks/20115564?countryCode=US&include=albums"
+  },
+  "tidal-track-3524506-albums": {
+    "bytes": 1255,
+    "content_type": "application/vnd.api+json",
+    "file": "tidal-track-3524506-albums.json",
+    "note": "Walking Disaster on TIDAL with its album and barcode",
+    "recorded_at": "2026-11-10T23:28:05+00:00",
+    "sha256": "7b746c8dc557fb9ac07da6d09838c5f328cc646b2cb785a19304bae921af8c4d",
+    "status": 200,
+    "url": "https://openapi.tidal.com/v2/tracks/3524506?countryCode=US&include=albums"
+  }
+}

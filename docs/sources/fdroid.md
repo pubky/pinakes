@@ -2,8 +2,7 @@
 
 Android apps in F-Droid's main repository, by package name. No key, no account. F-Droid's
 package API says whether the repository has the package, and the package's page gives its name,
-summary, icon and links. The metadata is the apps' own and F-Droid's, published under the
-repository's terms.
+summary, icon and links. The metadata is the apps' own and F-Droid's.
 
 ## Links
 

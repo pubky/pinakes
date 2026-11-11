@@ -20,6 +20,7 @@ pub mod deezer;
 pub mod editions;
 pub mod films;
 pub mod itunes;
+pub mod itunes_song;
 pub mod media;
 pub mod musicbrainz;
 pub mod musicbrainz_entity;
@@ -31,10 +32,12 @@ pub mod spotify;
 pub mod spotify_api;
 pub mod spotify_isrc;
 pub mod tidal;
+pub mod tidal_isrc;
 pub mod tmdb;
 pub mod wikidata;
 pub mod wikidata_item;
 pub mod wikipedia;
+pub mod youtube_match;
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -59,7 +62,7 @@ pub struct AlsoOnConfig {
     /// Music links carry no storefront (`music::parse`).
     pub apple_storefront: String,
     /// Read the public page of a Spotify track a card may show for the album it is on
-    /// (`editions`), where Spotify's Web API does not answer for it: off by default.
+    /// (`editions`), where Spotify's Web API does not answer for it: on by default.
     pub spotify_pages: bool,
     #[serde(skip)]
     pub links_per_source: usize,
@@ -79,7 +82,7 @@ impl Default for AlsoOnConfig {
             derive_links: true,
             sources: BTreeMap::new(),
             apple_storefront: "us".into(),
-            spotify_pages: false,
+            spotify_pages: true,
             links_per_source: 32,
             keys_per_source: 16,
             facts_per_source: 32,
@@ -253,7 +256,18 @@ impl Link {
         self.key = Some(key.into());
         self
     }
+    /// This link as a match by metadata (an artist, a title, a length), not an exact ID: possibly
+    /// the same thing. Its `kind` is [`MAYBE`]; it never carries a key, so it never joins a
+    /// group, and a card shows it marked so.
+    pub fn maybe(mut self) -> Self {
+        self.kind = Some(MAYBE.into());
+        self.key = None;
+        self
+    }
 }
+/// The `kind` of a derived link that is a match by metadata, possibly the same thing
+/// ([`Link::maybe`]).
+pub const MAYBE: &str = "maybe";
 
 /// What a source's lookup may use.
 #[derive(Clone)]
@@ -277,8 +291,7 @@ pub trait Source: Send + Sync {
     /// Before a batch of resources (their URIs): ask the service, in as few requests as it
     /// allows, what this source will ask for each, so their lookups find it cached. Best effort.
     async fn prefetch(&self, _cx: &Context, _uris: &[String]) {}
-    /// Whether it runs without `[also_on.sources.<id>] enabled = true` (a service whose terms
-    /// the operator should accept first is off by default).
+    /// Whether it runs without `[also_on.sources.<id>] enabled = true`.
     fn enabled_by_default(&self) -> bool {
         true
     }
@@ -463,10 +476,13 @@ pub fn registry() -> Vec<Arc<dyn Source>> {
         // Before the barcode lookups: a Discogs release's barcodes are keys.
         Arc::new(crate::sources::discogs::also_on::Discogs),
         Arc::new(deezer::DeezerSource),
-        // After every source that keys a track's ISRC (a service's own record, Deezer's, the
-        // hubs'), before `editions` places its links.
+        // After every source that keys a track's ISRC or an album's barcode (a service's own
+        // record, Deezer's, the hubs'), before `editions` places its links.
         Arc::new(spotify_isrc::SpotifyIsrc),
+        Arc::new(tidal_isrc::TidalIsrc),
         Arc::new(itunes::ItunesSource),
+        Arc::new(itunes_song::ItunesSong),
+        Arc::new(youtube_match::YoutubeMatch),
         Arc::new(wikipedia::WikipediaSource),
         Arc::new(wikidata_item::WikidataItemSource),
         Arc::new(books::Books),
@@ -695,6 +711,10 @@ fn checked(
             {
                 continue;
             }
+            // A match is never a key.
+            if link.kind.as_deref() == Some(MAYBE) {
+                link.key = None;
+            }
             // A link is stored under its root spelling (`alias::root`, when that is a URL): a
             // tagged resource that is the same object under another spelling is its root, and
             // the link names that root.
@@ -870,7 +890,10 @@ pub async fn record(
         .collect();
     sqlx::query("DELETE FROM derived_link WHERE resource_id=$1 AND source=$2 AND NOT link_id=ANY(SELECT v->>'id' FROM jsonb_array_elements($3) v)")
         .bind(resource_id).bind(source).bind(Value::from(link_rows.clone())).execute(&mut *tx).await?;
-    sqlx::query("INSERT INTO derived_link(resource_id,link_id,uri,site,source,via,kind,at,key,expires_at) SELECT $1,v->>'id',v->>'uri',v->>'site',$2,v->>'via',v->>'kind',(v->>'at')::timestamptz,v->>'key',$4 FROM jsonb_array_elements($3) v ON CONFLICT(resource_id,link_id) DO UPDATE SET uri=excluded.uri,site=excluded.site,via=excluded.via,kind=excluded.kind,at=excluded.at,key=excluded.key,seen_at=now(),expires_at=excluded.expires_at WHERE derived_link.source=excluded.source")
+    // A link another source derived first stays that source's, unless it is a maybe (a match by
+    // metadata) and this one is not: the exact row takes it over, its source, kind and key too, so
+    // the maybe source neither writes it back nor deletes it when it stops finding the link.
+    sqlx::query("INSERT INTO derived_link(resource_id,link_id,uri,site,source,via,kind,at,key,expires_at) SELECT $1,v->>'id',v->>'uri',v->>'site',$2,v->>'via',v->>'kind',(v->>'at')::timestamptz,v->>'key',$4 FROM jsonb_array_elements($3) v ON CONFLICT(resource_id,link_id) DO UPDATE SET source=excluded.source,uri=excluded.uri,site=excluded.site,via=excluded.via,kind=excluded.kind,at=excluded.at,key=excluded.key,seen_at=now(),expires_at=excluded.expires_at WHERE derived_link.source=excluded.source OR (derived_link.kind='maybe' AND excluded.kind IS DISTINCT FROM 'maybe')")
         .bind(resource_id).bind(source).bind(Value::from(link_rows)).bind(expires).execute(&mut *tx).await?;
     let fact_rows: Vec<Value> = facts
         .iter()

@@ -34,9 +34,8 @@ Rotate at the provider, update the protected environment and restart; never log 
 ## Optional provider credentials
 
 These are all credentialed providers in the current runtime configuration and event-adapter
-registry. Staging and production may share a provider application's API credentials only where
-the provider's terms, app/deployment rules and combined rate allowance permit it. Pool and budget
-their traffic explicitly; use separate apps/keys when required or when quota/revocation isolation
+registry. Staging and production may share a provider application's API credentials where the
+provider's combined rate allowance permits it. Pool and budget their traffic explicitly; use separate apps/keys when required or when quota/revocation isolation
 is needed. Share self-hosted read-only datasets similarly, with capacity and licence checks
 ([deployment](deployment.md#storage-model)), not writable databases or database/admin/Nexus secrets
 across security boundaries. Each environment still injects its credentials from its own protected
@@ -79,13 +78,11 @@ the request without it. A value of neither form stops startup (the message never
 Unset or empty, or with `[tmdb] enabled = false`, TMDB is off: no request, its stored rows
 hidden, its values gone from cards at their next read.
 
-TMDB's terms ask for attribution and limit caching: Pinakes credits every TMDB value on its card
-(`credits[]`, provider `tmdb`), `/v1/info` gives TMDB's notice ("This product uses the TMDB API
+Pinakes credits every TMDB value on its card (`credits[]`, provider `tmdb`), `/v1/info` gives TMDB's notice ("This product uses the TMDB API
 but is not endorsed or certified by TMDB.") and logo for clients to show, and no TMDB value is
-kept longer than 60 days after the last read that answered (TMDB allows six months;
-[operations](operations.md#also-on)); with the key set, startup refuses a
-`refresh.retention_days` over 120, and a change line holding a TMDB value goes after 120 days in
-any case, so change lines keep no TMDB value longer either. Commercial use needs a separate agreement with TMDB.
+kept longer than 60 days after the last read that answered ([operations](operations.md#also-on));
+with the key set, startup refuses a `refresh.retention_days` over 120, and a change line holding a
+TMDB value goes after 120 days in any case, so change lines keep no TMDB value longer either.
 
 ## Quotas and operating rules
 
@@ -109,13 +106,11 @@ identification, caching, attribution and provider-specific pacing; see their sou
 GovInfo's supported path does not use an api.data.gov key. FRED, Congress.gov and Companies House
 credentials are not current Pinakes configuration: do not provision unsupported variables.
 
-**Keep the Deezer API off:** leave `[also_on.sources.deezer] enabled = false` (the default).
-This stops Deezer API reads and hides that source's own stored results, not the Deezer website:
-Deezer links from MusicBrainz, Wikidata or links people reference remain allowed.
+**The Deezer API** needs no key and is on by default; `[also_on.sources.deezer] enabled = false`
+turns it off. That stops Deezer API reads and hides that source's own stored results, not the
+Deezer website: Deezer links from MusicBrainz, Wikidata or links people reference stay.
 Odesli/song.link is not implemented; it is not a configured fallback or another key to obtain.
 
-Review current provider terms for the actual deployment; open-source code does not by itself
-establish permission for every deployment. This guide makes no commercial-use or branding ruling.
 Keep the attributions and OSM dump described in [operations](operations.md#deployment-and-egress).
 
 ## Verify after setup

@@ -58,6 +58,14 @@ fn shared_track_body(id: &str, ms: u64) -> Vec<u8> {
     }))
     .unwrap()
 }
+/// A made-up album the barcode search lists beside HYDRA 3D's, whose own record carries
+/// Underclass Hero's barcode.
+const OTHER_UPC_ALBUM: &str = "0otherUpcAlbum00000000";
+/// A made-up album a barcode search lists, which Spotify has no album for (404).
+const MISSING_UPC_ALBUM: &str = "0missingUpcAlbum000000";
+/// A made-up album that carries Random Access Memories' barcode, listed by a search that found
+/// more albums than it lists.
+const PAGED_UPC_ALBUM: &str = "0ramUpcAlbum0000000000";
 /// A made-up track the ISRC search lists beside Bohemian Rhapsody's, with another ISRC.
 const OTHER_ISRC_TRACK: &str = "0otherIsrcTrack0000000";
 /// `GET /v1/tracks/{TRACK}`: `id`, `type`, `external_ids.isrc` and `duration_ms` (5:54).
@@ -78,6 +86,8 @@ fn track_body() -> Vec<u8> {
 struct Answers {
     refuse: bool,
     api_status: Option<u16>,
+    /// A status for one album's read (`/v1/albums/{id}`) alone.
+    album_status: Option<u16>,
 }
 /// Answers Spotify (its token and API), MusicBrainz's ISRC lookup, iTunes and Deezer; records
 /// each request.
@@ -158,8 +168,29 @@ impl Transport for Recorded {
                         "text/plain",
                     ));
                 }
+                if let Some(status) = self
+                    .answers
+                    .album_status
+                    .filter(|_| path.starts_with("/v1/albums/"))
+                {
+                    return Ok(answer(
+                        status,
+                        br#"{"error":{"status":403,"message":"Forbidden"}}"#.to_vec(),
+                        "application/json",
+                    ));
+                }
                 if path == format!("/v1/albums/{ALBUM}") {
                     answer(200, album_body(), "application/json; charset=utf-8")
+                } else if path == format!("/v1/albums/{OTHER_UPC_ALBUM}") {
+                    answer(
+                        200,
+                        serde_json::to_vec(&serde_json::json!({
+                            "album_type": "album", "id": OTHER_UPC_ALBUM, "type": "album",
+                            "name": "Underclass Hero", "external_ids": {"upc": "602517416987"},
+                        }))
+                        .unwrap(),
+                        "application/json; charset=utf-8",
+                    )
                 } else if path == format!("/v1/tracks/{TRACK}") {
                     answer(200, track_body(), "application/json; charset=utf-8")
                 } else if path == format!("/v1/tracks/{SHARED_PICKED}") {
@@ -167,21 +198,50 @@ impl Transport for Recorded {
                 } else if path == format!("/v1/tracks/{SHARED_NEITHER}") {
                     answer(200, shared_track_body(SHARED_NEITHER, 196_000), "application/json")
                 } else if path == "/v1/search" {
-                    // The ISRC search (`q=isrc:…&type=track`): Bohemian Rhapsody's ISRC answers
-                    // its track and a track of another ISRC (never Spotify's answer in truth: the
-                    // filter is exact, but the source checks); any other ISRC, nothing.
                     let q = url
                         .query_pairs()
                         .find(|(k, _)| k == "q")
                         .map(|(_, v)| v.into_owned())
                         .unwrap_or_default();
-                    assert_eq!(
-                        url.query_pairs()
-                            .find(|(k, _)| k == "type")
-                            .map(|(_, v)| v.into_owned())
-                            .as_deref(),
-                        Some("track")
-                    );
+                    let kind = url
+                        .query_pairs()
+                        .find(|(k, _)| k == "type")
+                        .map(|(_, v)| v.into_owned())
+                        .unwrap_or_default();
+                    // The barcode search (`q=upc:…&type=album`), whose albums carry no barcode:
+                    // HYDRA 3D's UPC-A lists its album and a made-up one the read-back drops;
+                    // Underclass Hero's lists the album that carries it and one Spotify has no
+                    // record of (so no link); Random Access Memories' lists one album that carries
+                    // it, of 4 found (a next page), which the source refuses unread.
+                    if kind == "album" {
+                        let albums = if q == "upc:4018939306052" {
+                            serde_json::json!({"items": [
+                                {"album_type": "album", "id": ALBUM, "type": "album", "name": "HYDRA 3D"},
+                                {"album_type": "album", "id": OTHER_UPC_ALBUM, "type": "album", "name": "HYDRA 3D"},
+                            ], "limit": 3, "offset": 0, "total": 2, "next": null})
+                        } else if q == "upc:602517416987" {
+                            serde_json::json!({"items": [
+                                {"album_type": "album", "id": OTHER_UPC_ALBUM, "type": "album", "name": "Underclass Hero"},
+                                {"album_type": "album", "id": MISSING_UPC_ALBUM, "type": "album", "name": "Underclass Hero"},
+                            ], "limit": 3, "offset": 0, "total": 2, "next": null})
+                        } else if q == "upc:886443927087" {
+                            serde_json::json!({"items": [
+                                {"album_type": "album", "id": PAGED_UPC_ALBUM, "type": "album", "name": "Random Access Memories"},
+                            ], "limit": 3, "offset": 0, "total": 4,
+                               "next": "https://api.spotify.com/v1/search?offset=3&limit=3&query=upc%3A886443927087&type=album"})
+                        } else {
+                            serde_json::json!({"items": [], "limit": 3, "offset": 0, "total": 0, "next": null})
+                        };
+                        return Ok(answer(
+                            200,
+                            serde_json::to_vec(&serde_json::json!({ "albums": albums })).unwrap(),
+                            "application/json; charset=utf-8",
+                        ));
+                    }
+                    // The ISRC search (`q=isrc:…&type=track`): Bohemian Rhapsody's ISRC answers
+                    // its track and a track of another ISRC (never Spotify's answer in truth: the
+                    // filter is exact, but the source checks); any other ISRC, nothing.
+                    assert_eq!(kind, "track");
                     let items = if q == "isrc:GBUM71029604" {
                         serde_json::json!([
                             serde_json::from_slice::<serde_json::Value>(&track_body()).unwrap(),
@@ -619,11 +679,11 @@ async fn a_track_with_an_isrc_key_gets_its_spotify_link(pool: sqlx::PgPool) {
     assert!(!seen.iter().any(|s| s.contains("/v1/search?")), "{seen:?}");
 }
 
-/// `spotify_isrc` is off by default: with the Spotify pair set and no switch, nothing asks the
-/// search. Switched on, a refusal (403) and a rate limit (429) keep the links an earlier run
-/// found; switched off again, those links stop showing on the card while their rows stay.
+/// `spotify_isrc` is on by default: with the Spotify pair set and no switch, it asks the search.
+/// A refusal (403) and a rate limit (429) keep the links an earlier run found; switched off, those
+/// links stop showing on the card while their rows stay.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
-async fn spotify_isrc_is_off_by_default_and_keeps_its_rows_through_refusals(pool: sqlx::PgPool) {
+async fn spotify_isrc_is_on_by_default_and_keeps_its_rows_through_refusals(pool: sqlx::PgPool) {
     let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
     if !registered.contains(&"spotify_isrc") {
         return;
@@ -637,12 +697,12 @@ async fn spotify_isrc_is_off_by_default_and_keeps_its_rows_through_refusals(pool
     store::save_document(&pool, &tidal_id, 0, &doc)
         .await
         .unwrap();
-    // Off by default: the pair alone turns nothing on.
+    // On by default: the pair alone turns it on.
     let mut by_default = config(Some(("isrc-default-id", "isrc-default-secret")));
     by_default.also_on.sources.remove("spotify_isrc");
     by_default.validate().unwrap();
     let seen = run(&pool, by_default, Answers::default()).await;
-    assert!(!seen.iter().any(|s| s.contains("/v1/search?")), "{seen:?}");
+    assert!(seen.iter().any(|s| s.contains("/v1/search?")), "{seen:?}");
     let links = |pool: sqlx::PgPool, id: String| async move {
         sqlx::query_scalar::<_, String>(
             "SELECT uri FROM derived_link WHERE resource_id=$1 AND source='spotify_isrc' ORDER BY uri",
@@ -652,8 +712,7 @@ async fn spotify_isrc_is_off_by_default_and_keeps_its_rows_through_refusals(pool
         .await
         .unwrap()
     };
-    assert!(links(pool.clone(), tidal_id.clone()).await.is_empty());
-    // Switched on (the test config), one run finds the link.
+    // The test config (switched on explicitly) finds the same.
     let on = config(Some(("isrc-default-id", "isrc-default-secret")));
     run(&pool, on.clone(), Answers::default()).await;
     let expected = [format!("https://open.spotify.com/track/{TRACK}")];
@@ -722,4 +781,123 @@ async fn spotify_isrc_is_off_by_default_and_keeps_its_rows_through_refusals(pool
         "{:?}",
         card(pool.clone(), tidal_id.clone()).await
     );
+}
+
+/// An album on another service with a barcode key is looked up on Spotify by it (`spotify_isrc`):
+/// a UPC-A by its 12 digits, an EAN-13 whole; the search's albums (three at most) are read back
+/// one by one (`/v1/albums/{id}`: Spotify answers no batch read to an app in development mode),
+/// and only the one whose own barcode is the key becomes a link keyed by it. A 403 on an album's
+/// read and a refusal of the app keep it.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn an_album_with_a_barcode_key_gets_its_spotify_album(pool: sqlx::PgPool) {
+    let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
+    if !registered.contains(&"spotify_isrc") {
+        return;
+    }
+    let keyed = |uri: &'static str, upc: &'static str| {
+        let pool = pool.clone();
+        async move {
+            let id = save(&pool, uri, "MusicAlbum").await;
+            sqlx::query("INSERT INTO resource_key(resource_id,key,source,via,expires_at) VALUES($1,$2,'test','test',now()+interval '1 day')")
+                .bind(&id)
+                .bind(upc)
+                .execute(&pool)
+                .await
+                .unwrap();
+            id
+        }
+    };
+    // HYDRA 3D on Deezer (its EAN-13), and Random Access Memories on Deezer (a UPC-A, which this
+    // Spotify's search lists among more it found).
+    let hydra = keyed(
+        "https://www.deezer.com/album/320429237",
+        "upc:4018939306052",
+    )
+    .await;
+    let ram = keyed("https://www.deezer.com/album/6575789", "upc:0886443927087").await;
+    // Underclass Hero on Deezer: of its two candidates, one carries the barcode and one gives no
+    // album (404), which might have been another: no link.
+    let underclass = keyed("https://www.deezer.com/album/125431", "upc:0602517416987").await;
+    let seen = run(
+        &pool,
+        config(Some(("upc-id", "upc-secret"))),
+        Answers::default(),
+    )
+    .await;
+    let mut asked: Vec<String> = seen
+        .iter()
+        .filter(|s| {
+            s.starts_with("api.spotify.com/v1/search?")
+                || s.starts_with("api.spotify.com/v1/albums/")
+        })
+        .cloned()
+        .collect();
+    asked.sort();
+    assert_eq!(
+        asked,
+        [
+            format!("api.spotify.com/v1/albums/{ALBUM}?"),
+            format!("api.spotify.com/v1/albums/{MISSING_UPC_ALBUM}?"),
+            format!("api.spotify.com/v1/albums/{OTHER_UPC_ALBUM}?"),
+            "api.spotify.com/v1/search?q=upc%3A4018939306052&type=album&limit=3".to_owned(),
+            "api.spotify.com/v1/search?q=upc%3A602517416987&type=album&limit=3".to_owned(),
+            "api.spotify.com/v1/search?q=upc%3A886443927087&type=album&limit=3".to_owned(),
+        ],
+        "{seen:?}"
+    );
+    let links = "SELECT uri||' '||coalesce(key,'-')||' '||via FROM derived_link WHERE resource_id=$1 AND source='spotify_isrc' ORDER BY uri";
+    let expected = [format!(
+        "https://open.spotify.com/album/{ALBUM} upc:4018939306052 spotify_isrc"
+    )];
+    assert_eq!(rows(&pool, links, &hydra).await, expected);
+    // Random Access Memories: a search that found more albums than it lists names none, and its
+    // album is not read.
+    assert!(rows(&pool, links, &ram).await.is_empty());
+    assert!(rows(&pool, links, &underclass).await.is_empty());
+    assert!(
+        !seen.iter().any(|s| s.contains(PAGED_UPC_ALBUM)),
+        "{seen:?}"
+    );
+    let queued = || async {
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT last_error FROM also_on_dirty WHERE resource_id=$1",
+        )
+        .bind(&hydra)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    // A 403 on one album's read alone: the link stays, the lookup is retried, and the pair is not
+    // refused: its next run asks Spotify again.
+    let pair = ("upc-album-id", "upc-album-secret");
+    run(
+        &pool,
+        config(Some(pair)),
+        Answers {
+            album_status: Some(403),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(rows(&pool, links, &hydra).await, expected);
+    assert_eq!(queued().await.as_deref(), Some("forbidden_request"));
+    let seen = run(&pool, config(Some(pair)), Answers::default()).await;
+    assert!(
+        seen.iter()
+            .any(|s| s.starts_with("api.spotify.com/v1/search?q=upc")),
+        "{seen:?}"
+    );
+    assert_eq!(rows(&pool, links, &hydra).await, expected);
+    // Spotify refusing the app (no Premium): the link stays, the lookup waits out the hold.
+    run(
+        &pool,
+        config(Some(("upc-refused-id", "upc-refused-secret"))),
+        Answers {
+            api_status: Some(403),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(rows(&pool, links, &hydra).await, expected);
+    assert_eq!(queued().await.as_deref(), Some("spotify_auth"));
 }

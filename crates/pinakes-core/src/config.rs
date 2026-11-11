@@ -1826,7 +1826,15 @@ mod tests {
             "https://deezer.com/album/14879699",
             "https://deezer.page.link/xyz",
         ];
-        let off = Config::load(None).unwrap();
+        let deezer = |also_on: serde_json::Value| with(serde_json::json!({ "also_on": also_on }));
+        // On by default: its API is asked.
+        let default = Config::load(None).unwrap();
+        assert!(!default
+            .egress
+            .off_hosts
+            .contains(&"api.deezer.com".to_owned()));
+        assert!(policy(&default).allows(api));
+        let off = deezer(serde_json::json!({"sources": {"deezer": {"enabled": false}}})).unwrap();
         assert!(off.egress.off_hosts.contains(&"api.deezer.com".to_owned()));
         assert!(
             off.egress.deny_hosts.is_empty(),
@@ -1836,7 +1844,6 @@ mod tests {
         for page in pages {
             assert!(policy(&off).allows(page), "{page}");
         }
-        let deezer = |also_on: serde_json::Value| with(serde_json::json!({ "also_on": also_on }));
         let on = deezer(serde_json::json!({"sources": {"deezer": {"enabled": true}}})).unwrap();
         assert!(!on.egress.off_hosts.contains(&"api.deezer.com".to_owned()));
         assert!(policy(&on).allows(api));

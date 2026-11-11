@@ -773,7 +773,7 @@ fn has(ids: &[&str]) -> bool {
     ids.iter().all(|id| registered.contains(id))
 }
 
-/// Deezer's API is never called while its source is off (the default), whatever path asks, and
+/// Deezer's API is never called while its source is switched off, whatever path asks, and
 /// switching it off hides nothing of deezer.com (TASK-deezer-api-off): a tagged Deezer album
 /// resolves from its own page, the album's other editions list it from MusicBrainz and
 /// Wikidata (P2723) and join it, and search finds it. Deezer itself records nothing.
@@ -783,10 +783,21 @@ async fn deezer_s_api_stays_off_and_its_links_stay(pool: sqlx::PgPool) {
     if !has(&["musicbrainz", "wikidata"]) {
         return;
     }
-    // The configuration as the daemon loads it, and its egress (`also_on::off_hosts`).
-    let config = Config::load(None).unwrap();
+    // The configuration as the daemon builds it, Deezer switched off, and its egress
+    // (`also_on::off_hosts`).
+    let mut config = Config::load(None).unwrap();
+    if has(&["deezer"]) {
+        config.also_on.sources.insert(
+            "deezer".into(),
+            also_on::SourceOptions {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        );
+        config.egress.off_hosts = also_on::off_hosts(&config);
+    }
     if let Some(deezer) = also_on::registered().iter().find(|s| s.id() == "deezer") {
-        assert!(!config.also_on.source_on(deezer.as_ref()), "off by default");
+        assert!(!config.also_on.source_on(deezer.as_ref()), "switched off");
     }
     let t = Arc::new(Recorded {
         seen: Mutex::default(),
@@ -2228,7 +2239,17 @@ async fn a_deezer_barcode_names_the_apple_album_that_joins(pool: sqlx::PgPool) {
             seen
         }
     };
-    let seen = run(Config::default()).await;
+    // Switched off: nothing asks Deezer.
+    let mut off = Config::default();
+    off.also_on.sources.insert(
+        "deezer".into(),
+        also_on::SourceOptions {
+            enabled: Some(false),
+            ..Default::default()
+        },
+    );
+    off.validate().unwrap();
+    let seen = run(off).await;
     assert!(
         !seen.iter().any(|s| s.starts_with("api.deezer.com")),
         "{seen:?}"

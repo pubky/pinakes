@@ -237,6 +237,8 @@ fn config(pair: Option<(&str, &str)>) -> Config {
     let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
     for (source, enabled) in [
         ("deezer", true),
+        // Its TIDAL reads (a track's album and place) are not this test's.
+        ("itunes_song", false),
         ("musicbrainz", false),
         ("musicbrainz_entity", false),
         ("wikidata", false),

@@ -3,7 +3,7 @@
 Android apps on Google Play. Google Play has no public API, so this source is a page hook: the
 web route reads the app's page as usual, and the card takes the app's name, icon, developer,
 developer website and category from what the page says about the app. No key, no account. The
-listing is the developer's and Google's, shown under Google Play's terms.
+listing is the developer's and Google's.
 
 ## Links
 

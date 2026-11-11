@@ -61,8 +61,7 @@ rights statement.
 
 ## Licence
 
-Item metadata is published by the Internet Archive under its Terms of Use; each item states its
-own licence, which the card carries.
+Each item states its own licence, which the card carries.
 
 ## Examples
 

@@ -193,7 +193,7 @@ has none.
 | `provider` | `wikipedia` (an article's summary), `wikimedia_commons` (a file), `wikidata` (an item's English description), `cover_art_archive` (a release's front cover) or `tmdb` (a film's or series' poster or overview) |
 | `source_url` | The article, the file's page on Commons, the item's page on Wikidata (`https://www.wikidata.org/wiki/Q…`), or for a cover the cover art page of the release it is of on MusicBrainz (`https://musicbrainz.org/release/…/cover-art`), or the title's page on TMDB (`https://www.themoviedb.org/movie/…` or `/tv/…`): `https:`, at most 1,024 bytes |
 | `author` | Plain text, at most 256 bytes: `Wikipedia contributors` for an article, the file's author for an image; `null` for a CC0 or public-domain file that names none, for a Wikidata description, for a cover and for TMDB's values |
-| `license` | An SPDX licence ID (`CC-BY-SA-4.0`, `CC-BY-2.0`, `CC-BY-SA-3.0-DE`, `CC0-1.0`, `GPL-3.0-only`, `LGPL-2.1-or-later`), `public-domain`, or `Attribution` (Commons' licence of that name, which has no SPDX ID); `null` for a cover (cover art is its label's; no licence is given) and for TMDB's values (used under TMDB's API terms) |
+| `license` | An SPDX licence ID (`CC-BY-SA-4.0`, `CC-BY-2.0`, `CC-BY-SA-3.0-DE`, `CC0-1.0`, `GPL-3.0-only`, `LGPL-2.1-or-later`), `public-domain`, or `Attribution` (Commons' licence of that name, which has no SPDX ID); `null` for a cover (cover art is its label's; no licence is given) and for TMDB's values |
 | `license_url` | The licence's text (`https:`): for a GNU licence its version's text on gnu.org, for `Attribution` its template's page on Commons; `null` for the public domain without a mark, for a cover and for TMDB's values |
 | `lang` | The text's language: `en`, or another Wikipedia's code (`de`) when only that Wikipedia describes it; `null` for an image. A client may label or hide a text in a language its reader does not read |
 | `excerpted` | `true` when the text is a part of a longer source: a summary is the article's first paragraphs, and one over 2,048 bytes is cut at a sentence or a word. A Wikidata description is whole (`false`) |
@@ -241,7 +241,7 @@ title's page on TMDB and no author or licence; the overview's `lang` is `en`:
 ```
 
 A client that shows a value credited to `tmdb` must also show TMDB's logo (smaller and less
-prominent than its own marks) and TMDB's notice, as TMDB's terms ask. `/v1/info` gives both, in
+prominent than its own marks) and TMDB's notice. `/v1/info` gives both, in
 `attributions`, while the instance uses TMDB and while a stored card still holds a TMDB value:
 
 ```json
@@ -253,8 +253,7 @@ prominent than its own marks) and TMDB's notice, as TMDB's terms ask. `/v1/info`
 ]
 ```
 
-TMDB's values are never older than TMDB's terms allow (six months): a card drops them when they
-were last read 60 days ago and TMDB has not answered since, or when the instance stops using
+A card drops TMDB's values when they were last read 60 days ago and TMDB has not answered since, or when the instance stops using
 TMDB.
 
 A credit is there only with its value: a card without the image or description has none for it.
@@ -1302,7 +1301,8 @@ A card's `also_on` says where else the same thing is: first the other members of
 [group](#groups) (links someone tagged, each with its resource `id`), by ID and URI, then
 **derived links**: the same thing on services nobody tagged, found by a source, with
 `derived: true`, the service's name in `site`, the hub or service it came through in `via`
-(`musicbrainz`, `wikidata`), and for some a `kind` its source's page names (`archived`: a Wayback Machine copy, with
+(`musicbrainz`, `wikidata`), and for some a `kind` its source's page names (`maybe`: a match
+by metadata, not an exact ID, [below](#also-on); `archived`: a Wayback Machine copy, with
 its capture time in `at`). Derived links are ordered by service name; each URL appears once (a tagged member wins)
 and never the card itself. Every card, a resource read too, carries one link per service, the
 service a link's URL is on (a derived link's `site`), at most 8 entries (256 on a read). Of a
@@ -1336,9 +1336,9 @@ anything. Sources read a resource after it is saved and again when their results
 source's lifetime: 30 days, `btcmap` 7); a source's links and keys live twice that, so one
 failed refresh keeps them, and they go when the source stops returning them. The sources run in this order, each
 seeing the keys the ones before it found: `service`, `tidal`, `spotify`,
-`musicbrainz`, `musicbrainz_entity`, `performers`, `wikidata`, `discogs`, `deezer`, `spotify_isrc`, `itunes`,
-`wikipedia`, `wikidata_item`, `books`, `films`, `podcasts`, `product_keys`, `open_food_facts`,
-`stack_exchange`, `titles`, `federal_register`, `mempool`, `osm_wikidata`, `wikidata_osm`,
+`musicbrainz`, `musicbrainz_entity`, `performers`, `wikidata`, `discogs`, `deezer`, `spotify_isrc`,
+`tidal_isrc`, `itunes`, `itunes_song`, `youtube_match`, `wikipedia`, `wikidata_item`, `books`,
+`films`, `podcasts`, `product_keys`, `open_food_facts`, `stack_exchange`, `titles`, `federal_register`, `mempool`, `osm_wikidata`, `wikidata_osm`,
 `wikidata_places`, `btcmap`, `unpaywall`, `ncbi`, `datacite`, `huggingface`, `crates`, `npm`,
 `pypi`, `software_heritage`, `steam`, `wikidata_stores`, `app_stores`, `wayback`, `editions`;
 `[also_on.sources.<id>] enabled = false` turns one off. A MusicBrainz or Wikidata answer over 8 MB is no answer: the source
@@ -1356,19 +1356,35 @@ spellings is one link, kept by the source that found it first.
 **The sources.** Each source's page in [docs/sources](sources/README.md#also-on) says what it reads
 and finds and what it costs; the index lists them in the order they run. A music link (a track,
 album or artist on a music service, [its spellings](#aliases)) is looked up exactly, never by title
-or name. A key comes from a hub (MusicBrainz, Wikidata) or from a known music service's own record
-of its own object; another host's claim (its JSON-LD `isrcCode`, `sameAs`, a canonical link) is a
-fact at most. An ISRC MusicBrainz gives to several recordings that agree (the same artists, the
+or name, except by the two sources that say they match (below). A key comes from a hub
+(MusicBrainz, Wikidata) or from a known music service's own record of its own object; another
+host's claim (its JSON-LD `isrcCode`, `sameAs`, a canonical link) is a fact at most. An ISRC MusicBrainz gives to several recordings that agree (the same artists, the
 same title once its identity-keeping tags go, the same disambiguation, all audio or all video,
 lengths within 3 s, the whole set alike) names one recording not yet
 merged: the ISRC and the MBID that stands for them (the smallest) are the track's keys, the
 other MBIDs facts; recordings that disagree (a live
 version, a remix, an edit, another artist) leave the duration to pick one or the ISRC a fact
 ([an ISRC on several recordings](sources/README.md#an-isrc-on-several-recordings)). A track with
-an ISRC key on another service is looked up on Spotify by it, exactly (`spotify_isrc`, off by
-default, with the operator's Spotify credentials): its Spotify track becomes a link keyed by the ISRC. ISRCs are
-stored in upper case and barcodes as GTIN-13 (a 12-digit UPC gains a
-leading zero), by every source. The level is exact: a track lists tracks and videos of the
+an ISRC key on another service is looked up on Spotify and TIDAL by it, and an album with a barcode
+key by that, exactly (`spotify_isrc` and `tidal_isrc`, with the operator's credentials): the
+service's own track or album that carries the value becomes a link keyed by it.
+
+**Exact links and matches.** A derived link is exact when an identifier the service owns, or a
+hub, names it: a MusicBrainz relation, a Wikidata claim, or a service's own answer to a lookup by
+ISRC or barcode (`deezer`, `itunes` albums, `spotify_isrc`, `tidal_isrc`). It carries that key, so a
+tagged resource that is the link joins the group; its entry is a plain derived link. Two sources
+match by metadata instead: their links are maybes, marked `kind: "maybe"` on the entry
+(possibly the same thing), still listed so a client can show or play them, but never keyed, never
+joining a group, never making a key of the card they are on.
+- `itunes_song`: Apple Music's song at the same disc and track number on the
+  album with the track's barcode, with the same title and within 3 s of its length (iTunes
+  answers carry no ISRC).
+- `youtube_match`: for a label's YouTube upload (a Topic channel, "Provided to
+  YouTube by"), the one Deezer and the one TIDAL track with the same artist and title within 2 s
+  of its length.
+
+ISRCs are stored in upper case and barcodes as GTIN-13 (a 12-digit UPC gains a leading zero), by
+every source. The level is exact: a track lists tracks and videos of the
 recording, an album lists albums and YouTube's album playlists, an artist lists artist pages and
 channels. Album links group by their release group, while two editions (two MusicBrainz releases)
 stay apart. Apple Music links carry no storefront; Apple Books and Apple Podcasts links, and the

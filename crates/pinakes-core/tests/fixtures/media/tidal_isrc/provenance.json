@@ -1,0 +1,62 @@
+{
+  "albums-barcode-0000000000000": {
+    "bytes": 4633,
+    "content_type": "application/vnd.api+json",
+    "file": "albums-barcode-0000000000000.json",
+    "note": "several albums carry this barcode",
+    "recorded_at": "2026-11-10T23:32:12+00:00",
+    "sha256": "c809e01fa733ba0a6fc334745527efd7685f825100d0d2853de62fb385385ecc",
+    "status": 200,
+    "url": "https://openapi.tidal.com/v2/albums?countryCode=US&filter%5BbarcodeId%5D=0000000000000"
+  },
+  "albums-barcode-0602517416987": {
+    "bytes": 638,
+    "content_type": "application/vnd.api+json",
+    "file": "albums-barcode-0602517416987.json",
+    "note": "Underclass Hero: barcodeId as GTIN-14",
+    "recorded_at": "2026-11-10T23:25:56+00:00",
+    "sha256": "aeb9f651fb5d1dab8a4bc23ad4e9519a0787209f05522d6c2c2a4d73c5b87c67",
+    "status": 200,
+    "url": "https://openapi.tidal.com/v2/albums?countryCode=US&filter%5BbarcodeId%5D=0602517416987"
+  },
+  "albums-barcode-0886443927087": {
+    "bytes": 720,
+    "content_type": "application/vnd.api+json",
+    "file": "albums-barcode-0886443927087.json",
+    "note": "Random Access Memories",
+    "recorded_at": "2026-11-10T23:32:11+00:00",
+    "sha256": "e1c1db1b573a92b2d09510e179e4f2fd3196bdd2fcfd698d584717ab22ecb5b5",
+    "status": 200,
+    "url": "https://openapi.tidal.com/v2/albums?countryCode=US&filter%5BbarcodeId%5D=0886443927087"
+  },
+  "tracks-isrc-USUM70740306": {
+    "bytes": 3708,
+    "content_type": "application/vnd.api+json",
+    "file": "tracks-isrc-USUM70740306.json",
+    "note": "Walking Disaster: one ISRC, eight TIDAL tracks",
+    "recorded_at": "2026-11-10T23:25:49+00:00",
+    "sha256": "3a100016179cd07d21a38b755de082e24758f5832303d55ac3ee0b0c707952c3",
+    "status": 200,
+    "url": "https://openapi.tidal.com/v2/tracks?countryCode=US&filter%5Bisrc%5D=USUM70740306"
+  },
+  "tracks-isrc-batch": {
+    "bytes": 1528,
+    "content_type": "application/vnd.api+json",
+    "file": "tracks-isrc-batch.json",
+    "note": "three ISRCs at once: one track each",
+    "recorded_at": "2026-11-10T23:25:52+00:00",
+    "sha256": "f0e5e289b58659af6331271ffd8e9bb4a4cb4fd99b9fc708af05670991b0348b",
+    "status": 200,
+    "url": "https://openapi.tidal.com/v2/tracks?countryCode=US&filter%5Bisrc%5D=USUM70740306&filter%5Bisrc%5D=PLL431541907&filter%5Bisrc%5D=GBUM72103841"
+  },
+  "tracks-isrc-missing": {
+    "bytes": 83,
+    "content_type": "application/vnd.api+json",
+    "file": "tracks-isrc-missing.json",
+    "note": "an ISRC TIDAL has no track for",
+    "recorded_at": "2026-11-10T23:25:54+00:00",
+    "sha256": "94e8caadc71c8ce5b51ea5005e91c5b7c47d9d671794c447e4db24fdeda73f8c",
+    "status": 200,
+    "url": "https://openapi.tidal.com/v2/tracks?countryCode=US&filter%5Bisrc%5D=QZZZZ2600001"
+  }
+}

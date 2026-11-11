@@ -872,7 +872,8 @@ pub struct AlsoOn {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub via: Option<String>,
     /// For a derived link, a qualifier (`archived`, `work`, `source`, `submitted`, `published`,
-    /// `pdf`).
+    /// `pdf`), or `maybe`: a match by metadata (artist, title, length), possibly the same
+    /// thing, never by an exact ID; it joins no group.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     /// For a derived link, a time that belongs to it (an archived copy's capture).
