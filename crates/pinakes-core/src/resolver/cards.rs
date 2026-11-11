@@ -1245,16 +1245,22 @@ impl CardResolver {
     }
     /// The frame alone of `endpoint`'s oEmbed answer (`embed::from_oembed`), for a page that is
     /// complete without one: nothing else of the answer is used, and an answer without a title
-    /// counts. An endpoint that refused (400, 401, 403: Facebook's without a token) or answered a
-    /// video or rich object without a frame is not asked again for a day (`NO_FRAME`), so a
-    /// provider that never gives one costs a request a day, not one per read.
+    /// counts. An endpoint that refused for want of a token (401, or an answer naming an access
+    /// token: Facebook's and Instagram's) is not asked again for a day; a link whose answer was
+    /// refused (400, 403: an embed-restricted video) or was a video or rich object without a
+    /// frame is not asked again for a day either (`NO_FRAME`), the provider's other links still
+    /// are.
     async fn fetch_frame(&self, endpoint: Url, ttl: u64) -> Option<crate::embed::Embed> {
         let key = format!(
             "{}{}",
             endpoint.host_str()?.to_ascii_lowercase(),
             endpoint.path()
         );
-        if crate::capability::names_capability(&endpoint) || NO_FRAME.get(&key) == Some(true) {
+        let link_key = endpoint.as_str().to_owned();
+        if crate::capability::names_capability(&endpoint)
+            || NO_FRAME.get(&key) == Some(true)
+            || NO_FRAME.get(&link_key) == Some(true)
+        {
             crate::telemetry::discovery("oembed", "skipped");
             return None;
         }
@@ -1270,7 +1276,11 @@ impl CardResolver {
             return None;
         };
         if matches!(f.status, 400 | 401 | 403) {
-            NO_FRAME.set(&key, true);
+            let body =
+                String::from_utf8_lossy(&f.body[..f.body.len().min(2048)]).to_ascii_lowercase();
+            let token =
+                f.status == 401 || body.contains("access token") || body.contains("access_token");
+            NO_FRAME.set(if token { &key } else { &link_key }, true);
             return None;
         }
         let answer = (f.status == 200)
@@ -1284,7 +1294,7 @@ impl CardResolver {
             Some("video" | "rich")
         );
         if frame.is_none() && player {
-            NO_FRAME.set(&key, true);
+            NO_FRAME.set(&link_key, true);
         }
         frame
     }
@@ -1383,8 +1393,9 @@ impl CardResolver {
         }
     }
 }
-/// The oEmbed endpoints (host and path) that refused a frame-only request (`fetch_frame`) or
-/// answered a player without a frame, for a day.
+/// For a day: the oEmbed endpoints (host and path) that refused a frame-only request
+/// (`fetch_frame`) for want of a token, and the requests (the endpoint with its link) that were
+/// refused or answered a player without a frame.
 static NO_FRAME: std::sync::LazyLock<crate::sources::HostMemo> =
     std::sync::LazyLock::new(crate::sources::HostMemo::default);
 fn media_type(d: &mut ResourceMeta, uri: &str) {

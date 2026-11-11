@@ -201,8 +201,9 @@ Where it comes from, the first that has one:
    `allow`. Pinakes asks a provider of the pinned registry (`data/oembed-providers.json`) for it
    when the page names no player of its own (its frame alone: the card keeps the page's fields);
    another site's oEmbed answer counts when the card reads it anyway. Its `provider` is the
-   answer's `provider_name` as a slug (`speaker-deck`), else the frame's host; an answer never
-   takes the name of a service of the first kind.
+   answer's `provider_name` as a slug (`speaker-deck`), else the frame's host; an answer takes
+   the name of a service of the first kind only for a frame on that service's own embed host
+   (never Mastodon's).
 3. **The page's own player**: its head's `twitter:player` (with `:width` and `:height`), or an
    `og:video:secure_url` / `og:video:url` whose `og:video:type` is `text/html`.
 

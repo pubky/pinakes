@@ -58,7 +58,8 @@ pub struct Embed {
     /// `fullscreen`, `gyroscope`, `picture-in-picture` and `web-share`.
     pub allow: Vec<String>,
     /// A query parameter (`autoplay=1`, `auto_play=true`) that makes the player start once
-    /// loaded: add it to `src` only when the viewer pressed play. Null when the player has none.
+    /// loaded: set it in `src` (replacing that parameter's value there, which is off) only when
+    /// the viewer pressed play. Null when the player has none.
     pub autoplay_param: Option<String>,
 }
 
@@ -946,9 +947,14 @@ fn quiet(mut embed: Embed) -> Embed {
         return embed;
     };
     let mut started = None;
-    let query = url.query().and_then(|q| quiet_pairs(q, &mut started));
-    // A player that reads its fragment is turned off there too; Play sets only the query.
-    let fragment = url.fragment().and_then(|f| quiet_pairs(f, &mut None));
+    let query = url
+        .query()
+        .and_then(|q| quiet_pairs(q, QUERY_SEPARATORS, &mut started));
+    // A player that reads its fragment (a hash route: `#/v?autoplay=1`) is turned off there too;
+    // Play sets only the query.
+    let fragment = url
+        .fragment()
+        .and_then(|f| quiet_pairs(f, FRAGMENT_SEPARATORS, &mut None));
     if query.is_some() || fragment.is_some() {
         if let Some(query) = query {
             url.set_query(Some(&query));
@@ -964,17 +970,22 @@ fn quiet(mut embed: Embed) -> Embed {
     }
     embed
 }
+/// Where a query's pairs end.
+const QUERY_SEPARATORS: &[char] = &['&', ';'];
+/// Where a fragment's pairs end: a hash route's path and query marks too (`#/v?autoplay=1`,
+/// `#!/autoplay=1`).
+const FRAGMENT_SEPARATORS: &[char] = &['&', ';', '?', '/', '!', '#'];
 /// `part` (a query or a fragment) with every autoplay parameter (`AUTOPLAY_PARAMS`, any case)
 /// that is not already off (`0`, `false`, `no`, `off`) turned off, a bare flag included; pairs
-/// split on `&` or `;`, and every other pair left as written (a signed query stays valid). The
-/// first one turned off is kept in `started` as `name=value` (`name=true` for a bare flag).
+/// split on `separators`, and every other pair left as written (a signed query stays valid).
+/// The first one turned off is kept in `started` as `name=value` (`name=true` for a bare flag).
 /// `None` when nothing was on.
-fn quiet_pairs(part: &str, started: &mut Option<String>) -> Option<String> {
+fn quiet_pairs(part: &str, separators: &[char], started: &mut Option<String>) -> Option<String> {
     let mut out = String::with_capacity(part.len() + 8);
     let mut changed = false;
-    for piece in part.split_inclusive(['&', ';']) {
+    for piece in part.split_inclusive(separators) {
         let (pair, end) = match piece.char_indices().last() {
-            Some((i, '&' | ';')) => piece.split_at(i),
+            Some((i, c)) if separators.contains(&c) => piece.split_at(i),
             _ => (piece, ""),
         };
         let (raw_key, raw_value) = pair.split_once('=').unwrap_or((pair, ""));
@@ -1735,6 +1746,18 @@ mod tests {
                 None,
             ),
             ("v?autoplay=false", "v?autoplay=false", None),
+            (
+                "v?autoplay=1#?autoplay=1",
+                "v?autoplay=0#?autoplay=0",
+                Some("autoplay=1"),
+            ),
+            (
+                "v#/player?a=b&autoplay=true",
+                "v#/player?a=b&autoplay=false",
+                None,
+            ),
+            ("v#!/autoplay=yes", "v#!/autoplay=false", None),
+            ("v#t=1/2", "v#t=1/2", None),
         ] {
             let v = json!({"type": "video", "provider_name": "Clips",
                 "html": format!("<iframe src=\"https://clips.example.com/{raw}\"></iframe>")});
