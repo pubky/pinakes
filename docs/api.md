@@ -777,8 +777,9 @@ updates are visible between pages; this is not a frozen snapshot.
 **Facets.** `facet` adds `facets` to the answer: counts over the whole filtered set (every page
 alike, whatever `limit`, `cursor` or `sort`; `collapse` changes the rows, not the counts), each
 list most frequent first, ties by value. Each value is what its filter takes, so a client can
-offer it as a choice: filtering by an entry finds exactly its count (one per card, an event
-occurrence counting as its own card).
+offer it as a choice: filtering by a `tags`, `host` or `category` entry finds exactly its count
+(one per card, an event occurrence counting as its own card). A `type` entry counts that exact
+type; `type=` also finds its subtypes, so its total is the counts rolled up along `type_path`.
 
 | Facet | Entries |
 | --- | --- |
