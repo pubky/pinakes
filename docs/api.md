@@ -284,6 +284,8 @@ answer `If-None-Match` with 304.
 | `organizer` | `{name, url}` |
 | `from` | Where the card's metadata came from when it is not the page itself: the [source](#sources) whose official API answered, e.g. `federal_register` |
 | `facts` | The fields that API names for the object, by name (`document_type`, `citation`, …), or the facts a [Pubky app's](pubky-apps.md) profile reads (`card_count`, `price`, `rating`, …), or a MusicBrainz page's own facts (its `artist`, `duration` in seconds, `genre`, …: [MusicBrainz facts](#also-on)), then the facts the [also-on](#also-on) sources read for it (such as a music link's `isrc`, `upc` and `mbid`); several values of one name are joined with `; `. Each source keeps at most `limits.also_on_facts_per_source` (32, at least 8) facts per resource, cutting the many values of one name (a recording's ISRCs) before a name's one value (its MBID, artist). Each source's page lists its facts. `null` when there are none. Facts never join anything |
+| `related` | The objects the card points at, each with its own card ([Related objects](#related-objects)): on a Bitcoin or Lightning card, a transaction's block, inputs and outputs, a block's previous and next block and coinbase transaction, an address's latest transactions, a node's biggest channels and their peers, a channel's nodes and funding transaction; `[]` on every other card |
+| `related_total` | How many entries of a `rel` there are when `related` lists fewer of them (`{"input": 400}`); `null` when it lists them all |
 | `keys` | The public identifiers the resource is keyed by, as `GET /v1/search?key=` takes them (`isrc:…`, `upc:…`, `doi:…`, `isbn:…`, `mb:recording:…`, `wikidata:Q…`, `osm:node/…`): the keys its sources vouch for ([Also on](#also-on)), sorted; `[]` when there are none |
 | `aliases` | Other spellings of this link that resolve to it ([aliases](#aliases)), at most 50; a page's own `url`, `@id`, `sameAs` or canonical claims are not aliases and are not listed. The card's `uri` is the canonical one: an alias is answered with its root's card |
 | `updated_at` | When the current metadata was accepted |
@@ -291,6 +293,45 @@ answer `If-None-Match` with 304.
 Nothing that describes the fetch rather than the thing is public (the resolver, TTL, group keys,
 raw attributes, parser warnings, content type and length): operators read the stored document
 with `GET /v1/resources/{id}/document` on the admin listener.
+
+### Related objects
+
+A resource read's `related` lists the objects its card points at, so a client can show them and
+open each one's card. Each entry is `{rel, uri, name?, amount_sat?, at?}`:
+
+- `rel` says what it is to the card; `uri` is its card's root, which `POST /v1/resolve` reads
+  (and `GET /v1/resources/by-uri` answers once it is known), never a page on a site. An input or
+  output without an address has a null `uri` and a `name` that says what it is (`OP_RETURN`,
+  `P2PK`, `coinbase`, or the script type).
+- `name` is plain text (a block's "Block 975,251", a node's alias); `amount_sat` is in
+  satoshis; `at` is an RFC 3339 instant.
+- A `rel` lists at most 10 entries; when there are more, `related_total` gives their number
+  (`{"input": 400}`). Entries come in the order below; inputs, outputs and channels the largest
+  first.
+- The list is read with the card and stored with it ([mempool.space](sources/mempool.md#related)):
+  it changes when the card is read again, never on a read of the resource. It is not the
+  `related=` search ([Related](#related)), which ranks what a link's taggers also referenced.
+
+| Card | `rel` |
+| --- | --- |
+| `BitcoinTransaction` | `block` (with `at`, the block time), `input` and `output` (an address, or null with a label; `amount_sat`) |
+| `BitcoinBlock` | `previous`, `next` (once the next block is six deep in the best chain), `coinbase` (its first transaction; `amount_sat` the block reward) |
+| `BitcoinAddress` | `tx`: its latest transactions, those in the mempool first, with `amount_sat` what each moved into (positive) or out of (negative) the address and `at` once confirmed |
+| `LightningNode` | `channel`: its biggest open channels (`amount_sat` the capacity, `name` the peer's alias); `peer`: those channels' other nodes, each once |
+| `LightningChannel` | `node` (both, with their aliases), `funding_tx` (`amount_sat` the capacity), `closing_tx` once closed |
+
+Roots keep their network: a testnet4 transaction's inputs are `btc-testnet4:address/…`, a signet
+channel's funding transaction `btc-signet:tx/…`.
+
+```json
+"related": [
+  {"rel": "block", "uri": "btc:block/0000000000000000000008dfb288144ec4626cad43656ff2cdd8cb278886fe80",
+   "name": "Block 975,251", "at": "2026-11-10T03:32:51Z"},
+  {"rel": "input", "uri": "btc:address/1FRQ1b96RVdsGbJUHHiqNGVSnuxq1cMBAZ", "amount_sat": 994797},
+  {"rel": "output", "uri": "btc:address/17Hh59K259oHaMtSfeJh9UmkV4seDAQe7x", "amount_sat": 129015985}
+],
+"related_total": {"input": 400}
+```
 
 ### Occurrence
 
@@ -1770,7 +1811,7 @@ layers, with the caller's address:
 | Tool | Request | Answer |
 | --- | --- | --- |
 | `search` | `GET /v1/search` with `q`, `type` (array), `tags` (array), `match`, `near` (`{lat, lon, radius}`), `bbox` (`[west, south, east, north]`), `from`, `to`, `key`, `sort`, `window`, `collapse`, `reach`, `boost`, `viewer`, `limit`, `cursor` | Compact cards, `cursor`, `facets` |
-| `card` | `GET /v1/resources/by-uri`; with `resolve: true` and an unknown link, `POST /v1/resolve` | One compact card with `category`, `address`, `facts`, `aliases` (at most 10) and the event fields |
+| `card` | `GET /v1/resources/by-uri`; with `resolve: true` and an unknown link, `POST /v1/resolve` | One compact card with `category`, `address`, `facts`, `related` and `related_total` (when it has them), `aliases` (at most 10) and the event fields |
 | `lookup` | `GET /v1/search?key=` | Compact cards |
 | `group` | `GET /v1/groups/{id}` | `id`, `type`, `keys`, every member's compact card, and `best`: the most complete readable member of the group's type |
 | `types` | `GET /v1/search?facet=type&limit=1` and `GET /v1/info` | The card types with their counts, and `resolves` |

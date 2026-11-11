@@ -708,6 +708,20 @@
               }
             ]
           },
+          "related": {
+            "description": "The objects the card points at, each with its own card (docs/api.md, Related objects): a\nBitcoin transaction's block, inputs and outputs; a block's previous and next block and\ncoinbase transaction; an address's latest transactions; a Lightning node's biggest\nchannels and their peers; a channel's nodes and funding transaction. Each is\n`{rel, uri, name?, amount_sat?, at?}`; `uri` is a root `POST /v1/resolve` reads, or null\nfor an input or output without an address (`name` says what it is). At most 10 of a\n`rel`, read with the card; `[]` on every other card.",
+            "items": {
+              "$ref": "#/components/schemas/Related"
+            },
+            "type": "array"
+          },
+          "related_total": {
+            "description": "How many entries of a `rel` there are when `related` lists fewer of them\n(`{\"input\": 400}`); null when it lists them all.",
+            "type": [
+              "object",
+              "null"
+            ]
+          },
           "tz": {
             "type": [
               "string",
@@ -733,6 +747,7 @@
           }
         },
         "required": [
+          "related",
           "keys",
           "aliases"
         ],
@@ -1514,6 +1529,49 @@
           "object_path",
           "start",
           "status"
+        ],
+        "type": "object"
+      },
+      "Related": {
+        "description": "One object a card points at (docs/api.md, Related objects): on a Bitcoin or Lightning card,\nthe block a transaction is in, its inputs and outputs, a block's neighbours, an address's\nlatest transactions, a node's channels and peers, a channel's nodes and transactions.",
+        "properties": {
+          "amount_sat": {
+            "description": "In satoshis: an input's or output's value, a channel's capacity, a block's reward on its\ncoinbase transaction, or what a transaction moved into (positive) or out of (negative)\nan address.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "at": {
+            "description": "When it happened: the block time of a transaction or of a transaction's block.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "description": "Plain text: a block's \"Block 975,251\", a node's alias, a channel's peer's alias, or the\nlabel of an entry without a `uri`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rel": {
+            "description": "What it is to this card: `block`, `input`, `output`, `previous`, `next`, `coinbase`,\n`tx`, `channel`, `peer`, `node`, `funding_tx` or `closing_tx`.",
+            "type": "string"
+          },
+          "uri": {
+            "description": "Its card's URI, a root `POST /v1/resolve` reads (`btc:tx/…`, `btc:address/…`,\n`ln:node/…`); null for an input or output without an address, which `name` labels\n(`OP_RETURN`, `coinbase`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "rel"
         ],
         "type": "object"
       },

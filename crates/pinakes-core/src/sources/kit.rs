@@ -41,6 +41,8 @@ pub struct Request {
     pub headers: Vec<(&'static str, String)>,
     /// Content types the answer may have beyond the page set, e.g. `text/plain`.
     pub extra_types: &'static [&'static str],
+    /// The largest answer taken, in place of the egress default (`FetchOptions::body_cap`).
+    pub body_cap: Option<usize>,
 }
 impl Request {
     pub fn get(url: &str) -> Option<Self> {
@@ -49,6 +51,7 @@ impl Request {
             accept: None,
             headers: vec![],
             extra_types: &[],
+            body_cap: None,
         })
     }
     pub fn accept(mut self, accept: &'static str) -> Self {
@@ -63,12 +66,18 @@ impl Request {
         self.extra_types = types;
         self
     }
+    /// Takes answers up to `bytes` (a larger one is refused), in place of the egress default.
+    pub fn cap(mut self, bytes: usize) -> Self {
+        self.body_cap = Some(bytes);
+        self
+    }
     /// The egress options of this request.
     pub fn options(&self) -> FetchOptions {
         FetchOptions {
             accept: Some(self.accept.unwrap_or("application/json").into()),
             headers: self.headers.clone(),
             extra_types: self.extra_types,
+            body_cap: self.body_cap,
             ..Default::default()
         }
     }
@@ -165,6 +174,10 @@ pub struct Card {
     pub keys: Vec<Key>,
     /// The same object elsewhere, for the step-8 foundation.
     pub also_on: Vec<Link>,
+    /// The objects it points at (`model::Related`), in the order a client lists them.
+    pub related: Vec<crate::model::Related>,
+    /// How many entries of a `rel` there are when `related` holds fewer of them.
+    pub related_total: BTreeMap<String, u64>,
 }
 impl Card {
     pub fn new(type_name: &'static str, id: String, url: String) -> Self {
@@ -183,6 +196,8 @@ impl Card {
             details: BTreeMap::new(),
             keys: vec![],
             also_on: vec![],
+            related: vec![],
+            related_total: BTreeMap::new(),
         }
     }
     /// Sets a detail, skipping nulls and empty strings and arrays.
@@ -213,8 +228,8 @@ impl Card {
     /// The resource document of this card, from the source's new card for the link
     /// (`Context::card`). Its facts are the details as strings (lists joined with "; "), each
     /// key's value under its namespace (`doi`, `wikidata`, …) and the object's page as
-    /// `page_url`. The card's `id` is the link's root (`source_root`): when the link is another
-    /// spelling, it becomes an alias of it.
+    /// `page_url`; `related` and `related_total` as they are. The card's `id` is the link's root
+    /// (`source_root`): when the link is another spelling, it becomes an alias of it.
     pub fn into_doc(self, mut doc: ResourceMeta, site: &str) -> ResourceMeta {
         doc.set_type(self.type_name);
         doc.site = site.into();
@@ -249,6 +264,8 @@ impl Card {
             }
         }
         doc.attributes.insert("page_url".into(), self.url);
+        doc.related = self.related;
+        doc.related_total = self.related_total;
         doc.source_root = Some(self.id);
         doc
     }
@@ -331,6 +348,11 @@ pub fn checked(source: &dyn super::Source, card: &Card) -> ResourceMeta {
         bounded.attributes.len(),
         doc.attributes.len(),
         "facts dropped"
+    );
+    assert_eq!(bounded.related, doc.related, "related entries dropped");
+    assert_eq!(
+        bounded.related_total, doc.related_total,
+        "related totals changed"
     );
     bounded
 }
