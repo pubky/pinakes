@@ -865,7 +865,8 @@ struct Frame {
     allow: Vec<String>,
 }
 fn first_frame(html: &str) -> Option<Frame> {
-    let fragment = scraper::Html::parse_fragment(html);
+    // Parsed within the parse caps and budget (`resolver::html`), as every HTML is.
+    let fragment = crate::resolver::html::fragment(html).ok()?;
     let iframe = scraper::Selector::parse("iframe[src]").expect("selector");
     if let Some(el) = fragment.select(&iframe).next() {
         let el = el.value();
