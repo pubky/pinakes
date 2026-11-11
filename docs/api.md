@@ -194,17 +194,23 @@ Where it comes from, the first that has one:
    show or episode, a SoundCloud track, set or profile, a Mixcloud show, a TIDAL track, album,
    video or playlist, a Deezer track, album, playlist or artist, an Apple Music song, album or
    playlist, an Apple Podcasts show or episode, an X post; a Mastodon post on the server it was
-   posted on (`/@{account}/{id}/embed`); an OpenStreetMap card's map (its bounding box, or the
+   posted on (`/@{account}/{id}/embed`; one Mastodon's own API answered for); an OpenStreetMap card's map (its bounding box, or the
    streets around its point, with a marker). `also_on` links get these as well.
 2. **The provider's oEmbed answer**, read with the card: only the `src` of its first `<iframe>`
    (or a Mastodon-style `data-embed-url`), never its HTML, with the iframe's `width`, `height` and
    `allow`. Pinakes asks a provider of the pinned registry (`data/oembed-providers.json`) for it
-   when the page names no player of its own; another site's oEmbed answer counts when the card
-   reads it anyway.
+   when the page names no player of its own (its frame alone: the card keeps the page's fields);
+   another site's oEmbed answer counts when the card reads it anyway. Its `provider` is the
+   answer's `provider_name` as a slug (`speaker-deck`), else the frame's host; an answer never
+   takes the name of a service of the first kind.
 3. **The page's own player**: its head's `twitter:player` (with `:width` and `:height`), or an
    `og:video:secure_url` / `og:video:url` whose `og:video:type` is `text/html`.
 
-A tagged `also_on` member whose link names none shows the frame its own card stores. A frame
+A frame from 2. or 3. never starts by itself: an autoplay its address turns on (`autoplay=1`)
+is turned off there and given as `autoplay_param`; one without such a parameter has no
+`autoplay` in `allow`. A card whose link names no frame takes the first of its other links' (its
+`http:` spelling, a short link) that does. A tagged `also_on` member whose link names none shows
+the frame its own card shows. A `missing` card, and a post found gone, have none. A frame
 stored on a card of an audio type (a recording, an album, a podcast or episode) with a fixed
 height is an `audio` player; one on a social post is a `post`.
 

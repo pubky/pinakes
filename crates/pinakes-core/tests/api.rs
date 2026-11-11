@@ -2577,9 +2577,32 @@ async fn a_card_carries_its_embed(pool: PgPool) {
     let gone_id = store::ensure_resource(&pool, gone).await.unwrap();
     let mut missing = ResourceMeta::new(gone, "jsonld", 86400);
     missing.status = pinakes_core::model::Status::Missing;
-    store::save_document(&pool, &gone_id, 0, &missing)
-        .await
-        .unwrap();
+    // Gone once it is found so twice.
+    for _ in 0..2 {
+        missing.fetched_at += 1000;
+        store::save_document(&pool, &gone_id, 0, &missing)
+            .await
+            .unwrap();
+    }
+    // A post Mastodon's API answered for has its server's frame; one read over ActivityPub alone
+    // may be on a server without one.
+    let mut posts = vec![];
+    for (uri, source) in [
+        (
+            "https://mastodon.social/@Mastodon/117466985005297414",
+            "mastodon",
+        ),
+        ("https://pleroma.example/@someone/1", "activitypub"),
+    ] {
+        let post_id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut post = ResourceMeta::new(uri, source, 86400);
+        post.set_type("SocialMediaPosting");
+        post.name = Some("A post".into());
+        store::save_document(&pool, &post_id, 0, &post)
+            .await
+            .unwrap();
+        posts.push(post_id);
+    }
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let embed = json!({
         "provider": "podcast-host",
@@ -2587,7 +2610,7 @@ async fn a_card_carries_its_embed(pool: PgPool) {
         "src": "https://player.podcast.example/e/1",
         "height": 150,
         "aspect": null,
-        "allow": ["autoplay"],
+        "allow": [],
         "autoplay_param": null
     });
     let (code, card) = call(&app, "GET", &format!("/v1/resources/{id}"), None).await;
@@ -2597,13 +2620,22 @@ async fn a_card_carries_its_embed(pool: PgPool) {
         &app,
         "POST",
         "/v1/resources/lookup",
-        Some(json!({"resource_ids": [id, gone_id]})),
+        Some(json!({"resource_ids": [id, gone_id, posts[0], posts[1]]})),
     )
     .await;
     assert_eq!(code, 200, "{cards}");
     assert_eq!(cards[0]["embed"], embed);
     assert_eq!(cards[1]["status"], "missing", "{cards}");
     assert_eq!(cards[1]["embed"], Value::Null, "{cards}");
+    assert_eq!(
+        cards[2]["embed"]["src"], "https://mastodon.social/@Mastodon/117466985005297414/embed",
+        "{cards}"
+    );
+    assert_eq!(
+        (&cards[2]["embed"]["provider"], &cards[2]["embed"]["kind"]),
+        (&json!("mastodon"), &json!("post"))
+    );
+    assert_eq!(cards[3]["embed"], Value::Null, "{cards}");
 }
 
 /// The stored document, with its internal fields, is on the admin listener only; the public

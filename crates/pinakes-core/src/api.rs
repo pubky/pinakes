@@ -1236,13 +1236,17 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
 /// Mastodon post's own frame, else an OpenStreetMap card's map (`osm`: the row is an OSM
 /// object), else the frame its document stores (its oEmbed answer's or its page's own).
 fn card_embed(uri: &str, doc: Option<&ResourceMeta>, osm: bool) -> Option<crate::embed::Embed> {
+    // A link found gone, a post among them while a later read fails (`changes::gone_social`),
+    // shows nothing of its own.
+    if doc.is_some_and(|d| d.status == model::Status::Missing || crate::changes::gone_social(d)) {
+        return None;
+    }
     if let Some(embed) = crate::embed::link(uri) {
         return Some(embed);
     }
     let doc = doc?;
-    if matches!(doc.source.as_str(), "mastodon" | "activitypub")
-        && doc.type_name == "SocialMediaPosting"
-    {
+    // A post that Mastodon's own API answered for: another fediverse server may have no `/embed`.
+    if doc.source == "mastodon" && doc.type_name == "SocialMediaPosting" {
         if let Some(embed) = crate::embed::mastodon(uri) {
             return Some(embed);
         }
@@ -1341,12 +1345,23 @@ pub(crate) async fn with_refs<'a>(
             card.refs.clone_from(refs);
         }
     }
+    // A card whose canonical link names no player may be read through another link that does
+    // (an `http:` spelling's card, a short link): its first referenced link that names one.
+    for card in cards.iter_mut() {
+        if card.embed.is_none() && card.status != "missing" {
+            card.embed = card
+                .refs
+                .iter()
+                .find_map(|r| crate::embed::link(r))
+                .map(|e| e.settled(&card.type_path));
+        }
+    }
     member_embeds(pool, &mut cards).await?;
     crate::collections::count(pool, cards).await
 }
-/// Fills the `embed` of each tagged `also_on` member whose link names none (`embed::link`) with
-/// the frame its own card stores (docs/api.md, Embed). One query, and none when no card has such
-/// a member.
+/// Fills the `embed` of each tagged `also_on` member whose link names none (`embed::link`) as its
+/// own card shows it (`card_embed`: a Mastodon post's or a map's frame, else the one it stores;
+/// docs/api.md, Embed). One query, and none when no card has such a member.
 async fn member_embeds(pool: &PgPool, cards: &mut [&mut Card]) -> Result<(), ApiError> {
     let ids: Vec<String> = cards
         .iter()
@@ -1357,17 +1372,18 @@ async fn member_embeds(pool: &PgPool, cards: &mut [&mut Card]) -> Result<(), Api
     if ids.is_empty() {
         return Ok(());
     }
-    let rows: Vec<(String, Value, Vec<String>)> = sqlx::query_as(
-        "SELECT id, doc->'embed', coalesce(type_path, '{}') FROM resource \
-         WHERE id = ANY($1) AND status <> 'missing' AND doc ? 'embed'",
+    let rows: Vec<(String, String, Value, Vec<String>, bool)> = sqlx::query_as(
+        "SELECT id, uri, doc, coalesce(type_path, '{}'), osm_id IS NOT NULL FROM resource \
+         WHERE id = ANY($1) AND status <> 'missing'",
     )
     .bind(&ids)
     .fetch_all(pool)
     .await?;
     let stored: BTreeMap<String, crate::embed::Embed> = rows
         .into_iter()
-        .filter_map(|(id, embed, type_path)| {
-            let embed: crate::embed::Embed = serde_json::from_value(embed).ok()?;
+        .filter_map(|(id, uri, doc, type_path, osm)| {
+            let doc: ResourceMeta = serde_json::from_value(doc).ok()?;
+            let embed = card_embed(&uri, Some(&doc), osm)?;
             Some((id, embed.bounded()?.settled(&type_path)))
         })
         .collect();

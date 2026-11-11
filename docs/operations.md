@@ -570,9 +570,11 @@ A card's frame ([`embed`](api.md#embed)) follows from the link alone for the pla
 knows, X and Mastodon posts and OpenStreetMap cards, added when the card is served. Any other comes
 from the oEmbed answer's `<iframe>` (its address only) or the page head's `twitter:player` /
 HTML `og:video`, stored with the card: a registry provider is then also asked when its page is
-complete but names no player of its own (one oEmbed request more per read, cached for the card's
-lifetime). Stored cards get those frames at their next read; `pinakesd reextract media` reads the
-registry providers' cards again at once.
+complete but names no player of its own, for its frame alone (one oEmbed request more per read,
+cached for the card's lifetime, counted as `decision="frame"`; a provider host that answered
+without a frame is not asked so again for a day). A stored frame never starts by itself: an
+autoplay its address turns on is turned off. Stored cards get those frames at their next read;
+`pinakesd reextract media` reads the registry providers' cards again at once.
 `web.discover_feeds` (web pages) and `cards.media.discover_feeds` (media pages: podcast feed
 scanning) follow RSS alternates on pages without a typed card. Discovery decisions are counted in
 `pinakes_discovery_decisions_total{kind,decision}`. A podcast show's card reads the show's feed

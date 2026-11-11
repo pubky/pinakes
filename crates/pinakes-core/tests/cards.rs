@@ -263,7 +263,16 @@ async fn optional_fetch_policy_and_metrics() {
         assert_eq!(
             metrics
                 .discovery
-                .with_label_values(&["oembed", if count == 1 { "skipped" } else { "requested" }])
+                .with_label_values(&[
+                    "oembed",
+                    if count == 1 {
+                        "skipped"
+                    } else if uri.ends_with("/no-player") {
+                        "frame"
+                    } else {
+                        "requested"
+                    }
+                ])
                 .get(),
             1
         );
