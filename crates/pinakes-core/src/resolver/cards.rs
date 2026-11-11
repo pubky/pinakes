@@ -1245,11 +1245,11 @@ impl CardResolver {
     }
     /// The frame alone of `endpoint`'s oEmbed answer (`embed::from_oembed`), for a page that is
     /// complete without one: nothing else of the answer is used, and an answer without a title
-    /// counts. An endpoint that refused for want of a token (401, or an answer naming an access
-    /// token: Facebook's and Instagram's) is not asked again for a day; a link whose answer was
-    /// refused (400, 403: an embed-restricted video) or was a video or rich object without a
-    /// frame is not asked again for a day either (`NO_FRAME`), the provider's other links still
-    /// are.
+    /// counts. An endpoint whose refusal (400, 401, 403) names an access token (Facebook's and
+    /// Instagram's) is not asked again for a day; a link whose answer was otherwise refused (a
+    /// bare 401 may be that object's alone; 403: an embed-restricted video) or was a video or
+    /// rich object without a frame is not asked again for a day either (`NO_FRAME`), the
+    /// provider's other links still are.
     async fn fetch_frame(&self, endpoint: Url, ttl: u64) -> Option<crate::embed::Embed> {
         let key = format!(
             "{}{}",
@@ -1276,11 +1276,14 @@ impl CardResolver {
             return None;
         };
         if matches!(f.status, 400 | 401 | 403) {
-            let body =
-                String::from_utf8_lossy(&f.body[..f.body.len().min(2048)]).to_ascii_lowercase();
-            let token =
-                f.status == 401 || body.contains("access token") || body.contains("access_token");
-            NO_FRAME.set(if token { &key } else { &link_key }, true);
+            NO_FRAME.set(
+                if wants_token(&f.body) {
+                    &key
+                } else {
+                    &link_key
+                },
+                true,
+            );
             return None;
         }
         let answer = (f.status == 200)
@@ -1393,6 +1396,13 @@ impl CardResolver {
         }
     }
 }
+/// Whether an oEmbed refusal's body names an access token: the endpoint wants one for every link
+/// (Facebook's, Instagram's), not just for the one asked. Its status alone (a 401) does not say:
+/// a provider may refuse one private object so.
+fn wants_token(body: &[u8]) -> bool {
+    let body = String::from_utf8_lossy(&body[..body.len().min(2048)]).to_ascii_lowercase();
+    body.contains("access token") || body.contains("access_token")
+}
 /// For a day: the oEmbed endpoints (host and path) that refused a frame-only request
 /// (`fetch_frame`) for want of a token, and the requests (the endpoint with its link) that were
 /// refused or answered a player without a frame.
@@ -1432,6 +1442,21 @@ fn budget(kind: &str) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Only a refusal that names an access token stops a provider's other frames; a bare 401 (one
+    /// private object) stops only that link's.
+    #[test]
+    fn only_a_token_refusal_is_remembered_for_the_whole_endpoint() {
+        assert!(wants_token(
+            br#"{"error":{"message":"(#200) Provide valid app ID","type":"OAuthException"},"hint":"An access token is required"}"#
+        ));
+        assert!(wants_token(br#"{"error":"missing access_token"}"#));
+        assert!(!wants_token(b"Unauthorized"));
+        assert!(!wants_token(br#"{"error":"This video is private"}"#));
+        assert!(!wants_token(b""));
+        // Only the start of the answer is read.
+        let late = format!("{}access token", " ".repeat(4096));
+        assert!(!wants_token(late.as_bytes()));
+    }
 
     #[test]
     fn official_apis_outlast_their_fetch_timeout() {
