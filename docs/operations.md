@@ -606,7 +606,11 @@ subdomains: placeholder titles are listed per domain), below the site's root, is
 stand-in for the object, a wall, at any length. Where the fetch ended decides: a short link that
 redirects to such a page is a wall, and the same title on any other host is just a title. Visible text excludes `script`, `style`, `noscript` and
 `template`. Title, heading and captcha markers count only on short pages (under 2,000 visible
-bytes) or challenge statuses (403, 429, 503). An HTML answer with status 202 that is empty or
+bytes) or challenge statuses (403, 429, 503). Challenge vendors' own wording that a work could
+also be named ("verifying your browser", "making sure you're not a bot", "pardon our
+interruption": `challenge_text`) counts on a challenge status, or on a short page only when it
+describes no object (no `og:title`, `twitter:title` or JSON-LD): a short film page named so is
+content. An HTML answer with status 202 that is empty or
 has no visible text is a challenge (AWS WAF answers bots so); an empty 202 of another type is
 content. A redirect of the requested path to a listed
 sign-in path (`/login`, `/authwall`, `/signin`, `/checkpoint`, …) is a wall unless the

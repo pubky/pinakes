@@ -13,7 +13,9 @@
     "incapsula incident id",
     "are you a robot",
     "press & hold",
-    "checking your browser",
+    "checking your browser"
+  ],
+  "challenge_text": [
     "verifying your browser",
     "verifying you are human",
     "making sure you're not a bot",

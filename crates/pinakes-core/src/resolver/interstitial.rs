@@ -25,6 +25,10 @@ pub enum Page {
 #[serde(deny_unknown_fields)]
 struct Walls {
     text: Vec<String>,
+    /// Challenge vendors' wording that a real work could also carry as its name ("Pardon Our
+    /// Interruption"): evidence on a challenge status, or on a short page that describes no
+    /// object (no `og:title`, `twitter:title` or JSON-LD, which challenge pages never carry).
+    challenge_text: Vec<String>,
     /// Whole page titles that name only the site, never an object, by the site's domain: the
     /// page a service shows in place of the object (YouTube's regional or consent page is titled
     /// "- YouTube"). A title counts only on its domain and the domain's subdomains.
@@ -41,6 +45,12 @@ impl Walls {
     fn marked(&self, text: &str) -> bool {
         let text = text.to_lowercase();
         self.text
+            .iter()
+            .any(|marker| text.contains(marker.as_str()))
+    }
+    fn challenge_marked(&self, text: &str) -> bool {
+        let text = text.to_lowercase();
+        self.challenge_text
             .iter()
             .any(|marker| text.contains(marker.as_str()))
     }
@@ -180,8 +190,21 @@ pub fn inspect(requested: &Url, f: &Fetched) -> anyhow::Result<Page> {
         return Ok(Page::Blocked);
     }
     let title_marked = walls.marked(&title);
+    let vendor_marked =
+        walls.challenge_marked(&title) || (heading.len() < 200 && walls.challenge_marked(&heading));
+    let describes_object = || {
+        html.select(&select(
+            "meta[property=\"og:title\"], meta[name=\"twitter:title\"], script[type=\"application/ld+json\"]",
+        ))
+        .next()
+        .is_some()
+    };
     if ((challenge || short) && (title_marked || (heading.len() < 200 && walls.marked(&heading))))
         || (short && walls.marked(&visible))
+        || (challenge && vendor_marked)
+        || (short
+            && (vendor_marked || walls.challenge_marked(&visible))
+            && !describes_object())
         || ((challenge || short || title_marked)
             && walls
                 .captcha_selectors
@@ -253,6 +276,7 @@ mod tests {
         let w = &*WALLS;
         for list in [
             &w.text,
+            &w.challenge_text,
             &w.captcha_selectors,
             &w.wall_host_prefixes,
             &w.wall_paths,
@@ -263,6 +287,7 @@ mod tests {
         for v in w
             .text
             .iter()
+            .chain(&w.challenge_text)
             .chain(&w.wall_host_prefixes)
             .chain(&w.wall_paths)
         {
@@ -354,6 +379,17 @@ mod tests {
             inspect(&url, &fetched(200, &article)).unwrap(),
             Page::Content
         );
+        // Short real pages that carry the wording describe an object: a film named "Pardon Our
+        // Interruption", a news brief about MusicBrainz' new gate. They are content, unless the
+        // answer is itself a challenge status.
+        for page in [
+            "<html><head><title>Pardon Our Interruption (2019)</title><meta property=\"og:title\" content=\"Pardon Our Interruption\"></head><body><h1>Pardon Our Interruption</h1><p>A short film.</p></body></html>",
+            "<html><head><title>MusicBrainz now shows Verifying your browser</title><meta name=\"twitter:title\" content=\"MusicBrainz gate\"></head><body><p>Plain clients now see a page saying verifying your browser.</p></body></html>",
+            "<html><head><title>Making sure you're not a bot</title><script type=\"application/ld+json\">{\"@type\":\"MusicRecording\"}</script></head><body><p>A song.</p></body></html>",
+        ] {
+            assert_eq!(inspect(&url, &fetched(200, page)).unwrap(), Page::Content, "{page}");
+            assert_eq!(inspect(&url, &fetched(429, page)).unwrap(), Page::Blocked, "{page}");
+        }
     }
     #[test]
     fn refresh_parsing_survives_multi_byte_content() {
