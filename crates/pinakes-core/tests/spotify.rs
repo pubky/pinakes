@@ -80,6 +80,8 @@ fn track_body() -> Vec<u8> {
 struct Answers {
     refuse: bool,
     api_status: Option<u16>,
+    /// A status for one album's read (`/v1/albums/{id}`) alone.
+    album_status: Option<u16>,
 }
 /// Answers Spotify (its token and API), MusicBrainz's ISRC lookup, iTunes and Deezer; records
 /// each request.
@@ -160,6 +162,17 @@ impl Transport for Recorded {
                         "text/plain",
                     ));
                 }
+                if let Some(status) = self
+                    .answers
+                    .album_status
+                    .filter(|_| path.starts_with("/v1/albums/"))
+                {
+                    return Ok(answer(
+                        status,
+                        br#"{"error":{"status":403,"message":"Forbidden"}}"#.to_vec(),
+                        "application/json",
+                    ));
+                }
                 if path == format!("/v1/albums/{ALBUM}") {
                     answer(200, album_body(), "application/json; charset=utf-8")
                 } else if path == format!("/v1/tracks/{TRACK}") {
@@ -168,28 +181,6 @@ impl Transport for Recorded {
                     answer(200, shared_track_body(SHARED_PICKED, 214_000), "application/json")
                 } else if path == format!("/v1/tracks/{SHARED_NEITHER}") {
                     answer(200, shared_track_body(SHARED_NEITHER, 196_000), "application/json")
-                } else if path == "/v1/albums" {
-                    // Several albums by ID (`ids=…`): HYDRA 3D's, and `null` for any other.
-                    let ids = url
-                        .query_pairs()
-                        .find(|(k, _)| k == "ids")
-                        .map(|(_, v)| v.into_owned())
-                        .unwrap_or_default();
-                    let albums: Vec<serde_json::Value> = ids
-                        .split(',')
-                        .map(|id| {
-                            if id == ALBUM {
-                                serde_json::from_slice(&album_body()).unwrap()
-                            } else {
-                                serde_json::Value::Null
-                            }
-                        })
-                        .collect();
-                    answer(
-                        200,
-                        serde_json::to_vec(&serde_json::json!({ "albums": albums })).unwrap(),
-                        "application/json; charset=utf-8",
-                    )
                 } else if path == "/v1/search" {
                     let q = url
                         .query_pairs()
@@ -765,9 +756,10 @@ async fn spotify_isrc_is_off_by_default_and_keeps_its_rows_through_refusals(pool
 }
 
 /// An album on another service with a barcode key is looked up on Spotify by it (`spotify_isrc`):
-/// a UPC-A by its 12 digits, an EAN-13 whole; the search's albums are read back
-/// (`/v1/albums?ids=`), and only the one whose own barcode is the key becomes a link keyed by it.
-/// A refusal (403) keeps it.
+/// a UPC-A by its 12 digits, an EAN-13 whole; the search's albums (three at most) are read back
+/// one by one (`/v1/albums/{id}`: Spotify answers no batch read to an app in development mode),
+/// and only the one whose own barcode is the key becomes a link keyed by it. A 403 on an album's
+/// read and a refusal of the app keep it.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn an_album_with_a_barcode_key_gets_its_spotify_album(pool: sqlx::PgPool) {
     let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
@@ -805,7 +797,7 @@ async fn an_album_with_a_barcode_key_gets_its_spotify_album(pool: sqlx::PgPool) 
         .iter()
         .filter(|s| {
             s.starts_with("api.spotify.com/v1/search?")
-                || s.starts_with("api.spotify.com/v1/albums?")
+                || s.starts_with("api.spotify.com/v1/albums/")
         })
         .cloned()
         .collect();
@@ -813,9 +805,10 @@ async fn an_album_with_a_barcode_key_gets_its_spotify_album(pool: sqlx::PgPool) 
     assert_eq!(
         asked,
         [
-            format!("api.spotify.com/v1/albums?ids={ALBUM},{OTHER_UPC_ALBUM}"),
-            "api.spotify.com/v1/search?q=upc%3A4018939306052&type=album&limit=10".to_owned(),
-            "api.spotify.com/v1/search?q=upc%3A886443927087&type=album&limit=10".to_owned(),
+            format!("api.spotify.com/v1/albums/{ALBUM}?"),
+            format!("api.spotify.com/v1/albums/{OTHER_UPC_ALBUM}?"),
+            "api.spotify.com/v1/search?q=upc%3A4018939306052&type=album&limit=3".to_owned(),
+            "api.spotify.com/v1/search?q=upc%3A886443927087&type=album&limit=3".to_owned(),
         ],
         "{seen:?}"
     );
@@ -825,6 +818,36 @@ async fn an_album_with_a_barcode_key_gets_its_spotify_album(pool: sqlx::PgPool) 
     )];
     assert_eq!(rows(&pool, links, &hydra).await, expected);
     assert!(rows(&pool, links, &ram).await.is_empty());
+    let queued = || async {
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT last_error FROM also_on_dirty WHERE resource_id=$1",
+        )
+        .bind(&hydra)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    // A 403 on one album's read alone: the link stays, the lookup is retried, and the pair is not
+    // refused: its next run asks Spotify again.
+    let pair = ("upc-album-id", "upc-album-secret");
+    run(
+        &pool,
+        config(Some(pair)),
+        Answers {
+            album_status: Some(403),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(rows(&pool, links, &hydra).await, expected);
+    assert_eq!(queued().await.as_deref(), Some("forbidden_request"));
+    let seen = run(&pool, config(Some(pair)), Answers::default()).await;
+    assert!(
+        seen.iter()
+            .any(|s| s.starts_with("api.spotify.com/v1/search?q=upc")),
+        "{seen:?}"
+    );
+    assert_eq!(rows(&pool, links, &hydra).await, expected);
     // Spotify refusing the app (no Premium): the link stays, the lookup waits out the hold.
     run(
         &pool,
@@ -836,11 +859,5 @@ async fn an_album_with_a_barcode_key_gets_its_spotify_album(pool: sqlx::PgPool) 
     )
     .await;
     assert_eq!(rows(&pool, links, &hydra).await, expected);
-    let queued: Option<String> =
-        sqlx::query_scalar("SELECT last_error FROM also_on_dirty WHERE resource_id=$1")
-            .bind(&hydra)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(queued.as_deref(), Some("spotify_auth"));
+    assert_eq!(queued().await.as_deref(), Some("spotify_auth"));
 }

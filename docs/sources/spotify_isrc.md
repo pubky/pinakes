@@ -14,10 +14,12 @@ answer with any of its recordings). Several answers are the recording on several
 [`editions`](editions.md) places them and a card shows one per service.
 
 For an album on another service with a `upc:` key, the Spotify album that carries exactly that
-barcode: the search's `upc:` filter (`/v1/search?q=upc:…&type=album&limit=10`; a UPC-A, a GTIN-13
-with a leading zero, is asked by its 12 digits, an EAN-13 whole) names up to 10 candidates, and as
-the search's album objects carry no barcode, `/v1/albums?ids=…` reads them back: only an album
-whose own `external_ids.upc` (as GTIN-13) is the key counts. Exactly one such album becomes a link
+barcode: the search's `upc:` filter (`/v1/search?q=upc:…&type=album&limit=3`; a UPC-A, a GTIN-13
+with a leading zero, is asked by its 12 digits, an EAN-13 whole) names up to 3 candidates, and as
+the search's album objects carry no barcode, each is read back with `/v1/albums/{id}` (the request
+`spotify` makes for a Spotify album, shared with it; Spotify answers no batch read such as
+`/v1/albums?ids=` to an app in development mode, per its February 2026 migration guide): only an
+album whose own `external_ids.upc` (as GTIN-13) is the key counts. Exactly one such album becomes a link
 `https://open.spotify.com/album/{id}` keyed by the barcode; none or several give nothing. Two
 barcode keys at most.
 
@@ -45,11 +47,13 @@ whether that is "temporary" is for the operator to judge. The Policy also asks t
 ## Operations
 
 `spotify_isrc` costs one search request per ISRC key of a track on another service (two at most),
-and per barcode key of an album one search and, when it lists albums, one read of them,
+and per barcode key of an album one search and one read per album it lists (three at most),
 shared for an hour by credential pair, on the same pace as `spotify` (2 requests/s on
 `api.spotify.com`), through the same token slot: a refusal of the credentials holds five minutes
 (`spotify_auth`), a rate limit or an outage is waited out (`spotify_busy`), and either keeps the
-links an earlier run found. Switched off, the rows it stored stop showing on cards and expire as
+links an earlier run found. A 403 on one album's read is that read's, not the credentials': the
+lookup is retried after five minutes (`forbidden_request`), keeping its links, and the token slot
+stays open for every other Spotify request. Switched off, the rows it stored stop showing on cards and expire as
 usual; switched on after an upgrade, `pinakesd reextract also-on` asks for every stored track and
 album at once. The credentials and the token never appear in logs, the operator info, errors or debug
 output. The shared Spotify client is `also_on/spotify_api.rs`; `spotify` and `spotify_isrc` each

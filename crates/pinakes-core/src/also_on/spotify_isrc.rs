@@ -3,9 +3,12 @@
 //! that carry exactly that ISRC (the Web API's search `isrc:` filter, an exact lookup, never a
 //! title), as links keyed by the ISRC; several answers are the recording on several releases,
 //! which `editions` places and a card shows one per service. For an album with a `upc:` key, the
-//! one Spotify album that carries exactly that barcode: the search's `upc:` filter names the
-//! candidates, and as its album objects carry no barcode, `/v1/albums?ids=` reads each back
-//! (`external_ids.upc`); a barcode several albums carry names none of them.
+//! one Spotify album that carries exactly that barcode: the search's `upc:` filter names up to
+//! three candidates, and as its album objects carry no barcode, each is read back with
+//! `/v1/albums/{id}` (`external_ids.upc`; the request `spotify` makes, shared with it: Spotify
+//! answers no batch read to an app in development mode); a barcode several albums carry names
+//! none of them. A 403 on one album's read is that read's: the lookup is retried, the token slot
+//! stays open.
 //!
 //! Off by default: Spotify's Developer Policy (III.5) reads against a product "integrated with
 //! streams or content from another service", which an "Also on" list is, so the operator turns
@@ -30,8 +33,8 @@ use serde_json::Value;
 const MAX_LINKS: usize = 5;
 /// The most ISRC or barcode keys of one track or album asked (a track's own ISRC first).
 const MAX_ISRCS: usize = 2;
-/// The most albums one barcode search lists, each read back.
-const ALBUM_CANDIDATES: usize = 10;
+/// The most albums one barcode search lists, each read back (one request each).
+const ALBUM_CANDIDATES: usize = 3;
 
 pub struct SpotifyIsrc;
 #[async_trait]
@@ -154,11 +157,22 @@ async fn albums(cx: &Context, pair: (&str, &str), subject: &Subject) -> Result<F
         if candidates.is_empty() {
             continue;
         }
-        let url = format!("{API}/albums?ids={}", candidates.join(","));
-        let Some(answer) = api(cx, pair, &url).await? else {
-            continue;
-        };
-        let carried = carrying(&answer, &candidates, &upc);
+        let mut carried = Vec::new();
+        for id in &candidates {
+            let url = format!("{API}/albums/{id}");
+            let album = client_credentials::object_as(
+                &SPOTIFY,
+                cx,
+                pair,
+                &url,
+                ("application/json", &[]),
+                false,
+            )
+            .await?;
+            if album.is_some_and(|a| carries(&a, id, &upc)) {
+                carried.push(id);
+            }
+        }
         let [id] = carried.as_slice() else {
             continue;
         };
@@ -199,32 +213,16 @@ pub fn album_ids(answer: &Value) -> Vec<String> {
     ids.truncate(ALBUM_CANDIDATES);
     ids
 }
-/// The IDs among `asked` of the albums of a `/v1/albums?ids=` answer whose own barcode
-/// (`external_ids.upc`) is `upc` (GTIN-13), each once. Spotify answers `null` for an ID it has no
-/// album for.
-pub fn carrying<'a>(answer: &Value, asked: &'a [String], upc: &str) -> Vec<&'a str> {
-    let mut ids: Vec<&str> = Vec::new();
-    for album in answer["albums"].as_array().into_iter().flatten() {
-        if album["type"].as_str() != Some("album")
-            || album["external_ids"]["upc"]
-                .as_str()
-                .and_then(crate::barcode::gtin13)
-                .as_deref()
-                != Some(upc)
-        {
-            continue;
-        }
-        let Some(id) = asked
-            .iter()
-            .find(|a| album["id"].as_str() == Some(a.as_str()))
-        else {
-            continue;
-        };
-        if !ids.contains(&id.as_str()) {
-            ids.push(id.as_str());
-        }
-    }
-    ids
+/// Whether a `/v1/albums/{id}` answer is album `id` and its own barcode (`external_ids.upc`) is
+/// `upc` (GTIN-13).
+pub fn carries(album: &Value, id: &str, upc: &str) -> bool {
+    album["type"].as_str() == Some("album")
+        && album["id"].as_str() == Some(id)
+        && album["external_ids"]["upc"]
+            .as_str()
+            .and_then(crate::barcode::gtin13)
+            .as_deref()
+            == Some(upc)
 }
 
 #[cfg(test)]
@@ -257,19 +255,33 @@ mod tests {
 
     #[test]
     fn only_an_album_whose_own_barcode_is_the_key_counts() {
-        let candidates = album_ids(&search(&[RAM, OTHER, RAM, "short"]));
-        assert_eq!(candidates, [RAM, OTHER]);
-        // Read back: the one album with the barcode, in either spelling Spotify keeps.
+        // At most three candidates, each once, in the search's order.
+        let candidates = album_ids(&search(&[
+            RAM,
+            OTHER,
+            RAM,
+            "short",
+            "1fourthAlbum0000000000",
+        ]));
+        assert_eq!(candidates, [RAM, OTHER, "1fourthAlbum0000000000"]);
+        let candidates = album_ids(&search(&[
+            RAM,
+            OTHER,
+            "1third00Album000000000",
+            "1fourthAlbum0000000000",
+        ]));
+        assert_eq!(candidates.len(), 3);
+        // Read back: the album with the barcode, in either spelling Spotify keeps.
         for upc in ["886443927087", "0886443927087"] {
-            let answer = json!({"albums": [album(RAM, upc), album(OTHER, "4018939306052"), null]});
-            assert_eq!(carrying(&answer, &candidates, "0886443927087"), [RAM]);
+            assert!(carries(&album(RAM, upc), RAM, "0886443927087"));
         }
-        // An album the search did not list, or another barcode, counts for nothing.
-        let answer = json!({"albums": [album("1unaskedAlbum000000000", "886443927087")]});
-        assert!(carrying(&answer, &candidates, "0886443927087").is_empty());
-        // Two albums with the barcode: the lookup takes neither.
-        let answer = json!({"albums": [album(RAM, "886443927087"), album(OTHER, "0886443927087")]});
-        assert_eq!(carrying(&answer, &candidates, "0886443927087").len(), 2);
+        // Another barcode, or another album than the one asked, counts for nothing.
+        assert!(!carries(&album(RAM, "4018939306052"), RAM, "0886443927087"));
+        assert!(!carries(
+            &album(OTHER, "886443927087"),
+            RAM,
+            "0886443927087"
+        ));
         assert!(album_ids(&json!({"albums": {"items": []}})).is_empty());
     }
 }
