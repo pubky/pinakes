@@ -489,7 +489,7 @@ pub fn tools() -> Vec<Tool> {
     vec![
         tool(
             "search",
-            "Search the links people referenced on Pubky. Every filter is optional and they combine: text, a schema.org type (Event includes MusicEvent; Place includes cafés), tags, a circle on the map, a time window, one exact identifier. Returns compact cards (id, uri, type, name, description, site, point, start, end, group, also_on) and a cursor for the next page.",
+            "Search the links people referenced on Pubky. Every filter is optional and they combine: text, a schema.org type (Event includes MusicEvent; Place includes cafés), tags, a circle on the map, a time window, one exact identifier. Returns compact cards (id, uri, type, name, description, site, point, start, end, group, also_on), a cursor for the next page and, with facet, counts over every match.",
             json!({"type":"object","additionalProperties":false,"properties":{
                 "q":{"type":"string","description":"Words in the name or description, at most 256 bytes."},
                 "type":{"type":"array","items":{"type":"string"},"maxItems":10,"description":"Schema.org types, any of them, each with its subtypes: e.g. [\"Place\"], [\"Event\"], [\"MusicRecording\", \"MusicAlbum\", \"MusicGroup\"]. A single type as a string is accepted too."},
@@ -504,6 +504,9 @@ pub fn tools() -> Vec<Tool> {
                 "closed":{"type":"boolean","description":"true: list job postings past their closing date too (left out by default)."},
                 "ingredient":{"type":"string","description":"Recipes with these ingredients: up to 3, comma-separated, each matching whole words of an ingredient's name (flour matches all-purpose flour)."},
                 "in_collection":{"type":"string","description":"The links one public collection holds: the collection post's pubky:// URI (from a card tool answer's in_collections)."},
+                "host":{"type":"string","description":"Only links on this host, exactly as their URLs name it (www.youtube.com), as facet host lists it."},
+                "category":{"type":"string","description":"Only links of this category: a place's OpenStreetMap key/value (amenity/cafe), or a page's schema.org category, as facet category lists it."},
+                "facet":{"type":"array","items":{"type":"string","enum":["type","tags","host","category"]},"maxItems":4,"description":"Counts over every match, not just this page, in facets: type (card types), tags (labels), host (services, with their site name) and category (categories such as amenity/cafe), most frequent first. A comma-separated string is accepted too."},
                 "sort":{"type":"string","enum":["relevance","activity","recent","distance","start","trending"],"description":"relevance (default with q: name match, then tag labels, then description; activity breaks ties; needs q), activity (default without q), recent, distance (needs near), start (earliest first), trending (with window)."},
                 "window":{"type":"string","description":"With sort trending: how far back, 1h to 90d, default 7d."},
                 "collapse":{"type":"string","enum":["group"],"description":"group: one row per group of links that are the same thing."},
@@ -593,6 +596,8 @@ fn search_query(args: &JsonObject) -> Result<String, Failure> {
         ("cursor", "cursor"),
         ("ingredient", "ingredient"),
         ("in_collection", "in_collection"),
+        ("host", "host"),
+        ("category", "category"),
     ];
     let known = [
         "q",
@@ -616,6 +621,9 @@ fn search_query(args: &JsonObject) -> Result<String, Failure> {
         "closed",
         "ingredient",
         "in_collection",
+        "host",
+        "category",
+        "facet",
     ];
     if let Some(unknown) = args.keys().find(|k| !known.contains(&k.as_str())) {
         return Err(Failure::bad(format!(
@@ -628,8 +636,8 @@ fn search_query(args: &JsonObject) -> Result<String, Failure> {
             pairs.push((param, value));
         }
     }
-    // `type` and `tags`: an array, or the route's comma-separated string.
-    for key in ["type", "tags"] {
+    // `type`, `tags` and `facet`: an array, or the route's comma-separated string.
+    for key in ["type", "tags", "facet"] {
         match args.get(key) {
             None | Some(Value::Null) => {}
             Some(Value::Array(items)) => {
@@ -935,12 +943,21 @@ mod tests {
             .unwrap(),
             "type=JobPosting&remote=true&closed=false"
         );
+        assert_eq!(
+            search_query(&args(json!({
+                "host": "www.youtube.com", "category": "amenity/cafe", "facet": ["host", "category"]
+            })))
+            .unwrap(),
+            "host=www.youtube.com&category=amenity%2Fcafe&facet=host%2Ccategory"
+        );
         for bad in [
             json!({"remote": "yes"}),
             json!({"admin": true}),
             json!({"q": 1}),
             json!({"tags": [1]}),
             json!({"type": [1]}),
+            json!({"facet": [1]}),
+            json!({"facet": true}),
             json!({"near": {"lat": 1}}),
             json!({"bbox": [1, 2, 3]}),
             json!({"limit": "ten"}),

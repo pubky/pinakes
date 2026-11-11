@@ -582,6 +582,8 @@ GET /v1/search?tags=meetup
 GET /v1/search?facet=tags
 GET /v1/search?facet=type
 GET /v1/search?facet=type,tags
+GET /v1/search?facet=host
+GET /v1/search?facet=category&type=Place
 GET /v1/search?near=46.0037,8.9511&radius=5000
 GET /v1/search?near=47.3769,8.5417&radius=10000
 GET /v1/search?near=52.5170,13.3889&radius=20000
@@ -709,7 +711,7 @@ POST /v1/changes/lookup {"resource_ids":["81cefcae5a6a468cfc27ff1c1b420fce","5bc
 | `window` | With `sort=trending` or `related`: `{n}h` or `{n}d`, from `1h` to `90d` (default `7d` for trending, `limits.related_window_days` for related), counted back from the first page's instant |
 | `limit` | 1–500, default 50 |
 | `cursor` | The signed next-page token of the previous page |
-| `facet` | `tags`, `type` or both (`type,tags`): counts over the whole filtered set, in `facets.tags` (`{label, count}` per label) and `facets.type` (`{type, type_path, count}` per card type, `type_path` from `Thing` down to the type: enough to build the type tree and roll counts up into families), most frequent first |
+| `facet` | Any of `type`, `tags`, `host` and `category`, comma-separated in any order (`type,tags,host,category`): counts over the whole filtered set, most frequent first ([Facets](#facets)) |
 | `bbox` | `minLon,minLat,maxLon,maxLat` in degrees; west > east crosses the antimeridian |
 | `near`, `radius` | `lat,lon` and a radius in metres (at most `limits.max_radius_m`, default 200 km); not with `bbox` |
 | `from`, `to` | Inclusive start-time bounds: RFC 3339, Unix milliseconds or relative (`now`, `now+30d`, `now-12h`), within UTC years 0001–9999 |
@@ -771,6 +773,27 @@ daemon startup (HMAC-BLAKE3) and binds the filters, sort and decay instant; keep
 (`limit` may change). A tampered cursor, a cursor for other filters or one from a previous
 daemon returns 400: restart without a cursor. A null cursor ends the results. Concurrent
 updates are visible between pages; this is not a frozen snapshot.
+
+**Facets.** `facet` adds `facets` to the answer: counts over the whole filtered set (every page
+alike, whatever `limit`, `cursor` or `sort`; `collapse` changes the rows, not the counts), each
+list most frequent first, ties by value. Each value is what its filter takes, so a client can
+offer it as a choice: filtering by a `tags`, `host` or `category` entry finds exactly its count
+(one per card, an event occurrence counting as its own card). A `type` entry counts that exact
+type; `type=` also finds its subtypes, so its total is the counts rolled up along `type_path`.
+
+| Facet | Entries |
+| --- | --- |
+| `type` | `facets.type`: `{type, type_path, count}` per card type; `type_path` runs from `Thing` down to the type, enough to build the type tree and roll counts up into families |
+| `tags` | `facets.tags`: `{label, count}` per label people tagged the links with |
+| `host` | `facets.host`: `{host, site, count}` per service, at most 100: `host` as `host=` takes it (exactly as the links' URLs name it, so `www.youtube.com` and `youtube.com` are two entries), `site` the name its cards show (`YouTube`, `Wikipedia (en)`: the service Pinakes knows by the URL, else the site name the documents give most often, else the host). A host that `pubky://` objects use is a user's key, not a service, and is left out (`host=<user key>` still filters them) |
+| `category` | `facets.category`: `{category, count}` per category, at most 100, as `category=` takes it: a place's OpenStreetMap `key/value` (`amenity/cafe`), or the `category` a page's schema.org data gives |
+
+```text
+GET /v1/search?facet=host&type=MusicRecording
+→ facets.host: [{"host":"open.spotify.com","site":"Spotify","count":27}, …]
+GET /v1/search?facet=category&near=46.0037,8.9511&radius=5000
+→ facets.category: [{"category":"amenity/restaurant","count":16}, {"category":"amenity/cafe","count":9}, …]
+```
 
 **Map clusters.** `cluster=<zoom>` returns `{resolution, clusters, points, truncated, total,
 reach_truncated, facets?}`. A cluster is `{cell, count, lat, lon, top, attribution?}`, where
@@ -1888,7 +1911,7 @@ layers, with the caller's address:
 
 | Tool | Request | Answer |
 | --- | --- | --- |
-| `search` | `GET /v1/search` with `q`, `type` (array), `tags` (array), `match`, `near` (`{lat, lon, radius}`), `bbox` (`[west, south, east, north]`), `from`, `to`, `key`, `sort`, `window`, `collapse`, `reach`, `boost`, `viewer`, `limit`, `cursor` | Compact cards, `cursor`, `facets` |
+| `search` | `GET /v1/search` with `q`, `type` (array), `tags` (array), `match`, `near` (`{lat, lon, radius}`), `bbox` (`[west, south, east, north]`), `from`, `to`, `key`, `host`, `category`, `sort`, `window`, `collapse`, `reach`, `boost`, `viewer`, `limit`, `cursor`, `facet` (array of `type`, `tags`, `host`, `category`) | Compact cards, `cursor`, `facets` |
 | `card` | `GET /v1/resources/by-uri`; with `resolve: true` and an unknown link, `POST /v1/resolve` | One compact card with `category`, `address`, `facts`, `related` and `related_total` (when it has them), `aliases` (at most 10) and the event fields |
 | `lookup` | `GET /v1/search?key=` | Compact cards |
 | `group` | `GET /v1/groups/{id}` | `id`, `type`, `keys`, every member's compact card, and `best`: the most complete readable member of the group's type |

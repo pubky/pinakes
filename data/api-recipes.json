@@ -1357,6 +1357,31 @@
       "expect": "items"
     },
     {
+      "name": "facet-host",
+      "summary": "facet=host",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "facet": "host"
+      },
+      "expect": "items"
+    },
+    {
+      "name": "facet-category",
+      "summary": "facet=category&type=Place",
+      "method": "GET",
+      "path": "/v1/search",
+      "query": {
+        "facet": "category",
+        "type": "Place"
+      },
+      "expect": "items",
+      "labels": {
+        "type": "Place, facet=category",
+        "facet": "category, type=Place"
+      }
+    },
+    {
       "name": "near-lugano",
       "summary": "near=46.0037,8.9511&radius=5000",
       "method": "GET",

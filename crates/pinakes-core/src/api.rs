@@ -654,8 +654,10 @@ pub struct SearchQuery {
     pub limit: Option<usize>,
     /// Authenticated opaque keyset cursor from this daemon; invalid after restart. Restart pagination on HTTP 400.
     pub cursor: Option<String>,
-    /// Counts over the whole filtered set: `tags` (labels), `type` (card types) or both
-    /// (`type,tags`); `collapse` changes the rows, not the counts.
+    /// Counts over the whole filtered set, comma-separated, any of: `type` (card types), `tags`
+    /// (labels), `host` (services, as `host` takes them), `category` (categories such as
+    /// OpenStreetMap's `amenity/cafe`, as `category` takes them); `collapse` changes the rows,
+    /// not the counts.
     pub facet: Option<String>,
     /// West,south,east,north in degrees; west > east crosses the antimeridian.
     pub bbox: Option<String>,
@@ -988,6 +990,23 @@ pub struct TypeFacet {
     pub type_path: Vec<String>,
     pub count: i64,
 }
+#[derive(Serialize, ToSchema)]
+pub struct HostFacet {
+    /// The host as `host` takes it: exactly as the links' URLs name it (`www.youtube.com` and
+    /// `youtube.com` are two hosts).
+    pub host: String,
+    /// The service's name as its cards show it in `site` (`YouTube`, `Wikipedia (en)`), else
+    /// the host. Plain text.
+    pub site: String,
+    pub count: i64,
+}
+#[derive(Serialize, ToSchema)]
+pub struct CategoryFacet {
+    /// A category as `category` takes it: a place's OpenStreetMap `key/value` (`amenity/cafe`),
+    /// or the `category` a page's schema.org data gives.
+    pub category: String,
+    pub count: i64,
+}
 /// The facets `facet` asked for, over the whole filtered set.
 #[derive(Serialize, ToSchema)]
 pub struct Facets {
@@ -997,20 +1016,47 @@ pub struct Facets {
     /// `facet=type`: the card types of the filtered set, most frequent first.
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     pub types: Option<Vec<TypeFacet>>,
+    /// `facet=host`: the services of the filtered set, most frequent first, at most 100.
+    /// A host `pubky://` objects use (a user's key) is not a service and is left out.
+    #[serde(rename = "host", skip_serializing_if = "Option::is_none")]
+    pub hosts: Option<Vec<HostFacet>>,
+    /// `facet=category`: the categories of the filtered set (a place's OpenStreetMap
+    /// `key/value`, a page's schema.org `category`), most frequent first, at most 100.
+    #[serde(rename = "category", skip_serializing_if = "Option::is_none")]
+    pub categories: Option<Vec<CategoryFacet>>,
 }
-/// The facets of a search: `tags`, `type` or both (`type,tags`).
-fn facets_asked(facet: Option<&str>) -> Result<(bool, bool), ApiError> {
+/// The most entries `facet=host` and `facet=category` list each.
+pub const FACET_LIST_CAP: i64 = 100;
+/// The links per host `facet=host` tries for the service's name (`HostFacet::site`).
+const FACET_SITE_SAMPLE: i32 = 8;
+/// The facets a search asked for.
+#[derive(Clone, Copy, Default)]
+struct FacetsAsked {
+    tags: bool,
+    types: bool,
+    hosts: bool,
+    categories: bool,
+}
+impl FacetsAsked {
+    fn any(self) -> bool {
+        self.tags || self.types || self.hosts || self.categories
+    }
+}
+/// The facets of a search: any of `type`, `tags`, `host` and `category`, comma-separated.
+fn facets_asked(facet: Option<&str>) -> Result<FacetsAsked, ApiError> {
+    let mut asked = FacetsAsked::default();
     let Some(facet) = facet else {
-        return Ok((false, false));
+        return Ok(asked);
     };
-    let mut asked = (false, false);
     for name in facet.split(',') {
         match name {
-            "tags" => asked.0 = true,
-            "type" => asked.1 = true,
+            "tags" => asked.tags = true,
+            "type" => asked.types = true,
+            "host" => asked.hosts = true,
+            "category" => asked.categories = true,
             _ => {
                 return Err(ApiError::bad(
-                    "facet must be tags, type or both (type,tags)",
+                    "facet must be one or more of type, tags, host and category, comma-separated",
                 ))
             }
         }
@@ -2588,7 +2634,7 @@ pub async fn search(
         }
         sql.push(" ORDER BY rank DESC,unit_id DESC) FROM page p),'[]') AS items, ");
     }
-    let (tag_facet, type_facet) = facets_asked(q.facet.as_deref())?;
+    let asked = facets_asked(q.facet.as_deref())?;
     // Facets count every matching link, collapsed or not.
     let counted = if q.collapse.is_some() {
         "eligible"
@@ -2596,7 +2642,7 @@ pub async fn search(
         "filtered"
     };
     sql.push("jsonb_build_object('type',");
-    if type_facet {
+    if asked.types {
         sql.push("coalesce((SELECT jsonb_agg(jsonb_build_object('type',type,'count',count) ORDER BY count DESC,type) FROM (SELECT r.type,count(DISTINCT r.unit_id) AS count FROM ")
             .push(counted)
             .push(" r WHERE r.type IS NOT NULL GROUP BY r.type) t),'[]')");
@@ -2604,13 +2650,39 @@ pub async fn search(
         sql.push("NULL");
     }
     sql.push(",'tags',");
-    if tag_facet {
+    if asked.tags {
         sql.push("coalesce((SELECT jsonb_agg(to_jsonb(t) ORDER BY count DESC,label) FROM (SELECT f.label,count(DISTINCT r.unit_id) AS count FROM ")
             .push(counted)
             .push(" r JOIN effective_reference f ON r.id=f.resource_id WHERE f.label IS NOT NULL");
 
         scope(&mut sql, &q, &reach);
         sql.push(" GROUP BY f.label) t),'[]')");
+    } else {
+        sql.push("NULL");
+    }
+    sql.push(",'host',");
+    if asked.hosts {
+        // One pass over the set: per host its count, a few of its links and the site name its
+        // documents give most often (an event reference's stand-in names only the host), for
+        // the service's name (`HostFacet::site`). A host that `pubky://` objects use is a user's
+        // key, not a service; a value over the filter's 256 bytes could not be filtered by.
+        sql.push("coalesce((SELECT jsonb_agg(to_jsonb(t) ORDER BY count DESC,host) FROM (SELECT r.host,count(DISTINCT r.unit_id) AS count,(array_agg(DISTINCT r.uri ORDER BY r.uri))[1:")
+            .push_bind(FACET_SITE_SAMPLE)
+            .push("] AS uris,mode() WITHIN GROUP (ORDER BY nullif(nullif(r.doc->>'site',''),r.host)) AS site FROM ")
+            .push(counted)
+            .push(" r WHERE r.host IS NOT NULL AND r.host<>'' AND octet_length(r.host)<=256 GROUP BY r.host HAVING bool_and(r.uri NOT LIKE 'pubky://%') ORDER BY count DESC,r.host LIMIT ")
+            .push_bind(FACET_LIST_CAP)
+            .push(") t),'[]')");
+    } else {
+        sql.push("NULL");
+    }
+    sql.push(",'category',");
+    if asked.categories {
+        sql.push("coalesce((SELECT jsonb_agg(to_jsonb(t) ORDER BY count DESC,category) FROM (SELECT r.category,count(DISTINCT r.unit_id) AS count FROM ")
+            .push(counted)
+            .push(" r WHERE r.category IS NOT NULL AND octet_length(r.category)<=256 GROUP BY r.category ORDER BY count DESC,r.category LIMIT ")
+            .push_bind(FACET_LIST_CAP)
+            .push(") t),'[]')");
     } else {
         sql.push("NULL");
     }
@@ -2650,7 +2722,7 @@ pub async fn search(
     } else {
         None
     };
-    let facets = if tag_facet || type_facet {
+    let facets = if asked.any() {
         let values: Value = row.try_get("facets")?;
         let list = |key: &str| values[key].as_array().cloned();
         Some(Facets {
@@ -2671,6 +2743,31 @@ pub async fn search(
                             type_name: type_name.into(),
                             count: v["count"].as_i64().unwrap_or(0),
                         }
+                    })
+                    .collect()
+            }),
+            hosts: list("host").map(|v| {
+                v.into_iter()
+                    .map(|v| {
+                        let host = v["host"].as_str().unwrap_or_default();
+                        let uris = v["uris"].as_array().into_iter().flatten();
+                        HostFacet {
+                            site: uris
+                                .filter_map(|uri| service_site(uri.as_str()?))
+                                .next()
+                                .or_else(|| present(v["site"].as_str()))
+                                .unwrap_or_else(|| host.into()),
+                            host: host.into(),
+                            count: v["count"].as_i64().unwrap_or(0),
+                        }
+                    })
+                    .collect()
+            }),
+            categories: list("category").map(|v| {
+                v.into_iter()
+                    .map(|v| CategoryFacet {
+                        category: v["category"].as_str().unwrap_or_default().into(),
+                        count: v["count"].as_i64().unwrap_or(0),
                     })
                     .collect()
             }),
@@ -3259,6 +3356,8 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
         ResolveRequest,
         TagFacet,
         TypeFacet,
+        HostFacet,
+        CategoryFacet,
         Facets,
         OsmDumpLine,
         OsmDumpNotice,

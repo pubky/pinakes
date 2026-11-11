@@ -420,13 +420,22 @@ async fn unknown_objects_are_missing_429_defers_and_category_filters(pool: PgPoo
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let (status, _, found) = call(
         &app,
-        "/v1/search?bbox=13,52,14,53&type=Place&category=place%2Fcity&q=Berlin&facet=tags",
+        "/v1/search?bbox=13,52,14,53&type=Place&category=place%2Fcity&q=Berlin&facet=tags,category,host",
         None,
     )
     .await;
     assert_eq!(status, 200, "{found}");
     assert_eq!(found["items"][0]["id"], id.as_str());
     assert_eq!(found["facets"]["tags"][0]["count"], 1);
+    // An OSM place's category is its object's, as `category` takes it.
+    assert_eq!(
+        found["facets"]["category"],
+        serde_json::json!([{"category":"place/city","count":1}])
+    );
+    assert_eq!(
+        found["facets"]["host"],
+        serde_json::json!([{"host":"www.openstreetmap.org","site":"OpenStreetMap","count":1}])
+    );
     server.abort();
 }
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
