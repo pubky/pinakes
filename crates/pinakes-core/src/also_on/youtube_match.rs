@@ -10,8 +10,9 @@
 //! artist and title. Of each service's answers, exactly one track must have the same artist and
 //! title, compared as `same_recording` compares them (`matching`), and a length within
 //! [`MATCH_WINDOW_SECS`]; none or several give nothing for that service (of the first page of
-//! answers). TIDAL failing leaves the Deezer match standing, and the run comes back later. A page YouTube serves
-//! only after a sign-in (`LOGIN_REQUIRED`, which it answers some hosts for some videos) is no
+//! answers). TIDAL failing fails the run (which keeps every earlier link) unless the run has a
+//! Deezer match, which then stands, and the run comes back later. A page YouTube serves only after
+//! a sign-in (`LOGIN_REQUIRED`, which it answers some hosts for some videos) is no
 //! answer: the lookup is retried hours later. It runs after `deezer` and `tidal_isrc`, and before
 //! `editions`.
 use super::{
@@ -166,9 +167,13 @@ impl Source for YoutubeMatch {
                     }
                 }
                 Ok(None) => {}
-                // TIDAL failing (refused credentials, a wait, an unexpected answer) leaves the
-                // run's Deezer match standing; the run comes back after the wait TIDAL named, else
-                // after five minutes.
+                // TIDAL failing (refused credentials, a wait, an unexpected answer) with no
+                // Deezer match in this run fails the run, which keeps every link an earlier run
+                // found (a TIDAL one too) until the retry.
+                Err(error) if found.links.is_empty() => return Err(error),
+                // With a Deezer match, that stands (a TIDAL failure that lasts never holds it
+                // back); the run comes back after the wait TIDAL named, else after five minutes,
+                // and a TIDAL link an earlier run found is out until then.
                 Err(error) => {
                     tracing::debug!(
                         kind = crate::resolver::error_class(&error),

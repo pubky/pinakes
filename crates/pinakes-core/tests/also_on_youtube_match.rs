@@ -45,6 +45,8 @@ fn fixture(name: &str) -> Vec<u8> {
 #[derive(Clone, Copy, Default)]
 struct Answers {
     sign_in: bool,
+    /// Deezer's search answers nothing.
+    deezer_none: bool,
     /// TIDAL's search answers this status instead.
     tidal_status: Option<u16>,
 }
@@ -103,7 +105,7 @@ impl Transport for Recorded {
             }
             ("api.deezer.com", "/search") => {
                 let body = match query("q").as_str() {
-                    "queen bohemian rhapsody" => {
+                    "queen bohemian rhapsody" if !self.answers.deezer_none => {
                         fixture("deezer-search-queen-bohemian-rhapsody.json")
                     }
                     _ => fixture("deezer-search-none.json"),
@@ -339,4 +341,42 @@ async fn a_tidal_failure_keeps_the_deezer_match(pool: sqlx::PgPool) {
         assert_eq!(error, None, "{status}");
         assert!((290.0..=300.0).contains(&seconds), "{status}: {seconds}");
     }
+}
+
+/// TIDAL failing in a run with no Deezer match fails the run, which keeps every link an earlier
+/// run found (a TIDAL one too) until the retry.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_tidal_failure_without_a_deezer_match_keeps_the_earlier_links(pool: sqlx::PgPool) {
+    let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
+    if !registered.contains(&"tidal_isrc") {
+        return;
+    }
+    let queen = save(&pool, "bSnlKl_PoQU").await;
+    // An earlier run's links (Deezer's match, and a TIDAL one as such a run would record it).
+    run(&pool, config(true, true, None), Answers::default()).await;
+    sqlx::query("INSERT INTO derived_link(resource_id,link_id,uri,site,source,via,kind,expires_at) SELECT resource_id,md5('https://tidal.com/track/534050211'),'https://tidal.com/track/534050211','TIDAL',source,via,kind,expires_at FROM derived_link WHERE resource_id=$1 AND source='youtube_match'")
+        .bind(&queen)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let before = links(&pool, &queen).await;
+    assert_eq!(before.len(), 2, "{before:?}");
+    run(
+        &pool,
+        config(true, true, Some(("nodeezer-id", "nodeezer-secret"))),
+        Answers {
+            deezer_none: true,
+            tidal_status: Some(403),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(links(&pool, &queen).await, before);
+    let error: Option<String> =
+        sqlx::query_scalar("SELECT last_error FROM also_on_dirty WHERE resource_id=$1")
+            .bind(&queen)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(error.as_deref(), Some("tidal_auth"));
 }
