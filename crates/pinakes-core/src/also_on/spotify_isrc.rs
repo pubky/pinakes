@@ -154,7 +154,8 @@ async fn albums(cx: &Context, pair: (&str, &str), subject: &Subject) -> Result<F
             continue;
         };
         let candidates = album_ids(&answer);
-        if candidates.is_empty() {
+        // A search with more albums than it listed may hide a second album with the barcode.
+        if candidates.is_empty() || lists_less(&answer) {
             continue;
         }
         let mut carried = Vec::new();
@@ -212,6 +213,13 @@ pub fn album_ids(answer: &Value) -> Vec<String> {
     }
     ids.truncate(ALBUM_CANDIDATES);
     ids
+}
+/// Whether an album search lists fewer albums than it found: a `next` page, or a `total` above
+/// the items it lists.
+pub fn lists_less(answer: &Value) -> bool {
+    let albums = &answer["albums"];
+    let listed = albums["items"].as_array().map_or(0, Vec::len) as u64;
+    !albums["next"].is_null() || albums["total"].as_u64().is_some_and(|t| t > listed)
 }
 /// Whether a `/v1/albums/{id}` answer is album `id` and its own barcode (`external_ids.upc`) is
 /// `upc` (GTIN-13).
@@ -283,5 +291,16 @@ mod tests {
             "0886443927087"
         ));
         assert!(album_ids(&json!({"albums": {"items": []}})).is_empty());
+        // A search that found more albums than it lists: refused before any read.
+        let all = search(&[RAM, OTHER]);
+        assert!(!lists_less(&all));
+        let mut more = all.clone();
+        more["albums"]["total"] = 4.into();
+        assert!(lists_less(&more));
+        let mut paged = all.clone();
+        paged["albums"]["next"] =
+            "https://api.spotify.com/v1/search?offset=3&limit=3&query=upc%3A886443927087&type=album"
+                .into();
+        assert!(lists_less(&paged));
     }
 }

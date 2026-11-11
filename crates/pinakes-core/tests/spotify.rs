@@ -60,6 +60,9 @@ fn shared_track_body(id: &str, ms: u64) -> Vec<u8> {
 }
 /// A made-up album the barcode search lists beside HYDRA 3D's, which Spotify has no album for.
 const OTHER_UPC_ALBUM: &str = "0otherUpcAlbum00000000";
+/// A made-up album that carries Random Access Memories' barcode, listed by a search that found
+/// more albums than it lists.
+const PAGED_UPC_ALBUM: &str = "0ramUpcAlbum0000000000";
 /// A made-up track the ISRC search lists beside Bohemian Rhapsody's, with another ISRC.
 const OTHER_ISRC_TRACK: &str = "0otherIsrcTrack0000000";
 /// `GET /v1/tracks/{TRACK}`: `id`, `type`, `external_ids.isrc` and `duration_ms` (5:54).
@@ -193,19 +196,26 @@ impl Transport for Recorded {
                         .map(|(_, v)| v.into_owned())
                         .unwrap_or_default();
                     // The barcode search (`q=upc:…&type=album`), whose albums carry no barcode:
-                    // HYDRA 3D's UPC-A lists its album and a made-up one the read-back drops.
+                    // HYDRA 3D's UPC-A lists its album and a made-up one the read-back drops;
+                    // Random Access Memories' lists one album that carries it, of 4 found (a next
+                    // page), which the source refuses unread.
                     if kind == "album" {
-                        let items = if q == "upc:4018939306052" {
-                            serde_json::json!([
+                        let albums = if q == "upc:4018939306052" {
+                            serde_json::json!({"items": [
                                 {"album_type": "album", "id": ALBUM, "type": "album", "name": "HYDRA 3D"},
                                 {"album_type": "album", "id": OTHER_UPC_ALBUM, "type": "album", "name": "HYDRA 3D"},
-                            ])
+                            ], "limit": 3, "offset": 0, "total": 2, "next": null})
+                        } else if q == "upc:886443927087" {
+                            serde_json::json!({"items": [
+                                {"album_type": "album", "id": PAGED_UPC_ALBUM, "type": "album", "name": "Random Access Memories"},
+                            ], "limit": 3, "offset": 0, "total": 4,
+                               "next": "https://api.spotify.com/v1/search?offset=3&limit=3&query=upc%3A886443927087&type=album"})
                         } else {
-                            serde_json::json!([])
+                            serde_json::json!({"items": [], "limit": 3, "offset": 0, "total": 0, "next": null})
                         };
                         return Ok(answer(
                             200,
-                            serde_json::to_vec(&serde_json::json!({"albums": {"items": items, "limit": 10, "offset": 0}})).unwrap(),
+                            serde_json::to_vec(&serde_json::json!({ "albums": albums })).unwrap(),
                             "application/json; charset=utf-8",
                         ));
                     }
@@ -780,7 +790,7 @@ async fn an_album_with_a_barcode_key_gets_its_spotify_album(pool: sqlx::PgPool) 
         }
     };
     // HYDRA 3D on Deezer (its EAN-13), and Random Access Memories on Deezer (a UPC-A, which this
-    // Spotify answers nothing for).
+    // Spotify's search lists among more it found).
     let hydra = keyed(
         "https://www.deezer.com/album/320429237",
         "upc:4018939306052",
@@ -817,7 +827,13 @@ async fn an_album_with_a_barcode_key_gets_its_spotify_album(pool: sqlx::PgPool) 
         "https://open.spotify.com/album/{ALBUM} upc:4018939306052 spotify_isrc"
     )];
     assert_eq!(rows(&pool, links, &hydra).await, expected);
+    // Random Access Memories: a search that found more albums than it lists names none, and its
+    // album is not read.
     assert!(rows(&pool, links, &ram).await.is_empty());
+    assert!(
+        !seen.iter().any(|s| s.contains(PAGED_UPC_ALBUM)),
+        "{seen:?}"
+    );
     let queued = || async {
         sqlx::query_scalar::<_, Option<String>>(
             "SELECT last_error FROM also_on_dirty WHERE resource_id=$1",

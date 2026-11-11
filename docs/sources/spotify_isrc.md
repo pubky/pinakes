@@ -19,9 +19,10 @@ with a leading zero, is asked by its 12 digits, an EAN-13 whole) names up to 3 c
 the search's album objects carry no barcode, each is read back with `/v1/albums/{id}` (the request
 `spotify` makes for a Spotify album, shared with it; Spotify answers no batch read such as
 `/v1/albums?ids=` to an app in development mode, per its February 2026 migration guide): only an
-album whose own `external_ids.upc` (as GTIN-13) is the key counts. Exactly one such album becomes a link
-`https://open.spotify.com/album/{id}` keyed by the barcode; none or several give nothing. Two
-barcode keys at most.
+album whose own `external_ids.upc` (as GTIN-13) is the key counts. Exactly one such album becomes
+a link `https://open.spotify.com/album/{id}` keyed by the barcode; none or several give nothing,
+and so does a search that found more albums than it lists (a `next` page, or a `total` above its
+items), which may hide another album with the barcode. Two barcode keys at most.
 
 No keys of the resource and no facts. Spotify's own tracks and albums are not asked. It runs after
 every source that keys a track's ISRC or an album's barcode (`deezer` among them).
