@@ -2840,9 +2840,10 @@ async fn an_alias_reads_as_its_root_everywhere(pool: PgPool) {
 }
 
 /// `facet=host` lists the services of the whole filtered set with the name their cards show,
-/// `facet=category` the OpenStreetMap categories, each value as its filter takes it: filtering
-/// by an entry finds exactly its count. A `pubky://` object has no service host. Every facet
-/// combines with the others, in any order, and the page's limit never changes a count.
+/// `facet=category` the categories (here a place's OpenStreetMap `key/value`), each value as
+/// its filter takes it: filtering by an entry finds exactly its count. A host `pubky://`
+/// objects use is not a service. Every facet combines with the others, in any order, and the
+/// page's limit never changes a count.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn host_and_category_facets_count_what_their_filters_take(pool: PgPool) {
     let links: [(&str, &str, Option<&str>, Option<&str>); 7] = [
