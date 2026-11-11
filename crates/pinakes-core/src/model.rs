@@ -401,6 +401,11 @@ pub struct ResourceMeta {
     /// The audio a client can play ([`Stream`]): an episode's enclosure, a recording's preview.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<Stream>,
+    /// The frame a client may load to show the link ([`crate::embed::Embed`]) that the page
+    /// itself names: its oEmbed answer's `<iframe>` or its own player `<meta>`. An embed that
+    /// follows from the link alone (`embed::link`) is added when the card is served, never stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embed: Option<crate::embed::Embed>,
     pub url: String,
     pub site: String,
     /// The service the link is on, by its URL alone ("Spotify", "F-Droid", "Wikidata"), when
@@ -609,6 +614,7 @@ impl ResourceMeta {
                 s.preview,
             )
         });
+        self.embed = self.embed.take().and_then(crate::embed::Embed::bounded);
         self.credits = std::mem::take(&mut self.credits)
             .into_iter()
             .filter_map(Credit::bounded)
@@ -638,7 +644,8 @@ impl ResourceMeta {
             if self.shed() {
                 continue;
             }
-            if self.description.take().is_some()
+            if self.embed.take().is_some()
+                || self.description.take().is_some()
                 || self.image.take().is_some()
                 || self.stream.take().is_some()
             {

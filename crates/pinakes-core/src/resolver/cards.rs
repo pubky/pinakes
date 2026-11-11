@@ -1267,10 +1267,13 @@ impl CardResolver {
         )
         .await;
         if let Some((endpoint, _)) = endpoint.filter(|_| !first) {
-            if !page
-                .as_ref()
-                .is_ok_and(|r| r.as_ref().is_ok_and(|d| !needs_embed(d)))
-            {
+            // The provider is asked when the page left the card short, or named no frame for a
+            // link whose player does not follow from the link (`embed::link`).
+            if !page.as_ref().is_ok_and(|r| {
+                r.as_ref().is_ok_and(|d| {
+                    !needs_embed(d) && (d.embed.is_some() || crate::embed::link(uri).is_some())
+                })
+            }) {
                 if page.as_ref().is_ok_and(|r| {
                     r.as_ref().is_ok_and(|d| {
                         d.status == Status::Ok && d.name.is_some() && d.image.is_none()

@@ -16,6 +16,17 @@
             "description": "A link nobody tagged, found by a source: never fetched, counted or ranked.",
             "type": "boolean"
           },
+          "embed": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Embed",
+                "description": "The frame that shows this link (docs/api.md, Embed), as on a card: from the link itself,\nelse, for a tagged member, the one its own card stores. Null when there is none."
+              }
+            ]
+          },
           "id": {
             "description": "A tagged member's resource ID; absent on a derived link.",
             "type": [
@@ -120,6 +131,17 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "embed": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Embed",
+                "description": "The frame a client may load, sandboxed, to show the link as its own site does\n(docs/api.md, Embed): a service's player, a social post, a map, slides. From the link\nitself for the services Pinakes knows, else from the page's oEmbed answer or its own player\ntags. Null when there is none, and on a card whose link is gone (`missing`)."
+              }
             ]
           },
           "end": {
@@ -752,6 +774,71 @@
           "aliases"
         ],
         "type": "object"
+      },
+      "Embed": {
+        "description": "The frame to load for a link (docs/api.md, Embed).",
+        "properties": {
+          "allow": {
+            "description": "The Permissions Policy features the frame may use, for its `allow` attribute (joined with\n`; `), from `accelerometer`, `autoplay`, `clipboard-write`, `encrypted-media`,\n`fullscreen`, `gyroscope`, `picture-in-picture` and `web-share`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "aspect": {
+            "description": "Width divided by height, for a frame that scales with its width (a video, a map, a slide\ndeck); null otherwise.",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "autoplay_param": {
+            "description": "A query parameter (`autoplay=1`, `auto_play=true`) that makes the player start once\nloaded: add it to `src` only when the viewer pressed play. Null when the player has none.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "height": {
+            "description": "The frame's height in CSS pixels, for a frame of fixed height (a player strip, a post, a\ndocument); null when it scales with its width (`aspect`) or the provider gives none.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "kind": {
+            "$ref": "#/components/schemas/EmbedKind"
+          },
+          "provider": {
+            "description": "Who serves the frame: a service Pinakes knows (`youtube`, `vimeo`, `spotify`,\n`soundcloud`, `mixcloud`, `tidal`, `deezer`, `apple-music`, `apple-podcasts`, `x`,\n`mastodon`, `openstreetmap`), else the oEmbed provider's name in lower case with hyphens\n(`speaker-deck`), else the frame's host.",
+            "type": "string"
+          },
+          "src": {
+            "description": "The frame's address: `https`, on a public host name, without a credential. It never starts\nplaying by itself (see `autoplay_param`).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "kind",
+          "src",
+          "allow"
+        ],
+        "type": "object"
+      },
+      "EmbedKind": {
+        "description": "What a frame shows (docs/api.md, Embed).",
+        "enum": [
+          "audio",
+          "video",
+          "post",
+          "map",
+          "rich"
+        ],
+        "type": "string"
       },
       "Episode": {
         "description": "One of a show's latest episodes, as its feed lists it.",

@@ -750,6 +750,11 @@ pub struct Card {
     /// signed, expiring or behind a login (docs/api.md, Stream). Absent when the card has none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<model::Stream>,
+    /// The frame a client may load, sandboxed, to show the link as its own site does
+    /// (docs/api.md, Embed): a service's player, a social post, a map, slides. From the link
+    /// itself for the services Pinakes knows, else from the page's oEmbed answer or its own player
+    /// tags. Null when there is none, and on a card whose link is gone (`missing`).
+    pub embed: Option<crate::embed::Embed>,
     /// The publishing site: the app for `pubky://` objects (e.g. `loopky`); the service a
     /// link's URL names (`Apple Music`, `Wikipedia (de)`, `MusicBrainz`, `Wikidata`,
     /// `OpenStreetMap`); else the site name the document gives, else the host. Plain text, like
@@ -879,6 +884,9 @@ pub struct AlsoOn {
     /// For a derived link, a time that belongs to it (an archived copy's capture).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub at: Option<DateTime<Utc>>,
+    /// The frame that shows this link (docs/api.md, Embed), as on a card: from the link itself,
+    /// else, for a tagged member, the one its own card stores. Null when there is none.
+    pub embed: Option<crate::embed::Embed>,
 }
 #[derive(Serialize, ToSchema)]
 pub struct OccurrenceKey {
@@ -1137,6 +1145,16 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
         _ => uri,
     };
     let also_on = also_on_entries(&row["also_on"], Some(&uri));
+    let status: String = row["status"].as_str().unwrap_or("pending").into();
+    let type_path: Vec<String> =
+        serde_json::from_value(row["type_path"].clone()).unwrap_or_default();
+    // A link gone upstream shows nothing of its own.
+    let embed = if status == "missing" {
+        None
+    } else {
+        card_embed(&uri, doc.as_ref(), row["osm_id"].as_i64().is_some())
+            .map(|e| e.settled(&type_path))
+    };
     let event = row.get("event").filter(|v| !v.is_null()).cloned();
     // An event card's clients are its event object's; a read object's are its own, and an object
     // not read yet has its kind's.
@@ -1175,14 +1193,15 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
         ),
         id,
         uri,
-        status: row["status"].as_str().unwrap_or("pending").into(),
+        status,
         type_name: present(row["type"].as_str()),
-        type_path: serde_json::from_value(row["type_path"].clone()).unwrap_or_default(),
+        type_path,
         name: present(row["name"].as_str())
             .or_else(|| doc.as_ref().and_then(|d| present(d.name.as_deref()))),
         description,
         image,
         stream: doc.as_ref().and_then(|d| d.stream.clone()),
+        embed,
         point: doc.as_ref().and_then(|d| d.location.clone()),
         start: doc.as_ref().and_then(|d| d.start),
         end: doc.as_ref().and_then(|d| d.end),
@@ -1213,6 +1232,32 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
         because: because(row),
     })
 }
+/// A card's `embed` (docs/api.md, Embed): the player its link names (`embed::link`), else a
+/// Mastodon post's own frame, else an OpenStreetMap card's map (`osm`: the row is an OSM
+/// object), else the frame its document stores (its oEmbed answer's or its page's own).
+fn card_embed(uri: &str, doc: Option<&ResourceMeta>, osm: bool) -> Option<crate::embed::Embed> {
+    if let Some(embed) = crate::embed::link(uri) {
+        return Some(embed);
+    }
+    let doc = doc?;
+    if matches!(doc.source.as_str(), "mastodon" | "activitypub")
+        && doc.type_name == "SocialMediaPosting"
+    {
+        if let Some(embed) = crate::embed::mastodon(uri) {
+            return Some(embed);
+        }
+    }
+    if osm {
+        if let Some(embed) = doc
+            .location
+            .as_ref()
+            .and_then(|p| crate::embed::map(p, doc.bbox))
+        {
+            return Some(embed);
+        }
+    }
+    doc.embed.clone()
+}
 /// A related row's `because`, when the row has one.
 fn because(row: &Value) -> Option<Because> {
     let b = row.get("because").filter(|v| v.is_object())?;
@@ -1242,8 +1287,9 @@ const REFS_ALIASES: i64 = 31;
 /// [`REFS_ALIASES`] most recently referenced), most referenced first (counted up to
 /// [`REFS_COUNTED`], then by URI), at most [`REFS`]. A gone social post's are its own link's
 /// alone: a spelling's link can carry the post's title. One query for every card of a response,
-/// and one for the missing cards among them. Then each card's `collections`
-/// (`collections::count`), one query more.
+/// and one for the missing cards among them. Then the stored `embed` of tagged `also_on`
+/// members (`member_embeds`) and each card's `collections` (`collections::count`), one query
+/// more each.
 pub(crate) async fn with_refs<'a>(
     pool: &PgPool,
     cards: impl IntoIterator<Item = &'a mut Card>,
@@ -1295,7 +1341,44 @@ pub(crate) async fn with_refs<'a>(
             card.refs.clone_from(refs);
         }
     }
+    member_embeds(pool, &mut cards).await?;
     crate::collections::count(pool, cards).await
+}
+/// Fills the `embed` of each tagged `also_on` member whose link names none (`embed::link`) with
+/// the frame its own card stores (docs/api.md, Embed). One query, and none when no card has such
+/// a member.
+async fn member_embeds(pool: &PgPool, cards: &mut [&mut Card]) -> Result<(), ApiError> {
+    let ids: Vec<String> = cards
+        .iter()
+        .flat_map(|c| c.also_on.iter())
+        .filter(|e| e.embed.is_none())
+        .filter_map(|e| e.id.clone())
+        .collect();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let rows: Vec<(String, Value, Vec<String>)> = sqlx::query_as(
+        "SELECT id, doc->'embed', coalesce(type_path, '{}') FROM resource \
+         WHERE id = ANY($1) AND status <> 'missing' AND doc ? 'embed'",
+    )
+    .bind(&ids)
+    .fetch_all(pool)
+    .await?;
+    let stored: BTreeMap<String, crate::embed::Embed> = rows
+        .into_iter()
+        .filter_map(|(id, embed, type_path)| {
+            let embed: crate::embed::Embed = serde_json::from_value(embed).ok()?;
+            Some((id, embed.bounded()?.settled(&type_path)))
+        })
+        .collect();
+    for entry in cards.iter_mut().flat_map(|c| c.also_on.iter_mut()) {
+        if entry.embed.is_none() {
+            if let Some(embed) = entry.id.as_ref().and_then(|id| stored.get(id)) {
+                entry.embed = Some(embed.clone());
+            }
+        }
+    }
+    Ok(())
 }
 /// A card's `maybe_same` as SQL, over a unit's ID and type path and the two hints' switches (SQL
 /// expressions): with `events`, the same-event hint for an event and, for an app's store card, up
@@ -1408,6 +1491,7 @@ fn also_on_entries(rows: &Value, card: Option<&str>) -> Vec<AlsoOn> {
         .map(|e| {
             let uri = e["uri"].as_str().unwrap_or_default().to_owned();
             let derived = e["derived"] == true;
+            let embed = crate::embed::link(&uri).map(|e| e.settled(&[]));
             AlsoOn {
                 id: e["id"].as_str().map(str::to_owned),
                 site: if derived {
@@ -1420,6 +1504,7 @@ fn also_on_entries(rows: &Value, card: Option<&str>) -> Vec<AlsoOn> {
                 via: e["via"].as_str().map(str::to_owned),
                 kind: e["kind"].as_str().map(str::to_owned),
                 at: e["at"].as_str().and_then(|s| s.parse().ok()),
+                embed,
             }
         })
         .collect();
@@ -1900,10 +1985,10 @@ fn related_because(sql: &mut QueryBuilder<'_, Postgres>, item: &str, n: &str, au
     ));
 }
 /// The version of a search page's shape, in its ETag: a page cached before a field was added
-/// (`because`, then every card's `credits`) or before its rows' order changed (`q` ranked by
-/// relevance by default) is never answered 304. Move it when a search row gains or loses a
-/// field, or the same query's rows come in another order.
-pub const SEARCH_SHAPE: u32 = 3;
+/// (`because`, then every card's `credits`, then `embed`) or before its rows' order changed (`q`
+/// ranked by relevance by default) is never answered 304. Move it when a search row gains or
+/// loses a field, or the same query's rows come in another order.
+pub const SEARCH_SHAPE: u32 = 4;
 /// The most taggers a related row's `because` names.
 pub const BECAUSE_TAGGERS: usize = 3;
 
@@ -3052,6 +3137,8 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
         crate::collections::CollectionPage,
         crate::collections::Collection,
         model::Stream,
+        crate::embed::Embed,
+        crate::embed::EmbedKind,
         model::Related,
         model::Credit,
         model::CreditField,

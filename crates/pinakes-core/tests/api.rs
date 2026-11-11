@@ -2557,6 +2557,55 @@ async fn a_card_carries_its_stream(pool: PgPool) {
     assert!(cards[1].get("stream").is_none(), "{cards}");
 }
 
+/// A card's `embed`: the frame its document stores (its oEmbed answer's), settled for its type
+/// (a podcast episode's fixed-height frame is its player), on a read, a lookup and a search; a
+/// card whose link is gone shows none, even when its link names a player.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_card_carries_its_embed(pool: PgPool) {
+    let uri = "https://podcast.example/episodes/1";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut doc = ResourceMeta::new(uri, "web", 86400);
+    doc.set_type("PodcastEpisode");
+    doc.name = Some("Episode One".into());
+    doc.embed = pinakes_core::embed::from_oembed(
+        &json!({"type": "rich", "provider_name": "Podcast Host", "height": 150,
+            "html": "<iframe src=\"https://player.podcast.example/e/1\" width=\"100%\" height=\"150\" allow=\"autoplay\"></iframe>"}),
+        &url::Url::parse("https://podcast.example/oembed").unwrap(),
+    );
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let gone = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+    let gone_id = store::ensure_resource(&pool, gone).await.unwrap();
+    let mut missing = ResourceMeta::new(gone, "jsonld", 86400);
+    missing.status = pinakes_core::model::Status::Missing;
+    store::save_document(&pool, &gone_id, 0, &missing)
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let embed = json!({
+        "provider": "podcast-host",
+        "kind": "audio",
+        "src": "https://player.podcast.example/e/1",
+        "height": 150,
+        "aspect": null,
+        "allow": ["autoplay"],
+        "autoplay_param": null
+    });
+    let (code, card) = call(&app, "GET", &format!("/v1/resources/{id}"), None).await;
+    assert_eq!(code, 200, "{card}");
+    assert_eq!(card["embed"], embed);
+    let (code, cards) = call(
+        &app,
+        "POST",
+        "/v1/resources/lookup",
+        Some(json!({"resource_ids": [id, gone_id]})),
+    )
+    .await;
+    assert_eq!(code, 200, "{cards}");
+    assert_eq!(cards[0]["embed"], embed);
+    assert_eq!(cards[1]["status"], "missing", "{cards}");
+    assert_eq!(cards[1]["embed"], Value::Null, "{cards}");
+}
+
 /// The stored document, with its internal fields, is on the admin listener only; the public
 /// card leaves those fields out.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]

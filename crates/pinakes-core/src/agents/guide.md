@@ -44,6 +44,9 @@ A link this instance does not know is a 404 there: nobody referenced it, or it h
   showing them must show TMDB's logo and its notice, both in `GET /v1/info` `attributions`. A MusicBrainz
   card's `facts` hold MusicBrainz's `rating` (0 to 5) and `rating_count` when people voted.
   `status` is `ok`, `pending`, `missing` (the object is gone upstream), `unreachable` or `error`.
+  `embed` is the frame that shows the link as its own site does (a player, a post, a map): load
+  its `src` in a sandboxed iframe sized by `height` or `aspect`; `null` when there is none. Each
+  `also_on` link carries its own.
 - **Only referenced links.** Search lists links someone tagged, replied to or embedded on Pubky.
   Pinakes holds no posts, users or tags of its own: those are Nexus's (below).
 - **Groups.** Links that are the same thing on several services (a song on Spotify and on
