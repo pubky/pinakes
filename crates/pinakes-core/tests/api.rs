@@ -3006,13 +3006,14 @@ async fn host_and_category_facets_count_what_their_filters_take(pool: PgPool) {
     )
     .await;
     assert_eq!(code, 200, "{all}");
-    let (_, alone) = call(&app, "GET", "/v1/search?facet=host", None).await;
-    assert_eq!(all["facets"]["host"], alone["facets"]["host"]);
+    for facet in ["host", "tags", "type", "category"] {
+        let (_, alone) = call(&app, "GET", &format!("/v1/search?facet={facet}"), None).await;
+        assert_eq!(all["facets"][facet], alone["facets"][facet], "{facet}");
+    }
     assert_eq!(
         all["facets"]["tags"],
         json!([{"label":"facets","count":10}])
     );
-    assert_eq!(all["facets"]["type"].as_array().unwrap().len(), 6, "{all}");
     assert_eq!(all["facets"]["category"].as_array().unwrap().len(), 2);
 }
 

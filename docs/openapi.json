@@ -304,7 +304,7 @@
       "CategoryFacet": {
         "properties": {
           "category": {
-            "description": "An OpenStreetMap category, `key/value` (`amenity/cafe`), as `category` takes it.",
+            "description": "A category as `category` takes it: a place's OpenStreetMap `key/value` (`amenity/cafe`),\nor the `category` a page's schema.org data gives.",
             "type": "string"
           },
           "count": {
@@ -942,7 +942,7 @@
         "description": "The facets `facet` asked for, over the whole filtered set.",
         "properties": {
           "category": {
-            "description": "`facet=category`: the OpenStreetMap categories of the filtered set, most frequent\nfirst, at most 100.",
+            "description": "`facet=category`: the categories of the filtered set (a place's OpenStreetMap\n`key/value`, a page's schema.org `category`), most frequent first, at most 100.",
             "items": {
               "$ref": "#/components/schemas/CategoryFacet"
             },
@@ -3865,7 +3865,7 @@
             }
           },
           {
-            "description": "Counts over the whole filtered set, comma-separated, any of: `type` (card types), `tags`\n(labels), `host` (services, as `host` takes them), `category` (OpenStreetMap categories,\nas `category` takes them); `collapse` changes the rows, not the counts.",
+            "description": "Counts over the whole filtered set, comma-separated, any of: `type` (card types), `tags`\n(labels), `host` (services, as `host` takes them), `category` (categories such as\nOpenStreetMap's `amenity/cafe`, as `category` takes them); `collapse` changes the rows,\nnot the counts.",
             "examples": {
               "(none)": {
                 "summary": "(none)",

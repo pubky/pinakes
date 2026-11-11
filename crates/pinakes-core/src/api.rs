@@ -655,8 +655,9 @@ pub struct SearchQuery {
     /// Authenticated opaque keyset cursor from this daemon; invalid after restart. Restart pagination on HTTP 400.
     pub cursor: Option<String>,
     /// Counts over the whole filtered set, comma-separated, any of: `type` (card types), `tags`
-    /// (labels), `host` (services, as `host` takes them), `category` (OpenStreetMap categories,
-    /// as `category` takes them); `collapse` changes the rows, not the counts.
+    /// (labels), `host` (services, as `host` takes them), `category` (categories such as
+    /// OpenStreetMap's `amenity/cafe`, as `category` takes them); `collapse` changes the rows,
+    /// not the counts.
     pub facet: Option<String>,
     /// West,south,east,north in degrees; west > east crosses the antimeridian.
     pub bbox: Option<String>,
@@ -1001,7 +1002,8 @@ pub struct HostFacet {
 }
 #[derive(Serialize, ToSchema)]
 pub struct CategoryFacet {
-    /// An OpenStreetMap category, `key/value` (`amenity/cafe`), as `category` takes it.
+    /// A category as `category` takes it: a place's OpenStreetMap `key/value` (`amenity/cafe`),
+    /// or the `category` a page's schema.org data gives.
     pub category: String,
     pub count: i64,
 }
@@ -1018,8 +1020,8 @@ pub struct Facets {
     /// A host `pubky://` objects use (a user's key) is not a service and is left out.
     #[serde(rename = "host", skip_serializing_if = "Option::is_none")]
     pub hosts: Option<Vec<HostFacet>>,
-    /// `facet=category`: the OpenStreetMap categories of the filtered set, most frequent
-    /// first, at most 100.
+    /// `facet=category`: the categories of the filtered set (a place's OpenStreetMap
+    /// `key/value`, a page's schema.org `category`), most frequent first, at most 100.
     #[serde(rename = "category", skip_serializing_if = "Option::is_none")]
     pub categories: Option<Vec<CategoryFacet>>,
 }
@@ -2664,7 +2666,7 @@ pub async fn search(
         // documents give most often (an event reference's stand-in names only the host), for
         // the service's name (`HostFacet::site`). A host that `pubky://` objects use is a user's
         // key, not a service; a value over the filter's 256 bytes could not be filtered by.
-        sql.push("coalesce((SELECT jsonb_agg(to_jsonb(t) ORDER BY count DESC,host) FROM (SELECT r.host,count(DISTINCT r.unit_id) AS count,(array_agg(r.uri ORDER BY r.uri))[1:")
+        sql.push("coalesce((SELECT jsonb_agg(to_jsonb(t) ORDER BY count DESC,host) FROM (SELECT r.host,count(DISTINCT r.unit_id) AS count,(array_agg(DISTINCT r.uri ORDER BY r.uri))[1:")
             .push_bind(FACET_SITE_SAMPLE)
             .push("] AS uris,mode() WITHIN GROUP (ORDER BY nullif(nullif(r.doc->>'site',''),r.host)) AS site FROM ")
             .push(counted)
