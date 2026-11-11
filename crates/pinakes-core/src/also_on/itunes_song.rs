@@ -91,11 +91,14 @@ impl Source for ItunesSong {
             return Ok(found);
         };
         if let Some(song) = song(&answer, &place) {
-            found.links.extend(derived(
-                &format!("https://music.apple.com/song/{song}"),
-                Level::Track,
-                "itunes_song",
-            ));
+            found.links.extend(
+                derived(
+                    &format!("https://music.apple.com/song/{song}"),
+                    Level::Track,
+                    "itunes_song",
+                )
+                .map(super::Link::maybe),
+            );
         }
         Ok(found)
     }

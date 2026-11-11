@@ -199,13 +199,14 @@ async fn run(pool: &sqlx::PgPool, config: Config, answers: Answers) -> Vec<Strin
     seen
 }
 async fn links(pool: &sqlx::PgPool, id: &str) -> Vec<String> {
-    sqlx::query_scalar("SELECT uri||' '||coalesce(key,'-')||' '||via FROM derived_link WHERE resource_id=$1 AND source='itunes_song' ORDER BY uri")
+    sqlx::query_scalar("SELECT uri||' '||coalesce(key,'-')||' '||via||' '||coalesce(kind,'-') FROM derived_link WHERE resource_id=$1 AND source='itunes_song' ORDER BY uri")
         .bind(id)
         .fetch_all(pool)
         .await
         .unwrap()
 }
-const GET_LUCKY: &str = "https://music.apple.com/song/617154366 - itunes_song";
+/// A maybe: no key, `kind` `maybe_same`.
+const GET_LUCKY: &str = "https://music.apple.com/song/617154366 - itunes_song maybe_same";
 
 /// Get Lucky on Deezer (367 s, disc 1 track 8 of Random Access Memories) is Apple's song
 /// 617154366 (369.6 s), unkeyed. Walking Disaster, by its ISRC key on another service, is

@@ -256,7 +256,18 @@ impl Link {
         self.key = Some(key.into());
         self
     }
+    /// This link as a match by metadata (an artist, a title, a length), not an exact ID: possibly
+    /// the same thing. Its `kind` is [`MAYBE_SAME`]; it never carries a key, so it never joins a
+    /// group, and a card shows it marked so.
+    pub fn maybe(mut self) -> Self {
+        self.kind = Some(MAYBE_SAME.into());
+        self.key = None;
+        self
+    }
 }
+/// The `kind` of a derived link that is a match by metadata, possibly the same thing
+/// ([`Link::maybe`]).
+pub const MAYBE_SAME: &str = "maybe_same";
 
 /// What a source's lookup may use.
 #[derive(Clone)]
@@ -700,6 +711,10 @@ fn checked(
                 || refused_link(&link.uri)
             {
                 continue;
+            }
+            // A match is never a key.
+            if link.kind.as_deref() == Some(MAYBE_SAME) {
+                link.key = None;
             }
             // A link is stored under its root spelling (`alias::root`, when that is a URL): a
             // tagged resource that is the same object under another spelling is its root, and

@@ -24,7 +24,7 @@
             ]
           },
           "kind": {
-            "description": "For a derived link, a qualifier (`archived`, `work`, `source`, `submitted`, `published`,\n`pdf`).",
+            "description": "For a derived link, a qualifier (`archived`, `work`, `source`, `submitted`, `published`,\n`pdf`), or `maybe_same`: a match by metadata (artist, title, length), possibly the same\nthing, never by an exact ID; it joins no group.",
             "type": [
               "string",
               "null"

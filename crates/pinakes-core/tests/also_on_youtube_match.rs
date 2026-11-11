@@ -213,7 +213,7 @@ async fn run(pool: &sqlx::PgPool, config: Config, answers: Answers) -> Vec<Strin
     seen
 }
 async fn links(pool: &sqlx::PgPool, id: &str) -> Vec<String> {
-    sqlx::query_scalar("SELECT uri||' '||coalesce(key,'-')||' '||via FROM derived_link WHERE resource_id=$1 AND source='youtube_match' ORDER BY uri")
+    sqlx::query_scalar("SELECT uri||' '||coalesce(key,'-')||' '||via||' '||coalesce(kind,'-') FROM derived_link WHERE resource_id=$1 AND source='youtube_match' ORDER BY uri")
         .bind(id)
         .fetch_all(pool)
         .await
@@ -249,7 +249,7 @@ async fn a_topic_upload_matches_one_deezer_track(pool: sqlx::PgPool) {
     // A match, never a key.
     assert_eq!(
         links(&pool, &queen).await,
-        ["https://www.deezer.com/track/4091937401 - youtube_match"]
+        ["https://www.deezer.com/track/4091937401 - youtube_match maybe_same"]
     );
     let keys: i64 =
         sqlx::query_scalar("SELECT count(*) FROM resource_key WHERE source='youtube_match'")
@@ -330,7 +330,7 @@ async fn a_tidal_failure_keeps_the_deezer_match(pool: sqlx::PgPool) {
         .await;
         assert_eq!(
             links(&pool, &queen).await,
-            ["https://www.deezer.com/track/4091937401 - youtube_match"],
+            ["https://www.deezer.com/track/4091937401 - youtube_match maybe_same"],
             "{status}"
         );
         let (error, seconds): (Option<String>, f64) = sqlx::query_as("SELECT last_error, extract(epoch FROM next_attempt_at-now())::float8 FROM also_on_dirty WHERE resource_id=$1")

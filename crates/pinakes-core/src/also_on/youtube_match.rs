@@ -142,11 +142,14 @@ impl Source for YoutubeMatch {
             );
             if let Some(answer) = deezer::answer(cx, &path).await? {
                 if let Some(id) = pick(&deezer_candidates(&answer), &upload) {
-                    found.links.extend(derived(
-                        &format!("https://www.deezer.com/track/{id}"),
-                        Level::Track,
-                        "youtube_match",
-                    ));
+                    found.links.extend(
+                        derived(
+                            &format!("https://www.deezer.com/track/{id}"),
+                            Level::Track,
+                            "youtube_match",
+                        )
+                        .map(super::Link::maybe),
+                    );
                 }
             }
         }
@@ -159,11 +162,14 @@ impl Source for YoutubeMatch {
             match tidal::api_object(cx, url.as_str()).await {
                 Ok(Some(answer)) => {
                     if let Some(id) = pick(&tidal_candidates(&answer), &upload) {
-                        found.links.extend(derived(
-                            &format!("https://tidal.com/track/{id}"),
-                            Level::Track,
-                            "youtube_match",
-                        ));
+                        found.links.extend(
+                            derived(
+                                &format!("https://tidal.com/track/{id}"),
+                                Level::Track,
+                                "youtube_match",
+                            )
+                            .map(super::Link::maybe),
+                        );
                     }
                 }
                 Ok(None) => {}
