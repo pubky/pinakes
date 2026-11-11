@@ -778,18 +778,29 @@ pub struct Place {
 }
 
 /// A block's place in the chain, from its status: whether it is in the best chain, and the best
-/// chain's next block (`next_best`) with its height. `None` when the API knows no such block.
+/// chain's next block (`next_best`) with its height. `None` when the API knows no such block; an
+/// error for a `next_best` that is not a block hash, or one without the block's height.
 pub fn parse_status(status: u16, raw: &[u8]) -> Result<Option<Place>> {
     let Some(v) = json(status, raw, &[404])? else {
         return Ok(None);
     };
     let best = v["in_best_chain"].as_bool() == Some(true);
-    let next = v["next_best"]
-        .as_str()
-        .and_then(hash)
-        .zip(v["height"].as_u64().and_then(|h| h.checked_add(1)))
-        .filter(|_| best);
-    Ok(Some(Place { best, next }))
+    let next = match &v["next_best"] {
+        Value::Null => None,
+        next => Some((
+            next.as_str()
+                .and_then(hash)
+                .context("next_best is not a block hash")?,
+            v["height"]
+                .as_u64()
+                .and_then(|h| h.checked_add(1))
+                .context("no height")?,
+        )),
+    };
+    Ok(Some(Place {
+        best,
+        next: next.filter(|_| best),
+    }))
 }
 
 /// The id of a block's first transaction, its coinbase (plain text).
@@ -1420,9 +1431,11 @@ async fn read(
                     card.related
                         .push(block_entry("next", n, &next, Some(height)));
                 }
-                // A best-chain block whose next block is not settled yet (or not there): its
-                // next block comes with a later read.
-                _ if place.as_ref().is_some_and(|p| p.best) => soon = true,
+                // Its next block is not settled yet, or it is the best chain's tip: the next block
+                // comes with a later read.
+                (Some(_), Some(_)) => soon = true,
+                (None, _) if place.as_ref().is_some_and(|p| p.best) => soon = true,
+                // A status or tip that failed was put off (`put_off`), or is left out for good.
                 _ => {}
             }
             let coinbase = part(cx, coinbase_request(to, n, hash), by)
@@ -2726,6 +2739,17 @@ mod tests {
             })
         );
         assert_eq!(parse_status(404, b"Block not found").unwrap(), None);
+        // A next block that is no block hash, or without a height, is no answer.
+        assert!(parse_status(
+            200,
+            br#"{"in_best_chain":true,"height":1,"next_best":"zz"}"#
+        )
+        .is_err());
+        assert!(parse_status(
+            200,
+            br#"{"in_best_chain":true,"next_best":"000000006a625f06636b8bb6ac7b960a8d03705d1ace08b1a19da3fdcc99ddbd"}"#
+        )
+        .is_err());
         assert!(parse_txid(200, b"<html>").is_err());
         assert_eq!(
             coinbase_request(Api::Mempool, Network::Mainnet, HASH)

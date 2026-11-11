@@ -167,7 +167,9 @@ Each card lists the objects it points at in the resource read's `related`
   is left out. Each part is left out when its request fails; a rate limit, a server error or
   the budget running out reads the card again within the hour, as does a transaction still in
   the mempool (its block comes later) and a block in the best chain whose next block is not
-  settled yet. A read again that cannot fetch a part leaves it out until the read after. The
+  settled yet (or that has none yet). A part refused for good (a 404, an answer that cannot be
+  read) is left out until the card's own refresh. A read again that cannot fetch a part leaves
+  it out until the read after. The
   Esplora fallback reads the same parts, but has no pool, no reward and no Lightning.
 - What a spent output was spent by (`/api/tx/{txid}/outspends`) is not read: one more request
   for every transaction card, and it changes after the card is read.

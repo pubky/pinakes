@@ -32,6 +32,11 @@ const UNKNOWN: &str = "020000000000000000000000000000000000000000000000000000000
 const BUSY: &str = "021111111111111111111111111111111111111111111111111111111111111111";
 const SLOW: &str = "022222222222222222222222222222222222222222222222222222222222222222";
 const STALLED: &str = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa";
+/// Blocks whose tip and first-txid requests mempool.space answers 404: `DEEP` has a next block,
+/// `TIP` has none yet.
+const DEEP: &str = "00000000000000000000000000000000000000000000000000000000000000d1";
+const TIP: &str = "00000000000000000000000000000000000000000000000000000000000000d2";
+const NEXT: &str = "00000000000000000000000000000000000000000000000000000000000000d3";
 
 fn answer(url: &Url, status: u16, body: String) -> Fetched {
     Fetched {
@@ -68,6 +73,34 @@ impl Transport for Scripted {
                 if path.strip_prefix("/api/address/").and_then(|p| p.strip_suffix("/txs")) == Some(STALLED) =>
             {
                 std::future::pending().await
+            }
+            (Some("mempool.space"), path)
+                if path.strip_prefix("/api/v1/block/") == Some(DEEP)
+                    || path.strip_prefix("/api/v1/block/") == Some(TIP) =>
+            {
+                let id = &path["/api/v1/block/".len()..];
+                Ok(answer(
+                    u,
+                    200,
+                    format!(
+                        r#"{{"id":"{id}","height":5,"timestamp":1231006505,"tx_count":1,"size":285,"weight":1140,"previousblockhash":"00000000000000000000000000000000000000000000000000000000000000d0"}}"#
+                    ),
+                ))
+            }
+            (Some("mempool.space"), path) if path.strip_prefix("/api/block/").and_then(|p| p.strip_suffix("/status")) == Some(DEEP) => {
+                Ok(answer(
+                    u,
+                    200,
+                    format!(r#"{{"in_best_chain":true,"height":5,"next_best":"{NEXT}"}}"#),
+                ))
+            }
+            (Some("mempool.space"), path) if path.strip_prefix("/api/block/").and_then(|p| p.strip_suffix("/status")) == Some(TIP) => Ok(
+                answer(u, 200, r#"{"in_best_chain":true,"height":5,"next_best":null}"#.into()),
+            ),
+            (Some("mempool.space"), path)
+                if path == "/api/blocks/tip/height" || path.ends_with("/txid/0") =>
+            {
+                Ok(answer(u, 404, "Not found".into()))
             }
             (Some("mempool.space"), path) if path.starts_with("/api/v1/lightning/nodes/") => {
                 Ok(if path.ends_with(BUSY) {
@@ -223,4 +256,29 @@ async fn a_stalled_related_part_leaves_the_card_in_time() {
     assert!(doc.related.is_empty());
     let soon = doc.refresh_by.expect("read again soon") - chrono::Utc::now();
     assert!(soon <= chrono::Duration::hours(1));
+}
+
+/// A part that fails for good (a 404) is left out without an early read again: a block with a
+/// next block whose tip the API refuses keeps its previous block and is read at its own time. The
+/// best chain's tip itself is read again within the hour, for its next block.
+#[tokio::test(start_paused = true)]
+async fn a_part_refused_for_good_is_not_read_again_soon() {
+    if !has("mempool") {
+        return;
+    }
+    let deep = official()
+        .resolve(&format!("btc:block/{DEEP}"))
+        .await
+        .unwrap();
+    assert_eq!(deep.status, Status::Ok);
+    let rels: Vec<&str> = deep.related.iter().map(|r| r.rel.as_str()).collect();
+    assert_eq!(rels, ["previous"]);
+    assert_eq!(deep.related[0].name.as_deref(), Some("Block 4"));
+    assert_eq!(deep.refresh_by, None);
+    let tip = official()
+        .resolve(&format!("btc:block/{TIP}"))
+        .await
+        .unwrap();
+    assert_eq!(tip.status, Status::Ok);
+    assert!(tip.refresh_by.is_some());
 }
