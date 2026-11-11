@@ -313,6 +313,49 @@ mod tests {
         );
     }
     #[test]
+    fn verification_pages_are_walls_never_names() {
+        let url =
+            Url::parse("https://musicbrainz.org/recording/833f00e1-781f-4edd-90e4-e52712618862")
+                .unwrap();
+        let fetched = |status: u16, body: &str| Fetched {
+            permanent_redirect: false,
+            truncated: false,
+            url: url.clone(),
+            body: body.as_bytes().to_vec(),
+            content_type: "text/html; charset=utf-8".into(),
+            status,
+            location: None,
+            retry_after_secs: 60,
+            validators: Default::default(),
+        };
+        // MusicBrainz' proof-of-work gate (2026-11-10), answered with 200 to a plain client.
+        let musicbrainz = "<!DOCTYPE html><html><head><meta charset=\"utf-8\">\n<title>Verifying your browser</title>\n<style>body{display:flex}</style>\n</head><body><div class=\"box\"><div class=\"spinner\"></div>\n<p>Verifying your browser, please wait…</p>\n<noscript><p><b>JavaScript is required to access this page.</b></p></noscript>\n</div><script>\n(async()=>{const f=document.createElement(\"form\");f.method=\"POST\";f.action=\"/__meb_verify\";})()\n</script></body></html>";
+        assert_eq!(
+            inspect(&url, &fetched(200, musicbrainz)).unwrap(),
+            Page::Blocked
+        );
+        // Anubis, Cloudflare's newer wording, Imperva and Vercel: by title or by heading.
+        for page in [
+            "<html><head><title>Making sure you&#39;re not a bot!</title></head><body><h1>Making sure you&#39;re not a bot!</h1><p>Loading...</p></body></html>",
+            "<html><head><title>Making sure you’re not a bot!</title></head><body><p>Loading...</p></body></html>",
+            "<html><head><title>example.org</title></head><body><h1>Verifying you are human. This may take a few seconds.</h1></body></html>",
+            "<html><head><title>Pardon Our Interruption</title></head><body><p>As you were browsing something about your browser made us think you were a bot.</p></body></html>",
+            "<html><head><title>Vercel Security Checkpoint</title></head><body><p>We're verifying your browser</p></body></html>",
+        ] {
+            assert_eq!(inspect(&url, &fetched(200, page)).unwrap(), Page::Blocked, "{page}");
+            assert_eq!(inspect(&url, &fetched(429, page)).unwrap(), Page::Blocked, "{page}");
+        }
+        // A real page that only carries such words in its title (a long article) is content.
+        let article = format!(
+            "<html><head><title>Verifying your browser: how bot walls work</title></head><body><p>{}</p></body></html>",
+            "A long article about challenge pages. ".repeat(80)
+        );
+        assert_eq!(
+            inspect(&url, &fetched(200, &article)).unwrap(),
+            Page::Content
+        );
+    }
+    #[test]
     fn refresh_parsing_survives_multi_byte_content() {
         let tokens = [
             "0", "5", ";", ",", " ", "url", "URL", "=", "'", "\"", "€", "é", "😀", "a", "/x", "ü",

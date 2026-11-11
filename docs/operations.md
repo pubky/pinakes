@@ -597,8 +597,10 @@ that is the card. Its last accepted document, event dates and feed occurrences s
 toward a disappearance. Fetches that hit one count as outcome `blocked` in
 `pinakes_fetch_total`.
 
-The markers are the built-in `data/interstitial-markers.json` (text markers, placeholder
-titles, captcha selectors, wall host prefixes, sign-in paths). A page on a site's own
+The markers are the built-in `data/interstitial-markers.json` (text markers such as "just a
+moment", "verifying your browser" or Anubis' "making sure you're not a bot", placeholder
+titles, captcha selectors, wall host prefixes, sign-in paths): a wall's title never becomes a
+card's name. A page on a site's own
 host titled only with its name (`- YouTube`, `YouTube` on `youtube.com`, `youtu.be` and their
 subdomains: placeholder titles are listed per domain), below the site's root, is the service's
 stand-in for the object, a wall, at any length. Where the fetch ended decides: a short link that
