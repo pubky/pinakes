@@ -16,7 +16,10 @@ use super::{
     },
     Budget, Example, Source,
 };
-use crate::model::{Related, ResourceMeta};
+use crate::{
+    model::{Related, ResourceMeta},
+    resolver::egress::Fetched,
+};
 use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use serde_json::Value;
@@ -32,6 +35,10 @@ pub const RELATED_EACH: usize = 10;
 /// When a card with a part not there yet (a block's next block, a transaction's block) or not
 /// read (its request was put off) is read again, at the latest.
 const READ_AGAIN_SECS: i64 = 3600;
+/// How long the requests for a card's `related` parts may take, from the start of its read: the
+/// rest of the official route's limit (`resolver::cards`, 14 s) stays for the card's own record
+/// and the Esplora fallback.
+const PARTS_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
 
 /// A Bitcoin network. Each one is a separate set of objects.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1318,6 +1325,24 @@ fn put_off(error: &anyhow::Error) -> bool {
         .is_some()
 }
 
+/// A request for a part of a card, answered by `by`: one still waiting then is put off
+/// (`RetryLater`), as a rate limit is.
+async fn part(
+    cx: &super::Context<'_>,
+    request: Option<Request>,
+    by: tokio::time::Instant,
+) -> Result<Fetched> {
+    let request = request.context("no reader for this part")?;
+    match tokio::time::timeout_at(by, fetch(cx, &request)).await {
+        Ok(fetched) => fetched,
+        Err(_) => Err(crate::resolver::RetryLater {
+            class: "timeout",
+            seconds: 60,
+        }
+        .into()),
+    }
+}
+
 /// The tip height.
 async fn read_tip(cx: &super::Context<'_>, to: Api, network: Network) -> Result<u64> {
     let tip = fetch(cx, &tip_request(to, network).context("tip")?).await?;
@@ -1325,10 +1350,17 @@ async fn read_tip(cx: &super::Context<'_>, to: Api, network: Network) -> Result<
 }
 
 /// Reads the object from one API: a block by height through its hash. Then what its card points
-/// at beyond its own record (`related`), one request per part, each left out when it fails: a
-/// block's next block (its status, and the tip when it has one) and its coinbase transaction;
-/// an address's latest transactions; a node's biggest channels.
-async fn read(cx: &super::Context<'_>, to: Api, target: &Target) -> Result<Option<Read>> {
+/// at beyond its own record (`related`), one request per part (`part`, answered by `by`), each
+/// left out when it fails: a block's next block (its status, and the tip when it has one) and
+/// its coinbase transaction; an address's latest transactions; a node's biggest channels. A
+/// block read by height needs its status and the tip whatever the time: their failure fails the
+/// read, as before.
+async fn read(
+    cx: &super::Context<'_>,
+    to: Api,
+    target: &Target,
+    by: tokio::time::Instant,
+) -> Result<Option<Read>> {
     let mut target = target.clone();
     let by_height = matches!(target.object, Object::Block(BlockRef::Height(_)));
     if by_height {
@@ -1347,25 +1379,31 @@ async fn read(cx: &super::Context<'_>, to: Api, target: &Target) -> Result<Optio
         Object::Block(BlockRef::Hash(hash)) => {
             // Its place in the best chain: whether its height names it (read by height, which
             // needs both), and its next block, linked once that is settled too.
-            let status =
-                match fetch(cx, &status_request(to, n, hash).context("block status")?).await {
+            let status = if by_height {
+                Some(fetch(cx, &status_request(to, n, hash).context("block status")?).await?)
+            } else {
+                match part(cx, status_request(to, n, hash), by).await {
                     Ok(status) => Some(status),
-                    Err(e) if by_height => return Err(e),
                     Err(e) => {
                         soon |= put_off(&e);
                         None
                     }
-                };
+                }
+            };
             let place = match status.as_ref().map(|s| parse_status(s.status, &s.body)) {
                 Some(Ok(place)) => place,
                 Some(Err(e)) if by_height => return Err(e),
                 _ => None,
             };
             let next = place.as_ref().and_then(|p| p.next.clone());
-            let tip = if by_height || next.is_some() {
-                match read_tip(cx, to, n).await {
+            let tip = if by_height {
+                Some(read_tip(cx, to, n).await?)
+            } else if next.is_some() {
+                match part(cx, tip_request(to, n), by)
+                    .await
+                    .and_then(|f| parse_tip(f.status, &f.body))
+                {
                     Ok(tip) => Some(tip),
-                    Err(e) if by_height => return Err(e),
                     Err(e) => {
                         soon |= put_off(&e);
                         None
@@ -1387,12 +1425,9 @@ async fn read(cx: &super::Context<'_>, to: Api, target: &Target) -> Result<Optio
                 _ if place.as_ref().is_some_and(|p| p.best) => soon = true,
                 _ => {}
             }
-            let coinbase = match coinbase_request(to, n, hash) {
-                Some(request) => fetch(cx, &request)
-                    .await
-                    .and_then(|f| parse_txid(f.status, &f.body)),
-                None => Err(anyhow::anyhow!("no coinbase reader")),
-            };
+            let coinbase = part(cx, coinbase_request(to, n, hash), by)
+                .await
+                .and_then(|f| parse_txid(f.status, &f.body));
             match coinbase {
                 Ok(txid) => {
                     let mut r = Related::new("coinbase", root(n, Object::Tx(txid)));
@@ -1403,12 +1438,9 @@ async fn read(cx: &super::Context<'_>, to: Api, target: &Target) -> Result<Optio
             }
         }
         Object::Address(addr) => {
-            let txs = match txs_request(to, n, addr) {
-                Some(request) => fetch(cx, &request)
-                    .await
-                    .and_then(|f| parse_address_txs(f.status, &f.body, n, addr)),
-                None => Err(anyhow::anyhow!("no transactions reader")),
-            };
+            let txs = part(cx, txs_request(to, n, addr), by)
+                .await
+                .and_then(|f| parse_address_txs(f.status, &f.body, n, addr));
             match txs {
                 Ok(txs) => {
                     let count = |name: &str| card.details.get(name).and_then(Value::as_u64);
@@ -1421,12 +1453,9 @@ async fn read(cx: &super::Context<'_>, to: Api, target: &Target) -> Result<Optio
             }
         }
         Object::Node(key) => {
-            let channels = match channels_request(n, key) {
-                Some(request) => fetch(cx, &request)
-                    .await
-                    .and_then(|f| parse_channels(f.status, &f.body, n, key)),
-                None => Err(anyhow::anyhow!("no channels reader")),
-            };
+            let channels = part(cx, channels_request(n, key), by)
+                .await
+                .and_then(|f| parse_channels(f.status, &f.body, n, key));
             match channels {
                 Ok((channels, peers)) => {
                     let total = card.details.get("channels").and_then(Value::as_u64);
@@ -1570,10 +1599,13 @@ impl Source for Mempool {
         let Some(target) = target(uri) else {
             return Ok(cx.missing(uri, self));
         };
-        let read = match read(cx, Api::Mempool, &target).await {
+        // The parts' requests share one budget, the fallback's too.
+        let by = tokio::time::Instant::now() + PARTS_BUDGET;
+        let by = cx.deadline().map_or(by, |d| d.min(by));
+        let read = match read(cx, Api::Mempool, &target, by).await {
             Ok(read) => read,
             Err(e) if request(Api::Esplora, &target).is_some() => {
-                read(cx, Api::Esplora, &target).await.map_err(|_| e)?
+                read(cx, Api::Esplora, &target, by).await.map_err(|_| e)?
             }
             Err(e) => match (
                 &target.object,

@@ -24,12 +24,14 @@ impl Dns for PublicDns {
 
 /// USGS never answers; mempool.space answers the record of `BUSY` with 429 and that of `SLOW`
 /// with 408, fails every other node record with a server error, and its search lists only
-/// `LISTED`, `BUSY` and `SLOW`.
+/// `LISTED`, `BUSY` and `SLOW`; it answers the record of the address `STALLED` but never its
+/// transaction list.
 struct Scripted;
 const LISTED: &str = "03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f";
 const UNKNOWN: &str = "020000000000000000000000000000000000000000000000000000000000000001";
 const BUSY: &str = "021111111111111111111111111111111111111111111111111111111111111111";
 const SLOW: &str = "022222222222222222222222222222222222222222222222222222222222222222";
+const STALLED: &str = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa";
 
 fn answer(url: &Url, status: u16, body: String) -> Fetched {
     Fetched {
@@ -53,6 +55,20 @@ impl Transport for Scripted {
     async fn get_with(&self, u: &Url, _: &[SocketAddr], _: &FetchOptions) -> Result<Fetched> {
         match (u.host_str(), u.path()) {
             (Some("earthquake.usgs.gov"), _) => std::future::pending().await,
+            (Some("mempool.space"), path) if path.strip_prefix("/api/address/") == Some(STALLED) => {
+                Ok(answer(
+                    u,
+                    200,
+                    format!(
+                        r#"{{"address":"{STALLED}","chain_stats":{{"funded_txo_sum":5000000000,"spent_txo_sum":0,"tx_count":1}},"mempool_stats":{{"tx_count":0}}}}"#
+                    ),
+                ))
+            }
+            (Some("mempool.space"), path)
+                if path.strip_prefix("/api/address/").and_then(|p| p.strip_suffix("/txs")) == Some(STALLED) =>
+            {
+                std::future::pending().await
+            }
             (Some("mempool.space"), path) if path.starts_with("/api/v1/lightning/nodes/") => {
                 Ok(if path.ends_with(BUSY) {
                     answer(u, 429, "Too Many Requests".into())
@@ -186,4 +202,25 @@ async fn compound_names_never_merge() {
         .unwrap();
     assert_eq!(several.source, "web");
     assert_eq!(several.name.as_deref(), Some("Glucose"));
+}
+
+/// A card whose `related` part never answers is still read in time: the address card comes back
+/// without its transaction list, to be read again within the hour, never as the route's own
+/// timeout (which counts toward dead letter).
+#[tokio::test(start_paused = true)]
+async fn a_stalled_related_part_leaves_the_card_in_time() {
+    if !has("mempool") {
+        return;
+    }
+    let started = tokio::time::Instant::now();
+    let doc = official()
+        .resolve(&format!("btc:address/{STALLED}"))
+        .await
+        .unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    assert_eq!(doc.status, Status::Ok);
+    assert_eq!(doc.attributes["tx_count"], "1");
+    assert!(doc.related.is_empty());
+    let soon = doc.refresh_by.expect("read again soon") - chrono::Utc::now();
+    assert!(soon <= chrono::Duration::hours(1));
 }

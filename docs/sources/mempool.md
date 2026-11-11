@@ -96,7 +96,7 @@ no request. Each is a link of the card's own object (above).
 - for a block by height, `/api/block-height/{height}` first, then `/api/block/{hash}/status` and
   `/api/blocks/tip/height`;
 - when a node's record answers a server error, `/api/v1/lightning/search?searchText={key}`;
-- for the card's `related` list (below), one or two more requests: for a block
+- for the card's `related` list (below), up to three more requests: for a block
   `/api/block/{hash}/status` (its next block), `/api/blocks/tip/height` (only when it has a next
   block, or was read by height) and `/api/block/{hash}/txid/0` (its coinbase transaction); for an
   address `/api/address/{address}/txs`; for a node
@@ -155,15 +155,20 @@ Each card lists the objects it points at in the resource read's `related`
 - At most 10 inputs, outputs, transactions, channels and peers each, the largest amount first
   for inputs, outputs and channels (the API's order among equals); `related_total` gives how
   many inputs, outputs, transactions (the address's `tx_count` plus `unconfirmed_tx_count`) or
-  channels (the node's `channels`) there are when fewer are listed. A transaction with 400
-  inputs is still one request: its record lists them all.
+  channels there are when fewer are listed. A node's channel total is its `channels` fact, the
+  channels mempool.space counts as active; the listed ones are its biggest open channels, which
+  can include an inactive one. A transaction with 400 inputs is still one request: its record
+  lists them all.
 - Roots stay on the card's network: `btc-testnet4:address/…`, `ln-signet:node/…`,
   `btc-signet:tx/…` (a signet channel's funding transaction). An address that is not valid on
   the card's network is listed as its script type, without a `uri`.
-- The extra requests are part of the read and paced like it. Each part is left out when its
-  request fails; a rate limit or server error on one reads the card again within the hour, as
-  does a transaction still in the mempool (its block comes later). The Esplora fallback reads
-  the same parts, but has no pool, no reward and no Lightning.
+- The extra requests are part of the read and paced like it, and share a budget of 8 seconds
+  from the start of the read (the route allows 14): a part whose request is still waiting then
+  is left out. Each part is left out when its request fails; a rate limit, a server error or
+  the budget running out reads the card again within the hour, as does a transaction still in
+  the mempool (its block comes later) and a block in the best chain whose next block is not
+  settled yet. A read again that cannot fetch a part leaves it out until the read after. The
+  Esplora fallback reads the same parts, but has no pool, no reward and no Lightning.
 - What a spent output was spent by (`/api/tx/{txid}/outspends`) is not read: one more request
   for every transaction card, and it changes after the card is read.
 

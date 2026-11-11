@@ -652,14 +652,19 @@ impl ResourceMeta {
         Ok(self)
     }
     /// Drops the last entry of `related`, counting it in `related_total`: the list of its `rel`
-    /// is cut there. False when the list is empty.
+    /// is cut there. A `rel` it leaves without entries keeps no total (a total is only for a
+    /// `rel` the list holds). False when the list is empty.
     fn cut_related(&mut self) -> bool {
         let Some(last) = self.related.pop() else {
             return false;
         };
-        let listed = self.related.iter().filter(|r| r.rel == last.rel).count() as u64 + 1;
-        let total = self.related_total.entry(last.rel).or_insert(listed);
-        *total = (*total).max(listed);
+        let left = self.related.iter().filter(|r| r.rel == last.rel).count() as u64;
+        if left == 0 {
+            self.related_total.remove(&last.rel);
+        } else {
+            let total = self.related_total.entry(last.rel).or_insert(left + 1);
+            *total = (*total).max(left + 1);
+        }
         true
     }
     /// Drops one of the parts a document too large gives up first, before its description and
@@ -1389,6 +1394,13 @@ mod tests {
         assert!(!bounded.related.is_empty());
         assert_eq!(bounded.related_total["output"], RELATED_CAP as u64);
         assert_eq!(bounded.attributes.len(), 1);
+        // A `rel` whose every entry is given up keeps no total.
+        let mut two = bounded.clone();
+        two.related = vec![input(1), Related::new("block", Some("btc:block/b".into()))];
+        two.related_total = BTreeMap::from([("block".into(), 3), ("input".into(), 5)]);
+        assert!(two.shed());
+        assert_eq!(two.related, [input(1)]);
+        assert_eq!(two.related_total, BTreeMap::from([("input".into(), 5)]));
         let stored: ResourceMeta =
             serde_json::from_value(serde_json::to_value(&bounded).unwrap()).unwrap();
         assert_eq!(

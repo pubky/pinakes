@@ -224,8 +224,9 @@ pub fn check_response(method: &str, path: &str, status: u16, value: &Value) {
 }
 
 /// The card a registered official source makes of `uri` from recorded answers (`(url, status,
-/// content type, file)`, the files in `tests/fixtures/sources/{name}/`), or `None` when this build
-/// has no source named `name`: a test that needs one source returns early without it.
+/// content type, file)`, the files in `tests/fixtures/sources/{name}/`; a `.gz` file is served
+/// unpacked, as the service sent it), or `None` when this build has no source named `name`: a
+/// test that needs one source returns early without it.
 pub async fn source_card(
     name: &str,
     uri: &str,
@@ -239,7 +240,16 @@ pub async fn source_card(
     let routes = answers
         .iter()
         .map(|(url, status, kind, file)| {
-            let body = std::fs::read(format!("{dir}/{file}")).unwrap();
+            let mut body = std::fs::read(format!("{dir}/{file}")).unwrap();
+            if file.ends_with(".gz") {
+                let mut out = Vec::new();
+                std::io::Read::read_to_end(
+                    &mut flate2::read::GzDecoder::new(body.as_slice()),
+                    &mut out,
+                )
+                .unwrap();
+                body = out;
+            }
             (url.to_string(), (*status, kind.to_string(), body))
         })
         .collect();

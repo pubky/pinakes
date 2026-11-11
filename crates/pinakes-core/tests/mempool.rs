@@ -128,9 +128,12 @@ async fn a_block_card_lists_the_explorers_and_their_links_are_its_aliases(pool: 
     }
 }
 
+/// A recorded answer: URL, status, content type, file.
+type Answer = (String, u16, &'static str, String);
+
 /// The answers `source_card` serves for a read of the example block by hash: on `host`'s API
 /// (mempool.space's v1 record, or Esplora's), with the files of `dir`.
-fn block_answers(api: &str, record: &str, dir: &str) -> Vec<(String, u16, &'static str, String)> {
+fn block_answers(api: &str, record: &str, dir: &str) -> Vec<Answer> {
     vec![
         (
             format!("{api}/{record}/{HASH}"),
@@ -160,7 +163,7 @@ fn block_answers(api: &str, record: &str, dir: &str) -> Vec<(String, u16, &'stat
     ]
 }
 
-async fn read_card(uri: &str, answers: &[(String, u16, &'static str, String)]) -> ResourceMeta {
+async fn read_card(uri: &str, answers: &[Answer]) -> ResourceMeta {
     let answers: Vec<(&str, u16, &str, &str)> = answers
         .iter()
         .map(|(u, s, k, f)| (u.as_str(), *s, *k, f.as_str()))
