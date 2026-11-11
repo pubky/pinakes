@@ -321,7 +321,7 @@ where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
-    let permit = PARSES.clone().acquire_owned().await?;
+    let permit = permit().await?;
     let cancelled = Arc::new(AtomicBool::new(false));
     let _cancel = Cancel(cancelled.clone());
     Ok(tokio::task::spawn_blocking(move || {
@@ -329,6 +329,28 @@ where
         in_job(Job::new(PARSE_BUDGET, cancelled), parse)
     })
     .await?)
+}
+
+/// A parse permit, waited for on the runtime.
+#[cfg(not(test))]
+async fn permit() -> anyhow::Result<tokio::sync::OwnedSemaphorePermit> {
+    Ok(PARSES.clone().acquire_owned().await?)
+}
+/// A parse permit. This crate's tests run on paused clocks, which tokio moves on whenever a
+/// test's runtime has nothing to do, and every test in the process shares the permits: a wait on
+/// the runtime for a permit another test holds would pass the test's timeouts at once (a
+/// recorded fetch "exceeded 10 seconds" in no time, a card part unread). The wait runs on the
+/// blocking pool instead, which keeps a paused clock where it is.
+#[cfg(test)]
+async fn permit() -> anyhow::Result<tokio::sync::OwnedSemaphorePermit> {
+    if let Ok(permit) = PARSES.clone().try_acquire_owned() {
+        return Ok(permit);
+    }
+    let runtime = tokio::runtime::Handle::current();
+    Ok(
+        tokio::task::spawn_blocking(move || runtime.block_on(PARSES.clone().acquire_owned()))
+            .await??,
+    )
 }
 
 /// Run a parse on a thread of its own, outside the runtime and its permits, as one parse job,
@@ -2192,6 +2214,33 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
         assert_eq!(running(), before);
+    }
+
+    /// While every permit is taken elsewhere in the process (another test's parses), a paused
+    /// test waits for one without its clock moving: a fetch timeout around the wait doesn't
+    /// pass in no time.
+    #[tokio::test(start_paused = true)]
+    async fn a_wait_for_a_permit_leaves_a_paused_clock_alone() {
+        let (taken, wait) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            let all = runtime
+                .block_on(PARSES.clone().acquire_many_owned(*PERMITS as u32))
+                .unwrap();
+            taken.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            drop(all);
+        });
+        tokio::task::spawn_blocking(move || wait.recv().unwrap())
+            .await
+            .unwrap();
+        let start = tokio::time::Instant::now();
+        let parsed = tokio::time::timeout(std::time::Duration::from_secs(10), blocking(|| 1)).await;
+        assert_eq!(parsed.expect("the wait passed the timeout").unwrap(), 1);
+        assert!(start.elapsed() < std::time::Duration::from_secs(10));
+        holder.join().unwrap();
     }
 
     /// No code but this module names the HTML parser's entry points.
