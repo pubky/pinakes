@@ -340,10 +340,10 @@ async fn search_filters_facets_true_keyset_and_invalid_options(pool: PgPool) {
     }
     let (_, page) = call(&app, "GET", "/v1/search?facet=type,tags", None).await;
     assert!(page["facets"]["type"].is_array() && page["facets"]["tags"].is_array());
-    assert_eq!(
-        call(&app, "GET", "/v1/search?facet=host", None).await.0,
-        400
-    );
+    for bad in ["hosts", "type,", "host,,tags", "category,place"] {
+        let (code, page) = call(&app, "GET", &format!("/v1/search?facet={bad}"), None).await;
+        assert_eq!(code, 400, "{bad}: {page}");
+    }
     let (_, page) = call(&app, "GET", "/v1/search?q=Even&facet=tags", None).await;
     assert_eq!(page["items"].as_array().unwrap().len(), 1);
     let (_, page) = call(
@@ -2837,6 +2837,168 @@ async fn an_alias_reads_as_its_root_everywhere(pool: PgPool) {
     );
     assert_eq!(lines["lines"][1]["resource_id"], root.as_str(), "{lines}");
     assert!(lines["lines"][1].get("root").is_none());
+}
+
+/// `facet=host` lists the services of the whole filtered set with the name their cards show,
+/// `facet=category` the OpenStreetMap categories, each value as its filter takes it: filtering
+/// by an entry finds exactly its count. A `pubky://` object has no service host. Every facet
+/// combines with the others, in any order, and the page's limit never changes a count.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn host_and_category_facets_count_what_their_filters_take(pool: PgPool) {
+    let links: [(&str, &str, Option<&str>, Option<&str>); 7] = [
+        (
+            "https://www.youtube.com/watch?v=aaaaaaaaaaa",
+            "VideoObject",
+            None,
+            Some("YouTube"),
+        ),
+        (
+            "https://www.youtube.com/watch?v=bbbbbbbbbbb",
+            "VideoObject",
+            None,
+            Some("YouTube"),
+        ),
+        (
+            "https://en.wikipedia.org/wiki/Zurich",
+            "Article",
+            None,
+            Some("Wiki"),
+        ),
+        (
+            "https://cafe.example.com/",
+            "CafeOrCoffeeShop",
+            Some("amenity/cafe"),
+            None,
+        ),
+        (
+            "https://bar.example.com/",
+            "CafeOrCoffeeShop",
+            Some("amenity/cafe"),
+            Some(""),
+        ),
+        (
+            "https://museum.example.com/",
+            "Museum",
+            Some("tourism/museum"),
+            Some("The Museum"),
+        ),
+        (
+            "https://www.youtube.com/watch?v=ccccccccccc",
+            "VideoObject",
+            None,
+            Some("YouTube"),
+        ),
+    ];
+    for (i, (uri, kind, category, site)) in links.iter().enumerate() {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut doc = ResourceMeta::new(uri, "web", 86400);
+        doc.name = Some(format!("Link {i}"));
+        doc.set_type(kind);
+        doc.category = category.map(str::to_owned);
+        if let Some(site) = site {
+            doc.site = (*site).into();
+        }
+        store::save_document(&pool, &id, 0, &doc).await.unwrap();
+        sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','facets',$3,now())")
+            .bind(&id)
+            .bind(author(i))
+            .bind(format!("/pub/app/tags/f{i}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let pubky = format!("pubky://{}/pub/mapky.app/posts/0034A0X7NJ52G", author(9));
+    let id = store::ensure_resource(&pool, &pubky).await.unwrap();
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','facets','/pub/app/tags/p',now())")
+        .bind(&id)
+        .bind(author(9))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let (code, page) = call(&app, "GET", "/v1/search?facet=host,category&limit=1", None).await;
+    assert_eq!(code, 200, "{page}");
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    // Most first, then by host; the site of a service Pinakes knows by its URL, else the name
+    // the documents give, else the host.
+    assert_eq!(
+        page["facets"]["host"],
+        json!([
+            {"host":"www.youtube.com","site":"YouTube","count":3},
+            {"host":"bar.example.com","site":"bar.example.com","count":1},
+            {"host":"cafe.example.com","site":"cafe.example.com","count":1},
+            {"host":"en.wikipedia.org","site":"Wikipedia (en)","count":1},
+            {"host":"museum.example.com","site":"The Museum","count":1}
+        ]),
+        "{page}"
+    );
+    assert_eq!(
+        page["facets"]["category"],
+        json!([
+            {"category":"amenity/cafe","count":2},
+            {"category":"tourism/museum","count":1}
+        ])
+    );
+    assert!(page["facets"].get("type").is_none() && page["facets"].get("tags").is_none());
+    // Each entry, as its filter, finds exactly its count.
+    let entries = |key: &str| page["facets"][key].as_array().unwrap().clone();
+    for (key, entries) in [("host", entries("host")), ("category", entries("category"))] {
+        for entry in entries {
+            let value = entry[key].as_str().unwrap();
+            let (code, found) = call(
+                &app,
+                "GET",
+                &format!("/v1/search?{key}={}", value.replace('/', "%2F")),
+                None,
+            )
+            .await;
+            assert_eq!(code, 200, "{found}");
+            assert_eq!(
+                found["items"].as_array().unwrap().len() as i64,
+                entry["count"].as_i64().unwrap(),
+                "{key}={value}"
+            );
+        }
+    }
+    // The counts are of the filtered set: the type and host filters narrow them.
+    let (_, page) = call(
+        &app,
+        "GET",
+        "/v1/search?type=CafeOrCoffeeShop&facet=category,host",
+        None,
+    )
+    .await;
+    assert_eq!(
+        page["facets"]["category"],
+        json!([{"category":"amenity/cafe","count":2}])
+    );
+    assert_eq!(page["facets"]["host"].as_array().unwrap().len(), 2);
+    let (_, page) = call(
+        &app,
+        "GET",
+        "/v1/search?host=www.youtube.com&facet=host,category",
+        None,
+    )
+    .await;
+    assert_eq!(
+        page["facets"]["host"],
+        json!([{"host":"www.youtube.com","site":"YouTube","count":3}])
+    );
+    assert_eq!(page["facets"]["category"], json!([]));
+    // All four together, in any order, with the same counts as alone.
+    let (code, all) = call(
+        &app,
+        "GET",
+        "/v1/search?facet=category,tags,host,type&collapse=group",
+        None,
+    )
+    .await;
+    assert_eq!(code, 200, "{all}");
+    let (_, alone) = call(&app, "GET", "/v1/search?facet=host", None).await;
+    assert_eq!(all["facets"]["host"], alone["facets"]["host"]);
+    assert_eq!(all["facets"]["tags"], json!([{"label":"facets","count":8}]));
+    assert_eq!(all["facets"]["type"].as_array().unwrap().len(), 4, "{all}");
+    assert_eq!(all["facets"]["category"].as_array().unwrap().len(), 2);
 }
 
 /// A Pubky object described by its content is social content: a 200-character excerpt that

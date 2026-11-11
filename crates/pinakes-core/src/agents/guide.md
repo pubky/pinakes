@@ -65,6 +65,9 @@ A link this instance does not know is a 404 there: nobody referenced it, or it h
 `GET {{BASE}}/v1/search?facet=type&limit=1` counts the card types this instance holds; each
 entry's `type_path` (`["Thing", "CreativeWork", "MusicRecording"]`) places it in the schema.org
 tree. `type` takes several types, any of them: `type=MusicRecording,MusicAlbum,MusicGroup`.
+`facet` counts over every match of a search, not just the page: any of `type`, `tags`, `host`
+(services: `{host, site, count}`, the `host` as `host=` takes it) and `category` (OpenStreetMap
+categories such as `amenity/cafe`, as `category=` takes them), e.g. `facet=type,host`.
 
 ## Recipes
 
