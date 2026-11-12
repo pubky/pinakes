@@ -2021,13 +2021,14 @@ fn word_char(c: char) -> bool {
             ))
 }
 /// The [`WordStart`] match of `text`. `None` for longer text, for text with other signs (`c++`
-/// and `c#` stay as precise as a match inside the name), and for a script written without spaces
-/// between words (Chinese, Japanese, Thai, ...), where only a match inside a run finds a word.
+/// and `c#` stay as precise as a match inside the name), for a script written without spaces
+/// between words (Chinese, Japanese, Thai, ...), where only a match inside a run finds a word,
+/// and for Hebrew and Arabic, which write prefixes onto words ([`prefixing_script`]).
 fn word_start(text: &str) -> Option<WordStart> {
     let words: Vec<&str> = text.split_whitespace().collect();
     let chars =
         words.iter().map(|w| w.chars().count()).sum::<usize>() + words.len().saturating_sub(1);
-    let plain = |c: char| c.is_alphanumeric() && !unspaced_script(c);
+    let plain = |c: char| c.is_alphanumeric() && !unspaced_script(c) && !prefixing_script(c);
     if words.is_empty() || chars > SHORT_QUERY_CHARS || !words.iter().all(|w| w.chars().all(plain))
     {
         return None;
@@ -2049,6 +2050,16 @@ fn push_word_start(sql: &mut QueryBuilder<'_, Postgres>, starts: WordStart) {
         .push("||lower(")
         .push_bind(starts.words)
         .push(")))");
+}
+/// A letter of a script that writes articles and short words onto the next word (Hebrew `ה`,
+/// `ו`; Arabic `ال`), so a short `q` in it keeps the match inside the name: `فن` finds `الفن`.
+fn prefixing_script(c: char) -> bool {
+    matches!(
+        u32::from(c),
+        0x0590..=0x08FF // Hebrew, Arabic, Syriac, Thaana, NKo, Samaritan, Mandaic, Arabic extended
+            | 0xFB1D..=0xFDFF // Hebrew and Arabic presentation forms A
+            | 0xFE70..=0xFEFF // Arabic presentation forms B
+    )
 }
 /// A letter of a script written without spaces between words.
 fn unspaced_script(c: char) -> bool {
@@ -4158,6 +4169,8 @@ mod tests {
             "ไทย",
             "ㄅㄆ",
             "\u{1B001}",
+            "فن",
+            "ספר",
             "",
             "  ",
         ] {

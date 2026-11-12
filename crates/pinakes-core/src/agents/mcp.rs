@@ -491,7 +491,7 @@ pub fn tools() -> Vec<Tool> {
             "search",
             "Search the links people referenced on Pubky. Every filter is optional and they combine: text, a schema.org type (Event includes MusicEvent; Place includes cafés), tags, a circle on the map, a time window, one exact identifier. Returns compact cards (id, uri, type, name, description, site, point, start, end, group, also_on), a cursor for the next page and, with facet, counts over every match.",
             json!({"type":"object","additionalProperties":false,"properties":{
-                "q":{"type":"string","description":"Words in the name or description, at most 256 bytes. Up to three characters of letters and digits (spaces counted, in a script written with spaces) match a name only where a word starts."},
+                "q":{"type":"string","description":"Words in the name or description, at most 256 bytes. Up to three characters of letters and digits (spaces counted; not Hebrew, Arabic or a script written without spaces) match a name only where a word starts."},
                 "type":{"type":"array","items":{"type":"string"},"maxItems":10,"description":"Schema.org types, any of them, each with its subtypes: e.g. [\"Place\"], [\"Event\"], [\"MusicRecording\", \"MusicAlbum\", \"MusicGroup\"]. A single type as a string is accepted too."},
                 "tags":{"type":"array","items":{"type":"string"},"maxItems":5,"description":"Labels people tagged the links with; any of them unless match is all."},
                 "match":{"type":"string","enum":["any","all"],"description":"With tags: any (default) or all (at most 3 tags)."},
