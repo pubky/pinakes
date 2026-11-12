@@ -3552,6 +3552,18 @@
             }
           },
           {
+            "description": "Cards of any type but these: one schema.org type, or up to 50 comma-separated, each with\nits subtypes (`Event` leaves `MusicEvent` out too). A link with no type yet (not read, or\nunreachable) is left out, as the `type` facet does not count it. Combines with `type`:\n`type=CreativeWork&exclude_type=Article`.",
+            "in": "query",
+            "name": "exclude_type",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
             "in": "query",
             "name": "category",
             "required": false,

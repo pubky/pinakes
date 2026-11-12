@@ -615,6 +615,11 @@ pub struct SearchQuery {
     /// subtypes (`Event` matches `MusicEvent`).
     #[serde(rename = "type")]
     pub type_name: Option<String>,
+    /// Cards of any type but these: one schema.org type, or up to 50 comma-separated, each with
+    /// its subtypes (`Event` leaves `MusicEvent` out too). A link with no type yet (not read, or
+    /// unreachable) is left out, as the `type` facet does not count it. Combines with `type`:
+    /// `type=CreativeWork&exclude_type=Article`.
+    pub exclude_type: Option<String>,
     pub category: Option<String>,
     pub host: Option<String>,
     /// Links carrying one exact identifier, on any service and in any spelling:
@@ -1787,13 +1792,19 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
     card.maybe_same = same_events(row);
     Ok(ResourceDetail { card, details })
 }
-/// The types a search's `type` names (1–10, comma-separated), each as its vocabulary spells it.
-fn search_types(types: &str) -> Result<Vec<String>, ApiError> {
+/// The most types a search's `type` takes.
+pub const SEARCH_TYPES_MAX: usize = 10;
+/// The most types a search's `exclude_type` takes: enough for a client to leave out every type its
+/// own groups of types stand for.
+pub const SEARCH_EXCLUDED_TYPES_MAX: usize = 50;
+/// The types a search's `param` (`type` or `exclude_type`) names (1 to `max`, comma-separated),
+/// each as its vocabulary spells it.
+fn search_types(param: &str, types: &str, max: usize) -> Result<Vec<String>, ApiError> {
     let names: Vec<&str> = types.split(',').map(str::trim).collect();
-    if names.len() > 10 || names.iter().any(|n| n.is_empty()) {
-        return Err(ApiError::bad(
-            "type takes 1–10 schema.org types, comma-separated",
-        ));
+    if names.len() > max || names.iter().any(|n| n.is_empty()) {
+        return Err(ApiError::bad(format!(
+            "{param} takes 1–{max} schema.org types, comma-separated"
+        )));
     }
     let mut known = Vec::with_capacity(names.len());
     for name in names {
@@ -1806,7 +1817,7 @@ fn search_types(types: &str) -> Result<Vec<String>, ApiError> {
             return Err(ApiError::bad(if a_name {
                 format!("unknown schema.org type: {name}")
             } else {
-                "type names schema.org types (letters and digits, comma-separated)".to_owned()
+                format!("{param} names schema.org types (letters and digits, comma-separated)")
             }));
         };
         if !known.contains(&leaf) {
@@ -2664,7 +2675,17 @@ pub async fn search(
     if let Some(types) = &q.type_name {
         // Any of the types, each with its subtypes: a path that holds one of them.
         sql.push(" AND r.type_path && ")
-            .push_bind(search_types(types)?);
+            .push_bind(search_types("type", types, SEARCH_TYPES_MAX)?);
+    }
+    if let Some(types) = &q.exclude_type {
+        // None of the types, nor their subtypes: a card with a type whose path holds none of them.
+        sql.push(" AND r.type IS NOT NULL AND NOT coalesce(r.type_path && ")
+            .push_bind(search_types(
+                "exclude_type",
+                types,
+                SEARCH_EXCLUDED_TYPES_MAX,
+            )?)
+            .push(",false)");
     }
     if let Some(remote) = q.remote {
         sql.push(" AND r.type_path @> ARRAY['JobPosting'] AND (coalesce(r.doc->'attributes'->>'remote','')='true')=")

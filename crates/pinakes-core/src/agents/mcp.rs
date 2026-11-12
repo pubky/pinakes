@@ -493,6 +493,7 @@ pub fn tools() -> Vec<Tool> {
             json!({"type":"object","additionalProperties":false,"properties":{
                 "q":{"type":"string","description":"Words in the name or description, at most 256 bytes. Up to three characters of letters and digits (spaces counted; not Hebrew, Arabic or a script written without spaces) match a name only where a word starts."},
                 "type":{"type":"array","items":{"type":"string"},"maxItems":10,"description":"Schema.org types, any of them, each with its subtypes: e.g. [\"Place\"], [\"Event\"], [\"MusicRecording\", \"MusicAlbum\", \"MusicGroup\"]. A single type as a string is accepted too."},
+                "exclude_type":{"type":"array","items":{"type":"string"},"maxItems":50,"description":"Schema.org types to leave out, each with its subtypes: every card of another type, e.g. [\"WebPage\", \"Article\"]. Links with no type yet are left out too. Combines with type. A single type as a string is accepted too."},
                 "tags":{"type":"array","items":{"type":"string"},"maxItems":5,"description":"Labels people tagged the links with; any of them unless match is all."},
                 "match":{"type":"string","enum":["any","all"],"description":"With tags: any (default) or all (at most 3 tags)."},
                 "near":{"type":"object","required":["lat","lon","radius"],"additionalProperties":false,"properties":{"lat":{"type":"number"},"lon":{"type":"number"},"radius":{"type":"number","description":"Metres, at most 200000 by default."}},"description":"A circle on the map."},
@@ -602,6 +603,7 @@ fn search_query(args: &JsonObject) -> Result<String, Failure> {
     let known = [
         "q",
         "type",
+        "exclude_type",
         "tags",
         "match",
         "near",
@@ -636,8 +638,8 @@ fn search_query(args: &JsonObject) -> Result<String, Failure> {
             pairs.push((param, value));
         }
     }
-    // `type`, `tags` and `facet`: an array, or the route's comma-separated string.
-    for key in ["type", "tags", "facet"] {
+    // `type`, `exclude_type`, `tags` and `facet`: an array, or the route's comma-separated string.
+    for key in ["type", "exclude_type", "tags", "facet"] {
         match args.get(key) {
             None | Some(Value::Null) => {}
             Some(Value::Array(items)) => {
@@ -938,6 +940,13 @@ mod tests {
         );
         assert_eq!(
             search_query(&args(
+                json!({"type": "CreativeWork", "exclude_type": ["Article", "Book"]})
+            ))
+            .unwrap(),
+            "type=CreativeWork&exclude_type=Article%2CBook"
+        );
+        assert_eq!(
+            search_query(&args(
                 json!({"type": "JobPosting", "remote": true, "closed": false})
             ))
             .unwrap(),
@@ -956,6 +965,8 @@ mod tests {
             json!({"q": 1}),
             json!({"tags": [1]}),
             json!({"type": [1]}),
+            json!({"exclude_type": [1]}),
+            json!({"exclude_type": true}),
             json!({"facet": [1]}),
             json!({"facet": true}),
             json!({"near": {"lat": 1}}),
