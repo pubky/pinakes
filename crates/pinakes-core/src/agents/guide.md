@@ -164,7 +164,9 @@ member with the most references standing for it.
 **Best match first.** With `q`, the default is `sort=relevance`: a name match first (the exact
 name, then the words as a phrase, then all the words, then a partial name), then a tag label
 equal to `q` or holding it, then the description; `activity` breaks ties. Add `sort=activity` for
-the most popular matches instead. `sort=relevance` needs `q`.
+the most popular matches instead. `sort=relevance` needs `q`. A short `q` (letters and digits, at
+most three characters with the spaces, like `ai` or `btc`; not Hebrew, Arabic or a script written
+without spaces) matches a name only where a word starts (`Airbnb`, not `Rain`).
 
 **Similar links.** `related=<card id>` lists what the people who tagged a card also referenced,
 most shared taggers first. Each row's `because` says why: `shared` (how many of them) and

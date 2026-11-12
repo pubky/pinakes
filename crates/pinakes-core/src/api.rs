@@ -1935,9 +1935,177 @@ fn label_spellings(text: &str) -> Vec<String> {
     spellings.dedup();
     spellings
 }
+/// The longest `q`, in characters (its words and the single spaces between them), that matches
+/// a name only at the start of a word: `lol` finds `LOLcats` but not `jimloli`, `ai` finds `AI`
+/// and `Airbnb` but not `Rain`, `lnd` finds `lightningnetwork/lnd`. Longer text also matches
+/// inside a name and by the trigram fallback (`musical` for `music`). Whole words (name or
+/// description) match at any length.
+pub const SHORT_QUERY_CHARS: usize = 3;
+/// How a short `q` ([`SHORT_QUERY_CHARS`]) of letters and digits matches a name: each word
+/// somewhere in it (`ILIKE`, which the name's trigram index serves for a word of three letters)
+/// and the words, in order and apart only by white space, where a word starts: the lowered name
+/// (lowered as `ILIKE` lowers it) matches [`word_start_regex`] followed by `words` lowered the
+/// same way.
+struct WordStart {
+    patterns: Vec<String>,
+    words: String,
+}
+/// Where a word starts, for [`WordStart`]: the start of the name or a character that is neither
+/// a letter, a digit nor a combining mark ([`word_char`]: white space, punctuation, symbols such
+/// as `™` or `・`, emoji), so `/`, `.` and `-` start words (`lightningnetwork/lnd`). The letters
+/// and digits are Rust's Unicode tables, the same as [`word_start`]'s own test, listed by code
+/// point (never through the database's locale: `[[:alnum:]]` under the C locale would take `É`
+/// for a separator). Built once.
+fn word_start_regex() -> &'static str {
+    static REGEX: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    REGEX.get_or_init(|| {
+        let escape = |c: char| match u32::from(c) {
+            n @ 0..=0xFFFF => format!("\\u{n:04x}"),
+            n => format!("\\U{n:08x}"),
+        };
+        let mut class = String::new();
+        let mut run: Option<(char, char)> = None;
+        let close = |run: (char, char), class: &mut String| {
+            class.push_str(&escape(run.0));
+            if run.1 != run.0 {
+                class.push('-');
+                class.push_str(&escape(run.1));
+            }
+        };
+        for c in (0..=u32::from(char::MAX)).filter_map(char::from_u32) {
+            match (word_char(c), run) {
+                (true, Some((first, last))) if u32::from(last) + 1 == u32::from(c) => {
+                    run = Some((first, c))
+                }
+                (true, _) => {
+                    if let Some(done) = run.replace((c, c)) {
+                        close(done, &mut class);
+                    }
+                }
+                (false, _) => {
+                    if let Some(done) = run.take() {
+                        close(done, &mut class);
+                    }
+                }
+            }
+        }
+        if let Some(done) = run {
+            close(done, &mut class);
+        }
+        format!("(^|[^{class}])")
+    })
+}
+/// A character inside a word, for [`word_start_regex`], outside the scripts written without
+/// spaces ([`unspaced_script`]): a letter or digit (`char::is_alphanumeric`, which counts most
+/// vowel signs as letters), or a combining mark or joiner a word is written with (combining
+/// diacritics, so an accent written apart, Hebrew points, Arabic vowel marks, the viramas and
+/// other marks of the Indic scripts, ZWNJ and ZWJ).
+fn word_char(c: char) -> bool {
+    // A script written without spaces has no word starts of its own: a Latin word right after
+    // one starts there (`AI` in `我的AI助手`).
+    !unspaced_script(c)
+        && (c.is_alphanumeric()
+            || matches!(
+            u32::from(c),
+            0x0300..=0x036F // combining diacritical marks
+                | 0x0483..=0x0489 // Cyrillic combining marks
+                | 0x0591..=0x05BD | 0x05BF | 0x05C1..=0x05C2 | 0x05C4..=0x05C5 | 0x05C7 // Hebrew points
+                | 0x0610..=0x061A | 0x064B..=0x065F | 0x0670 // Arabic marks
+                | 0x06D6..=0x06DC | 0x06DF..=0x06E4 | 0x06E7..=0x06E8 | 0x06EA..=0x06ED
+                | 0x0900..=0x0963 | 0x0966..=0x0DFF // Indic scripts, but the dandas
+                | 0x1AB0..=0x1AFF // combining diacritical marks extended
+                | 0x1DC0..=0x1DFF // combining diacritical marks supplement
+                | 0x200C..=0x200D // ZWNJ, ZWJ
+                | 0x20D0..=0x20FF // combining marks for symbols
+                | 0xFE20..=0xFE2F // combining half marks
+            ))
+}
+/// The [`WordStart`] match of `text`. `None` for longer text, for text with other signs (`c++`
+/// and `c#` stay as precise as a match inside the name), for a script written without spaces
+/// between words (Chinese, Japanese, Thai, ...), where only a match inside a run finds a word,
+/// and for Hebrew and Arabic, which write prefixes onto words ([`prefixing_script`]).
+fn word_start(text: &str) -> Option<WordStart> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let chars =
+        words.iter().map(|w| w.chars().count()).sum::<usize>() + words.len().saturating_sub(1);
+    let plain = |c: char| c.is_alphanumeric() && !unspaced_script(c) && !prefixing_script(c);
+    if words.is_empty() || chars > SHORT_QUERY_CHARS || !words.iter().all(|w| w.chars().all(plain))
+    {
+        return None;
+    }
+    // Letters and digits only: nothing to escape in either pattern.
+    Some(WordStart {
+        patterns: words.iter().map(|w| format!("%{w}%")).collect(),
+        words: words.join("\\s+"),
+    })
+}
+/// `r.name` matches the short text ([`WordStart`]).
+fn push_word_start(sql: &mut QueryBuilder<'_, Postgres>, starts: WordStart) {
+    sql.push("(");
+    for pattern in starts.patterns {
+        sql.push("r.name ILIKE ").push_bind(pattern).push(" AND ");
+    }
+    sql.push("lower(r.name) ~ (")
+        .push_bind(word_start_regex())
+        .push("||lower(")
+        .push_bind(starts.words)
+        .push(")))");
+}
+/// A letter of a script that writes articles and short words onto the next word (Hebrew `ה`,
+/// `ו`; Arabic `ال`), so a short `q` in it keeps the match inside the name: `فن` finds `الفن`.
+fn prefixing_script(c: char) -> bool {
+    matches!(
+        u32::from(c),
+        0x0590..=0x08FF // Hebrew, Arabic, Syriac, Thaana, NKo, Samaritan, Mandaic, Arabic extended
+            | 0xFB1D..=0xFDFF // Hebrew and Arabic presentation forms A
+            | 0xFE70..=0xFEFF // Arabic presentation forms B
+    )
+}
+/// A letter of a script written without spaces between words.
+fn unspaced_script(c: char) -> bool {
+    matches!(
+        u32::from(c),
+        0x0E00..=0x0EFF // Thai, Lao
+            | 0x0F00..=0x0FFF // Tibetan
+            | 0x1000..=0x109F // Myanmar
+            | 0x1780..=0x17FF // Khmer
+            | 0x1980..=0x19DF // New Tai Lue
+            | 0x1A00..=0x1AAF // Buginese, Tai Tham
+            | 0x1B00..=0x1B7F // Balinese
+            | 0x3005..=0x303C // ideographic marks, Hangzhou numerals, kana repeat marks
+            | 0x3040..=0x30FF // Hiragana, Katakana
+            | 0x3100..=0x312F // Bopomofo
+            | 0x31A0..=0x31BF // Bopomofo extended
+            | 0x31F0..=0x31FF // Katakana extensions
+            | 0x3400..=0x4DBF // CJK extension A
+            | 0x4E00..=0x9FFF // CJK
+            | 0xA000..=0xA4CF // Yi
+            | 0xA980..=0xA9DF // Javanese
+            | 0xA9E0..=0xA9FF // Myanmar extended-B
+            | 0xAA60..=0xAA7F // Myanmar extended-A
+            | 0xAA80..=0xAADF // Tai Viet
+            | 0xF900..=0xFAFF // CJK compatibility
+            | 0xFF66..=0xFF9F // halfwidth Katakana
+            | 0x1950..=0x197F // Tai Le
+            | 0x11700..=0x1174F // Ahom
+            | 0x17000..=0x18D7F // Tangut, Khitan
+            | 0x1AFF0..=0x1B2FF // Kana extensions and supplement, Nushu
+            | 0x20000..=0x3FFFF // CJK extensions
+    )
+}
+/// `text` anywhere, as an `ILIKE` pattern.
+fn like_anywhere(text: &str) -> String {
+    format!(
+        "%{}%",
+        text.replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    )
+}
 /// `sort=relevance`: how well `text` matches a row, in whole points, so the activity score
 /// (squashed below 1 by the caller) only breaks ties. Lexicographic: the name's match
-/// (exact 4, the whole phrase as words 3, every word 2, a partial or fuzzy match 1) times
+/// (exact 4, the whole phrase as words 3, every word 2, a partial or fuzzy match 1, for a short
+/// `q` only word starts: [`word_start`]) times
 /// [`NAME_WEIGHT`], then a tag label (equal 2, holding the phrase as words 1) times
 /// [`TAG_WEIGHT`], then the text (the phrase as words in the description 2, every word in the
 /// name and description together 1). Tags count as the filters do: the row's references and its
@@ -1956,24 +2124,26 @@ fn relevance(
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase();
-    let pattern = format!(
-        "%{}%",
-        text.replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_")
-    );
     // The name's words, read once per row.
-    sql.push("(SELECT ((CASE WHEN lower(btrim(regexp_replace(coalesce(r.name,''),'\\s+',' ','g')))=")
-        .push_bind(exact)
-        .push(" THEN 4 WHEN v.name @@ phraseto_tsquery('simple',")
-        .push_bind(text.to_owned())
-        .push(") THEN 3 WHEN v.name @@ websearch_to_tsquery('simple',")
-        .push_bind(text.to_owned())
-        .push(") THEN 2 WHEN r.name ILIKE ")
-        .push_bind(pattern)
-        .push(" OR r.name % ")
-        .push_bind(text.to_owned())
-        .push(format!(" THEN 1 ELSE 0 END)*{NAME_WEIGHT:.1}+coalesce((SELECT max(CASE WHEN f.label=ANY("))
+    sql.push(
+        "(SELECT ((CASE WHEN lower(btrim(regexp_replace(coalesce(r.name,''),'\\s+',' ','g')))=",
+    )
+    .push_bind(exact)
+    .push(" THEN 4 WHEN v.name @@ phraseto_tsquery('simple',")
+    .push_bind(text.to_owned())
+    .push(") THEN 3 WHEN v.name @@ websearch_to_tsquery('simple',")
+    .push_bind(text.to_owned())
+    .push(") THEN 2 WHEN ");
+    match word_start(text) {
+        Some(starts) => push_word_start(sql, starts),
+        None => {
+            sql.push("r.name ILIKE ")
+                .push_bind(like_anywhere(text))
+                .push(" OR r.name % ")
+                .push_bind(text.to_owned());
+        }
+    }
+    sql.push(format!(" THEN 1 ELSE 0 END)*{NAME_WEIGHT:.1}+coalesce((SELECT max(CASE WHEN f.label=ANY("))
         .push_bind(label_spellings(text))
         .push(") THEN 2 WHEN to_tsvector('simple',f.label) @@ phraseto_tsquery('simple',")
         .push_bind(text.to_owned())
@@ -2127,9 +2297,10 @@ fn related_because(sql: &mut QueryBuilder<'_, Postgres>, item: &str, n: &str, au
 }
 /// The version of a search page's shape, in its ETag: a page cached before a field was added
 /// (`because`, then every card's `credits`, then `embed`, then a show's `episodes`) or before its
-/// rows' order changed (`q` ranked by relevance by default) is never answered 304. Move it when a
-/// search row gains or loses a field, or the same query's rows come in another order.
-pub const SEARCH_SHAPE: u32 = 5;
+/// rows' order changed (`q` ranked by relevance by default) or their set (a short `q` matches a
+/// name at word starts only) is never answered 304. Move it when a search row gains or loses a
+/// field, or the same query finds other rows or the same rows in another order.
+pub const SEARCH_SHAPE: u32 = 6;
 /// The most taggers a related row's `because` names.
 pub const BECAUSE_TAGGERS: usize = 3;
 
@@ -2497,20 +2668,20 @@ pub async fn search(
         sql.push(")");
     }
     if let Some(text) = q.q.as_ref().filter(|s| !s.is_empty()) {
-        let prefix = format!(
-            "%{}%",
-            text.replace('\\', "\\\\")
-                .replace('%', "\\%")
-                .replace('_', "\\_")
-        );
         sql.push(" AND (r.search_text @@ websearch_to_tsquery('simple',")
             .push_bind(text.clone())
-            .push(") OR r.name ILIKE ")
-            .push_bind(prefix)
-            .push(" OR r.name % ")
-            .push_bind(text.clone())
-            // A post whose author opted out of search indexing is never found by its text.
-            .push(") AND coalesce(r.doc->'attributes'->>'opted_out','') <> 'true'");
+            .push(") OR ");
+        match word_start(text) {
+            Some(starts) => push_word_start(&mut sql, starts),
+            None => {
+                sql.push("r.name ILIKE ")
+                    .push_bind(like_anywhere(text))
+                    .push(" OR r.name % ")
+                    .push_bind(text.clone());
+            }
+        }
+        // A post whose author opted out of search indexing is never found by its text.
+        sql.push(") AND coalesce(r.doc->'attributes'->>'opted_out','') <> 'true'");
     }
     if related.is_none() {
         // (A related row is referenced by a sampled tagger, who is in scope.)
@@ -3952,6 +4123,70 @@ pub async fn curate_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Up to three letters or digits match at word starts; longer text, other signs and scripts
+    /// written without spaces keep the match inside the name.
+    #[test]
+    fn short_queries_match_word_starts() {
+        let start = |text: &str| word_start(text).map(|w| (w.patterns, w.words));
+        assert_eq!(start("lol"), Some((vec!["%lol%".into()], "lol".into())));
+        assert_eq!(start(" AI "), Some((vec!["%AI%".into()], "AI".into())));
+        assert_eq!(
+            start("a b"),
+            Some((vec!["%a%".into(), "%b%".into()], "a\\s+b".into()))
+        );
+        // Letters, digits and the marks a word is written with never start a word; signs do.
+        for inside in [
+            'a',
+            'É',
+            'ß',
+            'Ж',
+            '²',
+            '①',
+            'ℹ',
+            '\u{301}',
+            '\u{94D}',
+            '\u{200D}',
+            '\u{10330}',
+        ] {
+            assert!(word_char(inside), "{inside:?}");
+        }
+        for sign in [
+            ' ', '/', '.', '-', '_', '™', '・', '🔥', '\u{964}', '\u{218A}', '«', '字', 'の', 'ก',
+        ] {
+            assert!(!word_char(sign), "{sign:?}");
+        }
+        let regex = word_start_regex();
+        assert!(
+            regex.starts_with("(^|[^\\u0030-\\u0039\\u0041-\\u005a"),
+            "{regex}"
+        );
+        assert!(
+            regex.ends_with("])") && regex.contains("\\U0001") && !regex.contains("\\U0002"),
+            "{regex}"
+        );
+        assert_eq!(start("été").unwrap().1, "été");
+        assert_eq!(start("x²").unwrap().1, "x²");
+        for longer_or_other in [
+            "lola",
+            "ab cd",
+            "c++",
+            "c#",
+            "a'b",
+            "a%",
+            "a_",
+            "a\\",
+            "音乐",
+            "ไทย",
+            "ㄅㄆ",
+            "\u{1B001}",
+            "فن",
+            "ספר",
+            "",
+            "  ",
+        ] {
+            assert!(start(longer_or_other).is_none(), "{longer_or_other:?}");
+        }
+    }
     /// A tag equals a text search when it spells the same words joined by a space, a hyphen, an
     /// underscore or nothing, in any case; and an empty `q` ranks nothing by relevance.
     #[test]
