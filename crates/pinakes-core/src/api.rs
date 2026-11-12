@@ -1178,8 +1178,9 @@ pub(crate) fn service_site(uri: &str) -> Option<String> {
 /// The web page that opens a card whose own link is not one (`btc:block/…`, `uniprot:P69905`,
 /// `fr:2026-07257`): the `page_url` its source read it from, as a client named by the source's
 /// site ("mempool.space"), so a client links the card without building a URL. None for a web
-/// link (it opens itself), a Pubky object (its app's clients open it, `resolver::pubky_apps`)
-/// and a page that is not `https:` or longer than a stored client link may be.
+/// link (it opens itself), a Pubky object (its app's clients open it, `resolver::pubky_apps`),
+/// a page that is not `https:`, and one as long as a stored attribute's value may be
+/// ([`model::ATTRIBUTE_VALUE_CAP`]): it may have been cut, and would link a page that is not there.
 fn page_client(uri: &str, doc: &ResourceMeta) -> Option<model::OpenIn> {
     let scheme = uri.split_once(':')?.0.to_ascii_lowercase();
     if matches!(scheme.as_str(), "http" | "https" | "pubky") {
@@ -1187,7 +1188,7 @@ fn page_client(uri: &str, doc: &ResourceMeta) -> Option<model::OpenIn> {
     }
     let page = doc.attributes.get("page_url")?;
     let url = url::Url::parse(page).ok()?;
-    if url.scheme() != "https" || page.len() > 2048 {
+    if url.scheme() != "https" || page.len() >= model::ATTRIBUTE_VALUE_CAP {
         return None;
     }
     let client = present(Some(&doc.site))
@@ -3997,6 +3998,15 @@ mod tests {
         };
         let open_in = |row: Value| serde_json::to_value(card(&row).unwrap().open_in).unwrap();
         let page = "https://mempool.space/tx/ab";
+        let long = format!(
+            "https://commons.wikimedia.org/wiki/File:{}",
+            "%D0%96".repeat(40)
+        );
+        let mut cut = ResourceMeta::new("commons:File:x", "commons", 3600);
+        cut.attributes.insert("page_url".into(), long.clone());
+        let cut = cut.bounded(&["page_url"]).unwrap();
+        let long = cut.attributes["page_url"].clone();
+        assert_eq!(long.len(), model::ATTRIBUTE_VALUE_CAP);
         assert_eq!(
             open_in(row("btc:tx/ab", "mempool.space", Some(page), "ok")),
             json!([{"client": "mempool.space", "url": page}])
@@ -4016,6 +4026,8 @@ mod tests {
             ("btc:tx/ab", Some("http://mempool.space/tx/ab"), "ok"),
             ("btc:tx/ab", Some("javascript:alert(1)"), "ok"),
             ("btc:tx/ab", Some(page), "missing"),
+            // Cut to the attribute cap when it was stored: it may link a page that is not there.
+            ("commons:File:x", Some(&*long), "ok"),
             ("isbn:9780140328721", None, "ok"),
         ] {
             assert_eq!(
