@@ -4049,8 +4049,8 @@ mod tests {
                 "(^|[^[:alnum:]])a\\s+b".into()
             ))
         );
-        assert_eq!(start("été").unwrap().regex, "(^|[^[:alnum:]])été");
-        assert_eq!(start("x²").unwrap().regex, "(^|[^[:alnum:]])x²");
+        assert_eq!(start("été").unwrap().1, "(^|[^[:alnum:]])été");
+        assert_eq!(start("x²").unwrap().1, "(^|[^[:alnum:]])x²");
         for longer_or_other in [
             "lola",
             "ab cd",

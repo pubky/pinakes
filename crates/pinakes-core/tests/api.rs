@@ -4013,7 +4013,10 @@ async fn a_short_query_matches_word_starts_not_inside_words(pool: PgPool) {
     // A sign that is neither a letter nor a digit starts a word too (`owner/repo`).
     assert_eq!(get("/v1/search?q=lnd".into()).await, [lnd]);
     // Several short words: in order, at word starts.
-    assert_eq!(get("/v1/search?q=ai%20s".into()).await, [slop.clone()]);
+    assert_eq!(
+        get("/v1/search?q=ai%20s".into()).await,
+        std::slice::from_ref(&slop)
+    );
     assert!(get("/v1/search?q=s%20ai".into()).await.is_empty());
     // Longer text still matches inside a name: the deck with more taggers first.
     assert_eq!(
