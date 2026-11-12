@@ -1950,12 +1950,22 @@ struct WordStart {
     words: String,
 }
 /// Where a word starts, for [`WordStart`]: the start of the name or a character that is no
-/// letter or digit (white space, punctuation, symbols, emoji), so `/`, `.` and `-` start words
-/// (`lightningnetwork/lnd`). Letters are named by code point, never through the database's
-/// locale (`[[:alnum:]]` under the C locale would take `É` for a separator): ASCII letters and
-/// digits, the letter blocks from U+00C0 on with their combining marks, and the joiners, so a
-/// virama or an accent written apart never starts a word.
-const WORD_START: &str = r"(^|[^0-9A-Za-z\u00aa\u00b5\u00ba\u00c0-\u00d6\u00d8-\u00f6\u00f8-\u1fff\u200c-\u200d\u2070-\u209f\u2100-\u218f\u2c00-\u2dff\u2e80-\u2fff\u3005-\u3007\u3021-\u302f\u3031-\u3035\u3038-\u303c\u3040-\ud7ff\uf900-\ufdff\ufe20-\ufe2f\ufe70-\ufefe\uff10-\uff19\uff21-\uff3a\uff41-\uff5a\uff66-\uffdc\U00010000-\U0001efff\U00020000-\U0003ffff])";
+/// letter or digit (white space, punctuation, symbols such as `™`, emoji), so `/`, `.` and `-`
+/// start words (`lightningnetwork/lnd`). Letters and digits are named by code point, never
+/// through the database's locale (`[[:alnum:]]` under the C locale would take `É` for a
+/// separator): ASCII letters and digits, Latin-1's (`²`, `½`), the letter blocks from U+00C0 on
+/// with their combining marks, the joiners (so a virama or an accent written apart never starts
+/// a word), the letters and digits among super- and subscripts, letterlike symbols and number
+/// forms, enclosed alphanumerics (`①`, `Ⓐ`), and the CJK, Hangul and supplementary planes.
+const WORD_START: &str = concat!(
+    r"(^|[^0-9A-Za-z\u00aa\u00b2-\u00b3\u00b5\u00b9-\u00ba\u00bc-\u00be\u00c0-\u00d6\u00d8-\u00f6\u00f8-\u1fff",
+    r"\u200c-\u200d\u2070-\u2071\u2074-\u2079\u207f-\u2089\u2090-\u209c",
+    r"\u2102\u2107\u210a-\u2113\u2115\u2119-\u211d\u2124\u2126\u2128\u212a-\u212d\u212f-\u2139",
+    r"\u213c-\u213f\u2145-\u2149\u214e\u2150-\u2189\u2460-\u24ff\u2776-\u2793",
+    r"\u2c00-\u2dff\u2e80-\u2fff\u3005-\u3007\u3021-\u302f\u3031-\u3035\u3038-\u303c",
+    r"\u3040-\ud7ff\uf900-\ufdff\ufe20-\ufe2f\ufe70-\ufefe\uff10-\uff19\uff21-\uff3a",
+    r"\uff41-\uff5a\uff66-\uffdc\U00010000-\U0001efff\U00020000-\U0003ffff])"
+);
 /// The [`WordStart`] match of `text`. `None` for longer text, for text with other signs (`c++`
 /// and `c#` stay as precise as a match inside the name), and for a script written without spaces
 /// between words (Chinese, Japanese, Thai, ...), where only a match inside a run finds a word.
@@ -2011,7 +2021,8 @@ fn unspaced_script(c: char) -> bool {
             | 0xAA80..=0xAADF // Tai Viet
             | 0xF900..=0xFAFF // CJK compatibility
             | 0xFF66..=0xFF9F // halfwidth Katakana
-            | 0x1AFF0..=0x1B16F // Kana extensions and supplement
+            | 0x17000..=0x18D7F // Tangut, Khitan
+            | 0x1AFF0..=0x1B2FF // Kana extensions and supplement, Nushu
             | 0x20000..=0x3FFFF // CJK extensions
     )
 }

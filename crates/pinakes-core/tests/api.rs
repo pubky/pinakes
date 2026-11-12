@@ -3999,6 +3999,20 @@ async fn a_short_query_matches_word_starts_not_inside_words(pool: PgPool) {
         ("ballad", 1700, 2),
     )
     .await;
+    let trademark = relevance_card(
+        &pool,
+        18,
+        ("Acme™Zqx", "A brand.", "WebPage"),
+        ("brand", 1800, 1),
+    )
+    .await;
+    relevance_card(
+        &pool,
+        19,
+        ("x²zqy", "A formula.", "WebPage"),
+        ("math", 1900, 2),
+    )
+    .await;
     let chinese = relevance_card(
         &pool,
         13,
@@ -4031,8 +4045,10 @@ async fn a_short_query_matches_word_starts_not_inside_words(pool: PgPool) {
         get("/v1/search?q=btc".into()).await,
         [map.clone(), btcpay.clone()]
     );
-    // A sign that is neither a letter nor a digit starts a word too (`owner/repo`).
+    // A sign that is neither a letter nor a digit starts a word too (`owner/repo`, `™`); a
+    // superscript digit is a digit.
     assert_eq!(get("/v1/search?q=lnd".into()).await, [lnd]);
+    assert_eq!(get("/v1/search?q=zq".into()).await, [trademark]);
     // The name is lowered as for `ILIKE`, so a capital with its own case rule still starts a word
     // (where the database's locale lowers `İ` to `i` at all: a UTF-8 one, not plain C).
     let unicode_lower: bool = sqlx::query_scalar("SELECT lower('İ')='i'")
