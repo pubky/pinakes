@@ -2,7 +2,7 @@
 //! the other explorers in `also_on`, each of those links reads back as the card, and the block's
 //! links on other explorers that people tag are aliases of it. And a chain card's `related` list,
 //! read with the card from recorded answers (mempool.space, or Esplora when it fails), on the
-//! resource read.
+//! resource read, with the mempool.space page that opens it in `open_in`.
 use axum::{body::Body, http::Request};
 use http_body_util::BodyExt;
 use pinakes_core::{
@@ -207,6 +207,12 @@ async fn a_block_card_lists_its_neighbours_and_coinbase(pool: PgPool) {
     assert_eq!(read["related"], expected, "{read}");
     assert_eq!(read["related_total"], Value::Null);
     assert_eq!(read["facts"]["pool"], "BTCC");
+    // Its link is not a web page: the card opens in the mempool.space page it was read from.
+    assert_eq!(
+        read["open_in"],
+        serde_json::json!([{"client": "mempool.space", "url": format!("https://mempool.space/block/{HASH}")}]),
+        "{read}"
+    );
 
     // mempool.space answers a server error (any body): the fallback reads the same parts.
     let mut answers = block_answers("https://blockstream.info/api", "block", "esplora/");

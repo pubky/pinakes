@@ -9,6 +9,8 @@ use utoipa::ToSchema;
 
 pub const DOCUMENT_CAP: usize = 8192;
 pub const ATTRIBUTE_CAP: usize = 32;
+/// The most bytes of an attribute's value kept (`bounded` cuts a longer one).
+pub const ATTRIBUTE_VALUE_CAP: usize = 256;
 /// The longest description a document keeps (bytes).
 pub const DESCRIPTION_CAP: usize = 2048;
 /// The most credits a document keeps: one per enriched field.
@@ -589,7 +591,7 @@ impl ResourceMeta {
             self.attributes.pop_last();
         }
         for v in self.attributes.values_mut() {
-            truncate(v, 256);
+            truncate(v, ATTRIBUTE_VALUE_CAP);
         }
         for (value, max) in [
             (&mut self.name, 512),

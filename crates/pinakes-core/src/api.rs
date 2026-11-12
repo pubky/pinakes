@@ -795,7 +795,9 @@ pub struct Card {
     /// feed's.
     pub collections: i64,
     /// The clients that open a Pubky app's object, from the app's profile (docs/pubky-apps.md);
-    /// on an event card, those of the event object it names. Empty for every other card.
+    /// on an event card, those of the event object it names. On a card whose link is not a web page
+    /// (`btc:`, `uniprot:`, ...), the web page its source reads it from, named by its site. Empty for
+    /// every other card.
     pub open_in: Vec<model::OpenIn>,
     /// OpenStreetMap cards, events placed at an OSM venue and events whose zone was derived from
     /// coordinates: the ODbL attribution to display with the card.
@@ -1173,6 +1175,38 @@ pub(crate) fn service_site(uri: &str) -> Option<String> {
     }
     crate::lookups::service_name(uri).map(Into::into)
 }
+/// The web page that opens a card whose own link is not one (`btc:block/…`, `uniprot:P69905`,
+/// `fr:2026-07257`): the `page_url` its source read it from, as a client named by the source's
+/// site ("mempool.space"), so a client links the card without building a URL. None for a web
+/// link (it opens itself), a Pubky object (its app's clients open it, `resolver::pubky_apps`),
+/// a page that is not `https:` or names a user or a credential, and one within a character of a
+/// stored attribute's cap ([`model::ATTRIBUTE_VALUE_CAP`]; `model::truncate` cuts on a character
+/// boundary, up to 3 bytes short of it): it may have been cut, and would link a page that is not
+/// there.
+fn page_client(uri: &str, doc: &ResourceMeta) -> Option<model::OpenIn> {
+    let scheme = uri.split_once(':')?.0.to_ascii_lowercase();
+    if matches!(scheme.as_str(), "http" | "https" | "pubky") {
+        return None;
+    }
+    let page = doc.attributes.get("page_url")?;
+    let url = url::Url::parse(page).ok()?;
+    if url.scheme() != "https"
+        || page.len() + 3 >= model::ATTRIBUTE_VALUE_CAP
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || crate::capability::is_capability_url(&url)
+    {
+        return None;
+    }
+    let fits = |s: &String| s.len() <= 64;
+    let client = present(Some(&doc.site))
+        .filter(fits)
+        .or_else(|| url.host_str().map(str::to_owned).filter(fits))?;
+    Some(model::OpenIn {
+        client,
+        url: page.clone(),
+    })
+}
 /// A card from a row of `search_unit` (or a row shaped like one).
 pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
     let doc: Option<ResourceMeta> = if row["doc"].get("type").is_some() {
@@ -1222,6 +1256,9 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
             }
             _ => vec![],
         },
+        (None, Some(d)) if d.open_in.is_empty() && status != "missing" => {
+            page_client(&uri, d).into_iter().collect()
+        }
         (None, Some(d)) => d.open_in.clone(),
         (None, None) => crate::resolver::pubky_apps::open_in(&uri),
     };
@@ -2296,11 +2333,13 @@ fn related_because(sql: &mut QueryBuilder<'_, Postgres>, item: &str, n: &str, au
     ));
 }
 /// The version of a search page's shape, in its ETag: a page cached before a field was added
-/// (`because`, then every card's `credits`, then `embed`, then a show's `episodes`) or before its
-/// rows' order changed (`q` ranked by relevance by default) or their set (a short `q` matches a
-/// name at word starts only) is never answered 304. Move it when a search row gains or loses a
-/// field, or the same query finds other rows or the same rows in another order.
-pub const SEARCH_SHAPE: u32 = 6;
+/// (`because`, then every card's `credits`, then `embed`, then a show's `episodes`), before a
+/// field's content changed for rows already stored (`open_in` naming the web page of a card whose
+/// link is not one), or before its rows' order changed (`q` ranked by relevance by default) or
+/// their set (a short `q` matches a name at word starts only) is never answered 304. Move it when
+/// a search row gains or loses a field, a field reads otherwise for stored rows, or the same query
+/// finds other rows or the same rows in another order.
+pub const SEARCH_SHAPE: u32 = 7;
 /// The most taggers a related row's `because` names.
 pub const BECAUSE_TAGGERS: usize = 3;
 
@@ -4123,6 +4162,85 @@ pub async fn curate_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A card whose link is not a web page opens in the `https:` page its source read it from,
+    /// named by its site (else the page's host); a web link, a Pubky object, an `http:` page and
+    /// a card gone upstream get none, and a card's own clients stay as they are.
+    #[test]
+    fn a_card_whose_link_is_not_a_web_page_opens_in_its_page() {
+        let row = |uri: &str, site: &str, page: Option<&str>, status: &str| {
+            let mut doc = ResourceMeta::new(uri, "mempool", 3600);
+            doc.site = site.into();
+            if let Some(page) = page {
+                doc.attributes.insert("page_url".into(), page.into());
+            }
+            json!({"id": "0".repeat(32), "uri": uri, "status": status, "doc": doc})
+        };
+        let open_in = |row: Value| serde_json::to_value(card(&row).unwrap().open_in).unwrap();
+        let page = "https://mempool.space/tx/ab";
+        let long = format!(
+            "https://commons.wikimedia.org/wiki/File:{}",
+            "%D0%96".repeat(40)
+        );
+        let mut cut = ResourceMeta::new("commons:File:x", "commons", 3600);
+        cut.attributes.insert("page_url".into(), long.clone());
+        let cut = cut.bounded(&["page_url"]).unwrap();
+        let long = cut.attributes["page_url"].clone();
+        assert_eq!(long.len(), model::ATTRIBUTE_VALUE_CAP);
+        let mut cut = ResourceMeta::new("commons:File:x", "commons", 3600);
+        let raw = format!(
+            "https://commons.wikimedia.org/wiki/File:x{}",
+            "€".repeat(80)
+        );
+        cut.attributes.insert("page_url".into(), raw);
+        let wide = cut.bounded(&["page_url"]).unwrap().attributes["page_url"].clone();
+        assert!(wide.len() < model::ATTRIBUTE_VALUE_CAP && url::Url::parse(&wide).is_ok());
+        assert_eq!(
+            open_in(row("btc:tx/ab", "mempool.space", Some(page), "ok")),
+            json!([{"client": "mempool.space", "url": page}])
+        );
+        assert_eq!(
+            open_in(row(
+                "uniprot:P69905",
+                "",
+                Some("https://www.uniprot.org/uniprotkb/P69905"),
+                "ok"
+            )),
+            json!([{"client": "www.uniprot.org", "url": "https://www.uniprot.org/uniprotkb/P69905"}])
+        );
+        for (uri, page, status) in [
+            ("https://example.org/a", Some("https://example.org/a"), "ok"),
+            ("pubky://u/pub/app/x", Some("https://app.example/x"), "ok"),
+            ("btc:tx/ab", Some("http://mempool.space/tx/ab"), "ok"),
+            ("btc:tx/ab", Some("javascript:alert(1)"), "ok"),
+            ("btc:tx/ab", Some(page), "missing"),
+            // Cut to the attribute cap when it was stored: it may link a page that is not there.
+            ("commons:File:x", Some(&*long), "ok"),
+            // Cut on a character boundary, short of the cap.
+            ("commons:File:x", Some(&*wide), "ok"),
+            // A user or a credential in the page.
+            ("btc:tx/ab", Some("https://user@mempool.space/tx/ab"), "ok"),
+            ("btc:tx/ab", Some("https://u:p@mempool.space/tx/ab"), "ok"),
+            (
+                "btc:tx/ab",
+                Some("https://mempool.space/tx/ab?token=x"),
+                "ok",
+            ),
+            ("isbn:9780140328721", None, "ok"),
+        ] {
+            assert_eq!(
+                open_in(row(uri, "x", page, status)),
+                json!([]),
+                "{uri} {page:?} {status}"
+            );
+        }
+        // Its own clients win over the page.
+        let mut own = row("btc:tx/ab", "mempool.space", Some(page), "ok");
+        own["doc"]["open_in"] = json!([{"client": "App", "url": "https://app.example/ab"}]);
+        assert_eq!(
+            open_in(own),
+            json!([{"client": "App", "url": "https://app.example/ab"}])
+        );
+    }
     /// Up to three letters or digits match at word starts; longer text, other signs and scripts
     /// written without spaces keep the match inside the name.
     #[test]

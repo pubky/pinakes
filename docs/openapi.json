@@ -220,7 +220,7 @@
             ]
           },
           "open_in": {
-            "description": "The clients that open a Pubky app's object, from the app's profile (docs/pubky-apps.md);\non an event card, those of the event object it names. Empty for every other card.",
+            "description": "The clients that open a Pubky app's object, from the app's profile (docs/pubky-apps.md);\non an event card, those of the event object it names. On a card whose link is not a web page\n(`btc:`, `uniprot:`, ...), the web page its source reads it from, named by its site. Empty for\nevery other card.",
             "items": {
               "$ref": "#/components/schemas/OpenIn"
             },
