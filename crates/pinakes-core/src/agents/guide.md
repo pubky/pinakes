@@ -70,6 +70,7 @@ lists every card of another type (links with no type yet are left out too).
 `facet` counts over every match of a search, not just the page: any of `type`, `tags`, `host`
 (services: `{host, site, count}`, the `host` as `host=` takes it) and `category` (categories
 such as OpenStreetMap's `amenity/cafe`, as `category=` takes them), e.g. `facet=type,host`.
+`host` takes several hosts too, any of them: `host=open.spotify.com,www.deezer.com`.
 
 ## Recipes
 
