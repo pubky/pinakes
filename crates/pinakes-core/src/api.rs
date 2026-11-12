@@ -795,7 +795,9 @@ pub struct Card {
     /// feed's.
     pub collections: i64,
     /// The clients that open a Pubky app's object, from the app's profile (docs/pubky-apps.md);
-    /// on an event card, those of the event object it names. Empty for every other card.
+    /// on an event card, those of the event object it names. On a card whose link is not a web page
+    /// (`btc:`, `uniprot:`, ...), the web page its source reads it from, named by its site. Empty for
+    /// every other card.
     pub open_in: Vec<model::OpenIn>,
     /// OpenStreetMap cards, events placed at an OSM venue and events whose zone was derived from
     /// coordinates: the ODbL attribution to display with the card.
@@ -1173,6 +1175,29 @@ pub(crate) fn service_site(uri: &str) -> Option<String> {
     }
     crate::lookups::service_name(uri).map(Into::into)
 }
+/// The web page that opens a card whose own link is not one (`btc:block/…`, `uniprot:P69905`,
+/// `fr:2026-07257`): the `page_url` its source read it from, as a client named by the source's
+/// site ("mempool.space"), so a client links the card without building a URL. None for a web
+/// link (it opens itself), a Pubky object (its app's clients open it, `resolver::pubky_apps`)
+/// and a page that is not `https:` or longer than a stored client link may be.
+fn page_client(uri: &str, doc: &ResourceMeta) -> Option<model::OpenIn> {
+    let scheme = uri.split_once(':')?.0.to_ascii_lowercase();
+    if matches!(scheme.as_str(), "http" | "https" | "pubky") {
+        return None;
+    }
+    let page = doc.attributes.get("page_url")?;
+    let url = url::Url::parse(page).ok()?;
+    if url.scheme() != "https" || page.len() > 2048 {
+        return None;
+    }
+    let client = present(Some(&doc.site))
+        .filter(|s| s.len() <= 64)
+        .or_else(|| url.host_str().map(str::to_owned))?;
+    Some(model::OpenIn {
+        client,
+        url: page.clone(),
+    })
+}
 /// A card from a row of `search_unit` (or a row shaped like one).
 pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
     let doc: Option<ResourceMeta> = if row["doc"].get("type").is_some() {
@@ -1222,6 +1247,9 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
             }
             _ => vec![],
         },
+        (None, Some(d)) if d.open_in.is_empty() && status != "missing" => {
+            page_client(&uri, d).into_iter().collect()
+        }
         (None, Some(d)) => d.open_in.clone(),
         (None, None) => crate::resolver::pubky_apps::open_in(&uri),
     };
@@ -2126,10 +2154,12 @@ fn related_because(sql: &mut QueryBuilder<'_, Postgres>, item: &str, n: &str, au
     ));
 }
 /// The version of a search page's shape, in its ETag: a page cached before a field was added
-/// (`because`, then every card's `credits`, then `embed`, then a show's `episodes`) or before its
-/// rows' order changed (`q` ranked by relevance by default) is never answered 304. Move it when a
-/// search row gains or loses a field, or the same query's rows come in another order.
-pub const SEARCH_SHAPE: u32 = 5;
+/// (`because`, then every card's `credits`, then `embed`, then a show's `episodes`), before a
+/// field's content changed for rows already stored (`open_in` naming the web page of a card whose
+/// link is not one) or before its rows' order changed (`q` ranked by relevance by default) is
+/// never answered 304. Move it when a search row gains or loses a field, a field reads otherwise
+/// for stored rows, or the same query's rows come in another order.
+pub const SEARCH_SHAPE: u32 = 6;
 /// The most taggers a related row's `because` names.
 pub const BECAUSE_TAGGERS: usize = 3;
 
@@ -3952,6 +3982,56 @@ pub async fn curate_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A card whose link is not a web page opens in the `https:` page its source read it from,
+    /// named by its site (else the page's host); a web link, a Pubky object, an `http:` page and
+    /// a card gone upstream get none, and a card's own clients stay as they are.
+    #[test]
+    fn a_card_whose_link_is_not_a_web_page_opens_in_its_page() {
+        let row = |uri: &str, site: &str, page: Option<&str>, status: &str| {
+            let mut doc = ResourceMeta::new(uri, "mempool", 3600);
+            doc.site = site.into();
+            if let Some(page) = page {
+                doc.attributes.insert("page_url".into(), page.into());
+            }
+            json!({"id": "0".repeat(32), "uri": uri, "status": status, "doc": doc})
+        };
+        let open_in = |row: Value| serde_json::to_value(card(&row).unwrap().open_in).unwrap();
+        let page = "https://mempool.space/tx/ab";
+        assert_eq!(
+            open_in(row("btc:tx/ab", "mempool.space", Some(page), "ok")),
+            json!([{"client": "mempool.space", "url": page}])
+        );
+        assert_eq!(
+            open_in(row(
+                "uniprot:P69905",
+                "",
+                Some("https://www.uniprot.org/uniprotkb/P69905"),
+                "ok"
+            )),
+            json!([{"client": "www.uniprot.org", "url": "https://www.uniprot.org/uniprotkb/P69905"}])
+        );
+        for (uri, page, status) in [
+            ("https://example.org/a", Some("https://example.org/a"), "ok"),
+            ("pubky://u/pub/app/x", Some("https://app.example/x"), "ok"),
+            ("btc:tx/ab", Some("http://mempool.space/tx/ab"), "ok"),
+            ("btc:tx/ab", Some("javascript:alert(1)"), "ok"),
+            ("btc:tx/ab", Some(page), "missing"),
+            ("isbn:9780140328721", None, "ok"),
+        ] {
+            assert_eq!(
+                open_in(row(uri, "x", page, status)),
+                json!([]),
+                "{uri} {page:?} {status}"
+            );
+        }
+        // Its own clients win over the page.
+        let mut own = row("btc:tx/ab", "mempool.space", Some(page), "ok");
+        own["doc"]["open_in"] = json!([{"client": "App", "url": "https://app.example/ab"}]);
+        assert_eq!(
+            open_in(own),
+            json!([{"client": "App", "url": "https://app.example/ab"}])
+        );
+    }
     /// A tag equals a text search when it spells the same words joined by a space, a hyphen, an
     /// underscore or nothing, in any case; and an empty `q` ranks nothing by relevance.
     #[test]
