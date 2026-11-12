@@ -646,6 +646,10 @@ fn search_query(args: &JsonObject) -> Result<String, Failure> {
                 let items: Option<Vec<&str>> = items.iter().map(Value::as_str).collect();
                 let items =
                     items.ok_or_else(|| Failure::bad(format!("`{key}` is an array of strings")))?;
+                // No type to leave out is not "every type": an exclusion lists typed cards only.
+                if key == "exclude_type" && items.is_empty() {
+                    return Err(Failure::bad("`exclude_type` names at least one type"));
+                }
                 if !items.is_empty() {
                     pairs.push((key, items.join(",")));
                 }
@@ -967,6 +971,7 @@ mod tests {
             json!({"type": [1]}),
             json!({"exclude_type": [1]}),
             json!({"exclude_type": true}),
+            json!({"exclude_type": []}),
             json!({"facet": [1]}),
             json!({"facet": true}),
             json!({"near": {"lat": 1}}),

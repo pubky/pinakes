@@ -619,6 +619,8 @@ pub struct SearchQuery {
     /// its subtypes (`Event` leaves `MusicEvent` out too). A link with no type yet (not read, or
     /// unreachable) is left out, as the `type` facet does not count it. Combines with `type`:
     /// `type=CreativeWork&exclude_type=Article`.
+    // Left out of the query's hash when absent, so a query without it keeps its cursor and ETag.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub exclude_type: Option<String>,
     pub category: Option<String>,
     pub host: Option<String>,
@@ -1930,7 +1932,10 @@ fn validate_search(q: &SearchQuery) -> Result<Vec<String>, ApiError> {
         }
     }
     if let Some(types) = &q.type_name {
-        search_types(types)?;
+        search_types("type", types, SEARCH_TYPES_MAX)?;
+    }
+    if let Some(types) = &q.exclude_type {
+        search_types("exclude_type", types, SEARCH_EXCLUDED_TYPES_MAX)?;
     }
     for text in [&q.q, &q.category, &q.host].into_iter().flatten() {
         if text.len() > 256 {
@@ -4325,6 +4330,26 @@ mod tests {
         ] {
             assert!(start(longer_or_other).is_none(), "{longer_or_other:?}");
         }
+    }
+    /// A query without `exclude_type` hashes as it did before the parameter existed: its cursors
+    /// and ETags do not move; with it, the hash differs.
+    #[test]
+    fn an_absent_exclusion_is_not_in_the_query_hash() {
+        let plain = SearchQuery {
+            type_name: Some("Event".into()),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&plain).unwrap();
+        assert!(value.get("exclude_type").is_none(), "{value}");
+        assert_eq!(value["type"], "Event");
+        let excluding = SearchQuery {
+            exclude_type: Some("Event".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_value(&excluding).unwrap()["exclude_type"],
+            "Event"
+        );
     }
     /// A tag equals a text search when it spells the same words joined by a space, a hyphen, an
     /// underscore or nothing, in any case; and an empty `q` ranks nothing by relevance.
