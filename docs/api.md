@@ -695,7 +695,8 @@ POST /v1/changes/lookup {"resource_ids":["81cefcae5a6a468cfc27ff1c1b420fce","5bc
 | `q` | Full-text name/description search with a trigram/partial-name fallback; at most 256 bytes. A short `q` (letters and digits, at most three characters counting one space between words, e.g. `ai`, `lol`, `btc`) matches a name only at the start of a word (`Airbnb`, not `Rain`; a sign such as `/` or `™` starts a word too) and the description by whole words; several short words match in that order, apart only by white space, each at a word start (`a s` finds `A slow song`, not `As lop`); text with other signs (`c++`), in a script written without spaces (Chinese, Japanese, Thai) or in Hebrew or Arabic (which write prefixes onto words) still matches inside the name. Ranked by `relevance` unless `sort` says otherwise ([Ranking](#search)). A post whose author opted out of search indexing (a read's `facts.opted_out`: Mastodon's `indexable: false` or `noindex`, Bluesky's `!no-unauthenticated`) never matches |
 | `type` | A schema.org type, ancestors included (`Event` matches `MusicEvent`; `Place` matches cafés and other `LocalBusiness` types), or up to 10 comma-separated: any of them (`type=MusicRecording,MusicAlbum,MusicGroup`). An unknown type is a 400 that names it (only a name of letters and digits is repeated; anything else, such as a URL, gets a general message) |
 | `exclude_type` | Every card of another type: a schema.org type, or up to 50 comma-separated, each with its subtypes (`exclude_type=Event` leaves `MusicEvent` out too), in the same spelling as `type` (an unknown type is a 400 the same way). A link with no type yet (not read, or unreachable) is left out, as the `type` facet does not count it, so a client that groups types can list "every other type" as the links its type facet counts outside its groups (`exclude_type=` its groups' types). Combines with `type`: `type=CreativeWork&exclude_type=Article` |
-| `category`, `host` | Exact filters |
+| `category` | Exact filter |
+| `host` | A host exactly as the links' URLs name it (`www.youtube.com` and `youtube.com` are two hosts), or up to 10 comma-separated: links on any of them (`host=open.spotify.com,www.deezer.com`); spaces around a host are ignored. More than 10, an empty one or one over 256 bytes is a 400 that names `host` |
 | `key` | Links carrying one exact identifier, on any service and in any spelling: `mbid:{uuid}` (a MusicBrainz recording, release, release group or artist), `wikidata:{Q-id}`, `isrc:{code}` (any letter case, hyphens allowed), `upc:{barcode}` (a UPC, EAN or GTIN in any of its lengths, check digit verified), `isbn:{ISBN-10 or ISBN-13}` (an edition), `imdb:{tt…}` (a film or series), `podcast:{GUID}` (a show), `podcast:enclosure:{URL}` (an episode, by the file it plays), `osm:{node|way|relation}/{id}`, `doi:{DOI}`, `gtin:{barcode}` (a [product](#products), in any of its lengths), any key exactly as a resource read lists it in `keys` (`mb:recording:{mbid}`, `podcast:guid:{GUID}`, `podcast:apple:{id}`, …), or another namespace a source records (its page in [docs/sources](sources/README.md#also-on) names its namespaces and how each is normalized), as the [also-on](#also-on) sources found them as keys or facts (`mbid:` also the MBID a MusicBrainz page was merged from, its `mbid_was` fact, and with `type=MusicEvent` an artist's events, by their performers), or as an exact lookup by that key named the link; anything else is 400 |
 | `related` | A resource ID: what the people who tagged it also referenced, ranked by how many of them did ([Related](#related)); not with `sort` |
 | `tags` | Comma-separated labels; at most 5, each 1–128 bytes |
@@ -782,6 +783,9 @@ list most frequent first, ties by value. Each value is what its filter takes, so
 offer it as a choice: filtering by a `tags`, `host` or `category` entry finds exactly its count
 (one per card, an event occurrence counting as its own card). A `type` entry counts that exact
 type; `type=` also finds its subtypes, so its total is the counts rolled up along `type_path`.
+A facet counts the set its own filter narrowed too: with `host=` set, `facets.host` lists only the
+picked hosts, each with its own count, as `type=` narrows `facets.type`. To offer every choice
+next to the picked ones, read the facet from the same search without its own filter.
 
 | Facet | Entries |
 | --- | --- |
@@ -1913,7 +1917,7 @@ layers, with the caller's address:
 
 | Tool | Request | Answer |
 | --- | --- | --- |
-| `search` | `GET /v1/search` with `q`, `type` (array), `tags` (array), `match`, `near` (`{lat, lon, radius}`), `bbox` (`[west, south, east, north]`), `from`, `to`, `key`, `host`, `category`, `sort`, `window`, `collapse`, `reach`, `boost`, `viewer`, `limit`, `cursor`, `facet` (array of `type`, `tags`, `host`, `category`) | Compact cards, `cursor`, `facets` |
+| `search` | `GET /v1/search` with `q`, `type` (array), `tags` (array), `match`, `near` (`{lat, lon, radius}`), `bbox` (`[west, south, east, north]`), `from`, `to`, `key`, `host` (array), `category`, `sort`, `window`, `collapse`, `reach`, `boost`, `viewer`, `limit`, `cursor`, `facet` (array of `type`, `tags`, `host`, `category`) | Compact cards, `cursor`, `facets` |
 | `card` | `GET /v1/resources/by-uri`; with `resolve: true` and an unknown link, `POST /v1/resolve` | One compact card with `category`, `address`, `facts`, `related` and `related_total` (when it has them), `aliases` (at most 10) and the event fields |
 | `lookup` | `GET /v1/search?key=` | Compact cards |
 | `group` | `GET /v1/groups/{id}` | `id`, `type`, `keys`, every member's compact card, and `best`: the most complete readable member of the group's type |

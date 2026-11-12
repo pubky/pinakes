@@ -3575,6 +3575,7 @@
             }
           },
           {
+            "description": "One host, or up to 10 comma-separated: links on any of them (OR), each exactly as the\nlinks' URLs name it (`www.youtube.com` and `youtube.com` are two hosts); spaces around a\nhost are ignored.",
             "in": "query",
             "name": "host",
             "required": false,

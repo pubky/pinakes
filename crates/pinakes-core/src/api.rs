@@ -623,6 +623,9 @@ pub struct SearchQuery {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exclude_type: Option<String>,
     pub category: Option<String>,
+    /// One host, or up to 10 comma-separated: links on any of them (OR), each exactly as the
+    /// links' URLs name it (`www.youtube.com` and `youtube.com` are two hosts); spaces around a
+    /// host are ignored.
     pub host: Option<String>,
     /// Links carrying one exact identifier, on any service and in any spelling:
     /// `mbid:{uuid}` (a MusicBrainz recording, release, release group or artist, or the MBID a
@@ -1794,6 +1797,26 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
     card.maybe_same = same_events(row);
     Ok(ResourceDetail { card, details })
 }
+/// The most hosts a search's `host` takes.
+pub const SEARCH_HOSTS_MAX: usize = 10;
+/// The hosts a search's `host` names (1 to [`SEARCH_HOSTS_MAX`], comma-separated, each at most
+/// 256 bytes), each as given but for spaces around it (no URL holds a host with one), without
+/// repeats. No host is echoed in the refusal.
+fn search_hosts(hosts: &str) -> Result<Vec<String>, ApiError> {
+    let names: Vec<&str> = hosts.split(',').map(str::trim).collect();
+    if names.len() > SEARCH_HOSTS_MAX || names.iter().any(|n| n.is_empty() || n.len() > 256) {
+        return Err(ApiError::bad(format!(
+            "host takes 1–{SEARCH_HOSTS_MAX} hosts, comma-separated, each at most 256 bytes"
+        )));
+    }
+    let mut known: Vec<String> = Vec::with_capacity(names.len());
+    for name in names {
+        if !known.iter().any(|k| k == name) {
+            known.push(name.to_owned());
+        }
+    }
+    Ok(known)
+}
 /// The most types a search's `type` takes.
 pub const SEARCH_TYPES_MAX: usize = 10;
 /// The most types a search's `exclude_type` takes: enough for a client to leave out every type its
@@ -1937,7 +1960,10 @@ fn validate_search(q: &SearchQuery) -> Result<Vec<String>, ApiError> {
     if let Some(types) = &q.exclude_type {
         search_types("exclude_type", types, SEARCH_EXCLUDED_TYPES_MAX)?;
     }
-    for text in [&q.q, &q.category, &q.host].into_iter().flatten() {
+    if let Some(hosts) = &q.host {
+        search_hosts(hosts)?;
+    }
+    for text in [&q.q, &q.category].into_iter().flatten() {
         if text.len() > 256 {
             return Err(ApiError::bad("filter exceeds 256 bytes"));
         }
@@ -2352,10 +2378,11 @@ fn related_because(sql: &mut QueryBuilder<'_, Postgres>, item: &str, n: &str, au
 /// (`because`, then every card's `credits`, then `embed`, then a show's `episodes`), before a
 /// field's content changed for rows already stored (`open_in` naming the web page of a card whose
 /// link is not one), or before its rows' order changed (`q` ranked by relevance by default) or
-/// their set (a short `q` matches a name at word starts only) is never answered 304. Move it when
+/// their set (a short `q` matches a name at word starts only; `host` lists any of several hosts,
+/// where a comma-separated value found nothing before) is never answered 304. Move it when
 /// a search row gains or loses a field, a field reads otherwise for stored rows, or the same query
 /// finds other rows or the same rows in another order.
-pub const SEARCH_SHAPE: u32 = 7;
+pub const SEARCH_SHAPE: u32 = 8;
 /// The most taggers a related row's `because` names.
 pub const BECAUSE_TAGGERS: usize = 3;
 
@@ -2707,13 +2734,14 @@ pub async fn search(
             .push_bind(at)
             .push(",false)");
     }
-    for (column, value) in [("r.category", &q.category), ("r.host", &q.host)] {
-        if let Some(value) = value {
-            sql.push(" AND ")
-                .push(column)
-                .push("=")
-                .push_bind(value.clone());
-        }
+    if let Some(category) = &q.category {
+        sql.push(" AND r.category=").push_bind(category.clone());
+    }
+    if let Some(hosts) = &q.host {
+        // Any of the hosts, each exactly as the links' URLs name it.
+        sql.push(" AND r.host=ANY(")
+            .push_bind(search_hosts(hosts)?)
+            .push(")");
     }
     // Exact identifiers: a source's live keys or facts on the resource, or a key an exact lookup
     // named it by (aliases read as roots); never a switched-off source's.
@@ -2904,12 +2932,13 @@ pub async fn search(
         // One pass over the set: per host its count, a few of its links and the site name its
         // documents give most often (an event reference's stand-in names only the host), for
         // the service's name (`HostFacet::site`). A host that `pubky://` objects use is a user's
-        // key, not a service; a value over the filter's 256 bytes could not be filtered by.
+        // key, not a service; a value over the filter's 256 bytes, or one with a comma (which
+        // `host=` reads as two), could not be filtered by.
         sql.push("coalesce((SELECT jsonb_agg(to_jsonb(t) ORDER BY count DESC,host) FROM (SELECT r.host,count(DISTINCT r.unit_id) AS count,(array_agg(DISTINCT r.uri ORDER BY r.uri))[1:")
             .push_bind(FACET_SITE_SAMPLE)
             .push("] AS uris,mode() WITHIN GROUP (ORDER BY nullif(nullif(r.doc->>'site',''),r.host)) AS site FROM ")
             .push(counted)
-            .push(" r WHERE r.host IS NOT NULL AND r.host<>'' AND octet_length(r.host)<=256 GROUP BY r.host HAVING bool_and(r.uri NOT LIKE 'pubky://%') ORDER BY count DESC,r.host LIMIT ")
+            .push(" r WHERE r.host IS NOT NULL AND r.host<>'' AND octet_length(r.host)<=256 AND strpos(r.host,',')=0 GROUP BY r.host HAVING bool_and(r.uri NOT LIKE 'pubky://%') ORDER BY count DESC,r.host LIMIT ")
             .push_bind(FACET_LIST_CAP)
             .push(") t),'[]')");
     } else {

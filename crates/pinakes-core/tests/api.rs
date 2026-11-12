@@ -3239,6 +3239,148 @@ async fn host_and_category_facets_count_what_their_filters_take(pool: PgPool) {
     assert_eq!(all["facets"]["category"].as_array().unwrap().len(), 2);
 }
 
+/// `host` takes up to 10 hosts, comma-separated: links on any of them, each host exactly as the
+/// links' URLs name it (spaces around one left out). One host finds what it found before; a
+/// repeat counts once; the host facet
+/// counts the picked hosts each on its own (as the type facet counts the picked types); over 10
+/// hosts, or an empty one, is a 400 that names `host` and echoes none of them; a cursor pages only
+/// the hosts that made it.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn search_host_takes_several_hosts(pool: PgPool) {
+    let links = [
+        "https://one.example.com/a",
+        "https://one.example.com/b",
+        "https://two.example.com/c",
+        "https://three.example.com/d",
+        "https://www.two.example.com/e",
+    ];
+    for (i, uri) in links.iter().enumerate() {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut doc = ResourceMeta::new(uri, "web", 86400);
+        doc.name = Some(format!("Song {i}"));
+        doc.set_type("MusicRecording");
+        store::save_document(&pool, &id, 0, &doc).await.unwrap();
+        sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','hosts',$3,now())")
+            .bind(&id)
+            .bind(author(i))
+            .bind(format!("/pub/app/tags/h{i}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let uris = |page: &Value| {
+        let mut v: Vec<String> = page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["uri"].as_str().unwrap().to_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    for (query, found) in [
+        ("host=one.example.com", vec![0, 1]),
+        ("host=one.example.com,two.example.com", vec![0, 1, 2]),
+        ("host=two.example.com,one.example.com", vec![0, 1, 2]),
+        ("host=one.example.com,one.example.com", vec![0, 1]),
+        (
+            "host=two.example.com,www.two.example.com,three.example.com",
+            vec![2, 3, 4],
+        ),
+        // Exactly as the URLs name them (no case folding), spaces around a host left out.
+        ("host=one.example.com,%20two.example.com%20", vec![0, 1, 2]),
+        ("host=ONE.EXAMPLE.COM", vec![]),
+        ("host=example.com", vec![]),
+    ] {
+        let (code, page) = call(&app, "GET", &format!("/v1/search?{query}"), None).await;
+        assert_eq!(code, 200, "{query}: {page}");
+        let mut want: Vec<String> = found.iter().map(|&i| links[i].to_owned()).collect();
+        want.sort();
+        assert_eq!(uris(&page), want, "{query}");
+    }
+    // The host facet counts each picked host on its own; the others are not in the set.
+    let (_, page) = call(
+        &app,
+        "GET",
+        "/v1/search?host=one.example.com,two.example.com&facet=host&limit=1",
+        None,
+    )
+    .await;
+    let counts: Vec<(String, i64)> = page["facets"]["host"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e["host"].as_str().unwrap().to_owned(),
+                e["count"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        counts,
+        vec![
+            ("one.example.com".to_owned(), 2),
+            ("two.example.com".to_owned(), 1)
+        ],
+        "{page}"
+    );
+    // 10 hosts are taken, 11 are not; an empty one is refused; the refusal names no host.
+    let ten = (0..9)
+        .map(|i| format!("h{i}.example.com"))
+        .chain(["one.example.com".to_owned()])
+        .collect::<Vec<_>>()
+        .join(",");
+    let (code, page) = call(&app, "GET", &format!("/v1/search?host={ten}"), None).await;
+    assert_eq!(code, 200, "{page}");
+    assert_eq!(uris(&page).len(), 2);
+    let eleven = format!("{ten},two.example.com");
+    // 257 bytes, naming a host the refusal must not repeat
+    let long = format!("{}.example.com", "x".repeat(245));
+    for bad in [
+        eleven.as_str(),
+        "one.example.com,",
+        ",one.example.com",
+        "one.example.com,,two.example.com",
+        "one.example.com,%20,two.example.com",
+        "",
+        long.as_str(),
+    ] {
+        let (code, page) = call(&app, "GET", &format!("/v1/search?host={bad}"), None).await;
+        assert_eq!(code, 400, "{bad}: {page}");
+        let error = page["error"].as_str().unwrap();
+        assert!(error.starts_with("host takes 1–10 hosts"), "{error}");
+        assert!(!error.contains("example"), "{error}");
+    }
+    // A cursor pages only the hosts that made it.
+    let (_, first) = call(
+        &app,
+        "GET",
+        "/v1/search?host=one.example.com,two.example.com&limit=1",
+        None,
+    )
+    .await;
+    let cursor = first["cursor"].as_str().unwrap().to_owned();
+    let (code, next) = call(
+        &app,
+        "GET",
+        &format!("/v1/search?host=one.example.com,two.example.com&limit=1&cursor={cursor}"),
+        None,
+    )
+    .await;
+    assert_eq!(code, 200, "{next}");
+    assert_ne!(uris(&next), uris(&first));
+    let (code, _) = call(
+        &app,
+        "GET",
+        &format!("/v1/search?host=one.example.com&limit=1&cursor={cursor}"),
+        None,
+    )
+    .await;
+    assert_eq!(code, 400);
+}
+
 /// A Pubky object described by its content is social content: a 200-character excerpt that
 /// refreshes within the hour, and once the object is confirmed gone the card loses the excerpt
 /// and search no longer matches it.
