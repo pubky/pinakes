@@ -1943,13 +1943,19 @@ fn label_spellings(text: &str) -> Vec<String> {
 pub const SHORT_QUERY_CHARS: usize = 3;
 /// How a short `q` ([`SHORT_QUERY_CHARS`]) of letters and digits matches a name: each word
 /// somewhere in it (`ILIKE`, which the name's trigram index serves) and the words, in order and
-/// apart only by white space, where a word starts (a regular expression on the lowered name: at
-/// the start or after a sign that is neither a letter nor a digit, so `/`, `.` and `-` start
-/// words too).
+/// apart only by white space, where a word starts: the lowered name (lowered as `ILIKE` lowers
+/// it) matches [`WORD_START`] followed by `words` lowered the same way.
 struct WordStart {
     patterns: Vec<String>,
-    regex: String,
+    words: String,
 }
+/// Where a word starts, for [`WordStart`]: the start of the name or a character that is no
+/// letter or digit (white space, punctuation, symbols, emoji), so `/`, `.` and `-` start words
+/// (`lightningnetwork/lnd`). Letters are named by code point, never through the database's
+/// locale (`[[:alnum:]]` under the C locale would take `É` for a separator): ASCII letters and
+/// digits, the letter blocks from U+00C0 on with their combining marks, and the joiners, so a
+/// virama or an accent written apart never starts a word.
+const WORD_START: &str = r"(^|[^0-9A-Za-z\u00aa\u00b5\u00ba\u00c0-\u00d6\u00d8-\u00f6\u00f8-\u1fff\u200c-\u200d\u2070-\u209f\u2100-\u218f\u2c00-\u2dff\u2e80-\u2fff\u3005-\u3007\u3021-\u302f\u3031-\u3035\u3038-\u303c\u3040-\ud7ff\uf900-\ufdff\ufe20-\ufe2f\ufe70-\ufefe\uff10-\uff19\uff21-\uff3a\uff41-\uff5a\uff66-\uffdc\U00010000-\U0001efff\U00020000-\U0003ffff])";
 /// The [`WordStart`] match of `text`. `None` for longer text, for text with other signs (`c++`
 /// and `c#` stay as precise as a match inside the name), and for a script written without spaces
 /// between words (Chinese, Japanese, Thai, ...), where only a match inside a run finds a word.
@@ -1965,7 +1971,7 @@ fn word_start(text: &str) -> Option<WordStart> {
     // Letters and digits only: nothing to escape in either pattern.
     Some(WordStart {
         patterns: words.iter().map(|w| format!("%{w}%")).collect(),
-        regex: format!("(^|[^[:alnum:]]){}", words.join("\\s+")),
+        words: words.join("\\s+"),
     })
 }
 /// `r.name` matches the short text ([`WordStart`]).
@@ -1974,11 +1980,11 @@ fn push_word_start(sql: &mut QueryBuilder<'_, Postgres>, starts: WordStart) {
     for pattern in starts.patterns {
         sql.push("r.name ILIKE ").push_bind(pattern).push(" AND ");
     }
-    // Both sides lowered as `ILIKE` does, so a word it finds is never lost to the regex's own
-    // case folding (`İzmir` for `izm`).
-    sql.push("lower(r.name) ~ lower(")
-        .push_bind(starts.regex)
-        .push("))");
+    sql.push("lower(r.name) ~ (")
+        .push_bind(WORD_START)
+        .push("||lower(")
+        .push_bind(starts.words)
+        .push(")))");
 }
 /// A letter of a script written without spaces between words.
 fn unspaced_script(c: char) -> bool {
@@ -4043,24 +4049,15 @@ mod tests {
     /// written without spaces keep the match inside the name.
     #[test]
     fn short_queries_match_word_starts() {
-        let start = |text: &str| word_start(text).map(|w| (w.patterns, w.regex));
-        assert_eq!(
-            start("lol"),
-            Some((vec!["%lol%".into()], "(^|[^[:alnum:]])lol".into()))
-        );
-        assert_eq!(
-            start(" AI "),
-            Some((vec!["%AI%".into()], "(^|[^[:alnum:]])AI".into()))
-        );
+        let start = |text: &str| word_start(text).map(|w| (w.patterns, w.words));
+        assert_eq!(start("lol"), Some((vec!["%lol%".into()], "lol".into())));
+        assert_eq!(start(" AI "), Some((vec!["%AI%".into()], "AI".into())));
         assert_eq!(
             start("a b"),
-            Some((
-                vec!["%a%".into(), "%b%".into()],
-                "(^|[^[:alnum:]])a\\s+b".into()
-            ))
+            Some((vec!["%a%".into(), "%b%".into()], "a\\s+b".into()))
         );
-        assert_eq!(start("été").unwrap().1, "(^|[^[:alnum:]])été");
-        assert_eq!(start("x²").unwrap().1, "(^|[^[:alnum:]])x²");
+        assert_eq!(start("été").unwrap().1, "été");
+        assert_eq!(start("x²").unwrap().1, "x²");
         for longer_or_other in [
             "lola",
             "ab cd",
