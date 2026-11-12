@@ -1944,28 +1944,77 @@ pub const SHORT_QUERY_CHARS: usize = 3;
 /// How a short `q` ([`SHORT_QUERY_CHARS`]) of letters and digits matches a name: each word
 /// somewhere in it (`ILIKE`, which the name's trigram index serves) and the words, in order and
 /// apart only by white space, where a word starts: the lowered name (lowered as `ILIKE` lowers
-/// it) matches [`WORD_START`] followed by `words` lowered the same way.
+/// it) matches [`word_start_regex`] followed by `words` lowered the same way.
 struct WordStart {
     patterns: Vec<String>,
     words: String,
 }
-/// Where a word starts, for [`WordStart`]: the start of the name or a character that is no
-/// letter or digit (white space, punctuation, symbols such as `™`, emoji), so `/`, `.` and `-`
-/// start words (`lightningnetwork/lnd`). Letters and digits are named by code point, never
-/// through the database's locale (`[[:alnum:]]` under the C locale would take `É` for a
-/// separator): ASCII letters and digits, Latin-1's (`²`, `½`), the letter blocks from U+00C0 on
-/// with their combining marks, the joiners (so a virama or an accent written apart never starts
-/// a word), the letters and digits among super- and subscripts, letterlike symbols and number
-/// forms, enclosed alphanumerics (`①`, `Ⓐ`), and the CJK, Hangul and supplementary planes.
-const WORD_START: &str = concat!(
-    r"(^|[^0-9A-Za-z\u00aa\u00b2-\u00b3\u00b5\u00b9-\u00ba\u00bc-\u00be\u00c0-\u00d6\u00d8-\u00f6\u00f8-\u1fff",
-    r"\u200c-\u200d\u2070-\u2071\u2074-\u2079\u207f-\u2089\u2090-\u209c",
-    r"\u2102\u2107\u210a-\u2113\u2115\u2119-\u211d\u2124\u2126\u2128\u212a-\u212d\u212f-\u2139",
-    r"\u213c-\u213f\u2145-\u2149\u214e\u2150-\u2189\u2460-\u24ff\u2776-\u2793",
-    r"\u2c00-\u2dff\u2e80-\u2fff\u3005-\u3007\u3021-\u302f\u3031-\u3035\u3038-\u303c",
-    r"\u3040-\ud7ff\uf900-\ufdff\ufe20-\ufe2f\ufe70-\ufefe\uff10-\uff19\uff21-\uff3a",
-    r"\uff41-\uff5a\uff66-\uffdc\U00010000-\U0001efff\U00020000-\U0003ffff])"
-);
+/// Where a word starts, for [`WordStart`]: the start of the name or a character that is neither
+/// a letter, a digit nor a combining mark ([`word_char`]: white space, punctuation, symbols such
+/// as `™` or `・`, emoji), so `/`, `.` and `-` start words (`lightningnetwork/lnd`). The letters
+/// and digits are Rust's Unicode tables, the same as [`word_start`]'s own test, listed by code
+/// point (never through the database's locale: `[[:alnum:]]` under the C locale would take `É`
+/// for a separator). Built once.
+fn word_start_regex() -> &'static str {
+    static REGEX: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    REGEX.get_or_init(|| {
+        let escape = |c: char| match u32::from(c) {
+            n @ 0..=0xFFFF => format!("\\u{n:04x}"),
+            n => format!("\\U{n:08x}"),
+        };
+        let mut class = String::new();
+        let mut run: Option<(char, char)> = None;
+        let close = |run: (char, char), class: &mut String| {
+            class.push_str(&escape(run.0));
+            if run.1 != run.0 {
+                class.push('-');
+                class.push_str(&escape(run.1));
+            }
+        };
+        for c in (0..=u32::from(char::MAX)).filter_map(char::from_u32) {
+            match (word_char(c), run) {
+                (true, Some((first, last))) if u32::from(last) + 1 == u32::from(c) => {
+                    run = Some((first, c))
+                }
+                (true, _) => {
+                    if let Some(done) = run.replace((c, c)) {
+                        close(done, &mut class);
+                    }
+                }
+                (false, _) => {
+                    if let Some(done) = run.take() {
+                        close(done, &mut class);
+                    }
+                }
+            }
+        }
+        if let Some(done) = run {
+            close(done, &mut class);
+        }
+        format!("(^|[^{class}])")
+    })
+}
+/// A character inside a word, for [`word_start_regex`]: a letter or digit (`char::is_alphanumeric`,
+/// which counts most vowel signs as letters), or a combining mark or joiner a word is written
+/// with (combining diacritics, so an accent written apart, Hebrew points, Arabic vowel marks, the
+/// viramas and other marks of the Indic scripts, ZWNJ and ZWJ).
+fn word_char(c: char) -> bool {
+    c.is_alphanumeric()
+        || matches!(
+            u32::from(c),
+            0x0300..=0x036F // combining diacritical marks
+                | 0x0483..=0x0489 // Cyrillic combining marks
+                | 0x0591..=0x05BD | 0x05BF | 0x05C1..=0x05C2 | 0x05C4..=0x05C5 | 0x05C7 // Hebrew points
+                | 0x0610..=0x061A | 0x064B..=0x065F | 0x0670 // Arabic marks
+                | 0x06D6..=0x06DC | 0x06DF..=0x06E4 | 0x06E7..=0x06E8 | 0x06EA..=0x06ED
+                | 0x0900..=0x0963 | 0x0966..=0x0DFF // Indic scripts, but the dandas
+                | 0x1AB0..=0x1AFF // combining diacritical marks extended
+                | 0x1DC0..=0x1DFF // combining diacritical marks supplement
+                | 0x200C..=0x200D // ZWNJ, ZWJ
+                | 0x20D0..=0x20FF // combining marks for symbols
+                | 0xFE20..=0xFE2F // combining half marks
+        )
+}
 /// The [`WordStart`] match of `text`. `None` for longer text, for text with other signs (`c++`
 /// and `c#` stay as precise as a match inside the name), and for a script written without spaces
 /// between words (Chinese, Japanese, Thai, ...), where only a match inside a run finds a word.
@@ -1991,7 +2040,7 @@ fn push_word_start(sql: &mut QueryBuilder<'_, Postgres>, starts: WordStart) {
         sql.push("r.name ILIKE ").push_bind(pattern).push(" AND ");
     }
     sql.push("lower(r.name) ~ (")
-        .push_bind(WORD_START)
+        .push_bind(word_start_regex())
         .push("||lower(")
         .push_bind(starts.words)
         .push(")))");
@@ -2021,6 +2070,8 @@ fn unspaced_script(c: char) -> bool {
             | 0xAA80..=0xAADF // Tai Viet
             | 0xF900..=0xFAFF // CJK compatibility
             | 0xFF66..=0xFF9F // halfwidth Katakana
+            | 0x1950..=0x197F // Tai Le
+            | 0x11700..=0x1174F // Ahom
             | 0x17000..=0x18D7F // Tangut, Khitan
             | 0x1AFF0..=0x1B2FF // Kana extensions and supplement, Nushu
             | 0x20000..=0x3FFFF // CJK extensions
@@ -4066,6 +4117,26 @@ mod tests {
         assert_eq!(
             start("a b"),
             Some((vec!["%a%".into(), "%b%".into()], "a\\s+b".into()))
+        );
+        // Letters, digits and the marks a word is written with never start a word; signs do.
+        for inside in [
+            'a', 'É', 'ß', '²', '①', 'ℹ', '\u{301}', '\u{94D}', '\u{200D}', '字',
+        ] {
+            assert!(word_char(inside), "{inside:?}");
+        }
+        for sign in [
+            ' ', '/', '.', '-', '_', '™', '・', '🔥', '\u{964}', '\u{218A}', '«',
+        ] {
+            assert!(!word_char(sign), "{sign:?}");
+        }
+        let regex = word_start_regex();
+        assert!(
+            regex.starts_with("(^|[^\\u0030-\\u0039\\u0041-\\u005a"),
+            "{regex}"
+        );
+        assert!(
+            regex.ends_with("])") && regex.contains("\\U00020000-"),
+            "{regex}"
         );
         assert_eq!(start("été").unwrap().1, "été");
         assert_eq!(start("x²").unwrap().1, "x²");

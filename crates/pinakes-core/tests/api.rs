@@ -4013,6 +4013,13 @@ async fn a_short_query_matches_word_starts_not_inside_words(pool: PgPool) {
         ("math", 1900, 2),
     )
     .await;
+    let dotted = relevance_card(
+        &pool,
+        21,
+        ("ACME・Zqw", "Katakana middle dot.", "WebPage"),
+        ("brand", 2100, 2),
+    )
+    .await;
     let chinese = relevance_card(
         &pool,
         13,
@@ -4045,10 +4052,10 @@ async fn a_short_query_matches_word_starts_not_inside_words(pool: PgPool) {
         get("/v1/search?q=btc".into()).await,
         [map.clone(), btcpay.clone()]
     );
-    // A sign that is neither a letter nor a digit starts a word too (`owner/repo`, `™`); a
-    // superscript digit is a digit.
+    // A sign that is neither a letter nor a digit starts a word too (`owner/repo`, `™`, `・`);
+    // a superscript digit is a digit. Two partial name matches: the one with more taggers first.
     assert_eq!(get("/v1/search?q=lnd".into()).await, [lnd]);
-    assert_eq!(get("/v1/search?q=zq".into()).await, [trademark]);
+    assert_eq!(get("/v1/search?q=zq".into()).await, [dotted, trademark]);
     // The name is lowered as for `ILIKE`, so a capital with its own case rule still starts a word
     // (where the database's locale lowers `İ` to `i` at all: a UTF-8 one, not plain C).
     let unicode_lower: bool = sqlx::query_scalar("SELECT lower('İ')='i'")
