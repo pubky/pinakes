@@ -1995,6 +1995,7 @@ fn unspaced_script(c: char) -> bool {
             | 0xAA60..=0xAA7F // Myanmar extended-A
             | 0xF900..=0xFAFF // CJK compatibility
             | 0xFF66..=0xFF9F // halfwidth Katakana
+            | 0x1AFF0..=0x1B16F // Kana extensions and supplement
             | 0x20000..=0x3FFFF // CJK extensions
     )
 }
@@ -4062,6 +4063,7 @@ mod tests {
             "音乐",
             "ไทย",
             "ㄅㄆ",
+            "\u{1B001}",
             "",
             "  ",
         ] {

@@ -751,7 +751,8 @@ by how well `q` matches, the name first, then the tags, then the description, an
 
 - `name`: 4 when the name equals `q` (any case, white space collapsed), 3 when it holds `q`'s words as
   a phrase, 2 when it holds all of them, 1 for a partial or fuzzy match (`musical` for `music`,
-  the trigram fallback; for a short `q`, a name word that starts with it: `Airbnb` for `ai`), else 0;
+  the trigram fallback; for a short `q` of letters and digits in a script written with spaces, a
+  name word that starts with it instead: `Airbnb` for `ai`), else 0;
 - `tag`: 2 when a label on the card equals `q` lowercased (for several words joined by a space,
   hyphen, underscore or nothing: `daft-punk` for `daft punk`), 1 when a label holds `q`'s words
   as a phrase (`electronic-music` for `music`), else 0; the labels are the card's and its
