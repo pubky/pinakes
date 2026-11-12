@@ -1942,9 +1942,10 @@ fn label_spellings(text: &str) -> Vec<String> {
 /// description) match at any length.
 pub const SHORT_QUERY_CHARS: usize = 3;
 /// How a short `q` ([`SHORT_QUERY_CHARS`]) of letters and digits matches a name: each word
-/// somewhere in it (`ILIKE`, which the name's trigram index serves) and the words, in order and
-/// apart only by white space, where a word starts: the lowered name (lowered as `ILIKE` lowers
-/// it) matches [`word_start_regex`] followed by `words` lowered the same way.
+/// somewhere in it (`ILIKE`, which the name's trigram index serves for a word of three letters)
+/// and the words, in order and apart only by white space, where a word starts: the lowered name
+/// (lowered as `ILIKE` lowers it) matches [`word_start_regex`] followed by `words` lowered the
+/// same way.
 struct WordStart {
     patterns: Vec<String>,
     words: String,
@@ -1994,13 +1995,17 @@ fn word_start_regex() -> &'static str {
         format!("(^|[^{class}])")
     })
 }
-/// A character inside a word, for [`word_start_regex`]: a letter or digit (`char::is_alphanumeric`,
-/// which counts most vowel signs as letters), or a combining mark or joiner a word is written
-/// with (combining diacritics, so an accent written apart, Hebrew points, Arabic vowel marks, the
-/// viramas and other marks of the Indic scripts, ZWNJ and ZWJ).
+/// A character inside a word, for [`word_start_regex`], outside the scripts written without
+/// spaces ([`unspaced_script`]): a letter or digit (`char::is_alphanumeric`, which counts most
+/// vowel signs as letters), or a combining mark or joiner a word is written with (combining
+/// diacritics, so an accent written apart, Hebrew points, Arabic vowel marks, the viramas and
+/// other marks of the Indic scripts, ZWNJ and ZWJ).
 fn word_char(c: char) -> bool {
-    c.is_alphanumeric()
-        || matches!(
+    // A script written without spaces has no word starts of its own: a Latin word right after
+    // one starts there (`AI` in `我的AI助手`).
+    !unspaced_script(c)
+        && (c.is_alphanumeric()
+            || matches!(
             u32::from(c),
             0x0300..=0x036F // combining diacritical marks
                 | 0x0483..=0x0489 // Cyrillic combining marks
@@ -2013,7 +2018,7 @@ fn word_char(c: char) -> bool {
                 | 0x200C..=0x200D // ZWNJ, ZWJ
                 | 0x20D0..=0x20FF // combining marks for symbols
                 | 0xFE20..=0xFE2F // combining half marks
-        )
+            ))
 }
 /// The [`WordStart`] match of `text`. `None` for longer text, for text with other signs (`c++`
 /// and `c#` stay as precise as a match inside the name), and for a script written without spaces

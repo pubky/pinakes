@@ -4020,6 +4020,13 @@ async fn a_short_query_matches_word_starts_not_inside_words(pool: PgPool) {
         ("brand", 2100, 2),
     )
     .await;
+    let mixed = relevance_card(
+        &pool,
+        22,
+        ("我的AI助手", "聊天。", "SoftwareApplication"),
+        ("assistant", 2200, 1),
+    )
+    .await;
     let chinese = relevance_card(
         &pool,
         13,
@@ -4041,11 +4048,22 @@ async fn a_short_query_matches_word_starts_not_inside_words(pool: PgPool) {
     assert_eq!(get("/v1/search?q=lol".into()).await, lol);
     assert_eq!(get("/v1/search?q=LOL".into()).await, lol);
     // The name's whole word (3·9), a name word that starts so (9), the description's word (2).
+    // A Latin word right after a script written without spaces starts there (`我的AI助手`); where
+    // it ranks depends on how the text parser splits the mixed run: only that it is found counts.
     let ai = [slop.clone(), airbnb.clone(), photos.clone()];
-    assert_eq!(get("/v1/search?q=ai".into()).await, ai);
+    let found = get("/v1/search?q=ai".into()).await;
+    assert!(found.contains(&mixed), "{found:?}");
+    assert_eq!(
+        found
+            .iter()
+            .filter(|id| **id != mixed)
+            .cloned()
+            .collect::<Vec<_>>(),
+        ai
+    );
     let mut by_activity = get("/v1/search?q=ai&sort=activity".into()).await;
     by_activity.sort();
-    let mut sorted = ai.to_vec();
+    let mut sorted = found.clone();
     sorted.sort();
     assert_eq!(by_activity, sorted, "the sort never changes what matches");
     assert_eq!(
