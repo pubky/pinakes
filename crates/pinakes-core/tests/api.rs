@@ -3985,6 +3985,20 @@ async fn a_short_query_matches_word_starts_not_inside_words(pool: PgPool) {
         ("city", 1500, 1),
     )
     .await;
+    let slow = relevance_card(
+        &pool,
+        16,
+        ("A slow song", "Music.", "MusicRecording"),
+        ("ballad", 1600, 1),
+    )
+    .await;
+    relevance_card(
+        &pool,
+        17,
+        ("As lop", "Music.", "MusicRecording"),
+        ("ballad", 1700, 2),
+    )
+    .await;
     let chinese = relevance_card(
         &pool,
         13,
@@ -4019,14 +4033,19 @@ async fn a_short_query_matches_word_starts_not_inside_words(pool: PgPool) {
     );
     // A sign that is neither a letter nor a digit starts a word too (`owner/repo`).
     assert_eq!(get("/v1/search?q=lnd".into()).await, [lnd]);
-    // The name is lowered as for `ILIKE`, so a capital with its own case rule still starts a word.
-    assert_eq!(get("/v1/search?q=izm".into()).await, [izmir]);
-    // Several short words: in order, at word starts.
-    assert_eq!(
-        get("/v1/search?q=ai%20s".into()).await,
-        std::slice::from_ref(&slop)
-    );
-    assert!(get("/v1/search?q=s%20ai".into()).await.is_empty());
+    // The name is lowered as for `ILIKE`, so a capital with its own case rule still starts a word
+    // (where the database's locale lowers `İ` to `i` at all: a UTF-8 one, not plain C).
+    let unicode_lower: bool = sqlx::query_scalar("SELECT lower('İ')='i'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    if unicode_lower {
+        assert_eq!(get("/v1/search?q=izm".into()).await, [izmir]);
+    }
+    // Several short words (`a s`: three characters): in order, apart only by white space, each
+    // at a word start; `As lop` holds both but not so.
+    assert_eq!(get("/v1/search?q=a%20s".into()).await, [slow]);
+    assert!(get("/v1/search?q=s%20a".into()).await.is_empty());
     // Longer text still matches inside a name: the deck with more taggers first.
     assert_eq!(
         get("/v1/search?q=jimlo".into()).await,
