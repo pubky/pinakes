@@ -1943,8 +1943,9 @@ fn label_spellings(text: &str) -> Vec<String> {
 pub const SHORT_QUERY_CHARS: usize = 3;
 /// How a short `q` ([`SHORT_QUERY_CHARS`]) of letters and digits matches a name: each word
 /// somewhere in it (`ILIKE`, which the name's trigram index serves) and the words, in order and
-/// apart only by white space, where a word starts (`~*`: at the start or after a sign that is
-/// neither a letter nor a digit, so `/`, `.` and `-` start words too).
+/// apart only by white space, where a word starts (a regular expression on the lowered name: at
+/// the start or after a sign that is neither a letter nor a digit, so `/`, `.` and `-` start
+/// words too).
 struct WordStart {
     patterns: Vec<String>,
     regex: String,
@@ -1973,7 +1974,11 @@ fn push_word_start(sql: &mut QueryBuilder<'_, Postgres>, starts: WordStart) {
     for pattern in starts.patterns {
         sql.push("r.name ILIKE ").push_bind(pattern).push(" AND ");
     }
-    sql.push("r.name ~* ").push_bind(starts.regex).push(")");
+    // Both sides lowered as `ILIKE` does, so a word it finds is never lost to the regex's own
+    // case folding (`İzmir` for `izm`).
+    sql.push("lower(r.name) ~ lower(")
+        .push_bind(starts.regex)
+        .push("))");
 }
 /// A letter of a script written without spaces between words.
 fn unspaced_script(c: char) -> bool {
@@ -1983,7 +1988,10 @@ fn unspaced_script(c: char) -> bool {
             | 0x0F00..=0x0FFF // Tibetan
             | 0x1000..=0x109F // Myanmar
             | 0x1780..=0x17FF // Khmer
-            | 0x3005..=0x3007 // ideographic iteration mark, closing mark, zero
+            | 0x1980..=0x19DF // New Tai Lue
+            | 0x1A00..=0x1AAF // Buginese, Tai Tham
+            | 0x1B00..=0x1B7F // Balinese
+            | 0x3005..=0x303C // ideographic marks, Hangzhou numerals, kana repeat marks
             | 0x3040..=0x30FF // Hiragana, Katakana
             | 0x3100..=0x312F // Bopomofo
             | 0x31A0..=0x31BF // Bopomofo extended
@@ -1991,8 +1999,10 @@ fn unspaced_script(c: char) -> bool {
             | 0x3400..=0x4DBF // CJK extension A
             | 0x4E00..=0x9FFF // CJK
             | 0xA000..=0xA4CF // Yi
+            | 0xA980..=0xA9DF // Javanese
             | 0xA9E0..=0xA9FF // Myanmar extended-B
             | 0xAA60..=0xAA7F // Myanmar extended-A
+            | 0xAA80..=0xAADF // Tai Viet
             | 0xF900..=0xFAFF // CJK compatibility
             | 0xFF66..=0xFF9F // halfwidth Katakana
             | 0x1AFF0..=0x1B16F // Kana extensions and supplement

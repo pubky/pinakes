@@ -3978,6 +3978,13 @@ async fn a_short_query_matches_word_starts_not_inside_words(pool: PgPool) {
         ("lightning", 1400, 1),
     )
     .await;
+    let izmir = relevance_card(
+        &pool,
+        15,
+        ("İzmir", "A city on the Aegean coast.", "Place"),
+        ("city", 1500, 1),
+    )
+    .await;
     let chinese = relevance_card(
         &pool,
         13,
@@ -4012,6 +4019,8 @@ async fn a_short_query_matches_word_starts_not_inside_words(pool: PgPool) {
     );
     // A sign that is neither a letter nor a digit starts a word too (`owner/repo`).
     assert_eq!(get("/v1/search?q=lnd".into()).await, [lnd]);
+    // The name is lowered as for `ILIKE`, so a capital with its own case rule still starts a word.
+    assert_eq!(get("/v1/search?q=izm".into()).await, [izmir]);
     // Several short words: in order, at word starts.
     assert_eq!(
         get("/v1/search?q=ai%20s".into()).await,
