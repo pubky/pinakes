@@ -4136,12 +4136,22 @@ mod tests {
         );
         // Letters, digits and the marks a word is written with never start a word; signs do.
         for inside in [
-            'a', 'É', 'ß', '²', '①', 'ℹ', '\u{301}', '\u{94D}', '\u{200D}', '字',
+            'a',
+            'É',
+            'ß',
+            'Ж',
+            '²',
+            '①',
+            'ℹ',
+            '\u{301}',
+            '\u{94D}',
+            '\u{200D}',
+            '\u{10330}',
         ] {
             assert!(word_char(inside), "{inside:?}");
         }
         for sign in [
-            ' ', '/', '.', '-', '_', '™', '・', '🔥', '\u{964}', '\u{218A}', '«',
+            ' ', '/', '.', '-', '_', '™', '・', '🔥', '\u{964}', '\u{218A}', '«', '字', 'の', 'ก',
         ] {
             assert!(!word_char(sign), "{sign:?}");
         }
@@ -4151,7 +4161,7 @@ mod tests {
             "{regex}"
         );
         assert!(
-            regex.ends_with("])") && regex.contains("\\U00020000-"),
+            regex.ends_with("])") && regex.contains("\\U0001") && !regex.contains("\\U0002"),
             "{regex}"
         );
         assert_eq!(start("été").unwrap().1, "été");
