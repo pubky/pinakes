@@ -692,7 +692,7 @@ POST /v1/changes/lookup {"resource_ids":["81cefcae5a6a468cfc27ff1c1b420fce","5bc
 
 | Parameter | Meaning |
 | --- | --- |
-| `q` | Full-text name/description search with a trigram/partial-name fallback; at most 256 bytes. Ranked by `relevance` unless `sort` says otherwise ([Ranking](#search)). A post whose author opted out of search indexing (a read's `facts.opted_out`: Mastodon's `indexable: false` or `noindex`, Bluesky's `!no-unauthenticated`) never matches |
+| `q` | Full-text name/description search with a trigram/partial-name fallback; at most 256 bytes. A short `q` (up to three letters or digits, e.g. `ai`, `lol`, `btc`) matches a name only at the start of a word (`Airbnb`, not `Rain`) and the description by whole words; text with other signs (`c++`) or in a script written without spaces (Chinese, Japanese, Thai) still matches inside the name. Ranked by `relevance` unless `sort` says otherwise ([Ranking](#search)). A post whose author opted out of search indexing (a read's `facts.opted_out`: Mastodon's `indexable: false` or `noindex`, Bluesky's `!no-unauthenticated`) never matches |
 | `type` | A schema.org type, ancestors included (`Event` matches `MusicEvent`; `Place` matches cafés and other `LocalBusiness` types), or up to 10 comma-separated: any of them (`type=MusicRecording,MusicAlbum,MusicGroup`). An unknown type is a 400 that names it (only a name of letters and digits is repeated; anything else, such as a URL, gets a general message) |
 | `category`, `host` | Exact filters |
 | `key` | Links carrying one exact identifier, on any service and in any spelling: `mbid:{uuid}` (a MusicBrainz recording, release, release group or artist), `wikidata:{Q-id}`, `isrc:{code}` (any letter case, hyphens allowed), `upc:{barcode}` (a UPC, EAN or GTIN in any of its lengths, check digit verified), `isbn:{ISBN-10 or ISBN-13}` (an edition), `imdb:{tt…}` (a film or series), `podcast:{GUID}` (a show), `podcast:enclosure:{URL}` (an episode, by the file it plays), `osm:{node|way|relation}/{id}`, `doi:{DOI}`, `gtin:{barcode}` (a [product](#products), in any of its lengths), any key exactly as a resource read lists it in `keys` (`mb:recording:{mbid}`, `podcast:guid:{GUID}`, `podcast:apple:{id}`, …), or another namespace a source records (its page in [docs/sources](sources/README.md#also-on) names its namespaces and how each is normalized), as the [also-on](#also-on) sources found them as keys or facts (`mbid:` also the MBID a MusicBrainz page was merged from, its `mbid_was` fact, and with `type=MusicEvent` an artist's events, by their performers), or as an exact lookup by that key named the link; anything else is 400 |
@@ -751,7 +751,7 @@ by how well `q` matches, the name first, then the tags, then the description, an
 
 - `name`: 4 when the name equals `q` (any case, white space collapsed), 3 when it holds `q`'s words as
   a phrase, 2 when it holds all of them, 1 for a partial or fuzzy match (`musical` for `music`,
-  the trigram fallback), else 0;
+  the trigram fallback; for a short `q`, a name word that starts with it: `Airbnb` for `ai`), else 0;
 - `tag`: 2 when a label on the card equals `q` lowercased (for several words joined by a space,
   hyphen, underscore or nothing: `daft-punk` for `daft punk`), 1 when a label holds `q`'s words
   as a phrase (`electronic-music` for `music`), else 0; the labels are the card's and its

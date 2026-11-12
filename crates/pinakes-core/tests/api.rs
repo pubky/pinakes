@@ -3862,3 +3862,151 @@ async fn a_text_search_ranks_the_best_match_first(pool: PgPool) {
         ids_of(&get("/v1/search?type=MusicGroup&sort=activity".into()).await)
     );
 }
+
+/// A short `q` (up to three letters or digits) matches a name only where a word starts, and the
+/// description by whole words: `lol` never finds the Hausa decks whose names hold `jimloli`, `ai`
+/// never finds `Rain` or `Saint`, `btc` never finds `Debtcleaner`, while `LOLcats`, `Airbnb` and
+/// `btcpayserver` are still found. Longer text still matches inside a name, and so does a script
+/// written without spaces between words.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_short_query_matches_word_starts_not_inside_words(pool: PgPool) {
+    let deck = relevance_card(
+        &pool,
+        1,
+        (
+            "Turanci: kalmomi da jimloli 3,000 mafi amfani",
+            "Za a fara da jimloli 60 na tsira, sannan kalmomi bisa yawan amfani.",
+            "LearningResource",
+        ),
+        ("hausa", 100, 3),
+    )
+    .await;
+    let basics = relevance_card(
+        &pool,
+        2,
+        (
+            "Tushen Turanci: jimloli, lambobi da kalmomin yau da kullum",
+            "Katunan farko 65: jimlolin da ake bukata a Turanci.",
+            "LearningResource",
+        ),
+        ("hausa", 200, 2),
+    )
+    .await;
+    let cats = relevance_card(
+        &pool,
+        3,
+        ("LOLcats archive", "Captioned cat pictures.", "WebPage"),
+        ("cats", 300, 1),
+    )
+    .await;
+    let slang = relevance_card(
+        &pool,
+        4,
+        ("Internet slang", "Why people write lol and brb.", "Article"),
+        ("slang", 400, 1),
+    )
+    .await;
+    let slop = relevance_card(
+        &pool,
+        5,
+        ("AI slop on the web", "Spam is unwanted reach.", "Article"),
+        ("spam", 500, 1),
+    )
+    .await;
+    let airbnb = relevance_card(
+        &pool,
+        6,
+        ("Airbnb", "Holiday rentals.", "WebApplication"),
+        ("travel", 600, 1),
+    )
+    .await;
+    let photos = relevance_card(
+        &pool,
+        7,
+        (
+            "Photo sorter",
+            "Sorts pictures with AI.",
+            "SoftwareApplication",
+        ),
+        ("photos", 700, 1),
+    )
+    .await;
+    // Each holds the short text inside a word only, and has the most taggers.
+    for (n, name, description) in [
+        (8, "Rain", "A song."),
+        (9, "Saint Joseph's Day", "Public holiday in Ticino."),
+        (10, "Debtcleaner", "Pay off loans."),
+    ] {
+        relevance_card(
+            &pool,
+            n,
+            (name, description, "WebPage"),
+            ("popular", n * 100, 5),
+        )
+        .await;
+    }
+    let btcpay = relevance_card(
+        &pool,
+        11,
+        (
+            "btcpayserver/btcpayserver",
+            "A self-hosted payment server.",
+            "SoftwareApplication",
+        ),
+        ("bitcoin", 1100, 1),
+    )
+    .await;
+    let map = relevance_card(
+        &pool,
+        12,
+        (
+            "BTC Map - Merchant",
+            "Find places to spend sats.",
+            "WebPage",
+        ),
+        ("bitcoin", 1200, 2),
+    )
+    .await;
+    let chinese = relevance_card(
+        &pool,
+        13,
+        ("流行音乐精选", "精选歌曲。", "MusicPlaylist"),
+        ("music", 1300, 1),
+    )
+    .await;
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let get = |path: String| {
+        let app = app.clone();
+        async move {
+            let (code, page) = call(&app, "GET", &path, None).await;
+            assert_eq!(code, 200, "{path}: {page}");
+            ids_of(&page)
+        }
+    };
+    // A name word that starts so (9), then the whole word in the description (2).
+    let lol = [cats.clone(), slang.clone()];
+    assert_eq!(get("/v1/search?q=lol".into()).await, lol);
+    assert_eq!(get("/v1/search?q=LOL".into()).await, lol);
+    // The name's whole word (3·9), a name word that starts so (9), the description's word (2).
+    let ai = [slop.clone(), airbnb.clone(), photos.clone()];
+    assert_eq!(get("/v1/search?q=ai".into()).await, ai);
+    let mut by_activity = get("/v1/search?q=ai&sort=activity".into()).await;
+    by_activity.sort();
+    let mut sorted = ai.to_vec();
+    sorted.sort();
+    assert_eq!(by_activity, sorted, "the sort never changes what matches");
+    assert_eq!(
+        get("/v1/search?q=btc".into()).await,
+        [map.clone(), btcpay.clone()]
+    );
+    // Longer text still matches inside a name: the deck with more taggers first.
+    assert_eq!(
+        get("/v1/search?q=jimlo".into()).await,
+        [deck.clone(), basics.clone()]
+    );
+    // No spaces between words: a short text is found inside the run.
+    assert_eq!(
+        get("/v1/search?q=%E9%9F%B3%E4%B9%90".into()).await,
+        [chinese]
+    );
+}
