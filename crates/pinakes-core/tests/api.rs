@@ -441,6 +441,164 @@ async fn search_filters_facets_true_keyset_and_invalid_options(pool: PgPool) {
         assert_eq!(code, 400, "{query}: {v}");
     }
 }
+/// `exclude_type` lists every card of another type: each type left out with its subtypes, a link
+/// with no type yet left out too (the type facet does not count it), with `type` both apply, the
+/// facets count the same set, and a cursor pages only the search that made it.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn search_exclude_type_lists_every_other_type(pool: PgPool) {
+    let ids = seed(&pool).await;
+    // ids[0] is a MusicEvent, ids[1..=3] Articles, ids[4] a link not read yet (no type).
+    sqlx::query("UPDATE resource SET type=NULL,type_path='{}' WHERE id=$1")
+        .bind(&ids[4])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let sorted = |mut v: Vec<String>| {
+        v.sort();
+        v
+    };
+    let articles = sorted(ids[1..=3].to_vec());
+    let (_, all) = call(&app, "GET", "/v1/search?limit=50", None).await;
+    assert_eq!(
+        ids_of(&all).len(),
+        5,
+        "no filter lists the untyped link: {all}"
+    );
+    for (query, found) in [
+        ("exclude_type=Article", vec![ids[0].clone()]),
+        ("exclude_type=CreativeWork", vec![ids[0].clone()]),
+        ("exclude_type=Event", articles.clone()),
+        ("exclude_type=MusicEvent", articles.clone()),
+        ("exclude_type=Book", sorted(ids[0..=3].to_vec())),
+        ("exclude_type=Article%2C%20Article", vec![ids[0].clone()]),
+        ("exclude_type=Article,Event", vec![]),
+        ("type=CreativeWork&exclude_type=Article", vec![]),
+        (
+            "type=MusicEvent,Article&exclude_type=Event",
+            articles.clone(),
+        ),
+        ("type=Article&exclude_type=Book", articles.clone()),
+        ("type=Event&exclude_type=Event", vec![]),
+    ] {
+        let (code, page) = call(&app, "GET", &format!("/v1/search?{query}&limit=50"), None).await;
+        assert_eq!(code, 200, "{query}: {page}");
+        assert_eq!(sorted(ids_of(&page)), found, "{query}");
+    }
+    // The facets count the rows the filter finds: what a client shows as the count of "every
+    // other type" is what the search lists.
+    let (_, page) = call(
+        &app,
+        "GET",
+        "/v1/search?exclude_type=Book&facet=type&limit=1",
+        None,
+    )
+    .await;
+    assert_eq!(
+        page["facets"]["type"],
+        json!([
+            {"type":"Article","type_path":["Thing","CreativeWork","Article"],"count":3},
+            {"type":"MusicEvent","type_path":["Thing","Event","MusicEvent"],"count":1}
+        ])
+    );
+    let (_, page) = call(
+        &app,
+        "GET",
+        "/v1/search?exclude_type=Article&facet=type",
+        None,
+    )
+    .await;
+    assert_eq!(page["facets"]["type"].as_array().unwrap().len(), 1);
+    assert_eq!(page["facets"]["type"][0]["type"], "MusicEvent");
+    // Up to 50 types; the same refusals as `type`, named by the parameter.
+    let fifty = ["Article"; 50].join(",");
+    let (code, page) = call(
+        &app,
+        "GET",
+        &format!("/v1/search?exclude_type={fifty}"),
+        None,
+    )
+    .await;
+    assert_eq!(code, 200, "{page}");
+    assert_eq!(ids_of(&page), vec![ids[0].clone()]);
+    let fifty_one = ["Article"; 51].join(",");
+    let (code, page) = call(
+        &app,
+        "GET",
+        &format!("/v1/search?exclude_type={fifty_one}"),
+        None,
+    )
+    .await;
+    assert_eq!(code, 400);
+    assert!(
+        page["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("exclude_type takes 1–50"),
+        "{page}"
+    );
+    for bad in ["", "Article,", ",", "Article,NotAType"] {
+        let (code, page) = call(&app, "GET", &format!("/v1/search?exclude_type={bad}"), None).await;
+        assert_eq!(code, 400, "{bad}: {page}");
+    }
+    let (_, page) = call(
+        &app,
+        "GET",
+        "/v1/search?exclude_type=Article,NotAType",
+        None,
+    )
+    .await;
+    assert!(page["error"].as_str().unwrap().contains("NotAType"));
+    let (code, page) = call(
+        &app,
+        "GET",
+        "/v1/search?exclude_type=https%3A%2F%2Fuser%3Asecret%40example.org%2Fx%3Ftoken%3Dabc",
+        None,
+    )
+    .await;
+    assert_eq!(code, 400);
+    let error = page["error"].as_str().unwrap();
+    assert!(error.starts_with("exclude_type names"), "{error}");
+    for leaked in ["secret", "token", "abc", "example.org"] {
+        assert!(!error.contains(leaked), "{leaked} in {error}");
+    }
+    // `type` keeps its own limit of 10.
+    let eleven = ["Article"; 11].join(",");
+    let (_, page) = call(&app, "GET", &format!("/v1/search?type={eleven}"), None).await;
+    assert!(
+        page["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("type takes 1–10"),
+        "{page}"
+    );
+    // A cursor pages its own exclusion only.
+    let (code, first) = call(&app, "GET", "/v1/search?exclude_type=Book&limit=2", None).await;
+    assert_eq!(code, 200, "{first}");
+    let cursor = first["cursor"].as_str().unwrap();
+    let (code, second) = call(
+        &app,
+        "GET",
+        &format!("/v1/search?exclude_type=Book&limit=2&cursor={cursor}"),
+        None,
+    )
+    .await;
+    assert_eq!(code, 200, "{second}");
+    let mut paged = ids_of(&first);
+    paged.extend(ids_of(&second));
+    assert_eq!(sorted(paged), sorted(ids[0..=3].to_vec()));
+    assert!(second["cursor"].is_null(), "{second}");
+    for other in ["exclude_type=Event&", "exclude_type=Book,Event&", ""] {
+        let (code, page) = call(
+            &app,
+            "GET",
+            &format!("/v1/search?{other}limit=2&cursor={cursor}"),
+            None,
+        )
+        .await;
+        assert_eq!(code, 400, "{other}: {page}");
+    }
+}
 #[derive(Clone)]
 struct Mock {
     calls: Arc<AtomicUsize>,

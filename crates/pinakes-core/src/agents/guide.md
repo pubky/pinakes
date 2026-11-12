@@ -65,6 +65,8 @@ A link this instance does not know is a 404 there: nobody referenced it, or it h
 `GET {{BASE}}/v1/search?facet=type&limit=1` counts the card types this instance holds; each
 entry's `type_path` (`["Thing", "CreativeWork", "MusicRecording"]`) places it in the schema.org
 tree. `type` takes several types, any of them: `type=MusicRecording,MusicAlbum,MusicGroup`.
+`exclude_type` leaves types out, each with its subtypes (up to 50): `exclude_type=Event,Place`
+lists every card of another type (links with no type yet are left out too).
 `facet` counts over every match of a search, not just the page: any of `type`, `tags`, `host`
 (services: `{host, site, count}`, the `host` as `host=` takes it) and `category` (categories
 such as OpenStreetMap's `amenity/cafe`, as `category=` takes them), e.g. `facet=type,host`.
@@ -219,7 +221,7 @@ the full result:
 
 | tool | does |
 | --- | --- |
-| `search` | `GET /v1/search`: `q`, `type` (one or several), `tags`, `match`, `near` + `radius`, `bbox`, `from`, `to`, `key`, `remote`, `closed`, `ingredient`, `in_collection`, `sort`, `collapse`, `reach` or `boost` + `viewer`, `limit`, `cursor` |
+| `search` | `GET /v1/search`: `q`, `type` (one or several), `exclude_type`, `tags`, `match`, `near` + `radius`, `bbox`, `from`, `to`, `key`, `remote`, `closed`, `ingredient`, `in_collection`, `sort`, `collapse`, `reach` or `boost` + `viewer`, `limit`, `cursor` |
 | `card` | One link's card by URI (`GET /v1/resources/by-uri`); `resolve: true` asks `POST /v1/resolve` for an unknown link. A card a public collection holds carries `collections` (the count), `in_collections` (the newest 5) and `collections_url` |
 | `lookup` | Every card with one identifier (`isbn:…`, `doi:…`, `isrc:…`, `osm:…`, …) |
 | `group` | A group's members by group id |
