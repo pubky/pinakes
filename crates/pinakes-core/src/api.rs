@@ -1179,8 +1179,10 @@ pub(crate) fn service_site(uri: &str) -> Option<String> {
 /// `fr:2026-07257`): the `page_url` its source read it from, as a client named by the source's
 /// site ("mempool.space"), so a client links the card without building a URL. None for a web
 /// link (it opens itself), a Pubky object (its app's clients open it, `resolver::pubky_apps`),
-/// a page that is not `https:`, and one as long as a stored attribute's value may be
-/// ([`model::ATTRIBUTE_VALUE_CAP`]): it may have been cut, and would link a page that is not there.
+/// a page that is not `https:` or names a user or a credential, and one within a character of a
+/// stored attribute's cap ([`model::ATTRIBUTE_VALUE_CAP`]; `model::truncate` cuts on a character
+/// boundary, up to 3 bytes short of it): it may have been cut, and would link a page that is not
+/// there.
 fn page_client(uri: &str, doc: &ResourceMeta) -> Option<model::OpenIn> {
     let scheme = uri.split_once(':')?.0.to_ascii_lowercase();
     if matches!(scheme.as_str(), "http" | "https" | "pubky") {
@@ -1188,12 +1190,18 @@ fn page_client(uri: &str, doc: &ResourceMeta) -> Option<model::OpenIn> {
     }
     let page = doc.attributes.get("page_url")?;
     let url = url::Url::parse(page).ok()?;
-    if url.scheme() != "https" || page.len() >= model::ATTRIBUTE_VALUE_CAP {
+    if url.scheme() != "https"
+        || page.len() + 3 >= model::ATTRIBUTE_VALUE_CAP
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || crate::capability::is_capability_url(&url)
+    {
         return None;
     }
+    let fits = |s: &String| s.len() <= 64;
     let client = present(Some(&doc.site))
-        .filter(|s| s.len() <= 64)
-        .or_else(|| url.host_str().map(str::to_owned))?;
+        .filter(fits)
+        .or_else(|| url.host_str().map(str::to_owned).filter(fits))?;
     Some(model::OpenIn {
         client,
         url: page.clone(),
@@ -4007,6 +4015,14 @@ mod tests {
         let cut = cut.bounded(&["page_url"]).unwrap();
         let long = cut.attributes["page_url"].clone();
         assert_eq!(long.len(), model::ATTRIBUTE_VALUE_CAP);
+        let mut cut = ResourceMeta::new("commons:File:x", "commons", 3600);
+        let raw = format!(
+            "https://commons.wikimedia.org/wiki/File:x{}",
+            "€".repeat(80)
+        );
+        cut.attributes.insert("page_url".into(), raw);
+        let wide = cut.bounded(&["page_url"]).unwrap().attributes["page_url"].clone();
+        assert!(wide.len() < model::ATTRIBUTE_VALUE_CAP && url::Url::parse(&wide).is_ok());
         assert_eq!(
             open_in(row("btc:tx/ab", "mempool.space", Some(page), "ok")),
             json!([{"client": "mempool.space", "url": page}])
@@ -4028,6 +4044,16 @@ mod tests {
             ("btc:tx/ab", Some(page), "missing"),
             // Cut to the attribute cap when it was stored: it may link a page that is not there.
             ("commons:File:x", Some(&*long), "ok"),
+            // Cut on a character boundary, short of the cap.
+            ("commons:File:x", Some(&*wide), "ok"),
+            // A user or a credential in the page.
+            ("btc:tx/ab", Some("https://user@mempool.space/tx/ab"), "ok"),
+            ("btc:tx/ab", Some("https://u:p@mempool.space/tx/ab"), "ok"),
+            (
+                "btc:tx/ab",
+                Some("https://mempool.space/tx/ab?token=x"),
+                "ok",
+            ),
             ("isbn:9780140328721", None, "ok"),
         ] {
             assert_eq!(
