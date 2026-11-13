@@ -1120,6 +1120,131 @@ async fn preview_returns_completion_within_synchronous_window(pool: PgPool) {
     worker.await.unwrap();
 }
 
+/// While a preview is pending, the wait reads its status alone; the card is read once, for the
+/// answer. Counted as calls of `also_on()`, which every card read makes once.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_pending_preview_is_waited_for_by_its_status_and_read_once(pool: PgPool) {
+    let connection = common::one_connection(&pool).await;
+    sqlx::query("SET track_functions='all'")
+        .execute(&connection)
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(connection.clone(), Config::default()).unwrap());
+    let card_reads =
+        "SELECT coalesce(sum(calls),0)::int8 FROM pg_stat_user_functions WHERE funcname='also_on'";
+    let before = common::counted(&connection, card_reads).await;
+    let start = std::time::Instant::now();
+    let (code, preview) = call(
+        &app,
+        "POST",
+        "/v1/resolve",
+        Some(json!({"uri":"https://example.org/waited"})),
+    )
+    .await;
+    assert_eq!(code, 202);
+    assert_eq!(preview["status"], "pending");
+    // The whole window was waited out, and the card was read once in it.
+    assert!(start.elapsed() >= std::time::Duration::from_secs(3));
+    assert_eq!(common::counted(&connection, card_reads).await - before, 1);
+    // A card that is there already is read once too.
+    let job = queue::claim(&pool, "web", &Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut doc = ResourceMeta::new(&job.uri, "web", 86400);
+    doc.name = Some("Waited".into());
+    store::save_document(&pool, &job.id, job.generation, &doc)
+        .await
+        .unwrap();
+    let before = common::counted(&connection, card_reads).await;
+    let (code, preview) = call(
+        &app,
+        "POST",
+        "/v1/resolve",
+        Some(json!({"uri":"https://example.org/waited"})),
+    )
+    .await;
+    assert_eq!(code, 200);
+    assert_eq!(preview["name"], "Waited");
+    assert_eq!(common::counted(&connection, card_reads).await - before, 1);
+}
+
+/// What happens to a preview while it is waited for decides the answer: a link deleted
+/// meanwhile is a 404, and one that became an alias answers with its root's card as soon as the
+/// root has one.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_preview_that_goes_or_becomes_an_alias_while_waited_for(pool: PgPool) {
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    // Runs `change` on the link's row once the request has stored it.
+    let meanwhile = |uri: &'static str, change: &'static str, root: Option<String>| {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            let id = loop {
+                let id: Option<String> = sqlx::query_scalar("SELECT id FROM resource WHERE uri=$1")
+                    .bind(uri)
+                    .fetch_optional(&pool)
+                    .await
+                    .unwrap();
+                if let Some(id) = id {
+                    break id;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            };
+            sqlx::query(change)
+                .bind(id)
+                .bind(root)
+                .execute(&pool)
+                .await
+                .unwrap();
+        })
+    };
+    let gone = meanwhile(
+        "https://example.org/gone-meanwhile",
+        "DELETE FROM resource WHERE id=$1 AND $2::text IS NULL",
+        None,
+    );
+    let start = std::time::Instant::now();
+    // The document declares no 404 for this route: the answer is not checked against it.
+    let (code, answer) = send(
+        &app,
+        "POST",
+        "/v1/resolve",
+        Some(json!({"uri":"https://example.org/gone-meanwhile"})),
+        |_, _, _, _| {},
+    )
+    .await;
+    gone.await.unwrap();
+    assert_eq!(code, 404);
+    assert_eq!(answer["error"], "resource expired");
+    // Answered when the row went, not at the end of the window.
+    assert!(start.elapsed() < std::time::Duration::from_secs(3));
+
+    let root = store::ensure_resource(&pool, "https://example.org/root")
+        .await
+        .unwrap();
+    let mut doc = ResourceMeta::new("https://example.org/root", "web", 86400);
+    doc.name = Some("Root".into());
+    store::save_document(&pool, &root, 0, &doc).await.unwrap();
+    let aliased = meanwhile(
+        "https://example.org/alias-meanwhile",
+        "INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'canonical')",
+        Some(root.clone()),
+    );
+    let start = std::time::Instant::now();
+    let (code, answer) = call(
+        &app,
+        "POST",
+        "/v1/resolve",
+        Some(json!({"uri":"https://example.org/alias-meanwhile"})),
+    )
+    .await;
+    aliased.await.unwrap();
+    assert_eq!(code, 200);
+    assert_eq!(answer["id"], root.as_str());
+    assert_eq!(answer["name"], "Root");
+    assert!(start.elapsed() < std::time::Duration::from_secs(3));
+}
+
 #[sqlx::test(migrations = "../../migrations")]
 async fn public_budget_covers_reads_and_evicts_old_ips(pool: PgPool) {
     let config = Config {
