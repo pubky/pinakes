@@ -17,7 +17,7 @@ use super::{
 };
 use crate::{
     music::{self, Level, Service},
-    music_sources::{derived, join_level, own_isrc},
+    music_sources::{derived, join_level, mb_level, own_isrc},
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -45,6 +45,15 @@ impl Kind {
             Level::Track => Some(Self::Track),
             _ => None,
         }
+    }
+    fn of_subject(subject: &Subject) -> Option<Self> {
+        music::parse(&subject.uri)
+            .and_then(|l| Self::of(&l))
+            .or_else(|| match mb_level(&subject.uri) {
+                Some(Level::Track) => Some(Self::Track),
+                Some(Level::Album) => Some(Self::Album),
+                _ => None,
+            })
     }
     fn level(self) -> Level {
         match self {
@@ -112,12 +121,11 @@ impl Source for TidalIsrc {
         config.section::<TidalConfig>().pair().is_some()
     }
     fn applies(&self, subject: &Subject) -> bool {
-        music::parse(&subject.uri)
-            .and_then(|l| Kind::of(&l))
+        Kind::of_subject(subject)
             .is_some_and(|kind| subject.keys_in(kind.namespace()).next().is_some())
     }
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
-        let Some(kind) = music::parse(&subject.uri).and_then(|l| Kind::of(&l)) else {
+        let Some(kind) = Kind::of_subject(subject) else {
             return Ok(Found::default());
         };
         let namespace = kind.namespace();

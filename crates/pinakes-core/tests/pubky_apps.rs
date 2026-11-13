@@ -570,17 +570,17 @@ async fn kept(
     .unwrap()
 }
 
-/// Objects of the old Mapky and Eventky layouts, and a path a profile leaves out, stored with
-/// their cards before Pinakes stopped fetching them, then refused (`policy`) and dead-lettered
-/// with those cards, as stable held them: the reextract repair leaves each the card it gets now
-/// (a missing `CreativeWork` with nothing of the object) and a history without documents, so none
-/// is found by its text or its old type. One read again after the rule gets the same card from
-/// its save. Another app's object keeps its card. A second repair changes nothing.
+/// Objects at paths Pinakes never fetches (the old Mapky and Eventky layouts, a path a profile
+/// leaves out) get no route when a reference names them, so nothing fetches them. One that holds
+/// a card all the same (stored while its path was read) keeps nothing of it once it is read
+/// again: the resolver gives it no card, without a request, and its save leaves a missing
+/// `CreativeWork` with nothing of the object and a history without documents, found neither by
+/// its text nor by its old type. Another app's object keeps its route and its card.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
-async fn objects_stored_before_their_paths_were_never_fetched_keep_nothing(pool: PgPool) {
+async fn an_object_at_a_path_never_fetched_keeps_nothing_once_read_again(pool: PgPool) {
     let owner = "ybndrfg8ejkmcpqxot1uwisza345h769ybndrfg8ejkmcpqxot1uwi";
     let at = |path: &str| format!("pubky://{owner}/pub/{path}");
-    let legacy = [
+    let left_out = [
         stored_before(
             &at("mapky.app/posts/00358SJCCNK1G"),
             json!({"content": "Excited to check out this place one day!"}),
@@ -606,39 +606,43 @@ async fn objects_stored_before_their_paths_were_never_fetched_keep_nothing(pool:
             json!({"name": "Night owl settings"}),
             None,
         ),
+        stored_before(
+            &at("mapky.app/reviews/0034FED2YCDKK"),
+            json!({"content": "Lovely terrace, slow service."}),
+            None,
+        ),
     ];
-    let read_again = stored_before(
-        &at("mapky.app/reviews/0034FED2YCDKK"),
-        json!({"content": "Lovely terrace, slow service."}),
-        None,
-    );
     let other = stored_before(
         &at("chess/games/0034FED2YCDKM"),
         json!({"content": "A quiet opening, then fireworks."}),
         None,
     );
     let mut ids = vec![];
-    for doc in legacy.iter().chain([&read_again, &other]) {
+    for doc in left_out.iter().chain([&other]) {
         let id = store::ensure_resource(&pool, &doc.url).await.unwrap();
+        // No route for a path never fetched: no worker ever leases it.
+        let route: Option<String> = sqlx::query_scalar("SELECT resolver FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            route.as_deref(),
+            (doc.url == other.url).then_some("pubky"),
+            "{}",
+            doc.url
+        );
         store::save_document(&pool, &id, 0, doc).await.unwrap();
         tagged(&pool, &id).await;
         ids.push(id);
     }
     let other_id = ids.pop().unwrap();
-    let read_again_id = ids.pop().unwrap();
-    sqlx::query(
-        "UPDATE resource SET status='error',last_error='policy',dead_letter=true WHERE id=ANY($1)",
-    )
-    .bind(&ids)
-    .execute(&pool)
-    .await
-    .unwrap();
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let posting = found(&app, "type=SocialMediaPosting").await;
-    assert!(posting.contains(&legacy[0].url), "{posting:?}");
+    assert!(posting.contains(&left_out[0].url), "{posting:?}");
     assert_eq!(
         found(&app, "q=fountains").await,
-        std::slice::from_ref(&legacy[2].url)
+        std::slice::from_ref(&left_out[2].url)
     );
     for id in &ids {
         let (name, _, description, _, lines) = kept(&pool, id).await;
@@ -646,24 +650,11 @@ async fn objects_stored_before_their_paths_were_never_fetched_keep_nothing(pool:
         assert_eq!(lines, 1, "{id}");
     }
 
-    // Read again after the rule: the resolver gives it no card, without a request, and its save
-    // keeps nothing of the card it had.
-    let fetched = pubky_apps::no_card(&read_again.url, 86400);
-    store::save_document(&pool, &read_again_id, 0, &fetched)
-        .await
-        .unwrap();
-    assert_eq!(
-        kept(&pool, &read_again_id).await,
-        (None, Some("CreativeWork".into()), None, 0, 0)
-    );
-
-    assert_eq!(
-        pinakes_core::changes::scrub_never_fetched(&pool)
-            .await
-            .unwrap(),
-        legacy.len() as u64
-    );
-    for (id, doc) in ids.iter().zip(&legacy) {
+    // Read again: the resolver gives each no card, without a request, and its save keeps
+    // nothing of the card it had.
+    for (id, doc) in ids.iter().zip(&left_out) {
+        let fetched = pubky_apps::no_card(&doc.url, 86400);
+        store::save_document(&pool, id, 0, &fetched).await.unwrap();
         assert_eq!(
             kept(&pool, id).await,
             (None, Some("CreativeWork".into()), None, 0, 0),
@@ -671,6 +662,7 @@ async fn objects_stored_before_their_paths_were_never_fetched_keep_nothing(pool:
             doc.url
         );
         let shown = get(&app, &format!("/v1/resources/{id}")).await;
+        assert_eq!(shown["status"], "missing", "{shown}");
         for field in ["name", "description", "image", "point", "facts"] {
             assert!(shown[field].is_null(), "{field} in {shown}");
         }
@@ -688,24 +680,19 @@ async fn objects_stored_before_their_paths_were_never_fetched_keep_nothing(pool:
             "Cobbles",
             "Quiet",
             "Night owl",
+            "terrace",
         ] {
             assert!(!text.contains(word), "{word} in {text}");
         }
     }
     assert!(!found(&app, "type=SocialMediaPosting")
         .await
-        .contains(&legacy[0].url));
+        .contains(&left_out[0].url));
     assert!(found(&app, "q=fountains").await.is_empty());
     // Another app's object keeps its card and stays a search result.
     assert_eq!(
         found(&app, "q=fireworks").await,
         std::slice::from_ref(&other.url),
         "{other_id}"
-    );
-    assert_eq!(
-        pinakes_core::changes::scrub_never_fetched(&pool)
-            .await
-            .unwrap(),
-        0
     );
 }

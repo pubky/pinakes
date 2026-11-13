@@ -614,6 +614,31 @@ async fn a_derived_link_that_carries_a_credential_is_refused(pool: PgPool) {
     assert!(!stored.contains("SECRET"), "{stored}");
 }
 
+/// The rule that refuses a derived link (`also_on::refused_link`) reads a link as it would be
+/// fetched: a percent-encoded key, a link start split by a tab, a provider's share path and bare
+/// user info are refused; an empty key in a fragment and a key-like word are not.
+#[test]
+fn a_link_is_refused_for_a_credential_however_it_is_spelt() {
+    // The share path is a probe of the repository guard's fixture, never written out here.
+    let probes: Value =
+        serde_json::from_str(include_str!("fixtures/capability_urls.json")).unwrap();
+    let share = probes["providers"][1].as_str().unwrap();
+    assert!(share.contains("/owa/"));
+    for (n, (uri, refused)) in [
+        ("https://cdn.example/x?%74oken=SECRET", true),
+        ("ht\ttps://cdn.example/y?token=SECRET", true),
+        (share, true),
+        ("https://u@cdn.example/z", true),
+        ("https://ok.example/x#key=", false),
+        ("https://ok.example/p?key_art=1", false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(also_on::refused_link(uri), refused, "probe {n}");
+    }
+}
+
 /// A saved document makes its sources due; an unchanged refetch does not; an alias never runs;
 /// the config refuses a source it does not know.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]

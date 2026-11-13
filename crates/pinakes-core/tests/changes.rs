@@ -1276,189 +1276,35 @@ async fn what_a_preview_held_keeps_the_full_grace_after_it_goes(pool: PgPool) {
     assert!(left().await.is_empty());
 }
 
-/// `pinakesd reextract` brings rows an earlier build stored before the credential rule reached
-/// them under the rule itself: a derived link the rule refuses goes (a percent-encoded key, a
-/// link start split by a tab, a provider's share path, user info); a change line's or group
-/// unit's occurrence key with such a UID takes its stand-in, its recurrence id as written; a
-/// change line's documents lose a spelling of the own link that adds a credential. Every other
-/// row stays byte for byte, and a second run changes nothing.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
-async fn reextract_repairs_rows_stored_before_the_credential_rule(pool: PgPool) {
-    let own = "https://cal.example/feed.ics?token=OWN";
-    let feed = store::ensure_resource(&pool, own).await.unwrap();
-    let card = store::ensure_resource(&pool, "https://open.spotify.com/track/r1")
-        .await
-        .unwrap();
-    // Derived links of the card, as an earlier build stored them; the share path is a probe of
-    // the repository guard's fixture, never written out here.
-    let probes: Value =
-        serde_json::from_str(include_str!("fixtures/capability_urls.json")).unwrap();
-    let share = probes["providers"][1].as_str().unwrap();
-    assert!(share.contains("/owa/"), "{share}");
-    let links = [
-        ("https://cdn.example/x?%74oken=SECRET", false),
-        ("ht\ttps://cdn.example/y?token=SECRET", false),
-        (share, false),
-        ("https://u@cdn.example/z", false),
-        ("https://ok.example/x#key=", true),
-        ("https://ok.example/p?key_art=1", true),
-    ];
-    for (n, (uri, _)) in links.iter().enumerate() {
-        sqlx::query("INSERT INTO derived_link(resource_id,link_id,uri,site,source,via,expires_at) VALUES($1,$2,$3,'S','music','wikidata',now()+interval '1 day')")
-            .bind(&card)
-            .bind(format!("{n:0>32}"))
-            .bind(uri)
-            .execute(&pool)
-            .await
-            .unwrap();
-    }
-    // Change lines of the feed: keys an earlier build wrote raw, and documents written under
-    // the old own-link exemption.
+/// A change line names its occurrence by the key as it is stored (`changes::stored_key`): a UID
+/// that holds a link carrying a credential (a percent-encoded key, a link start split by a tab
+/// or a newline included) is written by its stand-in, the same on every read, its recurrence id
+/// as written. Every other key stays byte for byte.
+#[test]
+fn an_occurrence_key_names_no_credential_and_others_stay_as_written() {
     let secret = "https://cal.example/event?token=SECRET";
-    let keys = [
-        (serde_json::to_string(&(secret, "")).unwrap(), false),
-        (
-            format!("[{},null]", serde_json::to_string(secret).unwrap()),
-            false,
-        ),
-        (
-            serde_json::to_string(&("ht\ttps://cal.example/e?%74oken=SECRET", "r")).unwrap(),
-            false,
-        ),
-        (
-            serde_json::to_string(&("https://u@cal.example/e", "")).unwrap(),
-            true,
-        ),
-        (serde_json::to_string(&("plain", "")).unwrap(), true),
-        (format!("[\"uid:{}\",\"\"]", "0".repeat(64)), true),
-    ];
-    let mut seqs = vec![];
-    for (key, _) in &keys {
-        let seq: i64 = sqlx::query_scalar("INSERT INTO resource_change(resource_id,class,fields,source,occurrence_key) VALUES($1,'created','{}','ics',$2) RETURNING seq")
-            .bind(&feed)
-            .bind(key)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        seqs.push(seq);
-    }
-    let history = [
-        (
-            json!({"url": own, "name": "Feed", "image": "https://u:OTHER@cal.example/feed.ics?token=OWN"}),
-            false,
-        ),
-        (
-            json!({"url": own, "name": "Feed", "feed": "https://CAL.example/feed.ics?token=OWN"}),
-            true,
-        ),
-    ];
-    let mut history_seqs = vec![];
-    for (after, _) in &history {
-        let seq: i64 = sqlx::query_scalar("INSERT INTO resource_change(resource_id,class,fields,source,after) VALUES($1,'created','{}','ics',$2) RETURNING seq")
-            .bind(&feed)
-            .bind(after)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        history_seqs.push(seq);
-    }
-    // Group units of the feed: one keyed raw, one plain.
-    for (n, (key, _)) in keys.iter().enumerate().take(5).skip(3) {
-        sqlx::query("INSERT INTO group_unit(unit_id,resource_id,occurrence_key,occurrence) VALUES($1,$2,$3,jsonb_build_object('uid',($3::text)::jsonb->>0,'recurrence_id',NULL))")
-            .bind(format!("{n:a>32}"))
-            .bind(&feed)
-            .bind(key)
-            .execute(&pool)
-            .await
-            .unwrap();
-    }
-    sqlx::query("INSERT INTO group_unit(unit_id,resource_id,occurrence_key,occurrence) VALUES($1,$2,$3,jsonb_build_object('uid',$4::text,'recurrence_id','r'))")
-        .bind("b".repeat(32))
-        .bind(&feed)
-        .bind(&keys[2].0)
-        .bind("ht\ttps://cal.example/e?%74oken=SECRET")
-        .execute(&pool)
-        .await
-        .unwrap();
-    let snapshot = || async {
-        sqlx::query_scalar::<_, String>(
-            "SELECT concat_ws(' ',(SELECT string_agg(uri,' ' ORDER BY link_id) FROM derived_link),(SELECT string_agg(concat_ws('|',seq,occurrence_key,after::text),' ' ORDER BY seq) FROM resource_change),(SELECT string_agg(concat_ws('|',unit_id,occurrence_key,occurrence::text),' ' ORDER BY unit_id) FROM group_unit))",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap()
-    };
-    let before = snapshot().await;
-    assert!(before.contains("SECRET"));
-    let lock = pinakes_core::locks::own_database(&pool).await.unwrap();
-    let done = changes::repair_credentials(&pool, &lock).await.unwrap();
-    assert_eq!(
-        done,
-        changes::CredentialRepair {
-            derived_links: 4,
-            change_keys: 3,
-            unit_keys: 1,
-            history_rows: 1,
-        }
-    );
-    let after = snapshot().await;
-    assert!(!after.contains("SECRET"), "{after}");
-    assert!(!after.contains("OTHER"), "{after}");
-    // What stays, stays byte for byte.
-    let left: Vec<String> = sqlx::query_scalar("SELECT uri FROM derived_link ORDER BY link_id")
-        .fetch_all(&pool)
-        .await
-        .unwrap();
-    let kept: Vec<&str> = links
-        .iter()
-        .filter(|(_, keep)| *keep)
-        .map(|(uri, _)| *uri)
-        .collect();
-    assert_eq!(left, kept);
-    let stored: Vec<String> = sqlx::query_scalar(
-        "SELECT occurrence_key FROM resource_change WHERE seq=ANY($1) ORDER BY seq",
-    )
-    .bind(&seqs)
-    .fetch_all(&pool)
-    .await
-    .unwrap();
-    for ((key, keep), now) in keys.iter().zip(&stored) {
-        if *keep {
-            assert_eq!(now, key);
-        } else {
-            assert_ne!(now, key);
-            assert!(now.starts_with("[\"uid:"), "{now}");
-            assert_eq!(now, &changes::stored_key(key));
-        }
+    let null_key = format!("[{},null]", serde_json::to_string(secret).unwrap());
+    for key in [
+        serde_json::to_string(&(secret, "")).unwrap(),
+        null_key.clone(),
+        serde_json::to_string(&("ht\ttps://cal.example/e?%74oken=SECRET", "r")).unwrap(),
+        serde_json::to_string(&("web\ncal:cal.example/feed.ics?token=SECRET", "")).unwrap(),
+    ] {
+        let stored = changes::stored_key(&key);
+        assert_ne!(stored, key);
+        assert!(stored.starts_with("[\"uid:"), "{stored}");
+        assert!(!stored.contains("SECRET"), "{stored}");
+        assert_eq!(changes::stored_key(&stored), stored);
     }
     // A non-string recurrence id is kept as written.
-    assert!(stored[1].ends_with(",null]"), "{}", stored[1]);
-    let docs: Vec<Value> =
-        sqlx::query_scalar("SELECT after FROM resource_change WHERE seq=ANY($1) ORDER BY seq")
-            .bind(&history_seqs)
-            .fetch_all(&pool)
-            .await
-            .unwrap();
-    assert_eq!(docs[0], json!({"url": own, "name": "Feed"}));
-    assert_eq!(docs[1], history[1].0);
-    let units: Vec<(String, Option<String>)> =
-        sqlx::query_as("SELECT occurrence_key,occurrence->>'uid' FROM group_unit ORDER BY unit_id")
-            .fetch_all(&pool)
-            .await
-            .unwrap();
-    assert_eq!(
-        units[0],
-        (keys[3].0.clone(), Some("https://u@cal.example/e".into()))
-    );
-    assert_eq!(units[1], (keys[4].0.clone(), Some("plain".into())));
-    let stand_in = pinakes_core::event::stored_uid("ht\ttps://cal.example/e?%74oken=SECRET".into());
-    assert_eq!(units[2], (changes::stored_key(&keys[2].0), Some(stand_in)));
-    // Idempotent.
-    assert_eq!(
-        changes::repair_credentials(&pool, &lock).await.unwrap(),
-        changes::CredentialRepair::default()
-    );
-    assert_eq!(snapshot().await, after);
+    assert!(changes::stored_key(&null_key).ends_with(",null]"));
+    for key in [
+        serde_json::to_string(&("https://u@cal.example/e", "")).unwrap(),
+        serde_json::to_string(&("plain", "")).unwrap(),
+        format!("[\"uid:{}\",\"\"]", "0".repeat(64)),
+    ] {
+        assert_eq!(changes::stored_key(&key), key);
+    }
 }
 
 /// Expediting moves an overdue resource to the front of the queue once: asked again, its row is
