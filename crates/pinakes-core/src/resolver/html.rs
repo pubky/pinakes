@@ -329,6 +329,8 @@ where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
+    #[cfg(test)]
+    counted::JOBS.with(|n| n.set(n.get() + 1));
     let permit = permit(parses).await?;
     let cancelled = Arc::new(AtomicBool::new(false));
     let _cancel = Cancel(cancelled.clone());
@@ -441,7 +443,27 @@ enum Kind {
 /// `text` parsed as an HTML document, within the caps and the job's limits.
 pub fn document(text: &str) -> anyhow::Result<scraper::Html> {
     check_slot();
+    #[cfg(test)]
+    counted::DOCUMENTS.with(|n| n.set(n.get() + 1));
     parse(Kind::Document, bounded(text), PARSE_BUDGET)
+}
+
+/// What this thread has asked of the parser, for the tests that count a function's work: the
+/// parse jobs it asked for (`blocking`, each a wait for a parse permit) and the documents it
+/// parsed (`document`).
+#[cfg(test)]
+pub(crate) mod counted {
+    use std::cell::Cell;
+    thread_local! {
+        pub(crate) static JOBS: Cell<usize> = const { Cell::new(0) };
+        pub(crate) static DOCUMENTS: Cell<usize> = const { Cell::new(0) };
+    }
+    pub(crate) fn jobs() -> usize {
+        JOBS.with(Cell::get)
+    }
+    pub(crate) fn documents() -> usize {
+        DOCUMENTS.with(Cell::get)
+    }
 }
 
 /// `text` parsed as an HTML fragment, within the caps and the job's limits.

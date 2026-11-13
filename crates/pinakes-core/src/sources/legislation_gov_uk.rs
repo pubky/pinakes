@@ -79,14 +79,8 @@ impl Item {
         };
         let kind = kind.to_ascii_lowercase();
         let ok_kind = (2..=8).contains(&kind.len()) && kind.bytes().all(|b| b.is_ascii_lowercase());
-        let year: u16 = (year.len() == 4 && year.bytes().all(|b| b.is_ascii_digit()))
-            .then(|| year.parse().ok())
-            .flatten()?;
-        let number: u32 =
-            (!number.is_empty() && number.len() <= 6 && number.bytes().all(|b| b.is_ascii_digit()))
-                .then(|| number.parse().ok())
-                .flatten()
-                .filter(|n| *n > 0)?;
+        let year: u16 = super::kit::decimal(year, 4).filter(|_| year.len() == 4)?;
+        let number: u32 = super::kit::number(number, 6)?;
         if !ok_kind {
             return None;
         }

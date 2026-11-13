@@ -292,10 +292,7 @@ impl Films {
         })
     }
     async fn tvmaze(cx: &Context, url: &str) -> Result<Option<Show>> {
-        let options = FetchOptions {
-            accept: Some("application/json".into()),
-            ..Default::default()
-        };
+        let options = FetchOptions::json();
         let f = cx.egress.discover(url, &options, 3600).await?;
         parse_tvmaze(f.status, &f.body)
     }

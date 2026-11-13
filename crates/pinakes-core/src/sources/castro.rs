@@ -3,7 +3,10 @@
 //! Apple Podcasts ID in its "Listen on" links. With them the card plays that file (its
 //! `stream`), and the podcasts also-on source finds the episode on Apple Podcasts by the file
 //! iTunes lists for it. The page's own metadata names the card, as for any page.
-use super::{kit::plain, web_url, Context, Example, Source};
+use super::{
+    kit::{decimal, plain},
+    web_url, Context, Example, Source,
+};
 use crate::{
     model::{ResourceMeta, Stream},
     resolver::egress::Fetched,
@@ -56,9 +59,7 @@ fn apple_id(href: &str) -> Option<u64> {
         }
         _ => return None,
     };
-    plain(id, 20, |c| c.is_ascii_digit())
-        .then(|| id.parse().ok())
-        .flatten()
+    decimal(id, 20)
 }
 
 /// What a Castro episode page (its body) plays and which show it names.

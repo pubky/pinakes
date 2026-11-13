@@ -3862,3 +3862,136 @@ async fn an_exact_link_replaces_a_maybe_of_the_same_link(pool: PgPool) {
         .unwrap();
     assert_eq!(row().await, taken);
 }
+
+/// A run asks once which sources hold rows of its resource, however many sources do not apply
+/// to it, and clears those that do: a source holding only a key, only a derived link, only a
+/// fact (an expired one) or only a place among releases. A source not in the run keeps its rows.
+/// Counted as the scans of `link_release`, which every such question reads.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_run_asks_once_which_sources_hold_rows(pool: PgPool) {
+    let id = page(&pool, "https://example.org/plain", "Plain").await;
+    // Forty sources, none with an answer for the page: none applies.
+    let sources: Vec<Arc<dyn Source>> = (0..40)
+        .map(|n| {
+            let id: &'static str = Box::leak(format!("idle{n}").into_boxed_str());
+            Fake::new(id) as Arc<dyn Source>
+        })
+        .collect();
+    let cx = cx(Config::default());
+    // The run and the count share one backend.
+    let connection = common::one_connection(&pool).await;
+    let scans = "SELECT (coalesce(seq_scan,0)+coalesce(idx_scan,0))::int8 FROM pg_stat_user_tables WHERE relname='link_release'";
+    let before = common::counted(&connection, scans).await;
+    drain(&connection, &cx, &sources).await;
+    let asked = common::counted(&connection, scans).await - before;
+    // One question; one per source would be forty.
+    assert!((1..10).contains(&asked), "{asked} scans");
+    // No source applied: the resource is not due again.
+    let due: i64 = sqlx::query_scalar("SELECT count(*) FROM also_on_dirty WHERE resource_id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(due, 0);
+    // Each kind of row, each for a source of its own; `gone` is no source of this run.
+    for statement in [
+        "INSERT INTO resource_key(resource_id,key,source,via,expires_at) VALUES($1,'wikidata:Q1','idle1','x',now()+interval '1 day'),($1,'wikidata:Q2','gone','x',now()+interval '1 day')",
+        "INSERT INTO derived_link(resource_id,link_id,uri,site,source,via,expires_at) VALUES($1,md5('idle2'),'https://www.deezer.com/track/1','Deezer','idle2','x',now()+interval '1 day')",
+        "INSERT INTO resource_fact(resource_id,name,value,source,expires_at) VALUES($1,'isrc','GBUM71029604','idle3',now()-interval '1 day')",
+        "INSERT INTO link_release(resource_id,link_id,rank,source,expires_at) VALUES($1,md5('idle4'),1000,'idle4',now()+interval '1 day')",
+        "INSERT INTO also_on_dirty(resource_id) VALUES($1) ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=now()",
+    ] {
+        sqlx::query(statement).bind(&id).execute(&pool).await.unwrap();
+    }
+    let held = |pool: PgPool, id: String| async move {
+        sqlx::query_scalar::<_, String>("SELECT source FROM resource_key WHERE resource_id=$1 UNION SELECT source FROM derived_link WHERE resource_id=$1 UNION SELECT source FROM resource_fact WHERE resource_id=$1 UNION SELECT source FROM link_release WHERE resource_id=$1 ORDER BY 1")
+            .bind(id)
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+    };
+    assert_eq!(
+        held(pool.clone(), id.clone()).await,
+        ["gone", "idle1", "idle2", "idle3", "idle4"]
+    );
+    let before = common::counted(&connection, scans).await;
+    drain(&connection, &cx, &sources).await;
+    let asked = common::counted(&connection, scans).await - before;
+    assert_eq!(held(pool.clone(), id.clone()).await, ["gone"]);
+    // One question and the four sources cleared, each in its own transaction.
+    assert!((1..20).contains(&asked), "{asked} scans");
+}
+
+/// A source that finds nothing for a resource it holds no rows of records nothing: its run
+/// takes no write lock, so it ends while an exclusive writer holds the write order. With rows to
+/// clear it records, and waits for the writer.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_run_that_finds_nothing_and_holds_nothing_records_nothing(pool: PgPool) {
+    let uri = "https://open.spotify.com/track/nothing";
+    let id = page(&pool, uri, "Track").await;
+    let quiet = Fake::new("quiet");
+    quiet.answer(uri, Ok(Found::default()));
+    let sources: Vec<Arc<dyn Source>> = vec![quiet.clone()];
+    let writer = |pool: PgPool| async move {
+        let mut exclusive = pool.begin().await.unwrap();
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(pinakes_core::locks::WRITE_ORDER)
+            .execute(&mut *exclusive)
+            .await
+            .unwrap();
+        exclusive
+    };
+    let exclusive = writer(pool.clone()).await;
+    let context = cx(Config::default());
+    tokio::time::timeout(Duration::from_secs(20), drain(&pool, &context, &sources))
+        .await
+        .expect("a run with nothing to record waits for no writer");
+    exclusive.commit().await.unwrap();
+    assert_eq!(quiet.calls.lock().unwrap().len(), 1);
+    // The run counts as any other: the resource is due again after the source's lifetime.
+    let (attempts, error, later): (i32, Option<String>, bool) = sqlx::query_as(
+        "SELECT attempts,last_error,next_attempt_at>now()+interval '23 hours' FROM also_on_dirty WHERE resource_id=$1",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((attempts, error, later), (0, None, true));
+    // The source holds a key now: finding nothing clears it, under the write order.
+    also_on::record(
+        &pool,
+        &id,
+        "quiet",
+        Found {
+            keys: vec![key("wikidata:Q7")],
+            ..Default::default()
+        },
+        Duration::from_secs(60),
+        &Config::default().also_on,
+    )
+    .await
+    .unwrap();
+    let keys = |pool: PgPool, id: String| async move {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource_key WHERE resource_id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    assert_eq!(keys(pool.clone(), id.clone()).await, 1);
+    let exclusive = writer(pool.clone()).await;
+    let run = {
+        let (pool, sources) = (pool.clone(), sources.clone());
+        tokio::spawn(async move {
+            let context = cx(Config::default());
+            drain(&pool, &context, &sources).await
+        })
+    };
+    common::lock_waiters_reach(&pool, 1, "the run").await;
+    assert!(!run.is_finished(), "the run waits for the exclusive writer");
+    assert_eq!(keys(pool.clone(), id.clone()).await, 1);
+    exclusive.commit().await.unwrap();
+    run.await.unwrap();
+    assert_eq!(keys(pool.clone(), id.clone()).await, 0);
+    assert_eq!(quiet.calls.lock().unwrap().len(), 2);
+}

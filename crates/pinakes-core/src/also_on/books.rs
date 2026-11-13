@@ -464,12 +464,6 @@ impl Source for Books {
 }
 
 impl Books {
-    fn options() -> FetchOptions {
-        FetchOptions {
-            accept: Some("application/json".into()),
-            ..Default::default()
-        }
-    }
     /// The work's Wikidata item (the one carrying its Open Library ID): its Q-id as a fact (the
     /// Open Library work key already joins the work's editions) and its pages, keyed by the work.
     async fn wikidata(cx: &Context, work: &str, kind: Option<&str>) -> Result<Option<Found>> {
@@ -498,7 +492,7 @@ impl Books {
     async fn edition(cx: &Context, book: &Book) -> Result<Found> {
         let f = cx
             .egress
-            .discover(&edition_request(book), &Self::options(), 3600)
+            .discover(&edition_request(book), &FetchOptions::json(), 3600)
             .await?;
         let Some(edition) = parse_edition(f.status, &f.body, book)? else {
             return Ok(Found::default());
@@ -515,10 +509,7 @@ impl Books {
         // A failing secondary service leaves what Open Library said.
         let mut deferred = Deferred::default();
         if let (true, Some(isbn)) = (edition.ebook, &isbn) {
-            let itunes = FetchOptions {
-                extra_types: &["text/javascript"],
-                ..Self::options()
-            };
+            let itunes = super::itunes_api::options();
             let storefront = &cx.config.also_on.apple_storefront;
             let apple = async {
                 let f = cx
@@ -603,7 +594,7 @@ impl Books {
         for _ in 0..3 {
             let f = cx
                 .egress
-                .discover(&work_request(&id), &Self::options(), 3600)
+                .discover(&work_request(&id), &FetchOptions::json(), 3600)
                 .await?;
             match parse_work(f.status, &f.body, &id)? {
                 WorkRecord::Work => {

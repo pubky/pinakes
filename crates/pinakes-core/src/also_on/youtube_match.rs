@@ -16,8 +16,8 @@
 //! answer: the lookup is retried hours later. It runs after `deezer` and `tidal_isrc`, and before
 //! `editions`.
 use super::{
-    deezer::{self, DeezerSource},
-    tidal::{self, TidalConfig, API as TIDAL_API},
+    deezer_api,
+    tidal_api::{self, TidalConfig, API as TIDAL_API},
     Context, Found, Source, Subject,
 };
 use crate::{
@@ -103,11 +103,9 @@ impl Source for YoutubeMatch {
         let Some(link) = music::parse(&subject.uri) else {
             return Ok(found);
         };
-        let on_deezer = super::runs(&cx.config, &DeezerSource);
-        // By its ID: this source goes without `tidal_isrc`, and `tidal_isrc` without it.
-        let on_tidal = super::registered()
-            .iter()
-            .any(|s| s.id() == "tidal_isrc" && super::runs(&cx.config, s.as_ref()));
+        // By their IDs: this source goes without `deezer` and `tidal_isrc`, and each without it.
+        let on_deezer = super::runs_by_id(&cx.config, "deezer");
+        let on_tidal = super::runs_by_id(&cx.config, "tidal_isrc");
         if !on_deezer && !on_tidal {
             return Ok(found);
         }
@@ -137,7 +135,7 @@ impl Source for YoutubeMatch {
                     .append_pair("q", &query)
                     .finish()
             );
-            if let Some(answer) = deezer::answer(cx, &path).await? {
+            if let Some(answer) = deezer_api::answer(cx, &path).await? {
                 if let Some(id) = pick(&deezer_candidates(&answer), &upload) {
                     found.links.extend(
                         derived(
@@ -156,7 +154,7 @@ impl Source for YoutubeMatch {
                 .append_pair("countryCode", &cx.config.section::<TidalConfig>().country)
                 .append_pair("filter[query]", &query)
                 .append_pair("include", "tracks.artists");
-            match tidal::api_object(cx, url.as_str()).await {
+            match tidal_api::api_object(cx, url.as_str()).await {
                 Ok(Some(answer)) => {
                     if let Some(id) = pick(&tidal_candidates(&answer), &upload) {
                         found.links.extend(
@@ -212,13 +210,7 @@ async fn watch(cx: &Context, id: &str) -> Result<Watch> {
     };
     match fetched.status {
         200 => {}
-        429 | 500..=599 => {
-            return Err(RetryLater {
-                class: "youtube_busy",
-                seconds: fetched.retry_after_secs.clamp(60, 3600),
-            }
-            .into())
-        }
+        429 | 500..=599 => return Err(super::media::busy("youtube_busy", &fetched)),
         // YouTube's answer to a host it blocks: no answer either.
         403 => return Ok(Watch::LoginRequired),
         _ => return Ok(Watch::Nothing),
@@ -350,11 +342,7 @@ pub fn tidal_candidates(answer: &Value) -> Vec<Candidate> {
         .filter(|t| t["type"] == "tracks")
         .filter_map(|t| {
             let a = &t["attributes"];
-            let title = a["title"].as_str()?;
-            let title = match a["version"].as_str().map(str::trim) {
-                Some(version) if !version.is_empty() => format!("{title} ({version})"),
-                _ => title.to_owned(),
-            };
+            let title = tidal_api::title(a)?;
             let first = t["relationships"]["artists"]["data"][0]["id"].as_str()?;
             Some(Candidate {
                 id: t["id"].as_str()?.to_owned(),

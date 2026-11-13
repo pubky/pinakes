@@ -81,10 +81,7 @@ pub fn of_uri(uri: &str) -> Option<Target> {
         ["questions", id, ..] | ["q", id, ..] => *id,
         _ => return None,
     };
-    let id = (id.len() <= 12 && id.bytes().all(|b| b.is_ascii_digit()))
-        .then(|| id.parse::<u64>().ok())
-        .flatten()
-        .filter(|n| *n > 0)?;
+    let id = super::kit::number::<u64>(id, 12)?;
     Some(Target { host, site, id })
 }
 impl Target {
