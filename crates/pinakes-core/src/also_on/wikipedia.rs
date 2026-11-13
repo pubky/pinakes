@@ -1,7 +1,7 @@
 //! The `wikipedia` also-on source.
 use crate::{
-    also_on::{Context, Found, Key, Source, Subject},
-    hubs::{self, wikidata},
+    also_on::{Context, Found, Source, Subject},
+    hubs::wikidata,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -43,13 +43,7 @@ impl WikipediaSource {
         let fetched = cx.egress.discover(url.as_str(), &options, 3600).await?;
         match fetched.status {
             200 => {}
-            429 | 500..=599 => {
-                return Err(crate::resolver::RetryLater {
-                    class: "wikipedia_busy",
-                    seconds: fetched.retry_after_secs.clamp(60, 3600),
-                }
-                .into())
-            }
+            429 | 500..=599 => return Err(super::media::busy("wikipedia_busy", &fetched)),
             _ => return Ok(Found::default()),
         }
         let Some(qid) = parse_item(&serde_json::from_slice(&fetched.body)?) else {
@@ -64,16 +58,7 @@ impl WikipediaSource {
                     .map(|item| found(item, &article))
                     .unwrap_or_default()
             }),
-            || Found {
-                keys: hubs::key::wikidata(&qid)
-                    .map(|key| Key {
-                        key,
-                        via: "wikidata".into(),
-                    })
-                    .into_iter()
-                    .collect(),
-                ..Default::default()
-            },
+            || crate::also_on::wikidata_key(&qid),
         )
     }
 }

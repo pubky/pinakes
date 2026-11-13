@@ -1,7 +1,7 @@
 //! The `wikidata_item` also-on source.
 use crate::{
-    also_on::{Context, Found, Key, Source, Subject},
-    hubs::{self, wikidata},
+    also_on::{Context, Found, Source, Subject},
+    hubs::wikidata,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -64,17 +64,9 @@ impl Source for WikidataItemSource {
 impl WikidataItemSource {
     /// What the item link alone proves: its Q-id.
     fn own_key(uri: &str) -> Found {
-        Found {
-            keys: wikidata::item_link(uri)
-                .and_then(|(qid, _)| hubs::key::wikidata(&qid))
-                .map(|key| Key {
-                    key,
-                    via: "wikidata".into(),
-                })
-                .into_iter()
-                .collect(),
-            ..Default::default()
-        }
+        wikidata::item_link(uri)
+            .map(|(qid, _)| crate::also_on::wikidata_key(&qid))
+            .unwrap_or_default()
     }
     async fn read(&self, cx: &Context, subject: &Subject) -> Result<Found> {
         let Some((qid, _)) = wikidata::item_link(&subject.uri) else {

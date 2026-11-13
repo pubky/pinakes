@@ -509,10 +509,7 @@ impl Books {
         // A failing secondary service leaves what Open Library said.
         let mut deferred = Deferred::default();
         if let (true, Some(isbn)) = (edition.ebook, &isbn) {
-            let itunes = FetchOptions {
-                extra_types: &["text/javascript"],
-                ..FetchOptions::json()
-            };
+            let itunes = super::itunes_api::options();
             let storefront = &cx.config.also_on.apple_storefront;
             let apple = async {
                 let f = cx
