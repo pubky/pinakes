@@ -3148,6 +3148,7 @@ async fn read(
         return Ok(None);
     };
     with_refs(pool, std::iter::once(&mut detail.card)).await?;
+    crate::music_identity::keys(pool, &mut detail).await?;
     Ok(Some(detail))
 }
 /// A read's JSON, cacheable for 30 seconds like a search page, with an ETag of its content; 304
