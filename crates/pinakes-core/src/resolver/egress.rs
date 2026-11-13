@@ -1084,9 +1084,10 @@ impl Egress {
                 Some(page) => page,
                 None => {
                     let original = requested.clone();
-                    let (page, answer) = super::html::blocking(move || {
+                    // Boxed: the job holds the answer, kept off callers' debug stacks.
+                    let (page, answer) = Box::pin(super::html::blocking(move || {
                         (super::interstitial::inspect(&original, &response), response)
-                    })
+                    }))
                     .await?;
                     response = answer;
                     page?

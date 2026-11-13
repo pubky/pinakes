@@ -399,7 +399,8 @@ impl WebResolver {
             }
 
             if let Some(cards) = &self.cards {
-                extracted.doc = super::cards::enrich(
+                // Boxed: keeps the enrichment state machine off callers' debug stacks.
+                extracted.doc = Box::pin(super::cards::enrich(
                     uri,
                     &fetched,
                     extracted.doc,
@@ -407,7 +408,7 @@ impl WebResolver {
                     &self.egress,
                     cards,
                     self.config.discover_feeds,
-                )
+                ))
                 .await?;
             }
             // A service the page names about itself (WordPress, Ghost) may say more.
