@@ -404,7 +404,7 @@ fn spotify_requests(seen: &[String]) -> Vec<&String> {
 
 /// A Spotify album's barcode joins Apple Music and Deezer; a track's ISRC, which MusicBrainz
 /// gives to one recording, is its key.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_spotify_barcode_joins_apple_music_and_deezer(pool: sqlx::PgPool) {
     let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
     if !["deezer", "itunes"]
@@ -477,7 +477,7 @@ async fn a_spotify_barcode_joins_apple_music_and_deezer(pool: sqlx::PgPool) {
     assert_eq!(rows(&pool, group, &apple).await, joined);
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn without_credentials_nothing_asks_spotify(pool: sqlx::PgPool) {
     let album = save(
         &pool,
@@ -493,7 +493,7 @@ async fn without_credentials_nothing_asks_spotify(pool: sqlx::PgPool) {
 /// Credentials the token endpoint refuses, and an app the API refuses (403, as for an owner
 /// without Premium): a refusal of the credentials, retried after the hold, asking Spotify
 /// nothing meanwhile; what Spotify gave before stays.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn refused_credentials_keep_what_spotify_gave_and_retry_later(pool: sqlx::PgPool) {
     let album = save(
         &pool,
@@ -560,7 +560,7 @@ async fn refused_credentials_keep_what_spotify_gave_and_retry_later(pool: sqlx::
 
 /// An ISRC MusicBrainz gives to several recordings is never Spotify's key: the recording the
 /// track's length picks is (its MBID), else nothing; the ISRC is a fact either way.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_shared_isrc_is_never_a_spotify_key(pool: sqlx::PgPool) {
     let picked = save(
         &pool,
@@ -600,7 +600,7 @@ async fn a_shared_isrc_is_never_a_spotify_key(pool: sqlx::PgPool) {
 /// the Spotify tracks carrying exactly that ISRC become links keyed by the ISRC, a track the
 /// search lists with another ISRC is left out, Spotify's own tracks are not asked, a track with
 /// no ISRC key asks nothing, and the switch turns it off.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_track_with_an_isrc_key_gets_its_spotify_link(pool: sqlx::PgPool) {
     let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
     if !registered.contains(&"spotify_isrc") {
@@ -682,7 +682,7 @@ async fn a_track_with_an_isrc_key_gets_its_spotify_link(pool: sqlx::PgPool) {
 /// `spotify_isrc` is on by default: with the Spotify pair set and no switch, it asks the search.
 /// A refusal (403) and a rate limit (429) keep the links an earlier run found; switched off, those
 /// links stop showing on the card while their rows stay.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn spotify_isrc_is_on_by_default_and_keeps_its_rows_through_refusals(pool: sqlx::PgPool) {
     let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
     if !registered.contains(&"spotify_isrc") {
@@ -788,7 +788,7 @@ async fn spotify_isrc_is_on_by_default_and_keeps_its_rows_through_refusals(pool:
 /// one by one (`/v1/albums/{id}`: Spotify answers no batch read to an app in development mode),
 /// and only the one whose own barcode is the key becomes a link keyed by it. A 403 on an album's
 /// read and a refusal of the app keep it.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_album_with_a_barcode_key_gets_its_spotify_album(pool: sqlx::PgPool) {
     let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
     if !registered.contains(&"spotify_isrc") {

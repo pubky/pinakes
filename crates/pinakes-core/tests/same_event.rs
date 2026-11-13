@@ -95,7 +95,7 @@ fn named(card: &Value) -> Vec<&str> {
         .collect()
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn one_meetup_on_three_sites_names_the_others(pool: PgPool) {
     let start = soon();
     let meetup = event(
@@ -160,7 +160,7 @@ async fn one_meetup_on_three_sites_names_the_others(pool: PgPool) {
     assert_eq!(row["maybe_same"].as_array().unwrap().len(), 2);
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_card_shows_three_and_its_details_ten(pool: PgPool) {
     let start = soon();
     let first = event(
@@ -197,7 +197,7 @@ async fn a_card_shows_three_and_its_details_ten(pool: PgPool) {
     assert_eq!(row["maybe_same"].as_array().unwrap().len(), 3);
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn other_times_places_names_and_one_feeds_occurrences_are_not_the_same(pool: PgPool) {
     let start = soon();
     let meetup = event(
@@ -297,7 +297,7 @@ async fn other_times_places_names_and_one_feeds_occurrences_are_not_the_same(poo
     }
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_member_of_the_cards_own_group_is_never_listed(pool: PgPool) {
     let start = soon();
     let a = event(
@@ -334,7 +334,7 @@ async fn a_member_of_the_cards_own_group_is_never_listed(pool: PgPool) {
     assert!(named(&card(&pool, &a).await).is_empty());
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn all_day_events_match_on_their_local_date(pool: PgPool) {
     use chrono::TimeZone;
     let day = (Utc::now() + Duration::days(20)).date_naive();
@@ -387,7 +387,7 @@ async fn all_day_events_match_on_their_local_date(pool: PgPool) {
 /// An all-day listing in Auckland and a timed one at 21:00 in Los Angeles on one local date,
 /// same name and organizer: their starts are 40 to 42 hours apart (UTC+12 or +13 against UTC-7
 /// or -8), beyond the old reach of 36 hours. Whichever is read first, the one read later finds it.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn listings_on_one_local_date_in_far_zones_pair_whichever_is_read_first(pool: PgPool) {
     use chrono::TimeZone;
     let day = (Utc::now() + Duration::days(20)).date_naive();
@@ -449,7 +449,7 @@ async fn listings_on_one_local_date_in_far_zones_pair_whichever_is_read_first(po
     assert_eq!(named(&card(&pool, &b).await), [a.as_str()]);
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn the_same_organizer_or_venue_counts_without_a_place(pool: PgPool) {
     let start = soon();
     let online = |uri: &str, name: &str| {
@@ -481,7 +481,7 @@ async fn the_same_organizer_or_venue_counts_without_a_place(pool: PgPool) {
     assert_eq!(named(&card(&pool, &a).await), [b.as_str()]);
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_change_or_the_window_moves_the_hint(pool: PgPool) {
     let start = soon();
     let a = event(
@@ -547,7 +547,7 @@ async fn a_change_or_the_window_moves_the_hint(pool: PgPool) {
     assert_eq!(named(&card(&pool, &a).await), [b.as_str()]);
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn off_removes_the_field_and_computes_nothing(pool: PgPool) {
     let mut off = Config::default();
     off.event.same_event_hint = SameEventHint::Off;
@@ -600,7 +600,7 @@ async fn off_removes_the_field_and_computes_nothing(pool: PgPool) {
     assert!(card(&pool, &page).await.get("maybe_same").is_none());
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn names_are_compared_without_dates_filler_and_symbols(pool: PgPool) {
     for (name, want) in [
         (
@@ -627,7 +627,7 @@ async fn names_are_compared_without_dates_filler_and_symbols(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn names_that_keep_different_numbers_are_not_the_same(pool: PgPool) {
     let start = soon();
     let fifty = event(
@@ -659,7 +659,7 @@ async fn names_that_keep_different_numbers_are_not_the_same(pool: PgPool) {
     assert_eq!(named(&card(&pool, &fifty).await), [plain.as_str()]);
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn one_organizers_meetups_in_two_cities_are_not_the_same(pool: PgPool) {
     let start = soon();
     let city = |uri: &str, name: &str, at: Point| {
@@ -703,7 +703,7 @@ async fn one_organizers_meetups_in_two_cities_are_not_the_same(pool: PgPool) {
     assert!(named(&card(&pool, &bern).await).is_empty());
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_event_that_becomes_an_alias_leaves_the_hint(pool: PgPool) {
     let start = soon();
     let b = event(
@@ -773,7 +773,7 @@ fn an_api_feed_is_named_by_a_page_a_person_can_open() {
     }
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn events_stored_before_the_hint_are_read_at_once(pool: PgPool) {
     let start = soon();
     let mut ids = vec![];
@@ -802,7 +802,7 @@ async fn events_stored_before_the_hint_are_read_at_once(pool: PgPool) {
     assert_eq!(named(&card(&pool, &ids[0]).await).len(), 2);
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_search_page_changes_its_etag_when_its_hint_does(pool: PgPool) {
     let start = soon();
     for n in 0..2 {
@@ -831,65 +831,10 @@ async fn a_search_page_changes_its_etag_when_its_hint_does(pool: PgPool) {
     assert_ne!(etag().await, before);
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
-async fn map_points_keep_their_group_with_the_hint_on_or_off(pool: PgPool) {
-    let start = soon();
-    let a = event(
-        &pool,
-        "https://example.org/a",
-        "Bitcoin Meetup Wattwil",
-        start,
-        Some(WATTWIL),
-    )
-    .await;
-    let b = event(
-        &pool,
-        "https://example.org/b",
-        "Bitcoin Meetup Wattwil",
-        start,
-        Some(WATTWIL),
-    )
-    .await;
-    pass(&pool, &Config::default()).await;
-    let group = "0123456789abcdef0123456789abcdef";
-    sqlx::query("INSERT INTO \"group\"(id,curated) VALUES($1,true)")
-        .bind(group)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE group_unit SET group_id=$1 WHERE unit_id=ANY($2)")
-        .bind(group)
-        .bind(vec![a.clone(), b.clone()])
-        .execute(&pool)
-        .await
-        .unwrap();
-    let mut off = Config::default();
-    off.event.same_event_hint = SameEventHint::Off;
-    for config in [Config::default(), off] {
-        let map = get(
-            &config,
-            &pool,
-            "/v1/search?bbox=9.0,47.2,9.2,47.4&cluster=12",
-        )
-        .await;
-        let points = map["points"].as_array().unwrap();
-        assert_eq!(points.len(), 2, "{map}");
-        for p in points {
-            assert_eq!(p["group"]["id"], group, "{p}");
-            let on = config.event.same_event_hint == SameEventHint::On;
-            // On: the hint is there, and never names a member of the point's own group.
-            assert_eq!(p.get("maybe_same").is_some(), on, "{p}");
-            if on {
-                assert!(named(p).is_empty(), "{p}");
-            }
-        }
-    }
-}
-
 /// A pass stopped after claiming loses nothing, without waiting for the sweep: its claim runs
 /// out and the next pass reads the event again, dropping the pair its old start made. A change
 /// marked while a claim is held is read too.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_stopped_pass_leaves_no_pair_stale(pool: PgPool) {
     let config = Config::default();
     let start = soon();
@@ -938,7 +883,7 @@ async fn a_stopped_pass_leaves_no_pair_stale(pool: PgPool) {
 /// A claim that ran out never settles: a change saved after it ran out leaves the entry's time
 /// as it was (the trigger only moves it earlier), so the old pass finishing late must not drop
 /// the entry; the next pass reads the change.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_expired_claim_never_drops_a_later_change(pool: PgPool) {
     let config = Config::default();
     let start = soon();
@@ -990,7 +935,7 @@ async fn an_expired_claim_never_drops_a_later_change(pool: PgPool) {
 
 /// Each read that changes pairs moves the revision search pages hash into their ETag, in its own
 /// commit: a pass stopped after one resource leaves no cached page answering with old hints.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn each_read_that_changes_pairs_moves_the_revision(pool: PgPool) {
     let start = soon();
     let a = event(
@@ -1051,7 +996,7 @@ async fn stored(pool: &PgPool, id: &str) -> Vec<String> {
 /// A unit that changes takes its pairs from the units that named it, and those are read again, so
 /// none is left without the hint. A crowd's pairs spread over it, and no unit is named by more
 /// than forty, which bounds the units one change marks.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_changed_event_leaves_no_neighbour_without_a_hint(pool: PgPool) {
     let start = soon();
     let mut crowd = vec![];
@@ -1103,7 +1048,7 @@ async fn a_changed_event_leaves_no_neighbour_without_a_hint(pool: PgPool) {
 }
 
 /// A unit that goes (out of the window) leaves the units that named it to refill their lists.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_unit_that_goes_leaves_its_neighbours_to_refill(pool: PgPool) {
     let start = soon();
     let mut crowd = vec![];
@@ -1141,7 +1086,7 @@ async fn a_unit_that_goes_leaves_its_neighbours_to_refill(pool: PgPool) {
 /// A search page reads the pairs and the revision its ETag hashes in one snapshot: a page that
 /// read before a change carries the old revision with the old pairs, never the new revision (a
 /// sequence moves outside the snapshot, and the next page would be answered 304 with old hints).
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_page_reads_the_pairs_and_the_revision_from_one_snapshot(pool: PgPool) {
     let start = soon();
     event(
@@ -1210,7 +1155,7 @@ async fn crowd(
 /// in: a unit read early names the few already there; one read late passes over the units already
 /// named by forty and names those with room, so the cap pushes nothing out that is not replaced,
 /// and what it pushes out is refilled.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_crowd_read_in_any_order_leaves_no_unit_without_a_hint(pool: PgPool) {
     let config = Config::default();
     let start = soon();
@@ -1275,7 +1220,7 @@ async fn a_crowd_read_in_any_order_leaves_no_unit_without_a_hint(pool: PgPool) {
 
 /// Resources deleted as orphans take their units and pairs with them (the cascade); the units that
 /// named them are marked before, and refill.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn deleted_orphans_leave_their_neighbours_to_refill(pool: PgPool) {
     let config = Config::default();
     let crowd = crowd(&pool, "Bitcoin Meetup Wattwil", soon(), &WATTWIL, 101).await;
@@ -1312,7 +1257,7 @@ async fn deleted_orphans_leave_their_neighbours_to_refill(pool: PgPool) {
 
 /// The sweep drops expired units a batch at a time, each batch its own transaction, and the units
 /// that named them are marked to refill.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn expired_units_are_dropped_in_bounded_batches(pool: PgPool) {
     let live = event(
         &pool,
@@ -1386,7 +1331,7 @@ async fn expired_units_are_dropped_in_bounded_batches(pool: PgPool) {
 /// Two events paired with each other that expire together are both dropped by the sweep (one
 /// statement; a trigger that updated the one while the statement deleted the other aborted it),
 /// and the units that named them refill.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn paired_units_that_expire_together_are_dropped_by_the_sweep(pool: PgPool) {
     let start = soon();
     let ids = crowd(&pool, "Bitcoin Meetup Wattwil", start, &WATTWIL, 3).await;
@@ -1426,7 +1371,7 @@ async fn paired_units_that_expire_together_are_dropped_by_the_sweep(pool: PgPool
 /// A database damaged before the fix (units whose lists the old trimming or a cascade emptied,
 /// with current fingerprints and no dirty row) is repaired by the upgrade's step: every unit with
 /// fewer than twenty pairs is marked to refill and its resource queued, once.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn the_upgrade_requeues_units_left_with_short_lists(pool: PgPool) {
     let ids = crowd(&pool, "Bitcoin Meetup Wattwil", soon(), &WATTWIL, 30).await;
     pass(&pool, &Config::default()).await;
@@ -1466,7 +1411,7 @@ async fn the_upgrade_requeues_units_left_with_short_lists(pool: PgPool) {
 /// twenty and every unit's namers to forty, as the pass ranks them, and every unit left with fewer
 /// than twenty pairs (its list emptied by the old cap or a cascade, or cut now) is marked to
 /// refill and its resource queued, once; the pass then leaves none without a hint.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn the_upgrade_cuts_the_old_lists_to_the_caps_and_requeues_the_short_ones(pool: PgPool) {
     let ids = crowd(&pool, "Bitcoin Meetup Wattwil", soon(), &WATTWIL, 101).await;
     pass(&pool, &Config::default()).await;
@@ -1525,7 +1470,7 @@ async fn the_upgrade_cuts_the_old_lists_to_the_caps_and_requeues_the_short_ones(
 /// orphan's units before it collects their namers, so the pass's pair (committed while the delete
 /// waits for it) is seen and its owner marked; without the lock the cascade would take the pair
 /// unseen and the owner would keep an empty list for good.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_orphan_deleted_while_a_pass_pairs_with_it_leaves_the_partner_to_refill(pool: PgPool) {
     let start = soon();
     // Two events that do not pair (different names), each with a unit.
@@ -1601,7 +1546,7 @@ async fn an_orphan_deleted_while_a_pass_pairs_with_it_leaves_the_partner_to_refi
 /// candidates, with room or not, so its work is bounded however large the crowd. A read that ran
 /// out with room left stopped at the unit it examined last and is due again; the later read
 /// keeps the pairs it has and goes on from there, until every event names twenty.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_read_in_a_dense_crowd_examines_a_bounded_number_of_candidates(pool: PgPool) {
     let mut ids = crowd(&pool, "Bitcoin Meetup Wattwil", soon(), &WATTWIL, 301).await;
     ids.sort();
@@ -1677,7 +1622,7 @@ async fn a_read_in_a_dense_crowd_examines_a_bounded_number_of_candidates(pool: P
 /// unit named by more than three (so in a crowd of twelve the units read after the first three
 /// find every other full and name none: a cap that small is the operator's choice), and
 /// `limits.same_event_drop_batch` is the sweep's step.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn the_caps_come_from_the_limits(pool: PgPool) {
     let config = Config::from_value(
         serde_json::json!({"limits": {"same_event_incoming_kept": 3, "same_event_drop_batch": 2}}),
@@ -1750,7 +1695,7 @@ async fn stopped_at(pool: &PgPool, id: &str) -> Option<(String, DateTime<Utc>)> 
 /// event and one of the crowd move three hours later, and the next read pairs them. (Gone on from
 /// the stale position, the read would look between it and the event's new place only, find
 /// nothing, and never look again, its fingerprint current.)
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_changed_event_starts_its_read_over_not_from_where_it_stopped(pool: PgPool) {
     let start = soon();
     let me = event(
@@ -1832,7 +1777,7 @@ async fn visited(one: &PgPool) -> (i64, i64) {
 /// few times each by their keys (walked, held, and the pairs' checks), its own row, and none of
 /// the rest of the crowd. (Taken from the crowd ordered round the ring and cut to a hundred
 /// after, it would visit and sort every one of them.) Counted on one connection's statistics.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_read_in_a_dense_crowd_visits_its_candidates_and_none_of_the_rest(pool: PgPool) {
     let start = soon();
     let me = event(

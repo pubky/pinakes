@@ -428,7 +428,7 @@ async fn get(app: &axum::Router, path: &str) -> Value {
     value
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn cards_carry_their_client_links_and_facts(pool: PgPool) {
     // A read deck: its stored links and facts.
     let (uri, body) = fixture("loopky/medeng2026a-url-cover");
@@ -459,7 +459,7 @@ async fn cards_carry_their_client_links_and_facts(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_object_that_loses_its_card_keeps_nothing_of_it(pool: PgPool) {
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     for (name, change) in [
@@ -576,7 +576,7 @@ async fn kept(
 /// again: the resolver gives it no card, without a request, and its save leaves a missing
 /// `CreativeWork` with nothing of the object and a history without documents, found neither by
 /// its text nor by its old type. Another app's object keeps its route and its card.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_object_at_a_path_never_fetched_keeps_nothing_once_read_again(pool: PgPool) {
     let owner = "ybndrfg8ejkmcpqxot1uwisza345h769ybndrfg8ejkmcpqxot1uwi";
     let at = |path: &str| format!("pubky://{owner}/pub/{path}");

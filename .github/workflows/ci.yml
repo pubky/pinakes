@@ -33,7 +33,7 @@ jobs:
           persist-credentials: false
           # The whitespace check compares this change with where it left main.
           fetch-depth: 0
-      - name: Provision PostgreSQL, PostGIS and h3
+      - name: Provision PostgreSQL and PostGIS
         run: scripts/ci/setup-postgres
       - name: Install Rust
         run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt,clippy
@@ -77,7 +77,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Provision PostgreSQL, PostGIS and h3
+      - name: Provision PostgreSQL and PostGIS
         run: scripts/ci/setup-postgres
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - name: Build image without publishing
@@ -124,7 +124,7 @@ jobs:
         run: scripts/ci/release-on-main >> "$GITHUB_OUTPUT"
       # Root package installs run before any registry credential is written to disk.
       # The pushed bytes come from a separate build: they are smoke-tested before manifest.
-      - name: Provision PostgreSQL, PostGIS and h3
+      - name: Provision PostgreSQL and PostGIS
         run: scripts/ci/setup-postgres
       - name: Log in to Docker Hub
         uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4

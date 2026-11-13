@@ -78,7 +78,7 @@ async fn classes(pool: &PgPool, id: &str) -> Vec<String> {
         .await
         .unwrap()
 }
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn dated_event_guard_counts_drift_and_allows_confirmed_missing(pool: PgPool) {
     let (id, mut accepted) = seed(&pool, "https://example.org/dated").await;
     accepted.start = Some(chrono::Utc::now() + chrono::Duration::days(1));
@@ -139,7 +139,7 @@ async fn dated_event_guard_counts_drift_and_allows_confirmed_missing(pool: PgPoo
         .unwrap();
     assert_eq!(classes(&pool, &id).await.last().unwrap(), "uncancelled");
 }
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn confirmations_failures_recovery_and_fencing(pool: PgPool) {
     let (id, mut doc) = seed(&pool, "https://example.org/event").await;
     doc.fetched_at += 100;
@@ -215,7 +215,7 @@ async fn confirmations_failures_recovery_and_fencing(pool: PgPool) {
         .unwrap();
     assert_eq!(name, "Renamed");
 }
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn paging_lookup_retention_and_deleted_history(pool: PgPool) {
     let (id, mut doc) = seed(&pool, "https://example.org/one").await;
     let (other, _) = seed(&pool, "https://example.org/two").await;
@@ -304,7 +304,7 @@ async fn paging_lookup_retention_and_deleted_history(pool: PgPool) {
 /// A change lookup takes links as `POST /v1/resources/lookup` does, IDs, or both: a link reads
 /// as its ID, an alias spelling as its alias (its line names the root, then the root's lines
 /// follow), and an unknown link adds nothing.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_change_lookup_takes_links_ids_or_both(pool: PgPool) {
     let (id, mut doc) = seed(&pool, "https://example.org/one").await;
     let (other, _) = seed(&pool, "https://example.org/two").await;
@@ -398,7 +398,7 @@ async fn a_change_lookup_takes_links_ids_or_both(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn overdue_priority_respects_backoff_and_final(pool: PgPool) {
     let (old, _) = seed(&pool, "https://example.org/old").await;
     let (wanted, _) = seed(&pool, "https://example.org/wanted").await;
@@ -511,7 +511,7 @@ impl Resolver for OverCap {
 }
 /// An over-budget canary sample is inconclusive: no health, no outage, no parse failure and no
 /// source outcome, even when the refusal is wrapped in context.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_over_cap_canary_is_inconclusive(pool: PgPool) {
     let config = CanaryConfig::default();
     let manifest = adapter::manifest("web");
@@ -552,7 +552,7 @@ async fn an_over_cap_canary_is_inconclusive(pool: PgPool) {
         "{text}"
     );
 }
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn canary_bookkeeping_metrics_and_separate_listener(pool: PgPool) {
     let config = CanaryConfig::default();
     let mut manifest = adapter::manifest("web");
@@ -640,7 +640,7 @@ async fn canary_bookkeeping_metrics_and_separate_listener(pool: PgPool) {
     assert_eq!(admin_call(&admin, "GET", "/v1/info").await.0, 200);
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn ops_artifacts_reference_registered_metrics(pool: PgPool) {
     sqlx::query("INSERT INTO source_state(source,canary_ok) VALUES('web',true)")
         .execute(&pool)
@@ -703,7 +703,7 @@ impl Resolver for Unchanged {
         Duration::from_secs(86400)
     }
 }
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn not_modified_renews_budget_without_replacing_facts(pool: PgPool) {
     let (id, _) = seed(&pool, "https://example.org/conditional").await;
     sqlx::query("UPDATE resource SET next_attempt_at=now(),status='unreachable' WHERE id=$1")
@@ -732,7 +732,7 @@ async fn not_modified_renews_budget_without_replacing_facts(pool: PgPool) {
     assert_eq!(classes(&pool, &id).await, vec!["created"]);
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn unreachable_backoff_stops_and_missing_never_invents_existence(pool: PgPool) {
     let (id, mut doc) = seed(&pool, "https://example.org/blocked").await;
     doc.status = Status::Unreachable;
@@ -784,7 +784,7 @@ async fn unreachable_backoff_stops_and_missing_never_invents_existence(pool: PgP
     assert_eq!(classes(&pool, &never).await, vec!["created"]);
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn new_preview_is_prioritized_and_change_time_follows_lock(pool: PgPool) {
     let _old = store::ensure_resource(&pool, "https://example.org/backlog")
         .await
@@ -837,7 +837,7 @@ async fn new_preview_is_prioritized_and_change_time_follows_lock(pool: PgPool) {
     assert!(at >= released, "timestamp must follow lock acquisition");
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn maintenance_runs_without_an_idle_ingestion_tick(pool: PgPool) {
     let (id, _) = seed(&pool, "https://example.org/orphan").await;
     sqlx::query("UPDATE resource SET orphaned_at=now()-interval '10 days'")
@@ -877,7 +877,7 @@ async fn maintenance_runs_without_an_idle_ingestion_tick(pool: PgPool) {
     assert_eq!(classes(&pool, &id).await, vec!["deleted"]);
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn public_info_is_redacted_and_source_errors_are_classes(pool: PgPool) {
     let secret = "http://private-relay.internal:8080/?token=do-not-publish";
     sqlx::query("INSERT INTO feed_cursor(nexus) VALUES($1)")
@@ -924,7 +924,7 @@ async fn public_info_is_redacted_and_source_errors_are_classes(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn retention_preserves_normalized_current_and_cached_osm_versions(pool: PgPool) {
     let mut current = ResourceMeta::new("https://www.openstreetmap.org/node/77", "osm", 3600);
     current.set_type("Place");
@@ -963,7 +963,7 @@ async fn retention_preserves_normalized_current_and_cached_osm_versions(pool: Pg
 /// opted out deletes that post's whole history (old lines too) and takes the sequence afterwards
 /// to append its own line. Retention skips the lines such a save holds instead of waiting for
 /// them, so the two never deadlock; the skipped lines go with the save, or at the next run.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn retention_and_an_opted_out_save_of_the_same_post_never_deadlock(pool: PgPool) {
     let uri = "https://mastodon.social/@Gargron/1";
     // The post's card from the Mastodon source; without it in this build there is nothing to test.
@@ -1060,7 +1060,7 @@ async fn retention_and_an_opted_out_save_of_the_same_post_never_deadlock(pool: P
 /// A stored event re-read as no event on a recorded decision (`not_event`: the page lists
 /// several events, or is a creative work) is replaced, type and all; without the decision a
 /// reading that merely lost the start is drift and keeps the card, as before.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_decided_no_event_replaces_a_stored_event_and_a_lost_start_is_still_drift(pool: PgPool) {
     let (id, mut accepted) = seed(&pool, "https://www.wikidata.org/wiki/Q1079").await;
     accepted.start = Some(chrono::Utc::now() + chrono::Duration::days(1));
@@ -1133,7 +1133,7 @@ async fn a_decided_no_event_replaces_a_stored_event_and_a_lost_start_is_still_dr
 
 /// A resource nothing ever referenced (one only previewed) goes after the preview grace; one that
 /// lost its references keeps the full grace, and so do a derived child and a venue of the same age.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_preview_goes_after_its_own_grace(pool: PgPool) {
     let mut ids = std::collections::HashMap::new();
     for name in ["preview", "fresh", "dropped", "calendar", "child", "venue"] {
@@ -1190,7 +1190,7 @@ async fn a_preview_goes_after_its_own_grace(pool: PgPool) {
 }
 
 /// One cleanup run deletes every eligible resource, however many: it no longer stops at a thousand.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn one_cleanup_run_deletes_past_a_thousand(pool: PgPool) {
     sqlx::query("INSERT INTO resource(id,uri,created_at,orphaned_at) SELECT md5('p'||n),'https://example.org/p'||n,now()-interval '8 days',now()-interval '8 days' FROM generate_series(1,1250) n")
         .execute(&pool)
@@ -1205,7 +1205,7 @@ async fn one_cleanup_run_deletes_past_a_thousand(pool: PgPool) {
 }
 
 /// A cleanup told to stop (the daemon shutting down) ends after the batch in hand.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_stopped_cleanup_ends_after_its_batch(pool: PgPool) {
     sqlx::query("INSERT INTO resource(id,uri,created_at,orphaned_at) SELECT md5('s'||n),'https://example.org/s'||n,now()-interval '8 days',now()-interval '8 days' FROM generate_series(1,250) n")
         .execute(&pool)
@@ -1223,7 +1223,7 @@ async fn a_stopped_cleanup_ends_after_its_batch(pool: PgPool) {
 /// A preview nothing referenced goes after the preview grace, but what it held (a calendar's
 /// derived events, its venue, its occurrences' venues) is not taken for a preview once it is
 /// gone: however many cleanup runs follow, they keep the full grace, counted from then.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn what_a_preview_held_keeps_the_full_grace_after_it_goes(pool: PgPool) {
     let mut ids = std::collections::HashMap::new();
     for name in ["calendar", "child", "venue", "hall"] {

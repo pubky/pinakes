@@ -69,9 +69,7 @@ below before upgrades. CLI commands replace the daemon arguments after the image
 
 [CI](../.github/workflows/ci.yml) runs on pull requests, pushes to `main`, and `v*.*.*` tags.
 It provisions a disposable PostgreSQL 16 cluster named `pinakesci` from the signed PGDG repository.
-h3 stays on the documented minimum, upstream 4.2.3 (the newest PGDG build of it, from the signed
-PGDG archive once the main repository drops it). The cluster must report h3 4.2.3+ and PostGIS
-3.4+, compared as numbers, and run the h3 function; then CI runs the full `scripts/test` gate and
+The cluster must report PostGIS 3.4+, compared as numbers; then CI runs the full `scripts/test` gate and
 `scripts/e2e --mock`. Workflow contracts, actionlint, ShellCheck, Hadolint and a whitespace check
 of the change against `main` also run. Rust is
 1.98.1 in CI and the image build. Native amd64 and arm64 image jobs build without registry login
@@ -158,7 +156,7 @@ docker buildx imagetools inspect "registry-1.docker.io/synonymsoft/pinakes:$VERS
 | Service | Why | Starting capacity / planning estimate | Operational requirement |
 | --- | --- | --- | --- |
 | `pinakesd` | Public cards/search API and a separate private admin listener | 2–4 vCPU, 4–8 GB RAM for a small instance; load-test the actual resolver mix | One daemon per database is enforced by the instance lock. Provider budgets are process-local; several instances behind one IP share upstream quotas. |
-| PostgreSQL 16–18 | Documents, references, queues, groups and change journal | See the storage model below | PostGIS 3.4+, `pg_trgm`, h3 4.2.3+; startup checks `h3_latlng_to_cell(point,integer)`. Package upgrades may also need `ALTER EXTENSION h3 UPDATE;`. |
+| PostgreSQL 16–18 | Documents, references, queues, groups and change journal | See the storage model below | PostGIS 3.4+ and `pg_trgm`. |
 | Self-hosted Nominatim | Pinakes hosting dependency for venue geocoding and OSM place details (`osm.nominatim_url`) | Global dataset: 64–128 GB RAM (128 GB recommended), about 1 TB NVMe; allow several days for import | [Nominatim hardware guidance](https://nominatim.org/release-docs/5.2/admin/Installation/). Public Nominatim is only for small development runs. |
 | Nexus | Reference feed and social/reach reads (`nexus_url`) | An existing compatible Nexus deployment | Trusted fixed upstream, not an arbitrary URL from a resource. Optional authorization comes from the environment. |
 | Persistent dump directory | `osm.dump_dir`, served at `/v1/dumps/osm_place.ndjson.gz` | About 1.5 KB per cached place uncompressed; allow two copies during replacement | Keep the compressed dump downloadable and preserve OSM attribution; a CDN can cache it by `ETag`. |

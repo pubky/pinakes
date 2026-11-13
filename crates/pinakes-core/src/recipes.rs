@@ -23,7 +23,7 @@ pub struct Recipe {
     #[serde(default)]
     pub query: BTreeMap<String, String>,
     pub body: Option<Value>,
-    /// What a working instance returns: `card`, `items`, `map`, `group`, `lines` or
+    /// What a working instance returns: `card`, `items`, `group`, `lines` or
     /// `same_event` (a card naming possibly the same event); for a card in another state,
     /// `missing`, `unreachable` or `pending`.
     pub expect: String,

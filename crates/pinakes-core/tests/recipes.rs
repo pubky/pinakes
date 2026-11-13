@@ -829,7 +829,7 @@ fn examples(doc: &Value) -> BTreeMap<String, (String, String, Option<Value>)> {
 }
 
 /// The schema behind a `$ref` into the document's components.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn every_named_example_returns_data(pool: PgPool) {
     fixture(&pool).await;
     let (nexus_url, nexus) = mock_nexus().await;
@@ -885,7 +885,6 @@ async fn every_named_example_returns_data(pool: PgPool) {
         let found = match recipe.expect.as_str() {
             "card" => usize::from(response["status"] == "ok" && response["type"].is_string()),
             "items" => count(&response).max(count(&response["items"])),
-            "map" => count(&response["clusters"]) + count(&response["points"]),
             "group" => usize::from(count(&response["members"]) >= 2),
             "same_event" => count(&response["maybe_same"]),
             "lines" => count(&response["lines"]),
@@ -918,7 +917,7 @@ async fn every_named_example_returns_data(pool: PgPool) {
 /// refuses it: the endpoint answers 400 with the same reason, and the live recipe check
 /// (`e2e_stack --live-recipes`), which asks `admit`, reports the refusal instead of a card.
 /// Calendars switched off are read as web pages, by both.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_recipe_whose_resolver_is_off_is_refused_as_the_endpoint_refuses_it(pool: PgPool) {
     use pinakes_core::resolver::{admit, ROUTES};
     let uris: Vec<String> = pinakes_core::recipes::recipes()

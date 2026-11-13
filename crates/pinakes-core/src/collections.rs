@@ -652,10 +652,7 @@ mod tests {
 
     /// The schema's `collection_post` is [`post`]: a post's version files belong to it, a path
     /// nested deeper in a post or not JSON is a collection of its own.
-    #[sqlx::test(
-        migrations = "../../migrations",
-        fixtures("../tests/fixtures/require_h3.sql")
-    )]
+    #[sqlx::test(migrations = "../../migrations")]
     async fn the_schema_reads_a_files_collection_as_post_does(pool: PgPool) {
         let paths = [
             "/pub/social/v1/posts/P/V.json",
@@ -803,10 +800,7 @@ mod tests {
     /// whose statistics say a link holds hundreds, and with 20,000 links more held once each,
     /// whose statistics say a link holds one (the planner's guess, wrong either way for these
     /// cards, chooses nothing here: each step of a walk is an `ORDER BY … LIMIT 1` along an index).
-    #[sqlx::test(
-        migrations = "../../migrations",
-        fixtures("../tests/fixtures/require_h3.sql")
-    )]
+    #[sqlx::test(migrations = "../../migrations")]
     async fn every_collections_query_reads_a_bounded_walk(pool: PgPool) {
         // Seeded on one connection without triggers: what they keep up (grouping, scores) plays
         // no part here, and 60,000 rows of it would take a minute.
@@ -1131,10 +1125,7 @@ mod tests {
     /// page's cursor, in the viewer's own segment and in the others', step over the first page's
     /// pinned window alone: the new posts are newer than it, listed with the others, never
     /// stepped over.
-    #[sqlx::test(
-        migrations = "../../migrations",
-        fixtures("../tests/fixtures/require_h3.sql")
-    )]
+    #[sqlx::test(migrations = "../../migrations")]
     async fn a_page_reads_a_bounded_walk_whatever_changed(pool: PgPool) {
         let card = "5".repeat(32);
         let (e, o) = ("e".repeat(52), "o".repeat(52));

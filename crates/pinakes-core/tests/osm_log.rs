@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 /// A Nominatim configured under a base path, which may hold a token: its requests are logged by
 /// the path below the base (`lookup`), never the base's own path or the query.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_osm_request_is_logged_below_its_configured_base(pool: PgPool) {
     #[derive(Clone, Default)]
     struct Lines(Arc<std::sync::Mutex<Vec<u8>>>);

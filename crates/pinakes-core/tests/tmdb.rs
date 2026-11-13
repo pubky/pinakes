@@ -302,7 +302,7 @@ const SERIES: Page = Page {
 /// own Wikidata item names, each credited to TMDB; a card's own image and text stay; a title of
 /// another type, an ID that names two titles, or two IDs that name different ones give nothing;
 /// a card with its own image and text, or of another kind, asks nothing.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn film_and_series_cards_take_tmdb_posters_by_exact_id(pool: PgPool) {
     let (ids, reader) = pages(
         &pool,
@@ -451,7 +451,7 @@ async fn film_and_series_cards_take_tmdb_posters_by_exact_id(pool: PgPool) {
 
 /// Without `TMDB_API_KEY` TMDB is never asked, cards stay as their pages make them, and
 /// `/v1/info` names no attribution; with it, `/v1/info` gives TMDB's notice verbatim and its logo.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn without_a_key_tmdb_is_never_asked(pool: PgPool) {
     let (ids, reader) = pages(&pool, &[MOVIE, SERIES]).await;
     let api = Api::new();
@@ -514,7 +514,7 @@ async fn without_a_key_tmdb_is_never_asked(pool: PgPool) {
 /// TMDB's rows live 60 days after the last read that answered: a failure (503) keeps a poster
 /// read 50 days ago; rows past that are dropped and the card loses the poster at its next
 /// reading; a removed key hides them at once (`also_on::configure`) and the card loses it too.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_failure_keeps_a_recent_poster_and_old_or_switched_off_ones_go(pool: PgPool) {
     let (ids, reader) = pages(&pool, &[MOVIE]).await;
     let api = Api::new();
@@ -577,7 +577,7 @@ async fn a_failure_keeps_a_recent_poster_and_old_or_switched_off_ones_go(pool: P
 /// The maintenance pass brings a card no reading brings back (final here) to TMDB's live rows:
 /// a TMDB poster whose rows expired goes, with its credit and a change line, and the search
 /// revision moves; the card's other values and credits, and cards TMDB gave nothing, stay.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn maintenance_drops_expired_tmdb_values_and_nothing_else(pool: PgPool) {
     let (ids, reader) = pages(&pool, &[SERIES, MOVIE]).await;
     let api = Api::new();
@@ -757,7 +757,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logs {
 /// Neither credential form appears anywhere but on the wire: not in the logs (every level), a
 /// stored row of any table (cards, facts, `last_error`s, change lines), the egress' cache (keyed
 /// by the URL alone) or an answer's URL, whether TMDB answers, fails or refuses it.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn the_credential_never_leaves_the_request(pool: PgPool) {
     let logs = Logs::default();
     let subscriber = tracing_subscriber::fmt()
@@ -852,7 +852,7 @@ fn a_long_change_retention_is_refused_while_tmdb_is_on() {
 /// With the key removed, `/v1/info` still lists TMDB's attribution while a stored card holds a
 /// TMDB value (a final card no read reaches); once the maintenance pass has taken the values
 /// out, it lists none.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn the_attribution_stays_while_a_card_holds_a_tmdb_value(pool: PgPool) {
     let (ids, reader) = pages(&pool, &[MOVIE]).await;
     let on = config(Some(TOKEN));
@@ -887,7 +887,7 @@ async fn the_attribution_stays_while_a_card_holds_a_tmdb_value(pool: PgPool) {
 /// A change line that holds a TMDB value goes after 120 days, whatever
 /// `limits.change_retention_days` says and with TMDB off; a line of the same age without one
 /// stays, as does a younger one.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn change_lines_with_tmdb_values_go_after_120_days(pool: PgPool) {
     let plain = Page {
         uri: "https://example.org/plain-page",

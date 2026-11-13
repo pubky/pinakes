@@ -74,7 +74,7 @@ async fn recorded(
     ids
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_duplicate_joins_its_original(pool: PgPool) {
     // The duplicate's lookup asks whether its original repeats another in turn: it does not.
     let original = std::fs::read_to_string(format!(
@@ -157,7 +157,7 @@ fn answer(id: u64, original: Option<u64>) -> String {
     serde_json::json!({"items": [q], "has_more": false}).to_string()
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_chain_of_duplicates_is_one_group(pool: PgPool) {
     // A repeats B, which repeats C: all three carry C's key (the chain's end), so A joins B.
     let (a, b, c) = (1001, 1002, 1003);

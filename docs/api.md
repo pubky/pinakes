@@ -17,7 +17,7 @@ snapshot; a test fails when it is stale.
 
 | Method and path | Input | Response |
 | --- | --- | --- |
-| `GET /v1/search` | Query parameters ([Search](#search)) | `{items: [card], cursor, reach_truncated, facets?}`, or a map page with `cluster` |
+| `GET /v1/search` | Query parameters ([Search](#search)) | `{items: [card], cursor, reach_truncated, facets?}` |
 | `GET /v1/resources/{id}` | 32-character resource ID | The card with the [read's fields](#resource-read); 404 if unknown |
 | `GET /v1/resources/by-uri` | `uri`: any spelling of a link | As `GET /v1/resources/{id}` for the URI's ID (an alias answers with its root); 404 if unknown, nothing is fetched |
 | `POST /v1/resources/lookup` | Exactly one of `{"ids":[…]}` (alias `resource_ids`) or `{"uris":[…]}`, 1–500 entries | `[card]` in request order, duplicates kept, unknowns skipped |
@@ -425,7 +425,7 @@ media, books and articles in their spellings, social posts, Pubky objects of oth
 `missing`, `unreachable` and `pending` states. Each is a named example in Swagger UI
 (`/swagger-ui`), named by its value: pick one in the dropdown of a body or a parameter and use
 **Try it out**. Every parameter of `GET /v1/search` starts at `(none)`; pick values in the
-parameters you want (a map viewport sets `bbox` and `cluster`), and the others are
+parameters you want (a map viewport sets `bbox`), and the others are
 not sent. The paths are relative to the instance's base URL, for example
 `curl "$BASE/v1/search?q=lugano"`; POST bodies are JSON
 (`curl -H 'Content-Type: application/json' -d '{"uri":"…"}' "$BASE/v1/resolve"`). Resource IDs
@@ -613,9 +613,9 @@ GET /v1/search?key=osm:node%2F240109189
 GET /v1/search?key=gtin:0840440422266
 GET /v1/search?collapse=group&type=Book
 GET /v1/search?collapse=group&type=ScholarlyArticle
-GET /v1/search?bbox=8.90,45.98,9.00,46.03&cluster=12
-GET /v1/search?bbox=8.45,47.33,8.62,47.42&cluster=10
-GET /v1/search?bbox=13.25,52.45,13.55,52.58&cluster=14
+GET /v1/search?bbox=8.90,45.98,9.00,46.03
+GET /v1/search?bbox=8.45,47.33,8.62,47.42
+GET /v1/search?bbox=13.25,52.45,13.55,52.58
 GET /v1/search?reach=following&viewer=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
 GET /v1/search?reach=friends&viewer=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
 GET /v1/search?boost=following&viewer=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
@@ -722,10 +722,9 @@ POST /v1/changes/lookup {"resource_ids":["81cefcae5a6a468cfc27ff1c1b420fce","5bc
 | `bbox` | `minLon,minLat,maxLon,maxLat` in degrees; west > east crosses the antimeridian |
 | `near`, `radius` | `lat,lon` and a radius in metres (at most `limits.max_radius_m`, default 200 km); not with `bbox` |
 | `from`, `to` | Inclusive start-time bounds: RFC 3339, Unix milliseconds or relative (`now`, `now+30d`, `now-12h`), within UTC years 0001–9999 |
-| `cluster` | A map zoom, with `bbox`: returns clusters and points instead of a page |
-| `collapse` | `group`: one row per group, after filtering members (a list view; not with `cluster`) |
+| `collapse` | `group`: one row per group, after filtering members (a list view) |
 
-Unknown parameters, invalid coordinates or dates, an out-of-range radius, a non-finite zoom and
+Unknown parameters, invalid coordinates or dates, an out-of-range radius and
 incompatible options return 400 (`timestamp out of range` for a date outside years 0001–9999).
 Search lists only resources with at least one public reference.
 
@@ -806,22 +805,11 @@ GET /v1/search?facet=category&near=46.0037,8.9511&radius=5000
 → facets.category: [{"category":"amenity/restaurant","count":16}, {"category":"amenity/cafe","count":9}, …]
 ```
 
-**Map clusters.** `cluster=<zoom>` returns `{resolution, clusters, points, truncated, total,
-reach_truncated, facets?}`. A cluster is `{cell, count, lat, lon, top, attribution?}`, where
-`top` holds at most three card IDs by rank, `lat` is the members' mean latitude and `lon` the
-circular mean of their longitudes. Points are cards. The H3 resolution comes from `limits.h3_resolutions` by floored zoom;
-large viewports coarsen to stay within `limits.max_cluster_cells` and `resolution` reports the
-value used; a viewport that still has more cells returns 400. Singleton cells are points, and when the filtered total fits in `limit` every unit
-is a point. `limit` caps clusters plus points; `truncated` marks omitted units, and otherwise
-the cluster counts plus the points equal `total`. Cluster mode has no cursor: refine the
-viewport.
-
 **Groups.** Without `collapse`, every member of a group is a row of its own, ranked on its own
 references. `collapse=group` filters first, then keeps one row per group: the matching member
 with the most references, counted up to `limits.collapse_refs_per_member` (10,000) each (ties
 by the lower ID), as its own card, ranked as itself. Facets count
-every matching link either way; clusters always count links, so `collapse` is refused with
-`cluster`.
+every matching link either way.
 
 **Reach.** Following and friends lists come from Nexus in pages of 200, at most 1,000 authors,
 cached per viewer for five minutes. `wot_2` (two steps of the follow graph) comes from Nexus's

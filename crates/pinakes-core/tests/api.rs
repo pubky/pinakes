@@ -135,7 +135,7 @@ async fn send(
     let value = parsed.unwrap_or_else(|| json!({"body":String::from_utf8_lossy(&bytes)}));
     (status, value)
 }
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn every_read_route_and_document_projection(pool: PgPool) {
     let ids = seed(&pool).await;
     let state = AppState::new(pool, Config::default()).unwrap();
@@ -266,7 +266,7 @@ async fn every_read_route_and_document_projection(pool: PgPool) {
         );
     }
 }
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn search_filters_facets_true_keyset_and_invalid_options(pool: PgPool) {
     let ids = seed(&pool).await;
     // Force ties to test the ID tie-breaker, with one common decay baseline.
@@ -412,7 +412,6 @@ async fn search_filters_facets_true_keyset_and_invalid_options(pool: PgPool) {
         "radius=100",
         "from=2026-01-01",
         "to=2026-02-01",
-        "cluster=3",
         "venue=x",
         "collapse=invalid",
         "reach=wot_2",
@@ -444,7 +443,7 @@ async fn search_filters_facets_true_keyset_and_invalid_options(pool: PgPool) {
 /// `exclude_type` lists every card of another type: each type left out with its subtypes, a link
 /// with no type yet left out too (the type facet does not count it), with `type` both apply, the
 /// facets count the same set, and a cursor pages only the search that made it.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn search_exclude_type_lists_every_other_type(pool: PgPool) {
     let ids = seed(&pool).await;
     // ids[0] is a MusicEvent, ids[1..=3] Articles, ids[4] a link not read yet (no type).
@@ -665,7 +664,7 @@ async fn mock_nexus(lines: Vec<Change>) -> (String, Arc<AtomicUsize>, tokio::tas
     let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     (format!("http://{addr}"), calls, task)
 }
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn nexus_reach_paginates_caches_and_scopes_tag_facets(pool: PgPool) {
     seed(&pool).await;
     let (nexus_url, calls, task) = mock_nexus(vec![]).await;
@@ -716,7 +715,7 @@ async fn nexus_reach_paginates_caches_and_scopes_tag_facets(pool: PgPool) {
     assert!(page["items"].as_array().unwrap().is_empty());
     task.abort();
 }
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn polls_the_http_feed_and_replays_without_duplicates(pool: PgPool) {
     let (_, uri, _) = identity("https://example.org/feed").unwrap();
     let line = Change {
@@ -779,7 +778,7 @@ impl std::io::Write for Lines {
 /// A link that carries a credential is never previewed: `POST /v1/resolve` answers 400 for every
 /// capability probe of the shared fixture and for a password in the user info, stores nothing and
 /// spends no preview budget, and neither an answer nor a log line holds the secret.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_link_that_carries_a_credential_is_never_previewed(pool: PgPool) {
     let probes: Value =
         serde_json::from_str(include_str!("fixtures/capability_urls.json")).unwrap();
@@ -832,7 +831,7 @@ async fn a_link_that_carries_a_credential_is_never_previewed(pool: PgPool) {
 /// The instance takes at most `limits.preview_new_per_hour` new previews an hour, whoever asks:
 /// over it, `POST /v1/resolve` of a link it does not know answers 503 with `Retry-After` and stores
 /// nothing, a link it knows still reads, and a client over its own budget gets 429 first.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn new_previews_are_capped_for_the_whole_instance(pool: PgPool) {
     let config = Config::from_value(json!({"limits": {
         "preview_new_per_hour": 2,
@@ -923,7 +922,7 @@ async fn resolve_from(
 /// One client takes at most `limits.preview_new_per_client_per_hour` of the hour's new previews:
 /// over it, that client gets 429 with `Retry-After` and nothing is stored, while another client
 /// still previews.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn one_client_takes_at_most_its_share_of_new_previews(pool: PgPool) {
     let config = Config::from_value(json!({"limits": {
         "preview_new_per_hour": 10,
@@ -957,7 +956,7 @@ fn the_per_client_share_is_off_unless_set() {
 
 /// `store::ensure_resource_created` says whether its call created the row: a preview keeps its
 /// place in the hour only then, so two first requests for one link take one place between them.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn only_the_request_that_stores_a_link_keeps_its_place(pool: PgPool) {
     let uri = "https://example.org/once";
     let (id, created) = store::ensure_resource_created(&pool, uri).await.unwrap();
@@ -968,7 +967,7 @@ async fn only_the_request_that_stores_a_link_keeps_its_place(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn preview_pending_cached_completion_and_per_ip_uri_budgets(pool: PgPool) {
     let config = Config {
         preview: pinakes_core::config::PreviewConfig {
@@ -1086,7 +1085,7 @@ async fn preview_pending_cached_completion_and_per_ip_uri_budgets(pool: PgPool) 
     assert!(search["items"].as_array().unwrap().is_empty());
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn preview_returns_completion_within_synchronous_window(pool: PgPool) {
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let worker = tokio::spawn(async move {
@@ -1121,7 +1120,7 @@ async fn preview_returns_completion_within_synchronous_window(pool: PgPool) {
     worker.await.unwrap();
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn public_budget_covers_reads_and_evicts_old_ips(pool: PgPool) {
     let config = Config {
         api: pinakes_core::config::ApiConfig {
@@ -1154,7 +1153,7 @@ async fn public_budget_covers_reads_and_evicts_old_ips(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn api_pool_enforces_query_timeout(pool: PgPool) {
     let api_pool = api::pool_options()
         .connect_with((*pool.connect_options()).clone())
@@ -1180,7 +1179,7 @@ async fn api_pool_enforces_query_timeout(pool: PgPool) {
 }
 
 /// A request body over 2 MB is refused before any handler reads it.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_body_over_two_megabytes_is_refused(pool: PgPool) {
     let app = api::router(AppState::new(pool, Config::default()).unwrap());
     let uris: Vec<String> = (0..1000)
@@ -1195,7 +1194,7 @@ async fn a_body_over_two_megabytes_is_refused(pool: PgPool) {
 /// A query or body axum cannot read is refused with what the route takes, never the input: a
 /// link given as a parameter's name, as a value of the wrong type or as a bare JSON string to
 /// `/v1/resolve` (Codex's case) stays out of the answer.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_rejected_request_quotes_no_input(pool: PgPool) {
     let app = api::router(AppState::new(pool, Config::default()).unwrap());
     let link = "HTTPS://user:CANARY@example.org/calendar?token=QUERYCANARY#FRAGMENTCANARY";
@@ -1240,7 +1239,7 @@ async fn a_rejected_request_quotes_no_input(pool: PgPool) {
     canary(&answer);
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn reach_searches_pay_for_upstream_pages_before_fetching(pool: PgPool) {
     let (nexus_url, calls, task) = mock_nexus(vec![]).await;
     let mut config = Config {
@@ -1264,7 +1263,7 @@ async fn reach_searches_pay_for_upstream_pages_before_fetching(pool: PgPool) {
     task.abort();
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn related_searches_cost_their_own_units_and_with_reach_both(pool: PgPool) {
     let seed = "0".repeat(32);
     let mut config = Config::default();
@@ -1294,7 +1293,7 @@ async fn related_searches_cost_their_own_units_and_with_reach_both(pool: PgPool)
     task.abort();
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn cursors_reject_payload_tampering_unsigned_forgery_and_another_daemon_key(pool: PgPool) {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
     seed(&pool).await;
@@ -1366,7 +1365,7 @@ async fn cursors_reject_payload_tampering_unsigned_forgery_and_another_daemon_ke
 
 /// Facets never change the rows, so the next page reads the same with any `facet` or none;
 /// a cursor from a search with other filters is still refused.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_search_cursor_pages_the_same_rows_whatever_the_facets(pool: PgPool) {
     seed(&pool).await;
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
@@ -1430,7 +1429,7 @@ async fn a_search_cursor_pages_the_same_rows_whatever_the_facets(pool: PgPool) {
 /// The search ETag follows exactly what a reader can see. A write in flight changes neither the
 /// results nor the ETag; its commit changes both. Two writers that commit in the other order
 /// than they began each change it, and folding the counted writes changes nothing.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_in_flight_writer_changes_the_etag_only_when_it_commits(pool: PgPool) {
     let ids = seed(&pool).await;
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
@@ -1503,7 +1502,7 @@ async fn an_in_flight_writer_changes_the_etag_only_when_it_commits(pool: PgPool)
     assert_eq!(search(Some(third)).await.0, 304);
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn reach_membership_changes_invalidate_etags_without_resource_writes(pool: PgPool) {
     seed(&pool).await;
     let expanded = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1570,7 +1569,7 @@ async fn reach_membership_changes_invalidate_etags_without_resource_writes(pool:
     server.abort();
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn admin_bearer_and_network_bind_policy(pool: sqlx::PgPool) {
     use axum::{body::Body, http::Request};
     use tower::ServiceExt;
@@ -1641,7 +1640,7 @@ async fn admin_status(
 /// machine gets 421 on every admin route, with or without a token configured, before a handler or
 /// the credential check runs, and its curation changes nothing; `localhost`, loopback addresses
 /// and `admin_hosts` names pass as before.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn the_admin_listener_refuses_requests_for_other_hosts(pool: PgPool) {
     let ids = seed(&pool).await;
     let curation = json!({"members": [
@@ -1714,7 +1713,7 @@ async fn the_admin_listener_refuses_requests_for_other_hosts(pool: PgPool) {
 
 /// `admin_hosts` names the hosts a scraper elsewhere reaches the admin listener by; they pass the
 /// host check and then the credential check as before. Each is a bare lowercase host name.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn admin_hosts_names_a_scraper_s_host(pool: PgPool) {
     let config = Config {
         admin_token: Some("review-only-operator-token".into()),
@@ -1800,7 +1799,7 @@ fn refs(value: &Value, out: &mut Vec<String>) {
     }
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn swagger_ui_and_the_openapi_document_are_on_the_public_listener_only(pool: PgPool) {
     let token = "swagger-test-operator-token";
     let config = Config {
@@ -1995,7 +1994,7 @@ async fn cors_call(
 
 /// CORS on the public listener only, for any origin by default, for listed origins,
 /// or not at all; preflights spend the per-IP budget and 429s stay readable cross-origin.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn cors_for_browser_clients_on_the_public_listener_only(pool: PgPool) {
     let app_with = |origins: Vec<&str>, per_minute: usize| {
         let mut config = Config::default();
@@ -2114,7 +2113,7 @@ async fn cors_for_browser_clients_on_the_public_listener_only(pool: PgPool) {
 
 /// Request instants Postgres cannot bind (outside UTC years 0001–9999) answer 400
 /// `timestamp out of range` instead of 500, as integers and as RFC 3339.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn out_of_range_request_timestamps_answer_400(pool: PgPool) {
     let ids = seed(&pool).await;
     let app = api::router(AppState::new(pool, Config::default()).unwrap());
@@ -2179,56 +2178,6 @@ async fn out_of_range_request_timestamps_answer_400(pool: PgPool) {
     assert_eq!(code, 200, "{body}");
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
-async fn startup_accepts_the_installed_h3_extension(pool: PgPool) {
-    pinakes_core::check_extensions(&pool).await.unwrap();
-    // Installed but off this connection's search_path: reported as such, not as too old.
-    let schema: String = sqlx::query_scalar(
-        "SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE e.extname='h3'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    let narrow = PgPool::connect_with(
-        (*pool.connect_options())
-            .clone()
-            .options([("search_path", "pg_catalog")]),
-    )
-    .await
-    .unwrap();
-    let error = pinakes_core::check_extensions(&narrow)
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(
-        error.contains(&format!("in schema {schema}")) && error.contains("search_path"),
-        "{error}"
-    );
-    assert!(!error.contains("Upgrade"), "{error}");
-    narrow.close().await;
-    // The function decides, whatever the version string says.
-    let installed: String =
-        sqlx::query_scalar("SELECT extversion FROM pg_extension WHERE extname='h3'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    sqlx::query(
-        "ALTER FUNCTION h3_latlng_to_cell(point,integer) RENAME TO h3_latlng_to_cell_hidden",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-    let error = pinakes_core::check_extensions(&pool)
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(
-        error.contains(&format!("h3 extension {installed} is installed")),
-        "{error}"
-    );
-    assert!(error.contains("ALTER EXTENSION h3 UPDATE"), "{error}");
-}
-
 async fn send_raw(
     app: &Router,
     method: &str,
@@ -2266,7 +2215,7 @@ fn test_clock(at: DateTime<Utc>) -> (Arc<std::sync::Mutex<DateTime<Utc>>>, api::
 /// invalid-UTF-8 values, including `x:`/`geo:` and coordinate-shaped ones, with the companions
 /// each parameter requires so the value reaches its parser. Every answer is 2xx or 4xx, never a
 /// panic; relative times answer 400 with the relative-time message.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn multibyte_input_never_panics_any_public_route(pool: PgPool) {
     let mut config = Config::default();
     config.api.requests_per_minute = 1_000_000;
@@ -2322,7 +2271,6 @@ async fn multibyte_input_never_panics_any_public_route(pool: PgPool) {
     let companions = |name: &str| match name {
         "radius" => "&near=46.0,8.9",
         "near" => "&radius=1000",
-        "cluster" => "&bbox=8.9,45.9,9.1,46.1",
         "reach" | "boost" => "&viewer=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
         "viewer" => "&reach=following",
         _ => "",
@@ -2496,7 +2444,7 @@ async fn multibyte_input_never_panics_any_public_route(pool: PgPool) {
 
 /// Page two of a relative-window search resolves `now` at the
 /// cursor's pinned instant, so an event that started between the two page fetches is not skipped.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn relative_windows_are_pinned_by_the_search_cursor(pool: PgPool) {
     let start: DateTime<Utc> = "2036-06-01T10:00:20Z".parse().unwrap();
     let (now, clock) = test_clock(start);
@@ -2540,7 +2488,7 @@ async fn relative_windows_are_pinned_by_the_search_cursor(pool: PgPool) {
 
 /// A relative `since` in /v1/changes/lookup keeps the first page's window on
 /// later cursor pages instead of re-resolving `now`.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn change_lookup_pins_a_relative_since_per_cursor(pool: PgPool) {
     let minute: DateTime<Utc> = "2036-06-01T10:00:00Z".parse().unwrap();
     let uri = "https://example.org/changing";
@@ -2589,7 +2537,7 @@ async fn change_lookup_pins_a_relative_since_per_cursor(pool: PgPool) {
 
 /// A panicking handler under the public layer stack answers the fixed 500
 /// body with the CORS header and increments `pinakes_api_panics_total`.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn the_panic_backstop_answers_500_with_cors_and_counts(pool: PgPool) {
     let state = AppState::new(pool, Config::default()).unwrap();
     let panics = state.metrics.api_panics.clone();
@@ -2619,7 +2567,7 @@ async fn the_panic_backstop_answers_500_with_cors_and_counts(pool: PgPool) {
 /// The admin listener's backstop, behind the bearer check: without the
 /// token a 401 and the handler never runs; with it a 500 with the fixed body, no CORS header,
 /// and the panic counter incremented.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn the_admin_backstop_sits_behind_the_bearer_check(pool: PgPool) {
     let config = Config {
         admin_token: Some("admin-test-token".into()),
@@ -2695,7 +2643,7 @@ fn the_lookup_cursor_cap_absorbs_inversions() {
 
 /// A card's attribution: OSM data and timezone boundaries derived from coordinates are ODbL, so
 /// an event whose zone came from its coordinates carries the boundary data's attribution.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn cards_carry_the_timezone_boundary_attribution(pool: PgPool) {
     let uri = "https://example.org/zoned-event";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
@@ -2737,7 +2685,7 @@ async fn cards_carry_the_timezone_boundary_attribution(pool: PgPool) {
 
 /// A card's `stream`, as its document stores it: on a resource read and on the lookup's cards,
 /// in the shape the OpenAPI document declares. A card without one has no `stream` at all.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_card_carries_its_stream(pool: PgPool) {
     let uri = "https://podcast.example/feed?guid=episode-1";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
@@ -2781,7 +2729,7 @@ async fn a_card_carries_its_stream(pool: PgPool) {
 /// A card's `embed`: the frame its document stores (its oEmbed answer's), settled for its type
 /// (a podcast episode's fixed-height frame is its player), on a read, a lookup and a search; a
 /// card whose link is gone shows none, even when its link names a player.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_card_carries_its_embed(pool: PgPool) {
     let uri = "https://podcast.example/episodes/1";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
@@ -2887,7 +2835,7 @@ async fn a_card_carries_its_embed(pool: PgPool) {
 
 /// The stored document, with its internal fields, is on the admin listener only; the public
 /// card leaves those fields out.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn the_stored_document_is_an_admin_read(pool: PgPool) {
     let ids = seed(&pool).await;
     let state = AppState::new(pool, Config::default()).unwrap();
@@ -2925,7 +2873,7 @@ async fn the_stored_document_is_an_admin_read(pool: PgPool) {
 
 /// A tracking variant is an alias: read by its ID or URI it answers with the root's card, its
 /// tag counts for the root in search, and the root's changes are its changes.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_alias_reads_as_its_root_everywhere(pool: PgPool) {
     let clean = "https://example.org/talk";
     let variant = "https://example.org/talk?utm_source=newsletter&fbclid=x";
@@ -3065,7 +3013,7 @@ async fn an_alias_reads_as_its_root_everywhere(pool: PgPool) {
 /// its filter takes it: filtering by an entry finds exactly its count. A host `pubky://`
 /// objects use is not a service. Every facet combines with the others, in any order, and the
 /// page's limit never changes a count.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn host_and_category_facets_count_what_their_filters_take(pool: PgPool) {
     let links: [(&str, &str, Option<&str>, Option<&str>); 7] = [
         (
@@ -3245,7 +3193,7 @@ async fn host_and_category_facets_count_what_their_filters_take(pool: PgPool) {
 /// counts the picked hosts each on its own (as the type facet counts the picked types); over 10
 /// hosts, or an empty one, is a 400 that names `host` and echoes none of them; a cursor pages only
 /// the hosts that made it.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn search_host_takes_several_hosts(pool: PgPool) {
     let links = [
         "https://one.example.com/a",
@@ -3384,7 +3332,7 @@ async fn search_host_takes_several_hosts(pool: PgPool) {
 /// A Pubky object described by its content is social content: a 200-character excerpt that
 /// refreshes within the hour, and once the object is confirmed gone the card loses the excerpt
 /// and search no longer matches it.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_deleted_pubky_post_loses_its_excerpt(pool: PgPool) {
     let uri = format!("pubky://{}/pub/mapky.app/posts/0034A0X7NJ52G", author(7));
     let id = store::ensure_resource(&pool, &uri).await.unwrap();
@@ -3432,7 +3380,7 @@ async fn a_deleted_pubky_post_loses_its_excerpt(pool: PgPool) {
 /// A Mastodon post whose author opted out of search indexing keeps its card, but its text is
 /// never found by `q=`, and its change history keeps no text: what was kept before goes, and the
 /// opt-out line itself carries only its kind and time.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_opted_out_post_is_not_searched_and_keeps_no_history_text(pool: PgPool) {
     let uri = "https://mastodon.social/@Gargron/1";
     // The post's card from the Mastodon source; without it in this build there is nothing to test.
@@ -3542,7 +3490,7 @@ async fn an_opted_out_post_is_not_searched_and_keeps_no_history_text(pool: PgPoo
 /// A spelling with its own full card that becomes an alias of a Mastodon post after its author
 /// opted out keeps none of the post's text, at once: not in its card, its search text or its
 /// history.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_spelling_that_joins_an_opted_out_post_keeps_none_of_its_text(pool: PgPool) {
     let uri = "https://mastodon.social/@Gargron/1";
     let card = |file: &'static str, at: i64| async move {
@@ -3591,7 +3539,7 @@ async fn a_spelling_that_joins_an_opted_out_post_keeps_none_of_its_text(pool: Pg
 /// A post whose author opted out and that an earlier build then stored as gone kept its facts
 /// (the author, the content warning) and its also-on results: gone wins over the opt-out, so the
 /// repair leaves it the gone card, nothing derived, and a second run changes nothing.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn the_repair_scrubs_a_gone_post_that_had_opted_out(pool: PgPool) {
     let uri = "https://mastodon.social/@Gargron/1";
     let api = "https://mastodon.social/api/v1/statuses/1";
@@ -3678,7 +3626,7 @@ fn ids_of(page: &Value) -> Vec<String> {
 /// `boost` ranks the cards the set's authors referenced first and leaves nothing out; `reach`
 /// with the same set keeps only those. `wot_2` answers 501 until the Nexus serves the reach-set
 /// route, then reads it.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_boost_ranks_the_viewers_set_first_and_never_filters(pool: PgPool) {
     let ids = seed(&pool).await;
     // Each item is tagged by its own author (item 0 twice, by one author): the default ranking
@@ -3815,7 +3763,7 @@ async fn a_boost_ranks_the_viewers_set_first_and_never_filters(pool: PgPool) {
 
 /// A boost reads the set's references once, not once per card: 10,000 cards each referenced by
 /// the friend answer well inside the five-second statement timeout.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_boost_over_many_cards_answers_in_time(pool: PgPool) {
     let friend = 3;
     sqlx::query("INSERT INTO resource(id,uri) SELECT md5('many'||i),'https://many.example.org/'||i FROM generate_series(1,10000) i")
@@ -3868,7 +3816,7 @@ async fn a_boost_over_many_cards_answers_in_time(pool: PgPool) {
 
 /// A reference from 1900 (in range) boosts nothing and breaks nothing: its decay is clamped to
 /// zero instead of underflowing a double, in the boost and in the plain ranking.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_old_reference_neither_boosts_nor_breaks_a_search(pool: PgPool) {
     let ids = seed(&pool).await;
     let friend = 1;
@@ -3959,7 +3907,7 @@ async fn relevance_card(
 /// podcast and media player whose descriptions merely mention music come after the music cards,
 /// which `sort=activity` (the old order) puts behind them. Cursors page the same order, facets
 /// and filters are unchanged, and `sort=relevance` without `q` is refused.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_text_search_ranks_the_best_match_first(pool: PgPool) {
     let podcast = relevance_card(
         &pool,
@@ -4168,7 +4116,7 @@ async fn a_text_search_ranks_the_best_match_first(pool: PgPool) {
 /// never finds `Rain` or `Saint`, `btc` never finds `Debtcleaner`, while `LOLcats`, `Airbnb`,
 /// `btcpayserver` and `lightningnetwork/lnd` (for `lnd`) are still found. Longer text still matches inside a name, and so does a script
 /// written without spaces between words.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_short_query_matches_word_starts_not_inside_words(pool: PgPool) {
     let deck = relevance_card(
         &pool,

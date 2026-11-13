@@ -945,10 +945,7 @@ mod tests {
     /// A change line names its occurrence by the UID as it is stored, whichever writer passes
     /// the key: a UID that holds a link carrying a credential is written by its stand-in, a
     /// plain one as it is.
-    #[sqlx::test(
-        migrations = "../../migrations",
-        fixtures("../tests/fixtures/require_h3.sql")
-    )]
+    #[sqlx::test(migrations = "../../migrations")]
     async fn a_change_line_names_its_occurrence_by_the_stored_uid(pool: PgPool) {
         let uri = "https://example.org/feed.ics";
         let id = crate::store::ensure_resource(&pool, uri).await.unwrap();

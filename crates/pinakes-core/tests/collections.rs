@@ -106,7 +106,7 @@ async fn count(app: &axum::Router, id: &str) -> i64 {
 
 /// Each item of a collection post is kept alone: a removed item drops only itself, put again it
 /// is back, an edit (a new version file) keeps the post once, and deleting the post drops all.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_collections_items_are_kept_each_and_dropped_alone(pool: PgPool) {
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let a = author('a');
@@ -180,7 +180,7 @@ async fn a_collections_items_are_kept_each_and_dropped_alone(pool: PgPool) {
 }
 
 /// A post's reply and embeds are kept each too: they share its version file.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_posts_reply_and_embeds_are_kept_each(pool: PgPool) {
     let a = author('a');
     let line = |op, kind, uri: &str| Change {
@@ -223,7 +223,7 @@ async fn a_posts_reply_and_embeds_are_kept_each(pool: PgPool) {
 
 /// A card's collections are those naming its own link or an alias's, each post once; an alias
 /// ID reads its root's.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_alias_link_counts_for_its_root_once_per_post(pool: PgPool) {
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let (a, b) = (author('a'), author('b'));
@@ -287,7 +287,7 @@ async fn request_lookup(app: &axum::Router, ids: &[&str]) -> (u16, Value) {
 
 /// The viewer's own collections first, then newest first, by author and post on a tie; pages
 /// continue to the end without repeating, and a cursor holds to its resource and viewer.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn the_viewers_own_come_first_then_newest_and_pages_continue(pool: PgPool) {
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let link = "https://example.org/song";
@@ -381,7 +381,7 @@ async fn the_viewers_own_come_first_then_newest_and_pages_continue(pool: PgPool)
 }
 
 /// `in_collection` keeps the cards a collection holds, an alias's link as its root.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn search_in_collection_keeps_the_cards_it_holds(pool: PgPool) {
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let a = author('a');
@@ -485,7 +485,7 @@ async fn all_pages(app: &axum::Router, id: &str, query: &str, limit: usize) -> V
 
 /// A viewer's own collections come first, their 100 newest; any more are listed with the others,
 /// by time.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_viewer_has_their_100_newest_first_and_the_rest_by_time(pool: PgPool) {
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let link = "https://example.org/song";
@@ -521,7 +521,7 @@ async fn a_viewer_has_their_100_newest_first_and_the_rest_by_time(pool: PgPool) 
 /// A post holding a card's link and its alias, edited (same file, a later instant) with the
 /// alias's put skipped: ingest settles the alias's row to the edit's instant, as the rest of
 /// Nexus's stage would, so the post is listed once, at its newest, on whichever page that falls.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_post_held_under_two_links_is_listed_once_at_its_newest(pool: PgPool) {
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let a = author('a');
@@ -599,7 +599,7 @@ async fn a_post_held_under_two_links_is_listed_once_at_its_newest(pool: PgPool) 
 
 /// A post's new version (another version file) replaces its older one even when a del of the
 /// older version's lines was skipped: the post is listed once, by its one URI.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_new_version_replaces_an_older_one_whose_del_was_skipped(pool: PgPool) {
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let a = author('a');
@@ -642,7 +642,7 @@ async fn a_new_version_replaces_an_older_one_whose_del_was_skipped(pool: PgPool)
 
 /// A collection holds at most 100 items (the specs' cap): a new item past them is refused, a put
 /// of one it holds is not.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_collection_holds_at_most_100_items(pool: PgPool) {
     let a = author('a');
     let link = |k: i64| format!("https://example.org/item/{k}");
@@ -679,7 +679,7 @@ async fn a_collection_holds_at_most_100_items(pool: PgPool) {
 /// The viewer's pinned set is fixed by the first page: a collection of theirs added while they
 /// page moves no post between their own and the others. It is newer than the first page's
 /// pinned window, so it is listed with the others, by time.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn the_pinned_set_holds_while_a_viewer_pages(pool: PgPool) {
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let link = "https://example.org/song";
@@ -767,7 +767,7 @@ async fn files(pool: &PgPool) -> Vec<String> {
 /// Only a post's version files (`<post>/<leaf>.json`) are its versions: a file nested deeper
 /// under its path, or not JSON, is a collection of its own, older or newer than an edit. An edit
 /// of the post neither deletes it nor is deleted by it.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn files_under_a_post_that_are_not_its_versions_are_collections_of_their_own(pool: PgPool) {
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let a = author('a');
@@ -813,7 +813,7 @@ async fn files_under_a_post_that_are_not_its_versions_are_collections_of_their_o
 /// Two versions staged in one millisecond, the older's del skipped, in either order: the post
 /// keeps one, the greatest editId (the specs' newest), listed and counted once, and only its
 /// items are the collection's.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn versions_staged_in_one_millisecond_leave_the_greatest(pool: PgPool) {
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let a = author('a');
@@ -872,7 +872,7 @@ async fn versions_staged_in_one_millisecond_leave_the_greatest(pool: PgPool) {
 /// item added later to a file that holds the card's alias. Each post is listed once, at its
 /// file's instant, on whichever page that falls, with and without a viewer; the count agrees;
 /// and a collection's items are its one file's.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn ingest_leaves_each_collection_one_file_at_one_instant(pool: PgPool) {
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let (a, b) = (author('a'), author('b'));
@@ -1008,7 +1008,7 @@ fn long(seed: &str, len: usize) -> String {
 /// Ingest applies every line; every page, followed to the end at limits 1, 7 and 20, with and
 /// without the viewer, lists each post once in order; each cursor fits the decoder's cap; the
 /// count and `in_collection` agree.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn the_longest_accepted_paths_are_kept_and_paged(pool: PgPool) {
     // Some 250 pages, one client: past the default rate limit.
     let mut config = Config::default();

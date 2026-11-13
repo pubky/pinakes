@@ -224,7 +224,7 @@ fn credit(item: &Item) -> Value {
 /// Signal's screenshot (AGPL), Mindustry's (GPLv3) and The Matrix's (Commons' `Attribution`):
 /// each card shows Commons' thumbnail with one credit, the file's author, the licence's SPDX ID
 /// (or `Attribution`) and its text, and the file's page. One Commons request each.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn gnu_and_attribution_files_show_with_their_credit(pool: PgPool) {
     for item in ITEMS {
         let (doc, t) = item_card(&pool, item, Commons::Recorded).await;
@@ -247,7 +247,7 @@ async fn gnu_and_attribution_files_show_with_their_credit(pool: PgPool) {
 
 /// The licence alone does not show a file: without its author, or with a URL that names another
 /// licence than its name, the card has no image and no credit.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_free_licence_without_its_author_shows_nothing(pool: PgPool) {
     let (shown, _) = item_card(&pool, &SIGNAL, Commons::Recorded).await;
     assert_eq!(shown.image.as_deref(), Some(SIGNAL.image));

@@ -42,7 +42,7 @@ async fn only_a_products_own_barcode_is_a_key() {
     )));
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn one_barcode_on_two_shops_is_one_group(pool: PgPool) {
     let cx = cx(Recorded::new(), Config::default());
     let mut ids = vec![];

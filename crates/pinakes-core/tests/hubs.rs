@@ -777,7 +777,7 @@ fn has(ids: &[&str]) -> bool {
 /// switching it off hides nothing of deezer.com (TASK-deezer-api-off): a tagged Deezer album
 /// resolves from its own page, the album's other editions list it from MusicBrainz and
 /// Wikidata (P2723) and join it, and search finds it. Deezer itself records nothing.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn deezer_s_api_stays_off_and_its_links_stay(pool: sqlx::PgPool) {
     use tower::ServiceExt;
     if !has(&["musicbrainz", "wikidata"]) {
@@ -989,7 +989,7 @@ async fn the_deezer_source_off_calls_nothing_even_asked_directly() {
 /// through its barcode, the Apple Music album), Wikidata the second (its item and release
 /// group). The shared release group joins them; each card lists the other first, then the
 /// derived links by service.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn music_links_join_through_the_hubs_and_list_each_other(pool: sqlx::PgPool) {
     use tower::ServiceExt;
     if !has(&["musicbrainz", "wikidata", "itunes"]) {
@@ -1145,7 +1145,7 @@ async fn music_links_join_through_the_hubs_and_list_each_other(pool: sqlx::PgPoo
 
 /// An English link (a redirect's title) and a German article are one Wikidata item: they join,
 /// and each card lists the other first, then the other editions and encyclopedias.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn wikipedia_editions_join_through_their_item(pool: sqlx::PgPool) {
     use tower::ServiceExt;
     // The articles' cards are the wikipedia source's.
@@ -1236,7 +1236,7 @@ async fn wikipedia_editions_join_through_their_item(pool: sqlx::PgPool) {
 /// A Wikidata item link is its own hub: any spelling is the item's canonical link, and its card
 /// lists the item's encyclopedia entries and Wikipedia editions from its own claims and
 /// sitelinks (one request, no search).
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_wikidata_item_lists_its_editions_and_encyclopedias(pool: sqlx::PgPool) {
     use tower::ServiceExt;
     // The item's card is the wikidata_item source's.
@@ -1319,7 +1319,7 @@ async fn a_wikidata_item_lists_its_editions_and_encyclopedias(pool: sqlx::PgPool
 /// An album link MusicBrainz relates to several releases of one release group (Dracula: TIDAL,
 /// Apple and Deezer each point to "Dracula" and "Dracula (remix)") takes the release group's key
 /// alone, and the links every release has. A configured mirror is asked instead of musicbrainz.org.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn editions_of_one_release_group_take_the_group(pool: sqlx::PgPool) {
     if !has(&["musicbrainz"]) {
         return;
@@ -1399,7 +1399,7 @@ async fn editions_of_one_release_group_take_the_group(pool: sqlx::PgPool) {
 /// Bohemian Rhapsody on TIDAL: a TIDAL track page states its own ISRC, a key. One
 /// MusicBrainz does not relate by URL joins the one recording its ISRC is on; an ISRC nobody else
 /// knows keeps its key and stays alone; one MusicBrainz gives to two recordings is no key.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
     if !has(&["service", "musicbrainz"]) {
         return;
@@ -1602,7 +1602,7 @@ async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
 /// facts) and from the ISRC's own MusicBrainz page (`musicbrainz_entity`), so the track, the
 /// recordings' pages and the ISRC page are one group. Recordings that disagree (another artist;
 /// 4.5 s apart) keep today's rule: the duration picks one or the ISRC stays a fact.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn duplicate_recordings_of_one_isrc_are_one_recording(pool: sqlx::PgPool) {
     if !has(&["service", "musicbrainz", "musicbrainz_entity"]) {
         return;
@@ -1769,7 +1769,7 @@ async fn duplicate_recordings_of_one_isrc_are_one_recording(pool: sqlx::PgPool) 
 /// recording's fourth (…36's fifth, shared with …35), and a recording page MusicBrainz answers
 /// over its cap, which keys nothing. No resource carries two recording keys, and `key=mbid:` with
 /// the other duplicate's MBID still finds its page.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn one_recording_stands_for_its_duplicates_on_every_path(pool: sqlx::PgPool) {
     if !has(&["service", "musicbrainz", "musicbrainz_entity", "wikidata"]) {
         return;
@@ -1944,7 +1944,7 @@ async fn one_recording_stands_for_its_duplicates_on_every_path(pool: sqlx::PgPoo
 /// the one Deezer track. Off by default, nothing asks Deezer.
 /// Spotify's own record of a track (`spotify`): its ISRC, which MusicBrainz gives to one
 /// recording, joins the track to that recording's page (REPORT-matching P1).
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_spotify_track_joins_the_musicbrainz_recording(pool: sqlx::PgPool) {
     if !has(&["spotify", "musicbrainz", "musicbrainz_entity"]) {
         return;
@@ -2118,11 +2118,11 @@ async fn spotify_falls_back_to_musicbrainz(pool: sqlx::PgPool, spotify: Option<&
         [groups[0].clone(), groups[0].clone(), groups[0].clone()]
     );
 }
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_spotify_track_spotify_refuses_joins_by_its_musicbrainz_url(pool: sqlx::PgPool) {
     spotify_falls_back_to_musicbrainz(pool, Some("premium-hold")).await;
 }
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_spotify_track_without_credentials_joins_by_its_musicbrainz_url(pool: sqlx::PgPool) {
     spotify_falls_back_to_musicbrainz(pool, None).await;
 }
@@ -2130,7 +2130,7 @@ async fn a_spotify_track_without_credentials_joins_by_its_musicbrainz_url(pool: 
 /// An Apple Music track plays iTunes' 30-second preview: the `itunes` source hears of it
 /// (recorded: Radiohead's "Paranoid Android"), the card is read again to take it, and the
 /// hints give it as a preview. Another track iTunes has no song for hears of none.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_apple_music_track_plays_its_itunes_preview(pool: sqlx::PgPool) {
     if !has(&["itunes"]) {
         return;
@@ -2193,7 +2193,7 @@ async fn an_apple_music_track_plays_its_itunes_preview(pool: sqlx::PgPool) {
     assert!(!due(ids[1].clone()).await);
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_deezer_barcode_names_the_apple_album_that_joins(pool: sqlx::PgPool) {
     // Deezer's barcode and iTunes' album for it are the two sources' work.
     if !has(&["deezer", "itunes"]) {
@@ -2310,7 +2310,7 @@ async fn a_deezer_barcode_names_the_apple_album_that_joins(pool: sqlx::PgPool) {
 }
 
 /// Two Wikidata item links in one batch: one read for both, each item's own read from the cache.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn item_links_are_read_in_one_request(pool: sqlx::PgPool) {
     // The items' reads are the wikidata_item source's.
     if !has(&["wikidata_item"]) {
@@ -2356,7 +2356,7 @@ async fn item_links_are_read_in_one_request(pool: sqlx::PgPool) {
 /// (keyed by it), so it joins the TIDAL track its ISRC names; the page of an ISRC one recording
 /// has joins too; an ISRC two recordings have names neither (a fact, no key); the artist's page
 /// joins the TIDAL artist.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     // Its keys are the musicbrainz_entity source's; its event pages are read by `performers`.
     if !has(&["musicbrainz_entity", "performers"]) {
@@ -3034,7 +3034,7 @@ async fn a_musicbrainz_page_card_comes_from_the_entity() {
 /// Wikipedia article's sources record only the key their own service proves and don't retry (asking again would read the same
 /// megabytes), and the MusicBrainz card is read from the page, the second time too, from the
 /// failure cache.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_entity_over_the_cap_is_no_answer(pool: sqlx::PgPool) {
     // The three pages' sources are the ones that answer over the cap.
     if !has(&["musicbrainz_entity", "wikipedia", "wikidata_item"]) {
@@ -3112,7 +3112,7 @@ async fn an_entity_over_the_cap_is_no_answer(pool: sqlx::PgPool) {
 /// its barcode key (TIDAL's own, stored by an earlier run): the release's keys, facts and links.
 /// A barcode MusicBrainz has no release for (Dracula's, on an album URL it does not know
 /// either) asks once, in both spellings, and finds nothing.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_album_s_barcode_key_finds_its_musicbrainz_release(pool: sqlx::PgPool) {
     if !has(&["musicbrainz"]) {
         return;
@@ -3197,7 +3197,7 @@ async fn an_album_s_barcode_key_finds_its_musicbrainz_release(pool: sqlx::PgPool
 
 /// A barcode the `musicbrainz` source keyed itself (from a release it once found by URL) never
 /// finds that release again once the URL relation is gone: an editor's removal stands.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn musicbrainz_s_own_barcode_never_re_finds_its_release(pool: sqlx::PgPool) {
     if !has(&["musicbrainz"]) {
         return;
@@ -3252,7 +3252,7 @@ async fn musicbrainz_s_own_barcode_never_re_finds_its_release(pool: sqlx::PgPool
 /// Discogs joins exactly and at its level: master 21491 is OK Computer's release group (so it
 /// joins the Spotify album), artist 3840 is Radiohead (as is the TIDAL artist page), and release
 /// 83182 is one edition: its own release and barcode, never the release group.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn discogs_joins_at_its_level(pool: sqlx::PgPool) {
     if !has(&["discogs", "musicbrainz"]) {
         return;
@@ -3389,7 +3389,7 @@ async fn discogs_joins_at_its_level(pool: sqlx::PgPool) {
 
 /// A Discogs release MusicBrainz relates to releases of different release groups is ambiguous:
 /// the MusicBrainz source records nothing for it, not the first release's group.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_discogs_release_of_two_release_groups_joins_nothing(pool: sqlx::PgPool) {
     if !has(&["musicbrainz", "discogs"]) {
         return;
@@ -3435,7 +3435,7 @@ async fn a_discogs_release_of_two_release_groups_joins_nothing(pool: sqlx::PgPoo
 /// page of 3:34 keys the 3:33 recording and one of 3:00 the 2:59 recording (each by its MBID,
 /// the ISRC a fact); one of 3:16 keys neither; Deezer's own record of a 214 s track decides the
 /// same way. The `musicbrainz` source follows the page's pick too.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_shared_isrc_names_the_recording_the_tracks_length_picks(pool: sqlx::PgPool) {
     if !has(&["service", "musicbrainz", "deezer"]) {
         return;
@@ -3555,7 +3555,7 @@ async fn a_shared_isrc_names_the_recording_the_tracks_length_picks(pool: sqlx::P
 /// disagrees is a fact, never a key (an exact lookup by it could name that other recording's
 /// track); a duration's pick that has a duplicate on another ISRC is keyed as the one standing
 /// for both, by every source.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn the_whole_set_agrees_and_only_its_own_isrcs_are_keys(pool: sqlx::PgPool) {
     use tower::ServiceExt;
     if !has(&["service", "musicbrainz"]) {
@@ -3690,7 +3690,7 @@ async fn the_whole_set_agrees_and_only_its_own_isrcs_are_keys(pool: sqlx::PgPool
 /// Wikidata's recording item, read alone (no other source keys the track): the MBID it names is
 /// keyed as the recording that stands for its duplicates, and the MBID it replaced stays as
 /// Wikidata's `mbid_was`, so `key=mbid:` with it still finds the track.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn wikidata_alone_keys_the_standing_recording_and_keeps_the_other(pool: sqlx::PgPool) {
     use tower::ServiceExt;
     if !has(&["wikidata", "service", "musicbrainz", "musicbrainz_entity"]) {
@@ -3780,7 +3780,7 @@ async fn wikidata_alone_keys_the_standing_recording_and_keeps_the_other(pool: sq
 /// Sources that key different recordings for one resource truly disagree: the record-time check
 /// only observes it. Both keys are kept, the resource joins no recording group (a group holds
 /// one), and the run is counted.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn disagreeing_recording_keys_are_kept_and_counted(pool: sqlx::PgPool) {
     let a = "00000000-0000-4000-8000-0000000000e1";
     let b = "00000000-0000-4000-8000-0000000000e2";
@@ -3875,7 +3875,7 @@ async fn disagreeing_recording_keys_are_kept_and_counted(pool: sqlx::PgPool) {
 /// with a recording over the cap keeps its own MBID and that recording's links, as on main; a
 /// track whose Wikidata item names a recording over the cap keeps Wikidata's own key (the raw
 /// P4404 MBID).
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_secondary_read_over_the_cap_settles_nothing(pool: sqlx::PgPool) {
     if !has(&["musicbrainz", "wikidata"]) {
         return;

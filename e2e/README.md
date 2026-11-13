@@ -16,7 +16,7 @@ tags per resource, so when a shared live resource already carries five other tag
 run's own tag is confirmed through `/v0/resource/{id}/tags` instead, and the MCP `social` tool,
 which reads the same batch view, is held to that view's labels.
 
-Requires Node >=20, Rust, and PostgreSQL 16 with PostGIS and h3 extensions installed
+Requires Node >=20, Rust, and PostgreSQL 16 with the PostGIS extension installed
 as described in the main README. `npm ci --prefix e2e` installs the pinned SDKs.
 
 ## Offline fixture flow (CI)

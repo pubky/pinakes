@@ -217,7 +217,7 @@ async fn due(pool: &sqlx::PgPool, id: &str) -> (Option<String>, f64) {
 /// Walking Disaster's ISRC on Deezer finds TIDAL's tracks (five of eight, streamed ones first),
 /// Underclass Hero's barcode its one album; an ISRC TIDAL lacks and a barcode several albums
 /// carry find nothing; TIDAL's own track is not asked.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn tracks_and_albums_are_found_on_tidal_by_their_keys(pool: sqlx::PgPool) {
     let track = save(
         &pool,
@@ -293,7 +293,7 @@ async fn tracks_and_albums_are_found_on_tidal_by_their_keys(pool: sqlx::PgPool) 
 }
 
 /// On by default with TIDAL's pair; switched off, or without the pair, it asks TIDAL nothing.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn off_or_without_credentials_nothing_asks_tidal(pool: sqlx::PgPool) {
     let track = save(
         &pool,
@@ -326,7 +326,7 @@ async fn off_or_without_credentials_nothing_asks_tidal(pool: sqlx::PgPool) {
 /// A refusal of the credentials (at the token endpoint, or a 403 from the API) and a rate limit
 /// (429) keep the links an earlier run found and retry later: after the five-minute hold
 /// (`tidal_auth`), or after the hour TIDAL asked for (`tidal_busy`).
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn refusals_and_rate_limits_keep_the_links(pool: sqlx::PgPool) {
     let album = save(
         &pool,

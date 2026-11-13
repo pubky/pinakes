@@ -1017,7 +1017,7 @@ fn identifier_dates_domains_media_attributes_and_social_excerpt() {
     let d=cards::activitypub(base.as_str(),&json!({"type":"Note","id":base.as_str(),"content":"unlisted text","to":["https://social.example/followers"],"cc":["https://www.w3.org/ns/activitystreams#Public"]}),&base,86400).unwrap();
     assert!(!serde_json::to_string(&d).unwrap().contains("unlisted text"));
 }
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn bad_identifiers_are_final_missing_and_ap_promotes_to_worker(pool: sqlx::PgPool) {
     use pinakes_core::{queue, store};
     for uri in ["isbn:9780140328722", "doi:invalid"] {
@@ -1258,7 +1258,7 @@ async fn a_card_read_at_a_credential_resolves_nothing_back_to_it() {
 
 /// Nothing stored names a credential but the resource's own link, whichever field it came in by:
 /// the image, an attribute, an alias, a client link, the stream, a performer's link.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn nothing_stored_names_a_credential_but_its_own_link(pool: sqlx::PgPool) {
     use pinakes_core::{
         event::Performer,
@@ -1307,7 +1307,7 @@ async fn nothing_stored_names_a_credential_but_its_own_link(pool: sqlx::PgPool) 
 }
 /// A card kept as it was stored (an answer found missing keeps it) is written without a
 /// credential too, and so is its change line: the guard runs at the last write.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_card_kept_as_stored_is_written_without_a_credential(pool: sqlx::PgPool) {
     use pinakes_core::{model::Status, store};
     let uri = "https://page.example/kept";
@@ -1344,7 +1344,7 @@ async fn a_card_kept_as_stored_is_written_without_a_credential(pool: sqlx::PgPoo
 
 /// A change line exempts only the resource's own link: a credential an earlier build stored in a
 /// document's `url` (another spelling of a public link) goes from the line too.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_change_line_exempts_only_the_resources_own_link(pool: sqlx::PgPool) {
     use pinakes_core::store;
     let uri = "https://page.example/legacy";
@@ -1369,7 +1369,7 @@ async fn a_change_line_exempts_only_the_resources_own_link(pool: sqlx::PgPool) {
     assert!(history.contains("Second"), "{history}");
     assert!(!history.contains("SECRET"), "{history}");
 }
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn social_deletion_purges_content_history(pool: sqlx::PgPool) {
     use pinakes_core::{model::Status, store};
     let uri = "https://social.example/post/one";

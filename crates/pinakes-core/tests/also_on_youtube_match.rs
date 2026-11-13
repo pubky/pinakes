@@ -223,7 +223,7 @@ async fn links(pool: &sqlx::PgPool, id: &str) -> Vec<String> {
 /// Queen - Topic's Bohemian Rhapsody (354 s): Deezer's one track of that artist and title within
 /// 2 s, unkeyed; TIDAL has two (355 s and 356 s), so none. Daft Punk's "Official Audio" on its
 /// VEVO channel is no label upload: nothing is asked for it.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_topic_upload_matches_one_deezer_track(pool: sqlx::PgPool) {
     let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
     let queen = save(&pool, "bSnlKl_PoQU").await;
@@ -262,7 +262,7 @@ async fn a_topic_upload_matches_one_deezer_track(pool: sqlx::PgPool) {
 
 /// A sign-in page instead of the video's: nothing is searched or recorded, and the lookup is
 /// retried hours later.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_sign_in_page_is_retried_hours_later(pool: sqlx::PgPool) {
     let queen = save(&pool, "bSnlKl_PoQU").await;
     let seen = run(
@@ -287,7 +287,7 @@ async fn a_sign_in_page_is_retried_hours_later(pool: sqlx::PgPool) {
 
 /// On by default; switched off, or on with neither Deezer nor `tidal_isrc` running, it asks
 /// nothing (not even YouTube).
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn without_its_switch_or_a_service_to_search_nothing_is_asked(pool: sqlx::PgPool) {
     save(&pool, "bSnlKl_PoQU").await;
     let mut by_default = config(true, true, None);
@@ -306,7 +306,7 @@ async fn without_its_switch_or_a_service_to_search_nothing_is_asked(pool: sqlx::
 
 /// TIDAL failing, by refusing the credentials (403) or with an answer the source does not expect
 /// (400), leaves the run's Deezer match standing; the run comes back after five minutes.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_tidal_failure_keeps_the_deezer_match(pool: sqlx::PgPool) {
     let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
     if !registered.contains(&"tidal_isrc") {
@@ -350,7 +350,7 @@ async fn a_tidal_failure_keeps_the_deezer_match(pool: sqlx::PgPool) {
 
 /// TIDAL failing in a run with no Deezer match fails the run, which keeps every link an earlier
 /// run found (a TIDAL one too) until the retry.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_tidal_failure_without_a_deezer_match_keeps_the_earlier_links(pool: sqlx::PgPool) {
     let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
     if !registered.contains(&"tidal_isrc") {

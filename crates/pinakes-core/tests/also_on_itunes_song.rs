@@ -211,7 +211,7 @@ const GET_LUCKY: &str = "https://music.apple.com/song/617154366 - itunes_song ma
 /// Get Lucky on Deezer (367 s, disc 1 track 8 of Random Access Memories) is Apple's song
 /// 617154366 (369.6 s), unkeyed. Walking Disaster, by its ISRC key on another service, is
 /// Deezer's track 2 of Underclass Hero, whose barcode answers several collections: nothing.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_deezer_track_s_place_names_its_apple_song(pool: sqlx::PgPool) {
     let lucky = save(&pool, "https://www.deezer.com/track/67238735", None).await;
     let walking = save(
@@ -240,7 +240,7 @@ async fn a_deezer_track_s_place_names_its_apple_song(pool: sqlx::PgPool) {
 
 /// TIDAL's Get Lucky (370 s): its one album's barcode and its place among the album's items.
 /// TIDAL's Walking Disaster: Underclass Hero again, several collections, nothing.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_tidal_track_s_place_names_its_apple_song(pool: sqlx::PgPool) {
     let lucky = save(&pool, "https://tidal.com/track/20115564", None).await;
     let walking = save(&pool, "https://tidal.com/track/3524506", None).await;
@@ -260,7 +260,7 @@ async fn a_tidal_track_s_place_names_its_apple_song(pool: sqlx::PgPool) {
 
 /// On by default; switched off, without the source of a track's place (Deezer off, no TIDAL
 /// pair) or with `itunes` off, it asks nothing.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn without_its_switch_or_a_place_s_source_nothing_is_asked(pool: sqlx::PgPool) {
     save(&pool, "https://www.deezer.com/track/67238735", None).await;
     save(&pool, "https://tidal.com/track/20115564", None).await;
@@ -300,7 +300,7 @@ async fn without_its_switch_or_a_place_s_source_nothing_is_asked(pool: sqlx::PgP
 
 /// iTunes rate-limiting the lookup: retried after the hour it asked for, the link an earlier run
 /// found kept.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_busy_itunes_keeps_the_song(pool: sqlx::PgPool) {
     let lucky = save(&pool, "https://www.deezer.com/track/67238735", None).await;
     run(&pool, config(true, true, None), Answers::default()).await;

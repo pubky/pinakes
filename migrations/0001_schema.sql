@@ -7,7 +7,6 @@
 
 CREATE EXTENSION IF NOT EXISTS postgis;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
-CREATE EXTENSION IF NOT EXISTS h3;
 
 -- Functions may name tables and views defined further down.
 SET LOCAL check_function_bodies = false;
