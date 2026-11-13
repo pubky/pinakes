@@ -87,4 +87,16 @@ async fn held_exact_edges_share_keys_in_both_directions(pool: PgPool) {
             "every member must expose the exact group keys: {card}"
         );
     }
+    // Membership can briefly lag a missing observation: never borrow that member's
+    // keys or its outgoing keyed evidence while reconciliation is queued.
+    sqlx::query("UPDATE resource SET status='missing',doc=jsonb_set(doc,'{status}','\"missing\"'::jsonb) WHERE id=$1")
+        .bind(&a).execute(&pool).await.unwrap();
+    let live = read(&app, &c).await;
+    assert!(
+        !live["keys"]
+            .as_array()
+            .unwrap()
+            .contains(&Value::String(mb.into())),
+        "missing donor leaked: {live}"
+    );
 }

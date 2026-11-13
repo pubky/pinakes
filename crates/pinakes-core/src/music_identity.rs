@@ -23,11 +23,14 @@ pub(crate) async fn keys(pool: &PgPool, detail: &mut ResourceDetail) -> Result<(
     let keys: Vec<String> = sqlx::query_scalar(
         "WITH owners AS (SELECT u.resource_id FROM group_unit own JOIN group_unit u USING(group_id) \
          JOIN resource r ON r.id=u.resource_id WHERE own.unit_id=$1 AND r.type=$2 \
+         AND r.status='ok' AND r.doc->>'status' IS DISTINCT FROM 'missing' \
          ORDER BY u.resource_id LIMIT 256), keys AS ( \
          SELECT k.key FROM resource_key k JOIN owners o USING(resource_id) \
          WHERE k.expires_at>now() AND k.source NOT IN (SELECT source FROM also_on_source_off) \
          UNION SELECT l.key FROM derived_link l JOIN owners o ON o.resource_id=l.link_id \
-         WHERE l.key IS NOT NULL AND l.kind IS DISTINCT FROM 'maybe' AND l.expires_at>now() \
+         JOIN resource issuer ON issuer.id=l.resource_id \
+         WHERE issuer.status='ok' AND issuer.doc->>'status' IS DISTINCT FROM 'missing' \
+         AND l.key IS NOT NULL AND l.kind IS DISTINCT FROM 'maybe' AND l.expires_at>now() \
          AND l.source NOT IN (SELECT source FROM also_on_source_off)) \
          SELECT key FROM keys ORDER BY key COLLATE \"C\" LIMIT 256",
     ).bind(&detail.card.id).bind(&detail.card.type_name).fetch_all(pool).await?;

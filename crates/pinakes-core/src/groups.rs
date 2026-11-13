@@ -583,7 +583,8 @@ fn join(
         entries.dedup_by_key(|e| e.0);
         // Curated members follow their curation only; automatic keys never pull them away.
         entries.retain(|(i, _)| curated || facts.overrides[*i].is_none());
-        if entries.len() > cfg.max_members {
+        let mut cap_reported = entries.len() > cfg.max_members;
+        if cap_reported {
             tracing::warn!(
                 members = entries.len(),
                 cap = cfg.max_members,
@@ -615,11 +616,14 @@ fn join(
                 continue;
             }
             if sets[a].len() + sets[b].len() > cfg.max_members {
-                tracing::warn!(
-                    members = sets[a].len() + sets[b].len(),
-                    cap = cfg.max_members,
-                    "group size cap reached"
-                );
+                if !cap_reported {
+                    tracing::warn!(
+                        members = sets[a].len() + sets[b].len(),
+                        cap = cfg.max_members,
+                        "group size cap reached"
+                    );
+                    cap_reported = true;
+                }
                 (capped[i], capped[j]) = (true, true);
                 continue;
             }

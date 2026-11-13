@@ -464,16 +464,14 @@ fn timed_out(mbid: &str, step: &'static str) {
 /// (100 releases), prefer dated earlier fronts, and ask at most three covers. These requests
 /// use the shared paced, one-hour discovery cache and the caller's enrichment deadline.
 async fn cover(egress: &Egress, base: &str, entity: &musicbrainz::Entity) -> Found {
-    let (mut candidates, complete) = match entity.kind {
+    let mut candidates = match entity.kind {
         MbKind::Release if entity.about.cover_art_front => {
-            (vec![(entity.kind, entity.mbid.clone())], true)
+            vec![(entity.kind, entity.mbid.clone())]
         }
-        MbKind::ReleaseGroup => (vec![(entity.kind, entity.mbid.clone())], true),
+        MbKind::ReleaseGroup => vec![(entity.kind, entity.mbid.clone())],
         MbKind::Recording => {
-            let (mut releases, complete) =
-                match musicbrainz::releases(egress, base, &format!("recording={}", entity.mbid), 1)
-                    .await
-                {
+            let mut releases =
+                match musicbrainz::recording_releases(egress, base, &entity.mbid).await {
                     Ok(answer) => answer,
                     Err(error) => {
                         unread(&entity.mbid, "recording_releases", &error);
@@ -485,7 +483,7 @@ async fn cover(egress: &Egress, base: &str, entity: &musicbrainz::Entity) -> Fou
                     .cmp(&(b["date"].as_str().unwrap_or("9999"), b["id"].as_str()))
             });
             let mut ids = std::collections::BTreeSet::new();
-            let fronts: Vec<_> = releases
+            releases
                 .iter()
                 .filter(|r| {
                     r["cover-art-archive"]["front"] == true
@@ -494,12 +492,10 @@ async fn cover(egress: &Egress, base: &str, entity: &musicbrainz::Entity) -> Fou
                 .filter_map(|r| crate::hubs::mbid(r["id"].as_str()?))
                 .filter(|id| ids.insert(id.clone()))
                 .map(|id| (MbKind::Release, id))
-                .collect();
-            (fronts, complete)
+                .collect()
         }
         _ => return Found::Missing,
     };
-    let complete = complete && candidates.len() <= 3;
     candidates.truncate(3);
     for (kind, id) in candidates {
         let front = match crate::hubs::cover_art::front(egress, kind, &id).await {
@@ -529,11 +525,7 @@ async fn cover(egress: &Egress, base: &str, entity: &musicbrainz::Entity) -> Fou
             return Found::Value(front.image, credit);
         }
     }
-    if complete {
-        Found::Missing
-    } else {
-        Found::Unread
-    }
+    Found::Missing
 }
 
 /// The image and description `entity` takes from its Wikidata item: the item's Commons file,
@@ -1254,7 +1246,14 @@ mod tests {
         let hit = json(
             serde_json::json!({"query": {"searchinfo": {"totalhits": 1}, "search": [{"title": "Q2"}]}}),
         );
+        let releases = format!("{}/release?recording={mbid}&status=official&inc=release-groups+media+url-rels&limit=100&fmt=json",musicbrainz::BASE);
         let (egress, recorded) = crate::sources::fixture::egress(vec![
+            (
+                releases.as_str(),
+                200,
+                "application/json",
+                br#"{"release-count":0,"releases":[]}"#.to_vec(),
+            ),
             (search.as_str(), 200, "application/json", hit.clone()),
             (read.as_str(), 200, "application/json", song.clone()),
         ]);
@@ -1267,7 +1266,11 @@ mod tests {
         )
         .await;
         assert_eq!(found, Enrichment::missing());
-        assert_eq!(recorded.asked(), [search.clone(), read.clone(), works]);
+        let mut asked = recorded.asked();
+        asked.sort();
+        let mut expected = vec![search.clone(), read.clone(), works, releases];
+        expected.sort();
+        assert_eq!(asked, expected);
         // The same item without the work ID is the recording's own.
         let recording = json(
             serde_json::json!({"entities": {"Q2": {"type": "item", "id": "Q2", "claims": {
@@ -1314,12 +1317,18 @@ mod tests {
             artist_type: None,
             about: Default::default(),
         };
-        let (egress, recorded) = crate::sources::fixture::egress(vec![]);
+        let releases=format!("{}/release?recording={}&status=official&inc=release-groups+media+url-rels&limit=100&fmt=json",musicbrainz::BASE,recording.mbid);
+        let (egress, recorded) = crate::sources::fixture::egress(vec![(
+            releases.as_str(),
+            200,
+            "application/json",
+            br#"{"release-count":0,"releases":[]}"#.to_vec(),
+        )]);
         assert_eq!(
             enrich_within(&egress, musicbrainz::BASE, &recording, 640, None).await,
             Enrichment::missing()
         );
-        assert_eq!(recorded.asked(), Vec::<String>::new());
+        assert_eq!(recorded.asked(), vec![releases]);
     }
 
     /// An item is an entity's own at its level, however it was found: a recording's names that
@@ -1721,7 +1730,14 @@ mod tests {
         let search = wikidata::search_lookup("P4404", RECORDING).unwrap();
         let none =
             json(serde_json::json!({"query": {"searchinfo": {"totalhits": 0}, "search": []}}));
+        let releases=format!("{}/release?recording={RECORDING}&status=official&inc=release-groups+media+url-rels&limit=100&fmt=json",musicbrainz::BASE);
         let (egress, _) = crate::sources::fixture::egress(vec![
+            (
+                releases.as_str(),
+                200,
+                "application/json",
+                br#"{"release-count":0,"releases":[]}"#.to_vec(),
+            ),
             (search.as_str(), 200, "application/json", none),
             (works.as_str(), 200, "application/json", one_work()),
             (

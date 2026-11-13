@@ -1,7 +1,7 @@
 //! Captured MusicBrainz/Deezer wire shapes for the owner's unmatched ISRC card.
 mod common;
 use pinakes_core::{
-    also_on::{self, Source, Subject},
+    also_on::{self, Subject},
     config::Config,
     hubs::{musicbrainz, MbKind},
     music_enrichment,
@@ -33,6 +33,8 @@ struct Recorded {
     seen: Mutex<Vec<String>>,
     mismatch: bool,
     no_cover: bool,
+    many_releases: bool,
+    release_status: Option<u16>,
 }
 #[async_trait::async_trait]
 impl Transport for Recorded {
@@ -56,7 +58,14 @@ impl Transport for Recorded {
                 }
                 serde_json::to_vec(&v).unwrap()
             }
-            ("musicbrainz.org", "/ws/2/release") => fixture("releases.json"),
+            ("musicbrainz.org", "/ws/2/release") => {
+                status = self.release_status.unwrap_or(200);
+                let mut v: Value = serde_json::from_slice(&fixture("releases.json")).unwrap();
+                if self.many_releases {
+                    v["release-count"] = 1000.into();
+                }
+                serde_json::to_vec(&v).unwrap()
+            }
             ("musicbrainz.org", p) if p == format!("/ws/2/recording/{RECORDING}") => {
                 fixture("works.json")
             }
@@ -113,7 +122,12 @@ async fn musicbrainz_isrc_and_recording_use_exact_deezer_lookup() {
         format!("https://musicbrainz.org/recording/{RECORDING}"),
     ] {
         let s = subject(&uri);
-        let source = also_on::deezer::DeezerSource;
+        let Some(source) = also_on::registered()
+            .into_iter()
+            .find(|s| s.id() == "deezer")
+        else {
+            return;
+        };
         assert!(
             source.applies(&s),
             "must use the already verified ISRC of {uri}"
@@ -146,11 +160,9 @@ async fn musicbrainz_isrc_and_recording_use_exact_deezer_lookup() {
 }
 #[test]
 fn exact_reverse_sources_accept_known_mb_levels_not_arbitrary_pages() {
-    let sources: Vec<Box<dyn Source>> = vec![
-        Box::new(also_on::deezer::DeezerSource),
-        Box::new(also_on::tidal_isrc::TidalIsrc),
-        Box::new(also_on::spotify_isrc::SpotifyIsrc),
-    ];
+    let sources = also_on::registered()
+        .into_iter()
+        .filter(|s| matches!(s.id(), "deezer" | "tidal_isrc" | "spotify_isrc"));
     for source in sources {
         let mut track = subject(&format!("https://musicbrainz.org/recording/{RECORDING}"));
         assert!(source.applies(&track), "{} MB recording", source.id());
@@ -172,7 +184,12 @@ async fn recording_containment_is_a_fact_never_an_identity_key() {
         format!("mb:recording:{RECORDING}"),
         "musicbrainz_entity".into(),
     ));
-    let source = also_on::musicbrainz_containment::MusicBrainzContainment;
+    let Some(source) = also_on::registered()
+        .into_iter()
+        .find(|s| s.id() == "musicbrainz_containment")
+    else {
+        return;
+    };
     let found = source
         .lookup(&cx(Arc::new(Recorded::default())), &s)
         .await
@@ -180,7 +197,46 @@ async fn recording_containment_is_a_fact_never_an_identity_key() {
     assert!(found.keys.is_empty() && found.links.is_empty());
     assert!(found.facts.iter().any(|f| f.name == "track_of_album"
         && f.value == format!("https://musicbrainz.org/release/{RELEASE}")));
-    assert_eq!(source.ttl(), std::time::Duration::from_secs(86_400));
+    assert_eq!(
+        source.ttl(),
+        std::time::Duration::from_secs(30 * 86_400),
+        "containment must not reschedule every provider daily"
+    );
+    let capped = source
+        .lookup(
+            &cx(Arc::new(Recorded {
+                many_releases: true,
+                ..Default::default()
+            })),
+            &s,
+        )
+        .await
+        .unwrap();
+    assert!(
+        !capped.facts.is_empty(),
+        "a deliberately bounded page is usable"
+    );
+    let missing = source
+        .lookup(
+            &cx(Arc::new(Recorded {
+                release_status: Some(404),
+                ..Default::default()
+            })),
+            &s,
+        )
+        .await
+        .unwrap();
+    assert!(missing.facts.is_empty());
+    assert!(source
+        .lookup(
+            &cx(Arc::new(Recorded {
+                release_status: Some(503),
+                ..Default::default()
+            })),
+            &s
+        )
+        .await
+        .is_err());
 }
 #[tokio::test]
 async fn recording_uses_its_release_cover_not_an_album_identity_key() {
@@ -211,10 +267,16 @@ async fn recording_uses_its_release_cover_not_an_album_identity_key() {
         .any(|c| c.source_url == format!("https://musicbrainz.org/release/{RELEASE}/cover-art")));
     let cx = cx(Arc::new(Recorded {
         no_cover: true,
+        many_releases: true,
         ..Default::default()
     }));
     let found =
         music_enrichment::enrich_within(&cx.egress, musicbrainz::BASE, &entity, 500, None).await;
+    assert_eq!(
+        found.image,
+        music_enrichment::Found::Missing,
+        "a deliberate page cap is not a transient image read"
+    );
     let mut missing = pinakes_core::model::ResourceMeta::new(
         &format!("https://musicbrainz.org/recording/{RECORDING}"),
         "musicbrainz",
