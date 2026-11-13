@@ -30,7 +30,7 @@ pub const ALL: [(i64, &str); 6] = [
 ];
 
 /// The instance lock, held on a connection of its own until it is dropped. Only
-/// [`own_database`] makes one, so a function that takes it runs while no daemon does.
+/// [`own_database`] makes one.
 #[derive(Debug)]
 pub struct InstanceLock(#[allow(dead_code)] PoolConnection<Postgres>);
 

@@ -43,6 +43,19 @@ pub(crate) fn join_level(link: &music::Link) -> Option<Level> {
         (level, _) => Some(level),
     }
 }
+/// A recognized MusicBrainz page's identity level. Its verified keys may be used by reverse
+/// provider lookups too; an arbitrary page's claimed type or ISRC is not enough.
+pub(crate) fn mb_level(uri: &str) -> Option<Level> {
+    if musicbrainz::isrc_link(uri).is_some() {
+        return Some(Level::Track);
+    }
+    musicbrainz::entity_link(uri).map(|(kind, _, _)| match kind {
+        MbKind::Recording => Level::Track,
+        MbKind::Release | MbKind::ReleaseGroup => Level::Album,
+        MbKind::Artist => Level::Artist,
+    })
+}
+
 /// A link found on a hub, when it is a music link at `level`: its canonical URL and service.
 pub(crate) fn derived(url: &str, level: Level, via: &str) -> Option<Link> {
     let found = music::parse(url)?;

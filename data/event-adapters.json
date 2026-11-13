@@ -15,7 +15,6 @@
     ],
     "canary": "https://portal.einundzwanzig.space/api/changes?since_sequence=0&limit=1",
     "canary_note": null,
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -38,7 +37,6 @@
     ],
     "canary": "https://api.btcmap.org/v4/events?updated_since=2026-10-15T00%3A00%3A00Z&include_deleted=true",
     "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -64,7 +62,6 @@
     ],
     "canary": "https://api.nostr.wine/search?kind=31923&limit=1&sort=time&order=descending",
     "canary_note": null,
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -85,7 +82,6 @@
     "expected_fields": [],
     "canary": "https://calendar.google.com/calendar/ical/en.usa%23holiday%40group.v.calendar.google.com/public/basic.ics",
     "canary_note": null,
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -106,7 +102,6 @@
     "expected_fields": [],
     "canary": null,
     "canary_note": "No public-by-design sample. Capability URLs must never be committed or fetched by canaries.",
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -129,7 +124,6 @@
     "expected_fields": [],
     "canary": null,
     "canary_note": "No public-by-design Outlook sample. Capability URLs must never be committed or fetched by canaries.",
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -152,7 +146,6 @@
     "expected_fields": [],
     "canary": null,
     "canary_note": "No public-by-design sample. Capability URLs must never be committed or fetched by canaries.",
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -171,7 +164,6 @@
     "expected_fields": [],
     "canary": null,
     "canary_note": "operator must configure a public sample",
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -188,7 +180,6 @@
     "expected_fields": [],
     "canary": "https://www.calendarlabs.com/ical-calendar/ics/76/US_Holidays.ics",
     "canary_note": null,
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -211,7 +202,6 @@
     ],
     "canary": "https://luma.com/376whqyw",
     "canary_note": null,
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -233,7 +223,6 @@
     ],
     "canary": "https://www.meetup.com/bitcoin-meetup-switzerland/events/316894744/",
     "canary_note": null,
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -258,7 +247,6 @@
     ],
     "canary": "https://www.eventbrite.com/e/se-bitcoin-sovereignty-economics-tickets-1978412197139",
     "canary_note": null,
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -280,7 +268,6 @@
     ],
     "canary": "https://partiful.com/e/AK0FMV5lu2PmfSyxuXwY",
     "canary_note": null,
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -302,7 +289,6 @@
     ],
     "canary": "https://posh.vip/e/halloween-2026-eden",
     "canary_note": null,
-    "ua_profile": "plain",
     "requires_key": false,
     "fragile": true,
     "enabled": true
@@ -326,7 +312,6 @@
     ],
     "canary": "https://events.ringcentral.com/events/innovators-retreat-2026",
     "canary_note": null,
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -349,7 +334,6 @@
     ],
     "canary": "https://api.airmeet.com/api/v1/airmeet/0d7e16c0-7cd9-11f0-b52b-c993ee1463de/info",
     "canary_note": null,
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -372,7 +356,6 @@
     ],
     "canary": "https://mobilizon.fr/events/86a665ae-e495-4e4f-88d4-4cffd44a82f1",
     "canary_note": null,
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -394,7 +377,6 @@
     ],
     "canary": "https://demo.gancio.org/api/events?max=1",
     "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -417,7 +399,6 @@
     ],
     "canary": "https://events.sfconservancy.org/1ukbcQFkKAEr0OrZ7PDgq",
     "canary_note": null,
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -442,7 +423,6 @@
     ],
     "canary": "https://www.wikidata.org/wiki/Special:EntityData/Q125933843.json",
     "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -464,7 +444,6 @@
     ],
     "canary": "https://ti.to/scipy/scipy2026.ics",
     "canary_note": null,
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -486,7 +465,6 @@
     ],
     "canary": "https://www.petzi.ch/en/events/61387-fri-son-kim-wilde-uk/",
     "canary_note": null,
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -509,7 +487,6 @@
     ],
     "canary": "https://api.weezevent.com/sites/view/live/E1114506.ics",
     "canary_note": null,
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -531,7 +508,6 @@
     ],
     "canary": "https://pretix.eu/demo/democon/ical/",
     "canary_note": null,
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -554,7 +530,6 @@
     ],
     "canary": "https://eventyay.com/ev/88882f3e/",
     "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -576,7 +551,6 @@
     ],
     "canary": "https://www.guidle.com/de/veranstaltungen/dies-das/ueberlingen/gregor-haegele-live-2027_A2rCGkH",
     "canary_note": "A dated sample (8 July 2027); rotate before then. guidle's listings are rendered by script, so no listing can pick a current event.",
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -599,7 +573,6 @@
     ],
     "canary": "https://eventfrog.ch/stream/de/event/7503702322012243890.ics",
     "canary_note": null,
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -621,7 +594,6 @@
     ],
     "canary": "https://allevents.in/zurich/200029487725505",
     "canary_note": null,
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -645,7 +617,6 @@
     ],
     "canary": null,
     "canary_note": "Off: CloudFront refuses its event pages (/e/…) to Pinakes's user agent with 403 while its home page answers (checked 2026-10-30); a bot wall is not worked around.",
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": true,
     "enabled": false
@@ -667,7 +638,6 @@
     ],
     "canary": "https://www.fatsoma.com/e/npky3qjt/the-official-dublin-student-halloween-ball-2026",
     "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -689,7 +659,6 @@
     ],
     "canary": "https://www.designmynight.com/london/whats-on/theatre/the-magic-hour-park-lane",
     "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -711,7 +680,6 @@
     ],
     "canary": null,
     "canary_note": "Off: Bunny Shield answers its event pages with a JavaScript challenge (403, checked 2026-10-30); a bot wall is not worked around.",
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": true,
     "enabled": false
@@ -733,7 +701,6 @@
     ],
     "canary": "https://fixr.co/event/halloween-2026-welcome-to-the-haunted-hotel-tickets-404456056",
     "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -755,7 +722,6 @@
     ],
     "canary": "https://v4.wegow.com/es/conciertos/konzert-von-yasi-hofer-band-in-bonn-harmonie",
     "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -777,7 +743,6 @@
     ],
     "canary": "https://grounds.stager.co/shop/default/events/111608505",
     "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -800,7 +765,6 @@
     ],
     "canary": null,
     "canary_note": "Off: CloudFront refuses every page, robots.txt included, to Pinakes's user agent with 403 (checked 2026-10-30); a bot wall is not worked around.",
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": true,
     "enabled": false
@@ -822,7 +786,6 @@
     ],
     "canary": null,
     "canary_note": "Off: every page, robots.txt included, answers Pinakes's user agent with an 'update your browser' page (checked 2026-10-30); a user-agent wall is not worked around.",
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": true,
     "enabled": false
@@ -843,7 +806,6 @@
     ],
     "canary": null,
     "canary_note": "Off: retired; starticket.ch redirects to See Tickets and its Atom feed answers 403 AccessDenied (checked 2026-10-30).",
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": false
@@ -865,7 +827,6 @@
     ],
     "canary": "https://www.songkick.com/concerts/42408878-bausa-at-komplex-457",
     "canary_note": null,
-    "ua_profile": "firefox",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -887,7 +848,6 @@
     ],
     "canary": "https://events.humanitix.com/great-northern-contemporary-craft-fair",
     "canary_note": null,
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -910,7 +870,6 @@
     "canary": "https://infomaniak.events/en-ch",
     "canary_link": "/*/*/*/*/events/*",
     "canary_note": "The listing's first event page, picked by its path alone: as current as Infomaniak keeps its listing.",
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -932,7 +891,6 @@
     ],
     "canary": "https://xceed.me/en/roma/event/dissonanze-2026-day-1/220015",
     "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -954,7 +912,6 @@
     ],
     "canary": "https://www.ents24.com/london-events/eventim-apollo/simon-brodkin/7474018",
     "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -976,7 +933,6 @@
     ],
     "canary": "https://www.ticketino.com/en/Event/TICKETINO-BBQ/192364",
     "canary_note": "Public sample selected from source research or provider pages; rotate when unpublished.",
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -998,7 +954,6 @@
     ],
     "canary": "https://dice.fm/event/6a06e51b6c518c00013a998c",
     "canary_note": null,
-    "ua_profile": "browser",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -1020,7 +975,6 @@
     ],
     "canary": "https://feverup.com/m/118911",
     "canary_note": null,
-    "ua_profile": "browser",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -1045,7 +999,6 @@
     ],
     "canary": null,
     "canary_note": "operator must configure a public sample",
-    "ua_profile": "pinakes",
     "requires_key": true,
     "fragile": false,
     "enabled": true
@@ -1067,7 +1020,6 @@
     ],
     "canary": null,
     "canary_note": "operator must configure a public sample",
-    "ua_profile": "pinakes",
     "requires_key": true,
     "fragile": false,
     "enabled": true
@@ -1087,7 +1039,6 @@
     ],
     "canary": null,
     "canary_note": "operator must configure a public sample",
-    "ua_profile": "pinakes",
     "requires_key": true,
     "fragile": false,
     "enabled": true
@@ -1107,7 +1058,6 @@
     ],
     "canary": null,
     "canary_note": "operator must configure a public sample",
-    "ua_profile": "pinakes",
     "requires_key": true,
     "fragile": false,
     "enabled": true
@@ -1126,7 +1076,6 @@
     ],
     "canary": null,
     "canary_note": "operator must configure a public sample",
-    "ua_profile": "pinakes",
     "requires_key": true,
     "fragile": false,
     "enabled": true
@@ -1148,7 +1097,6 @@
     ],
     "canary": null,
     "canary_note": "operator must configure a public sample",
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": true,
     "enabled": false
@@ -1170,7 +1118,6 @@
     "expected_fields": [],
     "canary": null,
     "canary_note": "operator must configure a public sample",
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -1197,7 +1144,6 @@
     "expected_fields": [],
     "canary": null,
     "canary_note": "operator must configure a public sample",
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -1216,7 +1162,6 @@
     "expected_fields": [],
     "canary": null,
     "canary_note": "operator must configure a public sample",
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -1235,7 +1180,6 @@
     "expected_fields": [],
     "canary": null,
     "canary_note": "operator must configure a public sample",
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -1254,7 +1198,6 @@
     "expected_fields": [],
     "canary": null,
     "canary_note": "operator must configure a public sample",
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -1273,7 +1216,6 @@
     "expected_fields": [],
     "canary": null,
     "canary_note": "operator must configure a public sample",
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -1301,7 +1243,6 @@
     "expected_fields": [],
     "canary": null,
     "canary_note": "operator must configure a public sample",
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -1320,7 +1261,6 @@
     "expected_fields": [],
     "canary": null,
     "canary_note": "operator must configure a public sample",
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -1340,7 +1280,6 @@
     "expected_fields": [],
     "canary": null,
     "canary_note": "operator must configure a public sample",
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
@@ -1357,7 +1296,6 @@
     "expected_fields": [],
     "canary": null,
     "canary_note": "operator must configure a public sample",
-    "ua_profile": "pinakes",
     "requires_key": false,
     "fragile": false,
     "enabled": true
