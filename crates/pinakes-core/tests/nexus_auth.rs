@@ -22,20 +22,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tower::ServiceExt;
+mod common;
+use common::Lines;
 
 const SECRET: &str = "Bearer NEXUS-CANARY";
-
-#[derive(Clone, Default)]
-struct Lines(Arc<Mutex<Vec<u8>>>);
-impl std::io::Write for Lines {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
 
 /// The status and body text of one request, as from a client at a non-loopback address.
 async fn send(

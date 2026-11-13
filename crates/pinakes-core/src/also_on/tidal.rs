@@ -285,16 +285,13 @@ mod tests {
                 _: &[SocketAddr],
                 options: &FetchOptions,
             ) -> Result<Fetched> {
-                let reply = |status: u16, body: &str| Fetched {
-                    permanent_redirect: false,
-                    truncated: false,
-                    validators: Default::default(),
-                    url: url.clone(),
-                    content_type: JSON_API.into(),
-                    status,
-                    retry_after_secs: 60,
-                    location: None,
-                    body: body.as_bytes().to_vec(),
+                let reply = |status: u16, body: &str| {
+                    Fetched::answer(
+                        url.clone(),
+                        status,
+                        JSON_API.into(),
+                        body.as_bytes().to_vec(),
+                    )
                 };
                 if url.host_str() == Some("auth.tidal.com") {
                     return Ok(reply(200, r#"{"access_token":"new","expires_in":14400}"#));

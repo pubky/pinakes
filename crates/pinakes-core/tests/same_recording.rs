@@ -16,6 +16,7 @@ use sqlx::PgPool;
 use std::time::Duration;
 use tower::ServiceExt;
 mod common;
+use common::maybe_same_ids as named;
 
 /// A recording's page, saved and tagged once, as its service states it: the title, the artist
 /// and the length (an ISO duration) in its attributes.
@@ -102,16 +103,6 @@ async fn card(config: &Config, pool: &PgPool, id: &str) -> Value {
     response(config, pool, &format!("/v1/resources/{id}"))
         .await
         .0
-}
-
-/// The IDs a card's hint names, best first.
-fn named(card: &Value) -> Vec<&str> {
-    card["maybe_same"]
-        .as_array()
-        .unwrap_or_else(|| panic!("no maybe_same: {card}"))
-        .iter()
-        .map(|m| m["id"].as_str().unwrap())
-        .collect()
 }
 
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]

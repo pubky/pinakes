@@ -5,7 +5,7 @@ use pinakes_core::{
     model::ResourceMeta,
     resolver::{
         cards::{self, CardResolver},
-        egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+        egress::{Egress, FetchOptions, Fetched, Transport},
         web::WebResolver,
         Resolver,
     },
@@ -17,14 +17,8 @@ use std::{
 };
 use url::Url;
 mod common;
+use common::media::PublicDns;
 
-struct PublicDns;
-#[async_trait]
-impl Dns for PublicDns {
-    async fn lookup(&self, _: &str, port: u16) -> Result<Vec<SocketAddr>> {
-        Ok(vec![SocketAddr::new("8.8.8.8".parse()?, port)])
-    }
-}
 #[derive(Default)]
 struct TransportMock {
     seen: Mutex<Vec<(String, Option<String>)>>,
@@ -61,17 +55,12 @@ impl Transport for TransportMock {
             },
             _=>bail!("unexpected request"),
         };
-        Ok(Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            url: u.clone(),
-            status: 200,
-            body: body.into_bytes(),
-            content_type: ct.into(),
-            retry_after_secs: 60,
-            location: None,
-            validators: Default::default(),
-        })
+        Ok(common::fetched(
+            u.clone(),
+            200,
+            ct.into(),
+            body.into_bytes(),
+        ))
     }
 }
 const RSS: &str = r#"<rss xmlns:podcast="https://podcastindex.org/namespace/1.0"><channel><title>Podcast</title><podcast:guid>channel-id</podcast:guid><item><guid>episode-1</guid><title>Episode One</title><link>https://podcast.example/episode</link><enclosure type="audio/mpeg" url="https://audio.example/one.mp3"/></item><item><guid>episode-2</guid><title>Episode Two</title></item></channel></rss>"#;
@@ -80,17 +69,12 @@ const RSS: &str = r#"<rss xmlns:podcast="https://podcastindex.org/namespace/1.0"
 /// asked for as its `podcast_feed`, never where the fetch ended.
 #[test]
 fn a_podcast_feed_that_lands_on_a_credential_keeps_the_link_asked_for() {
-    let f = Fetched {
-        permanent_redirect: false,
-        truncated: false,
-        url: "https://feeds.example/rss?auth=SECRET".parse().unwrap(),
-        status: 200,
-        body: RSS.as_bytes().to_vec(),
-        content_type: "application/rss+xml".into(),
-        retry_after_secs: 60,
-        location: None,
-        validators: Default::default(),
-    };
+    let f = common::fetched(
+        "https://feeds.example/rss?auth=SECRET".parse().unwrap(),
+        200,
+        "application/rss+xml".into(),
+        RSS.as_bytes().to_vec(),
+    );
     let doc = cards::podcast("https://podcast.example/feed", &f, 3600, 10)
         .unwrap()
         .unwrap();
@@ -105,17 +89,12 @@ fn a_podcast_feed_that_lands_on_a_credential_keeps_the_link_asked_for() {
 /// link or image: they resolve to that address.
 #[test]
 fn an_episode_card_never_takes_a_link_that_lands_on_a_credential_feed() {
-    let f = Fetched {
-        permanent_redirect: false,
-        truncated: false,
-        url: "https://feeds.example/rss?auth=SECRET".parse().unwrap(),
-        body: r#"<rss xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel><title>Podcast</title><item><guid>e1</guid><title>Episode One</title><link>#e1</link><itunes:image href=""/><enclosure type="audio/mpeg" url="https://audio.example/one.mp3"/></item></channel></rss>"#.as_bytes().to_vec(),
-        content_type: "application/rss+xml".into(),
-        status: 200,
-        location: None,
-        retry_after_secs: 60,
-        validators: Default::default(),
-    };
+    let f = common::fetched(
+        "https://feeds.example/rss?auth=SECRET".parse().unwrap(),
+        200,
+        "application/rss+xml".into(),
+        r#"<rss xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel><title>Podcast</title><item><guid>e1</guid><title>Episode One</title><link>#e1</link><itunes:image href=""/><enclosure type="audio/mpeg" url="https://audio.example/one.mp3"/></item></channel></rss>"#.as_bytes().to_vec(),
+    );
     let d = cards::podcast("https://podcast.example/feed?guid=e1", &f, 3600, 10)
         .unwrap()
         .unwrap();
@@ -129,9 +108,12 @@ fn an_episode_card_never_takes_a_link_that_lands_on_a_credential_feed() {
 #[test]
 fn namespace_alone_does_not_make_a_podcast_series() {
     for items in ["", "<item><guid>news</guid><title>News</title></item>"] {
-        let f=Fetched { permanent_redirect: false, truncated:false,url:"https://feed.example/rss".parse().unwrap(),status:200,
-            body:format!(r#"<rss xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel><title>News feed</title>{items}</channel></rss>"#).into_bytes(),
-            content_type:"application/rss+xml".into(),retry_after_secs:60,location:None,validators:Default::default() };
+        let f = common::fetched(
+            "https://feed.example/rss".parse().unwrap(),
+            200,
+            "application/rss+xml".into(),
+            format!(r#"<rss xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel><title>News feed</title>{items}</channel></rss>"#).into_bytes(),
+        );
         assert_eq!(
             cards::podcast(f.url.as_str(), &f, 3600, 10)
                 .unwrap()
@@ -165,20 +147,18 @@ async fn optional_fetch_policy_and_metrics() {
                 r#"<head><meta name="twitter:player" content="https://player.vimeo.com/video/1"></head><script type="application/ld+json">{"@type":"Article","name":"Complete","image":"https://images.example/page.jpg"}</script>"#.into()
             };
             Ok(Fetched {
-                permanent_redirect: false,
                 truncated: u.path() == "/truncated",
-                url: u.clone(),
-                status: 200,
-                body: body.into_bytes(),
-                content_type: if embed {
-                    "application/json"
-                } else {
-                    "text/html"
-                }
-                .into(),
-                retry_after_secs: 60,
-                location: None,
-                validators: Default::default(),
+                ..common::fetched(
+                    u.clone(),
+                    200,
+                    if embed {
+                        "application/json"
+                    } else {
+                        "text/html"
+                    }
+                    .into(),
+                    body.into_bytes(),
+                )
             })
         }
     }
@@ -338,27 +318,22 @@ async fn the_media_route_never_sends_a_link_that_carries_a_credential_to_oembed(
         async fn get(&self, u: &Url, _: &[SocketAddr]) -> Result<Fetched> {
             self.0.lock().unwrap().push(u.to_string());
             let embed = u.path().contains("oembed");
-            Ok(Fetched {
-                permanent_redirect: false,
-                truncated: false,
-                url: u.clone(),
-                status: 200,
-                body: if embed {
-                    json!({"type":"video","title":"Embed"}).to_string()
-                } else {
-                    "<title>Page</title>".into()
-                }
-                .into_bytes(),
-                content_type: if embed {
+            Ok(common::fetched(
+                u.clone(),
+                200,
+                if embed {
                     "application/json"
                 } else {
                     "text/html"
                 }
                 .into(),
-                retry_after_secs: 60,
-                location: None,
-                validators: Default::default(),
-            })
+                if embed {
+                    json!({"type":"video","title":"Embed"}).to_string()
+                } else {
+                    "<title>Page</title>".into()
+                }
+                .into_bytes(),
+            ))
         }
     }
     for (policy, uri) in [
@@ -410,25 +385,23 @@ async fn a_redirect_to_a_link_that_carries_a_credential_gets_no_oembed() {
             self.0.lock().unwrap().push(u.to_string());
             let landed = u.query().is_some_and(|q| q.contains("token="));
             Ok(Fetched {
-                permanent_redirect: false,
-                truncated: false,
-                url: u.clone(),
-                status: if u.path() == "/page" && !landed { 302 } else { 200 },
-                body: if u.path().contains("oembed") {
-                    json!({"type":"video","title":"Embed"}).to_string()
-                } else {
-                    "<head><link rel='alternate' type='application/json+oembed' href='/oembed?url=https%3A%2F%2Fmedia.example%2Fpage%3Ftoken%3Dx'></head><title>Page</title>".into()
-                }
-                .into_bytes(),
-                content_type: if u.path().contains("oembed") {
-                    "application/json"
-                } else {
-                    "text/html"
-                }
-                .into(),
-                retry_after_secs: 60,
                 location: (u.path() == "/page" && !landed).then(|| "/page?token=x".into()),
-                validators: Default::default(),
+                ..common::fetched(
+                    u.clone(),
+                    if u.path() == "/page" && !landed { 302 } else { 200 },
+                    if u.path().contains("oembed") {
+                        "application/json"
+                    } else {
+                        "text/html"
+                    }
+                    .into(),
+                    if u.path().contains("oembed") {
+                        json!({"type":"video","title":"Embed"}).to_string()
+                    } else {
+                        "<head><link rel='alternate' type='application/json+oembed' href='/oembed?url=https%3A%2F%2Fmedia.example%2Fpage%3Ftoken%3Dx'></head><title>Page</title>".into()
+                    }
+                    .into_bytes(),
+                )
             })
         }
     }
@@ -527,17 +500,12 @@ async fn registry_identifiers_negotiation_discovery_and_switches() {
 #[test]
 fn a_feed_item_carries_its_enclosure() {
     let body = r#"<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel><title>Show</title><itunes:author>Host</itunes:author><item><title>Latest</title><guid isPermaLink="false">ep-2</guid><enclosure url="https://cdn.example/pts/redirect.mp3/media.example/ep-2.mp3" length="57000000" type="audio/mpeg"/><itunes:duration>59:17</itunes:duration></item><item><title>First</title><guid isPermaLink="false">ep-1</guid><enclosure url="https://cdn.example/ep-1.mp3" length="1000" type="audio/mpeg"/><itunes:duration>61</itunes:duration></item></channel></rss>"#;
-    let f = Fetched {
-        permanent_redirect: false,
-        truncated: false,
-        url: "https://show.example/".parse().unwrap(),
-        body: body.as_bytes().to_vec(),
-        content_type: "application/rss+xml".into(),
-        status: 200,
-        location: None,
-        retry_after_secs: 60,
-        validators: Default::default(),
-    };
+    let f = common::fetched(
+        "https://show.example/".parse().unwrap(),
+        200,
+        "application/rss+xml".into(),
+        body.as_bytes().to_vec(),
+    );
     let d = cards::podcast("https://show.example/?guid=ep-2", &f, 3600, 1000)
         .unwrap()
         .unwrap();
@@ -572,17 +540,12 @@ fn a_feed_item_carries_its_enclosure() {
 }
 #[test]
 fn podcast_selection_and_schema_media_keys() {
-    let f = Fetched {
-        permanent_redirect: false,
-        truncated: false,
-        url: "https://podcast.example/feed".parse().unwrap(),
-        body: RSS.as_bytes().to_vec(),
-        content_type: "application/rss+xml".into(),
-        status: 200,
-        location: None,
-        retry_after_secs: 60,
-        validators: Default::default(),
-    };
+    let f = common::fetched(
+        "https://podcast.example/feed".parse().unwrap(),
+        200,
+        "application/rss+xml".into(),
+        RSS.as_bytes().to_vec(),
+    );
     let d = cards::podcast("https://podcast.example/feed?guid=episode-2", &f, 3600, 10)
         .unwrap()
         .unwrap();
@@ -672,15 +635,13 @@ fn a_feed_cut_off_at_the_cap_reads_to_its_last_whole_item() {
         r#"<feed xmlns="http://www.w3.org/2005/Atom"><title>A</title><entry><id>1</id></entry></feed>"#
     );
     let f = Fetched {
-        permanent_redirect: false,
         truncated: true,
-        url: "https://podcast.example/feed".parse().unwrap(),
-        body: cut.into_bytes(),
-        content_type: "application/rss+xml".into(),
-        status: 200,
-        location: None,
-        retry_after_secs: 60,
-        validators: Default::default(),
+        ..common::fetched(
+            "https://podcast.example/feed".parse().unwrap(),
+            200,
+            "application/rss+xml".into(),
+            cut.into_bytes(),
+        )
     };
     let series = cards::podcast("https://podcast.example/feed", &f, 3600, 1000)
         .unwrap()
@@ -807,7 +768,12 @@ async fn blog_rss_preserves_jsonld_and_single_episode_feed_is_series() {
         "DataFeed"
     );
     for enclosure in ["audio/mpeg", "video/mp4"] {
-        let f = Fetched {permanent_redirect: false,truncated: false,url:"https://podcast.example/feed".parse().unwrap(),status:200,body:format!("<rss><channel><title>Podcast</title><item><guid>one</guid><title>Episode</title><link>https://podcast.example/one</link><enclosure type='{enclosure}'/></item></channel></rss>").into_bytes(),content_type:"application/rss+xml".into(),location:None,retry_after_secs:60,validators:Default::default()};
+        let f = common::fetched(
+            "https://podcast.example/feed".parse().unwrap(),
+            200,
+            "application/rss+xml".into(),
+            format!("<rss><channel><title>Podcast</title><item><guid>one</guid><title>Episode</title><link>https://podcast.example/one</link><enclosure type='{enclosure}'/></item></channel></rss>").into_bytes(),
+        );
         assert_eq!(
             cards::podcast(f.url.as_str(), &f, 3600, 10)
                 .unwrap()
@@ -998,7 +964,12 @@ fn identifier_dates_domains_media_attributes_and_social_excerpt() {
     ] {
         assert!(cards::provider_endpoint(uri).is_none(), "{uri}");
     }
-    let f=Fetched{permanent_redirect: false,truncated:false,url:"https://doi.org/10.1234/work".parse().unwrap(),body:serde_json::to_vec(&json!({"type":"article-journal","title":"Dated","issued":{"date-parts":[[2024,5,12]]},"container-title":"Journal"})).unwrap(),content_type:"application/json".into(),status:200,location:None,retry_after_secs:60,validators:Default::default()};
+    let f = common::fetched(
+        "https://doi.org/10.1234/work".parse().unwrap(),
+        200,
+        "application/json".into(),
+        serde_json::to_vec(&json!({"type":"article-journal","title":"Dated","issued":{"date-parts":[[2024,5,12]]},"container-title":"Journal"})).unwrap(),
+    );
     let d = cards::parse_doi("doi:10.1234/work", &f, 3600).unwrap();
     assert_eq!(d.attributes["published"], "2024-05-12");
     assert_eq!(d.attributes["container"], "Journal");
@@ -1096,17 +1067,12 @@ async fn oembed_first_keeps_rich_page_types_and_ap_denial_falls_back() {
             } else {
                 ("text/html",r#"<script type="application/ld+json">{"@type":"Article","name":"JSON first","author":"page author","duration":"PT3M","isrcCode":"USABC2600001"}</script>"#.into())
             };
-            Ok(Fetched {
-                permanent_redirect: false,
-                truncated: false,
-                url: u.clone(),
+            Ok(common::fetched(
+                u.clone(),
                 status,
-                body: body.into_bytes(),
-                content_type: ct.into(),
-                location: None,
-                retry_after_secs: 60,
-                validators: Default::default(),
-            })
+                ct.into(),
+                body.into_bytes(),
+            ))
         }
     }
     let make = |kind| CardResolver {
@@ -1170,17 +1136,12 @@ impl Transport for Landing {
                 .to_string()
                 .into_bytes()
         };
-        let mut f = Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            url: u.clone(),
-            status: 200,
-            body: b"<title>Fallback</title>".to_vec(),
-            content_type: "text/html".into(),
-            location: None,
-            retry_after_secs: 60,
-            validators: Default::default(),
-        };
+        let mut f = common::fetched(
+            u.clone(),
+            200,
+            "text/html".into(),
+            b"<title>Fallback</title>".to_vec(),
+        );
         match u.path() {
             "/note" | "/alternate" | "/header" | "/oembed" if !landed => {
                 f.status = 302;
@@ -1418,19 +1379,17 @@ async fn redirected_feed_cannot_inherit_destination_container() {
     impl Transport for RedirectFeed {
         async fn get(&self, u: &Url, _: &[SocketAddr]) -> Result<Fetched> {
             Ok(Fetched {
-                permanent_redirect: false,
-                truncated: false,
-                validators: Default::default(),
-                url: u.clone(),
-                content_type: "application/rss+xml".into(),
-                status: if u.host_str() == Some("attacker.example") {
-                    302
-                } else {
-                    200
-                },
-                retry_after_secs: 60,
                 location: Some("https://podcast.example/feed".into()),
-                body: RSS.as_bytes().to_vec(),
+                ..common::fetched(
+                    u.clone(),
+                    if u.host_str() == Some("attacker.example") {
+                        302
+                    } else {
+                        200
+                    },
+                    "application/rss+xml".into(),
+                    RSS.as_bytes().to_vec(),
+                )
             })
         }
     }
@@ -1476,22 +1435,17 @@ async fn advertised_oembed_uses_policy_and_origin_checks() {
             } else {
                 format!("<title>Title</title>{}<link rel='alternate' type='application/json+oembed' href='{}'>",if self.complete {"<meta property='og:image' content='/image.jpg'>"}else{""},self.target)
             };
-            Ok(Fetched {
-                permanent_redirect: false,
-                truncated: false,
-                validators: Default::default(),
-                url: u.clone(),
-                status: 200,
-                content_type: if u.path().contains("embed") {
+            Ok(common::fetched(
+                u.clone(),
+                200,
+                if u.path().contains("embed") {
                     "application/json"
                 } else {
                     "text/html"
                 }
                 .into(),
-                body: body.into_bytes(),
-                retry_after_secs: 60,
-                location: None,
-            })
+                body.into_bytes(),
+            ))
         }
     }
     use cards::OembedPolicy::{Always, WhenNeeded};
@@ -1551,17 +1505,12 @@ async fn advertised_oembed_uses_policy_and_origin_checks() {
 }
 
 fn recorded(url: &str, body: &[u8]) -> Fetched {
-    Fetched {
-        permanent_redirect: false,
-        truncated: false,
-        url: url.parse().unwrap(),
-        body: body.to_vec(),
-        content_type: "application/json".into(),
-        status: 200,
-        location: None,
-        retry_after_secs: 60,
-        validators: Default::default(),
-    }
+    common::fetched(
+        url.parse().unwrap(),
+        200,
+        "application/json".into(),
+        body.to_vec(),
+    )
 }
 fn url_key(uri: &str) -> String {
     format!("url:{}", pinakes_core::model::identity(uri).unwrap().0)
@@ -1780,17 +1729,12 @@ async fn youtube_is_named_by_its_oembed_answer_not_a_regional_page() {
                     ),
                 )
             };
-            Ok(Fetched {
-                permanent_redirect: false,
-                truncated: false,
-                validators: Default::default(),
-                url: u.clone(),
-                content_type: content_type.into(),
-                status: 200,
-                retry_after_secs: 60,
-                location: None,
-                body: body.into_bytes(),
-            })
+            Ok(common::fetched(
+                u.clone(),
+                200,
+                content_type.into(),
+                body.into_bytes(),
+            ))
         }
     }
     let resolver = CardResolver {
@@ -1938,17 +1882,12 @@ async fn json_ld_names_the_object_unless_its_provider_names_the_link_exactly() {
                     ),
                 )
             };
-            Ok(Fetched {
-                permanent_redirect: false,
-                truncated: false,
-                validators: Default::default(),
-                url: u.clone(),
-                content_type: content_type.into(),
-                status: 200,
-                retry_after_secs: 60,
-                location: None,
-                body: body.into_bytes(),
-            })
+            Ok(common::fetched(
+                u.clone(),
+                200,
+                content_type.into(),
+                body.into_bytes(),
+            ))
         }
     }
     let resolver = CardResolver {

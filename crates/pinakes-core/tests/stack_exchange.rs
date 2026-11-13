@@ -131,18 +131,9 @@ async fn a_duplicate_joins_its_original(pool: PgPool) {
 }
 
 async fn get(app: &axum::Router, path: &str) -> Value {
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
-    let mut request = axum::http::Request::builder()
-        .uri(path)
-        .body(axum::body::Body::empty())
-        .unwrap();
-    request.extensions_mut().insert(axum::extract::ConnectInfo(
-        "127.0.0.1:1111".parse::<std::net::SocketAddr>().unwrap(),
-    ));
-    let r = app.clone().oneshot(request).await.unwrap();
-    assert_eq!(r.status(), 200, "{path}");
-    serde_json::from_slice(&r.into_body().collect().await.unwrap().to_bytes()).unwrap()
+    let (status, value) = common::get_from(app, "127.0.0.1:1111", path).await;
+    assert_eq!(status, 200, "{path}");
+    value
 }
 
 /// The API's answer for question `id` on Stack Overflow, closed as a duplicate of `original`.
