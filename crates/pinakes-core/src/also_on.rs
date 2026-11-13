@@ -23,6 +23,7 @@ pub mod itunes;
 pub mod itunes_song;
 pub mod media;
 pub mod musicbrainz;
+pub mod musicbrainz_containment;
 pub mod musicbrainz_entity;
 pub mod performers;
 pub mod podcasts;
@@ -471,6 +472,7 @@ pub fn registry() -> Vec<Arc<dyn Source>> {
         Arc::new(spotify::Spotify),
         Arc::new(musicbrainz::MusicBrainzSource),
         Arc::new(musicbrainz_entity::MusicBrainzEntitySource),
+        Arc::new(musicbrainz_containment::MusicBrainzContainment),
         Arc::new(performers::PerformersSource),
         Arc::new(wikidata::WikidataSource),
         // Before the barcode lookups: a Discogs release's barcodes are keys.

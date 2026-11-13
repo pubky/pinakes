@@ -104,7 +104,7 @@ An IMDb title keeps the type its page gives (it can be either).
 | `point` | `{lat, lon}` |
 | `start`, `end` | RFC 3339 instants for events and occurrences |
 | `group` | `{id, size}` when the resource or occurrence is in a [group](#groups), else `null` |
-| `also_on` | The same thing elsewhere ([Also on](#also-on)): the other members of its group as `{id, uri, site}` (other resources first, one entry each by ID, then other occurrences of its own feed), then derived links nobody tagged as `{uri, site, derived: true, via, kind?, at?}`, by service name; each with its `embed` ([Embed](#embed)) or `null`; one per service (of a recording's or an album's links, the one on the card's own release, else on the original edition), never another page of the card's own service, at most 8 on a search, lookup or group card and 256 on a resource read. A hint only: every member keeps its own card |
+| `also_on` | The same thing elsewhere ([Also on](#also-on)): the other members of its group as `{id, uri, site, refs?}` (other resources first, one entry each by ID, then other occurrences of its own feed), then derived links nobody tagged as `{uri, site, derived: true, via, kind?, at?}`, by service name; each with its `embed` ([Embed](#embed)) or `null`; one per service (of a recording's or an album's links, the one on the card's own release, else on the original edition), never another page of the card's own service, at most 8 on a search, lookup or group card and 256 on a resource read. A hint only: every member keeps its own card |
 | `open_in` | The clients that open a card, `[{client, url}]` (`url` is `https:`). A Pubky app's object: from the app's profile ([Pubky apps](pubky-apps.md)), e.g. Loopky for a deck; on a Pubky event reference's card, those of the event object. A card whose link is not a web page (`btc:`, `ln:`, `uniprot:`, `fr:`, …): the web page its source reads it from, named by its site, e.g. `[{"client": "mempool.space", "url": "https://mempool.space/block/…"}]`. `[]` on a web link's card, a card gone upstream and a card whose source names no page |
 | `attribution` | Present on OSM cards, events placed at an OSM venue and events whose zone came from coordinates; display it with the card |
 | `credits` | Where `image` and `description` came from when Pinakes added them from another source than the link ([Credits](#credits)): one entry per such field, at most 4. `[]` when none: such a field came from the link itself |
@@ -277,7 +277,12 @@ A Wikidata description's credit:
 A release's or release group's card with no free Commons file (or whose Commons file could not be
 read just now, while it has no stored image) shows the front cover the
 [Cover Art Archive](https://coverartarchive.org/) holds for it, credited to the release the cover
-is of (a release group's cover is one of its releases', chosen by the archive):
+is of (a release group's cover is one of its releases', chosen by the archive). A recording
+can take a front cover from a release containing its exact MusicBrainz recording ID: one
+release page (at most 100 releases), with at most three CAA requests, under the shared
+cache, host pacing and enrichment deadline. A front flag alone is not an image; the archive
+must confirm it. The release's barcode and album identity remain separate:
+
 
 ```json
 {"field": "image", "provider": "cover_art_archive",
@@ -1276,6 +1281,22 @@ change. A group is a hint, never a merge: nothing about its members is combined 
 it, so each keeps its own card, references, score and ranking, and the group tables hold only
 membership (no OSM-derived value can reach them).
 
+Exact music membership is symmetric and transitive: a keyed A→B→C chain exposes the
+other members from every entry point. A music detail read includes the live exact keys
+of same-type members (at most 256 members and 256 additional keys); expired, disabled-source
+and `maybe` evidence is excluded. A music card without its own image can reuse a same-type
+member's Commons or Cover Art Archive image together with its image credit. This fallback
+is read-time, not copied into the stored document, and disappears when membership changes.
+
+A recording's release is containment, not another copy of the recording. The
+`musicbrainz_containment` source stores at most eight exact release URLs as
+`facts.track_of_album`, never as grouping keys or Also on entries. It reads one bounded
+MusicBrainz release page and retries incomplete reads. MusicBrainz recording and ISRC
+pages can also use their verified ISRCs for exact reverse provider lookups; release pages
+use their UPCs. Provider answers must return the requested identifier. Album links and
+UPCs are never promoted to recording identity.
+
+
 On the **admin listener**, `PUT /v1/groups/{id}` replaces a group's member set and answers as
 `GET /v1/groups/{id}`:
 
@@ -1396,6 +1417,16 @@ nothing, and `[event] same_event_hint = "off"` removes it too.
 
 ## Also on
 
+An exact, non-derived group member can also carry `refs`: the same referenced links as its
+own card, using the same selection and order as `Card.refs` (at most 5, from the canonical
+link and the 31 most recently referenced aliases, counts capped at 1,000, ties by URI).
+The field is omitted when empty or equal to `[uri]`. To join group tags, batch each member's
+`uri` and `refs` with the card's own links in Nexus; no extra group read is needed for these
+members. Derived links and `kind: "maybe"` entries never carry `refs`. These bounded lists
+are not every group member or alias. Gone social posts keep the same alias-privacy rule as
+their own cards. All cards and exact members in a response share one reference query,
+with member IDs deduplicated before it; there is no query per entry.
+
 A card's `also_on` says where else the same thing is: first the other members of its
 [group](#groups) (links someone tagged, each with its resource `id`), by ID and URI, then
 **derived links**: the same thing on services nobody tagged, found by a source, with
@@ -1435,7 +1466,7 @@ anything. Sources read a resource after it is saved and again when their results
 source's lifetime: 30 days, `btcmap` 7); a source's links and keys live twice that, so one
 failed refresh keeps them, and they go when the source stops returning them. The sources run in this order, each
 seeing the keys the ones before it found: `service`, `tidal`, `spotify`,
-`musicbrainz`, `musicbrainz_entity`, `performers`, `wikidata`, `discogs`, `deezer`, `spotify_isrc`,
+`musicbrainz`, `musicbrainz_entity`, `musicbrainz_containment`, `performers`, `wikidata`, `discogs`, `deezer`, `spotify_isrc`,
 `tidal_isrc`, `itunes`, `itunes_song`, `youtube_match`, `wikipedia`, `wikidata_item`, `books`,
 `films`, `podcasts`, `product_keys`, `open_food_facts`, `stack_exchange`, `titles`, `federal_register`, `mempool`, `osm_wikidata`, `wikidata_osm`,
 `wikidata_places`, `btcmap`, `unpaywall`, `ncbi`, `datacite`, `huggingface`, `crates`, `npm`,
@@ -1917,7 +1948,8 @@ layers, with the caller's address:
 | `social` | `POST /v1/resources/lookup` for card `ids`, then Nexus `POST /v0/stream/resources/by_ids` (100 URIs a call) with each card's `uri` and `refs`, and any plain `uris`; 1–100 entries together, optional `viewer` | Per card (or link): `asked` (the URIs sent, the card's own first), `found` (those Nexus knew), and the tags merged over them: per label `taggers_count` (the taggers the views list, each once, or the most one view counts, whichever is more) and `viewer_tagged`; `taggers_count` over all labels, the same way. A view counts taggers it does not list, who may be ones another view lists: over several such views a count is a lower bound, marked `at_least: true`. An alias's id (a spelling, or a card that became one after it was read) is answered under the id asked, with `root`, the card that answers for it. `unknown_ids` names ids Pinakes does not know |
 
 A compact card keeps `id`, `uri`, `status`, `type`, `name`, `description` (at most 300
-characters), `image`, `site`, `point`, `start`, `end`, `group`, `also_on` (`uri`, `site`), `refs`,
+characters), `image`, `site`, `point`, `start`, `end`, `group`, `also_on` (`uri`, `site`, and
+`id`, `refs`, `derived`, `kind` when present), `refs`,
 `occurrence`, `event` and `attribution`, and adds `url`, the card's full read
 (`GET /v1/resources/{id}`); every answer names the REST URL of its full result. A failed request
 is the tool's error (`isError`), its text `{error, status, hint, url}` with the route's status

@@ -178,6 +178,7 @@ so one goes without the others needing a change.
 - [`spotify`](spotify.md): Spotify's own barcodes and ISRCs (with the operator's Spotify app credentials).
 - [`musicbrainz`](musicbrainz.md): what MusicBrainz relates a music link to.
 - [`musicbrainz_entity`](musicbrainz_entity.md): a MusicBrainz page as its own hub.
+- [`musicbrainz_containment`](musicbrainz_containment.md): an exact recording's releases as containment facts, never identity edges.
 - [`performers`](performers.md): an event's performers, keyed to the artist on the page's own service.
 - [`wikidata`](wikidata.md): the Wikidata item of a music link.
 - [`discogs`](discogs.md#also-on): a Discogs object's key and a release's barcodes.

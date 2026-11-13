@@ -147,6 +147,78 @@ async fn tag(pool: &PgPool, id: &str, author: &str, label: &str) {
     tx.commit().await.unwrap();
 }
 
+/// Exact group links carry the same referenced spellings as the member's own card, so a
+/// cold search page can join Nexus without first reading the group.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn also_on_refs_include_ok_computer_member_spellings(pool: PgPool) {
+    let uris = [
+        "https://musicbrainz.org/release-group/b1392450-e666-3926-a536-22c65f834433",
+        "https://music.apple.com/album/1097861387",
+        "https://www.discogs.com/master/21491",
+    ];
+    let spellings = [
+        uris[0],
+        "https://music.apple.com/us/album/ok-computer/1097861387",
+        "https://www.discogs.com/master/21491-Radiohead-OK-Computer",
+    ];
+    let mut members = Vec::new();
+    for (uri, spelling) in uris.iter().zip(spellings) {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut doc = ResourceMeta::new(uri, "web", 86400);
+        doc.set_type("MusicAlbum");
+        doc.name = Some("OK Computer".into());
+        store_document(&pool, &id, &doc).await;
+        let alias = store::ensure_resource(&pool, spelling).await.unwrap();
+        assert_eq!(
+            pinakes_core::alias::resolve_id(&pool, &alias)
+                .await
+                .unwrap(),
+            id
+        );
+        tag(&pool, &alias, &"y".repeat(52), "album").await;
+        members.push(id);
+    }
+    groups::curate(
+        &pool,
+        &"c".repeat(32),
+        serde_json::from_value(json!({"members": members.iter().map(|id| json!({"resource_id": id})).collect::<Vec<_>>()})).unwrap(),
+        &Default::default(),
+    ).await.unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let detail = get(&app, &format!("/v1/resources/{}", members[0])).await;
+    let search = get(&app, "/v1/search?type=MusicAlbum").await;
+    let search_card = search["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == members[0])
+        .unwrap();
+    for response in [&detail, search_card] {
+        for (member, spelling) in members.iter().zip(spellings).skip(1) {
+            let entry = response["also_on"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["id"] == *member)
+                .unwrap();
+            let own = get(&app, &format!("/v1/resources/{member}")).await;
+            assert_eq!(entry["refs"], json!([spelling]), "{entry}");
+            assert_eq!(entry["refs"], own["refs"]);
+        }
+    }
+    let apple = get(&app, &format!("/v1/resources/{}", members[1])).await;
+    let mb = apple["also_on"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["id"] == members[0])
+        .unwrap();
+    assert!(
+        mb.get("refs").is_none(),
+        "canonical-only refs are omitted: {mb}"
+    );
+}
+
 /// ISBN-10 and its ISBN-13, and every DOI spelling, are one resource: the spelling is an alias.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn identifier_spellings_are_aliases_of_one_resource(pool: PgPool) {

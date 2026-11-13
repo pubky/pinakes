@@ -889,6 +889,11 @@ pub struct AlsoOn {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     pub uri: String,
+    /// An exact, non-derived member's referenced links, selected and ordered as its card's
+    /// `refs` (at most 5). Omitted when empty or just `uri`; absent on derived and maybe links.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[schema(max_items = 5)]
+    pub refs: Vec<String>,
     /// The service: a member's site as its card names it, a derived link's service name.
     pub site: Option<String>,
     /// A link nobody tagged, found by a source: never fetched, counted or ranked.
@@ -1431,8 +1436,10 @@ const REFS_ALIASES: i64 = 31;
 /// Fills each card's `refs`: the referenced links among its own and its aliases' (the
 /// [`REFS_ALIASES`] most recently referenced), most referenced first (counted up to
 /// [`REFS_COUNTED`], then by URI), at most [`REFS`]. A gone social post's are its own link's
-/// alone: a spelling's link can carry the post's title. One query for every card of a response,
-/// and one for the missing cards among them. Then the stored `embed` of tagged `also_on`
+/// alone: a spelling's link can carry the post's title. The same selection fills exact,
+/// non-derived `also_on` members, omitting empty or canonical-only lists. One reference query
+/// for all distinct card and member IDs of a response, and one for the missing rows among them.
+/// Then the stored `embed` of tagged `also_on`
 /// members (`member_embeds`) and each card's `collections` (`collections::count`), one query
 /// more each, and a show's `episodes` (`episodes::on_cards`), only when the response holds a show.
 pub(crate) async fn with_refs<'a>(
@@ -1440,7 +1447,18 @@ pub(crate) async fn with_refs<'a>(
     cards: impl IntoIterator<Item = &'a mut Card>,
 ) -> Result<(), ApiError> {
     let mut cards: Vec<&mut Card> = cards.into_iter().collect();
-    let ids: Vec<String> = cards.iter().map(|c| c.id.clone()).collect();
+    // Share the bounded reference selection and privacy check with exact group members.
+    // Deduplicate across the whole response: no query per card or also-on entry.
+    let mut ids: Vec<String> = cards.iter().map(|c| c.id.clone()).collect();
+    ids.extend(
+        cards
+            .iter()
+            .flat_map(|c| &c.also_on)
+            .filter(|e| !e.derived && e.kind.as_deref() != Some("maybe"))
+            .filter_map(|e| e.id.clone()),
+    );
+    ids.sort();
+    ids.dedup();
     if ids.is_empty() {
         return Ok(());
     }
@@ -1489,6 +1507,16 @@ pub(crate) async fn with_refs<'a>(
         if let Some(refs) = by_card.get(&card.id) {
             card.refs.clone_from(refs);
         }
+        for entry in &mut card.also_on {
+            if entry.derived || entry.kind.as_deref() == Some("maybe") {
+                continue;
+            }
+            if let Some(refs) = entry.id.as_ref().and_then(|id| by_card.get(id)) {
+                if refs.len() != 1 || refs[0] != entry.uri {
+                    entry.refs.clone_from(refs);
+                }
+            }
+        }
     }
     // A card whose canonical link names no player may be read through another link that does
     // (an `http:` spelling's card, a short link): its first referenced link that names one.
@@ -1501,6 +1529,7 @@ pub(crate) async fn with_refs<'a>(
                 .map(|e| e.settled(&card.type_path));
         }
     }
+    crate::music_identity::images(pool, &mut cards).await?;
     member_embeds(pool, &mut cards).await?;
     crate::collections::count(pool, cards.iter_mut().map(|c| &mut **c)).await?;
     crate::episodes::on_cards(pool, cards).await
@@ -1682,6 +1711,7 @@ fn also_on_entries(rows: &Value, card: Option<&str>) -> Vec<AlsoOn> {
             let embed = crate::embed::link(&uri).map(|e| e.settled(&[]));
             AlsoOn {
                 id: e["id"].as_str().map(str::to_owned),
+                refs: Vec::new(),
                 site: if derived {
                     e["site"].as_str().map(str::to_owned)
                 } else {
@@ -2375,14 +2405,16 @@ fn related_because(sql: &mut QueryBuilder<'_, Postgres>, item: &str, n: &str, au
     ));
 }
 /// The version of a search page's shape, in its ETag: a page cached before a field was added
-/// (`because`, then every card's `credits`, then `embed`, then a show's `episodes`), before a
+/// (`because`, then every card's `credits`, then `embed`, then a show's `episodes`, then an
+/// exact `also_on` member's `refs`), before a
 /// field's content changed for rows already stored (`open_in` naming the web page of a card whose
 /// link is not one), or before its rows' order changed (`q` ranked by relevance by default) or
 /// their set (a short `q` matches a name at word starts only; `host` lists any of several hosts,
 /// where a comma-separated value found nothing before) is never answered 304. Move it when
 /// a search row gains or loses a field, a field reads otherwise for stored rows, or the same query
 /// finds other rows or the same rows in another order.
-pub const SEARCH_SHAPE: u32 = 8;
+// 9: exact member refs; 10: held music group artwork and its credit.
+pub const SEARCH_SHAPE: u32 = 10;
 /// The most taggers a related row's `because` names.
 pub const BECAUSE_TAGGERS: usize = 3;
 
@@ -3148,6 +3180,7 @@ async fn read(
         return Ok(None);
     };
     with_refs(pool, std::iter::once(&mut detail.card)).await?;
+    crate::music_identity::keys(pool, &mut detail).await?;
     Ok(Some(detail))
 }
 /// A read's JSON, cacheable for 30 seconds like a search page, with an ETag of its content; 304
@@ -4217,6 +4250,110 @@ pub async fn curate_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Exact members use Card.refs' bounded ranking; repeated members in a response share it.
+    #[sqlx::test(
+        migrations = "../../migrations",
+        fixtures("../tests/fixtures/require_h3.sql")
+    )]
+    async fn also_on_refs_share_card_bounds_and_exclude_non_exact_links(pool: PgPool) {
+        let uri = "https://example.org/member";
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut expected = Vec::new();
+        for k in 0..40i32 {
+            let alias_uri = format!("https://example.org/member-{k:02}");
+            let alias = store::ensure_resource(&pool, &alias_uri).await.unwrap();
+            sqlx::query(
+                "INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'canonical')",
+            )
+            .bind(&alias)
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+            // The older nine would win if the 31-alias cap were lost. Among recent links,
+            // 0 and 1 both cap at 1,000, so URI (not their full counts) breaks the tie.
+            let n = match k {
+                0 => 1200,
+                1 => 1500,
+                31.. => 2000,
+                _ => 2,
+            };
+            sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) SELECT $1,$2,'tag','music','/pub/app/tags/'||$1||'-'||n,now()-$3*interval '1 minute' FROM generate_series(1,$4) n")
+                .bind(&alias).bind("y".repeat(52)).bind(k).bind(n).execute(&pool).await.unwrap();
+            if k < 5 {
+                expected.push(alias_uri);
+            }
+        }
+        let blank = store::ensure_resource(&pool, "https://example.net/empty")
+            .await
+            .unwrap();
+        let make = || {
+            card(&serde_json::json!({
+                "id": blank, "uri": "https://example.net/empty", "status": "ok",
+                "also_on": [
+                    {"id": id, "uri": uri},
+                    {"id": id, "uri": uri, "derived": true},
+                    {"id": id, "uri": uri, "kind": "maybe"},
+                    {"id": blank, "uri": "https://example.net/empty"}
+                ]
+            }))
+            .unwrap()
+        };
+        let mut cards: Vec<Card> = (0..50).map(|_| make()).collect();
+        cards.push(card(&serde_json::json!({"id": id, "uri": uri, "status": "ok"})).unwrap());
+        with_refs(&pool, cards.iter_mut()).await.unwrap();
+        assert_eq!(cards.last().unwrap().refs, expected);
+        for card in &cards[..50] {
+            assert_eq!(card.also_on[0].refs, expected);
+            for entry in &card.also_on[1..] {
+                assert!(serde_json::to_value(entry).unwrap().get("refs").is_none());
+            }
+        }
+    }
+
+    #[sqlx::test(
+        migrations = "../../migrations",
+        fixtures("../tests/fixtures/require_h3.sql")
+    )]
+    async fn also_on_refs_preserve_gone_social_alias_privacy(pool: PgPool) {
+        let uri = "https://example.org/post/1";
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let alias = store::ensure_resource(&pool, "https://example.org/post/private-title")
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'canonical')")
+            .bind(&alias)
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut gone = ResourceMeta::new(uri, "activitypub", 3600);
+        gone.set_type("SocialMediaPosting");
+        gone.status = model::Status::Missing;
+        sqlx::query("UPDATE resource SET status='error',doc=$2 WHERE id=$1")
+            .bind(&id)
+            .bind(serde_json::to_value(gone).unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+        for rid in [&id, &alias] {
+            sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','post','/pub/app/tags/'||$1,now())")
+                .bind(rid).bind("y".repeat(52)).execute(&pool).await.unwrap();
+        }
+        let parent = store::ensure_resource(&pool, "https://example.net/parent")
+            .await
+            .unwrap();
+        let mut c = card(&serde_json::json!({"id":parent,"uri":"https://example.net/parent","status":"ok","also_on":[{"id":id,"uri":uri}]})).unwrap();
+        with_refs(&pool, [&mut c]).await.unwrap();
+        assert!(
+            serde_json::to_value(&c.also_on[0])
+                .unwrap()
+                .get("refs")
+                .is_none(),
+            "canonical only; no title-bearing aliases"
+        );
+    }
     /// A card whose link is not a web page opens in the `https:` page its source read it from,
     /// named by its site (else the page's host); a web link, a Pubky object, an `http:` page and
     /// a card gone upstream get none, and a card's own clients stay as they are.
