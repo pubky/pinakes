@@ -188,7 +188,12 @@ by id. Who tagged a link, with which labels, and what your own follows think of 
    feed, `occurrence.feed_uri`, and its `refs` are the feed's. A full read
    (`GET /v1/resources/{id}`) lists every other spelling of a card's link in `aliases` (at most
    50); add those for a complete join. Ask Nexus about all of them, and add up a
-   card's tags over its links.
+   card's tags over its links. To show group tags, also include each exact, non-derived
+   `also_on` member's `uri` and optional `refs`: the same selection as its card's `refs`,
+   at most 5, omitted when empty or just its `uri`. Batch these with the card's own links;
+   no group read is needed for the supplied members. Derived and `kind: "maybe"` links
+   have no `refs` and are not exact-group tag sources. The lists are bounded, not every
+   group member or every alias.
 2. Send those URIs, 100 at a time, to the Nexus batch resource view:
 
 ```sh
