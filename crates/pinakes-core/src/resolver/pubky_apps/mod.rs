@@ -332,8 +332,7 @@ pub(crate) fn encode(value: &str) -> String {
         .remove(b'~');
     percent_encoding::utf8_percent_encode(value, SET).collect()
 }
-/// The client links of an object by its URI alone: what a card shows before its object is read,
-/// and on an event card for the event object it names.
+/// The client links of an object by its URI alone: what a card shows before its object is read.
 pub fn open_in(uri: &str) -> Vec<OpenIn> {
     let Some((owner, segments)) = segments(uri) else {
         return vec![];

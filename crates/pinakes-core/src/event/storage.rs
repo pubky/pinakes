@@ -517,16 +517,6 @@ pub struct OccurrenceRef {
     pub uid: String,
     pub recurrence_id: Option<String>,
 }
-#[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
-pub struct ReferenceEvent {
-    pub author: String,
-    pub object_path: String,
-    /// The instance of a recurring event; `null` for a one-off one.
-    pub recurrence_id: Option<String>,
-    pub start: chrono::DateTime<chrono::Utc>,
-    pub end: Option<chrono::DateTime<chrono::Utc>>,
-    pub status: String,
-}
 #[derive(serde::Serialize, utoipa::ToSchema)]
 pub struct OccurrencePage {
     /// One card per occurrence, with `occurrence` naming the feed instance and its lifecycle.
