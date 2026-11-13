@@ -5,6 +5,8 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+# The version CI and the image build test (rust-toolchain.toml selects it).
+rust-version = "1.98.1"
 license = "MIT"
 repository = "https://github.com/pubky/pinakes"
 
@@ -27,3 +29,11 @@ url = { version = "2", features = ["serde"] }
 utoipa = { version = "5", features = ["axum_extras", "chrono"] }
 utoipa-swagger-ui = { version = "9.0.2", default-features = false, features = ["axum", "vendored"] }
 pinakes-core = { path = "crates/pinakes-core" }
+
+# Development and test builds keep line tables only: backtraces name file and line, and the test
+# executables stay small. The release profile is not changed.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.test]
+debug = "line-tables-only"

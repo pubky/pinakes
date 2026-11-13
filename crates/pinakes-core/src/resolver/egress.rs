@@ -1725,7 +1725,7 @@ mod tests {
         server.abort();
     }
     /// Nothing in a page's text ends its read early: a head of about 1.05 MB with `<body` or
-    /// `</script>` in a script, a style or a comment (Codex's variants, including a script whose
+    /// `</script>` in a script, a style or a comment (in every variant, including a script whose
     /// `<!--<script>` escapes the `</script>` inside it) is read whole, the title and meta tags
     /// after the decoy with it.
     #[tokio::test]

@@ -997,8 +997,8 @@ async fn a_heard_stream_reaches_the_card(pool: PgPool) {
 }
 
 /// Every key a resource read lists (`keys`, as stored) searches back to that resource:
-/// `GET /v1/search?key=` takes each exactly as listed (review of d6d0aeb: MusicBrainz and podcast
-/// keys did not; of e48807e: Open Library keys did not).
+/// `GET /v1/search?key=` takes each exactly as listed (MusicBrainz, podcast and Open Library
+/// keys among them).
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn every_key_a_read_lists_searches_back(pool: PgPool) {
     let uri = "https://example.org/a-show";
@@ -2104,7 +2104,7 @@ impl Source for Outlives {
     }
 }
 
-/// A batch that outlives its lease still records every run against it (Kimi, train-1): a clean
+/// A batch that outlives its lease still records every run against it: a clean
 /// run schedules its next one, a run no source applies to leaves the queue, a partial or failed
 /// run backs off and counts. Only a row another claim took meanwhile keeps that claim.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]

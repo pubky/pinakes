@@ -27,7 +27,7 @@ async fn worker_started(before: usize) -> bool {
     }
     html::running() > before && !no_worker_left()
 }
-/// Codex's shapes, each with a title before it: misnested `<span><div></span>`, a tag inside
+/// Hostile shapes, each with a title before it: misnested `<span><div></span>`, a tag inside
 /// SVG's `<title>` followed by 20,000 `<div>`, 60,000 attributes on an end tag and on a start
 /// tag, 20,000 unclosed `<div>`, 30,000 `<span>x`.
 fn shapes() -> Vec<(&'static str, String)> {
@@ -114,7 +114,7 @@ fn a_calendar_past_its_parse_budget_is_refused() {
 /// they catch is a parse that runs on for minutes. "At once" is the reason: a shape that ran
 /// to the CPU budget or the wall deadline was not cut by the scan.)
 #[test]
-fn codex_s_shapes_end_at_once_with_a_card_or_too_complex() {
+fn hostile_shapes_end_at_once_with_a_card_or_too_complex() {
     let _serial = worker();
     for (name, page) in shapes() {
         let started = Instant::now();
@@ -221,7 +221,7 @@ async fn an_abandoned_parse_frees_its_slot_when_its_worker_dies() {
     assert!(no_worker_left());
 }
 
-/// A record with 20,000 descriptions in markup (Codex's Internet Archive case), their text
+/// A record with 20,000 descriptions in markup (as an Internet Archive record may hold), their text
 /// joined as a record parser does (`kit::html_text` each): one job, one worker for all of them,
 /// done well within the job's limits. One worker per fragment took minutes and outlived its
 /// caller.
@@ -314,7 +314,7 @@ async fn a_cancelled_job_stops_its_loop() {
         );
         // The test marks the caller gone just before `abort`, and the job learns it when the
         // runtime drops the future: a few parses fit between the two, not the hundreds of
-        // thousands that went on before (Codex counted 944,000 in 5.26 s).
+        // thousands a job that never learns it goes on to (944,000 in 5.26 s in one run).
         assert!(
             parsed_after.load(std::sync::atomic::Ordering::SeqCst) <= 1_000,
             "{name}: {} parses after the caller left",
@@ -324,7 +324,7 @@ async fn a_cancelled_job_stops_its_loop() {
     assert!(no_worker_left());
 }
 
-/// A record of 250,000 plain descriptions (about 1 MB, Codex's Internet Archive case): its
+/// A record of 250,000 plain descriptions (about 1 MB, as an Internet Archive record may hold): its
 /// caller gone, the job refuses the rest of them and frees its slot within a fraction of a
 /// second, instead of parsing on.
 #[tokio::test]

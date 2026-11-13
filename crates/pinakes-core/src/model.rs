@@ -903,7 +903,7 @@ mod tests {
         }
         let long = format!("https://cdn.example.org/{}.mp3", "a".repeat(2048));
         assert_eq!(Stream::public(&long, "audio/mpeg", None, false), None);
-        // A type of at most 127 bytes, so a stored stream stays small (review of 49666ef1).
+        // A type of at most 127 bytes, so a stored stream stays small.
         let typed = |sub: usize| {
             Stream::public(
                 enclosure,

@@ -18,11 +18,8 @@
 //! every link to the episode shares, and `podcast:enclosure:{SHA-256 of a file's URL}` for each
 //! file it plays; and the show's `wikidata:Q…`.
 //!
-//! TODO(spotify-episodes): Spotify names no item GUID or file for an episode, so its episode
-//! links join only through derived links today. Once the Spotify source answers (it needs
-//! Premium on the app owner's account, `also_on::spotify`), `episodes/{id}` gives an episode's
-//! show, title and release date: the input of a same-episode `maybe_same` hint (title and date
-//! within one show, never a key), which is not built yet. Never depend on it answering.
+//! Spotify names no item GUID or file for an episode, so its episode links join only through
+//! derived links.
 use super::{
     media::{self, digits, guid, property, slug, Deferred, Property},
     Context, Fact, Found, Key, Link, Source, Subject,

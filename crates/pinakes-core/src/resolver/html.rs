@@ -1821,7 +1821,7 @@ mod tests {
         }
     }
 
-    /// Each of Codex's probes is cut where it passes a cap, and parses in well under a second.
+    /// Each hostile shape is cut where it passes a cap, and parses in well under a second.
     #[test]
     fn hostile_markup_is_cut_at_its_cap() {
         // One tag with 60,000 attributes, separated by spaces or by `/`.
@@ -1852,7 +1852,7 @@ mod tests {
         }
     }
 
-    /// The second round of Codex's probes: attributes on an end tag, a tag inside SVG's
+    /// More hostile shapes: attributes on an end tag, a tag inside SVG's
     /// `<title>`, names alike in their first 32 bytes, and end tags that cannot close past a
     /// special element. Each is cut at its cap and parses at once.
     #[test]
@@ -1983,7 +1983,7 @@ mod tests {
     }
 
     /// Plain text passes the job's checks like markup: a job whose caller is gone, whose deadline
-    /// or CPU budget has passed, parses no more plain text either (Codex on 6877c1f). A job still
+    /// or CPU budget has passed, parses no more plain text either. A job still
     /// within its limits parses it.
     #[test]
     fn a_job_that_is_over_refuses_plain_text_too() {
@@ -2161,10 +2161,10 @@ mod tests {
         }
     }
 
-    /// Codex's probes, each through the code that met it, finish in well under a second (in a
+    /// The hostile shapes, each through the code that met it, finish in well under a second (in a
     /// debug build) and overflow no stack.
     #[test]
-    fn codex_s_probes_finish_at_once() {
+    fn hostile_shapes_finish_at_once() {
         use crate::resolver::{egress::Fetched, interstitial, web};
         let fetched = |status: u16, content_type: &str, body: String| Fetched {
             permanent_redirect: false,

@@ -718,7 +718,7 @@ POST /v1/changes/lookup {"resource_ids":["81cefcae5a6a468cfc27ff1c1b420fce","5bc
 | `window` | With `sort=trending` or `related`: `{n}h` or `{n}d`, from `1h` to `90d` (default `7d` for trending, `limits.related_window_days` for related), counted back from the first page's instant |
 | `limit` | 1–500, default 50 |
 | `cursor` | The signed next-page token of the previous page |
-| `facet` | Any of `type`, `tags`, `host` and `category`, comma-separated in any order (`type,tags,host,category`): counts over the whole filtered set, most frequent first ([Facets](#facets)) |
+| `facet` | Any of `type`, `tags`, `host` and `category`, comma-separated in any order (`type,tags,host,category`): counts over the whole filtered set, most frequent first (Facets, below) |
 | `bbox` | `minLon,minLat,maxLon,maxLat` in degrees; west > east crosses the antimeridian |
 | `near`, `radius` | `lat,lon` and a radius in metres (at most `limits.max_radius_m`, default 200 km); not with `bbox` |
 | `from`, `to` | Inclusive start-time bounds: RFC 3339, Unix milliseconds or relative (`now`, `now+30d`, `now-12h`), within UTC years 0001–9999 |
@@ -1940,7 +1940,7 @@ layers, with the caller's address:
 
 | Tool | Request | Answer |
 | --- | --- | --- |
-| `search` | `GET /v1/search` with `q`, `type` (array), `tags` (array), `match`, `near` (`{lat, lon, radius}`), `bbox` (`[west, south, east, north]`), `from`, `to`, `key`, `host` (array), `category`, `sort`, `window`, `collapse`, `reach`, `boost`, `viewer`, `limit`, `cursor`, `facet` (array of `type`, `tags`, `host`, `category`) | Compact cards, `cursor`, `facets` |
+| `search` | `GET /v1/search` with `q`, `type` (array), `exclude_type` (array), `tags` (array), `match`, `near` (`{lat, lon, radius}`), `bbox` (`[west, south, east, north]`), `from`, `to`, `key`, `remote`, `closed`, `ingredient`, `in_collection`, `host` (array), `category`, `sort`, `window`, `collapse`, `reach`, `boost`, `viewer`, `limit`, `cursor`, `facet` (array of `type`, `tags`, `host`, `category`) | Compact cards, `cursor`, `facets` |
 | `card` | `GET /v1/resources/by-uri`; with `resolve: true` and an unknown link, `POST /v1/resolve` | One compact card with `category`, `address`, `facts`, `related` and `related_total` (when it has them), `aliases` (at most 10) and the event fields |
 | `lookup` | `GET /v1/search?key=` | Compact cards |
 | `group` | `GET /v1/groups/{id}` | `id`, `type`, `keys`, every member's compact card, and `best`: the most complete readable member of the group's type |

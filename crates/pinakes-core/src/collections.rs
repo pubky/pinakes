@@ -1,4 +1,4 @@
-//! The public collections that hold a link (TASK-in-collections): the collection posts Nexus
+//! The public collections that hold a link: the collection posts Nexus
 //! indexed whose items name a card's link, its own or an alias's. They come from the reference
 //! feed's `collection` lines, one per item (`ingest`), stored in `reference` with kind
 //! `collection`; a `del` line, for a deleted collection, a removed item or an edit's old version,

@@ -50,8 +50,8 @@ pub(crate) fn gone_social(doc: &ResourceMeta) -> bool {
 pub(crate) fn scrubbed(doc: &ResourceMeta) -> bool {
     opted_out(doc) || gone_social(doc)
 }
-/// The one type of every gone social post's card, whatever the post was (owner decision,
-/// 2026-10-28): its type was the post's read too.
+/// The one type of every gone social post's card, whatever the post was: its type was the
+/// post's read too.
 pub const GONE_POST_TYPE: &str = "SocialMediaPosting";
 /// Whether `doc` has a gone social post's own type (`gone_card`): each source's social rule
 /// accepts it, so the card stays known as a gone social post.

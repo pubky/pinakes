@@ -86,7 +86,7 @@ mod tests {
             "postgresql://CANARY_USER:CANARY_PASSWORD@/CANARY_DB?host=/nonexistent-CANARY",
             "postgresql://CANARY_USER:CANARY_PASSWORD@127.0.0.1:1/CANARY_DB",
             // A line break in the host makes psql's error a line of the script's own form: psql's
-            // stderr is never read, whatever its lines look like (Codex, review of ee24d93).
+            // stderr is never read, whatever its lines look like.
             "postgresql:///postgres?host=/nonexistent%0Alock-waits:%20CANARY_HOST",
         ] {
             let run = std::process::Command::new("bash")

@@ -33,9 +33,12 @@ Tests use local servers, injected transports and recorded fixtures instead of pu
 
 ## Layout
 
-- `crates/pinakes-core/src/`: everything but the binary.
-  - `ingest.rs`, `nexus.rs`: the Nexus reference feed and reach lists.
-  - `identity.rs`, `alias.rs`: URI normalization, resource IDs, aliases.
+- `crates/pinakes-core/src/`: everything but the daemon binary (`lib.rs` lists the modules).
+  - `ingest.rs`, `nexus.rs`, `collections.rs`: the Nexus reference feed, reach lists and the
+    public collections that hold a link.
+  - `identity.rs`, `alias.rs`, `capability.rs`: URI normalization, resource IDs, aliases, and
+    links that carry a credential.
+  - `model.rs`: the stored document (`ResourceMeta`) and the schema.org type table.
   - `queue.rs`, `scheduler.rs`, `store.rs`, `changes.rs`: the resolution queue, refresh times,
     saving documents, the change journal and orphan cleanup.
   - `resolver/`: routing (`classify`), the egress client (`egress.rs`), and the web, pubky, geo,
@@ -48,12 +51,19 @@ Tests use local servers, injected transports and recorded fixtures instead of pu
     their JSON-LD readers and their `FACTS`.
   - `also_on.rs` and `also_on/` (one module per also-on source), `lookups/` (one module per
     lookup family: places, papers, packages, games, archived copies), and the code they share:
-    `hubs.rs` (MusicBrainz, Wikidata), `music.rs`, `music_sources.rs`, `wikipedia.rs`.
-  - `groups.rs`, `group_keys.rs`, `same_event.rs`: groups and the same-event hint.
+    `hubs.rs` (MusicBrainz, Wikidata), `music.rs`, `music_sources.rs`, `music_identity.rs`,
+    `music_enrichment.rs`, `wikipedia.rs`, `wikimedia.rs` (Commons files), `episodes.rs` (a
+    show's latest episodes), `podcast_index_api.rs`, `app_ids.rs` and `barcode.rs` (ID forms
+    several modules read), `embed.rs` (a card's `embed`).
+  - `groups.rs`, `group_keys.rs`, `same_event.rs`, `same_recording.rs`, `hints.rs`,
+    `matching.rs`: groups, the same-event and same-recording hints and what they share.
   - `api.rs`, `change_api.rs`, `spatial.rs`, `recipes.rs`: the HTTP API, its OpenAPI document
-    and examples.
+    and examples. `agents/`: the agents' guide (`/llms.txt`, `/skill.md`) and the MCP endpoint.
   - `config.rs`: configuration and every limit with its default.
-  - `telemetry.rs`, `canary.rs`, `maintenance.rs`, `osm_dump.rs`, `locks.rs`.
+  - `telemetry.rs`, `canary.rs`, `maintenance.rs`, `osm_dump.rs`, `locks.rs`, `adapter.rs`
+    (each route's manifest: mode, cadence, expected fields, canary), `source.rs` (each source's
+    last outcome and its error classes).
+  - `bin/pinakes-parse.rs`: the parse worker as a program of its own, for the tests.
 - `crates/pinakes-core/tests/`: integration tests; `fixtures/` holds recorded responses, each
   directory with a README or `provenance.json` saying where they came from.
 - `crates/pinakes-core/examples/`: `e2e_stack` (the e2e harness's daemon) and `adapter_probe`
@@ -61,8 +71,8 @@ Tests use local servers, injected transports and recorded fixtures instead of pu
 - `crates/pinakesd/`: the daemon binary.
 - `migrations/0001_schema.sql`: the schema.
 - `data/`: pinned data sets (schema.org, oEmbed registry, event adapters, wall markers, tenant
-  rules, time zones, API examples). [data/README.md](data/README.md) names each one's source and
-  checksum.
+  rules, time zones, API examples). [data/README.md](data/README.md) names each one's source,
+  and the checksum of each pinned upstream file.
 - `docs/`, `ops/`, `e2e/`, `scripts/`.
 
 ## Conventions

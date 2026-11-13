@@ -1295,8 +1295,6 @@ fn merge(dst: &mut serde_json::Value, src: serde_json::Value) {
     }
 }
 
-/// An upstream service's URL is a web URL with a host, and holds no secret: no user info, query
-/// or fragment, which logs and errors would otherwise carry.
 /// An egress host rule as the policy compares hosts (`egress::canonical_host`, the one reading
 /// for rules and the hosts asked alike: `faß.de。` is `xn--fa-hia.de`, `8.8.8..` is `8.8.0.8`),
 /// a leading `*.` kept for a name. `None` for what names no host, a name with a `*` inside it, or
@@ -1316,6 +1314,8 @@ fn host_rule(rule: &str) -> Option<String> {
         _ => None,
     }
 }
+/// An upstream service's URL is a web URL with a host, and holds no secret: no user info, query
+/// or fragment, which logs and errors would otherwise carry.
 fn plain_upstream(raw: &str) -> Result<bool> {
     let url = url::Url::parse(raw)?;
     Ok(matches!(url.scheme(), "http" | "https")
@@ -1565,7 +1565,7 @@ mod tests {
         }
     }
     /// A relay entry that is refused is named by its place and host, never with what its URL
-    /// carries (Kimi).
+    /// carries.
     #[test]
     fn a_refused_pkarr_relay_is_named_by_its_host_alone() {
         for (relay, says) in [
@@ -1800,12 +1800,8 @@ mod tests {
             "{refused}"
         );
     }
-    /// Egress host rules may be written in Unicode or punycode, any case, with a trailing dot:
-    /// each is compared as URL hosts are written. One that names no host stops startup, naming
-    /// the rule.
     /// A switched-off also-on source's API hosts are refused at the egress, whatever path asks,
-    /// and only those: Deezer's API while it is off (the default), never deezer.com's pages
-    /// (TASK-deezer-api-off).
+    /// and only those: Deezer's API while it is off, never deezer.com's pages.
     #[test]
     fn a_switched_off_source_s_api_is_refused_at_the_egress() {
         if !crate::also_on::registered()
@@ -1847,6 +1843,9 @@ mod tests {
                 .unwrap();
         assert!(!policy(&idle).allows(api));
     }
+    /// Egress host rules may be written in Unicode or punycode, any case, with a trailing dot:
+    /// each is compared as URL hosts are written. One that names no host stops startup, naming
+    /// the rule.
     #[test]
     fn egress_host_rules_are_canonical_and_a_bad_one_is_refused() {
         let rules = |deny: &[&str]| with(serde_json::json!({"egress": {"deny_hosts": deny}}));

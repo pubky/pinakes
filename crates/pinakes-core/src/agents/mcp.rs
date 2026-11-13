@@ -28,7 +28,10 @@ use rmcp::{
     ErrorData, ServerHandler,
 };
 use serde_json::{json, Map, Value};
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    net::SocketAddr,
+    sync::{Arc, LazyLock},
+};
 use tower::ServiceExt;
 
 /// The largest REST answer a tool reads (a search page of 500 cards fits).
@@ -580,6 +583,18 @@ fn encode(pairs: &[(&str, String)]) -> String {
         .finish()
 }
 
+/// The arguments `search` takes: the properties of its schema (`tools`).
+static SEARCH_ARGUMENTS: LazyLock<Vec<String>> = LazyLock::new(|| {
+    tools()
+        .iter()
+        .find(|t| t.name == "search")
+        .and_then(|t| t.input_schema["properties"].as_object())
+        .expect("the search tool's properties")
+        .keys()
+        .cloned()
+        .collect()
+});
+
 /// The `/v1/search` query of a `search` call: its arguments as the route's parameters.
 fn search_query(args: &JsonObject) -> Result<String, Failure> {
     const TEXT: &[(&str, &str)] = &[
@@ -599,34 +614,7 @@ fn search_query(args: &JsonObject) -> Result<String, Failure> {
         ("in_collection", "in_collection"),
         ("category", "category"),
     ];
-    let known = [
-        "q",
-        "type",
-        "exclude_type",
-        "tags",
-        "match",
-        "near",
-        "bbox",
-        "from",
-        "to",
-        "key",
-        "sort",
-        "window",
-        "collapse",
-        "reach",
-        "boost",
-        "viewer",
-        "limit",
-        "cursor",
-        "remote",
-        "closed",
-        "ingredient",
-        "in_collection",
-        "host",
-        "category",
-        "facet",
-    ];
-    if let Some(unknown) = args.keys().find(|k| !known.contains(&k.as_str())) {
+    if let Some(unknown) = args.keys().find(|k| !SEARCH_ARGUMENTS.contains(k)) {
         return Err(Failure::bad(format!(
             "`{unknown}` is not an argument of search"
         )));
@@ -1162,6 +1150,29 @@ mod tests {
         assert_eq!(one["items"][0]["taggers_count"], 2);
         assert!(one["items"][0].get("at_least").is_none());
         assert!(one["items"][0]["tags"][0].get("at_least").is_none());
+    }
+
+    /// The `search` rows of the guide and of docs/api.md name every argument the schema takes.
+    #[test]
+    fn the_search_rows_name_every_argument() {
+        assert_eq!(SEARCH_ARGUMENTS.len(), 25);
+        let docs = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/api.md");
+        let docs = std::fs::read_to_string(docs).unwrap();
+        for (page, text) in [
+            ("agents/guide.md", include_str!("guide.md")),
+            ("docs/api.md", docs.as_str()),
+        ] {
+            let row = text
+                .lines()
+                .find(|l| l.starts_with("| `search` |"))
+                .unwrap_or_else(|| panic!("{page} has no search row"));
+            for argument in SEARCH_ARGUMENTS.iter() {
+                assert!(
+                    row.contains(&format!("`{argument}`")),
+                    "{page}: the search row lacks `{argument}`"
+                );
+            }
+        }
     }
 
     #[test]

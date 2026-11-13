@@ -124,9 +124,9 @@ pub enum Route {
 }
 /// The namespaces whose objects Pinakes never fetches: those Nexus describes (pubky.app's own, and
 /// the social specs', `/pub/social/…` in any version, their posts, events and rsvps included:
-/// social events are Nexus's, owner decision 2026-10-26), and the old Mapky and Eventky layouts
-/// (`mapky.app`, `eventky.app`), whose data the owner disregards: Maps writes posts now
-/// (`posts`), and events and availability are social posts.
+/// social events are Nexus's), and the old Mapky and Eventky layouts (`mapky.app`,
+/// `eventky.app`), whose data is disregarded: Maps writes posts (`posts`), and events and
+/// availability are social posts.
 const NEVER_FETCHED: &[&str] = &["pubky.app", "social", "mapky.app", "eventky.app"];
 /// Whether Pinakes never fetches the objects of this namespace (decoded): ingest drops their post
 /// lines, so they create no resource, and one stored before the rule keeps no card (`no_card`).
@@ -157,7 +157,7 @@ pub fn route(segments: &[String]) -> Option<Route> {
         return Some(Route::Excluded);
     }
     // A post in a namespace no profile reads (`/pub/<ns>/v1/posts/{id}`) has the general card,
-    // with its namespace and kind (owner decision, 2026-10-27); a path inside one (a version
+    // with its namespace and kind; a path inside one (a version
     // file) is the resolver's to fetch, never an object of its own.
     if matches!(segments, [_, version, posts, ..] if version == "v1" && posts == "posts") {
         let any = &posts::ANY.kinds[0];

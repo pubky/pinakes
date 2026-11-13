@@ -549,10 +549,6 @@ pub(crate) async fn duplicates_found(
     Ok(found)
 }
 
-/// A MusicBrainz page's card, from the entity MusicBrainz serves (`musicbrainz_entity` reads the
-/// same answer): its title, its type (a recording, an album, an artist that is a person or a
-/// group), the artist credit and a recording's length. An ISRC's page is its one recording's card
-/// under the ISRC's own link, or the ISRC's when several recordings or none have it.
 /// The forms of key the music sources record (`also_on::Source::key_forms`): ISRCs, barcodes,
 /// MusicBrainz IDs at each level, Wikidata items.
 pub const KEY_FORMS: &[(&str, &str)] = &[
@@ -564,6 +560,10 @@ pub const KEY_FORMS: &[(&str, &str)] = &[
     ("mb:artist", "8f3471b5-7e6a-48da-86a9-c1c07a0f47ae"),
     ("wikidata", "Q42"),
 ];
+/// A MusicBrainz page's card, from the entity MusicBrainz serves (`musicbrainz_entity` reads the
+/// same answer): its title, its type (a recording, an album, an artist that is a person or a
+/// group), the artist credit and a recording's length. An ISRC's page is its one recording's card
+/// under the ISRC's own link, or the ISRC's when several recordings or none have it.
 pub fn musicbrainz_card(
     uri: &str,
     entity: Option<&musicbrainz::Entity>,
