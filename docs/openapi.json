@@ -41,6 +41,14 @@
               "null"
             ]
           },
+          "refs": {
+            "description": "An exact, non-derived member's referenced links, selected and ordered as its card's\n`refs` (at most 5). Omitted when empty or just `uri`; absent on derived and maybe links.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 5,
+            "type": "array"
+          },
           "site": {
             "description": "The service: a member's site as its card names it, a derived link's service name.",
             "type": [

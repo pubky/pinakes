@@ -104,7 +104,7 @@ An IMDb title keeps the type its page gives (it can be either).
 | `point` | `{lat, lon}` |
 | `start`, `end` | RFC 3339 instants for events and occurrences |
 | `group` | `{id, size}` when the resource or occurrence is in a [group](#groups), else `null` |
-| `also_on` | The same thing elsewhere ([Also on](#also-on)): the other members of its group as `{id, uri, site}` (other resources first, one entry each by ID, then other occurrences of its own feed), then derived links nobody tagged as `{uri, site, derived: true, via, kind?, at?}`, by service name; each with its `embed` ([Embed](#embed)) or `null`; one per service (of a recording's or an album's links, the one on the card's own release, else on the original edition), never another page of the card's own service, at most 8 on a search, lookup or group card and 256 on a resource read. A hint only: every member keeps its own card |
+| `also_on` | The same thing elsewhere ([Also on](#also-on)): the other members of its group as `{id, uri, site, refs?}` (other resources first, one entry each by ID, then other occurrences of its own feed), then derived links nobody tagged as `{uri, site, derived: true, via, kind?, at?}`, by service name; each with its `embed` ([Embed](#embed)) or `null`; one per service (of a recording's or an album's links, the one on the card's own release, else on the original edition), never another page of the card's own service, at most 8 on a search, lookup or group card and 256 on a resource read. A hint only: every member keeps its own card |
 | `open_in` | The clients that open a card, `[{client, url}]` (`url` is `https:`). A Pubky app's object: from the app's profile ([Pubky apps](pubky-apps.md)), e.g. Loopky for a deck; on a Pubky event reference's card, those of the event object. A card whose link is not a web page (`btc:`, `ln:`, `uniprot:`, `fr:`, …): the web page its source reads it from, named by its site, e.g. `[{"client": "mempool.space", "url": "https://mempool.space/block/…"}]`. `[]` on a web link's card, a card gone upstream and a card whose source names no page |
 | `attribution` | Present on OSM cards, events placed at an OSM venue and events whose zone came from coordinates; display it with the card |
 | `credits` | Where `image` and `description` came from when Pinakes added them from another source than the link ([Credits](#credits)): one entry per such field, at most 4. `[]` when none: such a field came from the link itself |
@@ -1404,6 +1404,16 @@ nothing, and `[event] same_event_hint = "off"` removes it too.
 
 ## Also on
 
+An exact, non-derived group member can also carry `refs`: the same referenced links as its
+own card, using the same selection and order as `Card.refs` (at most 5, from the canonical
+link and the 31 most recently referenced aliases, counts capped at 1,000, ties by URI).
+The field is omitted when empty or equal to `[uri]`. To join group tags, batch each member's
+`uri` and `refs` with the card's own links in Nexus; no extra group read is needed for these
+members. Derived links and `kind: "maybe"` entries never carry `refs`. These bounded lists
+are not every group member or alias. Gone social posts keep the same alias-privacy rule as
+their own cards. All cards and exact members in a response share one reference query,
+with member IDs deduplicated before it; there is no query per entry.
+
 A card's `also_on` says where else the same thing is: first the other members of its
 [group](#groups) (links someone tagged, each with its resource `id`), by ID and URI, then
 **derived links**: the same thing on services nobody tagged, found by a source, with
@@ -1925,7 +1935,8 @@ layers, with the caller's address:
 | `social` | `POST /v1/resources/lookup` for card `ids`, then Nexus `POST /v0/stream/resources/by_ids` (100 URIs a call) with each card's `uri` and `refs`, and any plain `uris`; 1–100 entries together, optional `viewer` | Per card (or link): `asked` (the URIs sent, the card's own first), `found` (those Nexus knew), and the tags merged over them: per label `taggers_count` (the taggers the views list, each once, or the most one view counts, whichever is more) and `viewer_tagged`; `taggers_count` over all labels, the same way. A view counts taggers it does not list, who may be ones another view lists: over several such views a count is a lower bound, marked `at_least: true`. An alias's id (a spelling, or a card that became one after it was read) is answered under the id asked, with `root`, the card that answers for it. `unknown_ids` names ids Pinakes does not know |
 
 A compact card keeps `id`, `uri`, `status`, `type`, `name`, `description` (at most 300
-characters), `image`, `site`, `point`, `start`, `end`, `group`, `also_on` (`uri`, `site`), `refs`,
+characters), `image`, `site`, `point`, `start`, `end`, `group`, `also_on` (`uri`, `site`, and
+`id`, `refs`, `derived`, `kind` when present), `refs`,
 `occurrence`, `event` and `attribution`, and adds `url`, the card's full read
 (`GET /v1/resources/{id}`); every answer names the REST URL of its full result. A failed request
 is the tool's error (`isError`), its text `{error, status, hint, url}` with the route's status
