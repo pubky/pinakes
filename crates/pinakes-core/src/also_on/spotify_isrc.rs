@@ -21,7 +21,7 @@ use super::{
 };
 use crate::{
     music::{self, Level, Service},
-    music_sources::{derived, join_level, own_isrc},
+    music_sources::{derived, join_level, key_values},
 };
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
@@ -74,16 +74,9 @@ impl Source for SpotifyIsrc {
         }
         // The track's own ISRC first, then the hubs'; only ISRCs that are keys (a shared one is
         // a fact, and Spotify would answer with any of its recordings).
-        let own = own_isrc(subject).filter(|o| subject.keys_in("isrc").any(|k| k == o.as_str()));
-        let mut isrcs: Vec<&str> = own.as_deref().into_iter().collect();
-        isrcs.extend(
-            subject
-                .keys_in("isrc")
-                .filter(|v| Some(*v) != own.as_deref()),
-        );
         let mut found = Found::default();
-        for isrc in isrcs.into_iter().take(MAX_ISRCS) {
-            let Some(isrc) = music::isrc(isrc) else {
+        for isrc in key_values(subject, "isrc", true, MAX_ISRCS) {
+            let Some(isrc) = music::isrc(&isrc) else {
                 continue;
             };
             let mut url = url::Url::parse(&format!("{API}/search")).expect("a fixed URL");

@@ -248,9 +248,12 @@ relied on it, a recording it took along). A removal that would need any other ed
 before it is needed.
 
 Shared code stays (`sources/kit.rs`, `sources/biodiversity.rs`, `music.rs`, `music_sources.rs`,
-`wikipedia.rs`, `lookups/mod.rs`, `lookups/wikidata.rs`, `also_on/media.rs`); code only one
-source uses is in that source's files, so a removal leaves no unused code behind (test helpers
-for any source excepted). Tests that need a source skip without it, so none has to change. The
+`wikipedia.rs`, `lookups/mod.rs`, `lookups/wikidata.rs`, `also_on/media.rs`,
+`also_on/client_credentials.rs`, and what several sources ask one service with, in
+`also_on/*_api.rs`); code only one source uses is in that source's files, so a removal leaves no
+unused code behind (test helpers for any source excepted). A source that needs to know whether
+another one runs asks by its ID (`also_on::runs_by_id`, `also_on::enabled_by_id`), never by its
+module. Tests that need a source skip without it, so none has to change. The
 keys a removed source recorded stay until they expire (up to their lifetime), and keep their
 single-object rule: the daemon writes every registered namespace's rule to the database at start
 (`single_object_namespace`), so grouping reads it after the code is gone.

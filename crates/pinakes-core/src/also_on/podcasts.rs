@@ -31,7 +31,7 @@ use crate::{
     hubs::{self, wikidata},
     model::Stream,
     podcast_index_api::{
-        index_page, pi_episode_by_guid, pi_episode_request, pi_headers, pi_request, pi_stream, Ask,
+        index_page, pi_episode_by_guid, pi_episode_request, pi_options, pi_request, pi_stream, Ask,
     },
     resolver::{egress::FetchOptions, RetryLater},
 };
@@ -724,12 +724,9 @@ impl Heard {
 
 impl Podcasts {
     async fn itunes(cx: &Context, url: &str) -> Result<crate::resolver::egress::Fetched> {
-        let options = FetchOptions {
-            accept: Some("application/json".into()),
-            extra_types: &["text/javascript"],
-            ..Default::default()
-        };
-        cx.egress.discover(url, &options, 3600).await
+        cx.egress
+            .discover(url, &super::itunes_api::options(), 3600)
+            .await
     }
     /// iTunes' record of the show, if it knows it.
     async fn itunes_show(cx: &Context, show: u64) -> Result<Option<ItunesShow>> {
@@ -763,12 +760,7 @@ impl Podcasts {
         let Some((key, secret)) = cx.config.podcast_index.pair() else {
             return Ok(None);
         };
-        let options = FetchOptions {
-            accept: Some("application/json".into()),
-            headers: pi_headers(key, secret, chrono::Utc::now().timestamp()),
-            sensitive: true,
-            ..Default::default()
-        };
+        let options = pi_options(key, secret);
         Ok(Some(cx.egress.fetch_with(url, &options).await?))
     }
     /// Podcast Index's feed for `ask`.

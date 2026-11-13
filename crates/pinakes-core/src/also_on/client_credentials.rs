@@ -47,6 +47,22 @@ impl Api {
         .into()
     }
 }
+/// An app's client ID and secret, trimmed: `None` unless both are set and neither is blank.
+pub(crate) fn pair(id: Option<&str>, secret: Option<&str>) -> Option<(String, String)> {
+    match (id, secret) {
+        (Some(id), Some(secret)) if !id.trim().is_empty() && !secret.trim().is_empty() => {
+            Some((id.trim().to_owned(), secret.trim().to_owned()))
+        }
+        _ => None,
+    }
+}
+/// Whether an error is a service refusing the operator's credentials, its token or its API (a
+/// class ending `_auth`: `spotify_auth`, `tidal_auth`). It lasts: a retry soon would be refused too.
+pub(crate) fn refused(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<RetryLater>()
+        .is_some_and(|r| r.class.ends_with("_auth"))
+}
 /// How long refused credentials are held before the service is asked again, and the wait a
 /// refused lookup reports: one value, so the retry comes when the hold ends.
 pub(crate) const REFUSAL_HOLD: u64 = 300;

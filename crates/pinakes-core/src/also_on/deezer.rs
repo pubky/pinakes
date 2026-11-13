@@ -1,63 +1,12 @@
 //! The `deezer` also-on source.
 use crate::{
-    also_on::{Context, Found, Key, Source, Subject},
+    also_on::{deezer_api, Context, Found, Key, Source, Subject},
     music::{self, Level, Service},
 };
 use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::music_sources::*;
-use serde_json::Value;
-
-const DEEZER_API: &str = "https://api.deezer.com";
-/// One Deezer API object; `None` when Deezer has no data (its error 800) or no such ID. Never
-/// while the source is off, whoever asks: the egress refuses `api.deezer.com` then too
-/// (`also_on::off_hosts`).
-pub(crate) async fn deezer(cx: &Context, path: &str) -> Result<Option<Value>> {
-    Ok(answer(cx, path)
-        .await?
-        .filter(|v| v["id"].as_u64().is_some()))
-}
-/// One Deezer API answer (`path` under `https://api.deezer.com/`, its query escaped), shared for
-/// an hour; `None` when Deezer answers an error (800: no data) or a client error. Its quota (error
-/// 4, 429) and an outage are retried. Never while the source is off.
-pub(crate) async fn answer(cx: &Context, path: &str) -> Result<Option<Value>> {
-    if !cx.config.also_on.source_enabled(&DeezerSource) {
-        anyhow::bail!("the deezer source is off: its API is not called");
-    }
-    let options = crate::resolver::egress::FetchOptions::json();
-    let fetched = cx
-        .egress
-        .discover(&format!("{DEEZER_API}/{path}"), &options, 3600)
-        .await?;
-    let busy = || -> anyhow::Error {
-        crate::resolver::RetryLater {
-            class: "deezer_busy",
-            seconds: fetched.retry_after_secs.clamp(60, 3600),
-        }
-        .into()
-    };
-    match fetched.status {
-        200 => {}
-        429 | 500..=599 => return Err(busy()),
-        _ => return Ok(None),
-    }
-    let v: Value = serde_json::from_slice(&fetched.body)?;
-    // Deezer answers errors with 200: 4 is its quota, 800 "no data".
-    match v["error"]["code"].as_u64() {
-        None if v["error"].is_null() => Ok(Some(v)),
-        Some(4) => Err(busy()),
-        _ => Ok(None),
-    }
-}
-
-/// The album a Deezer track is on. Never while the source is off.
-pub(crate) async fn track_album(cx: &Context, track: &str) -> Result<Option<String>> {
-    Ok(deezer(cx, &format!("track/{track}"))
-        .await?
-        .and_then(|v| v["album"]["id"].as_u64())
-        .map(|id| id.to_string()))
-}
 
 /// Deezer's public API: its own record of a Deezer link, and its lookups by ISRC and barcode.
 pub struct DeezerSource;
@@ -101,7 +50,7 @@ impl Source for DeezerSource {
         let mut found = Found::default();
         if link.service == Service::Deezer {
             // Its own record of its own object.
-            let Some(v) = deezer(cx, &format!("{kind}/{}", link.id)).await? else {
+            let Some(v) = deezer_api::object(cx, &format!("{kind}/{}", link.id)).await? else {
                 return Ok(found);
             };
             if let Some(value) = v[field].as_str().and_then(normal) {
@@ -124,21 +73,15 @@ impl Source for DeezerSource {
         }
         // The link's own ISRC first, then the hubs'. Its own only when it is a key: a shared ISRC
         // (on several recordings) is a fact, and Deezer would answer with any of them.
-        let own = own_isrc(subject)
-            .filter(|o| kind == "track" && subject.keys_in(namespace).any(|k| k == o.as_str()));
-        let mut values: Vec<&str> = own.as_deref().into_iter().collect();
-        values.extend(
-            subject
-                .keys_in(namespace)
-                .filter(|v| Some(*v) != own.as_deref()),
-        );
-        for value in values.into_iter().take(2) {
+        for value in key_values(subject, namespace, kind == "track", 2) {
+            let value = value.as_str();
             // Deezer finds a UPC-A by its 12 digits, without GTIN-13's leading zero.
             let asked = match value.strip_prefix('0') {
                 Some(upc) if kind == "album" => upc,
                 _ => value,
             };
-            let Some(v) = deezer(cx, &format!("{kind}/{namespace}:{asked}")).await? else {
+            let Some(v) = deezer_api::object(cx, &format!("{kind}/{namespace}:{asked}")).await?
+            else {
                 continue;
             };
             // Only the object that has the value asked.

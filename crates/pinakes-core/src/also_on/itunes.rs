@@ -1,6 +1,6 @@
 //! The `itunes` also-on source.
 use crate::{
-    also_on::{Context, Found, Link, Source, Subject},
+    also_on::{itunes_api, Context, Found, Link, Source, Subject},
     music::{self, Level, Service},
 };
 use anyhow::Result;
@@ -51,25 +51,9 @@ async fn itunes_album(cx: &Context, barcode: &str) -> Result<Option<Link>> {
     let storefront = &cx.config.also_on.apple_storefront;
     let url =
         format!("https://itunes.apple.com/lookup?upc={barcode}&entity=album&country={storefront}");
-    Ok(answer(cx, &url).await?.and_then(|v| itunes_parse(&v)))
-}
-/// One iTunes Search or Lookup answer (`url` in the configured storefront), shared for an hour;
-/// `None` for an answer that is no result list (4xx). A rate limit or an outage is retried.
-pub(crate) async fn answer(cx: &Context, url: &str) -> Result<Option<Value>> {
-    let fetched = cx.egress.discover(url, &itunes_options(), 3600).await?;
-    match fetched.status {
-        200 => {}
-        429 | 500..=599 => {
-            return Err(crate::resolver::RetryLater {
-                class: "itunes_busy",
-                seconds: fetched.retry_after_secs.clamp(60, 3600),
-            }
-            .into())
-        }
-        _ => return Ok(None),
-    }
-    // iTunes answers `text/javascript` with leading newlines.
-    Ok(Some(serde_json::from_slice(fetched.body.trim_ascii())?))
+    Ok(itunes_api::answer(cx, &url)
+        .await?
+        .and_then(|v| itunes_parse(&v)))
 }
 /// The track an Apple Music track link names.
 fn apple_track(uri: &str) -> Option<String> {
@@ -80,7 +64,7 @@ fn apple_track(uri: &str) -> Option<String> {
 /// iTunes' 30-second preview of an Apple Music track (`lookup?id=`, in the configured
 /// storefront), when it is a public stream.
 async fn itunes_preview(cx: &Context, track: &str) -> Result<Option<crate::model::Stream>> {
-    Ok(lookup(cx, track)
+    Ok(itunes_api::lookup(cx, track)
         .await?
         .and_then(|v| preview_parse(&v, track)))
 }
@@ -109,32 +93,6 @@ pub fn preview_parse(v: &Value, track: &str) -> Option<crate::model::Stream> {
         return None;
     };
     crate::model::Stream::public(url, media_type, None, true)
-}
-/// The album an Apple Music track is on (the same lookup as its preview's).
-pub(crate) async fn track_album(cx: &Context, track: &str) -> Result<Option<String>> {
-    Ok(lookup(cx, track).await?.and_then(|v| {
-        v["results"].as_array()?.iter().find_map(|r| {
-            (r["wrapperType"] == "track"
-                && r["trackId"].as_u64().map(|id| id.to_string()).as_deref() == Some(track))
-            .then(|| r["collectionId"].as_u64())
-            .flatten()
-            .map(|id| id.to_string())
-        })
-    }))
-}
-/// iTunes' `lookup?id={id}&entity=song` in the configured storefront.
-async fn lookup(cx: &Context, id: &str) -> Result<Option<Value>> {
-    let storefront = &cx.config.also_on.apple_storefront;
-    let url = format!("https://itunes.apple.com/lookup?id={id}&entity=song&country={storefront}");
-    answer(cx, &url).await
-}
-/// How iTunes is asked: for JSON, which it serves as `text/javascript`.
-fn itunes_options() -> crate::resolver::egress::FetchOptions {
-    crate::resolver::egress::FetchOptions {
-        accept: Some("application/json".into()),
-        extra_types: &["text/javascript"],
-        ..Default::default()
-    }
 }
 /// The one album of an iTunes lookup, as an Apple Music link.
 pub fn itunes_parse(v: &Value) -> Option<Link> {
@@ -188,7 +146,7 @@ mod tests {
                 .await
             }
         };
-        let fetched = read(itunes_options()).await.unwrap();
+        let fetched = read(itunes_api::options()).await.unwrap();
         assert_eq!(fetched.status, 200);
         let v: Value = serde_json::from_slice(fetched.body.trim_ascii()).unwrap();
         assert!(itunes_parse(&v).is_none());
