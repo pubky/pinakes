@@ -114,18 +114,6 @@ async fn get(app: &axum::Router, path: &str) -> Value {
     common::check_response("GET", path, status.as_u16(), &value);
     value
 }
-async fn status(app: &axum::Router, path: &str) -> u16 {
-    let mut request = Request::builder().uri(path).body(Body::empty()).unwrap();
-    request.extensions_mut().insert(axum::extract::ConnectInfo(
-        "127.0.0.2:1234".parse::<std::net::SocketAddr>().unwrap(),
-    ));
-    app.clone()
-        .oneshot(request)
-        .await
-        .unwrap()
-        .status()
-        .as_u16()
-}
 /// The `{id, uri, site}` a card's group hint names `id` by.
 fn named(id: &str, name: &str) -> Value {
     json!({"id": id, "uri": format!("https://example.org/{name}"), "site": "example.org", "embed": null})
