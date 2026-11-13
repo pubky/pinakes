@@ -17,9 +17,11 @@ use crate::{config::Config, model::ResourceMeta, resolver::egress::Egress};
 pub mod books;
 pub mod client_credentials;
 pub mod deezer;
+pub mod deezer_api;
 pub mod editions;
 pub mod films;
 pub mod itunes;
+pub mod itunes_api;
 pub mod itunes_song;
 pub mod media;
 pub mod musicbrainz;
@@ -33,6 +35,7 @@ pub mod spotify;
 pub mod spotify_api;
 pub mod spotify_isrc;
 pub mod tidal;
+pub mod tidal_api;
 pub mod tidal_isrc;
 pub mod tmdb;
 pub mod wikidata;
@@ -404,6 +407,20 @@ pub trait Source: Send + Sync {
 pub fn runs(config: &Config, source: &dyn Source) -> bool {
     config.also_on.source_enabled(source) && source.ready(config)
 }
+/// Whether the source with this ID runs under `config` ([`runs`]): never in a build without it.
+/// How one source asks about another, so each goes without the other's module.
+pub fn runs_by_id(config: &Config, id: &str) -> bool {
+    registered()
+        .iter()
+        .any(|s| s.id() == id && runs(config, s.as_ref()))
+}
+/// Whether the source with this ID is on under `config` and the worker runs
+/// ([`AlsoOnConfig::source_enabled`]): never in a build without it.
+pub fn enabled_by_id(config: &Config, id: &str) -> bool {
+    registered()
+        .iter()
+        .any(|s| s.id() == id && config.also_on.source_enabled(s.as_ref()))
+}
 /// Whether `source` counts as switched off under `config`: by the operator, or for want of what
 /// it needs to run when that switches it off ([`Source::off_until_ready`]). A source that is not
 /// switched off shows its stored rows, and what cards took from them, whether or not the worker
@@ -461,6 +478,20 @@ pub fn unless_over_cap(found: Result<Found>, fallback: impl FnOnce() -> Found) -
     match found {
         Err(e) if crate::resolver::egress::over_cap(&e) => Ok(fallback()),
         found => found,
+    }
+}
+/// What a Wikidata item's Q-id alone proves: the item's key. The fallback of a read of the item
+/// that is over its cap ([`unless_over_cap`]).
+pub fn wikidata_key(qid: &str) -> Found {
+    Found {
+        keys: crate::hubs::key::wikidata(qid)
+            .map(|key| Key {
+                key,
+                via: "wikidata".into(),
+            })
+            .into_iter()
+            .collect(),
+        ..Default::default()
     }
 }
 /// Every source this build has: these, then each lookup family's ([`crate::lookups::FAMILIES`]).
@@ -1238,6 +1269,20 @@ struct Next {
     partial: Option<Duration>,
 }
 
+/// The sources that hold rows of `resource_id`, in every table `record` writes (keys, derived
+/// links, facts, places among releases), whatever their expiry and whether the source is on.
+async fn stored_sources(
+    pool: &PgPool,
+    resource_id: &str,
+) -> Result<std::collections::HashSet<String>> {
+    Ok(sqlx::query_scalar::<_, String>("SELECT source FROM resource_key WHERE resource_id=$1 UNION SELECT source FROM derived_link WHERE resource_id=$1 UNION SELECT source FROM resource_fact WHERE resource_id=$1 UNION SELECT source FROM link_release WHERE resource_id=$1")
+        .bind(resource_id)
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .collect())
+}
+
 /// One resource: every enabled source that applies runs; each success replaces its rows. Ok
 /// with when the next run is due, Ok(None) when no source applies, Err when any source failed
 /// (the others' results are kept).
@@ -1263,6 +1308,11 @@ async fn one(
     let mut partial: Option<Duration> = None;
     let mut failed = None;
     let mut reread = false;
+    // The sources holding rows of this resource (`stored_sources`): read once for every source
+    // in a row that asks, and again after a lookup, which takes long enough for another run to
+    // have recorded meanwhile. Rows this run takes over from another source only leave that
+    // source listed, and clearing a source that holds nothing changes nothing.
+    let mut stored: Option<std::collections::HashSet<String>> = None;
     // In registry order: each source sees the keys the ones before it found in this run (a
     // barcode MusicBrainz names, then the services looked up by it).
     for source in sources
@@ -1271,11 +1321,10 @@ async fn one(
     {
         if gone || withheld || !source.applies(&subject) {
             // It read the resource before (a key it starts from is gone): its rows go too.
-            let had: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource_key WHERE resource_id=$1 AND source=$2) OR EXISTS(SELECT 1 FROM derived_link WHERE resource_id=$1 AND source=$2) OR EXISTS(SELECT 1 FROM resource_fact WHERE resource_id=$1 AND source=$2) OR EXISTS(SELECT 1 FROM link_release WHERE resource_id=$1 AND source=$2)")
-                .bind(id)
-                .bind(source.id())
-                .fetch_one(pool)
-                .await?;
+            if stored.is_none() {
+                stored = Some(stored_sources(pool, id).await?);
+            }
+            let had = stored.as_ref().is_some_and(|s| s.contains(source.id()));
             if had {
                 record(pool, id, source.id(), Found::default(), source.ttl(), cfg)
                     .await
@@ -1295,6 +1344,7 @@ async fn one(
                 tracing::error!(resource = %id, source = source.id(), "also-on lookup panicked");
                 Err(anyhow::anyhow!("lookup panicked"))
             });
+        stored = None;
         match lookup {
             Ok(found) => {
                 reread |= found.reread;
@@ -1305,9 +1355,25 @@ async fn one(
                 }
                 let lifetime = source.ttl();
                 check_key_forms(source.as_ref(), &found);
-                record(pool, id, source.id(), found, source.ttl(), cfg)
-                    .await
-                    .with_context(|| format!("record {}", source.id()))?;
+                // Nothing found replaces nothing unless the source holds rows: only then is
+                // there anything to clear, and a transaction with its locks to take.
+                let nothing = found.keys.is_empty()
+                    && found.links.is_empty()
+                    && found.facts.is_empty()
+                    && found.editions.is_empty();
+                let clears = if nothing {
+                    let held = stored_sources(pool, id).await?;
+                    let clears = held.contains(source.id());
+                    stored = Some(held);
+                    clears
+                } else {
+                    true
+                };
+                if clears {
+                    record(pool, id, source.id(), found, source.ttl(), cfg)
+                        .await
+                        .with_context(|| format!("record {}", source.id()))?;
+                }
                 next = Some(next.map_or(lifetime, |n| n.min(lifetime)));
                 subject.keys = sqlx::query_as("SELECT key,source FROM resource_key WHERE resource_id=$1 AND expires_at>now() AND source NOT IN (SELECT source FROM also_on_source_off) ORDER BY key")
                     .bind(id)

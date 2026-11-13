@@ -57,12 +57,9 @@ pub fn card(
     status: u16,
     body: &[u8],
 ) -> Result<Option<ResourceMeta>> {
-    match status {
-        200 => {}
-        404 => return Ok(None),
-        s => anyhow::bail!("GLEIF answered {s}"),
-    }
-    let v: Value = serde_json::from_slice(body)?;
+    let Some(v) = super::kit::json(status, body, &[404])? else {
+        return Ok(None);
+    };
     let a = &v["data"]["attributes"];
     anyhow::ensure!(a["lei"] == lei, "GLEIF answered for another LEI");
     let entity = &a["entity"];

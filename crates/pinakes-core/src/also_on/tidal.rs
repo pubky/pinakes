@@ -8,130 +8,36 @@
 //! and `PINAKES_TIDAL_CLIENT_SECRET`), through the client-credentials grant. A batch of links asks
 //! for up to 20 albums or tracks at once (`filter[id]`).
 use super::{
-    client_credentials::{self, slot_key, Api},
+    client_credentials::{self, slot_key},
+    tidal_api::{api_object, TidalConfig, API, JSON_API, TIDAL},
     Context, Fact, Found, Key, Source, Subject,
 };
 use crate::{
-    event::adapters::SecretKey,
     music::{self, Level, Service},
+    music_sources::Kind,
     resolver::egress::{FetchOptions, Fetched},
 };
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
-/// TIDAL's developer API credentials (`[tidal] client_id` and `client_secret`, or
-/// `PINAKES_TIDAL_CLIENT_ID` and `PINAKES_TIDAL_CLIENT_SECRET`) and the country its catalogue is
-/// read in. Without both, TIDAL is never asked.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct TidalConfig {
-    pub client_id: Option<SecretKey>,
-    pub client_secret: Option<SecretKey>,
-    /// An ISO 3166-1 alpha-2 code in upper case, `US` by default.
-    pub country: String,
-}
-impl Default for TidalConfig {
-    fn default() -> Self {
-        Self {
-            client_id: None,
-            client_secret: None,
-            country: "US".into(),
-        }
-    }
-}
-impl TidalConfig {
-    pub(crate) fn pair(&self) -> Option<(String, String)> {
-        match (self.client_id.as_deref(), self.client_secret.as_deref()) {
-            (Some(id), Some(secret)) if !id.trim().is_empty() && !secret.trim().is_empty() => {
-                Some((id.trim().to_owned(), secret.trim().to_owned()))
-            }
-            _ => None,
-        }
-    }
-}
-impl super::OwnSection for TidalConfig {
-    const NAME: &'static str = "tidal";
-    const VARIABLES: &'static [(&'static str, &'static str)] = &[
-        ("PINAKES_TIDAL_CLIENT_ID", "client_id"),
-        ("PINAKES_TIDAL_CLIENT_SECRET", "client_secret"),
-    ];
-    fn check(&self) -> Result<()> {
-        anyhow::ensure!(
-            COUNTRIES.contains(&self.country.as_str()),
-            "tidal.country must be an ISO 3166-1 alpha-2 country code in upper case, like US"
-        );
-        Ok(())
-    }
-}
-/// The ISO 3166-1 alpha-2 codes in use (tzdata's `iso3166.tab`): a TIDAL country must be one,
-/// so a typo stops startup instead of failing every request.
-const COUNTRIES: &[&str] = &[
-    "AD", "AE", "AF", "AG", "AI", "AL", "AM", "AO", "AQ", "AR", "AS", "AT", "AU", "AW", "AX", "AZ",
-    "BA", "BB", "BD", "BE", "BF", "BG", "BH", "BI", "BJ", "BL", "BM", "BN", "BO", "BQ", "BR", "BS",
-    "BT", "BV", "BW", "BY", "BZ", "CA", "CC", "CD", "CF", "CG", "CH", "CI", "CK", "CL", "CM", "CN",
-    "CO", "CR", "CU", "CV", "CW", "CX", "CY", "CZ", "DE", "DJ", "DK", "DM", "DO", "DZ", "EC", "EE",
-    "EG", "EH", "ER", "ES", "ET", "FI", "FJ", "FK", "FM", "FO", "FR", "GA", "GB", "GD", "GE", "GF",
-    "GG", "GH", "GI", "GL", "GM", "GN", "GP", "GQ", "GR", "GS", "GT", "GU", "GW", "GY", "HK", "HM",
-    "HN", "HR", "HT", "HU", "ID", "IE", "IL", "IM", "IN", "IO", "IQ", "IR", "IS", "IT", "JE", "JM",
-    "JO", "JP", "KE", "KG", "KH", "KI", "KM", "KN", "KP", "KR", "KW", "KY", "KZ", "LA", "LB", "LC",
-    "LI", "LK", "LR", "LS", "LT", "LU", "LV", "LY", "MA", "MC", "MD", "ME", "MF", "MG", "MH", "MK",
-    "ML", "MM", "MN", "MO", "MP", "MQ", "MR", "MS", "MT", "MU", "MV", "MW", "MX", "MY", "MZ", "NA",
-    "NC", "NE", "NF", "NG", "NI", "NL", "NO", "NP", "NR", "NU", "NZ", "OM", "PA", "PE", "PF", "PG",
-    "PH", "PK", "PL", "PM", "PN", "PR", "PS", "PT", "PW", "PY", "QA", "RE", "RO", "RS", "RU", "RW",
-    "SA", "SB", "SC", "SD", "SE", "SG", "SH", "SI", "SJ", "SK", "SL", "SM", "SN", "SO", "SR", "SS",
-    "ST", "SV", "SX", "SY", "SZ", "TC", "TD", "TF", "TG", "TH", "TJ", "TK", "TL", "TM", "TN", "TO",
-    "TR", "TT", "TV", "TW", "TZ", "UA", "UG", "UM", "US", "UY", "UZ", "VA", "VC", "VE", "VG", "VI",
-    "VN", "VU", "WF", "WS", "YE", "YT", "ZA", "ZM", "ZW",
-];
-
-const AUTH: &str = "https://auth.tidal.com/v1/oauth2/token";
-pub(crate) const API: &str = "https://openapi.tidal.com/v2";
 /// The most IDs one `filter[id]` request takes.
 const BATCH: usize = 20;
-/// TIDAL's JSON:API answers.
-const JSON_API: &str = "application/vnd.api+json";
 
-/// An album or a track, as the API names its collection, the attribute read and the key's
-/// namespace.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum Kind {
-    Album,
-    Track,
+/// The kind of a TIDAL album or track link.
+fn kind_of(link: &music::Link) -> Option<Kind> {
+    match (link.service, link.level) {
+        (Service::Tidal, Level::Album) => Some(Kind::Album),
+        (Service::Tidal, Level::Track) => Some(Kind::Track),
+        _ => None,
+    }
 }
-impl Kind {
-    fn of(link: &music::Link) -> Option<Self> {
-        match (link.service, link.level) {
-            (Service::Tidal, Level::Album) => Some(Self::Album),
-            (Service::Tidal, Level::Track) => Some(Self::Track),
-            _ => None,
-        }
-    }
-    fn collection(self) -> &'static str {
-        match self {
-            Self::Album => "albums",
-            Self::Track => "tracks",
-        }
-    }
-    fn attribute(self) -> &'static str {
-        match self {
-            Self::Album => "barcodeId",
-            Self::Track => "isrc",
-        }
-    }
-    fn namespace(self) -> &'static str {
-        match self {
-            Self::Album => "upc",
-            Self::Track => "isrc",
-        }
-    }
-    fn normal(self, value: &str) -> Option<String> {
-        match self {
-            Self::Album => crate::barcode::gtin13(value),
-            Self::Track => music::isrc(value),
-        }
+/// The attribute of an album or a track that holds its barcode or its ISRC.
+fn attribute(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Album => "barcodeId",
+        Kind::Track => "isrc",
     }
 }
 
@@ -156,13 +62,13 @@ impl Source for Tidal {
         config.section::<TidalConfig>().pair().is_some()
     }
     fn applies(&self, subject: &Subject) -> bool {
-        music::parse(&subject.uri).is_some_and(|l| Kind::of(&l).is_some())
+        music::parse(&subject.uri).is_some_and(|l| kind_of(&l).is_some())
     }
     async fn prefetch(&self, cx: &Context, uris: &[String]) {
         let wanted: BTreeSet<(Kind, String)> = uris
             .iter()
             .filter_map(|u| music::parse(u))
-            .filter_map(|l| Some((Kind::of(&l)?, l.id)))
+            .filter_map(|l| Some((kind_of(&l)?, l.id)))
             .collect();
         for kind in [Kind::Album, Kind::Track] {
             let ids: Vec<&str> = wanted
@@ -185,7 +91,7 @@ impl Source for Tidal {
         }
     }
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
-        let Some((kind, link)) = music::parse(&subject.uri).and_then(|l| Some((Kind::of(&l)?, l)))
+        let Some((kind, link)) = music::parse(&subject.uri).and_then(|l| Some((kind_of(&l)?, l)))
         else {
             return Ok(Found::default());
         };
@@ -193,7 +99,7 @@ impl Source for Tidal {
         let Some(attributes) = item(cx, kind, &link.id).await? else {
             return Ok(found);
         };
-        let Some(value) = attributes[kind.attribute()]
+        let Some(value) = attributes[attribute(kind)]
             .as_str()
             .and_then(|v| kind.normal(v))
         else {
@@ -229,14 +135,6 @@ fn item_url(cx: &Context, kind: Kind, id: &str) -> String {
         cx.config.section::<TidalConfig>().country
     )
 }
-/// TIDAL's API and its token endpoint (`client_credentials`).
-const TIDAL: Api = Api {
-    service: "tidal",
-    label: "TIDAL",
-    auth: AUTH,
-    auth_class: "tidal_auth",
-    busy_class: "tidal_busy",
-};
 /// How the API is asked: with the client-credentials token, its answers cached by the pair.
 fn api_options(token: &str, slot: &[u8; 32]) -> FetchOptions {
     client_credentials::api_options(token, slot, JSON_API, &[JSON_API])
@@ -268,44 +166,6 @@ async fn item(cx: &Context, kind: Kind, id: &str) -> Result<Option<Value>> {
         (data["id"].as_str() == Some(id) && data["type"].as_str() == Some(kind.collection()))
             .then(|| data["attributes"].clone()),
     )
-}
-
-/// The albums a TIDAL track is on, every one TIDAL names (a single and its album may share the
-/// track); none when TIDAL has no such track.
-pub(crate) async fn track_albums(cx: &Context, track: &str) -> Result<Vec<String>> {
-    let country = &cx.config.section::<TidalConfig>().country;
-    let url = format!("{API}/tracks/{track}?countryCode={country}&include=albums");
-    Ok(api_object(cx, &url)
-        .await?
-        .filter(|v| v["data"]["id"].as_str() == Some(track))
-        .map(|v| items(&v["data"]["relationships"]["albums"], "albums"))
-        .unwrap_or_default())
-}
-/// The IDs of the items of `kind` a relationship lists.
-pub fn items(v: &Value, kind: &str) -> Vec<String> {
-    v["data"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|i| i["type"] == kind)
-        .filter_map(|i| i["id"].as_str().map(str::to_owned))
-        .collect()
-}
-/// One answer of the API, with the configured pair.
-pub(crate) async fn api_object(cx: &Context, url: &str) -> Result<Option<Value>> {
-    let (client_id, secret) = cx
-        .config
-        .section::<TidalConfig>()
-        .pair()
-        .context("no TIDAL credentials")?;
-    client_credentials::object(
-        &TIDAL,
-        cx,
-        (&client_id, &secret),
-        url,
-        (JSON_API, &[JSON_API]),
-    )
-    .await
 }
 
 /// Up to 20 albums or tracks in one request: each item's own request finds its answer cached,
@@ -396,65 +256,6 @@ mod tests {
     use crate::resolver::RetryLater;
     use client_credentials::{Issued, Slot};
     use std::time::{Duration, Instant};
-
-    /// `[tidal]` is TIDAL's own section: its pair from the file or its own variables, secret in
-    /// every form the config shows, and a country that must exist.
-    #[test]
-    fn the_tidal_section_takes_its_own_variables_and_stays_secret() {
-        use crate::config::{apply_env, apply_named_env, Config};
-        let mut value = Config::defaults().unwrap();
-        let vars = [
-            ("PINAKES_TIDAL_CLIENT_ID", "ABCDEFID"),
-            ("PINAKES_TIDAL_CLIENT_SECRET", "ABCDEFSECRET"),
-            ("PINAKES_OTHER", "x"),
-        ]
-        .map(|(k, v)| (k.to_string(), v.to_string()));
-        // `apply_env` reads only the double-underscore form.
-        apply_env(&mut value, vars.clone()).unwrap();
-        apply_named_env(&mut value, vars).unwrap();
-        let cfg = Config::from_value(value).unwrap();
-        let tidal = cfg.section::<TidalConfig>();
-        assert_eq!(
-            tidal.pair(),
-            Some(("ABCDEFID".into(), "ABCDEFSECRET".into()))
-        );
-        assert_eq!(tidal.country, "US");
-        let shown = format!("{cfg:?} {}", serde_json::to_string(&cfg).unwrap());
-        assert!(!shown.contains("ABCDEF"), "{shown}");
-        // An empty variable leaves the file's value.
-        let mut value = Config::defaults().unwrap();
-        value["tidal"]["client_id"] = "FROMFILE".into();
-        apply_named_env(&mut value, [("PINAKES_TIDAL_CLIENT_ID".into(), "".into())]).unwrap();
-        assert_eq!(value["tidal"]["client_id"], "FROMFILE");
-        assert_eq!(COUNTRIES.len(), 249);
-        let with = |country: &str| {
-            let mut value = Config::defaults().unwrap();
-            value["tidal"]["country"] = country.into();
-            Config::from_value(value)
-        };
-        for country in ["us", "USA", "", "UX", "EU"] {
-            assert!(with(country).is_err(), "{country}");
-        }
-        assert_eq!(with("CH").unwrap().section::<TidalConfig>().country, "CH");
-    }
-
-    #[test]
-    fn credentials_stay_secret_and_both_are_needed() {
-        let config: TidalConfig = serde_json::from_value(
-            serde_json::json!({"client_id": "ABCDEFID", "client_secret": "ABCDEFSECRET"}),
-        )
-        .unwrap();
-        assert_eq!(
-            config.pair(),
-            Some(("ABCDEFID".into(), "ABCDEFSECRET".into()))
-        );
-        assert_eq!(config.country, "US");
-        let shown = format!("{config:?} {}", serde_json::to_string(&config).unwrap());
-        assert!(!shown.contains("ABCDEF"), "{shown}");
-        let half: TidalConfig =
-            serde_json::from_value(serde_json::json!({"client_id": "ABCDEFID"})).unwrap();
-        assert_eq!(half.pair(), None);
-    }
 
     /// A token TIDAL rejects (401) is dropped, and the next lookup asks TIDAL again with a new
     /// one: the 401 was never cached for the pair.
@@ -553,7 +354,7 @@ mod tests {
     }
     #[test]
     fn only_tidal_albums_and_tracks_apply() {
-        let kind = |uri: &str| music::parse(uri).and_then(|l| Kind::of(&l));
+        let kind = |uri: &str| music::parse(uri).and_then(|l| kind_of(&l));
         assert_eq!(kind("https://tidal.com/album/199574241"), Some(Kind::Album));
         assert_eq!(
             kind("https://listen.tidal.com/track/199574242"),

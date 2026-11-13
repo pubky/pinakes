@@ -781,6 +781,16 @@ pub fn activitypub(uri: &str, v: &Value, base: &Url, ttl: u64) -> Option<Resourc
     Some(d)
 }
 async fn parse_activitypub(uri: &str, f: &Fetched, ttl: u64) -> Result<Option<ResourceMeta>> {
+    // An ActivityPub object is a JSON object: a body that starts otherwise (an HTML page) is
+    // none, and takes no copy and no parse slot.
+    let object = f
+        .body
+        .iter()
+        .find(|&&b| !matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
+        .is_some_and(|&b| b == b'{');
+    if !object {
+        return Ok(None);
+    }
     let (uri, f) = (uri.to_owned(), f.clone());
     crate::resolver::html::blocking(move || {
         let Ok(v) = serde_json::from_slice::<Value>(&f.body) else {
@@ -792,10 +802,48 @@ async fn parse_activitypub(uri: &str, f: &Fetched, ttl: u64) -> Result<Option<Re
     })
     .await?
 }
+/// The metadata endpoints a page's head advertises: its ActivityPub object and its RSS feed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Alternates {
+    pub activitypub: Option<String>,
+    pub rss: Option<String>,
+}
+/// The first of each among the first 64 `head link[rel='alternate']` of `html`, read at `base`.
+pub(crate) fn alternates(html: &scraper::Html, base: &Url) -> Alternates {
+    let mut found = Alternates::default();
+    for el in html
+        .select(&scraper::Selector::parse("head link[rel='alternate']").unwrap())
+        .take(64)
+    {
+        let Some(ty) = el.value().attr("type") else {
+            continue;
+        };
+        let Some(href) = el
+            .value()
+            .attr("href")
+            .and_then(|s| web::origin_url(base, s))
+        else {
+            continue;
+        };
+        if found.activitypub.is_none()
+            && (ty.contains("activity+json")
+                || (ty.contains("ld+json") && ty.contains("activitystreams")))
+        {
+            found.activitypub = Some(href.clone());
+        }
+        if found.rss.is_none() && ty.contains("rss+xml") {
+            found.rss = Some(href);
+        }
+    }
+    found
+}
+/// `alternates` are the page's (`web::Extracted::alternates`): `None` when its body was not read
+/// as HTML there, and it is parsed for them here.
 pub async fn enrich(
     uri: &str,
     f: &Fetched,
     mut doc: ResourceMeta,
+    alternates: Option<Alternates>,
     egress: &Egress,
     cfg: &CardConfig,
     discover_feeds: bool,
@@ -808,40 +856,23 @@ pub async fn enrich(
             return Ok(d);
         }
     }
-    // One bounded parse for advertised metadata endpoints. Never follow arbitrary links.
-    // Read where the page was served, without a credential its address carries (`direct`
-    // below still compares the address itself).
-    let (body, base) = (f.body.clone(), web::read_at(&f.url));
-    let (ap, rss) = super::html::blocking(move || -> anyhow::Result<_> {
-        let html = crate::resolver::html::document(&String::from_utf8_lossy(&body))?;
-        let (mut ap, mut rss) = (None, None);
-        for el in html
-            .select(&scraper::Selector::parse("head link[rel='alternate']").unwrap())
-            .take(64)
-        {
-            let Some(ty) = el.value().attr("type") else {
-                continue;
-            };
-            let Some(href) = el
-                .value()
-                .attr("href")
-                .and_then(|s| web::origin_url(&base, s))
-            else {
-                continue;
-            };
-            if ap.is_none()
-                && (ty.contains("activity+json")
-                    || (ty.contains("ld+json") && ty.contains("activitystreams")))
-            {
-                ap = Some(href.clone());
-            }
-            if rss.is_none() && ty.contains("rss+xml") {
-                rss = Some(href);
-            }
+    // Only advertised metadata endpoints. Never follow arbitrary links. They are read where the
+    // page was served, without a credential its address carries (`direct` below still compares
+    // the address itself). A body the page read did not parse gets one bounded parse here.
+    let Alternates {
+        activitypub: ap,
+        rss,
+    } = match alternates {
+        Some(found) => found,
+        None => {
+            let (body, base) = (f.body.clone(), web::read_at(&f.url));
+            super::html::blocking(move || -> anyhow::Result<_> {
+                let html = crate::resolver::html::document(&String::from_utf8_lossy(&body))?;
+                Ok(self::alternates(&html, &base))
+            })
+            .await??
         }
-        Ok((ap, rss))
-    })
-    .await??;
+    };
     let ap = ap.or_else(|| {
         crate::event::service::header_alternate(f.validators.link.as_deref(), &web::read_at(&f.url))
             .map(|v| v.0)
@@ -1466,5 +1497,101 @@ mod tests {
             assert!(budget(kind) >= Duration::from_secs(11), "{kind}");
             assert!(budget(kind) < crate::queue::RESOLVE_TIMEOUT, "{kind}");
         }
+    }
+
+    /// Only a body that starts as a JSON object is read as an ActivityPub object, whatever its
+    /// content type says: any other (an HTML page) asks for no parse job.
+    #[tokio::test]
+    async fn only_a_json_object_is_read_as_an_activitypub_object() {
+        let uri = "https://social.example/notes/1";
+        let note = r#"{"type":"Note","id":"https://social.example/notes/1","to":"https://www.w3.org/ns/activitystreams#Public","content":"<p>Hello</p>"}"#;
+        let read = move |content_type: &'static str, body: String| async move {
+            let f = crate::sources::fixture::page(uri, content_type, body.into(), None);
+            let before = crate::resolver::html::counted::jobs();
+            let doc = parse_activitypub(uri, &f, 100).await.unwrap();
+            (crate::resolver::html::counted::jobs() - before, doc)
+        };
+        // The object, under its own type, another, or none, and after JSON's white space.
+        for (content_type, body) in [
+            ("application/activity+json", note.to_owned()),
+            ("text/html", note.to_owned()),
+            ("", format!(" \t\r\n{note}")),
+        ] {
+            let (jobs, doc) = read(content_type, body).await;
+            assert_eq!(jobs, 1, "{content_type}");
+            let doc = doc.unwrap();
+            assert_eq!(doc.source, "activitypub", "{content_type}");
+            assert_eq!(doc.type_name, "SocialMediaPosting", "{content_type}");
+            assert_eq!(doc.description.as_deref(), Some("Hello"), "{content_type}");
+        }
+        // A JSON object that is no ActivityPub object is read and is none.
+        let (jobs, doc) = read("application/json", r#"{"type":"Video"}"#.into()).await;
+        assert_eq!((jobs, doc.is_none()), (1, true));
+        // Anything else is none without a parse job: a page, a list, text, a byte order mark
+        // before the object (no JSON), nothing.
+        for body in [
+            format!("<html><head><title>{note}</title></head></html>"),
+            format!("[{note}]"),
+            "Note".to_owned(),
+            format!("\u{feff}{note}"),
+            String::new(),
+            "  ".to_owned(),
+        ] {
+            let (jobs, doc) = read("application/activity+json", body.clone()).await;
+            assert_eq!((jobs, doc.is_none()), (0, true), "{body}");
+        }
+    }
+
+    /// `enrich` asks the endpoints the page read found in the head, without parsing the page
+    /// again; a body that read did not parse is parsed here, once.
+    #[tokio::test(start_paused = true)]
+    async fn enrichment_takes_the_alternates_the_page_read_found() {
+        let uri = "https://blog.example/post";
+        let feed = "https://blog.example/feed.xml";
+        let body = r#"<html><head><title>Post</title><link rel="alternate" type="application/rss+xml" href="/feed.xml"></head><body></body></html>"#;
+        let f = crate::sources::fixture::page(uri, "text/html", body.into(), None);
+        let cfg = CardConfig::default();
+        let found = Alternates {
+            activitypub: None,
+            rss: Some(feed.to_owned()),
+        };
+        // What was carried, what a parse of the body costs, and the endpoints asked.
+        for (carried, jobs, asked) in [
+            (Some(found.clone()), 0, vec![feed]),
+            // Nothing found in the head: the body's own link is not read again.
+            (Some(Alternates::default()), 0, vec![]),
+            (None, 1, vec![feed]),
+        ] {
+            // The feed's host answers "gone" as plain text: nothing more to parse.
+            let (egress, recorded) =
+                crate::sources::fixture::egress(vec![(feed, 404, "text/plain", b"gone".to_vec())]);
+            let before = crate::resolver::html::counted::jobs();
+            let doc = enrich(
+                uri,
+                &f,
+                ResourceMeta::new(uri, "web", 100),
+                carried.clone(),
+                &egress,
+                &cfg,
+                true,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                crate::resolver::html::counted::jobs() - before,
+                jobs,
+                "{carried:?}"
+            );
+            assert_eq!(recorded.asked(), asked, "{carried:?}");
+            assert_eq!(doc.source, "web", "{carried:?}");
+        }
+        // The head's links, as the page read takes them from its tree.
+        let base = Url::parse(uri).unwrap();
+        let read = crate::resolver::html::blocking(move || {
+            alternates(&crate::resolver::html::document(body).unwrap(), &base)
+        })
+        .await
+        .unwrap();
+        assert_eq!(read, found);
     }
 }

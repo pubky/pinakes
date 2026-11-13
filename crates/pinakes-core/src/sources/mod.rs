@@ -830,12 +830,21 @@ pub fn markdown_excerpt(markdown: &str) -> String {
             break;
         }
     }
-    let out = without_addresses(&out);
-    let mut cut = out.chars().take(200).collect::<String>();
-    if cut.len() < out.len() {
-        cut.push('…');
+    cut(&without_addresses(&out), 200)
+}
+
+/// At most `max` characters of `text`, with an ellipsis when cut.
+pub fn cut(text: &str, max: usize) -> String {
+    let mut out: String = text.chars().take(max).collect();
+    if out.len() < text.len() {
+        out.push('…');
     }
-    cut
+    out
+}
+
+/// At most `max` characters of `text`, its whitespace flattened, with an ellipsis when cut.
+pub fn excerpt(text: &str, max: usize) -> String {
+    cut(&text.split_whitespace().collect::<Vec<_>>().join(" "), max)
 }
 
 /// `[text](url)` as `text`, without `**`, `__` and backticks.

@@ -103,6 +103,17 @@ fn wall_path(walls: &Walls, path: &str) -> bool {
 /// script redirect stub is a `Redirect` hop, anything else is content.
 /// `Err` when the answer is too complex to parse.
 pub fn inspect(requested: &Url, f: &Fetched) -> anyhow::Result<Page> {
+    if let Some(page) = unparsed(requested, f) {
+        return Ok(page);
+    }
+    let text = String::from_utf8_lossy(&f.body);
+    let html = crate::resolver::html::document(&text)?;
+    Ok(parsed(f, &text, &html))
+}
+/// What the answer's addresses, status and type say before its body is parsed: `None` when
+/// only the parsed body tells ([`parsed`]). An answer that is not HTML is content, unless a
+/// challenge status comes as plain text or without a type.
+pub(crate) fn unparsed(requested: &Url, f: &Fetched) -> Option<Page> {
     let walls = &*WALLS;
     // A redirect from the requested host to a challenge or sign-in host of the same site. A
     // page referenced on such a host itself (`login.example.org/help`) is content.
@@ -115,7 +126,7 @@ pub fn inspect(requested: &Url, f: &Fetched) -> anyhow::Result<Page> {
                 .iter()
                 .any(|p| b.starts_with(p.as_str()))
         {
-            return Ok(Page::Blocked);
+            return Some(Page::Blocked);
         }
     }
     // A requested page redirected to a sign-in path (LinkedIn /authwall, Facebook /login/).
@@ -126,21 +137,25 @@ pub fn inspect(requested: &Url, f: &Fetched) -> anyhow::Result<Page> {
         && !wall_path(walls, requested.path())
         && wall_path(walls, f.url.path())
     {
-        return Ok(Page::Blocked);
+        return Some(Page::Blocked);
     }
     if !f.content_type.contains("html")
         && !(matches!(f.status, 403 | 429 | 503)
             && matches!(f.content_type.as_str(), "text/plain" | ""))
     {
-        return Ok(Page::Content);
+        return Some(Page::Content);
     }
     // "Accepted" with nothing in it is a challenge (AWS WAF answers bots so), never a page; an
     // API's empty 202 (not HTML) is its own answer.
     if f.status == 202 && f.body.iter().all(u8::is_ascii_whitespace) {
-        return Ok(Page::Blocked);
+        return Some(Page::Blocked);
     }
-    let text = String::from_utf8_lossy(&f.body);
-    let html = crate::resolver::html::document(&text)?;
+    None
+}
+/// [`inspect`] for an answer [`unparsed`] does not settle: `html` is its body `text`, parsed as
+/// a document.
+pub(crate) fn parsed(f: &Fetched, text: &str, html: &scraper::Html) -> Page {
+    let walls = &*WALLS;
     let title = html
         .select(&select("title"))
         .next()
@@ -174,7 +189,7 @@ pub fn inspect(requested: &Url, f: &Fetched) -> anyhow::Result<Page> {
     // "Accepted" with nothing to read is a challenge (AWS WAF answers bots so: a script that
     // reloads the page), never the page.
     if f.status == 202 && visible.trim().is_empty() {
-        return Ok(Page::Blocked);
+        return Page::Blocked;
     }
     let challenge = matches!(f.status, 403 | 429 | 503);
     let short = visible.trim().len() < 2000;
@@ -192,7 +207,7 @@ pub fn inspect(requested: &Url, f: &Fetched) -> anyhow::Result<Page> {
         .flat_map(|(_, titles)| titles)
         .any(|t| t.eq_ignore_ascii_case(title.trim()));
     if placeholder && !landed.path().trim_end_matches('/').is_empty() {
-        return Ok(Page::Blocked);
+        return Page::Blocked;
     }
     let title_marked = walls.marked(&title);
     let vendor_marked =
@@ -248,7 +263,7 @@ pub fn inspect(requested: &Url, f: &Fetched) -> anyhow::Result<Page> {
                 .iter()
                 .any(|s| html.select(&select(s)).next().is_some()))
     {
-        return Ok(Page::Blocked);
+        return Page::Blocked;
     }
     for el in html.select(&select("meta[http-equiv]")) {
         if el
@@ -263,7 +278,7 @@ pub fn inspect(requested: &Url, f: &Fetched) -> anyhow::Result<Page> {
             if let Some(target) = target {
                 let itself = f.url.join(&target).is_ok_and(|t| t == f.url);
                 if delay <= 10.0 || (short && !itself) {
-                    return Ok(Page::Redirect(target));
+                    return Page::Redirect(target);
                 }
             }
         }
@@ -276,7 +291,7 @@ pub fn inspect(requested: &Url, f: &Fetched) -> anyhow::Result<Page> {
         for marker in ["location.replace(", "location.assign("] {
             if let Some((_, tail)) = body.split_once(marker) {
                 if let Some(target) = quoted(tail) {
-                    return Ok(Page::Redirect(target.to_owned()));
+                    return Page::Redirect(target.to_owned());
                 }
             }
         }
@@ -292,16 +307,16 @@ pub fn inspect(requested: &Url, f: &Fetched) -> anyhow::Result<Page> {
             .next()
             .and_then(|a| a.value().attr("href"))
         {
-            return Ok(Page::Redirect(target.to_owned()));
+            return Page::Redirect(target.to_owned());
         }
         if let Some((_, target)) = title.split_once(':') {
             if !target.trim().is_empty() {
-                return Ok(Page::Redirect(target.trim().into()));
+                return Page::Redirect(target.trim().into());
             }
         }
-        return Ok(Page::Blocked);
+        return Page::Blocked;
     }
-    Ok(Page::Content)
+    Page::Content
 }
 
 #[cfg(test)]

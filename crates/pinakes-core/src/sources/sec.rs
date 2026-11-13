@@ -37,11 +37,7 @@ pub enum Target {
 }
 
 fn cik(value: &str) -> Option<u64> {
-    let digits = value.strip_prefix("CIK").unwrap_or(value);
-    (!digits.is_empty() && digits.len() <= 10 && digits.bytes().all(|b| b.is_ascii_digit()))
-        .then(|| digits.parse().ok())
-        .flatten()
-        .filter(|n| *n > 0)
+    super::kit::number(value.strip_prefix("CIK").unwrap_or(value), 10)
 }
 /// `0001104659-26-000959` from itself or from its 18-digit folder form.
 fn accession(value: &str) -> Option<String> {
@@ -473,13 +469,7 @@ pub fn company_card(mut doc: ResourceMeta, cik: u64, body: &[u8]) -> Result<Reso
         .and_then(cik_of)
         .or_else(|| v["cik"].as_u64());
     anyhow::ensure!(got == Some(cik), "EDGAR answered for another company");
-    let text = |key: &str| {
-        v[key]
-            .as_str()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned)
-    };
+    let text = |key: &str| super::text(&v[key]);
     doc.set_type("Corporation");
     doc.name = text("name");
     let tickers: Vec<String> = v["tickers"]
@@ -714,10 +704,7 @@ impl Source for Sec {
         }
         let target = Target::of_uri(uri).context("not an EDGAR link")?;
         if let Target::Release { release, file } = &target {
-            let json = FetchOptions {
-                accept: Some("application/json".into()),
-                ..Default::default()
-            };
+            let json = FetchOptions::json();
             let f = cx.fetch(&docket_url(release), &json).await?;
             anyhow::ensure!(f.status == 200, "Federal Register answered {}", f.status);
             // The document's card from whichever switched-on source reads `fr:` documents.

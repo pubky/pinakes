@@ -148,6 +148,14 @@ impl Transport for Captured {
     }
 }
 
+/// Whether this build has the sources whose services say which album a track is on (`tidal`,
+/// `deezer`, `itunes`, `spotify`): a test that places links returns early without one of them.
+fn has_services() -> bool {
+    let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
+    ["tidal", "deezer", "itunes", "spotify"]
+        .iter()
+        .all(|id| registered.contains(id))
+}
 /// TIDAL with a pair (each test its own: tokens are kept per pair), Deezer on or off.
 fn config(pair: &str, deezer: bool) -> Config {
     switched(pair, &[("deezer", deezer)])
@@ -247,6 +255,9 @@ fn others(found: &Found) -> Vec<String> {
 /// services name no track's album here).
 #[tokio::test]
 async fn get_luckys_links_are_placed_on_random_access_memories() {
+    if !has_services() {
+        return;
+    }
     let transport = Captured::new();
     let cx = context(transport.clone(), with_pages(config("editions-off", false)));
     let subject = subject(
@@ -309,6 +320,9 @@ async fn get_luckys_links_are_placed_on_random_access_memories() {
 /// With Deezer's source on, its link on that album is placed too.
 #[tokio::test]
 async fn with_deezer_on_its_link_on_the_album_is_placed() {
+    if !has_services() {
+        return;
+    }
     let transport = Captured::new();
     let cx = context(transport.clone(), with_pages(config("editions-on", true)));
     let subject = subject(
@@ -343,6 +357,9 @@ const KIND_OF_BLUE_LINKS: &[&str] = &[
 /// pages of that release are placed on it; another Deezer album is not.
 #[tokio::test]
 async fn kind_of_blues_album_pages_are_placed_on_its_own_release() {
+    if !has_services() {
+        return;
+    }
     // Keyed by its releases, or (as MusicBrainz relates the link to two releases of one group) by
     // the group alone: its own releases are then those its URL is related to.
     for keys in [
@@ -399,6 +416,9 @@ async fn kind_of_blues_album_pages_are_placed_on_its_own_release() {
 /// before (kept), and the run comes back sooner; the other services' links are placed.
 #[tokio::test]
 async fn a_busy_service_keeps_its_links_places() {
+    if !has_services() {
+        return;
+    }
     let transport = Captured::busy(&["itunes.apple.com"]);
     let cx = context(transport.clone(), config("editions-busy", false));
     let subject = subject(
@@ -430,6 +450,9 @@ async fn a_busy_service_keeps_its_links_places() {
 /// album page nobody linked; with the `spotify` source off, no Spotify page is read.
 #[tokio::test]
 async fn a_spotify_link_is_placed_by_its_own_page() {
+    if !has_services() {
+        return;
+    }
     let apple = "https://music.apple.com/us/song/617154366";
     let links = &[GET_LUCKY];
     let transport = Captured::new();
@@ -480,6 +503,9 @@ async fn a_spotify_link_is_placed_by_its_own_page() {
 /// placed.
 #[tokio::test]
 async fn refused_spotify_credentials_place_nothing_and_fail_nothing() {
+    if !has_services() {
+        return;
+    }
     let mut config = config("editions-refused", false);
     config.sections.set(
         "spotify",
@@ -528,6 +554,9 @@ async fn refused_spotify_credentials_place_nothing_and_fail_nothing() {
 /// nothing.
 #[tokio::test]
 async fn links_no_service_can_place_ask_nothing() {
+    if !has_services() {
+        return;
+    }
     let transport = Captured::new();
     let cx = context(transport.clone(), config("editions-unplaceable", false));
     let subject = subject(
@@ -546,6 +575,9 @@ async fn links_no_service_can_place_ask_nothing() {
 /// A card with no link to place asks nothing.
 #[tokio::test]
 async fn nothing_to_place_asks_nothing() {
+    if !has_services() {
+        return;
+    }
     let transport = Captured::new();
     let cx = context(transport.clone(), config("editions-none", false));
     let subject = subject(
@@ -909,6 +941,9 @@ async fn a_group_that_changes_places_its_cards_links_again(pool: PgPool) {
 /// place.
 #[tokio::test]
 async fn a_list_cut_short_ranks_only_the_cards_own_release() {
+    if !has_services() {
+        return;
+    }
     let transport = Captured::truncated();
     let cx = context(transport.clone(), with_pages(config("editions-cut", false)));
     let subject = subject(
@@ -936,6 +971,9 @@ async fn a_list_cut_short_ranks_only_the_cards_own_release() {
 /// Of one service, at most eight links are asked about; the rest keep their places.
 #[tokio::test]
 async fn links_past_the_cap_keep_their_places() {
+    if !has_services() {
+        return;
+    }
     let transport = Captured::new();
     let cx = context(transport.clone(), with_pages(config("editions-cap", false)));
     let apple: Vec<String> = (1..=9)
@@ -953,6 +991,9 @@ async fn links_past_the_cap_keep_their_places() {
 /// API refuses the credentials, the pages switch off: its own release ranks first.
 #[tokio::test]
 async fn a_spotify_cards_own_page_names_its_own_release() {
+    if !has_services() {
+        return;
+    }
     let mut config = config("editions-own-page", false);
     config.sections.set(
         "spotify",
@@ -990,6 +1031,9 @@ async fn a_spotify_cards_own_page_names_its_own_release() {
 /// places stay as recorded, and its run comes back sooner.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn the_worker_keeps_the_places_a_failing_service_could_not_tell(pool: PgPool) {
+    if !has_services() {
+        return;
+    }
     let cfg = Config::default().also_on;
     let card = save(&pool, GET_LUCKY, "MusicRecording", Some("Spotify")).await;
     also_on::record(
@@ -1274,6 +1318,9 @@ async fn an_alias_assignment_places_its_groups_links_again(pool: PgPool) {
 /// master, the group itself, is not.
 #[tokio::test]
 async fn an_album_cards_own_release_pages_are_its_links() {
+    if !has_services() {
+        return;
+    }
     let transport = Captured::new();
     let cx = context(transport.clone(), config("editions-own-pages", false));
     let subject = subject(
@@ -1327,6 +1374,9 @@ async fn an_album_cards_own_release_pages_are_its_links() {
 /// third run.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn an_album_cards_own_pages_stay_from_run_to_run(pool: PgPool) {
+    if !has_services() {
+        return;
+    }
     let cfg = Config::default().also_on;
     let uri = "https://open.spotify.com/album/1weenld61qoidwYuZ1GESA";
     let card = save(&pool, uri, "MusicAlbum", Some("Spotify")).await;
@@ -1409,6 +1459,9 @@ async fn an_album_cards_own_pages_stay_from_run_to_run(pool: PgPool) {
 /// An album card with no link of another service yet still derives its own release's pages.
 #[tokio::test]
 async fn an_album_card_with_nothing_to_place_derives_its_own_pages() {
+    if !has_services() {
+        return;
+    }
     let transport = Captured::new();
     let cx = context(transport.clone(), config("editions-alone", false));
     let subject = subject(

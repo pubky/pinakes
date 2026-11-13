@@ -21,10 +21,7 @@ fn board(value: &str) -> Option<&str> {
     .then_some(value)
 }
 fn job(value: &str) -> Option<u64> {
-    ((1..=16).contains(&value.len()) && value.bytes().all(|b| b.is_ascii_digit()))
-        .then(|| value.parse().ok())
-        .flatten()
-        .filter(|n| *n > 0)
+    super::kit::number(value, 16)
 }
 
 /// The board and job of `job-boards.greenhouse.io/{board}/jobs/{id}`, its `boards.` spelling, its
@@ -63,12 +60,9 @@ pub fn card(
     status: u16,
     body: &[u8],
 ) -> Result<Option<ResourceMeta>> {
-    match status {
-        200 => {}
-        404 => return Ok(None),
-        s => anyhow::bail!("Greenhouse answered {s}"),
-    }
-    let v: Value = serde_json::from_slice(body)?;
+    let Some(v) = super::kit::json(status, body, &[404])? else {
+        return Ok(None);
+    };
     anyhow::ensure!(
         v["id"].as_u64() == Some(id),
         "Greenhouse answered for another posting"
@@ -170,10 +164,7 @@ impl Source for Greenhouse {
                 &format!(
                     "https://boards-api.greenhouse.io/v1/boards/{board}/jobs/{id}?pay_transparency=true"
                 ),
-                &FetchOptions {
-                    accept: Some("application/json".into()),
-                    ..Default::default()
-                },
+                &FetchOptions::json(),
             )
             .await?;
         let doc = cx.card(uri, self);

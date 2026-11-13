@@ -144,11 +144,9 @@ fn iso_date(v: &Value) -> Option<String> {
 
 /// The document, or `None` when the API has no document with this number (404).
 pub fn parse(status: u16, raw: &[u8], number: &str) -> Result<Option<Document>> {
-    match status {
-        200 => {}
-        404 => return Ok(None),
-        s => anyhow::bail!("unexpected status {s}"),
-    }
+    let Some(raw) = super::kit::body(status, raw, &[404])? else {
+        return Ok(None);
+    };
     let number = document_number(number).context("not a document number")?;
     let record: Value = serde_json::from_slice(raw)?;
     anyhow::ensure!(
@@ -358,15 +356,7 @@ impl Source for FederalRegister {
             return Ok(cx.missing(uri, self));
         };
         let url = api_url(&number).context("document number")?;
-        let f = cx
-            .fetch(
-                &url,
-                &FetchOptions {
-                    accept: Some("application/json".into()),
-                    ..Default::default()
-                },
-            )
-            .await?;
+        let f = cx.fetch(&url, &FetchOptions::json()).await?;
         Ok(match parse(f.status, &f.body, &number)? {
             Some(document) => card(cx.card(uri, self), document),
             None => cx.missing(uri, self),

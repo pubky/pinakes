@@ -20,7 +20,10 @@
 //! Each link ends a run placed, on another release, unplaced, or kept: a link whose place the run
 //! cannot tell (its service failed or refused the credentials, the release list was cut short, a
 //! cap was reached) keeps the place recorded before. Only MusicBrainz failing fails the run.
-use super::{deezer, itunes, spotify, tidal, Context, Edition, Fact, Found, Link, Source, Subject};
+use super::{
+    deezer_api, itunes_api, spotify_api, tidal_api, Context, Edition, Fact, Found, Link, Source,
+    Subject,
+};
 use crate::{
     hubs::{self, musicbrainz, MbKind},
     music::{self, Level, Service},
@@ -122,7 +125,7 @@ impl Source for Editions {
                     Ok(albums) => albums,
                     Err(error) => {
                         own_unknown = true;
-                        if !refusal(&error) {
+                        if !super::client_credentials::refused(&error) {
                             found.retry_after = Some(RETRY);
                         }
                         vec![]
@@ -551,7 +554,7 @@ async fn place_tracks(
                     "a track's album failed; its place stays"
                 );
                 Outcome::Keep {
-                    retry: !refusal(&error),
+                    retry: !super::client_credentials::refused(&error),
                 }
             }
         };
@@ -595,31 +598,30 @@ pub fn place(service: Service, albums: &[music::Link], pages: &[Page]) -> Outcom
 /// The albums a track is on, as its own service says ([`placeable`]); none when it says none.
 /// `own`: the card's own track, whose public Spotify page is read where the API does not answer.
 async fn album_of(cx: &Context, track: &music::Link, own: bool) -> Result<Vec<music::Link>> {
-    let own_spotify = own
-        && track.service == Service::Spotify
-        && cx.config.also_on.source_enabled(&spotify::Spotify);
+    let own_spotify =
+        own && track.service == Service::Spotify && super::enabled_by_id(&cx.config, "spotify");
     if !placeable(cx, track.service) && !own_spotify {
         return Ok(vec![]);
     }
     let albums: Vec<String> = match track.service {
-        Service::AppleMusic => itunes::track_album(cx, &track.id)
+        Service::AppleMusic => itunes_api::track_album(cx, &track.id)
             .await?
             .map(|id| format!("https://music.apple.com/album/{id}"))
             .into_iter()
             .collect(),
         Service::Spotify => {
-            spotify::track_album(cx, &track.id, own || cx.config.also_on.spotify_pages)
+            spotify_api::track_album(cx, &track.id, own || cx.config.also_on.spotify_pages)
                 .await?
                 .map(|id| format!("https://open.spotify.com/album/{id}"))
                 .into_iter()
                 .collect()
         }
-        Service::Tidal => tidal::track_albums(cx, &track.id)
+        Service::Tidal => tidal_api::track_albums(cx, &track.id)
             .await?
             .into_iter()
             .map(|id| format!("https://tidal.com/album/{id}"))
             .collect(),
-        Service::Deezer => deezer::track_album(cx, &track.id)
+        Service::Deezer => deezer_api::track_album(cx, &track.id)
             .await?
             .map(|id| format!("https://www.deezer.com/album/{id}"))
             .into_iter()
@@ -632,21 +634,15 @@ async fn album_of(cx: &Context, track: &music::Link, own: bool) -> Result<Vec<mu
 /// iTunes, Spotify by its Web API with the operator's credentials (or its track's public page,
 /// with `[also_on] spotify_pages`), TIDAL with the operator's credentials, Deezer.
 fn placeable(cx: &Context, service: Service) -> bool {
-    let on = |source: &dyn Source| cx.config.also_on.source_enabled(source);
+    // By their IDs: this source goes without each service's own source, and each without it.
+    let on = |id: &str| super::enabled_by_id(&cx.config, id);
     match service {
-        Service::AppleMusic => on(&itunes::ItunesSource),
-        Service::Spotify => on(&spotify::Spotify) && spotify::places(&cx.config),
-        Service::Tidal => on(&tidal::Tidal) && tidal::Tidal.ready(&cx.config),
-        Service::Deezer => on(&deezer::DeezerSource),
+        Service::AppleMusic => on("itunes"),
+        Service::Spotify => on("spotify") && spotify_api::places(&cx.config),
+        Service::Tidal => on("tidal") && tidal_api::configured(&cx.config),
+        Service::Deezer => on("deezer"),
         _ => false,
     }
-}
-/// Whether an error is a service refusing the operator's credentials (its token or its API): it
-/// lasts, so the run does not come back for it.
-fn refusal(error: &anyhow::Error) -> bool {
-    error
-        .downcast_ref::<crate::resolver::RetryLater>()
-        .is_some_and(|r| r.class.ends_with("_auth"))
 }
 
 #[cfg(test)]

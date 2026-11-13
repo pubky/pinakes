@@ -11,64 +11,38 @@
 //! catalogue is read. While this source is on, `editions` asks it which album a Spotify track a
 //! card may show is on; where the API does not answer, and only with `[also_on] spotify_pages`,
 //! the track's public page (its `music:album`).
-use super::{
-    client_credentials,
-    spotify_api::{API, SPOTIFY},
-    Context, Fact, Found, Key, Source, Subject,
+use super::{spotify_api, Context, Fact, Found, Key, Source, Subject};
+use crate::{
+    music::{self, Level, Service},
+    music_sources::Kind,
 };
-use crate::music::{self, Level, Service};
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
 
 /// The credentials and endpoints every source that asks Spotify shares (`spotify_api`).
 pub use super::spotify_api::SpotifyConfig;
 
-/// An album or a track, as the API names its collection, the external ID read and the key's
-/// namespace.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Kind {
-    Album,
-    Track,
+/// The kind of a Spotify album or track link.
+fn kind_of(link: &music::Link) -> Option<Kind> {
+    match (link.service, link.level) {
+        (Service::Spotify, Level::Album) => Some(Kind::Album),
+        (Service::Spotify, Level::Track) => Some(Kind::Track),
+        _ => None,
+    }
 }
-impl Kind {
-    fn of(link: &music::Link) -> Option<Self> {
-        match (link.service, link.level) {
-            (Service::Spotify, Level::Album) => Some(Self::Album),
-            (Service::Spotify, Level::Track) => Some(Self::Track),
-            _ => None,
-        }
+/// The type the API gives the object.
+fn type_name(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Album => "album",
+        Kind::Track => "track",
     }
-    fn collection(self) -> &'static str {
-        match self {
-            Self::Album => "albums",
-            Self::Track => "tracks",
-        }
-    }
-    /// The type the API gives the object.
-    fn type_name(self) -> &'static str {
-        match self {
-            Self::Album => "album",
-            Self::Track => "track",
-        }
-    }
-    fn external_id(self) -> &'static str {
-        match self {
-            Self::Album => "upc",
-            Self::Track => "isrc",
-        }
-    }
-    fn namespace(self) -> &'static str {
-        match self {
-            Self::Album => "upc",
-            Self::Track => "isrc",
-        }
-    }
-    fn normal(self, value: &str) -> Option<String> {
-        match self {
-            Self::Album => crate::barcode::gtin13(value),
-            Self::Track => music::isrc(value),
-        }
+}
+/// The external ID read: an album's barcode or a track's ISRC.
+fn external_id(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Album => "upc",
+        Kind::Track => "isrc",
     }
 }
 
@@ -93,10 +67,10 @@ impl Source for Spotify {
         config.section::<SpotifyConfig>().pair().is_some()
     }
     fn applies(&self, subject: &Subject) -> bool {
-        music::parse(&subject.uri).is_some_and(|l| Kind::of(&l).is_some())
+        music::parse(&subject.uri).is_some_and(|l| kind_of(&l).is_some())
     }
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
-        let Some((kind, link)) = music::parse(&subject.uri).and_then(|l| Some((Kind::of(&l)?, l)))
+        let Some((kind, link)) = music::parse(&subject.uri).and_then(|l| Some((kind_of(&l)?, l)))
         else {
             return Ok(Found::default());
         };
@@ -104,7 +78,7 @@ impl Source for Spotify {
         let Some(record) = object(cx, kind, &link.id).await? else {
             return Ok(found);
         };
-        let Some(value) = record["external_ids"][kind.external_id()]
+        let Some(value) = record["external_ids"][external_id(kind)]
             .as_str()
             .and_then(|v| kind.normal(v))
         else {
@@ -133,112 +107,18 @@ impl Source for Spotify {
     }
 }
 
-/// The album a Spotify track is on: the Web API's record of the track (`/v1/tracks/{id}`) with
-/// the operator's credentials, else, where `page` allows (a card's own track, a link someone
-/// referenced, or any with `[also_on] spotify_pages`), the album its public page names
-/// (`music:album`). Spotify refusing the credentials, with no page to read, is an error
-/// ([`refused`]): the caller keeps what it knew.
-pub(crate) async fn track_album(cx: &Context, track: &str, page: bool) -> Result<Option<String>> {
-    let mut refusal = None;
-    if Spotify.ready(&cx.config) {
-        match object(cx, Kind::Track, track).await {
-            Ok(record) => {
-                return Ok(record.and_then(|v| v["album"]["id"].as_str().map(str::to_owned)))
-            }
-            Err(error) if refused(&error) => refusal = Some(error),
-            Err(error) => return Err(error),
-        }
-    }
-    if !page {
-        return refusal.map_or(Ok(None), Err);
-    }
-    Ok(page_links(cx, "track", track, "music:album", Level::Album)
-        .await?
-        .and_then(|albums| albums.into_iter().next()))
-}
-/// Whether Spotify can say which album a track is on: its credentials, or its pages allowed.
-pub(crate) fn places(config: &crate::config::Config) -> bool {
-    Spotify.ready(config) || config.also_on.spotify_pages
-}
-/// Whether an error is Spotify refusing the credentials (its token or its API).
-pub(crate) fn refused(error: &anyhow::Error) -> bool {
-    error
-        .downcast_ref::<crate::resolver::RetryLater>()
-        .is_some_and(|r| r.class == SPOTIFY.auth_class)
-}
-/// The Spotify objects at `level` a public page names in its `<meta name="{meta}">` tags.
-async fn page_links(
-    cx: &Context,
-    kind: &str,
-    id: &str,
-    meta: &'static str,
-    level: Level,
-) -> Result<Option<Vec<String>>> {
-    let url = format!("https://open.spotify.com/{kind}/{id}");
-    let fetched = cx
-        .egress
-        .discover(
-            &url,
-            &crate::resolver::egress::FetchOptions::default(),
-            3600,
-        )
-        .await?;
-    match fetched.status {
-        200 => {}
-        429 | 500..=599 => {
-            return Err(crate::resolver::RetryLater {
-                class: "spotify_busy",
-                seconds: fetched.retry_after_secs.clamp(60, 3600),
-            }
-            .into())
-        }
-        _ => return Ok(None),
-    }
-    let body = String::from_utf8_lossy(&fetched.body).into_owned();
-    Ok(Some(
-        crate::resolver::html::blocking(move || meta_links(&body, meta, level)).await?,
-    ))
-}
-/// The IDs of the Spotify objects at `level` a page's `<meta name="{meta}">` tags name.
-pub fn meta_links(html: &str, meta: &str, level: Level) -> Vec<String> {
-    let Ok(document) = crate::resolver::html::document(html) else {
-        return vec![];
-    };
-    let selector = scraper::Selector::parse(&format!("meta[name='{meta}'][content]"))
-        .expect("a fixed selector");
-    document
-        .select(&selector)
-        .filter_map(|m| music::parse(m.value().attr("content")?))
-        .filter(|l| l.service == Service::Spotify && l.level == level)
-        .map(|l| l.id)
-        .collect()
-}
-
-/// One album or track of the catalogue (`/v1/{albums|tracks}/{id}`); `None` when Spotify has
-/// none. Its answer is shared for an hour.
+/// One album or track of the catalogue (`spotify_api::object`).
 async fn object(cx: &Context, kind: Kind, id: &str) -> Result<Option<Value>> {
-    let (client_id, secret) = cx
-        .config
-        .section::<SpotifyConfig>()
-        .pair()
-        .context("no Spotify credentials")?;
-    let url = format!("{API}/{}/{id}", kind.collection());
-    let record = client_credentials::object(
-        &SPOTIFY,
-        cx,
-        (&client_id, &secret),
-        &url,
-        ("application/json", &[]),
-    )
-    .await?;
-    // Only the object asked for.
-    Ok(record
-        .filter(|v| v["id"].as_str() == Some(id) && v["type"].as_str() == Some(kind.type_name())))
+    spotify_api::object(cx, kind.collection(), type_name(kind), id).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::also_on::{
+        client_credentials,
+        spotify_api::{API, SPOTIFY},
+    };
 
     /// `[spotify]` is Spotify's own section: its pair from the file or its own variables, both
     /// needed, secret in every form the config shows.
@@ -343,7 +223,7 @@ mod tests {
     }
     #[test]
     fn only_spotify_albums_and_tracks_apply() {
-        let kind = |uri: &str| music::parse(uri).and_then(|l| Kind::of(&l));
+        let kind = |uri: &str| music::parse(uri).and_then(|l| kind_of(&l));
         assert_eq!(
             kind("https://open.spotify.com/album/6dVIqQ8qmQ5GBnJ9shOYGE"),
             Some(Kind::Album)

@@ -14,9 +14,8 @@ use crate::{
     event::adapters::SecretKey,
     model::ResourceMeta,
     podcast_index_api::{
-        index_page, pi_episode_request, pi_headers, pi_request, pi_stream, Ask, PodcastIndexConfig,
+        index_page, pi_episode_request, pi_options, pi_request, pi_stream, Ask, PodcastIndexConfig,
     },
-    resolver::egress::FetchOptions,
 };
 use anyhow::{ensure, Result};
 use async_trait::async_trait;
@@ -175,13 +174,7 @@ impl Source for PodcastIndex {
         }) else {
             return Ok(cx.missing(uri, self));
         };
-        let options = FetchOptions {
-            accept: Some("application/json".into()),
-            headers: pi_headers(&key, &secret, chrono::Utc::now().timestamp()),
-            // Errors and cache keys never carry the signed headers.
-            sensitive: true,
-            ..Default::default()
-        };
+        let options = pi_options(&key, &secret);
         let f = cx.egress.fetch_with(&url, &options).await?;
         super::retry(&f)?;
         let card = crate::resolver::html::blocking(move || match episode {
