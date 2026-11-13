@@ -770,8 +770,7 @@ fn checked(
 }
 /// Whether a source's link is refused for a credential: one that does not parse or has user
 /// info, or that carries a credential as written or under its root spelling (the rule documents
-/// follow, `capability::names_credential`). Refused, never stripped; the rule a stored link is
-/// held to as well (`changes::repair_credentials`).
+/// follow, `capability::names_credential`). Refused, never stripped.
 pub fn refused_link(uri: &str) -> bool {
     url::Url::parse(uri).map_or(true, |u| !u.username().is_empty() || u.password().is_some())
         || crate::capability::names_credential(uri)

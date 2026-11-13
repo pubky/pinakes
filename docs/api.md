@@ -1213,12 +1213,6 @@ whose del was skipped stays listed, until the post's next edit. A collection hol
 items, the specs' cap: a new item past them is refused (`collection_items` in
 `pinakes_ingest_rejected_total`), also when a skipped del left one of the 100 stale.
 
-References stored before ingest kept posts so (until a repair of them runs) are left out as each
-page reads them: a file that is not its post's current one, and an older reference of a file that
-holds a newer one among the card's links. So each post is still listed once, but a page can hold
-fewer than `limit` items, none even, with a `cursor` to the next: page on until `cursor` is
-`null`.
-
 The viewer's pinned set is fixed by the first page and carried in its cursor: the window from
 the instant of their newest post to their 100th newest, as that page found them. While a client pages, no post
 moves between the viewer's own and the others. A collection the viewer adds or edits later is newer
@@ -1229,20 +1223,18 @@ one, as with any newest-first list.
 Every read is bounded, with these limits however many collections hold a link, an author made
 or the viewer holds, ties of one instant included:
 - **A page** (any cursor) reads at most `limit` + 1 posts per link (the card's own and each of
-  those aliases), and one probe for each of its `limit` + 1 places, whether it is current.
+  those aliases).
 - **The others' walk** steps over the viewer's pinned window alone: the at most 100 posts of at
   most 100 items each that the first page found, and any reference Nexus appended to its feed
   later with an instant inside the window (an append recovered after a later one, or one in the
   same millisecond as their newest).
 - **The viewer's pinned window** reads at most 100 posts per link on a first page.
-- **The count** reads at most 1,000 posts per link, and one probe for each post it counts.
+- **The count** reads at most 1,000 posts per link.
 - **`in_collection`** reads the one post's files.
 
 Each step is one or more probes of an index, each a range in the index's order (newest first,
 then author and file; the viewer's own by author, never past their pinned boundary; a post's
-files newest first). A stale file from before ingest kept posts costs one probe more; until the
-repair, such files take steps of the count's walk too, so a card more than 1,000 posts hold can
-count fewer.
+files newest first).
 
 ```text
 GET /v1/resources/{id}/collections?viewer={public key}&limit=20
