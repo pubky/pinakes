@@ -45,7 +45,7 @@ moves to the front of the refresh queue without bypassing its TTL, backoff or fi
 
 ## Response shapes
 
-Every route returns the same card for a resource, an occurrence or a Pubky event reference.
+Every route returns the same card for a resource or an occurrence.
 Absent values are `null`, never `""`. Text fields (`name`, `description`, `site`, and every
 text a read adds) are plain text, decoded from the source's HTML entities once: escape them
 before rendering them as HTML.
@@ -105,11 +105,10 @@ An IMDb title keeps the type its page gives (it can be either).
 | `start`, `end` | RFC 3339 instants for events and occurrences |
 | `group` | `{id, size}` when the resource or occurrence is in a [group](#groups), else `null` |
 | `also_on` | The same thing elsewhere ([Also on](#also-on)): the other members of its group as `{id, uri, site, refs?}` (other resources first, one entry each by ID, then other occurrences of its own feed), then derived links nobody tagged as `{uri, site, derived: true, via, kind?, at?}`, by service name; each with its `embed` ([Embed](#embed)) or `null`; one per service (of a recording's or an album's links, the one on the card's own release, else on the original edition), never another page of the card's own service, at most 8 on a search, lookup or group card and 256 on a resource read. A hint only: every member keeps its own card |
-| `open_in` | The clients that open a card, `[{client, url}]` (`url` is `https:`). A Pubky app's object: from the app's profile ([Pubky apps](pubky-apps.md)), e.g. Loopky for a deck; on a Pubky event reference's card, those of the event object. A card whose link is not a web page (`btc:`, `ln:`, `uniprot:`, `fr:`, …): the web page its source reads it from, named by its site, e.g. `[{"client": "mempool.space", "url": "https://mempool.space/block/…"}]`. `[]` on a web link's card, a card gone upstream and a card whose source names no page |
+| `open_in` | The clients that open a card, `[{client, url}]` (`url` is `https:`). A Pubky app's object: from the app's profile ([Pubky apps](pubky-apps.md)), e.g. Loopky for a deck. A card whose link is not a web page (`btc:`, `ln:`, `uniprot:`, `fr:`, …): the web page its source reads it from, named by its site, e.g. `[{"client": "mempool.space", "url": "https://mempool.space/block/…"}]`. `[]` on a web link's card, a card gone upstream and a card whose source names no page |
 | `attribution` | Present on OSM cards, events placed at an OSM venue and events whose zone came from coordinates; display it with the card |
 | `credits` | Where `image` and `description` came from when Pinakes added them from another source than the link ([Credits](#credits)): one entry per such field, at most 4. `[]` when none: such a field came from the link itself |
 | `occurrence` | Occurrence cards only: `{feed_id, feed_uri, uid, recurrence_id, status}`; `feed_uri` is the feed's URI, the link people tagged |
-| `event` | Pubky event references only (an event post's occurrence at a place; no feed writes them today: social events are Nexus's, see [Pubky events](#calendars-and-occurrences)): `{author, object_path, recurrence_id, start, end, status}`; `object_path` is the post's versionless path, `recurrence_id` the occurrence's local start (`YYYY-MM-DDTHH:MM:SS`) or null for a one-off |
 | `maybe_same` | Event and occurrence cards: other events that are [possibly the same event](#possibly-the-same-event), best first, each `{id, uri, site, start, score}` (`[]` when there are none). An app's store card: store cards that are [possibly the same app](#possibly-the-same-app). `MusicRecording` cards: other recordings that are [possibly the same recording](#possibly-the-same-recording), the same shape (`start` is `null`). Up to three on a search, lookup or group card, up to ten on a resource read. A hint only, like `group`. Absent on other cards, on event and app cards with `[event] same_event_hint = "off"` and on recording cards with `[groups] same_recording_hint = "off"` |
 | `because` | [Related](#related) search rows only: why the row is listed, `{shared, taggers}` (how many of the resource's taggers referenced it, and up to three of them as Pubky public keys). Absent on every other card |
 
@@ -277,7 +276,12 @@ A Wikidata description's credit:
 A release's or release group's card with no free Commons file (or whose Commons file could not be
 read just now, while it has no stored image) shows the front cover the
 [Cover Art Archive](https://coverartarchive.org/) holds for it, credited to the release the cover
-is of (a release group's cover is one of its releases', chosen by the archive):
+is of (a release group's cover is one of its releases', chosen by the archive). A recording
+can take a front cover from a release containing its exact MusicBrainz recording ID: one
+release page (at most 100 releases), with at most three CAA requests, under the shared
+cache, host pacing and enrichment deadline. A front flag alone is not an image; the archive
+must confirm it. The release's barcode and album identity remain separate:
+
 
 ```json
 {"field": "image", "provider": "cover_art_archive",
@@ -724,12 +728,10 @@ Unknown parameters, invalid coordinates or dates, an out-of-range radius, a non-
 incompatible options return 400 (`timestamp out of range` for a date outside years 0001–9999).
 Search lists only resources with at least one public reference.
 
-**Events.** `type=Event` with `from`/`to` and `sort=start` covers Event pages with a start,
-calendar occurrences and located Pubky event references. Each of these is one result unit, so
-a calendar with three matching dates counts three times. `start` sorts exclude units without a
-start. A Pubky event result carries `event` for Nexus post hydration and no name: Pinakes keeps
-the post's time, status and place, not its text. Author and reach filters also constrain that
-post's author.
+**Events.** `type=Event` with `from`/`to` and `sort=start` covers Event pages with a start and
+calendar occurrences. Each of these is one result unit, so a calendar with three matching dates
+counts three times. `start` sorts exclude units without a start. Pubky events are Nexus's
+([Pubky events](#calendars-and-occurrences)): a client merges them with these results.
 
 **Jobs.** `type=JobPosting` with `near` or `bbox` finds postings by their workplace,
 `remote=true` the remote ones, and `from`/`to` select by the date posted (a posting's `start`).
@@ -879,10 +881,9 @@ No other search carries `because`.
   other filters, together. `/v1/info` gives every limit here. A related search costs
   `limits.related_cost` (6) units of the [per-IP budget](#limits-and-errors).
 - Only the references Pinakes copies from Nexus's feed count: the resource's taggers, and any
-  reference of theirs (a tag, a reply, an embed, a collection, an event). With `reach`, only the
+  reference of theirs (a tag, a reply, an embed, a collection). With `reach`, only the
   taggers within the viewer's reach.
-- Each resource is listed once, as its own card: never once per occurrence of a feed or per
-  event reference at a venue.
+- Each resource is listed once, as its own card: never once per occurrence of a feed.
 - A post whose author opted out of indexing is never listed, as it is never found by its text,
   and references to it count for nothing: not toward its group, and its taggers are not the
   taggers of a group it is in.
@@ -1097,8 +1098,7 @@ horizon. Mixed dated and undated RSS, Atom and JSON feeds keep their dated items
 rsvps and counts, and a client reads them there. Pinakes never fetches or indexes them; it
 indexes external events (pages, calendar feeds, NIP-52), and a client merges both. The resource
 feed carries no event lines: a `kind:event` line is skipped as `unknown_kind`, a `post` line for
-a social post is rejected. Event references (one per occurrence and place, the `event` field)
-remain in the schema and the search, but nothing writes them today.
+a social post is rejected.
 
 **NIP-52 calendars.** A calendar waits (`calendar_members_pending`) for members not yet
 resolved, at most `limits.calendar_member_wait_hours` (48) after it first listed them. A member
@@ -1208,12 +1208,6 @@ whose del was skipped stays listed, until the post's next edit. A collection hol
 items, the specs' cap: a new item past them is refused (`collection_items` in
 `pinakes_ingest_rejected_total`), also when a skipped del left one of the 100 stale.
 
-References stored before ingest kept posts so (until a repair of them runs) are left out as each
-page reads them: a file that is not its post's current one, and an older reference of a file that
-holds a newer one among the card's links. So each post is still listed once, but a page can hold
-fewer than `limit` items, none even, with a `cursor` to the next: page on until `cursor` is
-`null`.
-
 The viewer's pinned set is fixed by the first page and carried in its cursor: the window from
 the instant of their newest post to their 100th newest, as that page found them. While a client pages, no post
 moves between the viewer's own and the others. A collection the viewer adds or edits later is newer
@@ -1224,20 +1218,18 @@ one, as with any newest-first list.
 Every read is bounded, with these limits however many collections hold a link, an author made
 or the viewer holds, ties of one instant included:
 - **A page** (any cursor) reads at most `limit` + 1 posts per link (the card's own and each of
-  those aliases), and one probe for each of its `limit` + 1 places, whether it is current.
+  those aliases).
 - **The others' walk** steps over the viewer's pinned window alone: the at most 100 posts of at
   most 100 items each that the first page found, and any reference Nexus appended to its feed
   later with an instant inside the window (an append recovered after a later one, or one in the
   same millisecond as their newest).
 - **The viewer's pinned window** reads at most 100 posts per link on a first page.
-- **The count** reads at most 1,000 posts per link, and one probe for each post it counts.
+- **The count** reads at most 1,000 posts per link.
 - **`in_collection`** reads the one post's files.
 
 Each step is one or more probes of an index, each a range in the index's order (newest first,
 then author and file; the viewer's own by author, never past their pinned boundary; a post's
-files newest first). A stale file from before ingest kept posts costs one probe more; until the
-repair, such files take steps of the count's walk too, so a card more than 1,000 posts hold can
-count fewer.
+files newest first).
 
 ```text
 GET /v1/resources/{id}/collections?viewer={public key}&limit=20
@@ -1283,6 +1275,22 @@ smallest member, and never takes an ID an existing group has). Member IDs and re
 change. A group is a hint, never a merge: nothing about its members is combined or stored with
 it, so each keeps its own card, references, score and ranking, and the group tables hold only
 membership (no OSM-derived value can reach them).
+
+Exact music membership is symmetric and transitive: a keyed A→B→C chain exposes the
+other members from every entry point. A music detail read includes the live exact keys
+of same-type members (at most 256 members and 256 additional keys); expired, disabled-source
+and `maybe` evidence is excluded. A music card without its own image can reuse a same-type
+member's Commons or Cover Art Archive image together with its image credit. This fallback
+is read-time, not copied into the stored document, and disappears when membership changes.
+
+A recording's release is containment, not another copy of the recording. The
+`musicbrainz_containment` source stores at most eight exact release URLs as
+`facts.track_of_album`, never as grouping keys or Also on entries. It reads one bounded
+MusicBrainz release page and retries incomplete reads. MusicBrainz recording and ISRC
+pages can also use their verified ISRCs for exact reverse provider lookups; release pages
+use their UPCs. Provider answers must return the requested identifier. Album links and
+UPCs are never promoted to recording identity.
+
 
 On the **admin listener**, `PUT /v1/groups/{id}` replaces a group's member set and answers as
 `GET /v1/groups/{id}`:
@@ -1453,7 +1461,7 @@ anything. Sources read a resource after it is saved and again when their results
 source's lifetime: 30 days, `btcmap` 7); a source's links and keys live twice that, so one
 failed refresh keeps them, and they go when the source stops returning them. The sources run in this order, each
 seeing the keys the ones before it found: `service`, `tidal`, `spotify`,
-`musicbrainz`, `musicbrainz_entity`, `performers`, `wikidata`, `discogs`, `deezer`, `spotify_isrc`,
+`musicbrainz`, `musicbrainz_entity`, `musicbrainz_containment`, `performers`, `wikidata`, `discogs`, `deezer`, `spotify_isrc`,
 `tidal_isrc`, `itunes`, `itunes_song`, `youtube_match`, `wikipedia`, `wikidata_item`, `books`,
 `films`, `podcasts`, `product_keys`, `open_food_facts`, `stack_exchange`, `titles`, `federal_register`, `mempool`, `osm_wikidata`, `wikidata_osm`,
 `wikidata_places`, `btcmap`, `unpaywall`, `ncbi`, `datacite`, `huggingface`, `crates`, `npm`,
@@ -1937,7 +1945,7 @@ layers, with the caller's address:
 A compact card keeps `id`, `uri`, `status`, `type`, `name`, `description` (at most 300
 characters), `image`, `site`, `point`, `start`, `end`, `group`, `also_on` (`uri`, `site`, and
 `id`, `refs`, `derived`, `kind` when present), `refs`,
-`occurrence`, `event` and `attribution`, and adds `url`, the card's full read
+`occurrence` and `attribution`, and adds `url`, the card's full read
 (`GET /v1/resources/{id}`); every answer names the REST URL of its full result. A failed request
 is the tool's error (`isError`), its text `{error, status, hint, url}` with the route's status
 and message; an unknown tool is a JSON-RPC error.

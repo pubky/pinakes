@@ -7,10 +7,9 @@ objects (`/pub/social/…`, any version: posts, events, rsvps, availability, tag
 Nexus's and never fetched: social events and availability come from Nexus (owner decisions,
 2026-10-26 and 2026-10-27). Neither are the old Mapky and Eventky layouts (`/pub/mapky.app/…`,
 `/pub/eventky.app/…`) fetched, whose data is disregarded: routes now come as [posts](#posts),
-events and availability as social posts. An object of any of these namespaces stored before the
-rule keeps nothing of a card it had, as a left-out path of a profiled app (below): `pinakesd
-reextract` scrubs it ([operations](operations.md#database)), and the resolver gives it no card
-without a request.
+events and availability as social posts. An object of any of these namespaces has no card, as a
+left-out path of a profiled app (below): its post lines are dropped, a link to it gets no route,
+and the resolver gives it no card without a request.
 
 For an app Pinakes has a profile for, the card is that app's: a schema.org type, the name,
 description, image and a few facts the app's format holds, and `open_in`, the clients that open
@@ -22,8 +21,8 @@ is gone (404) is `missing` once a second fetch confirms it, as any link. Either 
 a profiled app's namespace keeps nothing of a card it had, neither on its card nor in its change
 history (the lines stay, with their kind, fields and time), and is checked again as missing
 links are; an object of an app without a profile keeps its last card under `missing`, as other
-links do. An object stored before its path was left out becomes `missing` at once, without a
-request.
+links do. An object stored before its path was left out becomes `missing` at once when it is
+read again (its next refresh, or `pinakesd reextract pubky`), without a request.
 
 Profiles are Pinakes's own code, one file per app (`resolver/pubky_apps/<app>.rs`). Nothing is
 read from the apps themselves or from a registry outside this repository.
