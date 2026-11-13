@@ -277,7 +277,12 @@ A Wikidata description's credit:
 A release's or release group's card with no free Commons file (or whose Commons file could not be
 read just now, while it has no stored image) shows the front cover the
 [Cover Art Archive](https://coverartarchive.org/) holds for it, credited to the release the cover
-is of (a release group's cover is one of its releases', chosen by the archive):
+is of (a release group's cover is one of its releases', chosen by the archive). A recording
+can take a front cover from a release containing its exact MusicBrainz recording ID: one
+release page (at most 100 releases), with at most three CAA requests, under the shared
+cache, host pacing and enrichment deadline. A front flag alone is not an image; the archive
+must confirm it. The release's barcode and album identity remain separate:
+
 
 ```json
 {"field": "image", "provider": "cover_art_archive",
@@ -1283,6 +1288,22 @@ smallest member, and never takes an ID an existing group has). Member IDs and re
 change. A group is a hint, never a merge: nothing about its members is combined or stored with
 it, so each keeps its own card, references, score and ranking, and the group tables hold only
 membership (no OSM-derived value can reach them).
+
+Exact music membership is symmetric and transitive: a keyed A→B→C chain exposes the
+other members from every entry point. A music detail read includes the live exact keys
+of same-type members (at most 256 members and 256 additional keys); expired, disabled-source
+and `maybe` evidence is excluded. A music card without its own image can reuse a same-type
+member's Commons or Cover Art Archive image together with its image credit. This fallback
+is read-time, not copied into the stored document, and disappears when membership changes.
+
+A recording's release is containment, not another copy of the recording. The
+`musicbrainz_containment` source stores at most eight exact release URLs as
+`facts.track_of_album`, never as grouping keys or Also on entries. It reads one bounded
+MusicBrainz release page and retries incomplete reads. MusicBrainz recording and ISRC
+pages can also use their verified ISRCs for exact reverse provider lookups; release pages
+use their UPCs. Provider answers must return the requested identifier. Album links and
+UPCs are never promoted to recording identity.
+
 
 On the **admin listener**, `PUT /v1/groups/{id}` replaces a group's member set and answers as
 `GET /v1/groups/{id}`:

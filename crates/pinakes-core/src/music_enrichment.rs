@@ -410,7 +410,7 @@ pub async fn enrich_within(
     deadline: Option<tokio::time::Instant>,
 ) -> Enrichment {
     let wikimedia = within(deadline, wikimedia(egress, base, entity, width));
-    let cover_read = within(deadline, cover(egress, entity));
+    let cover_read = within(deadline, cover(egress, base, entity));
     tokio::pin!(wikimedia, cover_read);
     let mut cover_early = None;
     let wikimedia = loop {
@@ -459,48 +459,80 @@ fn timed_out(mbid: &str, step: &'static str) {
     tracing::info!(mbid, step, "music enrichment timed out");
 }
 
-/// The front cover of a release or release group from the Cover Art Archive, by its MBID alone
-/// (`hubs::cover_art`), in at most one request: a release's only when MusicBrainz says the
-/// archive shows a front cover for it (`About::cover_art_front`), a release group's always (one
-/// of its releases' covers). The credit names the release the cover is of (its cover art page on
-/// MusicBrainz) and no licence or author: cover art is its label's. A 404 is none; a busy
-/// archive, a failed request or an answer that proves nothing (`cover_art::read_front`) leaves
-/// the image unread.
-async fn cover(egress: &Egress, entity: &musicbrainz::Entity) -> Found {
-    let ask = match entity.kind {
-        MbKind::Release => entity.about.cover_art_front,
-        MbKind::ReleaseGroup => true,
-        MbKind::Recording | MbKind::Artist => false,
-    };
-    if !ask {
-        return Found::Missing;
-    }
-    let front = match crate::hubs::cover_art::front(egress, entity.kind, &entity.mbid).await {
-        Ok(Some(front)) => front,
-        Ok(None) => return Found::Missing,
-        Err(error) => {
-            unread(&entity.mbid, "cover_art", &error);
-            return Found::Unread;
+/// CAA front art of the entity, or an official release containing its exact recording.
+/// Recording containment never supplies an album identity key to the track. Browse one page
+/// (100 releases), prefer dated earlier fronts, and ask at most three covers. These requests
+/// use the shared paced, one-hour discovery cache and the caller's enrichment deadline.
+async fn cover(egress: &Egress, base: &str, entity: &musicbrainz::Entity) -> Found {
+    let (mut candidates, complete) = match entity.kind {
+        MbKind::Release if entity.about.cover_art_front => {
+            (vec![(entity.kind, entity.mbid.clone())], true)
         }
+        MbKind::ReleaseGroup => (vec![(entity.kind, entity.mbid.clone())], true),
+        MbKind::Recording => {
+            let (mut releases, complete) =
+                match musicbrainz::releases(egress, base, &format!("recording={}", entity.mbid), 1)
+                    .await
+                {
+                    Ok(answer) => answer,
+                    Err(error) => {
+                        unread(&entity.mbid, "recording_releases", &error);
+                        return Found::Unread;
+                    }
+                };
+            releases.sort_by(|a, b| {
+                (a["date"].as_str().unwrap_or("9999"), a["id"].as_str())
+                    .cmp(&(b["date"].as_str().unwrap_or("9999"), b["id"].as_str()))
+            });
+            let mut ids = std::collections::BTreeSet::new();
+            let fronts: Vec<_> = releases
+                .iter()
+                .filter(|r| {
+                    r["cover-art-archive"]["front"] == true
+                        && r["cover-art-archive"]["darkened"] != true
+                })
+                .filter_map(|r| crate::hubs::mbid(r["id"].as_str()?))
+                .filter(|id| ids.insert(id.clone()))
+                .map(|id| (MbKind::Release, id))
+                .collect();
+            (fronts, complete)
+        }
+        _ => return Found::Missing,
     };
-    let credit = Credit {
-        field: CreditField::Image,
-        provider: CreditProvider::CoverArtArchive,
-        source_url: format!(
-            "https://musicbrainz.org/release/{}/cover-art",
-            front.release
-        ),
-        author: None,
-        license: String::new(),
-        license_url: None,
-        lang: None,
-        excerpted: false,
-        modified: false,
-        subject: None,
-    };
-    match credit.bounded() {
-        Some(credit) => Found::Value(front.image, credit),
-        None => Found::Missing,
+    let complete = complete && candidates.len() <= 3;
+    candidates.truncate(3);
+    for (kind, id) in candidates {
+        let front = match crate::hubs::cover_art::front(egress, kind, &id).await {
+            Ok(Some(front)) => front,
+            Ok(None) => continue,
+            Err(error) => {
+                unread(&entity.mbid, "cover_art", &error);
+                return Found::Unread;
+            }
+        };
+        let credit = Credit {
+            field: CreditField::Image,
+            provider: CreditProvider::CoverArtArchive,
+            source_url: format!(
+                "https://musicbrainz.org/release/{}/cover-art",
+                front.release
+            ),
+            author: None,
+            license: String::new(),
+            license_url: None,
+            lang: None,
+            excerpted: false,
+            modified: false,
+            subject: None,
+        };
+        if let Some(credit) = credit.bounded() {
+            return Found::Value(front.image, credit);
+        }
+    }
+    if complete {
+        Found::Missing
+    } else {
+        Found::Unread
     }
 }
 

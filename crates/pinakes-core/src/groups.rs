@@ -583,6 +583,13 @@ fn join(
         entries.dedup_by_key(|e| e.0);
         // Curated members follow their curation only; automatic keys never pull them away.
         entries.retain(|(i, _)| curated || facts.overrides[*i].is_none());
+        if entries.len() > cfg.max_members {
+            tracing::warn!(
+                members = entries.len(),
+                cap = cfg.max_members,
+                "group size cap reached"
+            );
+        }
         entries.truncate(cfg.max_members);
         let cross_feed = key.starts_with("ics_uid:");
         // Two cards naming one edition page never join each other, only the page itself.
@@ -608,6 +615,11 @@ fn join(
                 continue;
             }
             if sets[a].len() + sets[b].len() > cfg.max_members {
+                tracing::warn!(
+                    members = sets[a].len() + sets[b].len(),
+                    cap = cfg.max_members,
+                    "group size cap reached"
+                );
                 (capped[i], capped[j]) = (true, true);
                 continue;
             }
@@ -1112,6 +1124,8 @@ pub async fn reconcile(pool: &PgPool, id: &str, cfg: &GroupConfig) -> bool {
             .await?;
         sync(&mut tx, id, cfg).await?;
         tx.commit().await?;
+        // Only report successful transactions: failed/retried plans are not merged groups.
+        tracing::info!(resource_id = id, "group reconciliation committed");
         Ok::<_, anyhow::Error>(())
     }
     .await;
