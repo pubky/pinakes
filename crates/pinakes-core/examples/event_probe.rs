@@ -22,7 +22,6 @@ async fn main() -> anyhow::Result<()> {
         let uri = entry["uri"].as_str().unwrap();
         let kind = entry["kind"].as_str().unwrap();
         let options = FetchOptions {
-            user_agent: entry["user_agent"].as_str().map(str::to_owned),
             feed_cap: (kind == "calendar" || entry["feed_hint"] == true)
                 .then_some(32 * 1024 * 1024),
             feed_hint: kind == "calendar" || entry["feed_hint"] == true,

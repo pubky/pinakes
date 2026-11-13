@@ -1118,9 +1118,6 @@ fn manifests_cover_every_platform_and_keys_disable_without_exposing_credentials(
         .platforms
         .insert("no-such-platform".into(), Default::default());
     assert!(adapters::validate(&cfg).is_err());
-    assert!(adapters::profile("browser").contains("Chrome/"));
-    assert!(adapters::profile("firefox").contains("Firefox/"));
-    assert_eq!(adapters::profile("plain"), "curl/8.10.1");
     assert_eq!(
         adapters::detect("https://pretix.example/test/ical/")
             .unwrap()
@@ -2352,18 +2349,22 @@ async fn platform_ua_config_class_c_and_secret_projection(pool: PgPool) {
     ] {
         platform.resolve(uri).await.unwrap();
     }
-    let profiles: Vec<_> = t
+    // Dice, Fever, Songkick and Posh are read with Pinakes's own User-Agent, like every platform.
+    let agents: Vec<_> = t
         .seen
         .lock()
         .unwrap()
         .iter()
         .filter(|(_, o)| o.accept.is_none())
-        .map(|(_, o)| o.user_agent.clone().unwrap())
+        .map(|(_, o)| o.user_agent.clone())
         .collect();
-    assert!(profiles[0].contains("Chrome/"));
-    assert!(profiles[1].contains("Chrome/"));
-    assert!(profiles[2].contains("Firefox/"));
-    assert_eq!(profiles[3], "curl/8.10.1");
+    assert!(agents.len() >= 4, "{agents:?}");
+    assert!(
+        agents
+            .iter()
+            .all(|a| a.as_deref() == Some(pinakes_core::resolver::egress::USER_AGENT)),
+        "{agents:?}"
+    );
     cfg.adapters.platforms.insert(
         "ticketmaster".into(),
         adapters::Options {

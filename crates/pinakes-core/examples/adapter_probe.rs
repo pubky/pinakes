@@ -176,8 +176,7 @@ async fn main() -> Result<()> {
             results.push(json!({"id":id,"skip":v["note"]}));
             continue;
         };
-        let mut result =
-            json!({"id":id,"uri":uri,"at":chrono::Utc::now(),"ua_profile":m.ua_profile});
+        let mut result = json!({"id":id,"uri":uri,"at":chrono::Utc::now()});
         // A platform's canary is read as the canary reads it: a listing's first event link.
         let canary = m.canary.as_ref().is_some_and(|c| c.as_str() == uri);
         let probe = async {

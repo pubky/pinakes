@@ -396,43 +396,6 @@ async fn send(app: &Router, method: &str, path: &str, body: Option<Value>) -> (u
         parsed.unwrap_or(json!(String::from_utf8_lossy(&bytes))),
     )
 }
-/// A post's event occurrences at a venue, as event references: each an hour long, scheduled; its
-/// previous occurrences replaced. Written directly: no feed writes event references today.
-async fn occurrences_at(
-    pool: &PgPool,
-    venue: &str,
-    path: &str,
-    occurrences: &[(Option<&str>, DateTime<Utc>)],
-) {
-    let (id, uri, _) = identity(venue).unwrap();
-    let author = "y".repeat(52);
-    let mut tx = pool.begin().await.unwrap();
-    let mut affected: Vec<String> = sqlx::query_scalar(
-        "DELETE FROM reference WHERE author=$1 AND object_path=$2 RETURNING resource_id",
-    )
-    .bind(&author)
-    .bind(path)
-    .fetch_all(&mut *tx)
-    .await
-    .unwrap();
-    let aliased = pinakes_core::store::insert_resource(&mut tx, &id, &uri)
-        .await
-        .unwrap();
-    for (rid, start) in occurrences {
-        sqlx::query(r#"INSERT INTO reference(resource_id,kind,author,object_path,recurrence_id,start_at,end_at,created_at,unit_key,event_status)
-            VALUES($1,'event',$2,$3,$4,$5,$6,now(),$7,'scheduled')"#)
-            .bind(&id).bind(&author).bind(path).bind(rid).bind(start).bind(*start + Duration::hours(1))
-            .bind(format!("{id}:{}", rid.unwrap_or(""))).execute(&mut *tx).await.unwrap();
-    }
-    affected.push(id);
-    pinakes_core::store::recompute_scores(&mut tx, &affected)
-        .await
-        .unwrap();
-    pinakes_core::alias::record(&mut tx, aliased.into_iter().collect())
-        .await
-        .unwrap();
-    tx.commit().await.unwrap();
-}
 async fn reference(pool: &PgPool, uri: &str, path: &str, kind: Kind, op: Op) {
     let (_, uri, _) = identity(uri).unwrap();
     let cursor = ingest::cursor(pool, "events").await.unwrap();
@@ -591,7 +554,7 @@ async fn single_key_loss_requires_two_and_regenerated_uid_links_supersedes(pool:
     assert_eq!(change["supersedes"], "[\"id0\",\"\"]");
 }
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
-async fn event_units_pagination_occurrence_route_pubky_recurrences_and_venue(pool: PgPool) {
+async fn event_units_pagination_occurrence_route_and_venue(pool: PgPool) {
     let feed = "https://example.org/events.ics";
     reference(&pool, feed, "/pub/social/tags/calendar", Kind::Tag, Op::Put).await;
     let id = identity(feed).unwrap().0;
@@ -607,49 +570,37 @@ async fn event_units_pagination_occurrence_route_pubky_recurrences_and_venue(poo
     store::save_document(&pool, &venue_id, 0, &place)
         .await
         .unwrap();
-    let second = Utc::now() + Duration::days(3);
-    occurrences_at(
-        &pool,
-        venue,
-        "/pub/social/v1/posts/event1",
-        &[
-            (Some("2026-10-21"), Utc::now() + Duration::days(2)),
-            (Some("2026-10-28"), second),
-        ],
-    )
-    .await;
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM reference WHERE kind='event'")
-            .fetch_one(&pool)
+    // Two event pages at the venue, each tagged as the feed is.
+    let mut page_ids = vec![];
+    for (name, days) in [("event", 2), ("event-later", 9)] {
+        let page_uri = format!("https://example.org/{name}");
+        reference(
+            &pool,
+            &page_uri,
+            &format!("/pub/social/tags/{name}"),
+            Kind::Tag,
+            Op::Put,
+        )
+        .await;
+        let page_id = identity(&page_uri).unwrap().0;
+        let mut page = ResourceMeta::new(&page_uri, "jsonld", 3600);
+        page.set_type("MusicEvent");
+        page.name = Some(format!("Page {name}"));
+        page.start = Some(Utc::now() + Duration::days(days));
+        page.location = Some(Point {
+            lat: 47.0,
+            lon: 8.0,
+        });
+        page.event.venue = Some(pinakes_core::event::Venue {
+            resource_id: Some(venue_id.clone()),
+            ..Default::default()
+        });
+        store::save_document(&pool, &page_id, 0, &page)
             .await
-            .unwrap(),
-        2
-    );
-    let page_uri = "https://example.org/event";
-    reference(
-        &pool,
-        page_uri,
-        "/pub/social/tags/event",
-        Kind::Tag,
-        Op::Put,
-    )
-    .await;
-    let page_id = identity(page_uri).unwrap().0;
-    let mut page = ResourceMeta::new(page_uri, "jsonld", 3600);
-    page.set_type("MusicEvent");
-    page.name = Some("Page event".into());
-    page.start = Some(Utc::now() + Duration::days(2));
-    page.location = Some(Point {
-        lat: 47.0,
-        lon: 8.0,
-    });
-    page.event.venue = Some(pinakes_core::event::Venue {
-        resource_id: Some(venue_id.clone()),
-        ..Default::default()
-    });
-    store::save_document(&pool, &page_id, 0, &page)
-        .await
-        .unwrap();
+            .unwrap();
+        page_ids.push(page_id);
+    }
+    page_ids.sort();
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let (code, v) = call(
         &app,
@@ -673,18 +624,46 @@ async fn event_units_pagination_occurrence_route_pubky_recurrences_and_venue(poo
         assert_eq!(result.0, 200, "{}", result.1);
         v = result.1;
     }
-    assert_eq!(seen.len(), 6);
-    assert_eq!(seen.iter().filter(|v| v.get("event").is_some()).count(), 2);
+    // Each unit once over the pages: the feed's three occurrences and the two pages.
+    assert_eq!(seen.len(), 5);
+    let occurrences: Vec<&Value> = seen
+        .iter()
+        .filter(|v| v.get("occurrence").is_some())
+        .collect();
+    assert_eq!(occurrences.len(), 3);
     assert_eq!(
-        seen.iter()
-            .filter(|v| v.get("occurrence").is_some())
-            .count(),
-        3
+        occurrences
+            .iter()
+            .map(|v| v["occurrence"]["uid"].as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from(["id0", "id1", "id2"])
     );
+    // An occurrence is its feed's card; a one-off one has no recurrence ID.
+    assert!(occurrences.iter().all(|v| v["id"] == id.as_str()
+        && v["occurrence"]["feed_id"] == id.as_str()
+        && v["occurrence"]["recurrence_id"].is_null()));
+    let pages = |items: &[Value]| {
+        let mut ids: Vec<String> = items
+            .iter()
+            .filter(|v| v.get("occurrence").is_none())
+            .map(|v| v["id"].as_str().unwrap().to_owned())
+            .collect();
+        ids.sort();
+        ids
+    };
+    assert_eq!(pages(&seen), page_ids);
     assert!(seen.iter().all(|v| v.get("start").is_some()));
+    // `sort=start` pages through the units in start order.
+    let starts: Vec<DateTime<Utc>> = seen
+        .iter()
+        .map(|v| v["start"].as_str().unwrap().parse().unwrap())
+        .collect();
+    assert!(starts.windows(2).all(|w| w[0] <= w[1]), "{starts:?}");
+    // The venue filter keeps the events placed at the venue: the pages, no occurrence of the feed.
     let (code, v) = call(&app, &format!("/v1/search?type=Event&venue={venue_id}")).await;
     assert_eq!(code, 200, "{v}");
-    assert_eq!(v["items"].as_array().unwrap().len(), 3);
+    assert_eq!(v["items"].as_array().unwrap().len(), 2, "{v}");
+    assert_eq!(pages(v["items"].as_array().unwrap()), page_ids);
     let (code, v) = call(&app, &format!("/v1/resources/{id}/occurrences")).await;
     assert_eq!(code, 200, "{v}");
     assert_eq!(v["items"].as_array().unwrap().len(), 3);
@@ -694,33 +673,25 @@ async fn event_units_pagination_occurrence_route_pubky_recurrences_and_venue(poo
     )
     .await;
     assert_eq!(code, 200, "{v}");
-    assert_eq!(v["total"], 6);
-    assert_eq!(v["clusters"][0]["count"], 6);
+    assert_eq!(v["total"], 5);
+    assert_eq!(v["clusters"][0]["count"], 5);
+    // The cluster's top resources, each once: the feed and the two pages.
     let top = v["clusters"][0]["top"].as_array().unwrap();
-    assert_eq!(top.len(), 3);
     assert_eq!(
         top.iter()
             .map(|v| v.as_str().unwrap())
-            .collect::<std::collections::BTreeSet<_>>()
-            .len(),
-        3
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from([id.as_str(), page_ids[0].as_str(), page_ids[1].as_str()])
     );
+    assert_eq!(top.len(), 3);
 
-    // A new version of the post with one occurrence fewer.
-    occurrences_at(
-        &pool,
-        venue,
-        "/pub/social/v1/posts/event1",
-        &[(Some("2026-10-28"), second)],
-    )
-    .await;
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM reference WHERE kind='event'")
-            .fetch_one(&pool)
+    // The references are the feed's lines alone: one tag each for the feed and the two pages.
+    let kinds: Vec<(String, i64)> =
+        sqlx::query_as("SELECT kind,count(*) FROM reference GROUP BY kind ORDER BY kind")
+            .fetch_all(&pool)
             .await
-            .unwrap(),
-        1
-    );
+            .unwrap();
+    assert_eq!(kinds, [("tag".to_owned(), 3)]);
 }
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn venue_geocoding_single_match_threshold_and_osm_storage_boundary(pool: PgPool) {
@@ -3911,8 +3882,8 @@ async fn retention_waits_for_a_writer_holding_nothing_else(pool: PgPool) {
     }
 }
 
-/// `related` lists a feed and a venue once each, as their own cards: never once per occurrence
-/// or per event reference (whose authors are other people).
+/// `related` lists a feed and a venue once each, as their own cards: a feed never once per
+/// occurrence.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn related_lists_a_feed_and_a_venue_once(pool: PgPool) {
     let feed = "https://example.org/events.ics";
@@ -3935,15 +3906,7 @@ async fn related_lists_a_feed_and_a_venue_once(pool: PgPool) {
     store::save_document(&pool, &venue_id, 0, &place)
         .await
         .unwrap();
-    for i in 0..50 {
-        occurrences_at(
-            &pool,
-            venue,
-            &format!("/pub/social/v1/posts/event{i}"),
-            &[(None, Utc::now() + Duration::days(2 + i))],
-        )
-        .await;
-    }
+    reference(&pool, venue, "/pub/social/tags/venue", Kind::Tag, Op::Put).await;
     let seed = "https://example.org/seed";
     reference(&pool, seed, "/pub/social/tags/seed", Kind::Tag, Op::Put).await;
     let seed_id = identity(seed).unwrap().0;
@@ -3968,7 +3931,7 @@ async fn related_lists_a_feed_and_a_venue_once(pool: PgPool) {
         }
     };
     assert_eq!(units(feed_id.clone()).await, 51);
-    assert_eq!(units(venue_id.clone()).await, 51);
+    assert_eq!(units(venue_id.clone()).await, 1);
     // `resource_unit` is exactly `search_unit`'s own units.
     let differ: i64 = sqlx::query_scalar("SELECT count(*) FROM ((SELECT * FROM search_unit WHERE unit_id=id EXCEPT ALL SELECT * FROM resource_unit) UNION ALL (SELECT * FROM resource_unit EXCEPT ALL SELECT * FROM search_unit WHERE unit_id=id)) d")
         .fetch_one(&pool)
@@ -3997,7 +3960,7 @@ async fn related_lists_a_feed_and_a_venue_once(pool: PgPool) {
             .as_array()
             .unwrap()
             .iter()
-            .all(|row| row.get("occurrence").is_none() && row.get("event").is_none()));
+            .all(|row| row.get("occurrence").is_none()));
     }
 }
 
@@ -4360,25 +4323,6 @@ fn an_unexpanded_rule_keeps_its_date_lists_and_the_horizon() {
         starts("DTSTART:20000101T120000Z\nRDATE:20261205T120000Z"),
         ["2026-12-05T12:00:00+00:00"]
     );
-}
-
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
-async fn a_one_off_event_reference_has_a_null_recurrence_id(pool: PgPool) {
-    occurrences_at(
-        &pool,
-        "geo:47.37,8.54",
-        "/pub/social/v1/posts/once",
-        &[(None, Utc::now() + Duration::days(2))],
-    )
-    .await;
-    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
-    let (code, v) = call(&app, "/v1/search?type=Event").await;
-    assert_eq!(code, 200, "{v}");
-    assert_eq!(
-        v["items"][0]["event"]["object_path"],
-        "/pub/social/v1/posts/once"
-    );
-    assert_eq!(v["items"][0]["event"]["recurrence_id"], Value::Null);
 }
 
 #[test]
