@@ -313,11 +313,9 @@ pub fn file_card(
     status: u16,
     body: &[u8],
 ) -> Result<Option<ResourceMeta>> {
-    match status {
-        200 => {}
-        404 => return Ok(None),
-        s => anyhow::bail!("the instance answered {s}"),
-    }
+    let Some(body) = super::kit::body(status, body, &[404])? else {
+        return Ok(None);
+    };
     let v = json(body)?;
     let Some(last) = v.as_array().and_then(|a| a.first()) else {
         return Ok(None);
@@ -476,10 +474,7 @@ impl Source for Gitlab {
         if INSTANCES.get(&host) == Some(false) {
             return Err(Declined.into());
         }
-        let json = FetchOptions {
-            accept: Some("application/json".into()),
-            ..Default::default()
-        };
+        let json = FetchOptions::json();
         // The first answer from an unknown host says whether it is GitLab.
         let get = |url: String| {
             let host = host.clone();

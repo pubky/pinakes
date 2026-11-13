@@ -1,7 +1,7 @@
 //! The Podcast Index API, which the also-on `podcasts` source and the official `podcast_index`
 //! source both read: the operator's key and secret (`[podcast_index]`), its requests and their
 //! signed headers, and the Podcast Index page a link names.
-use crate::event::adapters::SecretKey;
+use crate::{event::adapters::SecretKey, resolver::egress::FetchOptions};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 
@@ -108,6 +108,15 @@ pub fn pi_headers(key: &str, secret: &str, now: i64) -> Vec<(&'static str, Strin
             hash.iter().map(|b| format!("{b:02x}")).collect(),
         ),
     ]
+}
+/// How Podcast Index is asked: for JSON, with the headers signed now. Sensitive: errors and cache
+/// keys never carry the signed headers.
+pub fn pi_options(key: &str, secret: &str) -> FetchOptions {
+    FetchOptions {
+        headers: pi_headers(key, secret, chrono::Utc::now().timestamp()),
+        sensitive: true,
+        ..FetchOptions::json()
+    }
 }
 
 #[cfg(test)]

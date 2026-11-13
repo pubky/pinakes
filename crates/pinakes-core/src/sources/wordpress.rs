@@ -16,10 +16,7 @@ use url::Url;
 pub struct Wordpress;
 
 fn post_id(value: &str) -> Option<u64> {
-    (!value.is_empty() && value.len() <= 12 && value.bytes().all(|b| b.is_ascii_digit()))
-        .then(|| value.parse().ok())
-        .flatten()
-        .filter(|n| *n > 0)
+    super::kit::number(value, 12)
 }
 
 /// The post a REST address names (`…/wp-json/wp/v2/posts/{id}` or

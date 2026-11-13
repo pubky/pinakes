@@ -311,10 +311,7 @@ impl Source for Reddit {
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
         let target = Target::of_uri(uri).context("not a Reddit link")?;
         let doc = cx.card(uri, self);
-        let options = FetchOptions {
-            accept: Some("application/json".into()),
-            ..Default::default()
-        };
+        let options = FetchOptions::json();
         let fetched = match cx.fetch(&target.json(), &options).await {
             Ok(fetched) => fetched,
             Err(e) if e.is::<crate::resolver::interstitial::Blocked>() => {

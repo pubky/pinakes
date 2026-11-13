@@ -3,7 +3,6 @@ use super::{list, text, web_url, Context, Example, Source};
 use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
-use serde_json::Value;
 
 pub struct UkParliamentBills;
 
@@ -11,10 +10,7 @@ pub const ATTRIBUTION: &str =
     "Contains Parliamentary information licensed under the Open Parliament Licence v3.0.";
 
 fn id(value: &str) -> Option<u32> {
-    (!value.is_empty() && value.len() <= 7 && value.bytes().all(|b| b.is_ascii_digit()))
-        .then(|| value.parse().ok())
-        .flatten()
-        .filter(|n| *n > 0)
+    super::kit::number(value, 7)
 }
 
 /// The bill id of `https://bills.parliament.uk/bills/{id}` or one of its tabs
@@ -66,12 +62,9 @@ pub fn card(
     status: u16,
     body: &[u8],
 ) -> Result<Option<ResourceMeta>> {
-    match status {
-        200 => {}
-        404 => return Ok(None),
-        s => anyhow::bail!("Bills API answered {s}"),
-    }
-    let v: Value = serde_json::from_slice(body)?;
+    let Some(v) = super::kit::json(status, body, &[404])? else {
+        return Ok(None);
+    };
     anyhow::ensure!(
         v["billId"].as_u64() == Some(u64::from(id)),
         "the API answered for another bill"

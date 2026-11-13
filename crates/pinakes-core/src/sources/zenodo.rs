@@ -12,7 +12,7 @@
 //! service, and DOI links (`doi.org/10.5281/zenodo.{id}`) belong to the DOI source.
 use super::{
     kit::{
-        credit, fetch, host_and_segments, html_text, int, json, plain, text, texts, Card, Key,
+        credit, fetch, host_and_segments, html_text, int, json, number, text, texts, Card, Key,
         Request,
     },
     Context, Example, Source,
@@ -25,9 +25,7 @@ pub const SITE: &str = "Zenodo";
 
 /// A record id: decimal digits without a leading zero (the API has no record `07790295`).
 fn record_id(s: &str) -> Option<u64> {
-    (plain(s, 12, |c| c.is_ascii_digit()) && !s.starts_with('0'))
-        .then(|| s.parse().ok())
-        .flatten()
+    number(s, 12).filter(|_| !s.starts_with('0'))
 }
 
 /// The record a zenodo.org link names.

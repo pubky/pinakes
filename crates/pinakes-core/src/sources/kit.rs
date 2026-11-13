@@ -359,6 +359,23 @@ pub fn plain(value: &str, max: usize, ok: impl Fn(char) -> bool) -> bool {
     !value.is_empty() && value.len() <= max && value.chars().all(ok)
 }
 
+/// A decimal number: one to `max_digits` ASCII digits and nothing else, read as a number, so zero
+/// and leading zeros are accepted. `None` when it does not fit the type.
+pub fn decimal<T: std::str::FromStr>(value: &str, max_digits: usize) -> Option<T> {
+    plain(value, max_digits, |c| c.is_ascii_digit())
+        .then(|| value.parse().ok())
+        .flatten()
+}
+
+/// A positive decimal id: a `decimal` above zero. A caller with a further rule (no leading zero,
+/// a range) keeps it as a filter.
+pub fn number<T: std::str::FromStr + PartialOrd + From<u8>>(
+    value: &str,
+    max_digits: usize,
+) -> Option<T> {
+    decimal(value, max_digits).filter(|n: &T| *n > T::from(0u8))
+}
+
 /// The host of a web URL in lower case without a leading `www.`, and its non-empty path
 /// segments (percent-decoding is left to the caller).
 pub fn host_and_segments(uri: &str) -> Option<(String, Vec<String>)> {
@@ -577,6 +594,38 @@ mod tests {
     }
 
     use serde_json::json;
+
+    #[test]
+    fn numbers() {
+        assert_eq!(number::<u64>("42", 12), Some(42));
+        assert_eq!(number::<u64>("007", 12), Some(7));
+        assert_eq!(number::<u64>("123456789012", 12), Some(123_456_789_012));
+        assert_eq!(number::<u16>("50", 2), Some(50));
+        assert_eq!(number::<u32>("4294967296", 10), None);
+        assert_eq!(number::<u64>("99999999999999999999", 20), None);
+        for bad in [
+            "",
+            "0",
+            "000",
+            "1234567890123",
+            "-1",
+            "+1",
+            "1.0",
+            " 1",
+            "1 ",
+            "１",
+            "x",
+        ] {
+            assert_eq!(number::<u64>(bad, 12), None, "{bad:?}");
+        }
+        assert_eq!(decimal::<u64>("0", 8), Some(0));
+        assert_eq!(decimal::<u64>("000", 8), Some(0));
+        assert_eq!(decimal::<u64>("0042", 8), Some(42));
+        assert_eq!(decimal::<u16>("0000", 4), Some(0));
+        for bad in ["", "123456789", "-1", "+1", "1x", "１"] {
+            assert_eq!(decimal::<u64>(bad, 8), None, "{bad:?}");
+        }
+    }
 
     #[test]
     fn statuses() {

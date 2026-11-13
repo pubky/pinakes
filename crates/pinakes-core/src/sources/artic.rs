@@ -7,7 +7,7 @@
 //!
 //! The API's data is CC0 except the long `description`, which is CC BY 4.0, so a card prefers the
 //! CC0 `short_description`.
-use super::kit::{fetch, host_and_segments, html_text, int, json, plain, text, Card, Request};
+use super::kit::{fetch, host_and_segments, html_text, int, json, number, text, Card, Request};
 use super::{Context, Example, Source};
 use crate::model::ResourceMeta;
 use anyhow::{ensure, Context as _, Result};
@@ -24,10 +24,7 @@ is_public_domain,image_id,description,short_description,main_reference_number,co
 
 /// An artwork id: decimal digits, read as a number.
 pub fn artwork_id(value: &str) -> Option<u64> {
-    plain(value, 10, |c| c.is_ascii_digit())
-        .then(|| value.parse().ok())
-        .flatten()
-        .filter(|id| *id > 0)
+    number(value, 10)
 }
 
 /// The artwork an artic.edu page or an API URL names.

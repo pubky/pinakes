@@ -1,7 +1,7 @@
 //! Links between biodiversity records that several sources cross-link: a GBIF occurrence and
 //! the iNaturalist observation it publishes name each other, whichever of the two sources this
 //! build has.
-use super::kit::{host_and_segments, plain};
+use super::kit::{host_and_segments, number};
 
 /// The sites of the iNaturalist Network (`/v1/sites`), without `www.`, plus naturalista.mx,
 /// which redirects to the Mexican site.
@@ -33,10 +33,7 @@ pub const INATURALIST_SITES: [&str; 23] = [
 
 /// A positive decimal id of at most `max` digits, without leading zeros.
 fn id(value: &str, max: usize) -> Option<u64> {
-    plain(value, max, |c| c.is_ascii_digit())
-        .then(|| value.parse().ok())
-        .flatten()
-        .filter(|id| *id > 0)
+    number(value, max)
 }
 
 /// The id of an iNaturalist observation link (any site of the network, or the API).

@@ -3334,10 +3334,22 @@ pub async fn resolve(
     store::expedite(&state.pool, std::slice::from_ref(&id)).await?;
     state.wake.notify_waiters();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let expired = || ApiError(StatusCode::NOT_FOUND, "resource expired".into());
     loop {
+        // While the card is pending only its status is read, at the row `read` answers with (an
+        // alias's root). The card itself is read once it has left pending or the wait is over,
+        // and that read decides the answer.
+        let status: Option<String> = sqlx::query_scalar("SELECT status FROM resource WHERE id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1)")
+            .bind(&id)
+            .fetch_optional(&state.pool)
+            .await?;
+        if status.ok_or_else(expired)? == "pending" && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            continue;
+        }
         let resource = read(&state.pool, &id, &state.config)
             .await?
-            .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "resource expired".into()))?;
+            .ok_or_else(expired)?;
         if resource.card.status != "pending" {
             return Ok((StatusCode::OK, Json(resource)).into_response());
         }
