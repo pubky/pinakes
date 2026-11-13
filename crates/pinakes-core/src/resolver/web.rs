@@ -201,16 +201,14 @@ impl WebResolver {
             .filter(|b| !b.is_empty())
             .unwrap_or(musicbrainz::BASE);
         let ttl = self.config.ttl_secs;
-        let card = if let Some((kind, mbid, _)) = musicbrainz::entity_link(uri) {
+        // The card and the entity it shows: the page's own, or the recording an ISRC's page
+        // shows (none for the ISRC's own card: no recording, or several that disagree).
+        let (mut card, entity) = if let Some((kind, mbid, _)) = musicbrainz::entity_link(uri) {
             match musicbrainz::entity(&self.egress, base, kind, &mbid).await? {
-                Some(entity) => {
-                    let mut card =
-                        crate::music_sources::musicbrainz_card(uri, Some(&entity), None, ttl);
-                    if self.config.music_enrichment {
-                        self.enrich_music(&mut card, &entity, base, started).await;
-                    }
-                    card
-                }
+                Some(entity) => (
+                    crate::music_sources::musicbrainz_card(uri, Some(&entity), None, ttl),
+                    Some(entity),
+                ),
                 None => return Ok(None),
             }
         } else if let Some((isrc, _)) = musicbrainz::isrc_link(uri) {
@@ -245,10 +243,16 @@ impl WebResolver {
             if recordings.len() > 1 {
                 card.attributes.remove("duration");
             }
-            card
+            (card, entity)
         } else {
             return Ok(None);
         };
+        // The shown entity gives its image and description, on an ISRC's page as on the
+        // entity's own (enrichment never touches `attributes`). Boxed: one call site, its state
+        // machine kept off the callers' stacks.
+        if let Some(entity) = entity.as_ref().filter(|_| self.config.music_enrichment) {
+            Box::pin(self.enrich_music(&mut card, entity, base, started)).await;
+        }
         Ok(Some(card.bounded(ATTRIBUTES)?))
     }
     /// A MusicBrainz entity's image and description with their credits
