@@ -375,7 +375,7 @@ async fn an_isrc_page_of_one_recording_takes_its_release_cover() {
         seen.iter()
             .all(|s| s.starts_with("https://musicbrainz.org/ws/2/isrc/")
                 || s.starts_with(&format!(
-                    "https://musicbrainz.org/ws/2/recording/{RECORDING}?inc="
+                    "https://musicbrainz.org/ws/2/recording/{RECORDING}?inc=url-rels+isrcs"
                 ))),
         "{seen:?}"
     );
@@ -388,9 +388,25 @@ async fn an_isrc_page_takes_a_cover_only_when_its_recordings_are_one() {
         other_length: Some(232_500),
         ..Default::default()
     });
-    let doc = isrc_card(agreeing, "ZZDUP2600001").await;
+    let doc = isrc_card(agreeing.clone(), "ZZDUP2600001").await;
     assert_eq!(doc.name.as_deref(), Some("Journey Through Time"));
     assert!(has_release_cover(&doc), "{:?} {:?}", doc.image, doc.credits);
+    // The cover is the shown recording's: of equal titles, the first by MBID (`OTHER`).
+    let browsed: Vec<String> = agreeing
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|s| s.starts_with("https://musicbrainz.org/ws/2/release?"))
+        .cloned()
+        .collect();
+    assert!(
+        !browsed.is_empty()
+            && browsed
+                .iter()
+                .all(|s| s.contains(&format!("recording={OTHER}&"))),
+        "{browsed:?}"
+    );
     let disagreeing = Arc::new(Recorded {
         other_length: Some(300_000),
         ..Default::default()
