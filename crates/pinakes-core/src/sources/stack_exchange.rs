@@ -253,7 +253,7 @@ pub fn card(
     Question {
         title: plain(&q["title"]),
         description: text(&q["body"])
-            .and_then(|b| crate::resolver::pubky_apps::read::html_text(&b))
+            .and_then(|b| crate::resolver::html::scan_text(&b))
             .map(|t| questions::excerpt(&t))
             .filter(|t| !t.is_empty()),
         answer_count: q["answer_count"].as_u64(),

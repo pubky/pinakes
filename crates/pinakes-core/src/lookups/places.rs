@@ -348,15 +348,7 @@ pub mod also_on {
             let Some(article) = crate::wikipedia::parse(&subject.uri) else {
                 return Ok(None);
             };
-            let mut url =
-                url::Url::parse(&format!("https://{}.wikipedia.org/w/api.php", article.lang))?;
-            url.query_pairs_mut()
-                .append_pair("action", "query")
-                .append_pair("prop", "pageprops")
-                .append_pair("ppprop", "wikibase_item")
-                .append_pair("titles", &article.title)
-                .append_pair("redirects", "1")
-                .append_pair("format", "json");
+            let url = crate::wikipedia::item_lookup(&article)?;
             let (status, body) = get(cx, url.as_str(), "wikipedia_busy").await?;
             if status != 200 {
                 return Ok(None);

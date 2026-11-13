@@ -5,6 +5,7 @@
 //! Each module names its type, its facts (`FACTS`, published in `facts`) and reads
 //! them from JSON-LD.
 use crate::model::ResourceMeta;
+use serde_json::Value;
 use std::collections::BTreeMap;
 
 pub mod cooking;
@@ -40,6 +41,42 @@ pub fn facts(
         facts.insert("job_status".into(), jobs::status(doc, now).into());
     }
     (!facts.is_empty()).then_some(facts)
+}
+
+// What the kinds' JSON-LD readers share.
+
+/// A value's first entry when it is an array, else the value.
+fn first(v: &Value) -> &Value {
+    v.as_array().and_then(|a| a.first()).unwrap_or(v)
+}
+/// A value's entries, the first `max` of an array or the value itself, nulls left out.
+fn all(v: &Value, max: usize) -> impl Iterator<Item = &Value> {
+    v.as_array()
+        .map_or_else(|| vec![v], |a| a.iter().take(max).collect())
+        .into_iter()
+        .filter(|v| !v.is_null())
+}
+/// A string value, trimmed; none when empty.
+fn text(v: &Value) -> Option<String> {
+    crate::event::page::string(v)
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+}
+/// As `text`, and a whole number as its digits.
+fn text_or_number(v: &Value) -> Option<String> {
+    crate::event::page::string(v)
+        .or_else(|| v.as_u64().map(|n| n.to_string()))
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+}
+/// A finite number of zero or more, given as a number or as a string (its commas ignored).
+fn number(v: &Value) -> Option<f64> {
+    v.as_f64()
+        .or_else(|| {
+            v.as_str()
+                .and_then(|s| s.trim().replace(',', "").parse().ok())
+        })
+        .filter(|n| n.is_finite() && *n >= 0.0)
 }
 
 #[cfg(test)]

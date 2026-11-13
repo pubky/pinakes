@@ -5,7 +5,6 @@ use crate::{
 };
 use anyhow::Result;
 use async_trait::async_trait;
-use url::Url;
 
 use crate::wikipedia::*;
 
@@ -31,14 +30,7 @@ impl WikipediaSource {
         let Some(article) = parse(&subject.uri) else {
             return Ok(Found::default());
         };
-        let mut url = Url::parse(&format!("https://{}.wikipedia.org/w/api.php", article.lang))?;
-        url.query_pairs_mut()
-            .append_pair("action", "query")
-            .append_pair("prop", "pageprops")
-            .append_pair("ppprop", "wikibase_item")
-            .append_pair("titles", &article.title)
-            .append_pair("redirects", "1")
-            .append_pair("format", "json");
+        let url = item_lookup(&article)?;
         let options = crate::resolver::egress::FetchOptions {
             accept: Some("application/json".into()),
             ..Default::default()

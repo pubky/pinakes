@@ -704,6 +704,33 @@ pub struct SearchQuery {
 pub enum CollapseMode {
     Group,
 }
+/// A cursor of `payload`, signed with the daemon's cursor key: the MAC, then the payload, as
+/// unpadded URL-safe base64. Every signed cursor (search, collections, occurrences) is made
+/// here and read by [`open`].
+pub(crate) fn seal(payload: &[u8], key: &SimpleHmac<blake3::Hasher>) -> String {
+    let mut mac = key.clone();
+    mac.update(payload);
+    let mut signed = mac.finalize().into_bytes().to_vec();
+    signed.extend_from_slice(payload);
+    URL_SAFE_NO_PAD.encode(signed)
+}
+/// The payload of a cursor of at most `max` bytes that [`seal`] made with this key; `None` for
+/// anything else.
+pub(crate) fn open(cursor: &str, max: usize, key: &SimpleHmac<blake3::Hasher>) -> Option<Vec<u8>> {
+    if cursor.len() > max {
+        return None;
+    }
+    let signed = URL_SAFE_NO_PAD.decode(cursor).ok()?;
+    if signed.len() <= 32 {
+        return None;
+    }
+    let (tag, payload) = signed.split_at(32);
+    let mut mac = key.clone();
+    mac.update(payload);
+    // RustCrypto's verify_slice compares the complete MAC in constant time.
+    mac.verify_slice(tag).ok()?;
+    Some(payload.to_vec())
+}
 #[derive(Deserialize, Serialize)]
 struct PageCursor {
     score: f64,
@@ -713,28 +740,12 @@ struct PageCursor {
 }
 impl PageCursor {
     fn encode(&self, template: &SimpleHmac<blake3::Hasher>) -> anyhow::Result<String> {
-        let payload = serde_json::to_vec(self)?;
-        let mut mac = template.clone();
-        mac.update(&payload);
-        let mut signed = mac.finalize().into_bytes().to_vec();
-        signed.extend_from_slice(&payload);
-        Ok(URL_SAFE_NO_PAD.encode(signed))
+        Ok(seal(&serde_json::to_vec(self)?, template))
     }
     fn decode(s: &str, template: &SimpleHmac<blake3::Hasher>) -> Result<Self, ApiError> {
-        let invalid = || ApiError::bad("invalid cursor");
-        if s.len() > 2048 {
-            return Err(invalid());
-        }
-        let signed = URL_SAFE_NO_PAD.decode(s).map_err(|_| invalid())?;
-        if signed.len() <= 32 {
-            return Err(invalid());
-        }
-        let (tag, payload) = signed.split_at(32);
-        let mut mac = template.clone();
-        mac.update(payload);
-        // RustCrypto's verify_slice compares the complete MAC in constant time.
-        mac.verify_slice(tag).map_err(|_| invalid())?;
-        serde_json::from_slice(payload).map_err(|_| invalid())
+        open(s, 2048, template)
+            .and_then(|payload| serde_json::from_slice(&payload).ok())
+            .ok_or_else(|| ApiError::bad("invalid cursor"))
     }
 }
 /// The one card every route returns for a resource, occurrence or reference event. Absent

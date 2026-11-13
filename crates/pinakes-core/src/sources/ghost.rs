@@ -36,11 +36,17 @@ pub struct Site {
 }
 
 impl Site {
-    pub fn of_page(page: &Fetched) -> Option<Self> {
+    /// Whether the page's text holds what a Ghost page names its site with: without it the
+    /// markup names none, and is not parsed.
+    fn marked(page: &Fetched) -> bool {
         let body = String::from_utf8_lossy(&page.body);
-        if !body.contains("data-key") || !body.contains("content=\"Ghost") {
+        body.contains("data-key") && body.contains("content=\"Ghost")
+    }
+    pub fn of_page(page: &Fetched) -> Option<Self> {
+        if !Self::marked(page) {
             return None;
         }
+        let body = String::from_utf8_lossy(&page.body);
         let html = crate::resolver::html::document(&body).ok()?;
         let generator = scraper::Selector::parse("head meta[name='generator']").ok()?;
         let ghost = html
@@ -198,6 +204,11 @@ impl Source for Ghost {
         page: &Fetched,
         doc: &ResourceMeta,
     ) -> Result<Option<ResourceMeta>> {
+        // The cheap test first: only a page with the markers in its text is copied and waits
+        // for a parse.
+        if !Site::marked(page) {
+            return Ok(None);
+        }
         let found = page.clone();
         let Some(site) = crate::resolver::html::blocking(move || Site::of_page(&found)).await?
         else {

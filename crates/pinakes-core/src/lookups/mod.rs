@@ -300,13 +300,14 @@ pub(crate) async fn item(cx: &Context, qid: &str) -> Result<Option<(Value, hubs:
     if status == 404 {
         return Ok(None);
     }
-    let mut entities = wikidata::parse_entities(status, &body)?;
-    let Some(raw) = entities.remove(qid) else {
-        return Ok(None);
-    };
-    let hub = hubs::wikidata::parse_entities(&serde_json::from_slice(&body)?)
+    // One parse of the body (up to the hubs' cap) for both readings.
+    let answer = wikidata::parse_answer(status, &body)?;
+    let hub = hubs::wikidata::parse_entities(&answer)
         .into_iter()
         .find(|i| i.qid == qid);
+    let Some(raw) = wikidata::entities(answer)?.remove(qid) else {
+        return Ok(None);
+    };
     Ok(hub.map(|hub| (raw, hub)))
 }
 

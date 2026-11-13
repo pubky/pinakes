@@ -21,11 +21,19 @@ pub fn key(qid: &str) -> Key {
 /// The items of a `wbgetentities` response by their own id. Missing items are left out; a
 /// redirected id appears under the id it redirects to.
 pub fn parse_entities(status: u16, raw: &[u8]) -> Result<BTreeMap<String, Value>> {
+    entities(parse_answer(status, raw)?)
+}
+/// A `wbgetentities` response as JSON; an answer that is an API error is an error.
+pub fn parse_answer(status: u16, raw: &[u8]) -> Result<Value> {
     let raw = body(status, raw, &[])?.context("no body")?;
-    let mut value: Value = serde_json::from_slice(raw)?;
+    let value: Value = serde_json::from_slice(raw)?;
     if let Some(error) = value.get("error") {
         anyhow::bail!("wikidata error: {}", error["code"]);
     }
+    Ok(value)
+}
+/// The items of a parsed `wbgetentities` response (`parse_answer`) by their own id.
+pub fn entities(mut value: Value) -> Result<BTreeMap<String, Value>> {
     let entities = value
         .get_mut("entities")
         .and_then(Value::as_object_mut)

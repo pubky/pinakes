@@ -106,6 +106,8 @@ pub async fn sweep(pool: &PgPool) -> Result<u64> {
 /// How long a claimed resource is the pass's: one that is not done by then (the pass was
 /// stopped, the process ended) is due again.
 const LEASE: Duration = Duration::from_secs(300);
+/// The pass's queue: one row per due resource.
+const DIRTY: &str = "same_recording_dirty";
 
 /// Claims up to `n` due resources for `lease`: each one's entry stays, moved `lease` ahead, and
 /// the time it was moved to is the claim. Exposed for the interruption test; `drain` claims with
@@ -115,16 +117,7 @@ pub async fn claim(
     n: i64,
     lease: Duration,
 ) -> Result<Vec<(String, chrono::DateTime<chrono::Utc>)>> {
-    let rows = sqlx::query("UPDATE same_recording_dirty d SET next_attempt_at=now()+$2*interval '1 millisecond' \
-        WHERE d.resource_id IN (SELECT resource_id FROM same_recording_dirty WHERE next_attempt_at<=now() ORDER BY next_attempt_at,resource_id LIMIT $1 FOR UPDATE SKIP LOCKED) \
-        RETURNING d.resource_id,d.next_attempt_at")
-        .bind(n)
-        .bind(lease.as_millis() as f64)
-        .fetch_all(pool)
-        .await?;
-    rows.iter()
-        .map(|r| Ok((r.try_get("resource_id")?, r.try_get("next_attempt_at")?)))
-        .collect()
+    crate::hints::claim(pool, DIRTY, n, lease).await
 }
 
 /// One pass: claims up to `CLAIMED` due resources (at most `budget`) and reads each one's
@@ -142,11 +135,7 @@ pub async fn drain(pool: &PgPool, config: &Config, budget: i64) -> Result<usize>
             Ok(_) => settle(pool, id, claimed).await?,
             Err(error) => {
                 tracing::warn!(resource_id = %id, error = %crate::resolver::log_error(&error), "same-recording pairs will retry");
-                sqlx::query("UPDATE same_recording_dirty SET next_attempt_at=now()+interval '60 seconds' WHERE resource_id=$1 AND next_attempt_at=$2 AND next_attempt_at>now()")
-                    .bind(id)
-                    .bind(claimed)
-                    .execute(pool)
-                    .await?;
+                crate::hints::release(pool, DIRTY, id, claimed, 60).await?;
             }
         }
     }
@@ -162,12 +151,7 @@ pub async fn settle(
     id: &str,
     claimed: &chrono::DateTime<chrono::Utc>,
 ) -> Result<()> {
-    sqlx::query("DELETE FROM same_recording_dirty WHERE resource_id=$1 AND next_attempt_at=$2 AND next_attempt_at>now()")
-        .bind(id)
-        .bind(claimed)
-        .execute(pool)
-        .await?;
-    Ok(())
+    crate::hints::settle(pool, DIRTY, id, claimed).await
 }
 
 /// A recording as the pass compares it: its title and artist keys and its length, from its

@@ -466,6 +466,92 @@ pub fn bounded(text: &str) -> &str {
     scan.cut.map_or(text, |at| &text[..at])
 }
 
+/// The text of an HTML fragment, read in one pass without a parser, so in time linear in
+/// its length whatever its nesting: tags and comments are dropped, a block tag (`p`, `br`,
+/// `li`, …) starts a new line, `script` and `style` contents are skipped, character
+/// references are decoded and white space is collapsed. `None` when no text is left.
+pub fn scan_text(html: &str) -> Option<String> {
+    const BLOCKS: &[&str] = &[
+        "address",
+        "blockquote",
+        "br",
+        "dd",
+        "div",
+        "dl",
+        "dt",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "hr",
+        "li",
+        "ol",
+        "p",
+        "pre",
+        "section",
+        "table",
+        "tr",
+        "ul",
+    ];
+    // ASCII lower-casing keeps every byte offset, so `lower` locates what `html` holds.
+    let lower = html.to_ascii_lowercase();
+    let mut lines = vec![String::new()];
+    let mut at = 0;
+    while at < html.len() {
+        let Some(open) = html[at..].find('<').map(|i| at + i) else {
+            lines.last_mut()?.push_str(&html[at..]);
+            break;
+        };
+        lines.last_mut()?.push_str(&html[at..open]);
+        if lower[open..].starts_with("<!--") {
+            // A comment, to its end (or the end of the text).
+            at = lower[open + 4..]
+                .find("-->")
+                .map_or(html.len(), |i| open + 4 + i + 3);
+            continue;
+        }
+        let next = html[open + 1..].chars().next();
+        if !next.is_some_and(|c| c.is_ascii_alphabetic() || c == '/' || c == '!') {
+            // Not a tag: a literal `<`.
+            lines.last_mut()?.push('<');
+            at = open + 1;
+            continue;
+        }
+        let Some(close) = html[open..].find('>').map(|i| open + i) else {
+            break;
+        };
+        let inner = &lower[open + 1..close];
+        let end_tag = inner.starts_with('/');
+        let name: String = inner
+            .trim_start_matches('/')
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect();
+        if BLOCKS.contains(&name.as_str()) {
+            lines.push(String::new());
+        }
+        at = close + 1;
+        if !end_tag && (name == "script" || name == "style") {
+            // Raw text, to its end tag (or the end of the text).
+            let end = format!("</{name}");
+            at = lower[at..].find(&end).map_or(html.len(), |i| at + i);
+        }
+    }
+    let text: Vec<String> = lines
+        .iter()
+        .map(|line| {
+            crate::resolver::web::decoded(line)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .filter(|line| !line.is_empty())
+        .collect();
+    (!text.is_empty()).then(|| text.join("\n"))
+}
+
 /// Parse in this thread's job, or in a job of its own with `budget` outside one.
 fn parse(kind: Kind, text: &str, budget: Duration) -> anyhow::Result<scraper::Html> {
     if JOB.with(|j| j.borrow().is_some()) {

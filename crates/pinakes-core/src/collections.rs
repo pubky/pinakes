@@ -574,34 +574,13 @@ fn push_page(
     sql.push("SELECT false AS own,at,author,path FROM others) x GROUP BY own,author,path ORDER BY own DESC,max(at) DESC,author COLLATE \"C\",path COLLATE \"C\" LIMIT (SELECT n FROM q)");
 }
 fn encode(cursor: &PageCursor, key: &hmac::SimpleHmac<blake3::Hasher>) -> anyhow::Result<String> {
-    use base64::Engine;
-    use hmac::Mac;
     // Bytes, not JSON: a path is its length and bytes, never escaped.
-    let payload = postcard::to_allocvec(cursor)?;
-    let mut mac = key.clone();
-    mac.update(&payload);
-    let mut signed = mac.finalize().into_bytes().to_vec();
-    signed.extend(payload);
-    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signed))
+    Ok(crate::api::seal(&postcard::to_allocvec(cursor)?, key))
 }
 fn decode(s: &str, key: &hmac::SimpleHmac<blake3::Hasher>) -> Result<PageCursor, ApiError> {
-    use base64::Engine;
-    use hmac::Mac;
-    let invalid = || ApiError::bad("invalid cursor");
-    if s.len() > MAX_CURSOR {
-        return Err(invalid());
-    }
-    let signed = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(s)
-        .map_err(|_| invalid())?;
-    if signed.len() <= 32 {
-        return Err(invalid());
-    }
-    let (tag, payload) = signed.split_at(32);
-    let mut mac = key.clone();
-    mac.update(payload);
-    mac.verify_slice(tag).map_err(|_| invalid())?;
-    postcard::from_bytes(payload).map_err(|_| invalid())
+    crate::api::open(s, MAX_CURSOR, key)
+        .and_then(|payload| postcard::from_bytes(&payload).ok())
+        .ok_or_else(|| ApiError::bad("invalid cursor"))
 }
 
 #[cfg(test)]
