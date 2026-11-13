@@ -714,17 +714,12 @@ mod tests {
                     .map(|(_, v)| v.clone())
                     .unwrap_or_default();
                 self.0.lock().unwrap().push((header, options.sensitive));
-                Ok(crate::resolver::egress::Fetched {
-                    permanent_redirect: false,
-                    truncated: false,
-                    validators: Default::default(),
-                    url: url.clone(),
-                    content_type: "application/json".into(),
-                    status: 200,
-                    retry_after_secs: 60,
-                    location: None,
-                    body: crate::sources::fixture::read("discogs", "master-21491.json"),
-                })
+                Ok(crate::resolver::egress::Fetched::answer(
+                    url.clone(),
+                    200,
+                    "application/json".into(),
+                    crate::sources::fixture::read("discogs", "master-21491.json"),
+                ))
             }
         }
         let seen = std::sync::Arc::new(Seen::default());
@@ -779,21 +774,16 @@ mod tests {
                     self.authorized
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                Ok(crate::resolver::egress::Fetched {
-                    permanent_redirect: false,
-                    truncated: false,
-                    validators: Default::default(),
-                    url: url.clone(),
-                    content_type: "application/json".into(),
-                    status: if authorized { 401 } else { 200 },
-                    retry_after_secs: 60,
-                    location: None,
-                    body: if authorized {
+                Ok(crate::resolver::egress::Fetched::answer(
+                    url.clone(),
+                    if authorized { 401 } else { 200 },
+                    "application/json".into(),
+                    if authorized {
                         br#"{"message": "You must authenticate to access this resource."}"#.to_vec()
                     } else {
                         crate::sources::fixture::read("discogs", "master-21491.json")
                     },
-                })
+                ))
             }
         }
         let api = std::sync::Arc::new(Refusing::default());

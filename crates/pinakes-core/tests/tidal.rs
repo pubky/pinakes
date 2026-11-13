@@ -89,15 +89,8 @@ impl Transport for Recorded {
                 .map(|(_, v)| v.clone())
         };
         let json = |status: u16, body: Vec<u8>, content_type: &str| Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: url.clone(),
-            status,
             retry_after_secs: if status == 429 { 3600 } else { 120 },
-            location: None,
-            content_type: content_type.into(),
-            body,
+            ..common::fetched(url.clone(), status, content_type.into(), body)
         };
         Ok(match (host, url.path()) {
             ("auth.tidal.com", "/v1/oauth2/token") => {

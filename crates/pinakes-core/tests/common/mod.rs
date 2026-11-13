@@ -267,17 +267,7 @@ impl pinakes_core::resolver::egress::Transport for Recorded {
             "text/html".into(),
             b"not found".to_vec(),
         ));
-        Ok(pinakes_core::resolver::egress::Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: url.clone(),
-            content_type: kind,
-            status,
-            retry_after_secs: 60,
-            location: None,
-            body,
-        })
+        Ok(fetched(url.clone(), status, kind, body))
     }
 }
 struct PublicDns;
@@ -288,6 +278,27 @@ impl pinakes_core::resolver::egress::Dns for PublicDns {
             [93, 184, 216, 34].into(),
             port,
         )])
+    }
+}
+/// An answer as a test's transport gives it: `status` with `body` of `content_type` at `url`,
+/// whole, with no redirect, no validators, no `Location` and a retry-after of 60 s. A test that
+/// needs another value sets that field with struct update syntax.
+pub fn fetched(
+    url: url::Url,
+    status: u16,
+    content_type: String,
+    body: Vec<u8>,
+) -> pinakes_core::resolver::egress::Fetched {
+    pinakes_core::resolver::egress::Fetched {
+        permanent_redirect: false,
+        truncated: false,
+        validators: Default::default(),
+        url,
+        content_type,
+        status,
+        retry_after_secs: 60,
+        location: None,
+        body,
     }
 }
 /// `groups::drain`, then each grouping run it left deferred done again at once through

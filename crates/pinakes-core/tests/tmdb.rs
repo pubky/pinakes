@@ -126,17 +126,12 @@ impl Transport for Api {
                 (200, body)
             }
         };
-        Ok(Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: url.clone(),
-            content_type: "application/json;charset=utf-8".into(),
+        Ok(common::fetched(
+            url.clone(),
             status,
-            retry_after_secs: 60,
-            location: None,
+            "application/json;charset=utf-8".into(),
             body,
-        })
+        ))
     }
 }
 

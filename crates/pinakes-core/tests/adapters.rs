@@ -345,21 +345,16 @@ struct SecondaryFailure(u16);
 impl Transport for SecondaryFailure {
     async fn get(&self, u: &url::Url, _: &[SocketAddr]) -> anyhow::Result<Fetched> {
         let secondary = u.path().starts_with("/api/") || u.host_str() == Some("api.lu.ma");
-        Ok(Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            url: u.clone(),
-            status: if secondary { self.0 } else { 200 },
-            content_type: "text/html".into(),
-            body: if secondary {
+        Ok(common::fetched(
+            u.clone(),
+            if secondary { self.0 } else { 200 },
+            "text/html".into(),
+            if secondary {
                 b"unavailable".to_vec()
             } else {
                 b"<title>Event page</title><meta name='generator' content='Gancio'>".to_vec()
             },
-            validators: Default::default(),
-            location: None,
-            retry_after_secs: 60,
-        })
+        ))
     }
 }
 
@@ -452,21 +447,16 @@ impl Transport for WikiFailure {
         if entity && self.failure == 1 {
             anyhow::bail!("fixture transport failure");
         }
-        Ok(Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            url: u.clone(),
-            status: if entity { self.failure } else { 200 },
-            content_type: "text/html".into(),
-            body: if !entity {
+        Ok(common::fetched(
+            u.clone(),
+            if entity { self.failure } else { 200 },
+            "text/html".into(),
+            if !entity {
                 include_bytes!("fixtures/adapters/wikipedia-item.html").to_vec()
             } else {
                 b"invalid JSON".to_vec()
             },
-            validators: Default::default(),
-            location: None,
-            retry_after_secs: 60,
-        })
+        ))
     }
 }
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
@@ -1735,15 +1725,14 @@ impl Transport for Replies {
             .pop_front()
             .unwrap_or_else(|| panic!("unexpected HTTP request {url} {:?}", options.accept));
         Ok(Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            url: url.clone(),
-            validators: Default::default(),
-            content_type: "application/json".into(),
-            status,
             retry_after_secs: self.retry_after_secs,
             location: (status == 302).then(|| "https://foreign.example/".into()),
-            body: serde_json::to_vec(&body)?,
+            ..common::fetched(
+                url.clone(),
+                status,
+                "application/json".into(),
+                serde_json::to_vec(&body)?,
+            )
         })
     }
 }
@@ -2142,17 +2131,7 @@ fn own_calendar_links_and_deterministic_platform_endpoints() {
             expected
         );
     }
-    let f = Fetched {
-        permanent_redirect: false,
-        truncated: false,
-        url: base,
-        validators: Default::default(),
-        content_type: "text/html".into(),
-        status: 200,
-        retry_after_secs: 60,
-        location: None,
-        body: vec![],
-    };
+    let f = common::fetched(base, 200, "text/html".into(), vec![]);
     for (id, uri, expected) in [
         (
             "partiful",
@@ -2300,17 +2279,12 @@ fn all_page_and_calendar_adapters_parse_their_public_contracts() {
         .filter(|d| d.parser == "ics_link" || d.parser == "calendar")
     {
         let bytes=b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:contract\r\nDTSTART;TZID=Europe/Zurich:20261020T190000\r\nDTEND;TZID=Europe/Zurich:20261020T210000\r\nSUMMARY:Contract fixture\r\nSTATUS:CANCELLED\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
-        let f = Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            url: uri.parse().unwrap(),
-            validators: Default::default(),
-            content_type: "text/calendar".into(),
-            status: 200,
-            retry_after_secs: 60,
-            location: None,
-            body: bytes.to_vec(),
-        };
+        let f = common::fetched(
+            uri.parse().unwrap(),
+            200,
+            "text/calendar".into(),
+            bytes.to_vec(),
+        );
         let doc = adapters::service::calendar_document(uri, d, &f, &cfg)
             .unwrap()
             .unwrap();
@@ -2506,15 +2480,14 @@ async fn recorded_public_adapter_responses_replay_without_network(pool: PgPool) 
                 r["sha256"].as_str().unwrap()
             );
             Ok(Fetched {
-                permanent_redirect: false,
-                truncated: false,
-                url: uri.parse().unwrap(),
-                status: r["status"].as_u64().unwrap_or(200) as u16,
-                content_type: r["content_type"].as_str().unwrap_or("text/html").into(),
-                body,
                 validators: serde_json::from_value(r["validators"].clone()).unwrap_or_default(),
                 location: r["location"].as_str().map(str::to_owned),
-                retry_after_secs: 60,
+                ..common::fetched(
+                    uri.parse().unwrap(),
+                    r["status"].as_u64().unwrap_or(200) as u16,
+                    r["content_type"].as_str().unwrap_or("text/html").into(),
+                    body,
+                )
             })
         };
         let key = format!(
@@ -3041,21 +3014,16 @@ fn recorded_egress(rows: Vec<(&str, &str, Value)>) -> Egress {
                         request.to_string()
                     }
                 ),
-                Ok(Fetched {
-                    permanent_redirect: false,
-                    truncated: false,
-                    url: uri.parse().unwrap(),
-                    body: body.as_bytes().to_vec(),
-                    content_type: if body.starts_with('<') {
+                Ok(common::fetched(
+                    uri.parse().unwrap(),
+                    200,
+                    if body.starts_with('<') {
                         "text/html".into()
                     } else {
                         "application/json".into()
                     },
-                    status: 200,
-                    retry_after_secs: 60,
-                    location: None,
-                    validators: Default::default(),
-                }),
+                    body.as_bytes().to_vec(),
+                )),
             )
         })
         .collect();
@@ -3141,15 +3109,13 @@ async fn a_cut_page_past_the_cap_gets_its_title(pool: PgPool) {
     let map = [(
         format!("{uri}:"),
         Ok(Fetched {
-            permanent_redirect: false,
             truncated: true,
-            url: uri.parse().unwrap(),
-            body: body.into_bytes(),
-            content_type: "text/html".into(),
-            status: 200,
-            retry_after_secs: 60,
-            location: None,
-            validators: Default::default(),
+            ..common::fetched(
+                uri.parse().unwrap(),
+                200,
+                "text/html".into(),
+                body.into_bytes(),
+            )
         }),
     )]
     .into_iter()
@@ -3182,17 +3148,12 @@ async fn a_whole_page_within_the_head_budget_gets_its_card(pool: PgPool) {
     );
     let map = [(
         format!("{uri}:"),
-        Ok(Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            url: uri.parse().unwrap(),
-            body: body.into_bytes(),
-            content_type: "text/html".into(),
-            status: 200,
-            retry_after_secs: 60,
-            location: None,
-            validators: Default::default(),
-        }),
+        Ok(common::fetched(
+            uri.parse().unwrap(),
+            200,
+            "text/html".into(),
+            body.into_bytes(),
+        )),
     )]
     .into_iter()
     .collect();
@@ -3230,16 +3191,14 @@ async fn a_hostile_page_is_parsed_in_bounded_time(pool: PgPool) {
     let map = [(
         format!("{uri}:"),
         Ok(Fetched {
-            permanent_redirect: false,
             // The egress stops at `</head>`, past the page cap: a cut page.
             truncated: true,
-            url: uri.parse().unwrap(),
-            body: body.into_bytes(),
-            content_type: "text/html".into(),
-            status: 200,
-            retry_after_secs: 60,
-            location: None,
-            validators: Default::default(),
+            ..common::fetched(
+                uri.parse().unwrap(),
+                200,
+                "text/html".into(),
+                body.into_bytes(),
+            )
         }),
     )]
     .into_iter()
@@ -3315,17 +3274,12 @@ async fn a_large_wikidata_item_gets_its_card(pool: PgPool) {
         Arc::new(LargeRecord {
             url: entity.into(),
             size: 2_678_320,
-            body: Fetched {
-                permanent_redirect: false,
-                truncated: false,
-                url: entity.parse().unwrap(),
-                body: body.into_bytes(),
-                content_type: "application/json".into(),
-                status: 200,
-                retry_after_secs: 60,
-                location: None,
-                validators: Default::default(),
-            },
+            body: common::fetched(
+                entity.parse().unwrap(),
+                200,
+                "application/json".into(),
+                body.into_bytes(),
+            ),
         }),
     );
     let cfg = EventConfig {
@@ -3633,21 +3587,16 @@ struct HintedGraphql;
 impl Transport for HintedGraphql {
     async fn get(&self, u: &url::Url, _: &[SocketAddr]) -> anyhow::Result<Fetched> {
         let api = u.path() == "/api";
-        Ok(Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            url: u.clone(),
-            status: 200,
-            content_type: if api { "application/json" } else { "text/html" }.into(),
-            body: if api {
+        Ok(common::fetched(
+            u.clone(),
+            200,
+            if api { "application/json" } else { "text/html" }.into(),
+            if api {
                 br#"{"errors":[{"message":"not that GraphQL API"}]}"#.to_vec()
             } else {
                 b"<title>A page about mobilizon</title>".to_vec()
             },
-            validators: Default::default(),
-            location: None,
-            retry_after_secs: 60,
-        })
+        ))
     }
 }
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
@@ -4749,15 +4698,8 @@ impl Transport for HtmlPages {
         // `REDIRECT <url>` answers 302 there, so a page can move to another host.
         if let Some(target) = page.and_then(|p| p.strip_prefix("REDIRECT ")) {
             return Ok(Fetched {
-                permanent_redirect: false,
-                truncated: false,
-                url: url.clone(),
-                validators: Default::default(),
-                content_type: "text/html".into(),
-                status: 302,
-                retry_after_secs: 60,
                 location: Some(target.into()),
-                body: vec![],
+                ..common::fetched(url.clone(), 302, "text/html".into(), vec![])
             });
         }
         // JSON and ICS bodies carry their own content types.
@@ -4766,17 +4708,12 @@ impl Transport for HtmlPages {
             Some(p) if p.starts_with("BEGIN:VCALENDAR") => "text/calendar",
             _ => "text/html; charset=utf-8",
         };
-        Ok(Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            url: url.clone(),
-            validators: Default::default(),
-            content_type: content_type.into(),
-            status: if page.is_some() { 200 } else { 404 },
-            retry_after_secs: 60,
-            location: None,
-            body: page.cloned().unwrap_or_default().into_bytes(),
-        })
+        Ok(common::fetched(
+            url.clone(),
+            if page.is_some() { 200 } else { 404 },
+            content_type.into(),
+            page.cloned().unwrap_or_default().into_bytes(),
+        ))
     }
 }
 fn html_platform(pool: &PgPool, pages: &[(&str, String)]) -> adapters::service::PlatformResolver {
@@ -5616,17 +5553,12 @@ async fn a_portal_calendar_export_naming_its_page_is_read_and_its_refusal_propag
     let mut responses = std::collections::HashMap::new();
     responses.insert(
         format!("{page}:"),
-        Ok(Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            url: page.parse().unwrap(),
-            body: html.clone().into_bytes(),
-            content_type: "text/html".into(),
-            status: 200,
-            retry_after_secs: 60,
-            location: None,
-            validators: Default::default(),
-        }),
+        Ok(common::fetched(
+            page.parse().unwrap(),
+            200,
+            "text/html".into(),
+            html.clone().into_bytes(),
+        )),
     );
     responses.insert(
         format!("{export}:"),

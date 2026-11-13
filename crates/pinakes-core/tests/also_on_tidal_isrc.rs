@@ -69,15 +69,8 @@ impl Transport for Recorded {
                 .map(|(_, v)| v.clone())
         };
         let answer = |status: u16, body: Vec<u8>| Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: url.clone(),
-            status,
             retry_after_secs: if status == 429 { 3600 } else { 120 },
-            location: None,
-            content_type: "application/vnd.api+json".into(),
-            body,
+            ..common::fetched(url.clone(), status, "application/vnd.api+json".into(), body)
         };
         let query = |name: &str| {
             url.query_pairs()

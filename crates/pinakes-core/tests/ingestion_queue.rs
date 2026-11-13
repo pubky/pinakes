@@ -11,6 +11,7 @@ use pinakes_core::{
 };
 use sqlx::PgPool;
 use std::time::Duration;
+mod common;
 
 fn author(seed: &str) -> String {
     let mut bytes = [0; 52];
@@ -760,15 +761,13 @@ impl pinakes_core::resolver::egress::Transport for Upstream {
         self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let status = self.answers.lock().unwrap().remove(0);
         Ok(pinakes_core::resolver::egress::Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: url.clone(),
-            status,
             retry_after_secs: if status == 503 { 120 } else { 60 },
-            location: None,
-            content_type: "application/json".into(),
-            body: b"{}".to_vec(),
+            ..common::fetched(
+                url.clone(),
+                status,
+                "application/json".into(),
+                b"{}".to_vec(),
+            )
         })
     }
 }

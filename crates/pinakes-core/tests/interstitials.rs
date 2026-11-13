@@ -17,19 +17,15 @@ use std::{
     sync::{Arc, Mutex},
 };
 use url::Url;
+mod common;
 
 fn page(uri: &str, body: &str, status: u16) -> Fetched {
-    Fetched {
-        permanent_redirect: false,
-        truncated: false,
-        validators: Default::default(),
-        url: uri.parse().unwrap(),
-        content_type: "text/html".into(),
+    common::fetched(
+        uri.parse().unwrap(),
         status,
-        retry_after_secs: 60,
-        location: None,
-        body: body.as_bytes().to_vec(),
-    }
+        "text/html".into(),
+        body.as_bytes().to_vec(),
+    )
 }
 #[test]
 fn captured_walls_stubs_and_content_are_distinguished() {

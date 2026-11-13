@@ -258,15 +258,9 @@ impl Transport for Recorded {
             None => panic!("unrecorded request {url}"),
         };
         Ok(Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: url.clone(),
-            status: answer.status,
             retry_after_secs: 0,
             location: answer.location,
-            content_type: answer.content_type,
-            body: answer.body,
+            ..super::fetched(url.clone(), answer.status, answer.content_type, answer.body)
         })
     }
 }

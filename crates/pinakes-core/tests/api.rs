@@ -2946,17 +2946,12 @@ async fn an_alias_reads_as_its_root_everywhere(pool: PgPool) {
     // The page claims other URLs as itself (`@id`, `sameAs`), as Wikipedia's Lugano article does:
     // claims, not aliases.
     let page = r#"<title>Talk</title><script type="application/ld+json">{"@type":"Article","@id":"https://www.wikidata.org/entity/Q7024","name":"Talk","url":"https://example.org/talk","sameAs":["https://www.wikidata.org/entity/Q7024","https://www.lugano.ch/"]}</script>"#;
-    let fetched = pinakes_core::resolver::egress::Fetched {
-        permanent_redirect: false,
-        truncated: false,
-        validators: Default::default(),
-        url: url::Url::parse(clean).unwrap(),
-        status: 200,
-        retry_after_secs: 60,
-        content_type: "text/html".into(),
-        location: None,
-        body: page.as_bytes().into(),
-    };
+    let fetched = common::fetched(
+        url::Url::parse(clean).unwrap(),
+        200,
+        "text/html".into(),
+        page.as_bytes().into(),
+    );
     let doc = pinakes_core::resolver::html::off_runtime(|| {
         pinakes_core::resolver::web::extract(clean, &fetched, 86400).unwrap()
     })

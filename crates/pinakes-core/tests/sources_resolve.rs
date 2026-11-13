@@ -13,6 +13,7 @@ use pinakes_core::{
 };
 use std::{net::SocketAddr, sync::Arc};
 use url::Url;
+mod common;
 
 struct PublicDns;
 #[async_trait]
@@ -40,15 +41,13 @@ const NEXT: &str = "000000000000000000000000000000000000000000000000000000000000
 
 fn answer(url: &Url, status: u16, body: String) -> Fetched {
     Fetched {
-        permanent_redirect: false,
-        truncated: false,
-        validators: Default::default(),
-        url: url.clone(),
-        content_type: "application/json".into(),
-        status,
         retry_after_secs: 0,
-        location: None,
-        body: body.into_bytes(),
+        ..common::fetched(
+            url.clone(),
+            status,
+            "application/json".into(),
+            body.into_bytes(),
+        )
     }
 }
 

@@ -48,17 +48,7 @@ fn recorded(file: &str) -> Vec<u8> {
     out
 }
 fn page(uri: &str, body: Vec<u8>) -> Fetched {
-    Fetched {
-        permanent_redirect: false,
-        truncated: false,
-        url: uri.parse().unwrap(),
-        status: 200,
-        content_type: "text/html".into(),
-        body,
-        location: None,
-        retry_after_secs: 60,
-        validators: Default::default(),
-    }
+    common::fetched(uri.parse().unwrap(), 200, "text/html".into(), body)
 }
 fn extracted(uri: &str, file: &str) -> ResourceMeta {
     web::extract(uri, &page(uri, recorded(file)), 3600)

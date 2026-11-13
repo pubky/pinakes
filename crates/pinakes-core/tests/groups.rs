@@ -1155,17 +1155,12 @@ async fn curation_waits_for_writer_and_policy_changes_redirty(pool: PgPool) {
 }
 
 fn recorded_json(url: &str, body: &[u8]) -> pinakes_core::resolver::egress::Fetched {
-    pinakes_core::resolver::egress::Fetched {
-        permanent_redirect: false,
-        truncated: false,
-        url: url.parse().unwrap(),
-        body: body.to_vec(),
-        content_type: "application/json".into(),
-        status: 200,
-        location: None,
-        retry_after_secs: 60,
-        validators: Default::default(),
-    }
+    common::fetched(
+        url.parse().unwrap(),
+        200,
+        "application/json".into(),
+        body.to_vec(),
+    )
 }
 async fn page(pool: &PgPool, uri: &str, name: &str, claims: &[(&str, &str)]) -> String {
     let id = store::ensure_resource(pool, uri).await.unwrap();

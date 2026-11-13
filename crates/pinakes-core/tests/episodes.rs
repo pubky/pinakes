@@ -224,15 +224,13 @@ async fn the_save_replaces_keeps_or_clears_the_list(pool: PgPool) {
 /// A feed as a show's read fetches it.
 fn fetched(body: String) -> pinakes_core::resolver::egress::Fetched {
     pinakes_core::resolver::egress::Fetched {
-        permanent_redirect: false,
-        truncated: false,
-        validators: Default::default(),
-        url: "https://feeds.example.org/show.xml".parse().unwrap(),
-        content_type: "application/rss+xml".into(),
-        status: 200,
         retry_after_secs: 0,
-        location: None,
-        body: body.into_bytes(),
+        ..common::fetched(
+            "https://feeds.example.org/show.xml".parse().unwrap(),
+            200,
+            "application/rss+xml".into(),
+            body.into_bytes(),
+        )
     }
 }
 fn feed(items: &str) -> String {

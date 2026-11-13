@@ -11,6 +11,7 @@ use pinakes_core::{
     },
 };
 use std::{io::Read, net::SocketAddr, sync::Arc};
+mod common;
 
 const ALTERNATE: &str =
     "https://www.alternate.ch/Corsair/SABRE-v3-PRO-PureVector-Ultralight-Ergo-Gaming-Maus/html/product/100222861";
@@ -29,17 +30,12 @@ fn recorded(file: &str) -> Vec<u8> {
 
 #[test]
 fn a_shop_page_names_its_barcode_and_dated_offer() {
-    let fetched = Fetched {
-        permanent_redirect: false,
-        truncated: false,
-        url: ALTERNATE.parse().unwrap(),
-        status: 200,
-        content_type: "text/html".into(),
-        body: recorded("alternate-100222861.html.gz"),
-        location: None,
-        retry_after_secs: 60,
-        validators: Default::default(),
-    };
+    let fetched = common::fetched(
+        ALTERNATE.parse().unwrap(),
+        200,
+        "text/html".into(),
+        recorded("alternate-100222861.html.gz"),
+    );
     let doc: ResourceMeta = web::extract(ALTERNATE, &fetched, 3600).unwrap().doc;
     assert_eq!(doc.type_name, "Product");
     assert_eq!(
@@ -74,17 +70,12 @@ fn only_the_pages_own_product_gives_its_barcode() {
         )
     };
     let extract = |page: &str, body: String| {
-        let fetched = Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            url: page.parse().unwrap(),
-            status: 200,
-            content_type: "text/html".into(),
-            body: body.into_bytes(),
-            location: None,
-            retry_after_secs: 60,
-            validators: Default::default(),
-        };
+        let fetched = common::fetched(
+            page.parse().unwrap(),
+            200,
+            "text/html".into(),
+            body.into_bytes(),
+        );
         web::extract(page, &fetched, 3600).unwrap().doc
     };
     let doc = extract(
@@ -190,17 +181,12 @@ fn only_the_pages_own_product_gives_its_barcode() {
 
 /// The page's card from `body`, served at `page`.
 fn extracted(page: &str, body: &str) -> ResourceMeta {
-    let fetched = Fetched {
-        permanent_redirect: false,
-        truncated: false,
-        url: page.parse().unwrap(),
-        status: 200,
-        content_type: "text/html".into(),
-        body: body.as_bytes().to_vec(),
-        location: None,
-        retry_after_secs: 60,
-        validators: Default::default(),
-    };
+    let fetched = common::fetched(
+        page.parse().unwrap(),
+        200,
+        "text/html".into(),
+        body.as_bytes().to_vec(),
+    );
     web::extract(page, &fetched, 3600).unwrap().doc
 }
 
@@ -346,17 +332,12 @@ fn a_json_document_is_guarded_as_a_pages_head_is() {
     // A page served as JSON-LD (`application/ld+json`) is all head: a product it names only by a
     // fragment while it declares itself a collection is one it lists, as in HTML.
     let served = |page: &str, body: String| {
-        let fetched = Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            url: page.parse().unwrap(),
-            status: 200,
-            content_type: "application/ld+json".into(),
-            body: body.into_bytes(),
-            location: None,
-            retry_after_secs: 60,
-            validators: Default::default(),
-        };
+        let fetched = common::fetched(
+            page.parse().unwrap(),
+            200,
+            "application/ld+json".into(),
+            body.into_bytes(),
+        );
         web::extract(page, &fetched, 3600).unwrap().doc
     };
     let product = |named: &str| {
@@ -446,15 +427,8 @@ impl Transport for ToAmazon {
     ) -> anyhow::Result<Fetched> {
         assert_eq!(url.host_str(), Some("link.example"), "fetched {url}");
         Ok(Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            url: url.clone(),
-            status: 302,
-            content_type: "text/html".into(),
-            body: vec![],
             location: Some(self.0.into()),
-            retry_after_secs: 60,
-            validators: Default::default(),
+            ..common::fetched(url.clone(), 302, "text/html".into(), vec![])
         })
     }
 }

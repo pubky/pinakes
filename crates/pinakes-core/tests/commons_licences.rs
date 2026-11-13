@@ -170,17 +170,12 @@ impl Transport for Recorded {
             }
             _ => (404, b"{}".to_vec()),
         };
-        Ok(Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: url.clone(),
+        Ok(common::fetched(
+            url.clone(),
             status,
-            retry_after_secs: 60,
-            location: None,
-            content_type: "application/json".into(),
+            "application/json".into(),
             body,
-        })
+        ))
     }
 }
 

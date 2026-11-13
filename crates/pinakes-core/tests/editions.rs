@@ -151,17 +151,7 @@ impl Transport for Captured {
         } else {
             body
         };
-        Ok(Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: url.clone(),
-            status,
-            retry_after_secs: 60,
-            location: None,
-            content_type,
-            body,
-        })
+        Ok(common::fetched(url.clone(), status, content_type, body))
     }
 }
 

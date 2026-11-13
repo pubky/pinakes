@@ -302,17 +302,12 @@ mod tests {
                         r#"{"error":{"status":401,"message":"The access token expired"}}"#,
                     )
                 };
-                Ok(Fetched {
-                    permanent_redirect: false,
-                    truncated: false,
-                    validators: Default::default(),
-                    url: url.clone(),
-                    content_type: "application/json".into(),
+                Ok(Fetched::answer(
+                    url.clone(),
                     status,
-                    retry_after_secs: 60,
-                    location: None,
-                    body: body.as_bytes().to_vec(),
-                })
+                    "application/json".into(),
+                    body.as_bytes().to_vec(),
+                ))
             }
         }
         let mut config = crate::config::Config::default();

@@ -186,15 +186,8 @@ impl Transport for Recorded {
             _ => (404, 60, "text/plain", b"not found".to_vec()),
         };
         Ok(Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: url.clone(),
-            status,
             retry_after_secs: retry_after,
-            location: None,
-            content_type: content_type.into(),
-            body,
+            ..common::fetched(url.clone(), status, content_type.into(), body)
         })
     }
 }

@@ -200,22 +200,21 @@ fn cover_art(path: &str, mode: CoverArt) -> Fetched {
     let answer = fixture_json(file);
     let busy = mode == CoverArt::Busy;
     Fetched {
-        permanent_redirect: false,
-        truncated: false,
-        validators: Default::default(),
-        url: url::Url::parse(&format!("https://coverartarchive.org{path}")).unwrap(),
-        status: if busy {
-            503
-        } else {
-            answer["status"].as_u64().unwrap() as u16
-        },
         retry_after_secs: if busy { 120 } else { 60 },
         location: answer["location"]
             .as_str()
             .filter(|_| !busy)
             .map(str::to_owned),
-        content_type: answer["content_type"].as_str().unwrap().to_owned(),
-        body: vec![],
+        ..common::fetched(
+            url::Url::parse(&format!("https://coverartarchive.org{path}")).unwrap(),
+            if busy {
+                503
+            } else {
+                answer["status"].as_u64().unwrap() as u16
+            },
+            answer["content_type"].as_str().unwrap().to_owned(),
+            vec![],
+        )
     }
 }
 /// Answers by host, path and query from the recorded fixtures; records each request.
@@ -478,15 +477,13 @@ impl Transport for Recorded {
                         })
                     } else if mode.album_item_busy && ids == "Q283221" {
                         return Ok(Fetched {
-                            permanent_redirect: false,
-                            truncated: false,
-                            validators: Default::default(),
-                            url: url.clone(),
-                            status: 503,
                             retry_after_secs: 120,
-                            location: None,
-                            content_type: "application/json".into(),
-                            body: b"{}".to_vec(),
+                            ..common::fetched(
+                                url.clone(),
+                                503,
+                                "application/json".into(),
+                                b"{}".to_vec(),
+                            )
                         });
                     } else if mode.album_item != AlbumItem::Recorded && ids == "Q283221" {
                         edited(&file, |v| {
@@ -661,15 +658,8 @@ impl Transport for Recorded {
             _ => (status, body),
         };
         Ok(Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: url.clone(),
-            status,
             retry_after_secs: retry_after,
-            location: None,
-            content_type: "application/json".into(),
-            body,
+            ..common::fetched(url.clone(), status, "application/json".into(), body)
         })
     }
 }

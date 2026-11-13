@@ -121,15 +121,8 @@ impl Transport for Recorded {
                 .map(|(_, v)| v.clone())
         };
         let answer = |status: u16, body: Vec<u8>, content_type: &str| Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: url.clone(),
-            status,
             retry_after_secs: 120,
-            location: None,
-            content_type: content_type.into(),
-            body,
+            ..common::fetched(url.clone(), status, content_type.into(), body)
         };
         Ok(match (host, url.path()) {
             ("accounts.spotify.com", "/api/token") => {

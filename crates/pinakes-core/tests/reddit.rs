@@ -27,6 +27,7 @@ use std::{
 };
 use tower::ServiceExt;
 use url::Url;
+mod common;
 
 const POST: &str = "https://www.reddit.com/comments/1k3d0pk/";
 
@@ -68,15 +69,13 @@ impl Transport for Listing {
             "post-1k3d0pk.json"
         };
         Ok(Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: u.clone(),
-            content_type: "application/json; charset=UTF-8".into(),
-            status: 200,
             retry_after_secs: 0,
-            location: None,
-            body: serde_json::to_vec(&fixture(file)).unwrap(),
+            ..common::fetched(
+                u.clone(),
+                200,
+                "application/json; charset=UTF-8".into(),
+                serde_json::to_vec(&fixture(file)).unwrap(),
+            )
         })
     }
 }

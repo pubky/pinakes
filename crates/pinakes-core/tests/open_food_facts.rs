@@ -15,6 +15,7 @@ use std::{
     net::SocketAddr,
     sync::{Arc, Mutex},
 };
+mod common;
 
 const DIR: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -66,17 +67,12 @@ impl Transport for Recorded {
             .get(url.as_str())
             .cloned()
             .unwrap_or_else(|| panic!("no recorded answer for {url}"));
-        Ok(Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            url: url.clone(),
+        Ok(common::fetched(
+            url.clone(),
             status,
-            content_type: "application/json".into(),
+            "application/json".into(),
             body,
-            location: None,
-            retry_after_secs: 60,
-            validators: Default::default(),
-        })
+        ))
     }
 }
 struct PublicDns;

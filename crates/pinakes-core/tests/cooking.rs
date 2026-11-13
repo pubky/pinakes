@@ -6,7 +6,7 @@ use pinakes_core::{
     api::{self, AppState},
     config::Config,
     model::ResourceMeta,
-    resolver::{egress::Fetched, web},
+    resolver::web,
     store,
 };
 use serde_json::Value;
@@ -24,17 +24,7 @@ fn extracted(uri: &str, file: &str) -> ResourceMeta {
         env!("CARGO_MANIFEST_DIR")
     ))
     .unwrap();
-    let fetched = Fetched {
-        permanent_redirect: false,
-        truncated: false,
-        url: uri.parse().unwrap(),
-        status: 200,
-        content_type: "text/html".into(),
-        body,
-        location: None,
-        retry_after_secs: 60,
-        validators: Default::default(),
-    };
+    let fetched = common::fetched(uri.parse().unwrap(), 200, "text/html".into(), body);
     web::extract(uri, &fetched, 3600).unwrap().doc
 }
 
@@ -94,17 +84,12 @@ fn only_the_pages_own_recipe_outranks_its_article() {
                 .map(|s| format!(r#"<script type="application/ld+json">{s}</script>"#))
                 .collect::<String>()
         );
-        let fetched = Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            url: page.parse().unwrap(),
-            status: 200,
-            content_type: "text/html".into(),
-            body: body.into_bytes(),
-            location: None,
-            retry_after_secs: 60,
-            validators: Default::default(),
-        };
+        let fetched = common::fetched(
+            page.parse().unwrap(),
+            200,
+            "text/html".into(),
+            body.into_bytes(),
+        );
         web::extract(page, &fetched, 3600).unwrap().doc
     };
     let unnamed = r#"{"@type": "Article", "headline": "Autumn evenings"}"#;

@@ -12,6 +12,7 @@ use pinakes_core::{
 };
 use std::{collections::BTreeMap, io::Read, net::SocketAddr, sync::Arc};
 use tower::ServiceExt;
+mod common;
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/lookups/apps");
 
@@ -81,17 +82,7 @@ impl Transport for Recorded {
             ),
             None => (404, "text/plain".into(), vec![]),
         };
-        Ok(Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: u.clone(),
-            content_type,
-            status,
-            retry_after_secs: 60,
-            location: None,
-            body,
-        })
+        Ok(common::fetched(u.clone(), status, content_type, body))
     }
 }
 

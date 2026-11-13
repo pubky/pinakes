@@ -494,17 +494,12 @@ mod tests {
                 } else {
                     r#"{"id":"1"}"#
                 };
-                Ok(Fetched {
-                    permanent_redirect: false,
-                    truncated: false,
-                    validators: Default::default(),
-                    url: url.clone(),
-                    content_type: "application/json".into(),
-                    status: 200,
-                    retry_after_secs: 60,
-                    location: None,
-                    body: body.as_bytes().to_vec(),
-                })
+                Ok(Fetched::answer(
+                    url.clone(),
+                    200,
+                    "application/json".into(),
+                    body.as_bytes().to_vec(),
+                ))
             }
         }
         static SLOW: Api = Api {

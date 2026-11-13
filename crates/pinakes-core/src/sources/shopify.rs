@@ -178,17 +178,7 @@ mod tests {
         crate::sources::fixture::read("shopify", file)
     }
     fn fetched(url: &str, body: Vec<u8>) -> Fetched {
-        Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            url: url.parse().unwrap(),
-            status: 200,
-            content_type: "text/html".into(),
-            body,
-            location: None,
-            retry_after_secs: 60,
-            validators: Default::default(),
-        }
+        Fetched::answer(url.parse().unwrap(), 200, "text/html".into(), body)
     }
 
     #[test]

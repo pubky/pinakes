@@ -75,15 +75,8 @@ impl Transport for Recorded {
             url.query().unwrap_or("")
         ));
         let answer = |body: Vec<u8>, content_type: &str| Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: url.clone(),
-            status: 200,
             retry_after_secs: 120,
-            location: None,
-            content_type: content_type.into(),
-            body,
+            ..common::fetched(url.clone(), 200, content_type.into(), body)
         };
         let query = |name: &str| {
             url.query_pairs()
