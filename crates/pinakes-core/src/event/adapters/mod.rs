@@ -108,7 +108,6 @@ pub struct Definition {
     #[serde(default)]
     pub canary_link: Option<String>,
     pub canary_note: Option<String>,
-    pub ua_profile: String,
     pub requires_key: bool,
     pub fragile: bool,
     pub enabled: bool,
@@ -278,7 +277,6 @@ pub fn manifest(d: &Definition, cfg: &EventConfig) -> Manifest {
             url
         }),
         canary_note: d.canary_note.clone(),
-        ua_profile: d.ua_profile.clone(),
         requires_key: d.requires_key,
         enabled: reason.is_none(),
         disabled_reason: reason.map(str::to_owned),
@@ -287,14 +285,6 @@ pub fn manifest(d: &Definition, cfg: &EventConfig) -> Manifest {
 }
 pub fn manifests(cfg: &EventConfig) -> Vec<Manifest> {
     definitions().iter().map(|d| manifest(d, cfg)).collect()
-}
-pub fn profile(name: &str) -> &'static str {
-    match name {
-        "browser" => "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "firefox" => "Mozilla/5.0 (X11; Linux x86_64; rv:133.0) Gecko/20100101 Firefox/133.0",
-        "plain" => "curl/8.10.1",
-        _ => crate::resolver::egress::USER_AGENT,
-    }
 }
 pub fn validate(cfg: &EventConfig) -> anyhow::Result<()> {
     anyhow::ensure!(
@@ -343,7 +333,6 @@ pub fn validate(cfg: &EventConfig) -> anyhow::Result<()> {
                     "resident_advisor"
                 ]
                 .contains(&d.parser.as_str())
-                && ["pinakes", "plain", "browser", "firefox"].contains(&d.ua_profile.as_str())
                 && d.canary_link.as_ref().is_none_or(|l| {
                     d.canary.is_some() && l.starts_with('/') && l.split('/').any(|s| s == "*")
                 }),

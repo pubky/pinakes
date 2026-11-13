@@ -1,4 +1,4 @@
-use super::{detect, manifest, options, profile, state, Definition};
+use super::{detect, manifest, options, state, Definition};
 use crate::{
     adapter::Mode,
     config::EventConfig,
@@ -167,7 +167,6 @@ impl PlatformResolver {
             Err(error) => return Err(error),
         };
         let (target, mut opts) = target.unwrap_or((uri.to_owned(), FetchOptions::default()));
-        opts.user_agent = Some(profile(&m.ua_profile).into());
         opts.feed_hint = crate::event::service::is_feed(&target)
             || (d.mode == Mode::Container && feed_path(&target))
             || (d.id == "starticket" && target.ends_with(".xml"));
@@ -260,7 +259,6 @@ impl PlatformResolver {
                                 || (d.mode == Mode::Container && feed_path(&target))
                                 || (d.id == "starticket" && target.ends_with(".xml"));
                             opts.feed_cap = opts.feed_hint.then_some(local.feed_body_bytes);
-                            opts.user_agent = Some(profile(&m.ua_profile).into());
                             {
                                 let f = discover_enrichment(
                                     &self.web.egress,
@@ -566,18 +564,18 @@ impl Resolver for PlatformResolver {
             seconds: 60,
         })?
     }
-    /// A platform whose canary is a listing (`Definition::canary_link`) reads the listing with its
-    /// user-agent profile and takes its first link of that form; any other reads its sample.
+    /// A platform whose canary is a listing (`Definition::canary_link`) reads the listing and takes
+    /// its first link of that form; any other reads its sample.
     async fn canary_target(&self, m: &crate::adapter::Manifest) -> Result<String> {
         let listing = m.canary.clone().context("no canary")?;
         let Some(pattern) = super::definition(&m.source).and_then(|d| d.canary_link.clone()) else {
             return Ok(listing.to_string());
         };
-        let opts = FetchOptions {
-            user_agent: Some(profile(&m.ua_profile).into()),
-            ..Default::default()
-        };
-        let fetched = self.web.egress.fetch_with(listing.as_str(), &opts).await?;
+        let fetched = self
+            .web
+            .egress
+            .fetch_with(listing.as_str(), &FetchOptions::default())
+            .await?;
         upstream_status(&fetched)?;
         if fetched.status != 200 {
             return Err(anyhow::Error::new(crate::resolver::ErrorClass("http_4xx"))
