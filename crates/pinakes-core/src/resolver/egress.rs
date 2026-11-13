@@ -1072,12 +1072,20 @@ impl Egress {
                 )?;
                 continue;
             }
-            // The wall check parses what it reads as HTML, whatever the answer's type says.
-            let page = {
-                let input = response.clone();
-                let original = requested.clone();
-                super::html::blocking(move || super::interstitial::inspect(&original, &input))
-                    .await??
+            // The wall check: an answer its addresses, status and type settle (an API's JSON)
+            // takes no parse slot. Any other is parsed as HTML in one, moved there and back.
+            let page = match super::interstitial::unparsed(&requested, &response) {
+                Some(page) => page,
+                None => {
+                    let original = requested.clone();
+                    // Boxed: the job holds the answer, kept off callers' debug stacks.
+                    let (page, answer) = Box::pin(super::html::blocking(move || {
+                        (super::interstitial::inspect(&original, &response), response)
+                    }))
+                    .await?;
+                    response = answer;
+                    page?
+                }
             };
             if page == super::interstitial::Page::Blocked {
                 crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "blocked");
@@ -2995,6 +3003,125 @@ mod tests {
             .unwrap();
         assert_eq!(fetched.body, b"binary");
         task.abort();
+    }
+
+    /// The wall check asks for a parse job only for an answer it parses: HTML, or a challenge
+    /// status that comes as plain text or without a type. Any other answer (an API's JSON, a
+    /// feed) is settled by its type, without a job. Either way the answer comes back as fetched.
+    #[tokio::test(start_paused = true)]
+    async fn only_an_answer_the_wall_check_parses_asks_for_a_parse_job() {
+        let page: &[u8] = b"<html><head><title>Page</title></head><body><p>Text</p></body></html>";
+        // The address, the answer (status, type, body), the parse jobs asked for, and whether
+        // the answer is a wall.
+        let routes = vec![
+            // An API's answers, whatever they say and whatever their status.
+            (
+                "https://api.example/record",
+                200,
+                "application/json",
+                br#"{"title":"Just a moment","note":"Verify you are human"}"#.as_slice(),
+                0,
+                false,
+            ),
+            (
+                "https://api.example/refused",
+                403,
+                "application/json",
+                br#"{"error":"Verify you are human"}"#.as_slice(),
+                0,
+                false,
+            ),
+            (
+                "https://api.example/feed",
+                200,
+                "application/rss+xml",
+                b"<rss><channel><title>Just a moment</title></channel></rss>".as_slice(),
+                0,
+                false,
+            ),
+            // Plain text or no type on an ordinary status is content too.
+            (
+                "https://site.example/notice",
+                200,
+                "text/plain",
+                b"Verify you are human".as_slice(),
+                0,
+                false,
+            ),
+            ("https://site.example/untyped", 200, "", page, 0, false),
+            // HTML is parsed, a page and a wall alike.
+            (
+                "https://site.example/page",
+                200,
+                "text/html; charset=utf-8",
+                page,
+                1,
+                false,
+            ),
+            (
+                "https://site.example/wall",
+                503,
+                "text/html",
+                b"<title>Just a moment</title>".as_slice(),
+                1,
+                true,
+            ),
+            // A challenge status as plain text or without a type is parsed as well.
+            (
+                "https://site.example/plain-wall",
+                403,
+                "text/plain",
+                b"Verify you are human".as_slice(),
+                1,
+                true,
+            ),
+            (
+                "https://site.example/untyped-wall",
+                403,
+                "",
+                b"<title>Just a moment</title>".as_slice(),
+                1,
+                true,
+            ),
+        ];
+        let (egress, _) = crate::sources::fixture::egress(
+            routes
+                .iter()
+                .map(|(url, status, kind, body, ..)| (*url, *status, *kind, body.to_vec()))
+                .collect(),
+        );
+        for (url, status, kind, body, jobs, blocked) in routes {
+            let before = crate::resolver::html::counted::jobs();
+            let answer = egress.fetch(url).await;
+            assert_eq!(
+                crate::resolver::html::counted::jobs() - before,
+                jobs,
+                "{url}"
+            );
+            match answer {
+                Ok(fetched) => {
+                    assert!(!blocked, "{url}");
+                    assert_eq!(
+                        (
+                            fetched.url.as_str(),
+                            fetched.status,
+                            fetched.content_type.as_str(),
+                            fetched.body.as_slice(),
+                            fetched.permanent_redirect,
+                            fetched.truncated,
+                        ),
+                        (url, status, kind, body, false, false),
+                        "{url}"
+                    );
+                }
+                Err(error) => {
+                    assert!(
+                        blocked && error.is::<crate::resolver::interstitial::Blocked>(),
+                        "{url}: {error:#}"
+                    );
+                }
+            }
+        }
     }
 }
 

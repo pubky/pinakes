@@ -348,6 +348,29 @@ pub async fn lock_waiters_reach(pool: &sqlx::PgPool, n: i64, what: &str) {
     .await
     .unwrap_or_else(|_| panic!("{what} never waited for the lock"));
 }
+/// A pool of one connection to `pool`'s database: what a test runs through it runs on one
+/// backend, whose statistics `counted` reads.
+pub async fn one_connection(pool: &sqlx::PgPool) -> sqlx::PgPool {
+    sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .unwrap()
+}
+/// A statistics counter (`query` selects one bigint), read through `connection`
+/// (`one_connection`) once its backend's own counts are flushed: the work that backend did, in
+/// place of a time. Other backends' counts arrive when they flush, so a bound on a database-wide
+/// counter leaves them room.
+pub async fn counted(connection: &sqlx::PgPool, query: &str) -> i64 {
+    sqlx::query("SELECT pg_stat_force_next_flush()")
+        .execute(connection)
+        .await
+        .unwrap();
+    sqlx::query_scalar::<_, i64>(query)
+        .fetch_one(connection)
+        .await
+        .unwrap()
+}
 /// An egress configuration for a mocked transport: no pacing between requests to one host, the
 /// hosts with a published rate included (a `host_rates` entry wins over the published rate), so
 /// recorded answers come back at once. The pacing itself is proven in `egress::tests` on a paused
