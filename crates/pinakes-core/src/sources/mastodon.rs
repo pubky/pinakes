@@ -59,13 +59,6 @@ fn plain(html: &str) -> String {
     let text = crate::resolver::cards::plain(&html.replace("</p>", "</p> "));
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
-fn excerpt(text: &str, max: usize) -> String {
-    let mut cut: String = text.chars().take(max).collect();
-    if cut.len() < text.len() {
-        cut.push('…');
-    }
-    cut
-}
 
 /// The card of a status, or `None` when the instance says it does not exist. A body that is not
 /// a Mastodon status is `Declined`.
@@ -100,9 +93,9 @@ pub fn card(
     doc.name = if shown.is_empty() {
         by.as_ref().map(|by| format!("Post by {by}"))
     } else {
-        Some(excerpt(&shown, 120))
+        Some(super::cut(&shown, 120))
     };
-    doc.description = (!shown.is_empty()).then(|| excerpt(&shown, 200));
+    doc.description = (!shown.is_empty()).then(|| super::cut(&shown, 200));
     doc.image = v["media_attachments"][0]["preview_url"]
         .as_str()
         .filter(|_| v["sensitive"] != true)
@@ -224,10 +217,7 @@ impl Source for Mastodon {
         let f = cx
             .fetch(
                 &format!("https://{}/api/v1/statuses/{}", target.host, target.id),
-                &FetchOptions {
-                    accept: Some("application/json".into()),
-                    ..Default::default()
-                },
+                &FetchOptions::json(),
             )
             .await?;
         let (doc, read, status, body) =

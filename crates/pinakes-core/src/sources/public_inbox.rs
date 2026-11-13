@@ -379,11 +379,7 @@ fn excerpt(text: &str) -> Option<String> {
             break;
         }
     }
-    let words = super::without_addresses(&words);
-    let mut cut: String = words.chars().take(200).collect();
-    if cut.len() < words.len() {
-        cut.push('…');
-    }
+    let cut = super::cut(&super::without_addresses(&words), 200);
     (!cut.is_empty()).then_some(cut)
 }
 

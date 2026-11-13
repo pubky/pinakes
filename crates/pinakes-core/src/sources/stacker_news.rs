@@ -10,10 +10,7 @@ pub struct StackerNews;
 const API: &str = "https://stacker.news/api/graphql";
 
 fn item(value: &str) -> Option<u64> {
-    (!value.is_empty() && value.len() <= 12 && value.bytes().all(|b| b.is_ascii_digit()))
-        .then(|| value.parse().ok())
-        .flatten()
-        .filter(|n| *n > 0)
+    super::kit::number(value, 12)
 }
 
 /// The item of `https://stacker.news/items/{id}[/…]`; with `?commentId={c}` the comment `c`.

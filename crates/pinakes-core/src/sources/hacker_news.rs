@@ -14,10 +14,7 @@ use serde_json::Value;
 pub struct HackerNews;
 
 fn item(value: &str) -> Option<u64> {
-    (!value.is_empty() && value.len() <= 12 && value.bytes().all(|b| b.is_ascii_digit()))
-        .then(|| value.parse().ok())
-        .flatten()
-        .filter(|n| *n > 0)
+    super::kit::number(value, 12)
 }
 
 /// The item of `news.ycombinator.com/item?id={n}`, `hnsignals.com/signal/{n}` or the API.
@@ -41,13 +38,10 @@ pub fn root(id: u64) -> String {
 
 /// HN's HTML-ish comment text as plain text.
 fn plain(html: &str) -> String {
-    let text = crate::resolver::cards::plain(&html.replace("<p>", "\n"));
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut cut: String = text.chars().take(200).collect();
-    if cut.len() < text.len() {
-        cut.push('…');
-    }
-    cut
+    super::excerpt(
+        &crate::resolver::cards::plain(&html.replace("<p>", "\n")),
+        200,
+    )
 }
 
 /// The card of an item, or `None` when there is no such item or it was deleted.
@@ -299,10 +293,7 @@ impl Source for HackerNews {
         let f = cx
             .fetch(
                 &format!("https://hacker-news.firebaseio.com/v0/item/{id}.json"),
-                &FetchOptions {
-                    accept: Some("application/json".into()),
-                    ..Default::default()
-                },
+                &FetchOptions::json(),
             )
             .await?;
         let doc = cx.card(uri, self);
@@ -321,10 +312,7 @@ impl Source for HackerNews {
             let thread = cx
                 .fetch(
                     &format!("https://hacker-news.firebaseio.com/v0/item/{parent}.json"),
-                    &FetchOptions {
-                        accept: Some("application/json".into()),
-                        ..Default::default()
-                    },
+                    &FetchOptions::json(),
                 )
                 .await
                 .ok()

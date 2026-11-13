@@ -4,6 +4,7 @@
 //! redirect, a challenge page, a 401, 403 or 999) still gets a card, of the link's shape alone,
 //! marked `blocked`: the link resolves, groups and counts while the platform shows the object to
 //! accounts only.
+pub use super::excerpt;
 use super::Context;
 use crate::{
     model::{ResourceMeta, Status},
@@ -140,10 +141,7 @@ pub async fn oembed(cx: &Context<'_>, endpoint: &str, url: &str) -> Result<Oembe
     );
     let mut request = url::Url::parse(endpoint)?;
     request.query_pairs_mut().append_pair("url", url);
-    let options = FetchOptions {
-        accept: Some("application/json".into()),
-        ..Default::default()
-    };
+    let options = FetchOptions::json();
     let Some(fetched) = fetch(cx, request.as_str(), &options).await? else {
         return Ok(Oembed::Blocked);
     };
@@ -220,16 +218,6 @@ pub fn open_graph(body: &str) -> Result<OpenGraph> {
     }
     tags.image = tags.image.filter(|i| crate::sources::web_url(i).is_some());
     Ok(tags)
-}
-
-/// At most `max` characters of `text`, its whitespace flattened, with an ellipsis when cut.
-pub fn excerpt(text: &str, max: usize) -> String {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut cut: String = flat.chars().take(max).collect();
-    if cut.len() < flat.len() {
-        cut.push('…');
-    }
-    cut
 }
 
 /// A post's text as its card's name (its first 120 characters) and description (200); a post

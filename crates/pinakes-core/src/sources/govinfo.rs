@@ -33,10 +33,7 @@ pub enum Target {
 }
 
 fn digits(value: &str, max: usize) -> Option<u32> {
-    (!value.is_empty() && value.len() <= max && value.bytes().all(|b| b.is_ascii_digit()))
-        .then(|| value.parse().ok())
-        .flatten()
-        .filter(|n| *n > 0)
+    super::kit::number(value, max)
 }
 /// Split `117hr3684enr` into its runs of digits and letters.
 fn runs(value: &str) -> Vec<&str> {

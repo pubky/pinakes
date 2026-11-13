@@ -10,7 +10,7 @@
 //! The service asks for at most 5 requests a second. Structure depictions are public domain.
 use super::{
     kit::{
-        encode, fetch, float, host_and_segments, json, plain, text, web_url, Card, Key, Request,
+        encode, fetch, float, host_and_segments, json, number, text, web_url, Card, Key, Request,
     },
     Example, Source,
 };
@@ -37,9 +37,7 @@ pub enum Target {
 
 /// A compound id: a positive decimal number without leading zeros.
 pub fn cid(value: &str) -> Option<u64> {
-    (plain(value, 12, |c| c.is_ascii_digit()) && !value.starts_with('0'))
-        .then(|| value.parse().ok())
-        .flatten()
+    number(value, 12).filter(|_| !value.starts_with('0'))
 }
 
 /// A standard InChIKey (`XXXXXXXXXXXXXX-XXXXXXXXXX-X`, upper-case letters).

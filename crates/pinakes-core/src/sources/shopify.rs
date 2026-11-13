@@ -1,7 +1,7 @@
 //! Shopify stores' product pages, improved from the store's own product record
 //! (`/products/{handle}.json`), which names each variant's barcode where the page's JSON-LD
 //! often does not. A page hook: it claims no links. No key.
-use super::{Context, Example, Source};
+use super::{text, Context, Example, Source};
 use crate::{
     kinds::products::{self, Product},
     model::ResourceMeta,
@@ -63,12 +63,6 @@ pub fn card(doc: &ResourceMeta, variant: Option<u64>, body: &[u8]) -> Result<Opt
     };
     let Some(chosen) = chosen else {
         return Ok(None);
-    };
-    let text = |v: &Value| {
-        v.as_str()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned)
     };
     let mut doc = doc.clone();
     if !products::is_product(&doc) {
@@ -152,15 +146,7 @@ impl Source for Shopify {
         let Some((record, variant)) = record(page) else {
             return Ok(None);
         };
-        let f = cx
-            .fetch(
-                &record,
-                &FetchOptions {
-                    accept: Some("application/json".into()),
-                    ..Default::default()
-                },
-            )
-            .await?;
+        let f = cx.fetch(&record, &FetchOptions::json()).await?;
         if f.status != 200 {
             return Ok(None);
         }
