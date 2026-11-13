@@ -1017,15 +1017,8 @@ pub(crate) mod fixture {
                 .contains(&status)
                 .then(|| String::from_utf8_lossy(&body).into_owned());
             Ok(crate::resolver::egress::Fetched {
-                permanent_redirect: false,
-                truncated: false,
-                validators: Default::default(),
-                url: url.clone(),
-                content_type: kind.into(),
-                status,
-                retry_after_secs: 60,
                 location,
-                body,
+                ..crate::resolver::egress::Fetched::answer(url.clone(), status, kind.into(), body)
             })
         }
     }
@@ -1037,18 +1030,16 @@ pub(crate) mod fixture {
         link: Option<&str>,
     ) -> crate::resolver::egress::Fetched {
         crate::resolver::egress::Fetched {
-            permanent_redirect: false,
-            truncated: false,
             validators: crate::resolver::egress::Validators {
                 link: link.map(str::to_owned),
                 ..Default::default()
             },
-            url: url::Url::parse(url).unwrap(),
-            content_type: content_type.into(),
-            status: 200,
-            retry_after_secs: 60,
-            location: None,
-            body,
+            ..crate::resolver::egress::Fetched::answer(
+                url::Url::parse(url).unwrap(),
+                200,
+                content_type.into(),
+                body,
+            )
         }
     }
     /// The recorded `Link` headers of a fixture (`provenance.json`, key `link`).

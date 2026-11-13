@@ -379,15 +379,13 @@ mod tests {
                 _ => (404, fixture::read("github", "repo-missing.json"), None),
             };
             Ok(crate::resolver::egress::Fetched {
-                permanent_redirect: false,
-                truncated: false,
-                validators: Default::default(),
-                url: url.clone(),
-                content_type: "application/json".into(),
-                status,
-                retry_after_secs: 60,
                 location,
-                body,
+                ..crate::resolver::egress::Fetched::answer(
+                    url.clone(),
+                    status,
+                    "application/json".into(),
+                    body,
+                )
             })
         }
     }

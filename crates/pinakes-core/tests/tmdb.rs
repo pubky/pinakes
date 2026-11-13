@@ -3,8 +3,6 @@
 //! its provenance.json): what a card takes, what it keeps through a failure, what goes when
 //! TMDB's rows expire or TMDB is switched off, and that the credential appears nowhere.
 use async_trait::async_trait;
-use axum::{body::Body, http::Request};
-use http_body_util::BodyExt;
 use pinakes_core::{
     also_on::{self, tmdb::Tmdb, Context, Source},
     api::{self, AppState},
@@ -12,7 +10,7 @@ use pinakes_core::{
     model::{Credit, CreditField, CreditProvider, ResourceMeta},
     queue,
     resolver::{
-        egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+        egress::{Egress, FetchOptions, Fetched, Transport},
         Resolver,
     },
     store,
@@ -25,22 +23,14 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tower::ServiceExt;
 mod common;
+use common::{get, PublicDns};
 
 /// Test credentials of both forms; never real ones.
 const TOKEN: &str =
     "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJwaW5ha2VzLXRlc3QifQ.cGluYWtlcy10ZXN0LXNpZ25hdHVyZQ";
 const KEY: &str = "0f1e2d3c4b5a69788796a5b4c3d2e1f0";
 const POSTERS: &str = "https://image.tmdb.org/t/p/w500";
-
-struct PublicDns;
-#[async_trait]
-impl Dns for PublicDns {
-    async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<SocketAddr>> {
-        Ok(vec![SocketAddr::new([93, 184, 216, 34].into(), port)])
-    }
-}
 
 fn fixture(name: &str) -> Vec<u8> {
     std::fs::read(format!(
@@ -126,17 +116,12 @@ impl Transport for Api {
                 (200, body)
             }
         };
-        Ok(Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: url.clone(),
-            content_type: "application/json;charset=utf-8".into(),
+        Ok(common::fetched(
+            url.clone(),
             status,
-            retry_after_secs: 60,
-            location: None,
+            "application/json;charset=utf-8".into(),
             body,
-        })
+        ))
     }
 }
 
@@ -247,19 +232,6 @@ async fn read_again(pool: &PgPool, pages: &Pages) {
         }
         queue::run_batch(pool, pages, &cfg, &jobs).await.unwrap();
     }
-}
-async fn get(app: &axum::Router, path: &str) -> Value {
-    let mut request = Request::builder().uri(path).body(Body::empty()).unwrap();
-    request.extensions_mut().insert(axum::extract::ConnectInfo(
-        "127.0.0.2:1234".parse::<SocketAddr>().unwrap(),
-    ));
-    let response = app.clone().oneshot(request).await.unwrap();
-    let status = response.status();
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&bytes));
-    let value = serde_json::from_slice(&bytes).unwrap();
-    common::check_response("GET", path, status.as_u16(), &value);
-    value
 }
 /// The stored card: its image, description and credits' providers by field.
 async fn stored(

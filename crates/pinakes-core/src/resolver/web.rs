@@ -201,16 +201,14 @@ impl WebResolver {
             .filter(|b| !b.is_empty())
             .unwrap_or(musicbrainz::BASE);
         let ttl = self.config.ttl_secs;
-        let card = if let Some((kind, mbid, _)) = musicbrainz::entity_link(uri) {
+        // The card and the entity it shows: the page's own, or the recording an ISRC's page
+        // shows (none for the ISRC's own card: no recording, or several that disagree).
+        let (mut card, entity) = if let Some((kind, mbid, _)) = musicbrainz::entity_link(uri) {
             match musicbrainz::entity(&self.egress, base, kind, &mbid).await? {
-                Some(entity) => {
-                    let mut card =
-                        crate::music_sources::musicbrainz_card(uri, Some(&entity), None, ttl);
-                    if self.config.music_enrichment {
-                        self.enrich_music(&mut card, &entity, base, started).await;
-                    }
-                    card
-                }
+                Some(entity) => (
+                    crate::music_sources::musicbrainz_card(uri, Some(&entity), None, ttl),
+                    Some(entity),
+                ),
                 None => return Ok(None),
             }
         } else if let Some((isrc, _)) = musicbrainz::isrc_link(uri) {
@@ -245,10 +243,16 @@ impl WebResolver {
             if recordings.len() > 1 {
                 card.attributes.remove("duration");
             }
-            card
+            (card, entity)
         } else {
             return Ok(None);
         };
+        // The shown entity gives its image and description, on an ISRC's page as on the
+        // entity's own (enrichment never touches `attributes`). Boxed: one call site, its state
+        // machine kept off the callers' stacks.
+        if let Some(entity) = entity.as_ref().filter(|_| self.config.music_enrichment) {
+            Box::pin(self.enrich_music(&mut card, entity, base, started)).await;
+        }
         Ok(Some(card.bounded(ATTRIBUTES)?))
     }
     /// A MusicBrainz entity's image and description with their credits
@@ -2121,15 +2125,8 @@ mod tests {
         };
         let card = |url: &str, content_type: &str, body: Vec<u8>, truncated: bool| {
             let f = Fetched {
-                permanent_redirect: false,
                 truncated,
-                validators: Default::default(),
-                url: Url::parse(url).unwrap(),
-                status: 200,
-                retry_after_secs: 60,
-                location: None,
-                content_type: content_type.into(),
-                body,
+                ..Fetched::answer(Url::parse(url).unwrap(), 200, content_type.into(), body)
             };
             let d = extract(url, &f, 3600).unwrap().doc;
             (d.type_name, d.name, d.description)
@@ -2283,16 +2280,13 @@ mod tests {
 
     #[test]
     fn a_page_names_its_feed_in_its_head() {
-        let page = |body: &str| Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: Url::parse("https://darknetdiaries.com/episode/180/").unwrap(),
-            status: 200,
-            retry_after_secs: 60,
-            location: None,
-            content_type: "text/html".into(),
-            body: body.as_bytes().to_vec(),
+        let page = |body: &str| {
+            Fetched::answer(
+                Url::parse("https://darknetdiaries.com/episode/180/").unwrap(),
+                200,
+                "text/html".into(),
+                body.as_bytes().to_vec(),
+            )
         };
         let feed = |body: &str| {
             extract("https://darknetdiaries.com/episode/180/", &page(body), 3600)
@@ -2333,14 +2327,12 @@ mod tests {
     fn a_link_that_carries_a_credential_is_never_an_alias() {
         let page = |url: &str, body: &str| Fetched {
             permanent_redirect: true,
-            truncated: false,
-            validators: Default::default(),
-            url: Url::parse(url).unwrap(),
-            status: 200,
-            retry_after_secs: 60,
-            location: None,
-            content_type: "text/html".into(),
-            body: body.as_bytes().to_vec(),
+            ..Fetched::answer(
+                Url::parse(url).unwrap(),
+                200,
+                "text/html".into(),
+                body.as_bytes().to_vec(),
+            )
         };
         let d = extract(
             "https://example.org/a",
@@ -2359,16 +2351,13 @@ mod tests {
     /// address, not a PDF's name.
     #[test]
     fn nothing_read_names_a_redirect_target_that_carries_a_credential() {
-        let landed = |content_type: &str| Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: Url::parse("https://cdn.example/files/SECRET-NAME.png?token=SECRET").unwrap(),
-            status: 200,
-            retry_after_secs: 60,
-            location: None,
-            content_type: content_type.into(),
-            body: vec![],
+        let landed = |content_type: &str| {
+            Fetched::answer(
+                Url::parse("https://cdn.example/files/SECRET-NAME.png?token=SECRET").unwrap(),
+                200,
+                content_type.into(),
+                vec![],
+            )
         };
         for content_type in ["image/png", "application/pdf"] {
             let d = extract(
@@ -2387,17 +2376,12 @@ mod tests {
     /// resolve against it.
     #[test]
     fn a_page_reached_at_a_credential_resolves_nothing_back_to_it() {
-        let fetched = Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: Url::parse("https://app.example/share?token=SECRET").unwrap(),
-            status: 200,
-            retry_after_secs: 60,
-            location: None,
-            content_type: "text/html".into(),
-            body: br##"<head><title>Shared</title><meta property="og:image" content=""><link rel="alternate" type="application/rss+xml" href=""><script type="application/ld+json">{"@type":"Article","name":"Shared","image":"#img","url":""}</script></head>"##.to_vec(),
-        };
+        let fetched = Fetched::answer(
+            Url::parse("https://app.example/share?token=SECRET").unwrap(),
+            200,
+            "text/html".into(),
+            br##"<head><title>Shared</title><meta property="og:image" content=""><link rel="alternate" type="application/rss+xml" href=""><script type="application/ld+json">{"@type":"Article","name":"Shared","image":"#img","url":""}</script></head>"##.to_vec(),
+        );
         let d = extract("https://example.org/s/abc", &fetched, 3600)
             .unwrap()
             .doc;
@@ -2408,19 +2392,13 @@ mod tests {
     /// never on the host of the link asked for.
     #[test]
     fn a_page_reached_at_a_credential_on_another_host_is_read_at_that_host() {
-        let fetched = Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: Url::parse("https://b.example/share?token=SECRET").unwrap(),
-            status: 200,
-            retry_after_secs: 60,
-            location: None,
-            content_type: "text/html".into(),
-            body:
-                br#"<head><title>Shared</title><meta property="og:image" content="/og.png"></head>"#
-                    .to_vec(),
-        };
+        let fetched = Fetched::answer(
+            Url::parse("https://b.example/share?token=SECRET").unwrap(),
+            200,
+            "text/html".into(),
+            br#"<head><title>Shared</title><meta property="og:image" content="/og.png"></head>"#
+                .to_vec(),
+        );
         let d = extract("https://a.example/s/abc", &fetched, 3600)
             .unwrap()
             .doc;
@@ -2430,18 +2408,13 @@ mod tests {
     /// read in its directory, so a link to the page itself names neither.
     #[test]
     fn a_page_reached_at_a_credential_is_read_in_its_directory() {
-        let fetched = Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: Url::parse("https://b.example/files/SECRETID?token=SECRET").unwrap(),
-            status: 200,
-            retry_after_secs: 60,
-            location: None,
-            content_type: "text/html".into(),
-            body: br#"<head><title>Shared</title><meta property="og:image" content=""><meta property="og:url" content=""></head>"#
+        let fetched = Fetched::answer(
+            Url::parse("https://b.example/files/SECRETID?token=SECRET").unwrap(),
+            200,
+            "text/html".into(),
+            br#"<head><title>Shared</title><meta property="og:image" content=""><meta property="og:url" content=""></head>"#
                 .to_vec(),
-        };
+        );
         let d = extract("https://a.example/s/abc", &fetched, 3600)
             .unwrap()
             .doc;
@@ -2467,14 +2440,12 @@ mod tests {
     fn only_head_canonicals_and_permanent_redirects_are_alias_candidates() {
         let page = |url: &str, permanent: bool, body: &str| Fetched {
             permanent_redirect: permanent,
-            truncated: false,
-            validators: Default::default(),
-            url: Url::parse(url).unwrap(),
-            status: 200,
-            retry_after_secs: 60,
-            location: None,
-            content_type: "text/html".into(),
-            body: body.as_bytes().to_vec(),
+            ..Fetched::answer(
+                Url::parse(url).unwrap(),
+                200,
+                "text/html".into(),
+                body.as_bytes().to_vec(),
+            )
         };
         let claims = r#"<title>T</title><meta property="og:url" content="https://example.org/a?utm_source=og"><script type="application/ld+json">{"@type":"Article","name":"A","url":"https://example.org/a/","sameAs":"https://example.org/a?fbclid=1"}</script>"#;
         // A temporary redirect, og:url and JSON-LD claims are listed but never candidates.
@@ -2530,17 +2501,12 @@ mod tests {
     #[test]
     fn card_text_is_entity_decoded_exactly_once() {
         let page = |head: &str| {
-            let fetched = Fetched {
-                permanent_redirect: false,
-                truncated: false,
-                validators: Default::default(),
-                url: Url::parse("https://example.org/").unwrap(),
-                status: 200,
-                retry_after_secs: 60,
-                content_type: "text/html".into(),
-                location: None,
-                body: head.as_bytes().into(),
-            };
+            let fetched = Fetched::answer(
+                Url::parse("https://example.org/").unwrap(),
+                200,
+                "text/html".into(),
+                head.as_bytes().into(),
+            );
             extract("https://example.org/", &fetched, 100).unwrap()
         };
         let meta = page(
@@ -2611,19 +2577,14 @@ mod tests {
         );
         assert_eq!(urls.doc.name.as_deref(), Some("Pay & go"));
         // JSON fetched as a body is the publisher's text as it is.
-        let fetched = Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: Url::parse("https://example.org/data.json").unwrap(),
-            status: 200,
-            retry_after_secs: 60,
-            content_type: "application/ld+json".into(),
-            location: None,
-            body: br#"{"@type":"WebPage","name":"Tom &amp; Jerry","description":"5&currency=EUR"}"#
+        let fetched = Fetched::answer(
+            Url::parse("https://example.org/data.json").unwrap(),
+            200,
+            "application/ld+json".into(),
+            br#"{"@type":"WebPage","name":"Tom &amp; Jerry","description":"5&currency=EUR"}"#
                 .as_slice()
                 .into(),
-        };
+        );
         let body = extract("https://example.org/data.json", &fetched, 100).unwrap();
         assert_eq!(body.doc.name.as_deref(), Some("Tom &amp; Jerry"));
         assert_eq!(body.doc.description.as_deref(), Some("5&currency=EUR"));
@@ -3050,17 +3011,12 @@ mod tests {
     #[test]
     fn extraction_precedence_and_promoted_facets() {
         let body = r#"<title>Title fallback</title><meta property="og:title" content="OG"><meta property="og:image" content="/pic.png"><link rel="alternate" type="application/json+oembed" href="/embed"><link rel="canonical" href="/canonical"><div class="h-event"><span class="p-name">MF</span><span class="p-summary">MF summary</span></div><script type="application/ld+json">{"@type":"MusicEvent","name":"JSON first","startDate":"2026-10-01T12:00:00Z","location":{"geo":{"latitude":46.0,"longitude":8.0}}}</script>"#;
-        let fetched = Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: Url::parse("https://example.org/").unwrap(),
-            status: 200,
-            retry_after_secs: 60,
-            content_type: "text/html".into(),
-            location: None,
-            body: body.as_bytes().into(),
-        };
+        let fetched = Fetched::answer(
+            Url::parse("https://example.org/").unwrap(),
+            200,
+            "text/html".into(),
+            body.as_bytes().into(),
+        );
         let out = extract("https://example.org/", &fetched, 100).unwrap();
         assert_eq!(out.doc.name.as_deref(), Some("JSON first"));
         assert_eq!(out.doc.description.as_deref(), Some("MF summary"));
@@ -3079,16 +3035,8 @@ mod tests {
     }
     #[test]
     fn the_pages_own_artist_outranks_a_site_wide_app_node() {
-        let fetch = |url: &str, body: Vec<u8>| Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            url: Url::parse(url).unwrap(),
-            body,
-            content_type: "text/html".into(),
-            status: 200,
-            location: None,
-            retry_after_secs: 60,
-            validators: Default::default(),
+        let fetch = |url: &str, body: Vec<u8>| {
+            Fetched::answer(Url::parse(url).unwrap(), 200, "text/html".into(), body)
         };
         // TIDAL's artist page: its own MusicGroup, and a graph with the site's Organization,
         // WebSite and WebApplication (all named "TIDAL").
@@ -3151,17 +3099,12 @@ mod tests {
     #[test]
     fn pages_cite_their_own_identifiers_from_meta() {
         let keys = |head: &str| {
-            let fetched = Fetched {
-                permanent_redirect: false,
-                truncated: false,
-                url: Url::parse("https://journal.example/a").unwrap(),
-                body: format!("<title>Paper</title>{head}").into_bytes(),
-                content_type: "text/html".into(),
-                status: 200,
-                location: None,
-                retry_after_secs: 60,
-                validators: Default::default(),
-            };
+            let fetched = Fetched::answer(
+                Url::parse("https://journal.example/a").unwrap(),
+                200,
+                "text/html".into(),
+                format!("<title>Paper</title>{head}").into_bytes(),
+            );
             extract("https://journal.example/a", &fetched, 100)
                 .unwrap()
                 .doc
@@ -3207,17 +3150,12 @@ mod tests {
     #[test]
     fn body_links_and_foreign_json_ld_nodes_claim_nothing() {
         let page = |html: &str| {
-            let fetched = Fetched {
-                permanent_redirect: false,
-                truncated: false,
-                url: Url::parse("https://victim.example/post").unwrap(),
-                body: html.as_bytes().to_vec(),
-                content_type: "text/html".into(),
-                status: 200,
-                location: None,
-                retry_after_secs: 60,
-                validators: Default::default(),
-            };
+            let fetched = Fetched::answer(
+                Url::parse("https://victim.example/post").unwrap(),
+                200,
+                "text/html".into(),
+                html.as_bytes().to_vec(),
+            );
             extract("https://victim.example/post", &fetched, 100).unwrap()
         };
         let claims = |out: &Extracted| {
@@ -3280,17 +3218,12 @@ mod tests {
     #[test]
     fn body_entities_name_their_page_through_main_entity_of_page_and_head_claims_stay() {
         let extract_keys = |html: &str| {
-            let fetched = Fetched {
-                permanent_redirect: false,
-                truncated: false,
-                url: Url::parse("https://news.example/story").unwrap(),
-                body: html.as_bytes().to_vec(),
-                content_type: "text/html".into(),
-                status: 200,
-                location: None,
-                retry_after_secs: 60,
-                validators: Default::default(),
-            };
+            let fetched = Fetched::answer(
+                Url::parse("https://news.example/story").unwrap(),
+                200,
+                "text/html".into(),
+                html.as_bytes().to_vec(),
+            );
             let d = extract("https://news.example/story", &fetched, 100)
                 .unwrap()
                 .doc;
@@ -3373,17 +3306,7 @@ mod tests {
             let url = Url::parse(uri).unwrap();
             extract(
                 uri,
-                &Fetched {
-                    permanent_redirect: false,
-                    truncated: false,
-                    validators: Default::default(),
-                    url,
-                    status: 200,
-                    retry_after_secs: 60,
-                    location: None,
-                    content_type: "text/html".into(),
-                    body: body.as_bytes().to_vec(),
-                },
+                &Fetched::answer(url, 200, "text/html".into(), body.as_bytes().to_vec()),
                 100,
             )
             .unwrap()
@@ -3449,7 +3372,12 @@ mod tests {
                 if url.path() != "/page" {
                     std::future::pending::<()>().await;
                 }
-                Ok(Fetched {permanent_redirect: false,truncated: false, validators:Default::default(),url:url.clone(),status:200,retry_after_secs:60,location:None,content_type:"text/html".into(),body:br#"<title>Page survives</title><link rel="alternate" type="application/json+oembed" href="/embed">"#.to_vec() })
+                Ok(Fetched::answer(
+                    url.clone(),
+                    200,
+                    "text/html".into(),
+                    br#"<title>Page survives</title><link rel="alternate" type="application/json+oembed" href="/embed">"#.to_vec(),
+                ))
             }
         }
         let resolver = WebResolver {

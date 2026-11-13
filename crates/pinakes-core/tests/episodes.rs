@@ -42,18 +42,7 @@ async fn show(pool: &PgPool, uri: &str, episodes: Option<Vec<Episode>>) -> Strin
     id
 }
 async fn request(app: &axum::Router, path: &str) -> (u16, Value) {
-    let mut request = Request::builder().uri(path).body(Body::empty()).unwrap();
-    request.extensions_mut().insert(axum::extract::ConnectInfo(
-        "127.0.0.2:1234".parse::<std::net::SocketAddr>().unwrap(),
-    ));
-    let response = app.clone().oneshot(request).await.unwrap();
-    let status = response.status().as_u16();
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    if status == 200 {
-        common::check_response("GET", path, status, &value);
-    }
-    (status, value)
+    common::get_from(app, "127.0.0.2:1234", path).await
 }
 async fn rows(pool: &PgPool, id: &str) -> i64 {
     sqlx::query_scalar("SELECT count(*) FROM podcast_episode WHERE resource_id=$1")
@@ -224,15 +213,13 @@ async fn the_save_replaces_keeps_or_clears_the_list(pool: PgPool) {
 /// A feed as a show's read fetches it.
 fn fetched(body: String) -> pinakes_core::resolver::egress::Fetched {
     pinakes_core::resolver::egress::Fetched {
-        permanent_redirect: false,
-        truncated: false,
-        validators: Default::default(),
-        url: "https://feeds.example.org/show.xml".parse().unwrap(),
-        content_type: "application/rss+xml".into(),
-        status: 200,
         retry_after_secs: 0,
-        location: None,
-        body: body.into_bytes(),
+        ..common::fetched(
+            "https://feeds.example.org/show.xml".parse().unwrap(),
+            200,
+            "application/rss+xml".into(),
+            body.into_bytes(),
+        )
     }
 }
 fn feed(items: &str) -> String {

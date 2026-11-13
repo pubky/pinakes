@@ -198,7 +198,7 @@ impl Resolver for PubkyResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resolver::egress::{Dns, Fetched, Transport, Validators};
+    use crate::resolver::egress::{Dns, Fetched, Transport};
     use pkarr::{dns::rdata::SVCB, Keypair, SignedPacket};
     use std::{
         collections::HashMap,
@@ -335,16 +335,15 @@ mod tests {
                 .unwrap()
                 .push((url.to_string(), options.headers.clone()));
             Ok(Fetched {
-                permanent_redirect: false,
-                truncated: false,
-                validators: Validators::default(),
-                url: url.clone(),
-                // As homeservers serve JSON without an extension.
-                content_type: "application/octet-stream".into(),
-                status: self.status,
                 retry_after_secs: 0,
                 location: Some("https://elsewhere.example/pub/app/item".into()),
-                body: self.body.as_bytes().to_vec(),
+                ..Fetched::answer(
+                    url.clone(),
+                    self.status,
+                    // As homeservers serve JSON without an extension.
+                    "application/octet-stream".into(),
+                    self.body.as_bytes().to_vec(),
+                )
             })
         }
     }

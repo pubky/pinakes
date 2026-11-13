@@ -20,6 +20,7 @@ use std::{
 };
 use tower::ServiceExt;
 mod common;
+use common::get;
 
 /// A source whose answers the test sets per URI; it counts its calls.
 #[derive(Default)]
@@ -113,19 +114,6 @@ fn key(k: &str) -> Key {
         key: k.into(),
         via: "musicbrainz".into(),
     }
-}
-async fn get(app: &axum::Router, path: &str) -> Value {
-    let mut request = Request::builder().uri(path).body(Body::empty()).unwrap();
-    request.extensions_mut().insert(axum::extract::ConnectInfo(
-        "127.0.0.2:1234".parse::<std::net::SocketAddr>().unwrap(),
-    ));
-    let response = app.clone().oneshot(request).await.unwrap();
-    let status = response.status();
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&bytes));
-    let value = serde_json::from_slice(&bytes).unwrap();
-    common::check_response("GET", path, status.as_u16(), &value);
-    value
 }
 async fn drain(pool: &PgPool, cx: &Context, sources: &[Arc<dyn Source>]) {
     sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()")

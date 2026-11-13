@@ -2275,15 +2275,13 @@ mod tests {
     fn hostile_shapes_finish_at_once() {
         use crate::resolver::{egress::Fetched, interstitial, web};
         let fetched = |status: u16, content_type: &str, body: String| Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: "https://hostile.example.org/p".parse().unwrap(),
-            content_type: content_type.into(),
-            status,
             retry_after_secs: 0,
-            location: None,
-            body: body.into_bytes(),
+            ..Fetched::answer(
+                "https://hostile.example.org/p".parse().unwrap(),
+                status,
+                content_type.into(),
+                body.into_bytes(),
+            )
         };
         let url: url::Url = "https://hostile.example.org/p".parse().unwrap();
         // 10,000 nested spans in an Internet Archive description: plain text, no overflow.

@@ -6,6 +6,7 @@ use pinakes_core::{
 };
 use serde_json::{json, Value};
 mod common;
+use common::media::PublicDns;
 fn now() -> DateTime<Utc> {
     "2026-10-16T00:00:00Z".parse().unwrap()
 }
@@ -352,7 +353,7 @@ use pinakes_core::{
     model::{identity, Point},
     nexus::{Change, Changes, FeedPage, Kind, Op},
     resolver::{
-        egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+        egress::{Egress, FetchOptions, Fetched, Transport},
         osm::OsmResolver,
         web::WebResolver,
         Resolver,
@@ -752,13 +753,6 @@ async fn venue_geocoding_single_match_threshold_and_osm_storage_boundary(pool: P
     assert_eq!(hits.load(Ordering::SeqCst), 1);
     server.abort();
 }
-struct PublicDns;
-#[async_trait::async_trait]
-impl Dns for PublicDns {
-    async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<SocketAddr>> {
-        Ok(vec![SocketAddr::new("8.8.8.8".parse()?, port)])
-    }
-}
 struct ProtocolTransport {
     seen: Mutex<Vec<(String, Option<String>, bool)>>,
 }
@@ -779,17 +773,12 @@ impl Transport for ProtocolTransport {
             o.accept.clone(),
             o.validators.etag.is_some(),
         ));
-        let mut f = Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: url.clone(),
-            status: 200,
-            retry_after_secs: 60,
-            location: None,
-            content_type: "text/html".into(),
-            body: b"<title>Fallback</title>".to_vec(),
-        };
+        let mut f = common::fetched(
+            url.clone(),
+            200,
+            "text/html".into(),
+            b"<title>Fallback</title>".to_vec(),
+        );
         if url.path() == "/event" && o.accept.is_none() {
             f.validators.link =
                 Some("</event>; rel=alternate; type=application/activity+json".into());
@@ -1486,17 +1475,12 @@ async fn performers_record_where_the_fetch_ended_on_every_path(pool: PgPool) {
     // the page against the address asked for) finds the performer: it still records where the
     // fetch ended.
     for ended in ["https://evil.example/gig", asked] {
-        let fetched = Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: url::Url::parse(ended).unwrap(),
-            content_type: "text/html".into(),
-            status: 200,
-            retry_after_secs: 60,
-            location: None,
-            body: body.clone().into_bytes(),
-        };
+        let fetched = common::fetched(
+            url::Url::parse(ended).unwrap(),
+            200,
+            "text/html".into(),
+            body.clone().into_bytes(),
+        );
         let doc = service
             .page(
                 asked,
@@ -2188,22 +2172,20 @@ impl Transport for ConditionalSnapshots {
         };
         calls.push((conditional, status));
         Ok(Fetched {
-            permanent_redirect: false,
-            truncated: false,
             validators: pinakes_core::resolver::egress::Validators {
                 etag: Some(etag.into()),
                 ..Default::default()
             },
-            url: url.clone(),
-            content_type: "text/calendar".into(),
-            status,
-            retry_after_secs: 60,
-            location: None,
-            body: if status == 304 {
-                vec![]
-            } else {
-                future_calendar(if first { 5 } else { self.remaining }).into_bytes()
-            },
+            ..common::fetched(
+                url.clone(),
+                status,
+                "text/calendar".into(),
+                if status == 304 {
+                    vec![]
+                } else {
+                    future_calendar(if first { 5 } else { self.remaining }).into_bytes()
+                },
+            )
         })
     }
 }
@@ -2493,18 +2475,16 @@ impl Transport for ReviewSnapshots {
         };
         calls.push((conditional, status));
         Ok(Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            url: url.clone(),
-            status,
-            content_type: content_type.clone(),
-            body: if status == 304 { vec![] } else { body.clone() },
             validators: pinakes_core::resolver::egress::Validators {
                 etag: Some("static".into()),
                 ..Default::default()
             },
-            retry_after_secs: 60,
-            location: None,
+            ..common::fetched(
+                url.clone(),
+                status,
+                content_type.clone(),
+                if status == 304 { vec![] } else { body.clone() },
+            )
         })
     }
 }
@@ -2717,17 +2697,12 @@ impl Transport for PlainSequence {
         let mut calls = self.calls.lock().unwrap();
         let body = self.responses[(*calls).min(self.responses.len() - 1)].clone();
         *calls += 1;
-        Ok(Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            url: url.clone(),
-            status: 200,
-            content_type: "text/calendar".into(),
+        Ok(common::fetched(
+            url.clone(),
+            200,
+            "text/calendar".into(),
             body,
-            validators: Default::default(),
-            retry_after_secs: 60,
-            location: None,
-        })
+        ))
     }
 }
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
@@ -4397,17 +4372,12 @@ async fn an_artists_concert_list_on_a_platform_is_the_artist_through_the_whole_r
         concert(1),
         concert(2)
     );
-    let fetched = Fetched {
-        permanent_redirect: false,
-        truncated: false,
-        validators: Default::default(),
-        url: url::Url::parse(asked).unwrap(),
-        content_type: "text/html".into(),
-        status: 200,
-        retry_after_secs: 60,
-        location: None,
-        body: body.into_bytes(),
-    };
+    let fetched = common::fetched(
+        url::Url::parse(asked).unwrap(),
+        200,
+        "text/html".into(),
+        body.into_bytes(),
+    );
     let input = fetched.clone();
     let card = pinakes_core::resolver::html::blocking(move || {
         pinakes_core::resolver::web::extract(asked, &input, 3600)
@@ -4457,17 +4427,12 @@ async fn an_event_naming_the_pages_canonical_is_the_pages_event_through_the_whol
     };
     let asked = "https://gigs.example/concert/amp";
     let body = r#"<html><head><title>Radiohead @ Arena</title><link rel="canonical" href="https://gigs.example/concert"><script type="application/ld+json">{"@type":"MusicEvent","name":"Radiohead @ Arena","url":"https://gigs.example/concert","startDate":"2027-05-03T19:30:00","location":{"@type":"Place","name":"Arena"}}</script><script type="application/ld+json">{"@type":"MusicEvent","name":"Other night","url":"https://gigs.example/other","startDate":"2027-05-09T19:30:00"}</script></head><body></body></html>"#;
-    let fetched = Fetched {
-        permanent_redirect: false,
-        truncated: false,
-        validators: Default::default(),
-        url: url::Url::parse(asked).unwrap(),
-        content_type: "text/html".into(),
-        status: 200,
-        retry_after_secs: 60,
-        location: None,
-        body: body.as_bytes().to_vec(),
-    };
+    let fetched = common::fetched(
+        url::Url::parse(asked).unwrap(),
+        200,
+        "text/html".into(),
+        body.as_bytes().to_vec(),
+    );
     let input = fetched.clone();
     let card = pinakes_core::resolver::html::blocking(move || {
         pinakes_core::resolver::web::extract(asked, &input, 3600)
@@ -4519,17 +4484,12 @@ async fn an_event_page_reached_at_a_credential_resolves_nothing_back_to_it(pool:
         osm: Arc::new(OsmResolver::new(pool.clone(), OsmConfig::default()).unwrap()),
     };
     let uri = "https://example.org/e/abc";
-    let fetched = Fetched {
-        permanent_redirect: false,
-        truncated: false,
-        validators: Default::default(),
-        url: "https://events.example/share?token=SECRET".parse().unwrap(),
-        status: 200,
-        retry_after_secs: 60,
-        location: None,
-        content_type: "text/html".into(),
-        body: br##"<title>Gig</title><script type="application/ld+json">{"@type":"Event","name":"Gig","startDate":"2027-01-20T18:00:00Z","image":"#poster","url":""}</script>"##.to_vec(),
-    };
+    let fetched = common::fetched(
+        "https://events.example/share?token=SECRET".parse().unwrap(),
+        200,
+        "text/html".into(),
+        br##"<title>Gig</title><script type="application/ld+json">{"@type":"Event","name":"Gig","startDate":"2027-01-20T18:00:00Z","image":"#poster","url":""}</script>"##.to_vec(),
+    );
     let card = ResourceMeta::new(uri, "web", 3600);
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
     let doc = service
@@ -4570,17 +4530,12 @@ fn protocol_service(
 }
 
 fn html_page(url: &str, body: &str) -> Fetched {
-    Fetched {
-        permanent_redirect: false,
-        truncated: false,
-        validators: Default::default(),
-        url: url.parse().unwrap(),
-        status: 200,
-        retry_after_secs: 60,
-        location: None,
-        content_type: "text/html".into(),
-        body: body.as_bytes().to_vec(),
-    }
+    common::fetched(
+        url.parse().unwrap(),
+        200,
+        "text/html".into(),
+        body.as_bytes().to_vec(),
+    )
 }
 
 /// An event page's ActivityPub alternate whose fetch ends on an address that carries a credential

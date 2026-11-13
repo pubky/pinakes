@@ -6,7 +6,7 @@ use pinakes_core::{
     also_on::{self, SourceOptions},
     config::Config,
     model::ResourceMeta,
-    resolver::egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+    resolver::egress::{Egress, FetchOptions, Fetched, Transport},
     store,
 };
 use std::{
@@ -15,14 +15,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 mod common;
-
-struct PublicDns;
-#[async_trait::async_trait]
-impl Dns for PublicDns {
-    async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<SocketAddr>> {
-        Ok(vec![SocketAddr::new("8.8.8.8".parse()?, port)])
-    }
-}
+use common::media::PublicDns;
 
 fn fixture(name: &str) -> Vec<u8> {
     let bytes = std::fs::read(format!(
@@ -75,15 +68,8 @@ impl Transport for Recorded {
             url.query().unwrap_or("")
         ));
         let answer = |body: Vec<u8>, content_type: &str| Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: url.clone(),
-            status: 200,
             retry_after_secs: 120,
-            location: None,
-            content_type: content_type.into(),
-            body,
+            ..common::fetched(url.clone(), 200, content_type.into(), body)
         };
         let query = |name: &str| {
             url.query_pairs()

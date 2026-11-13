@@ -9,7 +9,7 @@ use pinakes_core::{
     config::Config,
     groups,
     model::ResourceMeta,
-    resolver::egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+    resolver::egress::{Egress, FetchOptions, Fetched, Transport},
     store,
 };
 use std::{
@@ -17,22 +17,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 mod common;
-
-struct PublicDns;
-#[async_trait::async_trait]
-impl Dns for PublicDns {
-    async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<SocketAddr>> {
-        Ok(vec![SocketAddr::new("8.8.8.8".parse()?, port)])
-    }
-}
-
-fn fixture(name: &str) -> Vec<u8> {
-    std::fs::read(format!(
-        "{}/tests/fixtures/hubs/{name}",
-        env!("CARGO_MANIFEST_DIR")
-    ))
-    .unwrap()
-}
+use common::{hubs_fixture as fixture, media::PublicDns, save_card as save, strings as rows};
 
 /// A made-up Spotify album ID (22 base-62 characters) with HYDRA 3D's barcode as a UPC-A.
 const ALBUM: &str = "0hydra3DexampleAlbum01";
@@ -121,15 +106,8 @@ impl Transport for Recorded {
                 .map(|(_, v)| v.clone())
         };
         let answer = |status: u16, body: Vec<u8>, content_type: &str| Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: url.clone(),
-            status,
             retry_after_secs: 120,
-            location: None,
-            content_type: content_type.into(),
-            body,
+            ..common::fetched(url.clone(), status, content_type.into(), body)
         };
         Ok(match (host, url.path()) {
             ("accounts.spotify.com", "/api/token") => {
@@ -357,13 +335,6 @@ fn config(pair: Option<(&str, &str)>) -> Config {
     config.validate().unwrap();
     config
 }
-async fn save(pool: &sqlx::PgPool, uri: &str, kind: &str) -> String {
-    let id = store::ensure_resource(pool, uri).await.unwrap();
-    let mut doc = ResourceMeta::new(uri, "jsonld", 86400);
-    doc.set_type(kind);
-    store::save_document(pool, &id, 0, &doc).await.unwrap();
-    id
-}
 /// Every resource's sources, once, on a fresh egress; the requests made.
 async fn run(pool: &sqlx::PgPool, config: Config, answers: Answers) -> Vec<String> {
     let t = Arc::new(Recorded {
@@ -388,13 +359,6 @@ async fn run(pool: &sqlx::PgPool, config: Config, answers: Answers) -> Vec<Strin
         .unwrap();
     let seen = t.seen.lock().unwrap().clone();
     seen
-}
-async fn rows(pool: &sqlx::PgPool, sql: &str, id: &str) -> Vec<String> {
-    sqlx::query_scalar(sql)
-        .bind(id)
-        .fetch_all(pool)
-        .await
-        .unwrap()
 }
 const KEYS: &str =
     "SELECT key||' '||source FROM resource_key WHERE resource_id=$1 ORDER BY key COLLATE \"C\"";

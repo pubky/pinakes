@@ -1748,15 +1748,13 @@ mod tests {
     #[test]
     fn a_wikidata_error_sent_with_200_is_busy() {
         let answer = |body: &str| Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: url::Url::parse("https://www.wikidata.org/w/api.php").unwrap(),
-            status: 200,
             retry_after_secs: 5,
-            location: None,
-            content_type: "application/json".into(),
-            body: body.as_bytes().to_vec(),
+            ..Fetched::answer(
+                url::Url::parse("https://www.wikidata.org/w/api.php").unwrap(),
+                200,
+                "application/json".into(),
+                body.as_bytes().to_vec(),
+            )
         };
         let limited = answer(r#"{"error":{"code":"ratelimited","info":"slow down"}}"#);
         let err = json(&limited, "wikidata").unwrap_err();
@@ -1770,15 +1768,13 @@ mod tests {
     #[test]
     fn a_hubs_410_is_gone_and_still_an_error() {
         let answer = |status: u16| Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: url::Url::parse("https://musicbrainz.org/ws/2/artist/x").unwrap(),
-            status,
             retry_after_secs: 0,
-            location: None,
-            content_type: "application/json".into(),
-            body: b"{}".to_vec(),
+            ..Fetched::answer(
+                url::Url::parse("https://musicbrainz.org/ws/2/artist/x").unwrap(),
+                status,
+                "application/json".into(),
+                b"{}".to_vec(),
+            )
         };
         for hub in ["musicbrainz", "wikidata"] {
             let err = json(&answer(410), hub).unwrap_err();
@@ -1827,15 +1823,14 @@ mod tests {
             assert_eq!(cover_art::redirect_release(&refused), None, "{refused}");
         }
         let answer = |status: u16, location: Option<&str>| Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: url::Url::parse("https://coverartarchive.org/x").unwrap(),
-            status,
             retry_after_secs: 120,
             location: location.map(str::to_owned),
-            content_type: "text/plain".into(),
-            body: vec![],
+            ..Fetched::answer(
+                url::Url::parse("https://coverartarchive.org/x").unwrap(),
+                status,
+                "text/plain".into(),
+                vec![],
+            )
         };
         let front = cover_art::read_front(MbKind::ReleaseGroup, RG, &answer(307, Some(&recorded)))
             .unwrap()

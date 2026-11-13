@@ -15,6 +15,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+/// Resolves every host to one public address (8.8.8.8), so the egress' own address check passes
+/// and no test asks a real resolver.
 pub struct PublicDns;
 #[async_trait::async_trait]
 impl Dns for PublicDns {
@@ -258,15 +260,9 @@ impl Transport for Recorded {
             None => panic!("unrecorded request {url}"),
         };
         Ok(Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: url.clone(),
-            status: answer.status,
             retry_after_secs: 0,
             location: answer.location,
-            content_type: answer.content_type,
-            body: answer.body,
+            ..super::fetched(url.clone(), answer.status, answer.content_type, answer.body)
         })
     }
 }

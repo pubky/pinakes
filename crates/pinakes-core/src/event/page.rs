@@ -976,17 +976,13 @@ mod performer_tests {
             name: "Radiohead".into(),
             links: vec!["https://www.songkick.com/artists/253846".into()],
         }];
-        card.event.read_from(&crate::resolver::egress::Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: url::Url::parse("https://www.songkick.com/concerts/1?token=SECRET").unwrap(),
-            status: 200,
-            retry_after_secs: 60,
-            location: None,
-            content_type: "text/html".into(),
-            body: vec![],
-        });
+        card.event
+            .read_from(&crate::resolver::egress::Fetched::answer(
+                url::Url::parse("https://www.songkick.com/concerts/1?token=SECRET").unwrap(),
+                200,
+                "text/html".into(),
+                vec![],
+            ));
         assert_eq!(
             card.event.performers_from(),
             Some("https://www.songkick.com/")
