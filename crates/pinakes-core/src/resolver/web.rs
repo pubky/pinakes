@@ -164,10 +164,7 @@ impl WebResolver {
         uri: &str,
         article: &crate::wikipedia::Article,
     ) -> Option<ResourceMeta> {
-        let options = super::egress::FetchOptions {
-            accept: Some("application/json".into()),
-            ..Default::default()
-        };
+        let options = super::egress::FetchOptions::json();
         let fetched = match self
             .egress
             .fetch_with(&crate::wikipedia::summary_url(article), &options)

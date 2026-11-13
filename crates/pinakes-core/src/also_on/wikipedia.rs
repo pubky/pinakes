@@ -39,10 +39,7 @@ impl WikipediaSource {
             .append_pair("titles", &article.title)
             .append_pair("redirects", "1")
             .append_pair("format", "json");
-        let options = crate::resolver::egress::FetchOptions {
-            accept: Some("application/json".into()),
-            ..Default::default()
-        };
+        let options = crate::resolver::egress::FetchOptions::json();
         let fetched = cx.egress.discover(url.as_str(), &options, 3600).await?;
         match fetched.status {
             200 => {}

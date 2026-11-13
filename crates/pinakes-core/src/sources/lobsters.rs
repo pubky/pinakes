@@ -3,7 +3,6 @@ use super::{list, text, texts, web_url, Context, Example, Source};
 use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
-use serde_json::Value;
 
 pub struct Lobsters;
 
@@ -41,23 +40,13 @@ pub fn card(
     status: u16,
     body: &[u8],
 ) -> Result<Option<ResourceMeta>> {
-    match status {
-        200 => {}
-        404 => return Ok(None),
-        s => anyhow::bail!("Lobsters answered {s}"),
-    }
-    let v: Value = serde_json::from_slice(body)?;
+    let Some(v) = super::kit::json(status, body, &[404])? else {
+        return Ok(None);
+    };
     anyhow::ensure!(v["short_id"] == id, "Lobsters answered for another story");
     doc.set_type("DiscussionForumPosting");
     doc.name = Some(text(&v["title"]).context("no title")?);
-    doc.description = text(&v["description_plain"]).map(|d| {
-        let d = d.split_whitespace().collect::<Vec<_>>().join(" ");
-        let mut cut: String = d.chars().take(200).collect();
-        if cut.len() < d.len() {
-            cut.push('…');
-        }
-        cut
-    });
+    doc.description = text(&v["description_plain"]).map(|d| super::excerpt(&d, 200));
     for (key, value) in [
         ("author", text(&v["submitter_user"])),
         ("published", text(&v["created_at"])),
@@ -134,10 +123,7 @@ impl Source for Lobsters {
         let f = cx
             .fetch(
                 &format!("https://lobste.rs/s/{id}.json"),
-                &FetchOptions {
-                    accept: Some("application/json".into()),
-                    ..Default::default()
-                },
+                &FetchOptions::json(),
             )
             .await?;
         Ok(card(cx.card(uri, self), &id, f.status, &f.body)?
@@ -196,7 +182,8 @@ mod tests {
         );
         assert!(card(base.clone(), "abcdef", 200, &read("lobsters-wtthju.json")).is_err());
         // A long description is cut to 200 characters.
-        let mut long: Value = serde_json::from_slice(&read("lobsters-wtthju.json")).unwrap();
+        let mut long: serde_json::Value =
+            serde_json::from_slice(&read("lobsters-wtthju.json")).unwrap();
         long["description_plain"] = "word ".repeat(500).into();
         let doc = card(base, "wtthju", 200, &serde_json::to_vec(&long).unwrap())
             .unwrap()

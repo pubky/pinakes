@@ -25,10 +25,7 @@ pub(crate) async fn answer(cx: &Context, path: &str) -> Result<Option<Value>> {
     if !cx.config.also_on.source_enabled(&DeezerSource) {
         anyhow::bail!("the deezer source is off: its API is not called");
     }
-    let options = crate::resolver::egress::FetchOptions {
-        accept: Some("application/json".into()),
-        ..Default::default()
-    };
+    let options = crate::resolver::egress::FetchOptions::json();
     let fetched = cx
         .egress
         .discover(&format!("{DEEZER_API}/{path}"), &options, 3600)

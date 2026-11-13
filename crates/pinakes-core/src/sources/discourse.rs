@@ -15,10 +15,7 @@ pub struct Discourse;
 static FORUMS: LazyLock<HostMemo> = LazyLock::new(HostMemo::default);
 
 fn number(value: &str) -> Option<u64> {
-    (!value.is_empty() && value.len() <= 10 && value.bytes().all(|b| b.is_ascii_digit()))
-        .then(|| value.parse().ok())
-        .flatten()
-        .filter(|n| *n > 0)
+    super::kit::number(value, 10)
 }
 fn slug(value: &str) -> bool {
     !value.is_empty()
@@ -102,13 +99,7 @@ fn root(host: &str, slug: &str, topic: u64, post: Option<u64>) -> String {
 }
 
 fn excerpt(html: &str) -> String {
-    let text = crate::resolver::cards::plain(html);
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut cut: String = text.chars().take(200).collect();
-    if cut.len() < text.len() {
-        cut.push('…');
-    }
-    cut
+    super::excerpt(&crate::resolver::cards::plain(html), 200)
 }
 
 /// Discourse answers JSON; anything else (a 404 page, a challenge) is another site.
@@ -324,15 +315,7 @@ impl Source for Discourse {
         if FORUMS.get(&host) == Some(false) {
             return Err(Declined.into());
         }
-        let f = cx
-            .fetch(
-                &target.api_url(),
-                &FetchOptions {
-                    accept: Some("application/json".into()),
-                    ..Default::default()
-                },
-            )
-            .await?;
+        let f = cx.fetch(&target.api_url(), &FetchOptions::json()).await?;
         // The cards read posts' HTML: in a parse slot.
         let (doc, at, read, json) = (cx.card(uri, self), host.clone(), target.clone(), f.clone());
         let result = crate::resolver::html::blocking(move || match &read {
