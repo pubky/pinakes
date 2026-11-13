@@ -337,7 +337,7 @@ fn has_release_cover(doc: &pinakes_core::model::ResourceMeta) -> bool {
             "https://coverartarchive.org/release/{RELEASE}/front-"
         ))
     }) && doc.credits.iter().any(|c| {
-        serde_json::to_value(&c.provider).unwrap() == "cover_art_archive"
+        serde_json::to_value(c.provider).unwrap() == "cover_art_archive"
             && c.source_url == format!("https://musicbrainz.org/release/{RELEASE}/cover-art")
     })
 }
