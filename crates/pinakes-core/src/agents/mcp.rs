@@ -489,7 +489,7 @@ pub fn tools() -> Vec<Tool> {
     vec![
         tool(
             "search",
-            "Search the links people referenced on Pubky. Every filter is optional and they combine: text, a schema.org type (Event includes MusicEvent; Place includes cafés), tags, a circle on the map, a time window, one exact identifier. Returns compact cards (id, uri, type, name, description, site, point, start, end, group, also_on), a cursor for the next page and, with facet, counts over every match.",
+            "Search the links people referenced on Pubky. Every filter is optional and they combine: text, a schema.org type (Event includes MusicEvent; Place includes cafés), tags, a circle on the map, a time window, one exact identifier. Returns compact cards (id, uri, refs, type, name, description, site, point, start, end, group, also_on). For group tags, batch each exact non-derived also_on member's uri and optional refs (at most 5) with the card's own links; no extra group read is needed for those members. Returns a cursor for the next page and, with facet, counts over every match.",
             json!({"type":"object","additionalProperties":false,"properties":{
                 "q":{"type":"string","description":"Words in the name or description, at most 256 bytes. Up to three characters of letters and digits (spaces counted; not Hebrew, Arabic or a script written without spaces) match a name only where a word starts."},
                 "type":{"type":"array","items":{"type":"string"},"maxItems":10,"description":"Schema.org types, any of them, each with its subtypes: e.g. [\"Place\"], [\"Event\"], [\"MusicRecording\", \"MusicAlbum\", \"MusicGroup\"]. A single type as a string is accepted too."},
@@ -520,7 +520,7 @@ pub fn tools() -> Vec<Tool> {
         ),
         tool(
             "card",
-            "Read one link by its URI: its card with details (address, facts from official APIs, the objects it points at (`related`: a Bitcoin transaction's block, inputs and outputs, an address's latest transactions, a Lightning node's channels), other spellings, the same thing on other services, the public Pubky collections that hold it). Only links this instance already knows; set resolve to true to have an unknown link read now (it has its own small per-minute budget and may answer pending).",
+            "Read one link by its URI: its card with details (address, facts from official APIs, the objects it points at (`related`: a Bitcoin transaction's block, inputs and outputs, an address's latest transactions, a Lightning node's channels), other spellings, the same thing on other services, the public Pubky collections that hold it). Exact non-derived also_on members include optional refs (at most 5) for a Nexus tag join alongside their uri; derived or maybe links do not. Only links this instance already knows; set resolve to true to have an unknown link read now (it has its own small per-minute budget and may answer pending).",
             json!({"type":"object","required":["uri"],"additionalProperties":false,"properties":{
                 "uri":{"type":"string","description":"The link, in any spelling."},
                 "resolve":{"type":"boolean","description":"Read the link now if it is unknown here. Default false."}
@@ -749,7 +749,15 @@ fn compact(base: &str, card: &Value) -> Value {
         .flatten()
         .filter(|a| sites.insert(a["site"].to_string()))
         .take(8)
-        .map(|a| json!({"uri": a["uri"], "site": a["site"]}))
+        .map(|a| {
+            let mut entry = Map::new();
+            for key in ["id", "uri", "site", "refs", "derived", "kind"] {
+                if !a[key].is_null() {
+                    entry.insert(key.into(), a[key].clone());
+                }
+            }
+            Value::Object(entry)
+        })
         .collect();
     if !also_on.is_empty() {
         out.insert("also_on".into(), also_on.into());
@@ -1010,7 +1018,7 @@ mod tests {
         );
         assert_eq!(
             compact["also_on"],
-            json!([{"uri": "https://example.com/", "site": "Example"}])
+            json!([{"id": "b", "uri": "https://example.com/", "site": "Example", "derived": false}])
         );
         for absent in ["image", "point", "group", "open_in"] {
             assert!(compact.get(absent).is_none(), "{absent}");
@@ -1035,6 +1043,29 @@ mod tests {
         credited["description"] = "short".into();
         let compact = super::compact("https://pinakes.example", &credited);
         assert_eq!(compact["credits"], json!([credit("description")]));
+    }
+
+    #[test]
+    fn compact_card_and_search_keep_exact_member_refs_and_link_kinds() {
+        let entries = json!([
+            {"id": "apple", "uri": "https://music.apple.com/album/1097861387", "site": "Apple Music",
+             "refs": ["https://music.apple.com/us/album/ok-computer/1097861387"]},
+            {"id": "mb", "uri": "https://musicbrainz.org/release-group/example", "site": "MusicBrainz"},
+            {"uri": "https://example.org/derived", "site": "Derived", "derived": true},
+            {"id": "possible", "uri": "https://example.net/possible", "site": "Possible", "kind": "maybe"}
+        ]);
+        let card = json!({"id": "album", "uri": "https://example.com/album", "also_on": entries});
+        let compact = compact("https://pinakes.example", &card);
+        assert_eq!(compact["also_on"], entries);
+        let page = page_answer(
+            "https://pinakes.example",
+            "/v1/search",
+            &json!({"items": [card]}),
+        );
+        assert_eq!(page["items"][0]["also_on"], entries);
+        for entry in compact["also_on"].as_array().unwrap().iter().skip(1) {
+            assert!(entry.get("refs").is_none());
+        }
     }
 
     #[test]
