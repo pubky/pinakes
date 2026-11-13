@@ -25,6 +25,7 @@ pub mod itunes_api;
 pub mod itunes_song;
 pub mod media;
 pub mod musicbrainz;
+pub mod musicbrainz_containment;
 pub mod musicbrainz_entity;
 pub mod performers;
 pub mod podcasts;
@@ -502,6 +503,7 @@ pub fn registry() -> Vec<Arc<dyn Source>> {
         Arc::new(spotify::Spotify),
         Arc::new(musicbrainz::MusicBrainzSource),
         Arc::new(musicbrainz_entity::MusicBrainzEntitySource),
+        Arc::new(musicbrainz_containment::MusicBrainzContainment),
         Arc::new(performers::PerformersSource),
         Arc::new(wikidata::WikidataSource),
         // Before the barcode lookups: a Discogs release's barcodes are keys.
@@ -799,8 +801,7 @@ fn checked(
 }
 /// Whether a source's link is refused for a credential: one that does not parse or has user
 /// info, or that carries a credential as written or under its root spelling (the rule documents
-/// follow, `capability::names_credential`). Refused, never stripped; the rule a stored link is
-/// held to as well (`changes::repair_credentials`).
+/// follow, `capability::names_credential`). Refused, never stripped.
 pub fn refused_link(uri: &str) -> bool {
     url::Url::parse(uri).map_or(true, |u| !u.username().is_empty() || u.password().is_some())
         || crate::capability::names_credential(uri)

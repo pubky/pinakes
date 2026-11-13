@@ -709,6 +709,37 @@ pub mod musicbrainz {
             .min()
             .map(|(_, title)| title.to_owned())
     }
+    /// One deliberately bounded release page for recording containment/artwork. A cap is not
+    /// a transient failure; true HTTP/shape failures still retry and preserve prior evidence.
+    pub async fn recording_releases(
+        egress: &Egress,
+        base: &str,
+        recording: &str,
+    ) -> Result<Vec<Value>> {
+        let url = format!("{base}/release?recording={recording}&status=official&inc=release-groups+media+url-rels&limit=100&fmt=json");
+        let Some(v) = get(egress, &url, "musicbrainz").await? else {
+            return Ok(Vec::new());
+        };
+        let Some(rows) = v.get("releases").and_then(Value::as_array) else {
+            return Err(RetryLater {
+                class: "musicbrainz_release_shape",
+                seconds: 60,
+            }
+            .into());
+        };
+        let Some(count) = v.get("release-count").and_then(Value::as_u64) else {
+            return Err(RetryLater {
+                class: "musicbrainz_release_shape",
+                seconds: 60,
+            }
+            .into());
+        };
+        if count > rows.len() as u64 || rows.len() > 100 {
+            tracing::debug!(recording, count, "recording release page bounded");
+        }
+        Ok(rows.iter().take(100).cloned().collect())
+    }
+
     /// The official releases MusicBrainz lists for `query` (`recording={mbid}&type=album`,
     /// `release-group={mbid}`), each with its release group, media and URL relations: up to
     /// `pages` pages of 100, in MusicBrainz's order (not by date); and whether that is every one

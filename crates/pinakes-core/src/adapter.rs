@@ -31,7 +31,6 @@ pub struct Manifest {
     #[schema(value_type = Option<String>)]
     pub canary: Option<Url>,
     pub canary_note: Option<String>,
-    pub ua_profile: String,
     pub requires_key: bool,
     pub enabled: bool,
     pub disabled_reason: Option<String>,
@@ -97,7 +96,6 @@ pub fn manifest(source: &str) -> Manifest {
         expected_fields: fields.into_iter().map(str::to_owned).collect(),
         canary: canary.map(|s| s.parse().expect("manifest URL")),
         canary_note: None,
-        ua_profile: "pinakes".into(),
         requires_key: false,
         enabled: true,
         disabled_reason: None,

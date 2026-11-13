@@ -17,7 +17,7 @@ use super::{
 };
 use crate::{
     music::{self, Level, Service},
-    music_sources::{derived, join_level, key_values, Kind},
+    music_sources::{derived, join_level, key_values, mb_level, Kind},
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -38,6 +38,17 @@ fn kind_of(link: &music::Link) -> Option<Kind> {
         Level::Track => Some(Kind::Track),
         _ => None,
     }
+}
+/// The kind asked for `subject`: another service's track or album, or a MusicBrainz recording or
+/// release.
+fn kind_of_subject(subject: &Subject) -> Option<Kind> {
+    music::parse(&subject.uri)
+        .and_then(|l| kind_of(&l))
+        .or_else(|| match mb_level(&subject.uri) {
+            Some(Level::Track) => Some(Kind::Track),
+            Some(Level::Album) => Some(Kind::Album),
+            _ => None,
+        })
 }
 fn level(kind: Kind) -> Level {
     match kind {
@@ -87,12 +98,11 @@ impl Source for TidalIsrc {
         config.section::<TidalConfig>().pair().is_some()
     }
     fn applies(&self, subject: &Subject) -> bool {
-        music::parse(&subject.uri)
-            .and_then(|l| kind_of(&l))
+        kind_of_subject(subject)
             .is_some_and(|kind| subject.keys_in(kind.namespace()).next().is_some())
     }
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
-        let Some(kind) = music::parse(&subject.uri).and_then(|l| kind_of(&l)) else {
+        let Some(kind) = kind_of_subject(subject) else {
             return Ok(Found::default());
         };
         let namespace = kind.namespace();

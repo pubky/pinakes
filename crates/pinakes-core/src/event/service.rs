@@ -391,7 +391,6 @@ impl EventService {
             let manifest = super::adapters::manifest(d, &self.config);
             opts.feed_hint = is_feed(&target) || d.parser == "ics_link";
             opts.feed_cap = opts.feed_hint.then_some(self.config.feed_body_bytes);
-            opts.user_agent = Some(super::adapters::profile(&manifest.ua_profile).into());
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             let enrichment = tokio::time::timeout(remaining.min(Duration::from_secs(2)), async {
                 let response = super::adapters::service::discover_enrichment(
