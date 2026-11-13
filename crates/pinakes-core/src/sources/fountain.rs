@@ -8,8 +8,6 @@ use crate::{model::ResourceMeta, resolver::egress::Fetched};
 use anyhow::Result;
 use async_trait::async_trait;
 
-pub const SITE: &str = "Fountain";
-
 /// What a Fountain link names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Page {

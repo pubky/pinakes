@@ -216,13 +216,7 @@ pub fn object(id: &str, uri: &str, v: &Value) -> Option<ResourceMeta> {
 }
 
 /// Read JSON values at balanced braces, including JSON strings in React flight payloads.
-/// The work is bounded by the transport cap and a fixed number of candidates.
-pub fn values(text: &str) -> Vec<Value> {
-    values_before(
-        text,
-        std::time::Instant::now() + std::time::Duration::from_millis(100),
-    )
-}
+/// The work is bounded by the transport cap, a fixed number of candidates and `deadline`.
 fn values_before(text: &str, deadline: std::time::Instant) -> Vec<Value> {
     let mut bytes_scanned = 0usize;
     let mut out = vec![];

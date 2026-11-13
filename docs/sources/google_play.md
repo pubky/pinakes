@@ -24,7 +24,7 @@ A page that names no app keeps its own card.
 ## What it reads
 
 Nothing beyond the page the web route fetched. The page is over a megabyte; the web route reads
-it whole within its head budget (`egress.html_head_bytes`).
+it whole within its head budget (`limits.html_head_bytes`).
 
 ## Card
 

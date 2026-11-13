@@ -528,7 +528,7 @@ async fn an_over_cap_canary_is_inconclusive(pool: PgPool) {
         .await
         .unwrap()
         .unwrap();
-    canary::run(&pool, &OverCap, &config, &metrics, generation)
+    canary::run_manifest(&pool, &OverCap, &manifest, &config, &metrics, generation)
         .await
         .unwrap();
     let (ok, failures, last_error, source_failures): (Option<bool>, i32, Option<String>, i32) =
@@ -579,7 +579,7 @@ async fn canary_bookkeeping_metrics_and_separate_listener(pool: PgPool) {
             .await
             .unwrap()
             .is_none());
-        canary::run(&pool, &probe, &config, &metrics, generation)
+        canary::run_manifest(&pool, &probe, &manifest, &config, &metrics, generation)
             .await
             .unwrap();
         let failures: i32 =
@@ -603,7 +603,7 @@ async fn canary_bookkeeping_metrics_and_separate_listener(pool: PgPool) {
         .await
         .unwrap()
         .unwrap();
-    canary::run(&pool, &probe, &config, &metrics, generation)
+    canary::run_manifest(&pool, &probe, &manifest, &config, &metrics, generation)
         .await
         .unwrap();
     let (ok, failures): (bool, i32) =

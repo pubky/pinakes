@@ -12,7 +12,7 @@ use crate::wikipedia::*;
 /// services its best-rank IDs name (every level: the item is the thing itself, so these carry
 /// no key: a song item's track is one of several recordings) and its Wikipedia editions. Only
 /// the item's own claims and sitelinks, never a search.
-pub fn item_found(item: &wikidata::Item, storefront: &str) -> Found {
+pub fn item_found(item: &wikidata::Item) -> Found {
     let mut found = Found {
         keys: item_key(item),
         ..Default::default()
@@ -20,7 +20,7 @@ pub fn item_found(item: &wikidata::Item, storefront: &str) -> Found {
     found.links = encyclopedias(item);
     found
         .links
-        .extend(crate::music_sources::service_links(item, storefront));
+        .extend(crate::music_sources::service_links(item));
     found.links.extend(editions(item, None));
     found
 }
@@ -83,7 +83,7 @@ impl WikidataItemSource {
         Ok(wikidata::items(&cx.egress, &[qid])
             .await?
             .first()
-            .map(|item| item_found(item, &cx.config.also_on.apple_storefront))
+            .map(item_found)
             .unwrap_or_default())
     }
 }
@@ -122,7 +122,7 @@ mod tests {
         }
         // Kant's item: encyclopedias and every edition, English included.
         let kant = &wikidata::parse_entities(&fixture("wd-kant.json"))[0];
-        let found = item_found(kant, "us");
+        let found = item_found(kant);
         assert_eq!(found.keys[0].key, "wikidata:Q9312");
         let sites: Vec<&str> = found.links.iter().map(|l| l.site.as_str()).collect();
         assert!(sites.contains(&"Britannica") && sites.contains(&"Wikipedia (en)"));
@@ -136,7 +136,7 @@ mod tests {
             .into_iter()
             .find(|i| i.qid == "Q202996")
             .unwrap();
-        let uris: Vec<String> = item_found(&album, "us")
+        let uris: Vec<String> = item_found(&album)
             .links
             .into_iter()
             .map(|l| l.uri)

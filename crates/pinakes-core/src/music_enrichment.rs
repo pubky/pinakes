@@ -393,17 +393,7 @@ async fn discogs_item(
 }
 
 /// The image and description of `entity` (`base`: the MusicBrainz web service), a Commons
-/// thumbnail `width` pixels wide ([`enrich_within`], with no deadline).
-pub async fn enrich(
-    egress: &Egress,
-    base: &str,
-    entity: &musicbrainz::Entity,
-    width: u32,
-) -> Enrichment {
-    enrich_within(egress, base, entity, width, None).await
-}
-
-/// The image and description of `entity`, each part read by `deadline` if one is given. A
+/// thumbnail `width` pixels wide, each part read by `deadline` if one is given. A
 /// release or release group with no free Commons file takes its front cover from the Cover Art
 /// Archive ([`cover`]). The cover is asked at the same time as Wikidata, Wikipedia and Commons,
 /// not after them: every host is paced (one request at a time), so behind a busy Wikidata the
@@ -1195,7 +1185,7 @@ mod tests {
                 (search.as_str(), 200, "application/json", none.clone()),
                 (discogs.as_str(), 200, "application/json", none.clone()),
             ]);
-            let found = enrich(&egress, musicbrainz::BASE, &entity(kind), 640).await;
+            let found = enrich_within(&egress, musicbrainz::BASE, &entity(kind), 640, None).await;
             assert_eq!(found, Enrichment::missing());
             let mut expected = vec![search.clone()];
             if kind == MbKind::Artist {
@@ -1236,7 +1226,14 @@ mod tests {
             (search.as_str(), 200, "application/json", hit.clone()),
             (read.as_str(), 200, "application/json", song.clone()),
         ]);
-        let found = enrich(&egress, musicbrainz::BASE, &entity(MbKind::Recording), 640).await;
+        let found = enrich_within(
+            &egress,
+            musicbrainz::BASE,
+            &entity(MbKind::Recording),
+            640,
+            None,
+        )
+        .await;
         assert_eq!(found, Enrichment::missing());
         assert_eq!(recorded.asked(), [search.clone(), read.clone(), works]);
         // The same item without the work ID is the recording's own.
@@ -1248,7 +1245,14 @@ mod tests {
             (search.as_str(), 200, "application/json", hit),
             (read.as_str(), 200, "application/json", recording),
         ]);
-        enrich(&egress, musicbrainz::BASE, &entity(MbKind::Recording), 640).await;
+        enrich_within(
+            &egress,
+            musicbrainz::BASE,
+            &entity(MbKind::Recording),
+            640,
+            None,
+        )
+        .await;
         assert!(recorded.asked().contains(&wikidata::pages_lookup("Q2")));
     }
     /// A recording whose own relations name two items takes nothing, not its work's
@@ -1280,7 +1284,7 @@ mod tests {
         };
         let (egress, recorded) = crate::sources::fixture::egress(vec![]);
         assert_eq!(
-            enrich(&egress, musicbrainz::BASE, &recording, 640).await,
+            enrich_within(&egress, musicbrainz::BASE, &recording, 640, None).await,
             Enrichment::missing()
         );
         assert_eq!(recorded.asked(), Vec::<String>::new());
@@ -1514,7 +1518,7 @@ mod tests {
                     .map(|(u, s, b)| (u.as_str(), *s, "application/json", b.clone()))
                     .collect();
                 let (egress, recorded) = crate::sources::fixture::egress(routes);
-                let found = enrich(&egress, musicbrainz::BASE, &recording, 640).await;
+                let found = enrich_within(&egress, musicbrainz::BASE, &recording, 640, None).await;
                 (found, recorded.asked())
             }
         };
@@ -1701,7 +1705,7 @@ mod tests {
                 titled_pages("Q2", "Work", &[], Some("work line")),
             ),
         ]);
-        let e = enrich(&egress, musicbrainz::BASE, &bare, 640).await;
+        let e = enrich_within(&egress, musicbrainz::BASE, &bare, 640, None).await;
         assert_eq!(e.image, Found::Missing);
         assert_eq!(text(&e), wd("work line", Some(&subject)));
     }
@@ -1765,7 +1769,14 @@ mod tests {
                 (search.as_str(), 200, "application/json", hit.clone()),
                 (read.as_str(), 200, "application/json", item(claims.clone())),
             ]);
-            let found = enrich(&egress, musicbrainz::BASE, &entity_of(kind, mbid, &[]), 640).await;
+            let found = enrich_within(
+                &egress,
+                musicbrainz::BASE,
+                &entity_of(kind, mbid, &[]),
+                640,
+                None,
+            )
+            .await;
             assert_eq!(found, Enrichment::missing(), "{kind:?} {claims}");
             assert_eq!(recorded.asked().contains(&pages), own, "{kind:?} {claims}");
         }
@@ -1816,7 +1827,7 @@ mod tests {
                     .map(|(u, s, k, b)| (u.as_str(), *s, *k, b.clone()))
                     .collect();
                 let (egress, recorded) = crate::sources::fixture::egress(routes);
-                let found = enrich(&egress, musicbrainz::BASE, &artist, 640).await;
+                let found = enrich_within(&egress, musicbrainz::BASE, &artist, 640, None).await;
                 (found, recorded.asked())
             }
         };

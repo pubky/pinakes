@@ -2,13 +2,11 @@
 //!
 //! Only best-rank statements count (preferred if any, else normal; never deprecated). A
 //! property with more than one best-rank value after validation is ambiguous and adds nothing.
-use super::{body, encode_path, plain, web_url, Key, Link, Request};
+use super::{body, encode_path, plain, web_url, Key, Link};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-/// The most items one `wbgetentities` request may name.
-pub const MAX_IDS: usize = 50;
 const VIA: &str = "wikidata";
 
 /// A Wikidata item id, `Q` and a number without leading zeros.
@@ -18,18 +16,6 @@ pub fn qid(value: &str) -> Option<&str> {
 }
 pub fn key(qid: &str) -> Key {
     Key::new("wikidata", qid)
-}
-
-/// Claims and sitelink URLs for up to `MAX_IDS` items.
-pub fn entities_request(ids: &[&str]) -> Option<Request> {
-    if ids.is_empty() || ids.len() > MAX_IDS || ids.iter().any(|id| qid(id).is_none()) {
-        return None;
-    }
-    Request::get(&format!(
-        "https://www.wikidata.org/w/api.php?action=wbgetentities&format=json\
-         &props=claims%7Csitelinks%2Furls&ids={}",
-        ids.join("%7C")
-    ))
 }
 
 /// The items of a `wbgetentities` response by their own id. Missing items are left out; a
@@ -343,20 +329,6 @@ mod tests {
     }
 
     #[test]
-    fn request() {
-        let r = entities_request(&["Q7024", "Q153306"]).unwrap();
-        assert_eq!(
-            r.url.as_str(),
-            "https://www.wikidata.org/w/api.php?action=wbgetentities&format=json\
-             &props=claims%7Csitelinks%2Furls&ids=Q7024%7CQ153306"
-        );
-        assert!(entities_request(&[]).is_none());
-        assert!(entities_request(&["Q7024", "P31"]).is_none());
-        assert!(entities_request(&["Q07024"]).is_none());
-        assert!(entities_request(&vec!["Q1"; MAX_IDS + 1]).is_none());
-    }
-
-    #[test]
     fn errors() {
         assert!(parse_entities(429, b"").is_err());
         assert!(parse_entities(200, br#"{"error":{"code":"no-such-entity"}}"#).is_err());
@@ -475,7 +447,9 @@ mod tests {
     #[test]
     fn ids() {
         assert_eq!(qid("Q7024"), Some("Q7024"));
-        for bad in ["Q", "Q0", "Q01", "q7024", "Q7024 ", "P31", "Q1;Q2"] {
+        for bad in [
+            "Q", "Q0", "Q01", "Q07024", "q7024", "Q7024 ", "P31", "Q1;Q2",
+        ] {
             assert_eq!(qid(bad), None, "{bad}");
         }
         assert_eq!(key("Q7024").as_str(), "wikidata:Q7024");

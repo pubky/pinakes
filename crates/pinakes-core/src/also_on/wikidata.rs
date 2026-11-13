@@ -57,7 +57,7 @@ impl WikidataSource {
         if property == DISCOGS_RELEASE && ["P1954", "P436"].iter().any(|p| !item.id(p).is_empty()) {
             return Ok(Found::default());
         }
-        let mut found = found(&item, level, &cx.config.also_on.apple_storefront);
+        let mut found = found(&item, level);
         // A recording item's MBID is keyed as every producer keys a recording (`recording_key`:
         // the one that stands for its duplicates); a replaced MBID stays as `mbid_was`, so
         // `key=mbid:` still finds the track by it.

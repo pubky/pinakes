@@ -16,14 +16,6 @@ pub enum Store {
     MicrosoftStore,
 }
 impl Store {
-    pub const ALL: [Store; 6] = [
-        Store::GooglePlay,
-        Store::FDroid,
-        Store::AppStore,
-        Store::Flathub,
-        Store::Snap,
-        Store::MicrosoftStore,
-    ];
     /// The store's name as shown to people.
     pub fn name(self) -> &'static str {
         match self {
@@ -68,17 +60,6 @@ impl Store {
             Self::MicrosoftStore => return app_ids::msstore_id(value),
         };
         valid.then(|| value.to_owned())
-    }
-    /// The app's own page on the store.
-    pub fn page(self, id: &str) -> String {
-        match self {
-            Self::GooglePlay => format!("https://play.google.com/store/apps/details?id={id}"),
-            Self::FDroid => format!("https://f-droid.org/packages/{id}"),
-            Self::AppStore => format!("https://apps.apple.com/app/id{id}"),
-            Self::Flathub => format!("https://flathub.org/apps/{id}"),
-            Self::Snap => format!("https://snapcraft.io/{id}"),
-            Self::MicrosoftStore => format!("https://apps.microsoft.com/detail/{id}"),
-        }
     }
 }
 

@@ -306,7 +306,7 @@ pub fn parse(status: u16, raw: &[u8], repo: &Repo) -> Result<Option<Card>> {
     );
     let id = identifier(&answered).expect("a namespaced repo");
     let mut card = Card::new(repo.kind.type_name(), id, page(&answered));
-    card.name = Some(answered.id.clone());
+    card.name = Some(answered.id);
     card.description = match repo.kind {
         Kind::Dataset => summary(&v["description"]),
         Kind::Space => text(&v["cardData"]["short_description"]),

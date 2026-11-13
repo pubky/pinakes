@@ -200,10 +200,9 @@ impl EventService {
                     // its scripts (a page listing several events is a list, whichever script
                     // holds each).
                     let mut values = vec![];
-                    let body_json = page::lenient_json(&text).is_some();
-                    if let Some(v) = page::lenient_json(&text) {
-                        values.push(v);
-                    }
+                    let body = page::lenient_json(&text);
+                    let body_json = body.is_some();
+                    values.extend(body);
                     let html = crate::resolver::html::document(&text)?;
                     event_candidate = text.contains("startDate")
                         || text.contains("dtstart")
@@ -306,15 +305,12 @@ impl EventService {
         {
             let (alternate, accept) =
                 advertised.unwrap_or_else(|| (uri.to_owned(), "application/activity+json".into()));
-            for _ in 0..1 {
-                let remaining = deadline
-                    .saturating_duration_since(tokio::time::Instant::now())
-                    .saturating_sub(Duration::from_millis(100));
-                if remaining < Duration::from_millis(100) {
-                    break;
-                }
+            let remaining = deadline
+                .saturating_duration_since(tokio::time::Instant::now())
+                .saturating_sub(Duration::from_millis(100));
+            if remaining >= Duration::from_millis(100) {
                 let options = FetchOptions {
-                    accept: Some(accept.clone()),
+                    accept: Some(accept),
                     ..Default::default()
                 };
                 if let Ok(Ok(response)) = tokio::time::timeout(
@@ -324,18 +320,14 @@ impl EventService {
                 .await
                 {
                     if response.status == 200 {
-                        let (parsed, matched) = crate::resolver::html::blocking(move || {
-                            let matched = serde_json::from_slice(&response.body).is_ok_and(|v| {
+                        event = crate::resolver::html::blocking(move || {
+                            if let Ok(v) = serde_json::from_slice(&response.body) {
                                 let base = crate::resolver::web::read_at(&response.url);
-                                page::activity(&mut event, &v, &base)
-                            });
-                            (event, matched)
+                                page::activity(&mut event, &v, &base);
+                            }
+                            event
                         })
                         .await?;
-                        event = parsed;
-                        if matched {
-                            break;
-                        }
                     }
                 }
             }

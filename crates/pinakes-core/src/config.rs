@@ -1182,9 +1182,9 @@ impl Config {
         {
             bail!("invalid refresh, canary or admin configuration");
         }
-        // Change lines hold a card's values for `refresh.retention_days`: no longer than a source
-        // whose values they may hold allows them kept (TMDB: six months, from a read up to 60
-        // days old), while it is ready.
+        // Change lines hold a card's values for `limits.change_retention_days`: no longer than a
+        // source whose values they may hold allows them kept (TMDB: six months, from a read up to
+        // 60 days old), while it is ready.
         for source in crate::also_on::registered() {
             if let Some(cap) = source.retention_days_cap() {
                 if source.ready(self) && self.refresh.retention_days > cap {
@@ -1193,7 +1193,7 @@ impl Config {
                         .map(|s| s.variables.iter().map(|(v, _)| (*v).to_owned()).collect())
                         .unwrap_or_default();
                     bail!(
-                        "refresh.retention_days is {}, over the {cap} days change lines may keep the `{}` source's values: lower it, or switch `{}` off ({}[{}] enabled = false)",
+                        "limits.change_retention_days is {}, over the {cap} days change lines may keep the `{}` source's values: lower it, or switch `{}` off ({}[{}] enabled = false)",
                         self.refresh.retention_days,
                         source.id(),
                         source.id(),

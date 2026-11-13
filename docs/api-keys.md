@@ -81,8 +81,9 @@ hidden, its values gone from cards at their next read.
 Pinakes credits every TMDB value on its card (`credits[]`, provider `tmdb`), `/v1/info` gives TMDB's notice ("This product uses the TMDB API
 but is not endorsed or certified by TMDB.") and logo for clients to show, and no TMDB value is
 kept longer than 60 days after the last read that answered ([operations](operations.md#also-on));
-with the key set, startup refuses a `refresh.retention_days` over 120, and a change line holding a
-TMDB value goes after 120 days in any case, so change lines keep no TMDB value longer either.
+with the key set, startup refuses a `limits.change_retention_days` over 120, and a change line
+holding a TMDB value goes after 120 days in any case, so change lines keep no TMDB value longer
+either.
 
 ## Quotas and operating rules
 

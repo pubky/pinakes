@@ -1149,17 +1149,17 @@ pub(crate) fn mb_property(level: Level) -> (&'static str, MbKind) {
         _ => ("P436", MbKind::ReleaseGroup),
     }
 }
-pub(crate) fn property_url(template: &str, value: &str, storefront: &str) -> String {
+pub(crate) fn property_url(template: &str, value: &str) -> String {
     let value: String = url::form_urlencoded::byte_serialize(value.as_bytes()).collect();
-    template.replace("{sf}", storefront).replace("{}", &value)
+    template.replace("{}", &value)
 }
 
 /// The music-service pages an item's best-rank IDs name, at any level.
-pub fn service_links(item: &wikidata::Item, storefront: &str) -> Vec<Link> {
+pub fn service_links(item: &wikidata::Item) -> Vec<Link> {
     let mut links = vec![];
     for (property, _, _, template) in PROPERTIES {
         for value in item.id(property).iter().take(4) {
-            let url = property_url(template, value, storefront);
+            let url = property_url(template, value);
             if let Some(found) = music::parse(&url) {
                 links.push(Link::new(found.canonical, found.service.name(), "wikidata"));
             }
@@ -1175,7 +1175,7 @@ pub(crate) fn recording_item(item: &wikidata::Item) -> bool {
     item.id("P4404").len() == 1 && item.id("P435").is_empty()
 }
 /// An item's keys and same-level links; at track level only a recording item's.
-pub fn found(item: &wikidata::Item, level: Level, storefront: &str) -> Found {
+pub fn found(item: &wikidata::Item, level: Level) -> Found {
     let mut found = Found::default();
     if level == Level::Track && !recording_item(item) {
         return found;
@@ -1200,11 +1200,7 @@ pub fn found(item: &wikidata::Item, level: Level, storefront: &str) -> Found {
     let named = hubs::key::wikidata(&item.qid);
     for (property, _, _, template) in PROPERTIES {
         for value in item.id(property).iter().take(4) {
-            if let Some(mut link) = derived(
-                &property_url(template, value, storefront),
-                level,
-                "wikidata",
-            ) {
+            if let Some(mut link) = derived(&property_url(template, value), level, "wikidata") {
                 link.key.clone_from(&named);
                 found.links.push(link);
             }
@@ -1545,7 +1541,7 @@ mod tests {
     fn a_wikidata_item_gives_its_ids_at_the_level() {
         let items = wikidata::parse_entities(&fixture("wd-entities.json"));
         let item = items.iter().find(|i| i.qid == "Q202996").unwrap();
-        let found = found(item, Level::Album, "us");
+        let found = found(item, Level::Album);
         let keys: Vec<&str> = found.keys.iter().map(|k| k.key.as_str()).collect();
         assert_eq!(
             keys,
@@ -1561,7 +1557,7 @@ mod tests {
         );
         assert!(found.links.iter().all(|l| l.via == "wikidata"));
         // The same item read as an artist gives no album links.
-        assert!(super::found(item, Level::Artist, "us")
+        assert!(super::found(item, Level::Artist)
             .links
             .iter()
             .all(|l| { music::parse(&l.uri).is_some_and(|m| m.level == Level::Artist) }));
@@ -1578,21 +1574,17 @@ mod tests {
         let spotify = ("P2207", "6LgJvl0Xdtc73RJ1mmpotq");
         let recording = ("P4404", "b1a9c0e9-d987-4042-ae91-78d6a3267d69");
         let work = ("P435", "ebd75d2a-0c3e-3b32-b4a5-d9c0eb0e5f8f");
-        let keys = |ids: &[(&str, &str)]| super::found(&item(ids), Level::Track, "us").keys.len();
+        let keys = |ids: &[(&str, &str)]| super::found(&item(ids), Level::Track).keys.len();
         assert_eq!(keys(&[spotify, recording]), 2);
         assert_eq!(keys(&[spotify, recording, work]), 0);
         assert_eq!(keys(&[spotify, work]), 0);
         assert_eq!(keys(&[spotify]), 0);
-        assert!(super::found(&item(&[spotify, work]), Level::Track, "us")
+        assert!(super::found(&item(&[spotify, work]), Level::Track)
             .links
             .is_empty());
-        // Property values become valid URLs: a storefront fills its place where a template has one.
+        // Property values become valid URLs.
         assert_eq!(
-            property_url("https://books.apple.com/{sf}/book/id{}", "721429965", "gb"),
-            "https://books.apple.com/gb/book/id721429965"
-        );
-        assert_eq!(
-            property_url("https://music.apple.com/album/{}", "1097861387", "gb"),
+            property_url("https://music.apple.com/album/{}", "1097861387"),
             "https://music.apple.com/album/1097861387"
         );
     }
