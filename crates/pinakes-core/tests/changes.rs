@@ -1306,3 +1306,298 @@ fn an_occurrence_key_names_no_credential_and_others_stay_as_written() {
         assert_eq!(changes::stored_key(&key), key);
     }
 }
+
+/// Expediting moves an overdue resource to the front of the queue once: asked again, its row is
+/// not written again (the same row version) and it keeps the place it took. A resource that is
+/// fresh, final, dead-lettered or leased is left as it is.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn expediting_writes_an_overdue_row_once(pool: PgPool) {
+    // The row's version (its inserting transaction and its place in the table) and its place
+    // in the queue.
+    async fn version(pool: &PgPool, id: &str) -> (String, String, Option<String>) {
+        sqlx::query_as("SELECT xmin::text,ctid::text,priority_at::text FROM resource WHERE id=$1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+    let id = store::ensure_resource(&pool, "https://example.org/overdue")
+        .await
+        .unwrap();
+    let new = version(&pool, &id).await;
+    assert_eq!(new.2, None);
+    store::expedite(&pool, std::slice::from_ref(&id))
+        .await
+        .unwrap();
+    let first = version(&pool, &id).await;
+    assert!(first.2.is_some());
+    assert_ne!((&first.0, &first.1), (&new.0, &new.1));
+    for _ in 0..3 {
+        store::expedite(&pool, std::slice::from_ref(&id))
+            .await
+            .unwrap();
+        assert_eq!(version(&pool, &id).await, first);
+    }
+    let mut ids = vec![id];
+    for (uri, state, expedited) in [
+        (
+            "https://example.org/fresh",
+            "refresh_at=now()+interval '1 hour'",
+            false,
+        ),
+        ("https://example.org/final", "final=true", false),
+        ("https://example.org/dead", "dead_letter=true", false),
+        (
+            "https://example.org/leased",
+            "lease_until=now()+interval '1 minute'",
+            false,
+        ),
+        (
+            "https://example.org/due",
+            "refresh_at=now()-interval '1 second'",
+            true,
+        ),
+        (
+            "https://example.org/lapsed",
+            "lease_until=now()-interval '1 second'",
+            true,
+        ),
+    ] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        sqlx::query(&format!("UPDATE resource SET {state} WHERE id=$1"))
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let before = version(&pool, &id).await;
+        store::expedite(&pool, std::slice::from_ref(&id))
+            .await
+            .unwrap();
+        let after = version(&pool, &id).await;
+        assert_eq!(after.2.is_some(), expedited, "{uri}");
+        assert_eq!(after != before, expedited, "{uri}");
+        ids.push(id);
+    }
+    // The whole list in one call, as a lookup asks: no row is written again.
+    let mut versions = vec![];
+    for id in &ids {
+        versions.push(version(&pool, id).await);
+    }
+    store::expedite(&pool, &ids).await.unwrap();
+    for (id, was) in ids.iter().zip(versions) {
+        assert_eq!(version(&pool, id).await, was, "{id}");
+    }
+}
+
+fn canary_manifest(source: &str, canary: bool) -> adapter::Manifest {
+    let mut manifest = adapter::manifest("web");
+    manifest.source = source.into();
+    manifest.canary = canary.then(|| {
+        format!("https://{source}.example.org/sample")
+            .parse()
+            .unwrap()
+    });
+    manifest
+}
+
+/// One claim among a resolver's manifests takes the first canary that is due, in their order,
+/// and holds its source so the next claim takes the next one. A source seen first is due an
+/// interval later; nothing is claimed while canaries are off, and a manifest without a canary
+/// gets no row.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn one_claim_takes_the_first_due_canary_among_its_manifests(pool: PgPool) {
+    let config = CanaryConfig::default();
+    // In the manifests' order, not the sources' alphabetical one.
+    let manifests = [
+        canary_manifest("mid", true),
+        canary_manifest("zeta", true),
+        canary_manifest("alpha", true),
+        canary_manifest("bare", false),
+    ];
+    assert!(canary::claim_due(&pool, &manifests, &config)
+        .await
+        .unwrap()
+        .is_none());
+    let seeded: Vec<(String, bool, bool)> = sqlx::query_as(
+        "SELECT source,canary_due_at BETWEEN now()+interval '5 hours' AND now()+interval '7 hours',canary_generation=0 AND canary_lease_until IS NULL FROM source_state WHERE source IN ('mid','zeta','alpha','bare') ORDER BY source",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        seeded,
+        [
+            ("alpha".to_owned(), true, true),
+            ("mid".to_owned(), true, true),
+            ("zeta".to_owned(), true, true)
+        ]
+    );
+    // A due time already set is never moved by another claim.
+    sqlx::query("UPDATE source_state SET canary_due_at=now()-interval '1 minute' WHERE source IN ('zeta','alpha')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let off = CanaryConfig {
+        enabled: false,
+        ..Default::default()
+    };
+    assert!(canary::claim_due(&pool, &manifests, &off)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(canary::claim_due(&pool, &manifests[3..], &config)
+        .await
+        .unwrap()
+        .is_none());
+    let claimed = |pool: PgPool, manifests: Vec<adapter::Manifest>| async move {
+        canary::claim_due(&pool, &manifests, &CanaryConfig::default())
+            .await
+            .unwrap()
+            .map(|(manifest, generation)| (manifest.source.clone(), generation))
+    };
+    let all = manifests.to_vec();
+    assert_eq!(
+        claimed(pool.clone(), all.clone()).await,
+        Some(("zeta".to_owned(), 1))
+    );
+    assert_eq!(
+        claimed(pool.clone(), all.clone()).await,
+        Some(("alpha".to_owned(), 1))
+    );
+    assert_eq!(claimed(pool.clone(), all.clone()).await, None);
+    // The one-manifest claim is the same claim: a held source is not claimed again.
+    assert!(canary::claim(&pool, &manifests[1], &config)
+        .await
+        .unwrap()
+        .is_none());
+    // A lease that ran out frees its source, and the first manifest goes first once it is due.
+    sqlx::query(
+        "UPDATE source_state SET canary_lease_until=now()-interval '1 second' WHERE source='alpha'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE source_state SET canary_due_at=now() WHERE source='mid'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        claimed(pool.clone(), all.clone()).await,
+        Some(("mid".to_owned(), 1))
+    );
+    assert_eq!(
+        claimed(pool.clone(), all.clone()).await,
+        Some(("alpha".to_owned(), 2))
+    );
+    assert_eq!(claimed(pool.clone(), all.clone()).await, None);
+    // A recorded result frees the source and sets its next time.
+    canary::record(
+        &pool,
+        &manifests[1],
+        1,
+        &Ok(ResourceMeta::new(
+            "https://zeta.example.org/sample",
+            "web",
+            60,
+        )),
+        config.interval_secs,
+    )
+    .await
+    .unwrap();
+    let (ok, due_later, leased): (Option<bool>, bool, bool) = sqlx::query_as(
+        "SELECT canary_ok,canary_due_at>now()+interval '5 hours',canary_lease_until IS NOT NULL FROM source_state WHERE source='zeta'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((ok, due_later, leased), (Some(true), true, false));
+    // Workers claiming at once each take a source of their own.
+    sqlx::query("UPDATE source_state SET canary_due_at=now(),canary_lease_until=NULL WHERE source IN ('mid','zeta','alpha')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (a, b, c, d) = tokio::join!(
+        claimed(pool.clone(), all.clone()),
+        claimed(pool.clone(), all.clone()),
+        claimed(pool.clone(), all.clone()),
+        claimed(pool.clone(), all.clone()),
+    );
+    let mut sources: Vec<String> = [a, b, c, d].into_iter().flatten().map(|c| c.0).collect();
+    sources.sort();
+    assert_eq!(sources, ["alpha", "mid", "zeta"]);
+}
+
+/// A tick's canary bookkeeping does not grow with the resolver's manifests: one claim is two
+/// statements for sixty of them, and one suspension is one. Counted as the transactions this
+/// database committed.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn canary_bookkeeping_does_not_grow_with_the_manifests(pool: PgPool) {
+    let connection = common::one_connection(&pool).await;
+    let config = CanaryConfig::default();
+    let manifests: Vec<adapter::Manifest> = (0..60)
+        .map(|n| canary_manifest(&format!("platform{n}"), true))
+        .collect();
+    let sources: Vec<&str> = manifests.iter().map(|m| m.source.as_str()).collect();
+    // The first claim seeds every source.
+    assert!(canary::claim_due(&connection, &manifests, &config)
+        .await
+        .unwrap()
+        .is_none());
+    let commits = "SELECT xact_commit FROM pg_stat_database WHERE datname=current_database()";
+    let before = common::counted(&connection, commits).await;
+    for _ in 0..5 {
+        canary::suspend(&connection, &sources).await.unwrap();
+        assert!(canary::claim_due(&connection, &manifests, &config)
+            .await
+            .unwrap()
+            .is_none());
+    }
+    // Fifteen statements and the two of the count itself; the bound leaves room for what other
+    // backends of this database flush meanwhile. One statement per manifest and tick would be
+    // three hundred.
+    let committed = common::counted(&connection, commits).await - before;
+    assert!((15..60).contains(&committed), "{committed} transactions");
+    let seeded: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM source_state WHERE source LIKE 'platform%' AND canary_due_at>now()",
+    )
+    .fetch_one(&connection)
+    .await
+    .unwrap();
+    assert_eq!(seeded, 60);
+}
+
+/// A suspension clears the canary results of its sources alone, and writes no row that has
+/// none.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_suspension_clears_its_sources_canary_results(pool: PgPool) {
+    sqlx::query("INSERT INTO source_state(source,canary_ok,canary_failures,canary_missing,canary_lease_until,canary_due_at) VALUES('failing',false,3,'{name}',now()+interval '1 minute',now()),('passing',true,0,'{}',NULL,now()),('other',false,2,'{start}',NULL,now()),('quiet',NULL,0,'{}',now()+interval '1 minute',now())")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Each source: whether it has no canary result, whether it is held, and its row's version.
+    let state = |pool: PgPool| async move {
+        sqlx::query_as::<_, (String, bool, bool, String)>(
+            "SELECT source,canary_ok IS NULL AND canary_failures=0 AND canary_missing='{}',canary_lease_until IS NOT NULL,xmin::text FROM source_state WHERE source IN ('failing','passing','other','quiet') ORDER BY source",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+    let before = state(pool.clone()).await;
+    let sources: Vec<&str> = before.iter().map(|row| row.0.as_str()).collect();
+    assert_eq!(sources, ["failing", "other", "passing", "quiet"]);
+    canary::suspend(&pool, &[]).await.unwrap();
+    assert_eq!(state(pool.clone()).await, before);
+    canary::suspend(&pool, &["failing", "passing", "quiet", "unknown"])
+        .await
+        .unwrap();
+    let after = state(pool.clone()).await;
+    // A source with a result loses it, and its hold.
+    for cleared in [&after[0], &after[2]] {
+        assert_eq!((cleared.1, cleared.2), (true, false), "{}", cleared.0);
+    }
+    // Another source's result stays, and a source without one is not written (its hold stays).
+    assert_eq!(after[1], before[1]);
+    assert_eq!(after[3], before[3]);
+    assert_eq!((after[3].1, after[3].2), (true, true));
+}

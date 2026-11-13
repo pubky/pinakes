@@ -9,17 +9,50 @@ use anyhow::Result;
 use sqlx::PgPool;
 use std::time::Duration;
 
+/// Claim `manifest`'s canary when it is due and no worker holds it: its generation.
 pub async fn claim(
     pool: &PgPool,
     manifest: &Manifest,
     config: &CanaryConfig,
 ) -> Result<Option<i64>> {
-    if !config.enabled || manifest.canary.is_none() {
+    Ok(claim_due(pool, std::slice::from_ref(manifest), config)
+        .await?
+        .map(|(_, generation)| generation))
+}
+/// Claim one canary among `manifests`: the first, in their order, that is due and that no
+/// worker holds, with its generation. The claim holds the source for 60 seconds, so no other
+/// worker runs it meanwhile. A source seen for the first time is due one interval from now.
+/// Two statements whatever the number of manifests; none when canaries are off or no manifest
+/// has one.
+pub async fn claim_due<'a>(
+    pool: &PgPool,
+    manifests: &'a [Manifest],
+    config: &CanaryConfig,
+) -> Result<Option<(&'a Manifest, i64)>> {
+    if !config.enabled {
         return Ok(None);
     }
-    sqlx::query("INSERT INTO source_state(source,canary_due_at) VALUES($1,now()+$2*interval '1 second') ON CONFLICT(source) DO UPDATE SET canary_due_at=excluded.canary_due_at WHERE source_state.canary_due_at IS NULL")
-        .bind(&manifest.source).bind(config.interval_secs as f64).execute(pool).await?;
-    Ok(sqlx::query_scalar("UPDATE source_state SET canary_lease_until=now()+interval '60 seconds',canary_generation=canary_generation+1 WHERE source=$1 AND canary_due_at<=now() AND (canary_lease_until IS NULL OR canary_lease_until<now()) RETURNING canary_generation").bind(&manifest.source).fetch_optional(pool).await?)
+    let sources: Vec<&str> = manifests
+        .iter()
+        .filter(|m| m.canary.is_some())
+        .map(|m| m.source.as_str())
+        .collect();
+    if sources.is_empty() {
+        return Ok(None);
+    }
+    // Only a source without a due time is written, in source order (two workers seed the same
+    // rows).
+    sqlx::query("INSERT INTO source_state(source,canary_due_at) SELECT wanted.source,now()+$2*interval '1 second' FROM (SELECT DISTINCT unnest($1::text[]) AS source) wanted WHERE NOT EXISTS(SELECT 1 FROM source_state s WHERE s.source=wanted.source AND s.canary_due_at IS NOT NULL) ORDER BY wanted.source ON CONFLICT(source) DO UPDATE SET canary_due_at=excluded.canary_due_at WHERE source_state.canary_due_at IS NULL")
+        .bind(&sources).bind(config.interval_secs as f64).execute(pool).await?;
+    // A row another worker is claiming now is passed over for the next one that is due.
+    let claimed: Option<(String, i64)> = sqlx::query_as("UPDATE source_state SET canary_lease_until=now()+interval '60 seconds',canary_generation=canary_generation+1 WHERE source=(SELECT source FROM source_state WHERE source=ANY($1) AND canary_due_at<=now() AND (canary_lease_until IS NULL OR canary_lease_until<now()) ORDER BY array_position($1::text[],source) LIMIT 1 FOR UPDATE SKIP LOCKED) AND canary_due_at<=now() AND (canary_lease_until IS NULL OR canary_lease_until<now()) RETURNING source,canary_generation")
+        .bind(&sources).fetch_optional(pool).await?;
+    Ok(claimed.and_then(|(source, generation)| {
+        manifests
+            .iter()
+            .find(|m| m.canary.is_some() && m.source == source)
+            .map(|m| (m, generation))
+    }))
 }
 pub async fn record(
     pool: &PgPool,
@@ -105,8 +138,13 @@ pub async fn run_manifest(
     record(pool, manifest, generation, &result, config.interval_secs).await
 }
 
-/// Policy-disabled probes do not leave a stale failing gauge behind after reconfiguration.
-pub async fn suspend(pool: &PgPool, manifest: &Manifest) -> Result<()> {
-    sqlx::query("UPDATE source_state SET canary_ok=NULL,canary_missing='{}',canary_failures=0,canary_lease_until=NULL WHERE source=$1 AND (canary_ok IS NOT NULL OR canary_failures<>0)").bind(&manifest.source).execute(pool).await?;
+/// Policy-disabled probes do not leave a stale failing gauge behind after reconfiguration: the
+/// canary results of `sources` are cleared, in one statement (none without sources). Rows are
+/// locked in source order, so two workers clearing the same sources never deadlock.
+pub async fn suspend(pool: &PgPool, sources: &[&str]) -> Result<()> {
+    if sources.is_empty() {
+        return Ok(());
+    }
+    sqlx::query("UPDATE source_state SET canary_ok=NULL,canary_missing='{}',canary_failures=0,canary_lease_until=NULL WHERE source IN (SELECT source FROM source_state WHERE source=ANY($1) AND (canary_ok IS NOT NULL OR canary_failures<>0) ORDER BY source FOR UPDATE) AND (canary_ok IS NOT NULL OR canary_failures<>0)").bind(sources).execute(pool).await?;
     Ok(())
 }
