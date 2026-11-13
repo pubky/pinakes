@@ -10,7 +10,7 @@ use pinakes_core::{
     api::{self, AppState},
     config::Config,
     model::ResourceMeta,
-    resolver::egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+    resolver::egress::{Egress, FetchOptions, Fetched, Transport},
     store,
 };
 use serde_json::Value;
@@ -22,6 +22,7 @@ use std::{
 };
 use tower::ServiceExt;
 mod common;
+use common::media::PublicDns;
 
 const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hubs");
 const GET_LUCKY: &str = "https://open.spotify.com/track/69kOkLUCkxIZYexIgSG8rq";
@@ -29,14 +30,6 @@ const RECORDING: &str = "833f00e1-781f-4edd-90e4-e52712618862";
 /// Random Access Memories, 2013: the worldwide digital release, and Apple's Digital Master.
 const RAM: &str = "5000a285-b67e-4cfc-b54b-2b98f1810d2e";
 const RAM_APPLE: &str = "36e2aede-346d-4931-8565-78d810d167c7";
-
-struct PublicDns;
-#[async_trait::async_trait]
-impl Dns for PublicDns {
-    async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<SocketAddr>> {
-        Ok(vec![SocketAddr::new("8.8.8.8".parse()?, port)])
-    }
-}
 
 /// A request's URL as the fixtures are found by: host, path and its query in any order.
 fn key(url: &url::Url) -> String {

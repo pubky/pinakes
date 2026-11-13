@@ -5,31 +5,18 @@ use pinakes_core::{
     also_on::{self, SourceOptions},
     config::Config,
     groups,
-    model::ResourceMeta,
-    resolver::egress::{Dns, Egress, FetchOptions, Fetched, Transport},
-    store,
+    resolver::egress::{Egress, FetchOptions, Fetched, Transport},
 };
 use std::{
     net::SocketAddr,
     sync::{Arc, Mutex},
 };
 mod common;
+use common::{
+    also_on_due as due, hubs_fixture as fixture, media::PublicDns, save_card as save,
+    strings as rows,
+};
 
-struct PublicDns;
-#[async_trait::async_trait]
-impl Dns for PublicDns {
-    async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<SocketAddr>> {
-        Ok(vec![SocketAddr::new("8.8.8.8".parse()?, port)])
-    }
-}
-
-fn fixture(name: &str) -> Vec<u8> {
-    std::fs::read(format!(
-        "{}/tests/fixtures/hubs/{name}",
-        env!("CARGO_MANIFEST_DIR")
-    ))
-    .unwrap()
-}
 /// The recorded batch of two albums, as TIDAL answers for one of them alone.
 fn album(id: &str) -> Option<Vec<u8>> {
     let batch: serde_json::Value =
@@ -251,13 +238,6 @@ fn config(pair: Option<(&str, &str)>) -> Config {
     config
 }
 
-async fn save(pool: &sqlx::PgPool, uri: &str, kind: &str) -> String {
-    let id = store::ensure_resource(pool, uri).await.unwrap();
-    let mut doc = ResourceMeta::new(uri, "jsonld", 86400);
-    doc.set_type(kind);
-    store::save_document(pool, &id, 0, &doc).await.unwrap();
-    id
-}
 /// Every resource's sources, once, on a fresh egress; the requests made.
 async fn run(pool: &sqlx::PgPool, config: Config, answers: Answers) -> Vec<String> {
     let t = Arc::new(Recorded {
@@ -293,13 +273,6 @@ async fn run_with(
         .unwrap();
     let seen = t.seen.lock().unwrap()[before..].to_vec();
     seen
-}
-async fn rows(pool: &sqlx::PgPool, sql: &str, id: &str) -> Vec<String> {
-    sqlx::query_scalar(sql)
-        .bind(id)
-        .fetch_all(pool)
-        .await
-        .unwrap()
 }
 const KEYS: &str =
     "SELECT key||' '||source FROM resource_key WHERE resource_id=$1 ORDER BY key COLLATE \"C\"";
@@ -416,15 +389,6 @@ async fn refused_credentials_keep_what_tidal_gave_and_retry_later(pool: sqlx::Pg
     // The refusal is kept five minutes: the retry asks TIDAL nothing.
     let seen = run(&pool, refused, refuse).await;
     assert!(!seen.iter().any(|s| s.contains("tidal.com")), "{seen:?}");
-}
-
-/// The time a reference is due again, in seconds from now, with its error.
-async fn due(pool: &sqlx::PgPool, id: &str) -> (Option<String>, f64) {
-    sqlx::query_as("SELECT last_error, extract(epoch FROM next_attempt_at-now())::float8 FROM also_on_dirty WHERE resource_id=$1")
-        .bind(id)
-        .fetch_one(pool)
-        .await
-        .unwrap()
 }
 
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]

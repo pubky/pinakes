@@ -12,6 +12,7 @@ use pinakes_core::{
 use sqlx::PgPool;
 use std::time::Duration;
 mod common;
+use common::{media::PublicDns, Lines};
 
 fn author(seed: &str) -> String {
     let mut bytes = [0; 52];
@@ -771,13 +772,6 @@ impl pinakes_core::resolver::egress::Transport for Upstream {
         })
     }
 }
-struct PublicDns;
-#[async_trait::async_trait]
-impl pinakes_core::resolver::egress::Dns for PublicDns {
-    async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<std::net::SocketAddr>> {
-        Ok(vec![std::net::SocketAddr::new("8.8.8.8".parse()?, port)])
-    }
-}
 /// A resolver that never answers.
 struct Unanswered;
 #[async_trait::async_trait]
@@ -1031,17 +1025,6 @@ async fn an_upstream_failure_is_recorded_by_its_status(pool: PgPool) {
             .await
             .unwrap();
         assert_eq!(error.as_deref(), Some(class), "{status}");
-    }
-}
-#[derive(Clone, Default)]
-struct Lines(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-impl std::io::Write for Lines {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
     }
 }
 /// The JSON log lines down to debug, from a process-wide subscriber: a thread-local one misses events
@@ -2584,18 +2567,11 @@ async fn a_too_complex_canary_records_its_outcome(pool: PgPool) {
 /// goes at once (no fetch again after a lease), and the worker logs no persistence failure.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_worker_finishes_a_page_over_its_cap(pool: PgPool) {
-    use pinakes_core::resolver::egress::{Dns, Egress, Fetched, Transport};
+    use pinakes_core::resolver::egress::{Egress, Fetched, Transport};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
-    struct PublicDns;
-    #[async_trait::async_trait]
-    impl Dns for PublicDns {
-        async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<std::net::SocketAddr>> {
-            Ok(vec![std::net::SocketAddr::new("8.8.8.8".parse()?, port)])
-        }
-    }
     struct OverCap(AtomicUsize);
     #[async_trait::async_trait]
     impl Transport for OverCap {

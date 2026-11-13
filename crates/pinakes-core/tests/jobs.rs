@@ -1,20 +1,13 @@
 //! Job postings: recorded career pages become JobPosting cards with their facts; a posting's
 //! workplace is placed on the map, and search finds postings by place, remoteness and date posted,
 //! leaving closed ones out unless asked.
-use axum::{
-    body::Body,
-    extract::{ConnectInfo, Query},
-    http::Request,
-    routing::get,
-    Router,
-};
-use http_body_util::BodyExt;
+use axum::{extract::Query, routing::get, Router};
 use pinakes_core::{
     api::{self, AppState},
     config::{Config, EgressConfig, EventConfig, OsmConfig},
     model::ResourceMeta,
     resolver::{
-        egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+        egress::{Egress, FetchOptions, Fetched, Transport},
         osm::OsmResolver,
         web::{self, WebResolver},
         Resolver,
@@ -24,8 +17,8 @@ use pinakes_core::{
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use std::{collections::HashMap, io::Read, net::SocketAddr, sync::Arc};
-use tower::ServiceExt;
 mod common;
+use common::PublicDns;
 
 const ASHBY: &str = "https://jobs.ashbyhq.com/ashby/7458d4e9-da2e-47bd-98cb-adfda43d42b2";
 const LEVER: &str = "https://jobs.lever.co/palantir/6ed76ce8-4156-4b60-b120-403538bd66cd";
@@ -124,13 +117,6 @@ fn career_pages_become_postings_with_their_facts() {
     assert_eq!(bounded.attributes, doc.attributes, "facts kept");
 }
 
-struct PublicDns;
-#[async_trait::async_trait]
-impl Dns for PublicDns {
-    async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<SocketAddr>> {
-        Ok(vec![SocketAddr::new("93.184.216.34".parse()?, port)])
-    }
-}
 /// The recorded pages, and two made-up ones: a closed posting and a remote one in the future.
 struct Pages;
 #[async_trait::async_trait]
@@ -160,18 +146,7 @@ impl Transport for Pages {
     }
 }
 async fn call(app: &Router, path: &str) -> (u16, Value) {
-    let mut request = Request::builder().uri(path).body(Body::empty()).unwrap();
-    request
-        .extensions_mut()
-        .insert(ConnectInfo("127.0.0.1:1111".parse::<SocketAddr>().unwrap()));
-    let r = app.clone().oneshot(request).await.unwrap();
-    let status = r.status().as_u16();
-    let bytes = r.into_body().collect().await.unwrap().to_bytes();
-    let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    if status == 200 {
-        common::check_response("GET", path.split('?').next().unwrap(), status, &value);
-    }
-    (status, value)
+    common::get_from(app, "127.0.0.1:1111", path).await
 }
 fn ids(v: &Value) -> Vec<String> {
     v["items"]

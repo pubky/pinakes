@@ -42,18 +42,7 @@ async fn show(pool: &PgPool, uri: &str, episodes: Option<Vec<Episode>>) -> Strin
     id
 }
 async fn request(app: &axum::Router, path: &str) -> (u16, Value) {
-    let mut request = Request::builder().uri(path).body(Body::empty()).unwrap();
-    request.extensions_mut().insert(axum::extract::ConnectInfo(
-        "127.0.0.2:1234".parse::<std::net::SocketAddr>().unwrap(),
-    ));
-    let response = app.clone().oneshot(request).await.unwrap();
-    let status = response.status().as_u16();
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    if status == 200 {
-        common::check_response("GET", path, status, &value);
-    }
-    (status, value)
+    common::get_from(app, "127.0.0.2:1234", path).await
 }
 async fn rows(pool: &PgPool, id: &str) -> i64 {
     sqlx::query_scalar("SELECT count(*) FROM podcast_episode WHERE resource_id=$1")

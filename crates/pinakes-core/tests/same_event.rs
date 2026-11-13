@@ -14,6 +14,7 @@ use pinakes_core::{
 use serde_json::Value;
 use sqlx::PgPool;
 mod common;
+use common::maybe_same_ids as named;
 use tower::ServiceExt;
 
 /// Wattwil, where the Ostschweiz meetup meets.
@@ -83,16 +84,6 @@ async fn get(config: &Config, pool: &PgPool, path: &str) -> Value {
 
 async fn card(pool: &PgPool, id: &str) -> Value {
     get(&Config::default(), pool, &format!("/v1/resources/{id}")).await
-}
-
-/// The IDs a card's hint names, best first.
-fn named(card: &Value) -> Vec<&str> {
-    card["maybe_same"]
-        .as_array()
-        .unwrap_or_else(|| panic!("no maybe_same: {card}"))
-        .iter()
-        .map(|m| m["id"].as_str().unwrap())
-        .collect()
 }
 
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]

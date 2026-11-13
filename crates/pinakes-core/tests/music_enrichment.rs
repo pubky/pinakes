@@ -3,6 +3,7 @@
 //! (`tests/fixtures/shared/music_enrichment`, see its provenance.json).
 mod common;
 use axum::{body::Body, http::Request, Router};
+use common::{author, media::PublicDns};
 use http_body_util::BodyExt;
 use pinakes_core::{
     api::{self, AppState},
@@ -12,7 +13,7 @@ use pinakes_core::{
     nexus::{Change, Changes, FeedPage, Kind, Op},
     queue,
     resolver::{
-        egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+        egress::{Egress, FetchOptions, Fetched, Transport},
         web::WebResolver,
     },
     telemetry::Metrics,
@@ -34,14 +35,6 @@ const KIND_OF_BLUE: &str =
     "https://musicbrainz.org/release-group/8e8a594f-2175-38c7-a871-abb68ec363e7";
 const GET_LUCKY: &str = "https://musicbrainz.org/recording/833f00e1-781f-4edd-90e4-e52712618862";
 const COLBURN: &str = "https://musicbrainz.org/artist/e7528aba-c5e2-4917-9a52-9b61d56f9a13";
-
-struct PublicDns;
-#[async_trait::async_trait]
-impl Dns for PublicDns {
-    async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<SocketAddr>> {
-        Ok(vec![SocketAddr::new("8.8.8.8".parse()?, port)])
-    }
-}
 
 fn fixture(name: &str) -> Vec<u8> {
     std::fs::read(format!(
@@ -1645,14 +1638,6 @@ async fn resolve_once(pool: &PgPool, resolver: &WebResolver, uri: &str) -> Resou
         .await
         .unwrap();
     serde_json::from_value(doc).unwrap()
-}
-fn author(n: usize) -> String {
-    let alphabet = b"ybndrfg8ejkmcpqxot1uwisza345h769";
-    let mut v = vec![b'y'; 52];
-    for i in 0..5 {
-        v[50 - i] = alphabet[(n >> (5 * i)) & 31];
-    }
-    String::from_utf8(v).unwrap()
 }
 /// A tag on each of `uris`, so each resource exists, is queued and is found by search.
 async fn tag(pool: &PgPool, uris: &[&str]) {

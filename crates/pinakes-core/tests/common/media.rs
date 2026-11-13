@@ -15,6 +15,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+/// Resolves every host to one public address (8.8.8.8), so the egress' own address check passes
+/// and no test asks a real resolver.
 pub struct PublicDns;
 #[async_trait::async_trait]
 impl Dns for PublicDns {

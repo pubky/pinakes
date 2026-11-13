@@ -1,7 +1,6 @@
 //! Recipes: recorded recipe pages become Recipe cards with their time, yield, ingredients and
 //! rating; search's `ingredient` finds them by whole words of their ingredients' names.
-use axum::{body::Body, extract::ConnectInfo, http::Request, Router};
-use http_body_util::BodyExt;
+use axum::Router;
 use pinakes_core::{
     api::{self, AppState},
     config::Config,
@@ -11,8 +10,6 @@ use pinakes_core::{
 };
 use serde_json::Value;
 use sqlx::PgPool;
-use std::net::SocketAddr;
-use tower::ServiceExt;
 mod common;
 
 const LASAGNE: &str = "https://www.bbcgoodfood.com/recipes/classic-lasagne-0";
@@ -118,18 +115,7 @@ fn only_the_pages_own_recipe_outranks_its_article() {
 }
 
 async fn call(app: &Router, path: &str) -> (u16, Value) {
-    let mut request = Request::builder().uri(path).body(Body::empty()).unwrap();
-    request
-        .extensions_mut()
-        .insert(ConnectInfo("127.0.0.1:1111".parse::<SocketAddr>().unwrap()));
-    let r = app.clone().oneshot(request).await.unwrap();
-    let status = r.status().as_u16();
-    let bytes = r.into_body().collect().await.unwrap().to_bytes();
-    let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    if status == 200 {
-        common::check_response("GET", path.split('?').next().unwrap(), status, &value);
-    }
-    (status, value)
+    common::get_from(app, "127.0.0.1:1111", path).await
 }
 fn uris(v: &Value) -> Vec<&str> {
     let mut all: Vec<&str> = v["items"]

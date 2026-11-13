@@ -1,5 +1,7 @@
-//! Shared test helpers: a small OpenAPI 3.1 response check, and an official source's card from
-//! its recorded answers for a test that needs one source (and skips without it).
+//! Shared test helpers: a small OpenAPI 3.1 response check, an official source's card from its
+//! recorded answers for a test that needs one source (and skips without it), and what several
+//! test files use alike: a transport's answer (`fetched`), a resolver (`PublicDns`), `GET`
+//! through the router (`get`, `get_from`), a saved card, a log buffer.
 #![allow(dead_code)]
 pub mod media;
 use serde_json::Value;
@@ -270,7 +272,9 @@ impl pinakes_core::resolver::egress::Transport for Recorded {
         Ok(fetched(url.clone(), status, kind, body))
     }
 }
-struct PublicDns;
+/// Resolves every host to one public address (93.184.216.34), so the egress' own address check
+/// passes and no test asks a real resolver. `media::PublicDns` answers 8.8.8.8 instead.
+pub struct PublicDns;
 #[async_trait::async_trait]
 impl pinakes_core::resolver::egress::Dns for PublicDns {
     async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<std::net::SocketAddr>> {
@@ -403,5 +407,107 @@ impl pinakes_core::resolver::egress::Transport for Offline {
         _: &[std::net::SocketAddr],
     ) -> anyhow::Result<pinakes_core::resolver::egress::Fetched> {
         anyhow::bail!("no network in tests: {}", url.host_str().unwrap_or(""))
+    }
+}
+/// Sends `GET path` to the router as the client at `peer` (`address:port`): the status and the
+/// whole body of the answer.
+async fn get_bytes(app: &axum::Router, peer: &str, path: &str) -> (u16, Vec<u8>) {
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    let mut request = axum::http::Request::builder()
+        .uri(path)
+        .body(axum::body::Body::empty())
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        peer.parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status().as_u16();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (status, bytes.to_vec())
+}
+/// `GET path` as the client at 127.0.0.2:1234, which must answer 200: the JSON body, checked
+/// against the public document.
+pub async fn get(app: &axum::Router, path: &str) -> Value {
+    let (status, bytes) = get_bytes(app, "127.0.0.2:1234", path).await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&bytes));
+    let value = serde_json::from_slice(&bytes).unwrap();
+    check_response("GET", path, status, &value);
+    value
+}
+/// `GET path` as the client at `peer` (`address:port`): the status and the JSON body, `Null`
+/// when the body is not JSON. A 200 is checked against the public document.
+pub async fn get_from(app: &axum::Router, peer: &str, path: &str) -> (u16, Value) {
+    let (status, bytes) = get_bytes(app, peer, path).await;
+    let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    if status == 200 {
+        check_response("GET", path, status, &value);
+    }
+    (status, value)
+}
+/// Saves a card of type `kind` for `uri`, read as JSON-LD: the resource's id.
+pub async fn save_card(pool: &sqlx::PgPool, uri: &str, kind: &str) -> String {
+    let id = pinakes_core::store::ensure_resource(pool, uri)
+        .await
+        .unwrap();
+    let mut doc = pinakes_core::model::ResourceMeta::new(uri, "jsonld", 86400);
+    doc.set_type(kind);
+    pinakes_core::store::save_document(pool, &id, 0, &doc)
+        .await
+        .unwrap();
+    id
+}
+/// The strings `sql` selects for `id`, its only parameter.
+pub async fn strings(pool: &sqlx::PgPool, sql: &str, id: &str) -> Vec<String> {
+    sqlx::query_scalar(sql)
+        .bind(id)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+/// The error a resource's also-on retry is queued with, and in how many seconds it is due.
+pub async fn also_on_due(pool: &sqlx::PgPool, id: &str) -> (Option<String>, f64) {
+    sqlx::query_as("SELECT last_error, extract(epoch FROM next_attempt_at-now())::float8 FROM also_on_dirty WHERE resource_id=$1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+/// A recorded hub answer: the file `name` of `tests/fixtures/hubs`.
+pub fn hubs_fixture(name: &str) -> Vec<u8> {
+    std::fs::read(format!(
+        "{}/tests/fixtures/hubs/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
+}
+/// The `n`th author of a test: a public key in z-base-32, 52 characters.
+pub fn author(n: usize) -> String {
+    let alphabet = b"ybndrfg8ejkmcpqxot1uwisza345h769";
+    let mut v = vec![b'y'; 52];
+    for i in 0..5 {
+        v[50 - i] = alphabet[(n >> (5 * i)) & 31];
+    }
+    String::from_utf8(v).unwrap()
+}
+/// The IDs a card's `maybe_same` hint names, best first.
+pub fn maybe_same_ids(card: &Value) -> Vec<&str> {
+    card["maybe_same"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no maybe_same: {card}"))
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .collect()
+}
+/// Log lines a test's subscriber writes.
+#[derive(Clone, Default)]
+pub struct Lines(pub std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+impl std::io::Write for Lines {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }

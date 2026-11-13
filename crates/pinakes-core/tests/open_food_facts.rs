@@ -6,7 +6,7 @@ use pinakes_core::{
     also_on::{Context, Fact, Found, Source as _, Subject},
     config::{Config, EgressConfig},
     model::ResourceMeta,
-    resolver::egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+    resolver::egress::{Egress, FetchOptions, Fetched, Transport},
     sources::open_food_facts::also_on::OpenFoodFacts,
 };
 use serde_json::Value;
@@ -16,6 +16,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 mod common;
+use common::PublicDns;
 
 const DIR: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -73,13 +74,6 @@ impl Transport for Recorded {
             "application/json".into(),
             body,
         ))
-    }
-}
-struct PublicDns;
-#[async_trait::async_trait]
-impl Dns for PublicDns {
-    async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<SocketAddr>> {
-        Ok(vec![SocketAddr::new("93.184.216.34".parse()?, port)])
     }
 }
 fn egress(recorded: Arc<Recorded>) -> Egress {

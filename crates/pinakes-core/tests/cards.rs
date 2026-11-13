@@ -5,7 +5,7 @@ use pinakes_core::{
     model::ResourceMeta,
     resolver::{
         cards::{self, CardResolver},
-        egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+        egress::{Egress, FetchOptions, Fetched, Transport},
         web::WebResolver,
         Resolver,
     },
@@ -17,14 +17,8 @@ use std::{
 };
 use url::Url;
 mod common;
+use common::media::PublicDns;
 
-struct PublicDns;
-#[async_trait]
-impl Dns for PublicDns {
-    async fn lookup(&self, _: &str, port: u16) -> Result<Vec<SocketAddr>> {
-        Ok(vec![SocketAddr::new("8.8.8.8".parse()?, port)])
-    }
-}
 #[derive(Default)]
 struct TransportMock {
     seen: Mutex<Vec<(String, Option<String>)>>,

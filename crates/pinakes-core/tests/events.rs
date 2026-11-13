@@ -6,6 +6,7 @@ use pinakes_core::{
 };
 use serde_json::{json, Value};
 mod common;
+use common::media::PublicDns;
 fn now() -> DateTime<Utc> {
     "2026-10-16T00:00:00Z".parse().unwrap()
 }
@@ -352,7 +353,7 @@ use pinakes_core::{
     model::{identity, Point},
     nexus::{Change, Changes, FeedPage, Kind, Op},
     resolver::{
-        egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+        egress::{Egress, FetchOptions, Fetched, Transport},
         osm::OsmResolver,
         web::WebResolver,
         Resolver,
@@ -780,13 +781,6 @@ async fn venue_geocoding_single_match_threshold_and_osm_storage_boundary(pool: P
     service.venue(&mut online).await.unwrap();
     assert_eq!(hits.load(Ordering::SeqCst), 1);
     server.abort();
-}
-struct PublicDns;
-#[async_trait::async_trait]
-impl Dns for PublicDns {
-    async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<SocketAddr>> {
-        Ok(vec![SocketAddr::new("8.8.8.8".parse()?, port)])
-    }
 }
 struct ProtocolTransport {
     seen: Mutex<Vec<(String, Option<String>, bool)>>,

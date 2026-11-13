@@ -6,7 +6,7 @@ use pinakes_core::{
     event::{adapters::service::PlatformResolver, service::EventService},
     model::{CreditField, ResourceMeta},
     resolver::{
-        egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+        egress::{Egress, FetchOptions, Fetched, Transport},
         osm::OsmResolver,
         web::WebResolver,
         Resolver,
@@ -20,19 +20,12 @@ use std::{
 };
 
 mod common;
+use common::PublicDns;
 
 const ITEM: &str = "https://www.wikidata.org/wiki/Q359924";
 const ARTICLE: &str = "https://en.wikipedia.org/wiki/Golden_Gate_Hotel_and_Casino";
 const IMAGE: &str = "https://thumb.wikimedia.org/wikipedia/commons/thumb/c/c5/M-408116720.jpg/960px-M-408116720.jpg";
 const FILE_PATH: &str = "https://commons.wikimedia.org/wiki/Special:FilePath/M%2D408116720%2Ejpg";
-
-struct PublicDns;
-#[async_trait::async_trait]
-impl Dns for PublicDns {
-    async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<SocketAddr>> {
-        Ok(vec![SocketAddr::new("93.184.216.34".parse()?, port)])
-    }
-}
 
 fn fixture(name: &str) -> Vec<u8> {
     std::fs::read(format!(

@@ -7,22 +7,15 @@ use pinakes_core::{
     config::Config,
     groups,
     model::ResourceMeta,
-    resolver::egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+    resolver::egress::{Egress, FetchOptions, Fetched, Transport},
     store,
 };
 use std::{collections::BTreeMap, io::Read, net::SocketAddr, sync::Arc};
 use tower::ServiceExt;
 mod common;
+use common::media::PublicDns;
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/lookups/apps");
-
-struct PublicDns;
-#[async_trait::async_trait]
-impl Dns for PublicDns {
-    async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<SocketAddr>> {
-        Ok(vec![SocketAddr::new("8.8.8.8".parse()?, port)])
-    }
-}
 
 /// The recorded answers by URL; a Wikidata search nobody recorded finds nothing, anything
 /// else is a 404.

@@ -5,7 +5,7 @@ use pinakes_core::{
     also_on::{self, SourceOptions},
     config::Config,
     model::ResourceMeta,
-    resolver::egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+    resolver::egress::{Egress, FetchOptions, Fetched, Transport},
     store,
 };
 use std::{
@@ -13,14 +13,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 mod common;
-
-struct PublicDns;
-#[async_trait::async_trait]
-impl Dns for PublicDns {
-    async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<SocketAddr>> {
-        Ok(vec![SocketAddr::new("8.8.8.8".parse()?, port)])
-    }
-}
+use common::{also_on_due as due, media::PublicDns};
 
 fn fixture(name: &str) -> Option<Vec<u8>> {
     std::fs::read(format!(
@@ -195,14 +188,6 @@ async fn links(pool: &sqlx::PgPool, id: &str) -> Vec<String> {
     sqlx::query_scalar("SELECT uri||' '||coalesce(key,'-')||' '||via FROM derived_link WHERE resource_id=$1 AND source='tidal_isrc' ORDER BY uri COLLATE \"C\"")
         .bind(id)
         .fetch_all(pool)
-        .await
-        .unwrap()
-}
-/// The error a resource's retry is queued with, and in how many seconds.
-async fn due(pool: &sqlx::PgPool, id: &str) -> (Option<String>, f64) {
-    sqlx::query_as("SELECT last_error, extract(epoch FROM next_attempt_at-now())::float8 FROM also_on_dirty WHERE resource_id=$1")
-        .bind(id)
-        .fetch_one(pool)
         .await
         .unwrap()
 }

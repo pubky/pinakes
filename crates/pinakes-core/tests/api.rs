@@ -8,6 +8,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use http_body_util::BodyExt;
 mod common;
+use common::{author, Lines};
 use pinakes_core::{
     api::{self, AppState},
     config::{Config, IngestConfig},
@@ -29,14 +30,6 @@ use std::{
 };
 use tower::ServiceExt;
 
-fn author(n: usize) -> String {
-    let alphabet = b"ybndrfg8ejkmcpqxot1uwisza345h769";
-    let mut v = vec![b'y'; 52];
-    for i in 0..5 {
-        v[50 - i] = alphabet[(n >> (5 * i)) & 31];
-    }
-    String::from_utf8(v).unwrap()
-}
 async fn seed(pool: &PgPool) -> Vec<String> {
     let saved = ingest::cursor(pool, "fixture").await.unwrap();
     let mut lines = vec![];
@@ -762,18 +755,6 @@ async fn polls_the_http_feed_and_replays_without_duplicates(pool: PgPool) {
         1
     );
     task.abort();
-}
-/// Log lines a test's subscriber writes.
-#[derive(Clone, Default)]
-struct Lines(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-impl std::io::Write for Lines {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
 }
 
 /// A link that carries a credential is never previewed: `POST /v1/resolve` answers 400 for every

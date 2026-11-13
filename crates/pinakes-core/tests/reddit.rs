@@ -11,7 +11,7 @@ use pinakes_core::{
     model::{ResourceMeta, Status},
     resolver::{
         cards::CardResolver,
-        egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+        egress::{Egress, FetchOptions, Fetched, Transport},
         Resolver,
     },
     sources::reddit::{self, Target},
@@ -28,6 +28,7 @@ use std::{
 use tower::ServiceExt;
 use url::Url;
 mod common;
+use common::media::PublicDns;
 
 const POST: &str = "https://www.reddit.com/comments/1k3d0pk/";
 
@@ -37,14 +38,6 @@ fn fixture(file: &str) -> Value {
         env!("CARGO_MANIFEST_DIR")
     );
     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
-}
-
-struct PublicDns;
-#[async_trait]
-impl Dns for PublicDns {
-    async fn lookup(&self, _: &str, port: u16) -> Result<Vec<SocketAddr>> {
-        Ok(vec![SocketAddr::new("8.8.8.8".parse()?, port)])
-    }
 }
 
 /// Reddit answering the post's listing: the post, then, once `deleted`, the stub it shows for a

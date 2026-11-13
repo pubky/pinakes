@@ -1,5 +1,6 @@
 //! The hub clients through Egress, against recorded MusicBrainz and Wikidata answers.
 mod common;
+use common::{hubs_fixture as fixture, media::PublicDns};
 use pinakes_core::{
     also_on,
     api::{self, AppState},
@@ -7,7 +8,7 @@ use pinakes_core::{
     hubs::{musicbrainz, wikidata, MbKind},
     model::ResourceMeta,
     resolver::{
-        egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+        egress::{Egress, FetchOptions, Fetched, Transport},
         RetryLater,
     },
     store,
@@ -17,24 +18,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-struct PublicDns;
-#[async_trait::async_trait]
-impl Dns for PublicDns {
-    async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<SocketAddr>> {
-        Ok(vec![SocketAddr::new("8.8.8.8".parse()?, port)])
-    }
-}
-
 /// Answers by the request's path and query, from `tests/fixtures/hubs`; records each request.
 struct Recorded {
     seen: Mutex<Vec<String>>,
-}
-fn fixture(name: &str) -> Vec<u8> {
-    std::fs::read(format!(
-        "{}/tests/fixtures/hubs/{name}",
-        env!("CARGO_MANIFEST_DIR")
-    ))
-    .unwrap()
 }
 /// MusicBrainz's answer to one URL lookup.
 fn mb_url(resource: &str) -> (u16, Vec<u8>) {

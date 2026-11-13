@@ -7,21 +7,14 @@ use pinakes_core::{
     model::Status,
     resolver::{
         cards::CardResolver,
-        egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+        egress::{Egress, FetchOptions, Fetched, Transport},
         error_class, Resolver, RetryLater,
     },
 };
 use std::{net::SocketAddr, sync::Arc};
 use url::Url;
 mod common;
-
-struct PublicDns;
-#[async_trait]
-impl Dns for PublicDns {
-    async fn lookup(&self, _: &str, port: u16) -> Result<Vec<SocketAddr>> {
-        Ok(vec![SocketAddr::new("8.8.8.8".parse()?, port)])
-    }
-}
+use common::media::PublicDns;
 
 /// USGS never answers; mempool.space answers the record of `BUSY` with 429 and that of `SLOW`
 /// with 408, fails every other node record with a server error, and its search lists only
