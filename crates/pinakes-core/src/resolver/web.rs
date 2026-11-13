@@ -242,6 +242,11 @@ impl WebResolver {
             };
             let mut card =
                 crate::music_sources::musicbrainz_card(uri, entity.as_ref(), Some(&isrc), ttl);
+            // The recording that stands for the ISRC gives its image and description as on its
+            // own page; the ISRC's own card (no recording, or several that disagree) takes none.
+            if let Some(entity) = entity.as_ref().filter(|_| self.config.music_enrichment) {
+                self.enrich_music(&mut card, entity, base, started).await;
+            }
             // Of agreeing duplicates, the card states no length of its own: the
             // `musicbrainz_entity` source states the one recording's that stands for them, and
             // the plainest title's may round to another second (two `duration` values).

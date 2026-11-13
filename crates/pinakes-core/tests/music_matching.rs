@@ -14,6 +14,8 @@ use std::{
 };
 const RECORDING: &str = "3276d651-6f19-4e3b-bfb2-d136f823f620";
 const RELEASE: &str = "2b4cd0d4-fe21-46ac-a4fc-ece7e990a9d4";
+/// A second recording that shares an ISRC with Sefa's (test data, not MusicBrainz's).
+const OTHER: &str = "00000000-0000-4000-8000-000000000051";
 fn fixture(name: &str) -> Vec<u8> {
     std::fs::read(format!(
         "{}/tests/fixtures/shared/music_matching/{name}",
@@ -35,6 +37,7 @@ struct Recorded {
     no_cover: bool,
     many_releases: bool,
     release_status: Option<u16>,
+    other_length: Option<u64>,
 }
 #[async_trait::async_trait]
 impl Transport for Recorded {
@@ -66,8 +69,29 @@ impl Transport for Recorded {
                 }
                 serde_json::to_vec(&v).unwrap()
             }
+            ("musicbrainz.org", "/ws/2/isrc/NLH2L2500268") => fixture("isrc.json"),
+            // The ISRC on Sefa's recording and on another one `other_length` long, by the same
+            // artists under the same title (agreeing duplicates within the length window).
+            ("musicbrainz.org", "/ws/2/isrc/ZZDUP2600001") => {
+                let length = self.other_length.unwrap();
+                format!(
+                    r#"{{"isrc":"ZZDUP2600001","recordings":[{{"id":"{RECORDING}","length":232000,"title":"Journey Through Time"}},{{"id":"{OTHER}","length":{length},"title":"Journey Through Time"}}]}}"#
+                )
+                .into_bytes()
+            }
             ("musicbrainz.org", p) if p == format!("/ws/2/recording/{RECORDING}") => {
-                fixture("works.json")
+                // The entity read (`inc=…isrcs…`) and the works read (`inc=work-rels…`).
+                if u.query().is_some_and(|q| q.contains("isrcs")) {
+                    fixture("recording.json")
+                } else {
+                    fixture("works.json")
+                }
+            }
+            ("musicbrainz.org", p) if p == format!("/ws/2/recording/{OTHER}") => {
+                let mut v: Value = serde_json::from_slice(&fixture("recording.json")).unwrap();
+                v["id"] = OTHER.into();
+                v["length"] = self.other_length.unwrap().into();
+                serde_json::to_vec(&v).unwrap()
             }
             ("coverartarchive.org", _) => {
                 if self.no_cover {
@@ -284,5 +308,105 @@ async fn recording_uses_its_release_cover_not_an_album_identity_key() {
     assert!(
         missing.image.is_none(),
         "a release front flag is not proof that CAA serves an image"
+    );
+}
+fn web(t: Arc<Recorded>, music_enrichment: bool) -> pinakes_core::resolver::web::WebResolver {
+    pinakes_core::resolver::web::WebResolver {
+        oembed_policy: Default::default(),
+        cards: None,
+        events: None,
+        egress: cx(t).egress,
+        config: pinakes_core::config::ResolverConfig {
+            music_enrichment,
+            ..Default::default()
+        },
+    }
+}
+async fn isrc_card(t: Arc<Recorded>, isrc: &str) -> pinakes_core::model::ResourceMeta {
+    web(t, true)
+        .resolve_with_policy(
+            &format!("https://musicbrainz.org/isrc/{isrc}"),
+            Default::default(),
+        )
+        .await
+        .unwrap()
+}
+fn has_release_cover(doc: &pinakes_core::model::ResourceMeta) -> bool {
+    doc.image.as_deref().is_some_and(|i| {
+        i.starts_with(&format!(
+            "https://coverartarchive.org/release/{RELEASE}/front-"
+        ))
+    }) && doc.credits.iter().any(|c| {
+        serde_json::to_value(&c.provider).unwrap() == "cover_art_archive"
+            && c.source_url == format!("https://musicbrainz.org/release/{RELEASE}/cover-art")
+    })
+}
+/// An ISRC page whose one recording is on a release with a front cover shows that cover, with
+/// the Cover Art Archive's credit, as the recording's own page does.
+#[tokio::test]
+async fn an_isrc_page_of_one_recording_takes_its_release_cover() {
+    let t = Arc::new(Recorded::default());
+    let doc = isrc_card(t.clone(), "NLH2L2500268").await;
+    assert_eq!(doc.name.as_deref(), Some("Journey Through Time"));
+    assert!(has_release_cover(&doc), "{:?} {:?}", doc.image, doc.credits);
+    let recording = web(t.clone(), true)
+        .resolve_with_policy(
+            &format!("https://musicbrainz.org/recording/{RECORDING}"),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        doc.image, recording.image,
+        "the same cover as the recording's page"
+    );
+    // Enrichment off: MusicBrainz's card alone, no cover read.
+    let off = Arc::new(Recorded::default());
+    let doc = web(off.clone(), false)
+        .resolve_with_policy(
+            "https://musicbrainz.org/isrc/NLH2L2500268",
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert!(doc.image.is_none() && doc.credits.is_empty());
+    let seen = off.seen.lock().unwrap().clone();
+    assert!(
+        seen.iter()
+            .all(|s| s.starts_with("https://musicbrainz.org/ws/2/isrc/")
+                || s.starts_with(&format!(
+                    "https://musicbrainz.org/ws/2/recording/{RECORDING}?inc="
+                ))),
+        "{seen:?}"
+    );
+}
+/// Agreeing duplicates take the standing recording's cover; recordings that disagree leave the
+/// ISRC's own card, which reads no release and takes no image.
+#[tokio::test]
+async fn an_isrc_page_takes_a_cover_only_when_its_recordings_are_one() {
+    let agreeing = Arc::new(Recorded {
+        other_length: Some(232_500),
+        ..Default::default()
+    });
+    let doc = isrc_card(agreeing, "ZZDUP2600001").await;
+    assert_eq!(doc.name.as_deref(), Some("Journey Through Time"));
+    assert!(has_release_cover(&doc), "{:?} {:?}", doc.image, doc.credits);
+    let disagreeing = Arc::new(Recorded {
+        other_length: Some(300_000),
+        ..Default::default()
+    });
+    let doc = isrc_card(disagreeing.clone(), "ZZDUP2600001").await;
+    assert_eq!(doc.name.as_deref(), Some("ISRC ZZDUP2600001"));
+    assert!(
+        doc.image.is_none() && doc.credits.is_empty(),
+        "{:?}",
+        doc.image
+    );
+    let seen = disagreeing.seen.lock().unwrap().clone();
+    assert!(
+        !seen
+            .iter()
+            .any(|s| s.contains("coverartarchive.org") || s.contains("/ws/2/release")),
+        "the ISRC's own card reads no cover: {seen:?}"
     );
 }
