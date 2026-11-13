@@ -768,7 +768,7 @@ fn compact(base: &str, card: &Value) -> Value {
     if card["collections"].as_i64().is_some_and(|n| n > 0) {
         out.insert("collections".into(), card["collections"].clone());
     }
-    for key in ["occurrence", "event", "attribution"] {
+    for key in ["occurrence", "attribution"] {
         if !card[key].is_null() {
             out.insert(key.into(), card[key].clone());
         }

@@ -287,8 +287,8 @@ Every request introduces itself as `pinakes/<version> (+https://pubky.app; <cont
 none by default, and the example configuration has only a commented placeholder. Set it to an
 address the services you read can reach: some refuse requests without one, and the links of the
 sources that need it (SEC EDGAR) wait until it is set. The User-Agent never names a code-hosting
-site, which some services refuse as an undeclared tool. Event platform adapters that need a browser
-profile keep their own User-Agent.
+site, which some services refuse as an undeclared tool. Event platform adapters send the same
+User-Agent.
 
 The official-API sources ([docs/sources](sources/README.md)) run on the `official` card route
 (`[cards.official]`), each with its own switch, `[sources.<name>] enabled` (on by default;
@@ -671,7 +671,7 @@ when it is turned back on.
 ### Event platforms
 
 `data/event-adapters.json` declares each platform's mode, identity, cancellation signal, cadence
-floor, expected fields, user-agent profile, key requirement and canary. Configure a platform
+floor, expected fields, key requirement and canary. Configure a platform
 under `[event.adapters.platforms.<id>]` with `enabled` and `key`; a missing key disables only
 that platform and no key ever appears in `/v1/info`. Resident Advisor (an unofficial GraphQL
 API) is off by default; Posh is marked fragile. Billetto, Reservix, Rausgegangen and Entradium
@@ -680,7 +680,8 @@ a script challenge, an "update your browser" page), and a bot wall is never work
 Starticket is off: it is retired, its site redirects to See Tickets. Each platform's
 `canary_note` in the table gives the reason and when it was checked. A platform that is off
 sends its URLs to the web resolver, as `event.adapters.enabled = false` sends every platform's.
-The `browser` and `firefox` user-agent profiles imitate browsers to pass bot walls.
+Every platform is read with Pinakes's own User-Agent (`/v1/info` `user_agent`), like every other
+request; a platform that refuses it gets the same refused or failed result as any other page.
 
 Luma, Meetup, Eventbrite, Partiful, Posh, RingCentral, Airmeet, Mobilizon, Gancio, Wikidata,
 Dice, Xceed, Ents24 and Ticketino supplement JSON-LD with bounded state parsing; JavaScript is
@@ -733,8 +734,8 @@ event_platform` reads every event platform link again at once, Wikidata items am
 Wikipedia page read from its item is on the `web` route).
 
 `cargo run -p pinakes-core --example adapter_probe -- MANIFEST.json REPLAYS.json OUTPUT_DIR`
-(with `DATABASE_URL`) runs a read-only, keyless canary pass and records requests, user-agent
-profiles, statuses, hashes and parser output; secrets are refused. `PINAKES_PROBE_OFFLINE=1`
+(with `DATABASE_URL`) runs a read-only, keyless canary pass and records requests, the User-Agent
+each sent, statuses, hashes and parser output; secrets are refused. `PINAKES_PROBE_OFFLINE=1`
 replays captures without network access. Recorded responses for the keyless probes run in
 `scripts/test`.
 
