@@ -125,10 +125,7 @@ impl PerformersSource {
                     .iter()
                     .any(|(_, links)| links.iter().any(|u| owned(u))) =>
             {
-                let wait = e
-                    .chain()
-                    .find_map(|c| c.downcast_ref::<crate::resolver::RetryLater>())
-                    .map_or(900, |r| r.seconds.max(60));
+                let wait = crate::also_on::media::retry_wait(&e);
                 found.retry_after = Some(std::time::Duration::from_secs(wait));
                 Default::default()
             }

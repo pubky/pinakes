@@ -12,12 +12,12 @@
 //! runs after every source that keys an ISRC or a barcode (a service's own record, the hubs,
 //! `discogs`, `deezer`) and before `editions`, which places its links.
 use super::{
-    tidal::{self, TidalConfig, API},
+    tidal_api::{self, TidalConfig, API},
     Context, Found, Source, Subject,
 };
 use crate::{
     music::{self, Level, Service},
-    music_sources::{derived, join_level, mb_level, own_isrc},
+    music_sources::{derived, join_level, key_values, mb_level, Kind},
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -28,76 +28,53 @@ const MAX_LINKS: usize = 5;
 /// The most ISRC or barcode keys of one track or album asked (a track's own ISRC first).
 const MAX_VALUES: usize = 2;
 
-/// A track by its ISRC or an album by its barcode, as the API names its collection, its filter,
-/// the attribute read back and the key's namespace.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Kind {
-    Album,
-    Track,
+/// Another service's track (asked by its ISRC) or album (asked by its barcode).
+fn kind_of(link: &music::Link) -> Option<Kind> {
+    if link.service == Service::Tidal {
+        return None;
+    }
+    match join_level(link)? {
+        Level::Album => Some(Kind::Album),
+        Level::Track => Some(Kind::Track),
+        _ => None,
+    }
 }
-impl Kind {
-    fn of(link: &music::Link) -> Option<Self> {
-        if link.service == Service::Tidal {
-            return None;
-        }
-        match join_level(link)? {
-            Level::Album => Some(Self::Album),
-            Level::Track => Some(Self::Track),
+/// The kind asked for `subject`: another service's track or album, or a MusicBrainz recording or
+/// release.
+fn kind_of_subject(subject: &Subject) -> Option<Kind> {
+    music::parse(&subject.uri)
+        .and_then(|l| kind_of(&l))
+        .or_else(|| match mb_level(&subject.uri) {
+            Some(Level::Track) => Some(Kind::Track),
+            Some(Level::Album) => Some(Kind::Album),
             _ => None,
-        }
+        })
+}
+fn level(kind: Kind) -> Level {
+    match kind {
+        Kind::Album => Level::Album,
+        Kind::Track => Level::Track,
     }
-    fn of_subject(subject: &Subject) -> Option<Self> {
-        music::parse(&subject.uri)
-            .and_then(|l| Self::of(&l))
-            .or_else(|| match mb_level(&subject.uri) {
-                Some(Level::Track) => Some(Self::Track),
-                Some(Level::Album) => Some(Self::Album),
-                _ => None,
-            })
+}
+/// The filter's name, `[` and `]` escaped as the URL carries them.
+fn filter(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Album => "filter%5BbarcodeId%5D",
+        Kind::Track => "filter%5Bisrc%5D",
     }
-    fn level(self) -> Level {
-        match self {
-            Self::Album => Level::Album,
-            Self::Track => Level::Track,
-        }
+}
+/// The attribute read back: an album's barcode or a track's ISRC.
+fn attribute(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Album => "barcodeId",
+        Kind::Track => "isrc",
     }
-    fn collection(self) -> &'static str {
-        match self {
-            Self::Album => "albums",
-            Self::Track => "tracks",
-        }
-    }
-    /// The filter's name, `[` and `]` escaped as the URL carries them.
-    fn filter(self) -> &'static str {
-        match self {
-            Self::Album => "filter%5BbarcodeId%5D",
-            Self::Track => "filter%5Bisrc%5D",
-        }
-    }
-    fn attribute(self) -> &'static str {
-        match self {
-            Self::Album => "barcodeId",
-            Self::Track => "isrc",
-        }
-    }
-    fn namespace(self) -> &'static str {
-        match self {
-            Self::Album => "upc",
-            Self::Track => "isrc",
-        }
-    }
-    fn normal(self, value: &str) -> Option<String> {
-        match self {
-            Self::Album => crate::barcode::gtin13(value),
-            Self::Track => music::isrc(value),
-        }
-    }
-    /// The URL of an item's page: the canonical form `music::parse` gives it.
-    fn page(self, id: &str) -> String {
-        match self {
-            Self::Album => format!("https://tidal.com/album/{id}"),
-            Self::Track => format!("https://tidal.com/track/{id}"),
-        }
+}
+/// The URL of an item's page: the canonical form `music::parse` gives it.
+fn page(kind: Kind, id: &str) -> String {
+    match kind {
+        Kind::Album => format!("https://tidal.com/album/{id}"),
+        Kind::Track => format!("https://tidal.com/track/{id}"),
     }
 }
 
@@ -121,36 +98,29 @@ impl Source for TidalIsrc {
         config.section::<TidalConfig>().pair().is_some()
     }
     fn applies(&self, subject: &Subject) -> bool {
-        Kind::of_subject(subject)
+        kind_of_subject(subject)
             .is_some_and(|kind| subject.keys_in(kind.namespace()).next().is_some())
     }
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
-        let Some(kind) = Kind::of_subject(subject) else {
+        let Some(kind) = kind_of_subject(subject) else {
             return Ok(Found::default());
         };
         let namespace = kind.namespace();
         // A track's own ISRC first, then the hubs'; only values that are keys (a shared ISRC is
         // a fact, and TIDAL would answer with any of its recordings).
-        let own = own_isrc(subject)
-            .filter(|o| kind == Kind::Track && subject.keys_in(namespace).any(|k| k == o.as_str()));
-        let mut values: Vec<&str> = own.as_deref().into_iter().collect();
-        values.extend(
-            subject
-                .keys_in(namespace)
-                .filter(|v| Some(*v) != own.as_deref()),
-        );
+        let values = key_values(subject, namespace, kind == Kind::Track, MAX_VALUES);
         let country = &cx.config.section::<TidalConfig>().country;
         let mut found = Found::default();
-        for value in values.into_iter().take(MAX_VALUES) {
-            let Some(value) = kind.normal(value) else {
+        for value in values {
+            let Some(value) = kind.normal(&value) else {
                 continue;
             };
             let url = format!(
                 "{API}/{}?countryCode={country}&{}={value}",
                 kind.collection(),
-                kind.filter()
+                filter(kind)
             );
-            let Some(answer) = tidal::api_object(cx, &url).await? else {
+            let Some(answer) = tidal_api::api_object(cx, &url).await? else {
                 continue;
             };
             let ids = matching(&answer, kind, &value);
@@ -160,7 +130,7 @@ impl Source for TidalIsrc {
                 continue;
             }
             for id in ids {
-                let Some(link) = derived(&kind.page(&id), kind.level(), "tidal_isrc") else {
+                let Some(link) = derived(&page(kind, &id), level(kind), "tidal_isrc") else {
                     continue;
                 };
                 if found.links.iter().any(|l| l.uri == link.uri) {
@@ -190,7 +160,7 @@ fn matching(answer: &Value, kind: Kind, value: &str) -> Vec<String> {
         .flatten()
         .filter(|i| i["type"].as_str() == Some(kind.collection()))
         .filter(|i| {
-            i["attributes"][kind.attribute()]
+            i["attributes"][attribute(kind)]
                 .as_str()
                 .and_then(|v| kind.normal(v))
                 .as_deref()
@@ -231,7 +201,7 @@ mod tests {
 
     #[test]
     fn only_other_services_tracks_and_albums_apply() {
-        let kind = |uri: &str| music::parse(uri).and_then(|l| Kind::of(&l));
+        let kind = |uri: &str| music::parse(uri).and_then(|l| kind_of(&l));
         assert_eq!(
             kind("https://www.deezer.com/track/1171872"),
             Some(Kind::Track)

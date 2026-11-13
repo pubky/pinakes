@@ -11,16 +11,15 @@
 //! codes), a place with no song or with several, or a length outside the window gives nothing.
 //! It runs after the sources that key a track's ISRC and before `editions`.
 use super::{
-    client_credentials, deezer,
-    spotify::Spotify,
+    client_credentials, deezer_api,
     spotify_api::{SpotifyConfig, API as SPOTIFY_API, SPOTIFY},
-    tidal::{self, Tidal, TidalConfig, API as TIDAL_API},
+    tidal_api::{self, TidalConfig, API as TIDAL_API},
     Context, Found, Source, Subject,
 };
 use crate::{
     matching::recording_title,
     music::{self, Level, Service},
-    music_sources::{derived, own_isrc, LENGTH_WINDOW_SECS},
+    music_sources::{derived, key_values, LENGTH_WINDOW_SECS},
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -72,7 +71,7 @@ impl Source for ItunesSong {
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
         let mut found = Found::default();
         // Apple is asked only while `itunes` runs, as `editions` asks it.
-        if !super::runs(&cx.config, &super::itunes::ItunesSource) {
+        if !super::runs_by_id(&cx.config, "itunes") {
             return Ok(found);
         }
         let Some(place) = place(cx, subject).await? else {
@@ -83,7 +82,7 @@ impl Source for ItunesSong {
             "https://itunes.apple.com/lookup?upc={}&entity=song&country={storefront}",
             place.upc
         );
-        let Some(answer) = super::itunes::answer(cx, &url).await? else {
+        let Some(answer) = super::itunes_api::answer(cx, &url).await? else {
             return Ok(found);
         };
         if let Some(song) = song(&answer, &place) {
@@ -106,19 +105,19 @@ async fn place(cx: &Context, subject: &Subject) -> Result<Option<Place>> {
     let Some(link) = music::parse(&subject.uri) else {
         return Ok(None);
     };
-    let deezer_runs = super::runs(&cx.config, &deezer::DeezerSource);
+    // By their IDs: this source goes without each service's own source, and each without it.
+    let runs = |id: &str| super::runs_by_id(&cx.config, id);
+    let deezer_runs = runs("deezer");
     let own = match link.service {
         Service::Deezer if deezer_runs => Some(deezer_place(cx, &link.id).await),
-        Service::Spotify if super::runs(&cx.config, &Spotify) => {
-            Some(spotify_place(cx, &link.id).await)
-        }
-        Service::Tidal if super::runs(&cx.config, &Tidal) => Some(tidal_place(cx, &link.id).await),
+        Service::Spotify if runs("spotify") => Some(spotify_place(cx, &link.id).await),
+        Service::Tidal if runs("tidal") => Some(tidal_place(cx, &link.id).await),
         _ => None,
     };
     match own {
         Some(Ok(place)) => return Ok(place),
         // Credentials the service refuses: the track's ISRC may still name its place on Deezer.
-        Some(Err(error)) if refused(&error) => {}
+        Some(Err(error)) if client_credentials::refused(&error) => {}
         Some(Err(error)) => return Err(error),
         None => {}
     }
@@ -126,18 +125,11 @@ async fn place(cx: &Context, subject: &Subject) -> Result<Option<Place>> {
         return Ok(None);
     }
     // The track's own ISRC first, then the hubs'; only ISRCs that are keys.
-    let own = own_isrc(subject).filter(|o| subject.keys_in("isrc").any(|k| k == o.as_str()));
-    let mut isrcs: Vec<&str> = own.as_deref().into_iter().collect();
-    isrcs.extend(
-        subject
-            .keys_in("isrc")
-            .filter(|v| Some(*v) != own.as_deref()),
-    );
-    for isrc in isrcs.into_iter().take(MAX_ISRCS) {
-        let Some(isrc) = music::isrc(isrc) else {
+    for isrc in key_values(subject, "isrc", true, MAX_ISRCS) {
+        let Some(isrc) = music::isrc(&isrc) else {
             continue;
         };
-        let Some(track) = deezer::deezer(cx, &format!("track/isrc:{isrc}")).await? else {
+        let Some(track) = deezer_api::object(cx, &format!("track/isrc:{isrc}")).await? else {
             continue;
         };
         // Only the track that has the ISRC asked.
@@ -149,17 +141,9 @@ async fn place(cx: &Context, subject: &Subject) -> Result<Option<Place>> {
     Ok(None)
 }
 
-/// Whether an error is a service refusing the operator's credentials (`spotify_auth`,
-/// `tidal_auth`).
-fn refused(error: &anyhow::Error) -> bool {
-    error
-        .downcast_ref::<crate::resolver::RetryLater>()
-        .is_some_and(|r| r.class.ends_with("_auth"))
-}
-
 /// A Deezer track's place (`track/{id}`, then its album's `upc`).
 async fn deezer_place(cx: &Context, id: &str) -> Result<Option<Place>> {
-    match deezer::deezer(cx, &format!("track/{id}")).await? {
+    match deezer_api::object(cx, &format!("track/{id}")).await? {
         Some(track) if track["id"].as_u64().map(|i| i.to_string()).as_deref() == Some(id) => {
             deezer_album_place(cx, &track).await
         }
@@ -171,7 +155,7 @@ async fn deezer_album_place(cx: &Context, track: &Value) -> Result<Option<Place>
     let Some(album) = track["album"]["id"].as_u64() else {
         return Ok(None);
     };
-    let Some(album) = deezer::deezer(cx, &format!("album/{album}")).await? else {
+    let Some(album) = deezer_api::object(cx, &format!("album/{album}")).await? else {
         return Ok(None);
     };
     Ok(deezer_parse(track, &album))
@@ -232,7 +216,7 @@ pub fn spotify_parse(track: &Value, album: &Value) -> Option<Place> {
 async fn tidal_place(cx: &Context, id: &str) -> Result<Option<Place>> {
     let country = &cx.config.section::<TidalConfig>().country;
     let url = format!("{TIDAL_API}/tracks/{id}?countryCode={country}&include=albums");
-    let Some(track) = tidal::api_object(cx, &url).await? else {
+    let Some(track) = tidal_api::api_object(cx, &url).await? else {
         return Ok(None);
     };
     let Some(track) = tidal_track(&track, id) else {
@@ -241,7 +225,7 @@ async fn tidal_place(cx: &Context, id: &str) -> Result<Option<Place>> {
     let album = &track.album;
     let mut url = format!("{TIDAL_API}/albums/{album}/relationships/items?countryCode={country}");
     for _ in 0..TIDAL_ITEM_PAGES {
-        let Some(items) = tidal::api_object(cx, &url).await? else {
+        let Some(items) = tidal_api::api_object(cx, &url).await? else {
             return Ok(None);
         };
         if let Some((disc, number)) = tidal_position(&items, id) {
@@ -266,7 +250,7 @@ async fn tidal_place(cx: &Context, id: &str) -> Result<Option<Place>> {
 pub fn tidal_track(v: &Value, id: &str) -> Option<TidalTrack> {
     let data = &v["data"];
     (data["id"].as_str()? == id && data["type"] == "tracks").then_some(())?;
-    let albums = tidal::items(&data["relationships"]["albums"], "albums");
+    let albums = tidal_api::items(&data["relationships"]["albums"], "albums");
     let [album] = albums.as_slice() else {
         return None;
     };
@@ -278,11 +262,7 @@ pub fn tidal_track(v: &Value, id: &str) -> Option<TidalTrack> {
     let seconds = data["attributes"]["duration"]
         .as_str()
         .and_then(crate::music_sources::duration_secs)?;
-    let title = data["attributes"]["title"].as_str()?;
-    let title = match data["attributes"]["version"].as_str().map(str::trim) {
-        Some(version) if !version.is_empty() => format!("{title} ({version})"),
-        _ => title.to_owned(),
-    };
+    let title = tidal_api::title(&data["attributes"])?;
     Some(TidalTrack {
         album: album.clone(),
         upc,
