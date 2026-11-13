@@ -44,9 +44,6 @@ fn coordinates(raw: &str, count: usize) -> Result<Vec<f64>> {
 /// `now` is the current minute, floored, so responses for the same relative query stay cacheable
 /// within a minute. Absolute times must lie within the years Postgres can bind
 /// (`time::bounded`).
-pub fn timestamp(raw: &str) -> Result<DateTime<Utc>> {
-    timestamp_at(raw, Utc::now())
-}
 pub fn timestamp_at(raw: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>> {
     if let Some(offset) = raw.strip_prefix("now") {
         let minute = DateTime::from_timestamp(now.timestamp() - now.timestamp().rem_euclid(60), 0)
@@ -104,11 +101,8 @@ pub struct Filters {
     pub resolution: Option<h3o::Resolution>,
 }
 impl Filters {
-    pub fn parse(q: &SearchQuery, config: &SearchConfig) -> Result<Self> {
-        Self::parse_at(q, config, Utc::now())
-    }
-    /// `parse` with relative times (`now`, `now+7d`) resolved against `now`: a search cursor pins
-    /// it, so every page of one query uses the same window.
+    /// A search's filters, with relative times (`now`, `now+7d`) resolved against `now`: a search
+    /// cursor pins it, so every page of one query uses the same window.
     pub fn parse_at(q: &SearchQuery, config: &SearchConfig, now: DateTime<Utc>) -> Result<Self> {
         ensure!(
             q.bbox.is_none() || q.near.is_none(),
@@ -186,9 +180,6 @@ impl Filters {
         );
         Ok(out)
     }
-    pub fn is_spatial(&self) -> bool {
-        self.bbox.is_some() || self.near.is_some()
-    }
     pub fn distance(&self, sql: &mut QueryBuilder<'_, Postgres>) {
         let (lat, lon, _) = self.near.expect("validated near");
         sql.push("ST_Distance(r.point::geography,ST_SetSRID(ST_MakePoint(")
@@ -261,28 +252,30 @@ mod tests {
             resolution(8.0, &config).unwrap()
         );
         assert!(resolution(f64::NAN, &config).is_err());
-        let world = Filters::parse(
+        let world = Filters::parse_at(
             &SearchQuery {
                 bbox: Some("-180,-90,180,90".into()),
                 cluster: Some("1000.5".into()),
                 ..Default::default()
             },
             &config,
+            Utc::now(),
         )
         .unwrap();
         assert!(world.resolution.unwrap().cell_count() <= config.max_cluster_cells as u64);
-        let tiny = Filters::parse(
+        let tiny = Filters::parse_at(
             &SearchQuery {
                 bbox: Some("8,46,8.00001,46.00001".into()),
                 cluster: Some("8.4".into()),
                 ..Default::default()
             },
             &config,
+            Utc::now(),
         )
         .unwrap();
         assert_eq!(u8::from(tiny.resolution.unwrap()), 4);
-        assert_eq!(timestamp("0").unwrap().timestamp(), 0);
-        let at = timestamp("2026-10-18T10:15:42.5Z").unwrap();
+        assert_eq!(timestamp_at("0", Utc::now()).unwrap().timestamp(), 0);
+        let at = timestamp_at("2026-10-18T10:15:42.5Z", Utc::now()).unwrap();
         for (raw, expected) in [
             ("now", "2026-10-18T10:15:00Z"),
             ("now+30d", "2026-11-17T10:15:00Z"),
@@ -292,7 +285,7 @@ mod tests {
         ] {
             assert_eq!(
                 timestamp_at(raw, at).unwrap(),
-                timestamp(expected).unwrap(),
+                timestamp_at(expected, at).unwrap(),
                 "{raw}"
             );
         }
@@ -318,8 +311,8 @@ mod tests {
             assert!(timestamp_at(bad, at).is_err(), "{bad}");
         }
         assert_eq!(
-            timestamp("2026-10-15T10:00:00+02:00").unwrap(),
-            timestamp("2026-10-15T08:00:00Z").unwrap()
+            timestamp_at("2026-10-15T10:00:00+02:00", at).unwrap(),
+            timestamp_at("2026-10-15T08:00:00Z", at).unwrap()
         );
     }
 }

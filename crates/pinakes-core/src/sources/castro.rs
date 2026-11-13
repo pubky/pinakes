@@ -11,8 +11,6 @@ use crate::{
 use anyhow::Result;
 use async_trait::async_trait;
 
-pub const SITE: &str = "Castro";
-
 /// The episode a Castro link names: `castro.fm/episode/{id}`.
 pub fn episode_of(uri: &str) -> Option<String> {
     let url = web_url(uri)?;

@@ -83,7 +83,7 @@ async fn fixture(pool: &PgPool) {
     event.end = Some(now + chrono::Duration::days(30) + chrono::Duration::hours(8));
     event.location = Some(lugano.clone());
     docs.push(event);
-    // A Zurich meetup later today, a Mapky post and a plain web page.
+    // A Zurich meetup later today, a post of another Pubky app and a plain web page.
     let mut meetup = card(
         "https://www.meetup.com/bitcoin-meetup-switzerland/events/316894744/",
         "event_platform",
@@ -110,12 +110,12 @@ async fn fixture(pool: &PgPool) {
     docs.push(meetup);
     docs.push(organiser);
     let mut post = card(
-        "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G",
+        "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/other.app/posts/00351MT54YS9G",
         "pubky",
         "SocialMediaPosting",
         "Great place to enjoy a beer!",
     );
-    post.site = "mapky.app".into();
+    post.site = "other.app".into();
     docs.push(post);
     docs.push(card(
         "https://example.org/",
@@ -659,8 +659,8 @@ async fn fixture(pool: &PgPool) {
             &["bitcoin", "meetup"],
         ),
         (
-            "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G",
-            &["pubky", "mapky"],
+            "pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/other.app/posts/00351MT54YS9G",
+            &["pubky", "notes"],
         ),
         ("https://example.org/", &["web"]),
         (

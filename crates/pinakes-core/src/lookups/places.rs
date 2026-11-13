@@ -138,7 +138,6 @@ pub fn btcmap_sync_request(updated_since: &str, limit: u32) -> Option<Request> {
 /// A BTC Map place from the sync.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BtcmapPlace {
-    pub id: i64,
     /// The OSM object, when the place has one.
     pub osm: Option<OsmId>,
     pub updated_at: String,
@@ -160,7 +159,6 @@ impl BtcmapPlace {
 
 #[derive(Deserialize)]
 struct RawPlace {
-    id: i64,
     osm_id: Option<String>,
     updated_at: String,
     deleted_at: Option<String>,
@@ -182,7 +180,6 @@ pub fn parse_btcmap_places(status: u16, raw: &[u8]) -> Result<Vec<BtcmapPlace>> 
     Ok(places
         .into_iter()
         .map(|p| BtcmapPlace {
-            id: p.id,
             osm: p.osm_id.as_deref().and_then(btcmap_osm),
             updated_at: p.updated_at,
             deleted: p.deleted_at.is_some_and(|d| !d.is_empty()),
@@ -191,7 +188,7 @@ pub fn parse_btcmap_places(status: u16, raw: &[u8]) -> Result<Vec<BtcmapPlace>> 
 }
 
 /// Where the next sync page starts: the latest `updated_at` on this page. Rows that share it
-/// come again on the next page, so the caller keys places by `id`.
+/// come again on the next page, so the caller keys places by their OSM object.
 pub fn btcmap_next_since(places: &[BtcmapPlace]) -> Option<&str> {
     places
         .iter()
@@ -609,7 +606,6 @@ pub mod also_on {
                 .into());
             }
             let place = places::BtcmapPlace {
-                id: 0,
                 osm: Some(osm.clone()),
                 updated_at: String::new(),
                 deleted: false,

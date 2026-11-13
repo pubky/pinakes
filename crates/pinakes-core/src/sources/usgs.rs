@@ -121,7 +121,7 @@ pub fn parse(status: u16, raw: &[u8], id: &str) -> Result<Option<Card>> {
     card.detail("status", text(&p["status"]));
     card.detail("felt", int(&p["felt"]));
     card.detail("significance", int(&p["sig"]));
-    card.detail("ids", all.clone());
+    card.detail("ids", all);
     Ok(Some(card))
 }
 

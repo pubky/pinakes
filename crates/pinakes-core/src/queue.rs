@@ -920,17 +920,8 @@ impl AuthorBudget {
     }
 }
 
-pub fn spawn(
-    pool: PgPool,
-    config: Config,
-    wake: Arc<Notify>,
-    shutdown: watch::Receiver<bool>,
-    metrics: Arc<crate::telemetry::Metrics>,
-) -> Result<JoinSet<()>> {
-    let egress = Egress::new(config.egress.clone());
-    spawn_with_egress(pool, config, wake, shutdown, metrics, egress)
-}
-/// Injectable upstream transport for deterministic integration stacks. Production uses `spawn`.
+/// The queue's workers on `egress`: the daemon's one, whose per-host budgets the also-on sources
+/// share, or a test stack's injected transport.
 pub fn spawn_with_egress(
     pool: PgPool,
     mut config: Config,
@@ -1005,7 +996,7 @@ pub fn spawn_with_egress(
     }
     if config.pubky.enabled {
         resolvers.push((
-            Arc::new(PubkyResolver::new(config.pubky.clone(), egress.clone())?),
+            Arc::new(PubkyResolver::new(config.pubky.clone(), egress)?),
             config.pubky.clone(),
         ));
     }

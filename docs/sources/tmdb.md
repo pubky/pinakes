@@ -59,7 +59,7 @@ TMDB lets its data be cached for six months at most. Its rows live 60 days from 
 that answered; a card takes TMDB's values only from live rows, so it drops them at its first read
 after they expire, and the hourly maintenance drops them from cards that are not read again
 (final, dead-lettered or orphaned cards, [operations](../operations.md#also-on)); change lines
-keep a card's earlier values for `refresh.retention_days` (90), startup refuses more than 120
-while the credential is set, and a change line holding a TMDB value goes after 120 days in any
-case. To fill stored
+keep a card's earlier values for `limits.change_retention_days` (90), startup refuses more than
+120 while the credential is set, and a change line holding a TMDB value goes after 120 days in
+any case. To fill stored
 cards after the key is set, run `pinakesd reextract also-on` with the daemon stopped.

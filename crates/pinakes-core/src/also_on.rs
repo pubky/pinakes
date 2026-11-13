@@ -319,9 +319,9 @@ pub trait Source: Send + Sync {
     fn fill_card(&self, _facts: &[Fact], _doc: &mut ResourceMeta) -> bool {
         false
     }
-    /// The longest `refresh.retention_days` its values may be kept in change lines while it is
-    /// ready (`Config::validate` refuses more): for a service that limits how long its data is
-    /// cached.
+    /// The longest `limits.change_retention_days` its values may be kept in change lines while
+    /// it is ready (`Config::validate` refuses more): for a service that limits how long its data
+    /// is cached.
     fn retention_days_cap(&self) -> Option<u32> {
         None
     }

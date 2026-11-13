@@ -33,7 +33,6 @@ scraper = "0.24"
 markup5ever = "=0.35.0"
 # scraper's own parser and tree, fed in pieces under a CPU budget (`resolver::html`).
 html5ever = "=0.35.0"
-ego-tree = "=0.10.0"
 # The parse budget is the parsing thread's CPU time (`clock_gettime`).
 libc = "0.2"
 toml = "0.9"
@@ -71,9 +70,10 @@ name = "e2e_stack"
 test = true
 
 [dev-dependencies]
+# scraper's tree nodes, named by a test of the rebuilt tree (`resolver::html`).
+ego-tree = "=0.10.0"
 secp256k1 = "=0.30.0"
 serde_yaml_ng = "0.10"
 tokio = { workspace = true, features = ["test-util"] }
-tower = { version = "0.5", features = ["util"] }
 tracing-subscriber = { version = "0.3", features = ["json"] }
 http-body-util = "0.1"

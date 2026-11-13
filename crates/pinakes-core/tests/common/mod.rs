@@ -161,17 +161,6 @@ fn operation<'a>(doc: &'a Value, method: &str, path: &str) -> Option<&'a Value> 
                 .filter(|op| op.is_object())
         })
 }
-/// The JSON schema a document declares for `method path` answering `status`, if any.
-pub fn response_schema<'a>(
-    doc: &'a Value,
-    method: &str,
-    path: &str,
-    status: u16,
-) -> Option<&'a Value> {
-    let schema = &operation(doc, method, path)?["responses"][status.to_string()]["content"]
-        ["application/json"]["schema"];
-    schema.is_object().then_some(schema)
-}
 /// Check one JSON response against the first document that declares its operation. An
 /// undeclared operation or status is an error, except the router's own 404/405 for paths no
 /// document has and the statuses middleware answers on every route (429 budget, 500 backstop,

@@ -50,16 +50,6 @@ pub async fn record(
         .bind(&manifest.source).bind(generation).bind(ok).bind(missing).bind(interval as f64).execute(pool).await?;
     Ok(())
 }
-pub async fn run(
-    pool: &PgPool,
-    resolver: &dyn Resolver,
-    config: &CanaryConfig,
-    metrics: &Metrics,
-    generation: i64,
-) -> Result<()> {
-    let manifest = resolver.manifest();
-    run_manifest(pool, resolver, &manifest, config, metrics, generation).await
-}
 pub async fn run_manifest(
     pool: &PgPool,
     resolver: &dyn Resolver,

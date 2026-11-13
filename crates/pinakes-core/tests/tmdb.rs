@@ -820,9 +820,9 @@ async fn the_credential_never_leaves_the_request(pool: PgPool) {
     );
 }
 
-/// Change lines keep a card's values for `refresh.retention_days`: while a TMDB credential is
-/// set, more than 120 days is refused (TMDB's six months, from a value up to 60 days old), with a
-/// message naming both settings and never the key; without one, or with TMDB switched off, any
+/// Change lines keep a card's values for `limits.change_retention_days`: while a TMDB credential
+/// is set, more than 120 days is refused (TMDB's six months, from a value up to 60 days old), with
+/// a message naming both settings and never the key; without one, or with TMDB switched off, any
 /// retention stands.
 #[test]
 fn a_long_change_retention_is_refused_while_tmdb_is_on() {
@@ -833,7 +833,7 @@ fn a_long_change_retention_is_refused_while_tmdb_is_on() {
         on.refresh.retention_days = 121;
         let refused = on.validate().unwrap_err().to_string();
         assert!(
-            refused.contains("refresh.retention_days") && refused.contains("TMDB_API_KEY"),
+            refused.contains("limits.change_retention_days") && refused.contains("TMDB_API_KEY"),
             "{refused}"
         );
         assert!(!refused.contains(credential), "{refused}");
@@ -884,8 +884,9 @@ async fn the_attribution_stays_while_a_card_holds_a_tmdb_value(pool: PgPool) {
     assert!(info.get("attributions").is_none(), "{info}");
 }
 
-/// A change line that holds a TMDB value goes after 120 days, whatever `refresh.retention_days`
-/// says and with TMDB off; a line of the same age without one stays, as does a younger one.
+/// A change line that holds a TMDB value goes after 120 days, whatever
+/// `limits.change_retention_days` says and with TMDB off; a line of the same age without one
+/// stays, as does a younger one.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn change_lines_with_tmdb_values_go_after_120_days(pool: PgPool) {
     let plain = Page {

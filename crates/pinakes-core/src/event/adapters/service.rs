@@ -441,7 +441,7 @@ impl PlatformResolver {
                 // Delta rows skip the horizon: a distant event never holds a slot past it, and
                 // the expiry follows the horizon until the event is inside it
                 // (`store::EXTEND_PARENT_DERIVATIONS`, on each feed apply).
-                if crate::store::derive_resource_within(
+                crate::store::derive_resource_within(
                     &events.pool,
                     &doc.url,
                     &link,
@@ -451,11 +451,7 @@ impl PlatformResolver {
                     Some(until),
                     Some(crate::store::derivation_horizon(cfg)),
                 )
-                .await?
-                .is_none()
-                {
-                    continue;
-                }
+                .await?;
             }
             crate::store::link_sources(&events.pool, &doc.url, &named, &gone).await?;
         }
@@ -762,11 +758,9 @@ pub fn endpoint(
             ))
         }
         "ics_link" if !crate::event::service::is_feed(uri) => {
-            let link =
-                page.and_then(|f| ics_link(&d.id, &f.url, &String::from_utf8_lossy(&f.body)));
+            let link = page.and_then(|f| ics_link(&f.url, &String::from_utf8_lossy(&f.body)));
             let fallback = match d.id.as_str() {
-                "tito" => Some(format!("{}.ics", uri.trim_end_matches('/'))),
-                "petzi" => Some(format!("{}.ics", uri.trim_end_matches('/'))),
+                "tito" | "petzi" => Some(format!("{}.ics", uri.trim_end_matches('/'))),
                 "pretix" | "eventyay" => Some(format!("{}/ical/", uri.trim_end_matches('/'))),
                 "gathio" => Some(u.join(&format!("/export/event/{id}"))?.into()),
                 "allevents" if !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()) => Some(query(
@@ -815,7 +809,7 @@ pub fn canary_link(base: &Url, text: &str, pattern: &str) -> Option<String> {
             u.to_string()
         })
 }
-pub fn ics_link(_id: &str, base: &Url, text: &str) -> Option<String> {
+pub fn ics_link(base: &Url, text: &str) -> Option<String> {
     let html = crate::resolver::html::document(text).ok()?;
     html.select(&scraper::Selector::parse("a[href],link[href]").unwrap())
         .filter_map(|e| e.value().attr("href"))

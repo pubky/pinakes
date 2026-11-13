@@ -897,8 +897,8 @@ pass takes out the values of a source the build no longer has, as a card's next 
 egress keeps TMDB's answers an hour and paces `api.themoviedb.org` at the default
 `limits.host_requests_per_second` (1/s), and at no more than 4/s when that is raised (TMDB's
 limit is about 40/s). Change lines hold a card's values before and after a change for
-`refresh.retention_days` (90): while a TMDB credential is set, startup refuses more than 120
-days, and a change line that holds a TMDB value goes after 120 days whatever that setting says,
+`limits.change_retention_days` (90): while a TMDB credential is set, startup refuses more than
+120 days, and a change line that holds a TMDB value goes after 120 days whatever that setting says,
 with TMDB on or off, so no TMDB value read more than six months ago stays served by
 `/v1/changes`.
 

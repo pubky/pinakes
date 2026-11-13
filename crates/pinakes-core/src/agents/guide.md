@@ -59,8 +59,8 @@ A link this instance does not know is a 404 there: nobody referenced it, or it h
   calendars, one card per occurrence.
 - **Identifiers.** Books, papers, music, films, podcasts and OSM objects carry exact keys:
   `isbn:`, `doi:`, `isrc:`, `upc:`, `mbid:`, `wikidata:`, `imdb:`, `podcast:`, `osm:`.
-- **Other Pubky apps.** `pubky://` objects of apps such as Mapky and Eventky are cards too, with
-  `open_in` naming the clients that open them.
+- **Other Pubky apps.** `pubky://` objects of other apps, such as a Loopky deck or a marketplace
+  listing, are cards too, with `open_in` naming the clients that open them.
 
 `GET {{BASE}}/v1/search?facet=type&limit=1` counts the card types this instance holds; each
 entry's `type_path` (`["Thing", "CreativeWork", "MusicRecording"]`) places it in the schema.org

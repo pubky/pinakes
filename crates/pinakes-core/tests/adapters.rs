@@ -2293,12 +2293,11 @@ fn own_calendar_links_and_deterministic_platform_endpoints() {
     let cfg = EventConfig::default();
     let base = "https://tickets.example/org/current/".parse().unwrap();
     assert_eq!(
-        ics_link("pretix", &base, "<a href='/org/other/ical/'>Other</a>"),
+        ics_link(&base, "<a href='/org/other/ical/'>Other</a>"),
         None
     );
     assert_eq!(
         ics_link(
-            "pretix",
             &base,
             "<a href='/org/other/ical/'>Other</a><a href='/org/current/ical/'>Mine</a>"
         )
@@ -2374,14 +2373,13 @@ fn own_calendar_links_and_deterministic_platform_endpoints() {
     let guidle = adapters::definition("guidle").unwrap();
     assert_eq!(
         ics_link(
-            "guidle",
             &page.parse().unwrap(),
             &export("https://www.guidle.com/de/veranstaltungen/other_B456")
         ),
         None
     );
     assert_eq!(
-        ics_link("guidle", &page.parse().unwrap(), &export(page)).unwrap(),
+        ics_link(&page.parse().unwrap(), &export(page)).unwrap(),
         format!("https://www.guidle.com/iCalendar/?id=42&lang=de&url={page}")
     );
     let f = Fetched {

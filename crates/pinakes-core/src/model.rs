@@ -243,7 +243,7 @@ impl CreditProvider {
         }
     }
     /// The longest a change line that holds one of the provider's values is kept (days),
-    /// whatever `refresh.retention_days` says and whether or not its source is on now
+    /// whatever `limits.change_retention_days` says and whether or not its source is on now
     /// (`changes::retain`): TMDB's six months, from a value up to 60 days old.
     pub fn change_days_cap(self) -> Option<u32> {
         match self {

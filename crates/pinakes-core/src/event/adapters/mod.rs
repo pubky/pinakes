@@ -335,15 +335,12 @@ pub fn validate(cfg: &EventConfig) -> anyhow::Result<()> {
                     "gancio",
                     "wikidata",
                     "ics_link",
-                    "jsonld",
                     "ticketmaster",
                     "skiddle",
                     "billetto_api",
                     "eventfrog_api",
                     "google_calendar_api",
-                    "resident_advisor",
-                    "none",
-                    "state"
+                    "resident_advisor"
                 ]
                 .contains(&d.parser.as_str())
                 && ["pinakes", "plain", "browser", "firefox"].contains(&d.ua_profile.as_str())

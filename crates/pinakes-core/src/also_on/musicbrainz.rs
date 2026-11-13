@@ -150,8 +150,7 @@ impl MusicBrainzSource {
         {
             if let Some(entity) = musicbrainz::entity(&cx.egress, base, kind, group).await? {
                 let named = hubs::key::mb(MbKind::ReleaseGroup, &entity.mbid);
-                let storefront = &cx.config.also_on.apple_storefront;
-                for mut link in album_item_links(cx, &entity, storefront).await? {
+                for mut link in album_item_links(cx, &entity).await? {
                     if !found.links.iter().any(|l| l.uri == link.uri) {
                         link.key.clone_from(&named);
                         found.links.push(link);
@@ -165,11 +164,7 @@ impl MusicBrainzSource {
 
 /// The album pages of the one Wikidata item a release group's MusicBrainz entry relates it to,
 /// when that item names the release group back (P436) and no other.
-async fn album_item_links(
-    cx: &Context,
-    group: &musicbrainz::Entity,
-    storefront: &str,
-) -> Result<Vec<Link>> {
+async fn album_item_links(cx: &Context, group: &musicbrainz::Entity) -> Result<Vec<Link>> {
     let mut qids: Vec<String> = group
         .urls
         .iter()
@@ -187,5 +182,5 @@ async fn album_item_links(
     if !matches!(item.id("P436"), [mbid] if *mbid == group.mbid) {
         return Ok(vec![]);
     }
-    Ok(found(item, Level::Album, storefront).links)
+    Ok(found(item, Level::Album).links)
 }
