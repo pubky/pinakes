@@ -866,79 +866,105 @@ async fn versions_staged_in_one_millisecond_leave_the_greatest(pool: PgPool) {
     assert_eq!(found(&app, &collection(&a, "T")).await, [id]);
 }
 
-/// References stored before ingest settled collections (this release's upgrade keeps them): a
-/// post's file whose link and alias rows carry different instants, an older version file beside
-/// the current one, two version files of one instant, and a file whose newest item is another
-/// link's. Each post is listed once, at its newest reference among the card's links, on whichever
-/// page that falls, with and without a viewer; the count agrees; and a collection's items are its
-/// current file's. A page may hold fewer than `limit` while such references remain.
+/// Whatever lines of a stage are skipped, ingest leaves every collection at one file and every
+/// file at one instant, so readers take each reference as it is: an edit whose put of an alias
+/// item was skipped, a new version whose dels were skipped, two versions of one instant, and an
+/// item added later to a file that holds the card's alias. Each post is listed once, at its
+/// file's instant, on whichever page that falls, with and without a viewer; the count agrees;
+/// and a collection's items are its one file's.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
-async fn references_stored_before_settling_list_each_post_once(pool: PgPool) {
+async fn ingest_leaves_each_collection_one_file_at_one_instant(pool: PgPool) {
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let (a, b) = (author('a'), author('b'));
-    let root = card(&pool, "https://example.org/root", "Root").await;
-    let alias = store::ensure_resource(&pool, "https://example.org/spelling")
-        .await
-        .unwrap();
+    let (link, spelling) = ("https://example.org/root", "https://example.org/spelling");
+    let (old, another) = ("https://example.org/only-old", "https://example.org/other");
+    let root = card(&pool, link, "Root").await;
+    let alias = store::ensure_resource(&pool, spelling).await.unwrap();
     sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'canonical')")
         .bind(&alias)
         .bind(&root)
         .execute(&pool)
         .await
         .unwrap();
-    let only_old = card(&pool, "https://example.org/only-old", "Only old").await;
-    let other = card(&pool, "https://example.org/other", "Other").await;
-    // As the release finds them: written before settling, so written here directly.
-    for (resource, by, path, at) in [
-        // P: the card at 3 s, its alias at 1 s, one file.
-        (&root, &a, "P/v.json", 3_000),
-        (&alias, &a, "P/v.json", 1_000),
-        (&root, &b, "S/S.json", 2_000),
-        // V: an older version (holding a card the newer one dropped) beside the current one.
-        (&root, &a, "V/v1.json", 1_500),
-        (&only_old, &a, "V/v1.json", 1_500),
-        (&root, &a, "V/v2.json", 2_500),
-        // W: two versions of one instant.
-        (&root, &b, "W/a.json", 1_200),
-        (&only_old, &b, "W/a.json", 1_200),
-        (&root, &b, "W/b.json", 1_200),
-        // Z: the alias at 0.5 s, another link at 4 s, one file.
-        (&alias, &b, "Z/z.json", 500),
-        (&other, &b, "Z/z.json", 4_000),
-    ] {
-        sqlx::query("INSERT INTO reference(resource_id,kind,author,object_path,created_at,unit_key) VALUES($1,'collection',$2,$3,to_timestamp($4/1000.0),'collection:'||md5($1))")
-            .bind(resource)
-            .bind(by)
-            .bind(format!("/pub/social/v1/posts/{path}"))
-            .bind(at as f64)
-            .execute(&pool)
-            .await
-            .unwrap();
-    }
+    let only_old = card(&pool, old, "Only old").await;
+    let other = card(&pool, another, "Other").await;
+    batch(
+        &pool,
+        vec![
+            // P: the card and its alias, one file.
+            item(Op::Put, &a, "P", "v", link, 1_000),
+            item(Op::Put, &a, "P", "v", spelling, 1_000),
+            item(Op::Put, &b, "S", "S", link, 2_000),
+            // V: its first version, holding a card the next one drops.
+            item(Op::Put, &a, "V", "v1", link, 1_500),
+            item(Op::Put, &a, "V", "v1", old, 1_500),
+            // W: two versions of one instant, the older's dels skipped.
+            item(Op::Put, &b, "W", "a", link, 1_200),
+            item(Op::Put, &b, "W", "a", old, 1_200),
+            item(Op::Put, &b, "W", "b", link, 1_200),
+            // Z: the alias alone.
+            item(Op::Put, &b, "Z", "z", spelling, 500),
+        ],
+    )
+    .await;
+    batch(
+        &pool,
+        vec![
+            // P's edit: its put of the alias item skipped.
+            item(Op::Put, &a, "P", "v", link, 3_000),
+            // V's next version: its dels of v1's lines skipped.
+            item(Op::Put, &a, "V", "v2", link, 2_500),
+            // Z's edit adds another link: its put of the alias item skipped.
+            item(Op::Put, &b, "Z", "z", another, 4_000),
+        ],
+    )
+    .await;
+    // No collection under two files, no file at two instants.
+    let unsettled: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM (SELECT 1 FROM reference WHERE kind='collection' GROUP BY author,collection_post(object_path) HAVING count(DISTINCT object_path)>1 OR count(DISTINCT created_at)>1) x",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(unsettled, 0);
+    assert_eq!(
+        files(&pool).await,
+        [
+            "/pub/social/v1/posts/P/v.json",
+            "/pub/social/v1/posts/S/S.json",
+            "/pub/social/v1/posts/V/v2.json",
+            "/pub/social/v1/posts/W/b.json",
+            "/pub/social/v1/posts/Z/z.json",
+        ]
+    );
     let post = |by: &str, p: &str| collection(by, p);
     let newest = vec![
+        post(&b, "Z"),
         post(&a, "P"),
         post(&a, "V"),
         post(&b, "S"),
         post(&b, "W"),
-        post(&b, "Z"),
     ];
     for limit in [1, 2, 20] {
         assert_eq!(all_pages(&app, &root, "", limit).await, newest, "{limit}");
-        // The viewer's own first: theirs are the newest two already.
+        // Each viewer's own first, then the rest.
         assert_eq!(
             all_pages(&app, &root, &format!("&viewer={a}"), limit).await,
-            newest,
+            [
+                post(&a, "P"),
+                post(&a, "V"),
+                post(&b, "Z"),
+                post(&b, "S"),
+                post(&b, "W")
+            ],
             "{limit}"
         );
-        // Another viewer's own first, then the rest.
-        let theirs = all_pages(&app, &root, &format!("&viewer={b}"), limit).await;
         assert_eq!(
-            theirs,
+            all_pages(&app, &root, &format!("&viewer={b}"), limit).await,
             [
+                post(&b, "Z"),
                 post(&b, "S"),
                 post(&b, "W"),
-                post(&b, "Z"),
                 post(&a, "P"),
                 post(&a, "V")
             ],

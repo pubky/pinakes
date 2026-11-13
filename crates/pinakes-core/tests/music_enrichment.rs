@@ -381,6 +381,13 @@ impl Transport for Recorded {
             tokio::time::sleep(std::time::Duration::from_millis(mode.wikidata_delay_ms)).await;
         }
         let (status, retry_after, body) = match (host.as_str(), path.as_str()) {
+            // Controlled negative for these Wikidata/work tests. Positive recording-cover
+            // responses are captured and exercised separately in music_matching.rs.
+            ("musicbrainz.org", "/ws/2/release")
+                if query("recording") == "833f00e1-781f-4edd-90e4-e52712618862" =>
+            {
+                (200, 0, br#"{"release-count":0,"releases":[]}"#.to_vec())
+            }
             ("musicbrainz.org", path) => {
                 let file = match path.trim_start_matches("/ws/2/") {
                     "artist/b5416a54-4941-4fcf-b2a0-7f98da6f9344" => "mb-artist-sefa.json",
@@ -847,7 +854,7 @@ async fn cards_take_credited_content_from_their_own_item() {
         1,
         "{seen:?}"
     );
-    assert_eq!(t.to("musicbrainz.org").len(), 5, "{seen:?}");
+    assert_eq!(t.to("musicbrainz.org").len(), 6, "{seen:?}");
     assert!(
         seen.iter()
             .all(|s| !s.contains("wbgetclaims&entity=Q11510350")),
@@ -900,7 +907,7 @@ fn song_credit() -> Value {
         Some("https://musicbrainz.org/work/b11bf816-1844-47e5-9075-9239b7609c6a"),
     )
 }
-/// Get Lucky's card asks exactly: MusicBrainz 2 (the recording, its works), Wikidata 6 (search,
+/// Get Lucky's card asks exactly: MusicBrainz 3 (the recording, its works, its releases), Wikidata 6 (search,
 /// read-back, the recording item's pages and image claim, the work item's read-back and pages),
 /// English Wikipedia 1 (the work's article; the recording item has none), nothing of Commons.
 #[tokio::test]
@@ -911,6 +918,7 @@ async fn a_recordings_requests_are_bounded() {
     let mut expected = vec![
         "musicbrainz.org/ws/2/recording/833f00e1-781f-4edd-90e4-e52712618862?inc=url-rels+isrcs+artist-credits+genres+ratings&fmt=json".to_owned(),
         "musicbrainz.org/ws/2/recording/833f00e1-781f-4edd-90e4-e52712618862?inc=work-rels+work-level-rels+url-rels&fmt=json".to_owned(),
+        "musicbrainz.org/ws/2/release?recording=833f00e1-781f-4edd-90e4-e52712618862&status=official&inc=release-groups+media+url-rels&limit=100&fmt=json".to_owned(),
         format!("{wd}query&list=search&srsearch=haswbstatement%3AP4404%3D833f00e1-781f-4edd-90e4-e52712618862&srlimit=5&format=json"),
         format!("{wd}wbgetentities&ids=Q139827657&props=claims%7Csitelinks%2Furls&format=json"),
         format!("{wd}wbgetentities&ids=Q139827657&props=sitelinks%2Furls%7Cdescriptions&languages=en&format=json"),
@@ -938,7 +946,7 @@ async fn a_recording_whose_work_has_no_item_takes_its_items_line() {
     );
     assert_eq!(credits(&song), json!([item_credit("Q139827657", None)]));
     assert!(song.unread_enriched.is_empty());
-    assert_eq!(t.to("musicbrainz.org").len(), 2, "{:?}", t.seen());
+    assert_eq!(t.to("musicbrainz.org").len(), 3, "{:?}", t.seen());
     assert_eq!(t.to("en.wikipedia.org"), Vec::<String>::new());
 }
 
@@ -2310,7 +2318,7 @@ async fn musicbrainz_ratings_are_facts_of_the_card() {
         let entity_reads: Vec<String> = t
             .to("musicbrainz.org")
             .into_iter()
-            .filter(|s| !s.contains("work-rels"))
+            .filter(|s| !s.contains("work-rels") && !s.contains("/release?"))
             .collect();
         assert_eq!(entity_reads.len(), 5, "{entity_reads:?}");
         assert!(entity_reads

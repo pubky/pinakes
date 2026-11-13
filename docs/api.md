@@ -277,7 +277,12 @@ A Wikidata description's credit:
 A release's or release group's card with no free Commons file (or whose Commons file could not be
 read just now, while it has no stored image) shows the front cover the
 [Cover Art Archive](https://coverartarchive.org/) holds for it, credited to the release the cover
-is of (a release group's cover is one of its releases', chosen by the archive):
+is of (a release group's cover is one of its releases', chosen by the archive). A recording
+can take a front cover from a release containing its exact MusicBrainz recording ID: one
+release page (at most 100 releases), with at most three CAA requests, under the shared
+cache, host pacing and enrichment deadline. A front flag alone is not an image; the archive
+must confirm it. The release's barcode and album identity remain separate:
+
 
 ```json
 {"field": "image", "provider": "cover_art_archive",
@@ -1208,12 +1213,6 @@ whose del was skipped stays listed, until the post's next edit. A collection hol
 items, the specs' cap: a new item past them is refused (`collection_items` in
 `pinakes_ingest_rejected_total`), also when a skipped del left one of the 100 stale.
 
-References stored before ingest kept posts so (until a repair of them runs) are left out as each
-page reads them: a file that is not its post's current one, and an older reference of a file that
-holds a newer one among the card's links. So each post is still listed once, but a page can hold
-fewer than `limit` items, none even, with a `cursor` to the next: page on until `cursor` is
-`null`.
-
 The viewer's pinned set is fixed by the first page and carried in its cursor: the window from
 the instant of their newest post to their 100th newest, as that page found them. While a client pages, no post
 moves between the viewer's own and the others. A collection the viewer adds or edits later is newer
@@ -1224,20 +1223,18 @@ one, as with any newest-first list.
 Every read is bounded, with these limits however many collections hold a link, an author made
 or the viewer holds, ties of one instant included:
 - **A page** (any cursor) reads at most `limit` + 1 posts per link (the card's own and each of
-  those aliases), and one probe for each of its `limit` + 1 places, whether it is current.
+  those aliases).
 - **The others' walk** steps over the viewer's pinned window alone: the at most 100 posts of at
   most 100 items each that the first page found, and any reference Nexus appended to its feed
   later with an instant inside the window (an append recovered after a later one, or one in the
   same millisecond as their newest).
 - **The viewer's pinned window** reads at most 100 posts per link on a first page.
-- **The count** reads at most 1,000 posts per link, and one probe for each post it counts.
+- **The count** reads at most 1,000 posts per link.
 - **`in_collection`** reads the one post's files.
 
 Each step is one or more probes of an index, each a range in the index's order (newest first,
 then author and file; the viewer's own by author, never past their pinned boundary; a post's
-files newest first). A stale file from before ingest kept posts costs one probe more; until the
-repair, such files take steps of the count's walk too, so a card more than 1,000 posts hold can
-count fewer.
+files newest first).
 
 ```text
 GET /v1/resources/{id}/collections?viewer={public key}&limit=20
@@ -1283,6 +1280,22 @@ smallest member, and never takes an ID an existing group has). Member IDs and re
 change. A group is a hint, never a merge: nothing about its members is combined or stored with
 it, so each keeps its own card, references, score and ranking, and the group tables hold only
 membership (no OSM-derived value can reach them).
+
+Exact music membership is symmetric and transitive: a keyed A→B→C chain exposes the
+other members from every entry point. A music detail read includes the live exact keys
+of same-type members (at most 256 members and 256 additional keys); expired, disabled-source
+and `maybe` evidence is excluded. A music card without its own image can reuse a same-type
+member's Commons or Cover Art Archive image together with its image credit. This fallback
+is read-time, not copied into the stored document, and disappears when membership changes.
+
+A recording's release is containment, not another copy of the recording. The
+`musicbrainz_containment` source stores at most eight exact release URLs as
+`facts.track_of_album`, never as grouping keys or Also on entries. It reads one bounded
+MusicBrainz release page and retries incomplete reads. MusicBrainz recording and ISRC
+pages can also use their verified ISRCs for exact reverse provider lookups; release pages
+use their UPCs. Provider answers must return the requested identifier. Album links and
+UPCs are never promoted to recording identity.
+
 
 On the **admin listener**, `PUT /v1/groups/{id}` replaces a group's member set and answers as
 `GET /v1/groups/{id}`:
@@ -1453,7 +1466,7 @@ anything. Sources read a resource after it is saved and again when their results
 source's lifetime: 30 days, `btcmap` 7); a source's links and keys live twice that, so one
 failed refresh keeps them, and they go when the source stops returning them. The sources run in this order, each
 seeing the keys the ones before it found: `service`, `tidal`, `spotify`,
-`musicbrainz`, `musicbrainz_entity`, `performers`, `wikidata`, `discogs`, `deezer`, `spotify_isrc`,
+`musicbrainz`, `musicbrainz_entity`, `musicbrainz_containment`, `performers`, `wikidata`, `discogs`, `deezer`, `spotify_isrc`,
 `tidal_isrc`, `itunes`, `itunes_song`, `youtube_match`, `wikipedia`, `wikidata_item`, `books`,
 `films`, `podcasts`, `product_keys`, `open_food_facts`, `stack_exchange`, `titles`, `federal_register`, `mempool`, `osm_wikidata`, `wikidata_osm`,
 `wikidata_places`, `btcmap`, `unpaywall`, `ncbi`, `datacite`, `huggingface`, `crates`, `npm`,

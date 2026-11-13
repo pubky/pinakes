@@ -189,17 +189,7 @@ gone even when its author had opted out. A gone post's card keeps nothing of the
 `SocialMediaPosting`), its change lines and also-on results are
 deleted, and it is regrouped. An opted-out post's lines lose their documents. The aliases of
 either keep only their `aliased` line: their cards, other lines and also-on results are deleted.
-Then it scrubs what a `pubky://` object Pinakes never fetches still keeps of a card stored
-before the rule: a path an app's profile leaves out, or any path in a namespace Pinakes never
-fetches (the old Mapky and Eventky layouts among them, [Pubky apps](pubky-apps.md)). Such an
-object's card becomes the card it gets now (a missing `CreativeWork` with only its link), its
-change lines lose their documents, and it is regrouped. It prints `scrubbed N posts gone or
-opted out` and `scrubbed N objects never fetched`. Then it brings what an earlier build stored
-before the credential rule ([the API](api.md#post-v1resolve-a-card-per-link)) reached it under the rule: a derived link
-that carries a credential goes, a change line's or group unit's occurrence key whose UID is such
-a link takes the UID's stand-in, and a change line's documents lose a spelling of the resource's
-own link that adds a credential; it prints `credential repair: derived_link -N, change keys N,
-unit keys N, history rows N` (counts only), then the re-queued count.
+It prints `scrubbed N posts gone or opted out`, then the re-queued count.
 
 **Dead letters.** To retry one by hand:
 
@@ -839,17 +829,18 @@ Wikipedia or Wikidata, from the entity's Wikidata item, each with its credit
 ([api.md](api.md#credits) says which item and which text), and a release or release group with
 no free Commons file its front cover from the Cover Art Archive, by its MBID. It runs inside the card's own read,
 after MusicBrainz answered, through the egress and its pace for those hosts, within
-`limits.music_enrichment_timeout_ms`. At most, per card: MusicBrainz one request more (a
-recording's works, only when the recording has no item of its own with an English article); Wikidata one
+`limits.music_enrichment_timeout_ms`. At most, per card: MusicBrainz two requests more for a
+recording (its works, only when it has no item of its own with an English article, and one
+page of its official releases for a cover); Wikidata one
 read-back of the item its own `wikidata` relation names, or, without one, one search and one
 read-back for each lookup (its MBID, then for an artist up to two Discogs pages: three lookups;
 hits over the 8 MB cap together are read back one by one), one read of the item's pages and
 English description, and one of its image claim, and for a recording one read-back and one read
 of its work's item's pages; Wikipedia two summaries
 (English, then one other language), for a recording three (its item's English article, its
-work's, then one other language); Commons one; the Cover Art Archive one (a release or release
-group, used only when it has no free Commons file; a release only when MusicBrainz says the archive
-shows its front cover), whose redirect to archive.org is kept, never followed (with
+work's, then one other language); Commons one; the Cover Art Archive one for a release or release
+group, or up to three for a recording's releases (used only when it has no free Commons file;
+a release only when MusicBrainz says the archive shows its front cover), whose redirect to archive.org is kept, never followed (with
 `egress.allow_hosts` set, allow `coverartarchive.org` for covers; archive.org is not needed). The
 Wikimedia requests run one after another and share each host's pace (`www.wikidata.org` with the
 also-on sources), so an artist found through its Discogs pages makes up to six Wikidata requests
