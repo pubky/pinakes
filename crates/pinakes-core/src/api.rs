@@ -740,8 +740,8 @@ impl PageCursor {
         serde_json::from_slice(payload).map_err(|_| invalid())
     }
 }
-/// The one card every route returns for a resource, occurrence or reference event. Absent
-/// values are null, never "".
+/// The one card every route returns for a resource or an occurrence. Absent values are null,
+/// never "".
 #[derive(Serialize, ToSchema)]
 pub struct Card {
     pub id: String,
@@ -804,10 +804,9 @@ pub struct Card {
     /// `GET /v1/resources/{id}/collections` (docs/api.md, Collections). An occurrence's are its
     /// feed's.
     pub collections: i64,
-    /// The clients that open a Pubky app's object, from the app's profile (docs/pubky-apps.md);
-    /// on an event card, those of the event object it names. On a card whose link is not a web page
-    /// (`btc:`, `uniprot:`, ...), the web page its source reads it from, named by its site. Empty for
-    /// every other card.
+    /// The clients that open a Pubky app's object, from the app's profile (docs/pubky-apps.md).
+    /// On a card whose link is not a web page (`btc:`, `uniprot:`, ...), the web page its source
+    /// reads it from, named by its site. Empty for every other card.
     pub open_in: Vec<model::OpenIn>,
     /// OpenStreetMap cards, events placed at an OSM venue and events whose zone was derived from
     /// coordinates: the ODbL attribution to display with the card.
@@ -825,10 +824,6 @@ pub struct Card {
     /// For a calendar occurrence: which feed instance this card is.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub occurrence: Option<OccurrenceKey>,
-    /// For a Nexus event reference: the reference this card is.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Option<crate::event::storage::ReferenceEvent>)]
-    pub event: Option<Value>,
     /// On an event card: other events that are possibly the same one, best first (the rule:
     /// "Possibly the same event" in docs/api.md); on an app's store card, other store cards that
     /// are possibly the same app ("Possibly the same app"); on a MusicRecording card, other
@@ -1261,21 +1256,13 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
         )
         .map(|e| e.settled(&type_path))
     };
-    let event = row.get("event").filter(|v| !v.is_null()).cloned();
-    // An event card's clients are its event object's; a read object's are its own, and an object
-    // not read yet has its kind's.
-    let open_in = match (&event, &doc) {
-        (Some(e), _) => match (e["author"].as_str(), e["object_path"].as_str()) {
-            (Some(author), Some(path)) => {
-                crate::resolver::pubky_apps::open_in(&format!("pubky://{author}{path}"))
-            }
-            _ => vec![],
-        },
-        (None, Some(d)) if d.open_in.is_empty() && status != "missing" => {
+    // A read object's clients are its own, and an object not read yet has its kind's.
+    let open_in = match &doc {
+        Some(d) if d.open_in.is_empty() && status != "missing" => {
             page_client(&uri, d).into_iter().collect()
         }
-        (None, Some(d)) => d.open_in.clone(),
-        (None, None) => crate::resolver::pubky_apps::open_in(&uri),
+        Some(d) => d.open_in.clone(),
+        None => crate::resolver::pubky_apps::open_in(&uri),
     };
     let description = doc.as_ref().and_then(|d| present(d.description.as_deref()));
     let image = doc.as_ref().and_then(|d| present(d.image.as_deref()));
@@ -1337,7 +1324,6 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
         ),
         credits: enriched,
         occurrence,
-        event,
         maybe_same: same_events(row).map(|all| all.into_iter().take(3).collect()),
         because: because(row),
     })
@@ -2380,7 +2366,7 @@ pub const BOOST_WEIGHT: f64 = 2.0;
 /// After this many 30-day halvings (about five years) a boost counts nothing.
 pub const BOOST_HALF_LIVES: i64 = 60;
 /// The columns of `search_unit` (and `resource_unit`), in order.
-pub const UNIT_COLUMNS: &str = "id,uri,host,type,type_path,name,category,point,start_at,end_at,venue_id,doc,search_text,resolver,resolved_at,refresh_at,status,osm_type,osm_id,unit_id,occurrence,event,event_author";
+pub const UNIT_COLUMNS: &str = "id,uri,host,type,type_path,name,category,point,start_at,end_at,venue_id,doc,search_text,resolver,resolved_at,refresh_at,status,osm_type,osm_id,unit_id,occurrence";
 /// A related row's rank from `{counts}.n` and `.at`: its shared taggers, then the newest of
 /// their references, in whole seconds after the window's start `since`. Every counted reference
 /// is in the window (at most 3,650 days, under 1e10 seconds), so the second term never reaches
@@ -2684,8 +2670,8 @@ pub async fn search(
         sql.push(",rel.n AS because_n,rel.authors AS because_authors");
     }
     if related.is_some() {
-        // Each related resource once, as its own card (never once per occurrence or event
-        // reference), looked up one by one: the set is bounded, and a join would read every card.
+        // Each related resource once, as its own card (never once per occurrence), looked up one
+        // by one: the set is bounded, and a join would read every card.
         sql.push(" FROM related rel CROSS JOIN LATERAL (SELECT * FROM resource_unit u WHERE u.id=rel.resource_id OFFSET 0) r");
     } else {
         sql.push(" FROM search_unit r");
@@ -2720,16 +2706,6 @@ pub async fn search(
         sql.push(" AND r.id IN (SELECT coalesce(a.root_id,f.resource_id) FROM reference f LEFT JOIN resource_alias a ON a.alias_id=f.resource_id WHERE ");
         crate::collections::push_items(&mut sql, collection);
         sql.push(")");
-    }
-    if let Some(author) = &q.author {
-        sql.push(" AND (r.event_author IS NULL OR r.event_author=")
-            .push_bind(author.clone())
-            .push(")");
-    }
-    if let Some(reach) = &reach {
-        sql.push(" AND (r.event_author IS NULL OR r.event_author=ANY(")
-            .push_bind(reach.authors.clone())
-            .push("))");
     }
     if sort == Some("start") {
         sql.push(" AND r.start_at IS NOT NULL");
@@ -2960,10 +2936,9 @@ pub async fn search(
     sql.push(",'host',");
     if asked.hosts {
         // One pass over the set: per host its count, a few of its links and the site name its
-        // documents give most often (an event reference's stand-in names only the host), for
-        // the service's name (`HostFacet::site`). A host that `pubky://` objects use is a user's
-        // key, not a service; a value over the filter's 256 bytes, or one with a comma (which
-        // `host=` reads as two), could not be filtered by.
+        // documents give most often, for the service's name (`HostFacet::site`). A host that
+        // `pubky://` objects use is a user's key, not a service; a value over the filter's 256
+        // bytes, or one with a comma (which `host=` reads as two), could not be filtered by.
         sql.push("coalesce((SELECT jsonb_agg(to_jsonb(t) ORDER BY count DESC,host) FROM (SELECT r.host,count(DISTINCT r.unit_id) AS count,(array_agg(DISTINCT r.uri ORDER BY r.uri))[1:")
             .push_bind(FACET_SITE_SAMPLE)
             .push("] AS uris,mode() WITHIN GROUP (ORDER BY nullif(nullif(r.doc->>'site',''),r.host)) AS site FROM ")
@@ -3633,7 +3608,6 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
         model::Credit,
         model::CreditField,
         model::CreditProvider,
-        crate::event::storage::ReferenceEvent,
         crate::change_api::ChangeLine,
         crate::change_api::ChangePage,
         crate::change_api::ChangeLookup,

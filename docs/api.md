@@ -45,7 +45,7 @@ moves to the front of the refresh queue without bypassing its TTL, backoff or fi
 
 ## Response shapes
 
-Every route returns the same card for a resource, an occurrence or a Pubky event reference.
+Every route returns the same card for a resource or an occurrence.
 Absent values are `null`, never `""`. Text fields (`name`, `description`, `site`, and every
 text a read adds) are plain text, decoded from the source's HTML entities once: escape them
 before rendering them as HTML.
@@ -105,11 +105,10 @@ An IMDb title keeps the type its page gives (it can be either).
 | `start`, `end` | RFC 3339 instants for events and occurrences |
 | `group` | `{id, size}` when the resource or occurrence is in a [group](#groups), else `null` |
 | `also_on` | The same thing elsewhere ([Also on](#also-on)): the other members of its group as `{id, uri, site, refs?}` (other resources first, one entry each by ID, then other occurrences of its own feed), then derived links nobody tagged as `{uri, site, derived: true, via, kind?, at?}`, by service name; each with its `embed` ([Embed](#embed)) or `null`; one per service (of a recording's or an album's links, the one on the card's own release, else on the original edition), never another page of the card's own service, at most 8 on a search, lookup or group card and 256 on a resource read. A hint only: every member keeps its own card |
-| `open_in` | The clients that open a card, `[{client, url}]` (`url` is `https:`). A Pubky app's object: from the app's profile ([Pubky apps](pubky-apps.md)), e.g. Loopky for a deck; on a Pubky event reference's card, those of the event object. A card whose link is not a web page (`btc:`, `ln:`, `uniprot:`, `fr:`, …): the web page its source reads it from, named by its site, e.g. `[{"client": "mempool.space", "url": "https://mempool.space/block/…"}]`. `[]` on a web link's card, a card gone upstream and a card whose source names no page |
+| `open_in` | The clients that open a card, `[{client, url}]` (`url` is `https:`). A Pubky app's object: from the app's profile ([Pubky apps](pubky-apps.md)), e.g. Loopky for a deck. A card whose link is not a web page (`btc:`, `ln:`, `uniprot:`, `fr:`, …): the web page its source reads it from, named by its site, e.g. `[{"client": "mempool.space", "url": "https://mempool.space/block/…"}]`. `[]` on a web link's card, a card gone upstream and a card whose source names no page |
 | `attribution` | Present on OSM cards, events placed at an OSM venue and events whose zone came from coordinates; display it with the card |
 | `credits` | Where `image` and `description` came from when Pinakes added them from another source than the link ([Credits](#credits)): one entry per such field, at most 4. `[]` when none: such a field came from the link itself |
 | `occurrence` | Occurrence cards only: `{feed_id, feed_uri, uid, recurrence_id, status}`; `feed_uri` is the feed's URI, the link people tagged |
-| `event` | Pubky event references only (an event post's occurrence at a place; no feed writes them today: social events are Nexus's, see [Pubky events](#calendars-and-occurrences)): `{author, object_path, recurrence_id, start, end, status}`; `object_path` is the post's versionless path, `recurrence_id` the occurrence's local start (`YYYY-MM-DDTHH:MM:SS`) or null for a one-off |
 | `maybe_same` | Event and occurrence cards: other events that are [possibly the same event](#possibly-the-same-event), best first, each `{id, uri, site, start, score}` (`[]` when there are none). An app's store card: store cards that are [possibly the same app](#possibly-the-same-app). `MusicRecording` cards: other recordings that are [possibly the same recording](#possibly-the-same-recording), the same shape (`start` is `null`). Up to three on a search, lookup or group card, up to ten on a resource read. A hint only, like `group`. Absent on other cards, on event and app cards with `[event] same_event_hint = "off"` and on recording cards with `[groups] same_recording_hint = "off"` |
 | `because` | [Related](#related) search rows only: why the row is listed, `{shared, taggers}` (how many of the resource's taggers referenced it, and up to three of them as Pubky public keys). Absent on every other card |
 
@@ -724,12 +723,10 @@ Unknown parameters, invalid coordinates or dates, an out-of-range radius, a non-
 incompatible options return 400 (`timestamp out of range` for a date outside years 0001–9999).
 Search lists only resources with at least one public reference.
 
-**Events.** `type=Event` with `from`/`to` and `sort=start` covers Event pages with a start,
-calendar occurrences and located Pubky event references. Each of these is one result unit, so
-a calendar with three matching dates counts three times. `start` sorts exclude units without a
-start. A Pubky event result carries `event` for Nexus post hydration and no name: Pinakes keeps
-the post's time, status and place, not its text. Author and reach filters also constrain that
-post's author.
+**Events.** `type=Event` with `from`/`to` and `sort=start` covers Event pages with a start and
+calendar occurrences. Each of these is one result unit, so a calendar with three matching dates
+counts three times. `start` sorts exclude units without a start. Pubky events are Nexus's
+([Pubky events](#calendars-and-occurrences)): a client merges them with these results.
 
 **Jobs.** `type=JobPosting` with `near` or `bbox` finds postings by their workplace,
 `remote=true` the remote ones, and `from`/`to` select by the date posted (a posting's `start`).
@@ -879,10 +876,9 @@ No other search carries `because`.
   other filters, together. `/v1/info` gives every limit here. A related search costs
   `limits.related_cost` (6) units of the [per-IP budget](#limits-and-errors).
 - Only the references Pinakes copies from Nexus's feed count: the resource's taggers, and any
-  reference of theirs (a tag, a reply, an embed, a collection, an event). With `reach`, only the
+  reference of theirs (a tag, a reply, an embed, a collection). With `reach`, only the
   taggers within the viewer's reach.
-- Each resource is listed once, as its own card: never once per occurrence of a feed or per
-  event reference at a venue.
+- Each resource is listed once, as its own card: never once per occurrence of a feed.
 - A post whose author opted out of indexing is never listed, as it is never found by its text,
   and references to it count for nothing: not toward its group, and its taggers are not the
   taggers of a group it is in.
@@ -1097,8 +1093,7 @@ horizon. Mixed dated and undated RSS, Atom and JSON feeds keep their dated items
 rsvps and counts, and a client reads them there. Pinakes never fetches or indexes them; it
 indexes external events (pages, calendar feeds, NIP-52), and a client merges both. The resource
 feed carries no event lines: a `kind:event` line is skipped as `unknown_kind`, a `post` line for
-a social post is rejected. Event references (one per occurrence and place, the `event` field)
-remain in the schema and the search, but nothing writes them today.
+a social post is rejected.
 
 **NIP-52 calendars.** A calendar waits (`calendar_members_pending`) for members not yet
 resolved, at most `limits.calendar_member_wait_hours` (48) after it first listed them. A member
@@ -1937,7 +1932,7 @@ layers, with the caller's address:
 A compact card keeps `id`, `uri`, `status`, `type`, `name`, `description` (at most 300
 characters), `image`, `site`, `point`, `start`, `end`, `group`, `also_on` (`uri`, `site`, and
 `id`, `refs`, `derived`, `kind` when present), `refs`,
-`occurrence`, `event` and `attribution`, and adds `url`, the card's full read
+`occurrence` and `attribution`, and adds `url`, the card's full read
 (`GET /v1/resources/{id}`); every answer names the REST URL of its full result. A failed request
 is the tool's error (`isError`), its text `{error, status, hint, url}` with the route's status
 and message; an unknown tool is a JSON-RPC error.
