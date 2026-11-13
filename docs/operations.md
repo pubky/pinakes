@@ -681,7 +681,7 @@ when it is turned back on.
 ### Event platforms
 
 `data/event-adapters.json` declares each platform's mode, identity, cancellation signal, cadence
-floor, expected fields, user-agent profile, key requirement and canary. Configure a platform
+floor, expected fields, key requirement and canary. Configure a platform
 under `[event.adapters.platforms.<id>]` with `enabled` and `key`; a missing key disables only
 that platform and no key ever appears in `/v1/info`. Resident Advisor (an unofficial GraphQL
 API) is off by default; Posh is marked fragile. Billetto, Reservix, Rausgegangen and Entradium
@@ -690,7 +690,8 @@ a script challenge, an "update your browser" page), and a bot wall is never work
 Starticket is off: it is retired, its site redirects to See Tickets. Each platform's
 `canary_note` in the table gives the reason and when it was checked. A platform that is off
 sends its URLs to the web resolver, as `event.adapters.enabled = false` sends every platform's.
-The `browser` and `firefox` user-agent profiles imitate browsers to pass bot walls.
+Every platform is read with Pinakes's own User-Agent (`/v1/info` `user_agent`), like every other
+request; a platform that refuses it gets the same refused or failed result as any other page.
 
 Luma, Meetup, Eventbrite, Partiful, Posh, RingCentral, Airmeet, Mobilizon, Gancio, Wikidata,
 Dice, Xceed, Ents24 and Ticketino supplement JSON-LD with bounded state parsing; JavaScript is

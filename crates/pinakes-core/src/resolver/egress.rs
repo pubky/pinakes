@@ -188,6 +188,8 @@ pub struct FetchOptions {
     /// holds it. Only on a `sensitive` request.
     pub query_secret: Option<(&'static str, String)>,
     pub accept: Option<String>,
+    /// The User-Agent the transport sends: set by the egress to [`user_agent`] with the
+    /// operator's contact on every request, whatever a caller put here.
     pub user_agent: Option<String>,
     pub feed_cap: Option<usize>,
     /// A cap for every body whatever its type, HTML too, in place of the default: a larger body
@@ -1038,16 +1040,8 @@ impl Egress {
                 }
             }
             let mut observation = crate::telemetry::FetchGuard::start();
-            let default_agent = options
-                .user_agent
-                .as_deref()
-                .is_none_or(|ua| ua == USER_AGENT);
             let with_agent = FetchOptions {
-                user_agent: if default_agent && !self.cfg.contact.is_empty() {
-                    Some(user_agent(&self.cfg.contact))
-                } else {
-                    options.user_agent.clone()
-                },
+                user_agent: Some(user_agent(&self.cfg.contact)),
                 head_cap: options.head_cap.or(Some(self.cfg.html_head_bytes)),
                 ..options.clone()
             };
@@ -1581,8 +1575,10 @@ mod tests {
         }
         server.abort();
     }
+    /// Every request carries Pinakes's own User-Agent, with the operator's contact when one is
+    /// set; a caller's value never reaches the wire.
     #[tokio::test]
-    async fn the_default_agent_carries_the_operator_contact() {
+    async fn every_request_carries_the_own_agent_with_the_operator_contact() {
         #[derive(Default)]
         struct Agents(std::sync::Mutex<Vec<Option<String>>>);
         #[async_trait]
@@ -1616,14 +1612,15 @@ mod tests {
             env!("CARGO_PKG_VERSION")
         );
         for (contact, agent, sent) in [
-            ("info@synonym.to", None, Some(with_contact.as_str())),
+            ("info@synonym.to", None, with_contact.as_str()),
+            ("info@synonym.to", Some(USER_AGENT), with_contact.as_str()),
             (
                 "info@synonym.to",
-                Some(USER_AGENT),
-                Some(with_contact.as_str()),
+                Some("Browser/1.0"),
+                with_contact.as_str(),
             ),
-            ("info@synonym.to", Some("Browser/1.0"), Some("Browser/1.0")),
-            ("", None, None),
+            ("", None, USER_AGENT),
+            ("", Some("Browser/1.0"), USER_AGENT),
         ] {
             let transport = Arc::new(Agents::default());
             let egress = Egress::with_backends(
@@ -1643,7 +1640,7 @@ mod tests {
                 .fetch_with("https://public.example/api", &options)
                 .await
                 .unwrap();
-            assert_eq!(transport.0.lock().unwrap()[0].as_deref(), sent);
+            assert_eq!(transport.0.lock().unwrap()[0].as_deref(), Some(sent));
         }
     }
     /// An HTML page past the page cap is read on to the head budget, whole when it ends before
