@@ -288,7 +288,7 @@ none by default, and the example configuration has only a commented placeholder.
 address the services you read can reach: some refuse requests without one, and the links of the
 sources that need it (SEC EDGAR) wait until it is set. The User-Agent never names a code-hosting
 site, which some services refuse as an undeclared tool. Event platform adapters send the same
-User-Agent; no caller can set another.
+User-Agent.
 
 The official-API sources ([docs/sources](sources/README.md)) run on the `official` card route
 (`[cards.official]`), each with its own switch, `[sources.<name>] enabled` (on by default;
