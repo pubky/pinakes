@@ -491,7 +491,7 @@ impl Source for Forgejo {
     }
     fn budgets(&self) -> &'static [Budget] {
         // Codeberg: 2,000 requests per 10 minutes.
-        &[("codeberg.org", 2.0, None)]
+        &[("codeberg.org", 2.0)]
     }
     fn examples(&self) -> &'static [Example] {
         &[

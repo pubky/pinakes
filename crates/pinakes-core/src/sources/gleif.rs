@@ -176,7 +176,7 @@ impl Source for Gleif {
         ]
     }
     fn budgets(&self) -> &'static [Budget] {
-        &[("api.gleif.org", 1.0, None)]
+        &[("api.gleif.org", 1.0)]
     }
     fn examples(&self) -> &'static [Example] {
         &[

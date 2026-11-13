@@ -56,8 +56,8 @@ Tests use local servers, injected transports and recorded fixtures instead of pu
   - `telemetry.rs`, `canary.rs`, `maintenance.rs`, `osm_dump.rs`, `locks.rs`.
 - `crates/pinakes-core/tests/`: integration tests; `fixtures/` holds recorded responses, each
   directory with a README or `provenance.json` saying where they came from.
-- `crates/pinakes-core/examples/`: `e2e_stack` (the e2e harness's daemon), `adapter_probe` and
-  `event_probe` (read-only canary probes).
+- `crates/pinakes-core/examples/`: `e2e_stack` (the e2e harness's daemon) and `adapter_probe`
+  (a read-only canary probe).
 - `crates/pinakesd/`: the daemon binary.
 - `migrations/0001_schema.sql`: the schema.
 - `data/`: pinned data sets (schema.org, oEmbed registry, event adapters, wall markers, tenant

@@ -88,29 +88,6 @@ pub async fn fetch(cx: &Context<'_>, request: &Request) -> Result<Fetched> {
     cx.fetch(request.url.as_str(), &request.options()).await
 }
 
-/// A link to the same object on another service. The step-8 foundation shows these; the sources
-/// only derive them from exact ids.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Link {
-    /// The service's name as shown to people, e.g. "Blockstream Explorer".
-    pub site: String,
-    pub uri: String,
-    /// The source the link was derived from, e.g. `mempool`.
-    pub via: &'static str,
-    /// What the link is, when the service offers more than one kind, e.g. `pdf`.
-    pub kind: Option<&'static str>,
-}
-impl Link {
-    pub fn new(site: impl Into<String>, uri: impl Into<String>, via: &'static str) -> Self {
-        Self {
-            site: site.into(),
-            uri: uri.into(),
-            via,
-            kind: None,
-        }
-    }
-}
-
 /// An exact join key, `{namespace}:{value}`, e.g. `doi:10.5281/zenodo.1234567` or
 /// `wikidata:Q12418`.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -172,8 +149,6 @@ pub struct Card {
     pub details: BTreeMap<&'static str, Value>,
     /// Other ids of the same object that it proves, e.g. `doi:…`.
     pub keys: Vec<Key>,
-    /// The same object elsewhere, for the step-8 foundation.
-    pub also_on: Vec<Link>,
     /// The objects it points at (`model::Related`), in the order a client lists them.
     pub related: Vec<crate::model::Related>,
     /// How many entries of a `rel` there are when `related` holds fewer of them.
@@ -195,7 +170,6 @@ impl Card {
             attribution: None,
             details: BTreeMap::new(),
             keys: vec![],
-            also_on: vec![],
             related: vec![],
             related_total: BTreeMap::new(),
         }
@@ -217,11 +191,6 @@ impl Card {
     pub fn key(&mut self, key: Key) {
         if !self.keys.contains(&key) {
             self.keys.push(key);
-        }
-    }
-    pub fn link(&mut self, link: Link) {
-        if link.uri != self.url && !self.also_on.iter().any(|l| l.uri == link.uri) {
-            self.also_on.push(link);
         }
     }
 
@@ -659,14 +628,12 @@ mod tests {
     }
 
     #[test]
-    fn card_skips_empty_details_and_self_links() {
+    fn card_skips_empty_details() {
         let mut card = Card::new("Thing", "x:1".into(), "https://a/1".into());
         card.detail("empty", "");
         card.detail("none", Value::Null);
         card.detail("n", 3);
-        card.link(Link::new("A", "https://a/1", "x"));
         assert_eq!(card.details.keys().collect::<Vec<_>>(), [&"n"]);
-        assert!(card.also_on.is_empty());
     }
 
     #[test]

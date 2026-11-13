@@ -2416,8 +2416,7 @@ async fn a_panicking_source_never_stops_the_worker(pool: PgPool) {
     }
 }
 
-/// Looks up the barcodes the sources before it found, like iTunes: one keyed link each. Off by
-/// default.
+/// Looks up the barcodes the sources before it found, like iTunes: one keyed link each.
 struct ByBarcode {
     named: &'static str,
 }
@@ -2428,9 +2427,6 @@ impl Source for ByBarcode {
     }
     fn applies(&self, subject: &Subject) -> bool {
         subject.keys_in("upc").next().is_some()
-    }
-    fn enabled_by_default(&self) -> bool {
-        false
     }
     async fn lookup(&self, _: &Context, subject: &Subject) -> anyhow::Result<Found> {
         let upc = subject.keys_in("upc").next().unwrap();
@@ -2462,8 +2458,16 @@ async fn a_link_an_exact_lookup_names_joins_by_its_key(pool: PgPool) {
         }),
     );
     let sources: Vec<Arc<dyn Source>> = vec![hub.clone(), Arc::new(ByBarcode { named: apple })];
-    // Off by default: nothing is named.
-    drain(&pool, &cx(Config::default()), &sources).await;
+    // Switched off: nothing is named.
+    let mut off = Config::default();
+    off.also_on.sources.insert(
+        "by_barcode".into(),
+        also_on::SourceOptions {
+            enabled: Some(false),
+            ..Default::default()
+        },
+    );
+    drain(&pool, &cx(off), &sources).await;
     let named = || async {
         sqlx::query_scalar::<_, String>(
             "SELECT uri||' '||coalesce(key,'-') FROM derived_link ORDER BY uri",

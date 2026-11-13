@@ -408,7 +408,7 @@ impl Source for HuggingFace {
         ]
     }
     fn budgets(&self) -> &'static [super::Budget] {
-        &[("huggingface.co", 1.6, None)]
+        &[("huggingface.co", 1.6)]
     }
     fn examples(&self) -> &'static [Example] {
         &[

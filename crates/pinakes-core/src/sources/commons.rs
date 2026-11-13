@@ -353,7 +353,7 @@ impl Source for Commons {
         ]
     }
     fn budgets(&self) -> &'static [super::Budget] {
-        &[("commons.wikimedia.org", 1.0, Some(1))]
+        &[("commons.wikimedia.org", 1.0)]
     }
     fn examples(&self) -> &'static [Example] {
         &[

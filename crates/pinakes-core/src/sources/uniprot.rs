@@ -13,7 +13,7 @@
 //! naming the accessions that replace it, and a deleted one is missing. The data is CC BY 4.0,
 //! credited to UniProt.
 use super::{
-    kit::{encode, fetch, host_and_segments, int, json, text, Card, Link, Request},
+    kit::{encode, fetch, host_and_segments, int, json, text, Card, Request},
     Example, Source,
 };
 use crate::model::ResourceMeta;
@@ -22,7 +22,6 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 pub const SITE: &str = "UniProt";
-const VIA: &str = "uniprot";
 pub const ATTRIBUTION: &str = "UniProt (CC BY 4.0)";
 /// How many PDB structures the card lists.
 const PDB_IDS: usize = 5;
@@ -283,13 +282,6 @@ fn entry(v: &Value, acc: &str) -> Result<Option<Entry>> {
         pdb.iter().take(PDB_IDS).cloned().collect::<Vec<_>>(),
     );
     card.detail("pdb_count", (!pdb.is_empty()).then_some(pdb.len()));
-    if ids("AlphaFoldDB").any(|a| accession(&a).as_deref() == Some(acc)) {
-        card.link(Link::new(
-            "AlphaFold DB",
-            format!("https://alphafold.ebi.ac.uk/entry/{acc}"),
-            VIA,
-        ));
-    }
     Ok(Some(Entry::Card(Box::new(card))))
 }
 
@@ -361,7 +353,7 @@ impl Source for Uniprot {
         ]
     }
     fn budgets(&self) -> &'static [super::Budget] {
-        &[("rest.uniprot.org", 1.0, None)]
+        &[("rest.uniprot.org", 1.0)]
     }
     fn examples(&self) -> &'static [Example] {
         &[
@@ -587,11 +579,6 @@ mod tests {
         );
         assert_eq!(d["pdb_count"], 355);
         assert!(card.keys.is_empty());
-        assert_eq!(card.also_on.len(), 1);
-        assert_eq!(
-            card.also_on[0].uri,
-            "https://alphafold.ebi.ac.uk/entry/P69905"
-        );
         assert!(parse(200, &read("search-p69905.json"), "P04637").is_err());
     }
 

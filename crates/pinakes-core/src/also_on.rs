@@ -96,13 +96,13 @@ impl AlsoOnConfig {
     pub fn source_enabled(&self, source: &dyn Source) -> bool {
         self.enabled && self.source_on(source)
     }
-    /// Whether the operator has the source on (`[also_on.sources.<id>] enabled`, else its
-    /// default), whether or not the worker runs (`[also_on] enabled`).
+    /// Whether the operator has the source on (`[also_on.sources.<id>] enabled`, on when
+    /// unset), whether or not the worker runs (`[also_on] enabled`).
     pub fn source_on(&self, source: &dyn Source) -> bool {
         self.sources
             .get(source.id())
             .and_then(|s| s.enabled)
-            .unwrap_or(source.enabled_by_default())
+            .unwrap_or(true)
     }
     /// The MusicBrainz web service: `[also_on.sources.musicbrainz] base_url`, or the public one.
     pub fn musicbrainz_base(&self) -> &str {
@@ -292,10 +292,6 @@ pub trait Source: Send + Sync {
     /// Before a batch of resources (their URIs): ask the service, in as few requests as it
     /// allows, what this source will ask for each, so their lookups find it cached. Best effort.
     async fn prefetch(&self, _cx: &Context, _uris: &[String]) {}
-    /// Whether it runs without `[also_on.sources.<id>] enabled = true`.
-    fn enabled_by_default(&self) -> bool {
-        true
-    }
     /// Whether the configuration lets it run (a service that needs the operator's credentials
     /// is off without them).
     fn ready(&self, _config: &Config) -> bool {

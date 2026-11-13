@@ -12,14 +12,6 @@ pub mod jobs;
 pub mod products;
 pub mod questions;
 
-/// Every attribute a kind's card may store.
-pub const ATTRIBUTES: &[&[&str]] = &[
-    jobs::FACTS,
-    products::FACTS,
-    questions::FACTS,
-    cooking::FACTS,
-];
-
 /// `facts` for a card of one of these kinds: `own` (its source's facts, if any) with the
 /// kind's facts and what follows from them at `now` (a job posting's `job_status`).
 pub fn facts(
@@ -52,10 +44,17 @@ pub fn facts(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn a_kinds_facts_are_stored_by_every_route() {
-        for facts in super::ATTRIBUTES {
-            for fact in *facts {
+        for facts in [
+            jobs::FACTS,
+            products::FACTS,
+            questions::FACTS,
+            cooking::FACTS,
+        ] {
+            for fact in facts {
                 assert!(
                     crate::resolver::web::ATTRIBUTES.contains(fact),
                     "{fact} is not a web attribute"

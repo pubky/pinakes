@@ -8,7 +8,7 @@ pub const ATTRIBUTES: &[&str] = &["precision"];
 #[derive(Default)]
 pub struct GeoResolver;
 
-fn number(s: &str, signed: bool, _integer_digits: usize) -> Result<f64> {
+fn number(s: &str, signed: bool) -> Result<f64> {
     let unsigned = if signed {
         s.strip_prefix('-').unwrap_or(s)
     } else {
@@ -58,14 +58,14 @@ pub fn parse(uri: &str) -> Result<ResourceMeta> {
         (2..=3).contains(&coords.len()),
         "geo requires latitude,longitude[,altitude]"
     );
-    let lat = number(coords[0], true, 2)?;
-    let lon = number(coords[1], true, 3)?;
+    let lat = number(coords[0], true)?;
+    let lon = number(coords[1], true)?;
     ensure!(
         (-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon),
         "coordinate out of range"
     );
     if let Some(alt) = coords.get(2) {
-        number(alt, true, usize::MAX)?;
+        number(alt, true)?;
     }
     let (mut crs, mut uncertainty, mut extra) = (false, false, false);
     for parameter in pieces {
@@ -96,7 +96,6 @@ pub fn parse(uri: &str) -> Result<ResourceMeta> {
                 number(
                     value.ok_or_else(|| anyhow::anyhow!("missing uncertainty"))?,
                     false,
-                    usize::MAX,
                 )?;
                 uncertainty = true;
             }
@@ -173,12 +172,12 @@ impl LocationLink {
     }
 }
 fn text_point(lat: &str, lon: &str, zoom: Option<String>) -> Option<LocationLink> {
-    let (lat_n, lon_n) = (number(lat, true, 2).ok()?, number(lon, true, 3).ok()?);
+    let (lat_n, lon_n) = (number(lat, true).ok()?, number(lon, true).ok()?);
     if !(-90.0..=90.0).contains(&lat_n) || !(-180.0..=180.0).contains(&lon_n) {
         return None;
     }
     let zoom = match zoom {
-        Some(z) => Some(number(&z, false, 2).ok().filter(|z| *z <= 25.0)?),
+        Some(z) => Some(number(&z, false).ok().filter(|z| *z <= 25.0)?),
         None => None,
     };
     Some(LocationLink {

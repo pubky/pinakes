@@ -94,7 +94,7 @@ fn captured_walls_stubs_and_content_are_distinguished() {
 #[tokio::test]
 async fn real_http_error_bodies_reach_interstitial_detection_with_a_cap() {
     use axum::{http::StatusCode, routing::get, Router};
-    use pinakes_core::resolver::egress::read_response;
+    use pinakes_core::resolver::egress::read_response_with;
     let app = Router::new()
         .route(
             "/forbidden",
@@ -147,7 +147,8 @@ async fn real_http_error_bodies_reach_interstitial_detection_with_a_cap() {
         ("ordinary", 503, Page::Content),
     ] {
         let uri: Url = format!("http://{address}/{path}").parse().unwrap();
-        let f = read_response(uri.clone(), client.get(uri.clone()).send().await.unwrap())
+        let response = client.get(uri.clone()).send().await.unwrap();
+        let f = read_response_with(uri.clone(), response, &Default::default())
             .await
             .unwrap();
         assert_eq!(f.status, status);

@@ -619,8 +619,6 @@ pub struct SearchQuery {
     /// its subtypes (`Event` leaves `MusicEvent` out too). A link with no type yet (not read, or
     /// unreachable) is left out, as the `type` facet does not count it. Combines with `type`:
     /// `type=CreativeWork&exclude_type=Article`.
-    // Left out of the query's hash when absent, so a query without it keeps its cursor and ETag.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub exclude_type: Option<String>,
     pub category: Option<String>,
     /// One host, or up to 10 comma-separated: links on any of them (OR), each exactly as the
@@ -708,7 +706,6 @@ pub enum CollapseMode {
 }
 #[derive(Deserialize, Serialize)]
 struct PageCursor {
-    version: u8,
     score: f64,
     id: String,
     at: DateTime<Utc>,
@@ -2514,8 +2511,7 @@ pub async fn search(
         .to_hex()
         .to_string();
     if let Some(c) = &cursor {
-        if c.version != 2
-            || c.filter != filter
+        if c.filter != filter
             || !c.score.is_finite()
             || !model::valid_id(&c.id)
             || c.at > state.now() + chrono::Duration::seconds(5)
@@ -3008,7 +3004,6 @@ pub async fn search(
         let last = items.last().expect("nonempty page");
         Some(
             PageCursor {
-                version: 2,
                 score: last["rank"].as_f64().context("missing rank")?,
                 id: last["unit_id"]
                     .as_str()
@@ -4497,26 +4492,6 @@ mod tests {
             assert!(start(longer_or_other).is_none(), "{longer_or_other:?}");
         }
     }
-    /// A query without `exclude_type` hashes as it did before the parameter existed: its cursors
-    /// and ETags do not move; with it, the hash differs.
-    #[test]
-    fn an_absent_exclusion_is_not_in_the_query_hash() {
-        let plain = SearchQuery {
-            type_name: Some("Event".into()),
-            ..Default::default()
-        };
-        let value = serde_json::to_value(&plain).unwrap();
-        assert!(value.get("exclude_type").is_none(), "{value}");
-        assert_eq!(value["type"], "Event");
-        let excluding = SearchQuery {
-            exclude_type: Some("Event".into()),
-            ..Default::default()
-        };
-        assert_eq!(
-            serde_json::to_value(&excluding).unwrap()["exclude_type"],
-            "Event"
-        );
-    }
     /// A tag equals a text search when it spells the same words joined by a space, a hyphen, an
     /// underscore or nothing, in any case; and an empty `q` ranks nothing by relevance.
     #[test]
@@ -4792,7 +4767,6 @@ mod tests {
             seed ^= seed << 17;
             let score = (seed >> 11) as f64 / (1u64 << 53) as f64 * (-((seed % 40) as f64)).exp();
             let cursor = PageCursor {
-                version: 2,
                 score,
                 id: "0".repeat(32),
                 at: Utc::now(),

@@ -189,7 +189,7 @@ impl Source for FDroid {
         ]
     }
     fn budgets(&self) -> &'static [super::Budget] {
-        &[("f-droid.org", 1.0, None)]
+        &[("f-droid.org", 1.0)]
     }
     fn examples(&self) -> &'static [Example] {
         &[Example {

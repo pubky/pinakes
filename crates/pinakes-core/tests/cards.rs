@@ -883,9 +883,10 @@ async fn recorded_youtube_head_and_oembed_survive_oversize_or_failed_page() {
             } else {
                 "/watch"
             };
-            pinakes_core::resolver::egress::read_response(
+            pinakes_core::resolver::egress::read_response_with(
                 u.clone(),
                 reqwest::get(format!("{}{path}", self.base)).await?,
+                &FetchOptions::default(),
             )
             .await
         }

@@ -377,9 +377,6 @@ pub fn page_fits(f: &Fetched) -> bool {
         ) && f.body.len() <= MAX_HTML_HEAD_BYTES)
 }
 
-pub async fn read_response(url: Url, response: reqwest::Response) -> Result<Fetched> {
-    read_response_with(url, response, &FetchOptions::default()).await
-}
 pub async fn read_response_with(
     url: Url,
     mut response: reqwest::Response,
@@ -722,9 +719,12 @@ impl Egress {
         }
     }
     pub async fn fetch(&self, uri: &str) -> Result<Fetched> {
-        tokio::time::timeout(Duration::from_secs(10), self.fetch_inner(uri))
-            .await
-            .context("web resolution exceeded 10 seconds")?
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            self.fetch_options_inner(uri, &FetchOptions::default()),
+        )
+        .await
+        .context("web resolution exceeded 10 seconds")?
     }
     pub async fn fetch_with(&self, uri: &str, options: &FetchOptions) -> Result<Fetched> {
         options.one_body()?;
@@ -980,10 +980,6 @@ impl Egress {
             },
         );
         result
-    }
-    async fn fetch_inner(&self, uri: &str) -> Result<Fetched> {
-        self.fetch_options_inner(uri, &FetchOptions::default())
-            .await
     }
     async fn fetch_options_inner(&self, uri: &str, options: &FetchOptions) -> Result<Fetched> {
         let requested = Url::parse(uri)?;
@@ -2510,7 +2506,9 @@ mod tests {
             let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
             let url = Url::parse(&format!("http://{addr}/")).unwrap();
             let response = reqwest::get(url.clone()).await.unwrap();
-            let f = read_response(url, response).await.unwrap();
+            let f = read_response_with(url, response, &Default::default())
+                .await
+                .unwrap();
             assert!(f.truncated);
             assert_eq!(f.body.len(), BODY_CAP);
             task.abort();
@@ -2952,7 +2950,8 @@ mod tests {
             .unwrap()
         });
         let url = Url::parse(&format!("http://{addr}/")).unwrap();
-        let fetched = read_response(url.clone(), reqwest::get(url).await.unwrap())
+        let response = reqwest::get(url.clone()).await.unwrap();
+        let fetched = read_response_with(url, response, &Default::default())
             .await
             .unwrap();
         // Whole headers only, up to 2 KB.
@@ -2979,7 +2978,8 @@ mod tests {
             .unwrap()
         });
         let url = Url::parse(&format!("http://{addr}/")).unwrap();
-        let error = read_response(url.clone(), reqwest::get(url.clone()).await.unwrap())
+        let response = reqwest::get(url.clone()).await.unwrap();
+        let error = read_response_with(url.clone(), response, &Default::default())
             .await
             .unwrap_err();
         assert!(error.to_string().contains("content type"));

@@ -125,7 +125,7 @@ impl Source for Flathub {
         ]
     }
     fn budgets(&self) -> &'static [super::Budget] {
-        &[("flathub.org", 1.0, None)]
+        &[("flathub.org", 1.0)]
     }
     fn examples(&self) -> &'static [Example] {
         &[Example {

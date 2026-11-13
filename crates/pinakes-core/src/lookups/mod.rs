@@ -651,7 +651,6 @@ mod tests {
             let _ = wikidata::parse_entities(status, raw);
             if let Ok(v) = serde_json::from_slice::<serde_json::Value>(raw) {
                 let _ = wikidata::best_values(&v, "P402");
-                let _ = wikidata::wikipedia(&v);
             }
         }
     }

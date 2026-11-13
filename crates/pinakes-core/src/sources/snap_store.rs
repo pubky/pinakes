@@ -116,7 +116,7 @@ impl Source for SnapStore {
         &["page_url", "developer", "category", "website", "license"]
     }
     fn budgets(&self) -> &'static [super::Budget] {
-        &[("api.snapcraft.io", 1.0, None)]
+        &[("api.snapcraft.io", 1.0)]
     }
     fn examples(&self) -> &'static [Example] {
         &[Example {

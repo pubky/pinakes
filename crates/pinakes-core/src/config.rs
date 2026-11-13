@@ -474,8 +474,7 @@ impl Default for EventConfig {
         }
     }
 }
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Clone, Debug)]
 pub struct IngestConfig {
     pub max_label_bytes: usize,
     pub max_object_path_bytes: usize,
@@ -710,10 +709,8 @@ impl Default for EgressConfig {
         }
     }
 }
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Clone, Debug)]
 pub struct QueueConfig {
-    #[serde(skip)]
     pub groups: crate::groups::GroupConfig,
     pub max_failures: u32,
     pub timeout_grace: u32,
@@ -737,8 +734,7 @@ impl Default for QueueConfig {
         }
     }
 }
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Clone, Debug)]
 pub struct PreviewConfig {
     pub requests_per_minute: usize,
     pub uri_requests_per_minute: usize,
@@ -787,8 +783,7 @@ impl Default for OsmConfig {
         }
     }
 }
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Clone, Debug)]
 pub struct SearchConfig {
     pub reach_timeout_secs: u64,
     /// The taggers a related page samples: the authors of a resource's most recent tags, at most
@@ -871,8 +866,7 @@ impl Default for GeoConfig {
         Self { enabled: true }
     }
 }
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Clone, Debug)]
 pub struct RefreshConfig {
     pub resource_secs: [u64; 4],
     pub container_secs: [u64; 4],

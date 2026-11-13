@@ -192,11 +192,7 @@ fn segments(uri: &str) -> Option<(String, Vec<String>)> {
     (all.first().map(String::as_str) == Some("pub")).then(|| (owner, all.split_off(1)))
 }
 
-/// The card of a fetched object: its kind's, or the general card.
-pub fn card(uri: &str, content_type: &str, body: &[u8], ttl: u64) -> ResourceMeta {
-    card_at(uri, content_type, body, ttl, chrono::Utc::now())
-}
-/// The card of an object fetched at `now`.
+/// The card of an object fetched at `now`: its kind's, or the general card.
 pub fn card_at(
     uri: &str,
     content_type: &str,

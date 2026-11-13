@@ -41,6 +41,10 @@ pub fn needs_embed(doc: &ResourceMeta) -> bool {
 }
 /// Card routes. `official` reads a service's own API (`crate::sources`).
 pub const KINDS: [&str; 6] = ["media", "isbn", "doi", "nostr", "activitypub", "official"];
+/// Open Library's Books API, which the `isbn` route reads.
+const OPENLIBRARY_URL: &str = "https://openlibrary.org/api/books";
+/// The DOI resolver, which the `doi` route reads.
+const DOI_URL: &str = "https://doi.org/";
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CardConfig {
@@ -51,10 +55,6 @@ pub struct CardConfig {
     pub nostr: ResolverConfig,
     pub activitypub: ResolverConfig,
     pub official: ResolverConfig,
-    #[serde(skip)]
-    pub openlibrary_url: String,
-    #[serde(skip)]
-    pub doi_url: String,
     #[serde(skip)]
     pub podcast_items: usize,
 }
@@ -67,8 +67,6 @@ impl Default for CardConfig {
             nostr: Default::default(),
             activitypub: Default::default(),
             official: Default::default(),
-            openlibrary_url: "https://openlibrary.org/api/books".into(),
-            doi_url: "https://doi.org/".into(),
             podcast_items: 1000,
         }
     }
@@ -95,15 +93,6 @@ impl CardConfig {
                     && c.requests_per_second <= 100.0
                     && (3600..=31536000).contains(&c.ttl_secs),
                 "invalid card resolver configuration"
-            );
-        }
-        for uri in [&self.openlibrary_url, &self.doi_url] {
-            let u = Url::parse(uri)?;
-            ensure!(
-                matches!(u.scheme(), "http" | "https")
-                    && u.username().is_empty()
-                    && u.password().is_none(),
-                "invalid identifier endpoint"
             );
         }
         ensure!(
@@ -391,8 +380,8 @@ impl Resolver for CardResolver {
             return true;
         };
         let endpoint = match self.kind {
-            "isbn" => self.config.cards.openlibrary_url.clone(),
-            "doi" => self.config.cards.doi_url.clone(),
+            "isbn" => OPENLIBRARY_URL.to_owned(),
+            "doi" => DOI_URL.to_owned(),
             "media" => provider_endpoint(canary.as_str())
                 .map(|u| u.to_string())
                 .unwrap_or_else(|| canary.to_string()),
@@ -406,7 +395,7 @@ impl Resolver for CardResolver {
             match self.kind {
                 "isbn" => {
                     let Some(number) = isbn(uri) else { return Ok(missing(uri,"isbn",0)); };
-                    let mut url = Url::parse(&self.config.cards.openlibrary_url)?;
+                    let mut url = Url::parse(OPENLIBRARY_URL)?;
                     url.query_pairs_mut()
                         .append_pair("bibkeys", &format!("ISBN:{number}"))
                         .append_pair("format", "json")
@@ -417,7 +406,7 @@ impl Resolver for CardResolver {
                 }
                 "doi" => {
                     let Some(number) = doi(uri) else { return Ok(missing(uri,"doi",0)); };
-                    let mut url = Url::parse(&self.config.cards.doi_url)?;
+                    let mut url = Url::parse(DOI_URL)?;
                     url.set_path(&format!(
                         "{}{}",
                         url.path().trim_end_matches('/').to_owned() + "/",

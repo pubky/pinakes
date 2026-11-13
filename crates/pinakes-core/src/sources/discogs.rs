@@ -288,7 +288,7 @@ impl Source for Discogs {
         &["artist", "year", "format", "country", "upc", "master"]
     }
     fn budgets(&self) -> &'static [Budget] {
-        &[("api.discogs.com", 25.0 / 60.0, None)]
+        &[("api.discogs.com", 25.0 / 60.0)]
     }
     fn examples(&self) -> &'static [Example] {
         &[

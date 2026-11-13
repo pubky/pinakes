@@ -3389,11 +3389,12 @@ async fn a_deleted_pubky_post_loses_its_excerpt(pool: PgPool) {
     let uri = format!("pubky://{}/pub/mapky.app/posts/0034A0X7NJ52G", author(7));
     let id = store::ensure_resource(&pool, &uri).await.unwrap();
     let body = json!({"content": format!("Sunrise over the lake {}", "x".repeat(400))});
-    let doc = pinakes_core::resolver::pubky_apps::card(
+    let doc = pinakes_core::resolver::pubky_apps::card_at(
         &uri,
         "application/json",
         body.to_string().as_bytes(),
         86400,
+        Utc::now(),
     );
     assert!(pinakes_core::resolver::cards::social(&doc));
     assert_eq!(doc.description.as_ref().unwrap().chars().count(), 200);

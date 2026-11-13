@@ -282,7 +282,7 @@ impl Source for Reddit {
     }
     fn budgets(&self) -> &'static [super::Budget] {
         // Reddit's published limit for requests without an account: 10 per minute.
-        &[("www.reddit.com", 10.0 / 60.0, None)]
+        &[("www.reddit.com", 10.0 / 60.0)]
     }
     /// A post's card, and its blocked card (a post Reddit refused to show), whose type is the
     /// same: storage asks the stored card whether to purge the post's history once it is gone.
