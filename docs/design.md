@@ -124,7 +124,7 @@ Postgres with PostGIS and full-text search **(arbitrary)**; any database with sp
 
 ### 5.5 API {#api}
 
-Every `/v1` route returns one card, `{id, uri, status, type, name, description, image, site, point, start, end, group, also_on}` (events add `event` and `maybe_same`, occurrences `occurrence`; [api.md](api.md#card) has the full shape), and lists carry an opaque cursor; limit default 50, maximum 500 **(arbitrary)**. Score stays internal to ranking and pagination.
+Every `/v1` route returns one card, `{id, uri, status, type, name, description, image, site, point, start, end, group, also_on}` (events add `maybe_same`, occurrences `occurrence`; [api.md](api.md#card) has the full shape), and lists carry an opaque cursor; limit default 50, maximum 500 **(arbitrary)**. Score stays internal to ranking and pagination.
 
 | Route | What it does |
 |---|---|

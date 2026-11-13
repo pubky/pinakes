@@ -106,7 +106,7 @@ fn evidence(row: &Value) -> Vec<String> {
         keys.insert(format!("ics_uid:{}", uid_hash(uid)));
         return keys.into_iter().collect();
     }
-    if !row["event"].is_null() || row["source"] == "geo" {
+    if row["source"] == "geo" {
         return vec![];
     }
     // Events group only with events: an event page's hub keys name what it is about (a concert's
@@ -242,9 +242,9 @@ fn open_library_edition(url: &str) -> bool {
         ) && u.path().starts_with("/books/")
     })
 }
-/// A unit of a resource (itself, or one occurrence): its ID, occurrence key, occurrence and event
-/// references, and grouping keys.
-type Unit = (String, String, Option<Value>, Option<Value>, Vec<String>);
+/// A unit of a resource (itself, or one occurrence): its ID, occurrence key, occurrence
+/// reference, and grouping keys.
+type Unit = (String, String, Option<Value>, Vec<String>);
 pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfig) -> Result<()> {
     if !cfg.enabled {
         return Ok(());
@@ -263,7 +263,7 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
     .bind(id)
     .fetch_all(&mut **tx)
     .await?;
-    let rows: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('unit_id',unit_id,'resource_id',id,'uri',uri,'keys',coalesce(doc->'group_keys','[]'),'type_path',type_path,'hub_keys',coalesce((SELECT jsonb_agg(h.key ORDER BY h.key) FROM (SELECT k.key FROM resource_key k WHERE k.resource_id=search_unit.id AND k.expires_at>now() AND k.source NOT IN (SELECT source FROM also_on_source_off) UNION SELECT l.key FROM derived_link l WHERE l.link_id=search_unit.id AND l.key IS NOT NULL AND l.expires_at>now() AND l.source NOT IN (SELECT source FROM also_on_source_off)) h),'[]'),'occurrence',occurrence,'event',event,'source',doc->>'source','lat',ST_Y(point),'lon',ST_X(point),'start',start_at,'trigrams',show_trgm(array_to_string(tsvector_to_array(to_tsvector('simple',coalesce(name,''))),' '))) FROM search_unit WHERE id=$1 LIMIT $2")
+    let rows: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('unit_id',unit_id,'resource_id',id,'uri',uri,'keys',coalesce(doc->'group_keys','[]'),'type_path',type_path,'hub_keys',coalesce((SELECT jsonb_agg(h.key ORDER BY h.key) FROM (SELECT k.key FROM resource_key k WHERE k.resource_id=search_unit.id AND k.expires_at>now() AND k.source NOT IN (SELECT source FROM also_on_source_off) UNION SELECT l.key FROM derived_link l WHERE l.link_id=search_unit.id AND l.key IS NOT NULL AND l.expires_at>now() AND l.source NOT IN (SELECT source FROM also_on_source_off)) h),'[]'),'occurrence',occurrence,'source',doc->>'source','lat',ST_Y(point),'lon',ST_X(point),'start',start_at,'trigrams',show_trgm(array_to_string(tsvector_to_array(to_tsvector('simple',coalesce(name,''))),' '))) FROM search_unit WHERE id=$1 LIMIT $2")
         .bind(id)
         .bind((cfg.max_graph_units + 1) as i64)
         .fetch_all(&mut **tx)
@@ -287,13 +287,12 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
                     .unwrap()
                 },
                 r.get("occurrence").filter(|v| !v.is_null()).cloned(),
-                r.get("event").filter(|v| !v.is_null()).cloned(),
                 evidence(r),
             )
         })
         .collect();
     let ids: Vec<String> = units.iter().map(|u| u.0.clone()).collect();
-    let keys: Vec<String> = units.iter().flat_map(|u| u.4.clone()).collect();
+    let keys: Vec<String> = units.iter().flat_map(|u| u.3.clone()).collect();
     let facts: Vec<_> = rows
         .iter()
         .map(|r| (&r["lat"], &r["lon"], &r["start"], &r["trigrams"]))
@@ -323,7 +322,7 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
     check_revisions(tx, &revisions).await?;
     // This resource's units take their new keys and facts, keeping each key's admission time.
     let mut incoming = Vec::new();
-    for ((unit, _, occurrence, _, unit_keys), row) in units.iter().zip(&rows) {
+    for ((unit, _, occurrence, unit_keys), row) in units.iter().zip(&rows) {
         let mut trigrams: Vec<String> =
             serde_json::from_value(row["trigrams"].clone()).unwrap_or_default();
         trigrams.sort();
@@ -370,14 +369,14 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
     for chunk in units.chunks(256) {
         let data: Vec<_> = chunk
             .iter()
-            .map(|u| json!({"unit":u.0,"resource":id,"occurrence":u.1,"occurrence_ref":u.2,"event_ref":u.3,"keys":u.4}))
+            .map(|u| json!({"unit":u.0,"resource":id,"occurrence":u.1,"occurrence_ref":u.2,"keys":u.3}))
             .collect();
-        sqlx::query("INSERT INTO group_unit(unit_id,resource_id,occurrence_key,occurrence,event) SELECT v->>'unit',v->>'resource',v->>'occurrence',nullif(v->'occurrence_ref','null'::jsonb),nullif(v->'event_ref','null'::jsonb) FROM jsonb_array_elements($1) v ON CONFLICT(unit_id) DO UPDATE SET occurrence_key=excluded.occurrence_key,occurrence=excluded.occurrence,event=excluded.event").bind(json!(data)).execute(&mut **tx).await?;
+        sqlx::query("INSERT INTO group_unit(unit_id,resource_id,occurrence_key,occurrence) SELECT v->>'unit',v->>'resource',v->>'occurrence',nullif(v->'occurrence_ref','null'::jsonb) FROM jsonb_array_elements($1) v ON CONFLICT(unit_id) DO UPDATE SET occurrence_key=excluded.occurrence_key,occurrence=excluded.occurrence").bind(json!(data)).execute(&mut **tx).await?;
         sqlx::query("INSERT INTO resource_group(unit_id,resource_id,key) SELECT v->>'unit',v->>'resource',k FROM jsonb_array_elements($1) v CROSS JOIN LATERAL jsonb_array_elements_text(v->'keys') k ON CONFLICT(unit_id,key) DO NOTHING").bind(json!(data)).execute(&mut **tx).await?;
     }
     let retained: Vec<_> = units
         .iter()
-        .flat_map(|u| u.4.iter().map(|k| json!([u.0, k])))
+        .flat_map(|u| u.3.iter().map(|k| json!([u.0, k])))
         .collect();
     sqlx::query("DELETE FROM resource_group k WHERE resource_id=$1 AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements($2) v WHERE v->>0=k.unit_id AND v->>1=k.key)").bind(id).bind(json!(retained)).execute(&mut **tx).await?;
     let (resume, parked) = (plan.resume.clone(), plan.parked as i32);
@@ -1116,7 +1115,7 @@ pub async fn reconcile(pool: &PgPool, id: &str, cfg: &GroupConfig) -> bool {
     if !cfg.enabled {
         return false;
     }
-    // Saves and the drain respect the same durable retry window, even under reference churn.
+    // Saves and the drain respect the same durable retry window.
     let due = sqlx::query_scalar::<_,bool>("SELECT coalesce((SELECT next_attempt_at<=now() FROM group_dirty WHERE resource_id=$1),true)").bind(id).fetch_one(pool).await.unwrap_or(false);
     if !due {
         return false;

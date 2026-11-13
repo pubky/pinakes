@@ -116,25 +116,17 @@ CREATE TABLE resource_alias (
 );
 CREATE INDEX resource_alias_root ON resource_alias USING btree (root_id);
 
--- One reference from the Nexus feed (a tag, reply, embed, collection entry, event, or a post
--- naming itself), keyed by the object that makes it; an event reference carries its own times
--- and status.
+-- One reference from the Nexus feed (a tag, reply, embed, collection entry, or a post naming
+-- itself), keyed by the object that makes it.
 CREATE TABLE reference (
     resource_id text NOT NULL REFERENCES resource(id) ON DELETE CASCADE,
-    kind text NOT NULL CONSTRAINT reference_kind_check CHECK (kind IN ('tag', 'reply', 'embed', 'collection', 'event', 'post')),
+    kind text NOT NULL CONSTRAINT reference_kind_check CHECK (kind IN ('tag', 'reply', 'embed', 'collection', 'post')),
     author text NOT NULL,
     label text,
     object_path text NOT NULL,
-    recurrence_id text,
-    start_at timestamp with time zone,
-    end_at timestamp with time zone,
     created_at timestamp with time zone NOT NULL,
     unit_key text NOT NULL DEFAULT '',
-    event_status text,
     PRIMARY KEY (author, object_path, unit_key),
-    CONSTRAINT reference_event_status CHECK (event_status IS NULL OR event_status IN ('scheduled', 'cancelled', 'postponed', 'rescheduled', 'moved_online')),
-    CONSTRAINT reference_start_at_range CHECK (start_at >= '0001-01-01 00:00:00+00' AND start_at < '10000-01-01 00:00:00+00'),
-    CONSTRAINT reference_end_at_range CHECK (end_at >= '0001-01-01 00:00:00+00' AND end_at < '10000-01-01 00:00:00+00'),
     CONSTRAINT reference_created_at_range CHECK (created_at >= '0001-01-01 00:00:00+00' AND created_at < '10000-01-01 00:00:00+00')
 );
 -- Search's `related` filter reads each tagger's most recent references in its window; the
@@ -142,7 +134,6 @@ CREATE TABLE reference (
 CREATE INDEX reference_author_created_idx ON reference USING btree (author, created_at);
 -- `sort=trending` counts the references made inside a window.
 CREATE INDEX reference_created_idx ON reference USING btree (created_at);
-CREATE INDEX reference_event_idx ON reference USING btree (resource_id, start_at) WHERE kind = 'event';
 CREATE INDEX reference_label_idx ON reference USING btree (label, resource_id);
 -- A resource's most recent references (`related` reads its tags in a window); serves every
 -- lookup by resource too.
@@ -182,12 +173,12 @@ CREATE FUNCTION collection_file(object_path text) RETURNS text
    THEN substring(object_path from '[^/]*$') ELSE '' END
 $$;
 -- A collection's files by author and collection, its current file first: the greatest instant,
--- then file name in byte order (`collections::settle`; its files share the post, so their leaves
--- order them as their names do). One probe finds it, for search's `in_collection`, the count and
--- a page (`collections::current`); the instant as the walk's. The path is stored once, as post
--- and leaf, so every path ingest accepts fits a btree entry.
+-- then file name in byte order (its files share the post, so their leaves order them as their
+-- names do). One probe finds the current file, for `collections::settle`, which keeps that file
+-- alone (`collections::current`); search's `in_collection` reads a collection's references by
+-- author and post. The instant as the walk's. The path is stored once, as post and leaf, so every
+-- path ingest accepts fits a btree entry.
 CREATE INDEX reference_collection_post_idx ON reference USING btree (author, collection_post(object_path), timezone('UTC', created_at) DESC, collection_file(object_path) COLLATE "C" DESC) INCLUDE (created_at) WHERE kind = 'collection';
-CREATE INDEX reference_start_idx ON reference USING btree (start_at);
 
 -- References as they count: an alias's count for its root, posts' own rows left out.
 CREATE VIEW effective_reference AS
@@ -443,10 +434,10 @@ UNION ALL
     LEFT JOIN osm_place o ON o.osm_type = r.osm_type AND o.osm_id = r.osm_id AND r.osm_version IS NOT NULL
     WHERE r.osm_id IS NOT NULL;
 
--- The units search ranks: each resource that is not an alias (an event only with a start), each
--- live occurrence of a feed that is not missing, and each event reference with a start.
+-- The units search ranks: each resource that is not an alias (an event only with a start) and
+-- each live occurrence of a feed that is not missing.
 CREATE VIEW search_unit AS
-    SELECT r.*, r.id AS unit_id, NULL::jsonb AS occurrence, NULL::jsonb AS event, NULL::text AS event_author
+    SELECT r.*, r.id AS unit_id, NULL::jsonb AS occurrence
     FROM resource_document r
     WHERE (NOT coalesce(r.type_path @> ARRAY['Event'], false) OR r.start_at IS NOT NULL)
         AND NOT EXISTS (SELECT 1 FROM resource_alias a WHERE a.alias_id = r.id)
@@ -455,29 +446,14 @@ UNION ALL
         o.name, NULL::text AS category, o.effective_point AS point, o.start_at, o.end_at, o.venue_id, o.document AS doc,
         o.search_text, r.resolver, r.resolved_at, r.refresh_at, r.status, NULL::text AS osm_type, NULL::bigint AS osm_id,
         md5(jsonb_build_array(r.id, o.uid, o.recurrence_id)::text) AS unit_id,
-        jsonb_build_object('uid', o.uid, 'recurrence_id', nullif(o.recurrence_id, ''), 'status', o.status) AS occurrence,
-        NULL::jsonb AS event, NULL::text AS event_author
+        jsonb_build_object('uid', o.uid, 'recurrence_id', nullif(o.recurrence_id, ''), 'status', o.status) AS occurrence
     FROM event_occurrence o JOIN resource r ON r.id = o.resource_id
-    WHERE r.status <> 'missing'
-UNION ALL
-    SELECT r.id, r.uri, r.host, 'Event'::text AS type, ARRAY['Thing', 'Event'] AS type_path, NULL::text AS name, NULL::text AS category,
-        r.point, f.start_at, f.end_at, r.id AS venue_id,
-        jsonb_build_object('type', 'Event', 'type_path', jsonb_build_array('Thing', 'Event'), 'url', r.uri, 'site', coalesce(r.host, ''), 'source', 'nexus_reference', 'status', 'ok', 'attributes', '{}'::jsonb, 'start', f.start_at, 'end', f.end_at, 'event_status', coalesce(f.event_status, 'scheduled'))
-            || CASE WHEN r.doc->'location' IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('location', r.doc->'location') END AS doc,
-        ''::tsvector AS search_text, r.resolver, r.resolved_at, r.refresh_at, r.status, r.osm_type, r.osm_id,
-        md5(jsonb_build_array(r.id, f.author, f.object_path, f.recurrence_id)::text) AS unit_id,
-        NULL::jsonb AS occurrence,
-        jsonb_build_object('author', f.author, 'object_path', f.object_path, 'recurrence_id', f.recurrence_id, 'start', f.start_at, 'end', f.end_at, 'status', coalesce(f.event_status, 'scheduled')) AS event,
-        f.author AS event_author
-    FROM reference f
-    LEFT JOIN resource_alias a ON a.alias_id = f.resource_id
-    JOIN resource_document r ON r.id = coalesce(a.root_id, f.resource_id)
-    WHERE f.kind = 'event' AND f.start_at IS NOT NULL;
+    WHERE r.status <> 'missing';
 
--- A resource's own search unit: `search_unit`'s first branch, without occurrences and event
--- references, so `related` reads each related resource's card by its ID alone.
+-- A resource's own search unit: `search_unit`'s first branch, without occurrences, so `related`
+-- reads each related resource's card by its ID alone.
 CREATE VIEW resource_unit AS
-    SELECT r.*, r.id AS unit_id, NULL::jsonb AS occurrence, NULL::jsonb AS event, NULL::text AS event_author
+    SELECT r.*, r.id AS unit_id, NULL::jsonb AS occurrence
     FROM resource_document r
     WHERE (NOT coalesce(r.type_path @> ARRAY['Event'], false) OR r.start_at IS NOT NULL)
         AND NOT EXISTS (SELECT 1 FROM resource_alias a WHERE a.alias_id = r.id);
@@ -531,14 +507,13 @@ CREATE TABLE "group" (
     curated boolean NOT NULL DEFAULT false
 );
 
--- A unit (a resource, an occurrence or an event reference) and its group, if any.
+-- A unit (a resource or an occurrence) and its group, if any.
 CREATE TABLE group_unit (
     unit_id text PRIMARY KEY CONSTRAINT group_unit_unit_id_check CHECK (unit_id ~ '^[0-9a-f]{32}$'),
     resource_id text NOT NULL REFERENCES resource(id) ON DELETE CASCADE,
     occurrence_key text NOT NULL DEFAULT '',
     group_id text REFERENCES "group"(id) DEFERRABLE INITIALLY DEFERRED,
     occurrence jsonb,
-    event jsonb,
     admitted_at timestamp with time zone NOT NULL DEFAULT now()
 );
 CREATE INDEX group_unit_group_idx ON group_unit USING btree (group_id, resource_id, unit_id);
@@ -606,36 +581,23 @@ CREATE TABLE single_object_namespace (
     CONSTRAINT single_object_namespace_source_check CHECK ((source ~ '^[a-z0-9_]{1,32}$'))
 );
 
--- A group member's document, as its card shows it: a resource's, an occurrence's, or an event
--- reference's.
+-- A group member's document, as its card shows it: a resource's or an occurrence's.
 CREATE VIEW group_member_document AS
-    SELECT r.*, u.unit_id, u.occurrence, u.event, NULL::text AS event_author
+    SELECT r.*, u.unit_id, u.occurrence
     FROM group_unit u
     CROSS JOIN LATERAL (SELECT * FROM resource_document WHERE resource_document.id = u.resource_id OFFSET 0) r
-    WHERE u.occurrence IS NULL AND u.event IS NULL
+    WHERE u.occurrence IS NULL
 UNION ALL
     SELECT r.id, r.uri, r.host, o.doc->>'type' AS type, ARRAY(SELECT jsonb_array_elements_text(o.doc->'type_path')) AS type_path,
         o.name, NULL::text AS category, o.effective_point AS point, o.start_at, o.end_at, o.venue_id, o.document AS doc,
         o.search_text, r.resolver, r.resolved_at, r.refresh_at, r.status, NULL::text AS osm_type, NULL::bigint AS osm_id,
-        u.unit_id, u.occurrence, NULL::jsonb AS event, NULL::text AS event_author
+        u.unit_id, u.occurrence
     FROM group_unit u
     CROSS JOIN LATERAL (SELECT * FROM event_occurrence
         WHERE event_occurrence.resource_id = u.resource_id AND event_occurrence.uid = u.occurrence->>'uid'
             AND event_occurrence.recurrence_id = coalesce(u.occurrence->>'recurrence_id', '') OFFSET 0) o
     JOIN resource r ON r.id = u.resource_id
-    WHERE u.occurrence IS NOT NULL AND r.status <> 'missing'
-UNION ALL
-    SELECT r.id, r.uri, r.host, 'Event'::text AS type, ARRAY['Thing', 'Event'] AS type_path, NULL::text AS name, NULL::text AS category,
-        r.point, f.start_at, f.end_at, r.id AS venue_id,
-        jsonb_build_object('type', 'Event', 'type_path', jsonb_build_array('Thing', 'Event'), 'url', r.uri, 'site', coalesce(r.host, ''), 'source', 'nexus_reference', 'status', 'ok', 'attributes', '{}'::jsonb, 'start', f.start_at, 'end', f.end_at, 'event_status', coalesce(f.event_status, 'scheduled'))
-            || CASE WHEN r.doc->'location' IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('location', r.doc->'location') END AS doc,
-        ''::tsvector AS search_text, r.resolver, r.resolved_at, r.refresh_at, r.status, r.osm_type, r.osm_id,
-        u.unit_id, NULL::jsonb AS occurrence, u.event, f.author AS event_author
-    FROM group_unit u
-    JOIN reference f ON f.resource_id = u.resource_id AND f.author = u.event->>'author' AND f.object_path = u.event->>'object_path'
-        AND f.recurrence_id = coalesce(u.event->>'recurrence_id', '')
-    CROSS JOIN LATERAL (SELECT * FROM resource_document WHERE resource_document.id = u.resource_id OFFSET 0) r
-    WHERE u.event IS NOT NULL AND f.kind = 'event' AND f.start_at IS NOT NULL;
+    WHERE u.occurrence IS NOT NULL AND r.status <> 'missing';
 
 -- A change grouping reads marks the resource dirty and bumps its `group_revision`; grouping's
 -- fence (groups::fence) relies on the bump.
@@ -689,8 +651,6 @@ CREATE TRIGGER group_resource_dirty AFTER INSERT OR UPDATE OF doc ON resource FO
 -- alias::assign's UPDATE of the alias names `doc` and `osm_version` so that this fires: keep those
 -- columns in both places.
 CREATE TRIGGER group_resource_revision BEFORE UPDATE OF doc, status, uri, host, point, start_at, end_at, type, name, osm_version ON resource FOR EACH ROW EXECUTE FUNCTION bump_group_resource_revision();
-CREATE TRIGGER group_reference_dirty AFTER INSERT OR DELETE OR UPDATE ON reference FOR EACH ROW EXECUTE FUNCTION mark_group_dirty();
-CREATE TRIGGER group_reference_revision AFTER INSERT OR DELETE OR UPDATE ON reference FOR EACH ROW EXECUTE FUNCTION bump_group_child_revision();
 CREATE TRIGGER group_occurrence_dirty AFTER INSERT OR DELETE OR UPDATE ON occurrence FOR EACH ROW EXECUTE FUNCTION mark_group_dirty();
 CREATE TRIGGER group_occurrence_revision AFTER INSERT OR DELETE OR UPDATE ON occurrence FOR EACH ROW EXECUTE FUNCTION bump_group_child_revision();
 CREATE TRIGGER group_member_deleted AFTER DELETE ON group_unit FOR EACH ROW EXECUTE FUNCTION group_member_deleted();
@@ -870,10 +830,9 @@ CREATE TRIGGER also_on_source_revision BEFORE INSERT OR DELETE ON also_on_source
 -- resources first, one each by ID, then other units of its own resource), then the live derived
 -- links of the card's resource and of every member, by service name, each URL once and never
 -- the card itself; at most `cap` entries. `resource` is the card's resource ID for a resource's
--- card, and the unit for an occurrence or an event reference (whose feed's links are not its
--- own). `members` false (groups switched off) leaves the group out. Read at
--- request time: OSM-derived values never enter these tables, and a switched-off source's rows
--- (`also_on_source_off`) are not read.
+-- card, and the unit for an occurrence (whose feed's links are not its own). `members` false
+-- (groups switched off) leaves the group out. Read at request time: OSM-derived values never
+-- enter these tables, and a switched-off source's rows (`also_on_source_off`) are not read.
 -- A card (`per_site`) shows one entry per service: the link on the card's own release first, then
 -- one on the original edition (`link_release`, best rank); among links neither places, a tagged
 -- member whose URL is on a service (`doc.service`: a music service, or one a derived link names,

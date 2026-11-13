@@ -2035,13 +2035,64 @@ async fn an_expired_member_leaves_its_group(pool: PgPool) {
     assert_eq!(left, 0);
 }
 
-/// Removing a resource's child row (here a tag) marks the resource dirty and bumps its revision;
-/// a save holds the resource's row, then marks it dirty. The removal locks the resource's row
-/// before marking it, as a save does, so the two never deadlock.
+/// A reference is no grouping input: grouping reads a resource's document, occurrences and hub
+/// keys, never who referenced it. So a tag put or removed neither marks the resource dirty nor
+/// bumps its revision, while a hub key does both.
 #[sqlx::test(migrations = "../../migrations")]
-async fn removing_a_tag_and_saving_its_resource_take_locks_in_one_order(pool: PgPool) {
-    let (id, _) = save(&pool, "child-order", &[], None).await;
+async fn a_reference_is_no_grouping_input_and_a_hub_key_is(pool: PgPool) {
+    let (id, _) = save(&pool, "inputs", &[], None).await;
+    sqlx::query("DELETE FROM group_dirty")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let state = || async {
+        sqlx::query_as::<_, (i64, bool)>("SELECT group_revision,EXISTS(SELECT 1 FROM group_dirty WHERE resource_id=$1) FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    let (revision, dirty) = state().await;
+    assert!(!dirty);
     tag(&pool, &id, &"y".repeat(52), "first").await;
+    assert_eq!(state().await, (revision, false), "a tag put");
+    sqlx::query("DELETE FROM reference WHERE resource_id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(state().await, (revision, false), "a tag removed");
+    // Kinds the feed does not write are refused: a reference is never an event of its own.
+    let event = sqlx::query("INSERT INTO reference(resource_id,author,kind,object_path,created_at) VALUES($1,$2,'event','/pub/social/v1/posts/e',now())")
+        .bind(&id)
+        .bind("y".repeat(52))
+        .execute(&pool)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        event.as_database_error().and_then(|e| e.constraint()),
+        Some("reference_kind_check")
+    );
+    sqlx::query("INSERT INTO resource_key(resource_id,key,source,via,expires_at) VALUES($1,'wikidata:Q1','test','test',now()+interval '1 day')")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (after, dirty) = state().await;
+    assert!(dirty && after > revision, "a hub key regroups");
+}
+
+/// Removing a resource's child row that grouping reads (here a hub key) marks the resource dirty
+/// and bumps its revision; a save holds the resource's row, then marks it dirty. The removal locks
+/// the resource's row before marking it, as a save does, so the two never deadlock.
+#[sqlx::test(migrations = "../../migrations")]
+async fn removing_a_hub_key_and_saving_its_resource_take_locks_in_one_order(pool: PgPool) {
+    let (id, _) = save(&pool, "child-order", &[], None).await;
+    sqlx::query("INSERT INTO resource_key(resource_id,key,source,via,expires_at) VALUES($1,'wikidata:Q1','test','test',now()+interval '1 day')")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query("DELETE FROM group_dirty")
         .execute(&pool)
         .await
@@ -2057,7 +2108,7 @@ async fn removing_a_tag_and_saving_its_resource_take_locks_in_one_order(pool: Pg
         let pool = pool.clone();
         let id = id.clone();
         async move {
-            sqlx::query("DELETE FROM reference WHERE resource_id=$1")
+            sqlx::query("DELETE FROM resource_key WHERE resource_id=$1")
                 .bind(&id)
                 .execute(&pool)
                 .await
@@ -2065,7 +2116,7 @@ async fn removing_a_tag_and_saving_its_resource_take_locks_in_one_order(pool: Pg
     });
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'DELETE FROM reference%')")
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'DELETE FROM resource_key%')")
                 .fetch_one(&pool).await.unwrap();
             if waiting {
                 break;
