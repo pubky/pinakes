@@ -1046,14 +1046,14 @@ pub fn spawn_with_egress(
                             { let mut next=rate.lock().await; tokio::time::sleep_until(*next).await; *next=Instant::now()+Duration::from_secs_f64(1.0/budget.requests_per_second); }
                             if Instant::now()>=canary_check {
                                 canary_check=Instant::now()+Duration::from_secs(60);
-                            for manifest in resolver.manifests() {
-                            if resolver.canary_allowed_for(&manifest) {
-                            match crate::canary::claim(&pool,&manifest,&canary).await {
-                                Ok(Some(generation))=>{if let Err(e)=crate::canary::run_manifest(&pool,resolver.as_ref(),&manifest,&canary,&metrics,generation).await {tracing::warn!(error=%crate::resolver::log_error(&e),"canary bookkeeping failed");}return;},
+                            // One suspension for the manifests whose canary may not run, one claim among the rest.
+                            let (allowed,refused):(Vec<_>,Vec<_>)=resolver.manifests().into_iter().partition(|m| resolver.canary_allowed_for(m));
+                            let refused:Vec<&str>=refused.iter().map(|m| m.source.as_str()).collect();
+                            if let Err(e)=crate::canary::suspend(&pool,&refused).await {tracing::warn!(error=%crate::resolver::log_error(&e),"canary suspension failed");}
+                            match crate::canary::claim_due(&pool,&allowed,&canary).await {
+                                Ok(Some((manifest,generation)))=>{if let Err(e)=crate::canary::run_manifest(&pool,resolver.as_ref(),manifest,&canary,&metrics,generation).await {tracing::warn!(error=%crate::resolver::log_error(&e),"canary bookkeeping failed");}return;},
                                 Err(e)=>tracing::warn!(error=%crate::resolver::log_error(&e),"canary claim failed"),
                                 _=>{}
-                            }
-                            } else if let Err(e)=crate::canary::suspend(&pool,&manifest).await {tracing::warn!(error=%crate::resolver::log_error(&e),"canary suspension failed");}
                             }
                             }
                             match claim_sources(&pool,&resolver.queue_sources(),&cfg,resolver.batch_size()).await {
