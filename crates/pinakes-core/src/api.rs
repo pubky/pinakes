@@ -1529,6 +1529,7 @@ pub(crate) async fn with_refs<'a>(
                 .map(|e| e.settled(&card.type_path));
         }
     }
+    crate::music_identity::images(pool, &mut cards).await?;
     member_embeds(pool, &mut cards).await?;
     crate::collections::count(pool, cards.iter_mut().map(|c| &mut **c)).await?;
     crate::episodes::on_cards(pool, cards).await
@@ -2412,7 +2413,8 @@ fn related_because(sql: &mut QueryBuilder<'_, Postgres>, item: &str, n: &str, au
 /// where a comma-separated value found nothing before) is never answered 304. Move it when
 /// a search row gains or loses a field, a field reads otherwise for stored rows, or the same query
 /// finds other rows or the same rows in another order.
-pub const SEARCH_SHAPE: u32 = 9;
+// 9: exact member refs; 10: held music group artwork and its credit.
+pub const SEARCH_SHAPE: u32 = 10;
 /// The most taggers a related row's `because` names.
 pub const BECAUSE_TAGGERS: usize = 3;
 
@@ -3178,6 +3180,7 @@ async fn read(
         return Ok(None);
     };
     with_refs(pool, std::iter::once(&mut detail.card)).await?;
+    crate::music_identity::keys(pool, &mut detail).await?;
     Ok(Some(detail))
 }
 /// A read's JSON, cacheable for 30 seconds like a search page, with an ETag of its content; 304
