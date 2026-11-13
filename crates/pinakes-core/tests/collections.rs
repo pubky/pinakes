@@ -2,6 +2,8 @@
 //! one per item, listed by `GET /v1/resources/{id}/collections` (the viewer's own first, then
 //! newest first, paged), counted on every card (`collections`) and a search filter
 //! (`in_collection`).
+mod common;
+
 use axum::{body::Body, http::Request};
 use http_body_util::BodyExt;
 use pinakes_core::{
