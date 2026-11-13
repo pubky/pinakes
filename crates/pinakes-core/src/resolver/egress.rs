@@ -270,6 +270,13 @@ impl std::fmt::Debug for FetchOptions {
     }
 }
 impl FetchOptions {
+    /// A plain JSON GET: `Accept: application/json`, every other option at its default.
+    pub fn json() -> Self {
+        Self {
+            accept: Some("application/json".into()),
+            ..Default::default()
+        }
+    }
     /// A request has one body: JSON or a form, never both.
     fn one_body(&self) -> Result<()> {
         if self.json_body.is_some() && self.form_body.is_some() {

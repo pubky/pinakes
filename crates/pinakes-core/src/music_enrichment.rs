@@ -574,10 +574,7 @@ fn unread(mbid: &str, step: &'static str, error: &anyhow::Error) {
 }
 
 fn json_options() -> FetchOptions {
-    FetchOptions {
-        accept: Some("application/json".into()),
-        ..Default::default()
-    }
+    FetchOptions::json()
 }
 
 /// An item a description may come from: its pages, and the subject its credit names (the work,

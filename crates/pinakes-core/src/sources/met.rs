@@ -5,7 +5,7 @@
 //! "collection online" form, and the API's own URL) is an alias of one identifier,
 //! `met:{objectID}`. The API's data is CC0; images are shown only for public-domain works.
 use super::kit::{
-    fetch, host_and_segments, int, json, plain, text, web_url, wikidata_id, Card, Key, Request,
+    fetch, host_and_segments, int, json, number, text, web_url, wikidata_id, Card, Key, Request,
 };
 use super::{Context, Example, Source};
 use crate::model::ResourceMeta;
@@ -19,10 +19,7 @@ const CREDIT: &str = "The Metropolitan Museum of Art";
 
 /// An object id: decimal digits, read as a number (so leading zeros name the same object).
 pub fn object_id(value: &str) -> Option<u64> {
-    plain(value, 10, |c| c.is_ascii_digit())
-        .then(|| value.parse().ok())
-        .flatten()
-        .filter(|id| *id > 0)
+    number(value, 10)
 }
 
 /// A language prefix of metmuseum.org, e.g. `fr` or `zh`.
