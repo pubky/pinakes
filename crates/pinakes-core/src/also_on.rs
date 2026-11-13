@@ -1237,6 +1237,20 @@ struct Next {
     partial: Option<Duration>,
 }
 
+/// The sources that hold rows of `resource_id`, in every table `record` writes (keys, derived
+/// links, facts, places among releases), whatever their expiry and whether the source is on.
+async fn stored_sources(
+    pool: &PgPool,
+    resource_id: &str,
+) -> Result<std::collections::HashSet<String>> {
+    Ok(sqlx::query_scalar::<_, String>("SELECT source FROM resource_key WHERE resource_id=$1 UNION SELECT source FROM derived_link WHERE resource_id=$1 UNION SELECT source FROM resource_fact WHERE resource_id=$1 UNION SELECT source FROM link_release WHERE resource_id=$1")
+        .bind(resource_id)
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .collect())
+}
+
 /// One resource: every enabled source that applies runs; each success replaces its rows. Ok
 /// with when the next run is due, Ok(None) when no source applies, Err when any source failed
 /// (the others' results are kept).
@@ -1262,6 +1276,11 @@ async fn one(
     let mut partial: Option<Duration> = None;
     let mut failed = None;
     let mut reread = false;
+    // The sources holding rows of this resource (`stored_sources`): read once for every source
+    // in a row that asks, and again after a lookup, which takes long enough for another run to
+    // have recorded meanwhile. Rows this run takes over from another source only leave that
+    // source listed, and clearing a source that holds nothing changes nothing.
+    let mut stored: Option<std::collections::HashSet<String>> = None;
     // In registry order: each source sees the keys the ones before it found in this run (a
     // barcode MusicBrainz names, then the services looked up by it).
     for source in sources
@@ -1270,11 +1289,10 @@ async fn one(
     {
         if gone || withheld || !source.applies(&subject) {
             // It read the resource before (a key it starts from is gone): its rows go too.
-            let had: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource_key WHERE resource_id=$1 AND source=$2) OR EXISTS(SELECT 1 FROM derived_link WHERE resource_id=$1 AND source=$2) OR EXISTS(SELECT 1 FROM resource_fact WHERE resource_id=$1 AND source=$2) OR EXISTS(SELECT 1 FROM link_release WHERE resource_id=$1 AND source=$2)")
-                .bind(id)
-                .bind(source.id())
-                .fetch_one(pool)
-                .await?;
+            if stored.is_none() {
+                stored = Some(stored_sources(pool, id).await?);
+            }
+            let had = stored.as_ref().is_some_and(|s| s.contains(source.id()));
             if had {
                 record(pool, id, source.id(), Found::default(), source.ttl(), cfg)
                     .await
@@ -1294,6 +1312,7 @@ async fn one(
                 tracing::error!(resource = %id, source = source.id(), "also-on lookup panicked");
                 Err(anyhow::anyhow!("lookup panicked"))
             });
+        stored = None;
         match lookup {
             Ok(found) => {
                 reread |= found.reread;
@@ -1304,9 +1323,25 @@ async fn one(
                 }
                 let lifetime = source.ttl();
                 check_key_forms(source.as_ref(), &found);
-                record(pool, id, source.id(), found, source.ttl(), cfg)
-                    .await
-                    .with_context(|| format!("record {}", source.id()))?;
+                // Nothing found replaces nothing unless the source holds rows: only then is
+                // there anything to clear, and a transaction with its locks to take.
+                let nothing = found.keys.is_empty()
+                    && found.links.is_empty()
+                    && found.facts.is_empty()
+                    && found.editions.is_empty();
+                let clears = if nothing {
+                    let held = stored_sources(pool, id).await?;
+                    let clears = held.contains(source.id());
+                    stored = Some(held);
+                    clears
+                } else {
+                    true
+                };
+                if clears {
+                    record(pool, id, source.id(), found, source.ttl(), cfg)
+                        .await
+                        .with_context(|| format!("record {}", source.id()))?;
+                }
                 next = Some(next.map_or(lifetime, |n| n.min(lifetime)));
                 subject.keys = sqlx::query_as("SELECT key,source FROM resource_key WHERE resource_id=$1 AND expires_at>now() AND source NOT IN (SELECT source FROM also_on_source_off) ORDER BY key")
                     .bind(id)

@@ -403,6 +403,7 @@ impl WebResolver {
                     uri,
                     &fetched,
                     extracted.doc,
+                    extracted.alternates.take(),
                     &self.egress,
                     cards,
                     self.config.discover_feeds,
@@ -502,6 +503,9 @@ pub struct Extracted {
     pub oembed: Option<Url>,
     pub title: Option<String>,
     pub description: Option<String>,
+    /// The metadata endpoints the page's head advertises (`cards::alternates`), when its body
+    /// was read as HTML here.
+    pub alternates: Option<super::cards::Alternates>,
 }
 /// `Err` when the page is too complex to parse (`html::TooComplex`).
 pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extracted> {
@@ -518,16 +522,27 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
         oembed: None,
         title: None,
         description: None,
+        alternates: None,
     };
-    if Url::parse(uri)
-        .ok()
-        .map(|url| super::interstitial::inspect(&url, fetched))
-        .transpose()?
-        .is_some_and(|page| page != super::interstitial::Page::Content)
-    {
-        out.doc.status = Status::Unreachable;
-        out.doc.aliases.clear();
-        return Ok(out);
+    // The wall check's parse of the body, when it needed one: the card is read from the same
+    // tree below.
+    let mut walled = None;
+    if let Ok(url) = Url::parse(uri) {
+        let page = match super::interstitial::unparsed(&url, fetched) {
+            Some(page) => page,
+            None => {
+                let text = String::from_utf8_lossy(&fetched.body);
+                let html = super::html::document(&text)?;
+                let page = super::interstitial::parsed(fetched, &text, &html);
+                walled = Some((text, html));
+                page
+            }
+        };
+        if page != super::interstitial::Page::Content {
+            out.doc.status = Status::Unreachable;
+            out.doc.aliases.clear();
+            return Ok(out);
+        }
     }
     // A redirect to a link that carries a credential is followed, never kept as an alias.
     if fetched.permanent_redirect
@@ -567,7 +582,11 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
     }
     let read = as_read(fetched);
     let fetched = read.as_ref();
-    let text = String::from_utf8_lossy(&fetched.body);
+    // `as_read` changes the address alone: the body is the one the wall check parsed.
+    let (text, walled) = match walled {
+        Some((text, html)) => (text, Some(html)),
+        None => (String::from_utf8_lossy(&fetched.body), None),
+    };
     // A feed, on whichever route fetched it: its own title and description.
     if let Some((name, description)) = feed(&fetched.content_type, &text) {
         out.doc.set_type("DataFeed");
@@ -584,7 +603,11 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
         out.doc.event.read_from(fetched);
         return Ok(out);
     }
-    let html = crate::resolver::html::document(&text)?;
+    let html = match walled {
+        Some(html) => html,
+        None => crate::resolver::html::document(&text)?,
+    };
+    out.alternates = Some(super::cards::alternates(&html, &fetched.url));
     // JSON-LD stays document-wide (plugins put it in the body), but only the chosen entity
     // may carry claims (url/@id, sameAs, identifiers): from a head script, as with head meta
     // and links (its main-entity url is the publisher's canonical declaration), or from a
@@ -3621,5 +3644,68 @@ mod tests {
             doc.name.as_deref(),
             Some("Karma Police - Radiohead | Music Video")
         );
+    }
+
+    /// A page's wall check and its card are read from one parse of its body. An answer the wall
+    /// check settles without a parse is parsed once, for the card, when it is read as HTML, and
+    /// never otherwise. The head's alternates come from the same tree.
+    #[test]
+    fn a_page_is_parsed_once_for_its_wall_check_and_its_card() {
+        let read = |content_type: &str, status: u16, body: &str| {
+            let mut fetched = crate::sources::fixture::page(
+                "https://example.org/page",
+                content_type,
+                body.into(),
+                None,
+            );
+            fetched.status = status;
+            let before = crate::resolver::html::counted::documents();
+            let out = extract("https://example.org/page", &fetched, 100).unwrap();
+            (crate::resolver::html::counted::documents() - before, out)
+        };
+        let page = r#"<html><head><title>Page</title><link rel="alternate" type="application/rss+xml" href="/feed.xml"><link rel="alternate" type="application/activity+json" href="/ap"></head><body><p>Text</p></body></html>"#;
+        let alternates = Some(crate::resolver::cards::Alternates {
+            activitypub: Some("https://example.org/ap".into()),
+            rss: Some("https://example.org/feed.xml".into()),
+        });
+        // HTML: the wall check parses it, and the card is read from that tree.
+        let (parses, out) = read("text/html; charset=utf-8", 200, page);
+        assert_eq!(parses, 1);
+        assert_eq!(out.doc.status, Status::Ok);
+        assert_eq!(out.title.as_deref(), Some("Page"));
+        assert_eq!(
+            out.doc.attributes.get("feed").map(String::as_str),
+            Some("https://example.org/feed.xml")
+        );
+        assert_eq!(out.alternates, alternates);
+        // No type: the wall check settles it unparsed, and the card's read parses it.
+        let (parses, out) = read("", 200, page);
+        assert_eq!(parses, 1);
+        assert_eq!(out.title.as_deref(), Some("Page"));
+        assert_eq!(out.alternates, alternates);
+        // A wall is parsed by its check alone.
+        let (parses, out) = read("text/html", 503, "<title>Just a moment</title>");
+        assert_eq!(parses, 1);
+        assert_eq!(out.doc.status, Status::Unreachable);
+        assert_eq!(out.alternates, None);
+        // An error page that is no wall, too: its status ends the read.
+        let (parses, out) = read("text/html", 500, page);
+        assert_eq!(parses, 1);
+        assert_eq!(out.doc.status, Status::Error);
+        assert_eq!(out.alternates, None);
+        // What is not read as HTML is never parsed: JSON, an image, a feed.
+        for (content_type, body) in [
+            ("application/json", r#"{"@type":"Article","name":"Named"}"#),
+            ("image/png", page),
+            (
+                "application/rss+xml",
+                "<rss><channel><title>Feed</title></channel></rss>",
+            ),
+        ] {
+            let (parses, out) = read(content_type, 200, body);
+            assert_eq!(parses, 0, "{content_type}");
+            assert_eq!(out.doc.status, Status::Ok, "{content_type}");
+            assert_eq!(out.alternates, None, "{content_type}");
+        }
     }
 }

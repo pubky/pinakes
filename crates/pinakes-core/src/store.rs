@@ -327,8 +327,10 @@ pub async fn recompute_scores(tx: &mut Transaction<'_, Postgres>, ids: &[String]
 pub async fn cleanup(pool: &PgPool, grace_days: u32, preview_grace_hours: u32) -> Result<u64> {
     crate::changes::delete_orphans_within(pool, grace_days, preview_grace_hours, || false).await
 }
+/// Move the overdue resources among `ids` to the front of the queue. One already there keeps its
+/// place and its row is not written again.
 pub async fn expedite(pool: &PgPool, ids: &[String]) -> Result<()> {
-    sqlx::query("UPDATE resource SET priority_at=coalesce(priority_at,now()) WHERE id=ANY($1) AND (refresh_at IS NULL OR refresh_at<=now()) AND NOT final AND NOT dead_letter AND (lease_until IS NULL OR lease_until<now())").bind(ids).execute(pool).await?;
+    sqlx::query("UPDATE resource SET priority_at=now() WHERE id=ANY($1) AND priority_at IS NULL AND (refresh_at IS NULL OR refresh_at<=now()) AND NOT final AND NOT dead_letter AND (lease_until IS NULL OR lease_until<now())").bind(ids).execute(pool).await?;
     Ok(())
 }
 pub async fn save_document(
