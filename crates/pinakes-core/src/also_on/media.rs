@@ -104,6 +104,28 @@ pub(crate) fn json(status: u16, raw: &[u8], missing: &[u16]) -> Result<Option<Va
     }
 }
 
+/// A service's 429 or 5xx as a wait: a retry under `class` after the time the answer asked for,
+/// held to a minute to an hour.
+pub(crate) fn busy(
+    class: &'static str,
+    fetched: &crate::resolver::egress::Fetched,
+) -> anyhow::Error {
+    RetryLater {
+        class,
+        seconds: fetched.retry_after_secs.clamp(60, 3600),
+    }
+    .into()
+}
+
+/// When a run comes back after a request of its failed: the wait a `RetryLater` in the error's
+/// chain names (a minute at least), else a quarter of an hour, in seconds.
+pub(crate) fn retry_wait(error: &anyhow::Error) -> u64 {
+    error
+        .chain()
+        .find_map(|c| c.downcast_ref::<RetryLater>())
+        .map_or(900, |r| r.seconds.max(60))
+}
+
 /// What a failed secondary request leaves: a retry to pass on when nothing else was found.
 #[derive(Default)]
 pub(crate) struct Deferred(Option<anyhow::Error>);

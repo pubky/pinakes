@@ -6,7 +6,7 @@
 //!
 //! The licence is per record: an occurrence card credits its own licence and rights holder.
 use super::kit::{
-    float, host_and_segments, int, json, plain, text, texts, time, Card, Point, Request,
+    float, host_and_segments, int, json, number, text, texts, time, Card, Point, Request,
 };
 use super::{Example, Source};
 use crate::model::ResourceMeta;
@@ -28,10 +28,7 @@ pub enum Object {
 
 /// A positive decimal key, without leading zeros.
 pub fn key(value: &str) -> Option<u64> {
-    plain(value, 19, |c| c.is_ascii_digit())
-        .then(|| value.parse().ok())
-        .flatten()
-        .filter(|k| *k > 0)
+    number(value, 19)
 }
 
 use super::biodiversity::gbif_language as language;

@@ -27,11 +27,8 @@ const LEGISLATION: [&str; 4] = [
 
 /// An affair id: the four-digit year and a four-digit number (`22.3765` is `20223765`).
 fn affair(value: &str) -> Option<u32> {
-    (value.len() == 8
-        && (value.starts_with("19") || value.starts_with("20"))
-        && value.bytes().all(|b| b.is_ascii_digit()))
-    .then(|| value.parse().ok())
-    .flatten()
+    super::kit::decimal(value, 8)
+        .filter(|_| value.len() == 8 && (value.starts_with("19") || value.starts_with("20")))
 }
 
 /// The affair id of a parlament.ch business page, its legacy page or the OData entity.
@@ -86,12 +83,9 @@ pub fn card(
     status: u16,
     body: &[u8],
 ) -> Result<Option<ResourceMeta>> {
-    match status {
-        200 => {}
-        404 => return Ok(None),
-        s => anyhow::bail!("parlament.ch answered {s}"),
-    }
-    let v: Value = serde_json::from_slice(body)?;
+    let Some(v) = super::kit::json(status, body, &[404])? else {
+        return Ok(None);
+    };
     let d = &v["d"];
     anyhow::ensure!(
         d["ID"].as_u64() == Some(u64::from(id)),
@@ -207,15 +201,7 @@ impl Source for SwissParliament {
         let url = format!(
             "https://ws.parlament.ch/odata.svc/Business(ID={id},Language='DE')?$select={SELECT}&$format=json"
         );
-        let f = cx
-            .fetch(
-                &url,
-                &FetchOptions {
-                    accept: Some("application/json".into()),
-                    ..Default::default()
-                },
-            )
-            .await?;
+        let f = cx.fetch(&url, &FetchOptions::json()).await?;
         Ok(card(cx.card(uri, self), id, f.status, &f.body)?
             .unwrap_or_else(|| cx.missing(uri, self)))
     }

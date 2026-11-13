@@ -8,7 +8,7 @@
 //! An observation whose location is obscured or private has public coordinates that are
 //! randomised, so its card has no point.
 use super::kit::html_text;
-use super::kit::{float, host_and_segments, int, json, plain, text, time, Card, Point, Request};
+use super::kit::{float, host_and_segments, int, json, text, time, Card, Point, Request};
 use super::{Example, Source};
 use crate::model::ResourceMeta;
 use anyhow::{ensure, Context, Result};
@@ -29,10 +29,7 @@ pub enum Object {
 
 /// A positive decimal id, without leading zeros.
 fn number(value: &str) -> Option<u64> {
-    plain(value, 12, |c| c.is_ascii_digit())
-        .then(|| value.parse().ok())
-        .flatten()
-        .filter(|id| *id > 0)
+    super::kit::number(value, 12)
 }
 
 /// A taxon id, alone or followed by the name slug (`47219-Apis-mellifera`).

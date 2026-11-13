@@ -24,10 +24,7 @@ pub enum Object {
 }
 
 fn title(value: &str) -> Option<u16> {
-    (!value.is_empty() && value.len() <= 2 && value.bytes().all(|b| b.is_ascii_digit()))
-        .then(|| value.parse().ok())
-        .flatten()
-        .filter(|t| (1..=50).contains(t))
+    super::kit::number(value, 2).filter(|t| (1..=50).contains(t))
 }
 fn part(value: &str) -> Option<&str> {
     (!value.is_empty() && value.len() <= 12 && value.bytes().all(|b| b.is_ascii_alphanumeric()))
@@ -147,12 +144,9 @@ pub fn card(
     status: u16,
     body: &[u8],
 ) -> Result<Option<ResourceMeta>> {
-    match status {
-        200 => {}
-        404 => return Ok(None),
-        s => anyhow::bail!("eCFR answered {s}"),
-    }
-    let v: Value = serde_json::from_slice(body)?;
+    let Some(v) = super::kit::json(status, body, &[404])? else {
+        return Ok(None);
+    };
     let ancestors = v["ancestors"].as_array().context("no ancestors")?;
     let own = ancestors.last().context("empty ancestry")?;
     let (kind, id) = match &target.object {
@@ -256,15 +250,7 @@ impl Source for Ecfr {
     }
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
         let target = Target::of_uri(uri).context("not an eCFR link")?;
-        let f = cx
-            .fetch(
-                &target.api_url(),
-                &FetchOptions {
-                    accept: Some("application/json".into()),
-                    ..Default::default()
-                },
-            )
-            .await?;
+        let f = cx.fetch(&target.api_url(), &FetchOptions::json()).await?;
         Ok(card(cx.card(uri, self), &target, f.status, &f.body)?
             .unwrap_or_else(|| cx.missing(uri, self)))
     }

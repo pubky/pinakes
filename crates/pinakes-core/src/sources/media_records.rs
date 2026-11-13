@@ -151,21 +151,8 @@ fn labels_lookup(qid: &str) -> String {
 fn parse_labels(raw: &[u8], qid: &str) -> Option<(String, Option<String>)> {
     let v: Value = serde_json::from_slice(raw).ok()?;
     let entity = &v["entities"][qid];
-    let text = |key: &str| {
-        entity[key]["en"]["value"]
-            .as_str()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned)
-    };
+    let text = |key: &str| super::text(&entity[key]["en"]["value"]);
     Some((text("labels")?, text("descriptions")))
-}
-
-fn json() -> FetchOptions {
-    FetchOptions {
-        accept: Some("application/json".into()),
-        ..Default::default()
-    }
 }
 
 /// The Wikidata ID a page's object is found by, and what the page's own text is worth: for the
@@ -191,7 +178,7 @@ pub async fn item(
         return Ok(None);
     };
     let f = egress
-        .discover(&labels_lookup(&item.qid), &json(), 86400)
+        .discover(&labels_lookup(&item.qid), &FetchOptions::json(), 86400)
         .await?;
     // A busy Wikidata (an HTTP error, or an API error sent with 200) is asked again later, never
     // taken for "no label".
@@ -204,7 +191,7 @@ pub async fn item(
         .and_then(|v| v["error"]["code"].as_str().map(str::to_owned));
     if let Some(code) = error {
         egress
-            .shorten_discovery(&labels_lookup(&item.qid), &json(), 1)
+            .shorten_discovery(&labels_lookup(&item.qid), &FetchOptions::json(), 1)
             .await?;
         return Err(crate::resolver::RetryLater {
             class: "wikidata_busy",
@@ -450,7 +437,7 @@ impl Source for MediaRecords {
                     .egress
                     .discover(
                         &format!("https://openlibrary.org/{path}.json"),
-                        &json(),
+                        &FetchOptions::json(),
                         3600,
                     )
                     .await?;
@@ -465,7 +452,11 @@ impl Source for MediaRecords {
             Record::Tvmaze(id) => {
                 let f = cx
                     .egress
-                    .discover(&format!("https://api.tvmaze.com/shows/{id}"), &json(), 3600)
+                    .discover(
+                        &format!("https://api.tvmaze.com/shows/{id}"),
+                        &FetchOptions::json(),
+                        3600,
+                    )
                     .await?;
                 super::retry(&f)?;
                 if f.status != 200 {
@@ -492,7 +483,7 @@ impl Source for MediaRecords {
             Some(Walled::ApplePodcast(show)) => {
                 let options = FetchOptions {
                     extra_types: &["text/javascript"],
-                    ..json()
+                    ..FetchOptions::json()
                 };
                 let f = cx
                     .egress

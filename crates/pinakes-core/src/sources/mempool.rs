@@ -12,7 +12,8 @@
 //! No schema.org type fits these objects, so the cards use local types.
 use super::{
     kit::{
-        body, fetch, float, host_and_segments, int, json, plain, text, time, unix, Card, Request,
+        body, decimal, fetch, float, host_and_segments, int, json, plain, text, time, unix, Card,
+        Request,
     },
     Budget, Example, Source,
 };
@@ -126,12 +127,7 @@ pub fn channel_id(value: &str) -> Option<u64> {
     let [block, tx, output] = parts.as_slice() else {
         return None;
     };
-    let number = |s: &str, max: u64| {
-        plain(s, 8, |c| c.is_ascii_digit())
-            .then(|| s.parse::<u64>().ok())
-            .flatten()
-            .filter(|n| *n <= max)
-    };
+    let number = |s: &str, max: u64| decimal::<u64>(s, 8).filter(|n| *n <= max);
     let (block, tx, output) = (
         number(block, 0xFF_FFFF)?,
         number(tx, 0xFF_FFFF)?,
@@ -262,9 +258,7 @@ enum Kind {
 
 /// A block height in a link: up to 8 digits.
 fn height(id: &str) -> Option<u64> {
-    plain(id, 8, |c| c.is_ascii_digit())
-        .then(|| id.parse().ok())
-        .flatten()
+    decimal(id, 8)
 }
 
 fn object(kind: Kind, id: &str, network: Network) -> Option<Object> {

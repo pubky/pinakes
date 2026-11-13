@@ -1,7 +1,7 @@
 //! Bluesky posts and profiles, read from the public AppView (`public.api.bsky.app`). No key. A
 //! post's identity is its at-URI: every address of it, by handle or by DID, becomes one resource
 //! named by the DID.
-use super::{text, web_url, Context, Example, Source};
+use super::{excerpt, text, web_url, Context, Example, Source};
 use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
@@ -112,15 +112,6 @@ impl Target {
 pub fn resolved_did(body: &[u8]) -> Option<String> {
     let v: Value = serde_json::from_slice(body).ok()?;
     v["did"].as_str().filter(|d| did(d)).map(str::to_owned)
-}
-
-fn excerpt(text: &str, max: usize) -> String {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut cut: String = flat.chars().take(max).collect();
-    if cut.len() < flat.len() {
-        cut.push('…');
-    }
-    cut
 }
 
 /// Whether an account carries the `!no-unauthenticated` self-label.
@@ -313,10 +304,7 @@ impl Source for Bluesky {
     }
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
         let target = Target::of_uri(uri).context("not a Bluesky link")?;
-        let json = FetchOptions {
-            accept: Some("application/json".into()),
-            ..Default::default()
-        };
+        let json = FetchOptions::json();
         let did = if target.by_did() {
             target.actor.clone()
         } else {

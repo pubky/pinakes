@@ -80,6 +80,58 @@ pub(crate) fn own_isrc(subject: &Subject) -> Option<String> {
         .map(|(_, isrc)| isrc)
 }
 
+/// An album or a track of a service that records albums' barcodes and tracks' ISRCs: how its
+/// API names the collection, the namespace of the key and the value's normal form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Kind {
+    Album,
+    Track,
+}
+impl Kind {
+    pub(crate) fn collection(self) -> &'static str {
+        match self {
+            Self::Album => "albums",
+            Self::Track => "tracks",
+        }
+    }
+    pub(crate) fn namespace(self) -> &'static str {
+        match self {
+            Self::Album => "upc",
+            Self::Track => "isrc",
+        }
+    }
+    pub(crate) fn normal(self, value: &str) -> Option<String> {
+        match self {
+            Self::Album => crate::barcode::gtin13(value),
+            Self::Track => music::isrc(value),
+        }
+    }
+}
+
+/// The values of a subject's keys in `namespace` to ask a service for, at most `max`. With
+/// `own_first`, the track's own ISRC comes first when it is one of them (a shared ISRC is a fact,
+/// not a key, and a service would answer with any of its recordings); the others follow in their
+/// order.
+pub(crate) fn key_values(
+    subject: &Subject,
+    namespace: &str,
+    own_first: bool,
+    max: usize,
+) -> Vec<String> {
+    let own = own_isrc(subject)
+        .filter(|o| own_first && subject.keys_in(namespace).any(|k| k == o.as_str()));
+    own.iter()
+        .map(String::as_str)
+        .chain(
+            subject
+                .keys_in(namespace)
+                .filter(|v| Some(*v) != own.as_deref()),
+        )
+        .take(max)
+        .map(str::to_owned)
+        .collect()
+}
+
 /// The length of a track as its service's page or record states it, in seconds (`duration`,
 /// an ISO 8601 duration in the document's attributes).
 pub(crate) fn page_duration(subject: &Subject) -> Option<i64> {

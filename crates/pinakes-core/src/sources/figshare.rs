@@ -56,9 +56,7 @@ const TYPES: &[&str] = &[
 
 /// A positive decimal number without a leading zero.
 fn number(s: &str) -> Option<u64> {
-    (plain(s, 10, |c| c.is_ascii_digit()) && !s.starts_with('0'))
-        .then(|| s.parse().ok())
-        .flatten()
+    super::kit::number(s, 10).filter(|_| !s.starts_with('0'))
 }
 
 /// The article an article page names: `/articles/{type}/{slug}/{id}`, the older
