@@ -141,6 +141,7 @@ async fn committed_music_groups_are_logged_and_capped(pool: PgPool) {
         .with_writer(logs.clone())
         .with_ansi(false)
         .finish();
+    tracing::subscriber::set_global_default(subscriber).unwrap();
     let mut cfg = Config::default();
     cfg.groups.max_members = 2;
     let mut ids = Vec::new();
@@ -170,12 +171,7 @@ async fn committed_music_groups_are_logged_and_capped(pool: PgPool) {
         .unwrap();
         ids.push(id);
     }
-    tracing::instrument::WithSubscriber::with_subscriber(
-        groups::drain(&pool, &cfg.groups, 100),
-        subscriber,
-    )
-    .await
-    .unwrap();
+    groups::drain(&pool, &cfg.groups, 100).await.unwrap();
     let sizes: Vec<i64> = sqlx::query_scalar(
         "SELECT count(*) FROM group_unit WHERE group_id IS NOT NULL GROUP BY group_id",
     )

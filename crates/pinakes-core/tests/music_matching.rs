@@ -122,10 +122,7 @@ async fn musicbrainz_isrc_and_recording_use_exact_deezer_lookup() {
         format!("https://musicbrainz.org/recording/{RECORDING}"),
     ] {
         let s = subject(&uri);
-        let Some(source) = also_on::registered()
-            .into_iter()
-            .find(|s| s.id() == "deezer")
-        else {
+        let Some(source) = also_on::registered().iter().find(|s| s.id() == "deezer") else {
             return;
         };
         assert!(
@@ -161,7 +158,7 @@ async fn musicbrainz_isrc_and_recording_use_exact_deezer_lookup() {
 #[test]
 fn exact_reverse_sources_accept_known_mb_levels_not_arbitrary_pages() {
     let sources = also_on::registered()
-        .into_iter()
+        .iter()
         .filter(|s| matches!(s.id(), "deezer" | "tidal_isrc" | "spotify_isrc"));
     for source in sources {
         let mut track = subject(&format!("https://musicbrainz.org/recording/{RECORDING}"));
@@ -185,7 +182,7 @@ async fn recording_containment_is_a_fact_never_an_identity_key() {
         "musicbrainz_entity".into(),
     ));
     let Some(source) = also_on::registered()
-        .into_iter()
+        .iter()
         .find(|s| s.id() == "musicbrainz_containment")
     else {
         return;
