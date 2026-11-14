@@ -299,7 +299,7 @@ async fn alias_root(pool: &PgPool, id: &str) -> Option<(String, String)> {
 /// resource derived from each spelling read. In the corroborated mode the page joins exactly
 /// its own date in that calendar, and a client gets from the page's card to every date in two
 /// reads: the group, whose occurrence member names the feed, then the feed's occurrences.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_date_page_joins_its_own_date_in_its_groups_calendar(pool: PgPool) {
     let (r, site) = resolver(&pool, site());
     let cfg = queue_config(CrossContainerOccurrences::Corroborated);
@@ -399,7 +399,7 @@ async fn a_date_page_joins_its_own_date_in_its_groups_calendar(pool: PgPool) {
 /// The page's own calendar file, read for its UID alone, is optional: refused, failing or gone,
 /// the page reads fine, keeps the UID it was stored with and stays in its group. A file that
 /// answers with two events names no date, and the page leaves the group.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_failed_uid_read_keeps_the_page_and_its_group(pool: PgPool) {
     let (r, _) = resolver(&pool, site());
     let cfg = queue_config(CrossContainerOccurrences::Corroborated);
@@ -462,7 +462,7 @@ async fn a_failed_uid_read_keeps_the_page_and_its_group(pool: PgPool) {
 }
 
 /// Without the corroborated mode, the page and the feed's occurrence stay apart.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_date_page_stays_apart_from_its_calendar_when_the_mode_is_off(pool: PgPool) {
     let (r, _) = resolver(&pool, site());
     let cfg = queue_config(CrossContainerOccurrences::Off);
@@ -478,7 +478,7 @@ async fn a_date_page_stays_apart_from_its_calendar_when_the_mode_is_off(pool: Pg
 /// A group's calendar mixes its series: a second series on the same evenings, under its own
 /// UIDs, never joins a date page, and no two dates of one feed join each other. Each page joins
 /// only its own date.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_calendar_with_two_series_joins_each_page_to_its_own_date_only(pool: PgPool) {
     let mut pages = site();
     let key = "www.meetup.com/bitcoin-meetup-switzerland/events/ical/".to_owned();
@@ -543,7 +543,7 @@ async fn a_calendar_with_two_series_joins_each_page_to_its_own_date_only(pool: P
 /// A page of another publisher whose own calendar file carries a Meetup date's UID does not
 /// join that date: across publishers the corroborated mode needs both located within 500 m,
 /// and the group's calendar gives no place.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn another_publishers_page_with_the_uid_does_not_join(pool: PgPool) {
     let (r, _) = resolver(&pool, site());
     let cfg = queue_config(CrossContainerOccurrences::Corroborated);
@@ -576,7 +576,7 @@ async fn another_publishers_page_with_the_uid_does_not_join(pool: PgPool) {
 /// The token spelling read first is the root; the number read later becomes its alias, so both
 /// links answer with one card. A page whose canonical names another group's event, or another
 /// host, keeps its own card.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_dates_number_and_token_are_one_resource_and_other_groups_are_not(pool: PgPool) {
     let mut pages = site();
     let page = pages["www.meetup.com/bitcoin-meetup-switzerland/events/316908442/"].clone();
