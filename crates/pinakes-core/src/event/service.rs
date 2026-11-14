@@ -29,7 +29,6 @@ impl EventService {
         uri: &str,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Fetched> {
-        let mapped = calendar::canonical_feed(uri);
         let feed_hint = is_feed(uri) && self.config.calendars;
         let validators = if feed_hint {
             let end = now
@@ -54,7 +53,8 @@ impl EventService {
             validators,
             ..Default::default()
         };
-        let fetched = egress.fetch_with(&mapped, &options).await?;
+        // An organiser calendar is the platform's own answer or none (`fetch_calendar`).
+        let fetched = super::adapters::fetch_calendar(egress, uri, &options).await?;
         // Conditional requests resume only after a snapshot is accepted and key-loss/hold
         // confirmation is complete. Otherwise a new ETag followed by perpetual 304s
         // would leave the first disappearance observation pending forever.
@@ -110,15 +110,6 @@ impl EventService {
         let ics = ics_body(bytes);
         if !feed_like(fetched) {
             return Ok(None);
-        }
-        // An organiser calendar answered from another origin is not that calendar: no snapshot,
-        // so its stored dates stay (`event/adapters/service.rs` answers the same).
-        if super::adapters::off_origin_calendar(uri, fetched.url.as_str()) {
-            return Err(crate::resolver::RetryLater {
-                class: "off_origin",
-                seconds: 3600,
-            }
-            .into());
         }
         let uri = uri.to_owned();
         let config = self.config.clone();

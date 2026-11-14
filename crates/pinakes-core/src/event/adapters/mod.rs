@@ -178,34 +178,70 @@ fn feed_form(d: &Definition, path: &str) -> bool {
 pub fn names_organiser_calendar(uri: &str) -> bool {
     organiser_calendar_of(uri).is_some()
 }
-/// Whether an answer for `uri` that came from `answered` (where redirects ended) is no answer of
-/// an organiser calendar (`names_organiser_calendar`). The platform's own answer comes over https
-/// from a host the platform declares (`Definition::domains`, the host or a subdomain, as
-/// `detect` reads them), at the organiser calendar's path form, without a query: every spelling
-/// of the calendar (`webcal:`, `http:`, the bare domain) that the platform answers so is read.
-/// Anything else is off its origin. Grouping trusts such a calendar's dates by its address
-/// (`groups`), so it must hold the platform's own.
-pub fn off_origin_calendar(uri: &str, answered: &str) -> bool {
+/// Whether `url` is where platform `d` answers an organiser calendar itself: over https on the
+/// default port, from a host it declares (`Definition::domains`, the host or a subdomain, as
+/// `detect` reads them), at the calendar's path form, without userinfo or a query.
+fn platform_calendar_location(d: &Definition, url: &Url) -> bool {
+    let host = url.host_str().unwrap_or("").trim_end_matches('.');
+    url.scheme() == "https"
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && d.domains.iter().any(|h| {
+            host == h
+                || host
+                    .strip_suffix(h.as_str())
+                    .is_some_and(|p| p.ends_with('.'))
+        })
+        && feed_form(d, url.path())
+}
+/// The answer for `uri` (a `webcal:` link read over https). An organiser calendar
+/// (`names_organiser_calendar`) is the platform's own answer or none: it is fetched without
+/// following redirects, and only a redirect to where the platform answers it itself
+/// (`platform_calendar_location`) is followed, up to three, so every spelling the platform
+/// answers (`webcal:`, `http:`, the bare domain) is read. An answer anywhere else, whatever
+/// its status or body, is refused before anything reads it (`RetryLater` `off_origin`, its
+/// stored dates kept): grouping trusts that calendar's dates by its address (`groups`).
+pub async fn fetch_calendar(
+    egress: &crate::resolver::egress::Egress,
+    uri: &str,
+    options: &crate::resolver::egress::FetchOptions,
+) -> anyhow::Result<crate::resolver::egress::Fetched> {
+    let mapped = crate::event::calendar::canonical_feed(uri);
     let Some(d) = organiser_calendar_of(uri) else {
-        return false;
+        return egress.fetch_with(&mapped, options).await;
     };
-    let Ok(answer) = Url::parse(answered) else {
-        return true;
+    let off_origin = || -> anyhow::Error {
+        crate::resolver::RetryLater {
+            class: "off_origin",
+            seconds: 3600,
+        }
+        .into()
     };
-    let host = answer.host_str().unwrap_or("").trim_end_matches('.');
-    let platform_host = d.domains.iter().any(|h| {
-        host == h
-            || host
-                .strip_suffix(h.as_str())
-                .is_some_and(|p| p.ends_with('.'))
-    });
-    !(answer.scheme() == "https"
-        && answer.port().is_none()
-        && answer.username().is_empty()
-        && answer.password().is_none()
-        && platform_host
-        && answer.query().is_none()
-        && feed_form(d, answer.path()))
+    let options = crate::resolver::egress::FetchOptions {
+        keep_redirect: true,
+        ..options.clone()
+    };
+    let mut url = Url::parse(&mapped)?;
+    for hop in 0..=3 {
+        let answer = egress.fetch_with(url.as_str(), &options).await?;
+        if matches!(answer.status, 301 | 302 | 303 | 307 | 308) {
+            let next = answer
+                .location
+                .as_deref()
+                .and_then(|l| url.join(l).ok())
+                .filter(|next| hop < 3 && platform_calendar_location(d, next))
+                .ok_or_else(off_origin)?;
+            url = next;
+            continue;
+        }
+        if !platform_calendar_location(d, &answer.url) {
+            return Err(off_origin());
+        }
+        return Ok(answer);
+    }
+    Err(off_origin())
 }
 /// The organiser feed of the event page `uri` on platform `d` (`Definition::container_feed`):
 /// on the page's own scheme, host and port, without its query or fragment. `None` when the

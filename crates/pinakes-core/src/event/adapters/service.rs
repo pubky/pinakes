@@ -171,22 +171,10 @@ impl PlatformResolver {
             || (d.mode == Mode::Container && feed_path(&target))
             || (d.id == "starticket" && target.ends_with(".xml"));
         opts.feed_cap = opts.feed_hint.then_some(local.feed_body_bytes);
-        let fetched = self
-            .web
-            .egress
-            .fetch_with(&calendar::canonical_feed(&target), &opts)
-            .await?;
+        // An organiser calendar is the platform's own answer or none (`fetch_calendar`).
+        let fetched = super::fetch_calendar(&self.web.egress, &target, &opts).await?;
         if fetched.status == 304 {
             return Err(crate::resolver::NotModified.into());
-        }
-        // An organiser calendar answered from another origin (a redirect) is not that calendar:
-        // grouping trusts its dates by its address. The stored one stays; the read is retried.
-        if super::off_origin_calendar(uri, fetched.url.as_str()) {
-            return Err(crate::resolver::RetryLater {
-                class: "off_origin",
-                seconds: 3600,
-            }
-            .into());
         }
         if d.mode == Mode::None {
             let extracted = extract_blocking(uri, &fetched, m.cadence_floor).await?;
