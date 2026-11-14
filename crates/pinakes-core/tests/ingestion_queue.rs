@@ -654,6 +654,19 @@ async fn a_refused_connection_retries_and_never_dead_letters(pool: PgPool) {
             row.3 <= delay as f64 && row.3 > delay as f64 - 2.0,
             "{row:?}"
         );
+        if streak == 3 {
+            // Egress's own waits between refusals (its host budget, a cached failure) keep the
+            // streak, so the backoff still grows and the host is not asked faster.
+            for wait in ["rate_limited", "discovery_cached"] {
+                run_due(&pool, &id, &DeferredResolver(wait), &cfg).await;
+                let row = queue_row(&pool, &id).await;
+                assert_eq!(
+                    (row.0, row.1, row.2, row.4.as_str(), row.5.as_deref()),
+                    (3, 0, false, "error", Some("connect")),
+                    "{wait} {row:?}"
+                );
+            }
+        }
     }
     assert_eq!(upstream.asked(), 7);
     // The upstream is back: the card is read and the streak is gone.

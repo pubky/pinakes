@@ -1925,6 +1925,33 @@ mod tests {
             server.await.unwrap();
         }
     }
+    /// A TLS failure is an answer about the host (the certificate it serves, a protocol it does
+    /// not speak): `connect`, but not unreached, so it still counts toward the dead letter.
+    #[tokio::test]
+    async fn a_tls_failure_is_not_unreached() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut hello = [0u8; 4096];
+            let _ = socket.read(&mut hello).await;
+            let _ = socket
+                .write_all(b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\n\r\n")
+                .await;
+            let _ = socket.shutdown().await;
+        });
+        let url: Url = format!("https://127.0.0.1:{}/page", addr.port())
+            .parse()
+            .unwrap();
+        let error = PinnedTransport
+            .get_with(&url, &[addr], &FetchOptions::default())
+            .await
+            .unwrap_err();
+        assert_eq!(super::super::error_class(&error), "connect", "{error:#}");
+        assert!(!super::super::unreached(&error), "{error:#}");
+        server.await.unwrap();
+    }
     /// A large PDF or an image past the page cap is cut there, not refused
     /// URL. Any other file past the cap is still refused.
     #[tokio::test]

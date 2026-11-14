@@ -340,7 +340,7 @@ pub fn error_class(error: &anyhow::Error) -> &'static str {
             if request.is_timeout() {
                 return "timeout";
             }
-            if request.is_connect() || reset(request) {
+            if request.is_connect() || transport(request) {
                 return "connect";
             }
             if let Some(status) = request.status() {
@@ -366,20 +366,28 @@ impl std::fmt::Display for Unreached {
 }
 impl std::error::Error for Unreached {}
 
-/// Whether a request broke in the transport after it connected: the peer reset or aborted the
-/// connection, or the pipe broke, while the request was sent or the answer read. Not a timeout.
-fn reset(request: &reqwest::Error) -> bool {
+/// Whether a request failed in the network under it, not in an answer: the connection was
+/// refused, reset or aborted, the pipe broke, or the host or its network is unreachable, while
+/// connecting, sending the request or reading the answer. Not a timeout (it has its own grace,
+/// `limits.timeout_grace`), and not a TLS failure (a certificate the host serves is an answer
+/// about it).
+fn transport(request: &reqwest::Error) -> bool {
     if request.is_timeout() {
         return false;
     }
     let mut source = std::error::Error::source(request);
     while let Some(cause) = source {
         if cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+            use std::io::ErrorKind::*;
             matches!(
                 io.kind(),
-                std::io::ErrorKind::ConnectionReset
-                    | std::io::ErrorKind::ConnectionAborted
-                    | std::io::ErrorKind::BrokenPipe
+                ConnectionRefused
+                    | ConnectionReset
+                    | ConnectionAborted
+                    | BrokenPipe
+                    | NotConnected
+                    | HostUnreachable
+                    | NetworkUnreachable
             )
         }) {
             return true;
@@ -389,20 +397,18 @@ fn reset(request: &reqwest::Error) -> bool {
     false
 }
 
-/// Whether a failure never reached the upstream's answer: the HTTP client could not connect
-/// (refused, TLS handshake) or the connection was reset on the way. Such a failure says nothing
-/// about the link, so the queue never dead-letters on it. A `connect` class a resolver names itself (a PKARR relay that serves no
-/// usable packet, a homeserver with only key-pinned endpoints) is an answer about the link and
-/// is not one; nor is a timeout, which has its own grace (`limits.timeout_grace`).
+/// Whether a failure never reached an answer from the upstream (`transport`, or `Unreached`
+/// where the error was rebuilt without its cause). Such a failure says nothing about the link,
+/// so the queue never dead-letters on it. A `connect` class a resolver names itself (a PKARR
+/// relay that serves no usable packet, a homeserver with only key-pinned endpoints) is an answer
+/// about the link and is not one; nor is a TLS failure or a timeout.
 pub fn unreached(error: &anyhow::Error) -> bool {
     error_class(error) == "connect"
         && error.chain().any(|cause| {
             cause.is::<Unreached>()
                 || cause
                     .downcast_ref::<reqwest::Error>()
-                    .is_some_and(|request| {
-                        (request.is_connect() && !request.is_timeout()) || reset(request)
-                    })
+                    .is_some_and(transport)
         })
 }
 

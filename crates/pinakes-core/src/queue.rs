@@ -328,8 +328,8 @@ async fn failed_as(
         .bind(&job.id).bind(job.generation).bind(attempt>=cfg.max_failures).bind(backoff(cfg,attempt) as f64).bind(error).bind(status.as_str()).execute(pool).await?;
     Ok(())
 }
-/// A fetch that never reached the upstream (`resolver::unreached`: the connection was refused,
-/// reset or its TLS handshake failed). It says nothing about the link, so it never counts toward
+/// A fetch that never got an answer from the upstream (`resolver::unreached`: the connection was
+/// refused, reset or aborted, or the host unreachable). It says nothing about the link, so it never counts toward
 /// the dead letter: it is read again with the queue's backoff, longer each time in a row up to
 /// `max_backoff_secs`, for as long as it lasts. The streak is kept in `timeout_streak` while
 /// `last_error` is `connect`, never in `attempts`, so it never brings a later answer about the
@@ -798,11 +798,14 @@ async fn finish_job(
             } else if retry.class == "off_origin" {
                 off_origin(pool, job, cfg).await?;
             } else {
-                sqlx::query("UPDATE resource SET timeout_streak=0,lease_until=NULL,priority_at=NULL,next_attempt_at=now()+$3*interval '1 second',last_error=$4 WHERE id=$1 AND generation=$2")
-                    .bind(&job.id).bind(job.generation).bind(retry.seconds.clamp(1,3600) as f64).bind(retry.class).execute(pool).await?;
+                // Egress's own waits (its host budget, a cached failure replayed) say nothing new
+                // about the link: a refused-connection streak stays, so its backoff keeps growing.
+                let own = matches!(retry.class, "rate_limited" | "discovery_cached");
+                sqlx::query("UPDATE resource SET timeout_streak=CASE WHEN $5 AND last_error='connect' THEN timeout_streak ELSE 0 END,lease_until=NULL,priority_at=NULL,next_attempt_at=now()+$3*interval '1 second',last_error=CASE WHEN $5 AND last_error='connect' THEN last_error ELSE $4 END WHERE id=$1 AND generation=$2")
+                    .bind(&job.id).bind(job.generation).bind(retry.seconds.clamp(1,3600) as f64).bind(retry.class).bind(own).execute(pool).await?;
             }
         } else if crate::resolver::unreached(&error) {
-            // A refused or dropped connection: retried with backoff, never dead-lettered.
+            // A refused, reset or unreachable connection: retried with backoff, never dead-lettered.
             unreached(pool, job, cfg).await?;
         } else if crate::resolver::error_class(&error) == "timeout" {
             timed_out(pool, job, cfg, 60).await?;
