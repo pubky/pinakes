@@ -683,9 +683,11 @@ from the page's own URL origin (scheme, host and port, after redirects). That re
 (it is skipped on a probe): a refused, failing or non-calendar answer keeps the UID the page
 was stored with, and never fails the page or marks it gone. A group calendar is read only when Meetup
 answers it itself: over https, from a meetup.com host, at the calendar's path, so its `webcal:`,
-`http:` and bare-domain spellings are read too. A redirect anywhere else is not followed, on the
-platform route and on the web route alike, whatever that answer's status or body: nothing there
-is fetched, the stored dates stay, and `last_error` is `off_origin`. It is read again with the
+`http:` and bare-domain spellings are read too; each hop of such a redirect waits for its own
+slot of the host's pace. A redirect anywhere else, an HTTP one or one in the page (a meta refresh,
+a script, a "Redirecting" stub), is not followed, on the platform route and on the web route
+alike, whatever that answer's status or body: nothing there is fetched, the stored dates stay,
+and `last_error` is `off_origin`. It is read again with the
 queue's backoff (`limits.backoff_secs` doubling up to `limits.max_backoff_secs`); that streak
 never counts toward the dead letter, and any other answer starts it over. After an upgrade, Meetup pages take their group calendar, their UID and
 their token alias at their next read; `pinakesd reextract event_platform` reads every event

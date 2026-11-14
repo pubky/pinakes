@@ -1095,3 +1095,93 @@ async fn an_off_origin_answer_of_any_status_keeps_a_calendars_dates(pool: PgPool
         read(&pool, &r, &cfg, &feed()).await;
     }
 }
+
+/// A group calendar answered by an in-page redirect (a meta refresh, a script) is decided like an
+/// HTTP one, on both routes: to another host, it is not followed (that host is never asked, so
+/// its failure charges nothing), the stored dates stay, nothing dead-letters, and `last_error`
+/// says why; to where Meetup answers the calendar itself, it is followed and read.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_in_page_redirect_of_a_calendar_is_decided_like_an_http_one(pool: PgPool) {
+    let cfg = queue_config(CrossContainerOccurrences::Off);
+    let elsewhere = "https://calendar.example.com/meetup.ics";
+    let stubs = [
+        format!(
+            r#"<!DOCTYPE html><html><head><meta http-equiv="refresh" content="0;url={elsewhere}"><title>Redirecting</title></head><body></body></html>"#
+        ),
+        format!(
+            r#"<!DOCTYPE html><html><head><title>Calendar</title><script>window.location.replace("{elsewhere}")</script></head><body></body></html>"#
+        ),
+    ];
+    for meetup in [true, false] {
+        let (r, _) = resolver_with(&pool, site(), meetup);
+        let id = read(&pool, &r, &cfg, &feed()).await;
+        let scheduled = |pool: PgPool, id: String| async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM occurrence WHERE resource_id=$1 AND status='scheduled'",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+        assert_eq!(scheduled(pool.clone(), id.clone()).await, 10, "{meetup}");
+        for stub in &stubs {
+            let mut pages = site();
+            pages.insert(path_key(&feed()), stub.clone());
+            // Were it asked, the other host would fail the request.
+            pages.insert("calendar.example.com/meetup.ics".into(), "ERROR".into());
+            for _ in 0..3 {
+                let (r, seen) = resolver_with(&pool, pages.clone(), meetup);
+                read(&pool, &r, &cfg, &feed()).await;
+                assert!(
+                    !seen
+                        .seen
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|u| u.starts_with(elsewhere)),
+                    "{meetup} {stub}"
+                );
+            }
+            assert_eq!(
+                scheduled(pool.clone(), id.clone()).await,
+                10,
+                "{meetup} {stub}"
+            );
+            let (attempts, dead, error): (i32, bool, Option<String>) =
+                sqlx::query_as("SELECT attempts,dead_letter,last_error FROM resource WHERE id=$1")
+                    .bind(&id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                (attempts, dead, error.as_deref()),
+                (0, false, Some("off_origin")),
+                "{meetup} {stub}"
+            );
+        }
+        // A stub to Meetup's own calendar location is followed.
+        let path = "/bitcoin-meetup-switzerland/events/ical/";
+        let http = format!("http://www.meetup.com{path}");
+        let mut pages = site();
+        pages.insert(
+            http.clone(),
+            format!(
+                r#"<!DOCTYPE html><html><head><meta http-equiv="refresh" content="0;url=https://www.meetup.com{path}"><title>Redirecting</title></head><body></body></html>"#
+            ),
+        );
+        let (r, _) = resolver_with(&pool, pages, meetup);
+        let id = read(&pool, &r, &cfg, &http).await;
+        let (occurrences, error): (i64, Option<String>) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM occurrence WHERE resource_id=$1),(SELECT last_error FROM resource WHERE id=$1)",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((occurrences, error), (10, None), "{meetup}");
+        // Read again from the platform's own answer, between the two routes.
+        let (r, _) = resolver_with(&pool, site(), meetup);
+        read(&pool, &r, &cfg, &feed()).await;
+    }
+}
