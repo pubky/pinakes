@@ -242,6 +242,8 @@ impl PlatformResolver {
                 // for its UID alone: the UID joins the page to its date in that feed. Read so,
                 // the file is optional and adds nothing else.
                 let uid_only = !missing && d.container_feed.is_some();
+                // Whether the file answered (200): then its UID, or none, is the page's now.
+                let mut answered = false;
                 if !d.requires_key && (missing || uid_only) {
                     // Calendar-link discovery reads the page: in a parse slot.
                     let found = {
@@ -280,6 +282,7 @@ impl PlatformResolver {
                                     return self.enrichment_gone(uri, &d.id).await;
                                 }
                                 if f.status == 200 && uid_only {
+                                    answered = true;
                                     if let Ok(Some(extra)) =
                                         enrichment_blocking(uri, d, &f, &local).await
                                     {
@@ -344,9 +347,14 @@ impl PlatformResolver {
                         }
                     }
                 }
-                // A UID-only read that gave none (refused, failed, gone) keeps the UID the page
-                // was stored with, so a passing failure never moves the page out of its group.
-                if uid_only && !probe && !doc.group_keys.iter().any(|k| k.basis == "ics_uid") {
+                // A UID-only read the file did not answer (refused, failed, gone) keeps the UID
+                // the page was stored with, so a passing failure never moves the page out of its
+                // group. A file that answers without one (two events, another origin) ends it.
+                if uid_only
+                    && !answered
+                    && !probe
+                    && !doc.group_keys.iter().any(|k| k.basis == "ics_uid")
+                {
                     self.stored_uid(uri, &mut doc).await?;
                 }
                 doc

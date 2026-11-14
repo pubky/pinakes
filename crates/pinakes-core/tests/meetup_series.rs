@@ -397,7 +397,8 @@ async fn a_date_page_joins_its_own_date_in_its_groups_calendar(pool: PgPool) {
 }
 
 /// The page's own calendar file, read for its UID alone, is optional: refused, failing or gone,
-/// the page reads fine, keeps the UID it was stored with and stays in its group.
+/// the page reads fine, keeps the UID it was stored with and stays in its group. A file that
+/// answers with two events names no date, and the page leaves the group.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_failed_uid_read_keeps_the_page_and_its_group(pool: PgPool) {
     let (r, _) = resolver(&pool, site());
@@ -443,6 +444,21 @@ async fn a_failed_uid_read_keeps_the_page_and_its_group(pool: PgPool) {
         common::drain_groups(&pool, &cfg.groups).await;
         assert_eq!(all_groups(&pool).await, joined, "{answer}");
     }
+    // A file that answers with another calendar (two events) names no date: the UID ends.
+    let mut pages = site();
+    let two = pages[&file.replacen("https://", "", 1)].replacen(
+        "END:VCALENDAR",
+        &shifted(
+            "BEGIN:VEVENT\r\nUID:event_900000003@meetup.com\r\nDTSTART;TZID=Europe/Zurich:20261210T190000\r\nSUMMARY:Other\r\nEND:VEVENT\r\nEND:VCALENDAR",
+            shift_days(),
+        ),
+        1,
+    );
+    pages.insert(file.replacen("https://", "", 1), two);
+    let (r, _) = resolver(&pool, pages);
+    read(&pool, &r, &cfg, &token()).await;
+    common::drain_groups(&pool, &cfg.groups).await;
+    assert_eq!(all_groups(&pool).await, Vec::<Vec<(String, String)>>::new());
 }
 
 /// Without the corroborated mode, the page and the feed's occurrence stay apart.
