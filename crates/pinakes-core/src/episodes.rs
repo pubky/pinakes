@@ -537,15 +537,14 @@ mod tests {
     }
     fn fetched(body: &str, truncated: bool) -> crate::resolver::egress::Fetched {
         crate::resolver::egress::Fetched {
-            permanent_redirect: false,
             truncated,
-            validators: Default::default(),
-            url: "https://feeds.example.org/show.xml".parse().unwrap(),
-            content_type: "application/rss+xml".into(),
-            status: 200,
             retry_after_secs: 0,
-            location: None,
-            body: body.as_bytes().to_vec(),
+            ..crate::resolver::egress::Fetched::answer(
+                "https://feeds.example.org/show.xml".parse().unwrap(),
+                200,
+                "application/rss+xml".into(),
+                body.as_bytes().to_vec(),
+            )
         }
     }
 

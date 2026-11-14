@@ -18,5 +18,10 @@
     "url": "https://musicbrainz.org/ws/2/recording/3276d651-6f19-4e3b-bfb2-d136f823f620?inc=work-rels+work-level-rels+url-rels&fmt=json",
     "date": "2026-11-13",
     "edits": []
+  },
+  "isrc.json": {
+    "url": "https://musicbrainz.org/ws/2/isrc/NLH2L2500268?fmt=json",
+    "date": "2026-11-13",
+    "edits": []
   }
 }

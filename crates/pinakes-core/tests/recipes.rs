@@ -24,17 +24,12 @@ const SEED: &str = "pubkyseedauthorpubkyseedauthorpubkyseedauthorpubkyse";
 const SECOND: &str = "pubkysecondtaggerpubkysecondtaggerpubkysecondtaggerp";
 
 fn recorded(url: &str, content_type: &str, body: &[u8]) -> pinakes_core::resolver::egress::Fetched {
-    pinakes_core::resolver::egress::Fetched {
-        permanent_redirect: false,
-        truncated: false,
-        url: url.parse().unwrap(),
-        body: body.to_vec(),
-        content_type: content_type.into(),
-        status: 200,
-        location: None,
-        retry_after_secs: 60,
-        validators: Default::default(),
-    }
+    common::fetched(
+        url.parse().unwrap(),
+        200,
+        content_type.into(),
+        body.to_vec(),
+    )
 }
 
 async fn save(pool: &PgPool, doc: &ResourceMeta) -> String {

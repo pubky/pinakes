@@ -355,16 +355,8 @@ mod tests {
     #[test]
     fn an_empty_accepted_answer_is_a_challenge() {
         let url = Url::parse("https://www.imdb.com/title/tt0133093/").unwrap();
-        let fetched = |status: u16, body: &[u8]| Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            url: url.clone(),
-            body: body.to_vec(),
-            content_type: "text/html".into(),
-            status,
-            location: None,
-            retry_after_secs: 60,
-            validators: Default::default(),
+        let fetched = |status: u16, body: &[u8]| {
+            Fetched::answer(url.clone(), status, "text/html".into(), body.to_vec())
         };
         assert_eq!(inspect(&url, &fetched(202, b"")).unwrap(), Page::Blocked);
         assert_eq!(inspect(&url, &fetched(202, b" \n")).unwrap(), Page::Blocked);
@@ -396,16 +388,13 @@ mod tests {
         let url =
             Url::parse("https://musicbrainz.org/recording/833f00e1-781f-4edd-90e4-e52712618862")
                 .unwrap();
-        let fetched = |status: u16, body: &str| Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            url: url.clone(),
-            body: body.as_bytes().to_vec(),
-            content_type: "text/html; charset=utf-8".into(),
-            status,
-            location: None,
-            retry_after_secs: 60,
-            validators: Default::default(),
+        let fetched = |status: u16, body: &str| {
+            Fetched::answer(
+                url.clone(),
+                status,
+                "text/html; charset=utf-8".into(),
+                body.as_bytes().to_vec(),
+            )
         };
         // MusicBrainz' proof-of-work gate (2026-11-10), answered with 200 to a plain client.
         let musicbrainz = "<!DOCTYPE html><html><head><meta charset=\"utf-8\">\n<title>Verifying your browser</title>\n<style>body{display:flex}</style>\n</head><body><div class=\"box\"><div class=\"spinner\"></div>\n<p>Verifying your browser, please wait…</p>\n<noscript><p><b>JavaScript is required to access this page.</b></p></noscript>\n</div><script>\n(async()=>{const f=document.createElement(\"form\");f.method=\"POST\";f.action=\"/__meb_verify\";})()\n</script></body></html>";

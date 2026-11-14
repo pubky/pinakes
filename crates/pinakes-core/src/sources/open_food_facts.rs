@@ -234,10 +234,7 @@ impl Source for OpenFoodFacts {
     }
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
         let (mut database, code, _) = of_uri(uri).context("not a product page")?;
-        let options = FetchOptions {
-            accept: Some("application/json".into()),
-            ..Default::default()
-        };
+        let options = FetchOptions::json();
         let f = cx.fetch(&database.api(&code), &options).await?;
         let mut found = answer(&code, f.status, &f.body)?;
         // Its page redirects to the database that holds it.
@@ -298,10 +295,7 @@ pub mod also_on {
             let Some(code) = barcode(subject) else {
                 return Ok(found);
             };
-            let options = FetchOptions {
-                accept: Some("application/json".into()),
-                ..Default::default()
-            };
+            let options = FetchOptions::json();
             // Open Food Facts first: it names the database of a barcode it holds as another type
             // of product, which is then asked once.
             let mut database = &DATABASES[0];

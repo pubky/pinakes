@@ -6,7 +6,7 @@ use pinakes_core::{
     also_on::{self, SourceOptions},
     config::Config,
     model::ResourceMeta,
-    resolver::egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+    resolver::egress::{Egress, FetchOptions, Fetched, Transport},
     store,
 };
 use std::{
@@ -14,14 +14,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 mod common;
-
-struct PublicDns;
-#[async_trait::async_trait]
-impl Dns for PublicDns {
-    async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<SocketAddr>> {
-        Ok(vec![SocketAddr::new("8.8.8.8".parse()?, port)])
-    }
-}
+use common::media::PublicDns;
 
 /// A recording of this source's own, else one of the hubs' shared ones.
 fn fixture(name: &str) -> Option<Vec<u8>> {
@@ -60,15 +53,8 @@ impl Transport for Recorded {
             url.query().unwrap_or("")
         ));
         let answer = |status: u16, body: Vec<u8>, content_type: &str| Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: url.clone(),
-            status,
             retry_after_secs: if status == 429 { 3600 } else { 120 },
-            location: None,
-            content_type: content_type.into(),
-            body,
+            ..common::fetched(url.clone(), status, content_type.into(), body)
         };
         let query = |name: &str| {
             url.query_pairs()
@@ -134,6 +120,12 @@ impl Transport for Recorded {
     }
 }
 
+/// Whether this build has every also-on source a test needs: a test of some sources returns
+/// early without them.
+fn has(ids: &[&str]) -> bool {
+    let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
+    ids.iter().all(|id| registered.contains(id))
+}
 /// The switches (`itunes_song` and `deezer`) and TIDAL's pair.
 fn config(on: bool, deezer: bool, tidal: Option<(&str, &str)>) -> Config {
     let mut config = Config::default();
@@ -144,6 +136,10 @@ fn config(on: bool, deezer: bool, tidal: Option<(&str, &str)>) -> Config {
         );
     }
     for (source, enabled) in [("itunes_song", on), ("deezer", deezer)] {
+        // Only the sources this build has: a switch for one it lacks is refused.
+        if !has(&[source]) {
+            continue;
+        }
         config.also_on.sources.insert(
             source.into(),
             SourceOptions {
@@ -213,6 +209,9 @@ const GET_LUCKY: &str = "https://music.apple.com/song/617154366 - itunes_song ma
 /// Deezer's track 2 of Underclass Hero, whose barcode answers several collections: nothing.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_deezer_track_s_place_names_its_apple_song(pool: sqlx::PgPool) {
+    if !has(&["deezer", "itunes"]) {
+        return;
+    }
     let lucky = save(&pool, "https://www.deezer.com/track/67238735", None).await;
     let walking = save(
         &pool,
@@ -242,6 +241,9 @@ async fn a_deezer_track_s_place_names_its_apple_song(pool: sqlx::PgPool) {
 /// TIDAL's Walking Disaster: Underclass Hero again, several collections, nothing.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_tidal_track_s_place_names_its_apple_song(pool: sqlx::PgPool) {
+    if !has(&["tidal", "itunes"]) {
+        return;
+    }
     let lucky = save(&pool, "https://tidal.com/track/20115564", None).await;
     let walking = save(&pool, "https://tidal.com/track/3524506", None).await;
     let seen = run(
@@ -262,6 +264,9 @@ async fn a_tidal_track_s_place_names_its_apple_song(pool: sqlx::PgPool) {
 /// pair) or with `itunes` off, it asks nothing.
 #[sqlx::test(migrations = "../../migrations")]
 async fn without_its_switch_or_a_place_s_source_nothing_is_asked(pool: sqlx::PgPool) {
+    if !has(&["deezer", "itunes"]) {
+        return;
+    }
     save(&pool, "https://www.deezer.com/track/67238735", None).await;
     save(&pool, "https://tidal.com/track/20115564", None).await;
     save(
@@ -302,6 +307,9 @@ async fn without_its_switch_or_a_place_s_source_nothing_is_asked(pool: sqlx::PgP
 /// found kept.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_busy_itunes_keeps_the_song(pool: sqlx::PgPool) {
+    if !has(&["deezer", "itunes"]) {
+        return;
+    }
     let lucky = save(&pool, "https://www.deezer.com/track/67238735", None).await;
     run(&pool, config(true, true, None), Answers::default()).await;
     assert_eq!(links(&pool, &lucky).await, [GET_LUCKY]);

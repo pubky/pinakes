@@ -11,10 +11,7 @@ pub const ENDPOINT: &str = "https://ld.admin.ch/query";
 pub const ATTRIBUTION: &str = "Source: Zefix, Federal Office of Justice (EHRA), via LINDAS";
 
 fn ehraid(value: &str) -> Option<u64> {
-    (!value.is_empty() && value.len() <= 9 && value.bytes().all(|b| b.is_ascii_digit()))
-        .then(|| value.parse().ok())
-        .flatten()
-        .filter(|n| *n > 0)
+    super::kit::number(value, 9)
 }
 
 /// The EHRA id of a LINDAS company IRI (or one of its sub-IRIs) or a zefix.ch company page.

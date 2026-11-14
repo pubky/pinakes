@@ -1536,9 +1536,11 @@ enrichment), each value whole and at most 256 bytes, else left out:
 | `genre` | any | Its top genres: at most three, most votes first, a tie by name, joined with `; ` |
 | `rating`, `rating_count` | release group, recording, artist | Its rating on MusicBrainz, 0 to 5 with one decimal (`4.5`; half rounds up), and the number of votes; neither when nobody voted. A release has no rating of its own |
 
-A MusicBrainz artist, release group, release or recording card also takes an image and a
-description from the entity's Wikidata item, each with its [credit](#credits) (`[web]
-music_enrichment`, on by default):
+A MusicBrainz artist, release group, release or recording card, and an ISRC's page that shows a
+recording's card (its one recording's, or of agreeing duplicates the one with the plainest title,
+as above; never the `ISRC {code}` card, which takes nothing), also takes an image and a description
+from the entity's Wikidata item, each with its [credit](#credits) (`[web] music_enrichment`, on by
+default):
 - the item is the one the entity's own `wikidata` relation on MusicBrainz names (several give
   nothing). Without such a relation, it is the one item that carries the entity's MBID (an
   artist's `P434`, a release group's `P436`, a release's `P5813`, a recording's `P4404`), as

@@ -34,10 +34,7 @@ fn options(token: &str) -> FetchOptions {
 pub const ATTRIBUTION: &str = "Source: CourtListener, Free Law Project";
 
 fn cluster(value: &str) -> Option<u64> {
-    (!value.is_empty() && value.len() <= 12 && value.bytes().all(|b| b.is_ascii_digit()))
-        .then(|| value.parse().ok())
-        .flatten()
-        .filter(|n| *n > 0)
+    super::kit::number(value, 12)
 }
 
 /// The cluster id of `/opinion/{id}[/{slug}/…]` or `/api/rest/v{3,4}/clusters/{id}/`.
@@ -322,17 +319,12 @@ mod tests {
                 }
                 _ => (401, "search_unauthenticated_401.json"),
             };
-            Ok(crate::resolver::egress::Fetched {
-                permanent_redirect: false,
-                truncated: false,
-                validators: Default::default(),
-                url: url.clone(),
-                content_type: "application/json".into(),
+            Ok(crate::resolver::egress::Fetched::answer(
+                url.clone(),
                 status,
-                retry_after_secs: 60,
-                location: None,
-                body: read(file),
-            })
+                "application/json".into(),
+                read(file),
+            ))
         }
     }
 

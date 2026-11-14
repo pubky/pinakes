@@ -17,9 +17,11 @@ use crate::{config::Config, model::ResourceMeta, resolver::egress::Egress};
 pub mod books;
 pub mod client_credentials;
 pub mod deezer;
+pub mod deezer_api;
 pub mod editions;
 pub mod films;
 pub mod itunes;
+pub mod itunes_api;
 pub mod itunes_song;
 pub mod media;
 pub mod musicbrainz;
@@ -33,6 +35,7 @@ pub mod spotify;
 pub mod spotify_api;
 pub mod spotify_isrc;
 pub mod tidal;
+pub mod tidal_api;
 pub mod tidal_isrc;
 pub mod tmdb;
 pub mod wikidata;
@@ -404,6 +407,20 @@ pub trait Source: Send + Sync {
 pub fn runs(config: &Config, source: &dyn Source) -> bool {
     config.also_on.source_enabled(source) && source.ready(config)
 }
+/// Whether the source with this ID runs under `config` ([`runs`]): never in a build without it.
+/// How one source asks about another, so each goes without the other's module.
+pub fn runs_by_id(config: &Config, id: &str) -> bool {
+    registered()
+        .iter()
+        .any(|s| s.id() == id && runs(config, s.as_ref()))
+}
+/// Whether the source with this ID is on under `config` and the worker runs
+/// ([`AlsoOnConfig::source_enabled`]): never in a build without it.
+pub fn enabled_by_id(config: &Config, id: &str) -> bool {
+    registered()
+        .iter()
+        .any(|s| s.id() == id && config.also_on.source_enabled(s.as_ref()))
+}
 /// Whether `source` counts as switched off under `config`: by the operator, or for want of what
 /// it needs to run when that switches it off ([`Source::off_until_ready`]). A source that is not
 /// switched off shows its stored rows, and what cards took from them, whether or not the worker
@@ -461,6 +478,20 @@ pub fn unless_over_cap(found: Result<Found>, fallback: impl FnOnce() -> Found) -
     match found {
         Err(e) if crate::resolver::egress::over_cap(&e) => Ok(fallback()),
         found => found,
+    }
+}
+/// What a Wikidata item's Q-id alone proves: the item's key. The fallback of a read of the item
+/// that is over its cap ([`unless_over_cap`]).
+pub fn wikidata_key(qid: &str) -> Found {
+    Found {
+        keys: crate::hubs::key::wikidata(qid)
+            .map(|key| Key {
+                key,
+                via: "wikidata".into(),
+            })
+            .into_iter()
+            .collect(),
+        ..Default::default()
     }
 }
 /// Every source this build has: these, then each lookup family's ([`crate::lookups::FAMILIES`]).

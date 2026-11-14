@@ -36,10 +36,7 @@ pub enum Found {
 /// timeout, a 429, a 5xx, any other status but 404 and 410, an answer that is not JSON). One
 /// request, through the egress and its cache. `subject` names the card in logs.
 pub async fn credited_image(egress: &Egress, name: &str, width: u32, subject: &str) -> Found {
-    let options = FetchOptions {
-        accept: Some("application/json".into()),
-        ..Default::default()
-    };
+    let options = FetchOptions::json();
     let fetched = match egress
         .discover(&file_query(name, width), &options, CACHE_SECS)
         .await

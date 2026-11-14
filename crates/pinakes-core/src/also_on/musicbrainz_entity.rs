@@ -84,10 +84,7 @@ impl MusicBrainzEntitySource {
                     match own_wikidata_key(&cx.egress, &entity).await {
                         Ok(key) => found.keys.extend(key),
                         Err(error) => {
-                            let wait = error
-                                .chain()
-                                .find_map(|c| c.downcast_ref::<crate::resolver::RetryLater>())
-                                .map_or(900, |r| r.seconds.max(60));
+                            let wait = crate::also_on::media::retry_wait(&error);
                             found.retry_after = Some(std::time::Duration::from_secs(wait));
                             found.keys.extend(
                                 subject

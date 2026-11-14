@@ -1,6 +1,6 @@
 //! Leaving a page's list entries out of its JSON-LD (`web::extract`) costs no copies: a large page
 //! of nested graphs with two listed events is read within a small multiple of its size.
-use pinakes_core::resolver::{egress::Fetched, web};
+use pinakes_core::resolver::web;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 mod common;
@@ -54,17 +54,12 @@ fn pruning_a_large_nested_page_copies_nothing() {
     let body = page();
     let size = body.len();
     assert!(size > 850_000, "{size}");
-    let fetched = Fetched {
-        permanent_redirect: false,
-        truncated: false,
-        validators: Default::default(),
-        url: url.parse().unwrap(),
-        content_type: "text/html".into(),
-        status: 200,
-        retry_after_secs: 60,
-        location: None,
-        body: body.into_bytes(),
-    };
+    let fetched = common::fetched(
+        url.parse().unwrap(),
+        200,
+        "text/html".into(),
+        body.into_bytes(),
+    );
     let before = ALLOCATED.load(Ordering::Relaxed);
     PEAK.store(LIVE.load(Ordering::Relaxed), Ordering::Relaxed);
     let started = common::thread_cpu_time();

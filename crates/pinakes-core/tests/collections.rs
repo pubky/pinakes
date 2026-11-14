@@ -2,6 +2,8 @@
 //! one per item, listed by `GET /v1/resources/{id}/collections` (the viewer's own first, then
 //! newest first, paged), counted on every card (`collections`) and a search filter
 //! (`in_collection`).
+mod common;
+
 use axum::{body::Body, http::Request};
 use http_body_util::BodyExt;
 use pinakes_core::{
@@ -75,17 +77,7 @@ fn id(uri: &str) -> String {
     identity(uri).unwrap().0
 }
 async fn request(app: &axum::Router, path: &str) -> (u16, Value) {
-    let mut request = Request::builder().uri(path).body(Body::empty()).unwrap();
-    request.extensions_mut().insert(axum::extract::ConnectInfo(
-        "127.0.0.2:1234".parse::<std::net::SocketAddr>().unwrap(),
-    ));
-    let response = app.clone().oneshot(request).await.unwrap();
-    let status = response.status().as_u16();
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    (
-        status,
-        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
-    )
+    common::get_from(app, "127.0.0.2:1234", path).await
 }
 /// The collections listed for a resource, as URIs, in order.
 async fn listed(app: &axum::Router, id: &str) -> Vec<String> {

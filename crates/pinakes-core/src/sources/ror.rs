@@ -6,7 +6,8 @@
 //! in lower case; ids with a wrong check are rejected. The data is CC0.
 use super::{
     kit::{
-        fetch, float, host_and_segments, int, json, text, texts, Card, Key, Link, Point, Request,
+        decimal, fetch, float, host_and_segments, int, json, text, texts, Card, Key, Link, Point,
+        Request,
     },
     Example, Source,
 };
@@ -31,11 +32,7 @@ pub fn ror_id(value: &str) -> Option<String> {
     for c in body.chars() {
         n = n * 32 + BASE32.find(c)? as u64;
     }
-    let check: u64 = check
-        .bytes()
-        .all(|b| b.is_ascii_digit())
-        .then(|| check.parse().ok())
-        .flatten()?;
+    let check: u64 = decimal(check, 2)?;
     (check == 98 - (n * 100) % 97).then_some(value)
 }
 

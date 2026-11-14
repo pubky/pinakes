@@ -1,5 +1,6 @@
 //! The hub clients through Egress, against recorded MusicBrainz and Wikidata answers.
 mod common;
+use common::{hubs_fixture as fixture, media::PublicDns};
 use pinakes_core::{
     also_on,
     api::{self, AppState},
@@ -7,7 +8,7 @@ use pinakes_core::{
     hubs::{musicbrainz, wikidata, MbKind},
     model::ResourceMeta,
     resolver::{
-        egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+        egress::{Egress, FetchOptions, Fetched, Transport},
         RetryLater,
     },
     store,
@@ -17,24 +18,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-struct PublicDns;
-#[async_trait::async_trait]
-impl Dns for PublicDns {
-    async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<SocketAddr>> {
-        Ok(vec![SocketAddr::new("8.8.8.8".parse()?, port)])
-    }
-}
-
 /// Answers by the request's path and query, from `tests/fixtures/hubs`; records each request.
 struct Recorded {
     seen: Mutex<Vec<String>>,
-}
-fn fixture(name: &str) -> Vec<u8> {
-    std::fs::read(format!(
-        "{}/tests/fixtures/hubs/{name}",
-        env!("CARGO_MANIFEST_DIR")
-    ))
-    .unwrap()
 }
 /// MusicBrainz's answer to one URL lookup.
 fn mb_url(resource: &str) -> (u16, Vec<u8>) {
@@ -119,17 +105,12 @@ impl Transport for Recorded {
                 }
                 .into());
             }
-            return Ok(Fetched {
-                permanent_redirect: false,
-                truncated: false,
-                validators: Default::default(),
-                url: url.clone(),
-                status: 200,
-                retry_after_secs: 60,
-                location: None,
-                content_type: "text/html".into(),
-                body: b"<html><head><title>Big Band</title></head><body></body></html>".to_vec(),
-            });
+            return Ok(common::fetched(
+                url.clone(),
+                200,
+                "text/html".into(),
+                b"<html><head><title>Big Band</title></head><body></body></html>".to_vec(),
+            ));
         }
         // Deezer's own pages, written by hand in their shape: the title, the Open Graph type, and
         // an oEmbed discovery link on its API's host (never followed: another origin).
@@ -144,31 +125,21 @@ impl Transport for Recorded {
                 }
                 other => panic!("unexpected Deezer page {other}"),
             };
-            return Ok(Fetched {
-                permanent_redirect: false,
-                truncated: false,
-                validators: Default::default(),
-                url: url.clone(),
-                status: 200,
-                retry_after_secs: 60,
-                location: None,
-                content_type: "text/html".into(),
-                body: body.as_bytes().to_vec(),
-            });
+            return Ok(common::fetched(
+                url.clone(),
+                200,
+                "text/html".into(),
+                body.as_bytes().to_vec(),
+            ));
         }
         // Spotify's public pages (`editions` reads a card's own track's for its album): none here.
         if url.host_str() == Some("open.spotify.com") {
-            return Ok(Fetched {
-                permanent_redirect: false,
-                truncated: false,
-                validators: Default::default(),
-                url: url.clone(),
-                status: 404,
-                retry_after_secs: 60,
-                location: None,
-                content_type: "text/html".into(),
-                body: vec![],
-            });
+            return Ok(common::fetched(
+                url.clone(),
+                404,
+                "text/html".into(),
+                vec![],
+            ));
         }
         // Spotify's token and Web API (`spotify`): the track REPORT-matching names, written by
         // hand in the API's shape (Spotify refused to answer the owner's app; tests/spotify.rs).
@@ -198,25 +169,20 @@ impl Transport for Recorded {
                 ),
                 other => panic!("unexpected Spotify request {other}"),
             };
-            return Ok(Fetched {
-                permanent_redirect: false,
-                truncated: false,
-                validators: Default::default(),
-                url: url.clone(),
+            return Ok(common::fetched(
+                url.clone(),
                 status,
-                retry_after_secs: 60,
-                location: None,
-                content_type: if status == 200 {
+                if status == 200 {
                     "application/json"
                 } else {
                     "text/plain"
                 }
                 .into(),
-                body: match body {
+                match body {
                     serde_json::Value::String(text) => text.into_bytes(),
                     json => serde_json::to_vec(&json)?,
                 },
-            });
+            ));
         }
         assert_eq!(options.accept.as_deref(), Some("application/json"));
         // Much-edited Wikidata items and MusicBrainz entities with many links exceed the default
@@ -576,15 +542,8 @@ impl Transport for Recorded {
             "application/json"
         };
         Ok(Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: url.clone(),
-            status,
             retry_after_secs: 120,
-            location: None,
-            content_type: content_type.into(),
-            body,
+            ..common::fetched(url.clone(), status, content_type.into(), body)
         })
     }
 }
@@ -2551,17 +2510,12 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
             } else {
                 uri
             };
-            d.event.read_from(&Fetched {
-                permanent_redirect: false,
-                truncated: false,
-                validators: Default::default(),
-                url: url::Url::parse(from).unwrap(),
-                content_type: "text/html".into(),
-                status: 200,
-                retry_after_secs: 60,
-                location: None,
-                body: vec![],
-            });
+            d.event.read_from(&common::fetched(
+                url::Url::parse(from).unwrap(),
+                200,
+                "text/html".into(),
+                vec![],
+            ));
         }
         store::save_document(&pool, &id, 0, &d).await.unwrap();
         ids.insert(uri, id);

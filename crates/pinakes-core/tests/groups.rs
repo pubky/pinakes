@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 use sqlx::PgPool;
 use tower::ServiceExt;
 mod common;
+use common::get;
 
 /// A page at `https://example.org/{name}` that cites `doi:10.5555/{c}` in its head for each
 /// name in `cites`.
@@ -100,19 +101,6 @@ async fn drained(pool: &PgPool, cfg: &groups::GroupConfig) {
     for id in failed {
         rerun_failed(pool, &id, cfg).await;
     }
-}
-async fn get(app: &axum::Router, path: &str) -> Value {
-    let mut request = Request::builder().uri(path).body(Body::empty()).unwrap();
-    request.extensions_mut().insert(axum::extract::ConnectInfo(
-        "127.0.0.2:1234".parse::<std::net::SocketAddr>().unwrap(),
-    ));
-    let response = app.clone().oneshot(request).await.unwrap();
-    let status = response.status();
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&bytes));
-    let value = serde_json::from_slice(&bytes).unwrap();
-    common::check_response("GET", path, status.as_u16(), &value);
-    value
 }
 /// The `{id, uri, site}` a card's group hint names `id` by.
 fn named(id: &str, name: &str) -> Value {
@@ -1128,17 +1116,12 @@ async fn curation_waits_for_writer_and_policy_changes_redirty(pool: PgPool) {
 }
 
 fn recorded_json(url: &str, body: &[u8]) -> pinakes_core::resolver::egress::Fetched {
-    pinakes_core::resolver::egress::Fetched {
-        permanent_redirect: false,
-        truncated: false,
-        url: url.parse().unwrap(),
-        body: body.to_vec(),
-        content_type: "application/json".into(),
-        status: 200,
-        location: None,
-        retry_after_secs: 60,
-        validators: Default::default(),
-    }
+    common::fetched(
+        url.parse().unwrap(),
+        200,
+        "application/json".into(),
+        body.to_vec(),
+    )
 }
 async fn page(pool: &PgPool, uri: &str, name: &str, claims: &[(&str, &str)]) -> String {
     let id = store::ensure_resource(pool, uri).await.unwrap();

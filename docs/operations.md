@@ -816,7 +816,7 @@ it names) and Wikidata for their item links' items together (10 to a request). E
 several sources make (an item, a record) are shared through the discovery cache.
 
 **Music enrichment.** `[web] music_enrichment` (on by default) gives a MusicBrainz artist, release
-group, release or recording card an image from Wikimedia Commons and a description from
+group, release or recording card (an ISRC's page with its recording's card too) an image from Wikimedia Commons and a description from
 Wikipedia or Wikidata, from the entity's Wikidata item, each with its credit
 ([api.md](api.md#credits) says which item and which text), and a release or release group with
 no free Commons file its front cover from the Cover Art Archive, by its MBID. It runs inside the card's own read,

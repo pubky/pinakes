@@ -324,11 +324,9 @@ pub fn file_card(
     status: u16,
     body: &[u8],
 ) -> Result<Option<ResourceMeta>> {
-    match status {
-        200 => {}
-        404 => return Ok(None),
-        s => anyhow::bail!("the instance answered {s}"),
-    }
+    let Some(body) = super::kit::body(status, body, &[404])? else {
+        return Ok(None);
+    };
     let v = json(body)?;
     let Some(last) = v.as_array().and_then(|a| a.first()) else {
         return Ok(None);
@@ -512,10 +510,7 @@ impl Source for Forgejo {
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
         let target = Target::of_uri(uri).context("not a repository link")?;
         let host = target.host.clone();
-        let json = FetchOptions {
-            accept: Some("application/json".into()),
-            ..Default::default()
-        };
+        let json = FetchOptions::json();
         match INSTANCES.get(&host) {
             Some(false) => return Err(Declined.into()),
             Some(true) => {}

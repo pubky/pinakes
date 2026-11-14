@@ -6,7 +6,7 @@ use pinakes_core::{
     also_on::{self, SourceOptions},
     config::Config,
     model::ResourceMeta,
-    resolver::egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+    resolver::egress::{Egress, FetchOptions, Fetched, Transport},
     store,
 };
 use std::{
@@ -15,14 +15,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 mod common;
-
-struct PublicDns;
-#[async_trait::async_trait]
-impl Dns for PublicDns {
-    async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<SocketAddr>> {
-        Ok(vec![SocketAddr::new("8.8.8.8".parse()?, port)])
-    }
-}
+use common::media::PublicDns;
 
 fn fixture(name: &str) -> Vec<u8> {
     let bytes = std::fs::read(format!(
@@ -75,15 +68,8 @@ impl Transport for Recorded {
             url.query().unwrap_or("")
         ));
         let answer = |body: Vec<u8>, content_type: &str| Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: url.clone(),
-            status: 200,
             retry_after_secs: 120,
-            location: None,
-            content_type: content_type.into(),
-            body,
+            ..common::fetched(url.clone(), 200, content_type.into(), body)
         };
         let query = |name: &str| {
             url.query_pairs()
@@ -226,6 +212,9 @@ async fn links(pool: &sqlx::PgPool, id: &str) -> Vec<String> {
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_topic_upload_matches_one_deezer_track(pool: sqlx::PgPool) {
     let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
+    if !registered.contains(&"deezer") {
+        return;
+    }
     let queen = save(&pool, "bSnlKl_PoQU").await;
     let vevo = save(&pool, "5NV6Rdv1a3I").await;
     let tidal = registered.contains(&"tidal_isrc");
@@ -264,6 +253,10 @@ async fn a_topic_upload_matches_one_deezer_track(pool: sqlx::PgPool) {
 /// retried hours later.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_sign_in_page_is_retried_hours_later(pool: sqlx::PgPool) {
+    // Deezer is the one service this test's configuration searches.
+    if !also_on::registry().iter().any(|s| s.id() == "deezer") {
+        return;
+    }
     let queen = save(&pool, "bSnlKl_PoQU").await;
     let seen = run(
         &pool,
@@ -289,6 +282,10 @@ async fn a_sign_in_page_is_retried_hours_later(pool: sqlx::PgPool) {
 /// nothing (not even YouTube).
 #[sqlx::test(migrations = "../../migrations")]
 async fn without_its_switch_or_a_service_to_search_nothing_is_asked(pool: sqlx::PgPool) {
+    // Deezer is the one service this test's configuration searches.
+    if !also_on::registry().iter().any(|s| s.id() == "deezer") {
+        return;
+    }
     save(&pool, "bSnlKl_PoQU").await;
     let mut by_default = config(true, true, None);
     by_default.also_on.sources.remove("youtube_match");
@@ -309,7 +306,7 @@ async fn without_its_switch_or_a_service_to_search_nothing_is_asked(pool: sqlx::
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_tidal_failure_keeps_the_deezer_match(pool: sqlx::PgPool) {
     let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
-    if !registered.contains(&"tidal_isrc") {
+    if !registered.contains(&"tidal_isrc") || !registered.contains(&"deezer") {
         return;
     }
     let queen = save(&pool, "bSnlKl_PoQU").await;
@@ -353,7 +350,7 @@ async fn a_tidal_failure_keeps_the_deezer_match(pool: sqlx::PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_tidal_failure_without_a_deezer_match_keeps_the_earlier_links(pool: sqlx::PgPool) {
     let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
-    if !registered.contains(&"tidal_isrc") {
+    if !registered.contains(&"tidal_isrc") || !registered.contains(&"deezer") {
         return;
     }
     let queen = save(&pool, "bSnlKl_PoQU").await;
