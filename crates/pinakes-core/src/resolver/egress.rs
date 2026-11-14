@@ -1885,7 +1885,47 @@ mod tests {
         // A refused connection never reached the upstream: the queue never dead-letters on it.
         assert!(super::super::unreached(&error));
     }
-    /// A PDF or an image past the page cap is cut there, not refused: its card comes from its
+    /// A connection the peer resets, before the answer or inside its body, is a `connect`
+    /// failure that never reached the upstream's answer: the queue never dead-letters on it.
+    #[tokio::test]
+    async fn a_reset_connection_is_unreached() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for partial in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 4096];
+                let _ = socket.read(&mut request).await;
+                if partial {
+                    socket
+                        .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: 100000\r\n\r\n<html><head>")
+                        .await
+                        .unwrap();
+                    socket.flush().await.unwrap();
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                // SO_LINGER 0: closing sends a reset, not a FIN.
+                socket.set_zero_linger().unwrap();
+                drop(socket);
+            });
+            let url: Url = format!("http://127.0.0.1:{}/page", addr.port())
+                .parse()
+                .unwrap();
+            let error = PinnedTransport
+                .get_with(&url, &[addr], &FetchOptions::default())
+                .await
+                .unwrap_err();
+            assert_eq!(
+                super::super::error_class(&error),
+                "connect",
+                "{partial} {error:#}"
+            );
+            assert!(super::super::unreached(&error), "{partial} {error:#}");
+            server.await.unwrap();
+        }
+    }
+    /// A large PDF or an image past the page cap is cut there, not refused
     /// URL. Any other file past the cap is still refused.
     #[tokio::test]
     async fn a_large_pdf_or_image_is_cut_not_refused() {

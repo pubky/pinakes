@@ -340,7 +340,7 @@ pub fn error_class(error: &anyhow::Error) -> &'static str {
             if request.is_timeout() {
                 return "timeout";
             }
-            if request.is_connect() {
+            if request.is_connect() || reset(request) {
                 return "connect";
             }
             if let Some(status) = request.status() {
@@ -366,9 +366,32 @@ impl std::fmt::Display for Unreached {
 }
 impl std::error::Error for Unreached {}
 
-/// Whether a failure never reached the upstream: the HTTP client could not connect (refused,
-/// reset, TLS handshake). Such a failure says nothing about the link, so the queue never
-/// dead-letters on it. A `connect` class a resolver names itself (a PKARR relay that serves no
+/// Whether a request broke in the transport after it connected: the peer reset or aborted the
+/// connection, or the pipe broke, while the request was sent or the answer read. Not a timeout.
+fn reset(request: &reqwest::Error) -> bool {
+    if request.is_timeout() {
+        return false;
+    }
+    let mut source = std::error::Error::source(request);
+    while let Some(cause) = source {
+        if cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+            matches!(
+                io.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+            )
+        }) {
+            return true;
+        }
+        source = cause.source();
+    }
+    false
+}
+
+/// Whether a failure never reached the upstream's answer: the HTTP client could not connect
+/// (refused, TLS handshake) or the connection was reset on the way. Such a failure says nothing
+/// about the link, so the queue never dead-letters on it. A `connect` class a resolver names itself (a PKARR relay that serves no
 /// usable packet, a homeserver with only key-pinned endpoints) is an answer about the link and
 /// is not one; nor is a timeout, which has its own grace (`limits.timeout_grace`).
 pub fn unreached(error: &anyhow::Error) -> bool {
@@ -377,7 +400,9 @@ pub fn unreached(error: &anyhow::Error) -> bool {
             cause.is::<Unreached>()
                 || cause
                     .downcast_ref::<reqwest::Error>()
-                    .is_some_and(|request| request.is_connect() && !request.is_timeout())
+                    .is_some_and(|request| {
+                        (request.is_connect() && !request.is_timeout()) || reset(request)
+                    })
         })
 }
 
