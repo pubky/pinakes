@@ -604,6 +604,8 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(crate::resolver::error_class(&error), "connect");
+        // An answer about the link, not a refused connection: it still dead-letters.
+        assert!(!crate::resolver::unreached(&error));
         assert!(format!("{error:#}").contains("key-pinned"), "{error:#}");
         assert!(homeserver.requests.lock().unwrap().is_empty());
     }

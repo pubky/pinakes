@@ -321,6 +321,9 @@ pub fn error_class(error: &anyhow::Error) -> &'static str {
     if error.is::<tokio::time::error::Elapsed>() {
         return "timeout";
     }
+    if error.chain().any(|cause| cause.is::<Unreached>()) {
+        return "connect";
+    }
     // An answer past its size cap: the page is readable, only too large.
     if error
         .chain()
@@ -350,6 +353,32 @@ pub fn error_class(error: &anyhow::Error) -> &'static str {
         }
     }
     "parse"
+}
+
+/// A connection that never reached the upstream, as an error rebuilt without its cause carries
+/// it (`egress::Egress::fetch_with` for a request with credentials, whose cause may name them).
+#[derive(Debug, Clone, Copy)]
+pub struct Unreached;
+impl std::fmt::Display for Unreached {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the connection to the upstream failed")
+    }
+}
+impl std::error::Error for Unreached {}
+
+/// Whether a failure never reached the upstream: the HTTP client could not connect (refused,
+/// reset, TLS handshake). Such a failure says nothing about the link, so the queue never
+/// dead-letters on it. A `connect` class a resolver names itself (a PKARR relay that serves no
+/// usable packet, a homeserver with only key-pinned endpoints) is an answer about the link and
+/// is not one; nor is a timeout, which has its own grace (`limits.timeout_grace`).
+pub fn unreached(error: &anyhow::Error) -> bool {
+    error_class(error) == "connect"
+        && error.chain().any(|cause| {
+            cause.is::<Unreached>()
+                || cause
+                    .downcast_ref::<reqwest::Error>()
+                    .is_some_and(|request| request.is_connect() && !request.is_timeout())
+        })
 }
 
 #[cfg(test)]

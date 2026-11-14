@@ -328,6 +328,34 @@ async fn failed_as(
         .bind(&job.id).bind(job.generation).bind(attempt>=cfg.max_failures).bind(backoff(cfg,attempt) as f64).bind(error).bind(status.as_str()).execute(pool).await?;
     Ok(())
 }
+/// A fetch that never reached the upstream (`resolver::unreached`: the connection was refused,
+/// reset or its TLS handshake failed). It says nothing about the link, so it never counts toward
+/// the dead letter: it is read again with the queue's backoff, longer each time in a row up to
+/// `max_backoff_secs`, for as long as it lasts. The streak is kept in `timeout_streak` while
+/// `last_error` is `connect`, never in `attempts`, so it never brings a later answer about the
+/// link nearer to the dead letter, and every other outcome starts it over. An accepted card and
+/// its status stay; a link with no card yet turns `error` once the streak reaches `max_failures`,
+/// and is still read again.
+async fn unreached(pool: &PgPool, job: &Job, cfg: &QueueConfig) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    let streak: Option<i32> = sqlx::query_scalar("SELECT CASE WHEN last_error='connect' THEN timeout_streak ELSE 0 END FROM resource WHERE id=$1 AND generation=$2 FOR UPDATE")
+        .bind(&job.id)
+        .bind(job.generation)
+        .fetch_optional(&mut *tx)
+        .await?;
+    if let Some(streak) = streak {
+        let streak = streak.saturating_add(1);
+        sqlx::query("UPDATE resource SET timeout_streak=$2,status=CASE WHEN $4 AND status='pending' THEN 'error' ELSE status END,lease_until=NULL,priority_at=NULL,last_error='connect',next_attempt_at=now()+$3*interval '1 second' WHERE id=$1")
+            .bind(&job.id)
+            .bind(streak)
+            .bind(backoff(cfg, streak as u32) as f64)
+            .bind(streak as u32 >= cfg.max_failures)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
 /// An organiser calendar answered from another origin (`event::adapters::fetch_calendar`): its
 /// stored dates and status stay, and it is read again with the queue's backoff, longer each time
 /// in a row. The streak is kept in `timeout_streak` while `last_error` is `off_origin`, never in
@@ -773,6 +801,9 @@ async fn finish_job(
                 sqlx::query("UPDATE resource SET timeout_streak=0,lease_until=NULL,priority_at=NULL,next_attempt_at=now()+$3*interval '1 second',last_error=$4 WHERE id=$1 AND generation=$2")
                     .bind(&job.id).bind(job.generation).bind(retry.seconds.clamp(1,3600) as f64).bind(retry.class).execute(pool).await?;
             }
+        } else if crate::resolver::unreached(&error) {
+            // A refused or dropped connection: retried with backoff, never dead-lettered.
+            unreached(pool, job, cfg).await?;
         } else if crate::resolver::error_class(&error) == "timeout" {
             timed_out(pool, job, cfg, 60).await?;
         } else if crate::resolver::error_class(&error) == "too_complex" {

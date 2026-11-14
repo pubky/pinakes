@@ -498,7 +498,12 @@ The durable queue leases rows with `SKIP LOCKED` and fences stale completions by
 counter. A job lease lasts at least `limits.lease_secs`; a 50-object OSM batch gets 760 seconds.
 Failures back off exponentially from `limits.backoff_secs` to `limits.max_backoff_secs` and
 dead-letter after `limits.max_failures`. The first `limits.timeout_grace` consecutive timeouts
-back off without charging an attempt. A missing result needs a second fresh fetch to confirm,
+back off without charging an attempt. A connection that never reached the upstream (refused,
+reset, a failed TLS handshake; stored as `connect`) is never charged and never dead-letters: it
+backs off up to `limits.max_backoff_secs` for as long as it lasts, its streak is kept in
+`timeout_streak` while `last_error` is `connect`, and a link with no card yet turns `error` after
+`limits.max_failures` of them in a row while it is still retried. A `connect` failure a resolver
+names itself (a PKARR relay, a key-pinned homeserver) is an answer about the link and counts. A missing result needs a second fresh fetch to confirm,
 scheduled after `limits.missing_ttl_secs` (at least an hour) for a link with an accepted card, and
 after `limits.backoff_secs` for one with none yet (a new preview has nothing to keep and would show
 `pending` for that hour); a cached copy cannot count twice, and the confirming fetch asks the

@@ -782,6 +782,8 @@ impl Egress {
                             class: retry.class,
                             seconds: retry.seconds,
                         })
+                    } else if super::unreached(&error) {
+                        anyhow::Error::new(super::Unreached)
                     } else {
                         anyhow::Error::new(super::ErrorClass(super::error_class(&error)))
                     }
@@ -1880,6 +1882,8 @@ mod tests {
         let text = format!("{error:#} {error:?}");
         assert!(!text.contains("CANARY"), "{text}");
         assert_eq!(super::super::error_class(&error), "connect");
+        // A refused connection never reached the upstream: the queue never dead-letters on it.
+        assert!(super::super::unreached(&error));
     }
     /// A PDF or an image past the page cap is cut there, not refused: its card comes from its
     /// URL. Any other file past the cap is still refused.
@@ -2625,6 +2629,47 @@ mod tests {
         };
         let error = egress.fetch_with(url, &plain).await.unwrap_err();
         assert_eq!(super::super::error_class(&error), "policy");
+    }
+    /// A refused connection on a request with credentials is rebuilt without its cause, and still
+    /// reads as one that never reached the upstream: the queue never dead-letters on it.
+    #[tokio::test]
+    async fn a_refused_request_with_credentials_stays_unreached() {
+        struct Closed(SocketAddr);
+        #[async_trait]
+        impl Transport for Closed {
+            async fn get(&self, url: &Url, addresses: &[SocketAddr]) -> Result<Fetched> {
+                self.get_with(url, addresses, &FetchOptions::default())
+                    .await
+            }
+            async fn get_with(
+                &self,
+                url: &Url,
+                _: &[SocketAddr],
+                options: &FetchOptions,
+            ) -> Result<Fetched> {
+                PinnedTransport.get_with(url, &[self.0], options).await
+            }
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let closed = listener.local_addr().unwrap();
+        drop(listener);
+        let egress = Egress::with_backends(
+            EgressConfig::default(),
+            Arc::new(FakeDns),
+            Arc::new(Closed(closed)),
+        );
+        let options = FetchOptions {
+            query_secret: Some(("api_key", "SECRETKEY".into())),
+            sensitive: true,
+            ..Default::default()
+        };
+        let error = egress
+            .fetch_with("https://api.example.org/3/find/tt1", &options)
+            .await
+            .unwrap_err();
+        assert!(!format!("{error:#} {error:?}").contains("SECRETKEY"));
+        assert_eq!(super::super::error_class(&error), "connect");
+        assert!(super::super::unreached(&error));
     }
     #[test]
     fn a_sensitive_request_s_debug_hides_its_credentials_and_two_bodies_are_refused() {

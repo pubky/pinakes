@@ -514,6 +514,259 @@ impl Resolver for FakeResolver {
         Duration::from_secs(100)
     }
 }
+/// An upstream that refuses the first `refusals` connections (a real refused connection through
+/// the HTTP client, to a closed local port) and then answers 200, and counts the requests.
+struct Refusing {
+    refusals: std::sync::atomic::AtomicUsize,
+    asked: std::sync::atomic::AtomicUsize,
+    closed: std::net::SocketAddr,
+}
+impl Refusing {
+    fn new(refusals: usize) -> std::sync::Arc<Self> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let closed = listener.local_addr().unwrap();
+        drop(listener);
+        std::sync::Arc::new(Self {
+            refusals: refusals.into(),
+            asked: Default::default(),
+            closed,
+        })
+    }
+    fn asked(&self) -> usize {
+        self.asked.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+#[async_trait::async_trait]
+impl pinakes_core::resolver::egress::Transport for Refusing {
+    async fn get(
+        &self,
+        url: &url::Url,
+        addresses: &[std::net::SocketAddr],
+    ) -> anyhow::Result<pinakes_core::resolver::egress::Fetched> {
+        self.get_with(url, addresses, &Default::default()).await
+    }
+    async fn get_with(
+        &self,
+        url: &url::Url,
+        _: &[std::net::SocketAddr],
+        options: &pinakes_core::resolver::egress::FetchOptions,
+    ) -> anyhow::Result<pinakes_core::resolver::egress::Fetched> {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.asked.fetch_add(1, SeqCst);
+        if self
+            .refusals
+            .fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return pinakes_core::resolver::egress::PinnedTransport
+                .get_with(url, &[self.closed], options)
+                .await;
+        }
+        Ok(common::fetched(
+            url.clone(),
+            200,
+            "text/html".into(),
+            b"<html></html>".to_vec(),
+        ))
+    }
+}
+/// A resolver that fetches its link through Egress: any answer is a page.
+struct Fetching(pinakes_core::resolver::egress::Egress);
+#[async_trait::async_trait]
+impl Resolver for Fetching {
+    fn name(&self) -> &'static str {
+        "web"
+    }
+    fn matches(&self, _: &str) -> bool {
+        true
+    }
+    async fn resolve(&self, uri: &str) -> anyhow::Result<ResourceMeta> {
+        self.0.fetch(uri).await?;
+        let mut doc = ResourceMeta::new(uri, "web", 86400);
+        doc.set_type("WebPage");
+        doc.name = Some("Read after all".into());
+        Ok(doc)
+    }
+    fn refresh_after(&self, _: &ResourceMeta) -> Duration {
+        Duration::from_secs(86400)
+    }
+}
+fn fetching(upstream: std::sync::Arc<Refusing>) -> Fetching {
+    Fetching(pinakes_core::resolver::egress::Egress::with_backends(
+        common::unpaced_egress_config(),
+        std::sync::Arc::new(PublicDns),
+        upstream,
+    ))
+}
+/// One row's queue state: streak, attempts, dead letter, seconds to the next try, status,
+/// last error.
+async fn queue_row(pool: &PgPool, id: &str) -> (i32, i32, bool, f64, String, Option<String>) {
+    sqlx::query_as("SELECT timeout_streak,attempts,dead_letter,extract(epoch FROM next_attempt_at-now())::float8,status,last_error FROM resource WHERE id=$1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+async fn run_due(pool: &PgPool, id: &str, resolver: &dyn Resolver, cfg: &QueueConfig) {
+    sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE id=$1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+    let job = queue::claim(pool, "web", cfg).await.unwrap().unwrap();
+    assert_eq!(job.id, id);
+    queue::run_job(pool, resolver, cfg, &job).await.unwrap();
+}
+/// A refused connection says nothing about the link: however many come in a row, the link is
+/// read again with the capped backoff and never dead-letters, and `attempts` stays as it was.
+/// A link with no card shows `error` once the streak reaches `max_failures`; when the upstream
+/// answers again the card is read and the streak is gone.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_refused_connection_retries_and_never_dead_letters(pool: PgPool) {
+    let cfg = QueueConfig {
+        max_failures: 2,
+        backoff_secs: 30,
+        max_backoff_secs: 240,
+        ..Default::default()
+    };
+    let upstream = Refusing::new(7);
+    let resolver = fetching(upstream.clone());
+    let id = store::ensure_resource(&pool, "https://books.example/isbn/9780141036144")
+        .await
+        .unwrap();
+    for (streak, delay, status) in [
+        (1, 30, "pending"),
+        (2, 60, "error"),
+        (3, 120, "error"),
+        (4, 240, "error"),
+        (5, 240, "error"),
+        (6, 240, "error"),
+        (7, 240, "error"),
+    ] {
+        run_due(&pool, &id, &resolver, &cfg).await;
+        let row = queue_row(&pool, &id).await;
+        assert_eq!(
+            (row.0, row.1, row.2, row.4.as_str(), row.5.as_deref()),
+            (streak, 0, false, status, Some("connect")),
+            "{row:?}"
+        );
+        assert!(
+            row.3 <= delay as f64 && row.3 > delay as f64 - 2.0,
+            "{row:?}"
+        );
+    }
+    assert_eq!(upstream.asked(), 7);
+    // The upstream is back: the card is read and the streak is gone.
+    run_due(&pool, &id, &resolver, &cfg).await;
+    let row = queue_row(&pool, &id).await;
+    assert_eq!(
+        (row.0, row.1, row.2, row.4.as_str(), row.5),
+        (0, 0, false, "ok", None),
+        "{row:?}"
+    );
+    assert_eq!(upstream.asked(), 8);
+    let name: Option<String> = sqlx::query_scalar("SELECT name FROM resource WHERE id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(name.as_deref(), Some("Read after all"));
+    // A card that was read keeps its card and `ok` through refused refreshes.
+    let upstream = Refusing::new(4);
+    let resolver = fetching(upstream.clone());
+    let before: serde_json::Value = sqlx::query_scalar("SELECT doc FROM resource WHERE id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    for streak in 1..=4 {
+        run_due(&pool, &id, &resolver, &cfg).await;
+        let row = queue_row(&pool, &id).await;
+        assert_eq!(
+            (row.0, row.1, row.2, row.4.as_str()),
+            (streak, 0, false, "ok"),
+            "{row:?}"
+        );
+    }
+    let after: serde_json::Value = sqlx::query_scalar("SELECT doc FROM resource WHERE id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(after, before);
+}
+/// A resolver that fails with one stored error kind.
+struct FailingAs(&'static str);
+#[async_trait::async_trait]
+impl Resolver for FailingAs {
+    fn name(&self) -> &'static str {
+        "web"
+    }
+    fn matches(&self, _: &str) -> bool {
+        true
+    }
+    async fn resolve(&self, _: &str) -> anyhow::Result<ResourceMeta> {
+        Err(match self.0 {
+            "wall" => pinakes_core::resolver::interstitial::Blocked.into(),
+            "parse" => anyhow::anyhow!("no card in this page"),
+            class => anyhow::Error::new(pinakes_core::resolver::ErrorClass(class))
+                .context("named by the resolver"),
+        })
+    }
+    fn refresh_after(&self, _: &ResourceMeta) -> Duration {
+        Duration::from_secs(60)
+    }
+}
+/// Answers about the link still dead-letter at `max_failures`, as before: a 4xx, a wall, a page
+/// with no card, and a `connect` class a resolver names itself (a PKARR relay or a key-pinned
+/// homeserver), which is no refused connection. Refused connections before them bring none of
+/// them nearer to the dead letter.
+#[sqlx::test(migrations = "../../migrations")]
+async fn answers_about_the_link_still_dead_letter(pool: PgPool) {
+    let cfg = QueueConfig {
+        max_failures: 2,
+        backoff_secs: 30,
+        max_backoff_secs: 240,
+        ..Default::default()
+    };
+    for (n, (kind, status)) in [
+        ("http_4xx", "error"),
+        ("wall", "unreachable"),
+        ("parse", "error"),
+        ("connect", "error"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = store::ensure_resource(&pool, &format!("https://site.example/{n}"))
+            .await
+            .unwrap();
+        // Three refused connections first: none of them counts.
+        let resolver = fetching(Refusing::new(3));
+        for _ in 0..3 {
+            run_due(&pool, &id, &resolver, &cfg).await;
+        }
+        assert_eq!(queue_row(&pool, &id).await.1, 0, "{kind}");
+        run_due(&pool, &id, &FailingAs(kind), &cfg).await;
+        let row = queue_row(&pool, &id).await;
+        assert_eq!(
+            (row.0, row.1, row.2, row.4.as_str(), row.5.as_deref()),
+            (0, 1, false, status, Some(kind)),
+            "{kind} {row:?}"
+        );
+        run_due(&pool, &id, &FailingAs(kind), &cfg).await;
+        let row = queue_row(&pool, &id).await;
+        assert_eq!(
+            (row.1, row.2, row.4.as_str(), row.5.as_deref()),
+            (2, true, status, Some(kind)),
+            "{kind} {row:?}"
+        );
+        assert!(
+            queue::claim(&pool, "web", &cfg).await.unwrap().is_none(),
+            "{kind}"
+        );
+    }
+}
 #[sqlx::test(migrations = "../../migrations")]
 async fn durable_queue_backoff_dead_letter_refresh_and_fencing(pool: PgPool) {
     let cfg = QueueConfig {
