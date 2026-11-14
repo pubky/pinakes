@@ -3,6 +3,9 @@
 `vendors.ics` and the inline page/calendar fixtures in `tests/events.rs` are synthetic
 MIT-licensed fixtures authored for this repository; they contain no vendor attendee data.
 
+`meetup/` holds trimmed public Meetup answers for `tests/meetup_series.rs`; its README says
+where each came from and what was removed.
+
 The calendar pitfalls the tests cover:
 
 | Pitfalls | Regression coverage |
