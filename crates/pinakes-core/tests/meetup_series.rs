@@ -139,8 +139,8 @@ impl Dns for AnyDns {
         Ok(vec![SocketAddr::new("93.184.216.34".parse()?, port)])
     }
 }
-/// Answers each `host/path` from its map (404 otherwise; `STATUS {code}` answers that status)
-/// and records what was asked.
+/// Answers each `host/path` from its map (404 otherwise; `STATUS {code}` answers that status,
+/// `REDIRECT {url}` a 302 to that URL) and records what was asked.
 struct Site {
     pages: BTreeMap<String, String>,
     seen: Mutex<Vec<String>>,
@@ -160,8 +160,12 @@ impl Transport for Site {
         let page = self
             .pages
             .get(&format!("{}{}", url.host_str().unwrap_or(""), url.path()));
+        let location = page
+            .and_then(|p| p.strip_prefix("REDIRECT "))
+            .map(str::to_owned);
         let status = match page.and_then(|p| p.strip_prefix("STATUS ")) {
             Some(code) => code.parse()?,
+            None if location.is_some() => 302,
             None if page.is_some() => 200,
             None => 404,
         };
@@ -178,7 +182,7 @@ impl Transport for Site {
             content_type: content_type.into(),
             status,
             retry_after_secs: 60,
-            location: None,
+            location,
             body: page.cloned().unwrap_or_default().into_bytes(),
         })
     }
@@ -416,6 +420,8 @@ async fn a_failed_uid_read_keeps_the_page_and_its_group(pool: PgPool) {
         "STATUS 403",
         "STATUS 451",
         "STATUS 404",
+        // A page in place of the file (a sign-in wall) is no calendar either.
+        "<!DOCTYPE html><html><head><title>Sign in</title></head><body>Sign in</body></html>",
     ] {
         let mut pages = site();
         pages.insert(file.replacen("https://", "", 1), answer.into());
@@ -640,4 +646,144 @@ fn shifting_keeps_weekdays_and_both_date_forms() {
     );
     assert!(text.ends_with(" 316908442"));
     assert_eq!(d.weekday(), chrono::Weekday::Wed);
+}
+
+/// The key of `uri` in the recorded site (`site`).
+fn path_key(uri: &str) -> String {
+    uri.replacen("https://", "", 1)
+}
+/// An organiser calendar is trusted by its address, so an answer from another origin is never
+/// that calendar: a redirect of the group's calendar to another host stores no dates, and the
+/// date page joins none. A redirect on the platform's own origin is still read.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_organiser_calendar_answered_from_another_origin_is_not_read(pool: PgPool) {
+    let cfg = queue_config(CrossContainerOccurrences::Corroborated);
+    let mut pages = site();
+    let calendar = pages.remove(&path_key(&feed())).unwrap();
+    pages.insert(
+        path_key(&feed()),
+        "REDIRECT https://calendar.example.com/meetup.ics".into(),
+    );
+    pages.insert("calendar.example.com/meetup.ics".into(), calendar.clone());
+    let (r, answered) = resolver(&pool, pages);
+    read(&pool, &r, &cfg, &numeric()).await;
+    read(&pool, &r, &cfg, &token()).await;
+    let feed_id = read(&pool, &r, &cfg, &feed()).await;
+    assert!(answered
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|u| u.starts_with("https://calendar.example.com/")));
+    let (occurrences, error): (i64, Option<String>) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM occurrence WHERE resource_id=$1),(SELECT last_error FROM resource WHERE id=$1)",
+    )
+    .bind(&feed_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((occurrences, error.as_deref()), (0, Some("off_origin")));
+    common::drain_groups(&pool, &cfg.groups).await;
+    assert_eq!(all_groups(&pool).await, Vec::<Vec<(String, String)>>::new());
+
+    // On the platform's own origin, a redirect is followed.
+    let mut pages = site();
+    pages.insert(
+        path_key(&feed()),
+        format!("REDIRECT {}", url("ical/all.ics")),
+    );
+    pages.insert(path_key(&url("ical/all.ics")), calendar);
+    let (r, _) = resolver(&pool, pages);
+    read(&pool, &r, &cfg, &feed()).await;
+    common::drain_groups(&pool, &cfg.groups).await;
+    assert_eq!(all_groups(&pool).await.len(), 1);
+}
+
+/// A date's own calendar file gives its UID only when it is answered from the page's own URL
+/// origin: a redirect to another host of the same site (or another scheme or port) gives none.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_date_file_from_another_url_origin_gives_no_uid(pool: PgPool) {
+    let cfg = queue_config(CrossContainerOccurrences::Corroborated);
+    let mut pages = site();
+    let file = path_key(&url("frxnbvyjcqbmb/ical/frxnbvyjcqbmb.ics"));
+    let ics = pages.remove(&file).unwrap();
+    pages.insert(
+        file,
+        "REDIRECT https://secure.meetup.com/ical/frxnbvyjcqbmb.ics".into(),
+    );
+    pages.insert("secure.meetup.com/ical/frxnbvyjcqbmb.ics".into(), ics);
+    let (r, _) = resolver(&pool, pages);
+    read(&pool, &r, &cfg, &numeric()).await;
+    let token_id = read(&pool, &r, &cfg, &token()).await;
+    read(&pool, &r, &cfg, &feed()).await;
+    common::drain_groups(&pool, &cfg.groups).await;
+    let keys: Option<Value> =
+        sqlx::query_scalar("SELECT doc->'group_keys' FROM resource WHERE id=$1")
+            .bind(&token_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        !keys
+            .iter()
+            .flat_map(|k| k.as_array().into_iter().flatten())
+            .any(|k| k["basis"] == "ics_uid"),
+        "{keys:?}"
+    );
+    assert_eq!(all_groups(&pool).await, Vec::<Vec<(String, String)>>::new());
+}
+
+/// A redirect from one date's page to another date's never makes them one resource: the
+/// spelling alias needs the fetch to end at the page asked for.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_redirect_to_another_date_is_no_alias(pool: PgPool) {
+    let mut pages = site();
+    pages.insert(
+        path_key(&numeric()),
+        format!("REDIRECT {}", url("frxnbvykccbjb/")),
+    );
+    let (r, _) = resolver(&pool, pages);
+    let cfg = queue_config(CrossContainerOccurrences::Off);
+    let id = read(&pool, &r, &cfg, &numeric()).await;
+    assert_eq!(alias_root(&pool, &id).await, None);
+}
+
+/// A date page missing its place or zone reads its own calendar file to fill them; on a
+/// platform with an organiser feed that read is optional too: refused, failing or gone, the
+/// page reads fine and is not marked gone.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_date_page_missing_fields_reads_fine_when_its_file_fails(pool: PgPool) {
+    let cfg = queue_config(CrossContainerOccurrences::Off);
+    let page_uri = url("frxnbvykcdbfb/");
+    let start = (Utc::now() + Duration::days(20)).to_rfc3339();
+    let page = format!(
+        r#"<html><head><title>Bitcoin Meetup</title><link rel="canonical" href="{page_uri}"><script type="application/ld+json">{{"@context":"https://schema.org","@type":"Event","name":"Bitcoin Meetup","startDate":"{start}","url":"{page_uri}"}}</script></head><body></body></html>"#
+    );
+    for answer in ["STATUS 503", "STATUS 403", "STATUS 451"] {
+        let mut pages = site();
+        pages.insert(path_key(&page_uri), page.clone());
+        let file = url("frxnbvykcdbfb/ical/frxnbvykcdbfb.ics");
+        pages.insert(path_key(&file), answer.into());
+        let (r, site) = resolver(&pool, pages);
+        let id = read(&pool, &r, &cfg, &page_uri).await;
+        assert!(site.seen.lock().unwrap().contains(&file), "{answer}");
+        let (status, error): (String, Option<String>) =
+            sqlx::query_as("SELECT status,last_error FROM resource WHERE id=$1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!((status.as_str(), error), ("ok", None), "{answer}");
+    }
+}
+
+/// A probe (the canary) reads the page alone: no calendar file for its UID.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_probe_reads_no_calendar_file(pool: PgPool) {
+    use pinakes_core::resolver::Resolver;
+    let (r, site) = resolver(&pool, site());
+    let doc = r.probe(&numeric()).await.unwrap();
+    assert!(doc.type_path.contains(&"Event".into()));
+    let seen = site.seen.lock().unwrap().clone();
+    assert!(!seen.iter().any(|u| u.ends_with(".ics")), "{seen:?}");
 }

@@ -678,10 +678,16 @@ request; a platform that refuses it gets the same refused or failed result as an
 Luma, Meetup, Eventbrite, Partiful, Posh, RingCentral, Airmeet, Mobilizon, Gancio, Wikidata,
 Dice, Xceed, Ents24 and Ticketino supplement JSON-LD with bounded state parsing; JavaScript is
 never executed. A Meetup date's page (by its number or its token) also reads its own calendar
-file, `{page}/ical/{id}.ics`, for the date's UID alone; that read is optional, and a failed one
-keeps the UID the page was stored with. After an upgrade, Meetup pages take their group calendar, their UID and
+file, `{page}/ical/{id}.ics`; its UID counts only when the file holds one event and is answered
+from the page's own URL origin (scheme, host and port, after redirects). That read is optional
+(it is skipped on a probe): a refused, failing or non-calendar answer keeps the UID the page
+was stored with, and never fails the page or marks it gone. A group calendar answered from
+another origin after a redirect is not read (`last_error` `off_origin`, retried an hour later;
+its stored dates stay). After an upgrade, Meetup pages take their group calendar, their UID and
 their token alias at their next read; `pinakesd reextract event_platform` reads every event
-platform's links at once. Self-hosted Pretix, Eventyay, Gathio, Gancio and Mobilizon are detected from page
+platform's links at once. A numeric Meetup page that becomes its token's alias leaves its
+group, as every alias does, and an operator's curation of it (`PUT /v1/groups/{id}`) goes with
+it: curate the token page again after its first read. Self-hosted Pretix, Eventyay, Gathio, Gancio and Mobilizon are detected from page
 signatures, a heuristic that can cost one bounded discovery request. Authenticated APIs never
 redirect, and credentials are removed from retained URLs and errors.
 
