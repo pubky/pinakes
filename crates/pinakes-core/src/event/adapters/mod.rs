@@ -111,6 +111,77 @@ pub struct Definition {
     pub requires_key: bool,
     pub fragile: bool,
     pub enabled: bool,
+    /// The feed that lists the dates of an event page's organiser, when the platform derives it
+    /// from the page's path (`container_feed`).
+    #[serde(default)]
+    pub container_feed: Option<ContainerFeed>,
+}
+/// An event page's organiser feed on the page's own origin: a page whose path has the form
+/// `page` (as `canary_link_matches` reads it, a trailing slash aside) names the feed at `feed`,
+/// where `{n}` is the n-th `*` segment of the page's path (Meetup: `/*/events/*` names
+/// `/{1}/events/ical/`, the group's calendar).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContainerFeed {
+    pub page: String,
+    pub feed: String,
+}
+impl ContainerFeed {
+    /// Both paths absolute, the feed's without a query, fragment or empty segment, and each
+    /// `{n}` naming one of the page's `*` segments.
+    fn valid(&self) -> bool {
+        let wild = self.page.split('/').filter(|s| *s == "*").count();
+        let mut literal = String::new();
+        let mut rest = self.feed.as_str();
+        while let Some((before, after)) = rest.split_once('{') {
+            let Some((n, tail)) = after.split_once('}') else {
+                return false;
+            };
+            if !n.parse::<usize>().is_ok_and(|n| (1..=wild).contains(&n)) {
+                return false;
+            }
+            literal.push_str(before);
+            rest = tail;
+        }
+        literal.push_str(rest);
+        self.page.starts_with('/')
+            && wild > 0
+            && self.feed.starts_with('/')
+            && !self.feed.contains("//")
+            && !literal.contains(['?', '#', '}', '*'])
+    }
+}
+/// The organiser feed of the event page `uri` on platform `d` (`Definition::container_feed`):
+/// on the page's own scheme, host and port, without its query or fragment. `None` when the
+/// platform declares none, the page's path has another form, or the feed is the page itself.
+pub fn container_feed(d: &Definition, uri: &str) -> Option<String> {
+    let spec = d.container_feed.as_ref()?;
+    let page = Url::parse(uri).ok()?;
+    if !matches!(page.scheme(), "http" | "https") {
+        return None;
+    }
+    let path = page.path().trim_end_matches('/');
+    let pattern = spec.page.trim_end_matches('/');
+    if !canary_link_matches(pattern, path) {
+        return None;
+    }
+    let captured: Vec<&str> = pattern
+        .split('/')
+        .zip(path.split('/'))
+        .filter(|(p, _)| *p == "*")
+        .map(|(_, s)| s)
+        .collect();
+    let mut feed = spec.feed.clone();
+    for (n, segment) in captured.iter().enumerate() {
+        feed = feed.replace(&format!("{{{}}}", n + 1), segment);
+    }
+    let mut url = page.clone();
+    url.set_path(&feed);
+    url.set_query(None);
+    url.set_fragment(None);
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    (url.path().trim_end_matches('/') != path).then(|| url.to_string())
 }
 /// Whether `path` has a canary link's form (`Definition::canary_link`): as many segments, each
 /// equal to the pattern's, where `*` stands for any one non-empty segment.
@@ -335,7 +406,8 @@ pub fn validate(cfg: &EventConfig) -> anyhow::Result<()> {
                 .contains(&d.parser.as_str())
                 && d.canary_link.as_ref().is_none_or(|l| {
                     d.canary.is_some() && l.starts_with('/') && l.split('/').any(|s| s == "*")
-                }),
+                })
+                && d.container_feed.as_ref().is_none_or(ContainerFeed::valid),
             "invalid adapter declaration {}",
             d.id
         );
@@ -344,4 +416,59 @@ pub fn validate(cfg: &EventConfig) -> anyhow::Result<()> {
         anyhow::ensure!(definition(id).is_some(), "unknown event adapter {id}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    /// A Meetup date's page, by number or token, names its group's calendar on its own origin;
+    /// other paths name none, and the calendar names no other.
+    #[test]
+    fn a_meetup_date_names_its_groups_calendar() {
+        let meetup = definition("meetup").unwrap();
+        let feed = "https://www.meetup.com/bitcoin-meetup-switzerland/events/ical/";
+        for page in [
+            "https://www.meetup.com/bitcoin-meetup-switzerland/events/316908442/",
+            "https://www.meetup.com/bitcoin-meetup-switzerland/events/316908442",
+            "https://www.meetup.com/bitcoin-meetup-switzerland/events/frxnbvyjcqbmb/?recId=1#x",
+        ] {
+            assert_eq!(
+                container_feed(meetup, page).as_deref(),
+                Some(feed),
+                "{page}"
+            );
+        }
+        for page in [
+            feed,
+            "https://www.meetup.com/bitcoin-meetup-switzerland/",
+            "https://www.meetup.com/bitcoin-meetup-switzerland/events/",
+            "https://www.meetup.com/bitcoin-meetup-switzerland/events/316908442/attendees/",
+            "https://www.meetup.com/find/events/",
+        ] {
+            assert_eq!(container_feed(meetup, page), None, "{page}");
+        }
+        assert_eq!(
+            container_feed(definition("luma").unwrap(), "https://luma.com/x/events/1/"),
+            None
+        );
+        // Declarations: a reference names a `*` of the page; the feed carries no query.
+        let spec = |page: &str, feed: &str| ContainerFeed {
+            page: page.into(),
+            feed: feed.into(),
+        };
+        assert!(spec("/*/events/*", "/{1}/events/ical/").valid());
+        assert!(spec("/*/events/*", "/{2}.ics").valid());
+        for (page, feed) in [
+            ("/*/events/*", "/{3}/ical/"),
+            ("/*/events/*", "/{0}/ical/"),
+            ("/*/events/*", "/{1/ical/"),
+            ("/*/events/*", "/{1}/ical/?x=1"),
+            ("/*/events/*", "{1}/ical/"),
+            ("/*/events/*", "//{1}/ical/"),
+            ("/events/x", "/ical/"),
+        ] {
+            assert!(!spec(page, feed).valid(), "{page} {feed}");
+        }
+        validate(&EventConfig::default()).unwrap();
+    }
 }
