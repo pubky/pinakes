@@ -60,8 +60,8 @@ pub fn mutual(osm: &OsmId, tag: &str, item: &Value) -> bool {
     names(osm, tag, item) && objects(item).into_iter().eq([osm.key()])
 }
 
-/// What a place card takes from its item: the item's place links and its Wikipedia articles
-/// when the item names the object back, and both keys only when the two are one to one.
+/// What a place card takes from its item: the item's place links when the item names the
+/// object back, and both keys only when the two are one to one.
 pub fn from_item(osm: &OsmId, tag: &str, item: &Value) -> Found {
     let mut found = Found::default();
     if !names(osm, tag, item) {
@@ -71,10 +71,7 @@ pub fn from_item(osm: &OsmId, tag: &str, item: &Value) -> Found {
         found.push_key(key(osm));
         found.push_key(wikidata::key(tag));
     }
-    for link in wikidata::links(item, wikidata::PLACE)
-        .into_iter()
-        .chain(wikidata::wikipedia(item))
-    {
+    for link in wikidata::links(item, wikidata::PLACE) {
         found.push_link(link);
     }
     found
@@ -296,7 +293,7 @@ pub mod also_on {
                 "wikidata",
             )];
             // The place links first, then the Wikipedia editions in their preferred order.
-            links.extend(found.links.into_iter().filter(|l| l.site != "Wikipedia"));
+            links.extend(found.links);
             links.extend(editions(&hub));
             Ok(also_on::Found {
                 keys: found.keys,
@@ -351,15 +348,7 @@ pub mod also_on {
             let Some(article) = crate::wikipedia::parse(&subject.uri) else {
                 return Ok(None);
             };
-            let mut url =
-                url::Url::parse(&format!("https://{}.wikipedia.org/w/api.php", article.lang))?;
-            url.query_pairs_mut()
-                .append_pair("action", "query")
-                .append_pair("prop", "pageprops")
-                .append_pair("ppprop", "wikibase_item")
-                .append_pair("titles", &article.title)
-                .append_pair("redirects", "1")
-                .append_pair("format", "json");
+            let url = crate::wikipedia::item_lookup(&article)?;
             let (status, body) = get(cx, url.as_str(), "wikipedia_busy").await?;
             if status != 200 {
                 return Ok(None);
@@ -1047,10 +1036,6 @@ mod tests {
         assert!(lugano.keys.is_empty());
         assert!(!mutual(&osm("relation/2888417"), "Q7024", &items["Q7024"]));
         assert_eq!(lugano.links[0].uri, "https://www.lugano.ch/");
-        assert!(lugano
-            .links
-            .iter()
-            .any(|l| l.uri == "https://it.wikipedia.org/wiki/Lugano"));
 
         let museum = from_item(
             &osm("node/9984134345"),

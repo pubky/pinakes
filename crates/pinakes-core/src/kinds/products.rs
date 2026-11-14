@@ -8,6 +8,7 @@
 //!
 //! Amazon pages are never fetched (the egress refuses them, a redirect's target too): an Amazon
 //! product link's card comes from the link alone (`amazon`).
+use super::{first, number, text_or_number as text};
 use crate::model::ResourceMeta;
 use serde_json::Value;
 use url::Url;
@@ -328,28 +329,8 @@ const AMAZON: &[&str] = &[
     "a.co",
 ];
 
-fn first(v: &Value) -> &Value {
-    v.as_array().and_then(|a| a.first()).unwrap_or(v)
-}
 fn all(v: &Value) -> impl Iterator<Item = &Value> {
-    v.as_array()
-        .map_or_else(|| vec![v], |a| a.iter().take(64).collect())
-        .into_iter()
-        .filter(|v| !v.is_null())
-}
-fn text(v: &Value) -> Option<String> {
-    crate::event::page::string(v)
-        .or_else(|| v.as_u64().map(|n| n.to_string()))
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty())
-}
-fn number(v: &Value) -> Option<f64> {
-    v.as_f64()
-        .or_else(|| {
-            v.as_str()
-                .and_then(|s| s.trim().replace(',', "").parse().ok())
-        })
-        .filter(|n| n.is_finite() && *n >= 0.0)
+    super::all(v, 64)
 }
 fn amount(n: f64) -> String {
     if n.fract() == 0.0 && n < 1e15 {

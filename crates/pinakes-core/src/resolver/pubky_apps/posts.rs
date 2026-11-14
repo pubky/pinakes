@@ -3,20 +3,20 @@
 //! as a `post` line naming its versionless URI; the resolver lists its versions and reads the
 //! latest (`Kind::versions`), checks it with pubky-social-specs' `PostEnvelope<K>`, and reads it
 //! by its namespace and kind. The social specs' own posts (`/pub/social/…`: events, rsvps and the
-//! rest) are Nexus's and never fetched (owner decision, 2026-10-26), availability included, now
+//! rest) are Nexus's and never fetched, availability included, now
 //! a social kind.
 //!
 //! - `maps` `route`: a `Trip` card, its box from its coordinate waypoints.
 //! - `music` `session`: a `BroadcastEvent` card of the track it embeds, from its start to its
 //!   expiry; `music` `listening` (now playing): a `ListenAction` card of the track until its
 //!   expiry. Each is named by its optional `name`, else generically ("Listening session", "Now
-//!   playing"), with its author as a fact, as clients name them (owner rule, 2026-10-27). A card
+//!   playing"), with its author as a fact, as clients name them. A card
 //!   with an expiry is read again when it passes (`refresh_by`), and
 //!   then has none. A `listen`
 //!   has no card: it counts on its track, and one card per play would be noise and a
-//!   play-by-play history in a second index (owner decision, 2026-10-27).
+//!   play-by-play history in a second index.
 //! - Any other namespace (`ANY`): the general card from the content's standard fields, with the
-//!   namespace and kind (owner decision, 2026-10-27).
+//!   namespace and kind.
 use super::{Client, Kind, Object, Profile, Read};
 use crate::model::ResourceMeta;
 use chrono::{DateTime, Utc};
@@ -260,7 +260,7 @@ fn named(object: &Object, content: &Value, generic: &str, doc: &mut ResourceMeta
     fact(doc, "author", Some(object.owner.into()));
 }
 /// The longest a `listening` is current: "now playing" for longer is no longer now (the music
-/// specs cap a listening at a day; owner decision, 2026-10-27).
+/// specs cap a listening at a day).
 const LISTENING_MAX: chrono::TimeDelta = chrono::TimeDelta::days(1);
 /// A session: a broadcast of the track it embeds, from `started_at` until `expires_at`, with its
 /// host and the service it plays on as facts. Named by its optional `name`, else "Listening

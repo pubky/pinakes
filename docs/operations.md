@@ -892,7 +892,7 @@ limit is about 40/s). Change lines hold a card's values before and after a chang
 `limits.change_retention_days` (90): while a TMDB credential is set, startup refuses more than
 120 days, and a change line that holds a TMDB value goes after 120 days whatever that setting says,
 with TMDB on or off, so no TMDB value read more than six months ago stays served by
-`/v1/changes`.
+`POST /v1/changes/lookup`.
 
 Sources reach their services through the egress policy and its per-host budgets, one request
 at a time per host. A hub's published limit lowers its host's default pace like a source's own

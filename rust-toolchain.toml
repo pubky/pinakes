@@ -1,0 +1,4 @@
+# The Rust version CI (.github/workflows/ci.yml) and the image build (Dockerfile) test.
+[toolchain]
+channel = "1.98.1"
+components = ["clippy", "rustfmt"]

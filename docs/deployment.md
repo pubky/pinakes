@@ -74,7 +74,7 @@ PGDG archive once the main repository drops it). The cluster must report h3 4.2.
 3.4+, compared as numbers, and run the h3 function; then CI runs the full `scripts/test` gate and
 `scripts/e2e --mock`. Workflow contracts, actionlint, ShellCheck, Hadolint and a whitespace check
 of the change against `main` also run. Rust is
-1.98.1 in CI and the image build. Native amd64 and arm64 image jobs build without registry login
+1.98.1 in CI, the image build and `rust-toolchain.toml`. Native amd64 and arm64 image jobs build without registry login
 or publishing and start the actual release daemon against the real database. They check the public API, ODbL
 dump volume, nonroot user and loopback admin binding. No public provider or test identity is needed.
 

@@ -43,8 +43,6 @@ and the attribution "RCSB PDB (CC0 1.0)". A structure is not an event, so its da
 | `citation_doi`, `citation_pubmed_id` | The primary citation's ids (another object) |
 | `page_url` | The entry's page on rcsb.org |
 
-The card also records the entry on PDBe and PDBj.
-
 ## Examples
 
 - `https://www.rcsb.org/structure/4HHB` (human deoxyhaemoglobin)

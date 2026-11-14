@@ -668,9 +668,9 @@ impl Source for Sec {
     fn budgets(&self) -> &'static [Budget] {
         // EDGAR allows ten requests per second in total.
         &[
-            ("www.sec.gov", 5.0, None),
-            ("sec.gov", 2.0, None),
-            ("data.sec.gov", 2.0, None),
+            ("www.sec.gov", 5.0),
+            ("sec.gov", 2.0),
+            ("data.sec.gov", 2.0),
         ]
     }
     fn examples(&self) -> &'static [Example] {

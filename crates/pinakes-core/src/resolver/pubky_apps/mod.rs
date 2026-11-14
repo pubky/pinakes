@@ -124,9 +124,9 @@ pub enum Route {
 }
 /// The namespaces whose objects Pinakes never fetches: those Nexus describes (pubky.app's own, and
 /// the social specs', `/pub/social/…` in any version, their posts, events and rsvps included:
-/// social events are Nexus's, owner decision 2026-10-26), and the old Mapky and Eventky layouts
-/// (`mapky.app`, `eventky.app`), whose data the owner disregards: Maps writes posts now
-/// (`posts`), and events and availability are social posts.
+/// social events are Nexus's), and the old Mapky and Eventky layouts (`mapky.app`,
+/// `eventky.app`), whose data is disregarded: Maps writes posts (`posts`), and events and
+/// availability are social posts.
 const NEVER_FETCHED: &[&str] = &["pubky.app", "social", "mapky.app", "eventky.app"];
 /// Whether Pinakes never fetches the objects of this namespace (decoded): ingest drops their post
 /// lines, so they create no resource, and one stored before the rule keeps no card (`no_card`).
@@ -157,7 +157,7 @@ pub fn route(segments: &[String]) -> Option<Route> {
         return Some(Route::Excluded);
     }
     // A post in a namespace no profile reads (`/pub/<ns>/v1/posts/{id}`) has the general card,
-    // with its namespace and kind (owner decision, 2026-10-27); a path inside one (a version
+    // with its namespace and kind; a path inside one (a version
     // file) is the resolver's to fetch, never an object of its own.
     if matches!(segments, [_, version, posts, ..] if version == "v1" && posts == "posts") {
         let any = &posts::ANY.kinds[0];
@@ -192,11 +192,7 @@ fn segments(uri: &str) -> Option<(String, Vec<String>)> {
     (all.first().map(String::as_str) == Some("pub")).then(|| (owner, all.split_off(1)))
 }
 
-/// The card of a fetched object: its kind's, or the general card.
-pub fn card(uri: &str, content_type: &str, body: &[u8], ttl: u64) -> ResourceMeta {
-    card_at(uri, content_type, body, ttl, chrono::Utc::now())
-}
-/// The card of an object fetched at `now`.
+/// The card of an object fetched at `now`: its kind's, or the general card.
 pub fn card_at(
     uri: &str,
     content_type: &str,
@@ -427,91 +423,6 @@ pub mod read {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_owned)
-    }
-    /// The text of an HTML fragment, read in one pass without a parser, so in time linear in
-    /// its length whatever its nesting: tags and comments are dropped, a block tag (`p`, `br`,
-    /// `li`, …) starts a new line, `script` and `style` contents are skipped, character
-    /// references are decoded and white space is collapsed. `None` when no text is left.
-    pub fn html_text(html: &str) -> Option<String> {
-        const BLOCKS: &[&str] = &[
-            "address",
-            "blockquote",
-            "br",
-            "dd",
-            "div",
-            "dl",
-            "dt",
-            "h1",
-            "h2",
-            "h3",
-            "h4",
-            "h5",
-            "h6",
-            "hr",
-            "li",
-            "ol",
-            "p",
-            "pre",
-            "section",
-            "table",
-            "tr",
-            "ul",
-        ];
-        // ASCII lower-casing keeps every byte offset, so `lower` locates what `html` holds.
-        let lower = html.to_ascii_lowercase();
-        let mut lines = vec![String::new()];
-        let mut at = 0;
-        while at < html.len() {
-            let Some(open) = html[at..].find('<').map(|i| at + i) else {
-                lines.last_mut()?.push_str(&html[at..]);
-                break;
-            };
-            lines.last_mut()?.push_str(&html[at..open]);
-            if lower[open..].starts_with("<!--") {
-                // A comment, to its end (or the end of the text).
-                at = lower[open + 4..]
-                    .find("-->")
-                    .map_or(html.len(), |i| open + 4 + i + 3);
-                continue;
-            }
-            let next = html[open + 1..].chars().next();
-            if !next.is_some_and(|c| c.is_ascii_alphabetic() || c == '/' || c == '!') {
-                // Not a tag: a literal `<`.
-                lines.last_mut()?.push('<');
-                at = open + 1;
-                continue;
-            }
-            let Some(close) = html[open..].find('>').map(|i| open + i) else {
-                break;
-            };
-            let inner = &lower[open + 1..close];
-            let end_tag = inner.starts_with('/');
-            let name: String = inner
-                .trim_start_matches('/')
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric())
-                .collect();
-            if BLOCKS.contains(&name.as_str()) {
-                lines.push(String::new());
-            }
-            at = close + 1;
-            if !end_tag && (name == "script" || name == "style") {
-                // Raw text, to its end tag (or the end of the text).
-                let end = format!("</{name}");
-                at = lower[at..].find(&end).map_or(html.len(), |i| at + i);
-            }
-        }
-        let text: Vec<String> = lines
-            .iter()
-            .map(|line| {
-                crate::resolver::web::decoded(line)
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            })
-            .filter(|line| !line.is_empty())
-            .collect();
-        (!text.is_empty()).then(|| text.join("\n"))
     }
     /// A number as a fact: an integer without a fraction, else as written.
     pub fn number(v: &Value) -> Option<String> {

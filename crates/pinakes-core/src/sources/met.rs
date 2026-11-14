@@ -180,7 +180,7 @@ impl Source for Met {
         ]
     }
     fn budgets(&self) -> &'static [super::Budget] {
-        &[("collectionapi.metmuseum.org", 1.0, None)]
+        &[("collectionapi.metmuseum.org", 1.0)]
     }
     fn examples(&self) -> &'static [Example] {
         &[Example {

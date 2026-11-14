@@ -8,6 +8,8 @@ import { E2E_CONTACT, dropRefusedPages, freshen, instanceAgent, json, liveRecipe
 
 const mock = process.argv.includes('--mock');
 const recipesOnly = process.argv.includes('--live-recipes');
+// The stack `scripts/e2e` built, where cargo put it.
+const stack = `${process.env.CARGO_TARGET_DIR || 'target'}/debug/examples/e2e_stack`;
 let child, session, liveSamples, skipped = [];
 const control = new AbortController();
 process.on('SIGINT', () => control.abort(new Error('Interrupted')));
@@ -22,7 +24,7 @@ async function stop(child) {
 }
 /** The public recipes, live (`liveRecipes`), each one left out or failed logged. */
 async function recipeSweep() {
-  const recipes = await liveRecipes(() => (child = spawn('./target/debug/examples/e2e_stack', ['--live-recipes'], { stdio: ['ignore', 'pipe', 'inherit'] })), control.signal);
+  const recipes = await liveRecipes(() => (child = spawn(stack, ['--live-recipes'], { stdio: ['ignore', 'pipe', 'inherit'] })), control.signal);
   for (const s of recipes.skipped) console.error(`recipe left out: ${s.name} (${s.uri}): ${s.reason}`);
   for (const f of recipes.failed) console.error(`recipe failed: ${f.name} (${f.uri}): ${f.reason}`);
   return recipes;
@@ -64,7 +66,7 @@ try {
       await writeFile(liveSamples, JSON.stringify(samples, null, 2));
     }
     if (mock || process.argv.includes('--isolated-live')) {
-      child = spawn('./target/debug/examples/e2e_stack', mock ? [] : ['--live', liveSamples], { stdio: ['ignore', 'pipe', 'inherit'] });
+      child = spawn(stack, mock ? [] : ['--live', liveSamples], { stdio: ['ignore', 'pipe', 'inherit'] });
       const lines = createInterface({ input: child.stdout });
       const startup = await Promise.race([once(lines, 'line').then(([line]) => JSON.parse(line)), once(child, 'exit').then(([code]) => { throw new Error(`Stack exited before ready: ${code}`); })]);
       pinakes = startup.pinakes; nexus = startup.nexus;

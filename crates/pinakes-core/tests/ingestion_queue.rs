@@ -808,7 +808,7 @@ impl Resolver for Discovering {
 }
 /// The fetch that confirms a missing answer asks the upstream again, whatever Egress cached
 /// (a 404 for five minutes, past the 30-second retry): a cached 404 never confirms `missing`
-/// after one upstream request (Codex's review of preview-park-1). A link back meanwhile is
+/// after one upstream request. A link back meanwhile is
 /// read; two real 404s make it missing.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_confirmation_asks_the_upstream_again(pool: PgPool) {
@@ -893,7 +893,7 @@ impl Resolver for Shared {
         Duration::from_secs(86400)
     }
 }
-/// A confirmation never cuts a named wait short (Codex's review of preview-park-2): two links on
+/// A confirmation never cuts a named wait short: two links on
 /// one endpoint await confirmation; the first's asks again and gets a real 503 with
 /// `Retry-After: 120`, which discovery keeps; the second's takes that answer, its wait, and asks
 /// nothing. A cached answer that names no wait is asked again.
@@ -1114,8 +1114,8 @@ impl Resolver for TooComplexResolver {
     }
 }
 /// A resource whose refresh is too complex to parse loses its card: no title, no description,
-/// status `error`, final with `too_complex`, and the change is recorded. Before, the old card
-/// stayed (Codex on 58ed270).
+/// status `error`, final with `too_complex`, and the change is recorded: the old card
+/// does not stay.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_too_complex_refresh_clears_the_card(pool: PgPool) {
     let uri = "https://complex.example.org/page";
@@ -1194,7 +1194,7 @@ async fn a_too_complex_refresh_clears_the_card(pool: PgPool) {
 }
 
 /// A resolver whose error repeats what an upstream answered: two links in one span, the second
-/// with user info, a query and a fragment (Codex's case), behind a 503.
+/// with user info, a query and a fragment, behind a 503.
 struct UpstreamTextResolver;
 #[async_trait::async_trait]
 impl Resolver for UpstreamTextResolver {
@@ -1596,8 +1596,8 @@ async fn invalid_non_event_feed_clock_has_its_own_rejection_reason(pool: PgPool)
 }
 
 /// Spotify's embedded-player links an older build stored as links of their own become aliases of
-/// their track at `reextract` of the route each is stored on (Codex's review of
-/// spotify-fallbacks-1): `open.spotify.com/embed/…` is on `media`, so `reextract web` folds only
+/// their track at `reextract` of the route each is stored on:
+/// `open.spotify.com/embed/…` is on `media`, so `reextract web` folds only
 /// `embed.spotify.com`, and `reextract web media` both.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn reextract_folds_a_stored_spotify_embed_on_its_own_route(pool: PgPool) {

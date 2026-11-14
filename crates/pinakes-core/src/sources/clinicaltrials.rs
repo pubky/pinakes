@@ -3,7 +3,7 @@
 //! Every clinicaltrials.gov link of one study, current or legacy (`/ct2/show/…`, the classic
 //! site), and its API URL are aliases of one identifier: `nct:{NCT number}`. The registry asks
 //! to be credited with the date of its data, which is the record's last update.
-use super::kit::{host_and_segments, int, json, text, texts, time, web_url, Card, Link, Request};
+use super::kit::{host_and_segments, int, json, text, texts, time, web_url, Card, Request};
 use super::{Example, Source};
 use crate::model::ResourceMeta;
 use anyhow::{bail, Context, Result};
@@ -11,7 +11,6 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 pub const SITE: &str = "ClinicalTrials.gov";
-const VIA: &str = "clinicaltrials";
 /// The parts of a study record the card reads (the results section can be megabytes).
 const FIELDS: &str = "protocolSection,hasResults";
 /// How many PubMed references a card keeps.
@@ -160,11 +159,6 @@ pub fn parse(status: u16, raw: &[u8], asked: &str) -> Result<Option<Card>> {
         Some(date) => format!("ClinicalTrials.gov, data as of {date}"),
         None => "ClinicalTrials.gov".into(),
     });
-    card.link(Link::new(
-        "WHO ICTRP",
-        format!("https://trialsearch.who.int/Trial2.aspx?TrialID={nct}"),
-        VIA,
-    ));
     Ok(Some(card))
 }
 
@@ -226,7 +220,7 @@ impl Source for ClinicalTrials {
         ]
     }
     fn budgets(&self) -> &'static [super::Budget] {
-        &[("clinicaltrials.gov", 0.8, None)]
+        &[("clinicaltrials.gov", 0.8)]
     }
     fn examples(&self) -> &'static [Example] {
         &[Example {
@@ -358,10 +352,6 @@ mod tests {
         assert_eq!(
             card.attribution.as_deref(),
             Some("ClinicalTrials.gov, data as of 2026-03-25")
-        );
-        assert_eq!(
-            card.also_on[0].uri,
-            "https://trialsearch.who.int/Trial2.aspx?TrialID=NCT04368728"
         );
         assert!(card.keys.is_empty());
 

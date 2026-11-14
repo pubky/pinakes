@@ -210,7 +210,7 @@ mod tests {
     fn conventional_card_and_namespace_matching() {
         let uri =
             "pubky://ybndrfg8ejkmcpqxot1uwisza345h769ybndrfg8ejkmcpqxot1uwi/pub/other.app/item";
-        let doc=super::super::pubky_apps::card(uri,"application/json",br#"{"title":"A deck","description":"Cards","image":"https://example.org/cover.png","password":"never keep"}"#,10);
+        let doc=super::super::pubky_apps::card_at(uri,"application/json",br#"{"title":"A deck","description":"Cards","image":"https://example.org/cover.png","password":"never keep"}"#,10,chrono::Utc::now());
         assert_eq!(doc.name.as_deref(), Some("A deck"));
         assert!(!serde_json::to_string(&doc).unwrap().contains("password"));
         assert_eq!(crate::resolver::classify(uri), Some("pubky"));

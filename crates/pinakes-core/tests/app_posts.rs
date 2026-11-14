@@ -1,7 +1,7 @@
-//! App posts (TASK-app-posts.md, its second amendment): `post` lines on the resource feed name a
+//! App posts: `post` lines on the resource feed name a
 //! post, which the Pubky resolver reads in its latest version by its namespace and kind. The
-//! social specs' posts (events, rsvps) are Nexus's: never fetched, their lines rejected (owner
-//! decision, 2026-10-26). Every URI and identity here is made up.
+//! social specs' posts (events, rsvps) are Nexus's: never fetched, their lines rejected.
+//! Every URI and identity here is made up.
 use chrono::{DateTime, Duration, Utc};
 use pinakes_core::{
     config::{IngestConfig, QueueConfig},
@@ -554,7 +554,7 @@ async fn card_name(pool: &PgPool, uri: &str) -> Option<String> {
 }
 
 /// A post whose every read failed (its homeserver down) until it was dead-lettered, never
-/// resolved: a new version line makes it due again, and it resolves (review of f275248).
+/// resolved: a new version line makes it due again, and it resolves.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_dead_lettered_post_is_read_again_at_a_new_version(pool: PgPool) {
     let metrics = Metrics::new().unwrap();
@@ -593,7 +593,7 @@ async fn a_dead_lettered_post_is_read_again_at_a_new_version(pool: PgPool) {
 
 /// A read in flight when a newer version arrives is fenced: what it read (the older version) is
 /// not saved with the card's normal TTL over the newer version's "due now"; the post is read
-/// again at once and keeps the newer version (review of f275248).
+/// again at once and keeps the newer version.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_read_in_flight_never_undoes_a_newer_version(pool: PgPool) {
     let metrics = Metrics::new().unwrap();
@@ -845,8 +845,7 @@ fn us(at: DateTime<Utc>) -> i64 {
 }
 
 /// A listening or a session is read again when it expires, not at the queue's usual hour or
-/// more after: its card never outlives `expires_at` by more than the queue's minute (review of
-/// d8e4ceb, M1).
+/// more after: its card never outlives `expires_at` by more than the queue's minute.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn an_expiring_card_is_read_again_when_it_expires(pool: PgPool) {
     let now = Utc::now();
@@ -882,8 +881,8 @@ async fn an_expiring_card_is_read_again_when_it_expires(pool: PgPool) {
 }
 
 /// A post of an unprofiled namespace with a title no stored text may hold (a NUL), or one too
-/// long, is saved with its card, without that title, on its first read (review of d8e4ceb, M2:
-/// it used to fail to save and dead-letter).
+/// long, is saved with its card, without that title, on its first read: it neither
+/// fails to save nor dead-letters.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_general_card_with_unstorable_text_is_saved_without_it(pool: PgPool) {
     for title in ["Sicilian\0Najdorf".to_owned(), "N".repeat(100_000)] {

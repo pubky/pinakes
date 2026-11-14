@@ -1,5 +1,6 @@
 //! Questions and their answers (`Question`): from a Q&A page's own JSON-LD (`QAPage` and its
 //! `Question`), a Q&A site's API (`sources::stack_exchange`) or a forum topic marked solved.
+use super::{first, text};
 use crate::{model::ResourceMeta, resolver::web::origin_url};
 use serde_json::Value;
 use url::Url;
@@ -75,7 +76,7 @@ pub fn from_jsonld(v: &Value, base: &Url) -> Question {
             .map(|t| {
                 // HTML is stripped first, then cut at a question's length.
                 if t.contains('<') {
-                    crate::resolver::pubky_apps::read::html_text(&t)
+                    crate::resolver::html::scan_text(&t)
                         .map(|t| excerpt(&t))
                         .unwrap_or_default()
                 } else {
@@ -104,14 +105,6 @@ pub fn excerpt(text: &str) -> String {
     cut
 }
 
-fn first(v: &Value) -> &Value {
-    v.as_array().and_then(|a| a.first()).unwrap_or(v)
-}
-fn text(v: &Value) -> Option<String> {
-    crate::event::page::string(v)
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty())
-}
 fn number(v: &Value) -> Option<i64> {
     v.as_i64()
         .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))

@@ -369,13 +369,13 @@ mod tests {
             ),
             ("HTTPS://Example.org/a?token=CANARY", "HTTPS://Example.org/a"),
             ("at https://user:CANARY@example.org/a, ok", "at https://example.org/a, ok"),
-            // Two links in one span: the second loses its user info too (Codex's case).
+            // Two links in one span: the second loses its user info too.
             (
                 "failed [https://first.example/a,HTTPS://user:CANARY@second.example/b?t=CANARY]",
                 "failed [https://first.example/a,HTTPS://second.example/b",
             ),
             ("from http://example.org/c#CANARY", "from http://example.org/c"),
-            // A database URL: its password (user info) and its settings (query) go (Kimi).
+            // A database URL: its password (user info) and its settings (query) go.
             (
                 "connect postgresql://pinakes:CANARY@db.example:5432/pinakes?sslmode=require&password=CANARY failed",
                 "connect postgresql://db.example:5432/pinakes failed",

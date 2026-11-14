@@ -46,10 +46,6 @@ pub fn inaturalist_observation(uri: &str) -> Option<u64> {
         _ => None,
     }
 }
-/// An iNaturalist observation's page.
-pub fn inaturalist_observation_page(id: u64) -> String {
-    format!("https://www.inaturalist.org/observations/{id}")
-}
 
 /// A language prefix of gbif.org, e.g. `es`, `fr` or `zh-tw`.
 pub fn gbif_language(segment: &str) -> bool {
@@ -72,10 +68,6 @@ pub fn gbif_occurrence(uri: &str) -> Option<u64> {
         ["occurrence", n] | ["occurrence", n, "verbatim"] => id(n, 19),
         _ => None,
     }
-}
-/// A GBIF occurrence's page.
-pub fn gbif_occurrence_page(key: u64) -> String {
-    format!("https://www.gbif.org/occurrence/{key}")
 }
 
 #[cfg(test)]

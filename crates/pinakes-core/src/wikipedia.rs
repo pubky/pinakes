@@ -213,6 +213,20 @@ pub(crate) const LANGUAGES: &[&str] = &[
     "tr", "id", "he", "cs", "vi", "fi", "no", "hu", "ca", "ro", "el", "da", "th", "bg", "sr", "hr",
 ];
 
+/// The request that asks an article's own Wikipedia for its Wikidata item (`pageprops`,
+/// redirects followed). Every reader builds it here, so they share its cached answer.
+pub fn item_lookup(article: &Article) -> Result<Url, url::ParseError> {
+    let mut url = Url::parse(&format!("https://{}.wikipedia.org/w/api.php", article.lang))?;
+    url.query_pairs_mut()
+        .append_pair("action", "query")
+        .append_pair("prop", "pageprops")
+        .append_pair("ppprop", "wikibase_item")
+        .append_pair("titles", &article.title)
+        .append_pair("redirects", "1")
+        .append_pair("format", "json");
+    Ok(url)
+}
+
 /// The Wikidata item of an article from its own Wikipedia (`pageprops`, redirects followed).
 pub fn parse_item(v: &Value) -> Option<String> {
     v["query"]["pages"]

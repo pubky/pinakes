@@ -985,8 +985,8 @@ async fn a_heard_stream_reaches_the_card(pool: PgPool) {
 }
 
 /// Every key a resource read lists (`keys`, as stored) searches back to that resource:
-/// `GET /v1/search?key=` takes each exactly as listed (review of d6d0aeb: MusicBrainz and podcast
-/// keys did not; of e48807e: Open Library keys did not).
+/// `GET /v1/search?key=` takes each exactly as listed (MusicBrainz, podcast and Open Library
+/// keys among them).
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn every_key_a_read_lists_searches_back(pool: PgPool) {
     let uri = "https://example.org/a-show";
@@ -2092,7 +2092,7 @@ impl Source for Outlives {
     }
 }
 
-/// A batch that outlives its lease still records every run against it (Kimi, train-1): a clean
+/// A batch that outlives its lease still records every run against it: a clean
 /// run schedules its next one, a run no source applies to leaves the queue, a partial or failed
 /// run backs off and counts. Only a row another claim took meanwhile keeps that claim.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
@@ -2404,8 +2404,7 @@ async fn a_panicking_source_never_stops_the_worker(pool: PgPool) {
     }
 }
 
-/// Looks up the barcodes the sources before it found, like iTunes: one keyed link each. Off by
-/// default.
+/// Looks up the barcodes the sources before it found, like iTunes: one keyed link each.
 struct ByBarcode {
     named: &'static str,
 }
@@ -2416,9 +2415,6 @@ impl Source for ByBarcode {
     }
     fn applies(&self, subject: &Subject) -> bool {
         subject.keys_in("upc").next().is_some()
-    }
-    fn enabled_by_default(&self) -> bool {
-        false
     }
     async fn lookup(&self, _: &Context, subject: &Subject) -> anyhow::Result<Found> {
         let upc = subject.keys_in("upc").next().unwrap();
@@ -2450,8 +2446,16 @@ async fn a_link_an_exact_lookup_names_joins_by_its_key(pool: PgPool) {
         }),
     );
     let sources: Vec<Arc<dyn Source>> = vec![hub.clone(), Arc::new(ByBarcode { named: apple })];
-    // Off by default: nothing is named.
-    drain(&pool, &cx(Config::default()), &sources).await;
+    // Switched off: nothing is named.
+    let mut off = Config::default();
+    off.also_on.sources.insert(
+        "by_barcode".into(),
+        also_on::SourceOptions {
+            enabled: Some(false),
+            ..Default::default()
+        },
+    );
+    drain(&pool, &cx(off), &sources).await;
     let named = || async {
         sqlx::query_scalar::<_, String>(
             "SELECT uri||' '||coalesce(key,'-') FROM derived_link ORDER BY uri",
