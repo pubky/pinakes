@@ -240,7 +240,7 @@ deny_hosts = []
 
 [groups]
 enabled = true
-cross_container_occurrences = "off" # Or "corroborated": the cross-feed ICS UID mode.
+cross_container_occurrences = "corroborated" # Or "off": no ICS UID join across feeds (a page and its date in its own publisher's calendar included).
 same_recording_hint = "on" # Recording cards name recordings that are possibly the same one (maybe_same).
 
 # "Also on": the same thing on other services, from hubs and exact lookups (docs/api.md).
