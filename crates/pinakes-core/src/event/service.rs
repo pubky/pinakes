@@ -442,6 +442,13 @@ impl EventService {
             event.image = card.image;
         }
         event.aliases = card.aliases;
+        // An event page's canonical aliases it only as the other spelling of its event on a
+        // platform that gives each event two (`alias::event_spelling`).
+        event.alias_candidates = card
+            .alias_candidates
+            .into_iter()
+            .filter(|c| crate::alias::event_spelling(uri, c).is_some())
+            .collect();
         event.attributes = card.attributes;
         event.site = card.site;
         // The card's identity claims (its same-origin canonical and og:url, typed identifiers,

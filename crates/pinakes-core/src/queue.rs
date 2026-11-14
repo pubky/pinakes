@@ -690,17 +690,19 @@ async fn finish_job(
         crate::changes::save(pool, &job.id, job.generation, &doc, cfg).await?;
         // An official API names the object's root (`source_root`), or the page names itself (its
         // head canonical, or the end of an all-permanent redirect chain) up to a trailing slash
-        // and tracking: the link is an alias of that URL, which is fetched in its place from now
-        // on. Other claimed URLs are never candidates.
+        // and tracking, or as the other spelling of its event on a platform that gives each
+        // event two (`alias::event_spelling`): the link is an alias of that URL, which is fetched
+        // in its place from now on. Other claimed URLs are never candidates.
         if doc.status == Status::Ok {
             if let Some(alias) = doc
                 .source_root
                 .as_deref()
                 .and_then(|root| crate::alias::source(&job.uri, root))
                 .or_else(|| {
-                    doc.alias_candidates
-                        .iter()
-                        .find_map(|a| crate::alias::canonical(&job.uri, a))
+                    doc.alias_candidates.iter().find_map(|a| {
+                        crate::alias::canonical(&job.uri, a)
+                            .or_else(|| crate::alias::event_spelling(&job.uri, a))
+                    })
                 })
             {
                 let mut tx = pool.begin().await?;

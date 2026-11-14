@@ -118,6 +118,50 @@ pub fn canonical(uri: &str, canonical: &str) -> Option<Alias> {
         basis: "canonical",
     })
 }
+/// Platforms that give one event page two spellings in one directory: a host and the path of an
+/// event page, `*` standing for one non-empty segment and the last one for the event (Meetup: a
+/// date's number, `/g/events/316908442/`, and its token, `/g/events/frxnbvyjcqbmb/`).
+const EVENT_SPELLINGS: &[(&[&str], &str)] = &[(&["meetup.com"], "/*/events/*")];
+/// The page's own head canonical as an alias on a platform of [`EVENT_SPELLINGS`]: on the
+/// page's host and in its event directory (the same group's `/events/`), naming another event
+/// segment. The platform gives each event page these two spellings; a canonical to another
+/// group, another host or any other path is a claim and never aliases (`canonical`).
+pub fn event_spelling(uri: &str, canonical: &str) -> Option<Alias> {
+    let (_, uri, _) = crate::model::identity(uri).ok()?;
+    let (_, root, _) = crate::model::identity(canonical).ok()?;
+    let (page, named) = (Url::parse(&uri).ok()?, Url::parse(&root).ok()?);
+    let host = page.host_str()?;
+    let (_, pattern) = EVENT_SPELLINGS.iter().find(|(hosts, _)| {
+        hosts
+            .iter()
+            .any(|h| host == *h || host.ends_with(&format!(".{h}")))
+    })?;
+    let event = |u: &Url| -> Option<(String, String)> {
+        let path = u.path().trim_end_matches('/');
+        if !matches!(u.scheme(), "http" | "https")
+            || u.query().is_some()
+            || !crate::event::adapters::canary_link_matches(pattern, path)
+        {
+            return None;
+        }
+        let (directory, segment) = path.rsplit_once('/')?;
+        segment
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric())
+            .then(|| (directory.to_owned(), segment.to_owned()))
+    };
+    let (directory, own) = event(&page)?;
+    let (other_directory, other) = event(&named)?;
+    (named.host_str() == Some(host)
+        && named.port() == page.port()
+        && named.scheme() == page.scheme()
+        && other_directory == directory
+        && other != own)
+        .then_some(Alias {
+            root,
+            basis: "canonical",
+        })
+}
 /// The root an official API named for `uri` (`ResourceMeta::source_root`), when it is another
 /// URI. The API's own record is the evidence, as an identifier is; its basis is `source`, since
 /// no rule of the URI names it (`reextract` keeps it).
@@ -546,6 +590,69 @@ mod tests {
             ),
         ] {
             assert_eq!(c(uri, target), None, "{uri} → {target}");
+        }
+    }
+
+    /// A Meetup date's page and its token spelling are one event in both directions; a
+    /// canonical to another group, another host, another path or a query is not.
+    #[test]
+    fn a_meetup_dates_number_and_token_are_spellings_of_one_page() {
+        let numeric = "https://www.meetup.com/bitcoin-meetup-switzerland/events/316908442/";
+        let token = "https://www.meetup.com/bitcoin-meetup-switzerland/events/frxnbvyjcqbmb/";
+        let root = |a: Option<Alias>| a.map(|a| (a.root, a.basis));
+        assert_eq!(
+            root(event_spelling(numeric, token)),
+            Some((token.into(), "canonical"))
+        );
+        assert_eq!(
+            root(event_spelling(token, numeric)),
+            Some((numeric.into(), "canonical"))
+        );
+        assert_eq!(
+            root(event_spelling(
+                "https://www.meetup.com/bitcoin-meetup-switzerland/events/316908442",
+                token
+            )),
+            Some((token.into(), "canonical"))
+        );
+        // Not a spelling the generic rule accepts: another path.
+        assert_eq!(canonical(numeric, token), None);
+        for (uri, target) in [
+            (numeric, numeric),
+            (
+                numeric,
+                "https://www.meetup.com/another-group/events/frxnbvyjcqbmb/",
+            ),
+            (
+                numeric,
+                "https://meetup.example.com/bitcoin-meetup-switzerland/events/frxnbvyjcqbmb/",
+            ),
+            (
+                numeric,
+                "http://www.meetup.com/bitcoin-meetup-switzerland/events/frxnbvyjcqbmb/",
+            ),
+            (
+                numeric,
+                "https://www.meetup.com/bitcoin-meetup-switzerland/events/frxnbvyjcqbmb/?x=1",
+            ),
+            (
+                numeric,
+                "https://www.meetup.com/bitcoin-meetup-switzerland/",
+            ),
+            (
+                numeric,
+                "https://www.meetup.com/bitcoin-meetup-switzerland/events/ical/x/",
+            ),
+            (
+                "https://www.meetup.com/bitcoin-meetup-switzerland/",
+                "https://www.meetup.com/bitcoin-meetup-switzerland/events/frxnbvyjcqbmb/",
+            ),
+            (
+                "https://events.example.com/g/events/316908442/",
+                "https://events.example.com/g/events/frxnbvyjcqbmb/",
+            ),
+        ] {
+            assert_eq!(event_spelling(uri, target), None, "{uri} → {target}");
         }
     }
 }
