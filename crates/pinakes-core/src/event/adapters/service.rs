@@ -344,6 +344,11 @@ impl PlatformResolver {
                         }
                     }
                 }
+                // A UID-only read that gave none (refused, failed, gone) keeps the UID the page
+                // was stored with, so a passing failure never moves the page out of its group.
+                if uid_only && !probe && !doc.group_keys.iter().any(|k| k.basis == "ics_uid") {
+                    self.stored_uid(uri, &mut doc).await?;
+                }
                 doc
             };
             if !probe {
@@ -390,6 +395,25 @@ impl PlatformResolver {
                 Ok(card)
             }
         }
+    }
+    /// The `ics_uid` keys the stored document of `uri` holds, added to `doc`.
+    async fn stored_uid(&self, uri: &str, doc: &mut ResourceMeta) -> Result<()> {
+        let keys: Option<Value> = sqlx::query_scalar(
+            "SELECT doc->'group_keys' FROM resource WHERE id=$1 AND doc ? 'group_keys'",
+        )
+        .bind(crate::model::identity(uri)?.0)
+        .fetch_optional(&self.web.events.as_ref().unwrap().pool)
+        .await?;
+        let keys: Vec<crate::group_keys::GroupKey> = keys
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+        let mut stored = ResourceMeta::new(uri, "", 0);
+        stored.group_keys = keys
+            .into_iter()
+            .filter(|k| k.basis == "ics_uid" && crate::group_keys::valid_stored(k))
+            .collect();
+        own_uid(doc, &stored);
+        Ok(())
     }
     /// Queue the organiser feed of an event page (`adapters::container_feed`) as a resource
     /// derived from the page, like a calendar's members: charged to the page's referrers, within
@@ -862,7 +886,13 @@ pub fn endpoint(
         "partiful" if page.is_some() => Some((format!("https://storage.googleapis.com/getpartiful.appspot.com/public/events/{id}/event.ics"), opts)),
         // A date's page by its number or its token (`/events/frxnbvyjcqbmb/`): both files carry
         // the date's current UID.
-        "meetup" if page.is_some() && super::container_feed(d, uri).is_some() && !id.is_empty() && id.len() <= 64 && id.bytes().all(|c| c.is_ascii_digit() || c.is_ascii_lowercase()) => Some((format!("{}/ical/{id}.ics", uri.trim_end_matches('/')), opts)),
+        "meetup" if page.is_some() && super::container_feed(d, uri).is_some() && !id.is_empty() && id.len() <= 64 && id.bytes().all(|c| c.is_ascii_digit() || c.is_ascii_lowercase()) => {
+            let mut file = u.clone();
+            file.set_query(None);
+            file.set_fragment(None);
+            file.set_path(&format!("{}/ical/{id}.ics", u.path().trim_end_matches('/')));
+            Some((file.into(), opts))
+        }
         _ => None,
     };
     Ok(result)
