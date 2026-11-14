@@ -155,7 +155,7 @@ impl Source for AppStore {
     }
     fn budgets(&self) -> &'static [super::Budget] {
         // Apple asks for about 20 calls a minute.
-        &[("itunes.apple.com", 0.33, None)]
+        &[("itunes.apple.com", 0.33)]
     }
     fn examples(&self) -> &'static [Example] {
         &[

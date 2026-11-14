@@ -1,12 +1,12 @@
-//! A podcast show's latest episodes, so a client can list and play them from the show's card
-//! (TASK-podcasts, item 3). They are read from the show's feed as the show's card is built (the
+//! A podcast show's latest episodes, so a client can list and play them from the show's card.
+//! They are read from the show's feed as the show's card is built (the
 //! feed's own card in `resolver::cards::podcast_body`; a Podcast Index or Apple Podcasts show's
 //! card fetches the feed its record names), kept in `podcast_episode` (the latest [`KEPT`],
 //! replaced whole at each save of the show, so they refresh with it) and served by
 //! `GET /v1/resources/{id}/episodes` (docs/api.md, Episodes); every show card carries the first
 //! [`ON_CARD`] that have a stream (`Card::episodes`, filled by [`on_cards`] from the stored rows).
 //!
-//! Why a route and a table, not a fact: a fact is one string of at most 256 bytes per name and a
+//! Why a route and a table, not a fact: a fact is one string of at most 512 bytes per name and a
 //! card's document is bounded at 8 KiB; twenty episodes with their streams are neither. Why not
 //! occurrences: an episode has no instant to window by, no recurrence and no document of its
 //! own here; the list is the feed's head and nothing more. An entry is not a card: the episode's

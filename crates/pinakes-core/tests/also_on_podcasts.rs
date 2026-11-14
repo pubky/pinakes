@@ -679,7 +679,7 @@ async fn an_episode_hears_of_its_stream() {
     assert!(found.keys.is_empty(), "{found:?}");
     assert_eq!(heard(&found), pc20_275);
     // Once its card plays that stream, the next lookup still hears of it, so the card keeps it at
-    // its next refresh (review of e10ca9a2: the facts went 3 -> 0 and the card lost its audio).
+    // its next refresh (else the facts go from 3 to 0 and the card loses its audio).
     // Whether or not the source also typed the card an episode (its fingerprint says which).
     for episode in [false, true] {
         let mut card = fountain.doc.clone().unwrap();
@@ -719,7 +719,7 @@ async fn an_episode_hears_of_its_stream() {
 }
 
 /// Podcast Index's record of the episode is its stream when the feed does not answer and
-/// iTunes names no file (review of e10ca9a2: its `episodes/byguid` answer was read for its ID
+/// iTunes names no file (its `episodes/byguid` answer is read for the stream too, not its ID
 /// alone): Apple's PC20-275, with the feed answering 404 and iTunes' list without
 /// `episodeUrl`.
 #[tokio::test]

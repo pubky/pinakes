@@ -598,7 +598,7 @@ fn a_feed_cut_off_at_the_cap_reads_to_its_last_whole_item() {
         format!("{head}{}{}</channel></rss>", item(1), item(2))
     );
     assert!(cards::feed_prefix(&format!("{head}{}", &item(1)[..30]), 1000).is_none());
-    // Kimi's shape on ee9a221: hundreds of thousands of open elements, then `</item>` after
+    // A hostile shape: hundreds of thousands of open elements, then `</item>` after
     // `</item>` (1 MiB). Each `</item>` copied the whole open stack, minutes of work at the item
     // cap. With end tags that close what is open (300,000 `<item>`), the reader takes them all;
     // with `<a>` it stops at the first mismatch. The prefix ends at once with the last item whole
@@ -849,9 +849,10 @@ async fn recorded_youtube_head_and_oembed_survive_oversize_or_failed_page() {
             } else {
                 "/watch"
             };
-            pinakes_core::resolver::egress::read_response(
+            pinakes_core::resolver::egress::read_response_with(
                 u.clone(),
                 reqwest::get(format!("{}{path}", self.base)).await?,
+                &FetchOptions::default(),
             )
             .await
         }

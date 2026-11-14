@@ -8,7 +8,7 @@
 //! An observation whose location is obscured or private has public coordinates that are
 //! randomised, so its card has no point.
 use super::kit::html_text;
-use super::kit::{float, host_and_segments, int, json, text, time, Card, Link, Point, Request};
+use super::kit::{float, host_and_segments, int, json, text, time, Card, Point, Request};
 use super::{Example, Source};
 use crate::model::ResourceMeta;
 use anyhow::{ensure, Context, Result};
@@ -16,7 +16,6 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 pub const SITE: &str = "iNaturalist";
-const VIA: &str = "inaturalist";
 const API: &str = "https://api.inaturalist.org/v1";
 
 pub use super::biodiversity::INATURALIST_SITES as SITES;
@@ -205,11 +204,6 @@ pub fn parse_observation(status: u16, raw: &[u8], id: u64) -> Result<Option<Card
         let gbif = text(&link["url"]).and_then(|u| super::biodiversity::gbif_occurrence(&u));
         if let (Some("GBIF"), Some(key)) = (link["source"].as_str(), gbif) {
             card.detail("gbif_occurrence", key);
-            card.link(Link::new(
-                "GBIF",
-                super::biodiversity::gbif_occurrence_page(key),
-                VIA,
-            ));
         }
     }
     Ok(Some(card))
@@ -327,7 +321,7 @@ impl Source for Inaturalist {
         ]
     }
     fn budgets(&self) -> &'static [super::Budget] {
-        &[("api.inaturalist.org", 0.11, None)]
+        &[("api.inaturalist.org", 0.11)]
     }
     fn examples(&self) -> &'static [Example] {
         &[
@@ -486,10 +480,6 @@ mod tests {
         );
         assert!(card.keys.is_empty(), "another service's object is a fact");
         assert_eq!(card.details["gbif_occurrence"], 5938027305u64);
-        assert_eq!(
-            card.also_on[0].uri,
-            "https://www.gbif.org/occurrence/5938027305"
-        );
 
         assert_eq!(
             parse_observation(200, &read("observation-missing.json"), 999999999999).unwrap(),

@@ -733,7 +733,7 @@ fn has(ids: &[&str]) -> bool {
 }
 
 /// Deezer's API is never called while its source is switched off, whatever path asks, and
-/// switching it off hides nothing of deezer.com (TASK-deezer-api-off): a tagged Deezer album
+/// switching it off hides nothing of deezer.com: a tagged Deezer album
 /// resolves from its own page, the album's other editions list it from MusicBrainz and
 /// Wikidata (P2723) and join it, and search finds it. Deezer itself records nothing.
 #[sqlx::test(migrations = "../../migrations")]

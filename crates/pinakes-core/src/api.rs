@@ -619,8 +619,6 @@ pub struct SearchQuery {
     /// its subtypes (`Event` leaves `MusicEvent` out too). A link with no type yet (not read, or
     /// unreachable) is left out, as the `type` facet does not count it. Combines with `type`:
     /// `type=CreativeWork&exclude_type=Article`.
-    // Left out of the query's hash when absent, so a query without it keeps its cursor and ETag.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub exclude_type: Option<String>,
     pub category: Option<String>,
     /// One host, or up to 10 comma-separated: links on any of them (OR), each exactly as the
@@ -704,9 +702,35 @@ pub struct SearchQuery {
 pub enum CollapseMode {
     Group,
 }
+/// A cursor of `payload`, signed with the daemon's cursor key: the MAC, then the payload, as
+/// unpadded URL-safe base64. Every signed cursor (search, collections, occurrences) is made
+/// here and read by [`open`].
+pub(crate) fn seal(payload: &[u8], key: &SimpleHmac<blake3::Hasher>) -> String {
+    let mut mac = key.clone();
+    mac.update(payload);
+    let mut signed = mac.finalize().into_bytes().to_vec();
+    signed.extend_from_slice(payload);
+    URL_SAFE_NO_PAD.encode(signed)
+}
+/// The payload of a cursor of at most `max` bytes that [`seal`] made with this key; `None` for
+/// anything else.
+pub(crate) fn open(cursor: &str, max: usize, key: &SimpleHmac<blake3::Hasher>) -> Option<Vec<u8>> {
+    if cursor.len() > max {
+        return None;
+    }
+    let signed = URL_SAFE_NO_PAD.decode(cursor).ok()?;
+    if signed.len() <= 32 {
+        return None;
+    }
+    let (tag, payload) = signed.split_at(32);
+    let mut mac = key.clone();
+    mac.update(payload);
+    // RustCrypto's verify_slice compares the complete MAC in constant time.
+    mac.verify_slice(tag).ok()?;
+    Some(payload.to_vec())
+}
 #[derive(Deserialize, Serialize)]
 struct PageCursor {
-    version: u8,
     score: f64,
     id: String,
     at: DateTime<Utc>,
@@ -714,28 +738,12 @@ struct PageCursor {
 }
 impl PageCursor {
     fn encode(&self, template: &SimpleHmac<blake3::Hasher>) -> anyhow::Result<String> {
-        let payload = serde_json::to_vec(self)?;
-        let mut mac = template.clone();
-        mac.update(&payload);
-        let mut signed = mac.finalize().into_bytes().to_vec();
-        signed.extend_from_slice(&payload);
-        Ok(URL_SAFE_NO_PAD.encode(signed))
+        Ok(seal(&serde_json::to_vec(self)?, template))
     }
     fn decode(s: &str, template: &SimpleHmac<blake3::Hasher>) -> Result<Self, ApiError> {
-        let invalid = || ApiError::bad("invalid cursor");
-        if s.len() > 2048 {
-            return Err(invalid());
-        }
-        let signed = URL_SAFE_NO_PAD.decode(s).map_err(|_| invalid())?;
-        if signed.len() <= 32 {
-            return Err(invalid());
-        }
-        let (tag, payload) = signed.split_at(32);
-        let mut mac = template.clone();
-        mac.update(payload);
-        // RustCrypto's verify_slice compares the complete MAC in constant time.
-        mac.verify_slice(tag).map_err(|_| invalid())?;
-        serde_json::from_slice(payload).map_err(|_| invalid())
+        open(s, 2048, template)
+            .and_then(|payload| serde_json::from_slice(&payload).ok())
+            .ok_or_else(|| ApiError::bad("invalid cursor"))
     }
 }
 /// The one card every route returns for a resource or an occurrence. Absent values are null,
@@ -2471,8 +2479,7 @@ pub async fn search(
         .to_hex()
         .to_string();
     if let Some(c) = &cursor {
-        if c.version != 2
-            || c.filter != filter
+        if c.filter != filter
             || !c.score.is_finite()
             || !model::valid_id(&c.id)
             || c.at > state.now() + chrono::Duration::seconds(5)
@@ -2900,7 +2907,6 @@ pub async fn search(
         let last = items.last().expect("nonempty page");
         Some(
             PageCursor {
-                version: 2,
                 score: last["rank"].as_f64().context("missing rank")?,
                 id: last["unit_id"]
                     .as_str()
@@ -4353,26 +4359,6 @@ mod tests {
             assert!(start(longer_or_other).is_none(), "{longer_or_other:?}");
         }
     }
-    /// A query without `exclude_type` hashes as it did before the parameter existed: its cursors
-    /// and ETags do not move; with it, the hash differs.
-    #[test]
-    fn an_absent_exclusion_is_not_in_the_query_hash() {
-        let plain = SearchQuery {
-            type_name: Some("Event".into()),
-            ..Default::default()
-        };
-        let value = serde_json::to_value(&plain).unwrap();
-        assert!(value.get("exclude_type").is_none(), "{value}");
-        assert_eq!(value["type"], "Event");
-        let excluding = SearchQuery {
-            exclude_type: Some("Event".into()),
-            ..Default::default()
-        };
-        assert_eq!(
-            serde_json::to_value(&excluding).unwrap()["exclude_type"],
-            "Event"
-        );
-    }
     /// A tag equals a text search when it spells the same words joined by a space, a hyphen, an
     /// underscore or nothing, in any case; and an empty `q` ranks nothing by relevance.
     #[test]
@@ -4648,7 +4634,6 @@ mod tests {
             seed ^= seed << 17;
             let score = (seed >> 11) as f64 / (1u64 << 53) as f64 * (-((seed % 40) as f64)).exp();
             let cursor = PageCursor {
-                version: 2,
                 score,
                 id: "0".repeat(32),
                 at: Utc::now(),

@@ -4,8 +4,8 @@ People tag objects that Pubky apps other than pubky.app keep in their public sto
 deck, a room, a marketplace listing. Pinakes fetches such a `pubky://` object from its owner's
 homeserver and gives it a card. pubky.app's own objects (posts, profiles) and the social specs'
 objects (`/pub/social/…`, any version: posts, events, rsvps, availability, tags, ratings) are
-Nexus's and never fetched: social events and availability come from Nexus (owner decisions,
-2026-10-26 and 2026-10-27). Neither are the old Mapky and Eventky layouts (`/pub/mapky.app/…`,
+Nexus's and never fetched: social events and availability come from Nexus.
+Neither are the old Mapky and Eventky layouts (`/pub/mapky.app/…`,
 `/pub/eventky.app/…`) fetched, whose data is disregarded: routes now come as [posts](#posts),
 events and availability as social posts. An object of any of these namespaces has no card, as a
 left-out path of a profiled app (below): its post lines are dropped, a link to it gets no route,
@@ -101,8 +101,7 @@ it has passed, the post has no card.
 
 Any other kind in `maps` or `music` has no card, and neither has a version the envelope refuses.
 A music `listen` is one: it counts on its track (an `embed` reference, once Nexus sends one for
-the post), and one card per play would be noise and a play-by-play history in a second index
-(owner decision, 2026-10-27).
+the post), and one card per play would be noise and a play-by-play history in a second index.
 
 The music kinds follow `pubky-music-specs` (`session`: `{started_at, expires_at?, host,
 source?, name?}`; `listening`: `{started_at, expires_at, duration_ms?, source?, name?}`; the track in the

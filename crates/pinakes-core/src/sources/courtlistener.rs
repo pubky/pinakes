@@ -195,7 +195,7 @@ impl Source for Courtlistener {
     fn budgets(&self) -> &'static [Budget] {
         // Five requests a minute, its anonymous limit when it had one: a token's own limit may
         // be higher, which the operator can set (`egress.host_rates`).
-        &[("www.courtlistener.com", 5.0 / 60.0, Some(1))]
+        &[("www.courtlistener.com", 5.0 / 60.0)]
     }
     fn examples(&self) -> &'static [Example] {
         &[Example {

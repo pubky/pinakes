@@ -269,7 +269,7 @@ impl Source for Figshare {
         ]
     }
     fn budgets(&self) -> &'static [super::Budget] {
-        &[("api.figshare.com", 1.0, None)]
+        &[("api.figshare.com", 1.0)]
     }
     fn examples(&self) -> &'static [Example] {
         &[

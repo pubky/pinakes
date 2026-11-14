@@ -791,8 +791,8 @@ async fn btc_status_drift_preserves_single_event(pool: PgPool) {
 }
 
 /// A portal event's list answering 401 or 403 is `missing` to the adapter, so the fetch that
-/// confirms it asks the portal again instead of replaying the discovery cache's answer (Codex's
-/// review of preview-park-3); a 404 likewise. The portal back with a 503 is then the wait it
+/// confirms it asks the portal again instead of replaying the discovery cache's answer;
+/// a 404 likewise. The portal back with a 503 is then the wait it
 /// names, not a confirmed `missing` after one request.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_portal_denial_is_asked_again_by_its_confirmation(pool: PgPool) {

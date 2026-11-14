@@ -1,4 +1,4 @@
-//! Wikidata items: identifier properties for places, apps and games, and Wikipedia sitelinks.
+//! Wikidata items: identifier properties for places, apps and games.
 //!
 //! Only best-rank statements count (preferred if any, else normal; never deprecated). A
 //! property with more than one best-rank value after validation is ambiguous and adds nothing.
@@ -21,11 +21,19 @@ pub fn key(qid: &str) -> Key {
 /// The items of a `wbgetentities` response by their own id. Missing items are left out; a
 /// redirected id appears under the id it redirects to.
 pub fn parse_entities(status: u16, raw: &[u8]) -> Result<BTreeMap<String, Value>> {
+    entities(parse_answer(status, raw)?)
+}
+/// A `wbgetentities` response as JSON; an answer that is an API error is an error.
+pub fn parse_answer(status: u16, raw: &[u8]) -> Result<Value> {
     let raw = body(status, raw, &[])?.context("no body")?;
-    let mut value: Value = serde_json::from_slice(raw)?;
+    let value: Value = serde_json::from_slice(raw)?;
     if let Some(error) = value.get("error") {
         anyhow::bail!("wikidata error: {}", error["code"]);
     }
+    Ok(value)
+}
+/// The items of a parsed `wbgetentities` response (`parse_answer`) by their own id.
+pub fn entities(mut value: Value) -> Result<BTreeMap<String, Value>> {
     let entities = value
         .get_mut("entities")
         .and_then(Value::as_object_mut)
@@ -262,41 +270,6 @@ pub fn links(item: &Value, properties: &[Property]) -> Vec<Link> {
         .collect()
 }
 
-/// Sitelinks that are never Wikipedia language editions.
-const NOT_WIKIPEDIA: &[&str] = &[
-    "commonswiki",
-    "metawiki",
-    "mediawikiwiki",
-    "specieswiki",
-    "sourceswiki",
-    "wikidatawiki",
-    "wikifunctionswiki",
-    "incubatorwiki",
-    "outreachwiki",
-    "wikimaniawiki",
-];
-
-/// The item's Wikipedia articles, one per language edition, ordered by site id.
-pub fn wikipedia(item: &Value) -> Vec<Link> {
-    let Some(sitelinks) = item["sitelinks"].as_object() else {
-        return Vec::new();
-    };
-    sitelinks
-        .iter()
-        .filter(|(site, _)| {
-            site.strip_suffix("wiki")
-                .is_some_and(|lang| plain(lang, 20, |c| c.is_ascii_lowercase() || c == '_'))
-                && !NOT_WIKIPEDIA.contains(&site.as_str())
-        })
-        .filter_map(|(_, link)| {
-            let url = web_url(link["url"].as_str()?)?;
-            url.host_str()?
-                .ends_with(".wikipedia.org")
-                .then(|| Link::new("Wikipedia", url.to_string(), VIA))
-        })
-        .collect()
-}
-
 /// The item a Wikidata link names (`www.wikidata.org/wiki/Q…`, `/entity/Q…`).
 pub fn wikidata_item(uri: &str) -> Option<String> {
     let url = super::web_url(uri)?;
@@ -368,14 +341,6 @@ mod tests {
             sites(&links(&items["Q7024"], PLACE)),
             [("Official website", "https://www.lugano.ch/")]
         );
-        let wiki = wikipedia(&items["Q7024"]);
-        assert!(wiki.len() > 100);
-        assert!(wiki
-            .iter()
-            .all(|l| l.uri.contains(".wikipedia.org/") && l.via == "wikidata"));
-        assert!(wiki
-            .iter()
-            .any(|l| l.uri == "https://de.wikipedia.org/wiki/Lugano"));
     }
 
     #[test]

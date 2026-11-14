@@ -22,10 +22,10 @@ as described in the main README. `npm ci --prefix e2e` installs the pinned SDKs.
 ## Offline fixture flow (CI)
 
 ```sh
-CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 scripts/test
+scripts/test
 npm ci --prefix e2e
 npm test --prefix e2e
-CARGO_PROFILE_DEV_DEBUG=0 scripts/e2e --mock
+scripts/e2e --mock
 ```
 
 Mock mode runs the same JavaScript assertions and real tag builder. A local Rust
@@ -58,7 +58,7 @@ export PINAKES_E2E_HOMESERVER=homeserver-public-key
 # Only for a new identity: export PINAKES_E2E_SIGNUP_TOKEN=invite-token
 export PINAKES_E2E_NEXUS=http://127.0.0.1:8080
 export PINAKES_E2E_REPORT=.runtime/e2e-live.json
-CARGO_PROFILE_DEV_DEBUG=0 scripts/e2e --isolated-live
+scripts/e2e --isolated-live
 ```
 
 `--isolated-live` uses the real SDK, homeserver, Nexus and public upstreams. Its private Pinakes
@@ -136,7 +136,7 @@ paths, never the secret. Journals stay under ignored `.runtime/` with mode 0600.
 ## The public recipes, live
 
 ```sh
-CARGO_PROFILE_DEV_DEBUG=0 scripts/e2e --live-recipes
+scripts/e2e --live-recipes
 ```
 
 The public `/v1/resolve` examples that promise a card (`data/api-recipes.json` and each official

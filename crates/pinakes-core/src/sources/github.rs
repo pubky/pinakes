@@ -200,7 +200,7 @@ impl Source for Github {
     }
     fn budgets(&self) -> &'static [Budget] {
         // 5,000 requests an hour with a token; the source never asks without one.
-        &[("api.github.com", 5000.0 / 3600.0, None)]
+        &[("api.github.com", 5000.0 / 3600.0)]
     }
     fn examples(&self) -> &'static [Example] {
         &[Example {

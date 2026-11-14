@@ -26,7 +26,7 @@ fn fixture(name: &str) -> (String, Vec<u8>) {
 }
 /// The stored card of `body` at `uri`, as the resolver saves it.
 fn card_of(uri: &str, body: &[u8]) -> ResourceMeta {
-    pubky_apps::card(uri, "application/octet-stream", body, 86400)
+    pubky_apps::card_at(uri, "application/octet-stream", body, 86400, Utc::now())
         .bounded(pubky_apps::attributes())
         .unwrap()
 }
@@ -481,11 +481,12 @@ async fn an_object_that_loses_its_card_keeps_nothing_of_it(pool: PgPool) {
         for (k, value) in change.as_object().unwrap() {
             v[k] = value.clone();
         }
-        let mut gone = pubky_apps::card(
+        let mut gone = pubky_apps::card_at(
             &uri,
             "application/octet-stream",
             v.to_string().as_bytes(),
             86400,
+            Utc::now(),
         );
         assert_eq!(gone.status, Status::Missing);
         doc.fetched_at += 1000;

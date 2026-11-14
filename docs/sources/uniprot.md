@@ -54,8 +54,6 @@ the `first_public` fact.
 | `inactive`, `replaced_by` | For a demerged accession: `demerged` and the accessions that replace it |
 | `page_url` | The entry's page on uniprot.org |
 
-The card also records the entry on AlphaFold DB when UniProt cross-references it.
-
 ## Examples
 
 - `https://www.uniprot.org/uniprotkb/P69905/entry` (haemoglobin subunit alpha)

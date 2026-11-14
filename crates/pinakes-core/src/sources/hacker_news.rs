@@ -128,7 +128,7 @@ pub fn hiring_comment(doc: &mut ResourceMeta, comment: &Value) {
         return;
     };
     let first = html.split("<p>").next().unwrap_or_default();
-    let Some(header) = crate::resolver::pubky_apps::read::html_text(first) else {
+    let Some(header) = crate::resolver::html::scan_text(first) else {
         return;
     };
     let header = header.split_whitespace().collect::<Vec<_>>().join(" ");

@@ -249,7 +249,7 @@ impl Source for Pubchem {
         ]
     }
     fn budgets(&self) -> &'static [super::Budget] {
-        &[("pubchem.ncbi.nlm.nih.gov", 4.0, None)]
+        &[("pubchem.ncbi.nlm.nih.gov", 4.0)]
     }
     fn examples(&self) -> &'static [Example] {
         &[
@@ -414,7 +414,6 @@ mod tests {
             card.keys,
             [Key::new("inchikey", "BSYNRYMUTXBXSQ-UHFFFAOYSA-N")]
         );
-        assert!(card.also_on.is_empty());
         assert!(parse(200, &read("compound-2244.json"), 2519).is_err());
     }
 
