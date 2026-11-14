@@ -565,11 +565,18 @@ pub async fn read_response_with(
         // An error page keeps a bounded prefix of its body, so the interstitial classifier sees a
         // challenge (and an API its error); the status is preserved.
         const ERROR_BODY_CAP: usize = 64 * 1024;
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(reqwest::Error::without_url)?
-        {
+        loop {
+            let chunk = match response.chunk().await {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => break,
+                // A connection reset inside the error page: its status is the answer, kept with
+                // the prefix read so far.
+                Err(error) if super::transport(&error) => {
+                    truncated = true;
+                    break;
+                }
+                Err(error) => return Err(error.without_url().into()),
+            };
             let remaining = ERROR_BODY_CAP.saturating_sub(body.len());
             body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
             if chunk.len() >= remaining {
@@ -782,6 +789,8 @@ impl Egress {
                             class: retry.class,
                             seconds: retry.seconds,
                         })
+                    } else if super::unreached(&error) {
+                        anyhow::Error::new(super::Unreached)
                     } else {
                         anyhow::Error::new(super::ErrorClass(super::error_class(&error)))
                     }
@@ -1880,8 +1889,103 @@ mod tests {
         let text = format!("{error:#} {error:?}");
         assert!(!text.contains("CANARY"), "{text}");
         assert_eq!(super::super::error_class(&error), "connect");
+        // A refused connection never reached the upstream: the queue never dead-letters on it.
+        assert!(super::super::unreached(&error));
     }
-    /// A PDF or an image past the page cap is cut there, not refused: its card comes from its
+    /// A connection the peer resets, before the answer or inside its body, is a `connect`
+    /// failure that never reached the upstream's answer: the queue never dead-letters on it.
+    #[tokio::test]
+    async fn a_reset_connection_is_unreached() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for partial in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 4096];
+                let _ = socket.read(&mut request).await;
+                if partial {
+                    socket
+                        .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: 100000\r\n\r\n<html><head>")
+                        .await
+                        .unwrap();
+                    socket.flush().await.unwrap();
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                // SO_LINGER 0: closing sends a reset, not a FIN.
+                socket.set_zero_linger().unwrap();
+                drop(socket);
+            });
+            let url: Url = format!("http://127.0.0.1:{}/page", addr.port())
+                .parse()
+                .unwrap();
+            let error = PinnedTransport
+                .get_with(&url, &[addr], &FetchOptions::default())
+                .await
+                .unwrap_err();
+            assert_eq!(
+                super::super::error_class(&error),
+                "connect",
+                "{partial} {error:#}"
+            );
+            assert!(super::super::unreached(&error), "{partial} {error:#}");
+            server.await.unwrap();
+        }
+        // A reset inside an error page's body: the status was answered, and is kept.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = socket.read(&mut request).await;
+            socket
+                .write_all(b"HTTP/1.1 403 Forbidden\r\ncontent-type: text/html\r\ncontent-length: 100000\r\n\r\n<html><head>")
+                .await
+                .unwrap();
+            socket.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            socket.set_zero_linger().unwrap();
+            drop(socket);
+        });
+        let url: Url = format!("http://127.0.0.1:{}/page", addr.port())
+            .parse()
+            .unwrap();
+        let fetched = PinnedTransport
+            .get_with(&url, &[addr], &FetchOptions::default())
+            .await
+            .unwrap();
+        assert_eq!((fetched.status, fetched.truncated), (403, true));
+        assert_eq!(fetched.body, b"<html><head>");
+        server.await.unwrap();
+    }
+    /// A TLS failure is an answer about the host (the certificate it serves, a protocol it does
+    /// not speak): `connect`, but not unreached, so it still counts toward the dead letter.
+    #[tokio::test]
+    async fn a_tls_failure_is_not_unreached() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut hello = [0u8; 4096];
+            let _ = socket.read(&mut hello).await;
+            let _ = socket
+                .write_all(b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\n\r\n")
+                .await;
+            let _ = socket.shutdown().await;
+        });
+        let url: Url = format!("https://127.0.0.1:{}/page", addr.port())
+            .parse()
+            .unwrap();
+        let error = PinnedTransport
+            .get_with(&url, &[addr], &FetchOptions::default())
+            .await
+            .unwrap_err();
+        assert_eq!(super::super::error_class(&error), "connect", "{error:#}");
+        assert!(!super::super::unreached(&error), "{error:#}");
+        server.await.unwrap();
+    }
+    /// A large PDF or an image past the page cap is cut there, not refused
     /// URL. Any other file past the cap is still refused.
     #[tokio::test]
     async fn a_large_pdf_or_image_is_cut_not_refused() {
@@ -2625,6 +2729,47 @@ mod tests {
         };
         let error = egress.fetch_with(url, &plain).await.unwrap_err();
         assert_eq!(super::super::error_class(&error), "policy");
+    }
+    /// A refused connection on a request with credentials is rebuilt without its cause, and still
+    /// reads as one that never reached the upstream: the queue never dead-letters on it.
+    #[tokio::test]
+    async fn a_refused_request_with_credentials_stays_unreached() {
+        struct Closed(SocketAddr);
+        #[async_trait]
+        impl Transport for Closed {
+            async fn get(&self, url: &Url, addresses: &[SocketAddr]) -> Result<Fetched> {
+                self.get_with(url, addresses, &FetchOptions::default())
+                    .await
+            }
+            async fn get_with(
+                &self,
+                url: &Url,
+                _: &[SocketAddr],
+                options: &FetchOptions,
+            ) -> Result<Fetched> {
+                PinnedTransport.get_with(url, &[self.0], options).await
+            }
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let closed = listener.local_addr().unwrap();
+        drop(listener);
+        let egress = Egress::with_backends(
+            EgressConfig::default(),
+            Arc::new(FakeDns),
+            Arc::new(Closed(closed)),
+        );
+        let options = FetchOptions {
+            query_secret: Some(("api_key", "SECRETKEY".into())),
+            sensitive: true,
+            ..Default::default()
+        };
+        let error = egress
+            .fetch_with("https://api.example.org/3/find/tt1", &options)
+            .await
+            .unwrap_err();
+        assert!(!format!("{error:#} {error:?}").contains("SECRETKEY"));
+        assert_eq!(super::super::error_class(&error), "connect");
+        assert!(super::super::unreached(&error));
     }
     #[test]
     fn a_sensitive_request_s_debug_hides_its_credentials_and_two_bodies_are_refused() {

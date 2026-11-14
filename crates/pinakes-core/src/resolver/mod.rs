@@ -321,6 +321,9 @@ pub fn error_class(error: &anyhow::Error) -> &'static str {
     if error.is::<tokio::time::error::Elapsed>() {
         return "timeout";
     }
+    if error.chain().any(|cause| cause.is::<Unreached>()) {
+        return "connect";
+    }
     // An answer past its size cap: the page is readable, only too large.
     if error
         .chain()
@@ -337,7 +340,7 @@ pub fn error_class(error: &anyhow::Error) -> &'static str {
             if request.is_timeout() {
                 return "timeout";
             }
-            if request.is_connect() {
+            if request.is_connect() || transport(request) {
                 return "connect";
             }
             if let Some(status) = request.status() {
@@ -350,6 +353,63 @@ pub fn error_class(error: &anyhow::Error) -> &'static str {
         }
     }
     "parse"
+}
+
+/// A connection that never reached the upstream, as an error rebuilt without its cause carries
+/// it (`egress::Egress::fetch_with` for a request with credentials, whose cause may name them).
+#[derive(Debug, Clone, Copy)]
+pub struct Unreached;
+impl std::fmt::Display for Unreached {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the connection to the upstream failed")
+    }
+}
+impl std::error::Error for Unreached {}
+
+/// Whether a request failed in the network under it, not in an answer: the connection was
+/// refused, reset or aborted, the pipe broke, or the host or its network is unreachable, while
+/// connecting, sending the request or reading the answer. Not a timeout (it has its own grace,
+/// `limits.timeout_grace`), and not a TLS failure (a certificate the host serves is an answer
+/// about it).
+pub(crate) fn transport(request: &reqwest::Error) -> bool {
+    if request.is_timeout() {
+        return false;
+    }
+    let mut source = std::error::Error::source(request);
+    while let Some(cause) = source {
+        if cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+            use std::io::ErrorKind::*;
+            matches!(
+                io.kind(),
+                ConnectionRefused
+                    | ConnectionReset
+                    | ConnectionAborted
+                    | BrokenPipe
+                    | NotConnected
+                    | HostUnreachable
+                    | NetworkUnreachable
+            )
+        }) {
+            return true;
+        }
+        source = cause.source();
+    }
+    false
+}
+
+/// Whether a failure never reached an answer from the upstream (`transport`, or `Unreached`
+/// where the error was rebuilt without its cause). Such a failure says nothing about the link,
+/// so the queue never dead-letters on it. A `connect` class a resolver names itself (a PKARR
+/// relay that serves no usable packet, a homeserver with only key-pinned endpoints) is an answer
+/// about the link and is not one; nor is a TLS failure or a timeout.
+pub fn unreached(error: &anyhow::Error) -> bool {
+    error_class(error) == "connect"
+        && error.chain().any(|cause| {
+            cause.is::<Unreached>()
+                || cause
+                    .downcast_ref::<reqwest::Error>()
+                    .is_some_and(transport)
+        })
 }
 
 #[cfg(test)]

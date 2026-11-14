@@ -341,7 +341,9 @@ memory is an accepted limit: it holds the newest timestamp of at most 10,000 key
 cache, and forgets the oldest timestamps of uncached keys first; a forgotten key, or any key
 after a restart, takes the newest packet the relays serve again. A relay that times out, is
 refused by the policy or serves a packet that does not verify is a `connect` failure, retried
-with the usual backoff and, like any failure, dead-lettered after `limits.max_failures`.
+with the usual backoff and, like any failure, dead-lettered after `limits.max_failures`. When no
+relay answered, because each one that failed refused or reset the connection (or Egress waited
+for its host budget), the failure never reached an answer and never dead-letters.
 Verified packets are kept for their smallest record TTL, between five minutes
 and a day (10,000 keys at most). It then takes the first endpoint with a public HTTPS (ICANN)
 domain and GETs the object path there with the `pubky-host` header, as Pubky clients address
@@ -498,7 +500,15 @@ The durable queue leases rows with `SKIP LOCKED` and fences stale completions by
 counter. A job lease lasts at least `limits.lease_secs`; a 50-object OSM batch gets 760 seconds.
 Failures back off exponentially from `limits.backoff_secs` to `limits.max_backoff_secs` and
 dead-letter after `limits.max_failures`. The first `limits.timeout_grace` consecutive timeouts
-back off without charging an attempt. A missing result needs a second fresh fetch to confirm,
+back off without charging an attempt. A request that never got an answer from the upstream (the
+connection refused, reset or aborted, or the host unreachable; stored as `connect`) is never
+charged and never dead-letters: it
+backs off up to `limits.max_backoff_secs` for as long as it lasts, its streak is kept in
+`timeout_streak` while `last_error` is `connect`, and a link with no card yet turns `error` after
+`limits.max_failures` of them in a row while it is still retried. Egress's own waits (its host
+budget, a cached failure) keep that streak. A TLS failure (a certificate the host serves) and a
+`connect` failure a resolver names itself (a PKARR relay, a key-pinned homeserver) are answers
+about the link and count. A missing result needs a second fresh fetch to confirm,
 scheduled after `limits.missing_ttl_secs` (at least an hour) for a link with an accepted card, and
 after `limits.backoff_secs` for one with none yet (a new preview has nothing to keep and would show
 `pending` for that hour); a cached copy cannot count twice, and the confirming fetch asks the

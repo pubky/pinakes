@@ -920,7 +920,10 @@ Statuses:
 - `unreachable`: the upstream denied access (401, 403) or answered with a challenge page (a bot
   wall, captcha or sign-in redirect); it is retried with backoff like an error.
 - `error`: the fetch failed; it is retried with backoff and dead-letters after
-  `limits.max_failures`.
+  `limits.max_failures`. A request that never got an answer from the upstream (the connection
+  refused, reset or aborted, or the host unreachable) says nothing about the link: it is retried with the capped backoff for as long
+  as it lasts and never dead-letters. A link with no card yet shows `error` after
+  `limits.max_failures` of them in a row; an accepted card keeps its status.
 
 A failed refresh keeps the last accepted metadata.
 
