@@ -179,6 +179,15 @@ impl PlatformResolver {
         if fetched.status == 304 {
             return Err(crate::resolver::NotModified.into());
         }
+        // An organiser calendar answered from another origin (a redirect) is not that calendar:
+        // grouping trusts its dates by its address. The stored one stays; the read is retried.
+        if super::off_origin_calendar(uri, fetched.url.as_str()) {
+            return Err(crate::resolver::RetryLater {
+                class: "off_origin",
+                seconds: 3600,
+            }
+            .into());
+        }
         if d.mode == Mode::None {
             let extracted = extract_blocking(uri, &fetched, m.cadence_floor).await?;
             let mut doc = ResourceMeta::new(uri, &d.id, m.cadence_floor);
@@ -241,8 +250,12 @@ impl PlatformResolver {
                 // A platform with an organiser feed reads the page's own calendar file anyway,
                 // for its UID alone: the UID joins the page to its date in that feed. Read so,
                 // the file is optional and adds nothing else.
-                let uid_only = !missing && d.container_feed.is_some();
-                // Whether the file answered (200): then its UID, or none, is the page's now.
+                let uid_only = !probe && !missing && d.container_feed.is_some();
+                // On a platform with an organiser feed, the file is optional on every read: a
+                // refusal, an outage or a 451 there leaves the page's own facts as they are.
+                let optional = d.container_feed.is_some();
+                // Whether the file answered with a calendar: then its UID, or none, is the
+                // page's now.
                 let mut answered = false;
                 if !d.requires_key && (missing || uid_only) {
                     // Calendar-link discovery reads the page: in a parse slot.
@@ -274,19 +287,19 @@ impl PlatformResolver {
                             .await;
                             let read = match read {
                                 Ok(f) => Some(f),
-                                Err(_) if uid_only => None,
+                                Err(_) if optional => None,
                                 Err(error) => return Err(error),
                             };
                             if let Some(f) = read {
-                                if f.status == 451 && !uid_only {
+                                if f.status == 451 && !optional {
                                     return self.enrichment_gone(uri, &d.id).await;
                                 }
                                 if f.status == 200 && uid_only {
-                                    answered = true;
-                                    if let Ok(Some(extra)) =
-                                        enrichment_blocking(uri, d, &f, &local).await
+                                    if let Ok(Some(calendar)) =
+                                        calendar_blocking(uri, d, &f, &local).await
                                     {
-                                        own_uid(&mut doc, &extra);
+                                        answered = true;
+                                        own_uid(&mut doc, &calendar);
                                     }
                                 } else if f.status == 200 {
                                     if d.id == "luma" {
@@ -337,9 +350,13 @@ impl PlatformResolver {
                                             }
                                         }
                                     }
-                                    if let Some(extra) =
-                                        enrichment_blocking(uri, d, &f, &local).await?
+                                    let extra = match enrichment_blocking(uri, d, &f, &local).await
                                     {
+                                        Ok(extra) => extra,
+                                        Err(_) if optional => None,
+                                        Err(error) => return Err(error),
+                                    };
+                                    if let Some(extra) = extra {
                                         merge(&mut doc, &extra).map_err(parse_error)?;
                                     }
                                 }
@@ -740,9 +757,12 @@ pub fn calendar_document(
             if let Some(o) = selected {
                 doc = o.doc.clone();
                 doc.url = uri.into();
-                // A file of one event on the page's own origin names the page's date: its UID
-                // joins the page to that date in a feed (in the corroborated mode, `groups`).
-                if c.occurrences.len() == 1 && crate::group_keys::same_origin(uri, f.url.as_str()) {
+                // A file of one event answered from the page's own URL origin (scheme, host and
+                // port, after redirects) names the page's date: its UID joins the page to that
+                // date in a feed (in the corroborated mode, `groups`).
+                if c.occurrences.len() == 1
+                    && crate::group_keys::same_url_origin(uri, f.url.as_str())
+                {
                     crate::group_keys::add(&mut doc, "ics_uid", &o.uid);
                 }
             }

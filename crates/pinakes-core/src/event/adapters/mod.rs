@@ -151,6 +151,35 @@ impl ContainerFeed {
             && !literal.contains(['?', '#', '}', '*'])
     }
 }
+/// Whether `uri` is an organiser calendar a platform derives for its event pages
+/// (`Definition::container_feed`): its path has the feed's form, each `{n}` one segment.
+pub fn names_organiser_calendar(uri: &str) -> bool {
+    let Some(spec) = detect(uri).and_then(|d| d.container_feed.as_ref()) else {
+        return false;
+    };
+    let Ok(u) = Url::parse(uri) else {
+        return false;
+    };
+    let mut pattern = String::new();
+    let mut rest = spec.feed.as_str();
+    while let Some((before, after)) = rest.split_once('{') {
+        pattern.push_str(before);
+        pattern.push('*');
+        rest = after.split_once('}').map_or("", |(_, tail)| tail);
+    }
+    pattern.push_str(rest);
+    u.query().is_none()
+        && canary_link_matches(
+            pattern.trim_end_matches('/'),
+            u.path().trim_end_matches('/'),
+        )
+}
+/// Whether an answer for `uri` that came from `answered` (where redirects ended) is no answer of
+/// an organiser calendar (`names_organiser_calendar`): it came from another URL origin. Grouping
+/// trusts such a calendar's dates by its address (`groups`), so it must hold the platform's own.
+pub fn off_origin_calendar(uri: &str, answered: &str) -> bool {
+    names_organiser_calendar(uri) && !crate::group_keys::same_url_origin(uri, answered)
+}
 /// The organiser feed of the event page `uri` on platform `d` (`Definition::container_feed`):
 /// on the page's own scheme, host and port, without its query or fragment. `None` when the
 /// platform declares none, the page's path has another form, or the feed is the page itself.

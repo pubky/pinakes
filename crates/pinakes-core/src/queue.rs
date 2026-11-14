@@ -699,10 +699,14 @@ async fn finish_job(
                 .as_deref()
                 .and_then(|root| crate::alias::source(&job.uri, root))
                 .or_else(|| {
-                    doc.alias_candidates.iter().find_map(|a| {
-                        crate::alias::canonical(&job.uri, a)
-                            .or_else(|| crate::alias::event_spelling(&job.uri, a))
-                    })
+                    doc.alias_candidates
+                        .iter()
+                        .find_map(|a| crate::alias::canonical(&job.uri, a))
+                        .or_else(|| {
+                            doc.event_spellings
+                                .iter()
+                                .find_map(|a| crate::alias::event_spelling(&job.uri, a))
+                        })
                 })
             {
                 let mut tx = pool.begin().await?;

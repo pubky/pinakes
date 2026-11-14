@@ -108,7 +108,8 @@ impl EventService {
         }
         let bytes = &fetched.body;
         let ics = ics_body(bytes);
-        if !feed_like(fetched) {
+        // An organiser calendar answered from another origin is not that calendar.
+        if !feed_like(fetched) || super::adapters::off_origin_calendar(uri, fetched.url.as_str()) {
             return Ok(None);
         }
         let uri = uri.to_owned();
@@ -175,6 +176,12 @@ impl EventService {
         if !(200..300).contains(&fetched.status) {
             return Ok(card);
         }
+        // Whether the fetch ended at the page asked for (a trailing slash aside): a redirect to
+        // another page never makes the two spellings of one event.
+        let landed = url::Url::parse(uri).is_ok_and(|u| {
+            u.origin() == fetched.url.origin()
+                && u.path().trim_end_matches('/') == fetched.url.path().trim_end_matches('/')
+        });
         // Past the page cap: a page cut where its long head closes, or a whole page within the
         // head budget (`egress::page_fits`).
         anyhow::ensure!(
@@ -443,11 +450,12 @@ impl EventService {
         }
         event.aliases = card.aliases;
         // An event page's canonical aliases it only as the other spelling of its event on a
-        // platform that gives each event two (`alias::event_spelling`).
-        event.alias_candidates = card
+        // platform that gives each event two (`alias::event_spelling`), and only when the fetch
+        // ended at the page itself.
+        event.event_spellings = card
             .alias_candidates
             .into_iter()
-            .filter(|c| crate::alias::event_spelling(uri, c).is_some())
+            .filter(|c| landed && crate::alias::event_spelling(uri, c).is_some())
             .collect();
         event.attributes = card.attributes;
         event.site = card.site;

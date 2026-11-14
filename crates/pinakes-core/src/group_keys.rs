@@ -196,3 +196,15 @@ pub fn origin(uri: &str) -> Option<String> {
 pub fn same_origin(a: &str, b: &str) -> bool {
     origin(a).zip(origin(b)).is_some_and(|(a, b)| a == b)
 }
+/// Whether two URLs have one URL origin: the same scheme, host (as the URL parser normalizes it)
+/// and port (the scheme's default when none is written). Stricter than [`same_origin`], which
+/// compares publishers.
+pub fn same_url_origin(a: &str, b: &str) -> bool {
+    match (url::Url::parse(a), url::Url::parse(b)) {
+        (Ok(a), Ok(b)) => {
+            let (a, b) = (a.origin(), b.origin());
+            a.is_tuple() && a == b
+        }
+        _ => false,
+    }
+}
