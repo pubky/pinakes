@@ -54,7 +54,7 @@ async fn rows(pool: &PgPool, id: &str) -> i64 {
 
 /// A show's episodes are stored without a link that carries a credential: an episode whose page
 /// does is not kept, and an image or enclosure that does goes from its row.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_shows_episodes_store_no_credential(pool: PgPool) {
     let mut leaky = episode(2, true);
     leaky.image = Some("https://img.example/2.png?token=SECRET".into());
@@ -76,7 +76,7 @@ async fn a_shows_episodes_store_no_credential(pool: PgPool) {
     assert_eq!(rows(&pool, &id).await, 2);
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_shows_latest_episodes_are_listed_newest_first_and_name_the_ones_pinakes_has(
     pool: PgPool,
 ) {
@@ -163,7 +163,7 @@ async fn a_shows_latest_episodes_are_listed_newest_first_and_name_the_ones_pinak
 /// A save with a list replaces the show's rows whole; a show's save without one (a record read
 /// without its feed) keeps them; a save that makes the resource no show clears them; at most
 /// twenty are kept.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn the_save_replaces_keeps_or_clears_the_list(pool: PgPool) {
     let uri = "https://feeds.example.org/show.xml";
     let id = show(
@@ -230,7 +230,7 @@ fn feed(items: &str) -> String {
 
 /// From the feed to the route: an item whose only name is a signed enclosure is listed, without
 /// a stream, and the whole response shows nothing of the link, not the token.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn the_route_shows_nothing_of_a_rejected_enclosure(pool: PgPool) {
     let body = feed(concat!(
         r#"<item><title>Hidden</title><enclosure url="https://cdn.example/ep.mp3?token=SECRET" type="audio/mpeg"/></item>"#,
@@ -269,7 +269,7 @@ async fn the_route_shows_nothing_of_a_rejected_enclosure(pool: PgPool) {
 /// An enclosure with an absurd media type (`audio/` and 5,000 characters) is no stream, and the
 /// show saves with the item listed: the stored stream is bounded by `Stream::public`, which the
 /// table's own bound (4,096 bytes) would otherwise fail the whole save on.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_oversized_media_type_is_no_stream_and_the_show_saves(pool: PgPool) {
     let body = feed(&format!(
         r#"<item><title>Long</title><guid>ep-1</guid><enclosure url="https://cdn.example/1.mp3" type="audio/{}"/></item><item><title>Short</title><guid>ep-2</guid><enclosure url="https://cdn.example/2.mp3" type="audio/mpeg"/></item>"#,
@@ -290,7 +290,7 @@ async fn an_oversized_media_type_is_no_stream_and_the_show_saves(pool: PgPool) {
 
 /// A valid stream whose JSON would not fit the table (a 2,042-byte URL of backslashes, which
 /// JSON escapes to twice that) is stored as none; the episode is listed and the show saves.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_stream_too_long_for_the_table_is_none_and_the_show_saves(pool: PgPool) {
     let long = format!("https://cdn.example/a?{}", "\\".repeat(2020));
     assert_eq!(long.len(), 2042);
@@ -327,7 +327,7 @@ async fn a_stream_too_long_for_the_table_is_none_and_the_show_saves(pool: PgPool
 
 /// A card cleared without a save (a page too complex to parse, an error card in its place) lists
 /// nothing: the rows follow the document, whatever writes it.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_cleared_card_lists_nothing(pool: PgPool) {
     let id = show(
         &pool,
@@ -354,7 +354,7 @@ async fn a_cleared_card_lists_nothing(pool: PgPool) {
 
 /// An OpenStreetMap place has no `type_path` on its resource row (its card lives in `osm_place`):
 /// it is no show, and the route says so with an empty list, not an error.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_place_without_a_type_path_lists_nothing(pool: PgPool) {
     let uri = "https://www.openstreetmap.org/node/123";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
@@ -379,7 +379,7 @@ async fn a_place_without_a_type_path_lists_nothing(pool: PgPool) {
 
 /// A show card without a list of its own (an Apple Podcasts page whose feed could not be read)
 /// lists the episodes of a member of its group that has them: the same show elsewhere.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_show_without_a_list_lists_a_group_members(pool: PgPool) {
     let feed = show(
         &pool,
@@ -506,7 +506,7 @@ fn fixture_episodes() -> Vec<Episode> {
 /// `itunes:duration` as a null length, an item without an enclosure or with a document one left
 /// out, at most five; the same entries the route lists, on a resource read, a read by URI and a
 /// lookup. No other card has the field, nor a show without such an episode.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_shows_card_carries_its_latest_episodes_with_audio(pool: PgPool) {
     let episodes = fixture_episodes();
     let names: Vec<&str> = episodes
@@ -619,7 +619,7 @@ async fn a_shows_card_carries_its_latest_episodes_with_audio(pool: PgPool) {
 /// them (an Apple Podcasts or Spotify show grouped with its feed), as the route lists them; a
 /// show outside the group, a member whose own list has no audio, and a member cleared after an
 /// error, carry none.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_show_card_without_episodes_carries_its_groups(pool: PgPool) {
     let feed = show(
         &pool,

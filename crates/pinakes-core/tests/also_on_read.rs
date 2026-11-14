@@ -16,7 +16,7 @@ mod common;
 
 /// Get Lucky's Spotify card as stable had it (2026-11-05): fifteen derived links, several of
 /// one service, two of them Spotify's. Its read lists one per service and no other Spotify page.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_read_shows_one_link_per_service_and_none_of_its_own(pool: PgPool) {
     let uri = "https://open.spotify.com/track/69kOkLUCkxIZYexIgSG8rq";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
@@ -83,7 +83,7 @@ async fn a_read_shows_one_link_per_service_and_none_of_its_own(pool: PgPool) {
 
 /// A card and each of its `also_on` links carry the frame that shows them (docs/api.md, Embed):
 /// a service's player from the link alone, `null` for a link without one.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_card_and_its_also_on_links_carry_their_embed(pool: PgPool) {
     let uri = "https://open.spotify.com/track/69kOkLUCkxIZYexIgSG8rq";
     let id = store::ensure_resource(&pool, uri).await.unwrap();

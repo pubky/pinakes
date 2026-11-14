@@ -136,7 +136,7 @@ async fn deadlocks(pool: &PgPool) -> i64 {
         .unwrap()
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn concurrent_writers_never_wait_on_the_search_revision(pool: PgPool) {
     let rounds: usize = std::env::var("WRITE_LOAD_ROUNDS")
         .ok()
@@ -324,7 +324,7 @@ async fn concurrent_writers_never_wait_on_the_search_revision(pool: PgPool) {
 /// The sampler counts a wait on a `search_write` row (the transaction holding it, and the row
 /// lock) and on its sequence, and not an advisory wait by a backend whose last statement named
 /// `search_write`.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn the_sampler_counts_waits_on_the_search_revision_and_nothing_else(pool: PgPool) {
     let connect = || async {
         PgConnection::connect_with(&pool.connect_options())

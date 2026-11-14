@@ -450,7 +450,7 @@ fn fresh(doc: &ResourceMeta) -> ResourceMeta {
     doc.fetched_at = *at;
     doc
 }
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn calendar_snapshots_atomic_held_disappearance_freeze_and_changes(pool: PgPool) {
     let uri = "https://example.org/test.ics";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
@@ -512,7 +512,7 @@ async fn calendar_snapshots_atomic_held_disappearance_freeze_and_changes(pool: P
         before
     );
 }
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn single_key_loss_requires_two_and_regenerated_uid_links_supersedes(pool: PgPool) {
     let uri = "https://example.org/t.ics";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
@@ -553,7 +553,7 @@ async fn single_key_loss_requires_two_and_regenerated_uid_links_supersedes(pool:
     .unwrap();
     assert_eq!(change["supersedes"], "[\"id0\",\"\"]");
 }
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn event_units_pagination_occurrence_route_and_venue(pool: PgPool) {
     let feed = "https://example.org/events.ics";
     reference(&pool, feed, "/pub/social/tags/calendar", Kind::Tag, Op::Put).await;
@@ -667,23 +667,6 @@ async fn event_units_pagination_occurrence_route_and_venue(pool: PgPool) {
     let (code, v) = call(&app, &format!("/v1/resources/{id}/occurrences")).await;
     assert_eq!(code, 200, "{v}");
     assert_eq!(v["items"].as_array().unwrap().len(), 3);
-    let (code, v) = call(
-        &app,
-        "/v1/search?type=Event&bbox=7,46,9,48&cluster=8&limit=1",
-    )
-    .await;
-    assert_eq!(code, 200, "{v}");
-    assert_eq!(v["total"], 5);
-    assert_eq!(v["clusters"][0]["count"], 5);
-    // The cluster's top resources, each once: the feed and the two pages.
-    let top = v["clusters"][0]["top"].as_array().unwrap();
-    assert_eq!(
-        top.iter()
-            .map(|v| v.as_str().unwrap())
-            .collect::<std::collections::BTreeSet<_>>(),
-        std::collections::BTreeSet::from([id.as_str(), page_ids[0].as_str(), page_ids[1].as_str()])
-    );
-    assert_eq!(top.len(), 3);
 
     // The references are the feed's lines alone: one tag each for the feed and the two pages.
     let kinds: Vec<(String, i64)> =
@@ -693,7 +676,7 @@ async fn event_units_pagination_occurrence_route_and_venue(pool: PgPool) {
             .unwrap();
     assert_eq!(kinds, [("tag".to_owned(), 3)]);
 }
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn venue_geocoding_single_match_threshold_and_osm_storage_boundary(pool: PgPool) {
     let hits = Arc::new(AtomicUsize::new(0));
     let seen = hits.clone();
@@ -848,7 +831,7 @@ impl Transport for ProtocolTransport {
 }
 /// `reextract web` repairs an event page's text stored before the decoding fix: its name and
 /// the venue and organizer details come back decoded once.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn reextract_repairs_event_text(pool: PgPool) {
     use pinakes_core::{config::QueueConfig, queue};
     let uri = "https://example.org/entities";
@@ -901,7 +884,7 @@ async fn reextract_repairs_event_text(pool: PgPool) {
     assert_eq!(v["organizer"]["name"], "Smith & Sons");
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn advertised_event_negotiation_and_calendar_not_modified(pool: PgPool) {
     let t = Arc::new(ProtocolTransport {
         seen: Mutex::default(),
@@ -1174,7 +1157,7 @@ fn recurrence_local_days_coordinate_zones_exclusion_budget_and_categories() {
     );
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn ended_occurrences_freeze_and_horizon_rolloff_is_not_cancellation(pool: PgPool) {
     let uri = "https://example.org/frozen.ics";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
@@ -1376,7 +1359,7 @@ fn ics_address_mixed_privacy_and_date_end() {
     .is_ok());
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn plain_pages_have_no_discovery_and_advertised_urls_share_ttl(pool: PgPool) {
     let transport = Arc::new(ProtocolTransport {
         seen: Mutex::new(vec![]),
@@ -1432,7 +1415,7 @@ impl Transport for FailedTls {
         anyhow::bail!("wrong version number")
     }
 }
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn webcals_never_downgrades_to_plaintext(pool: PgPool) {
     let transport = Arc::new(FailedTls(Mutex::new(vec![])));
     let egress = Egress::with_backends(
@@ -1455,7 +1438,7 @@ async fn webcals_never_downgrades_to_plaintext(pool: PgPool) {
 /// An event page's performers record the address its fetch ended on, on every path, the page's
 /// JSON-LD and the fallback for self-hosted event software (here Mobilizon, named in the page)
 /// alike: a Songkick address that redirected to another site never lends Songkick's authority.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn performers_record_where_the_fetch_ended_on_every_path(pool: PgPool) {
     let egress = Egress::with_backends(
         EgressConfig::default(),
@@ -1519,7 +1502,7 @@ impl Transport for XmlTransport {
         .await
     }
 }
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn xml_past_the_page_cap_is_cut_and_never_a_container(pool: PgPool) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -1562,7 +1545,7 @@ async fn xml_past_the_page_cap_is_cut_and_never_a_container(pool: PgPool) {
     server.abort();
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn container_caps_patches_rotation_backoff_retention_and_labels(pool: PgPool) {
     let uri = "https://example.org/limits.ics";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
@@ -1650,7 +1633,7 @@ async fn container_caps_patches_rotation_backoff_retention_and_labels(pool: PgPo
     );
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn links_supersession_and_coordinate_constraints(pool: PgPool) {
     let uri = "https://example.org/link.ics";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
@@ -1778,7 +1761,7 @@ fn accepted_venue_survives_failed_enrichment_and_floating_date_lists_use_series_
     assert_eq!(ttl.container.unwrap().feed_ttl, Some(21600));
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn occurrences_signed_paging_windows_and_indexed_views(pool: PgPool) {
     let uri = "https://example.org/page.ics";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
@@ -1886,7 +1869,7 @@ async fn occurrences_signed_paging_windows_and_indexed_views(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_occurrence_lookup_pages_several_feeds_in_time_order(pool: PgPool) {
     let mut feeds = vec![];
     let calendar = future_calendar(3);
@@ -2050,7 +2033,7 @@ async fn an_occurrence_lookup_pages_several_feeds_in_time_order(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn disabled_calendars_use_web_queue_and_preview(pool: PgPool) {
     let cfg = Config {
         event: EventConfig {
@@ -2112,7 +2095,7 @@ async fn disabled_calendars_use_web_queue_and_preview(pool: PgPool) {
     assert_eq!(response.status(), 200);
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn change_cap_includes_parent_metadata_change(pool: PgPool) {
     let uri = "https://example.org/combined.ics";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
@@ -2189,7 +2172,7 @@ impl Transport for ConditionalSnapshots {
         })
     }
 }
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn conditional_feed_confirms_small_loss_and_held_snapshot_through_queue(pool: PgPool) {
     use pinakes_core::{config::QueueConfig, queue};
     for (remaining, unconditional) in [(4, false), (1, false), (4, true), (1, true)] {
@@ -2270,7 +2253,7 @@ async fn conditional_feed_confirms_small_loss_and_held_snapshot_through_queue(po
     }
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn webcal_url_less_occurrence_never_links_https_twin(pool: PgPool) {
     let uri = "webcal://example.org/calendar.ics";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
@@ -2288,7 +2271,7 @@ async fn webcal_url_less_occurrence_never_links_https_twin(pool: PgPool) {
     assert_eq!(link, None);
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn repeated_key_growth_confirms_but_total_row_limit_stays_hard(pool: PgPool) {
     let uri = "https://example.org/growth.ics";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
@@ -2488,7 +2471,7 @@ impl Transport for ReviewSnapshots {
         })
     }
 }
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn conditional_calendar_refreshes_horizon_with_advanced_clock(pool: PgPool) {
     let base = Utc::now();
     let body = cal(&event(&format!(
@@ -2569,7 +2552,7 @@ async fn conditional_calendar_refreshes_horizon_with_advanced_clock(pool: PgPool
         vec![(false, 200), (true, 304), (false, 200), (true, 304)]
     );
 }
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn vanished_feed_confirms_twice_and_recovers_through_queue(pool: PgPool) {
     use pinakes_core::{config::QueueConfig, queue};
     // A 200 that is no longer a feed (HTML) is a wall or a move: the feed is unreachable and
@@ -2705,7 +2688,7 @@ impl Transport for PlainSequence {
         ))
     }
 }
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn emptied_feed_is_held_then_confirmed_on_the_second_observation(pool: PgPool) {
     use pinakes_core::{config::QueueConfig, queue};
     // An emptied VCALENDAR at 200 is held on the first observation and confirmed on the
@@ -2828,7 +2811,7 @@ fn expanded_documents_and_mixed_feeds_obey_budgets() {
     .unwrap();
     assert_eq!(c.feed_ttl, Some(30 * 86400));
 }
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn chunked_occurrence_upsert_remains_one_snapshot(pool: PgPool) {
     let uri = "https://example.org/chunked.ics";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
@@ -3431,7 +3414,7 @@ fn whitespace_compact_z_and_bounded_feed_timestamps() {
 /// 10000) is dropped with the item's warning instead of failing the whole feed's apply; the good
 /// items are stored. ICS: a zoned DTEND late on 9999-12-31, a huge DURATION, a year-0000
 /// LAST-MODIFIED. JSON feed: an offset end late on 9999-12-31.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn out_of_range_instants_never_fail_a_feed(pool: PgPool) {
     let uri = "https://example.org/far.ics";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
@@ -3538,7 +3521,7 @@ fn a_padded_date_only_end_is_reanchored() {
 /// venue's zone when this refresh's geocode failed) are bounded where the upsert rows are built:
 /// a floating 9999-12-31T20:00 at a New York venue (10000-01-01T01:00Z) keeps the stored row and
 /// the feed applies.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn times_rederived_after_the_bound_never_reach_the_cast(pool: PgPool) {
     use pinakes_core::event::{Container, Occurrence, Venue};
     let uri = "https://example.org/venue.ics";
@@ -3621,7 +3604,7 @@ async fn times_rederived_after_the_bound_never_reach_the_cast(pool: PgPool) {
 /// (not a feed row) is bounded after `preserve_venue`, and when that drops the start while the
 /// stored start is valid, the save answers `drift` and keeps the stored document, like the early
 /// guard and like the occurrence path, which keeps its stored row.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_document_start_rederived_after_the_bound_is_drift(pool: PgPool) {
     use pinakes_core::event::Venue;
     let uri = "https://example.org/talk-page";
@@ -3688,7 +3671,7 @@ async fn a_document_start_rederived_after_the_bound_is_drift(pool: PgPool) {
 /// Postgres keeps microseconds and rounds finer values, so 9999-12-31T23:59:59.9999995Z would land
 /// in year 10000: instants are truncated before the range check. A JSON-feed end like that is
 /// stored in year 9999 and its page reads; the schema refuses a year-10000 value outright.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn sub_microsecond_instants_never_round_past_9999(pool: PgPool) {
     let edge: DateTime<Utc> = "9999-12-31T23:59:59.9999995Z".parse().unwrap();
     let kept: DateTime<Utc> = "9999-12-31T23:59:59.999999Z".parse().unwrap();
@@ -3770,7 +3753,7 @@ fn a_leap_second_is_normalised_before_the_bound() {
 
 /// An occurrence card's `status` is the feed's fetch health, as on every card; the instance's
 /// lifecycle is `occurrence.status`, the same in the occurrence route and in search.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn occurrence_cards_report_their_lifecycle_beside_the_feed_status(pool: PgPool) {
     let uri = "https://example.org/lifecycle.ics";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
@@ -3811,7 +3794,7 @@ async fn occurrence_cards_report_their_lifecycle_beside_the_feed_status(pool: Pg
 /// Retention deletes a resource's expired occurrences in a save's order and holds no other
 /// resource's row while it waits for one: a writer that holds one feed and then locks another
 /// (an ingested batch, a save of each) never waits on it.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn retention_waits_for_a_writer_holding_nothing_else(pool: PgPool) {
     let mut feeds = vec![];
     for name in ["first", "second"] {
@@ -3884,7 +3867,7 @@ async fn retention_waits_for_a_writer_holding_nothing_else(pool: PgPool) {
 
 /// `related` lists a feed and a venue once each, as their own cards: a feed never once per
 /// occurrence.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn related_lists_a_feed_and_a_venue_once(pool: PgPool) {
     let feed = "https://example.org/events.ics";
     reference(&pool, feed, "/pub/social/tags/calendar", Kind::Tag, Op::Put).await;
@@ -4349,7 +4332,7 @@ fn a_plain_rule_counts_its_month_day_as_a_whole_month() {
 /// naming its own page, with the artist's own node): through the whole event route, with the
 /// platform's state fallback reading the page again, the card stays the artist's, never the
 /// first concert's.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_artists_concert_list_on_a_platform_is_the_artist_through_the_whole_route(pool: PgPool) {
     let egress = Egress::with_backends(
         EgressConfig::default(),
@@ -4411,7 +4394,7 @@ async fn an_artists_concert_list_on_a_platform_is_the_artist_through_the_whole_r
 /// An event page under another address (an AMP copy whose head canonical is the event page):
 /// its MusicEvent names the canonical, a related event is listed beside it. Through the whole
 /// event route the card is the event, with its start, not a page without one.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_event_naming_the_pages_canonical_is_the_pages_event_through_the_whole_route(
     pool: PgPool,
 ) {
@@ -4463,7 +4446,7 @@ async fn an_event_naming_the_pages_canonical_is_the_pages_event_through_the_whol
 
 /// An event page whose fetch ended on an address that carries a credential names nothing after
 /// it: relative JSON-LD `image` and `url` resolve against it.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_event_page_reached_at_a_credential_resolves_nothing_back_to_it(pool: PgPool) {
     let egress = Egress::with_backends(
         pinakes_core::config::EgressConfig {
@@ -4540,7 +4523,7 @@ fn html_page(url: &str, body: &str) -> Fetched {
 
 /// An event page's ActivityPub alternate whose fetch ends on an address that carries a credential
 /// is read at that address's origin: its relative `image` names nothing after it.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_activitypub_alternate_reached_at_a_credential_resolves_nothing_back_to_it(
     pool: PgPool,
 ) {
@@ -4564,7 +4547,7 @@ async fn an_activitypub_alternate_reached_at_a_credential_resolves_nothing_back_
 
 /// A page on host B reached through a link on host A, at an address that carries a credential, is
 /// still B's: a calendar file on A is not its own, so it is never fetched for the page.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_page_reached_at_a_credential_on_another_host_claims_no_calendar_of_the_first(
     pool: PgPool,
 ) {

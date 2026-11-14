@@ -51,7 +51,7 @@ async fn send(
     (status, String::from_utf8_lossy(&bytes).into_owned())
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn the_nexus_authorization_is_sent_on_every_call_and_shown_nowhere(pool: PgPool) {
     // A Nexus that records what each call carried: the reach list answers, the batch view and
     // the feed fail, so their errors are logged and answered too.

@@ -139,24 +139,14 @@ class Quality(unittest.TestCase):
 
     def test_real_extension_provisioning(self):
         s = (ROOT / 'scripts/ci/setup-postgres').read_text()
-        for required in ['postgresql-16-postgis-3', 'postgresql-16-h3=4.2.3-',
-                         'pg_trgm', 'h3_latlng_to_cell', '4.2.3', 'ON_ERROR_STOP=1']:
+        for required in ['postgresql-16-postgis-3', 'pg_trgm', 'ON_ERROR_STOP=1']:
             self.assertIn(required, s)
 
-    def test_extension_versions_are_numeric_and_survive_pgdg_rotation(self):
+    def test_extension_versions_are_numeric(self):
         s = (ROOT / 'scripts/ci/setup-postgres').read_text()
-        # Any PGDG build of upstream h3 4.2.3 (apt prefix match), from the signed archive
-        # once the main repository has rotated it out.
-        self.assertIn("'postgresql-16-h3=4.2.3-*'", s)
-        self.assertNotRegex(s, r'postgresql-16-h3=4\.2\.3-[0-9]')
-        self.assertIn('deb [signed-by=/usr/share/keyrings/pinakes-pgdg.asc] '
-                      'https://apt-archive.postgresql.org/pub/repos/apt noble-pgdg-archive main', s)
         # The documented requirement, compared as numbers: '3.10' < '3.4' as text.
-        self.assertRegex(s, r"coalesce\(\(SELECT string_to_array\(extversion, '\.'\)::int\[\] FROM pg_extension "
-                            r"WHERE extname = 'h3'\),\s+'\{\}'\) < ARRAY\[4, 2, 3\] THEN")
         self.assertIn("coalesce((string_to_array(postgis_lib_version(), '.'))[1:2]::int[], '{}') < ARRAY[3, 4]", s)
         self.assertNotRegex(s, r"(<>|<|>|=) *'[0-9]+(\.[0-9]+)+'")
-        self.assertIn('h3 4.2.3+', (ROOT / 'docs/deployment.md').read_text())
 
     def test_apt_falls_back_to_a_mirror_only_for_unresolvable_ubuntu_hosts(self):
         s = (ROOT / 'scripts/ci/setup-postgres').read_text()

@@ -229,7 +229,7 @@ fn image_credit(author: Option<&str>, license: &str, license_url: &str) -> Value
 /// author, licence and page, never the file's Special:FilePath link. Its description is
 /// Wikidata's own (CC0) and carries no credit. One Commons request, of the width the enriched
 /// cards ask for.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_item_shows_its_free_image_with_its_credit(pool: PgPool) {
     let (doc, t) = item_card(&pool, Mode::default()).await;
     assert_eq!(doc.type_name, "Place");
@@ -254,7 +254,7 @@ async fn an_item_shows_its_free_image_with_its_credit(pool: PgPool) {
 
 /// A file marked non-free, or under a licence off the list, gives no image and no credit; a CC0
 /// file is shown, credited without an author. An item without an image asks Commons nothing.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn only_a_free_file_is_shown(pool: PgPool) {
     for commons in [Commons::NonFree, Commons::Gfdl] {
         let (doc, t) = item_card(
@@ -305,7 +305,7 @@ async fn only_a_free_file_is_shown(pool: PgPool) {
 /// A busy Commons, or one that does not answer in time, leaves the image unread: no image from
 /// this reading, an early read again, and the stored card's credited image kept
 /// (`keep_enriched`). A stored image without a credit (a Special:FilePath link) is not kept.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_busy_commons_keeps_the_stored_image(pool: PgPool) {
     let (stored, _) = item_card(&pool, Mode::default()).await;
     assert_eq!(stored.image.as_deref(), Some(IMAGE));
@@ -346,7 +346,7 @@ async fn a_busy_commons_keeps_the_stored_image(pool: PgPool) {
 
 /// A Wikipedia page about a place, read from its Wikidata item when Wikipedia serves no summary
 /// of the article, shows the item's image the same way: verified on Commons, with its credit.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_wikipedia_place_shows_its_item_image_with_its_credit(pool: PgPool) {
     for (commons, image) in [(Commons::Recorded, Some(IMAGE)), (Commons::NonFree, None)] {
         let t = Recorded::new(Mode {

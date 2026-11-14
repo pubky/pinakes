@@ -717,10 +717,7 @@ mod tests {
             assert!(!crate::model::type_path(kind.as_str().unwrap()).is_empty());
         }
     }
-    #[sqlx::test(
-        migrations = "../../migrations",
-        fixtures("../../tests/fixtures/require_h3.sql")
-    )]
+    #[sqlx::test(migrations = "../../migrations")]
     async fn saved_version_is_the_key_even_with_diagnostic_fields(pool: PgPool) {
         let resolver = OsmResolver::new(pool.clone(), OsmConfig::default()).unwrap();
         let id = parse_id("https://www.openstreetmap.org/node/123").unwrap();
@@ -767,10 +764,7 @@ mod tests {
         assert_eq!(resolver.save(&id, &doc, None).await.unwrap(), version);
     }
     /// The place cache stores no tag or document field that carries a credential.
-    #[sqlx::test(
-        migrations = "../../migrations",
-        fixtures("../../tests/fixtures/require_h3.sql")
-    )]
+    #[sqlx::test(migrations = "../../migrations")]
     async fn the_place_cache_stores_no_credential(pool: PgPool) {
         let resolver = OsmResolver::new(pool.clone(), OsmConfig::default()).unwrap();
         let id = parse_id("https://www.openstreetmap.org/node/124").unwrap();
@@ -793,10 +787,7 @@ mod tests {
         assert!(stored.contains("+41 00 000 00 00"), "{stored}");
     }
     /// A place's display name that is a link carrying a credential is not cached; a name is.
-    #[sqlx::test(
-        migrations = "../../migrations",
-        fixtures("../../tests/fixtures/require_h3.sql")
-    )]
+    #[sqlx::test(migrations = "../../migrations")]
     async fn the_place_cache_stores_no_credential_display_name(pool: PgPool) {
         let resolver = OsmResolver::new(pool.clone(), OsmConfig::default()).unwrap();
         for (osm_id, display_name) in [

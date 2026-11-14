@@ -6,7 +6,7 @@ the pipeline fits together; read it first.
 ## Build and test
 
 All commands run from the repository root. Tests that touch the database need a PostgreSQL
-server with PostGIS, `pg_trgm` and h3 (see the README) and a role that can create databases:
+server with PostGIS and `pg_trgm` (see the README) and a role that can create databases:
 
 ```sh
 export DATABASE_URL='postgresql:///postgres?host=/var/run/postgresql'
@@ -16,7 +16,7 @@ export DATABASE_URL='postgresql:///postgres?host=/var/run/postgresql'
 | --- | --- |
 | `scripts/test` | The full gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --workspace`, the e2e driver's Node tests (`npm test --prefix e2e`), `scripts/check-ops`. Run it before you commit. |
 | `cargo test -p pinakes-core --lib` | Unit tests only. A few need `DATABASE_URL` and fail without it. |
-| `cargo test -p pinakes-core --test <name>` | One integration test file in `crates/pinakes-core/tests/` (`api`, `groups`, `also_on`, `tidal`, …). Each test gets a fresh database with the schema and `tests/fixtures/require_h3.sql`, which stops it with the h3 version found when h3 is older than 4.2.3 (`#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]`; a unit test checks every one has it). |
+| `cargo test -p pinakes-core --test <name>` | One integration test file in `crates/pinakes-core/tests/` (`api`, `groups`, `also_on`, `tidal`, …). Each test gets a fresh database with the schema (`#[sqlx::test(migrations = "../../migrations")]`). |
 | `scripts/check-ops` | `promtool check rules ops/alerts.yml` when promtool is installed; otherwise the test that checks every metric in `ops/alerts.yml` and `ops/grafana/pinakes.json` against the registry (`telemetry.rs`), which `cargo test` also runs. |
 | `npm ci --prefix e2e && npm test --prefix e2e` | The e2e harness's own unit tests. |
 | `scripts/e2e --mock` | The whole flow against fixtures, offline: migrations, ingest, queue, resolvers, groups, API. First, that a cancelled `--live-recipes` run drops its database and still reports (`e2e/cancel.test.mjs`, which lets egress reach no host). |

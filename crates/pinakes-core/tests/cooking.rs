@@ -128,7 +128,7 @@ fn uris(v: &Value) -> Vec<&str> {
     all
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn recipes_are_found_by_their_ingredients(pool: PgPool) {
     for (uri, file) in [
         (LASAGNE, "bbcgoodfood-classic-lasagne.html"),

@@ -277,7 +277,7 @@ async fn run_with(
 const KEYS: &str =
     "SELECT key||' '||source FROM resource_key WHERE resource_id=$1 ORDER BY key COLLATE \"C\"";
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_tidal_barcode_joins_apple_music_and_deezer(pool: sqlx::PgPool) {
     // Deezer's album and iTunes' are the joins; without either source there is nothing to check.
     let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
@@ -345,7 +345,7 @@ async fn a_tidal_barcode_joins_apple_music_and_deezer(pool: sqlx::PgPool) {
     assert_eq!(rows(&pool, group, &apple).await, joined);
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn without_credentials_nothing_asks_tidal(pool: sqlx::PgPool) {
     let hydra = save(&pool, "https://tidal.com/album/199574241", "MusicAlbum").await;
     let seen = run(&pool, config(None), Answers::default()).await;
@@ -353,7 +353,7 @@ async fn without_credentials_nothing_asks_tidal(pool: sqlx::PgPool) {
     assert!(rows(&pool, KEYS, &hydra).await.is_empty());
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn refused_credentials_keep_what_tidal_gave_and_retry_later(pool: sqlx::PgPool) {
     let hydra = save(&pool, "https://tidal.com/album/199574241", "MusicAlbum").await;
     // A first run with credentials TIDAL accepts.
@@ -391,7 +391,7 @@ async fn refused_credentials_keep_what_tidal_gave_and_retry_later(pool: sqlx::Pg
     assert!(!seen.iter().any(|s| s.contains("tidal.com")), "{seen:?}");
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_busy_batch_holds_the_single_requests_for_the_time_tidal_asked(pool: sqlx::PgPool) {
     let hydra = save(&pool, "https://tidal.com/album/199574241", "MusicAlbum").await;
     let dracula = save(&pool, "https://tidal.com/album/495402659", "MusicAlbum").await;
@@ -423,7 +423,7 @@ async fn a_busy_batch_holds_the_single_requests_for_the_time_tidal_asked(pool: s
     assert!(!seen.iter().any(|s| s.contains("tidal.com")), "{seen:?}");
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_forbidden_answer_is_a_refusal_of_the_credentials(pool: sqlx::PgPool) {
     let hydra = save(&pool, "https://tidal.com/album/199574241", "MusicAlbum").await;
     let config = config(Some(("forbidden-id", "forbidden-secret")));
@@ -454,7 +454,7 @@ async fn a_forbidden_answer_is_a_refusal_of_the_credentials(pool: sqlx::PgPool) 
 /// Two lookups at once (the worker's concurrency) and a 429 on the first, released only once
 /// this test's second lookup is pending at the pair's slot (the test fails when it never is):
 /// the second then sees the wait TIDAL asked for, and exactly one request reaches TIDAL.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn two_concurrent_lookups_send_one_request_after_a_429(pool: sqlx::PgPool) {
     // An album and a track: one of each kind, so neither is batched and both ask alone.
     let album = save(&pool, "https://tidal.com/album/199574241", "MusicAlbum").await;
@@ -481,7 +481,7 @@ async fn two_concurrent_lookups_send_one_request_after_a_429(pool: sqlx::PgPool)
 
 /// A retry within the hour asks TIDAL nothing: a busy MusicBrainz fails both tracks' lookups
 /// after their batch, and on the retry the batch skips what the items have cached.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_retry_s_batch_skips_cached_items(pool: sqlx::PgPool) {
     let track = save(&pool, "https://tidal.com/track/199574242", "MusicRecording").await;
     save(&pool, "https://tidal.com/track/199574243", "MusicRecording").await;

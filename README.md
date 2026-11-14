@@ -74,11 +74,11 @@ ID, makes a key; what a page says about itself is at most a fact. A group is a h
 never a merge.
 
 **Serve.** The public listener (`listen`, port 8090) serves `/v1`: one search with filters,
-facets, map clusters and group collapse; cards by ID or URI; batch lookup; a compose-time
+facets and group collapse; cards by ID or URI; batch lookup; a compose-time
 `resolve`; feed occurrences; and changes since a time. The admin listener (`admin_listen`, port
 9090) serves `/metrics`, operator info, stored documents and group curation.
 
-**Database.** PostgreSQL with PostGIS, `pg_trgm` and h3. The schema is one file,
+**Database.** PostgreSQL with PostGIS and `pg_trgm`. The schema is one file,
 `migrations/0001_schema.sql`. The main tables are `resource` (the document and its indexed facts),
 `reference`, `occurrence`, `resource_alias`, `resource_group`, `resource_key`, `resource_fact`,
 `derived_link` and `resource_change`. The work queues are tables too: `resource` rows for
@@ -100,10 +100,8 @@ card. Nominatim and Nexus are trusted upstreams outside this policy.
 
 ## Run locally
 
-Requires Rust 1.98.1 (`rust-toolchain.toml` selects it), PostgreSQL 16–18 with PostGIS 3.4+,
-`pg_trgm` and h3 4.2.3+ (`pinakesd` refuses to start without `h3_latlng_to_cell(point, integer)`,
-and every database test fails with the h3 version found). On Ubuntu:
-`postgresql-16 postgresql-16-postgis-3 postgresql-contrib-16 postgresql-16-h3` (from the
+Requires Rust 1.98.1 (`rust-toolchain.toml` selects it), PostgreSQL 16–18 with PostGIS 3.4+ and
+`pg_trgm`. On Ubuntu: `postgresql-16 postgresql-16-postgis-3 postgresql-contrib-16` (from the
 [PGDG repository](https://www.postgresql.org/download/linux/ubuntu/) if the distribution lacks
 version 16). Docker is not required.
 

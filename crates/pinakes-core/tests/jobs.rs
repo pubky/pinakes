@@ -157,7 +157,7 @@ fn ids(v: &Value) -> Vec<String> {
         .collect()
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn postings_are_placed_found_and_close(pool: PgPool) {
     // Nominatim knows Philadelphia as the one settlement of that name in Pennsylvania.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -309,7 +309,7 @@ fn settlement(id: i64, name: &str, country: &str, code: &str) -> Value {
         "address": {"city": name, "country": country, "country_code": code}})
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_workplace_is_never_an_ambiguous_or_other_settlement(pool: PgPool) {
     // Two Springfields; one settlement under another name than the posting's town; and London,
     // United Kingdom for a posting in London, Canada.
@@ -378,7 +378,7 @@ async fn a_workplace_is_never_an_ambiguous_or_other_settlement(pool: PgPool) {
     server.abort();
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_workplace_is_never_in_another_region_or_postal_region(pool: PgPool) {
     // Nominatim's sole Springfield is Springfield, Missouri: a posting in Springfield, Illinois
     // (by name or code, in its address or in its one-line place) or with a postcode of another
@@ -471,7 +471,7 @@ async fn a_workplace_is_never_in_another_region_or_postal_region(pool: PgPool) {
     server.abort();
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_one_line_place_is_compared_by_its_region_code_and_postcode(pool: PgPool) {
     // Each town has one settlement. A state's or province's code after the town contradicts
     // one in another country or with another code, unless it is the settlement's own code

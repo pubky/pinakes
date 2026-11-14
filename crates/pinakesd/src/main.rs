@@ -46,8 +46,6 @@ async fn serve(config: Option<PathBuf>, command: Command) -> Result<()> {
     if migrate_only {
         return Ok(());
     }
-    // After migrations, before serving: clustering needs h3 >= 4.2.3.
-    pinakes_core::check_extensions(&pool).await?;
     // Build the public document now, so a malformed recipe file stops startup before workers,
     // ingestion and the listeners start.
     let _ = api::openapi_document();

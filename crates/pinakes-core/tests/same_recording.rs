@@ -105,7 +105,7 @@ async fn card(config: &Config, pool: &PgPool, id: &str) -> Value {
         .0
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn recordings_nothing_exact_joins_name_the_ones_they_may_be(pool: PgPool) {
     let config = Config::default();
     // A 2021 re-release whose ISRC nobody else knows: no key joins it to the recording.
@@ -279,7 +279,7 @@ async fn recordings_nothing_exact_joins_name_the_ones_they_may_be(pool: PgPool) 
 
 /// `[groups] same_recording_hint = "off"` removes the field from recording cards and stops the
 /// pass; the OpenAPI document keeps the field while either hint is on.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn the_switch_removes_the_field_and_stops_the_pass(pool: PgPool) {
     let on = Config::default();
     let off: Config = toml::from_str("[groups]\nsame_recording_hint = \"off\"\n").unwrap();
@@ -321,7 +321,7 @@ async fn the_switch_removes_the_field_and_stops_the_pass(pool: PgPool) {
 /// A pass stopped after claiming loses nothing: its claim runs out and the next pass reads the
 /// recording again, dropping the pair its old length made. A change marked while a claim is held
 /// is read too.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_stopped_pass_leaves_no_pair_stale(pool: PgPool) {
     let config = Config::default();
     let take_five = |pool: &PgPool, uri: &'static str, length: &'static str| {
@@ -378,7 +378,7 @@ async fn a_stopped_pass_leaves_no_pair_stale(pool: PgPool) {
 
 /// A crowd of recordings with one title and artist: each keeps at most twenty pairs, its own and
 /// those others gave it, the lengths that agree before the ones unknown.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_crowd_of_one_recording_keeps_twenty_pairs_each(pool: PgPool) {
     let config = Config::default();
     for i in 0..101 {
@@ -437,7 +437,7 @@ async fn a_crowd_of_one_recording_keeps_twenty_pairs_each(pool: PgPool) {
 /// A claim that ran out never settles: a change saved after it ran out leaves the entry's time
 /// as it was (the trigger only moves it earlier), so the old pass finishing late must not drop
 /// the entry; the next pass reads the change.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_expired_claim_never_drops_a_later_change(pool: PgPool) {
     let config = Config::default();
     let take_five = |pool: &PgPool, uri: &'static str, length: &'static str| {
@@ -480,7 +480,7 @@ async fn an_expired_claim_never_drops_a_later_change(pool: PgPool) {
 
 /// An artist or duration fact that had expired and is found again (its expiry extended, the row
 /// kept) marks its recording: the pairs follow the fact's value again.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_fact_found_again_after_it_expired_moves_the_pairs(pool: PgPool) {
     let config = Config::default();
     let a = recording(
@@ -534,7 +534,7 @@ async fn a_fact_found_again_after_it_expired_moves_the_pairs(pool: PgPool) {
 
 /// Each read that changes pairs moves the revision search pages hash into their ETag, in its own
 /// commit: a pass stopped after one recording leaves no cached page answering with old hints.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn each_read_that_changes_pairs_moves_the_revision(pool: PgPool) {
     let config = Config::default();
     let take_five = |pool: &PgPool, uri: &'static str, length: &'static str| {
@@ -592,7 +592,7 @@ async fn spread(pool: &PgPool, by: &str) -> (i64, i64) {
 /// A recording that changes takes its pairs from the recordings that named it, and those are read
 /// again, so none is left without the hint (no sweep needed). Its pairs spread over the crowd, and
 /// no recording is named by more than forty, which bounds the recordings one change marks.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_changed_recording_leaves_no_neighbour_without_a_hint(pool: PgPool) {
     let config = Config::default();
     let mut crowd = vec![];
@@ -663,7 +663,7 @@ async fn a_changed_recording_leaves_no_neighbour_without_a_hint(pool: PgPool) {
 /// A search page reads the pairs and the revision its ETag hashes in one snapshot: a page that
 /// read before a change carries the old revision with the old pairs, never the new revision (a
 /// sequence moves outside the snapshot, and the next page would be answered 304 with old hints).
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_page_reads_the_pairs_and_the_revision_from_one_snapshot(pool: PgPool) {
     let config = Config::default();
     let take_five = |uri: &'static str, length: &'static str| {
@@ -738,7 +738,7 @@ async fn without_a_hint(pool: &PgPool, ids: &[String]) -> Vec<String> {
 /// order: one read late passes over the recordings already named by forty and names those with
 /// room (round the index from just after itself), so the cap pushes nothing out that is not
 /// replaced, and what it pushes out is refilled.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_crowd_without_lengths_read_in_any_order_leaves_none_without_a_hint(pool: PgPool) {
     let config = Config::default();
     let mut ascending = crowd(&pool, "Take Five", None, 101).await;
@@ -785,7 +785,7 @@ async fn a_crowd_without_lengths_read_in_any_order_leaves_none_without_a_hint(po
 /// `SCAN` candidates, with room or not, so its work is bounded however large the crowd. A read
 /// that ran out with room left stopped at the candidate it examined last and is due again; the
 /// later read keeps the pairs it has and goes on from there, until every recording names twenty.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_read_in_a_dense_crowd_examines_a_bounded_number_of_candidates(pool: PgPool) {
     let config = Config::default();
     let mut ids = crowd(&pool, "Take Five", None, 301).await;
@@ -864,7 +864,7 @@ async fn a_read_in_a_dense_crowd_examines_a_bounded_number_of_candidates(pool: P
 
 /// Resources deleted as orphans take their units and pairs with them (the cascade); the
 /// recordings that named them are marked before, and refill.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn deleted_orphans_leave_their_neighbours_to_refill(pool: PgPool) {
     let config = Config::default();
     let crowd = crowd(&pool, "Take Five", Some("PT5M24S"), 101).await;
@@ -913,7 +913,7 @@ async fn deleted_orphans_leave_their_neighbours_to_refill(pool: PgPool) {
 /// nothing bounded the namers of one recording) are cut to the best twenty and forty as the pass
 /// ranks them, and every recording with fewer than twenty pairs (its list emptied by the old cap
 /// or a cascade, or a pair cut now) is marked to refill and queued, once.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn the_upgrade_cuts_the_old_lists_and_requeues_recordings_left_with_short_lists(
     pool: PgPool,
 ) {
@@ -977,7 +977,7 @@ async fn the_upgrade_cuts_the_old_lists_and_requeues_recordings_left_with_short_
 /// locks the orphan's unit before it collects the namers, so the pass's pair (committed while the
 /// delete waits for it) is seen and its owner marked; without the lock the cascade would take the
 /// pair unseen and the owner would keep an empty list for good.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_orphan_deleted_while_a_pass_pairs_with_it_leaves_the_partner_to_refill(pool: PgPool) {
     let config = Config::default();
     // Two recordings that do not pair (different titles), each with a unit.
@@ -1129,7 +1129,7 @@ async fn pairs_of(pool: &PgPool, id: &str) -> Vec<String> {
 /// with room. The resumed read passes the last twenty of the crowd and names the twenty at 102 s.
 /// (Resumed from the candidate's new position, it would skip them, end with no hints and never
 /// look again, its fingerprint current.)
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_resumed_read_goes_on_from_the_position_it_stopped_at(pool: PgPool) {
     let full = full_crowd(&pool, "Take Five", Some("PT1M41S"), 120).await;
     let me = recording(
@@ -1187,7 +1187,7 @@ async fn a_resumed_read_goes_on_from_the_position_it_stopped_at(pool: PgPool) {
 /// A pair added to a stopped read's list before it resumes (a recording ahead of its position
 /// named it back) takes no place among the candidates the resumed read may still take: the
 /// recording ends with twenty, not nineteen.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_pair_kept_from_before_takes_no_place_from_a_resumed_read(pool: PgPool) {
     let full = full_crowd(&pool, "Take Five", Some("PT1M41S"), 120).await;
     let me = recording(
@@ -1227,7 +1227,7 @@ async fn a_pair_kept_from_before_takes_no_place_from_a_resumed_read(pool: PgPool
 /// other: the pass takes its candidates with `SKIP LOCKED`, so the orphan's unit is passed over,
 /// the pass commits, and the delete goes on and marks the first recording, which is read again
 /// without the orphan. (Waiting for the orphan's unit, the two would deadlock, and one would fail.)
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_pass_and_an_orphan_delete_holding_each_others_unit_never_deadlock(pool: PgPool) {
     let config = Config::default();
     let a = recording(
@@ -1315,7 +1315,7 @@ async fn a_pass_and_an_orphan_delete_holding_each_others_unit_never_deadlock(poo
 /// among the lengths unknown. Then a duration is read for it and for one of the crowd, 101 s
 /// both, and the next read pairs them: in its new ring the lengths that agree come first. (Gone
 /// on from the stale position, the read would take up among the lengths unknown, past them.)
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_changed_recording_starts_its_read_over_not_from_where_it_stopped(pool: PgPool) {
     let full = full_crowd(&pool, "Take Five", None, 120).await;
     let me = recording(

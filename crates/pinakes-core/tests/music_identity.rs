@@ -35,7 +35,7 @@ async fn read(app: &axum::Router, id: &str) -> Value {
     assert_eq!(response.status(), 200);
     serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
 }
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn held_exact_edges_share_keys_in_both_directions(pool: PgPool) {
     let cfg = Config::default();
     let a = save(

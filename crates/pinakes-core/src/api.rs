@@ -678,8 +678,6 @@ pub struct SearchQuery {
     pub from: Option<String>,
     /// Inclusive start time upper bound: RFC3339, Unix milliseconds, or relative (`now+30d`).
     pub to: Option<String>,
-    /// Finite map zoom; fractional zooms are floored and clamped to the table. Requires bbox; large views coarsen to the configured cell budget.
-    pub cluster: Option<String>,
     /// Resource ID of the accepted event venue; filters event units.
     pub venue: Option<String>,
     /// A collection post's URI (an item's `uri` from `GET /v1/resources/{id}/collections`): the
@@ -695,7 +693,7 @@ pub struct SearchQuery {
     /// recipe's card records it, without amounts (`flour` matches "all-purpose flour").
     pub ingredient: Option<String>,
     /// A list view with one row per group: the matching member with the most references, as its
-    /// own card; links in no group stay rows of their own. Not with `cluster`.
+    /// own card; links in no group stay rows of their own.
     #[param(value_type = Option<CollapseMode>)]
     pub collapse: Option<String>,
 }
@@ -1087,28 +1085,6 @@ fn facets_asked(facet: Option<&str>) -> Result<FacetsAsked, ApiError> {
 pub struct SearchResponse {
     pub items: Vec<Card>,
     pub cursor: Option<String>,
-    /// The `reach` or `boost` set was capped at 1,000 authors.
-    pub reach_truncated: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub facets: Option<Facets>,
-}
-#[derive(Serialize, ToSchema)]
-pub struct Cluster {
-    pub cell: String,
-    pub count: i64,
-    pub lat: f64,
-    pub lon: f64,
-    pub top: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub attribution: Option<String>,
-}
-#[derive(Serialize, ToSchema)]
-pub struct ClusterResponse {
-    pub resolution: u8,
-    pub clusters: Vec<Cluster>,
-    pub points: Vec<Card>,
-    pub truncated: bool,
-    pub total: i64,
     /// The `reach` or `boost` set was capped at 1,000 authors.
     pub reach_truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2432,7 +2408,7 @@ fn scope(
 /// seen a change never carries the revision that includes it.
 pub const REVISION: &str = "jsonb_build_array((SELECT jsonb_agg(jsonb_build_array(cursor,epoch) ORDER BY nexus) FROM feed_cursor),(SELECT revision FROM search_revision WHERE id=1))";
 
-#[utoipa::path(get,tag="Search",path="/v1/search",params(SearchQuery),responses((status=200,body=SearchResult),(status=304,description="ETag unchanged"),(status=400,description="Invalid or unavailable filter"),(status=501,description="wot_2 asked of an instance whose Nexus serves no reach set"),(status=502,description="Nexus reach unavailable")))]
+#[utoipa::path(get,tag="Search",path="/v1/search",params(SearchQuery),responses((status=200,body=SearchResponse),(status=304,description="ETag unchanged"),(status=400,description="Invalid or unavailable filter"),(status=501,description="wot_2 asked of an instance whose Nexus serves no reach set"),(status=502,description="Nexus reach unavailable")))]
 pub async fn search(
     State(state): State<AppState>,
     Query(q): Query<SearchQuery>,
@@ -2442,11 +2418,6 @@ pub async fn search(
     let key = q.key.as_deref().map(key_filter).transpose()?;
     if q.collapse.is_some() && !state.config.groups.enabled {
         return Err(ApiError::bad("groups are disabled"));
-    }
-    if q.collapse.is_some() && q.cluster.is_some() {
-        return Err(ApiError::bad(
-            "collapse=group is a list view; a map with cluster shows every member",
-        ));
     }
     let cursor = q
         .cursor
@@ -2841,81 +2812,34 @@ pub async fn search(
             .push_bind(cap)
             .push(") x) c GROUP BY gi.root), filtered AS (SELECT DISTINCT ON(coalesce(u.group_id,e.unit_id)) e.* FROM eligible e LEFT JOIN group_unit u ON u.unit_id=e.unit_id AND u.group_id IS NOT NULL LEFT JOIN grouped_refs c ON c.resource_id=e.id ORDER BY coalesce(u.group_id,e.unit_id),coalesce(c.refs,0) DESC,e.id,e.unit_id");
     }
-    if let Some(resolution) = spatial.resolution {
-        sql.push("), cells AS (SELECT *, h3_latlng_to_cell(point(ST_X(point),ST_Y(point)),")
-            .push_bind(i32::from(u8::from(resolution)))
-            .push(")::text AS cell FROM filtered WHERE point IS NOT NULL), groups AS (SELECT cell,count(*) AS count,avg(ST_Y(point)) AS lat,degrees(atan2(avg(sin(radians(ST_X(point)))),avg(cos(radians(ST_X(point)))))) AS lon,ARRAY(SELECT id FROM (SELECT DISTINCT ON (id) id,rank,unit_id FROM cells t WHERE t.cell=cells.cell ORDER BY id,rank DESC,unit_id DESC) unique_ids ORDER BY rank DESC,unit_id DESC LIMIT 3) AS top,max(rank) AS rank,CASE WHEN bool_or(osm_id IS NOT NULL OR doc->>'attribution' IS NOT NULL) THEN ")
-            .push_bind(crate::resolver::osm::ATTRIBUTION)
-            .push(" ELSE NULL END AS attribution FROM cells GROUP BY cell LIMIT ")
-            .push_bind((state.config.search.max_cluster_cells+1) as i64)
-            .push("), entries AS (SELECT 'cluster' AS kind,cell AS id,cell AS unit_id,rank,to_jsonb(g)-'rank' AS item FROM groups g WHERE count>1 AND (SELECT count(*) FROM filtered)>")
-            .push_bind(q.limit.unwrap_or(50) as i64)
-            .push(" UNION ALL SELECT 'point',c.id,c.unit_id,c.rank,to_jsonb(c) FROM cells c JOIN groups g USING(cell) WHERE g.count=1 OR (SELECT count(*) FROM filtered)<=")
-            .push_bind(q.limit.unwrap_or(50) as i64)
-            .push("), page AS (SELECT * FROM entries ORDER BY rank DESC,unit_id DESC LIMIT ")
-            .push_bind((q.limit.unwrap_or(50)+1) as i64)
-            .push(") SELECT coalesce((SELECT jsonb_agg(to_jsonb(p)");
-        // A point's card is its `item`, built once: `||` replaces a key, it never merges two items.
-        sql.push(" || CASE WHEN p.kind='point' THEN jsonb_build_object('item',");
-        if related.is_some() {
-            related_because(
-                &mut sql,
-                "p.item",
-                "(p.item->>'because_n')::bigint",
-                "p.item->>'because_authors'",
-            );
-        } else {
-            sql.push("p.item");
-        }
-        if state.config.groups.enabled {
-            sql.push("||jsonb_build_object('group',group_hint(p.unit_id),'also_on',also_on(p.unit_id,p.unit_id,8,true))");
-        } else {
-            sql.push("||jsonb_build_object('also_on',also_on(p.unit_id,p.unit_id,8,false))");
-        }
-        if let Some((events, recordings)) = hint_flags(&state.config) {
-            sql.push(format!(
-                "||jsonb_build_object('maybe_same',{})",
-                maybe_same_sql(
-                    "p.unit_id",
-                    "ARRAY(SELECT jsonb_array_elements_text(p.item->'type_path'))",
-                    3,
-                    events,
-                    recordings
-                )
-            ));
-        }
-        sql.push(") ELSE '{}'::jsonb END");
-        sql.push(" ORDER BY rank DESC,unit_id DESC) FROM page p),'[]') AS items, (SELECT count(*) FROM filtered) AS total, (SELECT count(*) FROM groups) AS cell_count, ");
-    } else {
-        sql.push("), page AS (SELECT * FROM filtered");
-        if let Some(c) = &cursor {
-            sql.push(" WHERE (rank,unit_id)<(")
-                .push_bind(c.score)
-                .push(",")
-                .push_bind(c.id.clone())
-                .push(")");
-        }
-        sql.push(" ORDER BY rank DESC,unit_id DESC LIMIT ")
-            .push_bind((q.limit.unwrap_or(50) + 1) as i64)
-            .push(") SELECT coalesce((SELECT jsonb_agg(");
-        if related.is_some() {
-            related_because(&mut sql, "to_jsonb(p)", "p.because_n", "p.because_authors");
-        } else {
-            sql.push("to_jsonb(p)");
-        }
-        if state.config.groups.enabled {
-            sql.push(" || jsonb_build_object('group',group_hint(p.unit_id),'also_on',also_on(p.unit_id,p.unit_id,8,true))");
-        } else {
-            sql.push(" || jsonb_build_object('also_on',also_on(p.unit_id,p.unit_id,8,false))");
-        }
-        if let Some((events, recordings)) = hint_flags(&state.config) {
-            sql.push(format!(
-                " || jsonb_build_object('maybe_same',{})",
-                maybe_same_sql("p.unit_id", "p.type_path", 3, events, recordings)
-            ));
-        }
-        sql.push(" ORDER BY rank DESC,unit_id DESC) FROM page p),'[]') AS items, ");
+    sql.push("), page AS (SELECT * FROM filtered");
+    if let Some(c) = &cursor {
+        sql.push(" WHERE (rank,unit_id)<(")
+            .push_bind(c.score)
+            .push(",")
+            .push_bind(c.id.clone())
+            .push(")");
     }
+    sql.push(" ORDER BY rank DESC,unit_id DESC LIMIT ")
+        .push_bind((q.limit.unwrap_or(50) + 1) as i64)
+        .push(") SELECT coalesce((SELECT jsonb_agg(");
+    if related.is_some() {
+        related_because(&mut sql, "to_jsonb(p)", "p.because_n", "p.because_authors");
+    } else {
+        sql.push("to_jsonb(p)");
+    }
+    if state.config.groups.enabled {
+        sql.push(" || jsonb_build_object('group',group_hint(p.unit_id),'also_on',also_on(p.unit_id,p.unit_id,8,true))");
+    } else {
+        sql.push(" || jsonb_build_object('also_on',also_on(p.unit_id,p.unit_id,8,false))");
+    }
+    if let Some((events, recordings)) = hint_flags(&state.config) {
+        sql.push(format!(
+            " || jsonb_build_object('maybe_same',{})",
+            maybe_same_sql("p.unit_id", "p.type_path", 3, events, recordings)
+        ));
+    }
+    sql.push(" ORDER BY rank DESC,unit_id DESC) FROM page p),'[]') AS items, ");
     let asked = facets_asked(q.facet.as_deref())?;
     // Facets count every matching link, collapsed or not.
     let counted = if q.collapse.is_some() {
@@ -2976,17 +2900,10 @@ pub async fn search(
         .persistent(related.is_none())
         .fetch_one(&state.pool)
         .await?;
-    if spatial.resolution.is_some()
-        && row.try_get::<i64, _>("cell_count")? > state.config.search.max_cluster_cells as i64
-    {
-        return Err(ApiError::bad(
-            "cluster cell budget exceeded; use a smaller viewport",
-        ));
-    }
     let mut items: Vec<Value> = serde_json::from_value(row.try_get("items")?)?;
     let has_more = items.len() > q.limit.unwrap_or(50);
     items.truncate(q.limit.unwrap_or(50));
-    let next = if has_more && spatial.resolution.is_none() {
+    let next = if has_more {
         let last = items.last().expect("nonempty page");
         Some(
             PageCursor {
@@ -3078,37 +2995,6 @@ pub async fn search(
                 .any(|v| v.trim().trim_start_matches("W/") == etag || v.trim() == "*")
         }) {
         StatusCode::NOT_MODIFIED.into_response()
-    } else if spatial.resolution.is_some() {
-        let mut clusters = Vec::new();
-        let mut points = Vec::new();
-        for entry in items {
-            let item = &entry["item"];
-            if entry["kind"] == "cluster" {
-                clusters.push(Cluster {
-                    cell: item["cell"].as_str().unwrap_or_default().into(),
-                    count: item["count"].as_i64().unwrap_or(0),
-                    lat: item["lat"].as_f64().unwrap_or(0.0),
-                    lon: item["lon"].as_f64().unwrap_or(0.0),
-                    top: serde_json::from_value(item["top"].clone())?,
-                    attribution: item["attribution"].as_str().map(str::to_owned),
-                });
-            } else {
-                points.push(card(item)?);
-            }
-        }
-        with_refs(&state.pool, points.iter_mut()).await?;
-        Json(ClusterResponse {
-            resolution: u8::from(spatial.resolution.expect("cluster mode")),
-            clusters,
-            points,
-            truncated: has_more,
-            total: row.try_get("total")?,
-            reach_truncated: [&reach, &boost]
-                .iter()
-                .any(|set| set.as_ref().is_some_and(|r| r.truncated)),
-            facets,
-        })
-        .into_response()
     } else {
         let mut cards = items.iter().map(card).collect::<Result<Vec<_>, _>>()?;
         with_refs(&state.pool, cards.iter_mut()).await?;
@@ -3130,13 +3016,6 @@ pub async fn search(
         header::HeaderValue::from_static("public, max-age=30"),
     );
     Ok(response)
-}
-#[derive(ToSchema)]
-#[allow(dead_code)]
-#[serde(untagged)]
-pub enum SearchResult {
-    Page(SearchResponse),
-    Cluster(ClusterResponse),
 }
 
 async fn read(
@@ -3642,9 +3521,6 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
         AlsoOn,
         VenueRef,
         SearchResponse,
-        SearchResult,
-        ClusterResponse,
-        Cluster,
         LookupRequest,
         ResolveRequest,
         TagFacet,
@@ -4244,10 +4120,7 @@ mod tests {
     use super::*;
 
     /// Exact members use Card.refs' bounded ranking; repeated members in a response share it.
-    #[sqlx::test(
-        migrations = "../../migrations",
-        fixtures("../tests/fixtures/require_h3.sql")
-    )]
+    #[sqlx::test(migrations = "../../migrations")]
     async fn also_on_refs_share_card_bounds_and_exclude_non_exact_links(pool: PgPool) {
         let uri = "https://example.org/member";
         let id = store::ensure_resource(&pool, uri).await.unwrap();
@@ -4304,10 +4177,7 @@ mod tests {
         }
     }
 
-    #[sqlx::test(
-        migrations = "../../migrations",
-        fixtures("../tests/fixtures/require_h3.sql")
-    )]
+    #[sqlx::test(migrations = "../../migrations")]
     async fn also_on_refs_preserve_gone_social_alias_privacy(pool: PgPool) {
         let uri = "https://example.org/post/1";
         let id = store::ensure_resource(&pool, uri).await.unwrap();
