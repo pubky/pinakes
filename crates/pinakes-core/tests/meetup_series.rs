@@ -140,8 +140,8 @@ impl Dns for AnyDns {
     }
 }
 /// Answers each `host/path` (or `scheme://host/path`) from its map (404 otherwise;
-/// `STATUS {code}` answers that status, `REDIRECT {url}` a 302 to that URL) and records what was
-/// asked.
+/// `STATUS {code}` answers that status, `REDIRECT {url}` a 302 to that URL, `ERROR` fails the
+/// request) and records what was asked.
 struct Site {
     pages: BTreeMap<String, String>,
     seen: Mutex<Vec<String>>,
@@ -158,6 +158,13 @@ impl Transport for Site {
         _: &FetchOptions,
     ) -> anyhow::Result<Fetched> {
         self.seen.lock().unwrap().push(url.to_string());
+        if self
+            .pages
+            .get(&format!("{}{}", url.host_str().unwrap_or(""), url.path()))
+            .is_some_and(|p| p == "ERROR")
+        {
+            anyhow::bail!("connection reset");
+        }
         // A key may name the scheme too (`http://host/path`); else it stands for any.
         let (host, path) = (url.host_str().unwrap_or(""), url.path());
         let page = self
@@ -261,15 +268,17 @@ async fn read(
     uri: &str,
 ) -> String {
     let id = store::ensure_resource(pool, uri).await.unwrap();
-    let generation: i64 = sqlx::query_scalar("SELECT generation FROM resource WHERE id=$1")
-        .bind(&id)
-        .fetch_one(pool)
-        .await
-        .unwrap();
+    // The row's own attempts, as a claim reads them: a failure counts toward the dead letter.
+    let (generation, attempts): (i64, i32) =
+        sqlx::query_as("SELECT generation,attempts FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
     let job = queue::Job {
         id: id.clone(),
         uri: uri.into(),
-        attempts: 0,
+        attempts,
         generation,
     };
     queue::run_job(pool, r, cfg, &job).await.unwrap();
@@ -691,7 +700,8 @@ async fn an_organiser_calendar_answered_from_another_origin_is_not_read(pool: Pg
     read(&pool, &r, &cfg, &numeric()).await;
     read(&pool, &r, &cfg, &token()).await;
     let feed_id = read(&pool, &r, &cfg, &feed()).await;
-    assert!(answered
+    // The redirect is not followed: the other host is never asked.
+    assert!(!answered
         .seen
         .lock()
         .unwrap()
@@ -708,10 +718,11 @@ async fn an_organiser_calendar_answered_from_another_origin_is_not_read(pool: Pg
     common::drain_groups(&pool, &cfg.groups).await;
     assert_eq!(all_groups(&pool).await, Vec::<Vec<(String, String)>>::new());
 
-    // The refusal backs off with each read and never dead-letters the feed.
+    // The refusal backs off with each read in a row (its streak, never `attempts`) and never
+    // dead-letters the feed.
     let backoff = |pool: PgPool, id: String| async move {
         sqlx::query_as::<_, (i32, bool, f64)>(
-            "SELECT attempts,dead_letter,extract(epoch FROM next_attempt_at-now())::float8 FROM resource WHERE id=$1",
+            "SELECT timeout_streak+100*attempts,dead_letter,extract(epoch FROM next_attempt_at-now())::float8 FROM resource WHERE id=$1",
         )
         .bind(id)
         .fetch_one(&pool)
@@ -974,4 +985,113 @@ async fn an_off_origin_calendar_on_the_web_route_keeps_its_dates(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(error.as_deref(), Some("off_origin"));
+}
+
+/// The off-origin streak never counts toward the dead letter: four off-origin answers, then an
+/// outage and a failed request, leave the calendar live; a read the platform answers itself
+/// starts everything over.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_off_origin_streak_never_brings_a_calendar_to_the_dead_letter(pool: PgPool) {
+    let cfg = queue_config(CrossContainerOccurrences::Off);
+    let mut pages = site();
+    let calendar = pages.remove(&path_key(&feed())).unwrap();
+    pages.insert(
+        path_key(&feed()),
+        "REDIRECT https://calendar.example.com/meetup.ics".into(),
+    );
+    pages.insert("calendar.example.com/meetup.ics".into(), calendar.clone());
+    let state = |pool: PgPool, id: String| async move {
+        sqlx::query_as::<_, (i32, i32, bool, Option<String>)>(
+            "SELECT attempts,timeout_streak,dead_letter,last_error FROM resource WHERE id=$1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let mut id = String::new();
+    for _ in 0..4 {
+        let (r, _) = resolver(&pool, pages.clone());
+        id = read(&pool, &r, &cfg, &feed()).await;
+    }
+    assert_eq!(
+        state(pool.clone(), id.clone()).await,
+        (0, 4, false, Some("off_origin".into()))
+    );
+    for answer in ["STATUS 503", "ERROR"] {
+        let mut pages = site();
+        pages.insert(path_key(&feed()), answer.into());
+        let (r, _) = resolver(&pool, pages);
+        read(&pool, &r, &cfg, &feed()).await;
+        let (_, _, dead, _) = state(pool.clone(), id.clone()).await;
+        assert!(!dead, "{answer}");
+    }
+    let (r, _) = resolver(&pool, site());
+    read(&pool, &r, &cfg, &feed()).await;
+    assert_eq!(state(pool.clone(), id.clone()).await, (0, 0, false, None));
+    let occurrences: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM occurrence WHERE resource_id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(occurrences, 10);
+}
+
+/// Whatever another origin answers for a group calendar (404, 410, 451, a page), on the platform
+/// route and on the web route, it is refused before any status, feed or disappearance handling:
+/// its stored dates are never cancelled, nothing dead-letters, and `last_error` says why.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_off_origin_answer_of_any_status_keeps_a_calendars_dates(pool: PgPool) {
+    let cfg = queue_config(CrossContainerOccurrences::Off);
+    for meetup in [true, false] {
+        let (r, _) = resolver_with(&pool, site(), meetup);
+        let id = read(&pool, &r, &cfg, &feed()).await;
+        let scheduled = |pool: PgPool, id: String| async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM occurrence WHERE resource_id=$1 AND status='scheduled'",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+        assert_eq!(scheduled(pool.clone(), id.clone()).await, 10, "{meetup}");
+        for answer in [
+            "STATUS 404",
+            "STATUS 410",
+            "STATUS 451",
+            "<!DOCTYPE html><html><head><title>Moved</title></head><body>Moved</body></html>",
+        ] {
+            let mut pages = site();
+            pages.insert(
+                path_key(&feed()),
+                "REDIRECT https://calendar.example.com/meetup.ics".into(),
+            );
+            pages.insert("calendar.example.com/meetup.ics".into(), answer.into());
+            for _ in 0..3 {
+                let (r, _) = resolver_with(&pool, pages.clone(), meetup);
+                read(&pool, &r, &cfg, &feed()).await;
+            }
+            assert_eq!(
+                scheduled(pool.clone(), id.clone()).await,
+                10,
+                "{meetup} {answer}"
+            );
+            let (dead, error): (bool, Option<String>) =
+                sqlx::query_as("SELECT dead_letter,last_error FROM resource WHERE id=$1")
+                    .bind(&id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                (dead, error.as_deref()),
+                (false, Some("off_origin")),
+                "{meetup} {answer}"
+            );
+        }
+        // Read again from the platform's own answer, between the two routes.
+        let (r, _) = resolver_with(&pool, site(), meetup);
+        read(&pool, &r, &cfg, &feed()).await;
+    }
 }
