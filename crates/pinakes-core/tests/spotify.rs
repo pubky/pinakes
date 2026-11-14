@@ -9,7 +9,7 @@ use pinakes_core::{
     config::Config,
     groups,
     model::ResourceMeta,
-    resolver::egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+    resolver::egress::{Egress, FetchOptions, Fetched, Transport},
     store,
 };
 use std::{
@@ -17,22 +17,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 mod common;
-
-struct PublicDns;
-#[async_trait::async_trait]
-impl Dns for PublicDns {
-    async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<SocketAddr>> {
-        Ok(vec![SocketAddr::new("8.8.8.8".parse()?, port)])
-    }
-}
-
-fn fixture(name: &str) -> Vec<u8> {
-    std::fs::read(format!(
-        "{}/tests/fixtures/hubs/{name}",
-        env!("CARGO_MANIFEST_DIR")
-    ))
-    .unwrap()
-}
+use common::{hubs_fixture as fixture, media::PublicDns, save_card as save, strings as rows};
 
 /// A made-up Spotify album ID (22 base-62 characters) with HYDRA 3D's barcode as a UPC-A.
 const ALBUM: &str = "0hydra3DexampleAlbum01";
@@ -121,15 +106,8 @@ impl Transport for Recorded {
                 .map(|(_, v)| v.clone())
         };
         let answer = |status: u16, body: Vec<u8>, content_type: &str| Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: url.clone(),
-            status,
             retry_after_secs: 120,
-            location: None,
-            content_type: content_type.into(),
-            body,
+            ..common::fetched(url.clone(), status, content_type.into(), body)
         };
         Ok(match (host, url.path()) {
             ("accounts.spotify.com", "/api/token") => {
@@ -357,13 +335,6 @@ fn config(pair: Option<(&str, &str)>) -> Config {
     config.validate().unwrap();
     config
 }
-async fn save(pool: &sqlx::PgPool, uri: &str, kind: &str) -> String {
-    let id = store::ensure_resource(pool, uri).await.unwrap();
-    let mut doc = ResourceMeta::new(uri, "jsonld", 86400);
-    doc.set_type(kind);
-    store::save_document(pool, &id, 0, &doc).await.unwrap();
-    id
-}
 /// Every resource's sources, once, on a fresh egress; the requests made.
 async fn run(pool: &sqlx::PgPool, config: Config, answers: Answers) -> Vec<String> {
     let t = Arc::new(Recorded {
@@ -389,13 +360,6 @@ async fn run(pool: &sqlx::PgPool, config: Config, answers: Answers) -> Vec<Strin
     let seen = t.seen.lock().unwrap().clone();
     seen
 }
-async fn rows(pool: &sqlx::PgPool, sql: &str, id: &str) -> Vec<String> {
-    sqlx::query_scalar(sql)
-        .bind(id)
-        .fetch_all(pool)
-        .await
-        .unwrap()
-}
 const KEYS: &str =
     "SELECT key||' '||source FROM resource_key WHERE resource_id=$1 ORDER BY key COLLATE \"C\"";
 fn spotify_requests(seen: &[String]) -> Vec<&String> {
@@ -404,7 +368,7 @@ fn spotify_requests(seen: &[String]) -> Vec<&String> {
 
 /// A Spotify album's barcode joins Apple Music and Deezer; a track's ISRC, which MusicBrainz
 /// gives to one recording, is its key.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_spotify_barcode_joins_apple_music_and_deezer(pool: sqlx::PgPool) {
     let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
     if !["deezer", "itunes"]
@@ -477,7 +441,7 @@ async fn a_spotify_barcode_joins_apple_music_and_deezer(pool: sqlx::PgPool) {
     assert_eq!(rows(&pool, group, &apple).await, joined);
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn without_credentials_nothing_asks_spotify(pool: sqlx::PgPool) {
     let album = save(
         &pool,
@@ -493,7 +457,7 @@ async fn without_credentials_nothing_asks_spotify(pool: sqlx::PgPool) {
 /// Credentials the token endpoint refuses, and an app the API refuses (403, as for an owner
 /// without Premium): a refusal of the credentials, retried after the hold, asking Spotify
 /// nothing meanwhile; what Spotify gave before stays.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn refused_credentials_keep_what_spotify_gave_and_retry_later(pool: sqlx::PgPool) {
     let album = save(
         &pool,
@@ -560,7 +524,7 @@ async fn refused_credentials_keep_what_spotify_gave_and_retry_later(pool: sqlx::
 
 /// An ISRC MusicBrainz gives to several recordings is never Spotify's key: the recording the
 /// track's length picks is (its MBID), else nothing; the ISRC is a fact either way.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_shared_isrc_is_never_a_spotify_key(pool: sqlx::PgPool) {
     let picked = save(
         &pool,
@@ -600,7 +564,7 @@ async fn a_shared_isrc_is_never_a_spotify_key(pool: sqlx::PgPool) {
 /// the Spotify tracks carrying exactly that ISRC become links keyed by the ISRC, a track the
 /// search lists with another ISRC is left out, Spotify's own tracks are not asked, a track with
 /// no ISRC key asks nothing, and the switch turns it off.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_track_with_an_isrc_key_gets_its_spotify_link(pool: sqlx::PgPool) {
     let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
     if !registered.contains(&"spotify_isrc") {
@@ -682,7 +646,7 @@ async fn a_track_with_an_isrc_key_gets_its_spotify_link(pool: sqlx::PgPool) {
 /// `spotify_isrc` is on by default: with the Spotify pair set and no switch, it asks the search.
 /// A refusal (403) and a rate limit (429) keep the links an earlier run found; switched off, those
 /// links stop showing on the card while their rows stay.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn spotify_isrc_is_on_by_default_and_keeps_its_rows_through_refusals(pool: sqlx::PgPool) {
     let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
     if !registered.contains(&"spotify_isrc") {
@@ -788,7 +752,7 @@ async fn spotify_isrc_is_on_by_default_and_keeps_its_rows_through_refusals(pool:
 /// one by one (`/v1/albums/{id}`: Spotify answers no batch read to an app in development mode),
 /// and only the one whose own barcode is the key becomes a link keyed by it. A 403 on an album's
 /// read and a refusal of the app keep it.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_album_with_a_barcode_key_gets_its_spotify_album(pool: sqlx::PgPool) {
     let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
     if !registered.contains(&"spotify_isrc") {

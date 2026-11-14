@@ -5,7 +5,7 @@ use pinakes_core::{
     also_on::{self, SourceOptions},
     config::Config,
     model::ResourceMeta,
-    resolver::egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+    resolver::egress::{Egress, FetchOptions, Fetched, Transport},
     store,
 };
 use std::{
@@ -13,14 +13,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 mod common;
-
-struct PublicDns;
-#[async_trait::async_trait]
-impl Dns for PublicDns {
-    async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<SocketAddr>> {
-        Ok(vec![SocketAddr::new("8.8.8.8".parse()?, port)])
-    }
-}
+use common::{also_on_due as due, media::PublicDns};
 
 fn fixture(name: &str) -> Option<Vec<u8>> {
     std::fs::read(format!(
@@ -69,15 +62,8 @@ impl Transport for Recorded {
                 .map(|(_, v)| v.clone())
         };
         let answer = |status: u16, body: Vec<u8>| Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: url.clone(),
-            status,
             retry_after_secs: if status == 429 { 3600 } else { 120 },
-            location: None,
-            content_type: "application/vnd.api+json".into(),
-            body,
+            ..common::fetched(url.clone(), status, "application/vnd.api+json".into(), body)
         };
         let query = |name: &str| {
             url.query_pairs()
@@ -205,19 +191,11 @@ async fn links(pool: &sqlx::PgPool, id: &str) -> Vec<String> {
         .await
         .unwrap()
 }
-/// The error a resource's retry is queued with, and in how many seconds.
-async fn due(pool: &sqlx::PgPool, id: &str) -> (Option<String>, f64) {
-    sqlx::query_as("SELECT last_error, extract(epoch FROM next_attempt_at-now())::float8 FROM also_on_dirty WHERE resource_id=$1")
-        .bind(id)
-        .fetch_one(pool)
-        .await
-        .unwrap()
-}
 
 /// Walking Disaster's ISRC on Deezer finds TIDAL's tracks (five of eight, streamed ones first),
 /// Underclass Hero's barcode its one album; an ISRC TIDAL lacks and a barcode several albums
 /// carry find nothing; TIDAL's own track is not asked.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn tracks_and_albums_are_found_on_tidal_by_their_keys(pool: sqlx::PgPool) {
     let track = save(
         &pool,
@@ -293,7 +271,7 @@ async fn tracks_and_albums_are_found_on_tidal_by_their_keys(pool: sqlx::PgPool) 
 }
 
 /// On by default with TIDAL's pair; switched off, or without the pair, it asks TIDAL nothing.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn off_or_without_credentials_nothing_asks_tidal(pool: sqlx::PgPool) {
     let track = save(
         &pool,
@@ -326,7 +304,7 @@ async fn off_or_without_credentials_nothing_asks_tidal(pool: sqlx::PgPool) {
 /// A refusal of the credentials (at the token endpoint, or a 403 from the API) and a rate limit
 /// (429) keep the links an earlier run found and retry later: after the five-minute hold
 /// (`tidal_auth`), or after the hour TIDAL asked for (`tidal_busy`).
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn refusals_and_rate_limits_keep_the_links(pool: sqlx::PgPool) {
     let album = save(
         &pool,

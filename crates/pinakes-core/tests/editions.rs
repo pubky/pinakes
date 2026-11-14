@@ -10,7 +10,7 @@ use pinakes_core::{
     api::{self, AppState},
     config::Config,
     model::ResourceMeta,
-    resolver::egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+    resolver::egress::{Egress, FetchOptions, Fetched, Transport},
     store,
 };
 use serde_json::Value;
@@ -22,6 +22,7 @@ use std::{
 };
 use tower::ServiceExt;
 mod common;
+use common::media::PublicDns;
 
 const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hubs");
 const GET_LUCKY: &str = "https://open.spotify.com/track/69kOkLUCkxIZYexIgSG8rq";
@@ -29,14 +30,6 @@ const RECORDING: &str = "833f00e1-781f-4edd-90e4-e52712618862";
 /// Random Access Memories, 2013: the worldwide digital release, and Apple's Digital Master.
 const RAM: &str = "5000a285-b67e-4cfc-b54b-2b98f1810d2e";
 const RAM_APPLE: &str = "36e2aede-346d-4931-8565-78d810d167c7";
-
-struct PublicDns;
-#[async_trait::async_trait]
-impl Dns for PublicDns {
-    async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<SocketAddr>> {
-        Ok(vec![SocketAddr::new("8.8.8.8".parse()?, port)])
-    }
-}
 
 /// A request's URL as the fixtures are found by: host, path and its query in any order.
 fn key(url: &url::Url) -> String {
@@ -151,17 +144,7 @@ impl Transport for Captured {
         } else {
             body
         };
-        Ok(Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: url.clone(),
-            status,
-            retry_after_secs: 60,
-            location: None,
-            content_type,
-            body,
-        })
+        Ok(common::fetched(url.clone(), status, content_type, body))
     }
 }
 
@@ -690,7 +673,7 @@ fn urlencoding(s: &str) -> String {
 /// TIDAL and its own Spotify. Placed, each service shows one: the link on the card's own release
 /// (TIDAL, Deezer), else on the original edition (Apple), else the shorter one (Qobuz); never
 /// another Spotify page. A read shows the same as a search card.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_card_shows_each_services_link_on_its_own_release_or_the_original(pool: PgPool) {
     let card = save(&pool, GET_LUCKY, "MusicRecording", Some("Spotify")).await;
     let cfg = Config::default().also_on;
@@ -749,7 +732,7 @@ async fn a_card_shows_each_services_link_on_its_own_release_or_the_original(pool
 
 /// Of one service, a tagged member on the card's own release wins over a derived link on the
 /// original edition; a member placed on no release does not beat a placed derived link.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_tagged_member_wins_only_on_as_good_a_release(pool: PgPool) {
     let cfg = Config::default().also_on;
     let card = save(&pool, GET_LUCKY, "MusicRecording", Some("Spotify")).await;
@@ -832,7 +815,7 @@ async fn a_tagged_member_wins_only_on_as_good_a_release(pool: PgPool) {
 
 /// Of two pages of one document on a service (GovInfo's details page and its PDF), the page,
 /// though the PDF's link is shorter and sorts first.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn of_a_page_and_a_file_on_one_service_the_page_shows(pool: PgPool) {
     let cfg = Config::default().also_on;
     let card = save(
@@ -866,7 +849,7 @@ async fn of_a_page_and_a_file_on_one_service_the_page_shows(pool: PgPool) {
 
 /// A tagged member on the card's own service never shows, its own card read or not (one whose
 /// document names no service yet).
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn no_member_on_the_cards_own_service_shows(pool: PgPool) {
     let cfg = Config::default().also_on;
     let card = save(&pool, GET_LUCKY, "MusicRecording", Some("Spotify")).await;
@@ -907,7 +890,7 @@ async fn no_member_on_the_cards_own_service_shows(pool: PgPool) {
 
 /// A group that changes runs its music cards' sources again: the links each may show changed,
 /// and `editions` places them.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_group_that_changes_places_its_cards_links_again(pool: PgPool) {
     let cfg = Config::default().also_on;
     let card = save(&pool, GET_LUCKY, "MusicRecording", Some("Spotify")).await;
@@ -1046,7 +1029,7 @@ async fn a_spotify_cards_own_page_names_its_own_release() {
 
 /// The worker keeps what a run could not tell: with iTunes and TIDAL failing, the card's earlier
 /// places stay as recorded, and its run comes back sooner.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn the_worker_keeps_the_places_a_failing_service_could_not_tell(pool: PgPool) {
     if !has_services() {
         return;
@@ -1126,7 +1109,7 @@ async fn the_worker_keeps_the_places_a_failing_service_could_not_tell(pool: PgPo
 
 /// Of one service, a tagged member its service puts on another release (a later edition) comes
 /// after a derived link nothing placed.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_member_on_another_release_comes_after_an_unplaced_link(pool: PgPool) {
     let cfg = Config::default().also_on;
     let card = save(&pool, GET_LUCKY, "MusicRecording", Some("Spotify")).await;
@@ -1189,7 +1172,7 @@ async fn a_member_on_another_release_comes_after_an_unplaced_link(pool: PgPool) 
 
 /// The releases `editions` reads as the card's own and as the original edition are facts of its
 /// read.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_read_names_the_releases_as_facts(pool: PgPool) {
     let cfg = Config::default().also_on;
     let card = save(&pool, GET_LUCKY, "MusicRecording", Some("Spotify")).await;
@@ -1216,7 +1199,7 @@ async fn a_read_names_the_releases_as_facts(pool: PgPool) {
 
 /// Pages of the card's own service whose cards name no service yet never take a card's slots:
 /// with eight of them, a TIDAL link still shows.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn pages_of_the_cards_own_service_take_no_slot(pool: PgPool) {
     let cfg = Config::default().also_on;
     let card = save(&pool, GET_LUCKY, "MusicRecording", Some("Spotify")).await;
@@ -1272,7 +1255,7 @@ async fn pages_of_the_cards_own_service_take_no_slot(pool: PgPool) {
 
 /// A member that becomes another link's alias runs its group's music cards' sources again, in ten
 /// minutes.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_alias_assignment_places_its_groups_links_again(pool: PgPool) {
     let cfg = Config::default().also_on;
     let card = save(&pool, GET_LUCKY, "MusicRecording", Some("Spotify")).await;
@@ -1389,7 +1372,7 @@ async fn an_album_cards_own_release_pages_are_its_links() {
 /// Two runs of an album card keyed by its group: the second names the same links of its own
 /// release and keeps the same places (no link flips off and back), and no regrouping asks for a
 /// third run.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_album_cards_own_pages_stay_from_run_to_run(pool: PgPool) {
     if !has_services() {
         return;
@@ -1497,7 +1480,7 @@ async fn an_album_card_with_nothing_to_place_derives_its_own_pages() {
 
 /// Of a group of more members than a card shows, the one the card places on its own release is
 /// never cut before the per-service pick.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_placed_member_survives_the_cap(pool: PgPool) {
     let cfg = Config::default().also_on;
     let card = save(&pool, GET_LUCKY, "MusicRecording", Some("Spotify")).await;

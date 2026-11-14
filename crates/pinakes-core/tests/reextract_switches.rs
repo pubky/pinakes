@@ -7,7 +7,7 @@ use sqlx::PgPool;
 /// merged through `reextract all`, neither released nor moved by a weaker rule (a tracking
 /// parameter). A link no source reads (a comment's permalink) is released
 /// as before.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_switched_off_sources_aliases_stay_through_reextract(pool: PgPool) {
     if pinakes_core::sources::by_name("reddit").is_none() {
         return;

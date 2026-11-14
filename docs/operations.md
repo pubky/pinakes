@@ -56,8 +56,6 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `related_seed_links` | `32` | Seed links a related page samples: of the resource, its group's members and their aliases, the ones with the newest tags, at most this many. |
 | `collapse_refs_per_member` | `10000` | References counted per group member when `collapse=group` picks a group's row. |
 | `max_radius_m` | `200000.0` | Largest `near` radius (metres). |
-| `h3_resolutions` | `[0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 11, 11, 11, 11, 11, 11, 11]` | H3 resolution per map zoom level. |
-| `max_cluster_cells` | `10000` | Most cells one cluster query returns. |
 | `api_cache_capacity` | `10000` | API response cache entries. |
 | `reach_cost` | `6` | Budget units a search costs for each of `reach` and `boost`. |
 | `related_cost` | `6` | Budget units a related search costs. |
@@ -109,13 +107,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 
 ## Database
 
-Supported: PostgreSQL 16–18, PostGIS 3.4+, `pg_trgm` and h3 4.2.3 or newer (h3-pg added
-`h3_latlng_to_cell(point, integer)` in 4.2.3; without it every `cluster=` search fails). After
-migrating and before serving, `pinakesd` checks `to_regprocedure('h3_latlng_to_cell(point,integer)')`
-and refuses to start without it, naming the h3 `extversion` it found; development and suffixed
-builds that have the function start normally. Upgrading the package does not upgrade the
-extension in a database, because `CREATE EXTENSION IF NOT EXISTS` keeps the installed version:
-run `ALTER EXTENSION h3 UPDATE;` (and `ALTER EXTENSION h3_postgis UPDATE;` if installed).
+Supported: PostgreSQL 16–18 with PostGIS 3.4+ and `pg_trgm`.
 
 `migrations/0001_schema.sql` is the whole schema. `pinakesd --config <path> --migrate` creates it
 on an empty database and exits; the daemon does the same at startup, and so does `reextract`. A
@@ -898,7 +890,7 @@ limit is about 40/s). Change lines hold a card's values before and after a chang
 `limits.change_retention_days` (90): while a TMDB credential is set, startup refuses more than
 120 days, and a change line that holds a TMDB value goes after 120 days whatever that setting says,
 with TMDB on or off, so no TMDB value read more than six months ago stays served by
-`/v1/changes`.
+`POST /v1/changes/lookup`.
 
 Sources reach their services through the egress policy and its per-host budgets, one request
 at a time per host. A hub's published limit lowers its host's default pace like a source's own

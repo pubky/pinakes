@@ -45,6 +45,12 @@ fn rest_post(url: &Url, page: &Url) -> Option<(Url, u64)> {
     Some((record, id))
 }
 
+/// Whether the page's text holds what a post's API link is written with: without it the markup
+/// names none, and is not parsed.
+fn names_api(page: &Fetched) -> bool {
+    let body = String::from_utf8_lossy(&page.body);
+    body.contains("wp-json") || body.contains("?p=")
+}
 /// The site's REST record of the post a page names about itself: (record address, post id).
 pub fn post_api(page: &Fetched) -> Option<(Url, u64)> {
     let base = &page.url;
@@ -64,10 +70,10 @@ pub fn post_api(page: &Fetched) -> Option<(Url, u64)> {
     if from_header.is_some() {
         return from_header;
     }
-    let body = String::from_utf8_lossy(&page.body);
-    if !body.contains("wp-json") && !body.contains("?p=") {
+    if !names_api(page) {
         return None;
     }
+    let body = String::from_utf8_lossy(&page.body);
     let html = crate::resolver::html::document(&body).ok()?;
     let links = scraper::Selector::parse("head link[href]").ok()?;
     let mut shortlink = None;
@@ -247,6 +253,11 @@ impl Source for Wordpress {
         page: &Fetched,
         doc: &ResourceMeta,
     ) -> Result<Option<ResourceMeta>> {
+        // The cheap test first: only a page with a `Link` header or the marker in its text is
+        // copied and waits for a parse.
+        if page.validators.link.is_none() && !names_api(page) {
+            return Ok(None);
+        }
         let found = page.clone();
         let Some((api, id)) = crate::resolver::html::blocking(move || post_api(&found)).await?
         else {

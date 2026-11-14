@@ -8,8 +8,9 @@ if [[ ! -f "$config_path" ]]; then
 fi
 mkdir -p .runtime
 cargo build -p pinakesd
-./target/debug/pinakesd --config "$config_path" --migrate
-./target/debug/pinakesd --config "$config_path" > .runtime/pinakesd.log 2>&1 &
+pinakesd="${CARGO_TARGET_DIR:-target}/debug/pinakesd"
+"$pinakesd" --config "$config_path" --migrate
+"$pinakesd" --config "$config_path" > .runtime/pinakesd.log 2>&1 &
 daemon_pid=$!
 echo "$daemon_pid" > .runtime/pinakesd.pid
 tail -n 20 -F --pid="$daemon_pid" .runtime/pinakesd.log &

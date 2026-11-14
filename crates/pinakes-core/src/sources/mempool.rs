@@ -1589,10 +1589,7 @@ impl Source for Mempool {
         ]
     }
     fn budgets(&self) -> &'static [Budget] {
-        &[
-            ("mempool.space", 1.0, None),
-            ("blockstream.info", 1.0, None),
-        ]
+        &[("mempool.space", 1.0), ("blockstream.info", 1.0)]
     }
     fn examples(&self) -> &'static [Example] {
         &[
@@ -2254,8 +2251,6 @@ mod tests {
         assert_eq!(card.details["pool"], "BTCC");
         assert_eq!(card.details["total_fees"], 212514269u64);
         assert_eq!(card.details["reward"], 1462514269u64);
-        // The other explorers are the also-on half's (`also_on`), not the card's.
-        assert!(card.also_on.is_empty());
         let links: Vec<_> = links(&from_root(&card.id).unwrap())
             .into_iter()
             .map(|(_, uri)| uri)

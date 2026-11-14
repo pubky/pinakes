@@ -214,7 +214,7 @@ async fn reference(pool: &PgPool, id: &str, label: &str) {
     sqlx::query("INSERT INTO reference(resource_id,kind,author,label,object_path,created_at) VALUES($1,'tag',$2,$3,$1,now())")
     .bind(id).bind("y".repeat(52)).bind(label).execute(pool).await.unwrap();
 }
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn fifty_one_jobs_two_calls_cache_refresh_and_separation(pool: PgPool) {
     let (state, resolver, server) = mock(&pool).await;
     let mut uris = vec![
@@ -383,7 +383,7 @@ async fn fifty_one_jobs_two_calls_cache_refresh_and_separation(pool: PgPool) {
     );
     server.abort();
 }
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn unknown_objects_are_missing_429_defers_and_category_filters(pool: PgPool) {
     let (state, resolver, server) = mock(&pool).await;
     let uri = "https://www.openstreetmap.org/node/111";
@@ -438,8 +438,8 @@ async fn unknown_objects_are_missing_429_defers_and_category_filters(pool: PgPoo
     );
     server.abort();
 }
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
-async fn geo_is_final_and_sql_h3_agrees_with_h3o(pool: PgPool) {
+#[sqlx::test(migrations = "../../migrations")]
+async fn geo_is_final(pool: PgPool) {
     let uri = "geo:46.0051,8.9528,20;crs=wgs84;u=5";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
     let job = queue::claim(&pool, "geo", &QueueConfig::default())
@@ -465,22 +465,9 @@ async fn geo_is_final_and_sql_h3_agrees_with_h3o(pool: PgPool) {
         .await
         .unwrap()
         .is_none());
-    for res in 0u8..=11 {
-        let sql: String =
-            sqlx::query_scalar("SELECT h3_latlng_to_cell(point(8.9528,46.0051),$1)::text")
-                .bind(i32::from(res))
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        let rust = h3o::LatLng::new(46.0051, 8.9528)
-            .unwrap()
-            .to_cell(res.try_into().unwrap())
-            .to_string();
-        assert_eq!(sql, rust);
-    }
 }
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
-async fn viewport_distance_time_facets_clustering_and_etag(pool: PgPool) {
+#[sqlx::test(migrations = "../../migrations")]
+async fn viewport_distance_time_facets_and_etag(pool: PgPool) {
     let mut ids = Vec::new();
     for (i, (lat, lon)) in [
         (46.0, 8.0),
@@ -596,42 +583,6 @@ async fn viewport_distance_time_facets_clustering_and_etag(pool: PgPool) {
     )
     .await;
     assert!(view["items"][0]["uri"].as_str().unwrap().ends_with("/1"));
-    let (status, _, view) = call(
-        &app,
-        "/v1/search?bbox=5,45,11,48&cluster=8&type=Place&limit=2&facet=tags",
-        None,
-    )
-    .await;
-    assert_eq!(status, 200, "{view}");
-    assert_eq!(view["truncated"], false);
-    let clusters = view["clusters"].as_array().unwrap();
-    let points = view["points"].as_array().unwrap();
-    assert_eq!(
-        clusters
-            .iter()
-            .map(|c| c["count"].as_u64().unwrap())
-            .sum::<u64>()
-            + points.len() as u64,
-        4
-    );
-    assert_eq!(view["total"], 4);
-    assert!(clusters
-        .iter()
-        .all(|c| c["top"].as_array().unwrap().len() <= 3));
-    assert!((clusters[0]["lat"].as_f64().unwrap() - 46.001).abs() < 1e-6);
-    let (_, _, view) = call(
-        &app,
-        "/v1/search?bbox=5,45,11,48&cluster=8&type=Place&limit=50",
-        None,
-    )
-    .await;
-    assert_eq!(view["clusters"], json!([]));
-    assert_eq!(view["points"].as_array().unwrap().len(), 4);
-    assert!(view["points"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|point| point.get("score").is_none()));
     let (_, _, view) = call(
         &app,
         "/v1/search?bbox=13,52,14,53&type=Place&facet=tags",
@@ -650,8 +601,6 @@ async fn viewport_distance_time_facets_clustering_and_etag(pool: PgPool) {
         "near=0,0&radius=200001",
         "near=91,0&radius=1",
         "near=0,0&radius=NaN",
-        "bbox=0,0,1,1&cluster=NaN",
-        "bbox=0,0,1,1&cluster=8&cursor=abc",
         "from=2027-01-01T00:00:00Z&to=2026-01-01T00:00:00Z",
     ] {
         assert_eq!(
@@ -660,10 +609,6 @@ async fn viewport_distance_time_facets_clustering_and_etag(pool: PgPool) {
             "{query}"
         );
     }
-    let (status, _, limited) =
-        call(&app, "/v1/search?bbox=5,45,11,48&cluster=8&limit=1", None).await;
-    assert_eq!(status, 200, "{limited}");
-    assert_eq!(limited["truncated"], true);
     let (_, before, _) = call(&app, "/v1/search?bbox=5,45,11,48&facet=tags", None).await;
     sqlx::query(
         "INSERT INTO feed_cursor(nexus,cursor,epoch,feed_length) VALUES('test',1,'epoch',1)",
@@ -684,7 +629,7 @@ async fn viewport_distance_time_facets_clustering_and_etag(pool: PgPool) {
     server.abort();
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn osm_history_and_unconfirmed_fetches_stay_in_derivative_table(pool: PgPool) {
     let (state, resolver, server) = mock(&pool).await;
     let uri = "https://www.openstreetmap.org/node/240109189";
@@ -796,7 +741,7 @@ async fn osm_history_and_unconfirmed_fetches_stay_in_derivative_table(pool: PgPo
     server.abort();
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn batch_failures_are_per_object_and_upstream_retries_do_not_charge(pool: PgPool) {
     use std::sync::atomic::AtomicU16;
     let code = Arc::new(AtomicU16::new(200));
@@ -892,7 +837,7 @@ async fn batch_failures_are_per_object_and_upstream_retries_do_not_charge(pool: 
     server.abort();
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn object_spellings_are_aliases_of_one_object(pool: PgPool) {
     let (mock, resolver, server) = mock(&pool).await;
     let uris = [
@@ -954,7 +899,7 @@ async fn object_spellings_are_aliases_of_one_object(pool: PgPool) {
 /// transfers only, not HEAD, 304 or 416), all with
 /// the database closed. A rewrite replaces the file atomically: a download in progress keeps the
 /// file it opened, and a failed write leaves the previous file and no temporary one.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn the_dump_is_a_static_file_written_atomically(pool: PgPool) {
     let (_, resolver, server) = mock(&pool).await;
     let node = "https://www.openstreetmap.org/node/240109189";
@@ -1058,7 +1003,7 @@ async fn the_dump_is_a_static_file_written_atomically(pool: PgPool) {
 
 /// Each writer has its own temporary file; the lock file keeps one writer per directory, and the
 /// writer holding it clears the temporary files an interrupted one left.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn one_writer_per_directory_and_leftover_temporary_files_go(pool: PgPool) {
     use pinakes_core::osm_dump::{lock, path, temp_path, write, FILE};
     let dir = dump_dir("temps");
@@ -1094,7 +1039,7 @@ async fn one_writer_per_directory_and_leftover_temporary_files_go(pool: PgPool) 
 }
 
 /// The daemon writes a missing or stale file at startup and leaves a fresh one alone.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn startup_writes_a_missing_or_stale_dump(pool: PgPool) {
     use pinakes_core::osm_dump::{due_in, path, run};
     let day = std::time::Duration::from_secs(86400);
@@ -1146,7 +1091,7 @@ async fn startup_writes_a_missing_or_stale_dump(pool: PgPool) {
 }
 
 /// Startup removes an interrupted write's temporary file even when no write is due.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn startup_removes_leftover_temporary_files(pool: PgPool) {
     use pinakes_core::osm_dump::{path, run, FILE};
     let day = std::time::Duration::from_secs(86400);
@@ -1176,7 +1121,7 @@ async fn startup_removes_leftover_temporary_files(pool: PgPool) {
 
 /// Shutdown does not wait for a write in progress: it is cancelled, the previous state stays, and
 /// the next writer removes its temporary file.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn shutdown_cancels_a_dump_write_in_progress(pool: PgPool) {
     use pinakes_core::osm_dump::{path, run, write};
     let day = std::time::Duration::from_secs(86400);
@@ -1219,7 +1164,7 @@ async fn shutdown_cancels_a_dump_write_in_progress(pool: PgPool) {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_osm_member_keeps_its_own_card_and_the_group_holds_no_osm_fact(pool: PgPool) {
     let (_, resolver, server) = mock(&pool).await;
     let node = "https://www.openstreetmap.org/node/240109189";
@@ -1317,7 +1262,7 @@ async fn group_of(pool: &PgPool, id: &str) -> Option<String> {
 }
 
 /// Every OSM URL style for one object (Berlin, node 240109189).
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn osm_url_styles_resolve_as_the_object_a_point_or_one_final_refusal(pool: PgPool) {
     let (mock, resolver, server) = mock(&pool).await;
     let canonical = "https://www.openstreetmap.org/node/240109189";
@@ -1480,7 +1425,7 @@ async fn osm_url_styles_resolve_as_the_object_a_point_or_one_final_refusal(pool:
     server.abort();
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn reextract_bypasses_the_osm_cache(pool: PgPool) {
     let (mock, resolver, server) = mock(&pool).await;
     let id = store::ensure_resource(&pool, "https://www.openstreetmap.org/node/240109189")
@@ -1510,7 +1455,7 @@ async fn reextract_bypasses_the_osm_cache(pool: PgPool) {
 
 /// Re-extracting osm.org object shortlinks stored as points makes them aliases of their object,
 /// and changeset/note shortlinks drop their point facts on the way to one final refusal.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn reextract_makes_object_shortlinks_aliases_and_refuses_osm_host_pages(pool: PgPool) {
     let (_, resolver, server) = mock(&pool).await;
     let canonical = "https://www.openstreetmap.org/node/240109189";
@@ -1688,7 +1633,7 @@ async fn boundary_script(pool: &PgPool) -> Option<std::process::Output> {
 /// `scripts/verify-osm-boundary` accepts the geo change lines of OSM-host location
 /// links (as the schema's `change_web_osm_boundary` does) and still refuses web facts on OSM
 /// hosts.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn boundary_script_accepts_location_link_history(pool: PgPool) {
     let marker = "https://www.openstreetmap.org/?mlat=52.5186925&mlon=13.3996024";
     let id = store::ensure_resource(&pool, marker).await.unwrap();
@@ -1731,7 +1676,7 @@ async fn boundary_script_accepts_location_link_history(pool: PgPool) {
 
 /// A resolved OSM-route row that re-extraction moves to web (a Nominatim alias with a lowercase
 /// osmtype, which the OSM route refuses) loses every resolution mark, not only its facts.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn reextract_unresolves_an_osm_row_moving_to_web(pool: PgPool) {
     let alias = "https://nominatim.openstreetmap.org/details?osmtype=n&osmid=240109189";
     let id = store::ensure_resource(&pool, alias).await.unwrap();

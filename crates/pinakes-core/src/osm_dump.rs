@@ -251,10 +251,7 @@ mod tests {
     /// A write cancelled at its last step (shutdown) keeps the directory's lock until its rename
     /// is done: another writer can neither take the lock nor publish while the cancelled write's
     /// rename is still to come, and once it has gone the next writer's file stays in place.
-    #[sqlx::test(
-        migrations = "../../migrations",
-        fixtures("../tests/fixtures/require_h3.sql")
-    )]
+    #[sqlx::test(migrations = "../../migrations")]
     async fn a_cancelled_write_keeps_the_lock_until_its_rename_is_done(pool: PgPool) {
         let dir = std::env::temp_dir().join(format!("pinakes-cancelled-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

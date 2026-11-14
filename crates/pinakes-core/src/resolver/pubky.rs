@@ -198,7 +198,7 @@ impl Resolver for PubkyResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resolver::egress::{Dns, Fetched, Transport, Validators};
+    use crate::resolver::egress::{Dns, Fetched, Transport};
     use pkarr::{dns::rdata::SVCB, Keypair, SignedPacket};
     use std::{
         collections::HashMap,
@@ -210,7 +210,7 @@ mod tests {
     fn conventional_card_and_namespace_matching() {
         let uri =
             "pubky://ybndrfg8ejkmcpqxot1uwisza345h769ybndrfg8ejkmcpqxot1uwi/pub/other.app/item";
-        let doc=super::super::pubky_apps::card(uri,"application/json",br#"{"title":"A deck","description":"Cards","image":"https://example.org/cover.png","password":"never keep"}"#,10);
+        let doc=super::super::pubky_apps::card_at(uri,"application/json",br#"{"title":"A deck","description":"Cards","image":"https://example.org/cover.png","password":"never keep"}"#,10,chrono::Utc::now());
         assert_eq!(doc.name.as_deref(), Some("A deck"));
         assert!(!serde_json::to_string(&doc).unwrap().contains("password"));
         assert_eq!(crate::resolver::classify(uri), Some("pubky"));
@@ -335,16 +335,15 @@ mod tests {
                 .unwrap()
                 .push((url.to_string(), options.headers.clone()));
             Ok(Fetched {
-                permanent_redirect: false,
-                truncated: false,
-                validators: Validators::default(),
-                url: url.clone(),
-                // As homeservers serve JSON without an extension.
-                content_type: "application/octet-stream".into(),
-                status: self.status,
                 retry_after_secs: 0,
                 location: Some("https://elsewhere.example/pub/app/item".into()),
-                body: self.body.as_bytes().to_vec(),
+                ..Fetched::answer(
+                    url.clone(),
+                    self.status,
+                    // As homeservers serve JSON without an extension.
+                    "application/octet-stream".into(),
+                    self.body.as_bytes().to_vec(),
+                )
             })
         }
     }

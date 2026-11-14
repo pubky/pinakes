@@ -3,6 +3,7 @@
 //! (`tests/fixtures/shared/music_enrichment`, see its provenance.json).
 mod common;
 use axum::{body::Body, http::Request, Router};
+use common::{author, media::PublicDns};
 use http_body_util::BodyExt;
 use pinakes_core::{
     api::{self, AppState},
@@ -12,7 +13,7 @@ use pinakes_core::{
     nexus::{Change, Changes, FeedPage, Kind, Op},
     queue,
     resolver::{
-        egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+        egress::{Egress, FetchOptions, Fetched, Transport},
         web::WebResolver,
     },
     telemetry::Metrics,
@@ -34,14 +35,6 @@ const KIND_OF_BLUE: &str =
     "https://musicbrainz.org/release-group/8e8a594f-2175-38c7-a871-abb68ec363e7";
 const GET_LUCKY: &str = "https://musicbrainz.org/recording/833f00e1-781f-4edd-90e4-e52712618862";
 const COLBURN: &str = "https://musicbrainz.org/artist/e7528aba-c5e2-4917-9a52-9b61d56f9a13";
-
-struct PublicDns;
-#[async_trait::async_trait]
-impl Dns for PublicDns {
-    async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<SocketAddr>> {
-        Ok(vec![SocketAddr::new("8.8.8.8".parse()?, port)])
-    }
-}
 
 fn fixture(name: &str) -> Vec<u8> {
     std::fs::read(format!(
@@ -200,22 +193,21 @@ fn cover_art(path: &str, mode: CoverArt) -> Fetched {
     let answer = fixture_json(file);
     let busy = mode == CoverArt::Busy;
     Fetched {
-        permanent_redirect: false,
-        truncated: false,
-        validators: Default::default(),
-        url: url::Url::parse(&format!("https://coverartarchive.org{path}")).unwrap(),
-        status: if busy {
-            503
-        } else {
-            answer["status"].as_u64().unwrap() as u16
-        },
         retry_after_secs: if busy { 120 } else { 60 },
         location: answer["location"]
             .as_str()
             .filter(|_| !busy)
             .map(str::to_owned),
-        content_type: answer["content_type"].as_str().unwrap().to_owned(),
-        body: vec![],
+        ..common::fetched(
+            url::Url::parse(&format!("https://coverartarchive.org{path}")).unwrap(),
+            if busy {
+                503
+            } else {
+                answer["status"].as_u64().unwrap() as u16
+            },
+            answer["content_type"].as_str().unwrap().to_owned(),
+            vec![],
+        )
     }
 }
 /// Answers by host, path and query from the recorded fixtures; records each request.
@@ -478,15 +470,13 @@ impl Transport for Recorded {
                         })
                     } else if mode.album_item_busy && ids == "Q283221" {
                         return Ok(Fetched {
-                            permanent_redirect: false,
-                            truncated: false,
-                            validators: Default::default(),
-                            url: url.clone(),
-                            status: 503,
                             retry_after_secs: 120,
-                            location: None,
-                            content_type: "application/json".into(),
-                            body: b"{}".to_vec(),
+                            ..common::fetched(
+                                url.clone(),
+                                503,
+                                "application/json".into(),
+                                b"{}".to_vec(),
+                            )
                         });
                     } else if mode.album_item != AlbumItem::Recorded && ids == "Q283221" {
                         edited(&file, |v| {
@@ -661,15 +651,8 @@ impl Transport for Recorded {
             _ => (status, body),
         };
         Ok(Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: url.clone(),
-            status,
             retry_after_secs: retry_after,
-            location: None,
-            content_type: "application/json".into(),
-            body,
+            ..common::fetched(url.clone(), status, "application/json".into(), body)
         })
     }
 }
@@ -1656,14 +1639,6 @@ async fn resolve_once(pool: &PgPool, resolver: &WebResolver, uri: &str) -> Resou
         .unwrap();
     serde_json::from_value(doc).unwrap()
 }
-fn author(n: usize) -> String {
-    let alphabet = b"ybndrfg8ejkmcpqxot1uwisza345h769";
-    let mut v = vec![b'y'; 52];
-    for i in 0..5 {
-        v[50 - i] = alphabet[(n >> (5 * i)) & 31];
-    }
-    String::from_utf8(v).unwrap()
-}
 /// A tag on each of `uris`, so each resource exists, is queued and is found by search.
 async fn tag(pool: &PgPool, uris: &[&str]) {
     let saved = ingest::cursor(pool, "fixture").await.unwrap();
@@ -1704,7 +1679,7 @@ async fn tag(pool: &PgPool, uris: &[&str]) {
 /// A transient failure (Wikipedia's 503 or 403, Commons' 429) keeps the stored image, description
 /// and credits, and is asked about less often while it lasts; a definite miss (the article is gone: 404) clears that field and its credit, and
 /// keeps the other. A transient failure with nothing stored saves MusicBrainz's own card.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn transient_failures_keep_stored_content_and_misses_clear_it(pool: PgPool) {
     tag(&pool, &[MILES]).await;
     let busy = Mode {
@@ -1785,7 +1760,7 @@ async fn transient_failures_keep_stored_content_and_misses_clear_it(pool: PgPool
 /// The item an artist's MBID names, through the queue: a busy Wikidata (503, maxlag) keeps the
 /// stored image, description and credits; a search that definitely finds no item (and no
 /// Discogs item) clears them.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_busy_search_keeps_stored_content_and_no_item_clears_it(pool: PgPool) {
     tag(&pool, &[SEFA]).await;
     let full = resolve_once(&pool, &web(Recorded::new(Mode::default()), true), SEFA).await;
@@ -1834,7 +1809,7 @@ async fn call(app: &Router, method: &str, path: &str, body: Option<Value>) -> Va
 
 /// Every route that shows a card's image and description shows their credits: a read by URI and
 /// by ID, a search and a lookup; a card without any shows `[]`.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn credits_show_on_every_card_route(pool: PgPool) {
     tag(&pool, &[MILES, SEFA]).await;
     resolve_once(&pool, &web(Recorded::new(Mode::default()), true), MILES).await;
@@ -1900,7 +1875,7 @@ async fn credits_show_on_every_card_route(pool: PgPool) {
 /// MusicBrainz's own facts about the entity are on the resource read, whether or not the card
 /// is enriched: an artist's disambiguation, country (ISO 3166-1 code), area, top genres and
 /// type; an album's type and first release date; a recording's first release date.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn musicbrainz_facts_show_on_the_resource_read(pool: PgPool) {
     tag(&pool, &[SEFA, KIND_OF_BLUE, GET_LUCKY]).await;
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
@@ -1945,7 +1920,7 @@ async fn musicbrainz_facts_show_on_the_resource_read(pool: PgPool) {
 /// facts of its own card: the resource read gives `duration` (in seconds, as the
 /// `musicbrainz_entity` source gives it) and `artist` from the card itself, before any also-on
 /// source has read the song (none has here).
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_enriched_recording_keeps_its_length_as_a_fact(pool: PgPool) {
     tag(&pool, &[GET_LUCKY]).await;
     let doc = resolve_once(&pool, &web(Recorded::new(Mode::default()), true), GET_LUCKY).await;
@@ -2173,7 +2148,7 @@ async fn a_busy_wikidata_leaves_the_album_its_cover() {
 
 /// Through the queue, while Wikidata is busy: a card with nothing stored keeps the cover; a stored
 /// free Commons image comes back over it with its credit, as does the stored description.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_stored_commons_image_stays_over_the_cover_while_wikidata_is_busy(pool: PgPool) {
     tag(&pool, &[KIND_OF_BLUE]).await;
     let busy = |album_has_image| Mode {
@@ -2255,7 +2230,7 @@ async fn no_cover_is_none_and_a_busy_archive_is_unread() {
 }
 
 /// A stored cover stays through a busy archive and goes when the archive says there is none.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_stored_cover_stays_while_the_archive_is_busy(pool: PgPool) {
     tag(&pool, &[KIND_OF_BLUE]).await;
     let stored = resolve_once(
@@ -2367,7 +2342,7 @@ impl pinakes_core::also_on::Source for Keys {
 /// relation to its artist's item), keys nothing. In groups the key is one more single-object
 /// key: a page that names another item for the same release group stays apart from the album's
 /// group (a conflict, counted), and a page with only the item's key joins it.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_musicbrainz_page_keys_its_own_wikidata_item_and_a_disagreeing_one_stays_apart(
     pool: PgPool,
 ) {
@@ -2586,7 +2561,7 @@ fn keys_of(found: &pinakes_core::also_on::Found) -> Vec<&str> {
 /// single's too (Wikidata often keys a single's track by it through its streaming IDs, so the
 /// track would join the album) nor an item with no identifier yet. Their text still counts for
 /// the card's description, as before.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_album_is_keyed_only_by_an_item_that_is_exactly_its_own(pool: PgPool) {
     let group = "mb:release-group:8e8a594f-2175-38c7-a871-abb68ec363e7";
     let Some(own) = entity_lookup(KIND_OF_BLUE, Mode::default(), &[]).await else {
@@ -2682,7 +2657,7 @@ async fn a_track_of_the_item_stays_apart(pool: &PgPool, album_item: AlbumItem) {
 /// An album's own item that also names one recording (and that recording's Spotify track) is a
 /// single's track's too: it keys no album, so the track the `wikidata` source keys by it stays
 /// out of the album's group.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_album_item_that_names_a_recording_keys_no_album(pool: PgPool) {
     let group = "mb:release-group:8e8a594f-2175-38c7-a871-abb68ec363e7";
     let mode = Mode {

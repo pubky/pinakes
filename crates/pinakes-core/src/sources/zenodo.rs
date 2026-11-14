@@ -225,7 +225,7 @@ impl Source for Zenodo {
         ]
     }
     fn budgets(&self) -> &'static [super::Budget] {
-        &[("zenodo.org", 2.2, None)]
+        &[("zenodo.org", 2.2)]
     }
     fn examples(&self) -> &'static [Example] {
         &[Example {

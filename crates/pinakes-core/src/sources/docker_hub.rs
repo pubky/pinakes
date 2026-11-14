@@ -199,7 +199,7 @@ impl Source for DockerHub {
         ]
     }
     fn budgets(&self) -> &'static [super::Budget] {
-        &[("hub.docker.com", 3.0, None)]
+        &[("hub.docker.com", 3.0)]
     }
     fn examples(&self) -> &'static [Example] {
         &[

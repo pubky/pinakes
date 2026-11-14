@@ -17,19 +17,15 @@ use std::{
     sync::{Arc, Mutex},
 };
 use url::Url;
+mod common;
 
 fn page(uri: &str, body: &str, status: u16) -> Fetched {
-    Fetched {
-        permanent_redirect: false,
-        truncated: false,
-        validators: Default::default(),
-        url: uri.parse().unwrap(),
-        content_type: "text/html".into(),
+    common::fetched(
+        uri.parse().unwrap(),
         status,
-        retry_after_secs: 60,
-        location: None,
-        body: body.as_bytes().to_vec(),
-    }
+        "text/html".into(),
+        body.as_bytes().to_vec(),
+    )
 }
 #[test]
 fn captured_walls_stubs_and_content_are_distinguished() {
@@ -94,7 +90,7 @@ fn captured_walls_stubs_and_content_are_distinguished() {
 #[tokio::test]
 async fn real_http_error_bodies_reach_interstitial_detection_with_a_cap() {
     use axum::{http::StatusCode, routing::get, Router};
-    use pinakes_core::resolver::egress::read_response;
+    use pinakes_core::resolver::egress::read_response_with;
     let app = Router::new()
         .route(
             "/forbidden",
@@ -147,7 +143,8 @@ async fn real_http_error_bodies_reach_interstitial_detection_with_a_cap() {
         ("ordinary", 503, Page::Content),
     ] {
         let uri: Url = format!("http://{address}/{path}").parse().unwrap();
-        let f = read_response(uri.clone(), client.get(uri.clone()).send().await.unwrap())
+        let response = client.get(uri.clone()).send().await.unwrap();
+        let f = read_response_with(uri.clone(), response, &Default::default())
             .await
             .unwrap();
         assert_eq!(f.status, status);
@@ -416,7 +413,7 @@ fn wall_heuristics_need_context_and_cover_more_vendors() {
 /// A challenge page is a failed fetch: the resource turns `unreachable` with the normal backoff
 /// and dead letter, keeps its accepted facts and group keys, never confirms disappearance and
 /// writes no change line; it stays in search and recovers with the next good page.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn walls_are_unreachable_with_normal_backoff_and_keep_their_facts(pool: PgPool) {
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
@@ -629,7 +626,7 @@ impl Transport for Wallet {
 }
 /// Text stored before the decoding fix (a plain `&` read back as `&amp;`) is repaired by
 /// `reextract web`: the resource is fetched again and extracted with today's rules.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn reextract_repairs_text_stored_before_the_decoding_fix(pool: PgPool) {
     let uri = "https://wallet.example/";
     let id = store::ensure_resource(&pool, uri).await.unwrap();

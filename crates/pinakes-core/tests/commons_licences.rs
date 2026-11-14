@@ -6,7 +6,7 @@ use pinakes_core::{
     event::{adapters::service::PlatformResolver, service::EventService},
     model::ResourceMeta,
     resolver::{
-        egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+        egress::{Egress, FetchOptions, Fetched, Transport},
         osm::OsmResolver,
         web::WebResolver,
         Resolver,
@@ -20,14 +20,7 @@ use std::{
 };
 
 mod common;
-
-struct PublicDns;
-#[async_trait::async_trait]
-impl Dns for PublicDns {
-    async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<SocketAddr>> {
-        Ok(vec![SocketAddr::new("93.184.216.34".parse()?, port)])
-    }
-}
+use common::PublicDns;
 
 fn fixture(name: &str) -> Vec<u8> {
     std::fs::read(format!(
@@ -170,17 +163,12 @@ impl Transport for Recorded {
             }
             _ => (404, b"{}".to_vec()),
         };
-        Ok(Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: url.clone(),
+        Ok(common::fetched(
+            url.clone(),
             status,
-            retry_after_secs: 60,
-            location: None,
-            content_type: "application/json".into(),
+            "application/json".into(),
             body,
-        })
+        ))
     }
 }
 
@@ -224,7 +212,7 @@ fn credit(item: &Item) -> Value {
 /// Signal's screenshot (AGPL), Mindustry's (GPLv3) and The Matrix's (Commons' `Attribution`):
 /// each card shows Commons' thumbnail with one credit, the file's author, the licence's SPDX ID
 /// (or `Attribution`) and its text, and the file's page. One Commons request each.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn gnu_and_attribution_files_show_with_their_credit(pool: PgPool) {
     for item in ITEMS {
         let (doc, t) = item_card(&pool, item, Commons::Recorded).await;
@@ -247,7 +235,7 @@ async fn gnu_and_attribution_files_show_with_their_credit(pool: PgPool) {
 
 /// The licence alone does not show a file: without its author, or with a URL that names another
 /// licence than its name, the card has no image and no credit.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_free_licence_without_its_author_shows_nothing(pool: PgPool) {
     let (shown, _) = item_card(&pool, &SIGNAL, Commons::Recorded).await;
     assert_eq!(shown.image.as_deref(), Some(SIGNAL.image));

@@ -303,7 +303,7 @@ impl Source for LegislationGovUk {
     }
     fn budgets(&self) -> &'static [Budget] {
         // 1,500 requests per 5 minutes; the site recommends a gentler pace.
-        &[("www.legislation.gov.uk", 1.0, None)]
+        &[("www.legislation.gov.uk", 1.0)]
     }
     fn examples(&self) -> &'static [Example] {
         &[

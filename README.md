@@ -11,9 +11,9 @@ Clients combine the two by URI: **Pinakes ranks, Nexus hydrates.** A client send
 cards Pinakes returns (`uri`, and `aliases` for other spellings; for an occurrence,
 `occurrence.feed_uri`) to Nexus `/v0/stream/resources/by_ids` as `uris` (batches of 100) for
 counts and tags. Pinakes IDs are its own and never match Nexus IDs.
-That batch view, and a feed of tag lines, are on the branch `feat/resources-changes-feed` of the
+That batch view and the reference feed are on the branch `feat/resources-changes-feed` of the
 fork [`gillohner/pubky-nexus`](https://github.com/gillohner/pubky-nexus/tree/feat/resources-changes-feed),
-not yet in pubky/pubky-nexus ([design §4](docs/design.md)).
+not yet in pubky/pubky-nexus.
 
 ## How it works
 
@@ -74,11 +74,11 @@ ID, makes a key; what a page says about itself is at most a fact. A group is a h
 never a merge.
 
 **Serve.** The public listener (`listen`, port 8090) serves `/v1`: one search with filters,
-facets, map clusters and group collapse; cards by ID or URI; batch lookup; a compose-time
+facets and group collapse; cards by ID or URI; batch lookup; a compose-time
 `resolve`; feed occurrences; and changes since a time. The admin listener (`admin_listen`, port
 9090) serves `/metrics`, operator info, stored documents and group curation.
 
-**Database.** PostgreSQL with PostGIS, `pg_trgm` and h3. The schema is one file,
+**Database.** PostgreSQL with PostGIS and `pg_trgm`. The schema is one file,
 `migrations/0001_schema.sql`. The main tables are `resource` (the document and its indexed facts),
 `reference`, `occurrence`, `resource_alias`, `resource_group`, `resource_key`, `resource_fact`,
 `derived_link` and `resource_change`. The work queues are tables too: `resource` rows for
@@ -100,10 +100,8 @@ card. Nominatim and Nexus are trusted upstreams outside this policy.
 
 ## Run locally
 
-Requires Rust 1.89 or newer, PostgreSQL 16–18 with PostGIS 3.4+, `pg_trgm` and h3 4.2.3+
-(`pinakesd` refuses to start without `h3_latlng_to_cell(point, integer)`, and every database test
-fails with the h3 version found). On Ubuntu:
-`postgresql-16 postgresql-16-postgis-3 postgresql-contrib-16 postgresql-16-h3` (from the
+Requires Rust 1.98.1 (`rust-toolchain.toml` selects it), PostgreSQL 16–18 with PostGIS 3.4+ and
+`pg_trgm`. On Ubuntu: `postgresql-16 postgresql-16-postgis-3 postgresql-contrib-16` (from the
 [PGDG repository](https://www.postgresql.org/download/linux/ubuntu/) if the distribution lacks
 version 16). Docker is not required.
 
@@ -147,12 +145,13 @@ export DATABASE_URL='postgresql:///postgres?host=/var/run/postgresql'
 scripts/test
 ```
 
-`scripts/test` runs `cargo fmt --check`, clippy with warnings denied, every workspace test and
+`scripts/test` runs `cargo fmt --check`, clippy with warnings denied, every workspace test, the
+e2e driver's own Node tests (`npm test --prefix e2e`, so it needs Node 20 or newer) and
 `scripts/check-ops`. Integration tests create their own disposable databases and never touch the
 development database. HTTP tests use local servers, injected transports and recorded fixtures.
 The tests that run `scripts/verify-osm-boundary` also need `psql`, `pg_dump` and `rg`.
 
-End-to-end checks ([e2e/README.md](e2e/README.md)) need Node 20 or newer:
+End-to-end checks ([e2e/README.md](e2e/README.md)) need Node 20 or newer too:
 
 - `scripts/e2e --mock` runs the whole flow (schema, ingest, queue, resolvers, groups, API)
   against fixtures, offline;
@@ -185,7 +184,6 @@ without one.
 
 ## Documentation
 
-- [docs/design.md](docs/design.md): what Pinakes is, what it needs from Nexus, and why.
 - [docs/api.md](docs/api.md): the `/v1` API, response shapes and example requests.
 - [docs/operations.md](docs/operations.md): limits, database, egress, re-extraction, monitoring
   and maintenance.
@@ -193,6 +191,7 @@ without one.
   sizing estimates, production network and upgrade checklist.
 - [docs/api-keys.md](docs/api-keys.md): complete credential setup and provider fallbacks.
 - [docs/sources](docs/sources/README.md): one page per official-API source.
+- [docs/pubky-apps.md](docs/pubky-apps.md): the Pubky app profiles and how to add one.
 - [ops/README.md](ops/README.md): metrics, alerts and the Grafana dashboard.
 - [data/README.md](data/README.md): pinned data sets and their licences.
 - [e2e/README.md](e2e/README.md): the end-to-end harness.

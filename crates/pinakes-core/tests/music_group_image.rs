@@ -40,7 +40,7 @@ async fn read(app: &axum::Router, id: &str) -> Value {
     assert_eq!(r.status(), 200);
     serde_json::from_slice(&r.into_body().collect().await.unwrap().to_bytes()).unwrap()
 }
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn exact_chain_shares_image_credit_and_also_on_both_ways(pool: PgPool) {
     let cfg = Config::default();
     let a_uri = "https://musicbrainz.org/recording/3276d651-6f19-4e3b-bfb2-d136f823f620";
@@ -134,7 +134,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logs {
         self.clone()
     }
 }
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn committed_music_groups_are_logged_and_capped(pool: PgPool) {
     let logs = Logs::default();
     let subscriber = tracing_subscriber::fmt()
@@ -184,7 +184,7 @@ async fn committed_music_groups_are_logged_and_capped(pool: PgPool) {
     assert!(text.contains("group reconciliation committed"), "{text}");
     assert!(text.contains("group size cap reached"), "{text}");
 }
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn album_link_does_not_union_track_groups(pool: PgPool) {
     let cfg = Config::default();
     let album_uri = "https://musicbrainz.org/release/2b4cd0d4-fe21-46ac-a4fc-ece7e990a9d4";

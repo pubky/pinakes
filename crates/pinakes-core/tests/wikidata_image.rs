@@ -6,7 +6,7 @@ use pinakes_core::{
     event::{adapters::service::PlatformResolver, service::EventService},
     model::{CreditField, ResourceMeta},
     resolver::{
-        egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+        egress::{Egress, FetchOptions, Fetched, Transport},
         osm::OsmResolver,
         web::WebResolver,
         Resolver,
@@ -20,19 +20,12 @@ use std::{
 };
 
 mod common;
+use common::PublicDns;
 
 const ITEM: &str = "https://www.wikidata.org/wiki/Q359924";
 const ARTICLE: &str = "https://en.wikipedia.org/wiki/Golden_Gate_Hotel_and_Casino";
 const IMAGE: &str = "https://thumb.wikimedia.org/wikipedia/commons/thumb/c/c5/M-408116720.jpg/960px-M-408116720.jpg";
 const FILE_PATH: &str = "https://commons.wikimedia.org/wiki/Special:FilePath/M%2D408116720%2Ejpg";
-
-struct PublicDns;
-#[async_trait::async_trait]
-impl Dns for PublicDns {
-    async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<SocketAddr>> {
-        Ok(vec![SocketAddr::new("93.184.216.34".parse()?, port)])
-    }
-}
 
 fn fixture(name: &str) -> Vec<u8> {
     std::fs::read(format!(
@@ -186,15 +179,8 @@ impl Transport for Recorded {
             _ => (404, 60, "text/plain", b"not found".to_vec()),
         };
         Ok(Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: url.clone(),
-            status,
             retry_after_secs: retry_after,
-            location: None,
-            content_type: content_type.into(),
-            body,
+            ..common::fetched(url.clone(), status, content_type.into(), body)
         })
     }
 }
@@ -243,7 +229,7 @@ fn image_credit(author: Option<&str>, license: &str, license_url: &str) -> Value
 /// author, licence and page, never the file's Special:FilePath link. Its description is
 /// Wikidata's own (CC0) and carries no credit. One Commons request, of the width the enriched
 /// cards ask for.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_item_shows_its_free_image_with_its_credit(pool: PgPool) {
     let (doc, t) = item_card(&pool, Mode::default()).await;
     assert_eq!(doc.type_name, "Place");
@@ -268,7 +254,7 @@ async fn an_item_shows_its_free_image_with_its_credit(pool: PgPool) {
 
 /// A file marked non-free, or under a licence off the list, gives no image and no credit; a CC0
 /// file is shown, credited without an author. An item without an image asks Commons nothing.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn only_a_free_file_is_shown(pool: PgPool) {
     for commons in [Commons::NonFree, Commons::Gfdl] {
         let (doc, t) = item_card(
@@ -319,7 +305,7 @@ async fn only_a_free_file_is_shown(pool: PgPool) {
 /// A busy Commons, or one that does not answer in time, leaves the image unread: no image from
 /// this reading, an early read again, and the stored card's credited image kept
 /// (`keep_enriched`). A stored image without a credit (a Special:FilePath link) is not kept.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_busy_commons_keeps_the_stored_image(pool: PgPool) {
     let (stored, _) = item_card(&pool, Mode::default()).await;
     assert_eq!(stored.image.as_deref(), Some(IMAGE));
@@ -360,7 +346,7 @@ async fn a_busy_commons_keeps_the_stored_image(pool: PgPool) {
 
 /// A Wikipedia page about a place, read from its Wikidata item when Wikipedia serves no summary
 /// of the article, shows the item's image the same way: verified on Commons, with its credit.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_wikipedia_place_shows_its_item_image_with_its_credit(pool: PgPool) {
     for (commons, image) in [(Commons::Recorded, Some(IMAGE)), (Commons::NonFree, None)] {
         let t = Recorded::new(Mode {

@@ -6,8 +6,7 @@
 //! in lower case; ids with a wrong check are rejected. The data is CC0.
 use super::{
     kit::{
-        decimal, fetch, float, host_and_segments, int, json, text, texts, Card, Key, Link, Point,
-        Request,
+        decimal, fetch, float, host_and_segments, int, json, text, texts, Card, Key, Point, Request,
     },
     Example, Source,
 };
@@ -200,9 +199,6 @@ pub fn parse(status: u16, raw: &[u8], id: &str) -> Result<Option<Card>> {
             card.key(key);
         }
     }
-    if let [wikipedia] = links(&v, "wikipedia").as_slice() {
-        card.link(Link::new("Wikipedia", wikipedia.as_str(), "ror"));
-    }
     Ok(Some(card))
 }
 
@@ -265,7 +261,7 @@ impl Source for Ror {
         ]
     }
     fn budgets(&self) -> &'static [super::Budget] {
-        &[("api.ror.org", 1.0, None)]
+        &[("api.ror.org", 1.0)]
     }
     fn examples(&self) -> &'static [Example] {
         &[
@@ -408,10 +404,6 @@ mod tests {
                 "isni:0000000123412786",
                 "wikidata:Q49108"
             ]
-        );
-        assert_eq!(
-            card.also_on[0].uri,
-            "http://en.wikipedia.org/wiki/Massachusetts_Institute_of_Technology"
         );
     }
 

@@ -195,7 +195,7 @@ impl Source for Courtlistener {
     fn budgets(&self) -> &'static [Budget] {
         // Five requests a minute, its anonymous limit when it had one: a token's own limit may
         // be higher, which the operator can set (`egress.host_rates`).
-        &[("www.courtlistener.com", 5.0 / 60.0, Some(1))]
+        &[("www.courtlistener.com", 5.0 / 60.0)]
     }
     fn examples(&self) -> &'static [Example] {
         &[Example {
@@ -319,17 +319,12 @@ mod tests {
                 }
                 _ => (401, "search_unauthenticated_401.json"),
             };
-            Ok(crate::resolver::egress::Fetched {
-                permanent_redirect: false,
-                truncated: false,
-                validators: Default::default(),
-                url: url.clone(),
-                content_type: "application/json".into(),
+            Ok(crate::resolver::egress::Fetched::answer(
+                url.clone(),
                 status,
-                retry_after_secs: 60,
-                location: None,
-                body: read(file),
-            })
+                "application/json".into(),
+                read(file),
+            ))
         }
     }
 

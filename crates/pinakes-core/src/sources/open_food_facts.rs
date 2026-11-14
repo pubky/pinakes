@@ -195,10 +195,10 @@ impl Source for OpenFoodFacts {
     fn budgets(&self) -> &'static [Budget] {
         // The databases' published limit: 100 product reads a minute.
         &[
-            ("world.openfoodfacts.org", 1.66, None),
-            ("world.openbeautyfacts.org", 1.66, None),
-            ("world.openproductsfacts.org", 1.66, None),
-            ("world.openpetfoodfacts.org", 1.66, None),
+            ("world.openfoodfacts.org", 1.66),
+            ("world.openbeautyfacts.org", 1.66),
+            ("world.openproductsfacts.org", 1.66),
+            ("world.openpetfoodfacts.org", 1.66),
         ]
     }
     fn examples(&self) -> &'static [Example] {

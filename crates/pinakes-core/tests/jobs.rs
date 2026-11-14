@@ -1,20 +1,13 @@
 //! Job postings: recorded career pages become JobPosting cards with their facts; a posting's
 //! workplace is placed on the map, and search finds postings by place, remoteness and date posted,
 //! leaving closed ones out unless asked.
-use axum::{
-    body::Body,
-    extract::{ConnectInfo, Query},
-    http::Request,
-    routing::get,
-    Router,
-};
-use http_body_util::BodyExt;
+use axum::{extract::Query, routing::get, Router};
 use pinakes_core::{
     api::{self, AppState},
     config::{Config, EgressConfig, EventConfig, OsmConfig},
     model::ResourceMeta,
     resolver::{
-        egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+        egress::{Egress, FetchOptions, Fetched, Transport},
         osm::OsmResolver,
         web::{self, WebResolver},
         Resolver,
@@ -24,8 +17,8 @@ use pinakes_core::{
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use std::{collections::HashMap, io::Read, net::SocketAddr, sync::Arc};
-use tower::ServiceExt;
 mod common;
+use common::PublicDns;
 
 const ASHBY: &str = "https://jobs.ashbyhq.com/ashby/7458d4e9-da2e-47bd-98cb-adfda43d42b2";
 const LEVER: &str = "https://jobs.lever.co/palantir/6ed76ce8-4156-4b60-b120-403538bd66cd";
@@ -48,17 +41,7 @@ fn recorded(file: &str) -> Vec<u8> {
     out
 }
 fn page(uri: &str, body: Vec<u8>) -> Fetched {
-    Fetched {
-        permanent_redirect: false,
-        truncated: false,
-        url: uri.parse().unwrap(),
-        status: 200,
-        content_type: "text/html".into(),
-        body,
-        location: None,
-        retry_after_secs: 60,
-        validators: Default::default(),
-    }
+    common::fetched(uri.parse().unwrap(), 200, "text/html".into(), body)
 }
 fn extracted(uri: &str, file: &str) -> ResourceMeta {
     web::extract(uri, &page(uri, recorded(file)), 3600)
@@ -134,13 +117,6 @@ fn career_pages_become_postings_with_their_facts() {
     assert_eq!(bounded.attributes, doc.attributes, "facts kept");
 }
 
-struct PublicDns;
-#[async_trait::async_trait]
-impl Dns for PublicDns {
-    async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<SocketAddr>> {
-        Ok(vec![SocketAddr::new("93.184.216.34".parse()?, port)])
-    }
-}
 /// The recorded pages, and two made-up ones: a closed posting and a remote one in the future.
 struct Pages;
 #[async_trait::async_trait]
@@ -170,18 +146,7 @@ impl Transport for Pages {
     }
 }
 async fn call(app: &Router, path: &str) -> (u16, Value) {
-    let mut request = Request::builder().uri(path).body(Body::empty()).unwrap();
-    request
-        .extensions_mut()
-        .insert(ConnectInfo("127.0.0.1:1111".parse::<SocketAddr>().unwrap()));
-    let r = app.clone().oneshot(request).await.unwrap();
-    let status = r.status().as_u16();
-    let bytes = r.into_body().collect().await.unwrap().to_bytes();
-    let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    if status == 200 {
-        common::check_response("GET", path.split('?').next().unwrap(), status, &value);
-    }
-    (status, value)
+    common::get_from(app, "127.0.0.1:1111", path).await
 }
 fn ids(v: &Value) -> Vec<String> {
     v["items"]
@@ -192,7 +157,7 @@ fn ids(v: &Value) -> Vec<String> {
         .collect()
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn postings_are_placed_found_and_close(pool: PgPool) {
     // Nominatim knows Philadelphia as the one settlement of that name in Pennsylvania.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -344,7 +309,7 @@ fn settlement(id: i64, name: &str, country: &str, code: &str) -> Value {
         "address": {"city": name, "country": country, "country_code": code}})
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_workplace_is_never_an_ambiguous_or_other_settlement(pool: PgPool) {
     // Two Springfields; one settlement under another name than the posting's town; and London,
     // United Kingdom for a posting in London, Canada.
@@ -413,7 +378,7 @@ async fn a_workplace_is_never_an_ambiguous_or_other_settlement(pool: PgPool) {
     server.abort();
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_workplace_is_never_in_another_region_or_postal_region(pool: PgPool) {
     // Nominatim's sole Springfield is Springfield, Missouri: a posting in Springfield, Illinois
     // (by name or code, in its address or in its one-line place) or with a postcode of another
@@ -506,7 +471,7 @@ async fn a_workplace_is_never_in_another_region_or_postal_region(pool: PgPool) {
     server.abort();
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_one_line_place_is_compared_by_its_region_code_and_postcode(pool: PgPool) {
     // Each town has one settlement. A state's or province's code after the town contradicts
     // one in another country or with another code, unless it is the settlement's own code

@@ -8,9 +8,7 @@
 //! An obsolete entry is gone from the Data API (404) and is missing; `status_request` says which
 //! entry replaced it. The data is CC0.
 use super::{
-    kit::{
-        fetch, float, host_and_segments, int, json, text, time, web_url, Card, Key, Link, Request,
-    },
+    kit::{fetch, float, host_and_segments, int, json, text, time, web_url, Card, Key, Request},
     Example, Source,
 };
 use crate::model::ResourceMeta;
@@ -19,7 +17,6 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 pub const SITE: &str = "RCSB PDB";
-const VIA: &str = "pdb";
 pub const ATTRIBUTION: &str = "RCSB PDB (CC0 1.0)";
 
 /// A four-character PDB id (a digit 1–9, then three letters or digits) in upper case, also from
@@ -135,17 +132,6 @@ pub fn parse(status: u16, raw: &[u8], id: &str) -> Result<Option<Card>> {
             card.key(Key::new("doi", &doi.to_ascii_lowercase()));
         }
     }
-    let lower = id.to_ascii_lowercase();
-    card.link(Link::new(
-        "PDBe",
-        format!("https://www.ebi.ac.uk/pdbe/entry/pdb/{lower}"),
-        VIA,
-    ));
-    card.link(Link::new(
-        "PDBj",
-        format!("https://pdbj.org/mine/summary/{lower}"),
-        VIA,
-    ));
     Ok(Some(card))
 }
 
@@ -218,7 +204,7 @@ impl Source for Pdb {
         ]
     }
     fn budgets(&self) -> &'static [super::Budget] {
-        &[("data.rcsb.org", 1.0, None)]
+        &[("data.rcsb.org", 1.0)]
     }
     fn examples(&self) -> &'static [Example] {
         &[
@@ -340,14 +326,6 @@ mod tests {
         assert_eq!(d["citation_doi"], "10.1016/0022-2836(84)90472-8");
         assert_eq!(d["citation_pubmed_id"], 6726807);
         assert_eq!(card.keys, [Key::new("doi", "10.2210/pdb4hhb/pdb")]);
-        let links: Vec<_> = card.also_on.iter().map(|l| l.uri.as_str()).collect();
-        assert_eq!(
-            links,
-            [
-                "https://www.ebi.ac.uk/pdbe/entry/pdb/4hhb",
-                "https://pdbj.org/mine/summary/4hhb"
-            ]
-        );
         assert!(parse(200, &read("entry-4hhb.json"), "6VXX").is_err());
     }
 

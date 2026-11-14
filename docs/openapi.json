@@ -445,96 +445,6 @@
         ],
         "type": "object"
       },
-      "Cluster": {
-        "properties": {
-          "attribution": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "cell": {
-            "type": "string"
-          },
-          "count": {
-            "format": "int64",
-            "type": "integer"
-          },
-          "lat": {
-            "format": "double",
-            "type": "number"
-          },
-          "lon": {
-            "format": "double",
-            "type": "number"
-          },
-          "top": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "cell",
-          "count",
-          "lat",
-          "lon",
-          "top"
-        ],
-        "type": "object"
-      },
-      "ClusterResponse": {
-        "properties": {
-          "clusters": {
-            "items": {
-              "$ref": "#/components/schemas/Cluster"
-            },
-            "type": "array"
-          },
-          "facets": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/Facets"
-              }
-            ]
-          },
-          "points": {
-            "items": {
-              "$ref": "#/components/schemas/Card"
-            },
-            "type": "array"
-          },
-          "reach_truncated": {
-            "description": "The `reach` or `boost` set was capped at 1,000 authors.",
-            "type": "boolean"
-          },
-          "resolution": {
-            "format": "int32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "total": {
-            "format": "int64",
-            "type": "integer"
-          },
-          "truncated": {
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "resolution",
-          "clusters",
-          "points",
-          "truncated",
-          "total",
-          "reach_truncated"
-        ],
-        "type": "object"
-      },
       "CollapseMode": {
         "enum": [
           "group"
@@ -1785,16 +1695,6 @@
           "reach_truncated"
         ],
         "type": "object"
-      },
-      "SearchResult": {
-        "oneOf": [
-          {
-            "$ref": "#/components/schemas/SearchResponse"
-          },
-          {
-            "$ref": "#/components/schemas/ClusterResponse"
-          }
-        ]
       },
       "Stream": {
         "description": "Audio a client can play: an episode's enclosure, or a recording's public preview (docs/api.md,\nStream).",
@@ -4025,36 +3925,6 @@
             }
           },
           {
-            "description": "Finite map zoom; fractional zooms are floored and clamped to the table. Requires bbox; large views coarsen to the configured cell budget.",
-            "examples": {
-              "(none)": {
-                "summary": "(none)",
-                "value": ""
-              },
-              "map-berlin": {
-                "summary": "14",
-                "value": "14"
-              },
-              "map-lugano": {
-                "summary": "12",
-                "value": "12"
-              },
-              "map-zurich": {
-                "summary": "10",
-                "value": "10"
-              }
-            },
-            "in": "query",
-            "name": "cluster",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
             "description": "Resource ID of the accepted event venue; filters event units.",
             "in": "query",
             "name": "venue",
@@ -4149,7 +4019,7 @@
             }
           },
           {
-            "description": "A list view with one row per group: the matching member with the most references, as its\nown card; links in no group stay rows of their own. Not with `cluster`.",
+            "description": "A list view with one row per group: the matching member with the most references, as its\nown card; links in no group stay rows of their own.",
             "examples": {
               "(none)": {
                 "summary": "(none)",
@@ -4184,7 +4054,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SearchResult"
+                  "$ref": "#/components/schemas/SearchResponse"
                 }
               }
             },

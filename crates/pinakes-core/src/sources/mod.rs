@@ -191,10 +191,10 @@ pub trait Source: Send + Sync {
     fn facts(&self) -> &'static [&'static str] {
         &[]
     }
-    /// The service's published limits per host, as `(host, requests_per_second,
-    /// max_in_flight)`; a windowed limit is given as its average rate (60 per minute → 1.0).
-    /// The rate becomes the host's default (`limits.host_rates` overrides it). Egress never has
-    /// more than one request in flight per host, which meets any `max_in_flight`.
+    /// The service's published limits per host, as `(host, requests_per_second)`; a windowed
+    /// limit is given as its average rate (60 per minute → 1.0). The rate becomes the host's
+    /// default (`limits.host_rates` overrides it). Egress never has more than one request in
+    /// flight per host, which meets any limit on concurrent requests.
     fn budgets(&self) -> &'static [Budget] {
         &[]
     }
@@ -375,8 +375,8 @@ pub(crate) async fn page_hooks_with(
     doc
 }
 
-/// `(host, requests_per_second, max_in_flight)`.
-pub type Budget = (&'static str, f64, Option<usize>);
+/// `(host, requests_per_second)`.
+pub type Budget = (&'static str, f64);
 
 /// Request headers a source may not set: they belong to the connection, carry credentials or
 /// replace the User-Agent.
@@ -719,9 +719,7 @@ pub fn invalid(uri: &str) -> bool {
 }
 /// Every source's default host rates, for hosts the operator did not set.
 pub fn budgets() -> impl Iterator<Item = (&'static str, f64)> {
-    REGISTRY
-        .iter()
-        .flat_map(|s| s.budgets().iter().map(|(host, rate, _)| (*host, *rate)))
+    REGISTRY.iter().flat_map(|s| s.budgets().iter().copied())
 }
 
 /// Every attribute a card on the `official` or web route may store: the web keys and every
@@ -1019,15 +1017,8 @@ pub(crate) mod fixture {
                 .contains(&status)
                 .then(|| String::from_utf8_lossy(&body).into_owned());
             Ok(crate::resolver::egress::Fetched {
-                permanent_redirect: false,
-                truncated: false,
-                validators: Default::default(),
-                url: url.clone(),
-                content_type: kind.into(),
-                status,
-                retry_after_secs: 60,
                 location,
-                body,
+                ..crate::resolver::egress::Fetched::answer(url.clone(), status, kind.into(), body)
             })
         }
     }
@@ -1039,18 +1030,16 @@ pub(crate) mod fixture {
         link: Option<&str>,
     ) -> crate::resolver::egress::Fetched {
         crate::resolver::egress::Fetched {
-            permanent_redirect: false,
-            truncated: false,
             validators: crate::resolver::egress::Validators {
                 link: link.map(str::to_owned),
                 ..Default::default()
             },
-            url: url::Url::parse(url).unwrap(),
-            content_type: content_type.into(),
-            status: 200,
-            retry_after_secs: 60,
-            location: None,
-            body,
+            ..crate::resolver::egress::Fetched::answer(
+                url::Url::parse(url).unwrap(),
+                200,
+                content_type.into(),
+                body,
+            )
         }
     }
     /// The recorded `Link` headers of a fixture (`provenance.json`, key `link`).
@@ -1131,9 +1120,8 @@ mod tests {
                     example.uri
                 );
             }
-            for (host, rate, in_flight) in source.budgets() {
+            for (host, rate) in source.budgets() {
                 assert!(rate.is_finite() && *rate > 0.0 && !host.is_empty());
-                assert!(in_flight.is_none_or(|n| n >= 1));
             }
         }
     }

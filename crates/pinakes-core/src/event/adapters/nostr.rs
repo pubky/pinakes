@@ -737,21 +737,16 @@ mod deadline_tests {
         impl Transport for Fixture {
             async fn get(&self, url: &Url, _: &[SocketAddr]) -> Result<Fetched> {
                 self.0.fetch_add(1, Ordering::SeqCst);
-                Ok(Fetched {
-                    permanent_redirect: false,
-                    truncated: false,
-                    url: url.clone(),
-                    status: 200,
-                    validators: Default::default(),
-                    retry_after_secs: 60,
-                    content_type: "application/json".into(),
-                    location: None,
-                    body: serde_json::to_vec(&if url.host_str() == Some("api.nostr.wine") {
+                Ok(Fetched::answer(
+                    url.clone(),
+                    200,
+                    "application/json".into(),
+                    serde_json::to_vec(&if url.host_str() == Some("api.nostr.wine") {
                         vec![json!({"created_at":200}); 100]
                     } else {
                         vec![]
                     })?,
-                })
+                ))
             }
         }
         // A public fixture key, never used by a live identity.

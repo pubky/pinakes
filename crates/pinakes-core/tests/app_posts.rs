@@ -1,7 +1,7 @@
-//! App posts (TASK-app-posts.md, its second amendment): `post` lines on the resource feed name a
+//! App posts: `post` lines on the resource feed name a
 //! post, which the Pubky resolver reads in its latest version by its namespace and kind. The
-//! social specs' posts (events, rsvps) are Nexus's: never fetched, their lines rejected (owner
-//! decision, 2026-10-26). Every URI and identity here is made up.
+//! social specs' posts (events, rsvps) are Nexus's: never fetched, their lines rejected.
+//! Every URI and identity here is made up.
 use chrono::{DateTime, Duration, Utc};
 use pinakes_core::{
     config::{IngestConfig, QueueConfig},
@@ -124,7 +124,7 @@ async fn resolved(pool: &PgPool, uri: &str, at: DateTime<Utc>) {
 
 /// A post line is a reference of the post to itself, keyed by its version file: queued for the
 /// Pubky resolver, counted nowhere, read again at each new version and at a deletion.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn post_lines_queue_the_post_and_each_version_reads_it_again(pool: PgPool) {
     let metrics = Metrics::new().unwrap();
     let route = post("maps", &id());
@@ -180,7 +180,7 @@ async fn post_lines_queue_the_post_and_each_version_reads_it_again(pool: PgPool)
 }
 
 /// A post line must name a post in its author's storage and a version file directly in it.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_post_line_outside_its_post_is_rejected(pool: PgPool) {
     let metrics = Metrics::new().unwrap();
     let good = post("maps", &id());
@@ -554,8 +554,8 @@ async fn card_name(pool: &PgPool, uri: &str) -> Option<String> {
 }
 
 /// A post whose every read failed (its homeserver down) until it was dead-lettered, never
-/// resolved: a new version line makes it due again, and it resolves (review of f275248).
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+/// resolved: a new version line makes it due again, and it resolves.
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_dead_lettered_post_is_read_again_at_a_new_version(pool: PgPool) {
     let metrics = Metrics::new().unwrap();
     let cfg = QueueConfig::default();
@@ -593,8 +593,8 @@ async fn a_dead_lettered_post_is_read_again_at_a_new_version(pool: PgPool) {
 
 /// A read in flight when a newer version arrives is fenced: what it read (the older version) is
 /// not saved with the card's normal TTL over the newer version's "due now"; the post is read
-/// again at once and keeps the newer version (review of f275248).
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+/// again at once and keeps the newer version.
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_read_in_flight_never_undoes_a_newer_version(pool: PgPool) {
     let metrics = Metrics::new().unwrap();
     let cfg = QueueConfig::default();
@@ -662,7 +662,7 @@ async fn a_read_in_flight_never_undoes_a_newer_version(pool: PgPool) {
 /// the old Mapky and Eventky layouts), however its namespace is spelt: its feed line is rejected
 /// and counted (`never_fetched`), and it creates no resource or reference, so nothing fetches it.
 /// A post of another app in the same batch is indexed.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_post_line_of_a_never_fetched_namespace_creates_nothing(pool: PgPool) {
     let metrics = Metrics::new().unwrap();
     let never: Vec<String> = [
@@ -715,7 +715,7 @@ async fn a_post_line_of_a_never_fetched_namespace_creates_nothing(pool: PgPool) 
 /// A tag on an object of a namespace Pinakes never fetches (the old Mapky and Eventky layouts)
 /// is a reference like any other, but its object gets no route: it is never queued for a fetch
 /// and stores no card.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_tag_on_an_object_never_fetched_stores_nothing(pool: PgPool) {
     let metrics = Metrics::new().unwrap();
     let uris = [
@@ -756,7 +756,7 @@ async fn a_tag_on_an_object_never_fetched_stores_nothing(pool: PgPool) {
 /// an encoded `.` or `..`) is refused as `uri` and creates no resource or reference: no spelling
 /// gets past the post-path check. Letter case is kept: `Social` is not `social` but another app's
 /// namespace, read as the resolver reads it (the general card), so it is indexed.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_post_line_whose_namespace_is_not_one_segment_creates_nothing(pool: PgPool) {
     let metrics = Metrics::new().unwrap();
     let malformed: Vec<String> = ["%FF", "ch%2Fess", "%2E", "%2e", "%2E%2E", ".%2E"]
@@ -845,9 +845,8 @@ fn us(at: DateTime<Utc>) -> i64 {
 }
 
 /// A listening or a session is read again when it expires, not at the queue's usual hour or
-/// more after: its card never outlives `expires_at` by more than the queue's minute (review of
-/// d8e4ceb, M1).
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+/// more after: its card never outlives `expires_at` by more than the queue's minute.
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_expiring_card_is_read_again_when_it_expires(pool: PgPool) {
     let now = Utc::now();
     // Now playing for another half hour: read again then.
@@ -882,9 +881,9 @@ async fn an_expiring_card_is_read_again_when_it_expires(pool: PgPool) {
 }
 
 /// A post of an unprofiled namespace with a title no stored text may hold (a NUL), or one too
-/// long, is saved with its card, without that title, on its first read (review of d8e4ceb, M2:
-/// it used to fail to save and dead-letter).
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+/// long, is saved with its card, without that title, on its first read: it neither
+/// fails to save nor dead-letters.
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_general_card_with_unstorable_text_is_saved_without_it(pool: PgPool) {
     for title in ["Sicilian\0Najdorf".to_owned(), "N".repeat(100_000)] {
         let uri = post("chess", &id());

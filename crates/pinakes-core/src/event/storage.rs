@@ -556,36 +556,15 @@ struct OccurrenceCursor {
 }
 impl OccurrenceCursor {
     fn encode(&self, key: &hmac::SimpleHmac<blake3::Hasher>) -> anyhow::Result<String> {
-        use base64::Engine;
-        use hmac::Mac;
-        let payload = serde_json::to_vec(self)?;
-        let mut mac = key.clone();
-        mac.update(&payload);
-        let mut signed = mac.finalize().into_bytes().to_vec();
-        signed.extend(payload);
-        Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signed))
+        Ok(crate::api::seal(&serde_json::to_vec(self)?, key))
     }
     fn decode(
         s: &str,
         key: &hmac::SimpleHmac<blake3::Hasher>,
     ) -> Result<Self, crate::api::ApiError> {
-        use base64::Engine;
-        use hmac::Mac;
-        let invalid = || crate::api::ApiError::bad("invalid occurrence cursor");
-        if s.len() > 8192 {
-            return Err(invalid());
-        }
-        let signed = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(s)
-            .map_err(|_| invalid())?;
-        if signed.len() <= 32 {
-            return Err(invalid());
-        }
-        let (tag, payload) = signed.split_at(32);
-        let mut mac = key.clone();
-        mac.update(payload);
-        mac.verify_slice(tag).map_err(|_| invalid())?;
-        serde_json::from_slice(payload).map_err(|_| invalid())
+        crate::api::open(s, 8192, key)
+            .and_then(|payload| serde_json::from_slice(&payload).ok())
+            .ok_or_else(|| crate::api::ApiError::bad("invalid occurrence cursor"))
     }
 }
 #[utoipa::path(get,path="/v1/resources/{id}/occurrences",operation_id="list_occurrences",tag="Events",params(("id"=String,Path),OccurrenceQuery),responses((status=200,body=OccurrencePage),(status=400,description="Invalid window, limit or cursor"),(status=404,description="Resource not found")),description="Calendar instances ordered by start, UID and recurrence ID. Inclusive window, default limit 100, maximum 500. Superseded keys are omitted.")]

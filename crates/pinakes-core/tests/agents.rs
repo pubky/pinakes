@@ -232,7 +232,7 @@ async fn call(app: &Router, tool: &str, arguments: Value) -> (bool, Value) {
     )
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn the_guide_and_the_index_name_the_host_that_asked(pool: PgPool) {
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let host = [("host", "pinakes.example")];
@@ -291,7 +291,7 @@ async fn the_guide_and_the_index_name_the_host_that_asked(pool: PgPool) {
     assert_eq!(status, 404);
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn the_mcp_handshake_and_every_tool(pool: PgPool) {
     let ids = seed(&pool).await;
     let config = Config {
@@ -456,7 +456,7 @@ async fn the_mcp_handshake_and_every_tool(pool: PgPool) {
     assert!(answer["error"].is_object(), "{answer}");
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn social_without_a_nexus_is_a_plain_error(pool: PgPool) {
     // Nothing listens at the first; the second is a Nexus without the batch resource view, whose
     // 404 is no answer either, never an empty one (every URI "unknown").
@@ -481,7 +481,7 @@ async fn social_without_a_nexus_is_a_plain_error(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_tool_call_spends_the_same_per_ip_budget(pool: PgPool) {
     seed(&pool).await;
     let mut config = Config::default();
@@ -507,7 +507,7 @@ async fn a_tool_call_spends_the_same_per_ip_budget(pool: PgPool) {
     assert_eq!(headers["retry-after"], "60");
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn no_admin_route_is_reachable_through_mcp(pool: PgPool) {
     let ids = seed(&pool).await;
     let config = Config {
@@ -556,7 +556,7 @@ async fn no_admin_route_is_reachable_through_mcp(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_browser_opening_mcp_sees_how_to_connect(pool: PgPool) {
     let app = api::router(AppState::new(pool, Config::default()).unwrap());
     let browser = [
@@ -685,7 +685,7 @@ async fn seed_typed(pool: &PgPool) -> Vec<String> {
 
 /// A typed card names the links people wrote for it (`refs`), on every read, and `social`
 /// asks Nexus by the card's own link and those, merging their tags per card.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn typed_cards_name_the_links_people_wrote_and_social_joins_by_them(pool: PgPool) {
     let ids = seed_typed(&pool).await;
     let config = Config {
@@ -779,7 +779,7 @@ async fn typed_cards_name_the_links_people_wrote_and_social_joins_by_them(pool: 
 
 /// `refs` ranks a card's links by their references counted only up to a bound, so a read never
 /// counts every reference of a much-referenced link: links past the bound rank by URI.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn refs_count_each_link_only_up_to_a_bound(pool: PgPool) {
     let ids = seed_typed(&pool).await;
     // Counted in full, the book's own isbn: link (1,501 references) would lead its Open Library
@@ -805,7 +805,7 @@ async fn refs_count_each_link_only_up_to_a_bound(pool: PgPool) {
 /// referenced spellings; the 9 least recently referenced have the most references (3 each, the
 /// others 2), and its Open Library page (2, last referenced before any spelling) is older still.
 /// Counted over every alias, those would lead; examined are the 31 most recent alone.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn refs_count_only_a_cards_most_recently_referenced_aliases(pool: PgPool) {
     let ids = seed_typed(&pool).await;
     let mut recent = vec![];
@@ -845,7 +845,7 @@ async fn refs_count_only_a_cards_most_recently_referenced_aliases(pool: PgPool) 
 
 /// The `card` tool names the public collections that hold a link: their count, the newest few
 /// and the route that lists them all. A card nobody collected carries neither.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn the_card_tool_names_the_collections_that_hold_a_link(pool: PgPool) {
     seed(&pool).await;
     let (id, uri, _) = identity("https://example.org/article").unwrap();
@@ -917,7 +917,7 @@ async fn the_card_tool_names_the_collections_that_hold_a_link(pool: PgPool) {
 
 /// The social tool never sends a link that carries a credential to the Nexus: a call naming one
 /// is refused before any batch is asked, and its answer does not hold the secret.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn social_never_sends_a_link_that_carries_a_credential_to_the_nexus(pool: PgPool) {
     let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let seen = asked.clone();
@@ -954,7 +954,7 @@ async fn social_never_sends_a_link_that_carries_a_credential_to_the_nexus(pool: 
 /// A card's own link or ref that carries a credential (a link someone's post made, read by its
 /// URI, here an alias of the card with references) is left out of what `social` asks the Nexus:
 /// the card is asked by its plain links, and nothing sent names the secret.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn social_asks_the_nexus_by_a_cards_plain_links_only(pool: PgPool) {
     let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let seen = asked.clone();

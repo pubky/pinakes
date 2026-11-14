@@ -474,8 +474,7 @@ impl Default for EventConfig {
         }
     }
 }
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Clone, Debug)]
 pub struct IngestConfig {
     pub max_label_bytes: usize,
     pub max_object_path_bytes: usize,
@@ -710,10 +709,8 @@ impl Default for EgressConfig {
         }
     }
 }
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Clone, Debug)]
 pub struct QueueConfig {
-    #[serde(skip)]
     pub groups: crate::groups::GroupConfig,
     pub max_failures: u32,
     pub timeout_grace: u32,
@@ -737,8 +734,7 @@ impl Default for QueueConfig {
         }
     }
 }
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Clone, Debug)]
 pub struct PreviewConfig {
     pub requests_per_minute: usize,
     pub uri_requests_per_minute: usize,
@@ -787,8 +783,7 @@ impl Default for OsmConfig {
         }
     }
 }
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Clone, Debug)]
 pub struct SearchConfig {
     pub reach_timeout_secs: u64,
     /// The taggers a related page samples: the authors of a resource's most recent tags, at most
@@ -809,8 +804,6 @@ pub struct SearchConfig {
     /// The references counted per group member when `collapse=group` picks a group's row.
     pub collapse_refs_per_member: usize,
     pub max_radius_m: f64,
-    pub h3_resolutions: Vec<u8>,
-    pub max_cluster_cells: usize,
 }
 impl Default for SearchConfig {
     fn default() -> Self {
@@ -824,8 +817,6 @@ impl Default for SearchConfig {
             related_seed_links: 32,
             collapse_refs_per_member: 10_000,
             max_radius_m: 200_000.0,
-            h3_resolutions: (0u8..=22).map(|z| z.saturating_sub(4).min(11)).collect(),
-            max_cluster_cells: 10000,
         }
     }
 }
@@ -871,8 +862,7 @@ impl Default for GeoConfig {
         Self { enabled: true }
     }
 }
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Clone, Debug)]
 pub struct RefreshConfig {
     pub resource_secs: [u64; 4],
     pub container_secs: [u64; 4],
@@ -1227,7 +1217,6 @@ impl Config {
             || self.osm.dump_dir.trim().is_empty()
             || !(1..=168).contains(&self.osm.dump_every_hours)
             || !(1..=1000).contains(&self.osm.dump_downloads_per_hour)
-            || !(122..=100000).contains(&self.search.max_cluster_cells)
             || !(1..=10000).contains(&self.api.requests_per_minute)
             || !(2..=100000).contains(&self.api.cache_capacity)
             || !(2..=100).contains(&self.api.reach_cost)
@@ -1242,9 +1231,6 @@ impl Config {
             || !(1..=1_000_000).contains(&self.search.collapse_refs_per_member)
             || !self.search.max_radius_m.is_finite()
             || !(1.0..=200_000.0).contains(&self.search.max_radius_m)
-            || self.search.h3_resolutions.is_empty()
-            || self.search.h3_resolutions.len() > 31
-            || self.search.h3_resolutions.iter().any(|r| *r > 11)
         {
             bail!("invalid OSM or spatial budget (public Nominatim maximum 1 request/s)");
         }
@@ -1301,8 +1287,6 @@ fn merge(dst: &mut serde_json::Value, src: serde_json::Value) {
     }
 }
 
-/// An upstream service's URL is a web URL with a host, and holds no secret: no user info, query
-/// or fragment, which logs and errors would otherwise carry.
 /// An egress host rule as the policy compares hosts (`egress::canonical_host`, the one reading
 /// for rules and the hosts asked alike: `faß.de。` is `xn--fa-hia.de`, `8.8.8..` is `8.8.0.8`),
 /// a leading `*.` kept for a name. `None` for what names no host, a name with a `*` inside it, or
@@ -1322,6 +1306,8 @@ fn host_rule(rule: &str) -> Option<String> {
         _ => None,
     }
 }
+/// An upstream service's URL is a web URL with a host, and holds no secret: no user info, query
+/// or fragment, which logs and errors would otherwise carry.
 fn plain_upstream(raw: &str) -> Result<bool> {
     let url = url::Url::parse(raw)?;
     Ok(matches!(url.scheme(), "http" | "https")
@@ -1571,7 +1557,7 @@ mod tests {
         }
     }
     /// A relay entry that is refused is named by its place and host, never with what its URL
-    /// carries (Kimi).
+    /// carries.
     #[test]
     fn a_refused_pkarr_relay_is_named_by_its_host_alone() {
         for (relay, says) in [
@@ -1806,12 +1792,8 @@ mod tests {
             "{refused}"
         );
     }
-    /// Egress host rules may be written in Unicode or punycode, any case, with a trailing dot:
-    /// each is compared as URL hosts are written. One that names no host stops startup, naming
-    /// the rule.
     /// A switched-off also-on source's API hosts are refused at the egress, whatever path asks,
-    /// and only those: Deezer's API while it is off (the default), never deezer.com's pages
-    /// (TASK-deezer-api-off).
+    /// and only those: Deezer's API while it is off, never deezer.com's pages.
     #[test]
     fn a_switched_off_source_s_api_is_refused_at_the_egress() {
         if !crate::also_on::registered()
@@ -1853,6 +1835,9 @@ mod tests {
                 .unwrap();
         assert!(!policy(&idle).allows(api));
     }
+    /// Egress host rules may be written in Unicode or punycode, any case, with a trailing dot:
+    /// each is compared as URL hosts are written. One that names no host stops startup, naming
+    /// the rule.
     #[test]
     fn egress_host_rules_are_canonical_and_a_bad_one_is_refused() {
         let rules = |deny: &[&str]| with(serde_json::json!({"egress": {"deny_hosts": deny}}));
@@ -2339,10 +2324,6 @@ limits! {
     collapse_refs_per_member: usize = |c| c.search.collapse_refs_per_member => [|c, v| c.search.collapse_refs_per_member = v],
     /// Largest `near` radius (metres).
     max_radius_m: f64 = |c| c.search.max_radius_m => [|c, v| c.search.max_radius_m = v],
-    /// H3 resolution per map zoom level.
-    h3_resolutions: Vec<u8> = |c| c.search.h3_resolutions.clone() => [|c, v| c.search.h3_resolutions = v],
-    /// Most cells one cluster query returns.
-    max_cluster_cells: usize = |c| c.search.max_cluster_cells => [|c, v| c.search.max_cluster_cells = v],
     /// API response cache entries.
     api_cache_capacity: usize = |c| c.api.cache_capacity => [|c, v| c.api.cache_capacity = v],
     /// Budget units a search costs for each of `reach` and `boost`.

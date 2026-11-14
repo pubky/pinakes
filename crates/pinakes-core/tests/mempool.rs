@@ -37,7 +37,7 @@ async fn by_uri(app: &axum::Router, uri: &str) -> Value {
     v
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_block_card_lists_the_explorers_and_their_links_are_its_aliases(pool: PgPool) {
     let raw = std::fs::read(format!(
         "{}/tests/fixtures/sources/mempool/block-481824.json",
@@ -175,7 +175,7 @@ async fn read_card(uri: &str, answers: &[Answer]) -> ResourceMeta {
 /// coinbase transaction (with the reward), and the resource read serves them as the OpenAPI
 /// document says; each entry is a root the source reads. When mempool.space fails, Esplora's
 /// answers give the same list, without the reward it does not know.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_block_card_lists_its_neighbours_and_coinbase(pool: PgPool) {
     let root = format!("btc:block/{HASH}");
     let doc = read_card(
@@ -237,7 +237,7 @@ async fn a_block_card_lists_its_neighbours_and_coinbase(pool: PgPool) {
 /// An address card lists its latest 10 transactions and counts them all; when the list's request
 /// is put off (a server error), the card is still read and comes back within the hour; a list
 /// the API refuses (404) is left out until the card's own refresh.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_address_card_lists_its_latest_transactions(pool: PgPool) {
     let addr = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq";
     let root = format!("btc:address/{addr}");
@@ -303,7 +303,7 @@ async fn an_address_card_lists_its_latest_transactions(pool: PgPool) {
 }
 
 /// Other cards' reads carry an empty list and no totals.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn other_cards_have_no_related_objects(pool: PgPool) {
     let uri = "https://example.org/page";
     let id = store::ensure_resource(&pool, uri).await.unwrap();

@@ -10,8 +10,7 @@
 //! The API's data is CC0; images are shown only for works the API marks CC0.
 use super::kit::wikidata_id;
 use super::kit::{
-    fetch, host_and_segments, html_text, int, json, plain, text, texts, web_url, Card, Key, Link,
-    Request,
+    fetch, host_and_segments, html_text, int, json, plain, text, texts, web_url, Card, Key, Request,
 };
 use super::{Context, Example, Source};
 use crate::model::ResourceMeta;
@@ -22,7 +21,6 @@ pub const SITE: &str = "Cleveland Museum of Art";
 
 const API: &str = "https://openaccess-api.clevelandart.org/api/artworks";
 const CREDIT: &str = "Cleveland Museum of Art";
-const VIA: &str = "cleveland";
 
 /// What a link names: an artwork by accession number or by numeric id.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -173,11 +171,6 @@ pub fn parse(status: u16, raw: &[u8], artwork: &Artwork) -> Result<Option<Card>>
             card.key(Key::new("wikidata", &q));
         }
     }
-    for uri in texts(&external["internet_archive"]) {
-        if archive_item(&uri) {
-            card.link(Link::new("Internet Archive", uri, VIA));
-        }
-    }
     Ok(Some(card))
 }
 
@@ -244,7 +237,7 @@ impl Source for Cleveland {
         ]
     }
     fn budgets(&self) -> &'static [super::Budget] {
-        &[("openaccess-api.clevelandart.org", 1.0, None)]
+        &[("openaccess-api.clevelandart.org", 1.0)]
     }
     fn examples(&self) -> &'static [Example] {
         &[Example {
@@ -265,16 +258,6 @@ impl Source for Cleveland {
             },
         )
     }
-}
-
-/// An Internet Archive item page, `https://archive.org/details/{identifier}`.
-fn archive_item(uri: &str) -> bool {
-    let Some((host, segments)) = host_and_segments(uri) else {
-        return false;
-    };
-    host == "archive.org"
-        && matches!(segments.as_slice(), [d, id] if d == "details"
-            && plain(id, 100, |c| c.is_ascii_alphanumeric() || "._-".contains(c)))
 }
 
 #[cfg(test)]
@@ -375,14 +358,6 @@ mod tests {
         );
         assert_eq!(card.keys, [Key::new("wikidata", "Q50772913")]);
         assert_eq!(card.details["object_id"], 135382);
-        assert_eq!(
-            card.also_on,
-            [Link::new(
-                "Internet Archive",
-                "https://archive.org/details/clevelandart-1958.39-the-red-kerchief",
-                "cleveland"
-            )]
-        );
         let d = &card.details;
         assert_eq!(d["creators"][0], "Claude Monet (French, 1840–1926)");
         assert_eq!(d["creation_date"], "c. 1868–73");

@@ -6,7 +6,7 @@ use pinakes_core::{
     also_on::{self, SourceOptions},
     config::Config,
     model::ResourceMeta,
-    resolver::egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+    resolver::egress::{Egress, FetchOptions, Fetched, Transport},
     store,
 };
 use std::{
@@ -14,14 +14,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 mod common;
-
-struct PublicDns;
-#[async_trait::async_trait]
-impl Dns for PublicDns {
-    async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<SocketAddr>> {
-        Ok(vec![SocketAddr::new("8.8.8.8".parse()?, port)])
-    }
-}
+use common::media::PublicDns;
 
 /// A recording of this source's own, else one of the hubs' shared ones.
 fn fixture(name: &str) -> Option<Vec<u8>> {
@@ -60,15 +53,8 @@ impl Transport for Recorded {
             url.query().unwrap_or("")
         ));
         let answer = |status: u16, body: Vec<u8>, content_type: &str| Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: url.clone(),
-            status,
             retry_after_secs: if status == 429 { 3600 } else { 120 },
-            location: None,
-            content_type: content_type.into(),
-            body,
+            ..common::fetched(url.clone(), status, content_type.into(), body)
         };
         let query = |name: &str| {
             url.query_pairs()
@@ -221,7 +207,7 @@ const GET_LUCKY: &str = "https://music.apple.com/song/617154366 - itunes_song ma
 /// Get Lucky on Deezer (367 s, disc 1 track 8 of Random Access Memories) is Apple's song
 /// 617154366 (369.6 s), unkeyed. Walking Disaster, by its ISRC key on another service, is
 /// Deezer's track 2 of Underclass Hero, whose barcode answers several collections: nothing.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_deezer_track_s_place_names_its_apple_song(pool: sqlx::PgPool) {
     if !has(&["deezer", "itunes"]) {
         return;
@@ -253,7 +239,7 @@ async fn a_deezer_track_s_place_names_its_apple_song(pool: sqlx::PgPool) {
 
 /// TIDAL's Get Lucky (370 s): its one album's barcode and its place among the album's items.
 /// TIDAL's Walking Disaster: Underclass Hero again, several collections, nothing.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_tidal_track_s_place_names_its_apple_song(pool: sqlx::PgPool) {
     if !has(&["tidal", "itunes"]) {
         return;
@@ -276,7 +262,7 @@ async fn a_tidal_track_s_place_names_its_apple_song(pool: sqlx::PgPool) {
 
 /// On by default; switched off, without the source of a track's place (Deezer off, no TIDAL
 /// pair) or with `itunes` off, it asks nothing.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn without_its_switch_or_a_place_s_source_nothing_is_asked(pool: sqlx::PgPool) {
     if !has(&["deezer", "itunes"]) {
         return;
@@ -319,7 +305,7 @@ async fn without_its_switch_or_a_place_s_source_nothing_is_asked(pool: sqlx::PgP
 
 /// iTunes rate-limiting the lookup: retried after the hour it asked for, the link an earlier run
 /// found kept.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_busy_itunes_keeps_the_song(pool: sqlx::PgPool) {
     if !has(&["deezer", "itunes"]) {
         return;

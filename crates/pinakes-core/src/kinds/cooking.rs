@@ -1,5 +1,6 @@
 //! Recipes (`Recipe`), from a recipe page's own JSON-LD: its time, yield, cuisine, category, diets,
 //! rating, and its ingredients without their amounts, which search's `ingredient` matches by word.
+use super::text_or_number as text;
 use crate::model::ResourceMeta;
 use serde_json::Value;
 
@@ -275,16 +276,7 @@ pub fn diet(s: &str) -> Option<String> {
 }
 
 fn all(v: &Value) -> impl Iterator<Item = &Value> {
-    v.as_array()
-        .map_or_else(|| vec![v], |a| a.iter().take(64).collect())
-        .into_iter()
-        .filter(|v| !v.is_null())
-}
-fn text(v: &Value) -> Option<String> {
-    crate::event::page::string(v)
-        .or_else(|| v.as_u64().map(|n| n.to_string()))
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty())
+    super::all(v, 64)
 }
 fn texts(v: &Value) -> Vec<String> {
     all(v).filter_map(text).collect()

@@ -450,7 +450,7 @@ impl Source for Gitlab {
     }
     fn budgets(&self) -> &'static [Budget] {
         // gitlab.com: 500 unauthenticated API requests per minute.
-        &[("gitlab.com", 2.0, None)]
+        &[("gitlab.com", 2.0)]
     }
     fn examples(&self) -> &'static [Example] {
         &[

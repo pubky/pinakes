@@ -6,7 +6,7 @@
 //!
 //! The licence is per record: an occurrence card credits its own licence and rights holder.
 use super::kit::{
-    float, host_and_segments, int, json, number, text, texts, time, Card, Link, Point, Request,
+    float, host_and_segments, int, json, number, text, texts, time, Card, Point, Request,
 };
 use super::{Example, Source};
 use crate::model::ResourceMeta;
@@ -15,7 +15,6 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 pub const SITE: &str = "GBIF";
-const VIA: &str = "gbif";
 const API: &str = "https://api.gbif.org/v1";
 /// The GBIF Backbone Taxonomy, whose species keys most links use.
 const BACKBONE: &str = "d7dddbf4-2cf0-4f39-9b2a-bb099caae36c";
@@ -277,11 +276,6 @@ pub fn parse_occurrence(status: u16, raw: &[u8], key: u64) -> Result<Option<Card
         .and_then(super::biodiversity::inaturalist_observation)
     {
         card.detail("inat_observation", id);
-        card.link(Link::new(
-            "iNaturalist",
-            super::biodiversity::inaturalist_observation_page(id),
-            VIA,
-        ));
     }
     card.detail("occurrence_id", occurrence_id);
     Ok(Some(card))
@@ -363,7 +357,7 @@ impl Source for Gbif {
         ]
     }
     fn budgets(&self) -> &'static [super::Budget] {
-        &[("api.gbif.org", 1.0, None)]
+        &[("api.gbif.org", 1.0)]
     }
     fn examples(&self) -> &'static [Example] {
         &[
@@ -555,10 +549,6 @@ mod tests {
         );
         assert!(card.keys.is_empty(), "another service's object is a fact");
         assert_eq!(card.details["inat_observation"], 333069440);
-        assert_eq!(
-            card.also_on[0].uri,
-            "https://www.inaturalist.org/observations/333069440"
-        );
 
         assert_eq!(
             parse_occurrence(404, &read("occurrence-missing.txt"), 999999999999).unwrap(),

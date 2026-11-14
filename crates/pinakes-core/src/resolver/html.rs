@@ -488,6 +488,92 @@ pub fn bounded(text: &str) -> &str {
     scan.cut.map_or(text, |at| &text[..at])
 }
 
+/// The text of an HTML fragment, read in one pass without a parser, so in time linear in
+/// its length whatever its nesting: tags and comments are dropped, a block tag (`p`, `br`,
+/// `li`, …) starts a new line, `script` and `style` contents are skipped, character
+/// references are decoded and white space is collapsed. `None` when no text is left.
+pub fn scan_text(html: &str) -> Option<String> {
+    const BLOCKS: &[&str] = &[
+        "address",
+        "blockquote",
+        "br",
+        "dd",
+        "div",
+        "dl",
+        "dt",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "hr",
+        "li",
+        "ol",
+        "p",
+        "pre",
+        "section",
+        "table",
+        "tr",
+        "ul",
+    ];
+    // ASCII lower-casing keeps every byte offset, so `lower` locates what `html` holds.
+    let lower = html.to_ascii_lowercase();
+    let mut lines = vec![String::new()];
+    let mut at = 0;
+    while at < html.len() {
+        let Some(open) = html[at..].find('<').map(|i| at + i) else {
+            lines.last_mut()?.push_str(&html[at..]);
+            break;
+        };
+        lines.last_mut()?.push_str(&html[at..open]);
+        if lower[open..].starts_with("<!--") {
+            // A comment, to its end (or the end of the text).
+            at = lower[open + 4..]
+                .find("-->")
+                .map_or(html.len(), |i| open + 4 + i + 3);
+            continue;
+        }
+        let next = html[open + 1..].chars().next();
+        if !next.is_some_and(|c| c.is_ascii_alphabetic() || c == '/' || c == '!') {
+            // Not a tag: a literal `<`.
+            lines.last_mut()?.push('<');
+            at = open + 1;
+            continue;
+        }
+        let Some(close) = html[open..].find('>').map(|i| open + i) else {
+            break;
+        };
+        let inner = &lower[open + 1..close];
+        let end_tag = inner.starts_with('/');
+        let name: String = inner
+            .trim_start_matches('/')
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect();
+        if BLOCKS.contains(&name.as_str()) {
+            lines.push(String::new());
+        }
+        at = close + 1;
+        if !end_tag && (name == "script" || name == "style") {
+            // Raw text, to its end tag (or the end of the text).
+            let end = format!("</{name}");
+            at = lower[at..].find(&end).map_or(html.len(), |i| at + i);
+        }
+    }
+    let text: Vec<String> = lines
+        .iter()
+        .map(|line| {
+            crate::resolver::web::decoded(line)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .filter(|line| !line.is_empty())
+        .collect();
+    (!text.is_empty()).then(|| text.join("\n"))
+}
+
 /// Parse in this thread's job, or in a job of its own with `budget` outside one.
 fn parse(kind: Kind, text: &str, budget: Duration) -> anyhow::Result<scraper::Html> {
     if JOB.with(|j| j.borrow().is_some()) {
@@ -1843,7 +1929,7 @@ mod tests {
         }
     }
 
-    /// Each of Codex's probes is cut where it passes a cap, and parses in well under a second.
+    /// Each hostile shape is cut where it passes a cap, and parses in well under a second.
     #[test]
     fn hostile_markup_is_cut_at_its_cap() {
         // One tag with 60,000 attributes, separated by spaces or by `/`.
@@ -1874,7 +1960,7 @@ mod tests {
         }
     }
 
-    /// The second round of Codex's probes: attributes on an end tag, a tag inside SVG's
+    /// More hostile shapes: attributes on an end tag, a tag inside SVG's
     /// `<title>`, names alike in their first 32 bytes, and end tags that cannot close past a
     /// special element. Each is cut at its cap and parses at once.
     #[test]
@@ -2005,7 +2091,7 @@ mod tests {
     }
 
     /// Plain text passes the job's checks like markup: a job whose caller is gone, whose deadline
-    /// or CPU budget has passed, parses no more plain text either (Codex on 6877c1f). A job still
+    /// or CPU budget has passed, parses no more plain text either. A job still
     /// within its limits parses it.
     #[test]
     fn a_job_that_is_over_refuses_plain_text_too() {
@@ -2183,21 +2269,19 @@ mod tests {
         }
     }
 
-    /// Codex's probes, each through the code that met it, finish in well under a second (in a
+    /// The hostile shapes, each through the code that met it, finish in well under a second (in a
     /// debug build) and overflow no stack.
     #[test]
-    fn codex_s_probes_finish_at_once() {
+    fn hostile_shapes_finish_at_once() {
         use crate::resolver::{egress::Fetched, interstitial, web};
         let fetched = |status: u16, content_type: &str, body: String| Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: "https://hostile.example.org/p".parse().unwrap(),
-            content_type: content_type.into(),
-            status,
             retry_after_secs: 0,
-            location: None,
-            body: body.into_bytes(),
+            ..Fetched::answer(
+                "https://hostile.example.org/p".parse().unwrap(),
+                status,
+                content_type.into(),
+                body.into_bytes(),
+            )
         };
         let url: url::Url = "https://hostile.example.org/p".parse().unwrap();
         // 10,000 nested spans in an Internet Archive description: plain text, no overflow.

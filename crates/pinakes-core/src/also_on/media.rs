@@ -269,72 +269,67 @@ pub async fn type_hints(
     for id in episodes {
         out.entry(id).or_default().episode = true;
     }
-    let types: Vec<(String, String)> = sqlx::query_as(&format!(
-        "SELECT resource_id, min(value) FROM resource_fact WHERE resource_id=ANY($1) AND source='films' AND name='title_type' AND expires_at>now() AND {sources} GROUP BY resource_id"
-    ))
-    .bind(ids)
-    .fetch_all(pool)
-    .await?;
-    for (id, kind) in types {
-        out.entry(id).or_default().title_type = Some(kind);
-    }
-    let titles: Vec<(String, String, String)> = sqlx::query_as(&format!(
-        "SELECT DISTINCT ON (resource_id,name) resource_id,name,value FROM resource_fact WHERE resource_id=ANY($1) AND source='titles' AND name IN ('title','title_description') AND expires_at>now() AND {sources} ORDER BY resource_id,name,value"
-    ))
-    .bind(ids)
-    .fetch_all(pool)
-    .await?;
-    for (id, name, value) in titles {
-        let hints = out.entry(id).or_default();
-        if name == "title" {
-            hints.title = Some(value);
-        } else {
-            hints.title_description = Some(value);
-        }
-    }
     let fillers: Vec<&str> = crate::also_on::registered()
         .iter()
         .filter(|s| !s.fills().is_empty())
         .map(|s| s.id())
         .collect();
-    if !fillers.is_empty() {
-        let filled: Vec<(String, String, String, String)> = sqlx::query_as(&format!(
-            "SELECT resource_id,source,name,value FROM resource_fact WHERE resource_id=ANY($1) AND source=ANY($2) AND expires_at>now() AND {sources} ORDER BY resource_id,source,name,value"
-        ))
-        .bind(ids)
-        .bind(&fillers)
-        .fetch_all(pool)
-        .await?;
-        for (id, source, name, value) in filled {
-            let takes = crate::also_on::registered()
-                .iter()
-                .any(|s| s.id() == source && s.fills().contains(&name.as_str()));
-            if takes {
-                out.entry(id)
-                    .or_default()
-                    .filled
-                    .entry(source)
-                    .or_default()
-                    .push(super::Fact::new(name, value));
-            }
-        }
-    }
-    let streams: Vec<(String, String, String, String)> = sqlx::query_as(&format!(
-        "SELECT resource_id,source,name,min(value) FROM resource_fact WHERE resource_id=ANY($1) AND source=ANY($2) AND name IN ('stream_url','stream_type','stream_duration') AND expires_at>now() AND {sources} GROUP BY resource_id,source,name"
+    // Every fact a hint reads, in one statement: a title's type (`films`), a title and its
+    // description (`titles`), the facts of the sources that fill cards and the stream facts.
+    // The rows come by resource, source, name and value, so the first row of a name is its
+    // least value: the one a hint with one value takes.
+    let facts: Vec<(String, String, String, String)> = sqlx::query_as(&format!(
+        "SELECT resource_id,source,name,value FROM resource_fact WHERE resource_id=ANY($1) AND expires_at>now() AND {sources} AND ((source='films' AND name='title_type') OR (source='titles' AND name IN ('title','title_description')) OR source=ANY($2) OR (source=ANY($3) AND name IN ('stream_url','stream_type','stream_duration'))) ORDER BY resource_id,source,name,value"
     ))
     .bind(ids)
+    .bind(&fillers)
     .bind(STREAMS.iter().map(|(s, _)| *s).collect::<Vec<_>>())
     .fetch_all(pool)
     .await?;
     let mut heard: std::collections::HashMap<(String, String), [Option<String>; 3]> =
         Default::default();
-    for (id, source, name, value) in streams {
+    for (id, source, name, value) in facts {
+        // A row may be read in more than one way: each is as its own statement read it.
+        let single = match (source.as_str(), name.as_str()) {
+            ("films", "title_type") => Some(0),
+            ("titles", "title") => Some(1),
+            ("titles", "title_description") => Some(2),
+            _ => None,
+        };
+        if let Some(field) = single {
+            let hints = out.entry(id.clone()).or_default();
+            let slot = match field {
+                0 => &mut hints.title_type,
+                1 => &mut hints.title,
+                _ => &mut hints.title_description,
+            };
+            if slot.is_none() {
+                *slot = Some(value.clone());
+            }
+        }
+        let takes = crate::also_on::registered()
+            .iter()
+            .any(|s| s.id() == source && s.fills().contains(&name.as_str()));
+        if takes {
+            out.entry(id.clone())
+                .or_default()
+                .filled
+                .entry(source.clone())
+                .or_default()
+                .push(super::Fact::new(name.clone(), value.clone()));
+        }
         let at = match name.as_str() {
             "stream_url" => 0,
             "stream_type" => 1,
-            _ => 2,
+            "stream_duration" => 2,
+            _ => continue,
         };
-        heard.entry((id, source)).or_default()[at] = Some(value);
+        if STREAMS.iter().any(|(s, _)| *s == source) {
+            let slot = &mut heard.entry((id, source)).or_default()[at];
+            if slot.is_none() {
+                *slot = Some(value);
+            }
+        }
     }
     for (source, preview) in STREAMS.iter().rev() {
         for ((id, from), [url, kind, seconds]) in &heard {

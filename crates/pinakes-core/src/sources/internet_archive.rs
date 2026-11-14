@@ -11,7 +11,7 @@
 //! separate small request (`size_request`). An unknown identifier and a taken-down ("darked")
 //! item both answer 200 with an error that names the identifier.
 use super::kit::{
-    fetch, host_and_segments, html_text, json, plain, text, web_url, Card, Key, Link, Request,
+    fetch, host_and_segments, html_text, json, plain, text, web_url, Card, Key, Request,
 };
 use super::{Example, Source};
 use crate::{model::ResourceMeta, resolver::cards};
@@ -20,7 +20,6 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 pub const SITE: &str = "Internet Archive";
-const VIA: &str = "internet_archive";
 
 /// An item identifier as archive.org writes it: letters, digits, `.`, `-` and `_`.
 pub fn item_id(value: &str) -> Option<String> {
@@ -236,11 +235,6 @@ pub fn parse(status: u16, raw: &[u8], id: &str) -> Result<Option<Card>> {
         .filter(|e| values(&m["openlibrary"]).iter().all(|o| o == e));
     if let Some(edition) = edition {
         card.key(Key::new("openlibrary", &edition));
-        card.link(Link::new(
-            "Open Library",
-            format!("https://openlibrary.org/books/{edition}"),
-            VIA,
-        ));
     }
     // The work is every edition, not this item: a fact, not a key.
     card.detail(
@@ -318,7 +312,7 @@ impl Source for InternetArchive {
         ]
     }
     fn budgets(&self) -> &'static [super::Budget] {
-        &[("archive.org", 0.5, None)]
+        &[("archive.org", 0.5)]
     }
     fn examples(&self) -> &'static [Example] {
         &[Example {
@@ -447,10 +441,6 @@ mod tests {
         assert_eq!(card.attribution, None);
         assert_eq!(keys(&card), ["openlibrary:OL7095326M"]);
         assert_eq!(card.details["openlibrary_work"], "OL16077419W");
-        assert_eq!(
-            card.also_on[0].uri,
-            "https://openlibrary.org/books/OL7095326M"
-        );
     }
 
     #[test]
@@ -490,7 +480,6 @@ mod tests {
         assert_eq!(keys(&crime), ["isbn:9780140449136"]);
         // The work is every edition: a fact, not a key.
         assert_eq!(crime.details["openlibrary_work"], "OL166894W");
-        assert!(crime.also_on.is_empty());
         // The ISBNs of two editions.
         let algo = card(
             "introductiontoal0000unse_t3a6",

@@ -391,10 +391,7 @@ mod tests {
         }
     }
 
-    #[sqlx::test(
-        migrations = "../../migrations",
-        fixtures("../tests/fixtures/require_h3.sql")
-    )]
+    #[sqlx::test(migrations = "../../migrations")]
     async fn a_line_that_panics_is_skipped_and_the_cursor_moves_past_it(pool: PgPool) {
         use tracing::instrument::WithSubscriber;
         // A Nexus URL with a token in its path: only its host may reach the log.
@@ -474,10 +471,7 @@ mod tests {
     /// A page that mixes lines this build reads with a line of an unknown kind and malformed ones
     /// is applied: the good lines land, the others are skipped and counted, and the cursor moves
     /// past them all, so one line never stops the feed. Through the real client and parser.
-    #[sqlx::test(
-        migrations = "../../migrations",
-        fixtures("../tests/fixtures/require_h3.sql")
-    )]
+    #[sqlx::test(migrations = "../../migrations")]
     async fn a_page_with_unknown_and_malformed_lines_moves_the_cursor_past_them(pool: PgPool) {
         use axum::{routing::get, Router};
         let good = |uri: &str, path: &str| serde_json::to_value(line(uri, path)).unwrap();
@@ -534,10 +528,7 @@ mod tests {
 
     /// A panic in the batch's work after its lines is an error: counted, the batch rolled back
     /// and the cursor held, so the operator sees a stalled feed instead of a silent retry loop.
-    #[sqlx::test(
-        migrations = "../../migrations",
-        fixtures("../tests/fixtures/require_h3.sql")
-    )]
+    #[sqlx::test(migrations = "../../migrations")]
     async fn a_panic_after_the_lines_holds_the_cursor_and_is_counted(pool: PgPool) {
         let lines = vec![
             line("https://example.org/kept-back", "/a"),

@@ -26,7 +26,7 @@ fn fixture(name: &str) -> (String, Vec<u8>) {
 }
 /// The stored card of `body` at `uri`, as the resolver saves it.
 fn card_of(uri: &str, body: &[u8]) -> ResourceMeta {
-    pubky_apps::card(uri, "application/octet-stream", body, 86400)
+    pubky_apps::card_at(uri, "application/octet-stream", body, 86400, Utc::now())
         .bounded(pubky_apps::attributes())
         .unwrap()
 }
@@ -428,7 +428,7 @@ async fn get(app: &axum::Router, path: &str) -> Value {
     value
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn cards_carry_their_client_links_and_facts(pool: PgPool) {
     // A read deck: its stored links and facts.
     let (uri, body) = fixture("loopky/medeng2026a-url-cover");
@@ -459,7 +459,7 @@ async fn cards_carry_their_client_links_and_facts(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_object_that_loses_its_card_keeps_nothing_of_it(pool: PgPool) {
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     for (name, change) in [
@@ -481,11 +481,12 @@ async fn an_object_that_loses_its_card_keeps_nothing_of_it(pool: PgPool) {
         for (k, value) in change.as_object().unwrap() {
             v[k] = value.clone();
         }
-        let mut gone = pubky_apps::card(
+        let mut gone = pubky_apps::card_at(
             &uri,
             "application/octet-stream",
             v.to_string().as_bytes(),
             86400,
+            Utc::now(),
         );
         assert_eq!(gone.status, Status::Missing);
         doc.fetched_at += 1000;
@@ -576,7 +577,7 @@ async fn kept(
 /// again: the resolver gives it no card, without a request, and its save leaves a missing
 /// `CreativeWork` with nothing of the object and a history without documents, found neither by
 /// its text nor by its old type. Another app's object keeps its route and its card.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_object_at_a_path_never_fetched_keeps_nothing_once_read_again(pool: PgPool) {
     let owner = "ybndrfg8ejkmcpqxot1uwisza345h769ybndrfg8ejkmcpqxot1uwi";
     let at = |path: &str| format!("pubky://{owner}/pub/{path}");

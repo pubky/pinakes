@@ -83,22 +83,12 @@ pub fn timestamp_at(raw: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>> {
     };
     crate::event::time::bounded(at).context("timestamp out of range")
 }
-pub fn resolution(zoom: f64, config: &SearchConfig) -> Result<h3o::Resolution> {
-    ensure!(zoom.is_finite(), "zoom must be finite");
-    let zoom = (zoom.floor().max(0.0) as usize).min(config.h3_resolutions.len().saturating_sub(1));
-    let res = *config
-        .h3_resolutions
-        .get(zoom)
-        .context("zoom outside configured H3 table")?;
-    Ok(res.try_into()?)
-}
 #[derive(Default)]
 pub struct Filters {
     pub bbox: Option<Bbox>,
     pub near: Option<(f64, f64, f64)>,
     pub from: Option<DateTime<Utc>>,
     pub to: Option<DateTime<Utc>>,
-    pub resolution: Option<h3o::Resolution>,
 }
 impl Filters {
     /// A search's filters, with relative times (`now`, `now+7d`) resolved against `now`: a search
@@ -115,14 +105,6 @@ impl Filters {
         ensure!(
             q.sort.as_deref() != Some("distance") || q.near.is_some(),
             "sort=distance requires near"
-        );
-        ensure!(
-            q.cluster.is_none() || q.bbox.is_some(),
-            "cluster requires bbox"
-        );
-        ensure!(
-            q.cluster.is_none() || q.cursor.is_none(),
-            "cluster does not accept a cursor"
         );
         let mut out = Self {
             bbox: q.bbox.as_deref().map(Bbox::parse).transpose()?,
@@ -154,25 +136,6 @@ impl Filters {
                 "radius exceeds configured metre range"
             );
             out.near = Some((p[0], p[1], radius));
-        }
-        if let Some(zoom) = &q.cluster {
-            let mut res = resolution(zoom.parse()?, config)?;
-            let [w, s, e, n] = out.bbox.as_ref().expect("required bbox").0;
-            let width = if e < w { e + 360.0 - w } else { e - w };
-            let fraction = width / 360.0 * (n.to_radians().sin() - s.to_radians().sin()) / 2.0;
-            // Conservative area and edge allowance; SQL also checks the actual group count.
-            while u8::from(res) > 0 {
-                let cells = res.cell_count() as f64;
-                let estimate = (cells * fraction * 4.0
-                    + cells.sqrt() * (width / 360.0 + (n - s) / 180.0) * 8.0
-                    + 16.0)
-                    .min(cells);
-                if estimate <= config.max_cluster_cells as f64 {
-                    break;
-                }
-                res = (u8::from(res) - 1).try_into()?;
-            }
-            out.resolution = Some(res);
         }
         ensure!(
             out.from.zip(out.to).is_none_or(|(f, t)| f <= t),
@@ -227,7 +190,7 @@ impl Filters {
 mod tests {
     use super::*;
     #[test]
-    fn antimeridian_and_h3_table() {
+    fn antimeridian_and_times() {
         assert_eq!(
             Bbox::parse("170,-10,-170,10").unwrap().split(),
             vec![[170.0, -10.0, 180.0, 10.0], [-180.0, -10.0, -170.0, 10.0]]
@@ -236,44 +199,6 @@ mod tests {
         for raw in ["1,2,3", "1,3,2,0", "NaN,0,2,3", "181,0,0,0"] {
             assert!(Bbox::parse(raw).is_err());
         }
-        let config = SearchConfig::default();
-        for zoom in 0usize..=22 {
-            assert_eq!(
-                u8::from(resolution(zoom as f64, &config).unwrap()),
-                zoom.saturating_sub(4).min(11) as u8
-            );
-        }
-        assert_eq!(
-            resolution(23.0, &config).unwrap(),
-            resolution(22.0, &config).unwrap()
-        );
-        assert_eq!(
-            resolution(8.4, &config).unwrap(),
-            resolution(8.0, &config).unwrap()
-        );
-        assert!(resolution(f64::NAN, &config).is_err());
-        let world = Filters::parse_at(
-            &SearchQuery {
-                bbox: Some("-180,-90,180,90".into()),
-                cluster: Some("1000.5".into()),
-                ..Default::default()
-            },
-            &config,
-            Utc::now(),
-        )
-        .unwrap();
-        assert!(world.resolution.unwrap().cell_count() <= config.max_cluster_cells as u64);
-        let tiny = Filters::parse_at(
-            &SearchQuery {
-                bbox: Some("8,46,8.00001,46.00001".into()),
-                cluster: Some("8.4".into()),
-                ..Default::default()
-            },
-            &config,
-            Utc::now(),
-        )
-        .unwrap();
-        assert_eq!(u8::from(tiny.resolution.unwrap()), 4);
         assert_eq!(timestamp_at("0", Utc::now()).unwrap().timestamp(), 0);
         let at = timestamp_at("2026-10-18T10:15:42.5Z", Utc::now()).unwrap();
         for (raw, expected) in [

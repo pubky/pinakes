@@ -6,6 +6,7 @@
 //! (`job_status`) and left out of search unless it asks for `closed=true`. Its workplace is its
 //! venue, placed on the map like an event's (`EventService::workplace`); a remote posting names
 //! the regions it accepts applicants from.
+use super::{first, number, text};
 use crate::{
     event::Venue,
     model::{LocationSource, ResourceMeta},
@@ -419,7 +420,7 @@ pub fn closes_at(s: &str) -> Option<DateTime<Utc>> {
 
 /// A posting's HTML description as a short plain-text excerpt.
 pub fn excerpt(html: &str) -> Option<String> {
-    let text = crate::resolver::pubky_apps::read::html_text(html)?;
+    let text = crate::resolver::html::scan_text(html)?;
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut cut: String = text.chars().take(EXCERPT).collect();
     if cut.len() < text.len() {
@@ -433,30 +434,11 @@ fn fill(dst: &mut Option<String>, src: Option<String>) {
         *dst = src;
     }
 }
-fn first(v: &Value) -> &Value {
-    v.as_array().and_then(|a| a.first()).unwrap_or(v)
-}
 fn all(v: &Value) -> impl Iterator<Item = &Value> {
-    v.as_array()
-        .map_or_else(|| vec![v], |a| a.iter().take(32).collect())
-        .into_iter()
-        .filter(|v| !v.is_null())
-}
-fn text(v: &Value) -> Option<String> {
-    crate::event::page::string(v)
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty())
+    super::all(v, 32)
 }
 fn texts(v: &Value) -> Vec<String> {
     all(v).filter_map(text).collect()
-}
-fn number(v: &Value) -> Option<f64> {
-    v.as_f64()
-        .or_else(|| {
-            v.as_str()
-                .and_then(|s| s.trim().replace(',', "").parse().ok())
-        })
-        .filter(|n| n.is_finite() && *n >= 0.0)
 }
 fn amount(n: f64) -> String {
     if n.fract() == 0.0 && n < 1e15 {

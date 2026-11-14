@@ -203,7 +203,7 @@ impl Source for Usgs {
         ]
     }
     fn budgets(&self) -> &'static [super::Budget] {
-        &[("earthquake.usgs.gov", 1.0, None)]
+        &[("earthquake.usgs.gov", 1.0)]
     }
     fn examples(&self) -> &'static [Example] {
         &[
@@ -324,7 +324,6 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&"usp000hvnu".into()));
-        assert!(card.also_on.is_empty());
     }
 
     #[test]

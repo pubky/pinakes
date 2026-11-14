@@ -7,21 +7,15 @@ use pinakes_core::{
     config::Config,
     groups,
     model::ResourceMeta,
-    resolver::egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+    resolver::egress::{Egress, FetchOptions, Fetched, Transport},
     store,
 };
 use std::{collections::BTreeMap, io::Read, net::SocketAddr, sync::Arc};
 use tower::ServiceExt;
+mod common;
+use common::media::PublicDns;
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/lookups/apps");
-
-struct PublicDns;
-#[async_trait::async_trait]
-impl Dns for PublicDns {
-    async fn lookup(&self, _: &str, port: u16) -> anyhow::Result<Vec<SocketAddr>> {
-        Ok(vec![SocketAddr::new("8.8.8.8".parse()?, port)])
-    }
-}
 
 /// The recorded answers by URL; a Wikidata search nobody recorded finds nothing, anything
 /// else is a 404.
@@ -81,17 +75,7 @@ impl Transport for Recorded {
             ),
             None => (404, "text/plain".into(), vec![]),
         };
-        Ok(Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: u.clone(),
-            content_type,
-            status,
-            retry_after_secs: 60,
-            location: None,
-            body,
-        })
+        Ok(common::fetched(u.clone(), status, content_type, body))
     }
 }
 
@@ -100,7 +84,7 @@ impl Transport for Recorded {
 /// Signal's Wikidata item (Signal replaces TextSecure, which carries the same Android package),
 /// whose store IDs are keys of each. A Google Play and an F-Droid page of a package Wikidata
 /// lacks join through the package alone.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_apps_store_links_join_one_group(pool: sqlx::PgPool) {
     if !also_on::registry().iter().any(|s| s.id() == "app_stores") {
         return;
@@ -215,7 +199,7 @@ async fn an_apps_store_links_join_one_group(pool: sqlx::PgPool) {
 /// An app Wikidata lacks, on the App Store and Flathub under one website and one name (as each
 /// store spells it): no group, but each card names the other as possibly the same app. A Snap
 /// with the same name under another website is not named.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_app_wikidata_lacks_is_only_possibly_the_same(pool: sqlx::PgPool) {
     if !also_on::registry().iter().any(|s| s.id() == "app_stores") {
         return;

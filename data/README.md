@@ -1,7 +1,8 @@
 # Pinned vocabulary
 
 `schemaorg-30.1.jsonld` is the unmodified schema.org 30.1 current HTTPS vocabulary,
-downloaded from <https://schema.org/version/30.1/schemaorg-current-https.jsonld>.
+downloaded from <https://schema.org/version/30.1/schemaorg-current-https.jsonld>. SHA-256:
+`0a4b8c4c910fc831ec8695196510973390906a5ee34dc6b862dfec4d21a12f74`.
 `schemaorg-types.json` derives every class and its direct parents from that file;
 regenerate it with `scripts/schema-types`. The runtime computes the full ancestor
 closure, preserving multiple inheritance. Unknown types are not invented.
@@ -21,6 +22,17 @@ uses is refused at startup.
 `type-mappings.json` is Pinakes's MIT-licensed mapping of OpenGraph, oEmbed and
 microformats names into the pinned vocabulary. Bumping the vocabulary is an
 explicit repository change, followed by re-resolution to update stored paths.
+
+## Pinakes's own tables
+
+MIT-licensed like the source code, with no upstream file:
+
+- `api-recipes.json`: the named API examples (`recipes.rs`); they become the OpenAPI examples,
+  and [docs/api.md](../docs/api.md) lists them.
+- `event-adapters.json`: one entry per event platform (its domains and paths, parser, mode,
+  cadence, identity and cancellation signal); [operations](../docs/operations.md) describes them.
+- `interstitial-markers.json`: the texts, titles, selectors, hosts and paths that mark a bot
+  wall or a challenge page instead of content (`resolver/interstitial.rs`).
 
 
 ## Calendar zones

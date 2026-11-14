@@ -89,8 +89,8 @@ pub fn lenient_json(text: &str) -> Option<Value> {
     }
     serde_json::from_str(&out).ok()
 }
-/// Every event node in `v`, in document order (an event's own nested entities aside).
-/// The event nodes of a value, each with whether it sits in a list of several main entities.
+/// Every event node in `v`, in document order (an event's own nested entities aside), each
+/// with whether it sits in a list of several main entities.
 fn event_nodes<'a>(v: &'a Value, out: &mut Vec<(&'a Value, bool)>, in_list: bool) {
     if let Some(values) = v.as_array() {
         values.iter().for_each(|v| event_nodes(v, out, in_list));
@@ -417,8 +417,6 @@ fn fields(doc: &mut ResourceMeta, v: &Value, base: &Url, ap: bool) {
         );
     }
 }
-/// Set the start or end from a page value, trimmed at both ends first (a padded date-only value
-/// is still recognised as a date by its length).
 /// Whether an event node is the page's own: the page it names is this page (tracking
 /// parameters and fragments aside). Another event a page describes beside its own (a venue's
 /// next show, a related date) never donates to the page's event.
@@ -627,6 +625,8 @@ fn field_values<'a>(node: &'a Value, field: &str) -> impl Iterator<Item = &'a Va
     };
     all.iter().chain(one)
 }
+/// Set the start or end from a page value, trimmed at both ends first (a padded date-only value
+/// is still recognised as a date by its length).
 pub fn set_time(doc: &mut ResourceMeta, s: &str, end: bool) {
     let s = s.trim();
     if (end && doc.end.is_some()) || (!end && doc.start.is_some()) {
@@ -976,17 +976,13 @@ mod performer_tests {
             name: "Radiohead".into(),
             links: vec!["https://www.songkick.com/artists/253846".into()],
         }];
-        card.event.read_from(&crate::resolver::egress::Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: url::Url::parse("https://www.songkick.com/concerts/1?token=SECRET").unwrap(),
-            status: 200,
-            retry_after_secs: 60,
-            location: None,
-            content_type: "text/html".into(),
-            body: vec![],
-        });
+        card.event
+            .read_from(&crate::resolver::egress::Fetched::answer(
+                url::Url::parse("https://www.songkick.com/concerts/1?token=SECRET").unwrap(),
+                200,
+                "text/html".into(),
+                vec![],
+            ));
         assert_eq!(
             card.event.performers_from(),
             Some("https://www.songkick.com/")

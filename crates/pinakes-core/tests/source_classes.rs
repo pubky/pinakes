@@ -6,7 +6,7 @@ use pinakes_core::{
 };
 use sqlx::PgPool;
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn the_schema_allows_exactly_the_source_error_classes(pool: PgPool) {
     let definition: String = sqlx::query_scalar(
         "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname='source_error_class' AND conrelid='source_state'::regclass",

@@ -147,6 +147,25 @@ pub struct Fetched {
     pub location: Option<String>,
     pub body: Vec<u8>,
 }
+#[cfg(test)]
+impl Fetched {
+    /// An answer as a test's transport gives it: `status` with `body` of `content_type` at
+    /// `url`, whole, with no redirect, no validators, no `Location` and a retry-after of 60 s.
+    /// A test that needs another value sets that field with struct update syntax.
+    pub(crate) fn answer(url: Url, status: u16, content_type: String, body: Vec<u8>) -> Self {
+        Self {
+            permanent_redirect: false,
+            truncated: false,
+            validators: Validators::default(),
+            url,
+            content_type,
+            status,
+            retry_after_secs: 60,
+            location: None,
+            body,
+        }
+    }
+}
 #[async_trait]
 pub trait Dns: Send + Sync {
     async fn lookup(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>>;
@@ -384,9 +403,6 @@ pub fn page_fits(f: &Fetched) -> bool {
         ) && f.body.len() <= MAX_HTML_HEAD_BYTES)
 }
 
-pub async fn read_response(url: Url, response: reqwest::Response) -> Result<Fetched> {
-    read_response_with(url, response, &FetchOptions::default()).await
-}
 pub async fn read_response_with(
     url: Url,
     mut response: reqwest::Response,
@@ -729,9 +745,12 @@ impl Egress {
         }
     }
     pub async fn fetch(&self, uri: &str) -> Result<Fetched> {
-        tokio::time::timeout(Duration::from_secs(10), self.fetch_inner(uri))
-            .await
-            .context("web resolution exceeded 10 seconds")?
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            self.fetch_options_inner(uri, &FetchOptions::default()),
+        )
+        .await
+        .context("web resolution exceeded 10 seconds")?
     }
     pub async fn fetch_with(&self, uri: &str, options: &FetchOptions) -> Result<Fetched> {
         options.one_body()?;
@@ -987,10 +1006,6 @@ impl Egress {
             },
         );
         result
-    }
-    async fn fetch_inner(&self, uri: &str) -> Result<Fetched> {
-        self.fetch_options_inner(uri, &FetchOptions::default())
-            .await
     }
     async fn fetch_options_inner(&self, uri: &str, options: &FetchOptions) -> Result<Fetched> {
         let requested = Url::parse(uri)?;
@@ -1367,17 +1382,12 @@ mod tests {
         #[async_trait]
         impl Transport for Ok200 {
             async fn get(&self, url: &Url, _: &[SocketAddr]) -> Result<Fetched> {
-                Ok(Fetched {
-                    permanent_redirect: false,
-                    truncated: false,
-                    url: url.clone(),
-                    status: 200,
-                    content_type: "application/json".into(),
-                    validators: Default::default(),
-                    location: None,
-                    retry_after_secs: 60,
-                    body: b"{}".to_vec(),
-                })
+                Ok(Fetched::answer(
+                    url.clone(),
+                    200,
+                    "application/json".into(),
+                    b"{}".to_vec(),
+                ))
             }
         }
         let egress = Arc::new(Egress::with_backends(
@@ -1430,17 +1440,12 @@ mod tests {
                 if url.path() == "/slow" {
                     tokio::time::sleep(Duration::from_secs(7)).await;
                 }
-                Ok(Fetched {
-                    permanent_redirect: false,
-                    truncated: false,
-                    url: url.clone(),
-                    status: 200,
-                    content_type: "application/json".into(),
-                    validators: Default::default(),
-                    location: None,
-                    retry_after_secs: 60,
-                    body: b"{}".to_vec(),
-                })
+                Ok(Fetched::answer(
+                    url.clone(),
+                    200,
+                    "application/json".into(),
+                    b"{}".to_vec(),
+                ))
             }
         }
         let egress = Arc::new(Egress::with_backends(
@@ -1480,15 +1485,13 @@ mod tests {
             async fn get(&self, url: &Url, _: &[SocketAddr]) -> Result<Fetched> {
                 let redirect = url.path() == "/old";
                 Ok(Fetched {
-                    permanent_redirect: false,
-                    truncated: false,
-                    url: url.clone(),
-                    status: if redirect { 301 } else { 200 },
-                    content_type: "application/json".into(),
-                    validators: Default::default(),
                     location: redirect.then(|| "/new".to_owned()),
-                    retry_after_secs: 60,
-                    body: b"{}".to_vec(),
+                    ..Fetched::answer(
+                        url.clone(),
+                        if redirect { 301 } else { 200 },
+                        "application/json".into(),
+                        b"{}".to_vec(),
+                    )
                 })
             }
         }
@@ -1609,17 +1612,12 @@ mod tests {
                 options: &FetchOptions,
             ) -> Result<Fetched> {
                 self.0.lock().unwrap().push(options.user_agent.clone());
-                Ok(Fetched {
-                    permanent_redirect: false,
-                    truncated: false,
-                    url: url.clone(),
-                    status: 200,
-                    content_type: "application/json".into(),
-                    validators: Default::default(),
-                    location: None,
-                    retry_after_secs: 60,
-                    body: b"{}".to_vec(),
-                })
+                Ok(Fetched::answer(
+                    url.clone(),
+                    200,
+                    "application/json".into(),
+                    b"{}".to_vec(),
+                ))
             }
         }
         let with_contact = format!(
@@ -1744,7 +1742,7 @@ mod tests {
         server.abort();
     }
     /// Nothing in a page's text ends its read early: a head of about 1.05 MB with `<body` or
-    /// `</script>` in a script, a style or a comment (Codex's variants, including a script whose
+    /// `</script>` in a script, a style or a comment (in every variant, including a script whose
     /// `<!--<script>` escapes the `</script>` inside it) is read whole, the title and meta tags
     /// after the decoy with it.
     #[tokio::test]
@@ -2007,21 +2005,16 @@ mod tests {
         #[async_trait]
         impl Transport for Graphql {
             async fn get(&self, url: &Url, _: &[SocketAddr]) -> Result<Fetched> {
-                Ok(Fetched {
-                    permanent_redirect: false,
-                    truncated: false,
-                    url: url.clone(),
-                    status: 200,
-                    content_type: "application/json".into(),
-                    validators: Default::default(),
-                    location: None,
-                    retry_after_secs: 60,
-                    body: if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                Ok(Fetched::answer(
+                    url.clone(),
+                    200,
+                    "application/json".into(),
+                    if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
                         br#"{"errors":[{"message":"temporary"}]}"#.to_vec()
                     } else {
                         br#"{"data":{"event":null}}"#.to_vec()
                     },
-                })
+                ))
             }
         }
         let transport = Arc::new(Graphql(AtomicUsize::new(0)));
@@ -2112,16 +2105,13 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_confirmation_asks_again_for_a_cached_failure() {
         let egress = Egress::new(Default::default());
-        let answer = |status| Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: Url::parse("https://example.org/gone").unwrap(),
-            content_type: "text/html".into(),
-            status,
-            retry_after_secs: 60,
-            location: None,
-            body: vec![],
+        let answer = |status| {
+            Fetched::answer(
+                Url::parse("https://example.org/gone").unwrap(),
+                status,
+                "text/html".into(),
+                vec![],
+            )
         };
         let status = |r: Result<Fetched>| r.unwrap().status;
         egress
@@ -2244,17 +2234,12 @@ mod tests {
             .cached("0".into(), 86400, &[], &[], async { panic!("cached") })
             .await
             .is_err());
-        let response = Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: Url::parse("https://example.org/").unwrap(),
-            content_type: "text/html".into(),
-            status: 200,
-            retry_after_secs: 60,
-            location: None,
-            body: vec![1],
-        };
+        let response = Fetched::answer(
+            Url::parse("https://example.org/").unwrap(),
+            200,
+            "text/html".into(),
+            vec![1],
+        );
         egress
             .cached("fresh".into(), 86400, &[], &[], async {
                 Ok(response.clone())
@@ -2315,17 +2300,12 @@ mod tests {
         for key in ["large-a", "large-b"] {
             egress
                 .cached(key.into(), 3600, &[], &[], async {
-                    Ok(Fetched {
-                        permanent_redirect: false,
-                        truncated: false,
-                        validators: Default::default(),
-                        url: Url::parse("https://example.org/").unwrap(),
-                        content_type: "text/calendar".into(),
-                        status: 200,
-                        retry_after_secs: 60,
-                        location: None,
-                        body: vec![0; 20 * 1024 * 1024],
-                    })
+                    Ok(Fetched::answer(
+                        Url::parse("https://example.org/").unwrap(),
+                        200,
+                        "text/calendar".into(),
+                        vec![0; 20 * 1024 * 1024],
+                    ))
                 })
                 .await
                 .unwrap();
@@ -2448,15 +2428,8 @@ mod tests {
             assert!(addresses.iter().all(|s| public_ip(s.ip())));
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(Fetched {
-                permanent_redirect: false,
-                truncated: false,
-                validators: Validators::default(),
-                url: url.clone(),
-                status: 302,
-                retry_after_secs: 60,
                 location: Some(self.target.into()),
-                content_type: "text/html".into(),
-                body: vec![],
+                ..Fetched::answer(url.clone(), 302, "text/html".into(), vec![])
             })
         }
     }
@@ -2525,7 +2498,9 @@ mod tests {
             let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
             let url = Url::parse(&format!("http://{addr}/")).unwrap();
             let response = reqwest::get(url.clone()).await.unwrap();
-            let f = read_response(url, response).await.unwrap();
+            let f = read_response_with(url, response, &Default::default())
+                .await
+                .unwrap();
             assert!(f.truncated);
             assert_eq!(f.body.len(), BODY_CAP);
             task.abort();
@@ -2604,17 +2579,12 @@ mod tests {
                     .lock()
                     .unwrap()
                     .push((url.to_string(), wire_url(url, options).to_string()));
-                Ok(Fetched {
-                    permanent_redirect: false,
-                    truncated: false,
-                    url: url.clone(),
-                    status: 200,
-                    content_type: "application/json".into(),
-                    validators: Default::default(),
-                    location: None,
-                    retry_after_secs: 60,
-                    body: b"{}".to_vec(),
-                })
+                Ok(Fetched::answer(
+                    url.clone(),
+                    200,
+                    "application/json".into(),
+                    b"{}".to_vec(),
+                ))
             }
         }
         let transport = Arc::new(Seen::default());
@@ -2680,17 +2650,12 @@ mod tests {
         assert_ne!(key(&tagged("old", "pair")), key(&tagged("old", "other")));
         assert!(!format!("{:?}", tagged("TOKEN", "PAIRTAG")).contains("PAIRTAG"));
         // A fetched answer's Debug never shows its body.
-        let fetched = Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: Url::parse("https://auth.example/token").unwrap(),
-            content_type: "application/json".into(),
-            status: 200,
-            retry_after_secs: 60,
-            location: None,
-            body: br#"{"access_token":"SECRETTOKEN"}"#.to_vec(),
-        };
+        let fetched = Fetched::answer(
+            Url::parse("https://auth.example/token").unwrap(),
+            200,
+            "application/json".into(),
+            br#"{"access_token":"SECRETTOKEN"}"#.to_vec(),
+        );
         let shown = format!("{fetched:?}");
         assert!(
             !shown.contains("SECRETTOKEN") && shown.contains("<30 bytes>"),
@@ -2711,18 +2676,13 @@ mod tests {
         impl Transport for Counting {
             async fn get(&self, url: &Url, _: &[SocketAddr]) -> Result<Fetched> {
                 let n = self.0.fetch_add(1, Ordering::SeqCst);
-                Ok(Fetched {
-                    permanent_redirect: false,
-                    truncated: false,
-                    url: url.clone(),
+                Ok(Fetched::answer(
+                    url.clone(),
                     // A 401, then a 200.
-                    status: if n == 0 { 401 } else { 200 },
-                    content_type: "application/json".into(),
-                    validators: Default::default(),
-                    location: None,
-                    retry_after_secs: 60,
-                    body: b"{}".to_vec(),
-                })
+                    if n == 0 { 401 } else { 200 },
+                    "application/json".into(),
+                    b"{}".to_vec(),
+                ))
             }
         }
         let transport = Arc::new(Counting(AtomicUsize::new(0)));
@@ -2967,7 +2927,8 @@ mod tests {
             .unwrap()
         });
         let url = Url::parse(&format!("http://{addr}/")).unwrap();
-        let fetched = read_response(url.clone(), reqwest::get(url).await.unwrap())
+        let response = reqwest::get(url.clone()).await.unwrap();
+        let fetched = read_response_with(url, response, &Default::default())
             .await
             .unwrap();
         // Whole headers only, up to 2 KB.
@@ -2994,7 +2955,8 @@ mod tests {
             .unwrap()
         });
         let url = Url::parse(&format!("http://{addr}/")).unwrap();
-        let error = read_response(url.clone(), reqwest::get(url.clone()).await.unwrap())
+        let response = reqwest::get(url.clone()).await.unwrap();
+        let error = read_response_with(url.clone(), response, &Default::default())
             .await
             .unwrap_err();
         assert!(error.to_string().contains("content type"));

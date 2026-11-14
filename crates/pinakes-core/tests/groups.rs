@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 use sqlx::PgPool;
 use tower::ServiceExt;
 mod common;
+use common::get;
 
 /// A page at `https://example.org/{name}` that cites `doi:10.5555/{c}` in its head for each
 /// name in `cites`.
@@ -101,31 +102,6 @@ async fn drained(pool: &PgPool, cfg: &groups::GroupConfig) {
         rerun_failed(pool, &id, cfg).await;
     }
 }
-async fn get(app: &axum::Router, path: &str) -> Value {
-    let mut request = Request::builder().uri(path).body(Body::empty()).unwrap();
-    request.extensions_mut().insert(axum::extract::ConnectInfo(
-        "127.0.0.2:1234".parse::<std::net::SocketAddr>().unwrap(),
-    ));
-    let response = app.clone().oneshot(request).await.unwrap();
-    let status = response.status();
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&bytes));
-    let value = serde_json::from_slice(&bytes).unwrap();
-    common::check_response("GET", path, status.as_u16(), &value);
-    value
-}
-async fn status(app: &axum::Router, path: &str) -> u16 {
-    let mut request = Request::builder().uri(path).body(Body::empty()).unwrap();
-    request.extensions_mut().insert(axum::extract::ConnectInfo(
-        "127.0.0.2:1234".parse::<std::net::SocketAddr>().unwrap(),
-    ));
-    app.clone()
-        .oneshot(request)
-        .await
-        .unwrap()
-        .status()
-        .as_u16()
-}
 /// The `{id, uri, site}` a card's group hint names `id` by.
 fn named(id: &str, name: &str) -> Value {
     json!({"id": id, "uri": format!("https://example.org/{name}"), "site": "example.org", "embed": null})
@@ -149,7 +125,7 @@ async fn tag(pool: &PgPool, id: &str, author: &str, label: &str) {
 
 /// Exact group links carry the same referenced spellings as the member's own card, so a
 /// cold search page can join Nexus without first reading the group.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn also_on_refs_include_ok_computer_member_spellings(pool: PgPool) {
     let uris = [
         "https://musicbrainz.org/release-group/b1392450-e666-3926-a536-22c65f834433",
@@ -220,7 +196,7 @@ async fn also_on_refs_include_ok_computer_member_spellings(pool: PgPool) {
 }
 
 /// ISBN-10 and its ISBN-13, and every DOI spelling, are one resource: the spelling is an alias.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn identifier_spellings_are_aliases_of_one_resource(pool: PgPool) {
     let root = |uri: &'static str| {
         let pool = pool.clone();
@@ -258,7 +234,7 @@ async fn identifier_spellings_are_aliases_of_one_resource(pool: PgPool) {
     assert!(invalid.group_keys.is_empty());
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn group_fence_ignores_unrelated_saves_and_retries_changed_inputs(pool: PgPool) {
     let (a, b) = pair(&pool, "fence", None).await;
     let (other, _) = save(&pool, "unrelated", &[], None).await;
@@ -328,7 +304,7 @@ async fn group_fence_ignores_unrelated_saves_and_retries_changed_inputs(pool: Pg
     }
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn evidence_loss_splits_and_curation_preserves_identity(pool: PgPool) {
     let a = card(&pool, "one", &["near", "far"], Some(47.)).await;
     let (b, mut doc) = save(&pool, "near", &["one"], Some(47.001)).await;
@@ -396,7 +372,7 @@ async fn evidence_loss_splits_and_curation_preserves_identity(pool: PgPool) {
 
 /// A group is a hint: every member keeps its own card, references, ranking and counts; each card
 /// names the others; `collapse=group` shows the member with the most references, as itself.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn members_keep_their_own_cards_and_counts_and_collapse_is_a_view(pool: PgPool) {
     let a = card(&pool, "joined", &["other"], None).await;
     let (b, _) = save(&pool, "other", &["joined"], Some(47.0001)).await;
@@ -485,21 +461,6 @@ async fn members_keep_their_own_cards_and_counts_and_collapse_is_a_view(pool: Pg
         .await;
         assert_eq!(ids(&result).len(), 2, "{result}");
     }
-    // Clusters count every located link; collapse is a list view only.
-    let cluster = get(
-        &app,
-        "/v1/search?bbox=7.99,46.99,8.01,47.01&cluster=5&limit=1",
-    )
-    .await;
-    assert_eq!(cluster["clusters"][0]["count"], 2, "{cluster}");
-    assert_eq!(
-        status(
-            &app,
-            "/v1/search?collapse=group&bbox=7.99,46.99,8.01,47.01&cluster=5"
-        )
-        .await,
-        400
-    );
     // Removing a member leaves the other its own row; after the next run it has no group.
     sqlx::query("DELETE FROM resource WHERE id=$1")
         .bind(&a)
@@ -524,7 +485,7 @@ async fn members_keep_their_own_cards_and_counts_and_collapse_is_a_view(pool: Pg
     );
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn recurring_uid_is_scoped_to_start_and_a_page_joins_only_when_corroborated(pool: PgPool) {
     use pinakes_core::{config::EventConfig, event::calendar};
     let date = chrono::Utc::now() + chrono::Duration::days(1);
@@ -597,7 +558,7 @@ async fn recurring_uid_is_scoped_to_start_and_a_page_joins_only_when_corroborate
 }
 /// A UID is free text: a NIP-52 coordinate, a URN or `{feed}:{uid}` never spells another
 /// feed's key, and no UID joins across feeds unless the corroborated mode is on.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn forged_or_colon_uids_never_join_across_feeds(pool: PgPool) {
     use pinakes_core::{config::EventConfig, event::calendar};
     let date = (chrono::Utc::now() + chrono::Duration::days(1)).format("%Y%m%dT%H%M%SZ");
@@ -683,7 +644,7 @@ fn tenant_rules_scope_publishers() {
     }
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn curation_sets_members_only_and_invalid_curation_is_refused(pool: PgPool) {
     let (a, _) = save(&pool, "member", &[], None).await;
     let id = "c".repeat(32);
@@ -739,7 +700,7 @@ async fn curation_sets_members_only_and_invalid_curation_is_refused(pool: PgPool
         .unwrap();
     assert_eq!(admin.oneshot(put(body)).await.unwrap().status(), 500);
 }
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn curating_an_automatic_id_pins_exactly_requested_members(pool: PgPool) {
     let a = card(&pool, "ca", &["cb", "cc"], None).await;
     let (b, _) = save(&pool, "cb", &["ca"], None).await;
@@ -769,7 +730,7 @@ async fn curating_an_automatic_id_pins_exactly_requested_members(pool: PgPool) {
         .unwrap();
     assert_eq!(count, 1);
 }
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn group_failure_keeps_document_and_drain_advances(pool: PgPool) {
     let a = card(&pool, "ga", &["gb"], None).await;
     let (b, mut d) = save(&pool, "gb", &["ga"], None).await;
@@ -840,7 +801,7 @@ async fn together(pool: &PgPool, a: &str, b: &str) -> bool {
 
 /// `common::drain_groups` runs a grouping again that a drain leaves deferred, whether it was
 /// parked on an error (`group_failed`, a minute on) or on a busy writer (`lock_busy`, seconds on).
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn drain_groups_runs_a_deferred_grouping_again(pool: PgPool) {
     let cfg = groups::GroupConfig::default();
     for error in ["group_failed", "lock_busy"] {
@@ -874,7 +835,7 @@ async fn drain_groups_runs_a_deferred_grouping_again(pool: PgPool) {
 
 /// A card names its group's size, and `also_on` eight other members, the first by ID, whichever
 /// member asks.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_hint_names_eight_other_members_by_id(pool: PgPool) {
     sqlx::query("INSERT INTO resource(id,uri,host,resolver,type,type_path,name,status,doc) SELECT md5('hint-'||i),'https://hint.example/'||i,'hint.example','web','WebPage',ARRAY['Thing','CreativeWork','WebPage'],'Hint '||i,'ok',jsonb_build_object('type','WebPage','name','Hint '||i,'source','web','url','https://hint.example/'||i,'status','ok','site','hint.example','fetched_at',0,'ttl_secs',3600,'attributes','{}'::jsonb) FROM generate_series(1,12) i").execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO \"group\"(id) VALUES(md5('hint-group'))")
@@ -914,7 +875,7 @@ async fn a_hint_names_eight_other_members_by_id(pool: PgPool) {
 
 /// A resource with many units in one group (a feed's occurrences) never crowds the others out:
 /// `also_on` lists up to eight other resources, one entry each, before its own feed's siblings.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_hint_lists_other_resources_before_a_feeds_many_occurrences(pool: PgPool) {
     sqlx::query("INSERT INTO resource(id,uri,host,resolver,type,type_path,name,status,doc) SELECT md5('multi-'||i),'https://multi.example/'||i,'multi.example','web','WebPage',ARRAY['Thing','CreativeWork','WebPage'],'Multi '||i,'ok',jsonb_build_object('type','WebPage','name','Multi '||i,'source','web','url','https://multi.example/'||i,'status','ok','site','multi.example','fetched_at',0,'ttl_secs',3600,'attributes','{}'::jsonb) FROM generate_series(0,10) i").execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO \"group\"(id) VALUES(md5('multi-group'))")
@@ -974,7 +935,7 @@ async fn a_hint_lists_other_resources_before_a_feeds_many_occurrences(pool: PgPo
     assert_eq!(hint(unit).await, ids[1..9].to_vec());
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn populated_collapse_and_hints_build_only_page_cards(pool: PgPool) {
     let count = 6000_i32;
     sqlx::query("INSERT INTO resource(id,uri,host,resolver,type,type_path,name,status,doc) SELECT md5('bench-'||i),'https://bench.example/'||i,'bench.example','web','WebPage',ARRAY['Thing','CreativeWork','WebPage'],'Bench '||i,'ok',jsonb_build_object('type','WebPage','type_path',jsonb_build_array('Thing','CreativeWork','WebPage'),'name','Bench '||i,'source','web','url','https://bench.example/'||i,'status','ok','site','bench.example','fetched_at',0,'ttl_secs',3600,'attributes','{}'::jsonb) FROM generate_series(1,$1) i").bind(count).execute(&pool).await.unwrap();
@@ -1111,7 +1072,7 @@ async fn populated_collapse_and_hints_build_only_page_cards(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn curation_waits_for_writer_and_policy_changes_redirty(pool: PgPool) {
     let (a, _) = save(&pool, "operator", &[], None).await;
     let mut lock = pool.begin().await.unwrap();
@@ -1155,17 +1116,12 @@ async fn curation_waits_for_writer_and_policy_changes_redirty(pool: PgPool) {
 }
 
 fn recorded_json(url: &str, body: &[u8]) -> pinakes_core::resolver::egress::Fetched {
-    pinakes_core::resolver::egress::Fetched {
-        permanent_redirect: false,
-        truncated: false,
-        url: url.parse().unwrap(),
-        body: body.to_vec(),
-        content_type: "application/json".into(),
-        status: 200,
-        location: None,
-        retry_after_secs: 60,
-        validators: Default::default(),
-    }
+    common::fetched(
+        url.parse().unwrap(),
+        200,
+        "application/json".into(),
+        body.to_vec(),
+    )
 }
 async fn page(pool: &PgPool, uri: &str, name: &str, claims: &[(&str, &str)]) -> String {
     let id = store::ensure_resource(pool, uri).await.unwrap();
@@ -1179,7 +1135,7 @@ async fn page(pool: &PgPool, uri: &str, name: &str, claims: &[(&str, &str)]) -> 
     id
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn registry_landing_pages_group_publisher_pages_with_identifiers(pool: PgPool) {
     use pinakes_core::resolver::cards;
     let landing = "https://www.nature.com/articles/nature12373";
@@ -1274,7 +1230,7 @@ async fn doi_card(pool: &PgPool, uri: &str, csl: &Value) -> String {
     id
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn registry_landing_pages_need_the_page_to_cite_the_identifier(pool: PgPool) {
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     // A victim article that cites no DOI, already tagged.
@@ -1360,7 +1316,7 @@ async fn registry_landing_pages_need_the_page_to_cite_the_identifier(pool: PgPoo
     );
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn registry_trust_needs_the_records_own_edition_and_a_real_landing_host(pool: PgPool) {
     use pinakes_core::resolver::cards;
     // An editor lists another edition in the victim record's identifiers.
@@ -1437,7 +1393,7 @@ async fn registry_trust_needs_the_records_own_edition_and_a_real_landing_host(po
     );
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn lock_contention_retries_shortly_without_charging(pool: PgPool) {
     let (a, b) = pair(&pool, "lock", None).await;
     assert_eq!(gid(&pool, &a).await, gid(&pool, &b).await);
@@ -1551,7 +1507,7 @@ fn tenant_shapes_cover_user_prefixes_show_pages_and_podbean_sites() {
     }
 }
 
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_book_and_its_open_library_edition_page_stay_two_cards(pool: PgPool) {
     use pinakes_core::resolver::cards;
     // The edition page is admitted first, complete (name and cover), with as many taggers.
@@ -1599,7 +1555,7 @@ async fn a_book_and_its_open_library_edition_page_stay_two_cards(pool: PgPool) {
 }
 /// Two ISBN cards whose (editable) records name one Open Library edition page never join each
 /// other: the edition key joins a card only to the page itself, once that page is indexed.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn edition_keys_join_only_through_the_page(pool: PgPool) {
     use pinakes_core::resolver::cards;
     let body = include_str!("fixtures/registry/openlibrary-9780140328721.json");
@@ -1632,7 +1588,7 @@ async fn edition_keys_join_only_through_the_page(pool: PgPool) {
 
 /// An automatic group keeps its ID as it grows: a member whose unit ID is smaller than every
 /// other's joins without renaming the group.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_group_keeps_its_id_when_a_smaller_member_joins(pool: PgPool) {
     use pinakes_core::model::identity;
     let card_id = identity("doi:10.5555/stable").unwrap().0;
@@ -1655,7 +1611,7 @@ async fn a_group_keeps_its_id_when_a_smaller_member_joins(pool: PgPool) {
 
 /// A member that leaves a group named after it and later pairs again gets a new group: its
 /// fresh name never takes the existing group's ID, so the two sets never merge without evidence.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_member_that_leaves_and_regroups_never_takes_its_old_groups_id(pool: PgPool) {
     use pinakes_core::model::identity;
     let id = |uri: String| identity(&uri).unwrap().0;
@@ -1698,7 +1654,7 @@ async fn a_member_that_leaves_and_regroups_never_takes_its_old_groups_id(pool: P
 
 /// A key that alone exceeds the compatibility budget is parked: its units keep their groups, the
 /// run settles (planning the same input again would park it again) and counts it.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_exhausted_run_keeps_established_groups(pool: PgPool) {
     let card = card(&pool, "budget", &["b1", "b2", "b3"], None).await;
     let mut pages = vec![];
@@ -1777,7 +1733,7 @@ fn tight(budget: usize) -> groups::GroupConfig {
 
 /// A key over the budget never starves the keys after it: they still join the units it does not
 /// touch, at the latest in the run that resumes where a stopped one ended.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_over_budget_key_never_starves_later_keys(pool: PgPool) {
     // The card's keys (`cite:{page}:…`) sort before the moving page's.
     let names = by_id("starve", 5);
@@ -1822,7 +1778,7 @@ async fn an_over_budget_key_never_starves_later_keys(pool: PgPool) {
 
 /// A run too large for its budget stops, records the key it stopped at, and the next run starts
 /// there: a join after the stop is made on the next run instead of never.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_stopped_run_resumes_where_it_stopped(pool: PgPool) {
     // Nine pages of one card (keys costing 1, 2, … 9 checks) sort before the moving page's key.
     let names = by_id("resume", 10);
@@ -1865,7 +1821,7 @@ async fn a_stopped_run_resumes_where_it_stopped(pool: PgPool) {
 
 /// A component that stops every run on unchanged input settles after `settle_after_stops` runs:
 /// no more hourly replans until its input changes, and it is counted.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_component_that_always_stops_settles(pool: PgPool) {
     let names = by_id("settle", 10);
     let (pages, mover) = (&names[..9], names[9].as_str());
@@ -1909,7 +1865,7 @@ async fn a_component_that_always_stops_settles(pool: PgPool) {
 
 /// Past the budget a newcomer never joins a group through a finished key unchecked against the
 /// members an unfinished key holds there.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_newcomer_never_joins_past_an_unfinished_key(pool: PgPool) {
     // Keys in order: the first page's, the newcomer's, then the far pages'.
     let names = by_id("join", 4);
@@ -1929,7 +1885,7 @@ async fn a_newcomer_never_joins_past_an_unfinished_key(pool: PgPool) {
 }
 
 /// Past the budget a chain whose bridging key is unfinished keeps every member in its group.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_chain_with_an_unfinished_bridge_stays_whole(pool: PgPool) {
     // `cite:{first}:…` sorts before `cite:{bridge}:…`; on the bridge the `fff` key before `ggg`.
     let names = by_id("chain", 2);
@@ -1954,7 +1910,7 @@ async fn a_chain_with_an_unfinished_bridge_stays_whole(pool: PgPool) {
 }
 
 /// A unit can leave a group and pair again any number of times: each new pair gets a fresh ID.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_unit_regroups_any_number_of_times(pool: PgPool) {
     use pinakes_core::model::identity;
     let id = |uri: String| identity(&uri).unwrap().0;
@@ -1984,7 +1940,7 @@ async fn a_unit_regroups_any_number_of_times(pool: PgPool) {
 }
 
 /// Facets count links: collapsing changes the rows, not the counts.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn the_type_facet_counts_every_member_collapsed_or_not(pool: PgPool) {
     let (card, page) = pair(&pool, "facet", None).await;
     for id in [&card, &page] {
@@ -2012,7 +1968,7 @@ async fn the_type_facet_counts_every_member_collapsed_or_not(pool: PgPool) {
 
 /// Orphan expiry removes a member's group rows with it: the group's size follows at once, the
 /// survivors are reconciled, and a group left without evidence is dropped.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn an_expired_member_leaves_its_group(pool: PgPool) {
     let (card, page) = pair(&pool, "expiring", None).await;
     let group = gid(&pool, &card).await;
@@ -2065,7 +2021,7 @@ async fn an_expired_member_leaves_its_group(pool: PgPool) {
 /// A reference is no grouping input: grouping reads a resource's document, occurrences and hub
 /// keys, never who referenced it. So a tag put or removed neither marks the resource dirty nor
 /// bumps its revision, while a hub key does both.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_reference_is_no_grouping_input_and_a_hub_key_is(pool: PgPool) {
     let (id, _) = save(&pool, "inputs", &[], None).await;
     sqlx::query("DELETE FROM group_dirty")
@@ -2112,7 +2068,7 @@ async fn a_reference_is_no_grouping_input_and_a_hub_key_is(pool: PgPool) {
 /// Removing a resource's child row that grouping reads (here a hub key) marks the resource dirty
 /// and bumps its revision; a save holds the resource's row, then marks it dirty. The removal locks
 /// the resource's row before marking it, as a save does, so the two never deadlock.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn removing_a_hub_key_and_saving_its_resource_take_locks_in_one_order(pool: PgPool) {
     let (id, _) = save(&pool, "child-order", &[], None).await;
     sqlx::query("INSERT INTO resource_key(resource_id,key,source,via,expires_at) VALUES($1,'wikidata:Q1','test','test',now()+interval '1 day')")
@@ -2173,7 +2129,7 @@ async fn removing_a_hub_key_and_saving_its_resource_take_locks_in_one_order(pool
 /// Removing a unit from a group marks every member dirty; a save holds its member's row, then
 /// marks it dirty. The removal locks the members' rows before marking them, as a save does, so
 /// the two never deadlock.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn removing_a_group_unit_and_saving_a_member_take_locks_in_one_order(pool: PgPool) {
     let (card, page) = pair(&pool, "member-order", None).await;
     assert_eq!(gid(&pool, &card).await, gid(&pool, &page).await);

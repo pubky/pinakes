@@ -469,8 +469,8 @@ mod tests {
         assert_eq!(asked_wait(&limited), Some(900));
     }
     /// A request held open at one service (Spotify, slow to answer) holds its own slot only:
-    /// another service's lookup (TIDAL) completes meanwhile (review of 18e57ab: one lock over
-    /// every slot stopped TIDAL while a Spotify request was pending).
+    /// another service's lookup (TIDAL) completes meanwhile. One lock over every slot would stop
+    /// TIDAL while a Spotify request is pending.
     #[tokio::test]
     async fn a_slow_request_holds_only_its_own_slot() {
         use crate::resolver::egress::{Dns, Egress, Fetched, Transport};
@@ -510,17 +510,12 @@ mod tests {
                 } else {
                     r#"{"id":"1"}"#
                 };
-                Ok(Fetched {
-                    permanent_redirect: false,
-                    truncated: false,
-                    validators: Default::default(),
-                    url: url.clone(),
-                    content_type: "application/json".into(),
-                    status: 200,
-                    retry_after_secs: 60,
-                    location: None,
-                    body: body.as_bytes().to_vec(),
-                })
+                Ok(Fetched::answer(
+                    url.clone(),
+                    200,
+                    "application/json".into(),
+                    body.as_bytes().to_vec(),
+                ))
             }
         }
         static SLOW: Api = Api {

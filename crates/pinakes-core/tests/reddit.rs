@@ -11,7 +11,7 @@ use pinakes_core::{
     model::{ResourceMeta, Status},
     resolver::{
         cards::CardResolver,
-        egress::{Dns, Egress, FetchOptions, Fetched, Transport},
+        egress::{Egress, FetchOptions, Fetched, Transport},
         Resolver,
     },
     sources::reddit::{self, Target},
@@ -27,6 +27,8 @@ use std::{
 };
 use tower::ServiceExt;
 use url::Url;
+mod common;
+use common::media::PublicDns;
 
 const POST: &str = "https://www.reddit.com/comments/1k3d0pk/";
 
@@ -36,14 +38,6 @@ fn fixture(file: &str) -> Value {
         env!("CARGO_MANIFEST_DIR")
     );
     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
-}
-
-struct PublicDns;
-#[async_trait]
-impl Dns for PublicDns {
-    async fn lookup(&self, _: &str, port: u16) -> Result<Vec<SocketAddr>> {
-        Ok(vec![SocketAddr::new("8.8.8.8".parse()?, port)])
-    }
 }
 
 /// Reddit answering the post's listing: the post, then, once `deleted`, the stub it shows for a
@@ -68,15 +62,13 @@ impl Transport for Listing {
             "post-1k3d0pk.json"
         };
         Ok(Fetched {
-            permanent_redirect: false,
-            truncated: false,
-            validators: Default::default(),
-            url: u.clone(),
-            content_type: "application/json; charset=UTF-8".into(),
-            status: 200,
             retry_after_secs: 0,
-            location: None,
-            body: serde_json::to_vec(&fixture(file)).unwrap(),
+            ..common::fetched(
+                u.clone(),
+                200,
+                "application/json; charset=UTF-8".into(),
+                serde_json::to_vec(&fixture(file)).unwrap(),
+            )
         })
     }
 }
@@ -92,7 +84,7 @@ async fn history(pool: &sqlx::PgPool, id: &str) -> Vec<Value> {
 /// A post read, then refused (Reddit's 403: the blocked card), then confirmed gone: the stored
 /// card is the blocked one when the deletion is confirmed, and it is still social content, so
 /// the post's history, text and all, is purged.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_refused_then_deleted_post_leaves_no_text_in_the_history(pool: sqlx::PgPool) {
     let id = store::ensure_resource(&pool, POST).await.unwrap();
     let target = Target::of_uri(POST).unwrap();
@@ -132,7 +124,7 @@ async fn a_refused_then_deleted_post_leaves_no_text_in_the_history(pool: sqlx::P
 /// Reddit's stub of a deleted post (a 200 whose text and author read `[deleted]`) is the post's
 /// deletion: the card read from it is missing, and once that is confirmed the post's history,
 /// text and all, is purged.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_deleted_posts_stub_leaves_no_text_in_the_history(pool: sqlx::PgPool) {
     if pinakes_core::sources::by_name("reddit").is_none() {
         return;
@@ -287,7 +279,7 @@ async fn delete(pool: &sqlx::PgPool, reddit: &Listing, resolver: &CardResolver, 
 /// title, body or facts: not in their histories, not in their stored cards or search text, and
 /// so not in the public change lookup (which answers an alias's own lines too) nor in the post's
 /// public read, whose `facts` are gone with them.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_deleted_posts_aliases_keep_none_of_its_text(pool: sqlx::PgPool) {
     if pinakes_core::sources::by_name("reddit").is_none() {
         return;
@@ -356,7 +348,7 @@ async fn a_deleted_posts_aliases_keep_none_of_its_text(pool: sqlx::PgPool) {
 
 /// A spelling with its own full card that becomes an alias of the post after the post is gone
 /// keeps none of its text either, at once: not in its card, its search text or its history.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_spelling_that_joins_a_deleted_post_keeps_none_of_its_text(pool: sqlx::PgPool) {
     if pinakes_core::sources::by_name("reddit").is_none() {
         return;
@@ -377,7 +369,7 @@ async fn a_spelling_that_joins_a_deleted_post_keeps_none_of_its_text(pool: sqlx:
 /// runs, even though the post is never fetched again: the post keeps nothing of itself and is
 /// regrouped, the alias only its line naming the post. A missing page that is no social post
 /// keeps its card, and a second run changes nothing.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn the_repair_scrubs_posts_stored_before_their_scrub(pool: sqlx::PgPool) {
     if pinakes_core::sources::by_name("reddit").is_none() {
         return;
@@ -494,7 +486,7 @@ async fn fail(pool: &sqlx::PgPool, id: &str) {
 /// A deleted post as an earlier build stored it, whose refresh then failed (Reddit's 500): its
 /// row says `error`, its stored card still `missing`. The repair finds it by that card and scrubs
 /// it and its spelling.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn the_repair_finds_a_gone_post_whose_refresh_failed(pool: sqlx::PgPool) {
     if pinakes_core::sources::by_name("reddit").is_none() {
         return;
@@ -520,7 +512,7 @@ async fn the_repair_finds_a_gone_post_whose_refresh_failed(pool: sqlx::PgPool) {
 
 /// A post this build deleted keeps nothing through a failed refresh: nothing comes back, and the
 /// repair finds nothing to do.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_failed_refresh_of_a_gone_post_brings_nothing_back(pool: sqlx::PgPool) {
     if pinakes_core::sources::by_name("reddit").is_none() {
         return;
@@ -585,7 +577,7 @@ async fn assert_scrubbed(pool: &sqlx::PgPool, spellings: &[String]) {
 
 /// A post with more spellings than one page of the scrub (500) has every one scrubbed by the
 /// repair.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn the_repair_scrubs_every_spelling_of_a_post_with_many(pool: sqlx::PgPool) {
     if pinakes_core::sources::by_name("reddit").is_none() {
         return;
@@ -602,7 +594,7 @@ async fn the_repair_scrubs_every_spelling_of_a_post_with_many(pool: sqlx::PgPool
 }
 
 /// And by the save that confirms the post deleted.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn a_deleted_post_scrubs_every_spelling_of_many(pool: sqlx::PgPool) {
     if pinakes_core::sources::by_name("reddit").is_none() {
         return;
@@ -633,7 +625,7 @@ async fn alias_entries_read(one: &sqlx::PgPool) -> i64 {
 /// and not by a scan of the whole table (that reads none through the index). Counted on one
 /// connection's statistics. The repair's own page query may also read the whole alias table for
 /// its `NOT EXISTS`, as the planner chooses; that is not counted.
-#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+#[sqlx::test(migrations = "../../migrations")]
 async fn the_repair_reads_each_spelling_once(pool: sqlx::PgPool) {
     if pinakes_core::sources::by_name("reddit").is_none() {
         return;

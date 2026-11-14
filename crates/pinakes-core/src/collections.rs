@@ -1,4 +1,4 @@
-//! The public collections that hold a link (TASK-in-collections): the collection posts Nexus
+//! The public collections that hold a link: the collection posts Nexus
 //! indexed whose items name a card's link, its own or an alias's. They come from the reference
 //! feed's `collection` lines, one per item (`ingest`), stored in `reference` with kind
 //! `collection`; a `del` line, for a deleted collection, a removed item or an edit's old version,
@@ -574,34 +574,13 @@ fn push_page(
     sql.push("SELECT false AS own,at,author,path FROM others) x GROUP BY own,author,path ORDER BY own DESC,max(at) DESC,author COLLATE \"C\",path COLLATE \"C\" LIMIT (SELECT n FROM q)");
 }
 fn encode(cursor: &PageCursor, key: &hmac::SimpleHmac<blake3::Hasher>) -> anyhow::Result<String> {
-    use base64::Engine;
-    use hmac::Mac;
     // Bytes, not JSON: a path is its length and bytes, never escaped.
-    let payload = postcard::to_allocvec(cursor)?;
-    let mut mac = key.clone();
-    mac.update(&payload);
-    let mut signed = mac.finalize().into_bytes().to_vec();
-    signed.extend(payload);
-    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signed))
+    Ok(crate::api::seal(&postcard::to_allocvec(cursor)?, key))
 }
 fn decode(s: &str, key: &hmac::SimpleHmac<blake3::Hasher>) -> Result<PageCursor, ApiError> {
-    use base64::Engine;
-    use hmac::Mac;
-    let invalid = || ApiError::bad("invalid cursor");
-    if s.len() > MAX_CURSOR {
-        return Err(invalid());
-    }
-    let signed = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(s)
-        .map_err(|_| invalid())?;
-    if signed.len() <= 32 {
-        return Err(invalid());
-    }
-    let (tag, payload) = signed.split_at(32);
-    let mut mac = key.clone();
-    mac.update(payload);
-    mac.verify_slice(tag).map_err(|_| invalid())?;
-    postcard::from_bytes(payload).map_err(|_| invalid())
+    crate::api::open(s, MAX_CURSOR, key)
+        .and_then(|payload| postcard::from_bytes(&payload).ok())
+        .ok_or_else(|| ApiError::bad("invalid cursor"))
 }
 
 #[cfg(test)]
@@ -652,10 +631,7 @@ mod tests {
 
     /// The schema's `collection_post` is [`post`]: a post's version files belong to it, a path
     /// nested deeper in a post or not JSON is a collection of its own.
-    #[sqlx::test(
-        migrations = "../../migrations",
-        fixtures("../tests/fixtures/require_h3.sql")
-    )]
+    #[sqlx::test(migrations = "../../migrations")]
     async fn the_schema_reads_a_files_collection_as_post_does(pool: PgPool) {
         let paths = [
             "/pub/social/v1/posts/P/V.json",
@@ -803,10 +779,7 @@ mod tests {
     /// whose statistics say a link holds hundreds, and with 20,000 links more held once each,
     /// whose statistics say a link holds one (the planner's guess, wrong either way for these
     /// cards, chooses nothing here: each step of a walk is an `ORDER BY … LIMIT 1` along an index).
-    #[sqlx::test(
-        migrations = "../../migrations",
-        fixtures("../tests/fixtures/require_h3.sql")
-    )]
+    #[sqlx::test(migrations = "../../migrations")]
     async fn every_collections_query_reads_a_bounded_walk(pool: PgPool) {
         // Seeded on one connection without triggers: what they keep up (grouping, scores) plays
         // no part here, and 60,000 rows of it would take a minute.
@@ -1131,10 +1104,7 @@ mod tests {
     /// page's cursor, in the viewer's own segment and in the others', step over the first page's
     /// pinned window alone: the new posts are newer than it, listed with the others, never
     /// stepped over.
-    #[sqlx::test(
-        migrations = "../../migrations",
-        fixtures("../tests/fixtures/require_h3.sql")
-    )]
+    #[sqlx::test(migrations = "../../migrations")]
     async fn a_page_reads_a_bounded_walk_whatever_changed(pool: PgPool) {
         let card = "5".repeat(32);
         let (e, o) = ("e".repeat(52), "o".repeat(52));
