@@ -4827,7 +4827,15 @@ async fn tracking_variants_of_an_event_are_one_resource(pool: PgPool) {
     .fetch_all(&pool)
     .await
     .unwrap();
-    assert_eq!(routed, vec![meetup.to_string(), other]);
+    // Reading a date's page queues its group's calendar too.
+    assert_eq!(
+        routed,
+        vec![
+            meetup.to_string(),
+            other,
+            "https://www.meetup.com/zurich-bitcoin/events/ical/".to_string()
+        ]
+    );
 }
 
 /// Through the web route, a sameAs between event pages on two origins never groups them,

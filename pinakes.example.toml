@@ -240,7 +240,11 @@ deny_hosts = []
 
 [groups]
 enabled = true
-cross_container_occurrences = "off" # Or "corroborated": the cross-feed ICS UID mode.
+# "corroborated" joins an event page to its date in the organiser calendar its platform names
+# (a Meetup date and its group's calendar). It also turns on the general ICS UID join across
+# publishers (both located within 500 m, starting within 300 s, names alike), which a determined
+# publisher can copy (docs/operations.md). "off" makes neither join.
+cross_container_occurrences = "corroborated"
 same_recording_hint = "on" # Recording cards name recordings that are possibly the same one (maybe_same).
 
 # "Also on": the same thing on other services, from hubs and exact lookups (docs/api.md).

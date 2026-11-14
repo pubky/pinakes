@@ -677,7 +677,23 @@ request; a platform that refuses it gets the same refused or failed result as an
 
 Luma, Meetup, Eventbrite, Partiful, Posh, RingCentral, Airmeet, Mobilizon, Gancio, Wikidata,
 Dice, Xceed, Ents24 and Ticketino supplement JSON-LD with bounded state parsing; JavaScript is
-never executed. Self-hosted Pretix, Eventyay, Gathio, Gancio and Mobilizon are detected from page
+never executed. A Meetup date's page (by its number or its token) also reads its own calendar
+file, `{page}/ical/{id}.ics`; its UID counts only when the file holds one event and is answered
+from the page's own URL origin (scheme, host and port, after redirects). That read is optional
+(it is skipped on a probe): a refused, failing or non-calendar answer keeps the UID the page
+was stored with, and never fails the page or marks it gone. A group calendar is read only when Meetup
+answers it itself: over https, from a meetup.com host, at the calendar's path, so its `webcal:`,
+`http:` and bare-domain spellings are read too; each hop of such a redirect waits for its own
+slot of the host's pace. A redirect anywhere else, an HTTP one or one in the page (a meta refresh,
+a script, a "Redirecting" stub), is not followed, on the platform route and on the web route
+alike, whatever that answer's status or body: nothing there is fetched, the stored dates stay,
+and `last_error` is `off_origin`. It is read again with the
+queue's backoff (`limits.backoff_secs` doubling up to `limits.max_backoff_secs`); that streak
+never counts toward the dead letter, and any other answer starts it over. After an upgrade, Meetup pages take their group calendar, their UID and
+their token alias at their next read; `pinakesd reextract event_platform` reads every event
+platform's links at once. A numeric Meetup page that becomes its token's alias leaves its
+group, as every alias does, and an operator's curation of it (`PUT /v1/groups/{id}`) goes with
+it: curate the token page again after its first read. Self-hosted Pretix, Eventyay, Gathio, Gancio and Mobilizon are detected from page
 signatures, a heuristic that can cost one bounded discovery request. Authenticated APIs never
 redirect, and credentials are removed from retained URLs and errors.
 
@@ -686,15 +702,17 @@ Cursor feeds (an event portal, BTC Map, the Google Calendar API) keep their chec
 ordinary hold rules. BTC Map requests every delta status and deletion, never advances its cursor
 past the local fetch time, and allows five minutes of clock skew. Malformed cursor rows are
 skipped (`invalid_cursor_row`, drift) and never imply deletions. With
-`event.adapters.derive_resources` (default on), NIP-52 calendar members and BTC Map event
-websites are queued as resources, charged to the referring authors (or a per-adapter sponsor)
+`event.adapters.derive_resources` (default on), NIP-52 calendar members, BTC Map event
+websites and the organiser calendar an event page names by its platform's rule (Meetup: a date's
+page names `/{group}/events/ical/` on its own origin) are queued as resources, charged to the referring authors (or a per-adapter sponsor)
 within `limits.max_calendar_members`, `limits.max_linked_resources` and
 `limits.max_derived_resources`. A BTC Map link expires with its event, capped at the horizon
 and extended at each feed apply as the horizon reaches it (a link that lapsed at the cap comes
 back while its event is ahead). Each link records which feed rows name it: a website shared by
 two events keeps the farther instant, and a tombstoned or re-linked row stops extending it;
 a NIP-52 member link ends when the calendar stops listing the member and otherwise lives 24 hours
-from the calendar's last fetch. A lapsed link keeps its child through the orphan grace
+from the calendar's last fetch. An organiser calendar's link lives until the page's event ends, at
+least 24 hours from the page's last fetch, capped at the horizon. A lapsed link keeps its child through the orphan grace
 (`limits.grace_days`) counted from the link's expiry, so a feed that failed for a day deletes no
 member, and a revived link meets the same per-parent and global caps as a new one.
 Portal coordinates are page facts, never written to `osm_place`.
@@ -923,7 +941,11 @@ resumed run meets the keys in another order. A member deleted by orphan expiry l
 at once. Writer lock contention retries after one to three seconds; curation waits up to two
 seconds and answers 503 with Retry-After. `groups.cross_container_occurrences = "corroborated"`
 also joins one UID across feeds when the instances are within 500 m, 300 s and a name similarity
-of 0.5; a determined publisher can copy that, so it is off by default.
+of 0.5; a determined publisher can copy that, so it is off by default. In that mode an event page
+also joins the occurrence with its own calendar file's UID in the organiser calendar its platform
+names for it (a Meetup date's group calendar), within 300 s, without the place and name checks.
+A page's calendar file gives its UID only when answered from the page's own URL origin (scheme,
+host and port, after redirects), on every route.
 
 `groups.same_recording_hint` (default `"on"`; `"off"`) puts `maybe_same` on `MusicRecording`
 cards: other recordings that are possibly the same one ([the

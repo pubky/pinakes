@@ -979,6 +979,14 @@ root, and a read, lookup, change query or occurrence read of the alias answers w
   parameters becomes an alias of that URL. A canonical to another path (a homepage, a sibling
   page), another host or another query (`/events/?event_id=42` naming `/events/`) never
   aliases.
+- **A Meetup date's number and token**: Meetup serves each date's page under its number
+  (`/{group}/events/316908442/`) and its token (`/{group}/events/frxnbvyjcqbmb/`), and names the
+  token in the page's head canonical. After a fetch that ended at the page itself (no redirect
+  to another page), a meetup.com event page whose canonical names the other spelling (a number
+  for a token, a token for a number) in the same group's `/events/` directory, on the same host,
+  without a query, becomes an alias of that page; both spellings answer with one card. A
+  canonical to another number or token, another group, another host, the group's calendar or
+  any other path never aliases.
 
 Refresh follows the time to an event's start: more than 30 days or no start, 7 days; 7–30 days,
 2 days; 24 hours to 7 days, 6 hours; under 24 hours or running, 1 hour
@@ -1028,6 +1036,15 @@ accepted horizon; an earlier explicit bound reads retained older rows. The signe
 fixes the resource and window and expires on daemon restart; a tampered or mismatched one is
 400. A known resource that is not a calendar returns an empty list. ICS feeds, event platform
 feeds, BTC Map, the Google Calendar API and NIP-52 calendars all produce the same occurrences.
+
+**Other dates of an event page.** A page that has its own date (a Meetup date) is its own
+resource, and the calendar listing the organiser's dates is another: reading a Meetup date's page
+queues its group's calendar (`/{group}/events/ical/`) as a resource. With
+`groups.cross_container_occurrences = "corroborated"`, the page and that date in the calendar are
+one [group](#groups): from the page's card, `GET /v1/groups/{group.id}` lists the member whose
+`occurrence` names the calendar (`feed_id`, `feed_uri`), and
+`GET /v1/resources/{feed_id}/occurrences` lists every date. A group calendar mixes the group's
+series; its other dates are occurrences, never members of the page's group.
 
 `POST /v1/occurrences/lookup` reads several feeds' occurrences as one page, ordered by start,
 then feed, UID and recurrence key; each card's `id` names its feed. The feeds are
@@ -1235,7 +1252,13 @@ one thing, only on evidence that cannot be spoofed:
   one edition page join only through the indexed page). A doi.org URL is the DOI itself, never a landing page.
 - **One ICS UID within one feed**, between dated instances that start within five minutes of
   each other. The UID is hashed into the key, so no UID text names another feed. Across feeds only with `groups.cross_container_occurrences = "corroborated"`: both
-  located within 500 m, starting within 300 s, with a name similarity of at least 0.5.
+  located within 500 m, starting within 300 s, with a name similarity of at least 0.5. An event
+  page takes the UID of its own calendar file (one event, linked on the page's own origin and
+  answered from the page's own URL origin); in the corroborated mode it joins the occurrence
+  with that UID in the organiser calendar its platform names for it on the same origin (a Meetup
+  date's page: its group's `/events/ical/`, read only when Meetup itself answers it over https)
+  when both start within 300 s, located or not and whatever their names. Any other calendar, and
+  two feeds, still need the cross-feed checks.
 - **An exact key a source vouches for** ([Also on](#also-on)): two links a hub names as the same
   recording, release or Wikidata item, by its own identifier (`mb:recording:{mbid}`,
   `wikidata:Q…`), or a known music service's own record of its own object (the ISRC on a TIDAL
@@ -1657,8 +1680,9 @@ counts by status.
 - **Event platforms**: the adapters in `data/event-adapters.json`. Each has an `enabled` switch
   and, where the platform needs one, a `key`; a missing key disables only that adapter and no key
   is ever returned. Its manifest lists the mode, cadence floor, identity, cancellation rule,
-  expected fields and canary. BTC Map websites and NIP-52 calendar members are queued as their
-  own resources (`event.adapters.derive_resources`). A Wikidata item's card (the `wikidata`
+  expected fields and canary. BTC Map websites, NIP-52 calendar members and the group calendar
+  of a Meetup date's page ([other dates](#calendars-and-occurrences)) are queued as their own
+  resources (`event.adapters.derive_resources`). A Wikidata item's card (the `wikidata`
   adapter, and a Wikipedia page about an event or a place that Wikipedia serves no summary of,
   read from the page's item) takes the item's label and description, English when it has one,
   else the item's language-independent (`mul`) value, else any language (CC0, no credit), and shows its image (`P18`) only when the file's own page on Commons gives a

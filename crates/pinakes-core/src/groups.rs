@@ -81,8 +81,8 @@ pub struct Curation {
 ///   edition pages need no citation: the registry builds them from its own record.
 /// - `ics_feed:{feed}:{uid hash}`: one ICS UID within one feed's occurrences. The UID is hashed,
 ///   so no UID text can spell another feed's key. `ics_uid:{uid hash}` is recorded too, also by
-///   an event page for its own calendar file's UID; it joins across feeds only in the
-///   corroborated mode (`plan`).
+///   an event page for its own calendar file's UID (only a file on the page's own origin gives
+///   one); it joins across feeds only in the corroborated mode (`join`).
 ///
 /// - `hub:{key}`: an exact key a source vouches for (`also_on`: a MusicBrainz MBID, a Wikidata
 ///   Q-id), or that named this resource in another's exact lookup (a keyed derived link). Two
@@ -229,6 +229,12 @@ async fn remembered_namespaces(tx: &mut Transaction<'_, Postgres>) -> Result<Vec
             .await?,
     )
 }
+/// The resource ID of the organiser calendar an event page's platform names for it
+/// (`event::adapters::container_feed`: Meetup's group calendar), on the page's own origin.
+fn organiser_calendar(uri: &str) -> Option<String> {
+    let feed = crate::event::adapters::container_feed(crate::event::adapters::detect(uri)?, uri)?;
+    Some(crate::model::identity(&feed).ok()?.0)
+}
 /// An ICS UID as a key segment: free text (NIP-52 coordinates, URNs, URLs) never decides the
 /// key's kind or names another feed.
 fn uid_hash(uid: &str) -> String {
@@ -347,6 +353,11 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
                 lat: row["lat"].as_f64(),
                 lon: row["lon"].as_f64(),
                 occurrence: occurrence.is_some(),
+                uri: if occurrence.is_some() {
+                    String::new()
+                } else {
+                    row["uri"].as_str().unwrap_or_default().to_owned()
+                },
             });
         }
     }
@@ -432,10 +443,13 @@ struct Edge {
     override_id: Option<String>,
     lat: Option<f64>,
     lon: Option<f64>,
+    /// A page unit's resource URI, which names its organiser calendar (`Facts::calendars`);
+    /// empty for an occurrence.
+    uri: String,
 }
 impl Edge {
     fn bytes(&self) -> usize {
-        self.key.len() + self.trigrams.iter().map(String::len).sum::<usize>() + 256
+        self.key.len() + self.uri.len() + self.trigrams.iter().map(String::len).sum::<usize>() + 256
     }
 }
 fn root(parents: &mut [usize], mut i: usize) -> usize {
@@ -479,7 +493,8 @@ async fn load_edges(
       UNION SELECT u.unit_id FROM group_unit u WHERE u.group_id IN(SELECT group_id FROM wanted) UNION SELECT unit_id FROM wanted
       UNION SELECT unit_id FROM group_override WHERE group_id=ANY($3))
     SELECT show_trgm(array_to_string(tsvector_to_array(to_tsvector('simple',coalesce(s.name,''))),' ')) AS trigrams,r.group_revision AS revision,u.unit_id,u.resource_id,coalesce(k.key,'unit:'||u.unit_id) AS key,coalesce(k.admitted_at,u.admitted_at) AS admitted_at,
-      u.occurrence IS NOT NULL AS occurrence,s.start_at,u.group_id,o.group_id AS override_id,ST_Y(s.point) AS lat,ST_X(s.point) AS lon
+      u.occurrence IS NOT NULL AS occurrence,s.start_at,u.group_id,o.group_id AS override_id,ST_Y(s.point) AS lat,ST_X(s.point) AS lon,
+      CASE WHEN u.occurrence IS NULL THEN r.uri ELSE '' END AS uri
     FROM affected a JOIN group_unit u USING(unit_id) LEFT JOIN resource_group k USING(unit_id) JOIN resource r ON r.id=u.resource_id
     LEFT JOIN group_override o USING(unit_id) LEFT JOIN group_member_document s USING(unit_id)
     ORDER BY u.unit_id,key LIMIT $5"#)
@@ -504,6 +519,9 @@ struct Facts<'a> {
     points: &'a [Option<(f64, f64)>],
     starts: &'a [Option<chrono::DateTime<chrono::Utc>>],
     occurrences: &'a [bool],
+    /// Per unit, a calendar's resource ID: an occurrence's feed, or the organiser calendar an
+    /// event page's platform names for it (`organiser_calendar`).
+    calendars: &'a [Option<String>],
     trigrams: &'a [Vec<String>],
     overrides: &'a [Option<String>],
     /// Per unit, its single-object hub keys as (namespace, value) ([`single_object`]).
@@ -663,10 +681,11 @@ fn join(
                 stopped = Some(n);
                 break 'keys;
             }
-            let (points, starts, occurrences, trigrams, singles) = (
+            let (points, starts, occurrences, calendars, trigrams, singles) = (
                 facts.points,
                 facts.starts,
                 facts.occurrences,
+                facts.calendars,
                 facts.trigrams,
                 facts.singles,
             );
@@ -700,10 +719,20 @@ fn join(
                         };
                         // A UID joins two instances only when both are dated, within 300 s.
                         let dated = || starts[*x].is_some() && starts[*y].is_some();
+                        // An event page and an occurrence of the organiser calendar its
+                        // platform names for it, on the page's own origin: the page's UID came
+                        // from its own calendar file (`group_keys`), so the organiser names the
+                        // page's date in both. Two feeds never pair so.
+                        let own_calendar = || {
+                            occurrences[*x] != occurrences[*y]
+                                && calendars[*x].is_some()
+                                && calendars[*x] == calendars[*y]
+                        };
                         near(cfg.max_distance_m)
                             && (!(occurrences[*x] || occurrences[*y]) || close_start())
                             && (!ics || (dated() && close_start()))
                             && (!cross_feed
+                                || own_calendar()
                                 || (points[*x].is_some()
                                     && points[*y].is_some()
                                     && near(500.0)
@@ -781,6 +810,8 @@ async fn plan(
     let mut points = vec![None; names.len()];
     let mut starts = vec![None; names.len()];
     let mut occurrences = vec![false; names.len()];
+    let mut calendars: Vec<Option<String>> = vec![None; names.len()];
+    let mut read_calendar = vec![false; names.len()];
     let mut trigrams = vec![Vec::new(); names.len()];
     let mut overrides = vec![None; names.len()];
     let mut singles: Vec<Vec<(String, String)>> = vec![Vec::new(); names.len()];
@@ -794,6 +825,14 @@ async fn plan(
         points[i] = e.lat.zip(e.lon).or(points[i]);
         starts[i] = e.start_at.or(starts[i]);
         occurrences[i] |= e.occurrence;
+        if !read_calendar[i] {
+            read_calendar[i] = true;
+            calendars[i] = if e.occurrence {
+                Some(e.resource_id.clone())
+            } else {
+                organiser_calendar(&e.uri)
+            };
+        }
         if !e.trigrams.is_empty() {
             trigrams[i] = e.trigrams.clone();
         }
@@ -835,6 +874,7 @@ async fn plan(
             points.clone(),
             starts.clone(),
             occurrences.clone(),
+            calendars,
             trigrams.clone(),
             overrides.clone(),
             singles,
@@ -842,13 +882,24 @@ async fn plan(
             resume.map(str::to_owned),
         );
         tokio::task::spawn_blocking(move || {
-            let (names, points, starts, occurrences, trigrams, overrides, singles, cfg, resume) =
-                owned;
+            let (
+                names,
+                points,
+                starts,
+                occurrences,
+                calendars,
+                trigrams,
+                overrides,
+                singles,
+                cfg,
+                resume,
+            ) = owned;
             let facts = Facts {
                 names: &names,
                 points: &points,
                 starts: &starts,
                 occurrences: &occurrences,
+                calendars: &calendars,
                 trigrams: &trigrams,
                 overrides: &overrides,
                 singles: &singles,
@@ -1303,10 +1354,11 @@ mod tests {
         resume: Option<&str>,
     ) -> Joined {
         let names: Vec<String> = (0..units).map(|i| format!("u{i}")).collect();
-        let (points, starts, occurrences, trigrams, overrides) = (
+        let (points, starts, occurrences, calendars, trigrams, overrides) = (
             vec![None; units],
             vec![None; units],
             vec![false; units],
+            vec![None; units],
             vec![Vec::new(); units],
             vec![None; units],
         );
@@ -1324,6 +1376,7 @@ mod tests {
             points: &points,
             starts: &starts,
             occurrences: &occurrences,
+            calendars: &calendars,
             trigrams: &trigrams,
             overrides: &overrides,
             singles: &singles,
@@ -1493,5 +1546,118 @@ mod tests {
         let joined = run(19, &keys, &cfg, None);
         assert_eq!(joined.parked, 1);
         assert_eq!(joined.resume.as_deref(), Some("k5"));
+    }
+
+    /// A unit for the UID rule: its resource URI, whether it is an occurrence, its point.
+    type UidUnit<'a> = (&'a str, bool, Option<(f64, f64)>);
+    /// Units for the UID rule, all dated at one instant and named alike, joined by one
+    /// `ics_uid:` key.
+    fn uid_join(units: &[UidUnit], mode: CrossContainerOccurrences) -> Joined {
+        let at = chrono::DateTime::from_timestamp(1_800_000_000, 0);
+        let n = units.len();
+        let names: Vec<String> = (0..n).map(|i| format!("u{i}")).collect();
+        let points: Vec<_> = units.iter().map(|u| u.2).collect();
+        let starts = vec![at; n];
+        let occurrences: Vec<bool> = units.iter().map(|u| u.1).collect();
+        let calendars: Vec<_> = units
+            .iter()
+            .map(|u| {
+                if u.1 {
+                    crate::model::identity(u.0).ok().map(|i| i.0)
+                } else {
+                    organiser_calendar(u.0)
+                }
+            })
+            .collect();
+        let (trigrams, overrides, singles) = (
+            vec![vec!["abc".to_owned()]; n],
+            vec![None; n],
+            vec![Vec::new(); n],
+        );
+        let facts = Facts {
+            names: &names,
+            points: &points,
+            starts: &starts,
+            occurrences: &occurrences,
+            calendars: &calendars,
+            trigrams: &trigrams,
+            overrides: &overrides,
+            singles: &singles,
+        };
+        let epoch = chrono::DateTime::UNIX_EPOCH;
+        let bykey =
+            BTreeMap::from([("ics_uid:x".to_owned(), (0..n).map(|i| (i, epoch)).collect())]);
+        let cfg = GroupConfig {
+            cross_container_occurrences: mode,
+            ..Default::default()
+        };
+        join(&facts, bykey, &cfg, None)
+    }
+
+    /// In the corroborated mode, an event page joins the occurrence with its UID in the
+    /// organiser calendar its platform names for it without the points and names a join across
+    /// feeds needs; another calendar, even on the same site, two feeds, or a page and a feed of
+    /// two publishers, still need them. Off joins none.
+    #[test]
+    fn a_page_joins_its_date_in_its_organisers_calendar() {
+        let page = "https://www.meetup.com/g/events/316908442/";
+        let feed = "https://www.meetup.com/g/events/ical/";
+        let corroborated = CrossContainerOccurrences::Corroborated;
+        let mut joined = uid_join(&[(page, false, None), (feed, true, None)], corroborated);
+        assert!(same(&mut joined, 0, 1));
+        let mut off = uid_join(
+            &[(page, false, None), (feed, true, None)],
+            CrossContainerOccurrences::Off,
+        );
+        assert!(!same(&mut off, 0, 1));
+        // Another publisher's page with the same UID: no points, no join.
+        let other = "https://events.example.com/meetup";
+        let mut joined = uid_join(&[(other, false, None), (feed, true, None)], corroborated);
+        assert!(!same(&mut joined, 0, 1));
+        // Two feeds of one publisher: still the cross-feed rule.
+        let second = "https://www.meetup.com/h/events/ical/";
+        let mut joined = uid_join(&[(feed, true, None), (second, true, None)], corroborated);
+        assert!(!same(&mut joined, 0, 1));
+        // Another calendar on the page's site (another group's): the cross-feed rule too.
+        let mut joined = uid_join(&[(page, false, None), (second, true, None)], corroborated);
+        assert!(!same(&mut joined, 0, 1));
+        let mut joined = uid_join(
+            &[
+                (page, false, None),
+                ("https://www.meetup.com/g/x.ics", true, None),
+            ],
+            corroborated,
+        );
+        assert!(!same(&mut joined, 0, 1));
+        // A third publisher's located feed joins neither: its pair with the page's unlocated
+        // own feed fails the cross-feed rule.
+        let located = "https://calendar.example.com/a.ics";
+        let mut joined = uid_join(
+            &[
+                (page, false, Some((47.37, 8.53))),
+                (feed, true, None),
+                (located, true, Some((47.37, 8.53))),
+            ],
+            corroborated,
+        );
+        assert!(same(&mut joined, 0, 1) && !same(&mut joined, 1, 2));
+        // The cross-publisher rule is unchanged: located within 500 m, same start and name.
+        let mut joined = uid_join(
+            &[
+                (other, false, Some((47.37, 8.53))),
+                (located, true, Some((47.37, 8.531))),
+            ],
+            corroborated,
+        );
+        assert!(same(&mut joined, 0, 1));
+        // Too far apart for a page and its organiser's calendar too (`max_distance_m`).
+        let mut joined = uid_join(
+            &[
+                (page, false, Some((47.37, 8.53))),
+                (feed, true, Some((46.0, 7.0))),
+            ],
+            corroborated,
+        );
+        assert!(!same(&mut joined, 0, 1));
     }
 }

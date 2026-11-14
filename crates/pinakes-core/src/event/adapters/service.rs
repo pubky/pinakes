@@ -171,11 +171,8 @@ impl PlatformResolver {
             || (d.mode == Mode::Container && feed_path(&target))
             || (d.id == "starticket" && target.ends_with(".xml"));
         opts.feed_cap = opts.feed_hint.then_some(local.feed_body_bytes);
-        let fetched = self
-            .web
-            .egress
-            .fetch_with(&calendar::canonical_feed(&target), &opts)
-            .await?;
+        // An organiser calendar is the platform's own answer or none (`fetch_calendar`).
+        let fetched = super::fetch_calendar(&self.web.egress, &target, &opts).await?;
         if fetched.status == 304 {
             return Err(crate::resolver::NotModified.into());
         }
@@ -234,12 +231,21 @@ impl PlatformResolver {
                     .page(uri, &fetched, card, &self.web.egress, deadline)
                     .await?;
                 // APIs and calendar links fill only absent page fields. Never query an unrelated recommendation.
-                if !d.requires_key
-                    && (doc.start.is_none()
-                        || doc.event.tz.is_none()
-                        || doc.location.is_none()
-                            && doc.event.attendance != Some(crate::event::Attendance::Online))
-                {
+                let missing = doc.start.is_none()
+                    || doc.event.tz.is_none()
+                    || doc.location.is_none()
+                        && doc.event.attendance != Some(crate::event::Attendance::Online);
+                // A platform with an organiser feed reads the page's own calendar file anyway,
+                // for its UID alone: the UID joins the page to its date in that feed. Read so,
+                // the file is optional and adds nothing else.
+                let uid_only = !probe && !missing && d.container_feed.is_some();
+                // On a platform with an organiser feed, the file is optional on every read: a
+                // refusal, an outage or a 451 there leaves the page's own facts as they are.
+                let optional = d.container_feed.is_some();
+                // Whether the file was asked for, and whether it answered with a calendar: then
+                // its UID, or none, is the page's now.
+                let (mut asked, mut answered) = (false, false);
+                if !d.requires_key && (missing || uid_only) {
                     // Calendar-link discovery reads the page: in a parse slot.
                     let found = {
                         let (d, uri, page, cfg) = (
@@ -259,19 +265,32 @@ impl PlatformResolver {
                                 || (d.mode == Mode::Container && feed_path(&target))
                                 || (d.id == "starticket" && target.ends_with(".xml"));
                             opts.feed_cap = opts.feed_hint.then_some(local.feed_body_bytes);
-                            {
-                                let f = discover_enrichment(
-                                    &self.web.egress,
-                                    &target,
-                                    &opts,
-                                    m.cadence_floor,
-                                    d,
-                                )
-                                .await?;
-                                if f.status == 451 {
+                            asked = true;
+                            let read = discover_enrichment(
+                                &self.web.egress,
+                                &target,
+                                &opts,
+                                m.cadence_floor,
+                                d,
+                            )
+                            .await;
+                            let read = match read {
+                                Ok(f) => Some(f),
+                                Err(_) if optional => None,
+                                Err(error) => return Err(error),
+                            };
+                            if let Some(f) = read {
+                                if f.status == 451 && !optional {
                                     return self.enrichment_gone(uri, &d.id).await;
                                 }
-                                if f.status == 200 {
+                                if f.status == 200 && uid_only {
+                                    if let Ok(Some(calendar)) =
+                                        calendar_blocking(uri, d, &f, &local).await
+                                    {
+                                        answered = true;
+                                        own_uid(&mut doc, &calendar);
+                                    }
+                                } else if f.status == 200 {
                                     if d.id == "luma" {
                                         // An event's API response names its calendar too: only
                                         // a calendar response turns the page into the calendar.
@@ -320,15 +339,42 @@ impl PlatformResolver {
                                             }
                                         }
                                     }
-                                    if let Some(extra) =
-                                        enrichment_blocking(uri, d, &f, &local).await?
-                                    {
+                                    // On a platform with an organiser feed, a calendar answer is
+                                    // told apart from a page in its place (a sign-in wall).
+                                    let calendar = if optional {
+                                        calendar_blocking(uri, d, &f, &local).await.ok().flatten()
+                                    } else {
+                                        None
+                                    };
+                                    answered |= calendar.is_some();
+                                    let extra = match calendar {
+                                        Some(calendar) => Ok(Some(calendar)),
+                                        None => enrichment_blocking(uri, d, &f, &local).await,
+                                    };
+                                    let extra = match extra {
+                                        Ok(extra) => extra,
+                                        Err(_) if optional => None,
+                                        Err(error) => return Err(error),
+                                    };
+                                    if let Some(extra) = extra {
                                         merge(&mut doc, &extra).map_err(parse_error)?;
                                     }
                                 }
                             }
                         }
                     }
+                }
+                // An optional read the file did not answer with a calendar (refused, failed,
+                // gone, a page in its place) keeps the UID the page was stored with, on either
+                // path, so a passing failure never moves the page out of its group. A calendar
+                // that answers without one (two events, another origin) ends it.
+                if optional
+                    && asked
+                    && !answered
+                    && !probe
+                    && !doc.group_keys.iter().any(|k| k.basis == "ics_uid")
+                {
+                    self.stored_uid(uri, &mut doc).await?;
                 }
                 doc
             };
@@ -362,7 +408,12 @@ impl PlatformResolver {
         }
         .await;
         match parsed {
-            Ok(doc) => Ok(doc),
+            Ok(doc) => {
+                if !probe {
+                    self.derive_container_feed(uri, d, &doc, &local).await?;
+                }
+                Ok(doc)
+            }
             Err(error) if probe || !error.is::<ParseFailure>() => Err(error),
             Err(_) => {
                 crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "drift");
@@ -371,6 +422,66 @@ impl PlatformResolver {
                 Ok(card)
             }
         }
+    }
+    /// The `ics_uid` keys the stored document of `uri` holds, added to `doc`.
+    async fn stored_uid(&self, uri: &str, doc: &mut ResourceMeta) -> Result<()> {
+        let keys: Option<Value> = sqlx::query_scalar(
+            "SELECT doc->'group_keys' FROM resource WHERE id=$1 AND doc ? 'group_keys'",
+        )
+        .bind(crate::model::identity(uri)?.0)
+        .fetch_optional(&self.web.events.as_ref().unwrap().pool)
+        .await?;
+        let keys: Vec<crate::group_keys::GroupKey> = keys
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+        let mut stored = ResourceMeta::new(uri, "", 0);
+        stored.group_keys = keys
+            .into_iter()
+            .filter(|k| k.basis == "ics_uid" && crate::group_keys::valid_stored(k))
+            .collect();
+        own_uid(doc, &stored);
+        Ok(())
+    }
+    /// Queue the organiser feed of an event page (`adapters::container_feed`) as a resource
+    /// derived from the page, like a calendar's members: charged to the page's referrers, within
+    /// `limits.max_linked_resources` and `limits.max_derived_resources`. The link lives until the
+    /// page's event ends, at least a day from this read, capped at the horizon; each read of the
+    /// page renews it.
+    async fn derive_container_feed(
+        &self,
+        uri: &str,
+        d: &Definition,
+        doc: &ResourceMeta,
+        cfg: &EventConfig,
+    ) -> Result<()> {
+        if !cfg.adapters.derive_resources
+            || !doc.type_path.contains(&"Event".into())
+            || doc.container.is_some()
+            || doc.status != crate::model::Status::Ok
+        {
+            return Ok(());
+        }
+        let Some(feed) = super::container_feed(d, uri) else {
+            return Ok(());
+        };
+        let floor = chrono::Utc::now() + chrono::Duration::days(1);
+        let until = doc
+            .end
+            .or(doc.start)
+            .and_then(crate::event::time::bounded)
+            .map_or(floor, |at| at.max(floor));
+        crate::store::derive_resource_within(
+            &self.web.events.as_ref().unwrap().pool,
+            uri,
+            &feed,
+            &d.id,
+            cfg.adapters.max_linked_resources,
+            cfg.adapters.max_derived_resources,
+            Some(until),
+            Some(crate::store::derivation_horizon(cfg)),
+        )
+        .await?;
+        Ok(())
     }
     async fn enrichment_gone(&self, uri: &str, source: &str) -> Result<ResourceMeta> {
         let mut doc = self
@@ -522,7 +633,17 @@ fn merge(doc: &mut ResourceMeta, extra: &ResourceMeta) -> Result<()> {
         doc.event.tz = None;
         doc.event.timezone_attribution = None;
     }
+    own_uid(doc, extra);
     page::merge_missing(doc, extra)
+}
+/// The UID of the page's own calendar file (`calendar_document`), which joins the page to its
+/// date in a feed (`groups`).
+fn own_uid(doc: &mut ResourceMeta, calendar: &ResourceMeta) {
+    for k in calendar.group_keys.iter().filter(|k| k.basis == "ics_uid") {
+        if let Some(uid) = k.key.strip_prefix("ics_uid:") {
+            crate::group_keys::add(doc, "ics_uid", uid);
+        }
+    }
 }
 #[async_trait]
 impl Resolver for PlatformResolver {
@@ -638,6 +759,14 @@ pub fn calendar_document(
             if let Some(o) = selected {
                 doc = o.doc.clone();
                 doc.url = uri.into();
+                // A file of one event answered from the page's own URL origin (scheme, host and
+                // port, after redirects) names the page's date: its UID joins the page to that
+                // date in a feed (in the corroborated mode, `groups`).
+                if c.occurrences.len() == 1
+                    && crate::group_keys::same_url_origin(uri, f.url.as_str())
+                {
+                    crate::group_keys::add(&mut doc, "ics_uid", &o.uid);
+                }
             }
         }
     }
@@ -785,7 +914,15 @@ pub fn endpoint(
             }
         }
         "partiful" if page.is_some() => Some((format!("https://storage.googleapis.com/getpartiful.appspot.com/public/events/{id}/event.ics"), opts)),
-        "meetup" if page.is_some() && id.chars().all(|c| c.is_ascii_digit()) && !id.is_empty() => Some((format!("{}/ical/{id}.ics", uri.trim_end_matches('/')), opts)),
+        // A date's page by its number or its token (`/events/frxnbvyjcqbmb/`): both files carry
+        // the date's current UID.
+        "meetup" if page.is_some() && super::container_feed(d, uri).is_some() && !id.is_empty() && id.len() <= 64 && id.bytes().all(|c| c.is_ascii_digit() || c.is_ascii_lowercase()) => {
+            let mut file = u.clone();
+            file.set_query(None);
+            file.set_fragment(None);
+            file.set_path(&format!("{}/ical/{id}.ics", u.path().trim_end_matches('/')));
+            Some((file.into(), opts))
+        }
         _ => None,
     };
     Ok(result)

@@ -221,7 +221,10 @@ pub struct FetchOptions {
     /// `limits.html_head_bytes`.
     pub head_cap: Option<usize>,
     /// Answer a redirect as it came (its status and `location`) instead of following it: where
-    /// a lookup redirects is the answer (PCGamingWiki's appid lookup).
+    /// a lookup redirects is the answer (PCGamingWiki's appid lookup). No redirect of any kind
+    /// is followed then: an in-page redirect (a meta refresh, `location.replace(`, a
+    /// "Redirecting" stub) comes back as it came too, its status and body, with its target,
+    /// resolved against the page, in `location`.
     pub keep_redirect: bool,
     /// An error answer in JSON keeps a bounded prefix of its body, and a 429 is answered as it
     /// came instead of as `RetryLater`: for an API whose error names its own wait (Stack
@@ -1114,6 +1117,10 @@ impl Egress {
                 return Err(super::interstitial::Blocked.into());
             }
             if let super::interstitial::Page::Redirect(target) = page {
+                if options.keep_redirect {
+                    response.location = Some(url.join(&target)?.to_string());
+                    return Ok(response);
+                }
                 if options.sensitive
                     || options.json_body.is_some()
                     || options.form_body.is_some()

@@ -167,6 +167,7 @@ pub fn strip_document(doc: &mut crate::model::ResourceMeta, own: &str) -> anyhow
         *doc = crate::model::ResourceMeta {
             container: doc.container.take(),
             alias_candidates: std::mem::take(&mut doc.alias_candidates),
+            event_spellings: std::mem::take(&mut doc.event_spellings),
             http_status: doc.http_status,
             withheld: doc.withheld,
             refresh_by: doc.refresh_by,

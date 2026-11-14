@@ -111,6 +111,171 @@ pub struct Definition {
     pub requires_key: bool,
     pub fragile: bool,
     pub enabled: bool,
+    /// The feed that lists the dates of an event page's organiser, when the platform derives it
+    /// from the page's path (`container_feed`).
+    #[serde(default)]
+    pub container_feed: Option<ContainerFeed>,
+}
+/// An event page's organiser feed on the page's own origin: a page whose path has the form
+/// `page` (as `canary_link_matches` reads it, a trailing slash aside) names the feed at `feed`,
+/// where `{n}` is the n-th `*` segment of the page's path (Meetup: `/*/events/*` names
+/// `/{1}/events/ical/`, the group's calendar).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContainerFeed {
+    pub page: String,
+    pub feed: String,
+}
+impl ContainerFeed {
+    /// Both paths absolute, the feed's without a query, fragment or empty segment, and each
+    /// `{n}` naming one of the page's `*` segments.
+    fn valid(&self) -> bool {
+        let wild = self.page.split('/').filter(|s| *s == "*").count();
+        let mut literal = String::new();
+        let mut rest = self.feed.as_str();
+        while let Some((before, after)) = rest.split_once('{') {
+            let Some((n, tail)) = after.split_once('}') else {
+                return false;
+            };
+            if !n.parse::<usize>().is_ok_and(|n| (1..=wild).contains(&n)) {
+                return false;
+            }
+            literal.push_str(before);
+            rest = tail;
+        }
+        literal.push_str(rest);
+        self.page.starts_with('/')
+            && wild > 0
+            && self.feed.starts_with('/')
+            && !self.feed.contains("//")
+            && !literal.contains(['?', '#', '}', '*'])
+    }
+}
+/// The platform whose organiser calendar `uri` is (`Definition::container_feed`): its path has
+/// the feed's form, each `{n}` one segment, without a query.
+fn organiser_calendar_of(uri: &str) -> Option<&'static Definition> {
+    let d = detect(uri)?;
+    let u = Url::parse(uri).ok()?;
+    (u.query().is_none() && feed_form(d, u.path())).then_some(d)
+}
+/// Whether `path` has the form of `d`'s organiser calendar path.
+fn feed_form(d: &Definition, path: &str) -> bool {
+    let Some(spec) = d.container_feed.as_ref() else {
+        return false;
+    };
+    let mut pattern = String::new();
+    let mut rest = spec.feed.as_str();
+    while let Some((before, after)) = rest.split_once('{') {
+        pattern.push_str(before);
+        pattern.push('*');
+        rest = after.split_once('}').map_or("", |(_, tail)| tail);
+    }
+    pattern.push_str(rest);
+    canary_link_matches(pattern.trim_end_matches('/'), path.trim_end_matches('/'))
+}
+/// Whether `uri` is an organiser calendar a platform derives for its event pages
+/// (`Definition::container_feed`).
+pub fn names_organiser_calendar(uri: &str) -> bool {
+    organiser_calendar_of(uri).is_some()
+}
+/// Whether `url` is where platform `d` answers an organiser calendar itself: over https on the
+/// default port, from a host it declares (`Definition::domains`, the host or a subdomain, as
+/// `detect` reads them), at the calendar's path form, without userinfo or a query.
+fn platform_calendar_location(d: &Definition, url: &Url) -> bool {
+    let host = url.host_str().unwrap_or("").trim_end_matches('.');
+    url.scheme() == "https"
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && d.domains.iter().any(|h| {
+            host == h
+                || host
+                    .strip_suffix(h.as_str())
+                    .is_some_and(|p| p.ends_with('.'))
+        })
+        && feed_form(d, url.path())
+}
+/// The answer for `uri` (a `webcal:` link read over https). An organiser calendar
+/// (`names_organiser_calendar`) is the platform's own answer or none: it is fetched without
+/// following redirects, and only a redirect to where the platform answers it itself
+/// (`platform_calendar_location`) is followed, up to three, HTTP or in-page (a meta refresh, a
+/// script or "Redirecting" stub), so every spelling the platform
+/// answers (`webcal:`, `http:`, the bare domain) is read. An answer anywhere else, whatever
+/// its status or body, is refused before anything reads it (`RetryLater` `off_origin`, its
+/// stored dates kept): grouping trusts that calendar's dates by its address (`groups`).
+pub async fn fetch_calendar(
+    egress: &crate::resolver::egress::Egress,
+    uri: &str,
+    options: &crate::resolver::egress::FetchOptions,
+) -> anyhow::Result<crate::resolver::egress::Fetched> {
+    let mapped = crate::event::calendar::canonical_feed(uri);
+    let Some(d) = organiser_calendar_of(uri) else {
+        return egress.fetch_with(&mapped, options).await;
+    };
+    let off_origin = || -> anyhow::Error {
+        crate::resolver::RetryLater {
+            class: "off_origin",
+            seconds: 3600,
+        }
+        .into()
+    };
+    let options = crate::resolver::egress::FetchOptions {
+        keep_redirect: true,
+        ..options.clone()
+    };
+    let mut url = Url::parse(&mapped)?;
+    for hop in 0..=3 {
+        let answer = egress.fetch_with(url.as_str(), &options).await?;
+        // A redirect, an HTTP one or one in the page (its target in `location`, `keep_redirect`).
+        if matches!(answer.status, 301 | 302 | 303 | 307 | 308) || answer.location.is_some() {
+            let next = answer
+                .location
+                .as_deref()
+                .and_then(|l| url.join(l).ok())
+                .filter(|next| hop < 3 && platform_calendar_location(d, next))
+                .ok_or_else(off_origin)?;
+            url = next;
+            continue;
+        }
+        if !platform_calendar_location(d, &answer.url) {
+            return Err(off_origin());
+        }
+        return Ok(answer);
+    }
+    Err(off_origin())
+}
+/// The organiser feed of the event page `uri` on platform `d` (`Definition::container_feed`):
+/// on the page's own scheme, host and port, without its query or fragment. `None` when the
+/// platform declares none, the page's path has another form, or the feed is the page itself.
+pub fn container_feed(d: &Definition, uri: &str) -> Option<String> {
+    let spec = d.container_feed.as_ref()?;
+    let page = Url::parse(uri).ok()?;
+    if !matches!(page.scheme(), "http" | "https") {
+        return None;
+    }
+    let path = page.path().trim_end_matches('/');
+    let pattern = spec.page.trim_end_matches('/');
+    if !canary_link_matches(pattern, path) {
+        return None;
+    }
+    let captured: Vec<&str> = pattern
+        .split('/')
+        .zip(path.split('/'))
+        .filter(|(p, _)| *p == "*")
+        .map(|(_, s)| s)
+        .collect();
+    let mut feed = spec.feed.clone();
+    for (n, segment) in captured.iter().enumerate() {
+        feed = feed.replace(&format!("{{{}}}", n + 1), segment);
+    }
+    let mut url = page.clone();
+    url.set_path(&feed);
+    url.set_query(None);
+    url.set_fragment(None);
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    (url.path().trim_end_matches('/') != path).then(|| url.to_string())
 }
 /// Whether `path` has a canary link's form (`Definition::canary_link`): as many segments, each
 /// equal to the pattern's, where `*` stands for any one non-empty segment.
@@ -335,7 +500,8 @@ pub fn validate(cfg: &EventConfig) -> anyhow::Result<()> {
                 .contains(&d.parser.as_str())
                 && d.canary_link.as_ref().is_none_or(|l| {
                     d.canary.is_some() && l.starts_with('/') && l.split('/').any(|s| s == "*")
-                }),
+                })
+                && d.container_feed.as_ref().is_none_or(ContainerFeed::valid),
             "invalid adapter declaration {}",
             d.id
         );
@@ -344,4 +510,59 @@ pub fn validate(cfg: &EventConfig) -> anyhow::Result<()> {
         anyhow::ensure!(definition(id).is_some(), "unknown event adapter {id}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    /// A Meetup date's page, by number or token, names its group's calendar on its own origin;
+    /// other paths name none, and the calendar names no other.
+    #[test]
+    fn a_meetup_date_names_its_groups_calendar() {
+        let meetup = definition("meetup").unwrap();
+        let feed = "https://www.meetup.com/bitcoin-meetup-switzerland/events/ical/";
+        for page in [
+            "https://www.meetup.com/bitcoin-meetup-switzerland/events/316908442/",
+            "https://www.meetup.com/bitcoin-meetup-switzerland/events/316908442",
+            "https://www.meetup.com/bitcoin-meetup-switzerland/events/frxnbvyjcqbmb/?recId=1#x",
+        ] {
+            assert_eq!(
+                container_feed(meetup, page).as_deref(),
+                Some(feed),
+                "{page}"
+            );
+        }
+        for page in [
+            feed,
+            "https://www.meetup.com/bitcoin-meetup-switzerland/",
+            "https://www.meetup.com/bitcoin-meetup-switzerland/events/",
+            "https://www.meetup.com/bitcoin-meetup-switzerland/events/316908442/attendees/",
+            "https://www.meetup.com/find/events/",
+        ] {
+            assert_eq!(container_feed(meetup, page), None, "{page}");
+        }
+        assert_eq!(
+            container_feed(definition("luma").unwrap(), "https://luma.com/x/events/1/"),
+            None
+        );
+        // Declarations: a reference names a `*` of the page; the feed carries no query.
+        let spec = |page: &str, feed: &str| ContainerFeed {
+            page: page.into(),
+            feed: feed.into(),
+        };
+        assert!(spec("/*/events/*", "/{1}/events/ical/").valid());
+        assert!(spec("/*/events/*", "/{2}.ics").valid());
+        for (page, feed) in [
+            ("/*/events/*", "/{3}/ical/"),
+            ("/*/events/*", "/{0}/ical/"),
+            ("/*/events/*", "/{1/ical/"),
+            ("/*/events/*", "/{1}/ical/?x=1"),
+            ("/*/events/*", "{1}/ical/"),
+            ("/*/events/*", "//{1}/ical/"),
+            ("/events/x", "/ical/"),
+        ] {
+            assert!(!spec(page, feed).valid(), "{page} {feed}");
+        }
+        validate(&EventConfig::default()).unwrap();
+    }
 }

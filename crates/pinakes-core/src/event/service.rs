@@ -29,7 +29,6 @@ impl EventService {
         uri: &str,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Fetched> {
-        let mapped = calendar::canonical_feed(uri);
         let feed_hint = is_feed(uri) && self.config.calendars;
         let validators = if feed_hint {
             let end = now
@@ -54,7 +53,8 @@ impl EventService {
             validators,
             ..Default::default()
         };
-        let fetched = egress.fetch_with(&mapped, &options).await?;
+        // An organiser calendar is the platform's own answer or none (`fetch_calendar`).
+        let fetched = super::adapters::fetch_calendar(egress, uri, &options).await?;
         // Conditional requests resume only after a snapshot is accepted and key-loss/hold
         // confirmation is complete. Otherwise a new ETag followed by perpetual 304s
         // would leave the first disappearance observation pending forever.
@@ -175,6 +175,12 @@ impl EventService {
         if !(200..300).contains(&fetched.status) {
             return Ok(card);
         }
+        // Whether the fetch ended at the page asked for (a trailing slash aside): a redirect to
+        // another page never makes the two spellings of one event.
+        let landed = url::Url::parse(uri).is_ok_and(|u| {
+            u.origin() == fetched.url.origin()
+                && u.path().trim_end_matches('/') == fetched.url.path().trim_end_matches('/')
+        });
         // Past the page cap: a page cut where its long head closes, or a whole page within the
         // head budget (`egress::page_fits`).
         anyhow::ensure!(
@@ -354,6 +360,8 @@ impl EventService {
             .await
             {
                 if response.status == 200 {
+                    let answered_here =
+                        crate::group_keys::same_url_origin(uri, response.url.as_str());
                     let config = self.config.clone();
                     if let Ok(Ok(mut calendar)) = crate::resolver::html::blocking(move || {
                         calendar::parse(&link, &response.body, &config, chrono::Utc::now())
@@ -371,13 +379,15 @@ impl EventService {
                                 event.source = "ics".into();
                             }
                             super::page::merge_missing(&mut event, fallback)?;
-                            // The UID joins (in the corroborated mode) only when the file is on
-                            // the page's own origin, not where a redirect took the page.
+                            // The UID joins (in the corroborated mode) only when the link is on
+                            // the page's own origin, not where a redirect took the page, and the
+                            // file was answered from the page's own URL origin (scheme, host and
+                            // port, after redirects).
                             if let Some(uid) = c
                                 .occurrences
                                 .first()
                                 .map(|o| o.uid.as_str())
-                                .filter(|_| own_origin)
+                                .filter(|_| own_origin && answered_here)
                             {
                                 crate::group_keys::add(&mut event, "ics_uid", uid);
                             }
@@ -442,6 +452,14 @@ impl EventService {
             event.image = card.image;
         }
         event.aliases = card.aliases;
+        // An event page's canonical aliases it only as the other spelling of its event on a
+        // platform that gives each event two (`alias::event_spelling`), and only when the fetch
+        // ended at the page itself.
+        event.event_spellings = card
+            .alias_candidates
+            .into_iter()
+            .filter(|c| landed && crate::alias::event_spelling(uri, c).is_some())
+            .collect();
         event.attributes = card.attributes;
         event.site = card.site;
         // The card's identity claims (its same-origin canonical and og:url, typed identifiers,

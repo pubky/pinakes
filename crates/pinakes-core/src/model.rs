@@ -460,6 +460,12 @@ pub struct ResourceMeta {
     /// redirect chain. The only alias candidates (`alias::canonical`); never stored.
     #[serde(skip)]
     pub alias_candidates: Vec<String>,
+    /// The other spelling of an event page on a platform that gives each event two, named by the
+    /// page's own head canonical in a fetch that ended at the page itself
+    /// (`alias::event_spelling`); never stored.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub event_spellings: Vec<String>,
     /// The HTTP status of an answer that failed (`status` is `Error`), so the queue records which
     /// kind of failure it was; never stored.
     #[serde(skip)]

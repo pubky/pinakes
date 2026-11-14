@@ -225,7 +225,11 @@
     "canary_note": null,
     "requires_key": false,
     "fragile": false,
-    "enabled": true
+    "enabled": true,
+    "container_feed": {
+      "page": "/*/events/*",
+      "feed": "/{1}/events/ical/"
+    }
   },
   {
     "id": "eventbrite",
