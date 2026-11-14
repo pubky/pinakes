@@ -681,9 +681,12 @@ never executed. A Meetup date's page (by its number or its token) also reads its
 file, `{page}/ical/{id}.ics`; its UID counts only when the file holds one event and is answered
 from the page's own URL origin (scheme, host and port, after redirects). That read is optional
 (it is skipped on a probe): a refused, failing or non-calendar answer keeps the UID the page
-was stored with, and never fails the page or marks it gone. A group calendar answered from
-another origin after a redirect is not read (`last_error` `off_origin`, retried an hour later;
-its stored dates stay). After an upgrade, Meetup pages take their group calendar, their UID and
+was stored with, and never fails the page or marks it gone. A group calendar is read only when Meetup
+answers it itself: over https, from a meetup.com host, at the calendar's path, so its `webcal:`,
+`http:` and bare-domain spellings are read too. An answer from anywhere else after a redirect is
+not read, on the platform route and on the web route alike (`last_error` `off_origin`; its stored
+dates stay). It is read again with the queue's backoff (`limits.backoff_secs` doubling up
+to `limits.max_backoff_secs`), never dead-lettered; a read Meetup answers itself resets it. After an upgrade, Meetup pages take their group calendar, their UID and
 their token alias at their next read; `pinakesd reextract event_platform` reads every event
 platform's links at once. A numeric Meetup page that becomes its token's alias leaves its
 group, as every alias does, and an operator's curation of it (`PUT /v1/groups/{id}`) goes with
@@ -938,6 +941,8 @@ also joins one UID across feeds when the instances are within 500 m, 300 s and a
 of 0.5; a determined publisher can copy that, so it is off by default. In that mode an event page
 also joins the occurrence with its own calendar file's UID in the organiser calendar its platform
 names for it (a Meetup date's group calendar), within 300 s, without the place and name checks.
+A page's calendar file gives its UID only when answered from the page's own URL origin (scheme,
+host and port, after redirects), on every route.
 
 `groups.same_recording_hint` (default `"on"`; `"off"`) puts `maybe_same` on `MusicRecording`
 cards: other recordings that are possibly the same one ([the

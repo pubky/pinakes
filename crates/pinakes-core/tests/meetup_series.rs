@@ -139,8 +139,9 @@ impl Dns for AnyDns {
         Ok(vec![SocketAddr::new("93.184.216.34".parse()?, port)])
     }
 }
-/// Answers each `host/path` from its map (404 otherwise; `STATUS {code}` answers that status,
-/// `REDIRECT {url}` a 302 to that URL) and records what was asked.
+/// Answers each `host/path` (or `scheme://host/path`) from its map (404 otherwise;
+/// `STATUS {code}` answers that status, `REDIRECT {url}` a 302 to that URL) and records what was
+/// asked.
 struct Site {
     pages: BTreeMap<String, String>,
     seen: Mutex<Vec<String>>,
@@ -157,9 +158,12 @@ impl Transport for Site {
         _: &FetchOptions,
     ) -> anyhow::Result<Fetched> {
         self.seen.lock().unwrap().push(url.to_string());
+        // A key may name the scheme too (`http://host/path`); else it stands for any.
+        let (host, path) = (url.host_str().unwrap_or(""), url.path());
         let page = self
             .pages
-            .get(&format!("{}{}", url.host_str().unwrap_or(""), url.path()));
+            .get(&format!("{}://{host}{path}", url.scheme()))
+            .or_else(|| self.pages.get(&format!("{host}{path}")));
         let location = page
             .and_then(|p| p.strip_prefix("REDIRECT "))
             .map(str::to_owned);
@@ -191,16 +195,33 @@ fn resolver(
     pool: &PgPool,
     pages: BTreeMap<String, String>,
 ) -> (adapters::service::PlatformResolver, Arc<Site>) {
+    resolver_with(pool, pages, true)
+}
+/// `resolver`, with the Meetup adapter on or off (off: its links take the web route).
+fn resolver_with(
+    pool: &PgPool,
+    pages: BTreeMap<String, String>,
+    meetup: bool,
+) -> (adapters::service::PlatformResolver, Arc<Site>) {
     let site = Arc::new(Site {
         pages,
         seen: Mutex::default(),
     });
-    let config = EventConfig {
+    let mut config = EventConfig {
         geocoding: false,
         months_back: 12,
         months_forward: 36,
         ..Default::default()
     };
+    if !meetup {
+        config.adapters.platforms.insert(
+            "meetup".into(),
+            adapters::Options {
+                enabled: Some(false),
+                key: None,
+            },
+        );
+    }
     let r = adapters::service::PlatformResolver {
         web: pinakes_core::resolver::web::WebResolver {
             oembed_policy: Default::default(),
@@ -654,7 +675,8 @@ fn path_key(uri: &str) -> String {
 }
 /// An organiser calendar is trusted by its address, so an answer from another origin is never
 /// that calendar: a redirect of the group's calendar to another host stores no dates, and the
-/// date page joins none. A redirect on the platform's own origin is still read.
+/// date page joins none. The refusal backs off and never dead-letters; once the platform answers
+/// itself again, the calendar is read.
 #[sqlx::test(migrations = "../../migrations")]
 async fn an_organiser_calendar_answered_from_another_origin_is_not_read(pool: PgPool) {
     let cfg = queue_config(CrossContainerOccurrences::Corroborated);
@@ -686,13 +708,27 @@ async fn an_organiser_calendar_answered_from_another_origin_is_not_read(pool: Pg
     common::drain_groups(&pool, &cfg.groups).await;
     assert_eq!(all_groups(&pool).await, Vec::<Vec<(String, String)>>::new());
 
-    // On the platform's own origin, a redirect is followed.
+    // The refusal backs off with each read and never dead-letters the feed.
+    let backoff = |pool: PgPool, id: String| async move {
+        sqlx::query_as::<_, (i32, bool, f64)>(
+            "SELECT attempts,dead_letter,extract(epoch FROM next_attempt_at-now())::float8 FROM resource WHERE id=$1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let (attempts, dead, first) = backoff(pool.clone(), feed_id.clone()).await;
+    assert_eq!((attempts, dead), (1, false));
+    for _ in 0..6 {
+        read(&pool, &r, &cfg, &feed()).await;
+    }
+    let (attempts, dead, later) = backoff(pool.clone(), feed_id.clone()).await;
+    assert_eq!((attempts, dead), (7, false));
+    assert!(later > first + 60.0, "{first} {later}");
+    // Answered by the platform itself (a redirect to its own calendar path), it is read.
     let mut pages = site();
-    pages.insert(
-        path_key(&feed()),
-        format!("REDIRECT {}", url("ical/all.ics")),
-    );
-    pages.insert(path_key(&url("ical/all.ics")), calendar);
+    pages.insert(path_key(&feed()), calendar);
     let (r, _) = resolver(&pool, pages);
     read(&pool, &r, &cfg, &feed()).await;
     common::drain_groups(&pool, &cfg.groups).await;
@@ -749,31 +785,54 @@ async fn a_redirect_to_another_date_is_no_alias(pool: PgPool) {
 }
 
 /// A date page missing its place or zone reads its own calendar file to fill them; on a
-/// platform with an organiser feed that read is optional too: refused, failing or gone, the
-/// page reads fine and is not marked gone.
+/// platform with an organiser feed that read is optional too: refused, failing, gone or a page
+/// in its place, the page reads fine, is not marked gone, and keeps the UID it was stored with,
+/// so it stays in its group.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_date_page_missing_fields_reads_fine_when_its_file_fails(pool: PgPool) {
-    let cfg = queue_config(CrossContainerOccurrences::Off);
-    let page_uri = url("frxnbvykcdbfb/");
-    let start = (Utc::now() + Duration::days(20)).to_rfc3339();
+    let cfg = queue_config(CrossContainerOccurrences::Corroborated);
+    let start = shifted("2026-12-09T19:00:00+01:00", shift_days());
+    let page_uri = token();
     let page = format!(
-        r#"<html><head><title>Bitcoin Meetup</title><link rel="canonical" href="{page_uri}"><script type="application/ld+json">{{"@context":"https://schema.org","@type":"Event","name":"Bitcoin Meetup","startDate":"{start}","url":"{page_uri}"}}</script></head><body></body></html>"#
+        r#"<html><head><title>Bitcoin Meetup Zürich</title><link rel="canonical" href="{page_uri}"><script type="application/ld+json">{{"@context":"https://schema.org","@type":"Event","name":"Bitcoin Meetup Zürich","startDate":"{start}","url":"{page_uri}"}}</script></head><body></body></html>"#
     );
-    for answer in ["STATUS 503", "STATUS 403", "STATUS 451"] {
+    let mut pages = site();
+    pages.insert(path_key(&page_uri), page.clone());
+    let (r, _) = resolver(&pool, pages);
+    let id = read(&pool, &r, &cfg, &page_uri).await;
+    read(&pool, &r, &cfg, &feed()).await;
+    common::drain_groups(&pool, &cfg.groups).await;
+    let joined = all_groups(&pool).await;
+    assert_eq!(joined.len(), 1, "{joined:?}");
+    let file = url("frxnbvyjcqbmb/ical/frxnbvyjcqbmb.ics");
+    for answer in [
+        "STATUS 503",
+        "STATUS 403",
+        "STATUS 451",
+        "STATUS 404",
+        "<!DOCTYPE html><html><head><title>Sign in</title></head><body>Sign in</body></html>",
+    ] {
         let mut pages = site();
         pages.insert(path_key(&page_uri), page.clone());
-        let file = url("frxnbvykcdbfb/ical/frxnbvykcdbfb.ics");
         pages.insert(path_key(&file), answer.into());
         let (r, site) = resolver(&pool, pages);
-        let id = read(&pool, &r, &cfg, &page_uri).await;
+        read(&pool, &r, &cfg, &page_uri).await;
         assert!(site.seen.lock().unwrap().contains(&file), "{answer}");
-        let (status, error): (String, Option<String>) =
-            sqlx::query_as("SELECT status,last_error FROM resource WHERE id=$1")
+        let (status, error, keys): (String, Option<String>, Option<Value>) =
+            sqlx::query_as("SELECT status,last_error,doc->'group_keys' FROM resource WHERE id=$1")
                 .bind(&id)
                 .fetch_one(&pool)
                 .await
                 .unwrap();
         assert_eq!((status.as_str(), error), ("ok", None), "{answer}");
+        assert!(
+            keys.iter()
+                .flat_map(|k| k.as_array().into_iter().flatten())
+                .any(|k| k["key"] == format!("ics_uid:{UID}")),
+            "{answer}: {keys:?}"
+        );
+        common::drain_groups(&pool, &cfg.groups).await;
+        assert_eq!(all_groups(&pool).await, joined, "{answer}");
     }
 }
 
@@ -786,4 +845,133 @@ async fn a_probe_reads_no_calendar_file(pool: PgPool) {
     assert!(doc.type_path.contains(&"Event".into()));
     let seen = site.seen.lock().unwrap().clone();
     assert!(!seen.iter().any(|u| u.ends_with(".ics")), "{seen:?}");
+}
+
+/// Every spelling of a group's calendar that the platform answers itself over https, from its
+/// own host, at the calendar's path, is read: `webcal:` and `webcals:`, `http:` redirected to
+/// https, and the bare domain redirected to `www`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_group_calendar_is_read_by_each_of_its_spellings(pool: PgPool) {
+    let cfg = queue_config(CrossContainerOccurrences::Off);
+    let path = "/bitcoin-meetup-switzerland/events/ical/";
+    let mut pages = site();
+    pages.insert(
+        format!("http://www.meetup.com{path}"),
+        format!("REDIRECT https://www.meetup.com{path}"),
+    );
+    pages.insert(
+        format!("meetup.com{path}"),
+        format!("REDIRECT https://www.meetup.com{path}"),
+    );
+    for uri in [
+        format!("webcal://www.meetup.com{path}"),
+        format!("webcals://www.meetup.com{path}"),
+        format!("http://www.meetup.com{path}"),
+        format!("https://meetup.com{path}"),
+    ] {
+        let (r, _) = resolver(&pool, pages.clone());
+        let id = read(&pool, &r, &cfg, &uri).await;
+        let (occurrences, error): (i64, Option<String>) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM occurrence WHERE resource_id=$1),(SELECT last_error FROM resource WHERE id=$1)",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((occurrences, error), (10, None), "{uri}");
+    }
+}
+
+/// On the web route (the platform's adapter off), a page's own calendar file gives its UID only
+/// when answered from the page's own URL origin: a redirect elsewhere gives none.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_web_page_calendar_file_from_another_origin_gives_no_uid(pool: PgPool) {
+    let cfg = queue_config(CrossContainerOccurrences::Off);
+    let start = Utc::now() + Duration::days(20);
+    let page_uri = "https://events.example.com/e/1";
+    let page = format!(
+        r#"<html><head><title>Workshop</title><script type="application/ld+json">{{"@context":"https://schema.org","@type":"Event","name":"Workshop","startDate":"{}"}}</script></head><body><a href="/e/1.ics">Add to calendar</a></body></html>"#,
+        start.to_rfc3339()
+    );
+    let ics = format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:e1@events.example.com\r\nDTSTART:{}\r\nSUMMARY:Workshop\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        start.format("%Y%m%dT%H%M%SZ")
+    );
+    let uid_of = |pool: PgPool, id: String| async move {
+        let keys: Option<Value> =
+            sqlx::query_scalar("SELECT doc->'group_keys' FROM resource WHERE id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        keys.iter()
+            .flat_map(|k| k.as_array().into_iter().flatten())
+            .any(|k| k["basis"] == "ics_uid")
+    };
+    // Answered from the page's own origin, the file gives the UID.
+    let pages = BTreeMap::from([
+        ("events.example.com/e/1".to_owned(), page.clone()),
+        ("events.example.com/e/1.ics".to_owned(), ics.clone()),
+    ]);
+    let (r, _) = resolver(&pool, pages);
+    let id = read(&pool, &r, &cfg, page_uri).await;
+    assert!(uid_of(pool.clone(), id).await);
+    // Redirected to another origin, it gives none.
+    let other = "https://events.example.com/e/2";
+    let pages = BTreeMap::from([
+        (
+            "events.example.com/e/2".to_owned(),
+            page.replace("/e/1.ics", "/e/2.ics"),
+        ),
+        (
+            "events.example.com/e/2.ics".to_owned(),
+            "REDIRECT https://cdn.example.net/e/2.ics".to_owned(),
+        ),
+        ("cdn.example.net/e/2.ics".to_owned(), ics),
+    ]);
+    let (r, site) = resolver(&pool, pages);
+    let id = read(&pool, &r, &cfg, other).await;
+    assert!(site
+        .seen
+        .lock()
+        .unwrap()
+        .contains(&"https://cdn.example.net/e/2.ics".to_owned()));
+    assert!(!uid_of(pool.clone(), id).await);
+}
+
+/// On the web route (the platform's adapter off), a group calendar redirected to another origin
+/// is refused like on the platform route: no snapshot, so its stored dates are never cancelled.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_off_origin_calendar_on_the_web_route_keeps_its_dates(pool: PgPool) {
+    let cfg = queue_config(CrossContainerOccurrences::Off);
+    let (r, _) = resolver_with(&pool, site(), false);
+    let id = read(&pool, &r, &cfg, &feed()).await;
+    let scheduled = |pool: PgPool, id: String| async move {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM occurrence WHERE resource_id=$1 AND status='scheduled'",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    assert_eq!(scheduled(pool.clone(), id.clone()).await, 10);
+    let mut pages = site();
+    let calendar = pages.remove(&path_key(&feed())).unwrap();
+    pages.insert(
+        path_key(&feed()),
+        "REDIRECT https://calendar.example.com/meetup.ics".into(),
+    );
+    pages.insert("calendar.example.com/meetup.ics".into(), calendar);
+    for _ in 0..3 {
+        let (r, _) = resolver_with(&pool, pages.clone(), false);
+        read(&pool, &r, &cfg, &feed()).await;
+    }
+    assert_eq!(scheduled(pool.clone(), id.clone()).await, 10);
+    let error: Option<String> = sqlx::query_scalar("SELECT last_error FROM resource WHERE id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(error.as_deref(), Some("off_origin"));
 }

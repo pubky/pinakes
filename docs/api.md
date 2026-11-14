@@ -1253,10 +1253,10 @@ one thing, only on evidence that cannot be spoofed:
 - **One ICS UID within one feed**, between dated instances that start within five minutes of
   each other. The UID is hashed into the key, so no UID text names another feed. Across feeds only with `groups.cross_container_occurrences = "corroborated"`: both
   located within 500 m, starting within 300 s, with a name similarity of at least 0.5. An event
-  page takes the UID of its own calendar file (one event, on the page's own origin; a platform's
-  file must be answered from the page's own URL origin); in the corroborated mode it joins the
-  occurrence with that UID in the organiser calendar its platform names for it on the same origin
-  (a Meetup date's page: its group's `/events/ical/`, read only when answered from that origin)
+  page takes the UID of its own calendar file (one event, linked on the page's own origin and
+  answered from the page's own URL origin); in the corroborated mode it joins the occurrence
+  with that UID in the organiser calendar its platform names for it on the same origin (a Meetup
+  date's page: its group's `/events/ical/`, read only when Meetup itself answers it over https)
   when both start within 300 s, located or not and whatever their names. Any other calendar, and
   two feeds, still need the cross-feed checks.
 - **An exact key a source vouches for** ([Also on](#also-on)): two links a hub names as the same
