@@ -118,10 +118,12 @@ pub fn canonical(uri: &str, canonical: &str) -> Option<Alias> {
         basis: "canonical",
     })
 }
-/// Platforms that give one event page two spellings in one directory: a host and the path of an
-/// event page, `*` standing for one non-empty segment and the last one for the event (Meetup: a
-/// date's number, `/g/events/316908442/`, and its token, `/g/events/frxnbvyjcqbmb/`).
-const EVENT_SPELLINGS: &[(&[&str], &str)] = &[(&["meetup.com"], "/*/events/*")];
+/// Platforms that give one event page two spellings in one directory, its number and its token:
+/// the hosts, the path of an event page (`*` stands for one non-empty segment, the last one for
+/// the event) and the segments there that name no event (Meetup: a date's number,
+/// `/g/events/316908442/`, and its token, `/g/events/frxnbvyjcqbmb/`; `/g/events/ical/` is the
+/// group's calendar).
+const EVENT_SPELLINGS: &[(&[&str], &str, &[&str])] = &[(&["meetup.com"], "/*/events/*", &["ical"])];
 /// The page's own head canonical as an alias on a platform of [`EVENT_SPELLINGS`]: on the
 /// page's host and in its event directory (the same group's `/events/`), naming another event
 /// segment. The platform gives each event page these two spellings; a canonical to another
@@ -131,7 +133,7 @@ pub fn event_spelling(uri: &str, canonical: &str) -> Option<Alias> {
     let (_, root, _) = crate::model::identity(canonical).ok()?;
     let (page, named) = (Url::parse(&uri).ok()?, Url::parse(&root).ok()?);
     let host = page.host_str()?;
-    let (_, pattern) = EVENT_SPELLINGS.iter().find(|(hosts, _)| {
+    let (_, pattern, reserved) = EVENT_SPELLINGS.iter().find(|(hosts, _, _)| {
         hosts
             .iter()
             .any(|h| host == *h || host.ends_with(&format!(".{h}")))
@@ -145,22 +147,22 @@ pub fn event_spelling(uri: &str, canonical: &str) -> Option<Alias> {
             return None;
         }
         let (directory, segment) = path.rsplit_once('/')?;
-        segment
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric())
+        (segment.bytes().all(|b| b.is_ascii_alphanumeric()) && !reserved.contains(&segment))
             .then(|| (directory.to_owned(), segment.to_owned()))
     };
+    let number = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
     let (directory, own) = event(&page)?;
     let (other_directory, other) = event(&named)?;
+    // One number and one token: two dates' numbers (or tokens) are two dates.
     (named.host_str() == Some(host)
         && named.port() == page.port()
         && named.scheme() == page.scheme()
         && other_directory == directory
-        && other != own)
-        .then_some(Alias {
-            root,
-            basis: "canonical",
-        })
+        && number(&own) != number(&other))
+    .then_some(Alias {
+        root,
+        basis: "canonical",
+    })
 }
 /// The root an official API named for `uri` (`ResourceMeta::source_root`), when it is another
 /// URI. The API's own record is the evidence, as an identifier is; its basis is `source`, since
@@ -642,6 +644,23 @@ mod tests {
             (
                 numeric,
                 "https://www.meetup.com/bitcoin-meetup-switzerland/events/ical/x/",
+            ),
+            // Two numbers, two tokens, the group's calendar: never one date.
+            (
+                numeric,
+                "https://www.meetup.com/bitcoin-meetup-switzerland/events/316908445/",
+            ),
+            (
+                token,
+                "https://www.meetup.com/bitcoin-meetup-switzerland/events/frxnbvykccbjb/",
+            ),
+            (
+                numeric,
+                "https://www.meetup.com/bitcoin-meetup-switzerland/events/ical/",
+            ),
+            (
+                "https://www.meetup.com/bitcoin-meetup-switzerland/events/ical/",
+                numeric,
             ),
             (
                 "https://www.meetup.com/bitcoin-meetup-switzerland/",
