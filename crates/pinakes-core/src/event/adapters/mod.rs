@@ -199,7 +199,8 @@ fn platform_calendar_location(d: &Definition, url: &Url) -> bool {
 /// The answer for `uri` (a `webcal:` link read over https). An organiser calendar
 /// (`names_organiser_calendar`) is the platform's own answer or none: it is fetched without
 /// following redirects, and only a redirect to where the platform answers it itself
-/// (`platform_calendar_location`) is followed, up to three, so every spelling the platform
+/// (`platform_calendar_location`) is followed, up to three, HTTP or in-page (a meta refresh, a
+/// script or "Redirecting" stub), so every spelling the platform
 /// answers (`webcal:`, `http:`, the bare domain) is read. An answer anywhere else, whatever
 /// its status or body, is refused before anything reads it (`RetryLater` `off_origin`, its
 /// stored dates kept): grouping trusts that calendar's dates by its address (`groups`).
@@ -226,7 +227,8 @@ pub async fn fetch_calendar(
     let mut url = Url::parse(&mapped)?;
     for hop in 0..=3 {
         let answer = egress.fetch_with(url.as_str(), &options).await?;
-        if matches!(answer.status, 301 | 302 | 303 | 307 | 308) {
+        // A redirect, an HTTP one or one in the page (its target in `location`, `keep_redirect`).
+        if matches!(answer.status, 301 | 302 | 303 | 307 | 308) || answer.location.is_some() {
             let next = answer
                 .location
                 .as_deref()
