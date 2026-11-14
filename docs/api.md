@@ -994,9 +994,10 @@ root, and a read, lookup, change query or occurrence read of the alias answers w
 - **A Meetup date's number and token**: Meetup serves each date's page under its number
   (`/{group}/events/316908442/`) and its token (`/{group}/events/frxnbvyjcqbmb/`), and names the
   token in the page's head canonical. After a fetch, a meetup.com event page whose canonical
-  names another event in the same group's `/events/` directory, on the same host, without a
-  query, becomes an alias of that page; both spellings answer with one card. A canonical to
-  another group, another host or any other path never aliases.
+  names the other spelling (a number for a token, a token for a number) in the same group's
+  `/events/` directory, on the same host, without a query, becomes an alias of that page; both
+  spellings answer with one card. A canonical to another number or token, another group,
+  another host, the group's calendar or any other path never aliases.
 
 Refresh follows the time to an event's start: more than 30 days or no start, 7 days; 7–30 days,
 2 days; 24 hours to 7 days, 6 hours; under 24 hours or running, 1 hour
@@ -1264,10 +1265,10 @@ one thing, only on evidence that cannot be spoofed:
   each other. The UID is hashed into the key, so no UID text names another feed. Across feeds only with `groups.cross_container_occurrences = "corroborated"`: both
   located within 500 m, starting within 300 s, with a name similarity of at least 0.5. An event
   page takes the UID of its own calendar file (one event, on the page's own origin); in the
-  corroborated mode it joins the occurrence with that UID in a feed of the same publisher (the
-  page's registrable domain, or its tenant on a multi-tenant host) when both start
-  within 300 s, located or not and whatever their names: a Meetup date's page and the same date
-  in its group's calendar. Two feeds of one publisher still need the cross-feed checks.
+  corroborated mode it joins the occurrence with that UID in the organiser calendar its platform
+  names for it on the same origin (a Meetup date's page: its group's `/events/ical/`) when both
+  start within 300 s, located or not and whatever their names. Any other calendar, and two feeds,
+  still need the cross-feed checks.
 - **An exact key a source vouches for** ([Also on](#also-on)): two links a hub names as the same
   recording, release or Wikidata item, by its own identifier (`mb:recording:{mbid}`,
   `wikidata:Q…`), or a known music service's own record of its own object (the ISRC on a TIDAL

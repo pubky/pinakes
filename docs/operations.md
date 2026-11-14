@@ -687,7 +687,7 @@ Luma, Meetup, Eventbrite, Partiful, Posh, RingCentral, Airmeet, Mobilizon, Ganci
 Dice, Xceed, Ents24 and Ticketino supplement JSON-LD with bounded state parsing; JavaScript is
 never executed. A Meetup date's page (by its number or its token) also reads its own calendar
 file, `{page}/ical/{id}.ics`, for the date's UID alone; that read is optional, and a failed one
-leaves the page as it is. After an upgrade, Meetup pages take their group calendar, their UID and
+keeps the UID the page was stored with. After an upgrade, Meetup pages take their group calendar, their UID and
 their token alias at their next read; `pinakesd reextract event_platform` reads every event
 platform's links at once. Self-hosted Pretix, Eventyay, Gathio, Gancio and Mobilizon are detected from page
 signatures, a heuristic that can cost one bounded discovery request. Authenticated APIs never
@@ -938,8 +938,8 @@ at once. Writer lock contention retries after one to three seconds; curation wai
 seconds and answers 503 with Retry-After. `groups.cross_container_occurrences = "corroborated"`
 also joins one UID across feeds when the instances are within 500 m, 300 s and a name similarity
 of 0.5; a determined publisher can copy that, so it is off by default. In that mode an event page
-also joins the occurrence with its own calendar file's UID in a feed of the same publisher, within
-300 s, without the place and name checks (a Meetup date and its group's calendar).
+also joins the occurrence with its own calendar file's UID in the organiser calendar its platform
+names for it (a Meetup date's group calendar), within 300 s, without the place and name checks.
 
 `groups.same_recording_hint` (default `"on"`; `"off"`) puts `maybe_same` on `MusicRecording`
 cards: other recordings that are possibly the same one ([the

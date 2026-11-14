@@ -139,7 +139,8 @@ impl Dns for AnyDns {
         Ok(vec![SocketAddr::new("93.184.216.34".parse()?, port)])
     }
 }
-/// Answers each `host/path` from its map (404 otherwise) and records what was asked.
+/// Answers each `host/path` from its map (404 otherwise; `STATUS {code}` answers that status)
+/// and records what was asked.
 struct Site {
     pages: BTreeMap<String, String>,
     seen: Mutex<Vec<String>>,
@@ -159,6 +160,12 @@ impl Transport for Site {
         let page = self
             .pages
             .get(&format!("{}{}", url.host_str().unwrap_or(""), url.path()));
+        let status = match page.and_then(|p| p.strip_prefix("STATUS ")) {
+            Some(code) => code.parse()?,
+            None if page.is_some() => 200,
+            None => 404,
+        };
+        let page = page.filter(|_| status == 200);
         let content_type = match page {
             Some(p) if p.starts_with("BEGIN:VCALENDAR") => "text/calendar",
             _ => "text/html; charset=utf-8",
@@ -169,7 +176,7 @@ impl Transport for Site {
             url: url.clone(),
             validators: Default::default(),
             content_type: content_type.into(),
-            status: if page.is_some() { 200 } else { 404 },
+            status,
             retry_after_secs: 60,
             location: None,
             body: page.cloned().unwrap_or_default().into_bytes(),
@@ -389,6 +396,55 @@ async fn a_date_page_joins_its_own_date_in_its_groups_calendar(pool: PgPool) {
     assert_eq!(joined[0]["occurrence"]["uid"], UID);
 }
 
+/// The page's own calendar file, read for its UID alone, is optional: refused, failing or gone,
+/// the page reads fine, keeps the UID it was stored with and stays in its group.
+#[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
+async fn a_failed_uid_read_keeps_the_page_and_its_group(pool: PgPool) {
+    let (r, _) = resolver(&pool, site());
+    let cfg = queue_config(CrossContainerOccurrences::Corroborated);
+    read(&pool, &r, &cfg, &numeric()).await;
+    let token_id = read(&pool, &r, &cfg, &token()).await;
+    read(&pool, &r, &cfg, &feed()).await;
+    common::drain_groups(&pool, &cfg.groups).await;
+    let joined = all_groups(&pool).await;
+    assert_eq!(joined.len(), 1, "{joined:?}");
+    let file = url("frxnbvyjcqbmb/ical/frxnbvyjcqbmb.ics");
+    for answer in [
+        "STATUS 503",
+        "STATUS 429",
+        "STATUS 403",
+        "STATUS 451",
+        "STATUS 404",
+    ] {
+        let mut pages = site();
+        pages.insert(file.replacen("https://", "", 1), answer.into());
+        let (r, site) = resolver(&pool, pages);
+        read(&pool, &r, &cfg, &token()).await;
+        assert!(site.seen.lock().unwrap().contains(&file), "{answer}");
+        let (status, error): (String, Option<String>) =
+            sqlx::query_as("SELECT status,last_error FROM resource WHERE id=$1")
+                .bind(&token_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!((status.as_str(), error), ("ok", None), "{answer}");
+        let keys: Value = sqlx::query_scalar("SELECT doc->'group_keys' FROM resource WHERE id=$1")
+            .bind(&token_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(
+            keys.as_array()
+                .unwrap()
+                .iter()
+                .any(|k| k["key"] == format!("ics_uid:{UID}")),
+            "{answer}: {keys}"
+        );
+        common::drain_groups(&pool, &cfg.groups).await;
+        assert_eq!(all_groups(&pool).await, joined, "{answer}");
+    }
+}
+
 /// Without the corroborated mode, the page and the feed's occurrence stay apart.
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_date_page_stays_apart_from_its_calendar_when_the_mode_is_off(pool: PgPool) {
@@ -507,8 +563,7 @@ async fn another_publishers_page_with_the_uid_does_not_join(pool: PgPool) {
 #[sqlx::test(migrations = "../../migrations", fixtures("fixtures/require_h3.sql"))]
 async fn a_dates_number_and_token_are_one_resource_and_other_groups_are_not(pool: PgPool) {
     let mut pages = site();
-    let page =
-        pages[&format!("www.meetup.com/bitcoin-meetup-switzerland/events/316908442/")].clone();
+    let page = pages["www.meetup.com/bitcoin-meetup-switzerland/events/316908442/"].clone();
     let other_group = "https://www.meetup.com/another-group/events/316908442/";
     pages.insert(
         "www.meetup.com/another-group/events/316908442/".into(),
