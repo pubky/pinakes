@@ -254,9 +254,9 @@ impl PlatformResolver {
                 // On a platform with an organiser feed, the file is optional on every read: a
                 // refusal, an outage or a 451 there leaves the page's own facts as they are.
                 let optional = d.container_feed.is_some();
-                // Whether the file answered with a calendar: then its UID, or none, is the
-                // page's now.
-                let mut answered = false;
+                // Whether the file was asked for, and whether it answered with a calendar: then
+                // its UID, or none, is the page's now.
+                let (mut asked, mut answered) = (false, false);
                 if !d.requires_key && (missing || uid_only) {
                     // Calendar-link discovery reads the page: in a parse slot.
                     let found = {
@@ -277,6 +277,7 @@ impl PlatformResolver {
                                 || (d.mode == Mode::Container && feed_path(&target))
                                 || (d.id == "starticket" && target.ends_with(".xml"));
                             opts.feed_cap = opts.feed_hint.then_some(local.feed_body_bytes);
+                            asked = true;
                             let read = discover_enrichment(
                                 &self.web.egress,
                                 &target,
@@ -350,8 +351,19 @@ impl PlatformResolver {
                                             }
                                         }
                                     }
-                                    let extra = match enrichment_blocking(uri, d, &f, &local).await
-                                    {
+                                    // On a platform with an organiser feed, a calendar answer is
+                                    // told apart from a page in its place (a sign-in wall).
+                                    let calendar = if optional {
+                                        calendar_blocking(uri, d, &f, &local).await.ok().flatten()
+                                    } else {
+                                        None
+                                    };
+                                    answered |= calendar.is_some();
+                                    let extra = match calendar {
+                                        Some(calendar) => Ok(Some(calendar)),
+                                        None => enrichment_blocking(uri, d, &f, &local).await,
+                                    };
+                                    let extra = match extra {
                                         Ok(extra) => extra,
                                         Err(_) if optional => None,
                                         Err(error) => return Err(error),
@@ -364,10 +376,12 @@ impl PlatformResolver {
                         }
                     }
                 }
-                // A UID-only read the file did not answer (refused, failed, gone) keeps the UID
-                // the page was stored with, so a passing failure never moves the page out of its
-                // group. A file that answers without one (two events, another origin) ends it.
-                if uid_only
+                // An optional read the file did not answer with a calendar (refused, failed,
+                // gone, a page in its place) keeps the UID the page was stored with, on either
+                // path, so a passing failure never moves the page out of its group. A calendar
+                // that answers without one (two events, another origin) ends it.
+                if optional
+                    && asked
                     && !answered
                     && !probe
                     && !doc.group_keys.iter().any(|k| k.basis == "ics_uid")

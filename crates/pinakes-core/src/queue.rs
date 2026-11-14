@@ -328,6 +328,31 @@ async fn failed_as(
         .bind(&job.id).bind(job.generation).bind(attempt>=cfg.max_failures).bind(backoff(cfg,attempt) as f64).bind(error).bind(status.as_str()).execute(pool).await?;
     Ok(())
 }
+/// An organiser calendar answered from another origin (`event::adapters::off_origin_calendar`):
+/// its stored dates and status stay, and it is read again with the queue's backoff, one attempt
+/// more each time. Never dead-lettered: the platform may answer it itself again, and a read that
+/// it does resets the attempts.
+async fn off_origin(pool: &PgPool, job: &Job, cfg: &QueueConfig) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    let attempts: Option<i32> = sqlx::query_scalar(
+        "SELECT attempts FROM resource WHERE id=$1 AND generation=$2 FOR UPDATE",
+    )
+    .bind(&job.id)
+    .bind(job.generation)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(attempts) = attempts {
+        let attempts = attempts.saturating_add(1);
+        sqlx::query("UPDATE resource SET attempts=$2,timeout_streak=0,dead_letter=false,lease_until=NULL,priority_at=NULL,last_error='off_origin',next_attempt_at=now()+$3*interval '1 second' WHERE id=$1")
+            .bind(&job.id)
+            .bind(attempts)
+            .bind(backoff(cfg, attempts as u32) as f64)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
 async fn timed_out(pool: &PgPool, job: &Job, cfg: &QueueConfig, seconds: u64) -> Result<()> {
     let mut tx = pool.begin().await?;
     let row: Option<(i32, i32)> = sqlx::query_as("SELECT CASE WHEN last_error='timeout' THEN timeout_streak ELSE 0 END,attempts FROM resource WHERE id=$1 AND generation=$2 FOR UPDATE")
@@ -743,6 +768,8 @@ async fn finish_job(
                 timed_out(pool, job, cfg, retry.seconds).await?;
             } else if matches!(retry.class, "upstream_denied" | "graphql") {
                 denied(pool, job, cfg, retry).await?;
+            } else if retry.class == "off_origin" {
+                off_origin(pool, job, cfg).await?;
             } else {
                 sqlx::query("UPDATE resource SET timeout_streak=0,lease_until=NULL,priority_at=NULL,next_attempt_at=now()+$3*interval '1 second',last_error=$4 WHERE id=$1 AND generation=$2")
                     .bind(&job.id).bind(job.generation).bind(retry.seconds.clamp(1,3600) as f64).bind(retry.class).execute(pool).await?;

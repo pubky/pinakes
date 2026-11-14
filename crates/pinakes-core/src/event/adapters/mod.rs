@@ -151,13 +151,16 @@ impl ContainerFeed {
             && !literal.contains(['?', '#', '}', '*'])
     }
 }
-/// Whether `uri` is an organiser calendar a platform derives for its event pages
-/// (`Definition::container_feed`): its path has the feed's form, each `{n}` one segment.
-pub fn names_organiser_calendar(uri: &str) -> bool {
-    let Some(spec) = detect(uri).and_then(|d| d.container_feed.as_ref()) else {
-        return false;
-    };
-    let Ok(u) = Url::parse(uri) else {
+/// The platform whose organiser calendar `uri` is (`Definition::container_feed`): its path has
+/// the feed's form, each `{n}` one segment, without a query.
+fn organiser_calendar_of(uri: &str) -> Option<&'static Definition> {
+    let d = detect(uri)?;
+    let u = Url::parse(uri).ok()?;
+    (u.query().is_none() && feed_form(d, u.path())).then_some(d)
+}
+/// Whether `path` has the form of `d`'s organiser calendar path.
+fn feed_form(d: &Definition, path: &str) -> bool {
+    let Some(spec) = d.container_feed.as_ref() else {
         return false;
     };
     let mut pattern = String::new();
@@ -168,17 +171,41 @@ pub fn names_organiser_calendar(uri: &str) -> bool {
         rest = after.split_once('}').map_or("", |(_, tail)| tail);
     }
     pattern.push_str(rest);
-    u.query().is_none()
-        && canary_link_matches(
-            pattern.trim_end_matches('/'),
-            u.path().trim_end_matches('/'),
-        )
+    canary_link_matches(pattern.trim_end_matches('/'), path.trim_end_matches('/'))
+}
+/// Whether `uri` is an organiser calendar a platform derives for its event pages
+/// (`Definition::container_feed`).
+pub fn names_organiser_calendar(uri: &str) -> bool {
+    organiser_calendar_of(uri).is_some()
 }
 /// Whether an answer for `uri` that came from `answered` (where redirects ended) is no answer of
-/// an organiser calendar (`names_organiser_calendar`): it came from another URL origin. Grouping
-/// trusts such a calendar's dates by its address (`groups`), so it must hold the platform's own.
+/// an organiser calendar (`names_organiser_calendar`). The platform's own answer comes over https
+/// from a host the platform declares (`Definition::domains`, the host or a subdomain, as
+/// `detect` reads them), at the organiser calendar's path form, without a query: every spelling
+/// of the calendar (`webcal:`, `http:`, the bare domain) that the platform answers so is read.
+/// Anything else is off its origin. Grouping trusts such a calendar's dates by its address
+/// (`groups`), so it must hold the platform's own.
 pub fn off_origin_calendar(uri: &str, answered: &str) -> bool {
-    names_organiser_calendar(uri) && !crate::group_keys::same_url_origin(uri, answered)
+    let Some(d) = organiser_calendar_of(uri) else {
+        return false;
+    };
+    let Ok(answer) = Url::parse(answered) else {
+        return true;
+    };
+    let host = answer.host_str().unwrap_or("").trim_end_matches('.');
+    let platform_host = d.domains.iter().any(|h| {
+        host == h
+            || host
+                .strip_suffix(h.as_str())
+                .is_some_and(|p| p.ends_with('.'))
+    });
+    !(answer.scheme() == "https"
+        && answer.port().is_none()
+        && answer.username().is_empty()
+        && answer.password().is_none()
+        && platform_host
+        && answer.query().is_none()
+        && feed_form(d, answer.path()))
 }
 /// The organiser feed of the event page `uri` on platform `d` (`Definition::container_feed`):
 /// on the page's own scheme, host and port, without its query or fragment. `None` when the

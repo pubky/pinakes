@@ -108,9 +108,17 @@ impl EventService {
         }
         let bytes = &fetched.body;
         let ics = ics_body(bytes);
-        // An organiser calendar answered from another origin is not that calendar.
-        if !feed_like(fetched) || super::adapters::off_origin_calendar(uri, fetched.url.as_str()) {
+        if !feed_like(fetched) {
             return Ok(None);
+        }
+        // An organiser calendar answered from another origin is not that calendar: no snapshot,
+        // so its stored dates stay (`event/adapters/service.rs` answers the same).
+        if super::adapters::off_origin_calendar(uri, fetched.url.as_str()) {
+            return Err(crate::resolver::RetryLater {
+                class: "off_origin",
+                seconds: 3600,
+            }
+            .into());
         }
         let uri = uri.to_owned();
         let config = self.config.clone();
@@ -361,6 +369,8 @@ impl EventService {
             .await
             {
                 if response.status == 200 {
+                    let answered_here =
+                        crate::group_keys::same_url_origin(uri, response.url.as_str());
                     let config = self.config.clone();
                     if let Ok(Ok(mut calendar)) = crate::resolver::html::blocking(move || {
                         calendar::parse(&link, &response.body, &config, chrono::Utc::now())
@@ -378,13 +388,15 @@ impl EventService {
                                 event.source = "ics".into();
                             }
                             super::page::merge_missing(&mut event, fallback)?;
-                            // The UID joins (in the corroborated mode) only when the file is on
-                            // the page's own origin, not where a redirect took the page.
+                            // The UID joins (in the corroborated mode) only when the link is on
+                            // the page's own origin, not where a redirect took the page, and the
+                            // file was answered from the page's own URL origin (scheme, host and
+                            // port, after redirects).
                             if let Some(uid) = c
                                 .occurrences
                                 .first()
                                 .map(|o| o.uid.as_str())
-                                .filter(|_| own_origin)
+                                .filter(|_| own_origin && answered_here)
                             {
                                 crate::group_keys::add(&mut event, "ics_uid", uid);
                             }
