@@ -660,7 +660,7 @@ async fn a_refused_connection_retries_and_never_dead_letters(pool: PgPool) {
     run_due(&pool, &id, &resolver, &cfg).await;
     let row = queue_row(&pool, &id).await;
     assert_eq!(
-        (row.0, row.1, row.2, row.4.as_str(), row.5),
+        (row.0, row.1, row.2, row.4.as_str(), row.5.as_deref()),
         (0, 0, false, "ok", None),
         "{row:?}"
     );
