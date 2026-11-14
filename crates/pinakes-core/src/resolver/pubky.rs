@@ -261,6 +261,8 @@ mod tests {
         tampering: Vec<&'static str>,
         /// Relay hosts that answer 404.
         empty: Mutex<Vec<&'static str>>,
+        /// Relay hosts that refuse the connection (a real refusal, from a closed local port).
+        refusing: Mutex<Vec<&'static str>>,
         /// What one relay host serves for one key instead.
         serve: Mutex<HashMap<(&'static str, String), Vec<u8>>>,
         relay_requests: Mutex<Vec<String>>,
@@ -282,6 +284,14 @@ mod tests {
                 return self.homeserver.get_with(url, addresses, options).await;
             }
             self.relay_requests.lock().unwrap().push(url.to_string());
+            if self.refusing.lock().unwrap().contains(&host) {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                let closed = listener.local_addr().unwrap();
+                drop(listener);
+                return crate::resolver::egress::PinnedTransport
+                    .get_with(url, &[closed], options)
+                    .await;
+            }
             let key = url.path().trim_start_matches('/');
             let served = self
                 .serve
@@ -373,6 +383,7 @@ mod tests {
                 .collect(),
             tampering: vec![],
             empty: Mutex::default(),
+            refusing: Mutex::default(),
             serve: Mutex::default(),
             relay_requests: Mutex::default(),
             homeserver,
@@ -848,6 +859,46 @@ mod tests {
             )]
         );
         assert_eq!(homeserver.requests.lock().unwrap().len(), 3);
+    }
+
+    /// Relays that refuse the connection never answered about the key: the failure never
+    /// reached an answer, so it never dead-letters. One relay that answers badly beside them, or
+    /// one that has no record, is an answer and still counts.
+    #[tokio::test]
+    async fn refusing_relays_are_unreached() {
+        let owner = Keypair::random();
+        let relays = ["https://relay.example", "https://relay2.example"];
+        let net = network(&[direct(&owner)], ok());
+        net.refusing
+            .lock()
+            .unwrap()
+            .extend(["relay.example", "relay2.example"]);
+        let error = resolver_on(net.clone(), &["8.8.8.8"], "8.8.4.4", &relays)
+            .resolve(&object(&owner))
+            .await
+            .unwrap_err();
+        assert_eq!(crate::resolver::error_class(&error), "connect", "{error:#}");
+        assert!(crate::resolver::unreached(&error), "{error:#}");
+        assert_eq!(net.relay_requests.lock().unwrap().len(), 2);
+        for answering in ["tampering", "empty"] {
+            let mut net = network(&[direct(&owner)], ok());
+            if answering == "tampering" {
+                Arc::get_mut(&mut net).unwrap().tampering = vec!["relay2.example"];
+            } else {
+                net.empty.lock().unwrap().push("relay2.example");
+            }
+            net.refusing.lock().unwrap().push("relay.example");
+            let error = resolver_on(net, &["8.8.8.8"], "8.8.4.4", &relays)
+                .resolve(&object(&owner))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                crate::resolver::error_class(&error),
+                "connect",
+                "{answering} {error:#}"
+            );
+            assert!(!crate::resolver::unreached(&error), "{answering} {error:#}");
+        }
     }
 
     #[tokio::test]

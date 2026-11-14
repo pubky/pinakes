@@ -341,7 +341,9 @@ memory is an accepted limit: it holds the newest timestamp of at most 10,000 key
 cache, and forgets the oldest timestamps of uncached keys first; a forgotten key, or any key
 after a restart, takes the newest packet the relays serve again. A relay that times out, is
 refused by the policy or serves a packet that does not verify is a `connect` failure, retried
-with the usual backoff and, like any failure, dead-lettered after `limits.max_failures`.
+with the usual backoff and, like any failure, dead-lettered after `limits.max_failures`. When no
+relay answered, because each one that failed refused or reset the connection (or Egress waited
+for its host budget), the failure never reached an answer and never dead-letters.
 Verified packets are kept for their smallest record TTL, between five minutes
 and a day (10,000 keys at most). It then takes the first endpoint with a public HTTPS (ICANN)
 domain and GETs the object path there with the `pubky-host` header, as Pubky clients address

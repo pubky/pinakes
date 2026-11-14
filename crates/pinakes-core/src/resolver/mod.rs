@@ -371,7 +371,7 @@ impl std::error::Error for Unreached {}
 /// connecting, sending the request or reading the answer. Not a timeout (it has its own grace,
 /// `limits.timeout_grace`), and not a TLS failure (a certificate the host serves is an answer
 /// about it).
-fn transport(request: &reqwest::Error) -> bool {
+pub(crate) fn transport(request: &reqwest::Error) -> bool {
     if request.is_timeout() {
         return false;
     }

@@ -565,11 +565,18 @@ pub async fn read_response_with(
         // An error page keeps a bounded prefix of its body, so the interstitial classifier sees a
         // challenge (and an API its error); the status is preserved.
         const ERROR_BODY_CAP: usize = 64 * 1024;
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(reqwest::Error::without_url)?
-        {
+        loop {
+            let chunk = match response.chunk().await {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => break,
+                // A connection reset inside the error page: its status is the answer, kept with
+                // the prefix read so far.
+                Err(error) if super::transport(&error) => {
+                    truncated = true;
+                    break;
+                }
+                Err(error) => return Err(error.without_url().into()),
+            };
             let remaining = ERROR_BODY_CAP.saturating_sub(body.len());
             body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
             if chunk.len() >= remaining {
@@ -1924,6 +1931,32 @@ mod tests {
             assert!(super::super::unreached(&error), "{partial} {error:#}");
             server.await.unwrap();
         }
+        // A reset inside an error page's body: the status was answered, and is kept.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = socket.read(&mut request).await;
+            socket
+                .write_all(b"HTTP/1.1 403 Forbidden\r\ncontent-type: text/html\r\ncontent-length: 100000\r\n\r\n<html><head>")
+                .await
+                .unwrap();
+            socket.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            socket.set_zero_linger().unwrap();
+            drop(socket);
+        });
+        let url: Url = format!("http://127.0.0.1:{}/page", addr.port())
+            .parse()
+            .unwrap();
+        let fetched = PinnedTransport
+            .get_with(&url, &[addr], &FetchOptions::default())
+            .await
+            .unwrap();
+        assert_eq!((fetched.status, fetched.truncated), (403, true));
+        assert_eq!(fetched.body, b"<html><head>");
+        server.await.unwrap();
     }
     /// A TLS failure is an answer about the host (the certificate it serves, a protocol it does
     /// not speak): `connect`, but not unreached, so it still counts toward the dead letter.

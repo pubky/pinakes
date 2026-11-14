@@ -57,6 +57,10 @@ enum Answer {
     Missing,
     Packet(SignedPacket),
     Failed(String),
+    /// The relay could not be reached (`super::unreached`): no answer about the key.
+    Unreached(String),
+    /// Egress's own wait for the relay host's budget, in seconds: no request was sent.
+    Wait(u64),
 }
 
 /// One HTTPS endpoint of a record: a domain, `.` (the key's own addresses) or another key.
@@ -79,8 +83,10 @@ impl Relays {
 
     /// The owner's verified packet: from the cache while it lives, else the newest one the
     /// relays (asked together) serve. `None` when the relays have no record. Relay-side failures
-    /// (timeouts, refusals, payloads that do not verify) are `connect`: retried with backoff,
-    /// then dead-lettered like any failure.
+    /// (timeouts, policy refusals, payloads that do not verify) are `connect`: retried with
+    /// backoff, then dead-lettered like any failure. When no relay answered, because each one
+    /// that failed could not be reached (refused, reset) or waited for its host budget, the
+    /// failure is `super::Unreached` (or that wait alone), which never dead-letters.
     pub async fn packet(&self, key: &PublicKey) -> Result<Option<SignedPacket>> {
         let z32 = key.to_z32();
         if let Some(cached) = self.state.lock().unwrap().cache.get(&z32) {
@@ -110,17 +116,25 @@ impl Relays {
                         }
                     }
                     Ok(fetched) => Answer::Failed(format!("{relay} answered {}", fetched.status)),
-                    Err(error) => Answer::Failed(format!("{relay}: {error:#}")),
+                    Err(error) if super::unreached(&error) => {
+                        Answer::Unreached(format!("{relay}: {error:#}"))
+                    }
+                    Err(error) => match error.downcast_ref::<super::RetryLater>() {
+                        Some(wait) if wait.class == "rate_limited" => Answer::Wait(wait.seconds),
+                        _ => Answer::Failed(format!("{relay}: {error:#}")),
+                    },
                 }
             }
         }))
         .await;
-        let mut failures = vec![];
+        let (mut failures, mut unreached, mut wait) = (vec![], vec![], None::<u64>);
         let (mut missing, mut best): (bool, Option<SignedPacket>) = (false, None);
         for answer in answers {
             match answer {
                 Answer::Missing => missing = true,
                 Answer::Failed(error) => failures.push(error),
+                Answer::Unreached(error) => unreached.push(error),
+                Answer::Wait(seconds) => wait = Some(wait.unwrap_or(0).max(seconds)),
                 Answer::Packet(packet) => {
                     if best
                         .as_ref()
@@ -137,13 +151,29 @@ impl Relays {
                 connect("the PKARR relays serve only a packet older than one seen before".into())
             });
         }
-        if missing && failures.is_empty() {
+        if missing && failures.is_empty() && unreached.is_empty() && wait.is_none() {
             self.store(z32, None, MIN_TTL);
             return Ok(None);
         }
-        if failures.is_empty() {
+        if failures.is_empty() && unreached.is_empty() {
+            if let Some(seconds) = wait {
+                // Egress waited for a relay host's budget: ask again then.
+                return Err(super::RetryLater {
+                    class: "rate_limited",
+                    seconds,
+                }
+                .into());
+            }
             return Err(connect("no PKARR relay configured".into()));
         }
+        if failures.is_empty() && !missing {
+            // No relay answered about the key: each one could not be reached, or Egress waited.
+            return Err(anyhow::Error::new(super::Unreached).context(format!(
+                "PKARR relays could not be reached: {}",
+                unreached.join("; ")
+            )));
+        }
+        failures.extend(unreached);
         Err(connect(format!(
             "PKARR relays failed: {}",
             failures.join("; ")
