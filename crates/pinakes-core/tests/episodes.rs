@@ -1336,22 +1336,38 @@ async fn an_episode_page_joins_only_its_own_feeds_item(pool: PgPool) {
     }
     let item = format!("{own}?guid=own-1");
     let item_id = store::ensure_resource(&pool, &item).await.unwrap();
-    let route: String = sqlx::query_scalar("SELECT resolver FROM resource WHERE id=$1")
-        .bind(&item_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    let route: &'static str = Box::leak(route.into_boxed_str());
     let run = || async {
         sqlx::query("UPDATE resource SET next_attempt_at=CASE WHEN id=$1 THEN now() ELSE now()+interval '1 day' END,final=false,dead_letter=false,lease_until=NULL")
             .bind(&item_id)
             .execute(&pool)
             .await
             .unwrap();
-        let job = queue::claim(&pool, route, &QueueConfig::default())
+        // Its route as it is now: a read may move it.
+        let route: String = sqlx::query_scalar("SELECT resolver FROM resource WHERE id=$1")
+            .bind(&item_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let route: &'static str = Box::leak(route.into_boxed_str());
+        let Some(job) = queue::claim(&pool, route, &QueueConfig::default())
             .await
             .unwrap()
-            .expect("due");
+        else {
+            let row: String =
+                sqlx::query_scalar("SELECT (to_jsonb(r)-'doc')::text FROM resource r WHERE id=$1")
+                    .bind(&item_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            let derived: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM resource_derivation WHERE child_id=$1")
+                    .bind(&item_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            panic!("not due on {route}: {row} derivations {derived}");
+        };
+        assert_eq!(job.id, item_id);
         queue::run_job(
             &pool,
             &OwnFeed(route, body.clone()),
