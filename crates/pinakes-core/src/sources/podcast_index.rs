@@ -117,6 +117,9 @@ pub fn parse_episode(status: u16, raw: &[u8], feed: u64, episode: u64) -> Result
     card.detail("duration", int(&e["duration"]).filter(|d| *d > 0));
     card.detail("website", text(&e["link"]));
     card.detail("show", show_page(feed));
+    // Its show's card: the show's page, as `POST /v1/resolve` reads it.
+    card.related
+        .push(crate::model::Related::new("show", Some(show_page(feed))));
     Ok(Some(card))
 }
 
@@ -377,11 +380,14 @@ mod tests {
             [api, "https://podcast.darknetdiaries.com/"]
         );
         let episodes = doc.episodes.expect("the feed's episodes");
-        assert_eq!(episodes.len(), crate::episodes::KEPT);
+        // Every item of the fixture's head (25, fewer than are kept), each by its feed item.
+        assert_eq!(episodes.len(), 25);
         let first = &episodes[0];
         assert!(first.name.is_some(), "{first:?}");
         assert!(
-            first.uri.starts_with("https://darknetdiaries.com/episode/"),
+            first
+                .uri
+                .starts_with("https://podcast.darknetdiaries.com/?guid="),
             "{first:?}"
         );
         assert!(first.published.is_some());

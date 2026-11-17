@@ -497,6 +497,12 @@ pub struct ResourceMeta {
     /// URI becomes an alias of it after the fetch (`alias::source`). Never stored.
     #[serde(skip)]
     pub source_root: Option<String>,
+    /// A podcast episode's page as the feed item this card was read from names it (its link,
+    /// without tracking parameters): the page becomes an alias of this card after the fetch when
+    /// the feed's own publisher publishes it (`episodes::join_page`). Never stored.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub episode_page: Option<String>,
     /// A podcast show's latest episodes, from its feed (`episodes`): the save writes them to
     /// `podcast_episode`, never into the document. `None` leaves the stored list as it is.
     #[serde(skip)]

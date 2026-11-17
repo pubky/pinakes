@@ -96,6 +96,12 @@ pub fn card(doc: &ResourceMeta, page: &Page, data: Embedded) -> Option<ResourceM
         Page::Episode(_) => {
             doc.set_type("PodcastEpisode");
             doc.attributes.insert("podcast_guid".into(), data.item?);
+            // Its show's card: the feed, as `POST /v1/resolve` reads it; never a feed whose
+            // address carries a credential.
+            if !crate::capability::is_capability(&feed) {
+                doc.related
+                    .push(crate::model::Related::new("show", Some(feed.clone())));
+            }
         }
     }
     doc.attributes.insert("podcast_feed".into(), feed);

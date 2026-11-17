@@ -1120,7 +1120,29 @@ fn podcast_body(
         d.attributes
             .insert("podcast_guid".into(), identity.guid.clone());
         d.stream = item_stream(item);
+        // Its show: the feed, which `POST /v1/resolve` reads as the show's card, by its title.
+        // Never a feed whose address carries a credential.
+        if !crate::capability::is_capability_url(&f.url) {
+            let mut show = crate::model::Related::new(
+                "show",
+                Some(crate::episodes::show_feed(&f.url).to_string()),
+            );
+            show.name = field(channel, "title")
+                .map(|t| t.trim().to_owned())
+                .filter(|t| !t.is_empty())
+                .map(|mut t| {
+                    crate::model::truncate(&mut t, 128);
+                    t
+                });
+            d.related.push(show);
+        }
         if let Some(link) = identity.page {
+            // Read from the address the URI names (no redirect to another feed), which carries no
+            // credential: the page the item links joins this card when the feed's publisher
+            // publishes it.
+            if direct && !crate::capability::is_capability_url(&f.url) {
+                d.episode_page = Some(link.clone());
+            }
             d.aliases.push(link);
         }
         d.image = item

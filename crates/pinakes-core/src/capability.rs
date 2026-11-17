@@ -233,6 +233,7 @@ pub fn strip_document(doc: &mut crate::model::ResourceMeta, own: &str) -> anyhow
             withheld: doc.withheld,
             refresh_by: doc.refresh_by,
             source_root: doc.source_root.take(),
+            episode_page: doc.episode_page.take(),
             episodes: doc.episodes.take(),
             ..stored
         };

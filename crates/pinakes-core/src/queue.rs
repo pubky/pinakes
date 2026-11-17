@@ -778,6 +778,11 @@ async fn finish_job(
                 }
                 tx.commit().await?;
             }
+            // A podcast episode read from its feed item: the page the item links, on the feed's
+            // own site, becomes an alias of this card (`episodes::join_page`).
+            if let Some(page) = doc.episode_page.as_deref() {
+                crate::episodes::join_page(pool, &job.id, job.generation, &job.uri, page).await?;
+            }
         }
         Ok(())
     }

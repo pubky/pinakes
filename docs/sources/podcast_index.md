@@ -42,6 +42,8 @@ else its show's). An episode's [`stream`](../api.md#stream) is its enclosure (`e
 | `show` | An episode's show page on Podcast Index |
 | `page_url` | The Podcast Index page |
 
+An episode's card names its show in `related` (`rel: "show"`, the show's Podcast Index page).
+
 A show's latest episodes, from its feed, are listed by `GET /v1/resources/{id}/episodes`
 ([Episodes](../api.md#episodes)); the show's card carries the latest 5 that have public audio
 or video (a `stream`) in `episodes`. The joins (Apple Podcasts, the feed, Spotify) come from the

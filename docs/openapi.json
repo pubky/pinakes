@@ -820,7 +820,7 @@
             ]
           },
           "uri": {
-            "description": "The episode's page (the item's link), else its feed item (`{feed}?guid={guid}`), which\nresolves to its `PodcastEpisode` card.",
+            "description": "The episode's feed item (`{feed}?guid={guid}`), which `POST /v1/resolve` reads as its\n`PodcastEpisode` card from the feed ([`ItemIdentity::uri`]); from a feed whose address\ncarries a credential, the item's page.",
             "type": "string"
           }
         },
@@ -838,6 +838,14 @@
               "$ref": "#/components/schemas/Episode"
             },
             "type": "array"
+          },
+          "next_offset": {
+            "description": "The `offset` of the next page when more episodes match; null on the last page.",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -3111,7 +3119,7 @@
     },
     "/v1/resources/{id}/episodes": {
       "get": {
-        "description": "A podcast show's latest episodes as its feed lists them, newest first: at most 20, each with its page or feed item, date and public stream. The show's own list, else, for a card that is a show, that of a member of its group which has one (an Apple Podcasts show grouped with its feed). A known resource that is no show, or no longer one, or whose feed was not read yet, returns an empty list.",
+        "description": "A podcast show's latest episodes as its feed lists them, newest first: the latest 100, in pages of at most 20 (`offset`, `next_offset`), optionally only those whose name holds `q` (any letter case), each with its feed item (which resolves to its PodcastEpisode card), date and public stream. The show's own list, else, for a card that is a show, that of a member of its group which has one (an Apple Podcasts show grouped with its feed). A known resource that is no show, or no longer one, or whose feed was not read yet, returns an empty list.",
         "operationId": "list_episodes",
         "parameters": [
           {
@@ -3134,6 +3142,31 @@
                 "null"
               ]
             }
+          },
+          {
+            "description": "How many of the matching episodes to skip, newest first: 0–100, default 0 (a page's\n`next_offset` gives the next page's).",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Only the episodes whose name holds this text, in any letter case; at most 256 bytes,\nspaces around it ignored, a blank one matching every episode.",
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -3148,7 +3181,7 @@
             "description": ""
           },
           "400": {
-            "description": "Invalid resource ID or limit"
+            "description": "Invalid resource ID, limit, offset or q"
           },
           "404": {
             "description": "Resource not found"

@@ -1,7 +1,9 @@
 //! A show's latest episodes through the store and the route (`episodes`): the save writes a
 //! show's list and keeps or clears it as later saves decide; `GET /v1/resources/{id}/episodes`
-//! lists it, names the episodes Pinakes has as resources, and falls back to a group member's;
-//! a show's card carries the first of them that have audio (`Card::episodes`).
+//! lists it in pages, matches names, names the episodes Pinakes has as resources, and falls back
+//! to a group member's; a show's card carries the first of them that have audio
+//! (`Card::episodes`). An entry's feed item reads as its episode, which names its show, and the
+//! episode's page on the feed's own site answers as the episode (`episodes::join_page`).
 use axum::{body::Body, http::Request};
 use http_body_util::BodyExt;
 use pinakes_core::{
@@ -162,17 +164,17 @@ async fn a_shows_latest_episodes_are_listed_newest_first_and_name_the_ones_pinak
 
 /// A save with a list replaces the show's rows whole; a show's save without one (a record read
 /// without its feed) keeps them; a save that makes the resource no show clears them; at most
-/// twenty are kept.
+/// a hundred are kept.
 #[sqlx::test(migrations = "../../migrations")]
 async fn the_save_replaces_keeps_or_clears_the_list(pool: PgPool) {
     let uri = "https://feeds.example.org/show.xml";
     let id = show(
         &pool,
         uri,
-        Some((1..=25).map(|n| episode(n, true)).collect()),
+        Some((1..=130).map(|n| episode(n, true)).collect()),
     )
     .await;
-    assert_eq!(rows(&pool, &id).await, 20);
+    assert_eq!(rows(&pool, &id).await, 100);
     let first: String =
         sqlx::query_scalar("SELECT guid FROM podcast_episode WHERE resource_id=$1 AND position=0")
             .bind(&id)
@@ -188,7 +190,7 @@ async fn the_save_replaces_keeps_or_clears_the_list(pool: PgPool) {
     d.set_type("PodcastSeries");
     d.name = Some("Show, renamed".into());
     store::save_document(&pool, &id, 0, &d).await.unwrap();
-    assert_eq!(rows(&pool, &id).await, 20);
+    assert_eq!(rows(&pool, &id).await, 100);
     // A shorter list replaces it whole.
     d.episodes = Some(vec![episode(30, true), episode(29, true)]);
     store::save_document(&pool, &id, 0, &d).await.unwrap();
@@ -212,10 +214,14 @@ async fn the_save_replaces_keeps_or_clears_the_list(pool: PgPool) {
 
 /// A feed as a show's read fetches it.
 fn fetched(body: String) -> pinakes_core::resolver::egress::Fetched {
+    fetched_at("https://feeds.example.org/show.xml", body)
+}
+/// A feed answering at `url`.
+fn fetched_at(url: &str, body: String) -> pinakes_core::resolver::egress::Fetched {
     pinakes_core::resolver::egress::Fetched {
         retry_after_secs: 0,
         ..common::fetched(
-            "https://feeds.example.org/show.xml".parse().unwrap(),
+            url.parse().unwrap(),
             200,
             "application/rss+xml".into(),
             body.into_bytes(),
@@ -545,7 +551,10 @@ async fn a_shows_card_carries_its_latest_episodes_with_audio(pool: PgPool) {
         ],
         "the latest five with audio or video, newest first: {card}"
     );
-    assert_eq!(list[0]["uri"], "https://show.example/episode/5");
+    assert_eq!(
+        list[0]["uri"],
+        "https://feeds.example.org/show.xml?guid=ep-5"
+    );
     assert_eq!(list[0]["guid"], "ep-5");
     assert_eq!(list[0]["published"], "2026-11-05T08:00:00Z");
     assert_eq!(
@@ -574,7 +583,7 @@ async fn a_shows_card_carries_its_latest_episodes_with_audio(pool: PgPool) {
         .collect();
     assert_eq!(list.iter().collect::<Vec<_>>(), route);
     // An episode Pinakes has as a resource is named by its card's ID, as on the route.
-    let known = store::ensure_resource(&pool, "https://show.example/episode/4")
+    let known = store::ensure_resource(&pool, "https://feeds.example.org/show.xml?guid=ep-4")
         .await
         .unwrap();
     let (_, card) = request(&app, &format!("/v1/resources/{id}")).await;
@@ -701,4 +710,317 @@ async fn a_show_card_without_episodes_carries_its_groups(pool: PgPool) {
         .unwrap();
     let (_, card) = request(&app, &format!("/v1/resources/{apple}")).await;
     assert!(card.get("episodes").is_none(), "{card}");
+}
+
+/// The route pages through the whole stored list, newest first (`offset`, `next_offset`), and
+/// with `q` lists only the episodes whose name holds it in any letter case, paged the same way;
+/// the bounds are 400s, and the show's card still carries five.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_route_pages_through_the_list_and_matches_names(pool: PgPool) {
+    let mut list: Vec<Episode> = (1..=45).rev().map(|n| episode(n, true)).collect();
+    list[5].name = Some("#500 – Khabib Nurmagomedov: Fighting".into());
+    list[30].name = Some("ÜBER khabib, again".into());
+    let id = show(&pool, "https://feeds.example.org/show.xml", Some(list)).await;
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let names = |page: &Value| -> Vec<String> {
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    // Every episode once, in order, twenty at a time.
+    let (mut seen, mut offset) = (vec![], Some(0u64));
+    while let Some(at) = offset {
+        let (status, page) =
+            request(&app, &format!("/v1/resources/{id}/episodes?offset={at}")).await;
+        assert_eq!(status, 200, "{page}");
+        assert!(names(&page).len() <= 20);
+        seen.extend(names(&page));
+        offset = page["next_offset"].as_u64();
+        assert!(offset.is_none_or(|next| next == at + 20), "{page}");
+    }
+    assert_eq!(seen.len(), 45);
+    assert_eq!(seen[0], "Episode 45");
+    assert_eq!(seen[44], "Episode 1");
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes?offset=40")).await;
+    assert_eq!(
+        (names(&page).len(), &page["next_offset"]),
+        (5, &Value::Null)
+    );
+    let (_, page) = request(
+        &app,
+        &format!("/v1/resources/{id}/episodes?offset=10&limit=3"),
+    )
+    .await;
+    assert_eq!(names(&page), ["Episode 35", "Episode 34", "Episode 33"]);
+    assert_eq!(page["next_offset"], 13);
+    let (status, page) = request(&app, &format!("/v1/resources/{id}/episodes?offset=100")).await;
+    assert_eq!((status, names(&page).len()), (200, 0));
+    // A name match, in any letter case, Unicode's included, paged as the whole list is.
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes?q=KHABIB")).await;
+    assert_eq!(
+        names(&page),
+        ["#500 – Khabib Nurmagomedov: Fighting", "ÜBER khabib, again"]
+    );
+    assert_eq!(page["next_offset"], Value::Null);
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes?q=%C3%BCber")).await;
+    assert_eq!(names(&page), ["ÜBER khabib, again"]);
+    let (_, page) = request(
+        &app,
+        &format!("/v1/resources/{id}/episodes?q=khabib&limit=1"),
+    )
+    .await;
+    assert_eq!(names(&page), ["#500 – Khabib Nurmagomedov: Fighting"]);
+    assert_eq!(page["next_offset"], 1);
+    let (_, page) = request(
+        &app,
+        &format!("/v1/resources/{id}/episodes?q=khabib&offset=1&limit=1"),
+    )
+    .await;
+    assert_eq!(names(&page), ["ÜBER khabib, again"]);
+    assert_eq!(page["next_offset"], Value::Null);
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes?q=no%20such")).await;
+    assert_eq!(
+        (names(&page).len(), &page["next_offset"]),
+        (0, &Value::Null)
+    );
+    // Spaces around `q` are ignored; a blank one matches every episode.
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes?q=%20khabib%20")).await;
+    assert_eq!(names(&page).len(), 2);
+    for blank in ["q=", "q=%20%20"] {
+        let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes?{blank}")).await;
+        assert_eq!(names(&page).len(), 20, "{blank}");
+        assert_eq!(page["next_offset"], 20, "{blank}");
+    }
+    let long = format!("q={}", "a".repeat(257));
+    for bad in ["offset=101", "offset=-1", "offset=x", long.as_str()] {
+        assert_eq!(
+            request(&app, &format!("/v1/resources/{id}/episodes?{bad}"))
+                .await
+                .0,
+            400,
+            "{bad}"
+        );
+    }
+    let (status, _) = request(
+        &app,
+        &format!("/v1/resources/{id}/episodes?q={}", "a".repeat(256)),
+    )
+    .await;
+    assert_eq!(status, 200);
+    // The card's list stays the first five.
+    let (_, card) = request(&app, &format!("/v1/resources/{id}")).await;
+    assert_eq!(card["episodes"].as_array().unwrap().len(), 5);
+}
+
+/// A show whose feed is on its own site, WordPress-style (lexfridman.com): each item links a blog
+/// post, shared with `utm_*` parameters, whose markup reads as an `Article` and names no feed.
+const BLOG_FEED: &str = "https://blog.example/feed/podcast/";
+fn blog_feed() -> String {
+    format!(
+        r#"<?xml version="1.0"?><rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel><title>Blog Show</title>{}</channel></rss>"#,
+        concat!(
+            r#"<item><title>#2 – Second</title><guid isPermaLink="false">https://blog.example/?p=2</guid><link>https://blog.example/second/?utm_source=rss&amp;utm_medium=rss&amp;utm_campaign=second</link><pubDate>Tue, 10 Nov 2026 10:00:00 +0000</pubDate><enclosure url="https://cdn.example/2.mp3" type="audio/mpeg"/></item>"#,
+            r#"<item><title>#1 – First</title><guid isPermaLink="false">https://blog.example/?p=1</guid><link>https://blog.example/first/?utm_source=rss</link><pubDate>Mon, 09 Nov 2026 10:00:00 +0000</pubDate><enclosure url="https://cdn.example/1.mp3" type="audio/mpeg"/></item>"#,
+            r#"<item><title>#0 – Elsewhere</title><guid isPermaLink="false">ep-0</guid><link>https://elsewhere.example/zero/</link><pubDate>Sun, 08 Nov 2026 10:00:00 +0000</pubDate><enclosure url="https://cdn.example/0.mp3" type="audio/mpeg"/></item>"#,
+        )
+    )
+}
+/// The blog feed answering at whatever address a job asks for (its item forms), read as the
+/// web route reads a feed (`resolver::cards::podcast`), on the route the job's row names.
+struct BlogFeed(&'static str);
+#[async_trait::async_trait]
+impl pinakes_core::resolver::Resolver for BlogFeed {
+    fn name(&self) -> &'static str {
+        self.0
+    }
+    fn matches(&self, _: &str) -> bool {
+        true
+    }
+    async fn resolve(&self, uri: &str) -> anyhow::Result<ResourceMeta> {
+        let f = fetched_at(uri, blog_feed());
+        Ok(pinakes_core::resolver::cards::podcast(uri, &f, 3600, 1000)?.expect("a podcast feed"))
+    }
+    fn refresh_after(&self, _: &ResourceMeta) -> std::time::Duration {
+        std::time::Duration::from_secs(3600)
+    }
+}
+/// Reads `uri` through the queue (its job alone due), as a client's `POST /v1/resolve` gets it
+/// read: its resource ID.
+async fn read(pool: &PgPool, uri: &str) -> String {
+    use pinakes_core::{config::QueueConfig, queue};
+    let id = store::ensure_resource(pool, uri).await.unwrap();
+    sqlx::query("UPDATE resource SET next_attempt_at=CASE WHEN id=$1 THEN now() ELSE now()+interval '1 day' END,final=false")
+        .bind(&id)
+        .execute(pool)
+        .await
+        .unwrap();
+    let route: Option<String> = sqlx::query_scalar("SELECT resolver FROM resource WHERE id=$1")
+        .bind(&id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let route: &'static str = Box::leak(route.expect("a route").into_boxed_str());
+    let job = queue::claim(pool, route, &QueueConfig::default())
+        .await
+        .unwrap()
+        .unwrap_or_else(|| panic!("{uri} due on {route}"));
+    assert_eq!(job.id, id);
+    queue::run_job(pool, &BlogFeed(route), &QueueConfig::default(), &job)
+        .await
+        .unwrap();
+    id
+}
+fn by_uri(uri: &str) -> String {
+    format!(
+        "/v1/resources/by-uri?uri={}",
+        url::form_urlencoded::byte_serialize(uri.as_bytes()).collect::<String>()
+    )
+}
+
+/// Every entry of a WordPress-style show names its feed item, which reads as its
+/// `PodcastEpisode` card naming its show; read, it is named by `id` on the route and the show's
+/// card, and the post it links (on the feed's site) answers as the episode, with its tracked
+/// spelling: one card, not an article beside an episode. A post not known yet is added as an
+/// alias, never fetched; a link on another site stays its own; a refresh and a reextract keep
+/// the join.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_episodes_post_on_its_feeds_site_answers_as_the_episode(pool: PgPool) {
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let episodes = pinakes_core::episodes::from_feed(&fetched_at(BLOG_FEED, blog_feed())).unwrap();
+    let show_id = show(&pool, BLOG_FEED, Some(episodes)).await;
+    // The second episode's post, already known as the article its markup makes of it, and its
+    // tracked spelling (an alias of it).
+    let post = "https://blog.example/second/";
+    let tracked = "https://blog.example/second/?utm_source=rss&utm_medium=rss&utm_campaign=second";
+    let post_id = store::ensure_resource(&pool, post).await.unwrap();
+    let mut d = ResourceMeta::new(post, "web", 86_400);
+    d.set_type("Article");
+    d.name = Some("Second, the post".into());
+    store::save_document(&pool, &post_id, 0, &d).await.unwrap();
+    store::ensure_resource(&pool, tracked).await.unwrap();
+    let (_, card) = request(&app, &by_uri(tracked)).await;
+    assert_eq!(
+        (&card["id"], &card["type"]),
+        (&Value::from(post_id.clone()), &Value::from("Article"))
+    );
+    // Every entry names its feed item, none its post; nothing read yet, nothing named.
+    let (_, page) = request(&app, &format!("/v1/resources/{show_id}/episodes")).await;
+    let items = page["items"].as_array().unwrap().clone();
+    let uris: Vec<&str> = items.iter().map(|i| i["uri"].as_str().unwrap()).collect();
+    assert_eq!(
+        uris,
+        [
+            "https://blog.example/feed/podcast/?guid=https%3A%2F%2Fblog.example%2F%3Fp%3D2",
+            "https://blog.example/feed/podcast/?guid=https%3A%2F%2Fblog.example%2F%3Fp%3D1",
+            "https://blog.example/feed/podcast/?guid=ep-0",
+        ]
+    );
+    assert!(items.iter().all(|i| i.get("id").is_none()), "{page}");
+    // The entry read: the episode's card, naming its show.
+    let second = read(&pool, uris[0]).await;
+    let (_, card) = request(&app, &format!("/v1/resources/{second}")).await;
+    assert_eq!(card["type"], "PodcastEpisode", "{card}");
+    assert_eq!(card["name"], "#2 – Second");
+    assert_eq!(card["stream"]["url"], "https://cdn.example/2.mp3");
+    assert_eq!(
+        card["related"],
+        serde_json::json!([{"rel": "show", "uri": BLOG_FEED, "name": "Blog Show"}])
+    );
+    assert!(
+        card["aliases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a == post),
+        "{card}"
+    );
+    // The route and the show's card name it.
+    let (_, page) = request(&app, &format!("/v1/resources/{show_id}/episodes")).await;
+    assert_eq!(page["items"][0]["id"], second);
+    let (_, show_card) = request(&app, &format!("/v1/resources/{show_id}")).await;
+    assert_eq!(show_card["episodes"][0]["id"], second);
+    // Its post and the post's tracked spelling answer as the episode.
+    for spelling in [post, tracked] {
+        let (status, card) = request(&app, &by_uri(spelling)).await;
+        assert_eq!(status, 200, "{spelling}: {card}");
+        assert_eq!(card["id"], second, "{spelling}");
+        assert_eq!(card["type"], "PodcastEpisode", "{spelling}");
+    }
+    let basis: String =
+        sqlx::query_scalar("SELECT basis FROM resource_alias WHERE alias_id=$1 AND root_id=$2")
+            .bind(&post_id)
+            .bind(&second)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(basis, "source");
+    // The first episode's post was not known: read, its feed item adds it as an alias, which is
+    // never fetched.
+    let first = read(&pool, uris[1]).await;
+    let (status, card) = request(&app, &by_uri("https://blog.example/first/")).await;
+    assert_eq!(
+        (status, &card["id"]),
+        (200, &Value::from(first.clone())),
+        "{card}"
+    );
+    let resolver: Option<String> = sqlx::query_scalar("SELECT r.resolver FROM resource r JOIN resource_alias a ON a.alias_id=r.id WHERE a.root_id=$1")
+        .bind(&first)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(resolver, None, "an alias is never fetched");
+    // A link on another site than the feed's is not joined, nor added.
+    let zero = read(&pool, uris[2]).await;
+    let (_, card) = request(&app, &format!("/v1/resources/{zero}")).await;
+    assert_eq!(card["type"], "PodcastEpisode");
+    assert_eq!(
+        request(&app, &by_uri("https://elsewhere.example/zero/"))
+            .await
+            .0,
+        404
+    );
+    // Read again, and after a reextract, the join stands.
+    read(&pool, uris[0]).await;
+    pinakes_core::queue::reextract(&pool, &["all".into()])
+        .await
+        .unwrap();
+    let (_, card) = request(&app, &by_uri(post)).await;
+    assert_eq!(card["id"], second);
+    let joined: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM resource_alias WHERE basis='source'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(joined, 2);
+}
+
+/// A post that is already another card's alias is left as it is: the feed's claim never moves it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_post_already_an_alias_is_left_as_it_is(pool: PgPool) {
+    let other = store::ensure_resource(&pool, "https://blog.example/2/")
+        .await
+        .unwrap();
+    let post = "https://blog.example/second/";
+    let post_id = store::ensure_resource(&pool, post).await.unwrap();
+    sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'canonical')")
+        .bind(&post_id)
+        .bind(&other)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let episode = read(
+        &pool,
+        "https://blog.example/feed/podcast/?guid=https%3A%2F%2Fblog.example%2F%3Fp%3D2",
+    )
+    .await;
+    let root: String = sqlx::query_scalar("SELECT root_id FROM resource_alias WHERE alias_id=$1")
+        .bind(&post_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(root, other);
+    assert_ne!(root, episode);
 }
