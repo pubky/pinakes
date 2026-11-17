@@ -86,6 +86,30 @@ pub(crate) async fn discover_enrichment(
     Ok(fetched)
 }
 
+/// Meetup writes its descriptions in Markdown (`*local*`, `**casual**`), on its pages and in its
+/// calendars: on meetup.com a card's description and its dates' are plain text.
+fn meetup_plain(uri: &str, doc: &mut ResourceMeta) {
+    let meetup = Url::parse(uri)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|h| h == "meetup.com" || h.ends_with(".meetup.com"));
+    if !meetup {
+        return;
+    }
+    let plain = |text: &mut Option<String>| {
+        *text = text
+            .as_deref()
+            .map(crate::sources::markdown_plain)
+            .filter(|t| !t.is_empty());
+    };
+    plain(&mut doc.description);
+    if let Some(c) = doc.container.as_mut() {
+        for o in &mut c.occurrences {
+            plain(&mut o.doc.description);
+        }
+    }
+}
+
 pub struct PlatformResolver {
     pub web: WebResolver,
 }
@@ -99,6 +123,16 @@ impl PlatformResolver {
             .config
     }
     async fn inner(
+        &self,
+        uri: &str,
+        probe: bool,
+        selected: Option<&Definition>,
+    ) -> Result<ResourceMeta> {
+        let mut doc = self.read(uri, probe, selected).await?;
+        meetup_plain(uri, &mut doc);
+        Ok(doc)
+    }
+    async fn read(
         &self,
         uri: &str,
         probe: bool,
@@ -1372,6 +1406,50 @@ pub fn keyed_url(adapter: &str, uri: &str) -> Result<Url> {
 
 #[cfg(test)]
 mod tests {
+    /// Meetup's Markdown reads as plain text on its cards and dates; another site's asterisks stay.
+    #[test]
+    fn meetup_descriptions_are_plain_text() {
+        let md = "*This event is local*\n\n**Our casual meetup.** 5 * 3";
+        let mut doc = ResourceMeta::new(
+            "https://www.meetup.com/bitcoin-meetup-switzerland/events/316908442/",
+            "meetup",
+            3600,
+        );
+        doc.description = Some(md.into());
+        let mut date = doc.clone();
+        date.description = Some(format!("Bitcoin Switzerland\n{md}"));
+        doc.container = Some(Box::new(crate::event::Container {
+            occurrences: vec![crate::event::Occurrence {
+                uid: "event_1@meetup.com".into(),
+                recurrence_id: String::new(),
+                doc: date,
+                sequence: 0,
+                modified: None,
+                content_hash: String::new(),
+            }],
+            ..Default::default()
+        }));
+        let mut other = doc.clone();
+        super::meetup_plain(&doc.url.clone(), &mut doc);
+        assert_eq!(
+            doc.description.as_deref(),
+            Some("This event is local\n\nOur casual meetup. 5 * 3")
+        );
+        assert_eq!(
+            doc.container.unwrap().occurrences[0]
+                .doc
+                .description
+                .as_deref(),
+            Some("Bitcoin Switzerland\nThis event is local\n\nOur casual meetup. 5 * 3")
+        );
+        super::meetup_plain("https://example.org/events/1/", &mut other);
+        assert_eq!(other.description.as_deref(), Some(md));
+        let mut empty = ResourceMeta::new("https://meetup.com/g/events/1/", "meetup", 3600);
+        empty.description = Some("**".into());
+        super::meetup_plain("https://meetup.com/g/events/1/", &mut empty);
+        assert_eq!(empty.description, None);
+    }
+
     use super::*;
     fn item(qid: &str, label: &str, claims: Value) -> Value {
         json!({"entities": {qid: {"id": qid, "labels": {"en": {"value": label}}, "claims": claims}}})

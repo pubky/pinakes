@@ -84,6 +84,43 @@ fn page_url(doc: &ResourceMeta, id: &str, canonical_id: &str) -> Option<String> 
         .filter(|(target, _, _)| target != id && target != canonical_id)
         .map(|(_, url, _)| url)
 }
+/// What two keys of one feed share when they are one date: the document without its own page
+/// link and status, and its start and name. A publisher that renumbers a date gives it a new UID
+/// and a new page (Meetup: `/events/<token>/` -> `/events/<number>/`), so the feed's content
+/// hash, which keeps the page link, differs.
+type SameDate = (
+    String,
+    Option<chrono::DateTime<chrono::Utc>>,
+    Option<String>,
+);
+fn same_date(doc: &ResourceMeta) -> SameDate {
+    let mut value = changes::normalize(doc);
+    if let Some(object) = value.as_object_mut() {
+        object.remove("url");
+        object.remove("event_status");
+    }
+    (
+        blake3::hash(value.to_string().as_bytes())
+            .to_hex()
+            .to_string(),
+        doc.start,
+        doc.name.clone(),
+    )
+}
+/// The first key of `keys` under `at` that no other row superseded yet.
+fn take<K: Ord>(
+    keys: &mut BTreeMap<K, Vec<String>>,
+    at: &K,
+    taken: &BTreeSet<String>,
+) -> Option<String> {
+    let list = keys.get_mut(at)?;
+    while let Some(key) = list.pop() {
+        if !taken.contains(&key) {
+            return Some(key);
+        }
+    }
+    None
+}
 /// Read, bound, hash and diff outside the global write/sequence locks. Apply rechecks the snapshot fence.
 pub async fn prepare(
     pool: &PgPool,
@@ -298,12 +335,35 @@ pub async fn prepare(
     missing.retain(|k, _| !cancelled.contains(k));
     plan.missing = missing;
     let mut hashes: BTreeMap<_, Vec<String>> = BTreeMap::new();
+    let mut dates: BTreeMap<SameDate, Vec<String>> = BTreeMap::new();
     for (key, (_, _, d, status, hash, _, _)) in &old {
         if !incoming.contains(key) && status != "superseded" && mutable(d) {
             hashes
                 .entry((hash.clone(), d.start, d.name.clone()))
                 .or_default()
                 .push(key.clone());
+            dates.entry(same_date(d)).or_default().push(key.clone());
+        }
+    }
+    // The dates the feed lists now, as it gives them and as they are stored: a key that left the
+    // feed while another key lists the same date was renumbered, not cancelled.
+    let mut live: BTreeSet<SameDate> = BTreeSet::new();
+    if !container.delta {
+        for item in &container.occurrences {
+            let key = item.key();
+            if !fetched_keys.contains(&key) || !incoming.contains(&key) {
+                continue;
+            }
+            live.insert(same_date(&item.doc));
+            // Its stored document too while the date is the same: the feed may have changed
+            // its text since the dropped key was stored.
+            if let Some((_, _, d, status, _, _, _)) = old.get(&key) {
+                if d.start == item.doc.start
+                    && !matches!(status.as_str(), "cancelled" | "superseded")
+                {
+                    live.insert(same_date(d));
+                }
+            }
         }
     }
     let mut superseded = BTreeSet::new();
@@ -350,12 +410,18 @@ pub async fn prepare(
         let mut after = changes::normalize(&doc);
         let before = previous.map(|(_, _, d, _, _, _, _)| changes::normalize(d));
         let supersedes = if previous.is_none() {
-            hashes
-                .get_mut(&(item.content_hash.clone(), doc.start, doc.name.clone()))
-                .and_then(Vec::pop)
+            take(
+                &mut hashes,
+                &(item.content_hash.clone(), doc.start, doc.name.clone()),
+                &superseded,
+            )
+            .or_else(|| take(&mut dates, &same_date(&doc), &superseded))
         } else {
             None
         };
+        if previous.is_none() {
+            live.insert(same_date(&doc));
+        }
         if let Some(key) = &supersedes {
             superseded.insert(key.clone());
             cancelled.remove(key);
@@ -366,6 +432,18 @@ pub async fn prepare(
         }
         let url = page_url(&doc, id, &canonical_id);
         plan.rows.push(json!({"uid":item.uid,"rid":item.recurrence_id,"start":doc.start,"end":doc.end,"name":doc.name,"venue_id":doc.event.venue.as_ref().and_then(|v|v.resource_id.as_deref()),"status":doc.event.event_status.as_ref().unwrap_or(&EventStatus::Scheduled).as_str(),"url":url,"doc":doc,"lat":doc.location.as_ref().map(|p|p.lat),"lon":doc.location.as_ref().map(|p|p.lon),"sequence":item.sequence,"modified":modified,"hash":item.content_hash}));
+    }
+    // A key the feed dropped, cancelled now or by an earlier snapshot, whose date another key still
+    // lists, is superseded by it instead (the order where the new key came first).
+    if !container.delta {
+        for (key, (_, _, d, status, _, _, _)) in &old {
+            let dropped = cancelled.contains(key)
+                || status == "cancelled" && !fetched_keys.contains(key) && mutable(d);
+            if dropped && !superseded.contains(key) && live.contains(&same_date(d)) {
+                superseded.insert(key.clone());
+                cancelled.remove(key);
+            }
+        }
     }
     for key in cancelled.iter().chain(superseded.iter()) {
         let Some((uid, rid, old, _, hash, seq, modified)) = old.get(key) else {

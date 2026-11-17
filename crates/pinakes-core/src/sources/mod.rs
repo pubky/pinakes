@@ -831,6 +831,39 @@ pub fn markdown_excerpt(markdown: &str) -> String {
     cut(&without_addresses(&out), 200)
 }
 
+/// Markdown as plain text, whole: its lines kept, heading, quote and list marks dropped, inline
+/// marks as in `markdown_excerpt`. For a site whose descriptions are Markdown (Meetup); not for
+/// text in general, whose asterisks may be its own. Callers pass a bounded document's text.
+pub fn markdown_plain(markdown: &str) -> String {
+    let mut out: Vec<String> = vec![];
+    for line in markdown.lines() {
+        let mut line = line.trim();
+        let heading = line.trim_start_matches('#');
+        if heading.len() < line.len() && (heading.is_empty() || heading.starts_with(' ')) {
+            line = heading.trim_start();
+        }
+        line = line.trim_start_matches('>').trim_start();
+        for bullet in ["- ", "* ", "+ "] {
+            if let Some(rest) = line.strip_prefix(bullet) {
+                line = rest.trim_start();
+                break;
+            }
+        }
+        if line.starts_with("![") && line.ends_with(')') {
+            continue;
+        }
+        let line = markdown_inline(line);
+        if line.trim().is_empty() && out.last().is_none_or(|l| l.is_empty()) {
+            continue;
+        }
+        out.push(line.trim().to_owned());
+    }
+    while out.last().is_some_and(String::is_empty) {
+        out.pop();
+    }
+    out.join("\n")
+}
+
 /// At most `max` characters of `text`, with an ellipsis when cut.
 pub fn cut(text: &str, max: usize) -> String {
     let mut out: String = text.chars().take(max).collect();
@@ -845,9 +878,11 @@ pub fn excerpt(text: &str, max: usize) -> String {
     cut(&text.split_whitespace().collect::<Vec<_>>().join(" "), max)
 }
 
-/// `[text](url)` as `text`, without `**`, `__` and backticks.
+/// `[text](url)` as `text`, without `**`, `__`, backticks and single `*`/`_` emphasis around
+/// words (`*local*`, `_here_`); a backslash-escaped mark (`\*`) is the mark itself. A mark
+/// between spaces or inside a word (`5 * 3`, `snake_case`, `2*3`) stays.
 fn markdown_inline(line: &str) -> String {
-    let mut line = line.replace("**", "").replace("__", "").replace('`', "");
+    let mut line = line.to_owned();
     while let Some(mid) = line.find("](") {
         let (Some(open), Some(close)) = (line[..mid].rfind('['), line[mid..].find(')')) else {
             break;
@@ -855,7 +890,58 @@ fn markdown_inline(line: &str) -> String {
         let text = line[open + 1..mid].to_owned();
         line.replace_range(open..mid + close + 1, &text);
     }
-    line
+    // Each character, and whether it is a mark (not escaped).
+    let mut chars: Vec<(char, bool)> = vec![];
+    let mut it = line.chars().peekable();
+    while let Some(c) = it.next() {
+        match (c, it.peek()) {
+            ('\\', Some(&next)) if next.is_ascii_punctuation() => {
+                chars.push((next, false));
+                it.next();
+            }
+            ('`', _) => {}
+            _ => chars.push((c, matches!(c, '*' | '_'))),
+        }
+    }
+    // `**` and `__` go wherever they are, as before.
+    let mut i = 0;
+    while i + 1 < chars.len() {
+        if chars[i].1 && chars[i + 1].1 && chars[i].0 == chars[i + 1].0 {
+            chars.drain(i..i + 2);
+        } else {
+            i += 1;
+        }
+    }
+    // Single emphasis: a mark that opens a word, up to the next same mark that closes one. One
+    // pass: the latest opening mark of each kind waits for its closing one.
+    let edge = |c: Option<&(char, bool)>| c.is_none_or(|(c, _)| !c.is_alphanumeric());
+    let mut drop = vec![false; chars.len()];
+    let mut open: [Option<usize>; 2] = [None, None];
+    for i in 0..chars.len() {
+        let (c, mark) = chars[i];
+        if !mark {
+            continue;
+        }
+        let slot = usize::from(c == '_');
+        let closes = i > 0 && !chars[i - 1].0.is_whitespace() && edge(chars.get(i + 1));
+        let opens = (i == 0 || edge(chars.get(i - 1)))
+            && chars.get(i + 1).is_some_and(|(c, _)| !c.is_whitespace());
+        match open[slot] {
+            Some(o) if closes && o + 1 < i => {
+                drop[o] = true;
+                drop[i] = true;
+                open[slot] = None;
+            }
+            _ if opens => open[slot] = Some(i),
+            _ => {}
+        }
+    }
+    chars
+        .iter()
+        .zip(drop)
+        .filter(|(_, d)| !d)
+        .map(|((c, _), _)| *c)
+        .collect()
 }
 
 /// A trimmed, non-empty JSON string.
@@ -1522,6 +1608,10 @@ mod tests {
             "Release highlights - Filter Gallery: see the docs and code"
         );
         assert_eq!(markdown_excerpt("a ](b) [c"), "a ](b) [c");
+        assert_eq!(
+            markdown_excerpt("*New* in _this_ release: `x`"),
+            "New in this release: x"
+        );
         // Hostile input costs no more than its first 2 KB: milliseconds of this thread's CPU
         // time, where a pass over the whole input took seconds.
         for hostile in [
@@ -1539,6 +1629,31 @@ mod tests {
             without_addresses("Mail <ann@example.org> or mailto:bob@x.org, not @user@host or a@b"),
             "Mail or not @user@host or a@b"
         );
+    }
+
+    #[test]
+    fn markdown_as_plain_text() {
+        let meetup = "Bitcoin Switzerland\n*This event is local and held in German and English*\n\n**Our casual Bitcoin Zurich Meetup is for newcomers.**\n\nOpen discussion ;-)\n*\\*\\*\\* Don't be a NO SHOW ! \\*\\*\\**\n\n- [Map](https://x.example/m)\n* item two\n## Agenda\n> quoted";
+        assert_eq!(
+            markdown_plain(meetup),
+            "Bitcoin Switzerland\nThis event is local and held in German and English\n\nOur casual Bitcoin Zurich Meetup is for newcomers.\n\nOpen discussion ;-)\n*** Don't be a NO SHOW ! ***\n\nMap\nitem two\nAgenda\nquoted"
+        );
+        for kept in [
+            "5 * 3 = 15",
+            "2*3*4",
+            "snake_case_name",
+            "a * b * c",
+            "price *",
+            "_ alone",
+            "C:\\path",
+            "#hashtag",
+        ] {
+            assert_eq!(markdown_plain(kept), kept, "{kept}");
+        }
+        assert_eq!(markdown_plain("say *hi*, _you_."), "say hi, you.");
+        assert_eq!(markdown_plain("a *b* 5 * 3 *c d*"), "a b 5 * 3 c d");
+        assert_eq!(markdown_plain("\n\n\nx\n\n\n\ny\n\n"), "x\n\ny");
+        assert_eq!(markdown_plain(""), "");
     }
 
     #[test]

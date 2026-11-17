@@ -1043,6 +1043,10 @@ fixes the resource and window and expires on daemon restart; a tampered or misma
 400. A known resource that is not a calendar returns an empty list. ICS feeds, event platform
 feeds, BTC Map, the Google Calendar API and NIP-52 calendars all produce the same occurrences.
 
+Meetup writes its descriptions in Markdown: on meetup.com a card's and its dates' descriptions
+are read as plain text (emphasis, heading, quote and list marks dropped, links kept as their
+text).
+
 **Other dates of an event page.** A page that has its own date (a Meetup date) is its own
 resource, and the calendar listing the organiser's dates is another: reading a Meetup date's page
 queues its group's calendar (`/{group}/events/ical/`) as a resource. With
@@ -1089,7 +1093,10 @@ with a warning.
 content hash, so DTSTAMP and fetch noise create no changes. Explicit cancellations apply at
 once; disappearance needs two fresh complete snapshots, and roll-off past the horizon or past
 end + 24 hours never cancels. A new UID with identical content supersedes the old row without a
-cancellation. A snapshot that loses more than half its active keys, or adds more than
+cancellation, also when the date's own page link changed with it (a publisher that renumbers a
+date, as Meetup does) or when the new UID was listed before the old one left: a key that would be
+cancelled, or was, while another key of the feed lists the same date (same start, name and content
+but for its link and status) is superseded instead. A snapshot that loses more than half its active keys, or adds more than
 `limits.feed_max_new_keys` (1000) to a feed with rows, is held until an identical snapshot
 confirms it; a feed over `limits.feed_max_rows` (10000) is held until it shrinks, and
 `limits.feed_max_holds` (5) consecutive holds dead-letter it. A re-parse that moves instances

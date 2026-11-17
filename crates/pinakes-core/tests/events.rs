@@ -553,6 +553,162 @@ async fn single_key_loss_requires_two_and_regenerated_uid_links_supersedes(pool:
     .unwrap();
     assert_eq!(change["supersedes"], "[\"id0\",\"\"]");
 }
+/// A Meetup-style calendar: each date `(id, week)` with its UID and page named by `id`.
+fn renumber_calendar(base: DateTime<Utc>, dates: &[(&str, i64, &str)]) -> String {
+    cal(&dates
+        .iter()
+        .map(|(id, week, text)| {
+            event(&format!(
+                "UID:event_{id}@meetup.com\nURL:https://www.meetup.com/g/events/{id}/\nDTSTART:{}Z\nDURATION:PT2H\nSUMMARY:Bitcoin Meetup\nDESCRIPTION:{text}",
+                (base + Duration::weeks(*week)).format("%Y%m%dT%H%M%S")
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+/// `renumber_calendar` parsed off the runtime (a description is read as HTML), as a new snapshot.
+async fn renumber_snapshot(
+    uri: &str,
+    base: DateTime<Utc>,
+    dates: &[(&str, i64, &str)],
+) -> ResourceMeta {
+    let (uri, text) = (uri.to_owned(), renumber_calendar(base, dates));
+    fresh(
+        &pinakes_core::resolver::html::blocking(move || dynamic_parse(&uri, &text))
+            .await
+            .unwrap(),
+    )
+}
+async fn statuses(pool: &PgPool) -> Vec<(String, String)> {
+    sqlx::query_as("SELECT uid,status FROM occurrence ORDER BY start_at,uid")
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+/// A publisher that renumbers a date (new UID and new page, the same date) supersedes it: the
+/// date is listed once, and nothing is cancelled.
+#[sqlx::test(migrations = "../../migrations")]
+async fn renumbered_date_with_a_new_page_supersedes(pool: PgPool) {
+    let uri = "https://www.meetup.com/g/events/ical/";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let base = Utc::now() + Duration::days(2);
+    let text = "Casual meetup";
+    store::save_document(
+        &pool,
+        &id,
+        0,
+        &renumber_snapshot(
+            uri,
+            base,
+            &[("tok0", 0, text), ("tok1", 1, text), ("tok2", 2, text)],
+        )
+        .await,
+    )
+    .await
+    .unwrap();
+    store::save_document(
+        &pool,
+        &id,
+        0,
+        &renumber_snapshot(
+            uri,
+            base,
+            &[("100", 0, text), ("tok1", 1, text), ("tok2", 2, text)],
+        )
+        .await,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        statuses(&pool).await,
+        [
+            ("event_100@meetup.com", "scheduled"),
+            ("event_tok0@meetup.com", "superseded"),
+            ("event_tok1@meetup.com", "scheduled"),
+            ("event_tok2@meetup.com", "scheduled"),
+        ]
+        .map(|(a, b)| (a.to_owned(), b.to_owned()))
+    );
+    let change: Value = sqlx::query_scalar(
+        "SELECT after FROM resource_change WHERE occurrence_key='[\"event_100@meetup.com\",\"\"]'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(change["supersedes"], "[\"event_tok0@meetup.com\",\"\"]");
+}
+/// The new key can come first: both keys list the date, then the old one leaves the feed. When it
+/// would be cancelled, it is superseded, also when an earlier release cancelled it; a dropped
+/// date that no other key lists is still cancelled.
+#[sqlx::test(migrations = "../../migrations")]
+async fn dropped_key_with_a_live_twin_is_superseded_not_cancelled(pool: PgPool) {
+    let uri = "https://www.meetup.com/g/events/ical/";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let base = Utc::now() + Duration::days(2);
+    let t = "Casual meetup";
+    let both = [
+        ("tok0", 0, t),
+        ("100", 0, t),
+        ("tok1", 1, t),
+        ("101", 1, t),
+        ("tok2", 2, t),
+        ("tok3", 3, t),
+    ];
+    store::save_document(&pool, &id, 0, &renumber_snapshot(uri, base, &both).await)
+        .await
+        .unwrap();
+    assert!(statuses(&pool).await.iter().all(|(_, s)| s == "scheduled"));
+    // A release before this rule cancelled tok1 already; its twin's text changed since.
+    sqlx::query("UPDATE occurrence SET status='cancelled', doc=jsonb_set(doc,'{event_status}','\"cancelled\"') WHERE uid='event_tok1@meetup.com'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let later = [
+        ("100", 0, t),
+        ("101", 1, "Casual meetup with new text"),
+        ("tok3", 3, t),
+    ];
+    store::save_document(&pool, &id, 0, &renumber_snapshot(uri, base, &later).await)
+        .await
+        .unwrap();
+    let rows = statuses(&pool).await;
+    let status = |uid: &str| {
+        rows.iter()
+            .find(|(u, _)| u == &format!("event_{uid}@meetup.com"))
+            .unwrap()
+            .1
+            .clone()
+    };
+    assert_eq!(status("tok1"), "superseded");
+    // tok0 and tok2 are only missing once: kept as they were.
+    assert_eq!(status("tok0"), "scheduled");
+    assert_eq!(status("tok2"), "scheduled");
+    store::save_document(&pool, &id, 0, &renumber_snapshot(uri, base, &later).await)
+        .await
+        .unwrap();
+    let rows = statuses(&pool).await;
+    let status = |uid: &str| {
+        rows.iter()
+            .find(|(u, _)| u == &format!("event_{uid}@meetup.com"))
+            .unwrap()
+            .1
+            .clone()
+    };
+    assert_eq!(status("tok0"), "superseded");
+    assert_eq!(status("tok1"), "superseded");
+    assert_eq!(status("tok2"), "cancelled");
+    assert_eq!(status("100"), "scheduled");
+    assert_eq!(status("101"), "scheduled");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM resource_change WHERE class='cancelled'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        1
+    );
+}
 #[sqlx::test(migrations = "../../migrations")]
 async fn event_units_pagination_occurrence_route_and_venue(pool: PgPool) {
     let feed = "https://example.org/events.ics";
