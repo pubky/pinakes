@@ -804,7 +804,7 @@ pub fn refused_link(uri: &str) -> bool {
         || crate::capability::names_credential(&link_root(uri))
 }
 /// The spelling a link is stored under: its root (`alias::root`) when that is a URL.
-fn link_root(uri: &str) -> String {
+pub(crate) fn link_root(uri: &str) -> String {
     crate::alias::root(uri)
         .map(|a| a.root)
         .filter(|r| r.starts_with("http"))

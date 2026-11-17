@@ -2383,8 +2383,9 @@ fn related_because(sql: &mut QueryBuilder<'_, Postgres>, item: &str, n: &str, au
 /// where a comma-separated value found nothing before) is never answered 304. Move it when
 /// a search row gains or loses a field, a field reads otherwise for stored rows, or the same query
 /// finds other rows or the same rows in another order.
-// 9: exact member refs; 10: held music group artwork and its credit.
-pub const SEARCH_SHAPE: u32 = 10;
+// 9: exact member refs; 10: held music group artwork and its credit; 11: a show's `episodes`
+// name the publisher's episode card and carry `aliases`.
+pub const SEARCH_SHAPE: u32 = 11;
 /// The most taggers a related row's `because` names.
 pub const BECAUSE_TAGGERS: usize = 3;
 

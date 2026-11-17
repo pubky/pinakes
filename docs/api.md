@@ -99,7 +99,7 @@ An IMDb title keeps the type its page gives (it can be either).
 | `name`, `description`, `image` | Display metadata; images point to the origin and are never proxied. A web image (`https` or `http`) is on a named host, as a [stream](#stream)'s link is: never an IP address, `localhost`, a single-label name or a link with a user |
 | `stream` | Audio a client can play, `{url, type, duration_s, preview}` ([Stream](#stream)): a podcast episode's enclosure, a recording's public preview. Absent when the card has none |
 | `embed` | The frame that shows the link as its own site does, `{provider, kind, src, height, aspect, allow, autoplay_param}` ([Embed](#embed)): a service's player, a social post, a map, slides. `null` when there is none and on a `missing` card |
-| `episodes` | A podcast show's card (`PodcastSeries`, status `ok`): its latest episodes that have a `stream`, newest first, at most 5, each `{uri, name, image, published, guid, stream, id?}` as `GET /v1/resources/{id}/episodes` lists it ([Episodes](#episodes)), so a client can play them from the card and open each one's own card (`uri`, `id`). Absent on every other card and on a show without one |
+| `episodes` | A podcast show's card (`PodcastSeries`, status `ok`): its latest episodes that have a `stream`, newest first, at most 5, each `{uri, name, image, published, guid, stream, id?, aliases?}` as `GET /v1/resources/{id}/episodes` lists it ([Episodes](#episodes)), so a client can play them from the card and open each one's own card (`uri`, `id`). Absent on every other card and on a show without one |
 | `site` | The publishing site: the page's own site name (`og:site_name`), else its host; for `pubky://` objects the app path segment (`loopky`), not the public key; for a link whose URL names a known service (a music service, a Wikipedia edition, MusicBrainz, Wikidata, a service the also-on lookups know), that service's name (`Apple Music`, `Wikipedia (de)`, `OpenStreetMap`), whatever the page calls itself and even before its card is read; for a card read from an official API without a host of its own, the service's name (`Federal Register`) |
 | `point` | `{lat, lon}` |
 | `start`, `end` | RFC 3339 instants for events and occurrences |
@@ -383,7 +383,7 @@ open each one's card. Each entry is `{rel, uri, name?, amount_sat?, at?}`:
 | `BitcoinAddress` | `tx`: its latest transactions, those in the mempool first, with `amount_sat` what each moved into (positive) or out of (negative) the address and `at` once confirmed |
 | `LightningNode` | `channel`: its biggest open channels (`amount_sat` the capacity, `name` the peer's alias); `peer`: those channels' other nodes, each once |
 | `LightningChannel` | `node` (both, with their aliases), `funding_tx` (`amount_sat` the capacity), `closing_tx` once closed |
-| `PodcastEpisode` | `show`: its show's card (with the feed's title as `name` when read from the feed). Read from the show's feed (the episode's feed item, or a page that names its feed), the feed's address without `guid` (never one that carries a credential); from a Podcast Index episode, the show's Podcast Index page; from a Fountain episode page, the feed its page names |
+| `PodcastEpisode` | `show`: its show's card (with the feed's title as `name` when read from the feed). Read from the show's feed (the episode's feed item, or a page that names its feed), the feed's address without `guid` (never one that carries a credential); from a Podcast Index episode, the show's Podcast Index page (with the show's title Podcast Index records as `name`); from a Fountain episode page, the feed its page names |
 
 Roots keep their network: a testnet4 transaction's inputs are `btc-testnet4:address/…`, a signet
 channel's funding transaction `btc-signet:tx/…`.
@@ -1160,7 +1160,7 @@ newest first: the latest 100, in pages of at most 20 (`limit`, 1–20, default 2
 while more episodes match, else `null`. `q` lists only the episodes whose `name` holds it, in any
 letter case (Unicode's, as Rust folds it: `über` finds `ÜBER`); at most 256 bytes, spaces around
 it ignored, a blank `q` matching every episode; it pages the same way. Each item is
-`{uri, name, image, published, guid, stream, id?}`. A show's card carries the first of them
+`{uri, name, image, published, guid, stream, id?, aliases?}`. A show's card carries the first of them
 in `episodes`: the latest 5 that have a `stream`, in the same shape (below). `guid` is what names the item: its GUID as
 the feed gives it; its page when the feed gives none; else `sha256:` and the hex digest of its
 enclosure's URL (without a fragment), so a link that carries a token shows nothing of itself.
@@ -1169,7 +1169,21 @@ enclosure's URL (without a fragment), so a link that carries a token shows nothi
 is (a blog post's markup may read as an `Article`); `id` names that card when Pinakes already
 has it (an alias as its root). That card names its show in `related` (`rel: "show"`, the feed),
 and the page the item links (its `utm_*` and other tracking parameters dropped) becomes its
-alias when it is the item's own page on the feed's own site ([Aliases](#aliases)). From a feed read at an
+alias when it is the item's own page on the feed's own site ([Aliases](#aliases)). The
+publisher's pages of an entry are the cards (status `ok`, not an alias) on the feed's own site
+(the rules of a page that joins, above) whose podcast links name this very feed item by its item
+key (`podcast:item:…`, given once the show's GUID is vouched and the feed names the page as the
+item's link; never a `maybe`, an expired or a switched-off source's link), read as a
+`PodcastEpisode` or as a page that may join one. When one of them is a `PodcastEpisode` card of
+its own (not joined to the item, e.g. a [group](#groups) holds it), the entry names it instead:
+`id` is that card (the one Pinakes knew first) and `uri` its link. A directory's page of the
+item is never one of them: neither a page on another site (Apple) nor a Podcast Index page (even
+for a feed Podcast Index hosts). `aliases` lists the entry's other links, which a client reads
+with `uri` (tags, counts, replies): the feed item when `uri` became another card's link, the link
+of the card the feed item reads as, the publisher's other pages, then the aliases of each of
+those cards (the named card's first); at most 16, absent when there are none. `id`, `uri` and
+`aliases` are named at each read from what Pinakes knows then; the entries themselves change only
+when the show is read again. From a feed read at an
 address that carries a credential, `uri` is the item's page instead, and an item without a page
 is not listed: a feed item would carry the credential. `stream` is the item's enclosure when it is public and direct, in the
 same shape as a card's (`{url, type, duration_s, preview}`: the URL a client hands to an audio

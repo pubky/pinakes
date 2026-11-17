@@ -564,9 +564,10 @@ fn same_page(a: &str, b: &str) -> bool {
 }
 /// The feed item's link: the feed's URL with `?guid=`, which a feed card reads as that item.
 fn rss_item(feed: &str, guid: &str) -> Option<String> {
-    let mut url = url::Url::parse(feed).ok()?;
-    url.query_pairs_mut().append_pair("guid", guid);
-    Some(url.into())
+    // The spelling an Episodes entry gives the item (`episodes::item_uri`: a `guid` the feed's
+    // address already carries is replaced), so the two meet by identity.
+    let url = url::Url::parse(feed).ok()?;
+    Some(crate::episodes::item_uri(&url, guid))
 }
 
 /// The show's other pages, from its Wikidata item (found by its Apple Podcasts ID).
@@ -1279,6 +1280,39 @@ impl Podcasts {
 
 #[cfg(test)]
 mod tests {
+    /// The RSS item link a page's podcast links name (`rss_item`) is the feed item an Episodes
+    /// entry names (`episodes::item_uri`), whatever its GUID holds: the list joins its entries to
+    /// the publisher's pages by that identity.
+    #[test]
+    fn an_rss_item_link_is_the_feed_item_an_entry_names() {
+        assert_eq!(
+            rss_item("https://podcast.darknetdiaries.com/", "prx_7057_141e0c43").as_deref(),
+            Some("https://podcast.darknetdiaries.com/?guid=prx_7057_141e0c43")
+        );
+        assert_eq!(
+            rss_item(
+                "https://example.com/feed.xml?guid=show&format=mp3",
+                "ep 1/2"
+            )
+            .as_deref(),
+            Some("https://example.com/feed.xml?format=mp3&guid=ep+1%2F2")
+        );
+        for feed in [
+            "https://podcast.example.com/",
+            "https://example.com/feed.xml?format=mp3",
+            "https://example.com/feed.xml?guid=show&format=mp3",
+        ] {
+            for guid in ["prx_7057_1", "ep 1/2", "a&b=c", "x+y", "ü€ é", "%20"] {
+                let rss = rss_item(feed, guid).unwrap();
+                let item = crate::episodes::item_uri(&url::Url::parse(feed).unwrap(), guid);
+                assert_eq!(
+                    crate::model::identity(&rss).unwrap().0,
+                    crate::model::identity(&item).unwrap().0,
+                    "{rss} vs {item}"
+                );
+            }
+        }
+    }
     use super::*;
 
     /// Its links are typed by what they are, whatever their pages call themselves

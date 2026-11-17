@@ -117,9 +117,14 @@ pub fn parse_episode(status: u16, raw: &[u8], feed: u64, episode: u64) -> Result
     card.detail("duration", int(&e["duration"]).filter(|d| *d > 0));
     card.detail("website", text(&e["link"]));
     card.detail("show", show_page(feed));
-    // Its show's card: the show's page, as `POST /v1/resolve` reads it.
-    card.related
-        .push(crate::model::Related::new("show", Some(show_page(feed))));
+    // Its show's card: the show's page, as `POST /v1/resolve` reads it, by the show's title as
+    // the record names it (`feedTitle`), as a feed's item names its show.
+    let mut show = crate::model::Related::new("show", Some(show_page(feed)));
+    show.name = text(&e["feedTitle"]).map(|mut t| {
+        crate::model::truncate(&mut t, 128);
+        t
+    });
+    card.related.push(show);
     Ok(Some(card))
 }
 
@@ -288,6 +293,14 @@ mod tests {
             card.details["show"],
             "https://podcastindex.org/podcast/255500"
         );
+        // Its show, by the title the record names.
+        assert_eq!(card.related.len(), 1);
+        assert_eq!(card.related[0].rel, "show");
+        assert_eq!(
+            card.related[0].uri.as_deref(),
+            Some("https://podcastindex.org/podcast/255500")
+        );
+        assert_eq!(card.related[0].name.as_deref(), Some("What Bitcoin Did"));
         assert!(card.details["published"]
             .as_str()
             .is_some_and(|p| p.starts_with("2026-")));

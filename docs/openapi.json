@@ -777,12 +777,19 @@
       "Episode": {
         "description": "One of a show's latest episodes, as its feed lists it.",
         "properties": {
+          "aliases": {
+            "description": "The episode's other links, which a client reads together with `uri` (tags, counts,\nreplies): the feed item when `uri` is another card's link, the link of the card the feed\nitem reads as, the publisher's other pages of the item ([`with_ids`]), then the aliases\nof each of those cards (the named card's first); at most [`ALIASES`], absent when there\nare none. Named at each read, never stored.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "guid": {
             "description": "What names the item ([`item_identity`]): its GUID as the feed gives it; its page when it\ngives none; else `sha256:` and the hex digest of its enclosure's URL, so a signed link\nshows nothing of itself here.",
             "type": "string"
           },
           "id": {
-            "description": "The episode's own card, when Pinakes has one for its `uri` (an alias reads as its root);\nabsent until someone looks it up.",
+            "description": "The episode's own card, when Pinakes has one ([`with_ids`]); absent until someone looks\nit up.",
             "type": [
               "string",
               "null"
@@ -820,7 +827,7 @@
             ]
           },
           "uri": {
-            "description": "The episode's feed item (`{feed}?guid={guid}`), which `POST /v1/resolve` reads as its\n`PodcastEpisode` card from the feed ([`ItemIdentity::uri`]); from a feed whose address\ncarries a credential, the item's page.",
+            "description": "The episode's feed item (`{feed}?guid={guid}`), which `POST /v1/resolve` reads as its\n`PodcastEpisode` card from the feed ([`ItemIdentity::uri`]); from a feed whose address\ncarries a credential, the item's page. When Pinakes has the episode's card (`id`), that\ncard's own link.",
             "type": "string"
           }
         },
@@ -3119,7 +3126,7 @@
     },
     "/v1/resources/{id}/episodes": {
       "get": {
-        "description": "A podcast show's latest episodes as its feed lists them, newest first: the latest 100, in pages of at most 20 (`offset`, `next_offset`), optionally only those whose name holds `q` (any letter case), each with its feed item (which resolves to its PodcastEpisode card), date and public stream. The show's own list, else, for a card that is a show, that of a member of its group which has one (an Apple Podcasts show grouped with its feed). A known resource that is no show, or no longer one, or whose feed was not read yet, returns an empty list.",
+        "description": "A podcast show's latest episodes as its feed lists them, newest first: the latest 100, in pages of at most 20 (`offset`, `next_offset`), optionally only those whose name holds `q` (any letter case), each with its episode's link (its feed item, which resolves to its PodcastEpisode card, or the link of the publisher's own episode card), its other links (`aliases`), date and public stream. The show's own list, else, for a card that is a show, that of a member of its group which has one (an Apple Podcasts show grouped with its feed). A known resource that is no show, or no longer one, or whose feed was not read yet, returns an empty list.",
         "operationId": "list_episodes",
         "parameters": [
           {
