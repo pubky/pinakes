@@ -564,9 +564,10 @@ fn same_page(a: &str, b: &str) -> bool {
 }
 /// The feed item's link: the feed's URL with `?guid=`, which a feed card reads as that item.
 fn rss_item(feed: &str, guid: &str) -> Option<String> {
-    let mut url = url::Url::parse(feed).ok()?;
-    url.query_pairs_mut().append_pair("guid", guid);
-    Some(url.into())
+    // The spelling an Episodes entry gives the item (`episodes::item_uri`: a `guid` the feed's
+    // address already carries is replaced), so the two meet by identity.
+    let url = url::Url::parse(feed).ok()?;
+    Some(crate::episodes::item_uri(&url, guid))
 }
 
 /// The show's other pages, from its Wikidata item (found by its Apple Podcasts ID).
@@ -1287,6 +1288,7 @@ mod tests {
         for feed in [
             "https://podcast.example.com/",
             "https://example.com/feed.xml?format=mp3",
+            "https://example.com/feed.xml?guid=show&format=mp3",
         ] {
             for guid in ["prx_7057_1", "ep 1/2", "a&b=c", "x+y", "ü€ é", "%20"] {
                 let rss = rss_item(feed, guid).unwrap();

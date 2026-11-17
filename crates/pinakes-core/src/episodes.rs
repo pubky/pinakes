@@ -1033,8 +1033,10 @@ async fn with_ids<'a>(
 /// the rules a page that joins an episode keeps ([`join_page`]): a web page on the feed's own
 /// registrable domain, or its tenant of a shared host (`group_keys::same_origin`), on the feed's
 /// host or a subdomain of the other; neither a site's root nor a feed or a feed's item, and
-/// carrying no credential. So another show's or a directory's page (Podcast Index, Apple) that
-/// names the same item is never the episode an entry names.
+/// carrying no credential; and no page a source of Pinakes reads as a service's own
+/// (`sources::reading`: a Podcast Index page, even of a feed Podcast Index hosts on
+/// `feeds.podcastindex.org`). So another show's or a directory's page that names the same item is
+/// never the episode an entry names.
 fn publisher_page(page: &str, item: &str) -> bool {
     let (Ok(url), Ok(feed)) = (Url::parse(page), Url::parse(item)) else {
         return false;
@@ -1047,10 +1049,35 @@ fn publisher_page(page: &str, item: &str) -> bool {
         && related_hosts(page, item)
         && !site_root(page)
         && !a_feed(page, &feed)
+        && crate::sources::reading(page).is_none()
 }
 
 #[cfg(test)]
 mod tests {
+    /// A publisher's page is a web page on the feed's own site, never a directory's page of the
+    /// item: not Podcast Index's even for a feed it hosts, nor a sibling host, another site, a
+    /// site's root, a feed or a feed item.
+    #[test]
+    fn a_publishers_page_is_on_the_feeds_own_site_and_no_directorys() {
+        let item = "https://podcast.show.example.com/feed.xml?guid=ep-6";
+        assert!(publisher_page("https://show.example.com/episode/6/", item));
+        assert!(publisher_page("https://podcast.show.example.com/6", item));
+        for page in [
+            "https://www.show.example.com/episode/6/",
+            "https://other.example.org/episode/6/",
+            "https://show.example.com/",
+            "https://podcast.show.example.com/feed.xml",
+            "https://podcast.show.example.com/feed.xml?guid=ep-7",
+            "ftp://show.example.com/episode/6/",
+        ] {
+            assert!(!publisher_page(page, item), "{page}");
+        }
+        let hosted = "https://feeds.podcastindex.org/pc20.xml?guid=PC20-275";
+        assert!(!publisher_page(
+            "https://podcastindex.org/podcast/920666?episode=61842097688",
+            hosted
+        ));
+    }
     use super::*;
 
     fn feed(items: &str) -> String {
