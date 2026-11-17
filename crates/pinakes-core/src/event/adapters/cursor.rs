@@ -342,7 +342,7 @@ pub async fn resolve(
     let mut next = previous.clone().unwrap_or_default();
     let mut reset = false;
     let mut resync = false;
-    let mut delta = previous.is_some();
+    let mut delta: bool;
     if d.id == "einundzwanzig" {
         resync = previous.is_none()
             || (!probe
