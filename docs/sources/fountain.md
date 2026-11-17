@@ -25,8 +25,9 @@ Nothing beyond the page the web route fetched.
 The page's card, typed `PodcastSeries` (a show) or `PodcastEpisode` (an episode), with its feed
 as `podcast_feed` and an episode's item GUID as `podcast_guid`: the facts a podcast feed's own
 card carries. The podcasts also-on source then reads the feed (and the item), and finds the show
-or episode on Apple Podcasts, Podcast Index and the services Wikidata names. `details.from` is
-`fountain`.
+or episode on Apple Podcasts, Podcast Index and the services Wikidata names. An episode's card
+names its show in `related` (`rel: "show"`, the feed, unless its address carries a credential).
+`details.from` is `fountain`.
 
 | Fact | Meaning |
 | --- | --- |

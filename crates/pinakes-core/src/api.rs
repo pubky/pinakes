@@ -963,10 +963,10 @@ pub struct Details {
     /// The objects the card points at, each with its own card (docs/api.md, Related objects): a
     /// Bitcoin transaction's block, inputs and outputs; a block's previous and next block and
     /// coinbase transaction; an address's latest transactions; a Lightning node's biggest
-    /// channels and their peers; a channel's nodes and funding transaction. Each is
-    /// `{rel, uri, name?, amount_sat?, at?}`; `uri` is a root `POST /v1/resolve` reads, or null
-    /// for an input or output without an address (`name` says what it is). At most 10 of a
-    /// `rel`, read with the card; `[]` on every other card.
+    /// channels and their peers; a channel's nodes and funding transaction; a podcast episode's
+    /// show (`show`). Each is `{rel, uri, name?, amount_sat?, at?}`; `uri` is a root
+    /// `POST /v1/resolve` reads, or null for an input or output without an address (`name` says
+    /// what it is). At most 10 of a `rel`, read with the card; `[]` on every other card.
     pub related: Vec<model::Related>,
     /// How many entries of a `rel` there are when `related` lists fewer of them
     /// (`{"input": 400}`); null when it lists them all.

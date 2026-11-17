@@ -25,7 +25,8 @@ pub struct Alias {
     pub root: String,
     /// `cursor`, `osm`, `identifier`, `service` (a music service's, Wikipedia's or a Wikidata
     /// item's URL forms), `tracking`, `canonical` (the page's own canonical) or `source` (an
-    /// official API's answer). The last two are no rule of the URI.
+    /// official API's answer, or a podcast feed naming its episode's page on its own site:
+    /// `episodes::join_page`). The last two are no rule of the URI.
     pub basis: &'static str,
 }
 /// The root of a URI known from the URI alone, when it differs from the URI itself.
@@ -65,7 +66,7 @@ pub fn root(uri: &str) -> Option<Alias> {
 }
 /// The URI without its tracking parameters, if it had any. Parameters are dropped from the raw
 /// query string, so every kept value keeps its own encoding.
-fn untracked(uri: &str) -> Option<String> {
+pub(crate) fn untracked(uri: &str) -> Option<String> {
     let mut u = Url::parse(uri).ok()?;
     if !matches!(u.scheme(), "http" | "https") {
         return None;

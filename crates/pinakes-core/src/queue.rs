@@ -778,6 +778,20 @@ async fn finish_job(
                 }
                 tx.commit().await?;
             }
+            // A podcast episode read from its feed item: the page the item links, on the feed's
+            // own site, becomes an alias of this card, and a page it no longer names lets go
+            // (`episodes::join_page`, `episodes::release_pages`).
+            if doc.episode_item {
+                let page = doc.episode_page.as_deref();
+                crate::episodes::release_pages(pool, &job.id, job.generation, page, false).await?;
+                if let Some(page) = page {
+                    crate::episodes::join_page(pool, &job.id, job.generation, &job.uri, page)
+                        .await?;
+                }
+            }
+        } else if doc.status == Status::Missing && crate::episodes::names_an_item(&job.uri) {
+            // The item has left its feed: the pages joined to its card answer for themselves.
+            crate::episodes::release_pages(pool, &job.id, job.generation, None, true).await?;
         }
         Ok(())
     }

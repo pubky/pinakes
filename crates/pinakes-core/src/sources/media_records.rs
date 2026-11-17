@@ -983,7 +983,8 @@ mod tests {
         assert_eq!(doc.type_name, "PodcastSeries");
         assert_eq!(recorded.asked(), [lookup, feed]);
         let episodes = doc.episodes.expect("the feed's episodes");
-        assert_eq!(episodes.len(), crate::episodes::KEPT);
+        // Every item of the fixture's head (25, fewer than are kept).
+        assert_eq!(episodes.len(), 25);
         let stream = episodes[0].stream.as_ref().expect("a public enclosure");
         assert!(stream.url.starts_with("https://"), "{stream:?}");
         assert_eq!(stream.media_type, "audio/mpeg");
@@ -1115,6 +1116,6 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(doc.episodes.map(|l| l.len()), Some(crate::episodes::KEPT));
+        assert_eq!(doc.episodes.map(|l| l.len()), Some(25));
     }
 }

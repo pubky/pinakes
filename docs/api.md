@@ -99,7 +99,7 @@ An IMDb title keeps the type its page gives (it can be either).
 | `name`, `description`, `image` | Display metadata; images point to the origin and are never proxied. A web image (`https` or `http`) is on a named host, as a [stream](#stream)'s link is: never an IP address, `localhost`, a single-label name or a link with a user |
 | `stream` | Audio a client can play, `{url, type, duration_s, preview}` ([Stream](#stream)): a podcast episode's enclosure, a recording's public preview. Absent when the card has none |
 | `embed` | The frame that shows the link as its own site does, `{provider, kind, src, height, aspect, allow, autoplay_param}` ([Embed](#embed)): a service's player, a social post, a map, slides. `null` when there is none and on a `missing` card |
-| `episodes` | A podcast show's card (`PodcastSeries`, status `ok`): its latest episodes that have a `stream`, newest first, at most 5, each `{uri, name, image, published, guid, stream, id?}` as `GET /v1/resources/{id}/episodes` lists it ([Episodes](#episodes)), so a client can play them from the card. Absent on every other card and on a show without one |
+| `episodes` | A podcast show's card (`PodcastSeries`, status `ok`): its latest episodes that have a `stream`, newest first, at most 5, each `{uri, name, image, published, guid, stream, id?}` as `GET /v1/resources/{id}/episodes` lists it ([Episodes](#episodes)), so a client can play them from the card and open each one's own card (`uri`, `id`). Absent on every other card and on a show without one |
 | `site` | The publishing site: the page's own site name (`og:site_name`), else its host; for `pubky://` objects the app path segment (`loopky`), not the public key; for a link whose URL names a known service (a music service, a Wikipedia edition, MusicBrainz, Wikidata, a service the also-on lookups know), that service's name (`Apple Music`, `Wikipedia (de)`, `OpenStreetMap`), whatever the page calls itself and even before its card is read; for a card read from an official API without a host of its own, the service's name (`Federal Register`) |
 | `point` | `{lat, lon}` |
 | `start`, `end` | RFC 3339 instants for events and occurrences |
@@ -346,7 +346,7 @@ answer `If-None-Match` with 304.
 | `organizer` | `{name, url}` |
 | `from` | Where the card's metadata came from when it is not the page itself: the [source](#sources) whose official API answered, e.g. `federal_register` |
 | `facts` | The fields that API names for the object, by name (`document_type`, `citation`, …), or the facts a [Pubky app's](pubky-apps.md) profile reads (`card_count`, `price`, `rating`, …), or a MusicBrainz page's own facts (its `artist`, `duration` in seconds, `genre`, …: [MusicBrainz facts](#also-on)), then the facts the [also-on](#also-on) sources read for it (such as a music link's `isrc`, `upc` and `mbid`); several values of one name are joined with `; `. Each source keeps at most `limits.also_on_facts_per_source` (32, at least 8) facts per resource, cutting the many values of one name (a recording's ISRCs) before a name's one value (its MBID, artist). Each source's page lists its facts. `null` when there are none. Facts never join anything |
-| `related` | The objects the card points at, each with its own card ([Related objects](#related-objects)): on a Bitcoin or Lightning card, a transaction's block, inputs and outputs, a block's previous and next block and coinbase transaction, an address's latest transactions, a node's biggest channels and their peers, a channel's nodes and funding transaction; `[]` on every other card |
+| `related` | The objects the card points at, each with its own card ([Related objects](#related-objects)): on a Bitcoin or Lightning card, a transaction's block, inputs and outputs, a block's previous and next block and coinbase transaction, an address's latest transactions, a node's biggest channels and their peers, a channel's nodes and funding transaction; on a podcast episode's card, its show; `[]` on every other card |
 | `related_total` | How many entries of a `rel` there are when `related` lists fewer of them (`{"input": 400}`); `null` when it lists them all |
 | `keys` | The public identifiers the resource is keyed by, as `GET /v1/search?key=` takes them (`isrc:…`, `upc:…`, `doi:…`, `isbn:…`, `mb:recording:…`, `wikidata:Q…`, `osm:node/…`): the keys its sources vouch for ([Also on](#also-on)), sorted; `[]` when there are none |
 | `aliases` | Other spellings of this link that resolve to it ([aliases](#aliases)), at most 50; a page's own `url`, `@id`, `sameAs` or canonical claims are not aliases and are not listed. The card's `uri` is the canonical one: an alias is answered with its root's card |
@@ -362,16 +362,18 @@ A resource read's `related` lists the objects its card points at, so a client ca
 open each one's card. Each entry is `{rel, uri, name?, amount_sat?, at?}`:
 
 - `rel` says what it is to the card; `uri` is its card's root, which `POST /v1/resolve` reads
-  (and `GET /v1/resources/by-uri` answers once it is known), never a page on a site. An input or
+  (and `GET /v1/resources/by-uri` answers once it is known): a chain card's root, a podcast
+  show's feed, or a show's Podcast Index page, never another page on a site. An input or
   output without an address has a null `uri` and a `name` that says what it is (`OP_RETURN`,
   `P2PK`, `coinbase`, or the script type).
-- `name` is plain text (a block's "Block 975,251", a node's alias); `amount_sat` is in
-  satoshis; `at` is an RFC 3339 instant.
+- `name` is plain text (a block's "Block 975,251", a node's alias, a show's title); `amount_sat`
+  is in satoshis; `at` is an RFC 3339 instant.
 - A `rel` lists at most 10 entries; when there are more, `related_total` gives their number
   (`{"input": 400}`). Entries come in the order below; inputs, outputs and channels the largest
   first.
-- The list is read with the card and stored with it ([mempool.space](sources/mempool.md#related)):
-  it changes when the card is read again, never on a read of the resource. It is not the
+- The list is read with the card and stored with it ([mempool.space](sources/mempool.md#related),
+  an episode's feed or its page's source): it changes when the card is read again, never on a
+  read of the resource. It is not the
   `related=` search ([Related](#related)), which ranks what a link's taggers also referenced.
 
 | Card | `rel` |
@@ -381,6 +383,7 @@ open each one's card. Each entry is `{rel, uri, name?, amount_sat?, at?}`:
 | `BitcoinAddress` | `tx`: its latest transactions, those in the mempool first, with `amount_sat` what each moved into (positive) or out of (negative) the address and `at` once confirmed |
 | `LightningNode` | `channel`: its biggest open channels (`amount_sat` the capacity, `name` the peer's alias); `peer`: those channels' other nodes, each once |
 | `LightningChannel` | `node` (both, with their aliases), `funding_tx` (`amount_sat` the capacity), `closing_tx` once closed |
+| `PodcastEpisode` | `show`: its show's card (with the feed's title as `name` when read from the feed). Read from the show's feed (the episode's feed item, or a page that names its feed), the feed's address without `guid` (never one that carries a credential); from a Podcast Index episode, the show's Podcast Index page; from a Fountain episode page, the feed its page names |
 
 Roots keep their network: a testnet4 transaction's inputs are `btc-testnet4:address/…`, a signet
 channel's funding transaction `btc-signet:tx/…`.
@@ -665,6 +668,8 @@ GET /v1/resources/2950248974677c9ca34f1f67b8a2da80/occurrences?limit=10
 
 ```text
 GET /v1/resources/faf081897e81377fd45b404f02a7f190/episodes?limit=20
+GET /v1/resources/faf081897e81377fd45b404f02a7f190/episodes?offset=20&limit=20
+GET /v1/resources/faf081897e81377fd45b404f02a7f190/episodes?q=khabib
 ```
 
 ### GET /v1/resources/{id}/collections
@@ -993,6 +998,25 @@ root, and a read, lookup, change query or occurrence read of the alias answers w
   without a query, becomes an alias of that page; both spellings answer with one card. A
   canonical to another number or token, another group, another host, the group's calendar or
   any other path never aliases.
+- **A podcast episode's page**: after a read of an episode's feed item (`{feed}?guid={guid}`, as
+  [Episodes](#episodes) lists it) that ended at that address (no redirect), the page the item
+  links, without its tracking parameters, becomes an alias of the episode's card when it is that
+  item's own page, the item is in a show's stored list, and the feed's publisher publishes the
+  page too (one registrable domain, or one tenant of a shared host, on one host or a subdomain
+  of the other): a blog post whose markup reads as an `Article` answers as the
+  `PodcastEpisode`, and its tracked spellings with it. A page another item links too, the feed's
+  own `<link>` (the show's site), a site's root, a feed and a feed's item are no episode's own
+  page. Only a page Pinakes has read joins, and only while it is a plain page of its own (no
+  group, no aliases but its own tracked and slash spellings, read as a web page or an article, or as an
+  episode of the same feed); a page not read yet joins at the item's next read after
+  its own. A page that is already an alias, or that a rule above gives another root, is left as
+  it is. When reads of the item confirm it gone from its feed (the card `missing`), or a read
+  finds it linking another page or none of its own (a redirect too), the page it had answers for itself again
+  (with its tracked spellings) and is read again. A page on
+  another site than its feed (a show hosted elsewhere) keeps its own card. The publisher test is
+  the registrable domain and the shared hosts Pinakes knows (`data/multi-tenant-hosts.json`): on
+  a host that serves several publishers by path and is not listed there, one publisher's feed
+  can still name another's page that reads as a plain page or article.
 
 Refresh follows the time to an event's start: more than 30 days or no start, 7 days; 7–30 days,
 2 days; 24 hours to 7 days, 6 hours; under 24 hours or running, 1 hour
@@ -1131,15 +1155,23 @@ that rotates its members never runs into its cap and the links of one nobody fet
 ## Episodes
 
 `GET /v1/resources/{id}/episodes` lists a podcast show's latest episodes as its feed lists them,
-newest first, at most 20 (`limit`, 1–20): `{items: [...]}`, each item
+newest first: the latest 100, in pages of at most 20 (`limit`, 1–20, default 20) from `offset`
+(0–100, default 0): `{items: [...], next_offset}`, `next_offset` being the next page's `offset`
+while more episodes match, else `null`. `q` lists only the episodes whose `name` holds it, in any
+letter case (Unicode's, as Rust folds it: `über` finds `ÜBER`); at most 256 bytes, spaces around
+it ignored, a blank `q` matching every episode; it pages the same way. Each item is
 `{uri, name, image, published, guid, stream, id?}`. A show's card carries the first of them
 in `episodes`: the latest 5 that have a `stream`, in the same shape (below). `guid` is what names the item: its GUID as
 the feed gives it; its page when the feed gives none; else `sha256:` and the hex digest of its
 enclosure's URL (without a fragment), so a link that carries a token shows nothing of itself.
-`uri` is the episode's page (the feed item's link), else its feed item (`{feed}?guid={guid}`);
-the resolver names items the same way, so either resolves to the episode's `PodcastEpisode` card
-(`POST /v1/resolve`), and `id` names that card when Pinakes already has it (an alias as its
-root). `stream` is the item's enclosure when it is public and direct, in the
+`uri` is the episode's feed item, `{feed}?guid={guid}` (the GUID URL-encoded), which
+`POST /v1/resolve` reads from the feed as the episode's `PodcastEpisode` card, whatever its page
+is (a blog post's markup may read as an `Article`); `id` names that card when Pinakes already
+has it (an alias as its root). That card names its show in `related` (`rel: "show"`, the feed),
+and the page the item links (its `utm_*` and other tracking parameters dropped) becomes its
+alias when it is the item's own page on the feed's own site ([Aliases](#aliases)). From a feed read at an
+address that carries a credential, `uri` is the item's page instead, and an item without a page
+is not listed: a feed item would carry the credential. `stream` is the item's enclosure when it is public and direct, in the
 same shape as a card's (`{url, type, duration_s, preview}`: the URL a client hands to an audio
 element, its `audio/*` or `video/*` type, its length in whole seconds when the feed states one,
 and `preview: false`, the whole episode); `null` when the item has no enclosure or a signed,
@@ -1159,14 +1191,16 @@ whose feed could not be read, a service that names no feed) answers with the lis
 of its [group](#groups) that has one: the same show elsewhere. Only a card that is a show
 (`PodcastSeries`, status `ok`) borrows a member's list: a card cleared after an error, found
 missing, or of another kind lists nothing, whatever its group holds. A known resource that is no
-show, or whose feed was not read yet, returns an empty list; an unknown ID is 404. The items a
-feed holds beyond its first 200 are not looked at: feeds list newest first, and a few are out of
-order. Why a route and not a fact: a fact is one string per name, and a card's document is
+show, or whose feed was not read yet, returns an empty list; an unknown ID is 404. Only a feed's
+first 200 items are looked at, and the newest 100 of them kept: feeds list newest first, and a
+few are out of order. Why a route and not a fact: a fact is one string per name, and a card's document is
 bounded; why not occurrences: an episode has no instant to window by, no recurrence and no
 document of its own here.
 
 ```text
 GET /v1/resources/{id}/episodes?limit=20
+GET /v1/resources/{id}/episodes?offset=20&limit=20
+GET /v1/resources/{id}/episodes?q=khabib
 ```
 
 **On the card.** Every card of a show (`PodcastSeries`, status `ok`) carries `episodes`: the
@@ -1180,7 +1214,8 @@ card's refresh). A show with no such episode, and every other card, has no `epis
 
 ```json
 "episodes": [
-  {"uri": "https://darknetdiaries.com/episode/182/", "name": "182: Blackshades",
+  {"uri": "https://feeds.megaphone.fm/darknetdiaries?guid=prx_7057_c0abbff3-ae98-4e23-a389-5ee0fd824f51",
+   "name": "182: Blackshades",
    "image": "https://f.prxu.org/…/Ep182_BlackshadesSquare.jpg", "published": "2026-11-03T08:00:00Z",
    "guid": "prx_7057_c0abbff3-ae98-4e23-a389-5ee0fd824f51",
    "stream": {"url": "https://www.podtrac.com/pts/redirect.mp3/dovetail.prxu.org/…/darknet-diaries-ep182-blackshades.mp3",

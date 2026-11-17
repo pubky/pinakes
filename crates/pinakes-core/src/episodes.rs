@@ -7,10 +7,12 @@
 //! [`ON_CARD`] that have a stream (`Card::episodes`, filled by [`on_cards`] from the stored rows).
 //!
 //! Why a route and a table, not a fact: a fact is one string of at most 512 bytes per name and a
-//! card's document is bounded at 8 KiB; twenty episodes with their streams are neither. Why not
-//! occurrences: an episode has no instant to window by, no recurrence and no document of its
+//! card's document is bounded at 8 KiB; a hundred episodes with their streams are neither. Why
+//! not occurrences: an episode has no instant to window by, no recurrence and no document of its
 //! own here; the list is the feed's head and nothing more. An entry is not a card: the episode's
-//! card is its `uri` resolved (`POST /v1/resolve`), and `id` names that card when Pinakes has it.
+//! card is its `uri` (its feed item) resolved (`POST /v1/resolve`), and `id` names that card when
+//! Pinakes has it. That card names its show (`related`, `show`), and its page joins it as an
+//! alias when the feed's own publisher publishes the page ([`join_page`]).
 use crate::model::Stream;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -20,8 +22,11 @@ use std::time::Duration;
 use url::Url;
 use utoipa::ToSchema;
 
-/// How many of a show's latest episodes are kept and listed.
-pub const KEPT: usize = 20;
+/// How many of a show's latest episodes are kept, and paged through on the route: the table's
+/// bound (`podcast_episode_position_check`).
+pub const KEPT: usize = 100;
+/// The most episodes one page of the route lists.
+pub const PAGE: usize = 20;
 /// How many of a feed's items are looked at for them: feeds list newest first, and a few are
 /// out of order.
 const SCANNED: usize = 200;
@@ -33,8 +38,9 @@ pub struct Episode {
     /// absent until someone looks it up.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
-    /// The episode's page (the item's link), else its feed item (`{feed}?guid={guid}`), which
-    /// resolves to its `PodcastEpisode` card.
+    /// The episode's feed item (`{feed}?guid={guid}`), which `POST /v1/resolve` reads as its
+    /// `PodcastEpisode` card from the feed ([`ItemIdentity::uri`]); from a feed whose address
+    /// carries a credential, the item's page.
     pub uri: String,
     /// Plain text, entity-decoded: escape it before rendering it as HTML.
     pub name: Option<String>,
@@ -165,21 +171,48 @@ pub struct ItemIdentity {
     /// hex digest of its enclosure's URL (without its fragment, as the `podcast:enclosure:` key
     /// digests it), so a link that carries a token names nothing of it.
     pub guid: String,
-    /// Its `<link>`, resolved against the feed: the episode's own page.
+    /// Its `<link>`, resolved against the feed and without its tracking parameters (`utm_*`,
+    /// `fbclid`, …: `alias::untracked`): the episode's own page.
     pub page: Option<String>,
     /// The URL of its first `<enclosure>`, resolved against the feed.
     pub enclosure: Option<String>,
 }
 impl ItemIdentity {
-    /// The URI that resolves to the item's `PodcastEpisode` card: its page, else its feed item
-    /// (`{feed}?guid={guid}`, which `resolver::cards::podcast_body` matches by this GUID).
-    pub fn uri(&self, feed: &Url) -> String {
-        self.page.clone().unwrap_or_else(|| {
-            let mut u = feed.clone();
-            u.query_pairs_mut().append_pair("guid", &self.guid);
-            u.to_string()
-        })
+    /// The URI the list gives the item: its feed item ([`item_uri`], which
+    /// `resolver::cards::podcast_body` matches by this GUID), the one form that reads as the
+    /// item's `PodcastEpisode` card from the feed alone (a page may read as an article: a blog
+    /// post's markup, no feed named). From a feed read at an address that carries a credential,
+    /// its page instead, since a feed item would carry that address; `None` without one.
+    pub fn uri(&self, feed: &Url) -> Option<String> {
+        if crate::capability::is_capability_url(feed) {
+            return self.page.clone();
+        }
+        Some(item_uri(feed, &self.guid))
     }
+}
+/// A feed item as a URI: the feed's address with its `guid` (`{feed}?guid={guid}`), any `guid`
+/// the address held replaced.
+pub fn item_uri(feed: &Url, guid: &str) -> String {
+    let mut u = show_feed(feed);
+    u.query_pairs_mut().append_pair("guid", guid);
+    u.to_string()
+}
+/// The feed an address names: the address without its `guid` query parameters (a feed item's,
+/// [`item_uri`]). The other parameters keep their own encoding.
+pub fn show_feed(url: &Url) -> Url {
+    let mut u = url.clone();
+    if let Some(query) = url.query() {
+        let kept: Vec<&str> = query
+            .split('&')
+            .filter(|piece| {
+                let name = piece.split('=').next().unwrap_or_default();
+                percent_encoding::percent_decode_str(name).decode_utf8_lossy() != "guid"
+            })
+            .collect();
+        let kept = kept.join("&");
+        u.set_query((!kept.is_empty()).then_some(kept.as_str()));
+    }
+    u
 }
 /// A feed item's identity ([`ItemIdentity`]); `None` for an item nothing names (no GUID, no link,
 /// no enclosure), which is no episode. One function names items for the episode list and for
@@ -202,10 +235,11 @@ pub fn item_identity(item: roxmltree::Node<'_, '_>, feed: &Url) -> Option<ItemId
         .filter(|u| !u.is_empty())
         .and_then(link);
     // A relative link resolves against the feed's address: one that lands on a link carrying a
-    // credential is no page.
+    // credential is no page. A page shared with tracking parameters is the same page.
     let page = text("link")
         .and_then(|l| link(&l))
-        .filter(|u| !crate::capability::is_capability(u));
+        .filter(|u| !crate::capability::is_capability(u))
+        .map(|u| crate::alias::untracked(&u).unwrap_or(u));
     let guid = text("guid")
         .filter(|g| g.len() <= 2048)
         .or_else(|| page.clone())
@@ -216,6 +250,77 @@ pub fn item_identity(item: roxmltree::Node<'_, '_>, feed: &Url) -> Option<ItemId
         enclosure,
     })
 }
+/// Whether `page`, the link of an item of the feed read at `feed` (its `channel` and the `items`
+/// read), is that one item's own page: no other item read links it, and it is not the feed's
+/// own `<link>` (the show's site), a site's root, nor a feed or a feed's item ([`a_feed`]). A
+/// page several items link is the show's, never one episode's.
+pub(crate) fn own_page(
+    page: &str,
+    items: &[roxmltree::Node<'_, '_>],
+    channel: roxmltree::Node<'_, '_>,
+    feed: &Url,
+) -> bool {
+    let id = |u: &str| crate::model::identity(u).ok().map(|v| v.0);
+    let Some(own) = id(page) else {
+        return false;
+    };
+    if site_root(page) || a_feed(page, feed) {
+        return false;
+    }
+    let site = channel
+        .children()
+        .filter(|c| c.is_element() && c.tag_name().name() == "link")
+        .find_map(|c| c.text())
+        .map(str::trim)
+        .and_then(|l| crate::resolver::web::origin_url(feed, l))
+        .map(|u| crate::alias::untracked(&u).unwrap_or(u));
+    if site.as_deref().and_then(id).as_ref() == Some(&own) {
+        return false;
+    }
+    items
+        .iter()
+        .filter(|n| {
+            item_identity(**n, feed)
+                .and_then(|i| i.page)
+                .and_then(|p| id(&p))
+                .as_ref()
+                == Some(&own)
+        })
+        .count()
+        == 1
+}
+/// Whether `page` is a feed's own address or a feed item's: it names an item (a `guid`
+/// parameter), or it is the feed `feed` names (`feed` itself, or another of its items).
+fn a_feed(page: &str, feed: &Url) -> bool {
+    let Ok(url) = Url::parse(page) else {
+        return true;
+    };
+    let id = |u: &Url| {
+        crate::model::identity(show_feed(u).as_str())
+            .ok()
+            .map(|v| v.0)
+    };
+    url.query_pairs().any(|(k, _)| k == "guid") || id(&url) == id(feed)
+}
+/// A site's root: a web address whose path is empty or `/`, without a query.
+fn site_root(page: &str) -> bool {
+    Url::parse(page).is_ok_and(|u| matches!(u.path(), "" | "/") && u.query().is_none())
+}
+/// Whether two web addresses' hosts are one, or one is a subdomain of the other
+/// (`podcast.example.com` and `example.com`).
+fn related_hosts(a: &str, b: &str) -> bool {
+    let host = |u: &str| {
+        Url::parse(u).ok().and_then(|u| {
+            u.host_str()
+                .map(|h| h.trim_end_matches('.').to_ascii_lowercase())
+        })
+    };
+    let (Some(a), Some(b)) = (host(a), host(b)) else {
+        return false;
+    };
+    a == b || a.ends_with(&format!(".{b}")) || b.ends_with(&format!(".{a}"))
+}
+
 /// `sha256:` and the hex digest of an enclosure's URL without its fragment.
 fn enclosure_digest(url: &str) -> String {
     use sha2::Digest as _;
@@ -241,12 +346,9 @@ fn episode(item: roxmltree::Node<'_, '_>, feed: &Url) -> Option<Episode> {
             .filter(|u| u.len() <= 2048 && !crate::capability::is_capability(u))
     };
     let identity = item_identity(item, feed)?;
-    // An episode named by its feed item carries the feed's address in its link: none from a feed
-    // read at an address that carries a credential.
-    if identity.page.is_none() && crate::capability::is_capability_url(feed) {
-        return None;
-    }
-    let uri = identity.uri(feed);
+    // A feed item carries the feed's address in its link: from a feed read at an address that
+    // carries a credential, only an item with a page of its own is listed, by that page.
+    let uri = identity.uri(feed)?;
     if uri.len() > 2048 {
         return None;
     }
@@ -376,14 +478,22 @@ type Row = (
 pub struct EpisodeQuery {
     /// At most this many, newest first: 1–20, default 20.
     pub limit: Option<usize>,
+    /// How many of the matching episodes to skip, newest first: 0–100, default 0 (a page's
+    /// `next_offset` gives the next page's).
+    pub offset: Option<usize>,
+    /// Only the episodes whose name holds this text, in any letter case; at most 256 bytes,
+    /// spaces around it ignored, a blank one matching every episode.
+    pub q: Option<String>,
 }
 #[derive(Serialize, ToSchema)]
 pub struct EpisodePage {
     /// The show's latest episodes, newest first; empty for a resource that is no show or whose
     /// feed was not read yet.
     pub items: Vec<Episode>,
+    /// The `offset` of the next page when more episodes match; null on the last page.
+    pub next_offset: Option<usize>,
 }
-#[utoipa::path(get,path="/v1/resources/{id}/episodes",operation_id="list_episodes",tag="Media",params(("id"=String,Path),EpisodeQuery),responses((status=200,body=EpisodePage),(status=400,description="Invalid resource ID or limit"),(status=404,description="Resource not found")),description="A podcast show's latest episodes as its feed lists them, newest first: at most 20, each with its page or feed item, date and public stream. The show's own list, else, for a card that is a show, that of a member of its group which has one (an Apple Podcasts show grouped with its feed). A known resource that is no show, or no longer one, or whose feed was not read yet, returns an empty list.")]
+#[utoipa::path(get,path="/v1/resources/{id}/episodes",operation_id="list_episodes",tag="Media",params(("id"=String,Path),EpisodeQuery),responses((status=200,body=EpisodePage),(status=400,description="Invalid resource ID, limit, offset or q"),(status=404,description="Resource not found")),description="A podcast show's latest episodes as its feed lists them, newest first: the latest 100, in pages of at most 20 (`offset`, `next_offset`), optionally only those whose name holds `q` (any letter case), each with its feed item (which resolves to its PodcastEpisode card), date and public stream. The show's own list, else, for a card that is a show, that of a member of its group which has one (an Apple Podcasts show grouped with its feed). A known resource that is no show, or no longer one, or whose feed was not read yet, returns an empty list.")]
 pub async fn list(
     axum::extract::State(state): axum::extract::State<crate::api::AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -393,10 +503,23 @@ pub async fn list(
     if !crate::model::valid_id(&id) {
         return Err(ApiError::bad("invalid resource ID"));
     }
-    let limit = q.limit.unwrap_or(KEPT);
-    if !(1..=KEPT).contains(&limit) {
+    let limit = q.limit.unwrap_or(PAGE);
+    if !(1..=PAGE).contains(&limit) {
         return Err(ApiError::bad("limit must be 1–20"));
     }
+    let offset = q.offset.unwrap_or(0);
+    if offset > KEPT {
+        return Err(ApiError::bad("offset must be 0–100"));
+    }
+    if q.q.as_ref().is_some_and(|t| t.len() > 256) {
+        return Err(ApiError::bad("q is at most 256 bytes"));
+    }
+    // Folded as Rust folds letter case (`str::to_lowercase`), whatever the database's locale.
+    let wanted =
+        q.q.as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_lowercase);
     let root: Option<(String, Vec<String>, String)> = sqlx::query_as("SELECT r.id,coalesce(r.type_path,'{}'),r.status FROM resource r WHERE r.id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1)")
         .bind(&id)
         .fetch_optional(&state.pool)
@@ -411,16 +534,30 @@ pub async fn list(
     // lists nothing, whatever its group has. (`type_path` is null for an OpenStreetMap place,
     // whose card lives in `osm_place`: no show, read as an empty path.)
     let show = is_show(&type_path, &status);
-    let mut items: Vec<Episode> = stored(&state.pool, &[(root, show)], limit, false)
+    // The whole stored list (at most `KEPT` rows), matched and paged here.
+    let mut items: Vec<Episode> = stored(&state.pool, &[(root, show)], KEPT, false)
         .await?
         .into_iter()
         .map(|(_, e)| e)
+        .filter(|e| {
+            wanted.as_deref().is_none_or(|w| {
+                e.name
+                    .as_deref()
+                    .is_some_and(|n| n.to_lowercase().contains(w))
+            })
+        })
+        .skip(offset)
+        .take(limit + 1)
         .collect();
+    let next_offset = (items.len() > limit).then(|| {
+        items.truncate(limit);
+        offset + limit
+    });
     with_ids(&state.pool, items.iter_mut()).await?;
-    Ok(axum::Json(EpisodePage { items }))
+    Ok(axum::Json(EpisodePage { items, next_offset }))
 }
 
-/// The most episodes a show's card carries (`Card::episodes`); the route lists up to [`KEPT`].
+/// The most episodes a show's card carries (`Card::episodes`); the route pages through [`KEPT`].
 pub const ON_CARD: usize = 5;
 
 /// Fills `episodes` on the cards that are podcast shows ([`is_show`]): the first [`ON_CARD`] of
@@ -499,6 +636,258 @@ async fn stored(
         })
         .filter(|(_, e)| !playable || e.stream.is_some())
         .collect())
+}
+
+/// The types of a page that may join an episode's card: a page read as a plain web page or an
+/// article (a blog post's markup). A page read as an episode joins only when it names the same
+/// feed (`podcast_feed`).
+const JOINABLE: &[&str] = &[
+    "Thing",
+    "WebPage",
+    "CreativeWork",
+    "Article",
+    "BlogPosting",
+    "NewsArticle",
+];
+/// Makes an episode's page an alias of the episode's card, read from its feed item (`uri`, the
+/// card `id`, its job's `generation`) that a stored show list names: the feed names the page as
+/// the item's own link (`ResourceMeta::episode_page`, [`own_page`]), and the feed's own publisher
+/// publishes the page: one registrable domain, or one tenant of a shared host
+/// (`group_keys::same_origin`), on one host or a subdomain of the other. So a page that reads as
+/// an article (a blog post's markup that names no feed) answers as the episode, and its tracking
+/// spellings, already its aliases, follow it. Only a page Pinakes has read joins, and only while
+/// it is a plain page of its own: no group, no aliases but its own tracking and canonical
+/// spellings (which [`release_pages`] gives back), read as a type of [`JOINABLE`], or as an
+/// episode of the same feed. A page not read yet, a
+/// page that is already an alias, a site's root, a feed or a feed's item, or a page a rule of its
+/// URI gives another root (`alias::root`), is left as it is: a page read later joins at the
+/// item's next read. The basis is `source`, the feed's own claim: no rule of the URI names it, so
+/// `reextract` keeps it. Nothing joins when the card is an alias itself or its job is stale (the
+/// generation fence).
+pub(crate) async fn join_page(
+    pool: &sqlx::PgPool,
+    id: &str,
+    generation: i64,
+    uri: &str,
+    page: &str,
+) -> Result<()> {
+    let (Ok((page_id, page_uri, scheme)), Ok(feed)) =
+        (crate::model::identity(page), Url::parse(uri))
+    else {
+        return Ok(());
+    };
+    if page_id == id
+        || !matches!(scheme.as_str(), "http" | "https")
+        || page_uri.len() > 2048
+        || crate::capability::is_capability(&page_uri)
+        || crate::capability::is_capability(uri)
+        || !crate::group_keys::same_origin(&page_uri, uri)
+        || !related_hosts(&page_uri, uri)
+        || site_root(&page_uri)
+        || a_feed(&page_uri, &feed)
+        || crate::alias::root(&page_uri).is_some()
+    {
+        return Ok(());
+    }
+    let feed_id = crate::model::identity(show_feed(&feed).as_str())
+        .ok()
+        .map(|v| v.0);
+    // An item a show's stored list names, not one of any feed someone asked for (a site's search
+    // or category feed lists its posts too).
+    let listed: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM podcast_episode WHERE url=$1)")
+            .bind(uri)
+            .fetch_one(pool)
+            .await?;
+    if !listed {
+        return Ok(());
+    }
+    let mut tx = pool.begin().await?;
+    crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
+    crate::alias::lock(&mut tx).await?;
+    // The alias's row first, then its root's, as `alias::assign` locks them. A page not read yet
+    // is left: its address alone says nothing of what it is.
+    let known: Option<String> =
+        sqlx::query_scalar("SELECT id FROM resource WHERE id=$1 FOR UPDATE")
+            .bind(&page_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if known.is_none() {
+        return Ok(());
+    }
+    // An alias already, or no plain page of its own: left as it is. Its aliases may only be its
+    // own spellings, which `release_pages` gives back: tracking ones, and canonical ones that
+    // differ from it only by a trailing slash (`alias::canonical`).
+    let others: Vec<(String, String)> = sqlx::query_as(
+        "SELECT r.uri,a.basis FROM resource_alias a JOIN resource r ON r.id=a.alias_id WHERE a.root_id=$1 AND a.basis<>'tracking'",
+    )
+    .bind(&page_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let spellings = others.iter().any(|(uri, basis)| {
+        basis != "canonical" || crate::alias::canonical(uri, &page_uri).is_none()
+    });
+    let (aliased, grouped, type_path, page_feed): (
+        bool,
+        bool,
+        Option<Vec<String>>,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT EXISTS(SELECT 1 FROM resource_alias WHERE alias_id=$1),\
+         EXISTS(SELECT 1 FROM group_unit WHERE resource_id=$1 AND group_id IS NOT NULL),\
+         (SELECT type_path FROM resource WHERE id=$1),\
+         (SELECT doc->'attributes'->>'podcast_feed' FROM resource WHERE id=$1)",
+    )
+    .bind(&page_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let same_feed = || {
+        page_feed
+            .as_deref()
+            .and_then(|f| Url::parse(f).ok())
+            .and_then(|f| crate::model::identity(show_feed(&f).as_str()).ok())
+            .map(|v| v.0)
+            .is_some_and(|f| Some(f) == feed_id)
+    };
+    let joinable = match type_path.as_deref().and_then(<[String]>::last) {
+        Some(t) if t == "PodcastEpisode" => same_feed(),
+        Some(t) => JOINABLE.contains(&t.as_str()),
+        None => false,
+    };
+    if aliased || spellings || grouped || !joinable {
+        return Ok(());
+    }
+    let current: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM resource r WHERE id=$1 AND generation=$2 AND NOT EXISTS (SELECT 1 FROM resource_alias a WHERE a.alias_id=r.id) FOR UPDATE",
+    )
+    .bind(id)
+    .bind(generation)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if current.is_none() {
+        // A stale job, or a card that became an alias: nothing joins.
+        return Ok(());
+    }
+    let alias = crate::alias::Alias {
+        root: uri.to_owned(),
+        basis: "source",
+    };
+    let line = crate::alias::assign(&mut tx, &page_id, &alias).await?;
+    crate::alias::record(&mut tx, line.into_iter().collect()).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Lets go of the pages joined to an episode's card ([`join_page`], basis `source`) that its feed
+/// item no longer names as its own: those other than `keep`, the page it names now (every one
+/// when it names none). When the item has left the feed (`gone`), only once the card is
+/// confirmed missing (its stored status), so one stray answer moves nothing. Each answers for
+/// itself again, with the tracking spellings that followed it, and is read again on its own
+/// route (`alias::release`); its canonical spellings that followed it go back to it too.
+/// Nothing moves when the job is stale (the generation fence).
+pub(crate) async fn release_pages(
+    pool: &sqlx::PgPool,
+    id: &str,
+    generation: i64,
+    keep: Option<&str>,
+    gone: bool,
+) -> Result<()> {
+    let keep = keep.and_then(|p| crate::model::identity(p).ok());
+    // The page kept is the one the item names now, in any of its spellings: a link that flips
+    // its trailing slash or tracking parameters still names the page joined (`alias::canonical`).
+    let kept = |page: &str, uri: &str| {
+        keep.as_ref().is_some_and(|(id, k, _)| {
+            id == page
+                || k == uri
+                || crate::alias::canonical(uri, k).is_some()
+                || crate::alias::canonical(k, uri).is_some()
+        })
+    };
+    let joined: Vec<String> = sqlx::query_as::<_, (String, String)>(
+        "SELECT r.id,r.uri FROM resource_alias a JOIN resource r ON r.id=a.alias_id WHERE a.root_id=$1 AND a.basis='source'",
+    )
+    .bind(id)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .filter(|(page, uri)| !kept(page, uri))
+    .map(|(page, _)| page)
+    .collect();
+    let keep = keep.map(|v| v.0);
+    if joined.is_empty() {
+        return Ok(());
+    }
+    let mut tx = pool.begin().await?;
+    crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
+    crate::alias::lock(&mut tx).await?;
+    // The aliases' rows first (the pages, and the spellings that followed them here), then their
+    // root's, as `alias::assign` locks them.
+    let pages: Vec<(String, String)> = sqlx::query_as(
+        "SELECT r.id,r.uri FROM resource r JOIN resource_alias a ON a.alias_id=r.id WHERE r.id=ANY($1) AND a.root_id=$2 AND a.basis='source' ORDER BY r.id FOR UPDATE OF r",
+    )
+    .bind(&joined)
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let spellings: Vec<(String, String)> = sqlx::query_as(
+        "SELECT r.id,r.uri FROM resource r JOIN resource_alias a ON a.alias_id=r.id WHERE a.root_id=$1 AND a.basis<>'source' AND ($2::text IS NULL OR r.id<>$2) ORDER BY r.id FOR UPDATE OF r",
+    )
+    .bind(id)
+    .bind(&keep)
+    .fetch_all(&mut *tx)
+    .await?;
+    let current: Option<String> =
+        sqlx::query_scalar("SELECT status FROM resource WHERE id=$1 AND generation=$2 FOR UPDATE")
+            .bind(id)
+            .bind(generation)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let settled = current
+        .as_deref()
+        .is_some_and(|status| !gone || status == "missing");
+    if pages.is_empty() || !settled {
+        return Ok(());
+    }
+    let mut lines = vec![];
+    for (page, uri) in &pages {
+        lines.extend(crate::alias::release(&mut tx, page).await?);
+        requeue(&mut tx, page, uri).await?;
+    }
+    let released: Vec<&str> = pages.iter().map(|(p, _)| p.as_str()).collect();
+    // The card's other spellings that followed a released page here go back to it: its
+    // tracking spellings (a rule of their URI names the page) and its canonical ones (they
+    // differ from the page only by a trailing slash, `alias::canonical`). The card's own
+    // spellings, and the kept page's, stay.
+    for (spelling, uri) in &spellings {
+        let back = crate::alias::root(uri)
+            .filter(|a| {
+                crate::model::identity(&a.root).is_ok_and(|v| released.contains(&v.0.as_str()))
+            })
+            .or_else(|| {
+                pages
+                    .iter()
+                    .find_map(|(_, page)| crate::alias::canonical(uri, page))
+            });
+        if let Some(alias) = back {
+            lines.extend(crate::alias::assign(&mut tx, spelling, &alias).await?);
+        }
+    }
+    crate::alias::record(&mut tx, lines).await?;
+    tx.commit().await?;
+    Ok(())
+}
+/// Queues a released alias on its own route, now: it answers for itself again.
+async fn requeue(tx: &mut Transaction<'_, Postgres>, id: &str, uri: &str) -> Result<()> {
+    sqlx::query("UPDATE resource SET resolver=$2,attempts=0,timeout_streak=0,dead_letter=false,final=false,last_error=NULL,lease_until=NULL,priority_at=now(),generation=generation+1,next_attempt_at=now() WHERE id=$1")
+        .bind(id)
+        .bind(crate::resolver::classify(uri))
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+/// Whether `uri` is a feed item's (`{feed}?guid={guid}`, [`item_uri`]).
+pub(crate) fn names_an_item(uri: &str) -> bool {
+    Url::parse(uri).is_ok_and(|u| u.query_pairs().any(|(k, _)| k == "guid"))
 }
 
 /// Names the episodes Pinakes has as resources (`id`), by their page's identity (an alias as its
@@ -608,7 +997,7 @@ mod tests {
             ["Three", "Two", "One", "Zero"]
         );
         let three = &episodes[0];
-        assert_eq!(three.uri, "https://show.example/3");
+        assert_eq!(three.uri, "https://feeds.example.org/show.xml?guid=ep-3");
         assert_eq!(three.guid, "ep-3");
         assert_eq!(
             three.stream,
@@ -696,7 +1085,14 @@ mod tests {
         let episodes = from_feed(&f).unwrap();
         assert_eq!(episodes.len(), 5);
         assert_eq!(episodes[0].guid, "ep-1", "trimmed");
-        assert_eq!(episodes[1].uri, "https://feeds.example.org/2");
+        assert_eq!(
+            episodes[0].uri, "https://feeds.example.org/show.xml?guid=ep-1",
+            "an item with a page is named by its feed item too"
+        );
+        assert_eq!(
+            episodes[1].uri,
+            "https://feeds.example.org/show.xml?guid=https%3A%2F%2Ffeeds.example.org%2F2"
+        );
         assert_eq!(episodes[1].guid, "https://feeds.example.org/2");
         assert_eq!(
             episodes[4].uri,
@@ -730,15 +1126,180 @@ mod tests {
         assert_eq!(card.status, crate::model::Status::Missing);
     }
 
+    /// The latest hundred of the first 200 items: the items past them are not looked at.
     #[test]
-    fn the_latest_twenty_are_kept() {
-        let items: String = (1..=30)
+    fn the_latest_hundred_of_the_first_two_hundred_are_kept() {
+        let items: String = (1..=230)
             .map(|n| format!(r#"<item><title>E{n}</title><guid>e{n}</guid><pubDate>{}</pubDate><enclosure url="https://cdn.example/{n}.mp3" type="audio/mpeg"/></item>"#, chrono::DateTime::<Utc>::from_timestamp(1_700_000_000 + n * 86_400, 0).unwrap().to_rfc2822()))
             .collect();
         let episodes = from_feed(&fetched(&feed(&items), false)).unwrap();
         assert_eq!(episodes.len(), KEPT);
-        assert_eq!(episodes[0].name.as_deref(), Some("E30"));
-        assert_eq!(episodes[19].name.as_deref(), Some("E11"));
+        assert_eq!(KEPT, 100);
+        // Items 201-230 are past the part of the feed that is read: E200 is the newest seen.
+        assert_eq!(episodes[0].name.as_deref(), Some("E200"));
+        assert_eq!(episodes[99].name.as_deref(), Some("E101"));
+    }
+
+    /// A page shared with tracking parameters is the same page: the item's page, and the GUID of
+    /// an item named by its page, carry none of them; its other parameters stay as written.
+    #[test]
+    fn an_items_page_carries_no_tracking_parameters() {
+        let body = feed(concat!(
+            r#"<item><title>One</title><guid>https://show.example/?p=1</guid><link>https://show.example/one/?utm_source=rss&amp;utm_medium=rss&amp;utm_campaign=one</link><enclosure url="https://cdn.example/1.mp3" type="audio/mpeg"/></item>"#,
+            r#"<item><title>Two</title><link>https://show.example/two?id=2&amp;fbclid=x</link><enclosure url="https://cdn.example/2.mp3" type="audio/mpeg"/></item>"#,
+        ));
+        let f = fetched(&body, false);
+        let xml = roxmltree::Document::parse(&body).unwrap();
+        let items: Vec<_> = xml
+            .descendants()
+            .filter(|n| n.has_tag_name("item"))
+            .collect();
+        let one = item_identity(items[0], &f.url).unwrap();
+        assert_eq!(one.page.as_deref(), Some("https://show.example/one/"));
+        assert_eq!(one.guid, "https://show.example/?p=1");
+        let two = item_identity(items[1], &f.url).unwrap();
+        assert_eq!(two.page.as_deref(), Some("https://show.example/two?id=2"));
+        assert_eq!(two.guid, "https://show.example/two?id=2");
+        let listed = serde_json::to_string(&from_feed(&f).unwrap()).unwrap();
+        assert!(!listed.contains("utm_"), "{listed}");
+        assert!(!listed.contains("fbclid"), "{listed}");
+    }
+
+    /// A feed item's URI: the feed's address with the item's `guid`, a `guid` the address held
+    /// replaced and its other parameters kept as written; the show is the address without it.
+    #[test]
+    fn a_feed_items_uri_and_its_show() {
+        let feed: Url = "https://f.example/rss?a=b%20c&guid=old&x".parse().unwrap();
+        assert_eq!(show_feed(&feed).as_str(), "https://f.example/rss?a=b%20c&x");
+        assert_eq!(
+            item_uri(&feed, "ep 1/2"),
+            "https://f.example/rss?a=b%20c&x&guid=ep+1%2F2"
+        );
+        let plain: Url = "https://f.example/rss?guid=a".parse().unwrap();
+        assert_eq!(show_feed(&plain).as_str(), "https://f.example/rss");
+        assert_eq!(item_uri(&plain, "b"), "https://f.example/rss?guid=b");
+    }
+
+    /// An episode read from its feed item names its show (`related`, `show`: the feed, by its
+    /// title) and the page its item links, without tracking, to join as an alias; read where a
+    /// redirect led, or from a feed whose address carries a credential, it names no page to join,
+    /// and from the latter no show either.
+    #[test]
+    fn an_episode_names_its_show_and_its_page() {
+        let body = feed(
+            r#"<item><title>One</title><guid>ep-1</guid><link>https://show.example/1/?utm_source=rss</link><enclosure url="https://cdn.example/1.mp3" type="audio/mpeg"/></item>"#,
+        );
+        let mut f = fetched(&body, false);
+        f.url = "https://feeds.example.org/show.xml?guid=ep-1"
+            .parse()
+            .unwrap();
+        let card = crate::resolver::cards::podcast(f.url.as_str(), &f, 3600, 1000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(card.type_name, "PodcastEpisode");
+        let mut show =
+            crate::model::Related::new("show", Some("https://feeds.example.org/show.xml".into()));
+        show.name = Some("Show".into());
+        assert_eq!(card.related, [show]);
+        assert_eq!(
+            card.episode_page.as_deref(),
+            Some("https://show.example/1/")
+        );
+        assert!(card.episode_item);
+        // Asked at another address (a redirect led to the feed): the show, no page to join.
+        let card =
+            crate::resolver::cards::podcast("https://old.example/feed?guid=ep-1", &f, 3600, 1000)
+                .unwrap()
+                .unwrap();
+        assert_eq!(card.related.len(), 1);
+        assert_eq!(card.episode_page, None);
+        assert!(
+            card.episode_item,
+            "a redirected read still settles the joined pages"
+        );
+        // A feed whose address carries a credential: neither.
+        f.url = "https://feeds.example.org/show.xml?token=SECRET&guid=ep-1"
+            .parse()
+            .unwrap();
+        let card = crate::resolver::cards::podcast(f.url.as_str(), &f, 3600, 1000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(card.type_name, "PodcastEpisode");
+        assert!(card.related.is_empty(), "{:?}", card.related);
+        assert_eq!(card.episode_page, None);
+        assert!(!card.episode_item);
+        // A show's name is cut to the entry's bound.
+        let long = format!(
+            r#"<?xml version="1.0"?><rss version="2.0"><channel><title>{}</title><item><title>One</title><guid>ep-1</guid><enclosure url="https://cdn.example/1.mp3" type="audio/mpeg"/></item></channel></rss>"#,
+            "é".repeat(100)
+        );
+        let mut f = fetched(&long, false);
+        f.url = "https://feeds.example.org/show.xml?guid=ep-1"
+            .parse()
+            .unwrap();
+        let card = crate::resolver::cards::podcast(f.url.as_str(), &f, 3600, 1000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(card.related[0].name.as_ref().unwrap().len(), 128);
+    }
+
+    /// Only an item's own page joins its episode: not one several items link, the show's site
+    /// (the channel's `<link>`), a site's root, the feed itself or a feed's item.
+    #[test]
+    fn only_an_items_own_page_joins_its_episode() {
+        let body = format!(
+            r#"<?xml version="1.0"?><rss version="2.0"><channel><title>Show</title><link>https://show.example/podcast/?utm_source=x</link>{}</channel></rss>"#,
+            concat!(
+                r#"<item><title>A</title><guid>a</guid><link>https://show.example/a/</link><enclosure url="https://cdn.example/a.mp3" type="audio/mpeg"/></item>"#,
+                r#"<item><title>B</title><guid>b</guid><link>https://show.example/shared/</link><enclosure url="https://cdn.example/b.mp3" type="audio/mpeg"/></item>"#,
+                r#"<item><title>C</title><guid>c</guid><link>https://show.example/shared/?utm_medium=rss</link><enclosure url="https://cdn.example/c.mp3" type="audio/mpeg"/></item>"#,
+                r#"<item><title>D</title><guid>d</guid><link>https://show.example/podcast/</link><enclosure url="https://cdn.example/d.mp3" type="audio/mpeg"/></item>"#,
+                r#"<item><title>E</title><guid>e</guid><link>https://show.example/</link><enclosure url="https://cdn.example/e.mp3" type="audio/mpeg"/></item>"#,
+                r#"<item><title>F</title><guid>f</guid><link>https://feeds.example.org/show.xml</link><enclosure url="https://cdn.example/f.mp3" type="audio/mpeg"/></item>"#,
+                r#"<item><title>G</title><guid>g</guid><link>https://show.example/?p=7</link><enclosure url="https://cdn.example/g.mp3" type="audio/mpeg"/></item>"#,
+                r#"<item><title>H</title><guid>h</guid><link>https://feeds.example.org/show.xml?guid=a</link><enclosure url="https://cdn.example/h.mp3" type="audio/mpeg"/></item>"#,
+                r#"<item><title>I</title><guid>i</guid><link>https://show.example/other.xml?guid=1</link><enclosure url="https://cdn.example/i.mp3" type="audio/mpeg"/></item>"#,
+            )
+        );
+        let feed: Url = "https://feeds.example.org/show.xml".parse().unwrap();
+        let page = |guid: &str| {
+            let mut f = fetched(&body, false);
+            f.url = item_uri(&feed, guid).parse().unwrap();
+            let card = crate::resolver::cards::podcast(f.url.as_str(), &f, 3600, 1000)
+                .unwrap()
+                .unwrap();
+            assert_eq!(card.type_name, "PodcastEpisode", "{guid}");
+            card.episode_page
+        };
+        assert_eq!(page("a").as_deref(), Some("https://show.example/a/"));
+        assert_eq!(page("b"), None, "two items link it");
+        assert_eq!(page("c"), None, "two items link it, one with tracking");
+        assert_eq!(page("d"), None, "the show's site");
+        assert_eq!(page("e"), None, "a site's root");
+        assert_eq!(page("f"), None, "the feed itself");
+        assert_eq!(page("g").as_deref(), Some("https://show.example/?p=7"));
+        assert_eq!(page("h"), None, "another item of the same feed");
+        assert_eq!(page("i"), None, "an item of another feed");
+        assert!(related_hosts(
+            "https://podcast.show.example/x",
+            "https://show.example/y"
+        ));
+        assert!(related_hosts(
+            "https://show.example/x",
+            "https://www.show.example/y"
+        ));
+        assert!(!related_hosts(
+            "https://show.example/x",
+            "https://other.example/y"
+        ));
+        assert!(!related_hosts(
+            "https://a.show.example/x",
+            "https://b.show.example/y"
+        ));
+        assert!(!related_hosts(
+            "https://xshow.example/x",
+            "https://show.example/y"
+        ));
     }
 
     #[test]
