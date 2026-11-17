@@ -783,16 +783,27 @@ pub(crate) async fn release_pages(
     keep: Option<&str>,
     gone: bool,
 ) -> Result<()> {
-    let keep = keep
-        .and_then(|p| crate::model::identity(p).ok())
-        .map(|v| v.0);
-    let joined: Vec<String> = sqlx::query_scalar(
-        "SELECT alias_id FROM resource_alias WHERE root_id=$1 AND basis='source' AND ($2::text IS NULL OR alias_id<>$2)",
+    let keep = keep.and_then(|p| crate::model::identity(p).ok());
+    // The page kept is the one the item names now, in any of its spellings: a link that flips
+    // its trailing slash or tracking parameters still names the page joined (`alias::canonical`).
+    let kept = |uri: &str| {
+        keep.as_ref().is_some_and(|(_, k, _)| {
+            k == uri
+                || crate::alias::canonical(uri, k).is_some()
+                || crate::alias::canonical(k, uri).is_some()
+        })
+    };
+    let joined: Vec<String> = sqlx::query_as::<_, (String, String)>(
+        "SELECT r.id,r.uri FROM resource_alias a JOIN resource r ON r.id=a.alias_id WHERE a.root_id=$1 AND a.basis='source'",
     )
     .bind(id)
-    .bind(&keep)
     .fetch_all(pool)
-    .await?;
+    .await?
+    .into_iter()
+    .filter(|(_, uri)| !kept(uri))
+    .map(|(page, _)| page)
+    .collect();
+    let keep = keep.map(|v| v.0);
     if joined.is_empty() {
         return Ok(());
     }

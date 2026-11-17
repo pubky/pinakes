@@ -1491,12 +1491,23 @@ async fn a_joined_post_lets_go_when_its_item_no_longer_names_it(pool: PgPool) {
     let slash_flip = moved.replace(moved_post, "https://blog.example/second-moved");
     assert_ne!(slash_flip, moved);
     let flipped = alias_of_episode("https://blog.example/second-moved").await;
-    read_with(&pool, item, slash_flip).await;
+    read_with(&pool, item, slash_flip.clone()).await;
     assert_eq!(
-        root_of(flipped).await.as_deref(),
+        root_of(flipped.clone()).await.as_deref(),
         Some(episode.as_str()),
         "the kept page stays"
     );
+    assert_eq!(
+        request(&app, &by_uri(moved_post)).await.1["id"],
+        episode,
+        "the same page in another spelling stays joined"
+    );
+    // Unlinked right after the flip: the post lets go, its slash-less spelling with it.
+    let flip_unlinked = slash_flip.replace("<link>https://blog.example/second-moved</link>", "");
+    assert_ne!(flip_unlinked, slash_flip);
+    read_with(&pool, item, flip_unlinked).await;
+    assert_eq!(request(&app, &by_uri(moved_post)).await.1["id"], moved_id);
+    assert_eq!(root_of(flipped).await.as_deref(), Some(moved_id.as_str()));
     read_with(&pool, item, moved.clone()).await;
     assert_eq!(request(&app, &by_uri(moved_post)).await.1["id"], episode);
     // The item links no page of its own any more (its link removed): the post lets go; linked
