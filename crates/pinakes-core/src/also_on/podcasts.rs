@@ -1285,6 +1285,18 @@ mod tests {
     /// the publisher's pages by that identity.
     #[test]
     fn an_rss_item_link_is_the_feed_item_an_entry_names() {
+        assert_eq!(
+            rss_item("https://podcast.darknetdiaries.com/", "prx_7057_141e0c43").as_deref(),
+            Some("https://podcast.darknetdiaries.com/?guid=prx_7057_141e0c43")
+        );
+        assert_eq!(
+            rss_item(
+                "https://example.com/feed.xml?guid=show&format=mp3",
+                "ep 1/2"
+            )
+            .as_deref(),
+            Some("https://example.com/feed.xml?format=mp3&guid=ep+1%2F2")
+        );
         for feed in [
             "https://podcast.example.com/",
             "https://example.com/feed.xml?format=mp3",

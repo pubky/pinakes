@@ -1563,8 +1563,8 @@ async fn a_joined_post_lets_go_when_its_item_no_longer_names_it(pool: PgPool) {
 /// An entry's feed item that the publisher's own page names as its podcast item (a certain
 /// `podcast:item:` link of the `podcasts` source) is that page's episode: the route and the show's
 /// card name the page's card (`id`), its link as `uri` and the feed item plus the card's aliases
-/// in `aliases`, so tags on the page show on the entry. Of two such pages, the most recently seen
-/// link wins and the other follows in `aliases`; a publisher's page read as an article is no
+/// in `aliases`, so tags on the page show on the entry. Of two such pages, the card Pinakes knew
+/// first wins and the other follows in `aliases`; a publisher's page read as an article is no
 /// episode but its link follows in `aliases`. A directory's page naming the same item (Podcast
 /// Index), a page on another site or a sibling host, a `maybe` link, an expired one, a switched-off
 /// source's, a card that is an alias or not `ok`, and a card of another type are never named;

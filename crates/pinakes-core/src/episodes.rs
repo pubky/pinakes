@@ -1033,10 +1033,11 @@ async fn with_ids<'a>(
 /// the rules a page that joins an episode keeps ([`join_page`]): a web page on the feed's own
 /// registrable domain, or its tenant of a shared host (`group_keys::same_origin`), on the feed's
 /// host or a subdomain of the other; neither a site's root nor a feed or a feed's item, and
-/// carrying no credential; and no page a source of Pinakes reads as a service's own
-/// (`sources::reading`: a Podcast Index page, even of a feed Podcast Index hosts on
-/// `feeds.podcastindex.org`). So another show's or a directory's page that names the same item is
-/// never the episode an entry names.
+/// carrying no credential; and, on another host than the feed's, no page a source of Pinakes
+/// reads as a service's own (`sources::reading`: a Podcast Index page, even of a feed Podcast
+/// Index hosts on `feeds.podcastindex.org`; a Substack show's posts, on its feed's host, stay
+/// its own). So another show's or a directory's page that names the same item is never the
+/// episode an entry names.
 fn publisher_page(page: &str, item: &str) -> bool {
     let (Ok(url), Ok(feed)) = (Url::parse(page), Url::parse(item)) else {
         return false;
@@ -1049,7 +1050,17 @@ fn publisher_page(page: &str, item: &str) -> bool {
         && related_hosts(page, item)
         && !site_root(page)
         && !a_feed(page, &feed)
-        && crate::sources::reading(page).is_none()
+        && (crate::sources::reading(page).is_none() || same_host(page, item))
+}
+/// Whether two web addresses have one host.
+fn same_host(a: &str, b: &str) -> bool {
+    let host = |u: &str| {
+        Url::parse(u).ok().and_then(|u| {
+            u.host_str()
+                .map(|h| h.trim_end_matches('.').to_ascii_lowercase())
+        })
+    };
+    host(a).is_some_and(|h| Some(h) == host(b))
 }
 
 #[cfg(test)]
@@ -1077,6 +1088,10 @@ mod tests {
             "https://podcastindex.org/podcast/920666?episode=61842097688",
             hosted
         ));
+        // A page a source reads, on the feed's own host: a Substack show's post.
+        let substack = "https://show.substack.com/feed?guid=ep-1";
+        assert!(crate::sources::reading("https://show.substack.com/p/ep-1").is_some());
+        assert!(publisher_page("https://show.substack.com/p/ep-1", substack));
     }
     use super::*;
 
