@@ -118,7 +118,7 @@ const OTHER: &str = "ybbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 /// A Nexus whose batch resource view knows [`NEXUS_KNOWS`].
 async fn nexus() -> String {
     let app = Router::new().route(
-        "/v0/stream/resources/by_ids",
+        "/v1/stream/resources/by_ids",
         post(|Json(body): Json<Value>| async move {
             let views: Vec<Value> = body["uris"]
                 .as_array()
@@ -126,9 +126,12 @@ async fn nexus() -> String {
                 .iter()
                 .filter_map(|u| {
                     let (uri, label, taggers) = NEXUS_KNOWS.iter().find(|(k, _, _)| u == k)?;
+                    // `tag_uri` is the viewer's own tag file, when the viewer tagged the label.
+                    let viewer = body["viewer_id"].as_str().filter(|v| taggers.contains(v));
+                    let tag_uri = viewer.map(|v| format!("pubky://{v}/pub/social/v1/tags/0034A"));
                     Some(json!({"details": {"id": "n1", "uri": uri}, "taggers_count": taggers.len(),
                            "tags": [{"label": label, "taggers_count": taggers.len(), "taggers": taggers,
-                                     "relationship": taggers.contains(&body["viewer_id"].as_str().unwrap_or_default())}]}))
+                                     "tag_uri": tag_uri}]}))
                 })
                 .collect();
             Json(Value::Array(views))
@@ -458,13 +461,16 @@ async fn the_mcp_handshake_and_every_tool(pool: PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn social_without_a_nexus_is_a_plain_error(pool: PgPool) {
-    // Nothing listens at the first; the second is a Nexus without the batch resource view, whose
-    // 404 is no answer either, never an empty one (every URI "unknown").
+    // Nothing listens at the first; the second is a Nexus that serves the batch resource view on
+    // `/v0` only, whose 404 on `/v1` is no answer either, never an empty one (every URI "unknown").
     let free = std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
         .unwrap();
-    let older = Router::new().route("/v0/info", axum::routing::get(|| async { "{}" }));
+    let older = Router::new().route(
+        "/v0/stream/resources/by_ids",
+        post(|| async { Json(json!([])) }),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let older_url = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, older).await.unwrap() });
@@ -922,7 +928,7 @@ async fn social_never_sends_a_link_that_carries_a_credential_to_the_nexus(pool: 
     let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let seen = asked.clone();
     let app = Router::new().route(
-        "/v0/stream/resources/by_ids",
+        "/v1/stream/resources/by_ids",
         post(move |Json(body): Json<Value>| {
             let seen = seen.clone();
             async move {
@@ -959,7 +965,7 @@ async fn social_asks_the_nexus_by_a_cards_plain_links_only(pool: PgPool) {
     let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let seen = asked.clone();
     let app = Router::new().route(
-        "/v0/stream/resources/by_ids",
+        "/v1/stream/resources/by_ids",
         post(move |Json(body): Json<Value>| {
             let seen = seen.clone();
             async move {

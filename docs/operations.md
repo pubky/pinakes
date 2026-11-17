@@ -418,7 +418,7 @@ the guide stays.
 
 ## Ingestion
 
-`pinakesd` polls the Nexus reference feed every `limits.poll_secs`. Pinakes keys each line on its
+`pinakesd` polls the Nexus reference feed (`GET /v1/resources/changes`) every `limits.poll_secs`. Pinakes keys each line on its
 `uri`, normalized and hashed into its own ID (Nexus's `resource_id` is not read); a URI that does
 not normalize is rejected (`uri`). A line's author must be 52
 lowercase z-base-32 characters; labels and object paths must be non-empty, NUL-free and within
@@ -483,7 +483,7 @@ a version left is `missing`. A `kind:event` line, which Nexus reserves, is `unkn
 
 Search's `reach` and `boost` read the viewer's `following` and `friends` lists from the same
 Nexus. `nexus_reach_set` (default `false`) says that Nexus also serves the reach-set route
-(`GET /v0/user/{viewer}/reach-set?depth=2`), which `wot_2` reads; while it is off, `wot_2`
+(`GET /v1/user/{viewer}/reach-set?depth=2`), which `wot_2` reads; while it is off, `wot_2`
 answers 501 and Nexus is never asked for it. Sets are kept in memory only, per viewer, five
 minutes (a `wot_2` set up to an hour, re-validated by its `ETag`).
 

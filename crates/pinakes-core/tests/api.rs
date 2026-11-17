@@ -647,9 +647,9 @@ async fn mock_nexus(lines: Vec<Change>) -> (String, Arc<AtomicUsize>, tokio::tas
     let addr = listener.local_addr().unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let app = Router::new()
-        .route("/v0/user/{id}/following", get(following))
-        .route("/v0/user/{id}/friends", get(friends))
-        .route("/v0/resources/changes", get(changes))
+        .route("/v1/user/{id}/following", get(following))
+        .route("/v1/user/{id}/friends", get(friends))
+        .route("/v1/resources/changes", get(changes))
         .with_state(Mock {
             calls: calls.clone(),
             lines,
@@ -1637,7 +1637,7 @@ async fn reach_membership_changes_invalidate_etags_without_resource_writes(pool:
         axum::serve(
             listener,
             Router::new().route(
-                "/v0/user/{id}/following",
+                "/v1/user/{id}/following",
                 get(move || {
                     let flag = flag.clone();
                     async move {
@@ -3713,15 +3713,15 @@ async fn graph_nexus(friend: usize, wot: usize) -> (String, tokio::task::JoinHan
     let addr = listener.local_addr().unwrap();
     let app = Router::new()
         .route(
-            "/v0/user/{id}/friends",
+            "/v1/user/{id}/friends",
             get(move || async move { Json(vec![author(friend)]) }),
         )
         .route(
-            "/v0/user/{id}/following",
+            "/v1/user/{id}/following",
             get(|| async { Json((0..5).map(author).collect::<Vec<_>>()) }),
         )
         .route(
-            "/v0/user/{id}/reach-set",
+            "/v1/user/{id}/reach-set",
             get(move || async move {
                 (
                     [("etag", "\"set-1\"")],

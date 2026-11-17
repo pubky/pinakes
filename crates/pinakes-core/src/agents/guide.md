@@ -197,12 +197,13 @@ by id. Who tagged a link, with which labels, and what your own follows think of 
 2. Send those URIs, 100 at a time, to the Nexus batch resource view:
 
 ```sh
-curl -s "$NEXUS/v0/stream/resources/by_ids" -H 'content-type: application/json' \
+curl -s "$NEXUS/v1/stream/resources/by_ids" -H 'content-type: application/json' \
   -d '{"uris":["https://www.openstreetmap.org/node/240109189"],"viewer_id":"<your pubky key>"}'
 ```
 
 Each answer has `details.uri`, `tags` (`label`, `taggers_count`, and with `viewer_id`
-`relationship`: whether the viewer used that label) and `taggers_count`, in request order;
+`tag_uri`: the address of the viewer's own tag file for that label, `null` when they did not use
+it) and `taggers_count`, in request order;
 unknown URIs are skipped. Through MCP, the `social` tool does the whole join with the Nexus this
 instance reads: give it card ids, and it asks by each card's `uri` and `refs` and merges the
 answers per card (each tagger counted once per label; `at_least: true` marks a count that is a
