@@ -885,7 +885,10 @@ dead-letter state. A 202 carries the ID to poll with `GET /v1/resources/{id}`. U
 schemes or disabled resolvers return 400, and so does a link that carries a credential: a
 calendar provider's secret share link (the patterns `scripts/verify-no-capability-urls` keeps out
 of the repository), a password in the user info, or a key such as `token`, `access_token`, `key`,
-`sig` or `signature` (`capability::CREDENTIAL_KEYS`) in the query (its parameters separated by
+`sig` or `signature` (`capability::CREDENTIAL_KEYS`), or one that ends like `client_secret`,
+`X-Api-Key`, `access_key`, `auth_token` or `session_id` once its case, `-`, `_` and `.` are set
+aside, but a public list's page cursor such as `pageToken` (`capability::credential_key`), in the
+query (its parameters separated by
 `&` or `;`), or with a value in a
 form-encoded fragment or any part of it after a `?`, `#` or `;` (a hash router's
 `#/reset?token=…`); a plain anchor such as `#key` is not one. It is not stored, does not count against the preview

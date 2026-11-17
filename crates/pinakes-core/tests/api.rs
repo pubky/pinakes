@@ -809,6 +809,21 @@ async fn a_link_that_carries_a_credential_is_never_previewed(pool: PgPool) {
     assert!(logs.contains("events.example.org"));
 }
 
+/// A key that only looks like a credential's (a public list's page cursor, a word holding
+/// `token` or `secret`) is none: `POST /v1/resolve` takes every public probe of the shared
+/// fixture.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_key_that_only_looks_like_a_credential_is_previewed(pool: PgPool) {
+    let probes: Value =
+        serde_json::from_str(include_str!("fixtures/capability_urls.json")).unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    for probe in probes["public"].as_array().unwrap() {
+        let probe = probe.as_str().unwrap();
+        let (code, answer) = call(&app, "POST", "/v1/resolve", Some(json!({"uri": probe}))).await;
+        assert!(code == 200 || code == 202, "{probe}: {code} {answer}");
+    }
+}
+
 /// The instance takes at most `limits.preview_new_per_hour` new previews an hour, whoever asks:
 /// over it, `POST /v1/resolve` of a link it does not know answers 503 with `Retry-After` and stores
 /// nothing, a link it knows still reads, and a client over its own budget gets 429 first.
