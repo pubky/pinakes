@@ -1639,6 +1639,17 @@ async fn an_entry_names_the_publishers_episode_page_and_its_other_links(pool: Pg
         .await
         .unwrap();
     assert_eq!(root, page);
+    // Its feed item was read too, as a card of its own, with a spelling of its own.
+    let item_card = card(&pool, &item(6), "PodcastEpisode").await;
+    let item_spelling = store::ensure_resource(&pool, "https://show.example.com/p/6")
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'source')")
+        .bind(&item_spelling)
+        .bind(&item_card)
+        .execute(&pool)
+        .await
+        .unwrap();
     // 5: only a directory's page, a page on another site, a sibling host and a `maybe` link.
     let other = card(
         &pool,
@@ -1700,7 +1711,7 @@ async fn an_entry_names_the_publishers_episode_page_and_its_other_links(pool: Pg
         .execute(&pool)
         .await
         .unwrap();
-    // 7: two publisher's pages: the most recently seen link wins, the other follows.
+    // 7: two publisher's pages: the card known first wins, the other follows.
     let older = card(&pool, "https://show.example.com/e/7", "PodcastEpisode").await;
     names(&pool, &older, &item(7), None, "1 day", "2 days").await;
     let newer = card(
@@ -1770,8 +1781,12 @@ async fn an_entry_names_the_publishers_episode_page_and_its_other_links(pool: Pg
     assert_eq!(six["uri"], "https://show.example.com/episode/6/");
     assert_eq!(
         six["aliases"],
-        serde_json::json!([item(6), "https://show.example.com/episode/6/?utm_source=x"]),
-        "the feed item first, then the card's aliases"
+        serde_json::json!([
+            item(6),
+            "https://show.example.com/episode/6/?utm_source=x",
+            "https://show.example.com/p/6"
+        ]),
+        "the feed item first, then the card's aliases, then the feed item's card's"
     );
     for (guid, why) in [
         (
@@ -1797,11 +1812,25 @@ async fn an_entry_names_the_publishers_episode_page_and_its_other_links(pool: Pg
     );
     assert_eq!(find(&items, "ep-3")["id"], off, "with the source on again");
     let seven = find(&items, "ep-7");
-    assert_eq!(seven["id"], newer, "the most recently seen link: {seven}");
+    assert_eq!(seven["id"], older, "the card known first: {seven}");
     assert_eq!(
         seven["aliases"],
-        serde_json::json!([item(7), "https://show.example.com/e/7"])
+        serde_json::json!([item(7), "https://show.example.com/episode/7/"])
     );
+    // Whichever was known first, not whichever sorts first.
+    sqlx::query("UPDATE resource SET created_at=now()-interval '1 day' WHERE id=$1")
+        .bind(&newer)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (_, again) = request(&app, &format!("/v1/resources/{show_id}/episodes")).await;
+    let seven_again = find(&entries(&again), "ep-7");
+    assert_eq!(seven_again["id"], newer, "{seven_again}");
+    sqlx::query("UPDATE resource SET created_at=now()-interval '2 days' WHERE id=$1")
+        .bind(&older)
+        .execute(&pool)
+        .await
+        .unwrap();
     let one = find(&items, "ep-1");
     assert_eq!(one["id"], own, "the feed item's own card: {one}");
     assert_eq!(one["uri"], item(1));
@@ -1819,5 +1848,6 @@ async fn an_entry_names_the_publishers_episode_page_and_its_other_links(pool: Pg
     );
     assert_eq!(on_card[0]["aliases"], serde_json::json!([tracked_item]));
     let card_seven = on_card.iter().find(|e| e["guid"] == "ep-7").unwrap();
+    assert_eq!(card_seven["id"], older, "{show_card}");
     assert_eq!(*card_seven, seven, "{show_card}");
 }

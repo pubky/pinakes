@@ -913,11 +913,12 @@ pub const ALIASES: usize = 16;
 /// item's link; never a `maybe`, an expired link or a switched-off source's), on the feed's own
 /// site ([`publisher_page`]), read as an episode or as a page that may join one ([`JOINABLE`]).
 /// That is the page people share and tag. An entry's episode is, first, such a page read as a
-/// `PodcastEpisode` (the most recently seen link first, then by ID): a card of its own, which
-/// [`join_page`] never joins to the item while a group holds it. Else the card the entry's
-/// `uri` reads as (an alias as its root). When `uri` becomes another card's link, the feed item
-/// is the first of `aliases`; the publisher's other pages follow, then the card's aliases, so
-/// what was written on any of them is read with the entry.
+/// `PodcastEpisode` (the card Pinakes knew first, then by ID, so the choice holds from one read
+/// to the next): a card of its own, which [`join_page`] never joins to the item while a group
+/// holds it. Else the card the entry's `uri` reads as (an alias as its root). When `uri` becomes
+/// another card's link, the feed item is the first of `aliases`; the link of the card the feed
+/// item reads as and the publisher's other pages follow, then the aliases of each of those cards
+/// (the named card's first), so what was written on any of them is read with the entry.
 async fn with_ids<'a>(
     pool: &sqlx::PgPool,
     episodes: impl IntoIterator<Item = &'a mut Episode>,
@@ -940,57 +941,66 @@ async fn with_ids<'a>(
     let joinable: Vec<&str> = JOINABLE.to_vec();
     // `(identity, 0, card, its link, null)` for the card the entry's link reads as,
     // `(identity, 1, card, its link, type)` for each publisher's page that names it as its
-    // feed item, the most recently seen first.
+    // feed item, the card known first first.
     let known: Vec<(String, i32, String, String, Option<String>)> = sqlx::query_as(
         "WITH i AS (SELECT DISTINCT i,l FROM unnest($1::text[],$3::text[]) AS t(i,l)) \
          SELECT i,rank,id,uri,kind FROM ( \
-         SELECT i.i,0 AS rank,r.id,r.uri,NULL::text AS kind,NULL::timestamptz AS seen FROM i LEFT JOIN resource_alias a ON a.alias_id=i.i JOIN resource r ON r.id=coalesce(a.root_id,i.i) \
+         SELECT i.i,0 AS rank,r.id,r.uri,NULL::text AS kind,NULL::timestamptz AS known FROM i LEFT JOIN resource_alias a ON a.alias_id=i.i JOIN resource r ON r.id=coalesce(a.root_id,i.i) \
          UNION ALL \
-         SELECT i.i,1,r.id,r.uri,r.type_path[cardinality(r.type_path)],d.seen_at FROM i JOIN derived_link d ON d.link_id=i.l AND d.key IS NOT NULL JOIN resource r ON r.id=d.resource_id \
+         SELECT i.i,1,r.id,r.uri,r.type_path[cardinality(r.type_path)],r.created_at FROM i JOIN derived_link d ON d.link_id=i.l AND d.key IS NOT NULL JOIN resource r ON r.id=d.resource_id \
            WHERE d.source='podcasts' AND d.key LIKE 'podcast:item:%' AND d.kind IS NULL AND d.expires_at>now() \
            AND d.source NOT IN (SELECT source FROM also_on_source_off) \
            AND r.status='ok' AND (r.type_path[cardinality(r.type_path)]='PodcastEpisode' OR r.type_path[cardinality(r.type_path)]=ANY($2)) \
            AND NOT EXISTS (SELECT 1 FROM resource_alias x WHERE x.alias_id=r.id) \
-         ) k ORDER BY i,rank,seen DESC,id",
+         ) k ORDER BY i,rank,known,id",
     )
     .bind(&identities)
     .bind(&joinable)
     .bind(&linked)
     .fetch_all(pool)
     .await?;
+    // Per entry, the cards whose aliases follow it: the named card first.
+    let mut from: Vec<Vec<String>> = Vec::with_capacity(episodes.len());
     for e in episodes.iter_mut() {
-        let Some(identity) = crate::model::identity(&e.uri).ok().map(|v| v.0) else {
-            continue;
-        };
-        let rows = || known.iter().filter(|(i, ..)| *i == identity);
-        let pages: Vec<&(String, i32, String, String, Option<String>)> = rows()
-            .filter(|(_, rank, ..)| *rank == 1)
-            .filter(|(_, _, _, uri, _)| names_an_item(&e.uri) && publisher_page(uri, &e.uri))
-            .collect();
-        let episode = pages
-            .iter()
-            .copied()
-            .find(|(.., kind)| kind.as_deref() == Some("PodcastEpisode"))
-            .or_else(|| rows().find(|(_, rank, ..)| *rank == 0));
-        let mut aliases = vec![];
-        match episode {
-            Some((_, _, id, uri, _)) => {
-                e.id = Some(id.clone());
+        let mut cards: Vec<String> = vec![];
+        let mut links: Vec<String> = vec![];
+        if let Some(identity) = crate::model::identity(&e.uri).ok().map(|v| v.0) {
+            let rows = || known.iter().filter(|(i, ..)| *i == identity);
+            let pages: Vec<&(String, i32, String, String, Option<String>)> = rows()
+                .filter(|(_, rank, ..)| *rank == 1)
+                .filter(|(_, _, _, uri, _)| names_an_item(&e.uri) && publisher_page(uri, &e.uri))
+                .collect();
+            let own = rows().find(|(_, rank, ..)| *rank == 0);
+            let episode = pages
+                .iter()
+                .copied()
+                .find(|(.., kind)| kind.as_deref() == Some("PodcastEpisode"))
+                .or(own);
+            e.id = episode.map(|(_, _, id, ..)| id.clone());
+            if let Some((_, _, id, uri, _)) = episode {
+                cards.push(id.clone());
                 if *uri != e.uri {
-                    aliases.push(std::mem::replace(&mut e.uri, uri.clone()));
+                    links.push(std::mem::replace(&mut e.uri, uri.clone()));
                 }
             }
-            None => e.id = None,
-        }
-        for (_, _, _, uri, _) in &pages {
-            if *uri != e.uri && !aliases.contains(uri) {
-                aliases.push(uri.clone());
+            // The card the feed item reads as, when another is named, then the publisher's
+            // other pages.
+            for (_, _, id, uri, _) in own.into_iter().chain(pages.iter().copied()) {
+                if !cards.contains(id) {
+                    cards.push(id.clone());
+                }
+                if *uri != e.uri && !links.contains(uri) {
+                    links.push(uri.clone());
+                }
             }
+        } else {
+            e.id = None;
         }
-        aliases.truncate(ALIASES);
-        e.aliases = aliases;
+        links.truncate(ALIASES);
+        e.aliases = links;
+        from.push(cards);
     }
-    let cards: Vec<String> = episodes.iter().filter_map(|e| e.id.clone()).collect();
+    let cards: Vec<String> = from.iter().flatten().cloned().collect();
     if cards.is_empty() {
         return Ok(());
     }
@@ -1004,16 +1014,15 @@ async fn with_ids<'a>(
     .bind(ALIASES as i64)
     .fetch_all(pool)
     .await?;
-    for e in episodes.iter_mut() {
-        let Some(id) = e.id.as_deref() else {
-            continue;
-        };
-        for (_, uri) in aliases.iter().filter(|(card, _)| card == id) {
-            if e.aliases.len() >= ALIASES {
-                break;
-            }
-            if *uri != e.uri && !e.aliases.contains(uri) {
-                e.aliases.push(uri.clone());
+    for (e, cards) in episodes.iter_mut().zip(&from) {
+        for id in cards {
+            for (_, uri) in aliases.iter().filter(|(card, _)| card == id) {
+                if e.aliases.len() >= ALIASES {
+                    break;
+                }
+                if *uri != e.uri && !e.aliases.contains(uri) {
+                    e.aliases.push(uri.clone());
+                }
             }
         }
     }
