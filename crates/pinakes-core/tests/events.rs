@@ -711,19 +711,19 @@ async fn dropped_key_with_a_live_twin_is_superseded_not_cancelled(pool: PgPool) 
     for missing in ["tok0", "tok1", "tok2", "q5", "geoA"] {
         assert_eq!(status(missing), "scheduled", "{missing}");
     }
-    // A release before this rule cancelled tok1 already.
-    sqlx::query("UPDATE occurrence SET status='cancelled', doc=jsonb_set(doc,'{event_status}','\"cancelled\"') WHERE uid='event_tok1@meetup.com'")
+    // A release before this rule cancelled tok1 already, its last listing an hour before 101 came.
+    sqlx::query("UPDATE occurrence SET status='cancelled', doc=jsonb_set(jsonb_set(doc,'{event_status}','\"cancelled\"'),'{fetched_at}',to_jsonb((doc->>'fetched_at')::bigint-3600000)) WHERE uid='event_tok1@meetup.com'")
         .execute(&pool)
         .await
         .unwrap();
-    let status = save(with_others(vec![
+    let settled = with_others(vec![
         ("100", 0, t),
         ("101", 1, t),
         ("tok3", 3, t),
         ("p5", 5, t),
         ("geoB", 6, "Casual meetup\nGEO:46;7"),
-    ]))
-    .await;
+    ]);
+    let status = save(settled.clone()).await;
     assert_eq!(status("tok0"), "superseded");
     assert_eq!(status("tok1"), "superseded");
     assert_eq!(status("tok2"), "cancelled");
@@ -732,6 +732,12 @@ async fn dropped_key_with_a_live_twin_is_superseded_not_cancelled(pool: PgPool) 
     assert_eq!(status("geoA"), "cancelled");
     for live in ["100", "101", "p5", "tok3", "geoB"] {
         assert_eq!(status(live), "scheduled", "{live}");
+    }
+    // A refresh later the cancelled keys stay cancelled: p5 was listed beside q5, geoB is
+    // another place.
+    let status = save(settled).await;
+    for gone in ["tok2", "q5", "geoA"] {
+        assert_eq!(status(gone), "cancelled", "{gone}");
     }
     assert_eq!(
         sqlx::query_scalar::<_, i64>(

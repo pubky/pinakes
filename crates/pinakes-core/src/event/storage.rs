@@ -89,8 +89,9 @@ fn page_url(doc: &ResourceMeta, id: &str, canonical_id: &str) -> Option<String> 
 /// and a new page (Meetup: `/events/<token>/` -> `/events/<number>/`), so the feed's content
 /// hash, which keeps the page link, differs. What a stored row gained after its feed gave it
 /// (a resolved venue and zone, `preserve_venue`, or a looked-up point) is left out too: the
-/// venue's own text, name and address count, and a point the feed or page gave. The description counts as plain text, so a stored copy
-/// still in Markdown matches one read since as plain text (`markdown_plain`, Meetup).
+/// venue's own text, name and address count, and a point the feed or page gave. The description
+/// counts by its words, so a stored copy still in Markdown matches one read since as plain text
+/// (`markdown_plain`, Meetup).
 type SameDate = (
     String,
     Option<chrono::DateTime<chrono::Utc>>,
@@ -113,8 +114,19 @@ fn same_date(doc: &ResourceMeta) -> SameDate {
         if let Some(venue) = object.get_mut("venue").and_then(Value::as_object_mut) {
             venue.retain(|k, _| matches!(k.as_str(), "text" | "name" | "address"));
         }
-        if let Some(Value::String(text)) = object.get_mut("description") {
-            *text = crate::sources::markdown_plain(text);
+        if let Some(Value::String(text)) = object.get("description") {
+            // Its words without marks: the same for Markdown and for text already read as
+            // plain text, however often. No words is no description (`meetup_plain` keeps none).
+            let words = crate::sources::markdown_plain(text)
+                .split(|c: char| c.is_whitespace() || "*_`#>\\".contains(c))
+                .filter(|w| !w.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if words.is_empty() {
+                object.remove("description");
+            } else {
+                object.insert("description".into(), Value::String(words));
+            }
         }
     }
     (
@@ -125,6 +137,9 @@ fn same_date(doc: &ResourceMeta) -> SameDate {
         doc.name.clone(),
     )
 }
+/// How long after a snapshot's fetch its new keys are surely written: a key first listed later
+/// was not listed in that snapshot (feeds are not read again this soon).
+const LISTING_GAP_MS: i64 = 10 * 60 * 1000;
 /// The first key of `keys` under `at` that no other row superseded yet.
 fn take<K: Ord>(
     keys: &mut BTreeMap<K, Vec<String>>,
@@ -367,7 +382,13 @@ pub async fn prepare(
     // (below), and its stored document while the date is the same, as the feed may have
     // changed its text since a dropped key was stored.
     let mut live: BTreeMap<SameDate, BTreeSet<String>> = BTreeMap::new();
-    if !container.delta {
+    // Only when a key may be dropped now: one cancelled now, or one cancelled earlier and gone.
+    let dropping = !container.delta
+        && (!cancelled.is_empty()
+            || old.iter().any(|(key, (_, _, d, status, _, _, _))| {
+                status == "cancelled" && !fetched_keys.contains(key) && mutable(d)
+            }));
+    if dropping {
         for item in &container.occurrences {
             let key = item.key();
             if !fetched_keys.contains(&key) || !incoming.contains(&key) {
@@ -435,7 +456,7 @@ pub async fn prepare(
         } else {
             None
         };
-        if !container.delta && incoming.contains(&key) {
+        if dropping && incoming.contains(&key) {
             live.entry(same_date(&doc)).or_default().insert(key.clone());
         }
         if let Some(key) = &supersedes {
@@ -453,11 +474,13 @@ pub async fn prepare(
     // another key lists its date and was first listed once it was gone: the date was renumbered
     // (the new key's first copy differed, or a release before this rule missed the link change).
     // Cancelled now (missing twice): the other key is first listed at or after the previous
-    // snapshot, the first one without this key. Cancelled earlier: after this key's stored
-    // document was fetched, its last listing. A key listed beside it before is a second session
-    // of that date, and the dropped one stays cancelled. First listed = the key's `created`
-    // change; without one, nothing is superseded.
-    if !container.delta && !live.is_empty() {
+    // snapshot, the first one without this key. Cancelled earlier: more than `LISTING_GAP_MS`
+    // after this key's stored document was fetched (its last listing, whose own new keys are
+    // written within seconds of that fetch); not for NIP-52 members, whose stored document is
+    // the member's own fetch. A key listed beside it before is a second session of that date,
+    // and the dropped one stays cancelled. First listed = the key's `created` change; without
+    // one, or once the key superseded another, nothing is superseded.
+    if dropping && !live.is_empty() {
         let dropped: Vec<_> = old
             .iter()
             .filter(|(key, (uid, _, d, status, _, _, _))| {
@@ -469,8 +492,10 @@ pub async fn prepare(
             .filter_map(|(key, (_, _, d, _, _, _, _))| {
                 let since = if cancelled.contains(key) {
                     plan.last.map(|at| at - 1)
+                } else if d.source != "nip52" {
+                    Some(d.fetched_at.saturating_add(LISTING_GAP_MS))
                 } else {
-                    Some(d.fetched_at)
+                    None
                 }?;
                 live.get(&same_date(d)).map(|twins| (key, since, twins))
             })
@@ -483,7 +508,7 @@ pub async fn prepare(
                 .into_iter()
                 .collect();
             let listed: BTreeMap<String, i64> = sqlx::query_as(
-                "SELECT occurrence_key,(extract(epoch FROM min(at))*1000)::bigint FROM resource_change WHERE resource_id=$1 AND class='created' AND occurrence_key=ANY($2) GROUP BY occurrence_key",
+                "SELECT occurrence_key,(extract(epoch FROM min(at) FILTER (WHERE class='created'))*1000)::bigint FROM resource_change WHERE resource_id=$1 AND occurrence_key=ANY($2) GROUP BY occurrence_key HAVING count(*) FILTER (WHERE class='created')>0 AND NOT bool_or(coalesce(after ? 'supersedes',false))",
             )
             .bind(id)
             .bind(&twins)
@@ -836,4 +861,41 @@ async fn page(
         .collect::<Result<_, _>>()?;
     crate::api::with_refs(&state.pool, items.iter_mut()).await?;
     Ok(Some(OccurrencePage { items, cursor }))
+}
+
+#[cfg(test)]
+mod same_date_tests {
+    use super::*;
+
+    fn doc(description: Option<&str>) -> ResourceMeta {
+        ResourceMeta {
+            name: Some("Casual meetup".into()),
+            description: description.map(str::to_owned),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn description_counts_by_its_words_however_often_read_as_plain_text() {
+        let raw = doc(Some("This event is \\*local\\* and **free**"));
+        let mut plain = raw.description.clone();
+        for _ in 0..3 {
+            plain = plain.map(|t| crate::sources::markdown_plain(&t));
+            assert_eq!(same_date(&raw), same_date(&doc(plain.as_deref())));
+        }
+        assert_eq!(
+            same_date(&raw),
+            same_date(&doc(Some("This event is local and free")))
+        );
+        assert_ne!(
+            same_date(&raw),
+            same_date(&doc(Some("This event is remote")))
+        );
+    }
+
+    #[test]
+    fn a_description_without_words_is_none() {
+        assert_eq!(same_date(&doc(Some("**"))), same_date(&doc(None)));
+        assert_eq!(same_date(&doc(Some(" \\* _ "))), same_date(&doc(None)));
+    }
 }
