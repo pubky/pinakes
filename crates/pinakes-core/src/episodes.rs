@@ -13,8 +13,8 @@
 //! card is its `uri` (its feed item) resolved (`POST /v1/resolve`), and `id` names that card when
 //! Pinakes has it. That card names its show (`related`, `show`), and its page joins it as an
 //! alias when the feed's own publisher publishes the page ([`join_page`]). A page of the
-//! publisher's that Pinakes read as the episode before, and that stays a card of its own (a
-//! group holds it), is the episode the entry names instead ([`with_ids`]).
+//! publisher's that Pinakes read as the episode and that is a card of its own (not joined to
+//! the item, e.g. a group holds it) is the episode the entry names instead ([`with_ids`]).
 use crate::model::Stream;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -46,8 +46,9 @@ pub struct Episode {
     /// card's own link.
     pub uri: String,
     /// The episode's other links, which a client reads together with `uri` (tags, counts,
-    /// replies): the feed item when `uri` is another card's link, then that card's aliases;
-    /// at most [`ALIASES`], absent when there are none. Never stored.
+    /// replies): the feed item when `uri` is another card's link, the publisher's other pages
+    /// of the item ([`with_ids`]), then that card's aliases; at most [`ALIASES`], absent when
+    /// there are none. Never stored.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
     /// Plain text, entity-decoded: escape it before rendering it as HTML.
@@ -906,14 +907,17 @@ pub const ALIASES: usize = 16;
 /// Names the episodes Pinakes has as cards: `id`, with `uri` that card's link and `aliases` the
 /// entry's other links: two queries for any number of entries, none for an empty list.
 ///
-/// An entry's episode is, first, the card its feed's own publisher has for it: a `PodcastEpisode`
-/// card (status `ok`, no alias) whose podcast links name this very feed item by its item key
-/// (`podcast:item:…`: a certain link of the `podcasts` source, the item of a show whose GUID
-/// is vouched, never a `maybe` nor a switched-off source's) and whose page the feed's publisher
-/// publishes ([`publisher_page`]). That is the page people share and tag, read as the episode
-/// before the feed was, and kept a card of its own when a group holds it ([`join_page`] joins
-/// only plain pages). Else the card the entry's `uri` reads as (an alias as its root). The feed
-/// item then becomes the first of `aliases`, so what was written on it is read with the card.
+/// The publisher's pages of an entry are the cards (status `ok`, no alias) whose podcast links
+/// name this very feed item by its item key (`podcast:item:…`: a certain link of the `podcasts`
+/// source, given only when the show's GUID is vouched and the feed names the page as the
+/// item's link; never a `maybe`, an expired link or a switched-off source's), on the feed's own
+/// site ([`publisher_page`]), read as an episode or as a page that may join one ([`JOINABLE`]).
+/// That is the page people share and tag. An entry's episode is, first, such a page read as a
+/// `PodcastEpisode` (the most recently seen link first, then by ID): a card of its own, which
+/// [`join_page`] never joins to the item while a group holds it. Else the card the entry's
+/// `uri` reads as (an alias as its root). When `uri` becomes another card's link, the feed item
+/// is the first of `aliases`; the publisher's other pages follow, then the card's aliases, so
+/// what was written on any of them is read with the entry.
 async fn with_ids<'a>(
     pool: &sqlx::PgPool,
     episodes: impl IntoIterator<Item = &'a mut Episode>,
@@ -926,20 +930,24 @@ async fn with_ids<'a>(
     if identities.is_empty() {
         return Ok(());
     }
-    // `(identity, 0, card, its link)` for the card the entry's link reads as, `(identity, 1, …)`
-    // for each publisher's card that names it as its feed item, in ID order.
-    let known: Vec<(String, i32, String, String)> = sqlx::query_as(
+    let joinable: Vec<&str> = JOINABLE.to_vec();
+    // `(identity, 0, card, its link, null)` for the card the entry's link reads as,
+    // `(identity, 1, card, its link, type)` for each publisher's page that names it as its
+    // feed item, the most recently seen first.
+    let known: Vec<(String, i32, String, String, Option<String>)> = sqlx::query_as(
         "WITH i AS (SELECT DISTINCT i FROM unnest($1::text[]) i) \
-         SELECT i.i,0,r.id,r.uri FROM i LEFT JOIN resource_alias a ON a.alias_id=i.i JOIN resource r ON r.id=coalesce(a.root_id,i.i) \
+         SELECT i,rank,id,uri,kind FROM ( \
+         SELECT i.i,0 AS rank,r.id,r.uri,NULL::text AS kind,NULL::timestamptz AS seen FROM i LEFT JOIN resource_alias a ON a.alias_id=i.i JOIN resource r ON r.id=coalesce(a.root_id,i.i) \
          UNION ALL \
-         SELECT i.i,1,r.id,r.uri FROM i JOIN derived_link d ON d.link_id=i.i AND d.key IS NOT NULL JOIN resource r ON r.id=d.resource_id \
+         SELECT i.i,1,r.id,r.uri,r.type_path[cardinality(r.type_path)],d.seen_at FROM i JOIN derived_link d ON d.link_id=i.i AND d.key IS NOT NULL JOIN resource r ON r.id=d.resource_id \
            WHERE d.source='podcasts' AND d.key LIKE 'podcast:item:%' AND d.kind IS NULL AND d.expires_at>now() \
            AND d.source NOT IN (SELECT source FROM also_on_source_off) \
-           AND r.status='ok' AND r.type_path[cardinality(r.type_path)]='PodcastEpisode' \
+           AND r.status='ok' AND (r.type_path[cardinality(r.type_path)]='PodcastEpisode' OR r.type_path[cardinality(r.type_path)]=ANY($2)) \
            AND NOT EXISTS (SELECT 1 FROM resource_alias x WHERE x.alias_id=r.id) \
-         ORDER BY 1,2,3",
+         ) k ORDER BY i,rank,seen DESC,id",
     )
     .bind(&identities)
+    .bind(&joinable)
     .fetch_all(pool)
     .await?;
     for e in episodes.iter_mut() {
@@ -947,18 +955,32 @@ async fn with_ids<'a>(
             continue;
         };
         let rows = || known.iter().filter(|(i, ..)| *i == identity);
-        let publishers = rows()
+        let pages: Vec<&(String, i32, String, String, Option<String>)> = rows()
             .filter(|(_, rank, ..)| *rank == 1)
-            .filter(|(.., uri)| names_an_item(&e.uri) && publisher_page(uri, &e.uri));
-        let own = rows().filter(|(_, rank, ..)| *rank == 0);
-        let Some((_, _, id, uri)) = publishers.chain(own).next() else {
-            e.id = None;
-            continue;
-        };
-        e.id = Some(id.clone());
-        if *uri != e.uri {
-            e.aliases = vec![std::mem::replace(&mut e.uri, uri.clone())];
+            .filter(|(_, _, _, uri, _)| names_an_item(&e.uri) && publisher_page(uri, &e.uri))
+            .collect();
+        let episode = pages
+            .iter()
+            .copied()
+            .find(|(.., kind)| kind.as_deref() == Some("PodcastEpisode"))
+            .or_else(|| rows().find(|(_, rank, ..)| *rank == 0));
+        let mut aliases = vec![];
+        match episode {
+            Some((_, _, id, uri, _)) => {
+                e.id = Some(id.clone());
+                if *uri != e.uri {
+                    aliases.push(std::mem::replace(&mut e.uri, uri.clone()));
+                }
+            }
+            None => e.id = None,
         }
+        for (_, _, _, uri, _) in &pages {
+            if *uri != e.uri && !aliases.contains(uri) {
+                aliases.push(uri.clone());
+            }
+        }
+        aliases.truncate(ALIASES);
+        e.aliases = aliases;
     }
     let cards: Vec<String> = episodes.iter().filter_map(|e| e.id.clone()).collect();
     if cards.is_empty() {

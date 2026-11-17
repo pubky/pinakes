@@ -1563,15 +1563,17 @@ async fn a_joined_post_lets_go_when_its_item_no_longer_names_it(pool: PgPool) {
 /// An entry's feed item that the publisher's own page names as its podcast item (a certain
 /// `podcast:item:` link of the `podcasts` source) is that page's episode: the route and the show's
 /// card name the page's card (`id`), its link as `uri` and the feed item plus the card's aliases
-/// in `aliases`, so tags on the page show on the entry. A directory's page naming the same item
-/// (Podcast Index), a page on another site, a `maybe` link, an expired one, a switched-off
-/// source's and a card that is no episode are never the entry's episode; without a publisher's
-/// page the entry names the card its feed item reads as, as before.
+/// in `aliases`, so tags on the page show on the entry. Of two such pages, the most recently seen
+/// link wins and the other follows in `aliases`; a publisher's page read as an article is no
+/// episode but its link follows in `aliases`. A directory's page naming the same item (Podcast
+/// Index), a page on another site or a sibling host, a `maybe` link, an expired one, a switched-off
+/// source's, a card that is an alias or not `ok`, and a card of another type are never named;
+/// without a publisher's page the entry names the card its feed item reads as, as before.
 #[sqlx::test(migrations = "../../migrations")]
 async fn an_entry_names_the_publishers_episode_page_and_its_other_links(pool: PgPool) {
     let feed = "https://podcast.show.example.com/feed.xml";
     let item = |n: u32| format!("{feed}?guid=ep-{n}");
-    let list: Vec<Episode> = (1..=6)
+    let list: Vec<Episode> = (1..=9)
         .rev()
         .map(|n| Episode {
             uri: item(n),
@@ -1592,15 +1594,14 @@ async fn an_entry_names_the_publishers_episode_page_and_its_other_links(pool: Pg
         card: &str,
         link: &str,
         kind: Option<&str>,
-        source: &str,
         ttl: &str,
+        seen: &str,
     ) {
         let link_id = pinakes_core::model::identity(link).unwrap().0;
-        sqlx::query(&format!("INSERT INTO derived_link(resource_id,link_id,uri,site,source,via,kind,key,expires_at) VALUES($1,$2,$3,'Podcast feed',$4,'feed',$5,$6,now()+interval '{ttl}')"))
+        sqlx::query(&format!("INSERT INTO derived_link(resource_id,link_id,uri,site,source,via,kind,key,seen_at,expires_at) VALUES($1,$2,$3,'Podcast feed','podcasts','feed',$4,$5,now()-interval '{seen}',now()+interval '{ttl}')"))
             .bind(card)
             .bind(link_id)
             .bind(link)
-            .bind(source)
             .bind(kind)
             .bind(format!("podcast:item:00000000-0000-5000-8000-000000000000:{}", "a".repeat(64)))
             .execute(pool)
@@ -1614,14 +1615,14 @@ async fn an_entry_names_the_publishers_episode_page_and_its_other_links(pool: Pg
         "PodcastEpisode",
     )
     .await;
-    names(&pool, &index, &item(6), None, "podcasts", "1 day").await;
+    names(&pool, &index, &item(6), None, "1 day", "0 s").await;
     let page = card(
         &pool,
         "https://show.example.com/episode/6/",
         "PodcastEpisode",
     )
     .await;
-    names(&pool, &page, &item(6), None, "podcasts", "1 day").await;
+    names(&pool, &page, &item(6), None, "1 day", "1 hour").await;
     let tracked = store::ensure_resource(&pool, "https://show.example.com/episode/6/?utm_source=x")
         .await
         .unwrap();
@@ -1632,49 +1633,56 @@ async fn an_entry_names_the_publishers_episode_page_and_its_other_links(pool: Pg
         .await
         .unwrap();
     assert_eq!(root, page);
-    // 5: only a directory's page, a page on another site and a `maybe` link name it.
+    // 5: only a directory's page, a page on another site, a sibling host and a `maybe` link.
     let other = card(
         &pool,
         "https://other.example.org/episode/5",
         "PodcastEpisode",
     )
     .await;
-    names(&pool, &other, &item(5), None, "podcasts", "1 day").await;
+    names(&pool, &other, &item(5), None, "1 day", "0 s").await;
     let maybe = card(
         &pool,
         "https://show.example.com/episode/5/",
         "PodcastEpisode",
     )
     .await;
-    names(&pool, &maybe, &item(5), Some("maybe"), "podcasts", "1 day").await;
+    names(&pool, &maybe, &item(5), Some("maybe"), "1 day", "0 s").await;
+    let sibling = card(
+        &pool,
+        "https://www.show.example.com/episode/5/",
+        "PodcastEpisode",
+    )
+    .await;
+    names(&pool, &sibling, &item(5), None, "1 day", "0 s").await;
     let directory = card(
         &pool,
         "https://podcastindex.org/podcast/1?episode=5",
         "PodcastEpisode",
     )
     .await;
-    names(&pool, &directory, &item(5), None, "podcasts", "1 day").await;
-    // 4: the publisher's page names it, but expired; 3: switched off; 2: no episode card.
+    names(&pool, &directory, &item(5), None, "1 day", "0 s").await;
+    // 4: the publisher's page names it, but expired; 3: switched off; 2: read as an article.
     let expired = card(
         &pool,
         "https://show.example.com/episode/4/",
         "PodcastEpisode",
     )
     .await;
-    names(&pool, &expired, &item(4), None, "podcasts", "-1 day").await;
+    names(&pool, &expired, &item(4), None, "-1 day", "2 days").await;
     let off = card(
         &pool,
         "https://show.example.com/episode/3/",
         "PodcastEpisode",
     )
     .await;
-    names(&pool, &off, &item(3), None, "podcasts", "1 day").await;
+    names(&pool, &off, &item(3), None, "1 day", "0 s").await;
     sqlx::query("INSERT INTO also_on_source_off(source) VALUES('podcasts')")
         .execute(&pool)
         .await
         .unwrap();
     let article = card(&pool, "https://show.example.com/episode/2/", "Article").await;
-    names(&pool, &article, &item(2), None, "podcasts", "1 day").await;
+    names(&pool, &article, &item(2), None, "1 day", "0 s").await;
     // 1: the feed item is a card of its own, with its page as an alias.
     let own = card(&pool, &item(1), "PodcastEpisode").await;
     let joined = store::ensure_resource(&pool, "https://show.example.com/episode/1/")
@@ -1686,27 +1694,61 @@ async fn an_entry_names_the_publishers_episode_page_and_its_other_links(pool: Pg
         .execute(&pool)
         .await
         .unwrap();
+    // 7: two publisher's pages: the most recently seen link wins, the other follows.
+    let older = card(&pool, "https://show.example.com/e/7", "PodcastEpisode").await;
+    names(&pool, &older, &item(7), None, "1 day", "2 days").await;
+    let newer = card(
+        &pool,
+        "https://show.example.com/episode/7/",
+        "PodcastEpisode",
+    )
+    .await;
+    names(&pool, &newer, &item(7), None, "1 day", "1 hour").await;
+    // 8: a publisher's page that is an alias, and one not `ok`; 9: one of another type.
+    let host = card(
+        &pool,
+        "https://show.example.com/episode/8/",
+        "PodcastEpisode",
+    )
+    .await;
+    let aliased = card(&pool, "https://show.example.com/ep/8", "PodcastEpisode").await;
+    names(&pool, &aliased, &item(8), None, "1 day", "0 s").await;
+    sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'source')")
+        .bind(&aliased)
+        .bind(&host)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let missing = card(
+        &pool,
+        "https://show.example.com/episode/8/old",
+        "PodcastEpisode",
+    )
+    .await;
+    names(&pool, &missing, &item(8), None, "1 day", "0 s").await;
+    sqlx::query("UPDATE resource SET status='missing' WHERE id=$1")
+        .bind(&missing)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let event = card(&pool, "https://show.example.com/episode/9/", "Event").await;
+    names(&pool, &event, &item(9), None, "1 day", "0 s").await;
+
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let entries = |page: &Value| -> Vec<Value> { page["items"].as_array().unwrap().clone() };
+    let find = |items: &[Value], g: &str| items.iter().find(|e| e["guid"] == g).unwrap().clone();
     let (status, page_json) = request(&app, &format!("/v1/resources/{show_id}/episodes")).await;
     assert_eq!(status, 200, "{page_json}");
-    let items = page_json["items"].as_array().unwrap();
-    let by_guid = |g: &str| items.iter().find(|e| e["guid"] == g).unwrap().clone();
-    // The switched-off source is off for every entry: re-enable it to read 6, 5, 4 and 2 as
-    // they would be with the source on.
-    assert_eq!(
-        by_guid("ep-3")["uri"],
-        item(3),
-        "a switched-off source names nothing"
-    );
-    assert!(by_guid("ep-3").get("id").is_none());
+    let three = find(&entries(&page_json), "ep-3");
+    assert_eq!(three["uri"], item(3), "a switched-off source names nothing");
+    assert!(three.get("id").is_none() && three.get("aliases").is_none());
     sqlx::query("DELETE FROM also_on_source_off")
         .execute(&pool)
         .await
         .unwrap();
     let (_, page_json) = request(&app, &format!("/v1/resources/{show_id}/episodes")).await;
-    let items = page_json["items"].as_array().unwrap();
-    let by_guid = |g: &str| items.iter().find(|e| e["guid"] == g).unwrap().clone();
-    let six = by_guid("ep-6");
+    let items = entries(&page_json);
+    let six = find(&items, "ep-6");
     assert_eq!(
         six["id"], page,
         "the publisher's page, not Podcast Index's: {six}"
@@ -1718,18 +1760,35 @@ async fn an_entry_names_the_publishers_episode_page_and_its_other_links(pool: Pg
         "the feed item first, then the card's aliases"
     );
     for (guid, why) in [
-        ("ep-5", "a directory, another site and a maybe link"),
+        (
+            "ep-5",
+            "a directory, another site, a sibling host and a maybe link",
+        ),
         ("ep-4", "an expired link"),
-        ("ep-2", "a card that is no episode"),
+        ("ep-8", "an alias and a card not ok"),
+        ("ep-9", "a card of another type"),
     ] {
-        let e = by_guid(guid);
+        let e = find(&items, guid);
         assert_eq!(e["uri"], item(guid[3..].parse().unwrap()), "{why}: {e}");
         assert!(e.get("id").is_none(), "{why}: {e}");
         assert!(e.get("aliases").is_none(), "{why}: {e}");
     }
-    let three = by_guid("ep-3");
-    assert_eq!(three["id"], off, "with the source on again: {three}");
-    let one = by_guid("ep-1");
+    let two = find(&items, "ep-2");
+    assert_eq!(two["uri"], item(2), "an article is no episode: {two}");
+    assert!(two.get("id").is_none(), "{two}");
+    assert_eq!(
+        two["aliases"],
+        serde_json::json!(["https://show.example.com/episode/2/"]),
+        "its link is read with the entry"
+    );
+    assert_eq!(find(&items, "ep-3")["id"], off, "with the source on again");
+    let seven = find(&items, "ep-7");
+    assert_eq!(seven["id"], newer, "the most recently seen link: {seven}");
+    assert_eq!(
+        seven["aliases"],
+        serde_json::json!([item(7), "https://show.example.com/e/7"])
+    );
+    let one = find(&items, "ep-1");
     assert_eq!(one["id"], own, "the feed item's own card: {one}");
     assert_eq!(one["uri"], item(1));
     assert_eq!(
@@ -1739,5 +1798,7 @@ async fn an_entry_names_the_publishers_episode_page_and_its_other_links(pool: Pg
     // The show's card names the same.
     let (_, show_card) = request(&app, &format!("/v1/resources/{show_id}")).await;
     let on_card = show_card["episodes"].as_array().unwrap();
-    assert_eq!(on_card[0], six, "{show_card}");
+    assert_eq!(on_card[0]["guid"], "ep-9", "{show_card}");
+    let card_seven = on_card.iter().find(|e| e["guid"] == "ep-7").unwrap();
+    assert_eq!(*card_seven, seven, "{show_card}");
 }

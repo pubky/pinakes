@@ -1169,15 +1169,18 @@ enclosure's URL (without a fragment), so a link that carries a token shows nothi
 is (a blog post's markup may read as an `Article`); `id` names that card when Pinakes already
 has it (an alias as its root). That card names its show in `related` (`rel: "show"`, the feed),
 and the page the item links (its `utm_*` and other tracking parameters dropped) becomes its
-alias when it is the item's own page on the feed's own site ([Aliases](#aliases)). When the
-publisher's page was read as the episode before the feed was and stays a card of its own (a
-[group](#groups) holds it), the entry names that card instead: `id` is a `PodcastEpisode` card
-(status `ok`) on the feed's own site (the rules of a page that joins, above) whose podcast links
-name this very feed item by its item key (`podcast:item:…`, never a `maybe` link), and `uri`
-becomes its link. A directory's page of the item (Podcast Index, Apple) is never the one named.
-`aliases` lists the entry's other links, which a client reads with `uri` (tags, counts,
-replies): the feed item when `uri` became the card's link, then that card's aliases, at most 16;
-absent when there are none. From a feed read at an
+alias when it is the item's own page on the feed's own site ([Aliases](#aliases)). The
+publisher's pages of an entry are the cards (status `ok`, not an alias) on the feed's own site
+(the rules of a page that joins, above) whose podcast links name this very feed item by its item
+key (`podcast:item:…`, given once the show's GUID is vouched and the feed names the page as the
+item's link; never a `maybe`, an expired or a switched-off source's link), read as a
+`PodcastEpisode` or as a page that may join one. When one of them is a `PodcastEpisode` card of
+its own (not joined to the item, e.g. a [group](#groups) holds it), the entry names it instead:
+`id` is that card (the most recently seen link first) and `uri` its link. A directory's page of
+the item (Podcast Index, Apple) is never one of them. `aliases` lists the entry's other links,
+which a client reads with `uri` (tags, counts, replies): the feed item when `uri` became another
+card's link, the publisher's other pages, then the card's aliases; at most 16, absent when there
+are none. From a feed read at an
 address that carries a credential, `uri` is the item's page instead, and an item without a page
 is not listed: a feed item would carry the credential. `stream` is the item's enclosure when it is public and direct, in the
 same shape as a card's (`{url, type, duration_s, preview}`: the URL a client hands to an audio
