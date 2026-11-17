@@ -70,17 +70,24 @@ const PUBLIC_KEYS: &[&str] = &[
 /// and is not one of [`PUBLIC_KEYS`].
 pub fn credential_key(key: &str) -> bool {
     let key = fold(key);
-    CREDENTIAL_KEYS.iter().any(|exact| fold(exact) == key)
-        || (!PUBLIC_KEYS.contains(&key.as_str())
-            && CREDENTIAL_STEMS.iter().any(|stem| key.ends_with(stem)))
+    !key.is_empty()
+        && (CREDENTIAL_KEYS
+            .iter()
+            .any(|exact| folded(exact).eq(key.bytes()))
+            || (!PUBLIC_KEYS.contains(&key.as_str())
+                && CREDENTIAL_STEMS.iter().any(|stem| key.ends_with(stem))))
 }
 
 /// A key's ASCII letters and digits, lowercased: what [`credential_key`] compares.
 fn fold(key: &str) -> String {
-    key.chars()
-        .filter(char::is_ascii_alphanumeric)
-        .map(|c| c.to_ascii_lowercase())
-        .collect()
+    folded(key).map(char::from).collect()
+}
+
+/// [`fold`] without a new string, for the exact keys compared on every key read.
+fn folded(key: &str) -> impl Iterator<Item = u8> + '_ {
+    key.bytes()
+        .filter(u8::is_ascii_alphanumeric)
+        .map(|b| b.to_ascii_lowercase())
 }
 
 /// Whether `uri` carries a credential ([`is_capability_url`]); a URI that is not a URL does not.
