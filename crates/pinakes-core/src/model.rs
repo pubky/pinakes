@@ -64,19 +64,20 @@ pub struct Stream {
 }
 /// One object a card points at (docs/api.md, Related objects): on a Bitcoin or Lightning card,
 /// the block a transaction is in, its inputs and outputs, a block's neighbours, an address's
-/// latest transactions, a node's channels and peers, a channel's nodes and transactions.
+/// latest transactions, a node's channels and peers, a channel's nodes and transactions; on a
+/// podcast episode's card, its show.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, ToSchema)]
 pub struct Related {
     /// What it is to this card: `block`, `input`, `output`, `previous`, `next`, `coinbase`,
-    /// `tx`, `channel`, `peer`, `node`, `funding_tx` or `closing_tx`.
+    /// `tx`, `channel`, `peer`, `node`, `funding_tx`, `closing_tx` or `show`.
     pub rel: String,
     /// Its card's URI, a root `POST /v1/resolve` reads (`btc:tx/…`, `btc:address/…`,
-    /// `ln:node/…`); null for an input or output without an address, which `name` labels
-    /// (`OP_RETURN`, `coinbase`).
+    /// `ln:node/…`, a podcast show's feed or Podcast Index page); null for an input or output
+    /// without an address, which `name` labels (`OP_RETURN`, `coinbase`).
     #[serde(default)]
     pub uri: Option<String>,
-    /// Plain text: a block's "Block 975,251", a node's alias, a channel's peer's alias, or the
-    /// label of an entry without a `uri`.
+    /// Plain text: a block's "Block 975,251", a node's alias, a channel's peer's alias, a show's
+    /// title from its feed, or the label of an entry without a `uri`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// In satoshis: an input's or output's value, a channel's capacity, a block's reward on its
@@ -462,7 +463,8 @@ pub struct ResourceMeta {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub open_in: Vec<OpenIn>,
     /// The objects the card points at ([`Related`]), at most [`RELATED_CAP`]: a chain card's
-    /// block, inputs and outputs, neighbours, transactions, channels and peers.
+    /// block, inputs and outputs, neighbours, transactions, channels and peers; an episode's
+    /// show.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub related: Vec<Related>,
     /// How many entries of a `rel` there are when `related` holds fewer of them (a transaction's

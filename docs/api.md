@@ -362,7 +362,8 @@ A resource read's `related` lists the objects its card points at, so a client ca
 open each one's card. Each entry is `{rel, uri, name?, amount_sat?, at?}`:
 
 - `rel` says what it is to the card; `uri` is its card's root, which `POST /v1/resolve` reads
-  (and `GET /v1/resources/by-uri` answers once it is known), never a page on a site. An input or
+  (and `GET /v1/resources/by-uri` answers once it is known): a chain card's root, a podcast
+  show's feed, or a show's Podcast Index page, never another page on a site. An input or
   output without an address has a null `uri` and a `name` that says what it is (`OP_RETURN`,
   `P2PK`, `coinbase`, or the script type).
 - `name` is plain text (a block's "Block 975,251", a node's alias, a show's title); `amount_sat`
@@ -382,7 +383,7 @@ open each one's card. Each entry is `{rel, uri, name?, amount_sat?, at?}`:
 | `BitcoinAddress` | `tx`: its latest transactions, those in the mempool first, with `amount_sat` what each moved into (positive) or out of (negative) the address and `at` once confirmed |
 | `LightningNode` | `channel`: its biggest open channels (`amount_sat` the capacity, `name` the peer's alias); `peer`: those channels' other nodes, each once |
 | `LightningChannel` | `node` (both, with their aliases), `funding_tx` (`amount_sat` the capacity), `closing_tx` once closed |
-| `PodcastEpisode` | `show`: its show's card, with its title as `name`. Read from the show's feed (the episode's feed item, or a page that names its feed), the feed's address without `guid` (never one that carries a credential); from a Podcast Index episode, the show's Podcast Index page; from a Fountain episode page, the feed its page names |
+| `PodcastEpisode` | `show`: its show's card (with the feed's title as `name` when read from the feed). Read from the show's feed (the episode's feed item, or a page that names its feed), the feed's address without `guid` (never one that carries a credential); from a Podcast Index episode, the show's Podcast Index page; from a Fountain episode page, the feed its page names |
 
 Roots keep their network: a testnet4 transaction's inputs are `btc-testnet4:address/…`, a signet
 channel's funding transaction `btc-signet:tx/…`.
