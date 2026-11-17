@@ -503,7 +503,7 @@ pub struct EpisodePage {
     /// The `offset` of the next page when more episodes match; null on the last page.
     pub next_offset: Option<usize>,
 }
-#[utoipa::path(get,path="/v1/resources/{id}/episodes",operation_id="list_episodes",tag="Media",params(("id"=String,Path),EpisodeQuery),responses((status=200,body=EpisodePage),(status=400,description="Invalid resource ID, limit, offset or q"),(status=404,description="Resource not found")),description="A podcast show's latest episodes as its feed lists them, newest first: the latest 100, in pages of at most 20 (`offset`, `next_offset`), optionally only those whose name holds `q` (any letter case), each with its feed item (which resolves to its PodcastEpisode card), date and public stream. The show's own list, else, for a card that is a show, that of a member of its group which has one (an Apple Podcasts show grouped with its feed). A known resource that is no show, or no longer one, or whose feed was not read yet, returns an empty list.")]
+#[utoipa::path(get,path="/v1/resources/{id}/episodes",operation_id="list_episodes",tag="Media",params(("id"=String,Path),EpisodeQuery),responses((status=200,body=EpisodePage),(status=400,description="Invalid resource ID, limit, offset or q"),(status=404,description="Resource not found")),description="A podcast show's latest episodes as its feed lists them, newest first: the latest 100, in pages of at most 20 (`offset`, `next_offset`), optionally only those whose name holds `q` (any letter case), each with its episode's link (its feed item, which resolves to its PodcastEpisode card, or the link of the publisher's own episode card), its other links (`aliases`), date and public stream. The show's own list, else, for a card that is a show, that of a member of its group which has one (an Apple Podcasts show grouped with its feed). A known resource that is no show, or no longer one, or whose feed was not read yet, returns an empty list.")]
 pub async fn list(
     axum::extract::State(state): axum::extract::State<crate::api::AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -923,10 +923,17 @@ async fn with_ids<'a>(
     episodes: impl IntoIterator<Item = &'a mut Episode>,
 ) -> Result<(), sqlx::Error> {
     let mut episodes: Vec<&mut Episode> = episodes.into_iter().collect();
-    let identities: Vec<String> = episodes
+    // Each entry's identity, and the one a derived link to it is stored under (its root
+    // spelling, `also_on::link_root`).
+    let (identities, linked): (Vec<String>, Vec<String>) = episodes
         .iter()
-        .filter_map(|e| crate::model::identity(&e.uri).ok().map(|v| v.0))
-        .collect();
+        .filter_map(|e| {
+            let own = crate::model::identity(&e.uri).ok()?.0;
+            let linked = crate::model::identity(&crate::also_on::link_root(&e.uri))
+                .map_or_else(|_| own.clone(), |v| v.0);
+            Some((own, linked))
+        })
+        .unzip();
     if identities.is_empty() {
         return Ok(());
     }
@@ -935,11 +942,11 @@ async fn with_ids<'a>(
     // `(identity, 1, card, its link, type)` for each publisher's page that names it as its
     // feed item, the most recently seen first.
     let known: Vec<(String, i32, String, String, Option<String>)> = sqlx::query_as(
-        "WITH i AS (SELECT DISTINCT i FROM unnest($1::text[]) i) \
+        "WITH i AS (SELECT DISTINCT i,l FROM unnest($1::text[],$3::text[]) AS t(i,l)) \
          SELECT i,rank,id,uri,kind FROM ( \
          SELECT i.i,0 AS rank,r.id,r.uri,NULL::text AS kind,NULL::timestamptz AS seen FROM i LEFT JOIN resource_alias a ON a.alias_id=i.i JOIN resource r ON r.id=coalesce(a.root_id,i.i) \
          UNION ALL \
-         SELECT i.i,1,r.id,r.uri,r.type_path[cardinality(r.type_path)],d.seen_at FROM i JOIN derived_link d ON d.link_id=i.i AND d.key IS NOT NULL JOIN resource r ON r.id=d.resource_id \
+         SELECT i.i,1,r.id,r.uri,r.type_path[cardinality(r.type_path)],d.seen_at FROM i JOIN derived_link d ON d.link_id=i.l AND d.key IS NOT NULL JOIN resource r ON r.id=d.resource_id \
            WHERE d.source='podcasts' AND d.key LIKE 'podcast:item:%' AND d.kind IS NULL AND d.expires_at>now() \
            AND d.source NOT IN (SELECT source FROM also_on_source_off) \
            AND r.status='ok' AND (r.type_path[cardinality(r.type_path)]='PodcastEpisode' OR r.type_path[cardinality(r.type_path)]=ANY($2)) \
@@ -948,6 +955,7 @@ async fn with_ids<'a>(
     )
     .bind(&identities)
     .bind(&joinable)
+    .bind(&linked)
     .fetch_all(pool)
     .await?;
     for e in episodes.iter_mut() {

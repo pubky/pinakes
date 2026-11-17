@@ -1573,10 +1573,16 @@ async fn a_joined_post_lets_go_when_its_item_no_longer_names_it(pool: PgPool) {
 async fn an_entry_names_the_publishers_episode_page_and_its_other_links(pool: PgPool) {
     let feed = "https://podcast.show.example.com/feed.xml";
     let item = |n: u32| format!("{feed}?guid=ep-{n}");
-    let list: Vec<Episode> = (1..=9)
+    // 10: an entry whose feed address carries a tracking parameter.
+    let tracked_item = format!("{feed}?guid=ep-10&utm_source=x");
+    let list: Vec<Episode> = (1..=10)
         .rev()
         .map(|n| Episode {
-            uri: item(n),
+            uri: if n == 10 {
+                tracked_item.clone()
+            } else {
+                item(n)
+            },
             ..episode(n, true)
         })
         .collect();
@@ -1733,6 +1739,14 @@ async fn an_entry_names_the_publishers_episode_page_and_its_other_links(pool: Pg
         .unwrap();
     let event = card(&pool, "https://show.example.com/episode/9/", "Event").await;
     names(&pool, &event, &item(9), None, "1 day", "0 s").await;
+    // 10: the page's link names the item by its root spelling, without the tracking parameter.
+    let ten = card(
+        &pool,
+        "https://show.example.com/episode/10/",
+        "PodcastEpisode",
+    )
+    .await;
+    names(&pool, &ten, &item(10), None, "1 day", "0 s").await;
 
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let entries = |page: &Value| -> Vec<Value> { page["items"].as_array().unwrap().clone() };
@@ -1798,7 +1812,12 @@ async fn an_entry_names_the_publishers_episode_page_and_its_other_links(pool: Pg
     // The show's card names the same.
     let (_, show_card) = request(&app, &format!("/v1/resources/{show_id}")).await;
     let on_card = show_card["episodes"].as_array().unwrap();
-    assert_eq!(on_card[0]["guid"], "ep-9", "{show_card}");
+    assert_eq!(on_card[0]["guid"], "ep-10", "{show_card}");
+    assert_eq!(
+        on_card[0]["id"], ten,
+        "a link stored under the root spelling: {show_card}"
+    );
+    assert_eq!(on_card[0]["aliases"], serde_json::json!([tracked_item]));
     let card_seven = on_card.iter().find(|e| e["guid"] == "ep-7").unwrap();
     assert_eq!(*card_seven, seven, "{show_card}");
 }
