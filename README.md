@@ -21,7 +21,7 @@ not yet in pubky/pubky-nexus.
 Nexus  GET /v0/resources/changes          reference feed: tag, reply, embed, collection, post
   │
   ▼
-ingest     resource row per URI, reference row per Pubky object    ingest.rs, identity.rs
+ingest     resource row per URI, one row per reference             ingest.rs, identity.rs
   │
   ▼
 queue      one job per resource: route, lease, backoff, refresh     queue.rs, scheduler.rs
@@ -47,8 +47,10 @@ command line, creates the schema, and starts the listeners and the background ta
 resolver workers, also-on, grouping, same-event, maintenance, the ODbL dump).
 
 **Ingest.** `pinakesd` polls the Nexus reference feed. Each line names a URI; Pinakes normalizes
-it and hashes it into its own resource ID (`identity.rs`), stores one reference row per Pubky
-object path, and queues a resource it has not seen. Nexus decides which references exist;
+it and hashes it into its own resource ID (`identity.rs`), stores one reference row per
+reference, and queues a resource it has not seen. A tag is keyed by its author, link and label
+(the file a tag line names is for information only); a reply, embed or collection item by its
+author, post file and link; a post by its version file. Nexus decides which references exist;
 Pinakes never parses the social specs.
 
 **Resolve.** `resolver::classify` routes each URI by scheme and host, without network. The queue
