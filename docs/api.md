@@ -1177,11 +1177,13 @@ item's link; never a `maybe`, an expired or a switched-off source's link), read 
 `PodcastEpisode` or as a page that may join one. When one of them is a `PodcastEpisode` card of
 its own (not joined to the item, e.g. a [group](#groups) holds it), the entry names it instead:
 `id` is that card (the one Pinakes knew first) and `uri` its link. A directory's page of the
-item is never one of them: neither a page on another site (Apple) nor one a source of Pinakes
-reads as a service's own (a Podcast Index page, even for a feed Podcast Index hosts). `aliases` lists the entry's other links,
-which a client reads with `uri` (tags, counts, replies): the feed item when `uri` became another
-card's link, the publisher's other pages, then the card's aliases; at most 16, absent when there
-are none. From a feed read at an
+item is never one of them: neither a page on another site (Apple) nor a Podcast Index page (even
+for a feed Podcast Index hosts). `aliases` lists the entry's other links, which a client reads
+with `uri` (tags, counts, replies): the feed item when `uri` became another card's link, the link
+of the card the feed item reads as, the publisher's other pages, then the aliases of each of
+those cards (the named card's first); at most 16, absent when there are none. `id`, `uri` and
+`aliases` are named at each read from what Pinakes knows then; the entries themselves change only
+when the show is read again. From a feed read at an
 address that carries a credential, `uri` is the item's page instead, and an item without a page
 is not listed: a feed item would carry the credential. `stream` is the item's enclosure when it is public and direct, in the
 same shape as a card's (`{url, type, duration_s, preview}`: the URL a client hands to an audio

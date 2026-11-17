@@ -778,7 +778,7 @@
         "description": "One of a show's latest episodes, as its feed lists it.",
         "properties": {
           "aliases": {
-            "description": "The episode's other links, which a client reads together with `uri` (tags, counts,\nreplies): the feed item when `uri` is another card's link, the publisher's other pages\nof the item ([`with_ids`]), then that card's aliases; at most [`ALIASES`], absent when\nthere are none. Never stored.",
+            "description": "The episode's other links, which a client reads together with `uri` (tags, counts,\nreplies): the feed item when `uri` is another card's link, the link of the card the feed\nitem reads as, the publisher's other pages of the item ([`with_ids`]), then the aliases\nof each of those cards (the named card's first); at most [`ALIASES`], absent when there\nare none. Named at each read, never stored.",
             "items": {
               "type": "string"
             },
