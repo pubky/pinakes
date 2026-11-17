@@ -856,7 +856,7 @@ async fn read(pool: &PgPool, uri: &str) -> String {
 async fn read_with(pool: &PgPool, uri: &str, body: String) -> String {
     use pinakes_core::{config::QueueConfig, queue};
     let id = store::ensure_resource(pool, uri).await.unwrap();
-    sqlx::query("UPDATE resource SET next_attempt_at=CASE WHEN id=$1 THEN now() ELSE now()+interval '1 day' END,final=false")
+    sqlx::query("UPDATE resource SET next_attempt_at=CASE WHEN id=$1 THEN now() ELSE now()+interval '1 day' END,final=false,dead_letter=false,lease_until=NULL")
         .bind(&id)
         .execute(pool)
         .await
@@ -1063,7 +1063,7 @@ async fn a_stale_job_or_a_page_of_its_own_joins_nothing(pool: PgPool) {
         .await
         .unwrap();
     let route: &'static str = Box::leak(route.into_boxed_str());
-    sqlx::query("UPDATE resource SET next_attempt_at=CASE WHEN id=$1 THEN now() ELSE now()+interval '1 day' END,final=false")
+    sqlx::query("UPDATE resource SET next_attempt_at=CASE WHEN id=$1 THEN now() ELSE now()+interval '1 day' END,final=false,dead_letter=false,lease_until=NULL")
         .bind(&id)
         .execute(&pool)
         .await
@@ -1343,7 +1343,7 @@ async fn an_episode_page_joins_only_its_own_feeds_item(pool: PgPool) {
         .unwrap();
     let route: &'static str = Box::leak(route.into_boxed_str());
     let run = || async {
-        sqlx::query("UPDATE resource SET next_attempt_at=CASE WHEN id=$1 THEN now() ELSE now()+interval '1 day' END,final=false")
+        sqlx::query("UPDATE resource SET next_attempt_at=CASE WHEN id=$1 THEN now() ELSE now()+interval '1 day' END,final=false,dead_letter=false,lease_until=NULL")
             .bind(&item_id)
             .execute(&pool)
             .await
