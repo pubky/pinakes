@@ -428,7 +428,8 @@ of a kind this build does not read (`unknown_kind`, a newer Nexus's) or one it c
 `next_cursor`) must be well formed. A bad line is skipped and counted in
 `pinakes_ingest_rejected_total{reason}` (`unknown_kind`, `malformed`, `author`, `label`,
 `object_path`, `uri`, `timestamp`, `never_fetched`, `collection_items`, `panic`) after the batch commits; the cursor still advances
-past it. A reference is keyed as Nexus keys it: a tag by its author, `uri` and label, so a del
+past it. A reference is keyed as Nexus keys it: a tag by its author, `uri` and label (its time is
+its latest put's `at`, the time Nexus gives the tag), so a del
 naming another tag file than the put did (a user's `pubky.app` tags rewritten to `social/v1`, or
 two files on one tag) deletes that tag, and a repeated put or del changes nothing more; a reply,
 embed or collection item by its author, `object_path` and `uri`; a post by its version file
@@ -473,8 +474,8 @@ Pinakes never fetches (`social`, `pubky.app`, and the old `mapky.app` and `event
 decoded, so `%73ocial` is `social`) is rejected (`never_fetched`), creating no resource or
 reference and fetching nothing. Letter case is kept, as the resolver keeps it: `Social` is another
 app's namespace. A namespace that is not one path segment once decoded (not UTF-8, an encoded `/`,
-`.` or `..`) is `uri`. A post line is a reference of the post to itself, keyed by its version file like
-any reference: it keeps the post's card alive and counts nowhere (scores, trending, reference
+`.` or `..`) is `uri`. A post line is a reference of the post to itself, keyed by its version file as
+a reply, embed or collection item is by its file: it keeps the post's card alive and counts nowhere (scores, trending, reference
 filters). The post is queued as any `pubky://` object; a new version, or a deleted one, makes its
 card due at once whatever its TTL. The Pubky resolver lists the post's folder newest first and reads
 the latest version by its namespace and kind ([Pubky apps](pubky-apps.md#posts)); a post without
