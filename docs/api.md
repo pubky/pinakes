@@ -1001,15 +1001,16 @@ root, and a read, lookup, change query or occurrence read of the alias answers w
 - **A podcast episode's page**: after a read of an episode's feed item (`{feed}?guid={guid}`, as
   [Episodes](#episodes) lists it) that ended at that address (no redirect), the page the item
   links, without its tracking parameters, becomes an alias of the episode's card when it is that
-  item's own page and the feed's publisher publishes it too (one registrable domain, or one
-  tenant of a shared host, on one host or a subdomain of the other): a blog post whose markup
-  reads as an `Article` answers as the `PodcastEpisode`, and its tracked spellings with it. A page
-  another item links too, the feed's own `<link>` (the show's site), a site's root and the feed
-  itself are no episode's own page. A known page joins only while it is a plain page of its own
-  (no group, no aliases but its tracking and canonical spellings, read as a web page, an article
-  or an episode, or not read yet); a page that is already an alias, or that a rule above gives
-  another root, is left as it is; a page Pinakes did not know is added as an alias, and never
-  fetched. A page on another site than its feed (a show hosted elsewhere) keeps its own card.
+  item's own page, the item is in a show's stored list, and the feed's publisher publishes the
+  page too (one registrable domain, or one tenant of a shared host, on one host or a subdomain
+  of the other): a blog post whose markup reads as an `Article` answers as the
+  `PodcastEpisode`, and its tracked spellings with it. A page another item links too, the feed's
+  own `<link>` (the show's site), a site's root, a feed and a feed's item are no episode's own
+  page. Only a page Pinakes has read joins, and only while it is a plain page of its own (no
+  group, no aliases but its tracking and canonical spellings, read as a web page or an article,
+  or as an episode of the same feed); a page not read yet joins at the item's next read after
+  its own. A page that is already an alias, or that a rule above gives another root, is left as
+  it is. A page on another site than its feed (a show hosted elsewhere) keeps its own card.
 
 Refresh follows the time to an event's start: more than 30 days or no start, 7 days; 7–30 days,
 2 days; 24 hours to 7 days, 6 hours; under 24 hours or running, 1 hour
