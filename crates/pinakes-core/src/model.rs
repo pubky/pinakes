@@ -505,6 +505,13 @@ pub struct ResourceMeta {
     #[serde(skip)]
     #[schema(ignore)]
     pub episode_page: Option<String>,
+    /// Read from its feed item at the address asked (no redirect, no credential): the pages
+    /// joined to this card follow `episode_page` after the fetch, one it no longer names letting
+    /// go (`episodes::release_pages`). Never stored, so a card reused as it was (a 304) moves
+    /// nothing.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub episode_item: bool,
     /// A podcast show's latest episodes, from its feed (`episodes`): the save writes them to
     /// `podcast_episode`, never into the document. `None` leaves the stored list as it is.
     #[serde(skip)]

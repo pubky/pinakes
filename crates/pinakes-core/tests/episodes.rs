@@ -1384,7 +1384,7 @@ async fn a_joined_post_lets_go_when_its_item_no_longer_names_it(pool: PgPool) {
         moved_post,
     );
     assert_ne!(moved, blog_feed());
-    read_with(&pool, item, moved).await;
+    read_with(&pool, item, moved.clone()).await;
     assert_eq!(request(&app, &by_uri(post)).await.1["id"], post_id);
     assert_eq!(request(&app, &by_uri(tracked)).await.1["id"], post_id);
     let tracked_root: String =
@@ -1405,6 +1405,17 @@ async fn a_joined_post_lets_go_when_its_item_no_longer_names_it(pool: PgPool) {
         (Some("web"), true),
         "read again on its own route"
     );
+    assert_eq!(request(&app, &by_uri(moved_post)).await.1["id"], episode);
+    // The item links no page of its own any more (its link removed): the post lets go; linked
+    // again, it joins again.
+    let unlinked = blog_feed().replace(
+        "<link>https://blog.example/second/?utm_source=rss&amp;utm_medium=rss&amp;utm_campaign=second</link>",
+        "",
+    );
+    assert_ne!(unlinked, blog_feed());
+    read_with(&pool, item, unlinked).await;
+    assert_eq!(request(&app, &by_uri(moved_post)).await.1["id"], moved_id);
+    read_with(&pool, item, moved.clone()).await;
     assert_eq!(request(&app, &by_uri(moved_post)).await.1["id"], episode);
     // The item leaves the feed: its card reads as missing, and the post it had lets go.
     let start = blog_feed().find("<item><title>#2").unwrap();

@@ -770,16 +770,17 @@ pub(crate) async fn join_page(
 }
 
 /// Lets go of the pages joined to an episode's card ([`join_page`], basis `source`) that its feed
-/// item no longer names as its own: every one when the item has left the feed (`keep` none: the
-/// card confirmed missing, its stored status, so one stray answer moves nothing), else those
-/// other than `keep`, the page it names now. Each answers for itself again, with the tracking
-/// spellings that followed it, and is read again on its own route (`alias::release`). Nothing
-/// moves when the job is stale (the generation fence).
+/// item no longer names as its own: those other than `keep`, the page it names now (every one
+/// when it names none). When the item has left the feed (`gone`), only once the card is
+/// confirmed missing (its stored status), so one stray answer moves nothing. Each answers for
+/// itself again, with the tracking spellings that followed it, and is read again on its own
+/// route (`alias::release`). Nothing moves when the job is stale (the generation fence).
 pub(crate) async fn release_pages(
     pool: &sqlx::PgPool,
     id: &str,
     generation: i64,
     keep: Option<&str>,
+    gone: bool,
 ) -> Result<()> {
     let keep = keep
         .and_then(|p| crate::model::identity(p).ok())
@@ -818,11 +819,9 @@ pub(crate) async fn release_pages(
             .bind(generation)
             .fetch_optional(&mut *tx)
             .await?;
-    let settled = match (&keep, current.as_deref()) {
-        (_, None) => false,
-        (Some(_), Some(_)) => true,
-        (None, Some(status)) => status == "missing",
-    };
+    let settled = current
+        .as_deref()
+        .is_some_and(|status| !gone || status == "missing");
     if pages.is_empty() || !settled {
         return Ok(());
     }
