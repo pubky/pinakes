@@ -1024,3 +1024,156 @@ async fn a_post_already_an_alias_is_left_as_it_is(pool: PgPool) {
     assert_eq!(root, other);
     assert_ne!(root, episode);
 }
+
+/// A stale job (its row read again meanwhile) joins nothing; a known page grouped with another
+/// link, or read as something else than a page or an article, is left as it is.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_stale_job_or_a_page_of_its_own_joins_nothing(pool: PgPool) {
+    use pinakes_core::{config::QueueConfig, queue};
+    let item = "https://blog.example/feed/podcast/?guid=https%3A%2F%2Fblog.example%2F%3Fp%3D2";
+    let id = store::ensure_resource(&pool, item).await.unwrap();
+    let route: String = sqlx::query_scalar("SELECT resolver FROM resource WHERE id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let route: &'static str = Box::leak(route.into_boxed_str());
+    sqlx::query("UPDATE resource SET next_attempt_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let job = queue::claim(&pool, route, &QueueConfig::default())
+        .await
+        .unwrap()
+        .expect("due");
+    sqlx::query("UPDATE resource SET generation=generation+1 WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Fenced: whatever the run answers, it writes nothing.
+    let _ = queue::run_job(&pool, &BlogFeed(route), &QueueConfig::default(), &job).await;
+    let aliases: i64 = sqlx::query_scalar("SELECT count(*) FROM resource_alias WHERE root_id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(aliases, 0, "a stale job joins nothing");
+    // The post read as a product (something else than a page): left as it is.
+    let post = "https://blog.example/second/";
+    let post_id = store::ensure_resource(&pool, post).await.unwrap();
+    let mut d = ResourceMeta::new(post, "web", 86_400);
+    d.set_type("Product");
+    d.name = Some("A product".into());
+    store::save_document(&pool, &post_id, 0, &d).await.unwrap();
+    read(&pool, item).await;
+    let root: Option<String> =
+        sqlx::query_scalar("SELECT root_id FROM resource_alias WHERE alias_id=$1")
+            .bind(&post_id)
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+    assert_eq!(root, None, "a product page stays its own");
+    // Read as an article but grouped with another link: left as it is.
+    let mut d = ResourceMeta::new(post, "web", 86_400);
+    d.set_type("Article");
+    store::save_document(&pool, &post_id, 0, &d).await.unwrap();
+    let group = "0123456789abcdef0123456789abcdef";
+    sqlx::query("INSERT INTO \"group\"(id) VALUES($1)")
+        .bind(group)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE group_unit SET group_id=$1 WHERE resource_id=$2")
+        .bind(group)
+        .bind(&post_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let grouped: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM group_unit WHERE resource_id=$1 AND group_id IS NOT NULL",
+    )
+    .bind(&post_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(grouped, 1);
+    read(&pool, item).await;
+    let root: Option<String> =
+        sqlx::query_scalar("SELECT root_id FROM resource_alias WHERE alias_id=$1")
+            .bind(&post_id)
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+    assert_eq!(root, None, "a grouped page stays its own");
+}
+
+/// As the web route reads a feed item (`resolver::cards::enrich` on an RSS answer): read at the
+/// address asked, the episode names its show and its page to join; where a redirect led
+/// elsewhere, no page; an HTML answer is no feed.
+#[tokio::test]
+async fn the_web_routes_read_of_a_feed_item_names_its_page_only_where_it_was_asked() {
+    use pinakes_core::model::Status;
+    use pinakes_core::resolver::cards::{enrich, Alternates, CardConfig};
+    let egress = common::offline_egress(common::unpaced_egress_config());
+    let cfg = CardConfig::default();
+    let item = "https://blog.example/feed/podcast/?guid=https%3A%2F%2Fblog.example%2F%3Fp%3D2";
+    let page_read = |uri: &str| {
+        let mut d = ResourceMeta::new(uri, "web", 3600);
+        d.status = Status::Ok;
+        d
+    };
+    let f = fetched_at(item, blog_feed());
+    let d = enrich(
+        item,
+        &f,
+        page_read(item),
+        Some(Alternates::default()),
+        &egress,
+        &cfg,
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(d.type_name, "PodcastEpisode");
+    assert_eq!(
+        d.episode_page.as_deref(),
+        Some("https://blog.example/second/")
+    );
+    assert_eq!(d.related.len(), 1);
+    assert_eq!(d.related[0].uri.as_deref(), Some(BLOG_FEED));
+    // Redirected to the feed at another address: still the episode, no page to join.
+    let moved = fetched_at(
+        "https://cdn.blog.example/feed.xml?guid=https%3A%2F%2Fblog.example%2F%3Fp%3D2",
+        blog_feed(),
+    );
+    let d = enrich(
+        item,
+        &moved,
+        page_read(item),
+        Some(Alternates::default()),
+        &egress,
+        &cfg,
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(d.type_name, "PodcastEpisode");
+    assert_eq!(d.episode_page, None);
+    // An HTML answer is no feed: the page read stands.
+    let mut html = fetched_at(item, "<html><head><title>x</title></head></html>".into());
+    html.content_type = "text/html".into();
+    let d = enrich(
+        item,
+        &html,
+        page_read(item),
+        Some(Alternates::default()),
+        &egress,
+        &cfg,
+        true,
+    )
+    .await
+    .unwrap();
+    assert_ne!(d.type_name, "PodcastEpisode");
+    assert_eq!(d.episode_page, None);
+}

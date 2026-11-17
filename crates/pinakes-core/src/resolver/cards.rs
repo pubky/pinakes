@@ -1138,9 +1138,12 @@ fn podcast_body(
         }
         if let Some(link) = identity.page {
             // Read from the address the URI names (no redirect to another feed), which carries no
-            // credential: the page the item links joins this card when the feed's publisher
-            // publishes it.
-            if direct && !crate::capability::is_capability_url(&f.url) {
+            // credential: the page the item links, when it is this item's own, joins this card
+            // when the feed's publisher publishes it.
+            if direct
+                && !crate::capability::is_capability_url(&f.url)
+                && crate::episodes::own_page(&link, &items, channel, &f.url)
+            {
                 d.episode_page = Some(link.clone());
             }
             d.aliases.push(link);
