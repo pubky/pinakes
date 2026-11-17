@@ -1136,12 +1136,14 @@ fn podcast_body(
                 });
             d.related.push(show);
         }
-        // Read from the address the URI names (no redirect to another feed), which carries no
-        // credential: the page the item links, when it is this item's own, joins this card when
-        // the feed's publisher publishes it, and a page it no longer names lets go.
-        d.episode_item = direct && guid.is_some() && !crate::capability::is_capability_url(&f.url);
+        // A read of a feed item from a feed that carries no credential: a page joined to this card
+        // that the item no longer names as its own lets go. Only one read from the address the
+        // URI names (no redirect to another feed) names a page to join: the item's own, which
+        // joins when the feed's publisher publishes it.
+        d.episode_item = guid.is_some() && !crate::capability::is_capability_url(&f.url);
         if let Some(link) = identity.page {
-            if d.episode_item && crate::episodes::own_page(&link, &items, channel, &f.url) {
+            if direct && d.episode_item && crate::episodes::own_page(&link, &items, channel, &f.url)
+            {
                 d.episode_page = Some(link.clone());
             }
             d.aliases.push(link);

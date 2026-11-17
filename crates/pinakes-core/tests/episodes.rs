@@ -1262,6 +1262,45 @@ async fn the_join_holds_to_its_bounds(pool: PgPool) {
     let (_, card) = request(&app, &by_uri("https://blog.example/first/")).await;
     assert_eq!(card["id"], first, "a root of other aliases stays its own");
     assert_ne!(card["id"], first_episode);
+    // A post with a canonical spelling (its slash-less address, say) does not join either: a
+    // release could not give that spelling back.
+    sqlx::query("DELETE FROM resource_alias WHERE alias_id=$1")
+        .bind(&elsewhere)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let slashless = store::ensure_resource(&pool, "https://blog.example/first")
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'canonical')")
+        .bind(&slashless)
+        .bind(&first)
+        .execute(&pool)
+        .await
+        .unwrap();
+    read(
+        &pool,
+        "https://blog.example/feed/podcast/?guid=https%3A%2F%2Fblog.example%2F%3Fp%3D1",
+    )
+    .await;
+    let (_, card) = request(&app, &by_uri("https://blog.example/first/")).await;
+    assert_eq!(
+        card["id"], first,
+        "a root of a canonical spelling stays its own"
+    );
+    // Without it, the same read joins the post.
+    sqlx::query("DELETE FROM resource_alias WHERE alias_id=$1")
+        .bind(&slashless)
+        .execute(&pool)
+        .await
+        .unwrap();
+    read(
+        &pool,
+        "https://blog.example/feed/podcast/?guid=https%3A%2F%2Fblog.example%2F%3Fp%3D1",
+    )
+    .await;
+    let (_, card) = request(&app, &by_uri("https://blog.example/first/")).await;
+    assert_eq!(card["id"], first_episode, "{card}");
 }
 
 /// A page already read as an episode joins an item's card only when it names the same feed.

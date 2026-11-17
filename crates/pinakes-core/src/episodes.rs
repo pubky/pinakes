@@ -1168,6 +1168,7 @@ mod tests {
             card.episode_page.as_deref(),
             Some("https://show.example/1/")
         );
+        assert!(card.episode_item);
         // Asked at another address (a redirect led to the feed): the show, no page to join.
         let card =
             crate::resolver::cards::podcast("https://old.example/feed?guid=ep-1", &f, 3600, 1000)
@@ -1175,6 +1176,10 @@ mod tests {
                 .unwrap();
         assert_eq!(card.related.len(), 1);
         assert_eq!(card.episode_page, None);
+        assert!(
+            card.episode_item,
+            "a redirected read still settles the joined pages"
+        );
         // A feed whose address carries a credential: neither.
         f.url = "https://feeds.example.org/show.xml?token=SECRET&guid=ep-1"
             .parse()
@@ -1185,6 +1190,7 @@ mod tests {
         assert_eq!(card.type_name, "PodcastEpisode");
         assert!(card.related.is_empty(), "{:?}", card.related);
         assert_eq!(card.episode_page, None);
+        assert!(!card.episode_item);
         // A show's name is cut to the entry's bound.
         let long = format!(
             r#"<?xml version="1.0"?><rss version="2.0"><channel><title>{}</title><item><title>One</title><guid>ep-1</guid><enclosure url="https://cdn.example/1.mp3" type="audio/mpeg"/></item></channel></rss>"#,
