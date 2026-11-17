@@ -830,7 +830,7 @@ fn blog_feed() -> String {
 }
 /// The blog feed answering at whatever address a job asks for (its item forms), read as the
 /// web route reads a feed (`resolver::cards::podcast`), on the route the job's row names.
-struct BlogFeed(&'static str);
+struct BlogFeed(&'static str, String);
 #[async_trait::async_trait]
 impl pinakes_core::resolver::Resolver for BlogFeed {
     fn name(&self) -> &'static str {
@@ -840,7 +840,7 @@ impl pinakes_core::resolver::Resolver for BlogFeed {
         true
     }
     async fn resolve(&self, uri: &str) -> anyhow::Result<ResourceMeta> {
-        let f = fetched_at(uri, blog_feed());
+        let f = fetched_at(uri, self.1.clone());
         Ok(pinakes_core::resolver::cards::podcast(uri, &f, 3600, 1000)?.expect("a podcast feed"))
     }
     fn refresh_after(&self, _: &ResourceMeta) -> std::time::Duration {
@@ -850,6 +850,10 @@ impl pinakes_core::resolver::Resolver for BlogFeed {
 /// Reads `uri` through the queue (its job alone due), as a client's `POST /v1/resolve` gets it
 /// read: its resource ID.
 async fn read(pool: &PgPool, uri: &str) -> String {
+    read_with(pool, uri, blog_feed()).await
+}
+/// [`read`], the blog feed answering with `body`.
+async fn read_with(pool: &PgPool, uri: &str, body: String) -> String {
     use pinakes_core::{config::QueueConfig, queue};
     let id = store::ensure_resource(pool, uri).await.unwrap();
     sqlx::query("UPDATE resource SET next_attempt_at=CASE WHEN id=$1 THEN now() ELSE now()+interval '1 day' END,final=false")
@@ -868,7 +872,7 @@ async fn read(pool: &PgPool, uri: &str) -> String {
         .unwrap()
         .unwrap_or_else(|| panic!("{uri} due on {route}"));
     assert_eq!(job.id, id);
-    queue::run_job(pool, &BlogFeed(route), &QueueConfig::default(), &job)
+    queue::run_job(pool, &BlogFeed(route, body), &QueueConfig::default(), &job)
         .await
         .unwrap();
     id
@@ -1074,7 +1078,13 @@ async fn a_stale_job_or_a_page_of_its_own_joins_nothing(pool: PgPool) {
         .await
         .unwrap();
     // Fenced: whatever the run answers, it writes nothing.
-    let _ = queue::run_job(&pool, &BlogFeed(route), &QueueConfig::default(), &job).await;
+    let _ = queue::run_job(
+        &pool,
+        &BlogFeed(route, blog_feed()),
+        &QueueConfig::default(),
+        &job,
+    )
+    .await;
     let aliases: i64 = sqlx::query_scalar("SELECT count(*) FROM resource_alias WHERE root_id=$1")
         .bind(&id)
         .fetch_one(&pool)
@@ -1334,4 +1344,73 @@ async fn an_episode_page_joins_only_its_own_feeds_item(pool: PgPool) {
         card["id"], item_id,
         "an episode of the same feed joins: {card}"
     );
+}
+
+/// A joined post lets go when its item no longer names it: the item's link moved to another post
+/// (which joins instead), or the item left the feed (its card read as missing). A post let go
+/// answers for itself again, with its tracked spelling, and is read again on its own route.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_joined_post_lets_go_when_its_item_no_longer_names_it(pool: PgPool) {
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let episodes = pinakes_core::episodes::from_feed(&fetched_at(BLOG_FEED, blog_feed())).unwrap();
+    show(&pool, BLOG_FEED, Some(episodes)).await;
+    async fn article(pool: &PgPool, uri: &str) -> String {
+        let id = store::ensure_resource(pool, uri).await.unwrap();
+        let mut d = ResourceMeta::new(uri, "web", 86_400);
+        d.set_type("Article");
+        store::save_document(pool, &id, 0, &d).await.unwrap();
+        id
+    }
+    let post = "https://blog.example/second/";
+    let tracked = "https://blog.example/second/?utm_source=rss&utm_medium=rss&utm_campaign=second";
+    let post_id = article(&pool, post).await;
+    let tracked_id = store::ensure_resource(&pool, tracked).await.unwrap();
+    let item = "https://blog.example/feed/podcast/?guid=https%3A%2F%2Fblog.example%2F%3Fp%3D2";
+    let episode = read(&pool, item).await;
+    for spelling in [post, tracked] {
+        assert_eq!(
+            request(&app, &by_uri(spelling)).await.1["id"],
+            episode,
+            "{spelling}"
+        );
+    }
+    // The item now links another post: the first lets go, with its tracked spelling; the other
+    // joins.
+    let moved_post = "https://blog.example/second-moved/";
+    let moved_id = article(&pool, moved_post).await;
+    let moved = blog_feed().replace(
+        "https://blog.example/second/?utm_source=rss&amp;utm_medium=rss&amp;utm_campaign=second",
+        moved_post,
+    );
+    assert_ne!(moved, blog_feed());
+    read_with(&pool, item, moved).await;
+    assert_eq!(request(&app, &by_uri(post)).await.1["id"], post_id);
+    assert_eq!(request(&app, &by_uri(tracked)).await.1["id"], post_id);
+    let tracked_root: String =
+        sqlx::query_scalar("SELECT root_id FROM resource_alias WHERE alias_id=$1")
+            .bind(&tracked_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(tracked_root, post_id);
+    let (resolver, due): (Option<String>, bool) =
+        sqlx::query_as("SELECT resolver,next_attempt_at<=now() FROM resource WHERE id=$1")
+            .bind(&post_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        (resolver.as_deref(), due),
+        (Some("web"), true),
+        "read again on its own route"
+    );
+    assert_eq!(request(&app, &by_uri(moved_post)).await.1["id"], episode);
+    // The item leaves the feed: its card reads as missing, and the post it had lets go.
+    let start = blog_feed().find("<item><title>#2").unwrap();
+    let end = blog_feed()[start..].find("</item>").unwrap() + start + "</item>".len();
+    let mut gone = blog_feed();
+    gone.replace_range(start..end, "");
+    assert!(!gone.contains("#2 –"));
+    read_with(&pool, item, gone).await;
+    assert_eq!(request(&app, &by_uri(moved_post)).await.1["id"], moved_id);
 }

@@ -768,6 +768,85 @@ pub(crate) async fn join_page(
     Ok(())
 }
 
+/// Lets go of the pages joined to an episode's card ([`join_page`], basis `source`) that its feed
+/// item no longer names as its own: every one when the item has left the feed (the card read as
+/// missing, `keep` none), else those other than `keep`, the page it names now. Each answers for
+/// itself again, with the tracking spellings that followed it, and is read again on its own
+/// route (`alias::release`). Nothing moves when the job is stale (the generation fence).
+pub(crate) async fn release_pages(
+    pool: &sqlx::PgPool,
+    id: &str,
+    generation: i64,
+    keep: Option<&str>,
+) -> Result<()> {
+    let keep = keep
+        .and_then(|p| crate::model::identity(p).ok())
+        .map(|v| v.0);
+    let joined: Vec<String> = sqlx::query_scalar(
+        "SELECT alias_id FROM resource_alias WHERE root_id=$1 AND basis='source' AND ($2::text IS NULL OR alias_id<>$2)",
+    )
+    .bind(id)
+    .bind(&keep)
+    .fetch_all(pool)
+    .await?;
+    if joined.is_empty() {
+        return Ok(());
+    }
+    let mut tx = pool.begin().await?;
+    crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
+    crate::alias::lock(&mut tx).await?;
+    // The aliases' rows first (the pages, and the spellings that followed them here), then their
+    // root's, as `alias::assign` locks them.
+    let pages: Vec<(String, String)> = sqlx::query_as(
+        "SELECT r.id,r.uri FROM resource r JOIN resource_alias a ON a.alias_id=r.id WHERE r.id=ANY($1) AND a.root_id=$2 AND a.basis='source' ORDER BY r.id FOR UPDATE OF r",
+    )
+    .bind(&joined)
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let spellings: Vec<(String, String)> = sqlx::query_as(
+        "SELECT r.id,r.uri FROM resource r JOIN resource_alias a ON a.alias_id=r.id WHERE a.root_id=$1 AND a.basis<>'source' ORDER BY r.id FOR UPDATE OF r",
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let current: Option<String> =
+        sqlx::query_scalar("SELECT id FROM resource WHERE id=$1 AND generation=$2 FOR UPDATE")
+            .bind(id)
+            .bind(generation)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if pages.is_empty() || current.is_none() {
+        return Ok(());
+    }
+    let mut lines = vec![];
+    for (page, uri) in &pages {
+        lines.extend(crate::alias::release(&mut tx, page).await?);
+        // Read again on its own route, now: it answers for itself.
+        sqlx::query("UPDATE resource SET resolver=$2,attempts=0,timeout_streak=0,dead_letter=false,final=false,last_error=NULL,lease_until=NULL,priority_at=now(),generation=generation+1,next_attempt_at=now() WHERE id=$1")
+            .bind(page)
+            .bind(crate::resolver::classify(uri))
+            .execute(&mut *tx)
+            .await?;
+    }
+    // A page's own spellings (its tracking parameters) followed it to this card: back to it.
+    let released: Vec<&str> = pages.iter().map(|(p, _)| p.as_str()).collect();
+    for (spelling, uri) in &spellings {
+        if let Some(alias) = crate::alias::root(uri).filter(|a| {
+            crate::model::identity(&a.root).is_ok_and(|v| released.contains(&v.0.as_str()))
+        }) {
+            lines.extend(crate::alias::assign(&mut tx, spelling, &alias).await?);
+        }
+    }
+    crate::alias::record(&mut tx, lines).await?;
+    tx.commit().await?;
+    Ok(())
+}
+/// Whether `uri` is a feed item's (`{feed}?guid={guid}`, [`item_uri`]).
+pub(crate) fn names_an_item(uri: &str) -> bool {
+    Url::parse(uri).is_ok_and(|u| u.query_pairs().any(|(k, _)| k == "guid"))
+}
+
 /// Names the episodes Pinakes has as resources (`id`), by their page's identity (an alias as its
 /// root): one query.
 async fn with_ids<'a>(

@@ -1010,7 +1010,12 @@ root, and a read, lookup, change query or occurrence read of the alias answers w
   group, no aliases but its tracking and canonical spellings, read as a web page or an article,
   or as an episode of the same feed); a page not read yet joins at the item's next read after
   its own. A page that is already an alias, or that a rule above gives another root, is left as
-  it is. A page on another site than its feed (a show hosted elsewhere) keeps its own card.
+  it is. When a read of the item finds it gone from its feed, or linking another page, the page
+  it had answers for itself again (with its tracked spellings) and is read again. A page on
+  another site than its feed (a show hosted elsewhere) keeps its own card. The publisher test is
+  the registrable domain and the shared hosts Pinakes knows (`data/multi-tenant-hosts.json`): on
+  a host that serves several publishers by path and is not listed there, one publisher's feed
+  can still name another's page that reads as a plain page or article.
 
 Refresh follows the time to an event's start: more than 30 days or no start, 7 days; 7–30 days,
 2 days; 24 hours to 7 days, 6 hours; under 24 hours or running, 1 hour
