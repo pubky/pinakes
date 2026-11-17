@@ -4236,9 +4236,13 @@ async fn a_refused_newest_member_version_cancels_after_two_snapshots(pool: PgPoo
     use pinakes_core::event::adapters::nostr as nip52;
     let cfg = EventConfig::default();
     let at = (Utc::now() + Duration::days(1)).timestamp().to_string();
-    // Two dates with their own titles: one with the same title, start and text as `kept` would be
-    // the same date listed twice, which supersedes instead of cancelling.
-    let timed = |d: &str| signed(31923, 100, &[&["d", d], &["title", d], &["start", &at]]);
+    let timed = |d: &str| {
+        signed(
+            31923,
+            100,
+            &[&["d", d], &["title", "Member"], &["start", &at]],
+        )
+    };
     let (kept, refused) = (timed("kept"), timed("refused"));
     let (uri, parent) = nip52_calendar(&pool, &[&kept, &refused]).await;
     let (egress, _) = mock_egress(vec![(200, json!([parent]))]);

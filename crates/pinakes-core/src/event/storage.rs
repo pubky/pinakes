@@ -88,8 +88,9 @@ fn page_url(doc: &ResourceMeta, id: &str, canonical_id: &str) -> Option<String> 
 /// link and status, and its start and name. A publisher that renumbers a date gives it a new UID
 /// and a new page (Meetup: `/events/<token>/` -> `/events/<number>/`), so the feed's content
 /// hash, which keeps the page link, differs. What a stored row gained after its feed gave it
-/// (a resolved venue, its point and zone: `preserve_venue`) is left out too: only the venue's
-/// own text, name and address count.
+/// (a resolved venue and zone, `preserve_venue`, or a looked-up point) is left out too: the
+/// venue's own text, name and address count, and a point the feed or page gave. The description counts as plain text, so a stored copy
+/// still in Markdown matches one read since as plain text (`markdown_plain`, Meetup).
 type SameDate = (
     String,
     Option<chrono::DateTime<chrono::Utc>>,
@@ -98,18 +99,22 @@ type SameDate = (
 fn same_date(doc: &ResourceMeta) -> SameDate {
     let mut value = changes::normalize(doc);
     if let Some(object) = value.as_object_mut() {
-        for field in [
-            "url",
-            "event_status",
-            "location",
-            "location_source",
-            "tz",
-            "timezone_attribution",
-        ] {
+        let looked_up = matches!(
+            object.get("location_source").and_then(Value::as_str),
+            Some("osm" | "geocoded")
+        );
+        for field in ["url", "event_status", "tz", "timezone_attribution"] {
             object.remove(field);
+        }
+        if looked_up {
+            object.remove("location");
+            object.remove("location_source");
         }
         if let Some(venue) = object.get_mut("venue").and_then(Value::as_object_mut) {
             venue.retain(|k, _| matches!(k.as_str(), "text" | "name" | "address"));
+        }
+        if let Some(Value::String(text)) = object.get_mut("description") {
+            *text = crate::sources::markdown_plain(text);
         }
     }
     (
@@ -358,23 +363,21 @@ pub async fn prepare(
             dates.entry(same_date(d)).or_default().push(key.clone());
         }
     }
-    // The dates the feed lists now, as it gives them and as they are stored: a key that left the
-    // feed while another key lists the same date was renumbered, not cancelled.
-    let mut live: BTreeSet<SameDate> = BTreeSet::new();
+    // The dates the feed lists now, by the keys listing them: each accepted row as written
+    // (below), and its stored document while the date is the same, as the feed may have
+    // changed its text since a dropped key was stored.
+    let mut live: BTreeMap<SameDate, BTreeSet<String>> = BTreeMap::new();
     if !container.delta {
         for item in &container.occurrences {
             let key = item.key();
             if !fetched_keys.contains(&key) || !incoming.contains(&key) {
                 continue;
             }
-            live.insert(same_date(&item.doc));
-            // Its stored document too while the date is the same: the feed may have changed
-            // its text since the dropped key was stored.
             if let Some((_, _, d, status, _, _, _)) = old.get(&key) {
                 if d.start == item.doc.start
                     && !matches!(status.as_str(), "cancelled" | "superseded")
                 {
-                    live.insert(same_date(d));
+                    live.entry(same_date(d)).or_default().insert(key);
                 }
             }
         }
@@ -432,8 +435,8 @@ pub async fn prepare(
         } else {
             None
         };
-        if previous.is_none() {
-            live.insert(same_date(&doc));
+        if !container.delta && incoming.contains(&key) {
+            live.entry(same_date(&doc)).or_default().insert(key.clone());
         }
         if let Some(key) = &supersedes {
             superseded.insert(key.clone());
@@ -446,15 +449,67 @@ pub async fn prepare(
         let url = page_url(&doc, id, &canonical_id);
         plan.rows.push(json!({"uid":item.uid,"rid":item.recurrence_id,"start":doc.start,"end":doc.end,"name":doc.name,"venue_id":doc.event.venue.as_ref().and_then(|v|v.resource_id.as_deref()),"status":doc.event.event_status.as_ref().unwrap_or(&EventStatus::Scheduled).as_str(),"url":url,"doc":doc,"lat":doc.location.as_ref().map(|p|p.lat),"lon":doc.location.as_ref().map(|p|p.lon),"sequence":item.sequence,"modified":modified,"hash":item.content_hash}));
     }
-    // A key the feed dropped, cancelled now or by an earlier snapshot, whose date another key still
-    // lists, is superseded by it instead (the order where the new key came first).
-    if !container.delta {
-        for (key, (_, _, d, status, _, _, _)) in &old {
-            let dropped = cancelled.contains(key)
-                || status == "cancelled" && !fetched_keys.contains(key) && mutable(d);
-            if dropped && !superseded.contains(key) && live.contains(&same_date(d)) {
-                superseded.insert(key.clone());
-                cancelled.remove(key);
+    // A key the feed dropped, cancelled now or by an earlier snapshot, is superseded instead when
+    // another key lists its date and was first listed once it was gone: the date was renumbered
+    // (the new key's first copy differed, or a release before this rule missed the link change).
+    // Cancelled now (missing twice): the other key is first listed at or after the previous
+    // snapshot, the first one without this key. Cancelled earlier: after this key's stored
+    // document was fetched, its last listing. A key listed beside it before is a second session
+    // of that date, and the dropped one stays cancelled. First listed = the key's `created`
+    // change; without one, nothing is superseded.
+    if !container.delta && !live.is_empty() {
+        let dropped: Vec<_> = old
+            .iter()
+            .filter(|(key, (uid, _, d, status, _, _, _))| {
+                !superseded.contains(*key)
+                    && !deleted.contains(uid)
+                    && (cancelled.contains(*key)
+                        || status == "cancelled" && !fetched_keys.contains(*key) && mutable(d))
+            })
+            .filter_map(|(key, (_, _, d, _, _, _, _))| {
+                let since = if cancelled.contains(key) {
+                    plan.last.map(|at| at - 1)
+                } else {
+                    Some(d.fetched_at)
+                }?;
+                live.get(&same_date(d)).map(|twins| (key, since, twins))
+            })
+            .collect();
+        if !dropped.is_empty() {
+            let twins: Vec<String> = dropped
+                .iter()
+                .flat_map(|(_, _, twins)| twins.iter().cloned())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            let listed: BTreeMap<String, i64> = sqlx::query_as(
+                "SELECT occurrence_key,(extract(epoch FROM min(at))*1000)::bigint FROM resource_change WHERE resource_id=$1 AND class='created' AND occurrence_key=ANY($2) GROUP BY occurrence_key",
+            )
+            .bind(id)
+            .bind(&twins)
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .collect();
+            let mut used = BTreeSet::new();
+            for (key, since, twins) in dropped {
+                let twin = twins.iter().find(|twin| {
+                    !used.contains(*twin) && listed.get(*twin).is_some_and(|at| *at > since)
+                });
+                if let Some(twin) = twin {
+                    used.insert(twin.clone());
+                    superseded.insert(key.clone());
+                    cancelled.remove(key);
+                    // The twin's change line names the key it supersedes, as a new key's does.
+                    if let Some((_, _, d, _, _, _, _)) = old.get(twin) {
+                        let before = changes::normalize(d);
+                        let mut after = before.clone();
+                        after["supersedes"] = json!(key);
+                        if let Some(change) = pending(Some(&before), &after, twin.clone()) {
+                            plan.push_change(change, container.limits.max_changes);
+                        }
+                    }
+                }
             }
         }
     }

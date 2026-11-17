@@ -903,15 +903,18 @@ fn markdown_inline(line: &str) -> String {
             _ => chars.push((c, matches!(c, '*' | '_'))),
         }
     }
-    // `**` and `__` go wherever they are, as before.
+    // `**` and `__` go wherever they are, as before (one pass, left to right).
+    let mut kept = Vec::with_capacity(chars.len());
     let mut i = 0;
-    while i + 1 < chars.len() {
-        if chars[i].1 && chars[i + 1].1 && chars[i].0 == chars[i + 1].0 {
-            chars.drain(i..i + 2);
+    while i < chars.len() {
+        if chars[i].1 && chars.get(i + 1).is_some_and(|n| n.1 && n.0 == chars[i].0) {
+            i += 2;
         } else {
+            kept.push(chars[i]);
             i += 1;
         }
     }
+    let chars = kept;
     // Single emphasis: a mark that opens a word, up to the next same mark that closes one. One
     // pass: the latest opening mark of each kind waits for its closing one.
     let edge = |c: Option<&(char, bool)>| c.is_none_or(|(c, _)| !c.is_alphanumeric());
