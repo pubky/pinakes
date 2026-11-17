@@ -774,7 +774,9 @@ pub(crate) async fn join_page(
 /// when it names none). When the item has left the feed (`gone`), only once the card is
 /// confirmed missing (its stored status), so one stray answer moves nothing. Each answers for
 /// itself again, with the tracking spellings that followed it, and is read again on its own
-/// route (`alias::release`). Nothing moves when the job is stale (the generation fence).
+/// route (`alias::release`); a spelling no rule names that followed it (a canonical claim read
+/// after the join) is released and read again too. Nothing moves when the job is stale (the
+/// generation fence).
 pub(crate) async fn release_pages(
     pool: &sqlx::PgPool,
     id: &str,
@@ -828,24 +830,39 @@ pub(crate) async fn release_pages(
     let mut lines = vec![];
     for (page, uri) in &pages {
         lines.extend(crate::alias::release(&mut tx, page).await?);
-        // Read again on its own route, now: it answers for itself.
-        sqlx::query("UPDATE resource SET resolver=$2,attempts=0,timeout_streak=0,dead_letter=false,final=false,last_error=NULL,lease_until=NULL,priority_at=now(),generation=generation+1,next_attempt_at=now() WHERE id=$1")
-            .bind(page)
-            .bind(crate::resolver::classify(uri))
-            .execute(&mut *tx)
-            .await?;
+        requeue(&mut tx, page, uri).await?;
     }
-    // A page's own spellings (its tracking parameters) followed it to this card: back to it.
+    // The spellings that followed a released page here: one a rule of its URI names (a page's
+    // tracking spelling) goes back to that page; one no rule names (a canonical claim read after
+    // the join) answers for itself and is read again, to find its root anew. The card's own
+    // spellings, and those of the page it keeps, stay.
     let released: Vec<&str> = pages.iter().map(|(p, _)| p.as_str()).collect();
     for (spelling, uri) in &spellings {
-        if let Some(alias) = crate::alias::root(uri).filter(|a| {
-            crate::model::identity(&a.root).is_ok_and(|v| released.contains(&v.0.as_str()))
-        }) {
-            lines.extend(crate::alias::assign(&mut tx, spelling, &alias).await?);
+        match crate::alias::root(uri) {
+            Some(alias)
+                if crate::model::identity(&alias.root)
+                    .is_ok_and(|v| released.contains(&v.0.as_str())) =>
+            {
+                lines.extend(crate::alias::assign(&mut tx, spelling, &alias).await?);
+            }
+            Some(_) => {}
+            None => {
+                lines.extend(crate::alias::release(&mut tx, spelling).await?);
+                requeue(&mut tx, spelling, uri).await?;
+            }
         }
     }
     crate::alias::record(&mut tx, lines).await?;
     tx.commit().await?;
+    Ok(())
+}
+/// Queues a released alias on its own route, now: it answers for itself again.
+async fn requeue(tx: &mut Transaction<'_, Postgres>, id: &str, uri: &str) -> Result<()> {
+    sqlx::query("UPDATE resource SET resolver=$2,attempts=0,timeout_streak=0,dead_letter=false,final=false,last_error=NULL,lease_until=NULL,priority_at=now(),generation=generation+1,next_attempt_at=now() WHERE id=$1")
+        .bind(id)
+        .bind(crate::resolver::classify(uri))
+        .execute(&mut **tx)
+        .await?;
     Ok(())
 }
 /// Whether `uri` is a feed item's (`{feed}?guid={guid}`, [`item_uri`]).
