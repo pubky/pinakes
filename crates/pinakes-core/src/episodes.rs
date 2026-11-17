@@ -656,9 +656,9 @@ const JOINABLE: &[&str] = &[
 /// (`group_keys::same_origin`), on one host or a subdomain of the other. So a page that reads as
 /// an article (a blog post's markup that names no feed) answers as the episode, and its tracking
 /// spellings, already its aliases, follow it. Only a page Pinakes has read joins, and only while
-/// it is a plain page of its own: no group, no aliases but its tracking spellings (which
-/// [`release_pages`] can give back), read as a type of [`JOINABLE`], or as an episode of the same
-/// feed. A page not read yet, a
+/// it is a plain page of its own: no group, no aliases but its own tracking and canonical
+/// spellings (which [`release_pages`] gives back), read as a type of [`JOINABLE`], or as an
+/// episode of the same feed. A page not read yet, a
 /// page that is already an alias, a site's root, a feed or a feed's item, or a page a rule of its
 /// URI gives another root (`alias::root`), is left as it is: a page read later joins at the
 /// item's next read. The basis is `source`, the feed's own claim: no rule of the URI names it, so
@@ -715,16 +715,25 @@ pub(crate) async fn join_page(
     if known.is_none() {
         return Ok(());
     }
-    // An alias already, or no plain page of its own: left as it is.
-    let (aliased, spellings, grouped, type_path, page_feed): (
-        bool,
+    // An alias already, or no plain page of its own: left as it is. Its aliases may only be its
+    // own spellings, which `release_pages` gives back: tracking ones, and canonical ones that
+    // differ from it only by a trailing slash (`alias::canonical`).
+    let others: Vec<(String, String)> = sqlx::query_as(
+        "SELECT r.uri,a.basis FROM resource_alias a JOIN resource r ON r.id=a.alias_id WHERE a.root_id=$1 AND a.basis<>'tracking'",
+    )
+    .bind(&page_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let spellings = others.iter().any(|(uri, basis)| {
+        basis != "canonical" || crate::alias::canonical(uri, &page_uri).is_none()
+    });
+    let (aliased, grouped, type_path, page_feed): (
         bool,
         bool,
         Option<Vec<String>>,
         Option<String>,
     ) = sqlx::query_as(
         "SELECT EXISTS(SELECT 1 FROM resource_alias WHERE alias_id=$1),\
-         EXISTS(SELECT 1 FROM resource_alias WHERE root_id=$1 AND basis<>'tracking'),\
          EXISTS(SELECT 1 FROM group_unit WHERE resource_id=$1 AND group_id IS NOT NULL),\
          (SELECT type_path FROM resource WHERE id=$1),\
          (SELECT doc->'attributes'->>'podcast_feed' FROM resource WHERE id=$1)",
@@ -786,9 +795,10 @@ pub(crate) async fn release_pages(
     let keep = keep.and_then(|p| crate::model::identity(p).ok());
     // The page kept is the one the item names now, in any of its spellings: a link that flips
     // its trailing slash or tracking parameters still names the page joined (`alias::canonical`).
-    let kept = |uri: &str| {
-        keep.as_ref().is_some_and(|(_, k, _)| {
-            k == uri
+    let kept = |page: &str, uri: &str| {
+        keep.as_ref().is_some_and(|(id, k, _)| {
+            id == page
+                || k == uri
                 || crate::alias::canonical(uri, k).is_some()
                 || crate::alias::canonical(k, uri).is_some()
         })
@@ -800,7 +810,7 @@ pub(crate) async fn release_pages(
     .fetch_all(pool)
     .await?
     .into_iter()
-    .filter(|(_, uri)| !kept(uri))
+    .filter(|(page, uri)| !kept(page, uri))
     .map(|(page, _)| page)
     .collect();
     let keep = keep.map(|v| v.0);

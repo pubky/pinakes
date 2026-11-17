@@ -1007,7 +1007,7 @@ root, and a read, lookup, change query or occurrence read of the alias answers w
   `PodcastEpisode`, and its tracked spellings with it. A page another item links too, the feed's
   own `<link>` (the show's site), a site's root, a feed and a feed's item are no episode's own
   page. Only a page Pinakes has read joins, and only while it is a plain page of its own (no
-  group, no aliases but its tracking spellings, read as a web page or an article, or as an
+  group, no aliases but its own tracked and slash spellings, read as a web page or an article, or as an
   episode of the same feed); a page not read yet joins at the item's next read after
   its own. A page that is already an alias, or that a rule above gives another root, is left as
   it is. When reads of the item confirm it gone from its feed (the card `missing`), or a read
