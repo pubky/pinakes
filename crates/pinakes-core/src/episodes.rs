@@ -809,9 +809,10 @@ pub(crate) async fn release_pages(
     .fetch_all(&mut *tx)
     .await?;
     let spellings: Vec<(String, String)> = sqlx::query_as(
-        "SELECT r.id,r.uri FROM resource r JOIN resource_alias a ON a.alias_id=r.id WHERE a.root_id=$1 AND a.basis<>'source' ORDER BY r.id FOR UPDATE OF r",
+        "SELECT r.id,r.uri FROM resource r JOIN resource_alias a ON a.alias_id=r.id WHERE a.root_id=$1 AND a.basis<>'source' AND ($2::text IS NULL OR r.id<>$2) ORDER BY r.id FOR UPDATE OF r",
     )
     .bind(id)
+    .bind(&keep)
     .fetch_all(&mut *tx)
     .await?;
     let current: Option<String> =

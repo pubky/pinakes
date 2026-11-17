@@ -1486,6 +1486,19 @@ async fn a_joined_post_lets_go_when_its_item_no_longer_names_it(pool: PgPool) {
         "read again on its own route"
     );
     assert_eq!(request(&app, &by_uri(moved_post)).await.1["id"], episode);
+    // The link flips to its slash-less spelling, already a canonical alias of the episode: that
+    // spelling is the page the item names now and stays; the post with the slash lets go.
+    let slash_flip = moved.replace(moved_post, "https://blog.example/second-moved");
+    assert_ne!(slash_flip, moved);
+    let flipped = alias_of_episode("https://blog.example/second-moved").await;
+    read_with(&pool, item, slash_flip).await;
+    assert_eq!(
+        root_of(flipped).await.as_deref(),
+        Some(episode.as_str()),
+        "the kept page stays"
+    );
+    read_with(&pool, item, moved.clone()).await;
+    assert_eq!(request(&app, &by_uri(moved_post)).await.1["id"], episode);
     // The item links no page of its own any more (its link removed): the post lets go; linked
     // again, it joins again.
     let unlinked = blog_feed().replace(
