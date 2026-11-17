@@ -1625,12 +1625,13 @@ async fn an_entry_names_the_publishers_episode_page_and_its_other_links(pool: Pg
     let tracked = store::ensure_resource(&pool, "https://show.example.com/episode/6/?utm_source=x")
         .await
         .unwrap();
-    sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'tracking')")
+    // Its tracked spelling is its alias already (a rule of its URI names the page).
+    let root: String = sqlx::query_scalar("SELECT root_id FROM resource_alias WHERE alias_id=$1")
         .bind(&tracked)
-        .bind(&page)
-        .execute(&pool)
+        .fetch_one(&pool)
         .await
         .unwrap();
+    assert_eq!(root, page);
     // 5: only a directory's page, a page on another site and a `maybe` link name it.
     let other = card(
         &pool,
