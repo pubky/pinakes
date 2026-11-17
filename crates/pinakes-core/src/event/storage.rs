@@ -481,7 +481,7 @@ pub async fn prepare(
     // and the dropped one stays cancelled. First listed = the key's `created` change; without
     // one, or once the key superseded another, nothing is superseded.
     if dropping && !live.is_empty() {
-        let dropped: Vec<_> = old
+        let mut dropped: Vec<_> = old
             .iter()
             .filter(|(key, (uid, _, d, status, _, _, _))| {
                 !superseded.contains(*key)
@@ -497,15 +497,24 @@ pub async fn prepare(
                 } else {
                     None
                 }?;
-                live.get(&same_date(d)).map(|twins| (key, since, twins))
+                live.get_key_value(&same_date(d))
+                    .map(|(date, twins)| (key, since, date, twins))
             })
             .collect();
+        // The latest `since` first: a twin listed after it also fits every key with an earlier one.
+        dropped.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
         if !dropped.is_empty() {
-            let twins: Vec<String> = dropped
+            // Each date's twins once, however many dropped keys share that date.
+            let dates: BTreeMap<&SameDate, &BTreeSet<String>> = dropped
                 .iter()
-                .flat_map(|(_, _, twins)| twins.iter().cloned())
+                .map(|(_, _, date, twins)| (*date, *twins))
+                .collect();
+            let twins: Vec<String> = dates
+                .values()
+                .flat_map(|twins| twins.iter())
                 .collect::<BTreeSet<_>>()
                 .into_iter()
+                .cloned()
                 .collect();
             let listed: BTreeMap<String, i64> = sqlx::query_as(
                 "SELECT occurrence_key,(extract(epoch FROM min(at) FILTER (WHERE class='created'))*1000)::bigint FROM resource_change WHERE resource_id=$1 AND occurrence_key=ANY($2) GROUP BY occurrence_key HAVING count(*) FILTER (WHERE class='created')>0 AND NOT bool_or(coalesce(after ? 'supersedes',false))",
@@ -516,13 +525,36 @@ pub async fn prepare(
             .await?
             .into_iter()
             .collect();
-            let mut used = BTreeSet::new();
-            for (key, since, twins) in dropped {
-                let twin = twins.iter().find(|twin| {
-                    !used.contains(*twin) && listed.get(*twin).is_some_and(|at| *at > since)
-                });
+            // Per date, its listed twins by first listing; a dropped key takes the first one listed
+            // after `since`, and each twin is taken once (a key can stand under two dates).
+            let mut free: BTreeMap<&SameDate, BTreeSet<(i64, &String)>> = dates
+                .into_iter()
+                .map(|(date, twins)| {
+                    let firsts = twins
+                        .iter()
+                        .filter_map(|twin| listed.get(twin).map(|at| (*at, twin)))
+                        .collect();
+                    (date, firsts)
+                })
+                .collect();
+            let lowest = String::new();
+            let mut used: BTreeSet<&String> = BTreeSet::new();
+            for (key, since, date, _) in dropped {
+                let Some(firsts) = free.get_mut(date) else {
+                    continue;
+                };
+                let twin = loop {
+                    let Some(&(at, twin)) =
+                        firsts.range((since.saturating_add(1), &lowest)..).next()
+                    else {
+                        break None;
+                    };
+                    firsts.remove(&(at, twin));
+                    if at > since && used.insert(twin) {
+                        break Some(twin);
+                    }
+                };
                 if let Some(twin) = twin {
-                    used.insert(twin.clone());
                     superseded.insert(key.clone());
                     cancelled.remove(key);
                     // The twin's change line names the key it supersedes, as a new key's does.
