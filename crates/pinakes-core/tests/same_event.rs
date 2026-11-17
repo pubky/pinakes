@@ -754,10 +754,6 @@ fn an_api_feed_is_named_by_a_page_a_person_can_open() {
             "https://api.btcmap.org/v4/events",
             Some("https://btcmap.org/"),
         ),
-        (
-            "https://www.googleapis.com/calendar/v3/calendars/a%40group.calendar.google.com/events",
-            Some("https://calendar.google.com/calendar/embed?src=a%40group.calendar.google.com"),
-        ),
         ("https://example.org/meetups.ics", None),
     ] {
         assert_eq!(human_page(feed).as_deref(), page, "{feed}");

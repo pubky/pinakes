@@ -675,7 +675,9 @@ when it is turned back on.
 `data/event-adapters.json` declares each platform's mode, identity, cancellation signal, cadence
 floor, expected fields, key requirement and canary. Configure a platform
 under `[event.adapters.platforms.<id>]` with `enabled` and `key`; a missing key disables only
-that platform and no key ever appears in `/v1/info`. Resident Advisor (an unofficial GraphQL
+that platform and no key ever appears in `/v1/info`. Settings for `billetto_api`,
+`eventfrog_api`, `google_calendar_api` or `skiddle`, which name no platform Pinakes reads, are
+ignored with a warning at startup; any other unknown platform id stops startup. Resident Advisor (an unofficial GraphQL
 API) is off by default; Posh is marked fragile. Billetto, Reservix, Rausgegangen and Entradium
 are off and fragile: each walls its event pages off from Pinakes's user agent (a CloudFront 403,
 a script challenge, an "update your browser" page), and a bot wall is never worked around.
@@ -707,7 +709,7 @@ it: curate the token page again after its first read. Self-hosted Pretix, Eventy
 signatures, a heuristic that can cost one bounded discovery request. Authenticated APIs never
 redirect, and credentials are removed from retained URLs and errors.
 
-Cursor feeds (an event portal, BTC Map, the Google Calendar API) keep their checkpoints in
+Cursor feeds (an event portal, BTC Map) keep their checkpoints in
 `event_fetch` and commit them with each accepted batch; an expired cursor resyncs under the
 ordinary hold rules. BTC Map requests every delta status and deletion, never advances its cursor
 past the local fetch time, and allows five minutes of clock skew. Malformed cursor rows are

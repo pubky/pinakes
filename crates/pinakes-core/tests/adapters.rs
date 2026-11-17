@@ -668,17 +668,10 @@ async fn cursor_outages_preserve_documents_and_checkpoints(pool: PgPool) {
         queue,
         resolver::{Resolver, RetryLater},
     };
-    let mut cfg = EventConfig {
+    let cfg = EventConfig {
         geocoding: false,
         ..Default::default()
     };
-    cfg.adapters.platforms.insert(
-        "google_calendar_api".into(),
-        adapters::Options {
-            key: Some("fixture-key".into()),
-            ..Default::default()
-        },
-    );
     for (uri, source, previous) in [
         (
             "https://portal.einundzwanzig.space/api/changes",
@@ -689,11 +682,6 @@ async fn cursor_outages_preserve_documents_and_checkpoints(pool: PgPool) {
             "https://api.btcmap.org/v4/events",
             "btcmap",
             "2026-10-15T00:00:00Z",
-        ),
-        (
-            "https://www.googleapis.com/calendar/v3/calendars/public/events",
-            "google_calendar_api",
-            "accepted-token",
         ),
     ] {
         let id = store::ensure_resource(&pool, uri).await.unwrap();
@@ -1047,7 +1035,6 @@ fn manifests_cover_every_platform_and_keys_disable_without_exposing_credentials(
         "einundzwanzig",
         "btcmap",
         "nip52",
-        "google_calendar_api",
         "luma",
         "meetup",
         "eventbrite",
@@ -1069,12 +1056,12 @@ fn manifests_cover_every_platform_and_keys_disable_without_exposing_credentials(
         "eventfrog",
         "allevents",
         "ticketmaster",
-        "skiddle",
-        "billetto_api",
-        "eventfrog_api",
         "resident_advisor",
     ] {
         assert!(adapters::definition(id).is_some(), "{id}");
+    }
+    for id in adapters::UNREAD_PLATFORMS {
+        assert!(adapters::definition(id).is_none(), "{id}");
     }
     for m in adapters::manifests(&cfg).iter().filter(|m| m.requires_key) {
         assert!(!m.enabled);
@@ -1087,12 +1074,6 @@ fn manifests_cover_every_platform_and_keys_disable_without_exposing_credentials(
             key: Some("secret-fixture-key".into()),
             ..Default::default()
         },
-    );
-    assert_eq!(
-        adapters::detect("https://billetto.dk/api/v3/public/events/123")
-            .unwrap()
-            .id,
-        "billetto_api"
     );
     let target = adapters::service::endpoint(
         adapters::definition("ticketmaster").unwrap(),
@@ -1114,6 +1095,18 @@ fn manifests_cover_every_platform_and_keys_disable_without_exposing_credentials(
         adapters::manifest(adapters::definition("facebook").unwrap(), &cfg).cadence_floor
             >= 7 * 86400
     );
+    // A platform Pinakes no longer reads, still named in an operator's config with a key or an
+    // empty value, is ignored; any other unknown platform is refused.
+    for id in adapters::UNREAD_PLATFORMS {
+        cfg.adapters.platforms.insert(
+            (*id).into(),
+            adapters::Options {
+                key: Some("old-key".into()),
+                ..Default::default()
+            },
+        );
+    }
+    adapters::validate(&cfg).unwrap();
     cfg.adapters
         .platforms
         .insert("no-such-platform".into(), Default::default());
@@ -1177,18 +1170,6 @@ fn embedded_platform_shapes_and_jsonld_precedence() {
         (
             "ticketmaster",
             json!({"name":"Ticketmaster","dates":{"start":{"dateTime":"2026-10-20T17:00:00Z"},"timezone":"Europe/Zurich","status":{"code":"postponed"}},"_embedded":{"venues":[{"name":"Hall","location":{"latitude":"47","longitude":"8"}}]}}),
-        ),
-        (
-            "skiddle",
-            json!({"results":{"eventname":"Skiddle","startdate":"2026-10-20T18:00:00+01:00","venue":{"latitude":47,"longitude":8}}}),
-        ),
-        (
-            "billetto_api",
-            json!({"event":{"name":"Billetto","start_at":"2026-10-20T17:00:00Z","state":"canceled"}}),
-        ),
-        (
-            "eventfrog_api",
-            json!({"events":[{"name":"Eventfrog","startDate":"2026-10-20T17:00:00Z","cancelled":true}]}),
         ),
         (
             "resident_advisor",
@@ -2024,67 +2005,6 @@ async fn cursor_http_resync_pagination_and_tombstones(pool: PgPool) {
     assert!(seen[0].0.contains("include_deleted=true&status=all"));
     assert!(!seen[0].0.contains("limit="));
 }
-#[sqlx::test(migrations = "../../migrations")]
-async fn google_expiration_resets_then_commits_only_final_token(pool: PgPool) {
-    let uri = "https://www.googleapis.com/calendar/v3/calendars/public/events";
-    let mut cfg = EventConfig {
-        ..Default::default()
-    };
-    cfg.adapters.platforms.insert(
-        "google_calendar_api".into(),
-        adapters::Options {
-            key: Some("private-key".into()),
-            ..Default::default()
-        },
-    );
-    install_cursor(&pool, uri, "expired").await;
-    let event = json!({"id":"e1","summary":"Google","start":{"dateTime":(Utc::now()+Duration::days(1)).to_rfc3339()}});
-    let (egress, t) = mock_egress(vec![
-        (410, Value::Null),
-        (200, json!({"items":[event],"nextPageToken":"page-two"})),
-        (
-            200,
-            json!({"items":[{"id":"old","status":"cancelled"}],"nextSyncToken":"current"}),
-        ),
-    ]);
-    let doc = cursor::resolve(
-        &pool,
-        uri,
-        adapters::definition("google_calendar_api").unwrap(),
-        &egress,
-        &cfg,
-        false,
-    )
-    .await
-    .unwrap();
-    let c = doc.container.as_ref().unwrap();
-    assert!(!c.delta);
-    assert_eq!(c.deleted_uids, ["old"]);
-    let checkpoint = c.cursor.as_ref().unwrap();
-    assert!(checkpoint.reset);
-    assert_eq!(checkpoint.next, "current");
-    {
-        let seen = t.seen.lock().unwrap();
-        assert!(seen[0].0.contains("syncToken=expired"));
-        assert!(!seen[1].0.contains("syncToken"));
-        assert!(!seen[0].0.contains("timeMin="));
-        assert!(seen[1].0.contains("timeMin=") && seen[1].0.contains("timeMax="));
-        assert!(seen[2].0.contains("timeMin=") && seen[2].0.contains("timeMax="));
-        assert!(seen[2].0.contains("pageToken=page-two"));
-        assert!(seen.iter().all(|(_, o)| o.sensitive));
-    }
-    let id = pinakes_core::model::identity(uri).unwrap().0;
-    assert_eq!(saved_cursor(&pool, &id).await.as_deref(), Some("expired"));
-    store::save_document(&pool, &id, 0, &doc).await.unwrap();
-    assert_eq!(saved_cursor(&pool, &id).await.as_deref(), Some("current"));
-    let resets: i64 = sqlx::query_scalar(
-        "SELECT cursor_resets_total FROM source_state WHERE source='google_calendar_api'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(resets, 1);
-}
 
 #[test]
 fn own_calendar_links_and_deterministic_platform_endpoints() {
@@ -2603,36 +2523,14 @@ fn registry_credentials_and_cadence() {
         assert_eq!(classify(uri), Some(route), "{uri}");
     }
     assert_eq!(classify("https://api.nostr.wine/search?kind=0"), None);
-    for (id, uri, path) in [
-        ("billetto_api", "https://api.billetto.com/v3/public/events/42?admin=true", "/api/v3/public/events/42"),
-        ("eventfrog_api", "https://api.eventfrog.net/public/v1/events?id=42&admin=true", "/public/v1/events"),
-        ("google_calendar_api", "https://www.googleapis.com/calendar/v3/calendars/abc%40example.org/events?syncToken=attacker", "/calendar/v3/calendars/abc@example.org/events"),
+    // Provider API addresses and Skiddle pages route to no event adapter: they are ordinary links.
+    for uri in [
+        "https://api.billetto.com/v3/public/events/42",
+        "https://api.eventfrog.net/public/v1/events?id=42",
+        "https://www.googleapis.com/calendar/v3/calendars/abc%40example.org/events",
+        "https://www.skiddle.com/whats-on/London/Venue/Event/12345678/",
     ] {
-        let url = adapters::service::keyed_url(id, uri).unwrap();
-        assert_eq!(url.path(), path);
-        assert!(!url.as_str().contains("admin") && !url.as_str().contains("attacker"));
-    }
-    for (id, uri) in [
-        ("billetto_api", "https://api.billetto.com/v3/admin/events"),
-        (
-            "eventfrog_api",
-            "https://api.eventfrog.net/public/v1/orders?id=42",
-        ),
-        (
-            "eventfrog_api",
-            "https://api.eventfrog.net/public/v1/events?id=42&id=43",
-        ),
-        (
-            "google_calendar_api",
-            "https://www.googleapis.com/calendar/v3/calendars/a/acl",
-        ),
-        (
-            "google_calendar_api",
-            "https://www.googleapis.com/calendar/v3/calendars/a%2fb/events",
-        ),
-    ] {
-        assert!(adapters::service::keyed_url(id, uri).is_err());
-        assert!(adapters::detect(uri).is_none());
+        assert!(adapters::detect(uri).is_none(), "{uri}");
     }
     let options = adapters::Options {
         key: Some("never-print-this".into()),
@@ -2643,11 +2541,7 @@ fn registry_credentials_and_cadence() {
         .unwrap()
         .contains("never-print-this"));
     let now = Utc::now();
-    for (id, seconds) in [
-        ("einundzwanzig", 300),
-        ("btcmap", 900),
-        ("google_calendar_api", 900),
-    ] {
+    for (id, seconds) in [("einundzwanzig", 300), ("btcmap", 900)] {
         let m = adapters::manifest(adapters::definition(id).unwrap(), &Default::default());
         assert_eq!(m.mode, Mode::Cursor);
         assert_eq!(
@@ -3689,33 +3583,19 @@ async fn registered_secondary_451_confirms_disappearance(pool: PgPool) {
 }
 #[sqlx::test(migrations = "../../migrations")]
 async fn cursor_privacy_is_confirmed_and_bad_requests_back_off(pool: PgPool) {
-    let mut cfg = EventConfig {
+    let cfg = EventConfig {
         geocoding: false,
         ..Default::default()
     };
-    cfg.adapters.platforms.insert(
-        "google_calendar_api".into(),
-        adapters::Options {
-            key: Some("fixture".into()),
-            ..Default::default()
-        },
-    );
     for (uri, source) in [
         (
             "https://portal.einundzwanzig.space/api/changes",
             "einundzwanzig",
         ),
         ("https://api.btcmap.org/v4/events", "btcmap"),
-        (
-            "https://www.googleapis.com/calendar/v3/calendars/public/events",
-            "google_calendar_api",
-        ),
     ] {
         let id = store::ensure_resource(&pool, uri).await.unwrap();
         for (index, status) in [401, 403, 404, 451].into_iter().enumerate() {
-            if source == "google_calendar_api" && matches!(status, 401 | 403) {
-                continue;
-            }
             let mut accepted = cursor::container(uri, &cfg);
             accepted.fetched_at += index as i64 * 10000;
             store::save_document(&pool, &id, 0, &accepted)
@@ -3780,73 +3660,6 @@ async fn cursor_privacy_is_confirmed_and_bad_requests_back_off(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrations = "../../migrations")]
-async fn google_credential_denials_keep_occurrences_and_count_drift(pool: PgPool) {
-    use pinakes_core::{queue, resolver::Resolver, telemetry};
-    let uri = "https://www.googleapis.com/calendar/v3/calendars/public/events";
-    let id = store::ensure_resource(&pool, uri).await.unwrap();
-    let mut cfg = EventConfig {
-        geocoding: false,
-        ..Default::default()
-    };
-    cfg.adapters.platforms.insert(
-        "google_calendar_api".into(),
-        adapters::Options {
-            key: Some("fixture".into()),
-            ..Default::default()
-        },
-    );
-    for status in [401, 403, 404] {
-        let mut accepted = cursor::container(uri, &cfg);
-        pinakes_core::resolver::html::off_runtime(|| cursor::append(&mut accepted,"google_calendar_api",&json!({"id":"keep","summary":"Retained event","start":{"dateTime":(Utc::now()+Duration::days(1)).to_rfc3339()}}),&cfg)).unwrap();
-        accepted.fetched_at += i64::from(status) * 10000;
-        store::save_document(&pool, &id, 0, &accepted)
-            .await
-            .unwrap();
-        for n in 1..=2 {
-            let (egress, _) = mock_egress(vec![(status, Value::Null)]);
-            let r = platform(&pool, cfg.clone(), egress);
-            let metrics = telemetry::Metrics::new().unwrap();
-            if status == 404 {
-                let mut missing = r.resolve(uri).await.unwrap();
-                assert_eq!(missing.status, pinakes_core::model::Status::Missing);
-                missing.fetched_at = accepted.fetched_at + n * 3_600_000;
-                store::save_document(&pool, &id, 0, &missing).await.unwrap();
-            } else {
-                let (result, observations) = telemetry::observe(
-                    &metrics,
-                    &r.manifest(),
-                    queue::run_job(
-                        &pool,
-                        &r,
-                        &Default::default(),
-                        &queue::Job {
-                            id: id.clone(),
-                            uri: uri.into(),
-                            attempts: 0,
-                            generation: 0,
-                        },
-                    ),
-                )
-                .await;
-                result.unwrap();
-                assert!(observations.iter().any(|o| o.outcome == "drift"));
-                let state:(String,i32,String,i32,bool)=sqlx::query_as("SELECT status,missing_streak,last_error,attempts,dead_letter FROM resource WHERE id=$1").bind(&id).fetch_one(&pool).await.unwrap();
-                assert_eq!(state, ("ok".into(), 0, "upstream_denied".into(), 0, false));
-                let active:i64=sqlx::query_scalar("SELECT count(*) FROM occurrence WHERE resource_id=$1 AND coalesce(doc->>'event_status','scheduled')<>'cancelled'").bind(&id).fetch_one(&pool).await.unwrap();
-                assert_eq!(active, 1);
-            }
-        }
-        if status == 404 {
-            let status: String = sqlx::query_scalar("SELECT status FROM resource WHERE id=$1")
-                .bind(&id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-            assert_eq!(status, "missing");
-        }
-    }
-}
 #[sqlx::test(migrations = "../../migrations")]
 async fn cursor_quarantines_bad_rows_without_inventing_deletions(pool: PgPool) {
     let uri = "https://portal.einundzwanzig.space/api/changes";
