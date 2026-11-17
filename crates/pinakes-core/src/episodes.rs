@@ -12,7 +12,9 @@
 //! own here; the list is the feed's head and nothing more. An entry is not a card: the episode's
 //! card is its `uri` (its feed item) resolved (`POST /v1/resolve`), and `id` names that card when
 //! Pinakes has it. That card names its show (`related`, `show`), and its page joins it as an
-//! alias when the feed's own publisher publishes the page ([`join_page`]).
+//! alias when the feed's own publisher publishes the page ([`join_page`]). A page of the
+//! publisher's that Pinakes read as the episode before, and that stays a card of its own (a
+//! group holds it), is the episode the entry names instead ([`with_ids`]).
 use crate::model::Stream;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -34,14 +36,20 @@ const SCANNED: usize = 200;
 /// One of a show's latest episodes, as its feed lists it.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, ToSchema)]
 pub struct Episode {
-    /// The episode's own card, when Pinakes has one for its `uri` (an alias reads as its root);
-    /// absent until someone looks it up.
+    /// The episode's own card, when Pinakes has one ([`with_ids`]); absent until someone looks
+    /// it up.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     /// The episode's feed item (`{feed}?guid={guid}`), which `POST /v1/resolve` reads as its
     /// `PodcastEpisode` card from the feed ([`ItemIdentity::uri`]); from a feed whose address
-    /// carries a credential, the item's page.
+    /// carries a credential, the item's page. When Pinakes has the episode's card (`id`), that
+    /// card's own link.
     pub uri: String,
+    /// The episode's other links, which a client reads together with `uri` (tags, counts,
+    /// replies): the feed item when `uri` is another card's link, then that card's aliases;
+    /// at most [`ALIASES`], absent when there are none. Never stored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
     /// Plain text, entity-decoded: escape it before rendering it as HTML.
     pub name: Option<String>,
     pub image: Option<String>,
@@ -355,6 +363,7 @@ fn episode(item: roxmltree::Node<'_, '_>, feed: &Url) -> Option<Episode> {
     Some(Episode {
         id: None,
         uri,
+        aliases: Vec::new(),
         name: text("title").map(|t| bounded(t, 512)),
         image: child("image")
             .and_then(|c| c.attribute("href"))
@@ -626,6 +635,7 @@ async fn stored(
                 Episode {
                     id: None,
                     uri,
+                    aliases: Vec::new(),
                     name,
                     image,
                     published,
@@ -890,8 +900,20 @@ pub(crate) fn names_an_item(uri: &str) -> bool {
     Url::parse(uri).is_ok_and(|u| u.query_pairs().any(|(k, _)| k == "guid"))
 }
 
-/// Names the episodes Pinakes has as resources (`id`), by their page's identity (an alias as its
-/// root): one query.
+/// The most other links an entry names ([`Episode::aliases`]).
+pub const ALIASES: usize = 16;
+
+/// Names the episodes Pinakes has as cards: `id`, with `uri` that card's link and `aliases` the
+/// entry's other links: two queries for any number of entries, none for an empty list.
+///
+/// An entry's episode is, first, the card its feed's own publisher has for it: a `PodcastEpisode`
+/// card (status `ok`, no alias) whose podcast links name this very feed item by its item key
+/// (`podcast:item:…`: a certain link of the `podcasts` source, the item of a show whose GUID
+/// is vouched, never a `maybe` nor a switched-off source's) and whose page the feed's publisher
+/// publishes ([`publisher_page`]). That is the page people share and tag, read as the episode
+/// before the feed was, and kept a card of its own when a group holds it ([`join_page`] joins
+/// only plain pages). Else the card the entry's `uri` reads as (an alias as its root). The feed
+/// item then becomes the first of `aliases`, so what was written on it is read with the card.
 async fn with_ids<'a>(
     pool: &sqlx::PgPool,
     episodes: impl IntoIterator<Item = &'a mut Episode>,
@@ -904,18 +926,88 @@ async fn with_ids<'a>(
     if identities.is_empty() {
         return Ok(());
     }
-    let known: Vec<(String, String)> = sqlx::query_as("SELECT i,r.id FROM unnest($1::text[]) i LEFT JOIN resource_alias a ON a.alias_id=i JOIN resource r ON r.id=coalesce(a.root_id,i)")
-        .bind(&identities)
-        .fetch_all(pool)
-        .await?;
+    // `(identity, 0, card, its link)` for the card the entry's link reads as, `(identity, 1, …)`
+    // for each publisher's card that names it as its feed item, in ID order.
+    let known: Vec<(String, i32, String, String)> = sqlx::query_as(
+        "WITH i AS (SELECT DISTINCT i FROM unnest($1::text[]) i) \
+         SELECT i.i,0,r.id,r.uri FROM i LEFT JOIN resource_alias a ON a.alias_id=i.i JOIN resource r ON r.id=coalesce(a.root_id,i.i) \
+         UNION ALL \
+         SELECT i.i,1,r.id,r.uri FROM i JOIN derived_link d ON d.link_id=i.i AND d.key IS NOT NULL JOIN resource r ON r.id=d.resource_id \
+           WHERE d.source='podcasts' AND d.key LIKE 'podcast:item:%' AND d.kind IS NULL AND d.expires_at>now() \
+           AND d.source NOT IN (SELECT source FROM also_on_source_off) \
+           AND r.status='ok' AND r.type_path[cardinality(r.type_path)]='PodcastEpisode' \
+           AND NOT EXISTS (SELECT 1 FROM resource_alias x WHERE x.alias_id=r.id) \
+         ORDER BY 1,2,3",
+    )
+    .bind(&identities)
+    .fetch_all(pool)
+    .await?;
     for e in episodes.iter_mut() {
-        let identity = crate::model::identity(&e.uri).ok().map(|v| v.0);
-        e.id = known
-            .iter()
-            .find(|(i, _)| Some(i) == identity.as_ref())
-            .map(|(_, id)| id.clone());
+        let Some(identity) = crate::model::identity(&e.uri).ok().map(|v| v.0) else {
+            continue;
+        };
+        let rows = || known.iter().filter(|(i, ..)| *i == identity);
+        let publishers = rows()
+            .filter(|(_, rank, ..)| *rank == 1)
+            .filter(|(.., uri)| names_an_item(&e.uri) && publisher_page(uri, &e.uri));
+        let own = rows().filter(|(_, rank, ..)| *rank == 0);
+        let Some((_, _, id, uri)) = publishers.chain(own).next() else {
+            e.id = None;
+            continue;
+        };
+        e.id = Some(id.clone());
+        if *uri != e.uri {
+            e.aliases = vec![std::mem::replace(&mut e.uri, uri.clone())];
+        }
+    }
+    let cards: Vec<String> = episodes.iter().filter_map(|e| e.id.clone()).collect();
+    if cards.is_empty() {
+        return Ok(());
+    }
+    // Each card's aliases, the first [`ALIASES`] by URI, as a card lists them (`aliases`).
+    let aliases: Vec<(String, String)> = sqlx::query_as(
+        "SELECT c.id,s.uri FROM (SELECT DISTINCT id FROM unnest($1::text[]) id) c CROSS JOIN LATERAL \
+         (SELECT x.uri FROM resource_alias a JOIN resource x ON x.id=a.alias_id WHERE a.root_id=c.id ORDER BY x.uri LIMIT $2) s \
+         ORDER BY 1,2",
+    )
+    .bind(&cards)
+    .bind(ALIASES as i64)
+    .fetch_all(pool)
+    .await?;
+    for e in episodes.iter_mut() {
+        let Some(id) = e.id.as_deref() else {
+            continue;
+        };
+        for (_, uri) in aliases.iter().filter(|(card, _)| card == id) {
+            if e.aliases.len() >= ALIASES {
+                break;
+            }
+            if *uri != e.uri && !e.aliases.contains(uri) {
+                e.aliases.push(uri.clone());
+            }
+        }
     }
     Ok(())
+}
+
+/// Whether `page`, a card's link, is a page the publisher of the feed item `item` publishes, by
+/// the rules a page that joins an episode keeps ([`join_page`]): a web page on the feed's own
+/// registrable domain, or its tenant of a shared host (`group_keys::same_origin`), on the feed's
+/// host or a subdomain of the other; neither a site's root nor a feed or a feed's item, and
+/// carrying no credential. So another show's or a directory's page (Podcast Index, Apple) that
+/// names the same item is never the episode an entry names.
+fn publisher_page(page: &str, item: &str) -> bool {
+    let (Ok(url), Ok(feed)) = (Url::parse(page), Url::parse(item)) else {
+        return false;
+    };
+    matches!(url.scheme(), "http" | "https")
+        && page.len() <= 2048
+        && !crate::capability::is_capability(page)
+        && !crate::capability::is_capability(item)
+        && crate::group_keys::same_origin(page, item)
+        && related_hosts(page, item)
+        && !site_root(page)
+        && !a_feed(page, &feed)
 }
 
 #[cfg(test)]

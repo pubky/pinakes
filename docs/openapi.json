@@ -777,12 +777,19 @@
       "Episode": {
         "description": "One of a show's latest episodes, as its feed lists it.",
         "properties": {
+          "aliases": {
+            "description": "The episode's other links, which a client reads together with `uri` (tags, counts,\nreplies): the feed item when `uri` is another card's link, then that card's aliases;\nat most [`ALIASES`], absent when there are none. Never stored.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "guid": {
             "description": "What names the item ([`item_identity`]): its GUID as the feed gives it; its page when it\ngives none; else `sha256:` and the hex digest of its enclosure's URL, so a signed link\nshows nothing of itself here.",
             "type": "string"
           },
           "id": {
-            "description": "The episode's own card, when Pinakes has one for its `uri` (an alias reads as its root);\nabsent until someone looks it up.",
+            "description": "The episode's own card, when Pinakes has one ([`with_ids`]); absent until someone looks\nit up.",
             "type": [
               "string",
               "null"
@@ -820,7 +827,7 @@
             ]
           },
           "uri": {
-            "description": "The episode's feed item (`{feed}?guid={guid}`), which `POST /v1/resolve` reads as its\n`PodcastEpisode` card from the feed ([`ItemIdentity::uri`]); from a feed whose address\ncarries a credential, the item's page.",
+            "description": "The episode's feed item (`{feed}?guid={guid}`), which `POST /v1/resolve` reads as its\n`PodcastEpisode` card from the feed ([`ItemIdentity::uri`]); from a feed whose address\ncarries a credential, the item's page. When Pinakes has the episode's card (`id`), that\ncard's own link.",
             "type": "string"
           }
         },
