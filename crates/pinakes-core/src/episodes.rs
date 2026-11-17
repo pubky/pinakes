@@ -1049,7 +1049,7 @@ fn publisher_page(page: &str, item: &str) -> bool {
         && related_hosts(page, item)
         && !site_root(page)
         && !a_feed(page, &feed)
-        && !crate::sources::by_name("podcast_index").is_some_and(|s| s.reads(page))
+        && crate::podcast_index_api::index_page(page).is_none()
 }
 
 #[cfg(test)]
@@ -1080,7 +1080,6 @@ mod tests {
         // Pages other sources read stay a publisher's own: a Substack show's post, a forum
         // thread on the show's site.
         let substack = "https://show.substack.com/feed?guid=ep-1";
-        assert!(crate::sources::reading("https://show.substack.com/p/ep-1").is_some());
         assert!(publisher_page("https://show.substack.com/p/ep-1", substack));
         assert!(publisher_page("https://show.example.com/t/episode/6", item));
     }
