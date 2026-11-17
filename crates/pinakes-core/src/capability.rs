@@ -5,7 +5,9 @@
 //! keeps out of the repository; `tests/fixtures/capability_urls.json` holds the probes both check.
 use url::Url;
 
-/// Query keys that carry a credential, compared after percent-decoding and without case.
+/// Query keys that carry a credential, compared after percent-decoding as [`credential_key`]
+/// reads them (without case and with only ASCII letters and digits, so `k-e-y` is `key`). A key
+/// that ends with one of [`CREDENTIAL_STEMS`] carries one too.
 pub const CREDENTIAL_KEYS: &[&str] = &[
     "token",
     "access_token",
@@ -26,14 +28,76 @@ pub const CREDENTIAL_KEYS: &[&str] = &[
     "x-goog-credential",
 ];
 
+/// Endings of a key that carries a credential, read after [`credential_key`] lowercases the key
+/// and keeps only its ASCII letters and digits: `client_secret`, `X-Api-Key`, `access.key`,
+/// `api key`, `user[password]`, `private_token`,
+/// `oauth_token`, `session_id`, `jsessionid`, `PHPSESSID`. `key`, `auth` and `sig` stay exact
+/// keys only: as endings they would take `monkey`, `hotkey`, `oauth` and the like.
+pub const CREDENTIAL_STEMS: &[&str] = &[
+    "token",
+    "secret",
+    "secretkey",
+    "privatekey",
+    "apikey",
+    "accesskey",
+    "password",
+    "passwd",
+    "passphrase",
+    "signature",
+    "credential",
+    "credentials",
+    "sessionid",
+    "sessid",
+];
+
+/// Keys a stem ends that carry no credential, as [`credential_key`] reads them. Each is a public
+/// list's page cursor: `pageToken` and `nextPageToken` (Google's and YouTube's lists),
+/// `prevPageToken`, `previousPageToken` and `continuationToken` (Azure's): an opaque place in a
+/// list anyone may read, naming no person and no session. A sync token (`syncToken`) and a CSRF
+/// token stay credentials: one is a user's own state, the other a session's.
+const PUBLIC_KEYS: &[&str] = &[
+    "pagetoken",
+    "nextpagetoken",
+    "prevpagetoken",
+    "previouspagetoken",
+    "continuationtoken",
+];
+
+/// Whether `key`, a query or fragment key as decoded, names a credential. The key is read as
+/// [`fold`] reads it, lowercased with only its ASCII letters and digits (`api key`, `api+key`,
+/// `Client.Secret`, `user[password]` and `access_token[]` as a PHP or Rails backend reads them):
+/// it is one of [`CREDENTIAL_KEYS`] read the same way, or it ends with a [`CREDENTIAL_STEMS`] stem
+/// and is not one of [`PUBLIC_KEYS`].
+pub fn credential_key(key: &str) -> bool {
+    let key = fold(key);
+    !key.is_empty()
+        && (CREDENTIAL_KEYS
+            .iter()
+            .any(|exact| folded(exact).eq(key.bytes()))
+            || (!PUBLIC_KEYS.contains(&key.as_str())
+                && CREDENTIAL_STEMS.iter().any(|stem| key.ends_with(stem))))
+}
+
+/// A key's ASCII letters and digits, lowercased: what [`credential_key`] compares.
+fn fold(key: &str) -> String {
+    folded(key).map(char::from).collect()
+}
+
+/// [`fold`] without a new string, for the exact keys compared on every key read.
+fn folded(key: &str) -> impl Iterator<Item = u8> + '_ {
+    key.bytes()
+        .filter(u8::is_ascii_alphanumeric)
+        .map(|b| b.to_ascii_lowercase())
+}
+
 /// Whether `uri` carries a credential ([`is_capability_url`]); a URI that is not a URL does not.
 pub fn is_capability(uri: &str) -> bool {
     Url::parse(uri).is_ok_and(|url| is_capability_url(&url))
 }
 
 /// Whether `url` carries a credential: a password in its user info, a calendar provider's secret
-/// share path, or a key in [`CREDENTIAL_KEYS`] in its query (its parameters separated by `&` or
-/// `;`, as in `?x=1;token=…`), or with a value in its form-encoded
+/// share path, or a credential key ([`credential_key`]) in its query (its parameters separated
+/// by `&` or `;`, as in `?x=1;token=…`), or with a value in its form-encoded
 /// fragment or in any part of it after a `?`, `#` or `;` (an OAuth callback's `#access_token=…`,
 /// a hash router's `#/reset?token=…` or `#/reset;token=…`, an OAuth answer after a route,
 /// `#/cb#access_token=…`; a key may start with an old hash router's `/` or `!/`, as in
@@ -54,16 +118,15 @@ pub fn is_capability_url(url: &Url) -> bool {
     let path = percent_encoding::percent_decode_str(url.path())
         .decode_utf8_lossy()
         .to_ascii_lowercase();
-    let credential = |key: &str| CREDENTIAL_KEYS.contains(&key.to_ascii_lowercase().as_str());
     secret_share(&host, &path)
         || url.query().is_some_and(|query| {
             query.split(';').any(|form| {
-                url::form_urlencoded::parse(form.as_bytes()).any(|(key, _)| credential(&key))
+                url::form_urlencoded::parse(form.as_bytes()).any(|(key, _)| credential_key(&key))
             })
         })
         || url
             .fragment()
-            .is_some_and(|fragment| fragment_credential(fragment, &credential))
+            .is_some_and(|fragment| fragment_credential(fragment, &credential_key))
 }
 
 /// Whether `fragment`, as a form and in each part of it after a `?`, `#` or `;`, has a key that
@@ -112,11 +175,9 @@ pub fn strip<T: serde::de::DeserializeOwned>(value: &mut serde_json::Value, own:
         Url::parse(s).is_ok_and(|url| {
             url.username().is_empty()
                 && url.password().is_none()
-                && !url.fragment().is_some_and(|fragment| {
-                    fragment_credential(fragment, &|key: &str| {
-                        CREDENTIAL_KEYS.contains(&key.to_ascii_lowercase().as_str())
-                    })
-                })
+                && !url
+                    .fragment()
+                    .is_some_and(|fragment| fragment_credential(fragment, &credential_key))
         })
     };
     let foreign = |s: &str| {
@@ -439,6 +500,34 @@ mod tests {
             "port": "https://cal.example:443/feed.ics?token=OWN",
         });
         assert!(!strip::<serde_json::Value>(&mut value, own));
+    }
+    /// A key a credential's stem ends (`client_secret`, `X-Api-Key`, `session_id`) goes from a
+    /// document as an exact key does, in the query and in the fragment; a public list's page
+    /// cursor and a word that only holds a stem stay.
+    #[test]
+    fn the_store_guard_drops_a_key_a_credential_stem_ends() {
+        let own = "https://s.example/p";
+        let kept = serde_json::json!({
+            "url": own,
+            "page": "https://www.example/v?pageToken=CAo",
+            "next": "https://www.example/v?nextPageToken=CAo",
+            "word": "https://www.example/s?keyword=token",
+            "tokens": "https://www.example/s?tokens=3",
+        });
+        let mut value = kept.clone();
+        for (field, link) in [
+            ("a", "https://api.example/x?client_secret=SECRET"),
+            ("b", "https://api.example/x?X-Api-Key=SECRET"),
+            ("c", "https://api.example/x?access.key=SECRET"),
+            ("d", "https://shop.example/cart?session_id=SECRET"),
+            ("e", "https://git.example/p?private_token=SECRET"),
+            ("f", "https://app.example/cb#oauth_token=SECRET"),
+            ("g", "https://app.example/#/cb?auth_token=SECRET"),
+        ] {
+            value[field] = link.into();
+        }
+        assert!(strip::<serde_json::Value>(&mut value, own));
+        assert_eq!(value, kept);
     }
     /// A spelling of the own link that adds a credential to the one it carries (a fragment key,
     /// user info) is not the own link: it goes, while the own link as written stays.

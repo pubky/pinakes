@@ -133,18 +133,7 @@ impl Stream {
         preview: bool,
     ) -> Option<Stream> {
         let parsed = url::Url::parse(url.trim()).ok()?;
-        if !matches!(parsed.scheme(), "https" | "http")
-            || !parsed.username().is_empty()
-            || parsed.password().is_some()
-            || parsed.query_pairs().any(|(name, _)| signed(&name))
-        {
-            return None;
-        }
-        let url::Host::Domain(host) = parsed.host()? else {
-            return None;
-        };
-        let host = host.trim_end_matches('.');
-        if !host.contains('.') || host == "localhost" || host.ends_with(".localhost") {
+        if !public_host(&parsed) || parsed.query_pairs().any(|(name, _)| signed(&name)) {
             return None;
         }
         let essence = media_type.split(';').next()?.trim().to_ascii_lowercase();
@@ -170,6 +159,30 @@ impl Stream {
             preview,
         })
     }
+}
+/// Whether `url` is an `http` or `https` link on a named public host, with no user info: a
+/// domain name with a dot, not `localhost` or a name under it. An IP address, `localhost` or a
+/// name with no dot is private to whoever reads the link (their own machine or network), so a
+/// stream or a card's image is never one. A public name that resolves to such an address
+/// (wildcard DNS) is not caught here: that needs the name resolved.
+pub fn public_host(url: &url::Url) -> bool {
+    matches!(url.scheme(), "https" | "http")
+        && url.username().is_empty()
+        && url.password().is_none()
+        && match url.host() {
+            Some(url::Host::Domain(host)) => {
+                let host = host.trim_end_matches('.');
+                host.contains('.') && host != "localhost" && !host.ends_with(".localhost")
+            }
+            _ => false,
+        }
+}
+/// Whether `s` is a web link (`http` or `https`) that is not on a named public host
+/// ([`public_host`]): an image clients would load from someone's own machine or network. A link
+/// of another scheme (`pubky://`) is no web link here.
+pub fn private_web_link(s: &str) -> bool {
+    url::Url::parse(s)
+        .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && !public_host(&url))
 }
 /// A query parameter that signs a URL or makes it expire (`X-Amz-Signature`, Deezer's
 /// `hdnea`, a `token`, an `expires`): such a link stops working, or works only for whom it was
@@ -611,7 +624,12 @@ impl ResourceMeta {
         for value in self.address.values_mut() {
             truncate(value, 256);
         }
-        if self.image.as_ref().is_some_and(|s| s.len() > 2048) {
+        // Clients load an image from where it is named: a web link's host is a named public one.
+        if self
+            .image
+            .as_ref()
+            .is_some_and(|s| s.len() > 2048 || private_web_link(s))
+        {
             self.image = None;
         }
         self.stream = self.stream.take().and_then(|s| {
@@ -1304,6 +1322,34 @@ mod tests {
         // Local types (data/local-types.json) sit under Thing.
         assert_eq!(type_path("BitcoinBlock"), ["Thing", "BitcoinBlock"]);
         assert_eq!(type_path("LightningChannel"), ["Thing", "LightningChannel"]);
+    }
+    /// A card's image that is a web link is on a named public host, as a stream's link is: an
+    /// IP address, `localhost`, a name with no dot or a link with user info is private to
+    /// whoever reads the card, and goes.
+    #[test]
+    fn a_card_image_is_on_a_named_public_host() {
+        for private in [
+            "http://127.0.0.1/a.jpg",
+            "https://10.0.0.5:8443/a.jpg",
+            "http://[::1]/a.jpg",
+            "http://localhost/a.jpg",
+            "https://printer.localhost/a.jpg",
+            "http://intranet/a.jpg",
+            "https://user@cdn.example/a.jpg",
+        ] {
+            let mut doc = ResourceMeta::new("https://example.org/p", "web", 100);
+            doc.image = Some(private.into());
+            assert_eq!(doc.bounded(&[]).unwrap().image, None, "{private}");
+        }
+        // A named public host, and a link that is no web link (a Pubky file), stay.
+        for public in [
+            "https://cdn.example.org/a.jpg",
+            "pubky://ybndrfg8ejkmcpqxot1uwisza345h769ybndrfg8ejkmcpqxot1uwi/pub/app/a.png",
+        ] {
+            let mut doc = ResourceMeta::new("https://example.org/p", "web", 100);
+            doc.image = Some(public.into());
+            assert_eq!(doc.bounded(&[]).unwrap().image.as_deref(), Some(public));
+        }
     }
     #[test]
     fn documents_are_bounded() {

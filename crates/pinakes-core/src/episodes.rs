@@ -320,7 +320,8 @@ pub(crate) async fn clear(tx: &mut Transaction<'_, Postgres>, id: &str) -> Resul
 const STREAM_TEXT_CAP: usize = 4096 - 64;
 /// An episode's row as the table takes it, so no one episode fails the show's save: a stream
 /// whose JSON exceeds the table's bound (a URL of 2,048 bytes that JSON escapes to twice that)
-/// is stored as none; a name is cut to 512 bytes, an image or a date outside the bounds dropped;
+/// is stored as none; a name is cut to 512 bytes, an image outside the bounds or a web link not
+/// on a named public host (`model::private_web_link`) dropped, and a date outside the bounds;
 /// an episode whose GUID or URI exceeds 2,048 bytes is not stored at all.
 fn storable(e: &Episode) -> Option<(Episode, Option<String>)> {
     if e.guid.len() > 2048 || e.uri.len() > 2048 {
@@ -333,7 +334,9 @@ fn storable(e: &Episode) -> Option<(Episode, Option<String>)> {
         .filter(|s| s.len() <= STREAM_TEXT_CAP);
     let mut row = e.clone();
     row.name = row.name.map(|n| bounded(n, 512));
-    row.image = row.image.filter(|i| i.len() <= 2048);
+    row.image = row
+        .image
+        .filter(|i| i.len() <= 2048 && !crate::model::private_web_link(i));
     row.published = row.published.and_then(crate::event::time::bounded);
     row.stream = row.stream.filter(|_| stream.is_some());
     Some((row, stream))
