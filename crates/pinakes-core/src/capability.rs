@@ -5,8 +5,9 @@
 //! keeps out of the repository; `tests/fixtures/capability_urls.json` holds the probes both check.
 use url::Url;
 
-/// Query keys that carry a credential, compared after percent-decoding and without case. A key
-/// that ends with one of [`CREDENTIAL_STEMS`] carries one too ([`credential_key`]).
+/// Query keys that carry a credential, compared after percent-decoding as [`credential_key`]
+/// reads them (without case and with only ASCII letters and digits, so `k-e-y` is `key`). A key
+/// that ends with one of [`CREDENTIAL_STEMS`] carries one too.
 pub const CREDENTIAL_KEYS: &[&str] = &[
     "token",
     "access_token",
@@ -28,7 +29,8 @@ pub const CREDENTIAL_KEYS: &[&str] = &[
 ];
 
 /// Endings of a key that carries a credential, read after [`credential_key`] lowercases the key
-/// and drops its `-`, `_` and `.`: `client_secret`, `X-Api-Key`, `access.key`, `private_token`,
+/// and keeps only its ASCII letters and digits: `client_secret`, `X-Api-Key`, `access.key`,
+/// `api key`, `user[password]`, `private_token`,
 /// `oauth_token`, `session_id`, `jsessionid`, `PHPSESSID`. `key`, `auth` and `sig` stay exact
 /// keys only: as endings they would take `monkey`, `hotkey`, `oauth` and the like.
 pub const CREDENTIAL_STEMS: &[&str] = &[
@@ -61,19 +63,24 @@ const PUBLIC_KEYS: &[&str] = &[
     "continuationtoken",
 ];
 
-/// Whether `key`, a query or fragment key as decoded, names a credential: one of
-/// [`CREDENTIAL_KEYS`] without case, or, lowercased and without its `-`, `_` and `.`, one that
-/// ends with a [`CREDENTIAL_STEMS`] stem and is not one of [`PUBLIC_KEYS`].
+/// Whether `key`, a query or fragment key as decoded, names a credential. The key is read as
+/// [`fold`] reads it, lowercased with only its ASCII letters and digits (`api key`, `api+key`,
+/// `Client.Secret`, `user[password]` and `access_token[]` as a PHP or Rails backend reads them):
+/// it is one of [`CREDENTIAL_KEYS`] read the same way, or it ends with a [`CREDENTIAL_STEMS`] stem
+/// and is not one of [`PUBLIC_KEYS`].
 pub fn credential_key(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
-    if CREDENTIAL_KEYS.contains(&key.as_str()) {
-        return true;
-    }
-    let key: String = key
-        .chars()
-        .filter(|c| !matches!(c, '-' | '_' | '.'))
-        .collect();
-    !PUBLIC_KEYS.contains(&key.as_str()) && CREDENTIAL_STEMS.iter().any(|stem| key.ends_with(stem))
+    let key = fold(key);
+    CREDENTIAL_KEYS.iter().any(|exact| fold(exact) == key)
+        || (!PUBLIC_KEYS.contains(&key.as_str())
+            && CREDENTIAL_STEMS.iter().any(|stem| key.ends_with(stem)))
+}
+
+/// A key's ASCII letters and digits, lowercased: what [`credential_key`] compares.
+fn fold(key: &str) -> String {
+    key.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
 }
 
 /// Whether `uri` carries a credential ([`is_capability_url`]); a URI that is not a URL does not.

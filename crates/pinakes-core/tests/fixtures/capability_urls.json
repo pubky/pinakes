@@ -44,7 +44,23 @@
     "https://shop.example.org/cart?PHPSESSID=SECRET",
     "https://app.example.org/cb#client_secret=SECRET",
     "https://app.example.org/#/cb?auth_token=SECRET",
-    "https://app.example.org/#/cb;oauth_token=SECRET"
+    "https://app.example.org/#/cb;oauth_token=SECRET",
+    "https://api.example.org/v1/items?api+key=SECRET",
+    "https://api.example.org/v1/items?client%20secret=SECRET",
+    "https://api.example.org/v1/items?user[password]=SECRET",
+    "https://api.example.org/v1/items?access_token[]=SECRET",
+    "https://api.example.org/v1/items?a-u-t-h=SECRET",
+    "https://api.example.org/v1/items?s_i_g=SECRET",
+    "https://api.example.org/v1/items?k%2Ee%2Ey=SECRET",
+    "https://api.example.org/v1/items?api%2Dkey=SECRET",
+    "https://api.example.org/v1/items?access-token=SECRET",
+    "https://api.example.org/v1/items?private_key=SECRET",
+    "https://api.example.org/v1/items?passwd=SECRET",
+    "https://api.example.org/v1/items?passphrase=SECRET",
+    "https://api.example.org/v1/items?credential=SECRET",
+    "https://api.example.org/v1/items?secretKey=SECRET",
+    "https://api.example.org/v1/items?client_secret",
+    "https://app.example.org/cb#api+key=SECRET"
   ],
   "public": [
     "https://calendar.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics",
@@ -67,6 +83,10 @@
     "https://www.example.org/search?keyword=token",
     "https://www.example.org/stats?tokens=3",
     "https://www.example.org/jobs?secretary=1",
-    "https://www.example.org/signin?passwordless=1"
+    "https://www.example.org/signin?passwordless=1",
+    "https://www.example.org/zoo?monkey=1",
+    "https://www.example.org/keys?hotkey=1",
+    "https://www.example.org/login?oauth=1",
+    "https://www.example.org/x?key1=1"
   ]
 }
