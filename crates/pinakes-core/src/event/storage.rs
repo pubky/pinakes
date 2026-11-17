@@ -369,13 +369,17 @@ pub async fn prepare(
     plan.missing = missing;
     let mut hashes: BTreeMap<_, Vec<String>> = BTreeMap::new();
     let mut dates: BTreeMap<SameDate, Vec<String>> = BTreeMap::new();
-    for (key, (_, _, d, status, hash, _, _)) in &old {
+    for (key, (uid, _, d, status, hash, _, _)) in &old {
         if !incoming.contains(key) && status != "superseded" && mutable(d) {
             hashes
                 .entry((hash.clone(), d.start, d.name.clone()))
                 .or_default()
                 .push(key.clone());
-            dates.entry(same_date(d)).or_default().push(key.clone());
+            // By its date only a key that left a whole feed (a delta feed lists only what
+            // changed) while it was live: not one its publisher cancelled or deleted.
+            if !container.delta && status != "cancelled" && !deleted.contains(uid) {
+                dates.entry(same_date(d)).or_default().push(key.clone());
+            }
         }
     }
     // The dates the feed lists now, by the keys listing them: each accepted row as written
@@ -477,8 +481,9 @@ pub async fn prepare(
     // snapshot, the first one without this key. Cancelled earlier: more than `LISTING_GAP_MS`
     // after this key's stored document was fetched (its last listing, whose own new keys are
     // written within seconds of that fetch); not for NIP-52 members, whose stored document is
-    // the member's own fetch. A key listed beside it before is a second session of that date,
-    // and the dropped one stays cancelled. First listed = the key's `created` change; without
+    // the member's own fetch; and only when it was cancelled for leaving the feed (its last
+    // `cancelled` change after that time), not by its publisher. A key listed beside it before
+    // is a second session of that date, and the dropped one stays cancelled. First listed = the key's `created` change; without
     // one, or once the key superseded another, nothing is superseded.
     if dropping && !live.is_empty() {
         let mut dropped: Vec<_> = old
@@ -486,11 +491,12 @@ pub async fn prepare(
             .filter(|(key, (uid, _, d, status, _, _, _))| {
                 !superseded.contains(*key)
                     && !deleted.contains(uid)
-                    && (cancelled.contains(*key)
+                    && (cancelled.contains(*key) && status != "cancelled"
                         || status == "cancelled" && !fetched_keys.contains(*key) && mutable(d))
             })
-            .filter_map(|(key, (_, _, d, _, _, _, _))| {
-                let since = if cancelled.contains(key) {
+            .filter_map(|(key, (_, _, d, status, _, _, _))| {
+                let earlier = status == "cancelled";
+                let since = if !earlier {
                     plan.last.map(|at| at - 1)
                 } else if d.source != "nip52" {
                     Some(d.fetched_at.saturating_add(LISTING_GAP_MS))
@@ -498,16 +504,37 @@ pub async fn prepare(
                     None
                 }?;
                 live.get_key_value(&same_date(d))
-                    .map(|(date, twins)| (key, since, date, twins))
+                    .map(|(date, twins)| (key, since, earlier, date, twins))
             })
             .collect();
+        let earlier: Vec<String> = dropped
+            .iter()
+            .filter(|(_, _, earlier, _, _)| *earlier)
+            .map(|(key, _, _, _, _)| (*key).clone())
+            .collect();
+        if !earlier.is_empty() {
+            // A publisher's own cancellation is written with the fetch that listed it, so its
+            // change is not later than `since`.
+            let gone: BTreeMap<String, i64> = sqlx::query_as(
+                "SELECT occurrence_key,(extract(epoch FROM max(at))*1000)::bigint FROM resource_change WHERE resource_id=$1 AND class='cancelled' AND occurrence_key=ANY($2) GROUP BY occurrence_key",
+            )
+            .bind(id)
+            .bind(&earlier)
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .collect();
+            dropped.retain(|(key, since, earlier, _, _)| {
+                !*earlier || gone.get(key.as_str()).is_some_and(|at| at > since)
+            });
+        }
         // The latest `since` first: a twin listed after it also fits every key with an earlier one.
         dropped.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
         if !dropped.is_empty() {
             // Each date's twins once, however many dropped keys share that date.
             let dates: BTreeMap<&SameDate, &BTreeSet<String>> = dropped
                 .iter()
-                .map(|(_, _, date, twins)| (*date, *twins))
+                .map(|(_, _, _, date, twins)| (*date, *twins))
                 .collect();
             let twins: Vec<String> = dates
                 .values()
@@ -539,7 +566,7 @@ pub async fn prepare(
                 .collect();
             let lowest = String::new();
             let mut used: BTreeSet<&String> = BTreeSet::new();
-            for (key, since, date, _) in dropped {
+            for (key, since, _, date, _) in dropped {
                 let Some(firsts) = free.get_mut(date) else {
                     continue;
                 };

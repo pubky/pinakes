@@ -711,8 +711,13 @@ async fn dropped_key_with_a_live_twin_is_superseded_not_cancelled(pool: PgPool) 
     for missing in ["tok0", "tok1", "tok2", "q5", "geoA"] {
         assert_eq!(status(missing), "scheduled", "{missing}");
     }
-    // A release before this rule cancelled tok1 already, its last listing an hour before 101 came.
+    // A release before this rule cancelled tok1 already for leaving the feed, its last listing
+    // an hour before 101 came.
     sqlx::query("UPDATE occurrence SET status='cancelled', doc=jsonb_set(jsonb_set(doc,'{event_status}','\"cancelled\"'),'{fetched_at}',to_jsonb((doc->>'fetched_at')::bigint-3600000)) WHERE uid='event_tok1@meetup.com'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO resource_change(seq,resource_id,occurrence_key,class,fields,source) SELECT nextval('resource_change_seq_seq'),resource_id,'[\"event_tok1@meetup.com\",\"\"]','cancelled','{event_status}','event' FROM occurrence WHERE uid='event_tok1@meetup.com'")
         .execute(&pool)
         .await
         .unwrap();
@@ -746,7 +751,7 @@ async fn dropped_key_with_a_live_twin_is_superseded_not_cancelled(pool: PgPool) 
         .fetch_one(&pool)
         .await
         .unwrap(),
-        3
+        4
     );
     // Each superseded key is named by its twin's change line.
     let named: Vec<(String, String)> = sqlx::query_as(
@@ -761,6 +766,61 @@ async fn dropped_key_with_a_live_twin_is_superseded_not_cancelled(pool: PgPool) 
             format!("[\"event_{a}@meetup.com\",\"\"]"),
             format!("[\"event_{b}@meetup.com\",\"\"]")
         ))
+    );
+}
+/// A date its publisher cancelled stays cancelled when it leaves the feed and the same date comes
+/// back under a new key, however long after: only a date cancelled for leaving is repaired.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_date_its_publisher_cancelled_stays_cancelled_beside_a_new_twin(pool: PgPool) {
+    let uri = "https://www.meetup.com/g/events/ical/";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let base = Utc::now() + Duration::days(2);
+    let t = "Casual meetup";
+    let save = |mut dates: Vec<(&'static str, i64, &'static str)>| {
+        let pool = pool.clone();
+        let id = id.clone();
+        dates.extend([("s8", 8, t), ("s9", 9, t), ("s10", 10, t), ("s11", 11, t)]);
+        async move {
+            let doc = renumber_snapshot(uri, base, &dates).await;
+            store::save_document(&pool, &id, 0, &doc).await.unwrap();
+            let rows = statuses(&pool).await;
+            move |uid: &str| {
+                rows.iter()
+                    .find(|(u, _)| u == &format!("event_{uid}@meetup.com"))
+                    .map(|(_, s)| s.clone())
+                    .unwrap_or_default()
+            }
+        }
+    };
+    let _ = save(vec![("c0", 0, t), ("s1", 1, t)]).await;
+    let status = save(vec![
+        ("c0", 0, "Casual meetup\nSTATUS:CANCELLED"),
+        ("s1", 1, t),
+    ])
+    .await;
+    assert_eq!(status("c0"), "cancelled");
+    // Its last listing and the publisher's cancellation an hour before the new key comes.
+    sqlx::query("UPDATE occurrence SET doc=jsonb_set(doc,'{fetched_at}',to_jsonb((doc->>'fetched_at')::bigint-3600000)) WHERE uid='event_c0@meetup.com'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource_change SET at=at-interval '1 hour' WHERE occurrence_key='[\"event_c0@meetup.com\",\"\"]'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    for _ in 0..3 {
+        let status = save(vec![("n0", 0, t), ("s1", 1, t)]).await;
+        assert_eq!(status("c0"), "cancelled");
+        assert_eq!(status("n0"), "scheduled");
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM resource_change WHERE after ? 'supersedes'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0
     );
 }
 #[sqlx::test(migrations = "../../migrations")]
