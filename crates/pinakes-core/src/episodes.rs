@@ -656,8 +656,9 @@ const JOINABLE: &[&str] = &[
 /// (`group_keys::same_origin`), on one host or a subdomain of the other. So a page that reads as
 /// an article (a blog post's markup that names no feed) answers as the episode, and its tracking
 /// spellings, already its aliases, follow it. Only a page Pinakes has read joins, and only while
-/// it is a plain page of its own: no group, no aliases but its tracking and canonical spellings,
-/// read as a type of [`JOINABLE`], or as an episode of the same feed. A page not read yet, a
+/// it is a plain page of its own: no group, no aliases but its tracking spellings (which
+/// [`release_pages`] can give back), read as a type of [`JOINABLE`], or as an episode of the same
+/// feed. A page not read yet, a
 /// page that is already an alias, a site's root, a feed or a feed's item, or a page a rule of its
 /// URI gives another root (`alias::root`), is left as it is: a page read later joins at the
 /// item's next read. The basis is `source`, the feed's own claim: no rule of the URI names it, so
@@ -723,7 +724,7 @@ pub(crate) async fn join_page(
         Option<String>,
     ) = sqlx::query_as(
         "SELECT EXISTS(SELECT 1 FROM resource_alias WHERE alias_id=$1),\
-         EXISTS(SELECT 1 FROM resource_alias WHERE root_id=$1 AND basis NOT IN ('tracking','canonical')),\
+         EXISTS(SELECT 1 FROM resource_alias WHERE root_id=$1 AND basis<>'tracking'),\
          EXISTS(SELECT 1 FROM group_unit WHERE resource_id=$1 AND group_id IS NOT NULL),\
          (SELECT type_path FROM resource WHERE id=$1),\
          (SELECT doc->'attributes'->>'podcast_feed' FROM resource WHERE id=$1)",
@@ -769,10 +770,11 @@ pub(crate) async fn join_page(
 }
 
 /// Lets go of the pages joined to an episode's card ([`join_page`], basis `source`) that its feed
-/// item no longer names as its own: every one when the item has left the feed (the card read as
-/// missing, `keep` none), else those other than `keep`, the page it names now. Each answers for
-/// itself again, with the tracking spellings that followed it, and is read again on its own
-/// route (`alias::release`). Nothing moves when the job is stale (the generation fence).
+/// item no longer names as its own: every one when the item has left the feed (`keep` none: the
+/// card confirmed missing, its stored status, so one stray answer moves nothing), else those
+/// other than `keep`, the page it names now. Each answers for itself again, with the tracking
+/// spellings that followed it, and is read again on its own route (`alias::release`). Nothing
+/// moves when the job is stale (the generation fence).
 pub(crate) async fn release_pages(
     pool: &sqlx::PgPool,
     id: &str,
@@ -811,12 +813,17 @@ pub(crate) async fn release_pages(
     .fetch_all(&mut *tx)
     .await?;
     let current: Option<String> =
-        sqlx::query_scalar("SELECT id FROM resource WHERE id=$1 AND generation=$2 FOR UPDATE")
+        sqlx::query_scalar("SELECT status FROM resource WHERE id=$1 AND generation=$2 FOR UPDATE")
             .bind(id)
             .bind(generation)
             .fetch_optional(&mut *tx)
             .await?;
-    if pages.is_empty() || current.is_none() {
+    let settled = match (&keep, current.as_deref()) {
+        (_, None) => false,
+        (Some(_), Some(_)) => true,
+        (None, Some(status)) => status == "missing",
+    };
+    if pages.is_empty() || !settled {
         return Ok(());
     }
     let mut lines = vec![];

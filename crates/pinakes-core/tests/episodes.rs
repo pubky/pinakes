@@ -1347,8 +1347,9 @@ async fn an_episode_page_joins_only_its_own_feeds_item(pool: PgPool) {
 }
 
 /// A joined post lets go when its item no longer names it: the item's link moved to another post
-/// (which joins instead), or the item left the feed (its card read as missing). A post let go
-/// answers for itself again, with its tracked spelling, and is read again on its own route.
+/// (which joins instead), or the item left the feed (its card confirmed missing; one missing
+/// answer moves nothing). A post let go answers for itself again, with its tracked spelling, and
+/// is read again on its own route.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_joined_post_lets_go_when_its_item_no_longer_names_it(pool: PgPool) {
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
@@ -1411,6 +1412,16 @@ async fn a_joined_post_lets_go_when_its_item_no_longer_names_it(pool: PgPool) {
     let mut gone = blog_feed();
     gone.replace_range(start..end, "");
     assert!(!gone.contains("#2 –"));
+    // One missing answer is not yet a confirmed one: the post stays joined.
+    read_with(&pool, item, gone.clone()).await;
+    assert_eq!(request(&app, &by_uri(moved_post)).await.1["id"], episode);
+    // Confirmed: the post lets go.
     read_with(&pool, item, gone).await;
+    let status: String = sqlx::query_scalar("SELECT status FROM resource WHERE id=$1")
+        .bind(&episode)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "missing");
     assert_eq!(request(&app, &by_uri(moved_post)).await.1["id"], moved_id);
 }
