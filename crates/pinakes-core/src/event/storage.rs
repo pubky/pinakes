@@ -87,7 +87,9 @@ fn page_url(doc: &ResourceMeta, id: &str, canonical_id: &str) -> Option<String> 
 /// What two keys of one feed share when they are one date: the document without its own page
 /// link and status, and its start and name. A publisher that renumbers a date gives it a new UID
 /// and a new page (Meetup: `/events/<token>/` -> `/events/<number>/`), so the feed's content
-/// hash, which keeps the page link, differs.
+/// hash, which keeps the page link, differs. What a stored row gained after its feed gave it
+/// (a resolved venue, its point and zone: `preserve_venue`) is left out too: only the venue's
+/// own text, name and address count.
 type SameDate = (
     String,
     Option<chrono::DateTime<chrono::Utc>>,
@@ -96,8 +98,19 @@ type SameDate = (
 fn same_date(doc: &ResourceMeta) -> SameDate {
     let mut value = changes::normalize(doc);
     if let Some(object) = value.as_object_mut() {
-        object.remove("url");
-        object.remove("event_status");
+        for field in [
+            "url",
+            "event_status",
+            "location",
+            "location_source",
+            "tz",
+            "timezone_attribution",
+        ] {
+            object.remove(field);
+        }
+        if let Some(venue) = object.get_mut("venue").and_then(Value::as_object_mut) {
+            venue.retain(|k, _| matches!(k.as_str(), "text" | "name" | "address"));
+        }
     }
     (
         blake3::hash(value.to_string().as_bytes())

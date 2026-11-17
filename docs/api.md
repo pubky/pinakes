@@ -1096,7 +1096,8 @@ end + 24 hours never cancels. A new UID with identical content supersedes the ol
 cancellation, also when the date's own page link changed with it (a publisher that renumbers a
 date, as Meetup does) or when the new UID was listed before the old one left: a key that would be
 cancelled, or was, while another key of the feed lists the same date (same start, name and content
-but for its link and status) is superseded instead. A snapshot that loses more than half its active keys, or adds more than
+but for its link and status) is superseded instead; that key writes no change line of its own,
+as the date is still listed. A snapshot that loses more than half its active keys, or adds more than
 `limits.feed_max_new_keys` (1000) to a feed with rows, is held until an identical snapshot
 confirms it; a feed over `limits.feed_max_rows` (10000) is held until it shrinks, and
 `limits.feed_max_holds` (5) consecutive holds dead-letter it. A re-parse that moves instances

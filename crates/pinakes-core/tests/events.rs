@@ -653,6 +653,8 @@ async fn dropped_key_with_a_live_twin_is_superseded_not_cancelled(pool: PgPool) 
         ("101", 1, t),
         ("tok2", 2, t),
         ("tok3", 3, t),
+        ("tok4", 4, t),
+        ("200", 4, t),
     ];
     store::save_document(&pool, &id, 0, &renumber_snapshot(uri, base, &both).await)
         .await
@@ -667,6 +669,7 @@ async fn dropped_key_with_a_live_twin_is_superseded_not_cancelled(pool: PgPool) 
         ("100", 0, t),
         ("101", 1, "Casual meetup with new text"),
         ("tok3", 3, t),
+        ("200", 4, t),
     ];
     store::save_document(&pool, &id, 0, &renumber_snapshot(uri, base, &later).await)
         .await
@@ -683,7 +686,10 @@ async fn dropped_key_with_a_live_twin_is_superseded_not_cancelled(pool: PgPool) 
     // tok0 and tok2 are only missing once: kept as they were.
     assert_eq!(status("tok0"), "scheduled");
     assert_eq!(status("tok2"), "scheduled");
-    store::save_document(&pool, &id, 0, &renumber_snapshot(uri, base, &later).await)
+    // 200 moves to another week in the snapshot that cancels tok4: its stored copy at tok4's week
+    // no longer lists that date, so tok4 is cancelled.
+    let last = [later[0], later[1], later[2], ("200", 5, t)];
+    store::save_document(&pool, &id, 0, &renumber_snapshot(uri, base, &last).await)
         .await
         .unwrap();
     let rows = statuses(&pool).await;
@@ -697,6 +703,8 @@ async fn dropped_key_with_a_live_twin_is_superseded_not_cancelled(pool: PgPool) 
     assert_eq!(status("tok0"), "superseded");
     assert_eq!(status("tok1"), "superseded");
     assert_eq!(status("tok2"), "cancelled");
+    assert_eq!(status("tok4"), "cancelled");
+    assert_eq!(status("200"), "scheduled");
     assert_eq!(status("100"), "scheduled");
     assert_eq!(status("101"), "scheduled");
     assert_eq!(
@@ -706,7 +714,7 @@ async fn dropped_key_with_a_live_twin_is_superseded_not_cancelled(pool: PgPool) 
         .fetch_one(&pool)
         .await
         .unwrap(),
-        1
+        2
     );
 }
 #[sqlx::test(migrations = "../../migrations")]
