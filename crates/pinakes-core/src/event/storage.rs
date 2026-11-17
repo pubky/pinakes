@@ -84,6 +84,76 @@ fn page_url(doc: &ResourceMeta, id: &str, canonical_id: &str) -> Option<String> 
         .filter(|(target, _, _)| target != id && target != canonical_id)
         .map(|(_, url, _)| url)
 }
+/// What two keys of one feed share when they are one date: the document without its own page
+/// link and status, and its start and name. A publisher that renumbers a date gives it a new UID
+/// and a new page (Meetup: `/events/<token>/` -> `/events/<number>/`), so the feed's content
+/// hash, which keeps the page link, differs. What a stored row gained after its feed gave it
+/// (a resolved venue and zone, `preserve_venue`, or a looked-up point) is left out too: the
+/// venue's own text, name and address count, and a point the feed or page gave. The description
+/// counts by its words, so a stored copy still in Markdown matches one read since as plain text
+/// (`markdown_plain`, Meetup).
+type SameDate = (
+    String,
+    Option<chrono::DateTime<chrono::Utc>>,
+    Option<String>,
+);
+fn same_date(doc: &ResourceMeta) -> SameDate {
+    let mut value = changes::normalize(doc);
+    if let Some(object) = value.as_object_mut() {
+        let looked_up = matches!(
+            object.get("location_source").and_then(Value::as_str),
+            Some("osm" | "geocoded")
+        );
+        for field in ["url", "event_status", "tz", "timezone_attribution"] {
+            object.remove(field);
+        }
+        if looked_up {
+            object.remove("location");
+            object.remove("location_source");
+        }
+        if let Some(venue) = object.get_mut("venue").and_then(Value::as_object_mut) {
+            venue.retain(|k, _| matches!(k.as_str(), "text" | "name" | "address"));
+        }
+        if let Some(Value::String(text)) = object.get("description") {
+            // Its words without marks: the same for Markdown and for text already read as
+            // plain text, however often. No words is no description (`meetup_plain` keeps none).
+            let words = crate::sources::markdown_plain(text)
+                .split(|c: char| c.is_whitespace() || "*_`#>\\".contains(c))
+                .filter(|w| !w.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if words.is_empty() {
+                object.remove("description");
+            } else {
+                object.insert("description".into(), Value::String(words));
+            }
+        }
+    }
+    (
+        blake3::hash(value.to_string().as_bytes())
+            .to_hex()
+            .to_string(),
+        doc.start,
+        doc.name.clone(),
+    )
+}
+/// How long after a snapshot's fetch its new keys are surely written: a key first listed later
+/// was not listed in that snapshot (feeds are not read again this soon).
+const LISTING_GAP_MS: i64 = 10 * 60 * 1000;
+/// The first key of `keys` under `at` that no other row superseded yet.
+fn take<K: Ord>(
+    keys: &mut BTreeMap<K, Vec<String>>,
+    at: &K,
+    taken: &BTreeSet<String>,
+) -> Option<String> {
+    let list = keys.get_mut(at)?;
+    while let Some(key) = list.pop() {
+        if !taken.contains(&key) {
+            return Some(key);
+        }
+    }
+    None
+}
 /// Read, bound, hash and diff outside the global write/sequence locks. Apply rechecks the snapshot fence.
 pub async fn prepare(
     pool: &PgPool,
@@ -298,12 +368,43 @@ pub async fn prepare(
     missing.retain(|k, _| !cancelled.contains(k));
     plan.missing = missing;
     let mut hashes: BTreeMap<_, Vec<String>> = BTreeMap::new();
-    for (key, (_, _, d, status, hash, _, _)) in &old {
+    let mut dates: BTreeMap<SameDate, Vec<String>> = BTreeMap::new();
+    for (key, (uid, _, d, status, hash, _, _)) in &old {
         if !incoming.contains(key) && status != "superseded" && mutable(d) {
             hashes
                 .entry((hash.clone(), d.start, d.name.clone()))
                 .or_default()
                 .push(key.clone());
+            // By its date only a key that left a whole feed (a delta feed lists only what
+            // changed) while it was live: not one its publisher cancelled or deleted.
+            if !container.delta && status != "cancelled" && !deleted.contains(uid) {
+                dates.entry(same_date(d)).or_default().push(key.clone());
+            }
+        }
+    }
+    // The dates the feed lists now, by the keys listing them: each accepted row as written
+    // (below), and its stored document while the date is the same, as the feed may have
+    // changed its text since a dropped key was stored.
+    let mut live: BTreeMap<SameDate, BTreeSet<String>> = BTreeMap::new();
+    // Only when a key may be dropped now: one cancelled now, or one cancelled earlier and gone.
+    let dropping = !container.delta
+        && (!cancelled.is_empty()
+            || old.iter().any(|(key, (_, _, d, status, _, _, _))| {
+                status == "cancelled" && !fetched_keys.contains(key) && mutable(d)
+            }));
+    if dropping {
+        for item in &container.occurrences {
+            let key = item.key();
+            if !fetched_keys.contains(&key) || !incoming.contains(&key) {
+                continue;
+            }
+            if let Some((_, _, d, status, _, _, _)) = old.get(&key) {
+                if d.start == item.doc.start
+                    && !matches!(status.as_str(), "cancelled" | "superseded")
+                {
+                    live.entry(same_date(d)).or_default().insert(key);
+                }
+            }
         }
     }
     let mut superseded = BTreeSet::new();
@@ -350,12 +451,18 @@ pub async fn prepare(
         let mut after = changes::normalize(&doc);
         let before = previous.map(|(_, _, d, _, _, _, _)| changes::normalize(d));
         let supersedes = if previous.is_none() {
-            hashes
-                .get_mut(&(item.content_hash.clone(), doc.start, doc.name.clone()))
-                .and_then(Vec::pop)
+            take(
+                &mut hashes,
+                &(item.content_hash.clone(), doc.start, doc.name.clone()),
+                &superseded,
+            )
+            .or_else(|| take(&mut dates, &same_date(&doc), &superseded))
         } else {
             None
         };
+        if dropping && incoming.contains(&key) {
+            live.entry(same_date(&doc)).or_default().insert(key.clone());
+        }
         if let Some(key) = &supersedes {
             superseded.insert(key.clone());
             cancelled.remove(key);
@@ -366,6 +473,129 @@ pub async fn prepare(
         }
         let url = page_url(&doc, id, &canonical_id);
         plan.rows.push(json!({"uid":item.uid,"rid":item.recurrence_id,"start":doc.start,"end":doc.end,"name":doc.name,"venue_id":doc.event.venue.as_ref().and_then(|v|v.resource_id.as_deref()),"status":doc.event.event_status.as_ref().unwrap_or(&EventStatus::Scheduled).as_str(),"url":url,"doc":doc,"lat":doc.location.as_ref().map(|p|p.lat),"lon":doc.location.as_ref().map(|p|p.lon),"sequence":item.sequence,"modified":modified,"hash":item.content_hash}));
+    }
+    // A key the feed dropped, cancelled now or by an earlier snapshot, is superseded instead when
+    // another key lists its date and was first listed once it was gone: the date was renumbered
+    // (the new key's first copy differed, or a release before this rule missed the link change).
+    // Cancelled now (missing twice): the other key is first listed at or after the previous
+    // snapshot, the first one without this key. Cancelled earlier: more than `LISTING_GAP_MS`
+    // after this key's stored document was fetched (its last listing, whose own new keys are
+    // written within seconds of that fetch); not for NIP-52 members, whose stored document is
+    // the member's own fetch; and only when it was cancelled for leaving the feed (its last
+    // `cancelled` change after that time), not by its publisher. A key listed beside it before
+    // is a second session of that date, and the dropped one stays cancelled. First listed = the key's `created` change; without
+    // one, or once the key superseded another, nothing is superseded.
+    if dropping && !live.is_empty() {
+        let mut dropped: Vec<_> = old
+            .iter()
+            .filter(|(key, (uid, _, d, status, _, _, _))| {
+                !superseded.contains(*key)
+                    && !deleted.contains(uid)
+                    && (cancelled.contains(*key) && status != "cancelled"
+                        || status == "cancelled" && !fetched_keys.contains(*key) && mutable(d))
+            })
+            .filter_map(|(key, (_, _, d, status, _, _, _))| {
+                let earlier = status == "cancelled";
+                let since = if !earlier {
+                    plan.last.map(|at| at - 1)
+                } else if d.source != "nip52" {
+                    Some(d.fetched_at.saturating_add(LISTING_GAP_MS))
+                } else {
+                    None
+                }?;
+                live.get_key_value(&same_date(d))
+                    .map(|(date, twins)| (key, since, earlier, date, twins))
+            })
+            .collect();
+        let earlier: Vec<String> = dropped
+            .iter()
+            .filter(|(_, _, earlier, _, _)| *earlier)
+            .map(|(key, _, _, _, _)| (*key).clone())
+            .collect();
+        if !earlier.is_empty() {
+            // A publisher's own cancellation is written with the fetch that listed it, so its
+            // change is not later than `since`.
+            let gone: BTreeMap<String, i64> = sqlx::query_as(
+                "SELECT occurrence_key,(extract(epoch FROM max(at))*1000)::bigint FROM resource_change WHERE resource_id=$1 AND class='cancelled' AND occurrence_key=ANY($2) GROUP BY occurrence_key",
+            )
+            .bind(id)
+            .bind(&earlier)
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .collect();
+            dropped.retain(|(key, since, earlier, _, _)| {
+                !*earlier || gone.get(key.as_str()).is_some_and(|at| at > since)
+            });
+        }
+        // The latest `since` first: a twin listed after it also fits every key with an earlier one.
+        dropped.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        if !dropped.is_empty() {
+            // Each date's twins once, however many dropped keys share that date.
+            let dates: BTreeMap<&SameDate, &BTreeSet<String>> = dropped
+                .iter()
+                .map(|(_, _, _, date, twins)| (*date, *twins))
+                .collect();
+            let twins: Vec<String> = dates
+                .values()
+                .flat_map(|twins| twins.iter())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .cloned()
+                .collect();
+            let listed: BTreeMap<String, i64> = sqlx::query_as(
+                "SELECT occurrence_key,(extract(epoch FROM min(at) FILTER (WHERE class='created'))*1000)::bigint FROM resource_change WHERE resource_id=$1 AND occurrence_key=ANY($2) GROUP BY occurrence_key HAVING count(*) FILTER (WHERE class='created')>0 AND NOT bool_or(coalesce(after ? 'supersedes',false))",
+            )
+            .bind(id)
+            .bind(&twins)
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .collect();
+            // Per date, its listed twins by first listing; a dropped key takes the first one listed
+            // after `since`, and each twin is taken once (a key can stand under two dates).
+            let mut free: BTreeMap<&SameDate, BTreeSet<(i64, &String)>> = dates
+                .into_iter()
+                .map(|(date, twins)| {
+                    let firsts = twins
+                        .iter()
+                        .filter_map(|twin| listed.get(twin).map(|at| (*at, twin)))
+                        .collect();
+                    (date, firsts)
+                })
+                .collect();
+            let lowest = String::new();
+            let mut used: BTreeSet<&String> = BTreeSet::new();
+            for (key, since, _, date, _) in dropped {
+                let Some(firsts) = free.get_mut(date) else {
+                    continue;
+                };
+                let twin = loop {
+                    let Some(&(at, twin)) =
+                        firsts.range((since.saturating_add(1), &lowest)..).next()
+                    else {
+                        break None;
+                    };
+                    firsts.remove(&(at, twin));
+                    if at > since && used.insert(twin) {
+                        break Some(twin);
+                    }
+                };
+                if let Some(twin) = twin {
+                    superseded.insert(key.clone());
+                    cancelled.remove(key);
+                    // The twin's change line names the key it supersedes, as a new key's does.
+                    if let Some((_, _, d, _, _, _, _)) = old.get(twin) {
+                        let before = changes::normalize(d);
+                        let mut after = before.clone();
+                        after["supersedes"] = json!(key);
+                        if let Some(change) = pending(Some(&before), &after, twin.clone()) {
+                            plan.push_change(change, container.limits.max_changes);
+                        }
+                    }
+                }
+            }
+        }
     }
     for key in cancelled.iter().chain(superseded.iter()) {
         let Some((uid, rid, old, _, hash, seq, modified)) = old.get(key) else {
@@ -690,4 +920,41 @@ async fn page(
         .collect::<Result<_, _>>()?;
     crate::api::with_refs(&state.pool, items.iter_mut()).await?;
     Ok(Some(OccurrencePage { items, cursor }))
+}
+
+#[cfg(test)]
+mod same_date_tests {
+    use super::*;
+
+    fn doc(description: Option<&str>) -> ResourceMeta {
+        ResourceMeta {
+            name: Some("Casual meetup".into()),
+            description: description.map(str::to_owned),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn description_counts_by_its_words_however_often_read_as_plain_text() {
+        let raw = doc(Some("This event is \\*local\\* and **free**"));
+        let mut plain = raw.description.clone();
+        for _ in 0..3 {
+            plain = plain.map(|t| crate::sources::markdown_plain(&t));
+            assert_eq!(same_date(&raw), same_date(&doc(plain.as_deref())));
+        }
+        assert_eq!(
+            same_date(&raw),
+            same_date(&doc(Some("This event is local and free")))
+        );
+        assert_ne!(
+            same_date(&raw),
+            same_date(&doc(Some("This event is remote")))
+        );
+    }
+
+    #[test]
+    fn a_description_without_words_is_none() {
+        assert_eq!(same_date(&doc(Some("**"))), same_date(&doc(None)));
+        assert_eq!(same_date(&doc(Some(" \\* _ "))), same_date(&doc(None)));
+    }
 }
