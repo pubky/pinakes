@@ -1414,17 +1414,28 @@ async fn a_joined_post_lets_go_when_its_item_no_longer_names_it(pool: PgPool) {
             "{spelling}"
         );
     }
-    // A spelling no rule names follows the post after the join (its slash-less address, whose
-    // canonical names the post, read since): an alias of the episode now.
-    let slashless = store::ensure_resource(&pool, "https://blog.example/second")
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'canonical')")
-        .bind(&slashless)
-        .bind(&episode)
-        .execute(&pool)
-        .await
-        .unwrap();
+    // Canonical spellings read since the join, both aliases of the episode now: the post's
+    // slash-less address (it followed the post) and the item's own slash-less one.
+    let alias_of_episode = |uri: &'static str| {
+        let (pool, episode) = (pool.clone(), episode.clone());
+        async move {
+            let id = store::ensure_resource(&pool, uri).await.unwrap();
+            sqlx::query(
+                "INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'canonical') ON CONFLICT(alias_id) DO UPDATE SET root_id=$2,basis='canonical'",
+            )
+            .bind(&id)
+            .bind(&episode)
+            .execute(&pool)
+            .await
+            .unwrap();
+            id
+        }
+    };
+    let slashless = alias_of_episode("https://blog.example/second").await;
+    let item_slashless = alias_of_episode(
+        "https://blog.example/feed/podcast?guid=https%3A%2F%2Fblog.example%2F%3Fp%3D2",
+    )
+    .await;
     // The item now links another post: the first lets go, with its tracked spelling; the other
     // joins.
     let moved_post = "https://blog.example/second-moved/";
@@ -1444,15 +1455,25 @@ async fn a_joined_post_lets_go_when_its_item_no_longer_names_it(pool: PgPool) {
             .await
             .unwrap();
     assert_eq!(tracked_root, post_id);
-    // The slash-less spelling answers for itself again, and is read again to find its root.
-    let (aliased, due): (bool, bool) = sqlx::query_as(
-        "SELECT EXISTS(SELECT 1 FROM resource_alias WHERE alias_id=$1),next_attempt_at<=now() FROM resource WHERE id=$1",
-    )
-    .bind(&slashless)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!((aliased, due), (false, true));
+    // The post's slash-less spelling went back with it; the item's own stays on the episode.
+    let root_of = |id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, String>("SELECT root_id FROM resource_alias WHERE alias_id=$1")
+                .bind(&id)
+                .fetch_optional(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(
+        root_of(slashless.clone()).await.as_deref(),
+        Some(post_id.as_str())
+    );
+    assert_eq!(
+        root_of(item_slashless.clone()).await.as_deref(),
+        Some(episode.as_str())
+    );
     let (resolver, due): (Option<String>, bool) =
         sqlx::query_as("SELECT resolver,next_attempt_at<=now() FROM resource WHERE id=$1")
             .bind(&post_id)

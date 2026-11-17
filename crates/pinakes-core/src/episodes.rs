@@ -774,9 +774,8 @@ pub(crate) async fn join_page(
 /// when it names none). When the item has left the feed (`gone`), only once the card is
 /// confirmed missing (its stored status), so one stray answer moves nothing. Each answers for
 /// itself again, with the tracking spellings that followed it, and is read again on its own
-/// route (`alias::release`); a spelling no rule names that followed it (a canonical claim read
-/// after the join) is released and read again too. Nothing moves when the job is stale (the
-/// generation fence).
+/// route (`alias::release`); its canonical spellings that followed it go back to it too.
+/// Nothing moves when the job is stale (the generation fence).
 pub(crate) async fn release_pages(
     pool: &sqlx::PgPool,
     id: &str,
@@ -832,24 +831,23 @@ pub(crate) async fn release_pages(
         lines.extend(crate::alias::release(&mut tx, page).await?);
         requeue(&mut tx, page, uri).await?;
     }
-    // The spellings that followed a released page here: one a rule of its URI names (a page's
-    // tracking spelling) goes back to that page; one no rule names (a canonical claim read after
-    // the join) answers for itself and is read again, to find its root anew. The card's own
-    // spellings, and those of the page it keeps, stay.
     let released: Vec<&str> = pages.iter().map(|(p, _)| p.as_str()).collect();
+    // The card's other spellings that followed a released page here go back to it: its
+    // tracking spellings (a rule of their URI names the page) and its canonical ones (they
+    // differ from the page only by a trailing slash, `alias::canonical`). The card's own
+    // spellings, and the kept page's, stay.
     for (spelling, uri) in &spellings {
-        match crate::alias::root(uri) {
-            Some(alias)
-                if crate::model::identity(&alias.root)
-                    .is_ok_and(|v| released.contains(&v.0.as_str())) =>
-            {
-                lines.extend(crate::alias::assign(&mut tx, spelling, &alias).await?);
-            }
-            Some(_) => {}
-            None => {
-                lines.extend(crate::alias::release(&mut tx, spelling).await?);
-                requeue(&mut tx, spelling, uri).await?;
-            }
+        let back = crate::alias::root(uri)
+            .filter(|a| {
+                crate::model::identity(&a.root).is_ok_and(|v| released.contains(&v.0.as_str()))
+            })
+            .or_else(|| {
+                pages
+                    .iter()
+                    .find_map(|(_, page)| crate::alias::canonical(uri, page))
+            });
+        if let Some(alias) = back {
+            lines.extend(crate::alias::assign(&mut tx, spelling, &alias).await?);
         }
     }
     crate::alias::record(&mut tx, lines).await?;
