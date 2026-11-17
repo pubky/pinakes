@@ -1,4 +1,4 @@
-use super::{options, state, Definition};
+use super::{state, Definition};
 use crate::{
     config::EventConfig,
     event::{Container, Occurrence},
@@ -12,7 +12,6 @@ use sqlx::{PgPool, Postgres, Transaction};
 use url::Url;
 
 /// Dataset roots are shared even when an author tags an arbitrary query variant.
-/// A Google calendar is its own dataset; its validated calendar ID selects the root.
 pub fn canonical_root(uri: &str) -> Option<String> {
     let u = Url::parse(uri).ok()?;
     match (u.host_str()?, u.path()) {
@@ -20,9 +19,6 @@ pub fn canonical_root(uri: &str) -> Option<String> {
         ("portal.einundzwanzig.space", "/api/changes" | "/api/meetup-events") => {
             Some("https://portal.einundzwanzig.space/api/changes".into())
         }
-        ("www.googleapis.com", _) => super::service::keyed_url("google_calendar_api", uri)
-            .ok()
-            .map(Into::into),
         _ => None,
     }
 }
@@ -35,14 +31,6 @@ pub fn human_page(uri: &str) -> Option<String> {
         ("api.btcmap.org", "/v4/events") => Some("https://btcmap.org/".into()),
         ("portal.einundzwanzig.space", path) if path.starts_with("/api/") => {
             Some("https://portal.einundzwanzig.space/".into())
-        }
-        ("www.googleapis.com", path) => {
-            let id = path
-                .strip_prefix("/calendar/v3/calendars/")?
-                .strip_suffix("/events")?;
-            Some(format!(
-                "https://calendar.google.com/calendar/embed?src={id}"
-            ))
         }
         _ => None,
     }
@@ -193,7 +181,6 @@ fn append_row(doc: &mut ResourceMeta, adapter: &str, v: &Value) -> Result<()> {
     }
     if let Some(url) = v["website"]
         .as_str()
-        .or_else(|| v["htmlLink"].as_str())
         .or_else(|| v["url"].as_str())
         .or_else(|| v["link"].as_str())
     {
@@ -220,15 +207,6 @@ fn append_row(doc: &mut ResourceMeta, adapter: &str, v: &Value) -> Result<()> {
         return Ok(());
     }
     let modified = timestamp(&v["updated_at"]).or_else(|| timestamp(&v["updated"]));
-    let recurrence = v["recurringEventId"]
-        .as_str()
-        .and_then(|_| {
-            v["originalStartTime"]["dateTime"]
-                .as_str()
-                .or_else(|| v["originalStartTime"]["date"].as_str())
-        })
-        .unwrap_or("")
-        .to_owned();
     event = event.bounded(crate::resolver::web::ATTRIBUTES)?;
 
     if adapter == "einundzwanzig" {
@@ -253,7 +231,7 @@ fn append_row(doc: &mut ResourceMeta, adapter: &str, v: &Value) -> Result<()> {
         .to_string();
     c.occurrences.push(Occurrence {
         uid: id,
-        recurrence_id: recurrence,
+        recurrence_id: String::new(),
         doc: event,
         sequence: v["sequence"].as_i64().unwrap_or(0),
         modified,
@@ -261,17 +239,10 @@ fn append_row(doc: &mut ResourceMeta, adapter: &str, v: &Value) -> Result<()> {
     });
     Ok(())
 }
-async fn json(
-    egress: &Egress,
-    uri: &str,
-    cfg: &EventConfig,
-    sensitive: bool,
-    cached: bool,
-) -> Result<(u16, Value)> {
+async fn json(egress: &Egress, uri: &str, cfg: &EventConfig, cached: bool) -> Result<(u16, Value)> {
     let options = FetchOptions {
         feed_hint: true,
         feed_cap: Some(cfg.feed_body_bytes),
-        sensitive,
         ..Default::default()
     };
     // A snapshot used to confirm a held resync must be a fresh upstream response.
@@ -282,15 +253,6 @@ async fn json(
         egress.fetch_with(uri, &options).await?
     };
     super::service::upstream_status(&f)?;
-    let requires_key = sensitive || super::detect(uri).is_some_and(|d| d.requires_key);
-    if matches!(f.status, 401 | 403) && requires_key {
-        crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "drift");
-        return Err(crate::resolver::RetryLater {
-            class: "upstream_denied",
-            seconds: 3600,
-        }
-        .into());
-    }
     if gone(f.status) {
         return Ok((f.status, Value::Null));
     }
@@ -325,7 +287,6 @@ pub async fn resolve(
             egress,
             "https://portal.einundzwanzig.space/api/meetup-events",
             cfg,
-            false,
             true,
         )
         .await?;
@@ -338,7 +299,6 @@ pub async fn resolve(
                 egress,
                 "https://portal.einundzwanzig.space/api/meetup-events",
                 cfg,
-                false,
                 false,
             )
             .await?;
@@ -418,7 +378,7 @@ pub async fn resolve(
             }
             url.query_pairs_mut()
                 .append_pair("limit", if probe || head { "1" } else { "1000" });
-            let (status, mut v) = json(egress, url.as_str(), cfg, false, false).await?;
+            let (status, mut v) = json(egress, url.as_str(), cfg, false).await?;
             if gone(status) {
                 return Ok(missing_container(uri, &d.id, cfg));
             }
@@ -468,7 +428,6 @@ pub async fn resolve(
                 "https://portal.einundzwanzig.space/api/meetup-events",
                 cfg,
                 false,
-                false,
             )
             .await?;
             if gone(status) {
@@ -492,7 +451,7 @@ pub async fn resolve(
             .next()
             .is_some_and(|s| s.parse::<u64>().is_ok())
         {
-            let (status, v) = json(egress, uri, cfg, false, false).await?;
+            let (status, v) = json(egress, uri, cfg, false).await?;
             if gone(status) {
                 return Ok(missing(uri, "btcmap"));
             }
@@ -532,7 +491,7 @@ pub async fn resolve(
                 url.query_pairs_mut().append_pair(key, value);
             }
         }
-        let (status, v) = json(egress, url.as_str(), cfg, false, false).await?;
+        let (status, v) = json(egress, url.as_str(), cfg, false).await?;
         if gone(status) {
             return Ok(missing_container(uri, &d.id, cfg));
         }
@@ -549,57 +508,7 @@ pub async fn resolve(
             .to_rfc3339();
         delta = true;
     } else {
-        let base = super::service::keyed_url("google_calendar_api", uri)?;
-        let key = options(cfg, &d.id)
-            .and_then(|o| o.key.as_deref())
-            .context("Google Calendar key missing")?;
-        let mut token = previous.clone();
-        let mut page_token = None::<String>;
-        let mut done = false;
-        for _ in 0..cfg.adapters.max_cursor_pages {
-            let mut url = base.clone();
-            url.set_query(None);
-            url.query_pairs_mut()
-                .append_pair("key", key)
-                .append_pair("showDeleted", "true")
-                .append_pair("singleEvents", "true")
-                .append_pair("maxResults", "2500");
-            if let Some(t) = &token {
-                url.query_pairs_mut().append_pair("syncToken", t);
-            } else {
-                let c = doc.container.as_ref().unwrap();
-                url.query_pairs_mut()
-                    .append_pair("timeMin", &c.horizon_start.to_rfc3339())
-                    .append_pair("timeMax", &c.horizon_end.to_rfc3339());
-            }
-            doc.container.as_mut().unwrap().delta = delta;
-            if let Some(t) = &page_token {
-                url.query_pairs_mut().append_pair("pageToken", t);
-            }
-            let (status, v) = json(egress, url.as_str(), cfg, true, false).await?;
-            if status == 410 {
-                ensure!(!reset, "repeated Google cursor expiration");
-                reset = true;
-                delta = false;
-                token = None;
-                page_token = None;
-                doc.container.as_mut().unwrap().occurrences.clear();
-                doc.container.as_mut().unwrap().deleted_uids.clear();
-                continue;
-            }
-            if gone(status) {
-                return Ok(missing_container(uri, &d.id, cfg));
-            }
-            page_token = v["nextPageToken"].as_str().map(str::to_owned);
-            let sync = v["nextSyncToken"].as_str().map(str::to_owned);
-            doc = append_batch(doc, &d.id, v, "full", cfg, None).await?.0;
-            if page_token.is_none() {
-                next = sync.context("Google omitted sync token")?;
-                done = true;
-                break;
-            }
-        }
-        ensure!(done, "Google pagination cap exceeded");
+        anyhow::bail!("no cursor reader for {}", d.id);
     }
     let c = doc.container.as_mut().unwrap();
     // Quarantined rows cannot imply disappearance of previously accepted members.
@@ -839,7 +748,6 @@ async fn portal_names(v: &mut Value, egress: &Egress, cfg: &EventConfig) -> Resu
         egress,
         "https://portal.einundzwanzig.space/api/meetups",
         cfg,
-        false,
         true,
     )
     .await

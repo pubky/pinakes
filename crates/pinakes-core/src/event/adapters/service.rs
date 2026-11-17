@@ -167,10 +167,7 @@ impl PlatformResolver {
             )
             .await;
         }
-        if matches!(
-            d.parser.as_str(),
-            "portal" | "btcmap" | "google_calendar_api"
-        ) {
+        if matches!(d.parser.as_str(), "portal" | "btcmap") {
             let mut doc = super::cursor::resolve(
                 &self.web.events.as_ref().unwrap().pool,
                 uri,
@@ -869,33 +866,6 @@ pub fn endpoint(
                 ..opts
             },
         )),
-        "skiddle" => Some((
-            query(
-                &format!("https://www.skiddle.com/api/v1/events/{id}/"),
-                "api_key",
-                key()?,
-            )?,
-            FetchOptions {
-                sensitive: true,
-                ..opts
-            },
-        )),
-        "billetto_api" => Some((
-            keyed_url("billetto_api",uri)?.into(),
-            FetchOptions {
-                headers: vec![("Api-Keypair", key()?.into())],
-                sensitive: true,
-                ..opts
-            },
-        )),
-        "eventfrog_api" => Some((
-            keyed_url("eventfrog_api",uri)?.into(),
-            FetchOptions {
-                headers: vec![("authorization", format!("Bearer {}", key()?))],
-                sensitive: true,
-                ..opts
-            },
-        )),
         "resident_advisor" => Some((
             "https://ra.co/graphql".into(),
             FetchOptions {
@@ -1327,81 +1297,6 @@ fn feed_path(uri: &str) -> bool {
             || u.path().contains("/published/")
             || u.path().contains("/remote.php/dav/public-calendars/")
     })
-}
-/// Parse only the public event lookup contract, then discard all caller query/fragment data.
-pub fn keyed_url(adapter: &str, uri: &str) -> Result<Url> {
-    let u = Url::parse(uri)?;
-    ensure!(
-        u.username().is_empty()
-            && u.password().is_none()
-            && u.scheme() == "https"
-            && u.port().is_none(),
-        "invalid keyed URI"
-    );
-    let number = |s: &str| -> Result<String> {
-        ensure!(
-            !s.is_empty() && s.len() <= 32 && s.bytes().all(|b| b.is_ascii_digit()),
-            "invalid event ID"
-        );
-        Ok(s.into())
-    };
-    match adapter {
-        "billetto_api" => {
-            ensure!(
-                matches!(u.host_str(), Some("billetto.dk" | "api.billetto.com")),
-                "invalid Billetto host"
-            );
-            let id = number(
-                u.path()
-                    .strip_prefix("/api/v3/public/events/")
-                    .or_else(|| u.path().strip_prefix("/v3/public/events/"))
-                    .context("invalid Billetto path")?,
-            )?;
-            Ok(Url::parse(&format!(
-                "https://billetto.dk/api/v3/public/events/{id}"
-            ))?)
-        }
-        "eventfrog_api" => {
-            ensure!(
-                u.host_str() == Some("api.eventfrog.net") && u.path() == "/public/v1/events",
-                "invalid Eventfrog path"
-            );
-            let ids: Vec<_> = u.query_pairs().filter(|(k, _)| k == "id").collect();
-            ensure!(ids.len() == 1, "one Eventfrog ID required");
-            let id = number(&ids[0].1)?;
-            Ok(Url::parse(&format!(
-                "https://api.eventfrog.net/public/v1/events?id={id}"
-            ))?)
-        }
-        "google_calendar_api" => {
-            ensure!(
-                u.host_str() == Some("www.googleapis.com"),
-                "invalid Google host"
-            );
-            let part = u
-                .path()
-                .strip_prefix("/calendar/v3/calendars/")
-                .and_then(|s| s.strip_suffix("/events"))
-                .context("invalid Google path")?;
-            let id = percent_encoding::percent_decode_str(part).decode_utf8()?;
-            ensure!(
-                !id.is_empty()
-                    && id.len() <= 320
-                    && id
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || "@._+-#".contains(c)),
-                "invalid calendar ID"
-            );
-            let mut url = Url::parse("https://www.googleapis.com/calendar/v3/calendars/")?;
-            url.path_segments_mut()
-                .unwrap()
-                .pop_if_empty()
-                .push(&id)
-                .push("events");
-            Ok(url)
-        }
-        _ => anyhow::bail!("unknown keyed adapter"),
-    }
 }
 
 #[cfg(test)]

@@ -317,20 +317,6 @@ pub fn detect(uri: &str) -> Option<&'static Definition> {
     if (host == "icloud.com" || host.ends_with(".icloud.com")) && path.contains("/published/") {
         return definition("icloud");
     }
-    for (id, matches) in [
-        ("google_calendar_api", host == "www.googleapis.com"),
-        (
-            "billetto_api",
-            host == "api.billetto.com" || host == "billetto.dk" && path.starts_with("/api/"),
-        ),
-        ("eventfrog_api", host == "api.eventfrog.net"),
-    ] {
-        if matches {
-            return service::keyed_url(id, uri)
-                .ok()
-                .and_then(|_| definition(id));
-        }
-    }
     if host == "api.btcmap.org" {
         return (path == "/v4/events"
             || path
@@ -398,6 +384,15 @@ pub fn detected_html(uri: &str, html: &str) -> Option<&'static Definition> {
         }
     })
 }
+/// Platform ids an operator's config or environment may still name although no adapter reads
+/// them (their APIs took only their own API URLs, which nobody links to): their settings are
+/// ignored with a warning, never a startup error. Any other unknown id is refused.
+pub const UNREAD_PLATFORMS: &[&str] = &[
+    "billetto_api",
+    "eventfrog_api",
+    "google_calendar_api",
+    "skiddle",
+];
 pub fn options<'a>(cfg: &'a EventConfig, id: &str) -> Option<&'a Options> {
     cfg.adapters.platforms.get(id)
 }
@@ -491,10 +486,6 @@ pub fn validate(cfg: &EventConfig) -> anyhow::Result<()> {
                     "wikidata",
                     "ics_link",
                     "ticketmaster",
-                    "skiddle",
-                    "billetto_api",
-                    "eventfrog_api",
-                    "google_calendar_api",
                     "resident_advisor"
                 ]
                 .contains(&d.parser.as_str())
@@ -507,6 +498,10 @@ pub fn validate(cfg: &EventConfig) -> anyhow::Result<()> {
         );
     }
     for id in cfg.adapters.platforms.keys() {
+        if UNREAD_PLATFORMS.contains(&id.as_str()) {
+            tracing::warn!(platform = %id, "event platform not read by Pinakes; its settings are ignored");
+            continue;
+        }
         anyhow::ensure!(definition(id).is_some(), "unknown event adapter {id}");
     }
     Ok(())

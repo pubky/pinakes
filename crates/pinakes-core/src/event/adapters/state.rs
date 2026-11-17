@@ -82,10 +82,6 @@ pub fn object(id: &str, uri: &str, v: &Value) -> Option<ResourceMeta> {
     let begins = start(v)?;
     doc.set_type("Event");
     doc.name = val(v, &["name", "title", "event_name", "eventname"]);
-    if id == "google_calendar_api" {
-        doc.name = doc.name.or_else(|| val(v, &["summary"]));
-        doc.description = val(v, &["description"]);
-    }
     doc.description = val(
         v,
         &[

@@ -1041,7 +1041,7 @@ UID and recurrence key; superseded rows are excluded. `from` defaults to the sta
 accepted horizon; an earlier explicit bound reads retained older rows. The signed `cursor`
 fixes the resource and window and expires on daemon restart; a tampered or mismatched one is
 400. A known resource that is not a calendar returns an empty list. ICS feeds, event platform
-feeds, BTC Map, the Google Calendar API and NIP-52 calendars all produce the same occurrences.
+feeds, BTC Map and NIP-52 calendars all produce the same occurrences.
 
 Meetup writes its descriptions in Markdown: on meetup.com a card's and its dates' descriptions
 are read as plain text (emphasis, heading, quote and list marks dropped, links kept as their
