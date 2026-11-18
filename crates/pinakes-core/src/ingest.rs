@@ -213,25 +213,12 @@ async fn apply_line(
             return Ok(Some(reason));
         }
     }
-    // One reference per object (a tag file, a post version naming itself), but a post's version
-    // can name several links: one reply, its embeds and a collection's items, each a line of its
-    // own, which Nexus keys by kind and link besides the file. Those key on both here, so an item
-    // put or dropped is that item alone. The link is hashed: the key stays short beside the path.
-    let unit_key = match line.kind {
-        crate::nexus::Kind::Reply | crate::nexus::Kind::Embed | crate::nexus::Kind::Collection => {
-            format!(
-                "{}:{}",
-                line.kind.as_str(),
-                &blake3::hash(line.uri.as_bytes()).to_hex()[..32]
-            )
-        }
-        crate::nexus::Kind::Tag | crate::nexus::Kind::Post => String::new(),
-    };
+    let (object_path, unit_key) = reference_key(line);
     let old: Option<String> = sqlx::query_scalar(
         "SELECT resource_id FROM reference WHERE author=$1 AND object_path=$2 AND unit_key=$3",
     )
     .bind(&line.author)
-    .bind(&line.object_path)
+    .bind(object_path)
     .bind(&unit_key)
     .fetch_optional(&mut **tx)
     .await?;
@@ -263,7 +250,7 @@ async fn apply_line(
                 VALUES($1,$2,$3,$4,$5,$6,$7)
                 ON CONFLICT(author,object_path,unit_key) DO UPDATE SET resource_id=excluded.resource_id, kind=excluded.kind,
                 label=excluded.label, created_at=excluded.created_at"#)
-                .bind(&id).bind(line.kind.as_str()).bind(&line.author).bind(&line.label).bind(&line.object_path)
+                .bind(&id).bind(line.kind.as_str()).bind(&line.author).bind(&line.label).bind(object_path)
                 .bind(timestamp(Some(line.at))?).bind(&unit_key)
                 .execute(&mut **tx).await?;
             affected.insert(id.clone());
@@ -275,7 +262,7 @@ async fn apply_line(
         Op::Del => {
             sqlx::query("DELETE FROM reference WHERE author=$1 AND object_path=$2 AND unit_key=$3")
                 .bind(&line.author)
-                .bind(&line.object_path)
+                .bind(object_path)
                 .bind(&unit_key)
                 .execute(&mut **tx)
                 .await?;
@@ -287,6 +274,48 @@ async fn apply_line(
     }
     Ok(None)
 }
+/// The key of the reference a line puts or deletes, `(object_path, unit_key)` beside its author.
+///
+/// A tag is the author's label on a link: Nexus keys it by author, `uri` (its normalized
+/// Resource URI) and label, and its lines' `object_path` (the tag file the event concerns) is for
+/// information only. A del can name another file than the put did for the same tag (a user's
+/// `pubky.app` tags rewritten to `social/v1`, two files on one tag), so a tag's row is keyed by
+/// label and link alone, under the fixed path [`TAG_PATH`]. A post's version names itself and is
+/// keyed by its file. A post's version can also name several links: one reply, its embeds and a
+/// collection's items, each a line of its own, which Nexus keys by kind and link besides the file;
+/// those key on both here, so an item put or dropped is that item alone. The link (and a tag's
+/// label) is hashed: the key stays short beside the path.
+fn reference_key(line: &Change) -> (&str, String) {
+    use crate::nexus::Kind;
+    let short = |hash: blake3::Hash| hash.to_hex()[..32].to_owned();
+    match line.kind {
+        Kind::Reply | Kind::Embed | Kind::Collection => (
+            line.object_path.as_str(),
+            format!(
+                "{}:{}",
+                line.kind.as_str(),
+                short(blake3::hash(line.uri.as_bytes()))
+            ),
+        ),
+        Kind::Tag => {
+            // Length-prefixed, so no label and link pair hashes as another's.
+            let mut hasher = blake3::Hasher::new();
+            match &line.label {
+                Some(label) => hasher
+                    .update(&[1])
+                    .update(&(label.len() as u64).to_le_bytes())
+                    .update(label.as_bytes()),
+                None => hasher.update(&[0]),
+            };
+            hasher.update(line.uri.as_bytes());
+            (TAG_PATH, format!("tag:{}", short(hasher.finalize())))
+        }
+        Kind::Post => (line.object_path.as_str(), String::new()),
+    }
+}
+/// The `object_path` of every tag's reference row: a tag is keyed by its label and link
+/// (`unit_key`), never by a file ([`reference_key`]). No other kind's row has it.
+pub const TAG_PATH: &str = "";
 /// Why a `post` line is rejected: its URI must be a post in its author's storage
 /// (`pubky://<author>/pub/<namespace>/v1/posts/{id}`), its object path a version file directly in
 /// that post (`…/{id}/{editId}.json`). A post in a namespace Pinakes never fetches
@@ -391,6 +420,61 @@ mod tests {
         }
     }
 
+    /// The links the references name, in order.
+    async fn tagged(pool: &PgPool) -> Vec<String> {
+        sqlx::query_scalar(
+            "SELECT r.uri FROM reference f JOIN resource r ON r.id=f.resource_id ORDER BY 1",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    /// A tag's key is its label and link, whatever file the line names; replies, embeds,
+    /// collection items and posts keep the keys earlier builds stored: their file, and for the
+    /// first three the kind and a hash of the link.
+    #[test]
+    fn reference_keys() {
+        let tag = line("https://example.org/a", "/pub/pubky.app/tags/X");
+        let mut moved = tag.clone();
+        moved.object_path = "/pub/social/v1/tags/Y".into();
+        let (path, key) = reference_key(&tag);
+        assert_eq!((path, key.clone()), reference_key(&moved));
+        assert_eq!(path, TAG_PATH);
+        let mut relabelled = tag.clone();
+        relabelled.label = Some("music".into());
+        let mut unlabelled = tag.clone();
+        unlabelled.label = None;
+        let mut elsewhere = tag.clone();
+        elsewhere.uri = "https://example.org/b".into();
+        let keys: BTreeSet<_> = [&tag, &relabelled, &unlabelled, &elsewhere]
+            .map(|l| reference_key(l).1)
+            .into();
+        assert_eq!(keys.len(), 4);
+        // A label that ends where a link starts is not another pair's prefix.
+        let mut a = tag.clone();
+        a.label = Some("ab".into());
+        a.uri = "c".into();
+        let mut b = tag.clone();
+        b.label = Some("a".into());
+        b.uri = "bc".into();
+        assert_ne!(reference_key(&a).1, reference_key(&b).1);
+        let path = "/pub/social/v1/posts/0034A/0034B.json";
+        for kind in [Kind::Reply, Kind::Embed, Kind::Collection] {
+            let mut item = line("https://example.org/a", path);
+            item.kind = kind;
+            let stored = format!(
+                "{}:{}",
+                item.kind.as_str(),
+                &blake3::hash(item.uri.as_bytes()).to_hex()[..32]
+            );
+            assert_eq!(reference_key(&item), (path, stored));
+        }
+        let mut post = line("https://example.org/a", path);
+        post.kind = Kind::Post;
+        assert_eq!(reference_key(&post), (path, String::new()));
+    }
+
     #[sqlx::test(migrations = "../../migrations")]
     async fn a_line_that_panics_is_skipped_and_the_cursor_moves_past_it(pool: PgPool) {
         use tracing::instrument::WithSubscriber;
@@ -450,12 +534,10 @@ mod tests {
         for secret in ["SECRET", "private-token", "CANARY", "https"] {
             assert!(!text.contains(secret), "{secret}: {text}");
         }
-        let paths: Vec<String> =
-            sqlx::query_scalar("SELECT object_path FROM reference ORDER BY object_path")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
-        assert_eq!(paths, ["/a", "/c"]);
+        assert_eq!(
+            tagged(&pool).await,
+            ["https://example.org/after", "https://example.org/before"]
+        );
         // What the panicking lines wrote before they panicked rolled back with them alone.
         let kept: i64 = sqlx::query_scalar("SELECT count(*) FROM resource WHERE uri=$1")
             .bind(bad)
@@ -514,12 +596,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(applied, 2);
-        let paths: Vec<String> =
-            sqlx::query_scalar("SELECT object_path FROM reference ORDER BY object_path")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
-        assert_eq!(paths, ["/a", "/b"]);
+        assert_eq!(
+            tagged(&pool).await,
+            ["https://example.org/first", "https://example.org/last"]
+        );
         assert_eq!(cursor(&pool, &url).await.unwrap().cursor, 6);
         let skipped = |reason| metrics.ingest_rejected.with_label_values(&[reason]).get();
         assert_eq!((skipped("unknown_kind"), skipped("malformed")), (1, 3));

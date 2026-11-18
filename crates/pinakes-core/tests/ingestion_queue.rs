@@ -67,7 +67,7 @@ async fn refs(pool: &PgPool) -> i64 {
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn put_delete_replay_retarget_and_grace(pool: PgPool) {
+async fn put_delete_replay_and_grace(pool: PgPool) {
     let a = change("https://example.org/a", "author-a", "/pub/app/tags/shared");
     let mut b = a.clone();
     b.author = author("author-b");
@@ -78,21 +78,23 @@ async fn put_delete_replay_retarget_and_grace(pool: PgPool) {
         .await
         .unwrap();
     assert!((score - 3.0_f64.ln()).abs() < 0.0001);
+    // Another link is another tag, whatever file the line names; lines need not come in
+    // timestamp order.
     let mut edit = change("https://example.org/b", "author-a", &a.object_path);
     edit.at = a.at - 100000;
     batch(&pool, vec![edit.clone()], Some("one")).await;
-    assert_eq!(refs(&pool).await, 2);
-    let current: String = sqlx::query_scalar("SELECT resource_id FROM reference WHERE author=$1")
-        .bind(author("author-a"))
+    assert_eq!(refs(&pool).await, 3);
+    let mut del = a.clone();
+    del.op = Op::Del;
+    let mut del_edit = edit.clone();
+    del_edit.op = Op::Del;
+    batch(&pool, vec![del.clone(), del, del_edit], None).await;
+    assert_eq!(refs(&pool).await, 1);
+    let left: String = sqlx::query_scalar("SELECT author FROM reference")
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(current, identity(&edit.uri).unwrap().0);
-    // Delete keys, not target IDs; edits and replays need not be timestamp ordered.
-    let mut del = a.clone();
-    del.op = Op::Del;
-    batch(&pool, vec![del.clone(), del], None).await;
-    assert_eq!(refs(&pool).await, 1);
+    assert_eq!(left, b.author);
     assert_eq!(
         ingest::cursor(&pool, "fixture")
             .await
@@ -109,6 +111,136 @@ async fn put_delete_replay_retarget_and_grace(pool: PgPool) {
         .unwrap();
     assert_eq!(store::cleanup(&pool, 7, 7 * 24).await.unwrap(), 1);
     assert_eq!(refs(&pool).await, 1);
+}
+/// The tags' rows, as (author seed, label, link), in order.
+async fn tags(pool: &PgPool, seeds: &[&str]) -> Vec<(String, String, String)> {
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT f.author,f.label,r.uri FROM reference f JOIN resource r ON r.id=f.resource_id \
+         WHERE f.kind='tag' ORDER BY 1,2,3",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    let mut named: Vec<_> = rows
+        .into_iter()
+        .map(|(a, label, uri)| {
+            let seed = seeds.iter().find(|s| author(s) == a).expect("known author");
+            (seed.to_string(), label, uri)
+        })
+        .collect();
+    named.sort();
+    named
+}
+fn tag(op: Op, seed: &str, uri: &str, label: &str, path: &str) -> Change {
+    let mut line = change(uri, seed, path);
+    line.op = op;
+    line.label = Some(label.into());
+    line
+}
+const LINK: &str = "https://example.org/tagged";
+fn link() -> String {
+    identity(LINK).unwrap().1
+}
+const V0: &str = "/pub/pubky.app/tags/0034TAGV0ID";
+const V1: &str = "/pub/social/v1/tags/0034TAGV1ID";
+
+/// A tag is its author's label on a link: a second file landing on the same tag (two spellings
+/// of one link, or a user's `pubky.app` and `social/v1` copies) is the same reference, and its
+/// row names no file.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_tag_put_from_another_file_is_the_same_reference(pool: PgPool) {
+    batch(&pool, vec![tag(Op::Put, "a", LINK, "rust", V0)], None).await;
+    batch(&pool, vec![tag(Op::Put, "a", LINK, "rust", V1)], None).await;
+    assert_eq!(refs(&pool).await, 1);
+    let (path, key): (String, String) =
+        sqlx::query_as("SELECT object_path,unit_key FROM reference")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(path, ingest::TAG_PATH);
+    assert!(key.starts_with("tag:") && key.len() == 36, "{key}");
+}
+/// A user's `pubky.app` tags are rewritten to `social/v1` without feed lines: the del names the
+/// new file, the put named the old one, and the tag goes.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_tag_del_naming_the_rewritten_file_deletes_the_tag(pool: PgPool) {
+    batch(&pool, vec![tag(Op::Put, "a", LINK, "rust", V0)], None).await;
+    assert_eq!(refs(&pool).await, 1);
+    batch(&pool, vec![tag(Op::Del, "a", LINK, "rust", V1)], None).await;
+    assert_eq!(refs(&pool).await, 0);
+    let orphaned: bool =
+        sqlx::query_scalar("SELECT orphaned_at IS NOT NULL FROM resource WHERE id=$1")
+            .bind(identity(LINK).unwrap().0)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(orphaned);
+}
+/// Two people's tags of one link with one label are two references, even under the same file
+/// name (a tag file's name is its tag's ID, the same in every user's storage): one's del leaves
+/// the other's.
+#[sqlx::test(migrations = "../../migrations")]
+async fn two_authors_tags_of_one_link_and_label_are_two_references(pool: PgPool) {
+    let seeds = ["alice", "bob"];
+    batch(
+        &pool,
+        vec![
+            tag(Op::Put, "alice", LINK, "rust", V0),
+            tag(Op::Put, "bob", LINK, "rust", V0),
+        ],
+        None,
+    )
+    .await;
+    assert_eq!(tags(&pool, &seeds).await.len(), 2);
+    batch(&pool, vec![tag(Op::Del, "alice", LINK, "rust", V1)], None).await;
+    assert_eq!(
+        tags(&pool, &seeds).await,
+        [("bob".to_string(), "rust".to_string(), link())]
+    );
+}
+/// One author's two labels on one link are two references: deleting one leaves the other.
+#[sqlx::test(migrations = "../../migrations")]
+async fn one_author_s_two_labels_on_one_link_are_two_references(pool: PgPool) {
+    let seeds = ["a"];
+    batch(
+        &pool,
+        vec![
+            tag(Op::Put, "a", LINK, "rust", V0),
+            tag(Op::Put, "a", LINK, "music", V0),
+        ],
+        None,
+    )
+    .await;
+    assert_eq!(tags(&pool, &seeds).await.len(), 2);
+    batch(&pool, vec![tag(Op::Del, "a", LINK, "music", V1)], None).await;
+    assert_eq!(
+        tags(&pool, &seeds).await,
+        [("a".to_string(), "rust".to_string(), link())]
+    );
+}
+/// The feed delivers at least once, and a del can come before Nexus's graph delete (and come
+/// again on its retry): repeated puts, from either of a tag's files, and repeated dels change
+/// nothing more than one does.
+#[sqlx::test(migrations = "../../migrations")]
+async fn repeated_tag_puts_and_dels_are_harmless(pool: PgPool) {
+    let seeds = ["a", "b"];
+    let put = tag(Op::Put, "a", LINK, "rust", V0);
+    let mut again = put.clone();
+    again.at += 1;
+    let moved = tag(Op::Put, "a", LINK, "rust", V1);
+    let other = tag(Op::Put, "b", LINK, "rust", V0);
+    batch(&pool, vec![put.clone(), again, moved, other, put], None).await;
+    assert_eq!(tags(&pool, &seeds).await.len(), 2);
+    let del = tag(Op::Del, "a", LINK, "rust", V1);
+    batch(&pool, vec![del.clone(), del.clone()], None).await;
+    batch(&pool, vec![del], None).await;
+    assert_eq!(
+        tags(&pool, &seeds).await,
+        [("b".to_string(), "rust".to_string(), link())]
+    );
+    // A put after the dels is the tag again.
+    batch(&pool, vec![tag(Op::Put, "a", LINK, "rust", V1)], None).await;
+    assert_eq!(tags(&pool, &seeds).await.len(), 2);
 }
 #[sqlx::test(migrations = "../../migrations")]
 async fn epoch_headers_length_reset_and_transaction_rollback(pool: PgPool) {
@@ -151,6 +283,7 @@ async fn epoch_headers_length_reset_and_transaction_rollback(pool: PgPool) {
     let mut foreign = serde_json::to_value(&a).unwrap();
     foreign["resource_id"] = serde_json::json!("0".repeat(32));
     foreign["object_path"] = serde_json::json!("/pub/app/tags/foreign");
+    foreign["label"] = serde_json::json!("foreign");
     let foreign: Change = serde_json::from_value(foreign).unwrap();
     let saved = ingest::cursor(&pool, "fixture").await.unwrap();
     // An invalid URI is rejected without stalling the batch.
@@ -304,7 +437,7 @@ async fn rejects_oversized_feed_fields_without_stalling_or_truncating_keys(pool:
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(stored, (good.label.unwrap(), good.object_path));
+    assert_eq!(stored, (good.label.unwrap(), ingest::TAG_PATH.into()));
     for (reason, count) in [("author", 4), ("label", 3), ("object_path", 3)] {
         assert_eq!(
             metrics.ingest_rejected.with_label_values(&[reason]).get(),
@@ -1602,9 +1735,9 @@ async fn new_reference_reopens_final_pages_but_never_geo(pool: PgPool) {
         .await
         .unwrap();
     let mut page2 = page;
-    page2.object_path = "/pub/app/tags/new-page".into();
+    page2.author = author("c");
     let mut geo2 = geo;
-    geo2.object_path = "/pub/app/tags/new-geo".into();
+    geo2.author = author("d");
     batch(&pool, vec![page2, geo2], Some("one")).await;
     let final_geo: bool = sqlx::query_scalar("SELECT final FROM resource WHERE uri LIKE 'geo:%'")
         .fetch_one(&pool)
@@ -1634,7 +1767,7 @@ async fn epoch_replay_does_not_reopen_final_resource(pool: PgPool) {
         .await
         .unwrap());
     let mut new = old;
-    new.object_path = "/pub/app/new".into();
+    new.author = author("b");
     new.at = Utc::now().timestamp_millis() + 10;
     batch(&pool, vec![new], Some("after")).await;
     assert!(!sqlx::query_scalar::<_, bool>("SELECT final FROM resource")
