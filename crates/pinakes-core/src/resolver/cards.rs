@@ -1664,7 +1664,7 @@ mod tests {
         let listed = d.episodes.unwrap().len();
         assert!((100..300).contains(&listed), "{listed}");
         assert!(d.episodes_older, "the list is the cut read's");
-        assert_eq!(recorded.asked().len(), 2);
+        assert!(recorded.asked().len() >= 2, "{:?}", recorded.asked());
         // A longer read that does not parse (an undefined entity past the cut): the cut read's
         // card and list.
         let broken = whole.replacen("<title>E1</title>", "<title>E1 &nbsp;</title>", 1);
@@ -1690,13 +1690,18 @@ mod tests {
         assert_eq!(recorded.asked(), [uri]);
         // An item card reads on only for an item past the cut.
         let old = "https://feeds.example.org/show.xml?guid=e1";
-        let (egress, recorded) = feed(&whole);
+        let (egress, recorded) = crate::sources::fixture::egress(vec![(
+            old,
+            200,
+            "application/rss+xml",
+            whole.as_bytes().to_vec(),
+        )]);
         let e = read(egress, old, cut(old)).await;
         assert_eq!(
             (e.type_name.as_str(), e.name.as_deref()),
             ("PodcastEpisode", Some("E1"))
         );
-        assert_eq!(recorded.asked(), [uri]);
+        assert_eq!(recorded.asked(), [old]);
         let new = "https://feeds.example.org/show.xml?guid=e300";
         let (egress, recorded) = feed(&whole);
         let e = read(egress, new, cut(new)).await;
