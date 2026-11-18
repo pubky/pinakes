@@ -116,7 +116,8 @@ Restart with the protected environment. Check private admin info and `/metrics` 
 headers or request URLs containing keys; public `/v1/info` intentionally exposes no credentials.
 The `ProviderKeyRefused` alert in `ops/alerts.yml` reads
 `pinakes_source_token_refusals_total{source}`, which counts every refusal of a configured key
-(a 401 or 403, or a refused token request; not a 429 or 5xx) for GitHub, CourtListener,
+(as each provider signals it: a 401, a 403 where it means a refused key, or a refused token
+request; never a 429 or 5xx) for GitHub, CourtListener,
 Discogs, Spotify, TIDAL, TMDB, Podcast Index and Ticketmaster. Load the alert rules before
 staging, and check that each provider you configured shows `0` on `/metrics` after the first
 cards using it are read. A non-zero value means the key is wrong, expired or revoked: fix it,

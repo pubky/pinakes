@@ -52,7 +52,7 @@ No messages are sent or contact points provisioned by these files.
 | `pinakes_resolution_deferred_total{reason}` | Resolutions put off without a charged attempt, by reason: `missing_unconfirmed` (a missing answer waiting for the fetch that confirms it) |
 | `pinakes_also_on_service_errors_total{service,class}` | Failed also-on requests to a service (`wikidata`, `itunes`, `tidal`, `crossref`, …), by error class; the lookup goes on without that service |
 | `pinakes_also_on_recording_key_conflicts_total{source}` | Also-on runs that keyed a recording another source keys differently on the same resource, by source; both keys stay and the resource joins no recording group |
-| `pinakes_source_token_refusals_total{source}` | Refusals of the operator's configured key, token or app credentials by its service: a 401 or 403 to a request that carried it, or a token endpoint refusing the credentials, never a 429 or 5xx. One series per keyed provider, each at 0 from the start: `courtlistener`, `discogs`, `github`, `podcast_index`, `spotify`, `ticketmaster`, `tidal`, `tmdb` |
+| `pinakes_source_token_refusals_total{source}` | Refusals of the operator's configured key, token or app credentials by its service, as each signals one (a 401; a 403 where the service uses it for a refused key, not GitHub's rate limit; a token endpoint answering anything but 200, 429 or 5xx), never a 429 or 5xx. One series per keyed provider, each at 0 from the start: `courtlistener`, `discogs`, `github`, `podcast_index`, `spotify`, `ticketmaster`, `tidal`, `tmdb` |
 
 Database metric refreshes are cached for 15 seconds. Overdue excludes dead letters.
 Full JSON diagnostics are on the admin `/v1/info`; public info is redacted.

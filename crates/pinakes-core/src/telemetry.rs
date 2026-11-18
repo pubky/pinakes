@@ -60,9 +60,9 @@ pub struct Metrics {
     /// Nexus polls whose batch work panicked outside a feed line (the cursor holds; retried).
     pub ingest_panics: IntCounter,
     pub ingest_rejected: IntCounterVec,
-    /// Refusals of an operator's configured key, token or app credentials by its service (a 401
-    /// or 403, or a token endpoint refusing the credentials; never a 429 or 5xx), by keyed
-    /// source (`sources::KEYED`), each at 0 from the start.
+    /// Refusals of an operator's configured key, token or app credentials by its service, as it
+    /// signals one (`sources::token_refused`; never a 429 or 5xx), by keyed source
+    /// (`sources::KEYED`), each at 0 from the start.
     pub token_refusals: IntCounterVec,
 }
 impl Metrics {
@@ -142,7 +142,7 @@ impl Metrics {
             token_refusals: metric!(
                 IntCounterVec,
                 "pinakes_source_token_refusals_total",
-                "Refusals of an operator's configured key, token or app credentials by its service (401, 403 or a refused token request), by keyed source",
+                "Refusals of an operator's configured key, token or app credentials by its service (an auth refusal, never a 429 or 5xx), by keyed source",
                 &["source"]
             ),
             discovery: metric!(

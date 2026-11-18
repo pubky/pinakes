@@ -632,9 +632,11 @@ pub const KEYED: &[&str] = &[
 /// (`pinakes_source_token_refusals_total`).
 static TOKEN_REFUSALS: std::sync::Mutex<BTreeMap<&'static str, u64>> =
     std::sync::Mutex::new(BTreeMap::new());
-/// Count one refusal of `source`'s configured credential: a 401 or 403 to a request that carried
-/// it, or a token endpoint refusing the app's credentials. A rate limit (429) or an outage (5xx)
-/// is never a refusal. `source` is one of [`KEYED`]; any other name is not counted.
+/// Count one refusal of `source`'s configured credential, as its service signals one: a 401, or
+/// a 403 where the service uses it for a refused key (not GitHub's, its rate limit; not a 403
+/// to one request Spotify withholds), or a token endpoint answering anything but 200, a 429 or a
+/// 5xx. A rate limit (429) or an outage (5xx) is never a refusal. `source` is one of [`KEYED`];
+/// any other name is not counted.
 pub fn token_refused(source: &'static str) {
     if !KEYED.contains(&source) {
         return;
