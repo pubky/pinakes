@@ -614,12 +614,31 @@ impl SourcesConfig {
     }
 }
 
-/// How often each source's service refused its configured token since the daemon started
+/// Every source, also-on service and event platform that reads with an operator's key, token or
+/// app credentials, as `pinakes_source_token_refusals_total{source}` names it: the series exists
+/// (at 0) for each from the start, and no other label is ever counted.
+pub const KEYED: &[&str] = &[
+    "courtlistener",
+    "discogs",
+    "github",
+    "podcast_index",
+    "spotify",
+    "ticketmaster",
+    "tidal",
+    "tmdb",
+];
+
+/// How often each keyed service refused the operator's credential since the daemon started
 /// (`pinakes_source_token_refusals_total`).
 static TOKEN_REFUSALS: std::sync::Mutex<BTreeMap<&'static str, u64>> =
     std::sync::Mutex::new(BTreeMap::new());
-/// Count one refusal of `source`'s token.
+/// Count one refusal of `source`'s configured credential: a 401 or 403 to a request that carried
+/// it, or a token endpoint refusing the app's credentials. A rate limit (429) or an outage (5xx)
+/// is never a refusal. `source` is one of [`KEYED`]; any other name is not counted.
 pub fn token_refused(source: &'static str) {
+    if !KEYED.contains(&source) {
+        return;
+    }
     *TOKEN_REFUSALS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -1157,6 +1176,43 @@ mod tests {
     fn repo(path: &str) -> String {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         std::fs::read_to_string(root.join(path)).unwrap_or_else(|e| panic!("{path}: {e}"))
+    }
+
+    /// Everything that reads with an operator's credential has its refusals series: each official
+    /// source and also-on source that takes a token or an app's key, the client-credentials
+    /// services, Podcast Index, TMDB and each event platform that requires a key. No other name
+    /// is counted, so the series' labels stay these.
+    #[test]
+    fn every_keyed_service_is_counted_by_name() {
+        let mut keyed: Vec<&str> = REGISTRY
+            .iter()
+            .filter(|s| s.takes_token())
+            .map(|s| s.name())
+            .collect();
+        keyed.extend(
+            crate::also_on::registered()
+                .iter()
+                .filter(|s| s.takes_token() || s.app_key_variables().is_some())
+                .map(|s| s.id()),
+        );
+        keyed.extend(
+            crate::event::adapters::definitions()
+                .iter()
+                .filter(|d| d.requires_key)
+                .map(|d| d.id.as_str()),
+        );
+        keyed.extend([
+            crate::also_on::spotify_api::SPOTIFY.service,
+            crate::also_on::tidal_api::TIDAL.service,
+            "podcast_index",
+            "tmdb",
+        ]);
+        for name in &keyed {
+            assert!(KEYED.contains(name), "{name} is not in KEYED");
+        }
+        assert!(keyed.contains(&"ticketmaster"), "{keyed:?}");
+        token_refused("not-a-keyed-source");
+        assert!(token_refusals().iter().all(|(s, _)| KEYED.contains(s)));
     }
 
     #[test]

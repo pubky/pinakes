@@ -52,8 +52,9 @@ false` or `[also_on.sources.tmdb] enabled = false` switches it off as an unset k
 request (the egress refuses `api.themoviedb.org`), TMDB's stored rows hidden from the next start,
 and every card that holds them due at once, losing TMDB's values at that read. A refused
 credential (401) is logged (`TMDB refused the credential`) and counted in
-`pinakes_also_on_service_errors_total{service="tmdb",class="refused"}`; a 429 or 5xx is retried
-later. Either keeps the rows TMDB gave before until they expire.
+`pinakes_also_on_service_errors_total{service="tmdb",class="refused"}` and
+`pinakes_source_token_refusals_total{source="tmdb"}` (read by the `ProviderKeyRefused` alert); a
+429 or 5xx is retried later. Either keeps the rows TMDB gave before until they expire.
 
 TMDB lets its data be cached for six months at most. Its rows live 60 days from the last read
 that answered; a card takes TMDB's values only from live rows, so it drops them at its first read

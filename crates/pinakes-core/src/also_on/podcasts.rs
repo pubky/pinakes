@@ -759,7 +759,9 @@ impl Podcasts {
             return Ok(None);
         };
         let options = pi_options(key, secret);
-        Ok(Some(cx.egress.fetch_with(url, &options).await?))
+        let fetched = cx.egress.fetch_with(url, &options).await?;
+        crate::podcast_index_api::note_refusal(fetched.status);
+        Ok(Some(fetched))
     }
     /// Podcast Index's feed for `ask`.
     async fn index(cx: &Context, ask: Ask<'_>) -> Result<Option<IndexFeed>> {

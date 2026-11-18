@@ -40,7 +40,8 @@ and the token never appear in logs, the operator info, errors or debug output. R
 credentials (the token endpoint refuses them, the API answers 403, or it rejects a token under a
 minute old) are logged (`TIDAL refused the client credentials`) and counted in
 `pinakes_also_on_service_errors_total{service="tidal"}` (class `refused`, `forbidden` or
-`rejected`); the TIDAL links read meanwhile keep what TIDAL gave them before and retry later
+`rejected`) and in `pinakes_source_token_refusals_total{source="tidal"}`, which the
+`ProviderKeyRefused` alert reads; the TIDAL links read meanwhile keep what TIDAL gave them before and retry later
 (`tidal_auth`, after the five-minute hold, then backing off to hourly), and TIDAL is asked again
 when the hold ends. A rate limit
 or an outage (429, 5xx) is waited out: no TIDAL request, batched or single, before the time it

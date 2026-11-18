@@ -204,6 +204,13 @@ impl PlatformResolver {
         opts.feed_cap = opts.feed_hint.then_some(local.feed_body_bytes);
         // An organiser calendar is the platform's own answer or none (`fetch_calendar`).
         let fetched = super::fetch_calendar(&self.web.egress, &target, &opts).await?;
+        if d.requires_key && matches!(fetched.status, 401 | 403) {
+            // The operator's key refused (Ticketmaster's `apikey`): counted under the platform's
+            // ID (`pinakes_source_token_refusals_total`).
+            if let Some(source) = crate::sources::KEYED.iter().find(|k| **k == d.id) {
+                crate::sources::token_refused(source);
+            }
+        }
         if fetched.status == 304 {
             return Err(crate::resolver::NotModified.into());
         }

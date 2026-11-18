@@ -316,6 +316,7 @@ async fn a_refused_podcast_index_key_fails_nothing() {
     // Podcast Index refuses the key (401): everything else still counts.
     let recorded = Recorded::with_recorded(&[("podcasts", "pi-byitunesid-401")]);
     let cx = cx(recorded.clone(), indexed());
+    let before = common::token_refusals("podcast_index");
     let found = Podcasts
         .lookup(&cx, &subject(DAILY, None, None))
         .await
@@ -326,6 +327,26 @@ async fn a_refused_podcast_index_key_fails_nothing() {
     );
     assert!(sites(&found).contains(&"Pocket Casts"));
     assert!(found.facts.is_empty());
+    // The refusal is counted where an alert reads it; a rate limit (429) is not. No other test
+    // here has Podcast Index refuse.
+    assert!(common::token_refusals("podcast_index") > before);
+    let limited = Recorded::with(&[(
+        "https://api.podcastindex.org/api/1.0/podcasts/byitunesid?id=1200361736",
+        429,
+        "{}",
+    )]);
+    let before = common::token_refusals("podcast_index");
+    let _ = Podcasts
+        .lookup(
+            &crate::cx(limited.clone(), indexed()),
+            &subject(DAILY, None, None),
+        )
+        .await;
+    assert!(limited
+        .seen()
+        .iter()
+        .any(|u| u.starts_with("https://api.podcastindex.org/")));
+    assert_eq!(common::token_refusals("podcast_index"), before);
     // When nothing at all could be read (iTunes answering 503), the retry is passed on.
     let show = "https://itunes.apple.com/lookup?id=1200361736&entity=podcast&country=us";
     let busy = Recorded::with(&[(show, 503, "")]);

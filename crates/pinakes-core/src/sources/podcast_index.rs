@@ -184,6 +184,7 @@ impl Source for PodcastIndex {
         };
         let options = pi_options(&key, &secret);
         let f = cx.egress.fetch_with(&url, &options).await?;
+        crate::podcast_index_api::note_refusal(f.status);
         super::retry(&f)?;
         let card = crate::resolver::html::blocking(move || match episode {
             Some(id) => parse_episode(f.status, &f.body, feed, id),

@@ -102,6 +102,7 @@ impl Slot {
             api.label
         );
         crate::telemetry::also_on_service_error(api.service, class);
+        crate::sources::token_refused(api.service);
         self.token = None;
         self.refused_until = Some(Instant::now() + Duration::from_secs(REFUSAL_HOLD));
     }

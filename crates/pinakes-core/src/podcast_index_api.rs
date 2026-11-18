@@ -118,6 +118,14 @@ pub fn pi_options(key: &str, secret: &str) -> FetchOptions {
         ..FetchOptions::json()
     }
 }
+/// Count Podcast Index refusing the operator's key and secret (401 or 403 to a signed request:
+/// a wrong, revoked or expired pair) in `pinakes_source_token_refusals_total{source=
+/// "podcast_index"}`; a rate limit or an outage is not a refusal.
+pub(crate) fn note_refusal(status: u16) {
+    if matches!(status, 401 | 403) {
+        crate::sources::token_refused("podcast_index");
+    }
+}
 
 #[cfg(test)]
 mod tests {

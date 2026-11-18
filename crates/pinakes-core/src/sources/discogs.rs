@@ -596,6 +596,12 @@ mod tests {
                 "text/html",
                 b"walled".to_vec(),
             ),
+            (
+                "https://api.discogs.com/artists/2",
+                429,
+                "application/json",
+                b"{}".to_vec(),
+            ),
         ]);
         let cx = Context {
             egress: &egress,
@@ -615,10 +621,25 @@ mod tests {
             .unwrap();
         assert_eq!(d.status, crate::model::Status::Missing);
         let token = Credential::Token("s3cret-token".into());
+        let refusals = || {
+            crate::sources::token_refusals()
+                .into_iter()
+                .find(|(s, _)| *s == "discogs")
+                .map_or(0, |(_, n)| n)
+        };
+        let before = refusals();
         let error = record(&egress, Kind::Artist, 1, Some(&token))
             .await
             .unwrap_err();
         assert!(!format!("{error:?}").contains("s3cret"), "{error:?}");
+        // The refusal is counted where an alert reads it (no other test here has Discogs
+        // refuse); a rate limit is not.
+        assert_eq!(refusals(), before + 1);
+        let other = Credential::Token("other-token".into());
+        assert!(record(&egress, Kind::Artist, 2, Some(&other))
+            .await
+            .is_err());
+        assert_eq!(refusals(), before + 1);
         // Refused with the token, then without it.
         assert_eq!(
             recorded.asked(),
@@ -627,6 +648,7 @@ mod tests {
                 "https://api.discogs.com/masters/999999999",
                 "https://api.discogs.com/artists/1",
                 "https://api.discogs.com/artists/1",
+                "https://api.discogs.com/artists/2",
             ]
         );
     }

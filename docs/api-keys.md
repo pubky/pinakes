@@ -114,8 +114,14 @@ Keep the attributions and OSM dump described in [operations](operations.md#deplo
 
 Restart with the protected environment. Check private admin info and `/metrics` without logging
 headers or request URLs containing keys; public `/v1/info` intentionally exposes no credentials.
-Monitor `pinakes_source_token_refusals_total` (GitHub, CourtListener, Discogs) and
-`pinakes_also_on_service_errors_total` (including Spotify/TIDAL) for refusals.
+The `ProviderKeyRefused` alert in `ops/alerts.yml` reads
+`pinakes_source_token_refusals_total{source}`, which counts every refusal of a configured key
+(a 401 or 403, or a refused token request; not a 429 or 5xx) for GitHub, CourtListener,
+Discogs, Spotify, TIDAL, TMDB, Podcast Index and Ticketmaster. Load the alert rules before
+staging, and check that each provider you configured shows `0` on `/metrics` after the first
+cards using it are read. A non-zero value means the key is wrong, expired or revoked: fix it,
+then restart (the count, and the alert, reset at start). Spotify shows refusals while the app
+owner has no Premium plan ([Spotify](sources/spotify.md)).
 With the daemon stopped, `pinakesd --config <path> reextract also-on` queues fresh joins;
 `reextract web official` refreshes stored official-source cards. Start the daemon again and
 check representative cards, not just process health. See [re-extraction](operations.md#database)

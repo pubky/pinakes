@@ -331,6 +331,7 @@ impl Tmdb {
         match fetched.status {
             401 => {
                 crate::telemetry::also_on_service_error("tmdb", "refused");
+                crate::sources::token_refused("tmdb");
                 tracing::warn!("TMDB refused the credential");
                 anyhow::bail!("TMDB refused the credential")
             }

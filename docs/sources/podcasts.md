@@ -101,4 +101,6 @@ Apple track. The key and secret never appear in logs, the operator info or error
 or a Podcast Index outage fails no lookup: the source keeps what the other services answered,
 and asks again later only when nothing at all was found. Such failures of a secondary service
 (Podcast Index, iTunes, Wikidata, the feed) are counted in
-`pinakes_also_on_service_errors_total{service,class}`.
+`pinakes_also_on_service_errors_total{service,class}`; a refused key (401 or 403) is also counted
+in `pinakes_source_token_refusals_total{source="podcast_index"}`, which the `ProviderKeyRefused`
+alert reads.

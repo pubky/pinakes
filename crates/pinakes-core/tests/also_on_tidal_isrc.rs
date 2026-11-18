@@ -355,9 +355,18 @@ async fn refusals_and_rate_limits_keep_the_links(pool: sqlx::PgPool) {
             .execute(&pool)
             .await
             .unwrap();
+        let before = common::token_refusals("tidal");
         let seen = run(&pool, config(Some(pair), true), answers.clone()).await;
         assert!(seen.iter().any(|s| s.contains("tidal.com")), "{seen:?}");
         assert_eq!(links(&pool, &album).await, found, "{class}");
+        // A refusal of the credentials (401 at the token endpoint, a 403 from the API) is counted
+        // where an alert reads it; a rate limit is not.
+        let counted = common::token_refusals("tidal") - before;
+        if answers.api_status == Some(429) {
+            assert_eq!(counted, 0, "{class}");
+        } else {
+            assert!(counted >= 1, "{class}");
+        }
         let (error, seconds) = due(&pool, &album).await;
         assert_eq!(error.as_deref(), Some(class));
         assert!(wait.contains(&seconds), "{class}: {seconds}");
