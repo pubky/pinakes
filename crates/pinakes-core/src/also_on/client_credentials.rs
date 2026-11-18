@@ -205,7 +205,8 @@ impl Slot {
                 });
                 Ok(token)
             }
-            429 | 500..=599 => {
+            // A timeout, a rate limit or an outage is a wait, never a refusal of the credentials.
+            408 | 429 | 500..=599 => {
                 self.cool_down(fetched.retry_after_secs);
                 Err(api.busy(fetched.retry_after_secs))
             }
