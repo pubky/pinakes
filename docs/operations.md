@@ -585,7 +585,8 @@ record names: one feed request per read, cached for the card's lifetime, cut at 
 fetched and parsed within three seconds and what is left of the read's deadline, so a slow feed
 or a wait for a parser costs the list and never the card; a feed card whose own read was cut at
 the page cap reads its feed again so for its show, keeping the cut read's card and list when that
-fails or does not parse), kept in `podcast_episode` (the rows follow the document: replaced at a
+fails or does not parse, joined by the other episodes a longer stored list holds until a read reads
+the whole list again), kept in `podcast_episode` (the rows follow the document: replaced at a
 save, cleared when the card is cleared or scrubbed; the newest 1000 of a feed's first 2000 items),
 with whether the feed lists older ones in `podcast_episode_list` (written and cleared with the
 rows), and served by

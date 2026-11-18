@@ -86,6 +86,10 @@ pub struct Listed {
     /// (cut at its cap, or past its item cap), it has items past the [`SCANNED`] looked at, or
     /// more episodes than the [`KEPT`] kept (`EpisodePage::truncated`).
     pub older: bool,
+    /// The read went past the page cap but only the part within it parsed
+    /// ([`from_feed_listed`]): a show's save keeps the older episodes a longer stored list holds
+    /// (`ResourceMeta::episodes_cut`).
+    pub cut: bool,
 }
 /// The latest [`KEPT`] episodes among a feed's items: newest first by `pubDate`, undated ones
 /// after them in the feed's order; an item without a GUID, an enclosure or a link is no
@@ -103,6 +107,7 @@ pub fn listed(items: &[roxmltree::Node<'_, '_>], feed: &Url, partial: bool) -> L
     Listed {
         episodes: episodes.into_iter().map(|(_, e)| e).collect(),
         older,
+        cut: false,
     }
 }
 /// The latest [`KEPT`] episodes among a feed's items ([`listed`]).
@@ -126,6 +131,7 @@ pub fn from_feed_listed(f: &crate::resolver::egress::Fetched) -> Option<Listed> 
             truncated: true,
             ..f.clone()
         })
+        .map(|l| Listed { cut: true, ..l })
     })
 }
 fn read_feed(f: &crate::resolver::egress::Fetched) -> Option<Listed> {
@@ -445,6 +451,8 @@ fn bounded(mut s: String, max: usize) -> String {
 /// path that replaces a document passes here: a save, a clear): a list replaces the show's rows
 /// whole; a document that is no podcast show, or a show found missing or cleared, clears them;
 /// a show's document without a list (a record read without its feed) leaves them as they are.
+/// A cut read's list (`ResourceMeta::episodes_cut`: its read on gave nothing, or only the part
+/// within the page cap parsed) is joined by the stored list's other episodes ([`under_stored`]).
 pub(crate) async fn store(
     tx: &mut Transaction<'_, Postgres>,
     id: &str,
@@ -452,6 +460,10 @@ pub(crate) async fn store(
 ) -> Result<()> {
     let show = is_show(&doc.type_path, doc.status.as_str());
     match &doc.episodes {
+        Some(list) if show && doc.episodes_cut => {
+            let (list, older) = under_stored(tx, id, list, doc.episodes_older).await?;
+            replace(tx, id, &list, older).await
+        }
         Some(list) if show => replace(tx, id, list, doc.episodes_older).await,
         None if show => Ok(()),
         _ => clear(tx, id).await.map(|_| ()),
@@ -463,6 +475,80 @@ pub(crate) async fn store(
 /// missing card lists nothing, grouped or not).
 pub(crate) fn is_show(type_path: &[String], status: &str) -> bool {
     type_path.iter().any(|t| t == "PodcastSeries") && status == "ok"
+}
+/// A cut read's `list` (whose feed lists older episodes: `older`) with the stored list's other
+/// episodes: every stored one `list` does not name (by GUID) and that is no newer than `list`'s
+/// newest joins it, and the whole is ordered as [`listed`] orders a feed's (newest first by date,
+/// undated ones last, else in order: `list`'s first). So a read on that was slow or failed once
+/// neither shortens a longer list an earlier read stored nor flips its `truncated` (the stored
+/// list's flag, when one of its episodes joins), while the cut read's newer episodes still come
+/// first; an undated or out-of-order item in the cut moves nothing else. An older episode the
+/// feed has dropped stays until a read reads the feed's whole list again. `list` as it is when it
+/// does not reach the stored list (it lacks the stored list's newest episode no newer than its
+/// own, or the one after it: another feed's list, or more new episodes than the cut holds) or the
+/// stored list holds nothing besides.
+async fn under_stored(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &str,
+    list: &[Episode],
+    older: bool,
+) -> Result<(Vec<Episode>, bool)> {
+    // A stored episode's GUID, URI, name, image, date and stream (as JSON text), and whether
+    // the stored list's feed lists older ones.
+    type Stored = (
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<DateTime<Utc>>,
+        Option<String>,
+        Option<bool>,
+    );
+    let rows: Vec<Stored> = sqlx::query_as(
+        "SELECT e.guid,e.url,e.name,e.image,e.published,e.stream::text,l.older FROM podcast_episode e LEFT JOIN podcast_episode_list l ON l.resource_id=e.resource_id WHERE e.resource_id=$1 ORDER BY e.position",
+    )
+    .bind(id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let named: std::collections::HashSet<&str> = list.iter().map(|e| e.guid.as_str()).collect();
+    // A stored episode newer than the cut list's newest is one the feed has taken down.
+    let newest = list.iter().filter_map(|e| e.published).max();
+    let kept: Vec<&Stored> = rows
+        .iter()
+        .filter(|r| !matches!((r.4, newest), (Some(d), Some(n)) if d > n))
+        .collect();
+    // The cut list reaches the stored one only when it names the stored list's two newest
+    // episodes left (its one, when it holds one): else between the two lie episodes neither read
+    // has (more new ones than the cut holds; one of them alone may be a re-release at the top of
+    // the feed), or the stored list is another feed's, and the cut list stands alone.
+    if kept.is_empty() || !kept.iter().take(2).all(|r| named.contains(r.0.as_str())) {
+        return Ok((list.to_vec(), older));
+    }
+    let joining: Vec<&Stored> = kept
+        .into_iter()
+        .filter(|r| !named.contains(r.0.as_str()))
+        .collect();
+    let Some(stored_older) = joining.first().map(|r| r.6.unwrap_or(older)) else {
+        return Ok((list.to_vec(), older));
+    };
+    let mut merged = list.to_vec();
+    merged.extend(
+        joining
+            .into_iter()
+            .map(|(guid, uri, name, image, published, stream, _)| Episode {
+                id: None,
+                uri: uri.clone(),
+                aliases: Vec::new(),
+                name: name.clone(),
+                image: image.clone(),
+                published: *published,
+                guid: guid.clone(),
+                stream: stream.as_deref().and_then(|s| serde_json::from_str(s).ok()),
+            }),
+    );
+    // Stable: equal dates keep the order above, as `listed` keeps the feed's.
+    merged.sort_by_key(|e| std::cmp::Reverse(e.published));
+    Ok((merged, stored_older))
 }
 /// Clears a resource's episodes, and what its list says of its feed (`podcast_episode_list`): for
 /// a document replaced outside a save (a scrub). The rows cleared.
@@ -687,13 +773,15 @@ pub(crate) async fn on_cards<'a>(
 
 /// The stored list each asked resource lists (`$1` the IDs, `$2` their flags), as `chosen(card,
 /// source)`: its own rows, else, when its flag is set (the resource is a show), those of the
-/// member of its group whose newest episode is the newest. Whether a resource has a list is a
+/// member of its group whose newest episode is the newest, of those the one whose list is the
+/// longest (a member read before a longer list was kept must not stand for the show), then by
+/// ID. Whether a resource has a list is a
 /// look at its first row (a list is stored from position 0, [`replace`]): one key of the
 /// primary key, where a look for any row of it may scan the table for a card that has none.
 const CHOSEN: &str = "WITH asked AS (SELECT DISTINCT ON (id) id,borrow FROM unnest($1::text[],$2::bool[]) AS t(id,borrow) ORDER BY id,borrow DESC),\
      chosen AS (SELECT a.id AS card,coalesce(\
        (SELECT a.id WHERE EXISTS (SELECT 1 FROM podcast_episode e WHERE e.resource_id=a.id AND e.position=0)),\
-       (SELECT m.resource_id FROM group_unit u JOIN group_unit m ON m.group_id=u.group_id WHERE a.borrow AND u.unit_id=a.id AND u.group_id IS NOT NULL AND m.resource_id<>a.id AND m.occurrence_key='' AND EXISTS (SELECT 1 FROM podcast_episode e WHERE e.resource_id=m.resource_id AND e.position=0) ORDER BY (SELECT max(published) FROM podcast_episode e WHERE e.resource_id=m.resource_id) DESC NULLS LAST,m.resource_id LIMIT 1)) AS source FROM asked a)";
+       (SELECT m.resource_id FROM group_unit u JOIN group_unit m ON m.group_id=u.group_id WHERE a.borrow AND u.unit_id=a.id AND u.group_id IS NOT NULL AND m.resource_id<>a.id AND m.occurrence_key='' AND EXISTS (SELECT 1 FROM podcast_episode e WHERE e.resource_id=m.resource_id AND e.position=0) ORDER BY (SELECT max(published) FROM podcast_episode e WHERE e.resource_id=m.resource_id) DESC NULLS LAST,(SELECT max(e.position) FROM podcast_episode e WHERE e.resource_id=m.resource_id) DESC,m.resource_id LIMIT 1)) AS source FROM asked a)";
 
 /// Each resource's stored list ([`CHOSEN`]), in order, from its `skip`th episode on, at most
 /// `limit` per resource, as `(resource ID, episode)`. With `playable`, only that list's episodes
@@ -1416,6 +1504,7 @@ mod tests {
             .collect();
         let listed = from_feed_listed(&fetched(&feed(&items), false)).unwrap();
         assert!(!listed.older);
+        assert!(!listed.cut);
         assert_eq!(listed.episodes.len(), 183);
         assert_eq!(listed.episodes[182].name.as_deref(), Some("E1"));
         // Exactly as many as are kept: nothing older.
@@ -1445,7 +1534,16 @@ mod tests {
         assert!(body.len() > 2 * BODY_CAP);
         let listed = from_feed_listed(&fetched(&body, false)).unwrap();
         assert!(listed.older);
+        assert!(
+            listed.cut,
+            "the save keeps a longer stored list's older episodes"
+        );
         assert!((100..400).contains(&listed.episodes.len()));
+        assert!(
+            !from_feed_listed(&fetched(&feed(&items), false))
+                .unwrap()
+                .cut
+        );
         assert_eq!(listed.episodes[0].name.as_deref(), Some("E400"));
         // A short body that does not parse is no feed, as before.
         assert!(from_feed(&fetched(

@@ -237,6 +237,7 @@ pub fn strip_document(doc: &mut crate::model::ResourceMeta, own: &str) -> anyhow
             episode_item: doc.episode_item,
             episodes: doc.episodes.take(),
             episodes_older: doc.episodes_older,
+            episodes_cut: doc.episodes_cut,
             ..stored
         };
     }
