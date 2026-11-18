@@ -165,17 +165,17 @@ async fn a_shows_latest_episodes_are_listed_newest_first_and_name_the_ones_pinak
 
 /// A save with a list replaces the show's rows whole; a show's save without one (a record read
 /// without its feed) keeps them; a save that makes the resource no show clears them; at most
-/// a hundred are kept.
+/// a thousand are kept.
 #[sqlx::test(migrations = "../../migrations")]
 async fn the_save_replaces_keeps_or_clears_the_list(pool: PgPool) {
     let uri = "https://feeds.example.org/show.xml";
     let id = show(
         &pool,
         uri,
-        Some((1..=130).map(|n| episode(n, true)).collect()),
+        Some((1..=1030).map(|n| episode(n, true)).collect()),
     )
     .await;
-    assert_eq!(rows(&pool, &id).await, 100);
+    assert_eq!(rows(&pool, &id).await, 1000);
     let first: String =
         sqlx::query_scalar("SELECT guid FROM podcast_episode WHERE resource_id=$1 AND position=0")
             .bind(&id)
@@ -191,7 +191,7 @@ async fn the_save_replaces_keeps_or_clears_the_list(pool: PgPool) {
     d.set_type("PodcastSeries");
     d.name = Some("Show, renamed".into());
     store::save_document(&pool, &id, 0, &d).await.unwrap();
-    assert_eq!(rows(&pool, &id).await, 100);
+    assert_eq!(rows(&pool, &id).await, 1000);
     // A shorter list replaces it whole.
     d.episodes = Some(vec![episode(30, true), episode(29, true)]);
     store::save_document(&pool, &id, 0, &d).await.unwrap();
@@ -757,8 +757,10 @@ async fn the_route_pages_through_the_list_and_matches_names(pool: PgPool) {
     .await;
     assert_eq!(names(&page), ["Episode 35", "Episode 34", "Episode 33"]);
     assert_eq!(page["next_offset"], 13);
-    let (status, page) = request(&app, &format!("/v1/resources/{id}/episodes?offset=100")).await;
+    let (status, page) = request(&app, &format!("/v1/resources/{id}/episodes?offset=1000")).await;
     assert_eq!((status, names(&page).len()), (200, 0));
+    // The feed's whole list is here: nothing older to link to.
+    assert_eq!(page["truncated"], false, "{page}");
     // A name match, in any letter case, Unicode's included, paged as the whole list is.
     let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes?q=KHABIB")).await;
     assert_eq!(
@@ -796,7 +798,7 @@ async fn the_route_pages_through_the_list_and_matches_names(pool: PgPool) {
         assert_eq!(page["next_offset"], 20, "{blank}");
     }
     let long = format!("q={}", "a".repeat(257));
-    for bad in ["offset=101", "offset=-1", "offset=x", long.as_str()] {
+    for bad in ["offset=1001", "offset=-1", "offset=x", long.as_str()] {
         assert_eq!(
             request(&app, &format!("/v1/resources/{id}/episodes?{bad}"))
                 .await
@@ -814,6 +816,154 @@ async fn the_route_pages_through_the_list_and_matches_names(pool: PgPool) {
     // The card's list stays the first five.
     let (_, card) = request(&app, &format!("/v1/resources/{id}")).await;
     assert_eq!(card["episodes"].as_array().unwrap().len(), 5);
+}
+
+/// A show keeps the latest 1000 episodes of its feed (`episodes::KEPT`): a longer list is
+/// stored to its 1000th, and the route pages through all of them (offsets to 1000) and says on
+/// every page, whatever `q`, that the feed lists older ones (`truncated`); a group member that
+/// borrows the list says the same. A list shorter than that is the feed's whole list.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_show_keeps_a_thousand_episodes_and_says_when_its_feed_has_more(pool: PgPool) {
+    let list: Vec<Episode> = (1..=1001).rev().map(|n| episode(n, n % 2 == 0)).collect();
+    let id = show(&pool, "https://feeds.example.org/long.xml", Some(list)).await;
+    assert_eq!(rows(&pool, &id).await, 1000);
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let names = |page: &Value| -> Vec<String> {
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let (status, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
+    assert_eq!(status, 200, "{page}");
+    assert_eq!(names(&page)[0], "Episode 1001");
+    assert_eq!(
+        (&page["next_offset"], &page["truncated"]),
+        (&Value::from(20), &Value::Bool(true))
+    );
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes?offset=160")).await;
+    assert_eq!(names(&page).len(), 20);
+    assert_eq!(names(&page)[0], "Episode 841");
+    assert_eq!(page["next_offset"], 180);
+    assert_eq!(page["truncated"], true);
+    // The last page ends at the 1000th: Episode 2; Episode 1 was not kept.
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes?offset=980")).await;
+    assert_eq!(names(&page).len(), 20);
+    assert_eq!(names(&page)[19], "Episode 2");
+    assert_eq!(
+        (&page["next_offset"], &page["truncated"]),
+        (&Value::Null, &Value::Bool(true))
+    );
+    let (_, page) = request(
+        &app,
+        &format!("/v1/resources/{id}/episodes?offset=995&limit=3"),
+    )
+    .await;
+    assert_eq!(names(&page), ["Episode 6", "Episode 5", "Episode 4"]);
+    assert_eq!(page["next_offset"], 998);
+    let (status, page) = request(&app, &format!("/v1/resources/{id}/episodes?offset=1000")).await;
+    assert_eq!((status, names(&page).len()), (200, 0));
+    assert_eq!(page["truncated"], true, "{page}");
+    // A name match over the whole list: the oldest kept one matches too.
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes?q=episode%202")).await;
+    assert_eq!(names(&page)[0], "Episode 299");
+    assert_eq!(page["truncated"], true);
+    let (_, page) = request(
+        &app,
+        &format!("/v1/resources/{id}/episodes?q=episode%202&offset=100"),
+    )
+    .await;
+    assert_eq!(names(&page).len(), 11);
+    assert_eq!(names(&page)[10], "Episode 2");
+    assert_eq!(page["next_offset"], Value::Null);
+    // The card still carries the first five that have audio.
+    let (_, card) = request(&app, &format!("/v1/resources/{id}")).await;
+    let carried: Vec<&str> = card["episodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        carried,
+        [
+            "Episode 1000",
+            "Episode 998",
+            "Episode 996",
+            "Episode 994",
+            "Episode 992"
+        ]
+    );
+    // A show of the same group without a list of its own borrows the list, and says so too.
+    let apple = show(
+        &pool,
+        "https://podcasts.apple.com/us/podcast/long/id1",
+        None,
+    )
+    .await;
+    let group = "0123456789abcdef0123456789abcde1";
+    sqlx::query("INSERT INTO \"group\"(id) VALUES($1)")
+        .bind(group)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE group_unit SET group_id=$1 WHERE resource_id=ANY($2)")
+        .bind(group)
+        .bind(vec![id.clone(), apple.clone()])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (_, page) = request(&app, &format!("/v1/resources/{apple}/episodes?offset=980")).await;
+    assert_eq!(names(&page)[19], "Episode 2", "{page}");
+    assert_eq!(page["truncated"], true);
+    // Read again with fewer, the list is the feed's whole list.
+    let list: Vec<Episode> = (1..=183).rev().map(|n| episode(n, true)).collect();
+    show(&pool, "https://feeds.example.org/long.xml", Some(list)).await;
+    assert_eq!(rows(&pool, &id).await, 183);
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes?offset=180")).await;
+    assert_eq!(names(&page), ["Episode 3", "Episode 2", "Episode 1"]);
+    assert_eq!(
+        (&page["next_offset"], &page["truncated"]),
+        (&Value::Null, &Value::Bool(false))
+    );
+    // Exactly as many as are kept: nothing older.
+    let list: Vec<Episode> = (1..=1000).rev().map(|n| episode(n, true)).collect();
+    show(&pool, "https://feeds.example.org/long.xml", Some(list)).await;
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
+    assert_eq!(page["truncated"], false, "{page}");
+    // A read that ended before the feed did (cut at its cap) says so, however short its list.
+    let mut d = ResourceMeta::new("https://feeds.example.org/long.xml", "web", 86_400);
+    d.set_type("PodcastSeries");
+    d.episodes = Some((1..=179).rev().map(|n| episode(n, true)).collect());
+    d.episodes_older = true;
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes?offset=160")).await;
+    assert_eq!(
+        (names(&page).len(), &page["truncated"]),
+        (19, &Value::Bool(true))
+    );
+    // A save without a list keeps the list and what it says; a save that is no show clears both.
+    let listed = |pool: PgPool, id: String| async move {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM podcast_episode_list WHERE resource_id=$1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let mut d = ResourceMeta::new("https://feeds.example.org/long.xml", "web", 86_400);
+    d.set_type("PodcastSeries");
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
+    assert_eq!(page["truncated"], true);
+    assert_eq!(listed(pool.clone(), id.clone()).await, 1);
+    d.set_type("DataFeed");
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    assert_eq!(rows(&pool, &id).await, 0);
+    assert_eq!(listed(pool.clone(), id.clone()).await, 0);
 }
 
 /// A show whose feed is on its own site, WordPress-style (lexfridman.com): each item links a blog

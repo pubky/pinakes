@@ -508,13 +508,17 @@ impl Source for MediaRecords {
                         // lookup, less what hands the card back: a slow feed, or a wait for a
                         // parser, costs the list, never the card.
                         if let Some(feed) = itunes_feed(&f.body) {
-                            doc.episodes = crate::episodes::fetch(
+                            if let Some(listed) = crate::episodes::fetch(
                                 cx.egress,
                                 &feed,
                                 3600,
                                 crate::episodes::feed_deadline(cx.deadline()),
                             )
-                            .await;
+                            .await
+                            {
+                                doc.episodes = Some(listed.episodes);
+                                doc.episodes_older = listed.older;
+                            }
                         }
                         Some(doc)
                     }

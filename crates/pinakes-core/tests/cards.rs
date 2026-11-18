@@ -562,7 +562,18 @@ fn podcast_selection_and_schema_media_keys() {
         .unwrap()
         .unwrap();
     assert_eq!(series.type_name, "PodcastSeries");
-    assert!(cards::podcast("https://podcast.example/feed", &f, 3600, 1).is_err());
+    // A feed of more items than the cap is read to the cap: still the show, an item past it
+    // not missing (it is past the part read).
+    let capped = cards::podcast("https://podcast.example/feed", &f, 3600, 1)
+        .unwrap()
+        .unwrap();
+    assert_eq!(capped.type_name, "PodcastSeries");
+    assert_eq!(capped.episodes.as_ref().map(Vec::len), Some(1));
+    assert!(
+        cards::podcast("https://podcast.example/feed?guid=episode-2", &f, 3600, 1)
+            .unwrap()
+            .is_none()
+    );
     for ty in [
         "VideoObject",
         "AudioObject",

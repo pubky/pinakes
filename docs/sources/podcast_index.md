@@ -20,7 +20,7 @@ does not know, or an episode of another show than the page names, is `missing`.
 `GET https://api.podcastindex.org/api/1.0/podcasts/byfeedid?id={feed id}` for a show, and
 `GET https://api.podcastindex.org/api/1.0/episodes/byid?id={episode id}` for an episode, with the
 signed headers (`X-Auth-Key`, `X-Auth-Date`, `Authorization`). For a show, then its feed (the
-record's `url`, read like any feed: cut at the page cap, cached for the card's lifetime), for the
+record's `url`, read on past the page cap to 8 MiB and cut there, cached for the card's lifetime), for the
 show's latest episodes ([Episodes](../api.md#episodes)); a feed that does not answer, or not
 within three seconds, leaves the show's stored list as it is.
 

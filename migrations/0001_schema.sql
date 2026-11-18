@@ -349,7 +349,7 @@ CREATE TABLE event_fetch (
 -- episode's page or feed item, `stream` its public enclosure (`model::Stream`), when it has one.
 CREATE TABLE podcast_episode (
     resource_id text NOT NULL REFERENCES resource(id) ON DELETE CASCADE,
-    position smallint NOT NULL CONSTRAINT podcast_episode_position_check CHECK (position >= 0 AND position < 100),
+    position smallint NOT NULL CONSTRAINT podcast_episode_position_check CHECK (position >= 0 AND position < 1000),
     guid text NOT NULL CONSTRAINT podcast_episode_guid_check CHECK (octet_length(guid) <= 2048),
     url text NOT NULL CONSTRAINT podcast_episode_url_check CHECK (octet_length(url) <= 2048),
     name text CONSTRAINT podcast_episode_name_check CHECK (octet_length(name) <= 512),
@@ -358,6 +358,15 @@ CREATE TABLE podcast_episode (
     stream jsonb CONSTRAINT podcast_episode_stream_check CHECK (octet_length(stream::text) <= 4096),
     PRIMARY KEY (resource_id, position),
     CONSTRAINT podcast_episode_published_range CHECK (published >= '0001-01-01 00:00:00+00' AND published < '10000-01-01 00:00:00+00')
+);
+-- An episode's link, for the look-up of whether a stored list names a page (`episodes::join_page`).
+CREATE INDEX podcast_episode_url ON podcast_episode (url);
+-- A show's stored list as its last read of the feed left it: whether the feed lists older episodes
+-- than the list holds (the read ended before the feed did, or the feed has more than are kept).
+-- Written and cleared with the list's rows (`episodes::replace`, `episodes::clear`).
+CREATE TABLE podcast_episode_list (
+    resource_id text PRIMARY KEY REFERENCES resource(id) ON DELETE CASCADE,
+    older boolean NOT NULL
 );
 
 -- Occurrences as they are read: superseded ones left out, an OSM venue's location filled in.
