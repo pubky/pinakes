@@ -401,7 +401,7 @@ impl WebResolver {
 
             if let Some(cards) = &self.cards {
                 // Boxed: keeps the enrichment state machine off callers' debug stacks.
-                extracted.doc = Box::pin(super::cards::enrich(
+                extracted.doc = Box::pin(super::cards::enrich_until(
                     uri,
                     &fetched,
                     extracted.doc,
@@ -409,6 +409,7 @@ impl WebResolver {
                     &self.egress,
                     cards,
                     self.config.discover_feeds,
+                    Some(deadline),
                 ))
                 .await?;
             }

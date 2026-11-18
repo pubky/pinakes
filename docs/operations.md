@@ -64,7 +64,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `preview_cache_capacity` | `10000` | Preview cache entries. |
 | `preview_new_per_hour` | `1000` | New previews per hour for the whole instance; over it `POST /v1/resolve` answers 503. |
 | `preview_new_per_client_per_hour` | `0` | New previews per hour one client address may take (0: no share); over it `POST /v1/resolve` answers 429. |
-| `podcast_items` | `1000` | Podcast feed items read per scan. |
+| `podcast_items` | `2000` | Podcast feed items read per scan (a show's list looks at its first 2000 and keeps the newest 1000). |
 | `group_max_members` | `256` | Most members of one automatic group. |
 | `group_max_distance_m` | `500.0` | Farthest two located members of one group (metres). |
 | `group_max_graph_units` | `20000` | Units one grouping pass may read. |

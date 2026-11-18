@@ -78,23 +78,57 @@ pub struct Episode {
     pub stream: Option<Stream>,
 }
 
+/// A show's latest episodes as a read of its feed found them ([`listed`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Listed {
+    pub episodes: Vec<Episode>,
+    /// Whether the feed lists older episodes than `episodes`: the read ended before the feed did
+    /// (cut at its cap, or past its item cap), it has items past the [`SCANNED`] looked at, or
+    /// more episodes than the [`KEPT`] kept (`EpisodePage::truncated`).
+    pub older: bool,
+}
 /// The latest [`KEPT`] episodes among a feed's items: newest first by `pubDate`, undated ones
 /// after them in the feed's order; an item without a GUID, an enclosure or a link is no
-/// episode.
-pub fn from_items(items: &[roxmltree::Node<'_, '_>], feed: &Url) -> Vec<Episode> {
+/// episode. `partial`: the items are a part of the feed's (the read ended before the feed did).
+pub fn listed(items: &[roxmltree::Node<'_, '_>], feed: &Url, partial: bool) -> Listed {
     let mut episodes: Vec<(usize, Episode)> = items
         .iter()
         .take(SCANNED)
         .enumerate()
         .filter_map(|(n, item)| Some((n, episode(*item, feed)?)))
         .collect();
+    let older = partial || items.len() > SCANNED || episodes.len() > KEPT;
     episodes.sort_by(|a, b| b.1.published.cmp(&a.1.published).then(a.0.cmp(&b.0)));
     episodes.truncate(KEPT);
-    episodes.into_iter().map(|(_, e)| e).collect()
+    Listed {
+        episodes: episodes.into_iter().map(|(_, e)| e).collect(),
+        older,
+    }
+}
+/// The latest [`KEPT`] episodes among a feed's items ([`listed`]).
+pub fn from_items(items: &[roxmltree::Node<'_, '_>], feed: &Url) -> Vec<Episode> {
+    listed(items, feed, false).episodes
+}
+/// The episodes a fetched feed lists ([`from_feed_listed`]).
+pub fn from_feed(f: &crate::resolver::egress::Fetched) -> Option<Vec<Episode>> {
+    from_feed_listed(f).map(|l| l.episodes)
 }
 /// The episodes a fetched feed lists: an RSS channel's items, a body cut at the fetch cap read
-/// to its last whole item. `None` when the body is no feed.
-pub fn from_feed(f: &crate::resolver::egress::Fetched) -> Option<Vec<Episode>> {
+/// to its last whole item. A body read past the page cap that does not parse (a malformed byte
+/// or entity past the first megabyte) is read to its last whole item within the page cap, as a
+/// read cut there would be. `None` when the body is no feed.
+pub fn from_feed_listed(f: &crate::resolver::egress::Fetched) -> Option<Listed> {
+    use crate::resolver::egress::BODY_CAP;
+    read_feed(f).or_else(|| {
+        (f.body.len() > BODY_CAP).then_some(())?;
+        read_feed(&crate::resolver::egress::Fetched {
+            body: f.body[..BODY_CAP].to_vec(),
+            truncated: true,
+            ..f.clone()
+        })
+    })
+}
+fn read_feed(f: &crate::resolver::egress::Fetched) -> Option<Listed> {
     let text = String::from_utf8_lossy(&f.body);
     let completed;
     let body: &str = if f.truncated {
@@ -112,9 +146,9 @@ pub fn from_feed(f: &crate::resolver::egress::Fetched) -> Option<Vec<Episode>> {
     let items: Vec<_> = xml
         .descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == "item")
-        .take(SCANNED)
+        .take(SCANNED + 1)
         .collect();
-    Some(from_items(&items, &f.url))
+    Some(listed(&items, &f.url, f.truncated))
 }
 /// The longest a show's read gives its feed's episodes: the fetch, the wait for a parse permit
 /// and the parse together. The list is optional: a feed slower than this leaves the show's
@@ -145,7 +179,7 @@ pub fn feed_deadline(deadline: Option<tokio::time::Instant>) -> tokio::time::Ins
 }
 
 /// The episodes of the feed at `url`, read through the egress (a discovery, cached for `ttl`
-/// seconds, cut at [`FEED_READ`]) and parsed, all before `deadline`
+/// seconds, cut at [`FEED_READ`]) and parsed ([`from_feed_listed`]), all before `deadline`
 /// ([`feed_deadline`]); `None` when the feed could not be read or parsed in time or is none: the
 /// show's stored list then stays as it is.
 pub async fn fetch(
@@ -153,7 +187,7 @@ pub async fn fetch(
     url: &str,
     ttl: u64,
     deadline: tokio::time::Instant,
-) -> Option<Vec<Episode>> {
+) -> Option<Listed> {
     let read = async {
         // A feed body over the page cap is read on to `FEED_READ` and cut there, not refused.
         let options = feed_options();
@@ -172,7 +206,7 @@ pub async fn fetch(
         if let Ok(wait) = PARSE_WAIT.try_with(|d| *d) {
             tokio::time::sleep(wait).await;
         }
-        crate::resolver::html::blocking(move || from_feed(&f))
+        crate::resolver::html::blocking(move || from_feed_listed(&f))
             .await
             .ok()
             .flatten()
@@ -418,7 +452,7 @@ pub(crate) async fn store(
 ) -> Result<()> {
     let show = is_show(&doc.type_path, doc.status.as_str());
     match &doc.episodes {
-        Some(list) if show => replace(tx, id, list).await,
+        Some(list) if show => replace(tx, id, list, doc.episodes_older).await,
         None if show => Ok(()),
         _ => clear(tx, id).await.map(|_| ()),
     }
@@ -430,8 +464,13 @@ pub(crate) async fn store(
 pub(crate) fn is_show(type_path: &[String], status: &str) -> bool {
     type_path.iter().any(|t| t == "PodcastSeries") && status == "ok"
 }
-/// Clears a resource's episodes: for a document replaced outside a save (a scrub).
+/// Clears a resource's episodes, and what its list says of its feed (`podcast_episode_list`): for
+/// a document replaced outside a save (a scrub). The rows cleared.
 pub(crate) async fn clear(tx: &mut Transaction<'_, Postgres>, id: &str) -> Result<u64> {
+    sqlx::query("DELETE FROM podcast_episode_list WHERE resource_id=$1")
+        .bind(id)
+        .execute(&mut **tx)
+        .await?;
     Ok(
         sqlx::query("DELETE FROM podcast_episode WHERE resource_id=$1")
             .bind(id)
@@ -466,13 +505,26 @@ fn storable(e: &Episode) -> Option<(Episode, Option<String>)> {
     row.stream = row.stream.filter(|_| stream.is_some());
     Some((row, stream))
 }
-async fn replace(tx: &mut Transaction<'_, Postgres>, id: &str, list: &[Episode]) -> Result<()> {
+/// Replaces a show's list with `list` (at most [`KEPT`] of it), and whether its feed lists older
+/// episodes than it: `older`, or a list longer than is kept.
+async fn replace(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &str,
+    list: &[Episode],
+    older: bool,
+) -> Result<()> {
     clear(tx, id).await?;
+    let older = older || list.len() > KEPT;
     let list: Vec<(Episode, Option<String>)> =
         list.iter().filter_map(storable).take(KEPT).collect();
     if list.is_empty() {
         return Ok(());
     }
+    sqlx::query("INSERT INTO podcast_episode_list(resource_id,older) VALUES ($1,$2)")
+        .bind(id)
+        .bind(older)
+        .execute(&mut **tx)
+        .await?;
     let positions: Vec<i16> = (0..list.len() as i16).collect();
     let guids: Vec<&str> = list.iter().map(|(e, _)| e.guid.as_str()).collect();
     let urls: Vec<&str> = list.iter().map(|(e, _)| e.uri.as_str()).collect();
@@ -515,12 +567,13 @@ pub struct EpisodePage {
     pub items: Vec<Episode>,
     /// The `offset` of the next page when more episodes match; null on the last page.
     pub next_offset: Option<usize>,
-    /// Whether the show's feed lists older episodes than the list holds: the list is full, the
-    /// latest 1000 ([`KEPT`]). A client links the show on its own service for the rest. The
-    /// same on every page, whatever `q`.
+    /// Whether the show's feed lists older episodes than the list holds, as its last read found
+    /// ([`Listed::older`]): the read ended before the feed did (past 8 MiB, [`FEED_READ`]), or the
+    /// feed has more than the latest 1000 ([`KEPT`]) kept. A client links the show on its own
+    /// service for the rest. The same on every page, whatever `q`.
     pub truncated: bool,
 }
-#[utoipa::path(get,path="/v1/resources/{id}/episodes",operation_id="list_episodes",tag="Media",params(("id"=String,Path),EpisodeQuery),responses((status=200,body=EpisodePage),(status=400,description="Invalid resource ID, limit, offset or q"),(status=404,description="Resource not found")),description="A podcast show's latest episodes as its feed lists them, newest first: the latest 1000, in pages of at most 20 (`offset`, `next_offset`; `truncated` when the feed lists older ones), optionally only those whose name holds `q` (any letter case), each with its episode's link (its feed item, which resolves to its PodcastEpisode card, or the link of the publisher's own episode card), its other links (`aliases`), date and public stream. The show's own list, else, for a card that is a show, that of a member of its group which has one (an Apple Podcasts show grouped with its feed). A known resource that is no show, or no longer one, or whose feed was not read yet, returns an empty list.")]
+#[utoipa::path(get,path="/v1/resources/{id}/episodes",operation_id="list_episodes",tag="Media",params(("id"=String,Path),EpisodeQuery),responses((status=200,body=EpisodePage),(status=400,description="Invalid resource ID, limit, offset or q"),(status=404,description="Resource not found")),description="A podcast show's latest episodes as its feed lists them, newest first: the latest 1000, in pages of at most 20 (`offset`, `next_offset`; `truncated` when its feed lists older ones than the list holds), optionally only those whose name holds `q` (any letter case), each with its episode's link (its feed item, which resolves to its PodcastEpisode card, or the link of the publisher's own episode card), its other links (`aliases`), date and public stream. The show's own list, else, for a card that is a show, that of a member of its group which has one (an Apple Podcasts show grouped with its feed). A known resource that is no show, or no longer one, or whose feed was not read yet, returns an empty list.")]
 pub async fn list(
     axum::extract::State(state): axum::extract::State<crate::api::AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -562,10 +615,10 @@ pub async fn list(
     // whose card lives in `osm_place`: no show, read as an empty path.)
     let show = is_show(&type_path, &status);
     let asked = [(root, show)];
-    let truncated = lengths(&state.pool, &asked)
+    let truncated = older(&state.pool, &asked)
         .await?
         .into_iter()
-        .any(|(_, n)| n >= KEPT);
+        .any(|(_, older)| older);
     let mut items: Vec<Episode> = match &wanted {
         // The page alone, paged in the query.
         None => stored(&state.pool, &asked, offset, limit + 1, false)
@@ -688,24 +741,20 @@ async fn stored(
         .collect())
 }
 
-/// How many episodes each resource's stored list ([`CHOSEN`]) holds, as `(resource ID, count)`:
-/// one count of the index's entries per resource.
-async fn lengths(
+/// Whether the feed of each resource's stored list ([`CHOSEN`]) lists older episodes than the
+/// list holds (`podcast_episode_list`), as `(resource ID, older)`; `false` without a list.
+async fn older(
     pool: &sqlx::PgPool,
     ids: &[(String, bool)],
-) -> Result<Vec<(String, usize)>, sqlx::Error> {
+) -> Result<Vec<(String, bool)>, sqlx::Error> {
     let (ids, shows): (Vec<&str>, Vec<bool>) = ids.iter().map(|(i, s)| (i.as_str(), *s)).unzip();
-    let rows: Vec<(String, i64)> = sqlx::query_as(&format!(
-        "{CHOSEN} SELECT c.card,(SELECT count(*) FROM podcast_episode e WHERE e.resource_id=c.source) FROM chosen c"
+    sqlx::query_as(&format!(
+        "{CHOSEN} SELECT c.card,coalesce((SELECT l.older FROM podcast_episode_list l WHERE l.resource_id=c.source),false) FROM chosen c"
     ))
     .bind(&ids)
     .bind(&shows)
     .fetch_all(pool)
-    .await?;
-    Ok(rows
-        .into_iter()
-        .map(|(id, n)| (id, usize::try_from(n).unwrap_or(0)))
-        .collect())
+    .await
 }
 
 /// The types of a page that may join an episode's card: a page read as a plain web page or an
@@ -1353,7 +1402,9 @@ mod tests {
         let items: String = (1..=2300)
             .map(|n| format!(r#"<item><title>E{n}</title><guid>e{n}</guid><pubDate>{}</pubDate><enclosure url="https://cdn.example/{n}.mp3" type="audio/mpeg"/></item>"#, chrono::DateTime::<Utc>::from_timestamp(1_700_000_000 + n * 86_400, 0).unwrap().to_rfc2822()))
             .collect();
-        let episodes = from_feed(&fetched(&feed(&items), false)).unwrap();
+        let listed = from_feed_listed(&fetched(&feed(&items), false)).unwrap();
+        assert!(listed.older, "items past the ones looked at");
+        let episodes = listed.episodes;
         assert_eq!(episodes.len(), KEPT);
         assert_eq!(KEPT, 1000);
         // Items 2001-2300 are past the part of the feed that is read: E2000 is the newest seen.
@@ -1363,9 +1414,45 @@ mod tests {
         let items: String = (1..=183)
             .map(|n| format!(r#"<item><title>E{n}</title><guid>e{n}</guid><pubDate>{}</pubDate><enclosure url="https://cdn.example/{n}.mp3" type="audio/mpeg"/></item>"#, chrono::DateTime::<Utc>::from_timestamp(1_700_000_000 + n * 86_400, 0).unwrap().to_rfc2822()))
             .collect();
-        let episodes = from_feed(&fetched(&feed(&items), false)).unwrap();
-        assert_eq!(episodes.len(), 183);
-        assert_eq!(episodes[182].name.as_deref(), Some("E1"));
+        let listed = from_feed_listed(&fetched(&feed(&items), false)).unwrap();
+        assert!(!listed.older);
+        assert_eq!(listed.episodes.len(), 183);
+        assert_eq!(listed.episodes[182].name.as_deref(), Some("E1"));
+        // Exactly as many as are kept: nothing older.
+        let items: String = (1..=1000)
+            .map(|n| format!(r#"<item><title>E{n}</title><guid>e{n}</guid><enclosure url="https://cdn.example/{n}.mp3" type="audio/mpeg"/></item>"#))
+            .collect();
+        let listed = from_feed_listed(&fetched(&feed(&items), false)).unwrap();
+        assert_eq!((listed.episodes.len(), listed.older), (1000, false));
+        // Cut at its read's cap: the feed has more.
+        assert!(
+            from_feed_listed(&fetched(&feed(&items), true))
+                .unwrap()
+                .older
+        );
+    }
+
+    /// A body read past the page cap that does not parse (a malformed entity past the first
+    /// megabyte) is read to its last whole item within the page cap, as a read cut there would be.
+    #[test]
+    fn a_long_feed_that_does_not_parse_is_read_within_the_page_cap() {
+        use crate::resolver::egress::BODY_CAP;
+        let items: String = (1..=400)
+            .rev()
+            .map(|n| format!(r#"<item><title>E{n}</title><guid>e{n}</guid><description>{}</description><enclosure url="https://cdn.example/{n}.mp3" type="audio/mpeg"/></item>"#, "x".repeat(6000)))
+            .collect();
+        let body = feed(&items).replacen("<title>E1</title>", "<title>E1 &nbsp;</title>", 1);
+        assert!(body.len() > 2 * BODY_CAP);
+        let listed = from_feed_listed(&fetched(&body, false)).unwrap();
+        assert!(listed.older);
+        assert!((100..400).contains(&listed.episodes.len()));
+        assert_eq!(listed.episodes[0].name.as_deref(), Some("E400"));
+        // A short body that does not parse is no feed, as before.
+        assert!(from_feed(&fetched(
+            "<rss><channel><item>&nbsp;</item></channel></rss>",
+            false
+        ))
+        .is_none());
     }
 
     /// A page shared with tracking parameters is the same page: the item's page, and the GUID of

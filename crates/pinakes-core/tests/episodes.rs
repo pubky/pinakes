@@ -928,6 +928,42 @@ async fn a_show_keeps_a_thousand_episodes_and_says_when_its_feed_has_more(pool: 
         (&page["next_offset"], &page["truncated"]),
         (&Value::Null, &Value::Bool(false))
     );
+    // Exactly as many as are kept: nothing older.
+    let list: Vec<Episode> = (1..=1000).rev().map(|n| episode(n, true)).collect();
+    show(&pool, "https://feeds.example.org/long.xml", Some(list)).await;
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
+    assert_eq!(page["truncated"], false, "{page}");
+    // A read that ended before the feed did (cut at its cap) says so, however short its list.
+    let mut d = ResourceMeta::new("https://feeds.example.org/long.xml", "web", 86_400);
+    d.set_type("PodcastSeries");
+    d.episodes = Some((1..=179).rev().map(|n| episode(n, true)).collect());
+    d.episodes_older = true;
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes?offset=160")).await;
+    assert_eq!(
+        (names(&page).len(), &page["truncated"]),
+        (19, &Value::Bool(true))
+    );
+    // A save without a list keeps the list and what it says; a save that is no show clears both.
+    let listed = |pool: PgPool, id: String| async move {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM podcast_episode_list WHERE resource_id=$1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let mut d = ResourceMeta::new("https://feeds.example.org/long.xml", "web", 86_400);
+    d.set_type("PodcastSeries");
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
+    assert_eq!(page["truncated"], true);
+    assert_eq!(listed(pool.clone(), id.clone()).await, 1);
+    d.set_type("DataFeed");
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    assert_eq!(rows(&pool, &id).await, 0);
+    assert_eq!(listed(pool.clone(), id.clone()).await, 0);
 }
 
 /// A show whose feed is on its own site, WordPress-style (lexfridman.com): each item links a blog

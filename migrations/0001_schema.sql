@@ -359,6 +359,13 @@ CREATE TABLE podcast_episode (
     PRIMARY KEY (resource_id, position),
     CONSTRAINT podcast_episode_published_range CHECK (published >= '0001-01-01 00:00:00+00' AND published < '10000-01-01 00:00:00+00')
 );
+-- A show's stored list as its last read of the feed left it: whether the feed lists older episodes
+-- than the list holds (the read ended before the feed did, or the feed has more than are kept).
+-- Written and cleared with the list's rows (`episodes::replace`, `episodes::clear`).
+CREATE TABLE podcast_episode_list (
+    resource_id text PRIMARY KEY REFERENCES resource(id) ON DELETE CASCADE,
+    older boolean NOT NULL
+);
 
 -- Occurrences as they are read: superseded ones left out, an OSM venue's location filled in.
 CREATE VIEW event_occurrence AS

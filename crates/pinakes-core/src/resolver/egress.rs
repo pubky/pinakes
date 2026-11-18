@@ -397,6 +397,18 @@ impl Transport for PinnedTransport {
         read_response_with(url.clone(), response, options).await
     }
 }
+/// Whether a content type (lower case, without parameters) is an RSS, Atom or other XML feed's:
+/// the bodies a read cuts at the page cap, or at `FetchOptions::feed_read`, rather than refuses.
+pub fn xml_feed_type(content_type: &str) -> bool {
+    matches!(
+        content_type,
+        "text/xml"
+            | "application/xml"
+            | "application/rss+xml"
+            | "application/atom+xml"
+            | "application/rdf+xml"
+    )
+}
 /// The largest `limits.html_head_bytes`: no HTML body the egress returns is longer.
 pub const MAX_HTML_HEAD_BYTES: usize = 16 * 1024 * 1024;
 
@@ -487,14 +499,7 @@ pub async fn read_response_with(
         // An RSS or Atom feed read without a feed cap keeps its first megabyte like a page, or
         // as much as the read asks for (`feed_read`): its channel and newest items come first
         // (`cards::feed_prefix` completes the cut).
-        let xml_feed = matches!(
-            content_type.as_str(),
-            "text/xml"
-                | "application/xml"
-                | "application/rss+xml"
-                | "application/atom+xml"
-                | "application/rdf+xml"
-        ) && options.feed_cap.is_none();
+        let xml_feed = xml_feed_type(&content_type) && options.feed_cap.is_none();
         // A file whose card comes from its URL (an image, a PDF) is cut at the page cap, never
         // refused: its size says nothing against the card.
         let url_card = content_type.starts_with("image/") || content_type == "application/pdf";
