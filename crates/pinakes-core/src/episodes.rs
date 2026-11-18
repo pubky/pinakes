@@ -634,11 +634,13 @@ pub(crate) async fn on_cards<'a>(
 
 /// The stored list each asked resource lists (`$1` the IDs, `$2` their flags), as `chosen(card,
 /// source)`: its own rows, else, when its flag is set (the resource is a show), those of the
-/// member of its group whose newest episode is the newest.
+/// member of its group whose newest episode is the newest. Whether a resource has a list is a
+/// look at its first row (a list is stored from position 0, [`replace`]): one key of the
+/// primary key, where a look for any row of it may scan the table for a card that has none.
 const CHOSEN: &str = "WITH asked AS (SELECT DISTINCT ON (id) id,borrow FROM unnest($1::text[],$2::bool[]) AS t(id,borrow) ORDER BY id,borrow DESC),\
      chosen AS (SELECT a.id AS card,coalesce(\
-       (SELECT a.id WHERE EXISTS (SELECT 1 FROM podcast_episode e WHERE e.resource_id=a.id)),\
-       (SELECT m.resource_id FROM group_unit u JOIN group_unit m ON m.group_id=u.group_id WHERE a.borrow AND u.unit_id=a.id AND u.group_id IS NOT NULL AND m.resource_id<>a.id AND m.occurrence_key='' AND EXISTS (SELECT 1 FROM podcast_episode e WHERE e.resource_id=m.resource_id) ORDER BY (SELECT max(published) FROM podcast_episode e WHERE e.resource_id=m.resource_id) DESC NULLS LAST,m.resource_id LIMIT 1)) AS source FROM asked a)";
+       (SELECT a.id WHERE EXISTS (SELECT 1 FROM podcast_episode e WHERE e.resource_id=a.id AND e.position=0)),\
+       (SELECT m.resource_id FROM group_unit u JOIN group_unit m ON m.group_id=u.group_id WHERE a.borrow AND u.unit_id=a.id AND u.group_id IS NOT NULL AND m.resource_id<>a.id AND m.occurrence_key='' AND EXISTS (SELECT 1 FROM podcast_episode e WHERE e.resource_id=m.resource_id AND e.position=0) ORDER BY (SELECT max(published) FROM podcast_episode e WHERE e.resource_id=m.resource_id) DESC NULLS LAST,m.resource_id LIMIT 1)) AS source FROM asked a)";
 
 /// Each resource's stored list ([`CHOSEN`]), in order, from its `skip`th episode on, at most
 /// `limit` per resource, as `(resource ID, episode)`. With `playable`, only that list's episodes

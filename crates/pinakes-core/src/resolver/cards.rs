@@ -968,8 +968,9 @@ async fn read_on(egress: &Egress, f: Fetched, ttl: u64) -> Fetched {
     {
         return f;
     }
+    let (url, options) = (f.url.to_string(), crate::episodes::feed_options());
     // Boxed: keeps the discovery's state machine off the enrichment's future.
-    let read = Box::pin(egress.discover(f.url.as_str(), &crate::episodes::feed_options(), ttl));
+    let read = Box::pin(egress.discover(&url, &options, ttl));
     match tokio::time::timeout(crate::episodes::FEED_WAIT, read).await {
         Ok(Ok(longer))
             if longer.status == 200 && longer.url == f.url && longer.body.len() > f.body.len() =>
