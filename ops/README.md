@@ -79,8 +79,9 @@ not repeated Prometheus scrapes of one failed run. For `FeedHeld`, `CursorReset`
 while the app owner has no Premium plan). Check or rotate that provider's key
 ([api-keys](../docs/api-keys.md)); keys are read only at start, so a new key needs a restart.
 Spotify, TIDAL, TMDB, Podcast Index and Ticketmaster keep asking with the key, so their alert
-holds while refusals continue and clears six hours after the last one (a provider that takes a
-key back, or a one-off refusal). GitHub, CourtListener and Discogs stop sending a refused key
+holds while lookups keep being refused and clears six hours after the last refusal (a provider
+that takes a key back, a one-off refusal, or no lookup for that provider in six hours). A refusal
+before Prometheus first scrapes a new target shows at the next one. GitHub, CourtListener and Discogs stop sending a refused key
 until restart (the first two then give their links web cards), so theirs holds until a restart
 resets the count.
 
