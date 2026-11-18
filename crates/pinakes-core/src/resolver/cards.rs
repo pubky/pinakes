@@ -924,6 +924,7 @@ pub async fn enrich(
             None
         };
         if let Some(f) = feed {
+            let f = read_on(egress, f, cfg.media.ttl_secs).await;
             let (uri, cap, ttl) = (uri.to_owned(), cfg.podcast_items, cfg.media.ttl_secs);
             let referenced = uri.clone();
             if let Ok(Some(mut d)) = crate::resolver::html::blocking(move || {
@@ -950,6 +951,33 @@ pub async fn enrich(
         }
     }
     doc.bounded(web::ATTRIBUTES)
+}
+/// A feed cut at the page cap (`Fetched::truncated`), read again as a show's episodes are read
+/// (`episodes::feed_options`: on to `episodes::FEED_READ`, cut there), at the address the cut
+/// read ended on, through the discovery cache, within `episodes::FEED_WAIT`. The cut read stands
+/// when that read fails, is slow, ends elsewhere or answers no more; a feed whose address
+/// carries a credential is not read again. So a show's card lists, and its episodes' cards read,
+/// a back catalogue past the first megabyte, while the page read (`web::extract`) keeps the
+/// page cap.
+async fn read_on(egress: &Egress, f: Fetched, ttl: u64) -> Fetched {
+    let xml = f.content_type.contains("xml") || f.content_type.contains("rss");
+    if !f.truncated
+        || !xml
+        || f.body.len() >= crate::episodes::FEED_READ
+        || crate::capability::is_capability_url(&f.url)
+    {
+        return f;
+    }
+    // Boxed: keeps the discovery's state machine off the enrichment's future.
+    let read = Box::pin(egress.discover(f.url.as_str(), &crate::episodes::feed_options(), ttl));
+    match tokio::time::timeout(crate::episodes::FEED_WAIT, read).await {
+        Ok(Ok(longer))
+            if longer.status == 200 && longer.url == f.url && longer.body.len() > f.body.len() =>
+        {
+            longer
+        }
+        _ => f,
+    }
 }
 /// The deepest a feed's elements may nest for `feed_prefix` to complete it: an RSS item ends at
 /// depth 2 (`rss`, `channel`), an Atom entry at 1, and nothing in a real feed comes near this.
@@ -1032,7 +1060,7 @@ fn podcast_body(
         }
         Err(e) => return Err(e.into()),
     };
-    // A feed cut off at the page cap reads up to its last whole item.
+    // A feed cut off at its read's cap reads up to its last whole item.
     let completed;
     let body = if f.truncated {
         completed = feed_prefix(body, cap).context("a feed cut off before its first item")?;
@@ -1041,12 +1069,14 @@ fn podcast_body(
         body
     };
     let xml = roxmltree::Document::parse(body)?;
-    let items: Vec<_> = xml
+    let mut items: Vec<_> = xml
         .descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == "item")
         .take(cap + 1)
         .collect();
-    ensure!(items.len() <= cap, "podcast item cap");
+    // A whole feed of more items than the cap is read to its first `cap`, as a cut one is.
+    let partial = f.truncated || items.len() > cap;
+    items.truncate(cap);
     let Some(channel) = xml.descendants().find(|n| n.has_tag_name("channel")) else {
         return Ok(None);
     };
@@ -1158,7 +1188,7 @@ fn podcast_body(
     } else {
         if guid.is_some() {
             // An episode past the part of the feed that was read is not missing.
-            if f.truncated {
+            if partial {
                 return Ok(None);
             }
             return Ok(Some(missing(uri, "media", ttl)));
@@ -1487,6 +1517,116 @@ fn budget(kind: &str) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A podcast feed of `n` items, newest first, each with `notes` bytes of show notes.
+    fn long_feed(n: u32, notes: usize) -> String {
+        let items: String = (1..=n)
+            .rev()
+            .map(|n| format!(r#"<item><title>E{n}</title><guid>e{n}</guid><description>{}</description><enclosure url="https://cdn.example/{n}.mp3" type="audio/mpeg"/></item>"#, "x".repeat(notes)))
+            .collect();
+        format!(
+            r#"<?xml version="1.0"?><rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel><title>Show</title>{items}</channel></rss>"#
+        )
+    }
+
+    /// A whole feed of more items than the item cap is read to its first `cap` items, as a cut
+    /// one is: still the show's card (no error), and an episode past them is not missing.
+    #[test]
+    fn a_whole_feed_past_the_item_cap_is_read_to_it() {
+        let f = crate::sources::fixture::page(
+            "https://feeds.example.org/show.xml",
+            "application/rss+xml",
+            long_feed(12, 10).into_bytes(),
+            None,
+        );
+        let d = podcast(f.url.as_str(), &f, 3600, 10).unwrap().unwrap();
+        assert_eq!(d.type_name, "PodcastSeries");
+        let episodes = d.episodes.unwrap();
+        assert_eq!(episodes.len(), 10);
+        assert_eq!(episodes[9].name.as_deref(), Some("E3"));
+        assert!(
+            podcast("https://feeds.example.org/show.xml?guid=e2", &f, 3600, 10)
+                .unwrap()
+                .is_none()
+        );
+        let e = podcast("https://feeds.example.org/show.xml?guid=e3", &f, 3600, 10)
+            .unwrap()
+            .unwrap();
+        assert_eq!(e.type_name, "PodcastEpisode");
+    }
+
+    /// A show's feed cut at the page cap is read on (`read_on`, through the discovery cache, at
+    /// the address the cut read ended on) for its episodes: its card lists them to the oldest. A
+    /// feed that cannot be read again keeps the cut read's list; a feed read whole, a page, or an
+    /// address that carries a credential is not read again.
+    #[tokio::test(start_paused = true)]
+    async fn a_feed_cut_at_the_page_cap_is_read_on_for_its_episodes() {
+        use crate::resolver::egress::BODY_CAP;
+        let uri = "https://feeds.example.org/show.xml";
+        let whole = long_feed(300, 8000);
+        assert!(whole.len() > 2 * BODY_CAP);
+        let cut = |url: &str| Fetched {
+            truncated: true,
+            ..crate::sources::fixture::page(
+                url,
+                "application/rss+xml",
+                whole.as_bytes()[..BODY_CAP].to_vec(),
+                None,
+            )
+        };
+        let cfg = &CardConfig::default();
+        let read = |egress: Egress, f: Fetched| async move {
+            enrich(
+                uri,
+                &f,
+                ResourceMeta::new(uri, "web", 100),
+                None,
+                &egress,
+                cfg,
+                true,
+            )
+            .await
+            .unwrap()
+        };
+        let (egress, recorded) = crate::sources::fixture::egress(vec![(
+            uri,
+            200,
+            "application/rss+xml",
+            whole.clone().into_bytes(),
+        )]);
+        let d = read(egress, cut(uri)).await;
+        assert_eq!(d.type_name, "PodcastSeries");
+        let episodes = d.episodes.unwrap();
+        assert_eq!(episodes.len(), 300);
+        assert_eq!(episodes[299].name.as_deref(), Some("E1"));
+        assert_eq!(recorded.asked(), [uri]);
+        // Not read again: the cut read's list stands.
+        let (egress, _) =
+            crate::sources::fixture::egress(vec![(uri, 503, "text/plain", b"busy".to_vec())]);
+        let d = read(egress, cut(uri)).await;
+        let listed = d.episodes.unwrap().len();
+        assert!((100..300).contains(&listed), "{listed}");
+        // A whole read is not read again.
+        let (egress, recorded) = crate::sources::fixture::egress(vec![]);
+        let short = crate::sources::fixture::page(
+            uri,
+            "application/rss+xml",
+            long_feed(3, 10).into_bytes(),
+            None,
+        );
+        assert_eq!(read(egress, short).await.episodes.unwrap().len(), 3);
+        assert!(recorded.asked().is_empty());
+        // Nor is an address that carries a credential.
+        let secret = "https://feeds.example.org/show.xml?token=SECRET";
+        let (egress, recorded) = crate::sources::fixture::egress(vec![(
+            secret,
+            200,
+            "application/rss+xml",
+            whole.clone().into_bytes(),
+        )]);
+        let f = read_on(&egress, cut(secret), 3600).await;
+        assert!(f.body.len() == BODY_CAP && recorded.asked().is_empty());
+    }
     /// Only a refusal that names an access token stops a provider's other frames; a bare 401 (one
     /// private object) stops only that link's.
     #[test]

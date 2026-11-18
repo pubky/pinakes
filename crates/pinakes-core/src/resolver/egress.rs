@@ -211,6 +211,10 @@ pub struct FetchOptions {
     /// operator's contact on every request, whatever a caller put here.
     pub user_agent: Option<String>,
     pub feed_cap: Option<usize>,
+    /// How far an RSS or Atom feed read without a feed cap goes before it is cut (marked
+    /// truncated, never refused), in place of the page cap: a show's feed read for its episodes
+    /// (`episodes::feed_options`). Never less than the page cap; other bodies keep their caps.
+    pub feed_read: Option<usize>,
     /// A cap for every body whatever its type, HTML too, in place of the default: a larger body
     /// is refused, never truncated (PKARR relay payloads below the default, Wikidata entities
     /// above it).
@@ -284,6 +288,7 @@ impl std::fmt::Debug for FetchOptions {
             .field("accept", &self.accept)
             .field("user_agent", &self.user_agent)
             .field("feed_cap", &self.feed_cap)
+            .field("feed_read", &self.feed_read)
             .field("body_cap", &self.body_cap)
             .field("feed_hint", &self.feed_hint)
             .field("head_cap", &self.head_cap)
@@ -479,8 +484,9 @@ pub async fn read_response_with(
             return Err(refused("content type is not allowed"));
         }
         let html = matches!(content_type.as_str(), "text/html" | "application/xhtml+xml");
-        // An RSS or Atom feed read without a feed cap keeps its first megabyte like a page: its
-        // channel and newest items come first (`cards::feed_prefix` completes the cut).
+        // An RSS or Atom feed read without a feed cap keeps its first megabyte like a page, or
+        // as much as the read asks for (`feed_read`): its channel and newest items come first
+        // (`cards::feed_prefix` completes the cut).
         let xml_feed = matches!(
             content_type.as_str(),
             "text/xml"
@@ -494,7 +500,11 @@ pub async fn read_response_with(
         let url_card = content_type.starts_with("image/") || content_type == "application/pdf";
         let (mut max, refuse) = match options.body_cap {
             Some(cap) => (cap, true),
-            None if html || xml_feed || url_card => (BODY_CAP, false),
+            None if xml_feed => (
+                options.feed_read.map_or(BODY_CAP, |n| n.max(BODY_CAP)),
+                false,
+            ),
+            None if html || url_card => (BODY_CAP, false),
             None => (options.feed_cap.unwrap_or(BODY_CAP), true),
         };
         // A page past the page cap is read on to the head budget, whole or cut there: its head
@@ -842,6 +852,10 @@ impl Egress {
                 options.body_cap.unwrap_or(0),
                 options.feed_cap.unwrap_or(0)
             ));
+        }
+        // A feed read further is another answer than one cut at the page cap.
+        if let Some(n) = options.feed_read {
+            key.push_str(&format!("|read:{n}"));
         }
         if options.keep_redirect {
             key.push_str("|redirect");
@@ -2017,8 +2031,9 @@ mod tests {
         assert!(error.downcast_ref::<BodyTooLarge>().is_some(), "{error:#}");
         server.abort();
     }
-    /// An RSS or Atom feed past the page cap keeps its first megabyte, marked truncated, unless
-    /// the fetch set a feed cap (calendars), which refuses what exceeds it.
+    /// An RSS or Atom feed past the page cap keeps its first megabyte, marked truncated, or as
+    /// much as the read asks for (`feed_read`), unless the fetch set a feed cap (calendars),
+    /// which refuses what exceeds it.
     #[tokio::test]
     async fn a_long_xml_feed_keeps_its_first_megabyte() {
         use axum::{routing::get, Router};
@@ -2041,11 +2056,37 @@ mod tests {
         let fetched = read(Default::default()).await.unwrap();
         assert!(fetched.truncated);
         assert_eq!(fetched.body.len(), BODY_CAP);
+        // A read that asks for more (a show's feed read for its episodes) goes on to it: cut
+        // there, or whole within it; never less than the page cap.
+        let further = |n: usize| FetchOptions {
+            feed_read: Some(n),
+            ..Default::default()
+        };
+        let longer = read(further(BODY_CAP + BODY_CAP / 2)).await.unwrap();
+        assert!(longer.truncated);
+        assert_eq!(longer.body.len(), BODY_CAP + BODY_CAP / 2);
+        let whole = read(further(4 * BODY_CAP)).await.unwrap();
+        assert!(!whole.truncated);
+        assert_eq!(whole.body.len(), 14 + 7 * (2 * BODY_CAP / 7));
+        let short = read(further(1024)).await.unwrap();
+        assert_eq!((short.truncated, short.body.len()), (true, BODY_CAP));
+        // Each is its own answer in the discovery cache.
+        let key = |o: &FetchOptions| Egress::discovery_key(url.as_str(), o).unwrap();
+        assert_ne!(key(&FetchOptions::default()), key(&further(4 * BODY_CAP)));
+        assert_ne!(key(&further(2 * BODY_CAP)), key(&further(4 * BODY_CAP)));
         let capped = FetchOptions {
             feed_cap: Some(BODY_CAP),
             ..Default::default()
         };
         let error = read(capped).await.unwrap_err();
+        assert!(error.downcast_ref::<BodyTooLarge>().is_some(), "{error:#}");
+        // A feed cap refuses as before, whatever the read would take.
+        let both = FetchOptions {
+            feed_cap: Some(BODY_CAP),
+            feed_read: Some(4 * BODY_CAP),
+            ..Default::default()
+        };
+        let error = read(both).await.unwrap_err();
         assert!(error.downcast_ref::<BodyTooLarge>().is_some(), "{error:#}");
         server.abort();
     }

@@ -1155,9 +1155,11 @@ that rotates its members never runs into its cap and the links of one nobody fet
 ## Episodes
 
 `GET /v1/resources/{id}/episodes` lists a podcast show's latest episodes as its feed lists them,
-newest first: the latest 100, in pages of at most 20 (`limit`, 1–20, default 20) from `offset`
-(0–100, default 0): `{items: [...], next_offset}`, `next_offset` being the next page's `offset`
-while more episodes match, else `null`. `q` lists only the episodes whose `name` holds it, in any
+newest first: the latest 1000, in pages of at most 20 (`limit`, 1–20, default 20) from `offset`
+(0–1000, default 0): `{items: [...], next_offset, truncated}`, `next_offset` being the next
+page's `offset` while more episodes match, else `null`, and `truncated` saying whether the feed
+lists older episodes than the list holds (the list is full, 1000): the same on every page,
+whatever `q`, so a client links the show on its own service for the rest. `q` lists only the episodes whose `name` holds it, in any
 letter case (Unicode's, as Rust folds it: `über` finds `ÜBER`); at most 256 bytes, spaces around
 it ignored, a blank `q` matching every episode; it pages the same way. Each item is
 `{uri, name, image, published, guid, stream, id?, aliases?}`. A show's card carries the first of them
@@ -1206,8 +1208,10 @@ of its [group](#groups) that has one: the same show elsewhere. Only a card that 
 (`PodcastSeries`, status `ok`) borrows a member's list: a card cleared after an error, found
 missing, or of another kind lists nothing, whatever its group holds. A known resource that is no
 show, or whose feed was not read yet, returns an empty list; an unknown ID is 404. Only a feed's
-first 200 items are looked at, and the newest 100 of them kept: feeds list newest first, and a
-few are out of order. Why a route and not a fact: a fact is one string per name, and a card's document is
+first 2000 items are looked at, and the newest 1000 of them kept: feeds list newest first, and a
+few are out of order. A feed is read for its episodes up to 8 MiB, past the 1 MiB page cap (a
+feed card's read cut at the page cap reads its feed again so, within the same three seconds, and
+keeps the cut read's list when that fails), and cut at its last whole item there. Why a route and not a fact: a fact is one string per name, and a card's document is
 bounded; why not occurrences: an episode has no instant to window by, no recurrence and no
 document of its own here.
 
@@ -1738,9 +1742,10 @@ counts by status.
   provider under `"always"`: their title, author and thumbnail come first. A blank field in an
   answer is no value, so the page's stays. An oEmbed answer survives a failed or truncated page. Podcast types need a namespace or an audio/video
   enclosure; any other feed is a DataFeed (Feeds, above). Direct podcast feeds are PodcastSeries; `?guid=` or the
-  episode page's RSS link selects an episode. A feed longer than the page cap is read up to its
-  last whole item within the first megabyte (the newest come first), so an episode past that is
-  never marked missing. No embed HTML or media bytes are served.
+  episode page's RSS link selects an episode. A feed longer than the page cap is read again up to
+  8 MiB for its episodes ([Episodes](#episodes)) and, past that, up to its last whole item there
+  (the newest come first), as is a feed of more items than `cards.podcast_items`, so an episode
+  past that is never marked missing. No embed HTML or media bytes are served.
 - **Event platforms**: the adapters in `data/event-adapters.json`. Each has an `enabled` switch
   and, where the platform needs one, a `key`; a missing key disables only that adapter and no key
   is ever returned. Its manifest lists the mode, cadence floor, identity, cancellation rule,

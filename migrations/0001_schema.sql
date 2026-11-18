@@ -349,7 +349,7 @@ CREATE TABLE event_fetch (
 -- episode's page or feed item, `stream` its public enclosure (`model::Stream`), when it has one.
 CREATE TABLE podcast_episode (
     resource_id text NOT NULL REFERENCES resource(id) ON DELETE CASCADE,
-    position smallint NOT NULL CONSTRAINT podcast_episode_position_check CHECK (position >= 0 AND position < 100),
+    position smallint NOT NULL CONSTRAINT podcast_episode_position_check CHECK (position >= 0 AND position < 1000),
     guid text NOT NULL CONSTRAINT podcast_episode_guid_check CHECK (octet_length(guid) <= 2048),
     url text NOT NULL CONSTRAINT podcast_episode_url_check CHECK (octet_length(url) <= 2048),
     name text CONSTRAINT podcast_episode_name_check CHECK (octet_length(name) <= 512),

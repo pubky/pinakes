@@ -757,8 +757,10 @@ async fn the_route_pages_through_the_list_and_matches_names(pool: PgPool) {
     .await;
     assert_eq!(names(&page), ["Episode 35", "Episode 34", "Episode 33"]);
     assert_eq!(page["next_offset"], 13);
-    let (status, page) = request(&app, &format!("/v1/resources/{id}/episodes?offset=100")).await;
+    let (status, page) = request(&app, &format!("/v1/resources/{id}/episodes?offset=1000")).await;
     assert_eq!((status, names(&page).len()), (200, 0));
+    // The feed's whole list is here: nothing older to link to.
+    assert_eq!(page["truncated"], false, "{page}");
     // A name match, in any letter case, Unicode's included, paged as the whole list is.
     let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes?q=KHABIB")).await;
     assert_eq!(
@@ -796,7 +798,7 @@ async fn the_route_pages_through_the_list_and_matches_names(pool: PgPool) {
         assert_eq!(page["next_offset"], 20, "{blank}");
     }
     let long = format!("q={}", "a".repeat(257));
-    for bad in ["offset=101", "offset=-1", "offset=x", long.as_str()] {
+    for bad in ["offset=1001", "offset=-1", "offset=x", long.as_str()] {
         assert_eq!(
             request(&app, &format!("/v1/resources/{id}/episodes?{bad}"))
                 .await
@@ -814,6 +816,118 @@ async fn the_route_pages_through_the_list_and_matches_names(pool: PgPool) {
     // The card's list stays the first five.
     let (_, card) = request(&app, &format!("/v1/resources/{id}")).await;
     assert_eq!(card["episodes"].as_array().unwrap().len(), 5);
+}
+
+/// A show keeps the latest 1000 episodes of its feed (`episodes::KEPT`): a longer list is
+/// stored to its 1000th, and the route pages through all of them (offsets to 1000) and says on
+/// every page, whatever `q`, that the feed lists older ones (`truncated`); a group member that
+/// borrows the list says the same. A list shorter than that is the feed's whole list.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_show_keeps_a_thousand_episodes_and_says_when_its_feed_has_more(pool: PgPool) {
+    let list: Vec<Episode> = (1..=1001).rev().map(|n| episode(n, n % 2 == 0)).collect();
+    let id = show(&pool, "https://feeds.example.org/long.xml", Some(list)).await;
+    assert_eq!(rows(&pool, &id).await, 1000);
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let names = |page: &Value| -> Vec<String> {
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let (status, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
+    assert_eq!(status, 200, "{page}");
+    assert_eq!(names(&page)[0], "Episode 1001");
+    assert_eq!(
+        (&page["next_offset"], &page["truncated"]),
+        (&Value::from(20), &Value::Bool(true))
+    );
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes?offset=160")).await;
+    assert_eq!(names(&page).len(), 20);
+    assert_eq!(names(&page)[0], "Episode 841");
+    assert_eq!(page["next_offset"], 180);
+    assert_eq!(page["truncated"], true);
+    // The last page ends at the 1000th: Episode 2; Episode 1 was not kept.
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes?offset=980")).await;
+    assert_eq!(names(&page).len(), 20);
+    assert_eq!(names(&page)[19], "Episode 2");
+    assert_eq!(
+        (&page["next_offset"], &page["truncated"]),
+        (&Value::Null, &Value::Bool(true))
+    );
+    let (_, page) = request(
+        &app,
+        &format!("/v1/resources/{id}/episodes?offset=995&limit=3"),
+    )
+    .await;
+    assert_eq!(names(&page), ["Episode 6", "Episode 5", "Episode 4"]);
+    assert_eq!(page["next_offset"], 998);
+    let (status, page) = request(&app, &format!("/v1/resources/{id}/episodes?offset=1000")).await;
+    assert_eq!((status, names(&page).len()), (200, 0));
+    assert_eq!(page["truncated"], true, "{page}");
+    // A name match over the whole list: the oldest kept one matches too.
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes?q=episode%202")).await;
+    assert_eq!(names(&page)[0], "Episode 299");
+    assert_eq!(page["truncated"], true);
+    let (_, page) = request(
+        &app,
+        &format!("/v1/resources/{id}/episodes?q=episode%202&offset=100"),
+    )
+    .await;
+    assert_eq!(names(&page).len(), 11);
+    assert_eq!(names(&page)[10], "Episode 2");
+    assert_eq!(page["next_offset"], Value::Null);
+    // The card still carries the first five that have audio.
+    let (_, card) = request(&app, &format!("/v1/resources/{id}")).await;
+    let carried: Vec<&str> = card["episodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        carried,
+        [
+            "Episode 1000",
+            "Episode 998",
+            "Episode 996",
+            "Episode 994",
+            "Episode 992"
+        ]
+    );
+    // A show of the same group without a list of its own borrows the list, and says so too.
+    let apple = show(
+        &pool,
+        "https://podcasts.apple.com/us/podcast/long/id1",
+        None,
+    )
+    .await;
+    let group = "0123456789abcdef0123456789abcde1";
+    sqlx::query("INSERT INTO \"group\"(id) VALUES($1)")
+        .bind(group)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE group_unit SET group_id=$1 WHERE resource_id=ANY($2)")
+        .bind(group)
+        .bind(vec![id.clone(), apple.clone()])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (_, page) = request(&app, &format!("/v1/resources/{apple}/episodes?offset=980")).await;
+    assert_eq!(names(&page)[19], "Episode 2", "{page}");
+    assert_eq!(page["truncated"], true);
+    // Read again with fewer, the list is the feed's whole list.
+    let list: Vec<Episode> = (1..=183).rev().map(|n| episode(n, true)).collect();
+    show(&pool, "https://feeds.example.org/long.xml", Some(list)).await;
+    assert_eq!(rows(&pool, &id).await, 183);
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes?offset=180")).await;
+    assert_eq!(names(&page), ["Episode 3", "Episode 2", "Episode 1"]);
+    assert_eq!(
+        (&page["next_offset"], &page["truncated"]),
+        (&Value::Null, &Value::Bool(false))
+    );
 }
 
 /// A show whose feed is on its own site, WordPress-style (lexfridman.com): each item links a blog

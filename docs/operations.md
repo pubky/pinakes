@@ -577,11 +577,13 @@ scanning) follow RSS alternates on pages without a typed card. Discovery decisio
 `pinakes_discovery_decisions_total{kind,decision}`. A podcast show's card reads the show's feed
 for its latest episodes at each refresh (a feed card from the feed it is; a Podcast Index or
 Apple Podcasts show page, and a player page opening a show by its Apple ID, from the feed its
-record names: one feed request per read, cached for the card's lifetime, cut at the page cap,
+record names: one feed request per read, cached for the card's lifetime, cut at 8 MiB,
 fetched and parsed within three seconds and what is left of the read's deadline, so a slow feed
-or a wait for a parser costs the list and never the card), kept in `podcast_episode` (the rows
-follow the document: replaced at a save, cleared when the card is cleared or scrubbed; the newest
-100 of a feed's first 200 items) and served by `GET /v1/resources/{id}/episodes`
+or a wait for a parser costs the list and never the card; a feed card whose own read was cut at
+the page cap reads its feed again so, keeping the cut read's list when that fails), kept in
+`podcast_episode` (the rows follow the document: replaced at a save, cleared when the card is
+cleared or scrubbed; the newest 1000 of a feed's first 2000 items) and served by
+`GET /v1/resources/{id}/episodes`
 ([API](api.md#episodes)). A list stored before entries named their feed item names the item's
 page until the show is read again.
 After the upgrade that added them, the lists fill as shows are read again: `reextract all`
