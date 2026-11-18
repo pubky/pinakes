@@ -432,7 +432,7 @@ past it. A reference is keyed as Nexus keys it: a tag by its author, `uri` and l
 its latest put's `at`, the time Nexus gives the tag), so a del
 naming another tag file than the put did (a user's `pubky.app` tags rewritten to `social/v1`, or
 two files on one tag) deletes that tag, and a repeated put or del changes nothing more; a reply,
-embed or collection item by its author, `object_path` and `uri`; a post by its version file
+embed or collection item by its author, `object_path`, kind and `uri`; a post by its version file
 ([Posts](#posts)). `collection_items` is a new item of a collection post that already holds 100 (the specs' cap). Each line runs in a savepoint: a line whose processing panics is rolled back alone and skipped (`panic`; the log
 line names its feed position only, never its content). A panic anywhere else in a poll (the
 batch's score update or cursor write, say) is an error: the batch rolls back, the cursor holds,
