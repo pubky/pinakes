@@ -1161,7 +1161,8 @@ page's `offset` while more episodes match, else `null`, and `truncated` saying w
 lists older episodes than the list holds, as the show's last read of it found: that read ended
 before the feed did (past 8 MiB, below), or the feed has more than the 1000 kept (exactly 1000 is
 not). It is the same on every page, whatever `q`, so a client links the show on its own service
-for the rest; a list stored before this field says `false` until its show is read again. `q` lists only the episodes whose `name` holds it, in any
+for the rest. A list stored before this field holds what the upgrade gave it (`true` for a list
+that was full at the old 100, else `false`) until its show is read again. `q` lists only the episodes whose `name` holds it, in any
 letter case (Unicode's, as Rust folds it: `über` finds `ÜBER`); at most 256 bytes, spaces around
 it ignored, a blank `q` matching every episode; it pages the same way. Each item is
 `{uri, name, image, published, guid, stream, id?, aliases?}`. A show's card carries the first of them

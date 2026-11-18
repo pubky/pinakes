@@ -957,10 +957,15 @@ pub async fn enrich_until(
                 Err(_) => false,
             };
             if is_feed && more {
-                if let Some(longer) = read_on(egress, &f, ttl, deadline).await {
-                    if let Ok(Some(d)) = read(longer).await? {
-                        parsed = Ok(Some(d));
-                    }
+                // The read on and its parse together, within the read's own time
+                // (`episodes::feed_deadline`): late, the cut read's card stands.
+                let longer = async {
+                    let longer = read_on(egress, &f, ttl).await?;
+                    read(longer).await.ok()?.ok().flatten()
+                };
+                let until = crate::episodes::feed_deadline(deadline);
+                if let Ok(Some(d)) = tokio::time::timeout_at(until, longer).await {
+                    parsed = Ok(Some(d));
                 }
             }
             let referenced = uri.to_owned();
@@ -987,19 +992,17 @@ pub async fn enrich_until(
 }
 /// The rest of a feed card's own feed, whose read `f` was cut at the page cap
 /// (`Fetched::truncated`): the feed read again as a show's episodes are read
-/// (`episodes::feed_options`: on to `episodes::FEED_READ`, cut there), at the address the cut read
-/// ended on, within `episodes::FEED_WAIT` and the read's `deadline` (`episodes::feed_deadline`).
-/// The discovery cache's answer when it is the feed as the cut read has it (it begins with the cut
-/// read's bytes), else the feed read afresh, once. `None`, and the cut read stands, when that
-/// fails, is slow, ends elsewhere or is no longer, and for a feed whose address carries a
-/// credential. So a show's card lists, and an old episode's card reads, a back catalogue past the
-/// first megabyte, while the page read (`web::extract`) keeps the page cap.
-async fn read_on(
-    egress: &Egress,
-    f: &Fetched,
-    ttl: u64,
-    deadline: Option<tokio::time::Instant>,
-) -> Option<Fetched> {
+/// (`episodes::feed_options`: on to `episodes::FEED_READ`, cut there) at the show's feed address
+/// (`episodes::show_feed`: an item card's `?guid=` dropped, so a show's items share one read), as
+/// read at `f`'s address. A read just made is taken as it is; an answer the discovery cache held
+/// is taken when it begins with the cut read's bytes (the feed as the cut read has it), else, at
+/// the feed card's own address, the feed is read afresh once. An item card takes only a read
+/// that begins as its cut read does: a feed that answers otherwise at the show's address is not
+/// its feed. `None`, and the cut read stands, when that fails, ends elsewhere or is no longer,
+/// and for a feed whose address carries a credential. The caller bounds its time. So a show's
+/// card lists, and an old episode's card reads, a back catalogue past the first megabyte, while
+/// the page read (`web::extract`) keeps the page cap.
+async fn read_on(egress: &Egress, f: &Fetched, ttl: u64) -> Option<Fetched> {
     if !f.truncated
         || !super::egress::xml_feed_type(&f.content_type)
         || f.body.len() >= crate::episodes::FEED_READ
@@ -1007,24 +1010,32 @@ async fn read_on(
     {
         return None;
     }
-    let (url, options) = (f.url.to_string(), crate::episodes::feed_options());
-    let longer = |l: &Fetched| l.status == 200 && l.url == f.url && l.body.len() > f.body.len();
-    let read = async {
-        // Boxed: keeps the reads' state machines off the enrichment's future.
-        if let Ok(cached) = Box::pin(egress.discover(&url, &options, ttl)).await {
-            if longer(&cached) && cached.body.starts_with(&f.body) {
-                return Some(cached);
-            }
-        }
-        Box::pin(egress.fetch_with(&url, &options))
-            .await
-            .ok()
-            .filter(|l| longer(l))
-    };
-    tokio::time::timeout_at(crate::episodes::feed_deadline(deadline), read)
+    let at = crate::episodes::show_feed(&f.url);
+    let own = at == f.url;
+    let options = crate::episodes::feed_options();
+    let longer = |l: &Fetched| l.status == 200 && l.url == at && l.body.len() > f.body.len();
+    let begins = |l: &Fetched| l.body.starts_with(&f.body);
+    let held = egress
+        .discovered(at.as_str(), &options)
+        .await
+        .unwrap_or(false);
+    // Boxed: keeps the reads' state machines off the enrichment's future.
+    let first = Box::pin(egress.discover(at.as_str(), &options, ttl))
         .await
         .ok()
-        .flatten()
+        .filter(|l| longer(l));
+    let read = match first {
+        Some(l) if begins(&l) || (own && !held) => Some(l),
+        _ if own && held => Box::pin(egress.fetch_with(at.as_str(), &options))
+            .await
+            .ok()
+            .filter(|l| longer(l)),
+        _ => None,
+    }?;
+    Some(Fetched {
+        url: f.url.clone(),
+        ..read
+    })
 }
 /// The deepest a feed's elements may nest for `feed_prefix` to complete it: an RSS item ends at
 /// depth 2 (`rss`, `channel`), an Atom entry at 1, and nothing in a real feed comes near this.
@@ -1657,14 +1668,18 @@ mod tests {
         assert_eq!(episodes[299].name.as_deref(), Some("E1"));
         assert!(!d.episodes_older, "the whole feed was read");
         assert_eq!(recorded.asked(), [uri]);
-        // Not read again (twice asked: the cache, then afresh): the cut read's list stands.
+        // Not read again: the cut read's list stands.
         let (egress, recorded) =
             crate::sources::fixture::egress(vec![(uri, 503, "text/plain", b"busy".to_vec())]);
         let d = read(egress, uri, cut(uri)).await;
         let listed = d.episodes.unwrap().len();
         assert!((100..300).contains(&listed), "{listed}");
         assert!(d.episodes_older, "the list is the cut read's");
-        assert!(recorded.asked().len() >= 2, "{:?}", recorded.asked());
+        assert_eq!(
+            recorded.asked(),
+            [uri],
+            "a read just made is not made again"
+        );
         // A longer read that does not parse (an undefined entity past the cut): the cut read's
         // card and list.
         let broken = whole.replacen("<title>E1</title>", "<title>E1 &nbsp;</title>", 1);
@@ -1688,20 +1703,22 @@ mod tests {
         let d = read(egress, uri, cut(uri)).await;
         assert_eq!(d.episodes.unwrap()[0].name.as_deref(), Some("E300"));
         assert_eq!(recorded.asked(), [uri]);
-        // An item card reads on only for an item past the cut.
+        // An item card reads on only for an item past the cut, at the show's feed address (one
+        // read for all of its items), and only a read that begins as its cut read does.
         let old = "https://feeds.example.org/show.xml?guid=e1";
-        let (egress, recorded) = crate::sources::fixture::egress(vec![(
-            old,
-            200,
-            "application/rss+xml",
-            whole.as_bytes().to_vec(),
-        )]);
+        let (egress, recorded) = feed(&whole);
         let e = read(egress, old, cut(old)).await;
         assert_eq!(
             (e.type_name.as_str(), e.name.as_deref()),
             ("PodcastEpisode", Some("E1"))
         );
-        assert_eq!(recorded.asked(), [old]);
+        assert_eq!(recorded.asked(), [uri]);
+        let (egress, _) = feed(&long_feed(300, 7000));
+        let e = read(egress, old, cut(old)).await;
+        assert_ne!(
+            e.type_name, "PodcastEpisode",
+            "another feed at the show's address is not its feed"
+        );
         let new = "https://feeds.example.org/show.xml?guid=e300";
         let (egress, recorded) = feed(&whole);
         let e = read(egress, new, cut(new)).await;
@@ -1720,12 +1737,12 @@ mod tests {
         // Nor is an address that carries a credential, nor a page.
         let secret = "https://feeds.example.org/show.xml?token=SECRET";
         let (egress, recorded) = feed(&whole);
-        assert!(read_on(&egress, &cut(secret), 3600, None).await.is_none());
+        assert!(read_on(&egress, &cut(secret), 3600).await.is_none());
         let page = Fetched {
             content_type: "text/html".into(),
             ..cut(uri)
         };
-        assert!(read_on(&egress, &page, 3600, None).await.is_none());
+        assert!(read_on(&egress, &page, 3600).await.is_none());
         assert!(recorded.asked().is_empty());
     }
 

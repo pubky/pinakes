@@ -359,6 +359,8 @@ CREATE TABLE podcast_episode (
     PRIMARY KEY (resource_id, position),
     CONSTRAINT podcast_episode_published_range CHECK (published >= '0001-01-01 00:00:00+00' AND published < '10000-01-01 00:00:00+00')
 );
+-- An episode's link, for the look-up of whether a stored list names a page (`episodes::join_page`).
+CREATE INDEX podcast_episode_url ON podcast_episode (url);
 -- A show's stored list as its last read of the feed left it: whether the feed lists older episodes
 -- than the list holds (the read ended before the feed did, or the feed has more than are kept).
 -- Written and cleared with the list's rows (`episodes::replace`, `episodes::clear`).
