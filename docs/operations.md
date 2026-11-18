@@ -580,9 +580,11 @@ Apple Podcasts show page, and a player page opening a show by its Apple ID, from
 record names: one feed request per read, cached for the card's lifetime, cut at 8 MiB,
 fetched and parsed within three seconds and what is left of the read's deadline, so a slow feed
 or a wait for a parser costs the list and never the card; a feed card whose own read was cut at
-the page cap reads its feed again so, keeping the cut read's list when that fails), kept in
-`podcast_episode` (the rows follow the document: replaced at a save, cleared when the card is
-cleared or scrubbed; the newest 1000 of a feed's first 2000 items) and served by
+the page cap reads its feed again so for its show, keeping the cut read's card and list when that
+fails or does not parse), kept in `podcast_episode` (the rows follow the document: replaced at a
+save, cleared when the card is cleared or scrubbed; the newest 1000 of a feed's first 2000 items),
+with whether the feed lists older ones in `podcast_episode_list` (written and cleared with the
+rows), and served by
 `GET /v1/resources/{id}/episodes`
 ([API](api.md#episodes)). A list stored before entries named their feed item names the item's
 page until the show is read again.

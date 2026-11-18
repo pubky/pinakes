@@ -855,7 +855,7 @@
             ]
           },
           "truncated": {
-            "description": "Whether the show's feed lists older episodes than the list holds: the list is full, the\nlatest 1000 ([`KEPT`]). A client links the show on its own service for the rest. The\nsame on every page, whatever `q`.",
+            "description": "Whether the show's feed lists older episodes than the list holds, as its last read found\n([`Listed::older`]): the read ended before the feed did (past 8 MiB, [`FEED_READ`]), or the\nfeed has more than the latest 1000 ([`KEPT`]) kept. A client links the show on its own\nservice for the rest. The same on every page, whatever `q`.",
             "type": "boolean"
           }
         },
@@ -3131,7 +3131,7 @@
     },
     "/v1/resources/{id}/episodes": {
       "get": {
-        "description": "A podcast show's latest episodes as its feed lists them, newest first: the latest 1000, in pages of at most 20 (`offset`, `next_offset`; `truncated` when the feed lists older ones), optionally only those whose name holds `q` (any letter case), each with its episode's link (its feed item, which resolves to its PodcastEpisode card, or the link of the publisher's own episode card), its other links (`aliases`), date and public stream. The show's own list, else, for a card that is a show, that of a member of its group which has one (an Apple Podcasts show grouped with its feed). A known resource that is no show, or no longer one, or whose feed was not read yet, returns an empty list.",
+        "description": "A podcast show's latest episodes as its feed lists them, newest first: the latest 1000, in pages of at most 20 (`offset`, `next_offset`; `truncated` when its feed lists older ones than the list holds), optionally only those whose name holds `q` (any letter case), each with its episode's link (its feed item, which resolves to its PodcastEpisode card, or the link of the publisher's own episode card), its other links (`aliases`), date and public stream. The show's own list, else, for a card that is a show, that of a member of its group which has one (an Apple Podcasts show grouped with its feed). A known resource that is no show, or no longer one, or whose feed was not read yet, returns an empty list.",
         "operationId": "list_episodes",
         "parameters": [
           {

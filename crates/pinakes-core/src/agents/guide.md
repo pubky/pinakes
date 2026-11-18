@@ -55,7 +55,7 @@ A link this instance does not know is a 404 there: nobody referenced it, or it h
 - **Podcasts.** A show's card (`PodcastSeries`) carries `episodes`: its latest 5 episodes with
   public audio or video, newest first, each with `uri`, `name`, `published` and a `stream` (`url`, `type`,
   `duration_s`) to play. `GET {{BASE}}/v1/resources/{id}/episodes` pages through its latest 1000,
-  20 at a time (`offset`, `next_offset`); `truncated: true` when its feed lists older ones.
+  20 at a time (`offset`, `next_offset`); `truncated: true` when its feed lists older ones than that.
 - **Places and events.** `point` places a card on the map; events have `start`, `end` and, for
   calendars, one card per occurrence.
 - **Identifiers.** Books, papers, music, films, podcasts and OSM objects carry exact keys:
