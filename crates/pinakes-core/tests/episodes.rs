@@ -2078,6 +2078,27 @@ async fn a_failed_read_on_keeps_the_longer_stored_list(pool: PgPool) {
         ]
     );
     assert_eq!(page["truncated"], false, "{page}");
+    // The stored newest taken down from the feed (newer than the cut's newest): it does not
+    // join; the rest does.
+    let list: Vec<Episode> = (1..=1001).rev().map(|n| episode(n, true)).collect();
+    show(&pool, uri, Some(list)).await;
+    let d = cut((903..=1000).rev().map(|n| episode(n, true)).collect(), true);
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    assert_eq!(rows(&pool, &id).await, 999);
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
+    assert_eq!(names(&page)[0], "Episode 1000");
+    // More new episodes than the cut holds (a re-release among them): the cut does not reach
+    // the stored list, so it stands alone and says the feed has more.
+    let whole: Vec<Episode> = (1..=183).rev().map(|n| episode(n, true)).collect();
+    show(&pool, uri, Some(whole)).await;
+    let mut list: Vec<Episode> = (201..=300).rev().map(|n| episode(n, true)).collect();
+    list.insert(0, episode(5, true));
+    store::save_document(&pool, &id, 0, &cut(list, true))
+        .await
+        .unwrap();
+    assert_eq!(rows(&pool, &id).await, 101);
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
+    assert_eq!(page["truncated"], true, "{page}");
     // A cut list the stored one shares nothing with (another feed's) is the list.
     let other: Vec<Episode> = (1..=100)
         .rev()

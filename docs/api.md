@@ -1222,10 +1222,11 @@ holds serves the show card when it begins as the cut read does (else the feed is
 once) and serves an item card as it is; the longer read is kept only when it gives the show, or
 that item's own episode. The cut read's card and list stand when that read fails, is slow, gives
 neither, or does not parse (a malformed byte or entity past the first megabyte); its list then
-keeps the other episodes a longer stored list holds (when the two share an episode: each stored
-one it lacks joins it, in date order, with whether that list's feed lists older ones), so one
-slow read does not cut a show back to the first megabyte's episodes, and an episode the feed has
-dropped stays listed until a read reads its whole list again; a Podcast Index or Apple show's feed that does not parse
+keeps the other episodes a longer stored list holds (when it holds the stored list's newest
+episode no newer than its own: each stored one it lacks and no newer than its newest joins it, in
+date order, with whether that list's feed lists older ones), so one slow read does not cut a show
+back to the first megabyte's episodes, and an older episode the feed has dropped stays listed
+until a read reads its whole list again; a Podcast Index or Apple show's feed that does not parse
 past the page cap is read within it, and keeps a longer stored list's other episodes the same way. A page's alternate feed is read within the page cap. Why a route and not a fact: a fact is one string per name, and a card's document is
 bounded; why not occurrences: an episode has no instant to window by, no recurrence and no
 document of its own here.

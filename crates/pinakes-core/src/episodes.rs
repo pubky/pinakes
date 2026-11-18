@@ -477,14 +477,16 @@ pub(crate) fn is_show(type_path: &[String], status: &str) -> bool {
     type_path.iter().any(|t| t == "PodcastSeries") && status == "ok"
 }
 /// A cut read's `list` (whose feed lists older episodes: `older`) with the stored list's other
-/// episodes: every stored one `list` does not name (by GUID) joins it, and the whole is ordered
-/// as [`listed`] orders a feed's (newest first by date, undated ones last, else in order: `list`'s
-/// first). So a read on that was slow or failed once neither shortens a longer list an earlier
-/// read stored nor flips its `truncated` (the stored list's flag, when one of its episodes
-/// joins), while the cut read's newer episodes still come first; an undated or out-of-order item
-/// in the cut moves nothing else. An episode the feed has dropped stays until a read reads the
-/// feed's whole list again. `list` as it is when the stored list names none of its episodes
-/// (another feed's, or none) or nothing besides them.
+/// episodes: every stored one `list` does not name (by GUID) and that is no newer than `list`'s
+/// newest joins it, and the whole is ordered as [`listed`] orders a feed's (newest first by date,
+/// undated ones last, else in order: `list`'s first). So a read on that was slow or failed once
+/// neither shortens a longer list an earlier read stored nor flips its `truncated` (the stored
+/// list's flag, when one of its episodes joins), while the cut read's newer episodes still come
+/// first; an undated or out-of-order item in the cut moves nothing else. An older episode the
+/// feed has dropped stays until a read reads the feed's whole list again. `list` as it is when it
+/// does not reach the stored list (it lacks the stored list's newest episode no newer than its
+/// own: another feed's list, or more new episodes than the cut holds) or the stored list holds
+/// nothing besides.
 async fn under_stored(
     tx: &mut Transaction<'_, Postgres>,
     id: &str,
@@ -509,11 +511,20 @@ async fn under_stored(
     .fetch_all(&mut **tx)
     .await?;
     let named: std::collections::HashSet<&str> = list.iter().map(|e| e.guid.as_str()).collect();
-    if !rows.iter().any(|r| named.contains(r.0.as_str())) {
+    // A stored episode newer than the cut list's newest is one the feed has taken down.
+    let newest = list.iter().filter_map(|e| e.published).max();
+    let kept: Vec<&Stored> = rows
+        .iter()
+        .filter(|r| !matches!((r.4, newest), (Some(d), Some(n)) if d > n))
+        .collect();
+    // The cut list reaches the stored one only when it names the stored list's newest episode
+    // left: else between the two lie episodes neither read has (more new ones than the cut
+    // holds), or the stored list is another feed's, and the cut list stands alone.
+    if !kept.first().is_some_and(|r| named.contains(r.0.as_str())) {
         return Ok((list.to_vec(), older));
     }
-    let joining: Vec<&Stored> = rows
-        .iter()
+    let joining: Vec<&Stored> = kept
+        .into_iter()
         .filter(|r| !named.contains(r.0.as_str()))
         .collect();
     let Some(stored_older) = joining.first().map(|r| r.6.unwrap_or(older)) else {
@@ -535,7 +546,7 @@ async fn under_stored(
             }),
     );
     // Stable: equal dates keep the order above, as `listed` keeps the feed's.
-    merged.sort_by(|a, b| b.published.cmp(&a.published));
+    merged.sort_by_key(|e| std::cmp::Reverse(e.published));
     Ok((merged, stored_older))
 }
 /// Clears a resource's episodes, and what its list says of its feed (`podcast_episode_list`): for
