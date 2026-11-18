@@ -46,6 +46,8 @@ enum Answer {
     Recorded,
     /// 503.
     Busy,
+    /// 429: a rate limit.
+    Limited,
     /// 401: the credential refused.
     Refused,
 }
@@ -94,6 +96,7 @@ impl Transport for Api {
         self.credentials.lock().unwrap().push(sent);
         let (status, body) = match *self.answer.lock().unwrap() {
             Answer::Busy => (503, b"{}".to_vec()),
+            Answer::Limited => (429, b"{}".to_vec()),
             Answer::Refused => (
                 401,
                 br#"{"success":false,"status_code":7,"status_message":"Invalid API key: You must be granted a valid key."}"#.to_vec(),
@@ -740,13 +743,27 @@ async fn the_credential_never_leaves_the_request(pool: PgPool) {
     let _guard = tracing::subscriber::set_default(subscriber);
     let (ids, reader) = pages(&pool, &[MOVIE, SERIES]).await;
     for credential in [TOKEN, KEY] {
-        for answer in [Answer::Recorded, Answer::Busy, Answer::Refused] {
+        for answer in [
+            Answer::Recorded,
+            Answer::Busy,
+            Answer::Limited,
+            Answer::Refused,
+        ] {
             let api = Api::new();
             *api.answer.lock().unwrap() = answer;
             let cx = cx(config(Some(credential)), &api);
+            let before = common::token_refusals("tmdb");
             look_up(&pool, &cx).await;
             read_again(&pool, &reader).await;
             assert!(!api.seen().is_empty());
+            // Only the refusal (401) is counted where an alert reads it, never a rate limit or
+            // an outage. No other test here has TMDB refuse.
+            let counted = common::token_refusals("tmdb") - before;
+            if answer == Answer::Refused {
+                assert!(counted >= 1);
+            } else {
+                assert_eq!(counted, 0);
+            }
             assert!(api.credentials.lock().unwrap().iter().all(|sent| *sent));
             for url in api.seen() {
                 assert!(!url.contains(credential), "{url}");

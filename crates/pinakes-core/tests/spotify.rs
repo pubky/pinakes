@@ -505,12 +505,15 @@ async fn refused_credentials_keep_what_spotify_gave_and_retry_later(pool: sqlx::
             ],
         ),
     ] {
+        let before = common::token_refusals("spotify");
         let seen = run(&pool, config(Some(pair)), answers.clone()).await;
         assert_eq!(
             spotify_requests(&seen),
             asked.iter().collect::<Vec<_>>(),
             "{seen:?}"
         );
+        // Counted where an alert reads it (other tests here may count too: at least one).
+        assert!(common::token_refusals("spotify") > before);
         assert_eq!(
             rows(&pool, KEYS, &album).await,
             ["upc:4018939306052 spotify"]

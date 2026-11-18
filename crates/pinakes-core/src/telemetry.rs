@@ -60,8 +60,9 @@ pub struct Metrics {
     /// Nexus polls whose batch work panicked outside a feed line (the cursor holds; retried).
     pub ingest_panics: IntCounter,
     pub ingest_rejected: IntCounterVec,
-    /// Requests a source's service answered 401 or 403 to its configured token (it then reads
-    /// without it).
+    /// Refusals of an operator's configured key, token or app credentials by its service, as it
+    /// signals one (`sources::token_refused`; never a 429 or 5xx), by keyed source
+    /// (`sources::KEYED`), each at 0 from the start.
     pub token_refusals: IntCounterVec,
 }
 impl Metrics {
@@ -141,7 +142,7 @@ impl Metrics {
             token_refusals: metric!(
                 IntCounterVec,
                 "pinakes_source_token_refusals_total",
-                "Requests a source's service refused its configured token for (read without it)",
+                "Refusals of an operator's configured key, token or app credentials by its service (an auth refusal, never a 429 or 5xx), by keyed source",
                 &["source"]
             ),
             discovery: metric!(
@@ -247,6 +248,10 @@ impl Metrics {
             out.held.with_label_values(&[&manifest.source]);
             out.resets.with_label_values(&[&manifest.source]);
             out.success.with_label_values(&[&manifest.source]);
+        }
+        // Every keyed source's refusals from 0, so a key refused later is a rise an alert reads.
+        for source in crate::sources::KEYED {
+            out.token_refusals.with_label_values(&[source]);
         }
         Ok(out)
     }

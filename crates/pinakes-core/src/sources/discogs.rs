@@ -464,6 +464,11 @@ pub mod also_on {
 mod tests {
     use super::*;
 
+    /// Held by each test here that has Discogs refuse a credential, so one test's exact count of
+    /// `pinakes_source_token_refusals_total{source="discogs"}` sees no other's refusal.
+    static REFUSING: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(Default::default);
+
     fn read(file: &str) -> Value {
         serde_json::from_slice(&crate::sources::fixture::read("discogs", file)).unwrap()
     }
@@ -577,6 +582,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn the_card_reads_the_api_and_a_token_stays_out_of_errors() {
+        let _refusing = REFUSING.lock().await;
         let (egress, recorded) = crate::sources::fixture::egress(vec![
             (
                 "https://api.discogs.com/masters/21491",
@@ -595,6 +601,12 @@ mod tests {
                 403,
                 "text/html",
                 b"walled".to_vec(),
+            ),
+            (
+                "https://api.discogs.com/artists/2",
+                429,
+                "application/json",
+                b"{}".to_vec(),
             ),
         ]);
         let cx = Context {
@@ -615,10 +627,25 @@ mod tests {
             .unwrap();
         assert_eq!(d.status, crate::model::Status::Missing);
         let token = Credential::Token("s3cret-token".into());
+        let refusals = || {
+            crate::sources::token_refusals()
+                .into_iter()
+                .find(|(s, _)| *s == "discogs")
+                .map_or(0, |(_, n)| n)
+        };
+        let before = refusals();
         let error = record(&egress, Kind::Artist, 1, Some(&token))
             .await
             .unwrap_err();
         assert!(!format!("{error:?}").contains("s3cret"), "{error:?}");
+        // The refusal is counted where an alert reads it (`REFUSING` keeps the other refusing
+        // test out of the count); a rate limit is not.
+        assert_eq!(refusals(), before + 1);
+        let other = Credential::Token("other-token".into());
+        assert!(record(&egress, Kind::Artist, 2, Some(&other))
+            .await
+            .is_err());
+        assert_eq!(refusals(), before + 1);
         // Refused with the token, then without it.
         assert_eq!(
             recorded.asked(),
@@ -627,6 +654,7 @@ mod tests {
                 "https://api.discogs.com/masters/999999999",
                 "https://api.discogs.com/artists/1",
                 "https://api.discogs.com/artists/1",
+                "https://api.discogs.com/artists/2",
             ]
         );
     }
@@ -746,6 +774,7 @@ mod tests {
     /// A token Discogs refuses (expired, mistyped) is dropped: the record comes without it.
     #[tokio::test(start_paused = true)]
     async fn a_refused_token_falls_back_to_reading_without_it() {
+        let _refusing = REFUSING.lock().await;
         #[derive(Default)]
         struct Refusing {
             authorized: std::sync::atomic::AtomicUsize,

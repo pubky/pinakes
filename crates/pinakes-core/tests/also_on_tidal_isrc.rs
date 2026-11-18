@@ -23,11 +23,12 @@ fn fixture(name: &str) -> Option<Vec<u8>> {
     .ok()
 }
 
-/// What TIDAL answers instead of the recordings: a refusal at the token endpoint, or a status
-/// from the API (a 429 with a `Retry-After` of an hour).
+/// What TIDAL answers instead of the recordings: a refusal at the token endpoint, another status
+/// from it, or a status from the API (a 429 with a `Retry-After` of an hour).
 #[derive(Clone, Default)]
 struct Answers {
     refuse: bool,
+    token_status: Option<u16>,
     api_status: Option<u16>,
 }
 /// Answers TIDAL's token endpoint and its lookups by ISRC and barcode from the recordings;
@@ -74,7 +75,9 @@ impl Transport for Recorded {
         Ok(match (host, url.path()) {
             ("auth.tidal.com", "/v1/oauth2/token") => {
                 assert!(options.sensitive);
-                if self.answers.refuse {
+                if let Some(status) = self.answers.token_status {
+                    answer(status, b"{}".to_vec())
+                } else if self.answers.refuse {
                     answer(401, br#"{"error":"invalid_client"}"#.to_vec())
                 } else {
                     answer(
@@ -301,9 +304,9 @@ async fn off_or_without_credentials_nothing_asks_tidal(pool: sqlx::PgPool) {
     assert!(!links(&pool, &track).await.is_empty());
 }
 
-/// A refusal of the credentials (at the token endpoint, or a 403 from the API) and a rate limit
-/// (429) keep the links an earlier run found and retry later: after the five-minute hold
-/// (`tidal_auth`), or after the hour TIDAL asked for (`tidal_busy`).
+/// A refusal of the credentials (at the token endpoint, or a 403 from the API), a rate limit (429)
+/// and a timeout at the token endpoint (408) keep the links an earlier run found and retry later:
+/// after the five-minute hold (`tidal_auth`), or after the wait TIDAL asked for (`tidal_busy`).
 #[sqlx::test(migrations = "../../migrations")]
 async fn refusals_and_rate_limits_keep_the_links(pool: sqlx::PgPool) {
     let album = save(
@@ -349,15 +352,34 @@ async fn refusals_and_rate_limits_keep_the_links(pool: sqlx::PgPool) {
             "tidal_busy",
             3500.0..=3600.0,
         ),
+        // A timeout at the token endpoint is a wait, not a refusal of the credentials.
+        (
+            ("timeout-id", "timeout-secret"),
+            Answers {
+                token_status: Some(408),
+                ..Default::default()
+            },
+            "tidal_busy",
+            60.0..=3600.0,
+        ),
     ] {
         // Each case's retry counts from its own first failure.
         sqlx::query("UPDATE also_on_dirty SET attempts=0")
             .execute(&pool)
             .await
             .unwrap();
+        let before = common::token_refusals("tidal");
         let seen = run(&pool, config(Some(pair), true), answers.clone()).await;
         assert!(seen.iter().any(|s| s.contains("tidal.com")), "{seen:?}");
         assert_eq!(links(&pool, &album).await, found, "{class}");
+        // A refusal of the credentials (401 at the token endpoint, a 403 from the API) is counted
+        // where an alert reads it; a rate limit or a timeout is not.
+        let counted = common::token_refusals("tidal") - before;
+        if answers.api_status == Some(429) || answers.token_status.is_some() {
+            assert_eq!(counted, 0, "{class}");
+        } else {
+            assert!(counted >= 1, "{class}");
+        }
         let (error, seconds) = due(&pool, &album).await;
         assert_eq!(error.as_deref(), Some(class));
         assert!(wait.contains(&seconds), "{class}: {seconds}");

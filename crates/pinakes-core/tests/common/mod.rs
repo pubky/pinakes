@@ -7,6 +7,15 @@ pub mod media;
 use serde_json::Value;
 use std::collections::BTreeSet;
 
+/// How often `source`'s configured credential was refused in this test process
+/// (`pinakes_source_token_refusals_total{source}`).
+pub fn token_refusals(source: &str) -> u64 {
+    pinakes_core::sources::token_refusals()
+        .into_iter()
+        .find(|(s, _)| *s == source)
+        .map_or(0, |(_, n)| n)
+}
+
 /// A schema with its `$ref` followed; a dangling reference is an error and checks nothing.
 fn resolve<'a>(doc: &'a Value, schema: &'a Value, at: &str, errors: &mut Vec<String>) -> &'a Value {
     match schema["$ref"].as_str() {

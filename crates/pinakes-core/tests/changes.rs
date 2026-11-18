@@ -670,9 +670,25 @@ async fn ops_artifacts_reference_registered_metrics(pool: PgPool) {
             assert!(names.contains(name), "unregistered alert metric {name}");
         }
     }
+    // Every keyed source's refusals are a series from the start (at 0), and an alert reads them.
+    for source in pinakes_core::sources::KEYED {
+        assert!(
+            exposition.contains(&format!(
+                "pinakes_source_token_refusals_total{{source=\"{source}\"}}"
+            )),
+            "{source}"
+        );
+    }
+    assert!(rules
+        .iter()
+        .any(|r| r["alert"].as_str() == Some("ProviderKeyRefused")
+            && r["expr"]
+                .as_str()
+                .unwrap()
+                .contains("pinakes_source_token_refusals_total")));
     let dashboard: Value =
         serde_json::from_str(include_str!("../../../ops/grafana/pinakes.json")).unwrap();
-    assert_eq!(dashboard["panels"].as_array().unwrap().len(), 6);
+    assert_eq!(dashboard["panels"].as_array().unwrap().len(), 7);
     for panel in dashboard["panels"].as_array().unwrap() {
         for target in panel["targets"].as_array().unwrap() {
             for name in target["expr"]

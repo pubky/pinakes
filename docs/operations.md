@@ -290,7 +290,11 @@ that reads with the operator's token (`github`: `[sources.github] token` or `PIN
 `courtlistener`: `[sources.courtlistener] token` or `PINAKES_COURTLISTENER_TOKEN`) is on only with
 one. Its token is a secret, sent only to its service's API and never through a redirect. A token
 the service refuses (401; CourtListener's 403 too) switches the source off until restart, and
-`pinakes_source_token_refusals_total{source}` counts each refusal (Discogs' token too). A source
+`pinakes_source_token_refusals_total{source}` counts each refusal. That series counts every keyed
+provider's refusals (Discogs, Spotify, TIDAL, TMDB, Podcast Index and Ticketmaster too, as each
+signals one: a 401, a 403 where it means a refused key, or a refused token request; never a 429
+or 5xx), and the `ProviderKeyRefused` alert
+(`ops/alerts.yml`) reads it. A source
 lowers its service's host to the service's published rate (never above
 `limits.host_requests_per_second`) unless `limits.host_rates` names the host, and a request that
 would wait more than five seconds for its host (its slot, or the request ahead of it) is retried

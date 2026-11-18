@@ -18,9 +18,9 @@ rule_files:
   - /path/to/pinakes/ops/alerts.yml
 ```
 
-Import `grafana/pinakes.json` and select a Prometheus datasource. The six panels
-show ingestion lag, fetch outcomes, changes by class, canaries, queue depth and
-overdue refreshes. Grafana contact points remain operator configuration. Route only
+Import `grafana/pinakes.json` and select a Prometheus datasource. The seven panels
+show ingestion lag, fetch outcomes, changes by class, canaries, queue depth,
+overdue refreshes and provider key refusals. Grafana contact points remain operator configuration. Route only
 `severity=critical` (`IngestionStalled`, `IngestPanics`) to paging; other rules are warning/info.
 No messages are sent or contact points provisioned by these files.
 
@@ -52,7 +52,7 @@ No messages are sent or contact points provisioned by these files.
 | `pinakes_resolution_deferred_total{reason}` | Resolutions put off without a charged attempt, by reason: `missing_unconfirmed` (a missing answer waiting for the fetch that confirms it) |
 | `pinakes_also_on_service_errors_total{service,class}` | Failed also-on requests to a service (`wikidata`, `itunes`, `tidal`, `crossref`, …), by error class; the lookup goes on without that service |
 | `pinakes_also_on_recording_key_conflicts_total{source}` | Also-on runs that keyed a recording another source keys differently on the same resource, by source; both keys stay and the resource joins no recording group |
-| `pinakes_source_token_refusals_total{source}` | Requests where a source's service refused its configured token (`github`, `discogs`, `courtlistener`) |
+| `pinakes_source_token_refusals_total{source}` | Refusals of the operator's configured key, token or app credentials by its service, as each signals one (a 401; a 403 where the service uses it for a refused key, not GitHub's rate limit; a token endpoint answering anything but 200, 408, 429 or 5xx), never a 429 or 5xx. One series per keyed provider, each at 0 from the start: `courtlistener`, `discogs`, `github`, `podcast_index`, `spotify`, `ticketmaster`, `tidal`, `tmdb` |
 
 Database metric refreshes are cached for 15 seconds. Overdue excludes dead letters.
 Full JSON diagnostics are on the admin `/v1/info`; public info is redacted.
@@ -73,6 +73,18 @@ rules for 15 minutes without success and 10 minutes above 1000 lag, avoiding an
 extra delay on the first condition. `CanaryDown` uses the durable failure streak,
 not repeated Prometheus scrapes of one failed run. For `FeedHeld`, `CursorReset`,
 `SchemaDrift` and `RateLimited`, a new event stays visible for an hour.
+
+`ProviderKeyRefused` (warning) fires when a provider refuses its configured key, one alert per
+`source`: the key is mistyped, expired, revoked or its account lost access (Spotify answers 403
+while the app owner has no Premium plan). Check or rotate that provider's key
+([api-keys](../docs/api-keys.md)); keys are read only at start, so a new key needs a restart.
+Spotify, TIDAL, TMDB, Podcast Index and Ticketmaster keep asking with the key, so their alert
+holds while lookups keep being refused and clears six hours after the last refusal (a provider
+that takes a key back, a one-off refusal, or no lookup for that provider in six hours). A refusal
+before Prometheus first scrapes a new target is its starting value, so the alert shows only at
+the next refusal. GitHub, CourtListener and Discogs stop sending a refused key
+until restart (the first two then give their links web cards), so theirs holds until a restart
+resets the count.
 
 Run `scripts/check-ops` for promtool syntax validation. Without promtool it runs the Rust
 YAML/metric-registry test instead. `scripts/test` also parses

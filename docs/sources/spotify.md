@@ -83,7 +83,8 @@ appear in logs, the operator info, errors or debug output. Refused credentials (
 endpoint refuses them, the API answers 403, or it rejects a token under a minute old) are logged
 (`Spotify refused the client credentials`) and counted in
 `pinakes_also_on_service_errors_total{service="spotify"}` (class `refused`, `forbidden` or
-`rejected`); the Spotify links read meanwhile keep what Spotify gave them before and retry later
+`rejected`) and in `pinakes_source_token_refusals_total{source="spotify"}`, which the
+`ProviderKeyRefused` alert reads; the Spotify links read meanwhile keep what Spotify gave them before and retry later
 (`spotify_auth`, after the five-minute hold), and Spotify is asked again when the hold ends. A
 rate limit or an outage (429, 5xx) is waited out: no Spotify request before the time it asked
 for (`Retry-After`, a minute to an hour) has passed, and the links retry after it
@@ -100,7 +101,8 @@ Without it, the token endpoint still issues a token, but every API request answe
 `Active premium subscription required for the owner of the app.` For Pinakes that is refused
 credentials (above):
 - the log line `Spotify refused the client credentials` with `status` 403 and `class`
-  `forbidden`, and `pinakes_also_on_service_errors_total{service="spotify",class="forbidden"}`;
+  `forbidden`, `pinakes_also_on_service_errors_total{service="spotify",class="forbidden"}`, and
+  `pinakes_source_token_refusals_total{source="spotify"}` rising, so `ProviderKeyRefused` fires;
 - the Spotify links read meanwhile keep what Spotify gave them before and wait with
   `spotify_auth` in `also_on_dirty.last_error`;
 - the refusal is held five minutes, and Spotify is asked nothing while it holds, so it gets one

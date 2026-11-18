@@ -2309,6 +2309,27 @@ async fn platform_ua_config_class_c_and_secret_projection(pool: PgPool) {
         .unwrap();
     assert!(t.seen.lock().unwrap()[0].0.contains("apikey=test-secret"));
     assert!(!serde_json::to_string(&doc).unwrap().contains("test-secret"));
+    // A refused key (401, 403) is counted where an alert reads it; a rate limit (429) is not.
+    // No other test here has Ticketmaster refuse.
+    for status in [401, 403, 429] {
+        let (egress, t) = mock_egress(vec![
+            (status, json!({"fault": {"faultstring": "Invalid ApiKey"}})),
+            (404, Value::Null),
+            (404, Value::Null),
+        ]);
+        platform.web.egress = egress;
+        let before = common::token_refusals("ticketmaster");
+        let _ = platform
+            .resolve("https://www.ticketmaster.com/event/fixture")
+            .await;
+        assert!(t.seen.lock().unwrap()[0].0.contains("app.ticketmaster.com"));
+        let counted = common::token_refusals("ticketmaster") - before;
+        if status == 429 {
+            assert_eq!(counted, 0);
+        } else {
+            assert!(counted >= 1, "{status}");
+        }
+    }
     let (egress, _) = mock_egress(vec![(503, Value::Null)]);
     platform.web.egress = egress;
     let uri = "https://www.facebook.com/events/fixture";
