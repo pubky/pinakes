@@ -1207,7 +1207,8 @@ its card). A card replaced without a read (cleared after an error, scrubbed) lis
 item's `stream` is `null` as well when its stored form would not fit the store's bound (a URL
 near 2,048 bytes that JSON escaping doubles): the episode is listed all the same. A show card without a list of its own (a page
 whose feed could not be read, a service that names no feed) answers with the list of a member
-of its [group](#groups) that has one: the same show elsewhere. Only a card that is a show
+of its [group](#groups) that has one: the same show elsewhere (the member whose newest episode
+is the newest, of those the one with the longest list). Only a card that is a show
 (`PodcastSeries`, status `ok`) borrows a member's list: a card cleared after an error, found
 missing, or of another kind lists nothing, whatever its group holds. A known resource that is no
 show, or whose feed was not read yet, returns an empty list; an unknown ID is 404. Only a feed's
@@ -1220,7 +1221,10 @@ share one read), within three seconds and what is left of the read's own time. A
 holds serves the show card when it begins as the cut read does (else the feed is read afresh,
 once) and serves an item card as it is; the longer read is kept only when it gives the show, or
 that item's own episode. The cut read's card and list stand when that read fails, is slow, gives
-neither, or does not parse (a malformed byte or entity past the first megabyte); a Podcast Index or Apple show's feed that does not parse
+neither, or does not parse (a malformed byte or entity past the first megabyte); its list then
+keeps the older episodes a longer stored list holds under its own (the stored ones past the last
+episode both name, and whether that list's feed lists older ones), so one slow read does not
+cut a show back to the first megabyte's episodes; a Podcast Index or Apple show's feed that does not parse
 past the page cap is read within it. A page's alternate feed is read within the page cap. Why a route and not a fact: a fact is one string per name, and a card's document is
 bounded; why not occurrences: an episode has no instant to window by, no recurrence and no
 document of its own here.

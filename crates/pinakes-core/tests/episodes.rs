@@ -2001,3 +2001,150 @@ async fn an_entry_names_the_publishers_episode_page_and_its_other_links(pool: Pg
     assert_eq!(card_seven["id"], older, "{show_card}");
     assert_eq!(*card_seven, seven, "{show_card}");
 }
+
+/// A feed card's cut read whose read on gave nothing (`ResourceMeta::episodes_cut`: too slow, or
+/// the read failed) keeps the older episodes a longer stored list holds under its own, newer
+/// ones first, and what that list says of its feed; a list it shares no episode with, or a save
+/// without the flag, replaces the stored list as before.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_failed_read_on_keeps_the_longer_stored_list(pool: PgPool) {
+    let uri = "https://feeds.example.org/long.xml";
+    let list: Vec<Episode> = (1..=1001).rev().map(|n| episode(n, true)).collect();
+    let id = show(&pool, uri, Some(list)).await;
+    assert_eq!(rows(&pool, &id).await, 1000);
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let names = |page: &Value| -> Vec<String> {
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let cut = |list: Vec<Episode>, flagged: bool| {
+        let mut d = ResourceMeta::new(uri, "web", 86_400);
+        d.set_type("PodcastSeries");
+        d.episodes = Some(list);
+        d.episodes_older = true;
+        d.episodes_cut = flagged;
+        d
+    };
+    // The cut read's 100 with one new episode on top: still 1000, the new one first.
+    let d = cut((902..=1002).rev().map(|n| episode(n, true)).collect(), true);
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    assert_eq!(rows(&pool, &id).await, 1000);
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
+    assert_eq!(names(&page)[0], "Episode 1002");
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes?offset=100")).await;
+    assert_eq!(names(&page)[0], "Episode 902", "{page}");
+    assert_eq!(page["truncated"], true);
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes?offset=980")).await;
+    assert_eq!(names(&page)[19], "Episode 3", "{page}");
+    // A stored list that was the feed's whole one stays whole: `truncated` does not flip.
+    let whole: Vec<Episode> = (1..=183).rev().map(|n| episode(n, true)).collect();
+    show(&pool, uri, Some(whole)).await;
+    let d = cut((85..=184).rev().map(|n| episode(n, true)).collect(), true);
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    assert_eq!(rows(&pool, &id).await, 184);
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes?offset=180")).await;
+    assert_eq!(
+        names(&page),
+        ["Episode 4", "Episode 3", "Episode 2", "Episode 1"]
+    );
+    assert_eq!(page["truncated"], false, "{page}");
+    // A cut list the stored one shares nothing with (another feed's) is the list.
+    let other: Vec<Episode> = (1..=100)
+        .rev()
+        .map(|n| Episode {
+            guid: format!("other-{n}"),
+            ..episode(n + 2000, true)
+        })
+        .collect();
+    store::save_document(&pool, &id, 0, &cut(other, true))
+        .await
+        .unwrap();
+    assert_eq!(rows(&pool, &id).await, 100);
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
+    assert_eq!(page["truncated"], true);
+    // Without the flag, a cut read's list replaces the stored one, as any list does.
+    let list: Vec<Episode> = (1..=1001).rev().map(|n| episode(n, true)).collect();
+    show(&pool, uri, Some(list)).await;
+    let d = cut(
+        (902..=1001).rev().map(|n| episode(n, true)).collect(),
+        false,
+    );
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    assert_eq!(rows(&pool, &id).await, 100);
+}
+
+/// A show without a list of its own borrows, of its group members whose newest episode is the
+/// newest, the one with the longest list: a member whose list was stored before a longer one
+/// was kept (the same feed, read under an older bound) does not cut the show's list short.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_borrowed_list_is_the_longest_of_the_newest(pool: PgPool) {
+    let a = show(&pool, "https://feeds.example.org/show.xml", None).await;
+    let b = show(&pool, "https://podcastindex.org/podcast/1", None).await;
+    let apple = show(
+        &pool,
+        "https://podcasts.apple.com/us/podcast/show/id1",
+        None,
+    )
+    .await;
+    // The member that wins a tie by ID gets the short list.
+    let (low, high) = if a < b { (&a, &b) } else { (&b, &a) };
+    let long: Vec<Episode> = (1..=1000).rev().map(|n| episode(n, true)).collect();
+    let short: Vec<Episode> = (901..=1000).rev().map(|n| episode(n, true)).collect();
+    let save = |id: String, list: Vec<Episode>| {
+        let pool = pool.clone();
+        async move {
+            let uri: String = sqlx::query_scalar("SELECT uri FROM resource WHERE id=$1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            let mut d = ResourceMeta::new(&uri, "web", 86_400);
+            d.set_type("PodcastSeries");
+            d.episodes = Some(list);
+            store::save_document(&pool, &id, 0, &d).await.unwrap();
+        }
+    };
+    save(low.clone(), short).await;
+    save(high.clone(), long).await;
+    let group = "0123456789abcdef0123456789abcde2";
+    sqlx::query("INSERT INTO \"group\"(id) VALUES($1)")
+        .bind(group)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE group_unit SET group_id=$1 WHERE resource_id=ANY($2)")
+        .bind(group)
+        .bind(vec![a.clone(), b.clone(), apple.clone()])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let (_, page) = request(&app, &format!("/v1/resources/{apple}/episodes?offset=100")).await;
+    let items = page["items"].as_array().unwrap();
+    assert_eq!(items.len(), 20, "{page}");
+    assert_eq!(items[0]["guid"], "ep-900");
+    // A newer episode still wins over a longer list (grouped again, as the grouping pass would
+    // leave it after the save).
+    save(
+        low.clone(),
+        (901..=1001).rev().map(|n| episode(n, true)).collect(),
+    )
+    .await;
+    sqlx::query("INSERT INTO \"group\"(id) VALUES($1) ON CONFLICT DO NOTHING")
+        .bind(group)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE group_unit SET group_id=$1 WHERE resource_id=ANY($2)")
+        .bind(group)
+        .bind(vec![a.clone(), b.clone(), apple.clone()])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (_, page) = request(&app, &format!("/v1/resources/{apple}/episodes")).await;
+    assert_eq!(page["items"][0]["guid"], "ep-1001", "{page}");
+}

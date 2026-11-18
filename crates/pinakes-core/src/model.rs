@@ -522,6 +522,12 @@ pub struct ResourceMeta {
     #[serde(skip)]
     #[schema(ignore)]
     pub episodes_older: bool,
+    /// `episodes` is a feed card's cut read's list whose read on gave nothing this time
+    /// (`resolver::cards`: too slow, or the read failed): the save keeps the older episodes a
+    /// longer stored list holds under it (`episodes::store`). Never stored in the document.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub episodes_cut: bool,
     pub source: String,
     /// The also-on sources whose findings the queue wrote into this card itself, each with a
     /// fingerprint of every value it wrote (`titles`: the name and description; `films`,
