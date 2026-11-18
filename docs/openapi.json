@@ -853,10 +853,15 @@
               "integer",
               "null"
             ]
+          },
+          "truncated": {
+            "description": "Whether the show's feed lists older episodes than the list holds: the list is full, the\nlatest 1000 ([`KEPT`]). A client links the show on its own service for the rest. The\nsame on every page, whatever `q`.",
+            "type": "boolean"
           }
         },
         "required": [
-          "items"
+          "items",
+          "truncated"
         ],
         "type": "object"
       },
@@ -3126,7 +3131,7 @@
     },
     "/v1/resources/{id}/episodes": {
       "get": {
-        "description": "A podcast show's latest episodes as its feed lists them, newest first: the latest 100, in pages of at most 20 (`offset`, `next_offset`), optionally only those whose name holds `q` (any letter case), each with its episode's link (its feed item, which resolves to its PodcastEpisode card, or the link of the publisher's own episode card), its other links (`aliases`), date and public stream. The show's own list, else, for a card that is a show, that of a member of its group which has one (an Apple Podcasts show grouped with its feed). A known resource that is no show, or no longer one, or whose feed was not read yet, returns an empty list.",
+        "description": "A podcast show's latest episodes as its feed lists them, newest first: the latest 1000, in pages of at most 20 (`offset`, `next_offset`; `truncated` when the feed lists older ones), optionally only those whose name holds `q` (any letter case), each with its episode's link (its feed item, which resolves to its PodcastEpisode card, or the link of the publisher's own episode card), its other links (`aliases`), date and public stream. The show's own list, else, for a card that is a show, that of a member of its group which has one (an Apple Podcasts show grouped with its feed). A known resource that is no show, or no longer one, or whose feed was not read yet, returns an empty list.",
         "operationId": "list_episodes",
         "parameters": [
           {
@@ -3151,7 +3156,7 @@
             }
           },
           {
-            "description": "How many of the matching episodes to skip, newest first: 0–100, default 0 (a page's\n`next_offset` gives the next page's).",
+            "description": "How many of the matching episodes to skip, newest first: 0–1000, default 0 (a page's\n`next_offset` gives the next page's).",
             "in": "query",
             "name": "offset",
             "required": false,

@@ -165,17 +165,17 @@ async fn a_shows_latest_episodes_are_listed_newest_first_and_name_the_ones_pinak
 
 /// A save with a list replaces the show's rows whole; a show's save without one (a record read
 /// without its feed) keeps them; a save that makes the resource no show clears them; at most
-/// a hundred are kept.
+/// a thousand are kept.
 #[sqlx::test(migrations = "../../migrations")]
 async fn the_save_replaces_keeps_or_clears_the_list(pool: PgPool) {
     let uri = "https://feeds.example.org/show.xml";
     let id = show(
         &pool,
         uri,
-        Some((1..=130).map(|n| episode(n, true)).collect()),
+        Some((1..=1030).map(|n| episode(n, true)).collect()),
     )
     .await;
-    assert_eq!(rows(&pool, &id).await, 100);
+    assert_eq!(rows(&pool, &id).await, 1000);
     let first: String =
         sqlx::query_scalar("SELECT guid FROM podcast_episode WHERE resource_id=$1 AND position=0")
             .bind(&id)
@@ -191,7 +191,7 @@ async fn the_save_replaces_keeps_or_clears_the_list(pool: PgPool) {
     d.set_type("PodcastSeries");
     d.name = Some("Show, renamed".into());
     store::save_document(&pool, &id, 0, &d).await.unwrap();
-    assert_eq!(rows(&pool, &id).await, 100);
+    assert_eq!(rows(&pool, &id).await, 1000);
     // A shorter list replaces it whole.
     d.episodes = Some(vec![episode(30, true), episode(29, true)]);
     store::save_document(&pool, &id, 0, &d).await.unwrap();
