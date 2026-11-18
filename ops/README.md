@@ -74,14 +74,15 @@ extra delay on the first condition. `CanaryDown` uses the durable failure streak
 not repeated Prometheus scrapes of one failed run. For `FeedHeld`, `CursorReset`,
 `SchemaDrift` and `RateLimited`, a new event stays visible for an hour.
 
-`ProviderKeyRefused` (warning) fires once a provider has refused its configured key since the
-daemon started, one alert per `source`: the key is mistyped, expired, revoked or its account
-lost access (Spotify answers 403 while the app owner has no Premium plan). Check or rotate that
-provider's key ([api-keys](../docs/api-keys.md)) and restart Pinakes: keys are read only at
-start, and the restart resets the count, which clears the alert. It stays up until then on
-purpose, because GitHub, CourtListener and Discogs stop sending a refused key until restart (the
-first two then give their links web cards), so an hour's window would clear while the source
-is still off. A one-off refusal with a good key also clears on restart.
+`ProviderKeyRefused` (warning) fires when a provider refuses its configured key, one alert per
+`source`: the key is mistyped, expired, revoked or its account lost access (Spotify answers 403
+while the app owner has no Premium plan). Check or rotate that provider's key
+([api-keys](../docs/api-keys.md)); keys are read only at start, so a new key needs a restart.
+Spotify, TIDAL, TMDB, Podcast Index and Ticketmaster keep asking with the key, so their alert
+holds while refusals continue and clears six hours after the last one (a provider that takes a
+key back, or a one-off refusal). GitHub, CourtListener and Discogs stop sending a refused key
+until restart (the first two then give their links web cards), so theirs holds until a restart
+resets the count.
 
 Run `scripts/check-ops` for promtool syntax validation. Without promtool it runs the Rust
 YAML/metric-registry test instead. `scripts/test` also parses

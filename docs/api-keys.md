@@ -120,8 +120,10 @@ The `ProviderKeyRefused` alert in `ops/alerts.yml` reads
 request; never a 429 or 5xx) for GitHub, CourtListener,
 Discogs, Spotify, TIDAL, TMDB, Podcast Index and Ticketmaster. Load the alert rules before
 staging, and check that each provider you configured shows `0` on `/metrics` after the first
-cards using it are read. A non-zero value means the key is wrong, expired or revoked: fix it,
-then restart (the count, and the alert, reset at start). Spotify shows refusals while the app
+cards using it are read. A rising value means the key is wrong, expired or revoked: fix it and
+restart (keys are read only at start; the count resets then). The alert clears six hours after
+the last refusal, or at the restart for GitHub, CourtListener and Discogs, which stop sending a
+refused key until then. Spotify shows refusals while the app
 owner has no Premium plan ([Spotify](sources/spotify.md)).
 With the daemon stopped, `pinakesd --config <path> reextract also-on` queues fresh joins;
 `reextract web official` refreshes stored official-source cards. Start the daemon again and
