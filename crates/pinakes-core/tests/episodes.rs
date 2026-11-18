@@ -2029,12 +2029,24 @@ async fn a_failed_read_on_keeps_the_longer_stored_list(pool: PgPool) {
         d.episodes_cut = flagged;
         d
     };
-    // The cut read's 100 with one new episode on top: still 1000, the new one first.
-    let d = cut((902..=1002).rev().map(|n| episode(n, true)).collect(), true);
+    // The cut read's 100 with one new episode on top: still 1000, the new one first. An old
+    // episode high in the feed (a re-release) and an undated one (a trailer) in the cut move
+    // nothing else: no stored episode between them is lost.
+    let mut list: Vec<Episode> = (903..=1002).rev().map(|n| episode(n, true)).collect();
+    list.insert(3, episode(5, true));
+    list.insert(
+        1,
+        Episode {
+            published: None,
+            guid: "trailer".into(),
+            ..episode(0, true)
+        },
+    );
+    let d = cut(list, true);
     store::save_document(&pool, &id, 0, &d).await.unwrap();
     assert_eq!(rows(&pool, &id).await, 1000);
     let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
-    assert_eq!(names(&page)[0], "Episode 1002");
+    assert_eq!(names(&page)[..2], ["Episode 1002", "Episode 1001"]);
     let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes?offset=100")).await;
     assert_eq!(names(&page)[0], "Episode 902", "{page}");
     assert_eq!(page["truncated"], true);
@@ -2043,13 +2055,27 @@ async fn a_failed_read_on_keeps_the_longer_stored_list(pool: PgPool) {
     // A stored list that was the feed's whole one stays whole: `truncated` does not flip.
     let whole: Vec<Episode> = (1..=183).rev().map(|n| episode(n, true)).collect();
     show(&pool, uri, Some(whole)).await;
-    let d = cut((85..=184).rev().map(|n| episode(n, true)).collect(), true);
-    store::save_document(&pool, &id, 0, &d).await.unwrap();
-    assert_eq!(rows(&pool, &id).await, 184);
+    let mut list: Vec<Episode> = (85..=184).rev().map(|n| episode(n, true)).collect();
+    list.push(Episode {
+        published: None,
+        name: Some("Trailer".into()),
+        guid: "trailer".into(),
+        ..episode(0, true)
+    });
+    store::save_document(&pool, &id, 0, &cut(list, true))
+        .await
+        .unwrap();
+    assert_eq!(rows(&pool, &id).await, 185);
     let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes?offset=180")).await;
     assert_eq!(
         names(&page),
-        ["Episode 4", "Episode 3", "Episode 2", "Episode 1"]
+        [
+            "Episode 4",
+            "Episode 3",
+            "Episode 2",
+            "Episode 1",
+            "Trailer"
+        ]
     );
     assert_eq!(page["truncated"], false, "{page}");
     // A cut list the stored one shares nothing with (another feed's) is the list.

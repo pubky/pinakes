@@ -977,9 +977,9 @@ pub async fn enrich_until(
                 let until = crate::episodes::feed_deadline(deadline);
                 match tokio::time::timeout_at(until, longer).await {
                     Ok(Some(d)) => parsed = Ok(Some(d)),
-                    // The show's list is then the cut read's: the save keeps the older episodes
-                    // an earlier, longer read stored under it, so one slow or failed read on
-                    // does not cut the stored list back to the page cap.
+                    // The show's list is then the cut read's: the save joins the other episodes
+                    // an earlier, longer read stored to it, so one slow or failed read on does
+                    // not cut the stored list back to the page cap.
                     _ if !item && reads_on(&f) => {
                         if let Ok(Some(d)) = &mut parsed {
                             d.episodes_cut = d.episodes.is_some();

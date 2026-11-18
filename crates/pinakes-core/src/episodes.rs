@@ -86,6 +86,10 @@ pub struct Listed {
     /// (cut at its cap, or past its item cap), it has items past the [`SCANNED`] looked at, or
     /// more episodes than the [`KEPT`] kept (`EpisodePage::truncated`).
     pub older: bool,
+    /// The read went past the page cap but only the part within it parsed
+    /// ([`from_feed_listed`]): a show's save keeps the older episodes a longer stored list holds
+    /// (`ResourceMeta::episodes_cut`).
+    pub cut: bool,
 }
 /// The latest [`KEPT`] episodes among a feed's items: newest first by `pubDate`, undated ones
 /// after them in the feed's order; an item without a GUID, an enclosure or a link is no
@@ -103,6 +107,7 @@ pub fn listed(items: &[roxmltree::Node<'_, '_>], feed: &Url, partial: bool) -> L
     Listed {
         episodes: episodes.into_iter().map(|(_, e)| e).collect(),
         older,
+        cut: false,
     }
 }
 /// The latest [`KEPT`] episodes among a feed's items ([`listed`]).
@@ -126,6 +131,7 @@ pub fn from_feed_listed(f: &crate::resolver::egress::Fetched) -> Option<Listed> 
             truncated: true,
             ..f.clone()
         })
+        .map(|l| Listed { cut: true, ..l })
     })
 }
 fn read_feed(f: &crate::resolver::egress::Fetched) -> Option<Listed> {
@@ -445,8 +451,8 @@ fn bounded(mut s: String, max: usize) -> String {
 /// path that replaces a document passes here: a save, a clear): a list replaces the show's rows
 /// whole; a document that is no podcast show, or a show found missing or cleared, clears them;
 /// a show's document without a list (a record read without its feed) leaves them as they are.
-/// A cut read's list whose read on gave nothing (`ResourceMeta::episodes_cut`) keeps the older
-/// episodes of the stored list under it ([`under_stored`]).
+/// A cut read's list (`ResourceMeta::episodes_cut`: its read on gave nothing, or only the part
+/// within the page cap parsed) is joined by the stored list's other episodes ([`under_stored`]).
 pub(crate) async fn store(
     tx: &mut Transaction<'_, Postgres>,
     id: &str,
@@ -470,12 +476,15 @@ pub(crate) async fn store(
 pub(crate) fn is_show(type_path: &[String], status: &str) -> bool {
     type_path.iter().any(|t| t == "PodcastSeries") && status == "ok"
 }
-/// A cut read's `list` (whose feed lists older episodes: `older`) with the stored list's older
-/// episodes under it: the stored ones past the last one `list` names too (by GUID), in their
-/// order, and then what the stored list says of its feed. So a read on that was slow or failed
-/// once neither shortens a longer list an earlier read stored nor flips its `truncated`, while
-/// the cut read's newer episodes still come first. `list` as it is when the stored list names
-/// none of its episodes (another feed's, or none) or nothing past them.
+/// A cut read's `list` (whose feed lists older episodes: `older`) with the stored list's other
+/// episodes: every stored one `list` does not name (by GUID) joins it, and the whole is ordered
+/// as [`listed`] orders a feed's (newest first by date, undated ones last, else in order: `list`'s
+/// first). So a read on that was slow or failed once neither shortens a longer list an earlier
+/// read stored nor flips its `truncated` (the stored list's flag, when one of its episodes
+/// joins), while the cut read's newer episodes still come first; an undated or out-of-order item
+/// in the cut moves nothing else. An episode the feed has dropped stays until a read reads the
+/// feed's whole list again. `list` as it is when the stored list names none of its episodes
+/// (another feed's, or none) or nothing besides them.
 async fn under_stored(
     tx: &mut Transaction<'_, Postgres>,
     id: &str,
@@ -500,17 +509,20 @@ async fn under_stored(
     .fetch_all(&mut **tx)
     .await?;
     let named: std::collections::HashSet<&str> = list.iter().map(|e| e.guid.as_str()).collect();
-    let Some(last) = rows.iter().rposition(|r| named.contains(r.0.as_str())) else {
+    if !rows.iter().any(|r| named.contains(r.0.as_str())) {
         return Ok((list.to_vec(), older));
-    };
-    let below = &rows[last + 1..];
-    let Some(stored_older) = below.first().map(|r| r.6.unwrap_or(older)) else {
+    }
+    let joining: Vec<&Stored> = rows
+        .iter()
+        .filter(|r| !named.contains(r.0.as_str()))
+        .collect();
+    let Some(stored_older) = joining.first().map(|r| r.6.unwrap_or(older)) else {
         return Ok((list.to_vec(), older));
     };
     let mut merged = list.to_vec();
     merged.extend(
-        below
-            .iter()
+        joining
+            .into_iter()
             .map(|(guid, uri, name, image, published, stream, _)| Episode {
                 id: None,
                 uri: uri.clone(),
@@ -522,6 +534,8 @@ async fn under_stored(
                 stream: stream.as_deref().and_then(|s| serde_json::from_str(s).ok()),
             }),
     );
+    // Stable: equal dates keep the order above, as `listed` keeps the feed's.
+    merged.sort_by(|a, b| b.published.cmp(&a.published));
     Ok((merged, stored_older))
 }
 /// Clears a resource's episodes, and what its list says of its feed (`podcast_episode_list`): for
@@ -1478,6 +1492,7 @@ mod tests {
             .collect();
         let listed = from_feed_listed(&fetched(&feed(&items), false)).unwrap();
         assert!(!listed.older);
+        assert!(!listed.cut);
         assert_eq!(listed.episodes.len(), 183);
         assert_eq!(listed.episodes[182].name.as_deref(), Some("E1"));
         // Exactly as many as are kept: nothing older.
@@ -1507,7 +1522,16 @@ mod tests {
         assert!(body.len() > 2 * BODY_CAP);
         let listed = from_feed_listed(&fetched(&body, false)).unwrap();
         assert!(listed.older);
+        assert!(
+            listed.cut,
+            "the save keeps a longer stored list's older episodes"
+        );
         assert!((100..400).contains(&listed.episodes.len()));
+        assert!(
+            !from_feed_listed(&fetched(&feed(&items), false))
+                .unwrap()
+                .cut
+        );
         assert_eq!(listed.episodes[0].name.as_deref(), Some("E400"));
         // A short body that does not parse is no feed, as before.
         assert!(from_feed(&fetched(
