@@ -1215,10 +1215,12 @@ first 2000 items are looked at, and the newest 1000 of them kept: feeds list new
 few are out of order. A feed is read for its episodes up to 8 MiB, past the 1 MiB page cap, and
 cut at its last whole item there. A feed card's own read is cut at the page cap like any page's:
 when it gives the show (or an episode's feed item asked for is past the part read), the feed is
-read again up to 8 MiB at the address the read ended on (the cached copy when it begins as the
-cut read does, else afresh), within three seconds and what is left of the read's own time. The
-cut read's card and list stand when that read fails, is slow, or does not parse (a malformed
-byte or entity past the first megabyte); a Podcast Index or Apple show's feed that does not parse
+read again up to 8 MiB at the show's feed address (the item's `?guid=` dropped, so a show's items
+share one read), within three seconds and what is left of the read's own time. A copy the cache
+holds serves the show card when it begins as the cut read does (else the feed is read afresh,
+once) and serves an item card as it is; the longer read is kept only when it gives the show, or
+that item's own episode. The cut read's card and list stand when that read fails, is slow, gives
+neither, or does not parse (a malformed byte or entity past the first megabyte); a Podcast Index or Apple show's feed that does not parse
 past the page cap is read within it. A page's alternate feed is read within the page cap. Why a route and not a fact: a fact is one string per name, and a card's document is
 bounded; why not occurrences: an episode has no instant to window by, no recurrence and no
 document of its own here.

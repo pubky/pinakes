@@ -958,10 +958,21 @@ pub async fn enrich_until(
             };
             if is_feed && more {
                 // The read on and its parse together, within the read's own time
-                // (`episodes::feed_deadline`): late, the cut read's card stands.
+                // (`episodes::feed_deadline`): late, the cut read's card stands. It is taken
+                // only as what the cut read gave or lacked: the show, or the item's episode.
+                let wanted = if item {
+                    "PodcastEpisode"
+                } else {
+                    "PodcastSeries"
+                };
                 let longer = async {
                     let longer = read_on(egress, &f, ttl).await?;
-                    read(longer).await.ok()?.ok().flatten()
+                    read(longer)
+                        .await
+                        .ok()?
+                        .ok()
+                        .flatten()
+                        .filter(|d| d.type_name == wanted && d.status == Status::Ok)
                 };
                 let until = crate::episodes::feed_deadline(deadline);
                 if let Ok(Some(d)) = tokio::time::timeout_at(until, longer).await {
@@ -994,12 +1005,12 @@ pub async fn enrich_until(
 /// (`Fetched::truncated`): the feed read again as a show's episodes are read
 /// (`episodes::feed_options`: on to `episodes::FEED_READ`, cut there) at the show's feed address
 /// (`episodes::show_feed`: an item card's `?guid=` dropped, so a show's items share one read), as
-/// read at `f`'s address. A read just made is taken as it is; an answer the discovery cache held
-/// is taken when it begins with the cut read's bytes (the feed as the cut read has it), else, at
-/// the feed card's own address, the feed is read afresh once. An item card takes only a read
-/// that begins as its cut read does: a feed that answers otherwise at the show's address is not
-/// its feed. `None`, and the cut read stands, when that fails, ends elsewhere or is no longer,
-/// and for a feed whose address carries a credential. The caller bounds its time. So a show's
+/// read at `f`'s address. A read just made is taken as it is. An answer the discovery cache held
+/// is taken by the feed card when it begins with the cut read's bytes (the feed as the cut read
+/// has it), else the feed is read afresh once; an item card takes it as it is (the caller keeps
+/// its parse only when it is the item's own episode). `None`, and the cut read stands, when that
+/// fails, ends elsewhere or is no longer, and for a feed whose address carries a credential. The
+/// caller bounds its time. So a show's
 /// card lists, and an old episode's card reads, a back catalogue past the first megabyte, while
 /// the page read (`web::extract`) keeps the page cap.
 async fn read_on(egress: &Egress, f: &Fetched, ttl: u64) -> Option<Fetched> {
@@ -1025,7 +1036,7 @@ async fn read_on(egress: &Egress, f: &Fetched, ttl: u64) -> Option<Fetched> {
         .ok()
         .filter(|l| longer(l));
     let read = match first {
-        Some(l) if begins(&l) || (own && !held) => Some(l),
+        Some(l) if !own || !held || begins(&l) => Some(l),
         _ if own && held => Box::pin(egress.fetch_with(at.as_str(), &options))
             .await
             .ok()
@@ -1713,11 +1724,34 @@ mod tests {
             ("PodcastEpisode", Some("E1"))
         );
         assert_eq!(recorded.asked(), [uri]);
-        let (egress, _) = feed(&long_feed(300, 7000));
+        // A held copy older than the cut read (a new episode since) still gives the item.
+        let (egress, recorded) = feed(&whole);
+        egress
+            .seed(
+                uri,
+                &crate::episodes::feed_options(),
+                3600,
+                crate::sources::fixture::page(
+                    uri,
+                    "application/rss+xml",
+                    long_feed(299, 8000).into_bytes(),
+                    None,
+                ),
+            )
+            .await
+            .unwrap();
         let e = read(egress, old, cut(old)).await;
-        assert_ne!(
-            e.type_name, "PodcastEpisode",
-            "another feed at the show's address is not its feed"
+        assert_eq!(e.name.as_deref(), Some("E1"));
+        assert!(recorded.asked().is_empty(), "the held copy, no read");
+        // Another feed at the show's address, without the item, gives nothing: no missing card.
+        let other = long_feed(300, 8000).replace("<guid>e", "<guid>x");
+        let (egress, _) = feed(&other);
+        let e = read(egress, old, cut(old)).await;
+        assert_ne!(e.type_name, "PodcastEpisode");
+        assert_eq!(
+            e.status,
+            Status::Ok,
+            "never a missing card from another feed"
         );
         let new = "https://feeds.example.org/show.xml?guid=e300";
         let (egress, recorded) = feed(&whole);
@@ -1746,6 +1780,77 @@ mod tests {
         assert!(recorded.asked().is_empty());
     }
 
+    /// Only a refusal that names an access token stops a provider's other frames; a bare 401 (one
+    /// private object) stops only that link's.
+    #[test]
+    fn only_a_token_refusal_is_remembered_for_the_whole_endpoint() {
+        assert!(wants_token(
+            br#"{"error":{"message":"(#200) Provide valid app ID","type":"OAuthException"},"hint":"An access token is required"}"#
+        ));
+        assert!(wants_token(br#"{"error":"missing access_token"}"#));
+        assert!(!wants_token(b"Unauthorized"));
+        assert!(!wants_token(br#"{"error":"This video is private"}"#));
+        assert!(!wants_token(b""));
+        // Only the start of the answer is read.
+        let late = format!("{}access token", " ".repeat(4096));
+        assert!(!wants_token(late.as_bytes()));
+    }
+
+    #[test]
+    fn official_apis_outlast_their_fetch_timeout() {
+        // A fetch gives up after 10 seconds; the route waits at least a second longer, so a
+        // source's own answer to a slow fetch (e.g. USGS's retry) always comes first.
+        for kind in ["official", "nostr"] {
+            assert!(budget(kind) >= Duration::from_secs(11), "{kind}");
+            assert!(budget(kind) < crate::queue::RESOLVE_TIMEOUT, "{kind}");
+        }
+    }
+
+    /// Only a body that starts as a JSON object is read as an ActivityPub object, whatever its
+    /// content type says: any other (an HTML page) asks for no parse job.
+    #[tokio::test]
+    async fn only_a_json_object_is_read_as_an_activitypub_object() {
+        let uri = "https://social.example/notes/1";
+        let note = r#"{"type":"Note","id":"https://social.example/notes/1","to":"https://www.w3.org/ns/activitystreams#Public","content":"<p>Hello</p>"}"#;
+        let read = move |content_type: &'static str, body: String| async move {
+            let f = crate::sources::fixture::page(uri, content_type, body.into(), None);
+            let before = crate::resolver::html::counted::jobs();
+            let doc = parse_activitypub(uri, &f, 100).await.unwrap();
+            (crate::resolver::html::counted::jobs() - before, doc)
+        };
+        // The object, under its own type, another, or none, and after JSON's white space.
+        for (content_type, body) in [
+            ("application/activity+json", note.to_owned()),
+            ("text/html", note.to_owned()),
+            ("", format!(" \t\r\n{note}")),
+        ] {
+            let (jobs, doc) = read(content_type, body).await;
+            assert_eq!(jobs, 1, "{content_type}");
+            let doc = doc.unwrap();
+            assert_eq!(doc.source, "activitypub", "{content_type}");
+            assert_eq!(doc.type_name, "SocialMediaPosting", "{content_type}");
+            assert_eq!(doc.description.as_deref(), Some("Hello"), "{content_type}");
+        }
+        // A JSON object that is no ActivityPub object is read and is none.
+        let (jobs, doc) = read("application/json", r#"{"type":"Video"}"#.into()).await;
+        assert_eq!((jobs, doc.is_none()), (1, true));
+        // Anything else is none without a parse job: a page, a list, text, a byte order mark
+        // before the object (no JSON), nothing.
+        for body in [
+            format!("<html><head><title>{note}</title></head></html>"),
+            format!("[{note}]"),
+            "Note".to_owned(),
+            format!("\u{feff}{note}"),
+            String::new(),
+            "  ".to_owned(),
+        ] {
+            let (jobs, doc) = read("application/activity+json", body.clone()).await;
+            assert_eq!((jobs, doc.is_none()), (0, true), "{body}");
+        }
+    }
+
+    /// `enrich` asks the endpoints the page read found in the head, without parsing the page
+    /// again; a body that read did not parse is parsed here, once.
     #[tokio::test(start_paused = true)]
     async fn enrichment_takes_the_alternates_the_page_read_found() {
         let uri = "https://blog.example/post";
