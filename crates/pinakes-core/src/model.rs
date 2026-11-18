@@ -517,6 +517,11 @@ pub struct ResourceMeta {
     #[serde(skip)]
     #[schema(ignore)]
     pub episodes: Option<Vec<crate::episodes::Episode>>,
+    /// Whether the show's feed lists older episodes than `episodes` (`episodes::Listed::older`),
+    /// written with them (`podcast_episode_list`). Never stored in the document.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub episodes_older: bool,
     pub source: String,
     /// The also-on sources whose findings the queue wrote into this card itself, each with a
     /// fingerprint of every value it wrote (`titles`: the name and description; `films`,

@@ -64,7 +64,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `preview_cache_capacity` | `10000` | Preview cache entries. |
 | `preview_new_per_hour` | `1000` | New previews per hour for the whole instance; over it `POST /v1/resolve` answers 503. |
 | `preview_new_per_client_per_hour` | `0` | New previews per hour one client address may take (0: no share); over it `POST /v1/resolve` answers 429. |
-| `podcast_items` | `1000` | Podcast feed items read per scan. |
+| `podcast_items` | `2000` | Podcast feed items read per scan (a show's list looks at its first 2000 and keeps the newest 1000). |
 | `group_max_members` | `256` | Most members of one automatic group. |
 | `group_max_distance_m` | `500.0` | Farthest two located members of one group (metres). |
 | `group_max_graph_units` | `20000` | Units one grouping pass may read. |
@@ -581,11 +581,15 @@ scanning) follow RSS alternates on pages without a typed card. Discovery decisio
 `pinakes_discovery_decisions_total{kind,decision}`. A podcast show's card reads the show's feed
 for its latest episodes at each refresh (a feed card from the feed it is; a Podcast Index or
 Apple Podcasts show page, and a player page opening a show by its Apple ID, from the feed its
-record names: one feed request per read, cached for the card's lifetime, cut at the page cap,
+record names: one feed request per read, cached for the card's lifetime, cut at 8 MiB,
 fetched and parsed within three seconds and what is left of the read's deadline, so a slow feed
-or a wait for a parser costs the list and never the card), kept in `podcast_episode` (the rows
-follow the document: replaced at a save, cleared when the card is cleared or scrubbed; the newest
-100 of a feed's first 200 items) and served by `GET /v1/resources/{id}/episodes`
+or a wait for a parser costs the list and never the card; a feed card whose own read was cut at
+the page cap reads its feed again so for its show, keeping the cut read's card and list when that
+fails or does not parse), kept in `podcast_episode` (the rows follow the document: replaced at a
+save, cleared when the card is cleared or scrubbed; the newest 1000 of a feed's first 2000 items),
+with whether the feed lists older ones in `podcast_episode_list` (written and cleared with the
+rows), and served by
+`GET /v1/resources/{id}/episodes`
 ([API](api.md#episodes)). A list stored before entries named their feed item names the item's
 page until the show is read again.
 After the upgrade that added them, the lists fill as shows are read again: `reextract all`
