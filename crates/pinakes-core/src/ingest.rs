@@ -575,7 +575,7 @@ mod tests {
             "next_cursor": 6,
         });
         let app = Router::new().route(
-            "/v0/resources/changes",
+            "/v1/resources/changes",
             get(move || {
                 let page = page.clone();
                 async move {

@@ -815,7 +815,7 @@ every matching link either way.
 
 **Reach.** Following and friends lists come from Nexus in pages of 200, at most 1,000 authors,
 cached per viewer for five minutes. `wot_2` (two steps of the follow graph) comes from Nexus's
-reach-set route, `GET /v0/user/{viewer}/reach-set?depth=2` (`{authors, truncated}`, at most 1,000,
+reach-set route, `GET /v1/user/{viewer}/reach-set?depth=2` (`{authors, truncated}`, at most 1,000,
 with an `ETag`), only where the operator says the Nexus serves it (`nexus_reach_set = true`;
 else `wot_2` answers 501): it is kept five minutes, then asked again with its `ETag` and kept
 while Nexus answers 304. `reach_truncated: true` warns that the `reach` or `boost` set was
@@ -2018,7 +2018,7 @@ layers, with the caller's address:
 | `lookup` | `GET /v1/search?key=` | Compact cards |
 | `group` | `GET /v1/groups/{id}` | `id`, `type`, `keys`, every member's compact card, and `best`: the most complete readable member of the group's type |
 | `types` | `GET /v1/search?facet=type&limit=1` and `GET /v1/info` | The card types with their counts, and `resolves` |
-| `social` | `POST /v1/resources/lookup` for card `ids`, then Nexus `POST /v0/stream/resources/by_ids` (100 URIs a call) with each card's `uri` and `refs`, and any plain `uris`; 1–100 entries together, optional `viewer` | Per card (or link): `asked` (the URIs sent, the card's own first), `found` (those Nexus knew), and the tags merged over them: per label `taggers_count` (the taggers the views list, each once, or the most one view counts, whichever is more) and `viewer_tagged`; `taggers_count` over all labels, the same way. A view counts taggers it does not list, who may be ones another view lists: over several such views a count is a lower bound, marked `at_least: true`. An alias's id (a spelling, or a card that became one after it was read) is answered under the id asked, with `root`, the card that answers for it. `unknown_ids` names ids Pinakes does not know |
+| `social` | `POST /v1/resources/lookup` for card `ids`, then Nexus `POST /v1/stream/resources/by_ids` (100 URIs a call) with each card's `uri` and `refs`, and any plain `uris`; 1–100 entries together, optional `viewer` | Per card (or link): `asked` (the URIs sent, the card's own first), `found` (those Nexus knew), and the tags merged over them: per label `taggers_count` (the taggers the views list, each once, or the most one view counts, whichever is more) and `viewer_tagged` (a view's `tag_uri` for the label addresses the viewer's own tag file); `taggers_count` over all labels, the same way. A view counts taggers it does not list, who may be ones another view lists: over several such views a count is a lower bound, marked `at_least: true`. An alias's id (a spelling, or a card that became one after it was read) is answered under the id asked, with `root`, the card that answers for it. `unknown_ids` names ids Pinakes does not know |
 
 A compact card keeps `id`, `uri`, `status`, `type`, `name`, `description` (at most 300
 characters), `image`, `site`, `point`, `start`, `end`, `group`, `also_on` (`uri`, `site`, and

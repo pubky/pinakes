@@ -76,13 +76,14 @@ test('the social tool is judged against the batch view, five tags at most', () =
   const tag = label => ({ label, taggers: ['me'] });
   const five = ['a', 'b', 'c', 'd', 'e'].map(tag);
   const row = (uri, tags) => ({ details: { id: 'n', uri }, tags });
-  const item = tags => ({ uri: 'x', tags: tags.map(t => ({ label: t.label, taggers_count: 1 })) });
+  const item = (tags, mine = true) => ({ uri: 'x', tags: tags.map(t => ({ label: t.label, taggers_count: 1, viewer_tagged: mine && t.label === 'run' })) });
   const [listed, full] = ['https://example.org/listed', 'https://example.org/full'];
   const hydrated = [row(listed, [tag('run'), ...five.slice(1)]), row(full, five)];
   socialAgrees(item([tag('run')]), hydrated, listed, 'run');
   // Five established tags push the run's out of both answers: the tool agrees with the view.
   socialAgrees(item([...five].reverse()), hydrated, full, 'run');
   assert.throws(() => socialAgrees(item(five), hydrated, listed, 'run'), /returns the run's tag/);
+  assert.throws(() => socialAgrees(item([tag('run')], false), hydrated, listed, 'run'), /viewer tagged the run's label/);
   assert.throws(() => socialAgrees(item(five.slice(1)), hydrated, full, 'run'), /answers as Nexus's batch view/);
   assert.throws(() => socialAgrees(undefined, hydrated, full, 'run'), /Missing social answer/);
   assert.throws(() => socialAgrees(item(five), hydrated, 'https://example.org/absent', 'run'), /Missing Nexus hydration/);

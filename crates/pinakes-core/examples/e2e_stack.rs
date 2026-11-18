@@ -322,14 +322,16 @@ async fn feed(
         }),
     )
 }
-/// Nexus's batch view by `uris`, answered in request order.
+/// Nexus's batch view by `uris` (`/v1`), answered in request order. A tag's `tag_uri` is the
+/// address of the viewer's tag file, when the viewer (`viewer_id`) is the run's author.
 async fn hydrate(State(f): State<Fixture>, Json(q): Json<Value>) -> Json<Value> {
     let b = f.boundary.lock().unwrap();
     let uris = q["uris"].as_array().cloned().unwrap_or_default();
+    let mine = q["viewer_id"] == AUTHOR;
     Json(Value::Array(uris.iter().filter_map(|v| {
         let (id, uri, _) = identity(v.as_str()?).ok()?;
         let lines:Vec<_>=b.lines.iter().filter(|l|l.uri==uri && matches!(l.op,Op::Put) && b.tags.contains_key(&l.object_path)).collect();
-        lines.first().map(|line|json!({"details":{"id":id,"uri":line.uri},"taggers_count":1,"tags":lines.iter().map(|l|json!({"label":l.label,"taggers":[AUTHOR],"taggers_count":1,"relationship":true})).collect::<Vec<_>>()}))
+        lines.first().map(|line|json!({"details":{"id":id,"uri":line.uri},"taggers_count":1,"tags":lines.iter().map(|l|json!({"label":l.label,"taggers":[AUTHOR],"taggers_count":1,"tag_uri":mine.then(|| format!("pubky://{AUTHOR}{}", l.object_path))})).collect::<Vec<_>>()}))
     }).collect()))
 }
 fn main() -> Result<()> {
@@ -480,15 +482,15 @@ async fn run(pool: sqlx::PgPool, f: Fixture) -> Result<()> {
                 "/search",
                 get(|State(f): State<Fixture>| async move { Json(vec![f.place()]) }),
             )
-            .route("/v0/resources/changes", get(feed))
-            .route("/v0/stream/resources/by_ids", post(hydrate))
+            .route("/v1/resources/changes", get(feed))
+            .route("/v1/stream/resources/by_ids", post(hydrate))
             // The run's author follows and befriends itself: a reach or boost set of one.
             .route(
-                "/v0/user/{id}/following",
+                "/v1/user/{id}/following",
                 get(|| async { Json(vec![AUTHOR]) }),
             )
             .route(
-                "/v0/user/{id}/friends",
+                "/v1/user/{id}/friends",
                 get(|| async { Json(vec![AUTHOR]) }),
             )
             .with_state(f.clone()),

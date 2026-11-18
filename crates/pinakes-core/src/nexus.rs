@@ -178,7 +178,7 @@ impl Nexus {
     pub async fn changes(&self, cursor: i64) -> Result<FeedPage> {
         let response = self
             .client
-            .get(format!("{}/v0/resources/changes", self.base))
+            .get(format!("{}/v1/resources/changes", self.base))
             .query(&[("cursor", cursor), ("limit", 1000)])
             .send()
             .await
@@ -204,7 +204,7 @@ impl Nexus {
             length,
         })
     }
-    /// Nexus's batch resource view of `uris` (`POST /v0/stream/resources/by_ids`, 1–100), for
+    /// Nexus's batch resource view of `uris` (`POST /v1/stream/resources/by_ids`, 1–100), for
     /// `viewer` when given: one view per URI it knows, in request order, with its tags and tagger
     /// count. A Nexus that knows none of them answers an empty list; one without this route (a 404)
     /// is an error, as any other failed answer is, never an empty one.
@@ -219,7 +219,7 @@ impl Nexus {
         }
         let response = self
             .client
-            .post(format!("{}/v0/stream/resources/by_ids", self.base))
+            .post(format!("{}/v1/stream/resources/by_ids", self.base))
             .json(&body)
             .send()
             .await
@@ -276,7 +276,7 @@ impl Nexus {
         cache.insert(key, (Instant::now(), result.clone(), etag));
         Ok(result)
     }
-    /// The `wot_2` set from Nexus's reach-set route (`GET /v0/user/{viewer}/reach-set?depth=2`:
+    /// The `wot_2` set from Nexus's reach-set route (`GET /v1/user/{viewer}/reach-set?depth=2`:
     /// `{authors, truncated}` with an `ETag`), asked with the `ETag` of the set `held`, which a
     /// 304 keeps. An unknown viewer has an empty set.
     async fn fetch_reach_set(
@@ -286,7 +286,7 @@ impl Nexus {
     ) -> Result<(ReachSet, Option<String>)> {
         let mut request = self
             .client
-            .get(format!("{}/v0/user/{viewer}/reach-set", self.base))
+            .get(format!("{}/v1/user/{viewer}/reach-set", self.base))
             .query(&[("depth", 2)]);
         if let Some((_, etag)) = &held {
             request = request.header(reqwest::header::IF_NONE_MATCH, etag);
@@ -331,7 +331,7 @@ impl Nexus {
         for skip in (0..=1000).step_by(200) {
             let response = self
                 .client
-                .get(format!("{}/v0/user/{viewer}/{reach}", self.base))
+                .get(format!("{}/v1/user/{viewer}/{reach}", self.base))
                 .query(&[("skip", skip), ("limit", 200)])
                 .send()
                 .await
@@ -366,6 +366,28 @@ pub fn valid_author(id: &str) -> bool {
         && id
             .bytes()
             .all(|c| b"ybndrfg8ejkmcpqxot1uwisza345h769".contains(&c))
+}
+/// The tagger a `/v1` tag's `tag_uri` names: the author of the tag file it addresses
+/// (`pubky://<author>/pub/<namespace>/tags/<id>`, the namespace one or more segments, such as
+/// `pubky.app` or `social/v1`: the stored address of their tag of that label; the
+/// batch view sets it for the viewer's own tag only). `None` for anything else: no tag file, an
+/// invalid author, an empty or dot segment, a query or fragment.
+pub fn tag_file_author(tag_uri: &str) -> Option<&str> {
+    let rest = tag_uri.strip_prefix("pubky://")?;
+    let (author, path) = rest.split_at(rest.find('/')?);
+    if !valid_author(author) || path.len() > 2048 || path.contains(['?', '#', '\\', '\0']) {
+        return None;
+    }
+    let segments: Vec<&str> = path.split('/').collect();
+    let real = |s: &&str| !s.is_empty() && *s != "." && *s != "..";
+    match segments.as_slice() {
+        ["", "pub", app @ .., "tags", id]
+            if !app.is_empty() && app.iter().all(real) && real(id) =>
+        {
+            Some(author)
+        }
+        _ => None,
+    }
 }
 async fn bounded_json<T: DeserializeOwned>(response: reqwest::Response) -> Result<T> {
     Ok(serde_json::from_slice(&bounded_bytes(response).await?)?)
@@ -441,51 +463,114 @@ mod tests {
         }
     }
 
+    /// A `/v1` tag's `tag_uri` names its tagger only when it is a tag file in that tagger's
+    /// storage; anything else names no one.
+    #[test]
+    fn a_tag_uri_names_the_author_of_its_tag_file() {
+        let me = "y".repeat(52);
+        for path in [
+            "/pub/pubky.app/tags/7T0R9X6A2E1L",
+            "/pub/social/v1/tags/7T0R9X6A2E1L",
+            "/pub/pinakes.e2e/tags/0034A",
+        ] {
+            let uri = format!("pubky://{me}{path}");
+            assert_eq!(tag_file_author(&uri), Some(me.as_str()), "{uri}");
+        }
+        let short = "y".repeat(51);
+        let upper = "Y".repeat(52);
+        for uri in [
+            String::new(),
+            "true".into(),
+            format!("https://{me}/pub/pubky.app/tags/X"),
+            format!("pubky://{me}"),
+            format!("pubky://{me}/"),
+            format!("pubky://{short}/pub/pubky.app/tags/X"),
+            format!("pubky://{upper}/pub/pubky.app/tags/X"),
+            format!("pubky://{me}/pub/pubky.app/posts/X"),
+            format!("pubky://{me}/pub/pubky.app/tags/"),
+            format!("pubky://{me}/pub/pubky.app/tags/X/Y"),
+            format!("pubky://{me}/pub/tags/X"),
+            format!("pubky://{me}/pub//tags/X"),
+            format!("pubky://{me}/pub/../tags/X"),
+            format!("pubky://{me}/pub/pubky.app/tags/.."),
+            format!("pubky://{me}/priv/pubky.app/tags/X"),
+            format!("pubky://{me}/pub/pubky.app/tags/X?viewer=1"),
+            format!("pubky://{me}/pub/pubky.app/tags/X#a"),
+            format!("pubky://{me}/pub/pubky.app\\tags/X"),
+            format!("pubky://{me}/pub/pubky.app/tags/{}", "X".repeat(2048)),
+        ] {
+            assert_eq!(tag_file_author(&uri), None, "{uri}");
+        }
+    }
+
     /// Every request to the Nexus (the feed, the batch view, each reach list's pages and the
-    /// reach-set route) carries the configured `Authorization` header, and none without one.
+    /// reach-set route) goes to its `/v1` route and carries the configured `Authorization`
+    /// header, and none without one. The Nexus here answers on `/v0` too, as one serving both
+    /// prefixes does: a request there would be recorded under `v0`.
     #[tokio::test]
-    async fn every_nexus_request_carries_the_configured_authorization() {
+    async fn every_nexus_request_is_on_v1_and_carries_the_configured_authorization() {
         use axum::{http::HeaderMap, routing::post};
-        // Each call's path and the header it carried.
+        // Each call's prefix and route, and the header it carried.
         type Seen = Arc<std::sync::Mutex<Vec<(String, Option<String>)>>>;
         let seen: Seen = Arc::default();
-        let record = |seen: &Seen, path: &str, headers: &HeaderMap| {
+        let record = |seen: &Seen, version: &str, route: &str, headers: &HeaderMap| {
             let auth = headers
                 .get("authorization")
                 .map(|v| v.to_str().unwrap().to_owned());
-            seen.lock().unwrap().push((path.to_owned(), auth));
+            seen.lock()
+                .unwrap()
+                .push((format!("{version} {route}"), auth));
         };
         let app = {
             let (a, b, c) = (seen.clone(), seen.clone(), seen.clone());
             Router::new()
                 .route(
-                    "/v0/resources/changes",
-                    get(move |headers: HeaderMap| async move {
-                        record(&a, "changes", &headers);
-                        (
-                            [("x-events-length", "0")],
-                            Json(serde_json::json!({"lines": [], "next_cursor": 0})),
-                        )
-                    }),
+                    "/{version}/resources/changes",
+                    get(
+                        move |Path(version): Path<String>, headers: HeaderMap| async move {
+                            record(&a, &version, "changes", &headers);
+                            (
+                                [("x-events-length", "0")],
+                                Json(serde_json::json!({"lines": [], "next_cursor": 0})),
+                            )
+                        },
+                    ),
                 )
                 .route(
-                    "/v0/stream/resources/by_ids",
-                    post(move |headers: HeaderMap| async move {
-                        record(&b, "by_ids", &headers);
-                        Json(serde_json::json!([]))
-                    }),
+                    "/{version}/stream/resources/by_ids",
+                    post(
+                        move |Path(version): Path<String>, headers: HeaderMap| async move {
+                            record(&b, &version, "by_ids", &headers);
+                            Json(serde_json::json!([]))
+                        },
+                    ),
                 )
                 .route(
-                    "/v0/user/{viewer}/{list}",
-                    get(move |Path((_, list)): Path<(String, String)>, headers: HeaderMap| async move {
-                        record(&c, &list, &headers);
-                        if list == "reach-set" {
-                            return Json(serde_json::json!({"authors": [], "truncated": false}));
-                        }
-                        // A full first page, so the list is read on.
-                        let n = c.lock().unwrap().iter().filter(|(p, _)| *p == list).count();
-                        Json(serde_json::json!(if n == 1 { vec!["y".repeat(52); 200] } else { vec![] }))
-                    }),
+                    "/{version}/user/{viewer}/{list}",
+                    get(
+                        move |Path((version, _, list)): Path<(String, String, String)>,
+                              headers: HeaderMap| async move {
+                            record(&c, &version, &list, &headers);
+                            if list == "reach-set" {
+                                return Json(
+                                    serde_json::json!({"authors": [], "truncated": false}),
+                                );
+                            }
+                            // A full first page, so the list is read on.
+                            let route = format!("{version} {list}");
+                            let n = c
+                                .lock()
+                                .unwrap()
+                                .iter()
+                                .filter(|(p, _)| *p == route)
+                                .count();
+                            Json(serde_json::json!(if n == 1 {
+                                vec!["y".repeat(52); 200]
+                            } else {
+                                vec![]
+                            }))
+                        },
+                    ),
                 )
         };
         let (url, task) = server(app).await;
@@ -506,13 +591,13 @@ mod tests {
             assert_eq!(
                 paths,
                 [
-                    "changes",
-                    "by_ids",
-                    "following",
-                    "following",
-                    "friends",
-                    "friends",
-                    "reach-set"
+                    "v1 changes",
+                    "v1 by_ids",
+                    "v1 following",
+                    "v1 following",
+                    "v1 friends",
+                    "v1 friends",
+                    "v1 reach-set"
                 ]
             );
             assert!(
@@ -522,6 +607,35 @@ mod tests {
         }
         // No value is none.
         assert!(Nexus::new(&url, Some(" ")).is_ok());
+        task.abort();
+    }
+
+    /// A Nexus that serves its resource routes on `/v0` only answers none of them: the feed and
+    /// the batch view fail (a 404 is no answer, never an empty one).
+    #[tokio::test]
+    async fn a_nexus_without_the_v1_routes_is_no_answer() {
+        use axum::routing::post;
+        let app = Router::new()
+            .route(
+                "/v0/resources/changes",
+                get(|| async {
+                    (
+                        [("x-events-length", "0")],
+                        Json(serde_json::json!({"lines": [], "next_cursor": 0})),
+                    )
+                }),
+            )
+            .route(
+                "/v0/stream/resources/by_ids",
+                post(|| async { Json(serde_json::json!([])) }),
+            );
+        let (url, task) = server(app).await;
+        let nexus = Nexus::new(&url, None).unwrap();
+        assert!(nexus.changes(0).await.is_err());
+        assert!(nexus
+            .resources_by_uris(&["https://example.org/".into()], None)
+            .await
+            .is_err());
         task.abort();
     }
 
@@ -542,7 +656,7 @@ mod tests {
             async move {
                 (
                     axum::http::StatusCode::TEMPORARY_REDIRECT,
-                    [("location", format!("{to}/v0/resources/changes?cursor=0"))],
+                    [("location", format!("{to}/v1/resources/changes?cursor=0"))],
                 )
             }
         }))
@@ -565,11 +679,11 @@ mod tests {
     async fn a_failed_nexus_request_names_no_url() {
         let app = Router::new()
             .route(
-                "/v0/resources/changes",
+                "/v1/resources/changes",
                 get(|| async { (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "down") }),
             )
             .route(
-                "/v0/user/{viewer}/following",
+                "/v1/user/{viewer}/following",
                 get(|| async { (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "down") }),
             );
         let (url, server) = server(app).await;
@@ -602,7 +716,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let (e, r, c) = (entered.clone(), release.clone(), calls.clone());
         let app = Router::new().route(
-            "/v0/user/{viewer}/following",
+            "/v1/user/{viewer}/following",
             get(move |Path(viewer): Path<String>| {
                 let (entered, release, calls) = (e.clone(), r.clone(), c.clone());
                 async move {
@@ -646,7 +760,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let c = calls.clone();
         let app = Router::new().route(
-            "/v0/user/{viewer}/following",
+            "/v1/user/{viewer}/following",
             get(move || {
                 let calls = c.clone();
                 async move {
@@ -678,7 +792,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let seen = calls.clone();
         let app = Router::new().route(
-            "/v0/user/{viewer}/reach-set",
+            "/v1/user/{viewer}/reach-set",
             get(move |Path(viewer): Path<String>, headers: HeaderMap| {
                 let n = seen.fetch_add(1, Ordering::SeqCst);
                 async move {

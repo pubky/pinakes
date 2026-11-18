@@ -9,16 +9,18 @@ map area, time, tags and reach.
 
 Clients combine the two by URI: **Pinakes ranks, Nexus hydrates.** A client sends the URIs of the
 cards Pinakes returns (`uri`, and `aliases` for other spellings; for an occurrence,
-`occurrence.feed_uri`) to Nexus `/v0/stream/resources/by_ids` as `uris` (batches of 100) for
+`occurrence.feed_uri`) to Nexus `/v1/stream/resources/by_ids` as `uris` (batches of 100) for
 counts and tags. Pinakes IDs are its own and never match Nexus IDs.
-That batch view and the reference feed are on the branch `feat/resources-changes-feed` of the
-fork [`gillohner/pubky-nexus`](https://github.com/gillohner/pubky-nexus/tree/feat/resources-changes-feed),
-not yet in pubky/pubky-nexus.
+Pinakes reads the Nexus `/v1` API: the reference feed and that batch view (pubky/pubky-nexus
+[#1189](https://github.com/pubky/pubky-nexus/pull/1189) and
+[#1185](https://github.com/pubky/pubky-nexus/pull/1185)), the reach-set route
+([#1232](https://github.com/pubky/pubky-nexus/pull/1232)), and each viewer's `following` and
+`friends` lists. Nexus serves the first three under `/v1` only.
 
 ## How it works
 
 ```
-Nexus  GET /v0/resources/changes          reference feed: tag, reply, embed, collection, post
+Nexus  GET /v1/resources/changes          reference feed: tag, reply, embed, collection, post
   │
   ▼
 ingest     resource row per URI, one row per reference             ingest.rs, identity.rs

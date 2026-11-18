@@ -398,12 +398,12 @@ impl Tools {
                     .await
                     .map_err(|_| Failure {
                         status: 502,
-                        error: "the Nexus this instance reads did not answer the batch resource view (POST /v0/stream/resources/by_ids)".into(),
+                        error: "the Nexus this instance reads did not answer the batch resource view (POST /v1/stream/resources/by_ids)".into(),
                         url: None,
                     })?,
             );
         }
-        let mut answer = social_answer(&asks, &views);
+        let mut answer = social_answer(&asks, &views, viewer.as_deref());
         if !unknown_ids.is_empty() {
             answer["unknown_ids"] = unknown_ids.into();
         }
@@ -851,8 +851,9 @@ fn taggers(tag: &Value) -> impl Iterator<Item = &Value> {
 
 /// What `social` answers: per card (or link), the URIs asked and those Nexus knew, and the tags
 /// of all of them merged: per label, its taggers once each; `viewer_tagged` when the viewer used
-/// the label on any of them.
-fn social_answer(asks: &[Ask], views: &[Value]) -> Value {
+/// the label on any of them: when a view's tag of that label has a `tag_uri` naming the viewer's
+/// own tag file (`nexus::tag_file_author`).
+fn social_answer(asks: &[Ask], views: &[Value], viewer: Option<&str>) -> Value {
     let mut items = vec![];
     for ask in asks {
         let found: Vec<(&String, &Value)> = ask
@@ -878,7 +879,12 @@ fn social_answer(asks: &[Ask], views: &[Value]) -> Value {
                     }
                 };
                 labels[at].1.add(taggers(tag), &tag["taggers_count"]);
-                labels[at].2 |= tag["relationship"] == true;
+                labels[at].2 |= viewer.is_some_and(|viewer| {
+                    tag["tag_uri"]
+                        .as_str()
+                        .and_then(crate::nexus::tag_file_author)
+                        == Some(viewer)
+                });
             }
         }
         let mut tags: Vec<(String, Taggers, bool)> = labels;
@@ -913,6 +919,9 @@ fn social_answer(asks: &[Ask], views: &[Value]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A viewer's pubky key.
+    const VIEWER: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
     fn args(value: Value) -> JsonObject {
         value.as_object().unwrap().clone()
@@ -1092,15 +1101,16 @@ mod tests {
         ];
         let views = vec![
             json!({"details": {"uri": "https://www.mempool.space/block/0000aa"}, "taggers_count": 2,
-                   "tags": [{"label": "halving", "taggers_count": 2, "relationship": true, "taggers": ["t1", "t2"]},
-                            {"label": "bitcoin", "taggers_count": 1, "taggers": ["t1"]}]}),
+                   "tags": [{"label": "halving", "taggers_count": 2, "taggers": ["t1", "t2"],
+                             "tag_uri": format!("pubky://{VIEWER}/pub/social/v1/tags/0034A")},
+                            {"label": "bitcoin", "taggers_count": 1, "taggers": ["t1"], "tag_uri": null}]}),
             // The same tagger on another link counts once. One counted but not listed may be one
             // the other link lists: the count is a lower bound, never a sum.
             json!({"details": {"uri": "https://blockstream.info/block/0000aa"}, "taggers_count": 2,
                    "tags": [{"label": "halving", "taggers_count": 2, "taggers": ["t2"]}]}),
         ];
         assert_eq!(
-            social_answer(&asks, &views),
+            social_answer(&asks, &views, Some(VIEWER)),
             json!({"items": [
                 {"id": "c1", "uri": "btc:block/0000aa",
                  "asked": ["btc:block/0000aa", "https://WWW.Mempool.space/block/0000aa", "https://blockstream.info/block/0000aa"],
@@ -1112,6 +1122,59 @@ mod tests {
                  "found": [], "taggers_count": 0, "tags": []}
             ]})
         );
+    }
+
+    /// `viewer_tagged` comes from a tag's `tag_uri` (`/v1`): set when it addresses the viewer's
+    /// own tag file on any of the views of the label, never from a `relationship` flag, another
+    /// author's file, an address that is not a tag file, or with no viewer.
+    #[test]
+    fn viewer_tagged_is_the_viewers_tag_file_in_tag_uri() {
+        let other = "o".repeat(52);
+        let ask = Ask {
+            id: None,
+            root: None,
+            uri: "https://example.org/a".into(),
+            asked: vec![
+                "https://example.org/a".into(),
+                "https://example.org/b".into(),
+            ],
+        };
+        let tag = |label: &str, extra: Value| {
+            let mut tag = json!({"label": label, "taggers_count": 1, "taggers": ["t1"]});
+            tag.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            tag
+        };
+        let views = [
+            json!({"details": {"uri": "https://example.org/a"}, "taggers_count": 1, "tags": [
+                tag("mine", json!({"tag_uri": format!("pubky://{VIEWER}/pub/pubky.app/tags/7T0R9X6A2E1L")})),
+                tag("flag", json!({"relationship": true})),
+                tag("theirs", json!({"tag_uri": format!("pubky://{other}/pub/social/v1/tags/0034A")})),
+                tag("null", json!({"tag_uri": null})),
+                tag("odd", json!({"tag_uri": format!("pubky://{VIEWER}/pub/pubky.app/posts/0034A")})),
+                tag("later", json!({"tag_uri": null})),
+            ]}),
+            // The viewer's tag of `later` is on the card's other link.
+            json!({"details": {"uri": "https://example.org/b"}, "taggers_count": 1, "tags": [
+                tag("later", json!({"tag_uri": format!("pubky://{VIEWER}/pub/social/v1/tags/0034B")})),
+            ]}),
+        ];
+        let tagged = |viewer: Option<&str>| {
+            let answer = social_answer(std::slice::from_ref(&ask), &views, viewer);
+            let mut tagged: Vec<String> = answer["items"][0]["tags"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|t| t["viewer_tagged"] == true)
+                .map(|t| t["label"].as_str().unwrap().to_owned())
+                .collect();
+            tagged.sort();
+            tagged
+        };
+        assert_eq!(tagged(Some(VIEWER)), ["later", "mine"]);
+        assert_eq!(tagged(Some(other.as_str())), ["theirs"]);
+        assert!(tagged(None).is_empty());
     }
 
     /// The same two people tag two of a card's links; each link's view lists one of them and
@@ -1138,6 +1201,7 @@ mod tests {
                 "https://blockstream.info/block/0000aa",
             ])],
             &views,
+            None,
         );
         let item = &both["items"][0];
         assert_eq!(item["taggers_count"], 2);
@@ -1146,7 +1210,11 @@ mod tests {
             item["tags"],
             json!([{"label": "halving", "taggers_count": 2, "viewer_tagged": false, "at_least": true}])
         );
-        let one = social_answer(&[ask(&["https://mempool.space/block/0000aa"])], &views);
+        let one = social_answer(
+            &[ask(&["https://mempool.space/block/0000aa"])],
+            &views,
+            None,
+        );
         assert_eq!(one["items"][0]["taggers_count"], 2);
         assert!(one["items"][0].get("at_least").is_none());
         assert!(one["items"][0]["tags"][0].get("at_least").is_none());

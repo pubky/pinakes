@@ -204,16 +204,19 @@ export async function ownTags(hydrated, uris, label, author, tagsOf) {
   }
   return confirmed;
 }
-/** The MCP social tool's `item` for `uri` answers as Nexus's batch view (`hydrated`, asked by
- * URI just before): the run's label when that view lists it, and the view's own labels when its
- * five are full without it (`ownTags` confirmed the tag through the resource tag route). */
+/** The MCP social tool's `item` for `uri`, asked with the run's author as viewer, answers as
+ * Nexus's batch view (`hydrated`, asked by URI just before): the run's label, tagged by the viewer
+ * (the view's `tag_uri`), when that view lists it, and the view's own labels when its five are
+ * full without it (`ownTags` confirmed the tag through the resource tag route). */
 export function socialAgrees(item, hydrated, uri, label) {
   const row = hydrated.find(r => r.details.uri === uri);
   assert(row, `Missing Nexus hydration: ${uri}`);
   assert(item, `Missing social answer: ${uri}`);
   const labels = tags => tags.map(t => t.label).sort();
   if (row.tags.some(t => t.label === label)) {
-    assert(item.tags.some(t => t.label === label), `the social tool returns the run's tag from Nexus: ${uri}`);
+    const own = item.tags.find(t => t.label === label);
+    assert(own, `the social tool returns the run's tag from Nexus: ${uri}`);
+    assert.equal(own.viewer_tagged, true, `the social tool says the viewer tagged the run's label: ${uri}`);
   } else {
     assert.deepEqual(labels(item.tags), labels(row.tags), `the social tool answers as Nexus's batch view: ${uri}`);
   }
@@ -284,11 +287,11 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
   builder.free();
   let cursor = 0;
   const feed = new Map();
-  const head = await fetch(`${nexus}/v0/resources/changes?cursor=0&limit=1`, { signal: AbortSignal.timeout(15000) });
+  const head = await fetch(`${nexus}/v1/resources/changes?cursor=0&limit=1`, { signal: AbortSignal.timeout(15000) });
   assert(head.ok); cursor = Number(head.headers.get('x-events-length')); assert(Number.isSafeInteger(cursor));
   await head.body?.cancel();
   const poll = async () => {
-    const page = await json(`${nexus}/v0/resources/changes?cursor=${cursor}&limit=1000`);
+    const page = await json(`${nexus}/v1/resources/changes?cursor=${cursor}&limit=1000`);
     assert(page.next_cursor >= cursor, 'Nexus cursor went backwards');
     cursor = page.next_cursor;
     for (const line of page.lines) if (line.author === author && tags.some(tag => tag.path === line.object_path)) feed.set(line.object_path, line);
@@ -442,9 +445,9 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
       for (const uri of uris) assert(asked.includes(uri), `A card's links must cover the tagged link ${uri}`);
       const hydrated = [];
       for (let i = 0; i < asked.length; i += 100) {
-        hydrated.push(...await json(`${nexus}/v0/stream/resources/by_ids`, { uris: asked.slice(i, i + 100), viewer_id: author }));
+        hydrated.push(...await json(`${nexus}/v1/stream/resources/by_ids`, { uris: asked.slice(i, i + 100), viewer_id: author }));
       }
-      const confirmed = await ownTags(hydrated, uris, label, author, id => json(`${nexus}/v0/resource/${id}/tags?limit_tags=100&viewer_id=${author}`));
+      const confirmed = await ownTags(hydrated, uris, label, author, id => json(`${nexus}/v1/resource/${id}/tags?limit_tags=100&viewer_id=${author}`));
       report.assertions.push(confirmed ? `Nexus hydration by URIs and own tags (${confirmed} through the resource tag route)` : 'Nexus hydration by URIs and own tags');
       // Agents: the guide, and MCP's tools answering as the routes do, `social` through the
       // Nexus this instance reads.

@@ -70,21 +70,21 @@ async fn the_nexus_authorization_is_sent_on_every_call_and_shown_nowhere(pool: P
     let (following, by_ids, changes) = (record("following"), record("by_ids"), record("changes"));
     let nexus = Router::new()
         .route(
-            "/v0/user/{viewer}/following",
+            "/v1/user/{viewer}/following",
             get(move |headers: HeaderMap| async move {
                 following(headers);
                 Json(Vec::<String>::new())
             }),
         )
         .route(
-            "/v0/stream/resources/by_ids",
+            "/v1/stream/resources/by_ids",
             post(move |headers: HeaderMap| async move {
                 by_ids(headers);
                 (StatusCode::UNAUTHORIZED, "NEXUS-CANARY refused")
             }),
         )
         .route(
-            "/v0/resources/changes",
+            "/v1/resources/changes",
             get(move |headers: HeaderMap| async move {
                 changes(headers);
                 (StatusCode::UNAUTHORIZED, "NEXUS-CANARY refused")
