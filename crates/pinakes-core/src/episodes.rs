@@ -485,8 +485,8 @@ pub(crate) fn is_show(type_path: &[String], status: &str) -> bool {
 /// first; an undated or out-of-order item in the cut moves nothing else. An older episode the
 /// feed has dropped stays until a read reads the feed's whole list again. `list` as it is when it
 /// does not reach the stored list (it lacks the stored list's newest episode no newer than its
-/// own: another feed's list, or more new episodes than the cut holds) or the stored list holds
-/// nothing besides.
+/// own, or the one after it: another feed's list, or more new episodes than the cut holds) or the
+/// stored list holds nothing besides.
 async fn under_stored(
     tx: &mut Transaction<'_, Postgres>,
     id: &str,
@@ -517,10 +517,11 @@ async fn under_stored(
         .iter()
         .filter(|r| !matches!((r.4, newest), (Some(d), Some(n)) if d > n))
         .collect();
-    // The cut list reaches the stored one only when it names the stored list's newest episode
-    // left: else between the two lie episodes neither read has (more new ones than the cut
-    // holds), or the stored list is another feed's, and the cut list stands alone.
-    if !kept.first().is_some_and(|r| named.contains(r.0.as_str())) {
+    // The cut list reaches the stored one only when it names the stored list's two newest
+    // episodes left (its one, when it holds one): else between the two lie episodes neither read
+    // has (more new ones than the cut holds; one of them alone may be a re-release at the top of
+    // the feed), or the stored list is another feed's, and the cut list stands alone.
+    if kept.is_empty() || !kept.iter().take(2).all(|r| named.contains(r.0.as_str())) {
         return Ok((list.to_vec(), older));
     }
     let joining: Vec<&Stored> = kept

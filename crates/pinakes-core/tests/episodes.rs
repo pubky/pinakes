@@ -2099,6 +2099,18 @@ async fn a_failed_read_on_keeps_the_longer_stored_list(pool: PgPool) {
     assert_eq!(rows(&pool, &id).await, 101);
     let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
     assert_eq!(page["truncated"], true, "{page}");
+    // The same when the re-release is the stored list's newest episode: one shared episode
+    // at the top of the feed does not reach the list below the new ones.
+    let whole: Vec<Episode> = (1..=183).rev().map(|n| episode(n, true)).collect();
+    show(&pool, uri, Some(whole)).await;
+    let mut list: Vec<Episode> = (201..=300).rev().map(|n| episode(n, true)).collect();
+    list.insert(0, episode(183, true));
+    store::save_document(&pool, &id, 0, &cut(list, true))
+        .await
+        .unwrap();
+    assert_eq!(rows(&pool, &id).await, 101);
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
+    assert_eq!(page["truncated"], true, "{page}");
     // A cut list the stored one shares nothing with (another feed's) is the list.
     let other: Vec<Episode> = (1..=100)
         .rev()
