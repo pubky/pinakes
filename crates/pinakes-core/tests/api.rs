@@ -1,0 +1,4465 @@
+use axum::{
+    body::Body,
+    extract::{Query, State},
+    http::{HeaderMap, Request, StatusCode},
+    routing::get,
+    Json, Router,
+};
+use chrono::{DateTime, Utc};
+use http_body_util::BodyExt;
+mod common;
+use common::{author, Lines};
+use pinakes_core::{
+    api::{self, AppState},
+    config::{Config, IngestConfig},
+    ingest,
+    model::{identity, ResourceMeta},
+    nexus::{Change, Changes, FeedPage, Kind, Nexus, Op},
+    queue, store,
+    telemetry::Metrics,
+};
+use serde_json::{json, Value};
+use sqlx::PgPool;
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+};
+use tower::ServiceExt;
+
+async fn seed(pool: &PgPool) -> Vec<String> {
+    let saved = ingest::cursor(pool, "fixture").await.unwrap();
+    let mut lines = vec![];
+    let mut ids = vec![];
+    for i in 0..5 {
+        let (id, uri, _) = identity(&format!("https://example.org/item/{i}")).unwrap();
+        ids.push(id.clone());
+        for label in if i == 0 {
+            vec!["rust", "music"]
+        } else {
+            vec!["rust"]
+        } {
+            lines.push(Change {
+                op: Op::Put,
+                uri: uri.clone(),
+                kind: Kind::Tag,
+                author: author(i),
+                object_path: format!("/pub/app/tags/{i}-{label}"),
+                label: Some(label.into()),
+                at: 1_790_000_000_000,
+            });
+        }
+    }
+    let next = lines.len() as i64;
+    ingest::apply(
+        pool,
+        "fixture",
+        &saved,
+        &FeedPage {
+            page: Changes {
+                lines,
+                next_cursor: next,
+                skipped: Default::default(),
+            },
+            epoch: Some("fixture".into()),
+            length: next,
+        },
+        &IngestConfig::default(),
+        &Metrics::new().unwrap(),
+    )
+    .await
+    .unwrap();
+    for (i, id) in ids.iter().enumerate() {
+        let uri = format!("https://example.org/item/{i}");
+        let mut doc = ResourceMeta::new(&uri, "web", 86400);
+        doc.name = Some(if i == 0 {
+            "Rust Music Evening".into()
+        } else {
+            format!("Rust Article {i}")
+        });
+        doc.description = Some("A reference document".into());
+        doc.set_type(if i == 0 { "MusicEvent" } else { "Article" });
+        if i == 0 {
+            doc.start = Some("2026-10-20T18:00:00Z".parse().unwrap());
+        }
+        store::save_document(pool, id, 0, &doc).await.unwrap();
+    }
+    ids
+}
+async fn call(app: &Router, method: &str, path: &str, body: Option<Value>) -> (StatusCode, Value) {
+    send(app, method, path, body, common::check_response).await
+}
+/// `call` on the admin listener, which has no OpenAPI document to check against.
+async fn admin_call(
+    app: &Router,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    send(app, method, path, body, |_, _, _, _| {}).await
+}
+async fn send(
+    app: &Router,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+    check: fn(&str, &str, u16, &Value),
+) -> (StatusCode, Value) {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("content-type", "application/json")
+        .body(body.map_or_else(Body::empty, |v| Body::from(v.to_string())))
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.2:1234".parse::<SocketAddr>().unwrap(),
+    ));
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let parsed: Option<Value> = serde_json::from_slice(&bytes).ok();
+    // Every JSON response matches the schema its listener's document declares for it.
+    if let Some(value) = &parsed {
+        check(method, path, status.as_u16(), value);
+    }
+    let value = parsed.unwrap_or_else(|| json!({"body":String::from_utf8_lossy(&bytes)}));
+    (status, value)
+}
+#[sqlx::test(migrations = "../../migrations")]
+async fn every_read_route_and_document_projection(pool: PgPool) {
+    let ids = seed(&pool).await;
+    let state = AppState::new(pool, Config::default()).unwrap();
+    let app = api::router(state);
+    let (code, info) = call(&app, "GET", "/v1/info", None).await;
+    assert_eq!(code, 200);
+    // What a client needs, nothing an operator does.
+    let keys: Vec<&String> = info.as_object().unwrap().keys().collect();
+    assert_eq!(
+        keys,
+        [
+            "api_shape",
+            "limits",
+            "osm_licence",
+            "resolves",
+            "user_agent",
+            "version"
+        ],
+        "{info}"
+    );
+    // The User-Agent its requests carry, so a harness can send the same: with no contact set,
+    // without one.
+    assert_eq!(
+        info["user_agent"],
+        format!("pinakes/{} (+https://pubky.app)", env!("CARGO_PKG_VERSION"))
+    );
+    assert!(info["resolves"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|k| k == "web"));
+    assert_eq!(info["limits"]["lookup"], 500);
+    assert_eq!(
+        info["limits"]["requests_per_minute"],
+        Config::default().api.requests_per_minute
+    );
+    let (code, spec) = call(&app, "GET", "/v1/openapi.json", None).await;
+    assert_eq!(code, 200);
+    assert!(spec["paths"]["/v1/resolve"]["post"].is_object());
+    assert!(spec["components"]["schemas"]["Card"]["properties"]
+        .get("score")
+        .is_none());
+    // The public routes, `GET /v1/resources/{id}/episodes` among them (podcast-episodes-1), and
+    // `GET /v1/resources/{id}/collections` (in-collections-1).
+    assert_eq!(spec["paths"].as_object().unwrap().len(), 17);
+    assert_eq!(
+        spec["paths"]["/v1/resources/{id}/collections"]["get"]["operationId"],
+        "list_collections"
+    );
+    assert!(spec["components"]["schemas"]["Card"]["properties"]["collections"].is_object());
+    // Swagger UI and client generators key operations by operationId: one each.
+    let mut operation_ids = std::collections::BTreeSet::new();
+    for item in spec["paths"].as_object().unwrap().values() {
+        for operation in item.as_object().unwrap().values() {
+            let id = operation["operationId"].as_str().unwrap();
+            assert!(
+                operation_ids.insert(id.to_owned()),
+                "operationId `{id}` twice"
+            );
+        }
+    }
+    let (code, item) = call(&app, "GET", &format!("/v1/resources/{}", ids[0]), None).await;
+    assert_eq!(code, 200);
+    assert_eq!(item["type"], "MusicEvent");
+    assert!(item.get("score").is_none());
+    assert!(item.get("document").is_none());
+    // One flat object: the read's fields beside the card's, no `details`.
+    assert!(item.get("details").is_none(), "{item}");
+    assert!(
+        item["aliases"].is_array() && item["keys"].is_array(),
+        "{item}"
+    );
+    assert_eq!(
+        item["type_path"].as_array().unwrap().last().unwrap(),
+        "MusicEvent"
+    );
+    assert_eq!(call(&app, "GET", "/v1/resources/bad", None).await.0, 400);
+    assert_eq!(
+        call(
+            &app,
+            "GET",
+            "/v1/resources/00000000000000000000000000000000",
+            None
+        )
+        .await
+        .0,
+        404
+    );
+    let (code, items) = call(
+        &app,
+        "POST",
+        "/v1/resources/lookup",
+        Some(json!({"ids":[ids[0],ids[0],"00000000000000000000000000000000"]})),
+    )
+    .await;
+    assert_eq!(code, 200);
+    assert_eq!(items.as_array().unwrap().len(), 2);
+    assert_eq!(items[0]["id"], ids[0]);
+    // A lookup card has the card's fields alone.
+    assert!(items[0].get("aliases").is_none() && items[0].get("details").is_none());
+    assert!(items
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|item| item.get("score").is_none()));
+    let (_, items) = call(
+        &app,
+        "POST",
+        "/v1/resources/lookup",
+        Some(json!({"uris":["https://EXAMPLE.org:443/item/0#ignored"]})),
+    )
+    .await;
+    assert_eq!(items[0]["id"], ids[0]);
+    assert!(items[0].get("score").is_none());
+    for body in [
+        json!({}),
+        json!({"ids":[]}),
+        json!({"ids":[ids[0]],"uris":[]}),
+        json!({"ids":["bad"]}),
+        json!({"uris":["invalid"]}),
+        json!({"ids":vec![ids[0].clone();501]}),
+    ] {
+        assert_eq!(
+            call(&app, "POST", "/v1/resources/lookup", Some(body))
+                .await
+                .0,
+            400
+        );
+    }
+}
+#[sqlx::test(migrations = "../../migrations")]
+async fn search_filters_facets_true_keyset_and_invalid_options(pool: PgPool) {
+    let ids = seed(&pool).await;
+    // Force ties to test the ID tie-breaker, with one common decay baseline.
+    sqlx::query("UPDATE resource_score SET score=1,updated_at='2026-01-01'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let (code, page) = call(
+        &app,
+        "GET",
+        "/v1/search?type=Event&tags=rust,music&match=all&facet=tags",
+        None,
+    )
+    .await;
+    assert_eq!(code, 200, "{page}");
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(page["items"][0]["id"], ids[0]);
+    assert!(page["items"][0].get("score").is_none());
+    assert_eq!(page["facets"]["tags"].as_array().unwrap().len(), 2);
+    assert!(page["facets"].get("type").is_none());
+    // Card types over the whole filtered set, most frequent first; both facets at once.
+    let (_, page) = call(&app, "GET", "/v1/search?facet=type&limit=1", None).await;
+    // Each entry says where its type sits, from Thing down, for a client's type tree.
+    assert_eq!(
+        page["facets"]["type"],
+        json!([
+            {"type":"Article","type_path":["Thing","CreativeWork","Article"],"count":4},
+            {"type":"MusicEvent","type_path":["Thing","Event","MusicEvent"],"count":1}
+        ])
+    );
+    assert!(page["facets"].get("tags").is_none());
+    // Several types: any of them, each with its subtypes; one type as before.
+    for (types, found) in [
+        ("MusicEvent,Article", 5),
+        ("Event,Book", 1),
+        ("CreativeWork", 4),
+        ("Article, Article", 4),
+        ("Book,Place", 0),
+    ] {
+        let (code, page) = call(
+            &app,
+            "GET",
+            &format!("/v1/search?type={}&limit=50", types.replace(' ', "%20")),
+            None,
+        )
+        .await;
+        assert_eq!(code, 200, "{types}: {page}");
+        assert_eq!(page["items"].as_array().unwrap().len(), found, "{types}");
+    }
+    let eleven = ["Article"; 11].join(",");
+    for bad in [eleven.as_str(), "Article,", "Article,NotAType", ","] {
+        let (code, page) = call(&app, "GET", &format!("/v1/search?type={bad}"), None).await;
+        assert_eq!(code, 400, "{bad}: {page}");
+    }
+    let (_, page) = call(&app, "GET", "/v1/search?type=Article,NotAType", None).await;
+    assert!(page["error"].as_str().unwrap().contains("NotAType"));
+    // Anything but a type's name is never echoed: a URL given as a type keeps its credentials,
+    // query and fragment out of the answer.
+    let (code, page) = call(
+        &app,
+        "GET",
+        "/v1/search?type=https%3A%2F%2Fuser%3Asecret%40example.org%2Fx%3Ftoken%3Dabc%23frag",
+        None,
+    )
+    .await;
+    assert_eq!(code, 400);
+    let error = page["error"].as_str().unwrap();
+    for leaked in ["secret", "token", "abc", "frag", "example.org"] {
+        assert!(!error.contains(leaked), "{leaked} in {error}");
+    }
+    let (_, page) = call(&app, "GET", "/v1/search?facet=type,tags", None).await;
+    assert!(page["facets"]["type"].is_array() && page["facets"]["tags"].is_array());
+    for bad in ["hosts", "type,", "host,,tags", "category,place"] {
+        let (code, page) = call(&app, "GET", &format!("/v1/search?facet={bad}"), None).await;
+        assert_eq!(code, 400, "{bad}: {page}");
+    }
+    let (_, page) = call(&app, "GET", "/v1/search?q=Even&facet=tags", None).await;
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    let (_, page) = call(
+        &app,
+        "GET",
+        &format!("/v1/search?author={}", author(3)),
+        None,
+    )
+    .await;
+    assert_eq!(page["items"][0]["id"], ids[3]);
+    // `scheme` is not a filter: `type` covers it.
+    assert_eq!(
+        call(&app, "GET", "/v1/search?scheme=nostr", None).await.0,
+        400
+    );
+    for sort in ["activity", "recent"] {
+        let mut path = format!("/v1/search?limit=2&facet=tags&sort={sort}");
+        let mut seen = vec![];
+        loop {
+            let (code, page) = call(&app, "GET", &path, None).await;
+            assert_eq!(code, 200, "{page}");
+            assert_eq!(page["facets"]["tags"][0]["count"], 5);
+            assert!(page["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item.get("score").is_none()));
+            seen.extend(
+                page["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|i| i["id"].as_str().unwrap().to_owned()),
+            );
+            match page["cursor"].as_str() {
+                Some(cursor) => {
+                    path = format!("/v1/search?limit=2&facet=tags&sort={sort}&cursor={cursor}")
+                }
+                None => break,
+            }
+        }
+        assert_eq!(seen.len(), 5);
+        let mut expected = ids.clone();
+        expected.sort_by(|a, b| b.cmp(a));
+        assert_eq!(seen, expected, "internal rank/ID tie-breaking is unchanged");
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), 5);
+    }
+    let (_, page) = call(&app, "GET", "/v1/search?limit=2", None).await;
+    let cursor = page["cursor"].as_str().unwrap();
+    assert_eq!(
+        call(
+            &app,
+            "GET",
+            &format!("/v1/search?type=Event&cursor={cursor}"),
+            None
+        )
+        .await
+        .0,
+        400
+    );
+    for query in [
+        "bbox=0,0,1",
+        "near=1,2",
+        "radius=100",
+        "from=2026-01-01",
+        "to=2026-02-01",
+        "venue=x",
+        "collapse=invalid",
+        "reach=wot_2",
+        "reach=following",
+        "reach=strangers",
+        "boost=following",
+        "boost=strangers&viewer=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+        "boost=following&viewer=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy&sort=distance",
+        "boost=friends&viewer=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy&sort=recent",
+        "boost=friends&viewer=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy&related=00000000000000000000000000000000",
+        "sort=distance",
+        "sort=unknown",
+        "limit=0",
+        "limit=501",
+        "match=bad",
+        "tags=a,b,c,d&match=all",
+        "tags=a,b,c,d,e,f",
+        "tags=",
+        "facet=bad",
+        "type=Invented",
+        "author=bad",
+        "cursor=broken",
+        "unknown=true",
+    ] {
+        let (code, v) = call(&app, "GET", &format!("/v1/search?{query}"), None).await;
+        assert_eq!(code, 400, "{query}: {v}");
+    }
+}
+/// `exclude_type` lists every card of another type: each type left out with its subtypes, a link
+/// with no type yet left out too (the type facet does not count it), with `type` both apply, the
+/// facets count the same set, and a cursor pages only the search that made it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn search_exclude_type_lists_every_other_type(pool: PgPool) {
+    let ids = seed(&pool).await;
+    // ids[0] is a MusicEvent, ids[1..=3] Articles, ids[4] a link not read yet (no type).
+    sqlx::query("UPDATE resource SET type=NULL,type_path='{}' WHERE id=$1")
+        .bind(&ids[4])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let sorted = |mut v: Vec<String>| {
+        v.sort();
+        v
+    };
+    let articles = sorted(ids[1..=3].to_vec());
+    let (_, all) = call(&app, "GET", "/v1/search?limit=50", None).await;
+    assert_eq!(
+        ids_of(&all).len(),
+        5,
+        "no filter lists the untyped link: {all}"
+    );
+    for (query, found) in [
+        ("exclude_type=Article", vec![ids[0].clone()]),
+        ("exclude_type=CreativeWork", vec![ids[0].clone()]),
+        ("exclude_type=Event", articles.clone()),
+        ("exclude_type=MusicEvent", articles.clone()),
+        ("exclude_type=Book", sorted(ids[0..=3].to_vec())),
+        ("exclude_type=Article%2C%20Article", vec![ids[0].clone()]),
+        ("exclude_type=Article,Event", vec![]),
+        ("type=CreativeWork&exclude_type=Article", vec![]),
+        (
+            "type=MusicEvent,Article&exclude_type=Event",
+            articles.clone(),
+        ),
+        ("type=Article&exclude_type=Book", articles.clone()),
+        ("type=Event&exclude_type=Event", vec![]),
+    ] {
+        let (code, page) = call(&app, "GET", &format!("/v1/search?{query}&limit=50"), None).await;
+        assert_eq!(code, 200, "{query}: {page}");
+        assert_eq!(sorted(ids_of(&page)), found, "{query}");
+    }
+    // The facets count the rows the filter finds: what a client shows as the count of "every
+    // other type" is what the search lists.
+    let (_, page) = call(
+        &app,
+        "GET",
+        "/v1/search?exclude_type=Book&facet=type&limit=1",
+        None,
+    )
+    .await;
+    assert_eq!(
+        page["facets"]["type"],
+        json!([
+            {"type":"Article","type_path":["Thing","CreativeWork","Article"],"count":3},
+            {"type":"MusicEvent","type_path":["Thing","Event","MusicEvent"],"count":1}
+        ])
+    );
+    let (_, page) = call(
+        &app,
+        "GET",
+        "/v1/search?exclude_type=Article&facet=type",
+        None,
+    )
+    .await;
+    assert_eq!(page["facets"]["type"].as_array().unwrap().len(), 1);
+    assert_eq!(page["facets"]["type"][0]["type"], "MusicEvent");
+    // Up to 50 types; the same refusals as `type`, named by the parameter.
+    let fifty = ["Article"; 50].join(",");
+    let (code, page) = call(
+        &app,
+        "GET",
+        &format!("/v1/search?exclude_type={fifty}"),
+        None,
+    )
+    .await;
+    assert_eq!(code, 200, "{page}");
+    assert_eq!(ids_of(&page), vec![ids[0].clone()]);
+    let fifty_one = ["Article"; 51].join(",");
+    let (code, page) = call(
+        &app,
+        "GET",
+        &format!("/v1/search?exclude_type={fifty_one}"),
+        None,
+    )
+    .await;
+    assert_eq!(code, 400);
+    assert!(
+        page["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("exclude_type takes 1–50"),
+        "{page}"
+    );
+    for bad in ["", "Article,", ",", "Article,NotAType"] {
+        let (code, page) = call(&app, "GET", &format!("/v1/search?exclude_type={bad}"), None).await;
+        assert_eq!(code, 400, "{bad}: {page}");
+    }
+    let (_, page) = call(
+        &app,
+        "GET",
+        "/v1/search?exclude_type=Article,NotAType",
+        None,
+    )
+    .await;
+    assert!(page["error"].as_str().unwrap().contains("NotAType"));
+    let (code, page) = call(
+        &app,
+        "GET",
+        "/v1/search?exclude_type=https%3A%2F%2Fuser%3Asecret%40example.org%2Fx%3Ftoken%3Dabc",
+        None,
+    )
+    .await;
+    assert_eq!(code, 400);
+    let error = page["error"].as_str().unwrap();
+    assert!(error.starts_with("exclude_type names"), "{error}");
+    for leaked in ["secret", "token", "abc", "example.org"] {
+        assert!(!error.contains(leaked), "{leaked} in {error}");
+    }
+    // `type` keeps its own limit of 10.
+    let eleven = ["Article"; 11].join(",");
+    let (_, page) = call(&app, "GET", &format!("/v1/search?type={eleven}"), None).await;
+    assert!(
+        page["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("type takes 1–10"),
+        "{page}"
+    );
+    // A cursor pages its own exclusion only.
+    let (code, first) = call(&app, "GET", "/v1/search?exclude_type=Book&limit=2", None).await;
+    assert_eq!(code, 200, "{first}");
+    let cursor = first["cursor"].as_str().unwrap();
+    let (code, second) = call(
+        &app,
+        "GET",
+        &format!("/v1/search?exclude_type=Book&limit=2&cursor={cursor}"),
+        None,
+    )
+    .await;
+    assert_eq!(code, 200, "{second}");
+    let mut paged = ids_of(&first);
+    paged.extend(ids_of(&second));
+    assert_eq!(sorted(paged), sorted(ids[0..=3].to_vec()));
+    assert!(second["cursor"].is_null(), "{second}");
+    for other in ["exclude_type=Event&", "exclude_type=Book,Event&", ""] {
+        let (code, page) = call(
+            &app,
+            "GET",
+            &format!("/v1/search?{other}limit=2&cursor={cursor}"),
+            None,
+        )
+        .await;
+        assert_eq!(code, 400, "{other}: {page}");
+    }
+}
+#[derive(Clone)]
+struct Mock {
+    calls: Arc<AtomicUsize>,
+    lines: Vec<Change>,
+}
+async fn following(
+    State(state): State<Mock>,
+    Query(q): Query<HashMap<String, usize>>,
+) -> Json<Vec<String>> {
+    state.calls.fetch_add(1, Ordering::SeqCst);
+    let skip = q["skip"];
+    assert_eq!(q["limit"], 200);
+    Json((skip..(skip + 200).min(1001)).map(author).collect())
+}
+async fn friends(
+    State(state): State<Mock>,
+    Query(q): Query<HashMap<String, usize>>,
+) -> Json<Vec<String>> {
+    state.calls.fetch_add(1, Ordering::SeqCst);
+    assert_eq!(q["limit"], 200);
+    Json(vec![author(0)])
+}
+async fn changes(
+    State(state): State<Mock>,
+    Query(q): Query<HashMap<String, usize>>,
+) -> (HeaderMap, Json<Changes>) {
+    let cursor = q["cursor"];
+    assert_eq!(q["limit"], 1000);
+    let lines = state
+        .lines
+        .iter()
+        .skip(cursor)
+        .take(1000)
+        .cloned()
+        .collect::<Vec<_>>();
+    let next_cursor = (cursor + lines.len()) as i64;
+    let mut headers = HeaderMap::new();
+    headers.insert("x-events-epoch", "fixture-epoch".parse().unwrap());
+    headers.insert(
+        "x-events-length",
+        state.lines.len().to_string().parse().unwrap(),
+    );
+    (
+        headers,
+        Json(Changes {
+            lines,
+            next_cursor,
+            skipped: Default::default(),
+        }),
+    )
+}
+async fn mock_nexus(lines: Vec<Change>) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let app = Router::new()
+        .route("/v1/user/{id}/following", get(following))
+        .route("/v1/user/{id}/friends", get(friends))
+        .route("/v1/resources/changes", get(changes))
+        .with_state(Mock {
+            calls: calls.clone(),
+            lines,
+        });
+    let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{addr}"), calls, task)
+}
+#[sqlx::test(migrations = "../../migrations")]
+async fn nexus_reach_paginates_caches_and_scopes_tag_facets(pool: PgPool) {
+    seed(&pool).await;
+    let (nexus_url, calls, task) = mock_nexus(vec![]).await;
+    let app = api::router(
+        AppState::new(
+            pool,
+            Config {
+                nexus_url,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+    );
+    let path = format!(
+        "/v1/search?reach=following&viewer={}&facet=tags",
+        author(9999)
+    );
+    let (code, response) = call(&app, "GET", &path, None).await;
+    assert_eq!(code, 200, "{response}");
+    assert_eq!(response["reach_truncated"], true);
+    assert_eq!(calls.load(Ordering::SeqCst), 6);
+    call(&app, "GET", &path, None).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 6);
+    let (_, page) = call(
+        &app,
+        "GET",
+        &format!(
+            "/v1/search?reach=friends&viewer={}&tags=music&facet=tags",
+            author(9999)
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(page["reach_truncated"], false);
+    assert_eq!(calls.load(Ordering::SeqCst), 7);
+    let (_, page) = call(
+        &app,
+        "GET",
+        &format!(
+            "/v1/search?reach=friends&viewer={}&author={}",
+            author(9999),
+            author(3)
+        ),
+        None,
+    )
+    .await;
+    assert!(page["items"].as_array().unwrap().is_empty());
+    task.abort();
+}
+#[sqlx::test(migrations = "../../migrations")]
+async fn polls_the_http_feed_and_replays_without_duplicates(pool: PgPool) {
+    let (_, uri, _) = identity("https://example.org/feed").unwrap();
+    let line = Change {
+        op: Op::Put,
+        uri,
+        kind: Kind::Tag,
+        author: author(0),
+        object_path: "/pub/app/tags/one".into(),
+        label: None,
+        at: Utc::now().timestamp_millis(),
+    };
+    let (url, _, task) = mock_nexus(vec![line.clone(), line]).await;
+    let nexus = Nexus::new(&url, None).unwrap();
+    assert_eq!(
+        ingest::poll_once(
+            &pool,
+            &url,
+            &nexus,
+            &IngestConfig::default(),
+            &Metrics::new().unwrap()
+        )
+        .await
+        .unwrap(),
+        2
+    );
+    assert_eq!(
+        ingest::poll_once(
+            &pool,
+            &url,
+            &nexus,
+            &IngestConfig::default(),
+            &Metrics::new().unwrap()
+        )
+        .await
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM reference")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    task.abort();
+}
+
+/// A link that carries a credential is never previewed: `POST /v1/resolve` answers 400 for every
+/// capability probe of the shared fixture and for a password in the user info, stores nothing and
+/// spends no preview budget, and neither an answer nor a log line holds the secret.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_link_that_carries_a_credential_is_never_previewed(pool: PgPool) {
+    let probes: Value =
+        serde_json::from_str(include_str!("fixtures/capability_urls.json")).unwrap();
+    let config = Config {
+        preview: pinakes_core::config::PreviewConfig {
+            requests_per_minute: 2,
+            uri_requests_per_minute: 2,
+            cache_capacity: 100,
+        },
+        ..Default::default()
+    };
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
+    let logs = Lines::default();
+    let writer = logs.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_max_level(tracing::Level::TRACE)
+        .with_writer(move || writer.clone())
+        .finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    let mut refused = probes["providers"].as_array().unwrap().clone();
+    refused.extend(probes["query"].as_array().unwrap().iter().cloned());
+    refused.push(json!("https://user:SECRET@events.example.org/feed.ics"));
+    for probe in &refused {
+        let probe = probe.as_str().unwrap();
+        let shown = probe.replace("SECRET", "…");
+        let (code, answer) = call(&app, "POST", "/v1/resolve", Some(json!({"uri": probe}))).await;
+        assert_eq!(code, 400, "{shown}: {answer}");
+        assert!(!answer.to_string().contains("SECRET"), "{shown}");
+        let (id, _, _) = identity(probe).unwrap();
+        let stored: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource WHERE id=$1)")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(!stored, "{shown}");
+    }
+    // None of them spent the budget of two previews a minute.
+    for uri in ["https://example.org/one", "https://example.org/two"] {
+        let (code, _) = call(&app, "POST", "/v1/resolve", Some(json!({"uri": uri}))).await;
+        assert!(code == 200 || code == 202, "{uri}: {code}");
+    }
+    drop(guard);
+    let logs = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    assert!(!logs.contains("SECRET"));
+    assert!(logs.contains("a link that carries a credential is not previewed"));
+    assert!(logs.contains("events.example.org"));
+}
+
+/// A key that only looks like a credential's (a public list's page cursor, a word holding
+/// `token` or `secret`) is none: `POST /v1/resolve` takes every public probe of the shared
+/// fixture.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_key_that_only_looks_like_a_credential_is_previewed(pool: PgPool) {
+    let probes: Value =
+        serde_json::from_str(include_str!("fixtures/capability_urls.json")).unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    for probe in probes["public"].as_array().unwrap() {
+        let probe = probe.as_str().unwrap();
+        let (code, answer) = call(&app, "POST", "/v1/resolve", Some(json!({"uri": probe}))).await;
+        assert!(code == 200 || code == 202, "{probe}: {code} {answer}");
+    }
+}
+
+/// The instance takes at most `limits.preview_new_per_hour` new previews an hour, whoever asks:
+/// over it, `POST /v1/resolve` of a link it does not know answers 503 with `Retry-After` and stores
+/// nothing, a link it knows still reads, and a client over its own budget gets 429 first.
+#[sqlx::test(migrations = "../../migrations")]
+async fn new_previews_are_capped_for_the_whole_instance(pool: PgPool) {
+    let config = Config::from_value(json!({"limits": {
+        "preview_new_per_hour": 2,
+        "preview_requests_per_minute": 4,
+    }}))
+    .unwrap();
+    let state = AppState::new(pool.clone(), config).unwrap();
+    let refused = state.metrics.preview_refused.clone();
+    let app = api::router(state);
+    for uri in ["https://example.org/one", "https://example.org/two"] {
+        let (code, _) = call(&app, "POST", "/v1/resolve", Some(json!({"uri": uri}))).await;
+        assert!(code == 200 || code == 202, "{uri}: {code}");
+    }
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/v1/resolve")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({"uri": "https://example.org/three"}).to_string(),
+        ))
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.2:1234".parse::<SocketAddr>().unwrap(),
+    ));
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let wait: u64 = response.headers()["retry-after"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((3000..=3600).contains(&wait), "{wait}");
+    assert_eq!(refused.with_label_values(&["instance"]).get(), 1);
+    assert_eq!(refused.with_label_values(&["client"]).get(), 0);
+    let (id, _, _) = identity("https://example.org/three").unwrap();
+    let stored: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource WHERE id=$1)")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(!stored);
+    // A link the instance knows takes no new place.
+    let (code, _) = call(
+        &app,
+        "POST",
+        "/v1/resolve",
+        Some(json!({"uri": "https://example.org/one"})),
+    )
+    .await;
+    assert!(code == 200 || code == 202, "known: {code}");
+    // This client's own budget (four a minute) is spent: 429 comes first.
+    let (code, _) = call(
+        &app,
+        "POST",
+        "/v1/resolve",
+        Some(json!({"uri": "https://example.org/four"})),
+    )
+    .await;
+    assert_eq!(code, 429);
+}
+
+/// `POST /v1/resolve` from `ip` for `uri`: the status, the headers and whether `uri` is stored.
+async fn resolve_from(
+    app: &Router,
+    pool: &PgPool,
+    ip: &str,
+    uri: &str,
+) -> (StatusCode, HeaderMap, bool) {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/v1/resolve")
+        .header("content-type", "application/json")
+        .body(Body::from(json!({ "uri": uri }).to_string()))
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        format!("{ip}:1234").parse::<SocketAddr>().unwrap(),
+    ));
+    let response = app.clone().oneshot(request).await.unwrap();
+    let (id, _, _) = identity(uri).unwrap();
+    let stored: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource WHERE id=$1)")
+        .bind(&id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    (response.status(), response.headers().clone(), stored)
+}
+
+/// One client takes at most `limits.preview_new_per_client_per_hour` of the hour's new previews:
+/// over it, that client gets 429 with `Retry-After` and nothing is stored, while another client
+/// still previews.
+#[sqlx::test(migrations = "../../migrations")]
+async fn one_client_takes_at_most_its_share_of_new_previews(pool: PgPool) {
+    let config = Config::from_value(json!({"limits": {
+        "preview_new_per_hour": 10,
+        "preview_new_per_client_per_hour": 1,
+    }}))
+    .unwrap();
+    let state = AppState::new(pool.clone(), config).unwrap();
+    let refused = state.metrics.preview_refused.clone();
+    let app = api::router(state);
+    let (code, _, stored) = resolve_from(&app, &pool, "127.0.0.2", "https://example.org/a").await;
+    assert!((code == 200 || code == 202) && stored, "{code}");
+    let (code, headers, stored) =
+        resolve_from(&app, &pool, "127.0.0.2", "https://example.org/b").await;
+    assert_eq!(code, StatusCode::TOO_MANY_REQUESTS);
+    assert!(!stored);
+    let wait: u64 = headers["retry-after"].to_str().unwrap().parse().unwrap();
+    assert!((3000..=3600).contains(&wait), "{wait}");
+    let (code, _, stored) = resolve_from(&app, &pool, "127.0.0.3", "https://example.org/b").await;
+    assert!((code == 200 || code == 202) && stored, "{code}");
+    assert_eq!(refused.with_label_values(&["client"]).get(), 1);
+}
+
+/// The per-client share of new previews is off unless the operator sets it: behind the reverse
+/// proxy the deployment asks for, every client has the proxy's address, and a share would cap the
+/// whole instance.
+#[test]
+fn the_per_client_share_is_off_unless_set() {
+    assert_eq!(Config::default().preview_new_per_client_per_hour, 0);
+    assert!(Config::from_value(json!({"limits": {"preview_new_per_client_per_hour": 0}})).is_ok());
+}
+
+/// `store::ensure_resource_created` says whether its call created the row: a preview keeps its
+/// place in the hour only then, so two first requests for one link take one place between them.
+#[sqlx::test(migrations = "../../migrations")]
+async fn only_the_request_that_stores_a_link_keeps_its_place(pool: PgPool) {
+    let uri = "https://example.org/once";
+    let (id, created) = store::ensure_resource_created(&pool, uri).await.unwrap();
+    assert!(created);
+    assert_eq!(
+        store::ensure_resource_created(&pool, uri).await.unwrap(),
+        (id, false)
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn preview_pending_cached_completion_and_per_ip_uri_budgets(pool: PgPool) {
+    let config = Config {
+        preview: pinakes_core::config::PreviewConfig {
+            requests_per_minute: 2,
+            uri_requests_per_minute: 2,
+            cache_capacity: 100,
+        },
+        ..Default::default()
+    };
+    let state = AppState::new(pool.clone(), config.clone()).unwrap();
+    let app = api::router(state);
+    let start = std::time::Instant::now();
+    let (code, preview) = call(
+        &app,
+        "POST",
+        "/v1/resolve",
+        Some(json!({"uri":"https://example.org/preview"})),
+    )
+    .await;
+    assert_eq!(code, 202);
+    assert_eq!(preview["status"], "pending");
+    assert!(preview.get("score").is_none());
+    // The synchronous window was waited out before the pending answer, and it is a window of
+    // seconds, not tens of them (loose above: a loaded machine never fails it).
+    assert!(start.elapsed() >= std::time::Duration::from_secs(3));
+    assert!(start.elapsed() < std::time::Duration::from_secs(20));
+    let job = queue::claim(&pool, "web", &config.queue)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut doc = ResourceMeta::new(&job.uri, "web", 86400);
+    doc.name = Some("A preview".into());
+    store::save_document(&pool, &job.id, job.generation, &doc)
+        .await
+        .unwrap();
+    // A preview takes a tagged link's path: nobody referenced it, yet its card queues its
+    // also-on lookups.
+    let (referenced, queued): (bool, bool) = sqlx::query_as(
+        "SELECT EXISTS(SELECT 1 FROM reference WHERE resource_id=$1),EXISTS(SELECT 1 FROM also_on_dirty WHERE resource_id=$1)",
+    )
+    .bind(&job.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((referenced, queued), (false, true));
+    let (code, preview) = call(
+        &app,
+        "POST",
+        "/v1/resolve",
+        Some(json!({"uri":"https://example.org/preview#same"})),
+    )
+    .await;
+    assert_eq!(code, 200);
+    assert_eq!(preview["name"], "A preview");
+    assert!(preview.get("score").is_none());
+    assert!(queue::claim(&pool, "web", &config.queue)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/v1/resolve",
+            Some(json!({"uri":"https://example.org/another"}))
+        )
+        .await
+        .0,
+        429
+    );
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/v1/resolve",
+            Some(json!({"uri":"urn:unsupported"}))
+        )
+        .await
+        .0,
+        400
+    );
+    assert_eq!(
+        call(&app, "POST", "/v1/resolve", Some(json!({"uri":"invalid"})))
+            .await
+            .0,
+        400
+    );
+    // A link pasted with its quotes is refused with the reason, never the input: its user info,
+    // query and fragment stay out of the answer.
+    let (code, answer) = call(
+        &app,
+        "POST",
+        "/v1/resolve",
+        Some(json!({"uri":"\"https://user:CANARY@example.org/p?token=CANARY#CANARY\""})),
+    )
+    .await;
+    assert_eq!(code, 400);
+    assert!(!answer.to_string().contains("CANARY"), "{answer}");
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/v1/resolve")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({"uri":"https://example.org/preview"}).to_string(),
+        ))
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.3:1234".parse::<SocketAddr>().unwrap(),
+    ));
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), 429);
+    assert_eq!(response.headers()["retry-after"], "60");
+    // A preview with no references is never included in public ranking search.
+    let (_, search) = call(&app, "GET", "/v1/search", None).await;
+    assert!(search["items"].as_array().unwrap().is_empty());
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn preview_returns_completion_within_synchronous_window(pool: PgPool) {
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let worker = tokio::spawn(async move {
+        loop {
+            if let Some(job) = queue::claim(&pool, "web", &Default::default())
+                .await
+                .unwrap()
+            {
+                let mut doc = ResourceMeta::new(&job.uri, "web", 100);
+                doc.name = Some("Fast card".into());
+                store::save_document(&pool, &job.id, job.generation, &doc)
+                    .await
+                    .unwrap();
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    });
+    let start = std::time::Instant::now();
+    let (code, body) = call(
+        &app,
+        "POST",
+        "/v1/resolve",
+        Some(json!({"uri":"https://example.org/fast"})),
+    )
+    .await;
+    // 200 with the card, not 202 pending: the completion came within the synchronous window,
+    // and the window itself is seconds (loose above: a loaded machine never fails it).
+    assert_eq!(code, 200);
+    assert_eq!(body["name"], "Fast card");
+    assert!(start.elapsed() < std::time::Duration::from_secs(10));
+    worker.await.unwrap();
+}
+
+/// While a preview is pending, the wait reads its status alone; the card is read once, for the
+/// answer. Counted as calls of `also_on()`, which every card read makes once.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_pending_preview_is_waited_for_by_its_status_and_read_once(pool: PgPool) {
+    let connection = common::one_connection(&pool).await;
+    sqlx::query("SET track_functions='all'")
+        .execute(&connection)
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(connection.clone(), Config::default()).unwrap());
+    let card_reads =
+        "SELECT coalesce(sum(calls),0)::int8 FROM pg_stat_user_functions WHERE funcname='also_on'";
+    let before = common::counted(&connection, card_reads).await;
+    let start = std::time::Instant::now();
+    let (code, preview) = call(
+        &app,
+        "POST",
+        "/v1/resolve",
+        Some(json!({"uri":"https://example.org/waited"})),
+    )
+    .await;
+    assert_eq!(code, 202);
+    assert_eq!(preview["status"], "pending");
+    // The whole window was waited out, and the card was read once in it.
+    assert!(start.elapsed() >= std::time::Duration::from_secs(3));
+    assert_eq!(common::counted(&connection, card_reads).await - before, 1);
+    // A card that is there already is read once too.
+    let job = queue::claim(&pool, "web", &Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut doc = ResourceMeta::new(&job.uri, "web", 86400);
+    doc.name = Some("Waited".into());
+    store::save_document(&pool, &job.id, job.generation, &doc)
+        .await
+        .unwrap();
+    let before = common::counted(&connection, card_reads).await;
+    let (code, preview) = call(
+        &app,
+        "POST",
+        "/v1/resolve",
+        Some(json!({"uri":"https://example.org/waited"})),
+    )
+    .await;
+    assert_eq!(code, 200);
+    assert_eq!(preview["name"], "Waited");
+    assert_eq!(common::counted(&connection, card_reads).await - before, 1);
+}
+
+/// What happens to a preview while it is waited for decides the answer: a link deleted
+/// meanwhile is a 404, and one that became an alias answers with its root's card as soon as the
+/// root has one.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_preview_that_goes_or_becomes_an_alias_while_waited_for(pool: PgPool) {
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    // Runs `change` on the link's row once the request has stored it.
+    let meanwhile = |uri: &'static str, change: &'static str, root: Option<String>| {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            let id = loop {
+                let id: Option<String> = sqlx::query_scalar("SELECT id FROM resource WHERE uri=$1")
+                    .bind(uri)
+                    .fetch_optional(&pool)
+                    .await
+                    .unwrap();
+                if let Some(id) = id {
+                    break id;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            };
+            sqlx::query(change)
+                .bind(id)
+                .bind(root)
+                .execute(&pool)
+                .await
+                .unwrap();
+        })
+    };
+    let gone = meanwhile(
+        "https://example.org/gone-meanwhile",
+        "DELETE FROM resource WHERE id=$1 AND $2::text IS NULL",
+        None,
+    );
+    let start = std::time::Instant::now();
+    // The document declares no 404 for this route: the answer is not checked against it.
+    let (code, answer) = send(
+        &app,
+        "POST",
+        "/v1/resolve",
+        Some(json!({"uri":"https://example.org/gone-meanwhile"})),
+        |_, _, _, _| {},
+    )
+    .await;
+    gone.await.unwrap();
+    assert_eq!(code, 404);
+    assert_eq!(answer["error"], "resource expired");
+    // Answered when the row went, not at the end of the window.
+    assert!(start.elapsed() < std::time::Duration::from_secs(3));
+
+    let root = store::ensure_resource(&pool, "https://example.org/root")
+        .await
+        .unwrap();
+    let mut doc = ResourceMeta::new("https://example.org/root", "web", 86400);
+    doc.name = Some("Root".into());
+    store::save_document(&pool, &root, 0, &doc).await.unwrap();
+    let aliased = meanwhile(
+        "https://example.org/alias-meanwhile",
+        "INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'canonical')",
+        Some(root.clone()),
+    );
+    let start = std::time::Instant::now();
+    let (code, answer) = call(
+        &app,
+        "POST",
+        "/v1/resolve",
+        Some(json!({"uri":"https://example.org/alias-meanwhile"})),
+    )
+    .await;
+    aliased.await.unwrap();
+    assert_eq!(code, 200);
+    assert_eq!(answer["id"], root.as_str());
+    assert_eq!(answer["name"], "Root");
+    assert!(start.elapsed() < std::time::Duration::from_secs(3));
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn public_budget_covers_reads_and_evicts_old_ips(pool: PgPool) {
+    let config = Config {
+        api: pinakes_core::config::ApiConfig {
+            requests_per_minute: 2,
+            cache_capacity: 2,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let app = api::router(AppState::new(pool, config).unwrap());
+    async fn read_from(app: &Router, path: &str, peer: &str) -> u16 {
+        let mut r = Request::builder().uri(path).body(Body::empty()).unwrap();
+        r.extensions_mut().insert(axum::extract::ConnectInfo(
+            peer.parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        app.clone().oneshot(r).await.unwrap().status().as_u16()
+    }
+    assert_eq!(read_from(&app, "/v1/info", "127.0.0.1:1").await, 200);
+    assert_eq!(
+        read_from(&app, "/v1/openapi.json", "127.0.0.1:2").await,
+        200
+    );
+    assert_eq!(read_from(&app, "/v1/search", "127.0.0.1:3").await, 429);
+    assert_eq!(read_from(&app, "/v1/info", "127.0.0.2:1").await, 200);
+    assert_eq!(read_from(&app, "/v1/info", "127.0.0.3:1").await, 200);
+    assert_eq!(
+        read_from(&app, "/v1/info", "127.0.0.1:1").await,
+        200,
+        "oldest IP is evicted instead of denying all new clients"
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn api_pool_enforces_query_timeout(pool: PgPool) {
+    let api_pool = api::pool_options()
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SHOW statement_timeout")
+            .fetch_one(&api_pool)
+            .await
+            .unwrap(),
+        "5s"
+    );
+    // 57014 (query_canceled): the statement timeout cut the six-second sleep.
+    let error = sqlx::query("SELECT pg_sleep(6)")
+        .execute(&api_pool)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.as_database_error().unwrap().code().as_deref(),
+        Some("57014")
+    );
+    api_pool.close().await;
+}
+
+/// A request body over 2 MB is refused before any handler reads it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_body_over_two_megabytes_is_refused(pool: PgPool) {
+    let app = api::router(AppState::new(pool, Config::default()).unwrap());
+    let uris: Vec<String> = (0..1000)
+        .map(|n| format!("https://example.org/{n}/{}", "x".repeat(2100)))
+        .collect();
+    let body = json!({ "uris": uris });
+    assert!(body.to_string().len() > 2 * 1024 * 1024);
+    let (code, _) = call(&app, "POST", "/v1/resources/lookup", Some(body)).await;
+    assert_eq!(code, StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+/// A query or body axum cannot read is refused with what the route takes, never the input: a
+/// link given as a parameter's name, as a value of the wrong type or as a bare JSON string to
+/// `/v1/resolve` stays out of the answer.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_rejected_request_quotes_no_input(pool: PgPool) {
+    let app = api::router(AppState::new(pool, Config::default()).unwrap());
+    let link = "HTTPS://user:CANARY@example.org/calendar?token=QUERYCANARY#FRAGMENTCANARY";
+    let canary = |answer: &Value| {
+        let text = answer.to_string();
+        assert!(
+            !text.contains("CANARY") && !text.contains("example.org"),
+            "{text}"
+        );
+    };
+    let name: String =
+        percent_encoding::utf8_percent_encode(link, percent_encoding::NON_ALPHANUMERIC).to_string();
+    let (code, answer) = call(&app, "GET", &format!("/v1/search?{name}=1"), None).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    assert!(
+        answer["error"]
+            .as_str()
+            .unwrap()
+            .contains("query parameter"),
+        "{answer}"
+    );
+    canary(&answer);
+    let (code, answer) = call(&app, "POST", "/v1/resolve", Some(json!(link))).await;
+    assert!(code.is_client_error(), "{code}");
+    assert_eq!(
+        answer["error"],
+        "the body must be a JSON object with a `uri` string"
+    );
+    canary(&answer);
+    let (code, answer) = call(
+        &app,
+        "POST",
+        "/v1/resources/lookup",
+        Some(json!({ "uris": link })),
+    )
+    .await;
+    assert!(code.is_client_error(), "{code}");
+    assert!(
+        answer["error"].as_str().unwrap().contains("`uris`"),
+        "{answer}"
+    );
+    canary(&answer);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn reach_searches_pay_for_upstream_pages_before_fetching(pool: PgPool) {
+    let (nexus_url, calls, task) = mock_nexus(vec![]).await;
+    let mut config = Config {
+        nexus_url,
+        ..Default::default()
+    };
+    config.api.requests_per_minute = 7;
+    let app = api::router(AppState::new(pool, config).unwrap());
+    let path = format!("/v1/search?%72each=following&viewer={}", author(0));
+    assert_eq!(call(&app, "GET", &path, None).await.0, 200);
+    assert_eq!(calls.load(Ordering::SeqCst), 6);
+    let rotated = format!("/v1/search?reach=following&viewer={}", author(1));
+    assert_eq!(call(&app, "GET", &rotated, None).await.0, 429);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        6,
+        "rejected before Nexus fetch"
+    );
+    assert_eq!(call(&app, "GET", "/v1/info", None).await.0, 200);
+    assert_eq!(call(&app, "GET", "/v1/search", None).await.0, 429);
+    task.abort();
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn related_searches_cost_their_own_units_and_with_reach_both(pool: PgPool) {
+    let seed = "0".repeat(32);
+    let mut config = Config::default();
+    config.api.requests_per_minute = 7;
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
+    let path = format!("/v1/search?%72elated={seed}");
+    assert_eq!(call(&app, "GET", &path, None).await.0, 200);
+    assert_eq!(call(&app, "GET", &path, None).await.0, 429);
+    assert_eq!(call(&app, "GET", "/v1/info", None).await.0, 200);
+    assert_eq!(call(&app, "GET", "/v1/search", None).await.0, 429);
+    // With reach too, the search costs both: 12 units.
+    let (nexus_url, calls, task) = mock_nexus(vec![]).await;
+    let both = format!(
+        "/v1/search?related={seed}&reach=following&viewer={}",
+        author(0)
+    );
+    for (budget, status, fetched) in [(11, 429, 0), (12, 200, 6)] {
+        let mut config = Config {
+            nexus_url: nexus_url.clone(),
+            ..Default::default()
+        };
+        config.api.requests_per_minute = budget;
+        let app = api::router(AppState::new(pool.clone(), config).unwrap());
+        assert_eq!(call(&app, "GET", &both, None).await.0, status, "{budget}");
+        assert_eq!(calls.load(Ordering::SeqCst), fetched, "{budget}");
+    }
+    task.abort();
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn cursors_reject_payload_tampering_unsigned_forgery_and_another_daemon_key(pool: PgPool) {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    seed(&pool).await;
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let (_, first) = call(&app, "GET", "/v1/search?limit=2", None).await;
+    let cursor = first["cursor"].as_str().unwrap();
+    let signed = URL_SAFE_NO_PAD.decode(cursor).unwrap();
+    let original: Value = serde_json::from_slice(&signed[32..]).unwrap();
+    for (field, value) in [
+        ("score", json!(99999)),
+        ("id", json!("f".repeat(32))),
+        ("at", json!("2025-01-01T00:00:00Z")),
+        ("filter", json!("0".repeat(64))),
+    ] {
+        let mut edited = original.clone();
+        edited[field] = value;
+        let payload = serde_json::to_vec(&edited).unwrap();
+        for tag in [
+            signed[..32].to_vec(),
+            blake3::hash(&payload).as_bytes().to_vec(),
+        ] {
+            let mut forged = tag;
+            forged.extend_from_slice(&payload);
+            let cursor = URL_SAFE_NO_PAD.encode(forged);
+            assert_eq!(
+                call(
+                    &app,
+                    "GET",
+                    &format!("/v1/search?limit=2&cursor={cursor}"),
+                    None
+                )
+                .await
+                .0,
+                400
+            );
+        }
+    }
+    let unsigned = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&original).unwrap());
+    assert_eq!(
+        call(&app, "GET", &format!("/v1/search?cursor={unsigned}"), None)
+            .await
+            .0,
+        400
+    );
+    assert_eq!(
+        call(
+            &app,
+            "GET",
+            &format!("/v1/search?limit=2&cursor={cursor}"),
+            None
+        )
+        .await
+        .0,
+        200
+    );
+    let restarted = api::router(AppState::new(pool, Config::default()).unwrap());
+    assert_eq!(
+        call(
+            &restarted,
+            "GET",
+            &format!("/v1/search?limit=2&cursor={cursor}"),
+            None
+        )
+        .await
+        .0,
+        400
+    );
+}
+
+/// Facets never change the rows, so the next page reads the same with any `facet` or none;
+/// a cursor from a search with other filters is still refused.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_search_cursor_pages_the_same_rows_whatever_the_facets(pool: PgPool) {
+    seed(&pool).await;
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let ids = |page: &Value| -> Vec<String> {
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let base = "/v1/search?tags=rust&sort=activity&limit=2";
+    let (code, first) = call(&app, "GET", &format!("{base}&facet=type,tags,host"), None).await;
+    assert_eq!(code, 200, "{first}");
+    let cursor = first["cursor"].as_str().unwrap().to_owned();
+    let (code, plain) = call(&app, "GET", &format!("{base}&cursor={cursor}"), None).await;
+    assert_eq!(code, 200, "{plain}");
+    assert_eq!(ids(&plain).len(), 2);
+    assert!(plain.get("facets").is_none_or(Value::is_null), "{plain}");
+    for facet in ["type,tags,host", "tags", "category"] {
+        let (code, page) = call(
+            &app,
+            "GET",
+            &format!("{base}&facet={facet}&cursor={cursor}"),
+            None,
+        )
+        .await;
+        assert_eq!(code, 200, "{facet}: {page}");
+        assert_eq!(ids(&page), ids(&plain), "{facet}");
+        assert!(page["facets"].is_object(), "{facet}: {page}");
+    }
+    // The cursor of a page without facets serves a faceted next page too.
+    let (_, unfaceted) = call(&app, "GET", base, None).await;
+    let other = unfaceted["cursor"].as_str().unwrap();
+    let (code, page) = call(
+        &app,
+        "GET",
+        &format!("{base}&facet=tags&cursor={other}"),
+        None,
+    )
+    .await;
+    assert_eq!(code, 200, "{page}");
+    assert_eq!(ids(&page), ids(&plain));
+    // Row-changing parameters stay bound.
+    for changed in [
+        "/v1/search?tags=music&sort=activity&limit=2",
+        "/v1/search?tags=rust&sort=recent&limit=2",
+        "/v1/search?tags=rust&sort=activity&limit=2&type=Event",
+    ] {
+        let (code, page) = call(
+            &app,
+            "GET",
+            &format!("{changed}&facet=type,tags,host&cursor={cursor}"),
+            None,
+        )
+        .await;
+        assert_eq!(code, 400, "{changed}: {page}");
+    }
+}
+
+/// The search ETag follows exactly what a reader can see. A write in flight changes neither the
+/// results nor the ETag; its commit changes both. Two writers that commit in the other order
+/// than they began each change it, and folding the counted writes changes nothing.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_in_flight_writer_changes_the_etag_only_when_it_commits(pool: PgPool) {
+    let ids = seed(&pool).await;
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let search = |etag: Option<String>| {
+        let app = app.clone();
+        async move {
+            let mut request = Request::builder().uri("/v1/search?tags=rust");
+            if let Some(etag) = etag {
+                request = request.header("if-none-match", etag);
+            }
+            let mut request = request.body(Body::empty()).unwrap();
+            request.extensions_mut().insert(axum::extract::ConnectInfo(
+                "127.0.0.1:1".parse::<std::net::SocketAddr>().unwrap(),
+            ));
+            let response = app.oneshot(request).await.unwrap();
+            let status = response.status();
+            let etag = response.headers()["etag"].to_str().unwrap().to_owned();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            (status, etag, String::from_utf8_lossy(&body).into_owned())
+        }
+    };
+    let revision = || async {
+        sqlx::query_scalar::<_, i64>("SELECT revision FROM search_revision")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    let (_, first, _) = search(None).await;
+    let start = revision().await;
+    // The first writer to begin commits last.
+    let mut early = pool.begin().await.unwrap();
+    sqlx::query("UPDATE resource SET name='Early rename' WHERE id=$1")
+        .bind(&ids[0])
+        .execute(&mut *early)
+        .await
+        .unwrap();
+    let mut late = pool.begin().await.unwrap();
+    sqlx::query("UPDATE resource SET name='Late rename' WHERE id=$1")
+        .bind(&ids[1])
+        .execute(&mut *late)
+        .await
+        .unwrap();
+    assert_eq!(
+        search(Some(first.clone())).await.0,
+        304,
+        "nothing visible changed"
+    );
+    assert_eq!(revision().await, start);
+    late.commit().await.unwrap();
+    let (status, second, body) = search(Some(first.clone())).await;
+    assert_eq!(status, 200);
+    assert!(body.contains("Late rename") && !body.contains("Early rename"));
+    assert_eq!(revision().await, start + 1);
+    early.commit().await.unwrap();
+    let (status, third, body) = search(Some(second.clone())).await;
+    assert_eq!(status, 200, "the earlier writer's commit is a change too");
+    assert!(body.contains("Early rename"));
+    assert!(third != first && third != second);
+    assert_eq!(revision().await, start + 2);
+    // A fold keeps every reader's revision.
+    store::compact_search_writes(&pool).await.unwrap();
+    assert_eq!(revision().await, start + 2);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM search_write")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(search(Some(third)).await.0, 304);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn reach_membership_changes_invalidate_etags_without_resource_writes(pool: PgPool) {
+    seed(&pool).await;
+    let expanded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = expanded.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let config = Config {
+        nexus_url: format!("http://{}", listener.local_addr().unwrap()),
+        ..Default::default()
+    };
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route(
+                "/v1/user/{id}/following",
+                get(move || {
+                    let flag = flag.clone();
+                    async move {
+                        Json(if flag.load(Ordering::SeqCst) {
+                            vec![author(0), author(1)]
+                        } else {
+                            vec![author(0)]
+                        })
+                    }
+                }),
+            ),
+        )
+        .await
+        .unwrap()
+    });
+    let path = format!("/v1/search?reach=following&viewer={}", author(999));
+    let first = api::router(AppState::new(pool.clone(), config.clone()).unwrap());
+    let mut request = Request::builder().uri(&path).body(Body::empty()).unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.1:1".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let response = first.oneshot(request).await.unwrap();
+    let etag = response.headers()["etag"].clone();
+    assert_eq!(response.status(), 200);
+    let revision: i64 = sqlx::query_scalar("SELECT revision FROM search_revision")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    expanded.store(true, Ordering::SeqCst);
+    // A new state represents the next reach refresh after the normal five-minute cache expires.
+    let refreshed = api::router(AppState::new(pool.clone(), config).unwrap());
+    let mut request = Request::builder()
+        .uri(path)
+        .header("if-none-match", &etag)
+        .body(Body::empty())
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.1:1".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let response = refreshed.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert_ne!(response.headers()["etag"], etag);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT revision FROM search_revision")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        revision
+    );
+    server.abort();
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn admin_bearer_and_network_bind_policy(pool: sqlx::PgPool) {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+    let mut cfg = pinakes_core::config::Config {
+        admin_listen: "0.0.0.0:9090".into(),
+        ..Default::default()
+    };
+    assert!(cfg.validate().is_err());
+    cfg.admin_token = Some("review-only-operator-token".into());
+    assert!(cfg.validate().is_ok());
+    let app = pinakes_core::api::admin_router(pinakes_core::api::AppState::new(pool, cfg).unwrap());
+    for credential in [
+        None,
+        Some("Bearer wrong"),
+        Some("Basic review-only-operator-token"),
+        Some("Bearer review-only-operator-token"),
+    ] {
+        for path in [
+            "/v1/info",
+            "/metrics",
+            "/v1/groups/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ] {
+            let mut r = Request::builder().uri(path);
+            if let Some(value) = credential {
+                r = r.header("authorization", value);
+            }
+            let response = app
+                .clone()
+                .oneshot(r.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            if credential == Some("Bearer review-only-operator-token") {
+                assert_ne!(response.status(), 401);
+            } else {
+                assert_eq!(response.status(), 401);
+            }
+        }
+    }
+}
+
+/// One admin request with an optional `Host` and bearer; its status.
+async fn admin_status(
+    app: &Router,
+    method: &str,
+    path: &str,
+    host: Option<&str>,
+    bearer: Option<&str>,
+    body: &str,
+) -> StatusCode {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("content-type", "application/json");
+    if let Some(host) = host {
+        request = request.header("host", host);
+    }
+    if let Some(token) = bearer {
+        request = request.header("authorization", format!("Bearer {token}"));
+    }
+    app.clone()
+        .oneshot(request.body(Body::from(body.to_owned())).unwrap())
+        .await
+        .unwrap()
+        .status()
+}
+
+/// The admin listener answers only requests for its own host. A page that rebinds its name to this
+/// machine gets 421 on every admin route, with or without a token configured, before a handler or
+/// the credential check runs, and its curation changes nothing; `localhost`, loopback addresses
+/// and `admin_hosts` names pass as before.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_admin_listener_refuses_requests_for_other_hosts(pool: PgPool) {
+    let ids = seed(&pool).await;
+    let curation = json!({"members": [
+        {"resource_id": ids[0], "occurrence": null},
+        {"resource_id": ids[1], "occurrence": null},
+    ]})
+    .to_string();
+    let routes = [
+        ("GET", "/v1/info".to_owned()),
+        ("GET", "/metrics".to_owned()),
+        ("GET", format!("/v1/resources/{}/document", ids[0])),
+        ("PUT", format!("/v1/groups/{}", "a".repeat(32))),
+    ];
+    let curated = || async {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM group_override")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    let before = curated().await;
+    // The defaults: loopback, no token.
+    let admin = api::admin_router(AppState::new(pool.clone(), Config::default()).unwrap());
+    for host in [
+        "attacker.example",
+        "attacker.example:9090",
+        "localhost.attacker.example",
+    ] {
+        for (method, path) in &routes {
+            let status = admin_status(&admin, method, path, Some(host), None, &curation).await;
+            assert_eq!(
+                status,
+                StatusCode::MISDIRECTED_REQUEST,
+                "{host} {method} {path}"
+            );
+        }
+    }
+    assert_eq!(curated().await, before);
+    for host in [
+        Some("localhost:9090"),
+        Some("127.0.0.1:9090"),
+        Some("[::1]:9090"),
+        None,
+    ] {
+        let status = admin_status(&admin, "GET", "/v1/info", host, None, "").await;
+        assert_eq!(status, StatusCode::OK, "{host:?}");
+        let status = admin_status(&admin, "GET", "/metrics", host, None, "").await;
+        assert_eq!(status, StatusCode::OK, "{host:?}");
+    }
+    // With a token: the host is checked first, even with the right credential.
+    let config = Config {
+        admin_token: Some("review-only-operator-token".into()),
+        ..Config::default()
+    };
+    let admin = api::admin_router(AppState::new(pool.clone(), config).unwrap());
+    let token = Some("review-only-operator-token");
+    for (method, path) in &routes {
+        let status = admin_status(
+            &admin,
+            method,
+            path,
+            Some("attacker.example"),
+            token,
+            &curation,
+        )
+        .await;
+        assert_eq!(status, StatusCode::MISDIRECTED_REQUEST, "{method} {path}");
+    }
+    assert_eq!(curated().await, before);
+}
+
+/// `admin_hosts` names the hosts a scraper elsewhere reaches the admin listener by; they pass the
+/// host check and then the credential check as before. Each is a bare lowercase host name.
+#[sqlx::test(migrations = "../../migrations")]
+async fn admin_hosts_names_a_scraper_s_host(pool: PgPool) {
+    let config = Config {
+        admin_token: Some("review-only-operator-token".into()),
+        admin_hosts: vec!["prometheus".into()],
+        ..Config::default()
+    };
+    config.validate().unwrap();
+    let admin = api::admin_router(AppState::new(pool.clone(), config).unwrap());
+    let token = Some("review-only-operator-token");
+    let status = admin_status(
+        &admin,
+        "GET",
+        "/metrics",
+        Some("prometheus.example"),
+        token,
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::MISDIRECTED_REQUEST);
+    for host in ["prometheus:9090", "PROMETHEUS", "127.0.0.1:9090"] {
+        for bearer in [None, Some("wrong")] {
+            let status = admin_status(&admin, "GET", "/metrics", Some(host), bearer, "").await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{host} {bearer:?}");
+        }
+        let status = admin_status(&admin, "GET", "/metrics", Some(host), token, "").await;
+        assert_eq!(status, StatusCode::OK, "{host}");
+    }
+    // Names are bare lowercase host names.
+    for bad in [
+        "prometheus:9090",
+        "http://prometheus",
+        "*.internal",
+        "Prometheus",
+        "a/b",
+        "",
+    ] {
+        let config = Config {
+            admin_hosts: vec![bad.into()],
+            ..Config::default()
+        };
+        assert!(config.validate().is_err(), "{bad}");
+    }
+}
+
+async fn raw(
+    app: &Router,
+    method: &str,
+    path: &str,
+    bearer: Option<&str>,
+) -> (StatusCode, HeaderMap, Vec<u8>) {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("content-type", "application/json");
+    if let Some(token) = bearer {
+        request = request.header("authorization", format!("Bearer {token}"));
+    }
+    let body = if method == "GET" {
+        Body::empty()
+    } else {
+        Body::from("{}")
+    };
+    let mut request = request.body(body).unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.9:1234".parse::<SocketAddr>().unwrap(),
+    ));
+    let response = app.clone().oneshot(request).await.unwrap();
+    let (parts, body) = response.into_parts();
+    let bytes = body.collect().await.unwrap().to_bytes().to_vec();
+    (parts.status, parts.headers, bytes)
+}
+
+fn refs(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::String(r)) = map.get("$ref") {
+                out.push(r.clone());
+            }
+            map.values().for_each(|v| refs(v, out));
+        }
+        Value::Array(items) => items.iter().for_each(|v| refs(v, out)),
+        _ => {}
+    }
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn swagger_ui_and_the_openapi_document_are_on_the_public_listener_only(pool: PgPool) {
+    let token = "swagger-test-operator-token";
+    let config = Config {
+        admin_token: Some(token.into()),
+        ..Default::default()
+    };
+    let state = AppState::new(pool.clone(), config.clone()).unwrap();
+    let public = api::router(state.clone());
+    let admin = api::admin_router(state);
+
+    // Swagger UI is on by default, from the vendored bundle, under restrictive headers.
+    let (code, headers, _) = raw(&public, "GET", "/swagger-ui", None).await;
+    assert!(code.is_redirection());
+    assert_eq!(headers["location"], "/swagger-ui/");
+    let (code, headers, body) = raw(&public, "GET", "/swagger-ui/", None).await;
+    assert_eq!(code, 200);
+    assert!(headers["content-type"]
+        .to_str()
+        .unwrap()
+        .starts_with("text/html"));
+    assert!(String::from_utf8(body).unwrap().contains("<html"));
+    let csp = headers["content-security-policy"].to_str().unwrap();
+    assert!(csp.starts_with("default-src 'self';") && !csp.contains("unsafe"));
+    assert_eq!(headers["x-content-type-options"], "nosniff");
+    let (code, _, body) = raw(&public, "GET", "/swagger-ui/swagger-initializer.js", None).await;
+    assert_eq!(code, 200);
+    let initializer = String::from_utf8(body).unwrap();
+    assert!(initializer.contains("\"/v1/openapi.json\"") && !initializer.contains("petstore"));
+    // No validator badge (an image from validator.swagger.io off localhost).
+    assert!(
+        initializer.contains("\"validatorUrl\": \"none\""),
+        "{initializer}"
+    );
+    // Redirect, assets and asset 404s carry the headers; other public paths, 404s included, do not.
+    for (path, expected) in [
+        ("/swagger-ui", 303),
+        ("/swagger-ui/swagger-ui.css", 200),
+        ("/swagger-ui/swagger-initializer.js", 200),
+        ("/swagger-ui/missing.js", 404),
+    ] {
+        let (code, headers, _) = raw(&public, "GET", path, None).await;
+        assert_eq!(code.as_u16(), expected, "{path}");
+        assert_eq!(
+            headers["content-security-policy"],
+            api::SWAGGER_UI_CSP,
+            "{path}"
+        );
+        assert_eq!(headers["x-content-type-options"], "nosniff", "{path}");
+    }
+    for path in ["/", "/metrics", "/favicon.ico", "/swagger-uix", "/v1/info"] {
+        let (_, headers, _) = raw(&public, "GET", path, None).await;
+        assert!(headers.get("content-security-policy").is_none(), "{path}");
+        assert!(headers.get("x-content-type-options").is_none(), "{path}");
+    }
+    // The CSP's style hashes are exactly those of the <style> elements the served bundle renders,
+    // so a utoipa-swagger-ui bump that changes them fails here, not silently in browsers.
+    let mut rendered = std::collections::BTreeSet::new();
+    let (mut elements, mut literals) = (0, 0);
+    for asset in ["swagger-ui-bundle.js", "swagger-ui-standalone-preset.js"] {
+        let (code, _, body) = raw(&public, "GET", &format!("/swagger-ui/{asset}"), None).await;
+        assert_eq!(code, 200, "{asset}");
+        let js = String::from_utf8(body).unwrap();
+        let needle = "createElement(\"style\",null,\"";
+        // Every <style> element must be a plain literal the pattern sees; any other form (a
+        // variable, props, a template) would escape the hash check.
+        elements += js.matches("createElement(\"style\"").count();
+        for (at, _) in js.match_indices(needle) {
+            literals += 1;
+            let css = &js[at + needle.len()..];
+            let css = &css[..css.find('"').unwrap()];
+            use base64::Engine;
+            use sha2::Digest;
+            rendered.insert(format!(
+                "'sha256-{}'",
+                base64::engine::general_purpose::STANDARD.encode(sha2::Sha256::digest(css))
+            ));
+        }
+    }
+    let allowed: std::collections::BTreeSet<String> = api::SWAGGER_UI_CSP
+        .split(';')
+        .find_map(|d| d.trim().strip_prefix("style-src "))
+        .unwrap()
+        .split(' ')
+        .filter(|s| s.starts_with("'sha256-"))
+        .map(str::to_owned)
+        .collect();
+    assert!(!rendered.is_empty());
+    assert_eq!(
+        elements, literals,
+        "a <style> element is not a plain string literal"
+    );
+    assert_eq!(rendered, allowed);
+
+    // The document matches its snapshot (without the sources' own examples) and every $ref
+    // resolves.
+    let docs = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/");
+    let public_doc = serde_json::to_value(api::openapi_document()).unwrap();
+    let snapshot_doc = api::openapi_snapshot();
+    for (doc, file) in [(&snapshot_doc, "openapi.json")] {
+        let snapshot: Value =
+            serde_json::from_str(&std::fs::read_to_string(format!("{docs}{file}")).unwrap())
+                .unwrap();
+        assert_eq!(doc, &snapshot, "{file} is stale; run scripts/openapi");
+        let mut found = vec![];
+        refs(doc, &mut found);
+        for r in found {
+            let pointer = r.strip_prefix('#').expect("local $ref");
+            assert!(doc.pointer(pointer).is_some(), "{file}: unresolved {r}");
+        }
+    }
+    assert_eq!(
+        call(&public, "GET", "/v1/openapi.json", None).await.1,
+        public_doc
+    );
+    // The admin listener serves no document; its routes are in docs/api.md.
+    assert_eq!(raw(&admin, "GET", "/v1/openapi.json", None).await.0, 401);
+    assert_eq!(
+        raw(&admin, "GET", "/v1/openapi.json", Some(token)).await.0,
+        404
+    );
+
+    // "Try it out" can only target operations the listener serves: the router's own fallback
+    // (404, empty body) and 405 never answer a documented operation.
+    let id = "00000000000000000000000000000000";
+    for (app, doc, bearer) in [(&public, &public_doc, None::<&str>)] {
+        for (path, item) in doc["paths"].as_object().unwrap() {
+            for method in item.as_object().unwrap().keys() {
+                let uri = path.replace("{id}", id);
+                let method = method.to_uppercase();
+                let (code, _, body) = raw(app, &method, &uri, bearer).await;
+                assert!(
+                    code != 405 && !(code == 404 && body.is_empty()),
+                    "{method} {path} is documented but not served ({code})"
+                );
+            }
+        }
+    }
+    assert!(public_doc["paths"].get("/metrics").is_none());
+    assert!(public_doc["paths"]["/v1/groups/{id}"].get("put").is_none());
+    assert_eq!(raw(&public, "GET", "/metrics", None).await.0, 404);
+    assert_eq!(
+        raw(&public, "PUT", &format!("/v1/groups/{id}"), None)
+            .await
+            .0,
+        405
+    );
+
+    // Switched off, the route is gone.
+    let mut off = config;
+    off.api.swagger_ui = false;
+    let public = api::router(AppState::new(pool.clone(), off).unwrap());
+    for path in [
+        "/swagger-ui",
+        "/swagger-ui/",
+        "/swagger-ui/swagger-initializer.js",
+    ] {
+        let (code, headers, _) = raw(&public, "GET", path, None).await;
+        assert_eq!(code, 404, "{path}");
+        assert!(headers.get("content-security-policy").is_none(), "{path}");
+    }
+    assert_eq!(call(&public, "GET", "/v1/openapi.json", None).await.0, 200);
+
+    // Swagger UI shares the per-IP budget of the /v1 routes.
+    let mut tight = Config::default();
+    tight.api.requests_per_minute = 2;
+    let public = api::router(AppState::new(pool, tight).unwrap());
+    assert_eq!(raw(&public, "GET", "/swagger-ui/", None).await.0, 200);
+    assert_eq!(raw(&public, "GET", "/v1/openapi.json", None).await.0, 200);
+    let (code, headers, _) = raw(&public, "GET", "/swagger-ui/", None).await;
+    assert_eq!(code, 429);
+    assert_eq!(headers["content-security-policy"], api::SWAGGER_UI_CSP);
+    assert_eq!(headers["x-content-type-options"], "nosniff");
+}
+
+async fn cors_call(
+    app: &Router,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> (StatusCode, HeaderMap) {
+    let mut request = Request::builder().method(method).uri(path);
+    for (k, v) in headers {
+        request = request.header(*k, *v);
+    }
+    let mut request = request.body(Body::empty()).unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.9:1234".parse::<SocketAddr>().unwrap(),
+    ));
+    let response = app.clone().oneshot(request).await.unwrap();
+    (response.status(), response.headers().clone())
+}
+
+/// CORS on the public listener only, for any origin by default, for listed origins,
+/// or not at all; preflights spend the per-IP budget and 429s stay readable cross-origin.
+#[sqlx::test(migrations = "../../migrations")]
+async fn cors_for_browser_clients_on_the_public_listener_only(pool: PgPool) {
+    let app_with = |origins: Vec<&str>, per_minute: usize| {
+        let mut config = Config::default();
+        config.api.cors_allow_origins = origins.into_iter().map(str::to_owned).collect();
+        config.api.requests_per_minute = per_minute;
+        config.validate().unwrap();
+        api::router(AppState::new(pool.clone(), config).unwrap())
+    };
+    let preflight = [
+        ("origin", "https://pubky.app"),
+        ("access-control-request-method", "POST"),
+        ("access-control-request-headers", "content-type"),
+    ];
+    // Default: any origin, no credentials, Retry-After and ETag exposed.
+    assert_eq!(Config::default().api.cors_allow_origins, ["*"]);
+    let any = app_with(vec!["*"], 120);
+    let (code, h) = cors_call(&any, "GET", "/v1/info", &[("origin", "https://pubky.app")]).await;
+    assert_eq!(code, 200);
+    assert_eq!(h["access-control-allow-origin"], "*");
+    assert_eq!(h["access-control-expose-headers"], "retry-after, etag");
+    assert!(h.get("access-control-allow-credentials").is_none());
+    assert!(h.get_all("vary").iter().all(|v| v != "origin"));
+    // In `*` mode a request without Origin gets the headers too, so a shared cache
+    // filled by curl or a server still serves browsers.
+    let (_, h) = cors_call(&any, "GET", "/v1/search?q=x", &[]).await;
+    assert_eq!(h["access-control-allow-origin"], "*");
+    assert_eq!(h["access-control-expose-headers"], "retry-after, etag");
+    assert!(h.get_all("vary").iter().all(|v| v != "origin"));
+    let (code, h) = cors_call(&any, "OPTIONS", "/v1/resolve", &preflight).await;
+    assert_eq!(code, 204);
+    assert_eq!(h["access-control-allow-origin"], "*");
+    assert_eq!(h["access-control-allow-methods"], "GET, POST");
+    assert_eq!(h["access-control-allow-headers"], "content-type");
+    assert_eq!(h["access-control-max-age"], "600");
+    // A list: the allowed origin is echoed with Vary: Origin; another origin gets nothing.
+    let listed = app_with(vec!["https://pubky.app"], 120);
+    let (_, h) = cors_call(
+        &listed,
+        "GET",
+        "/v1/info",
+        &[("origin", "https://pubky.app")],
+    )
+    .await;
+    assert_eq!(h["access-control-allow-origin"], "https://pubky.app");
+    assert!(h.get_all("vary").iter().any(|v| v == "origin"));
+    let (_, h) = cors_call(
+        &listed,
+        "GET",
+        "/v1/info",
+        &[("origin", "https://evil.example")],
+    )
+    .await;
+    assert!(h.get("access-control-allow-origin").is_none());
+    assert!(h.get_all("vary").iter().any(|v| v == "origin"));
+    let refused = [
+        ("origin", "https://evil.example"),
+        ("access-control-request-method", "POST"),
+    ];
+    let (code, h) = cors_call(&listed, "OPTIONS", "/v1/resolve", &refused).await;
+    assert_eq!(code, 204);
+    assert!(h.get("access-control-allow-origin").is_none());
+    assert!(h.get("access-control-allow-methods").is_none());
+    // Preflights share the per-IP budget, and the 429 is readable cross-origin.
+    let tight = app_with(vec!["*"], 2);
+    for _ in 0..2 {
+        assert_eq!(
+            cors_call(&tight, "OPTIONS", "/v1/resolve", &preflight)
+                .await
+                .0,
+            204
+        );
+    }
+    let (code, h) = cors_call(
+        &tight,
+        "GET",
+        "/v1/info",
+        &[("origin", "https://pubky.app")],
+    )
+    .await;
+    assert_eq!(code, 429);
+    assert!(h.contains_key("retry-after"));
+    assert_eq!(h["access-control-allow-origin"], "*");
+    assert_eq!(h["access-control-expose-headers"], "retry-after, etag");
+    // Disabled: no CORS headers, and OPTIONS is not answered as a preflight.
+    let off = app_with(vec![], 120);
+    let (_, h) = cors_call(&off, "GET", "/v1/info", &[("origin", "https://pubky.app")]).await;
+    assert!(h.get("access-control-allow-origin").is_none());
+    let (code, h) = cors_call(&off, "OPTIONS", "/v1/resolve", &preflight).await;
+    assert_ne!(code, 204);
+    assert!(h.get("access-control-allow-methods").is_none());
+    // The admin listener never sends CORS headers.
+    let admin = api::admin_router(AppState::new(pool.clone(), Config::default()).unwrap());
+    for (method, headers) in [
+        ("GET", &[("origin", "https://pubky.app")][..]),
+        ("OPTIONS", &preflight[..]),
+    ] {
+        let (_, h) = cors_call(&admin, method, "/v1/info", headers).await;
+        assert!(h.get("access-control-allow-origin").is_none(), "{method}");
+        assert!(h.get("access-control-allow-methods").is_none(), "{method}");
+    }
+    // Only "*" alone or exact origins are accepted.
+    for bad in [
+        vec!["*", "https://pubky.app"],
+        vec!["https://pubky.app/"],
+        vec!["https://pubky.app/path"],
+        vec!["ftp://pubky.app"],
+        vec!["pubky.app"],
+        vec!["https://*.pubky.app"],
+        vec!["https://pubky.*"],
+    ] {
+        let mut config = Config::default();
+        config.api.cors_allow_origins = bad.iter().map(|s| s.to_string()).collect();
+        assert!(config.validate().is_err(), "{bad:?}");
+    }
+}
+
+/// Request instants Postgres cannot bind (outside UTC years 0001–9999) answer 400
+/// `timestamp out of range` instead of 500, as integers and as RFC 3339.
+#[sqlx::test(migrations = "../../migrations")]
+async fn out_of_range_request_timestamps_answer_400(pool: PgPool) {
+    let ids = seed(&pool).await;
+    let app = api::router(AppState::new(pool, Config::default()).unwrap());
+    let refused = |code: StatusCode, body: &Value, what: &str| {
+        assert_eq!(code, 400, "{what}: {body}");
+        assert!(
+            body.to_string().contains("timestamp out of range"),
+            "{what}: {body}"
+        );
+    };
+    for value in [
+        "-8000000000000000",
+        "8000000000000000",
+        "-62135596800001",
+        "0000-01-01T00:00:00Z",
+        "9999-12-31T23:59:59-05:00",
+    ] {
+        for key in ["from", "to"] {
+            let (code, body) = call(&app, "GET", &format!("/v1/search?{key}={value}"), None).await;
+            refused(code, &body, &format!("search {key}={value}"));
+        }
+        let since = value
+            .parse::<i64>()
+            .map_or_else(|_| json!(value), |n| json!(n));
+        let (code, body) = call(
+            &app,
+            "POST",
+            "/v1/changes/lookup",
+            Some(json!({"resource_ids":[ids[0]],"since":since})),
+        )
+        .await;
+        refused(code, &body, &format!("lookup since={since}"));
+    }
+    for value in ["0000-01-01T00:00:00Z", "9999-12-31T23:59:59-05:00"] {
+        for key in ["from", "to"] {
+            let (code, body) = call(
+                &app,
+                "GET",
+                &format!("/v1/resources/{}/occurrences?{key}={value}", ids[0]),
+                None,
+            )
+            .await;
+            refused(code, &body, &format!("occurrences {key}={value}"));
+        }
+    }
+    // The edges themselves are accepted.
+    for value in [
+        "0001-01-01T00:00:00Z",
+        "9999-12-31T23:59:59Z",
+        "-62135596800000",
+    ] {
+        let (code, body) = call(&app, "GET", &format!("/v1/search?from={value}"), None).await;
+        assert_eq!(code, 200, "search from={value}: {body}");
+    }
+    let (code, body) = call(
+        &app,
+        "POST",
+        "/v1/changes/lookup",
+        Some(json!({"resource_ids":[ids[0]],"since":"0001-01-01T00:00:00Z"})),
+    )
+    .await;
+    assert_eq!(code, 200, "{body}");
+}
+
+async fn send_raw(
+    app: &Router,
+    method: &str,
+    target: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let mut request = Request::builder().method(method).uri(target);
+    if body.is_some() {
+        request = request.header("content-type", "application/json");
+    }
+    let mut request = request
+        .body(body.map_or_else(Body::empty, |b| Body::from(b.to_string())))
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.11:1234".parse::<SocketAddr>().unwrap(),
+    ));
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or_else(|_| json!(String::from_utf8_lossy(&bytes))),
+    )
+}
+
+/// A test clock for relative times and search cursors.
+fn test_clock(at: DateTime<Utc>) -> (Arc<std::sync::Mutex<DateTime<Utc>>>, api::Clock) {
+    let now = Arc::new(std::sync::Mutex::new(at));
+    let read = now.clone();
+    (now, Arc::new(move || *read.lock().unwrap()))
+}
+
+/// Every query parameter, path parameter and body field of
+/// every public operation, taken from the served document, gets multibyte, emoji, U+FFFD and
+/// invalid-UTF-8 values, including `x:`/`geo:` and coordinate-shaped ones, with the companions
+/// each parameter requires so the value reaches its parser. Every answer is 2xx or 4xx, never a
+/// panic; relative times answer 400 with the relative-time message.
+#[sqlx::test(migrations = "../../migrations")]
+async fn multibyte_input_never_panics_any_public_route(pool: PgPool) {
+    let mut config = Config::default();
+    config.api.requests_per_minute = 1_000_000;
+    config.preview.requests_per_minute = 1_000_000;
+    config.preview.uri_requests_per_minute = 1_000_000;
+    let state = AppState::new(pool, config).unwrap();
+    let panics = state.metrics.api_panics.clone();
+    let app = api::router(state);
+    let id = "0123456789abcdef0123456789abcdef";
+    for (method, target, body) in [
+        ("GET", "/v1/search?from=now%C3%A9", None),
+        ("GET", "/v1/search?to=now%2B%C3%A9", None),
+        ("GET", "/v1/search?from=now%2B1%F0%9F%98%80", None),
+        ("GET", "/v1/search?from=now%FF", None),
+        (
+            "POST",
+            "/v1/changes/lookup",
+            Some(json!({"resource_ids":[id],"since":"nowé"})),
+        ),
+        (
+            "POST",
+            "/v1/changes/lookup",
+            Some(json!({"resource_ids":[id],"since":"now-é"})),
+        ),
+    ] {
+        let (status, body) = send_raw(&app, method, target, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{method} {target}");
+        assert!(
+            body["error"].as_str().unwrap().contains("relative time"),
+            "{method} {target}: {body}"
+        );
+    }
+    let values = [
+        "é",
+        "😀",
+        "nowé",
+        "now+é",
+        "now+1é",
+        "now-😀",
+        "a\u{FFFD}b",
+        "日本語",
+        "now 😀d",
+        "x:é",
+        "geo:😀,1",
+        "46.0,é",
+        "é,1,2,3",
+    ];
+    // Raw invalid UTF-8 in query strings (decoded to U+FFFD by the extractor).
+    let raw_values = ["%FF", "now%FF", "now%2B1%FF", "%FF,1"];
+    let doc = api::openapi_document();
+    let encode = |v: &str| url::form_urlencoded::byte_serialize(v.as_bytes()).collect::<String>();
+    // Query parameters that only reach their parser with a companion.
+    let companions = |name: &str| match name {
+        "radius" => "&near=46.0,8.9",
+        "near" => "&radius=1000",
+        "reach" | "boost" => "&viewer=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+        "viewer" => "&reach=following",
+        _ => "",
+    };
+    // Relative times exist on search (`from`, `to`) and the change lookup (`since`); the
+    // occurrence window takes plain RFC 3339 and answers with the query extractor's message.
+    let relative_field = |what: &str, name: &str| {
+        (what.contains("/v1/search") && matches!(name, "from" | "to"))
+            || (what.contains("/v1/changes/lookup") && name == "since")
+    };
+    let mut sent = 0;
+    let check = |status: StatusCode, body: &Value, what: &str, name: &str, value: &str| {
+        // 2xx or 4xx; 502 only where the request reaches the Nexus upstream (`reach=`).
+        assert!(
+            status.is_success()
+                || status.is_client_error()
+                || (matches!(
+                    status,
+                    StatusCode::BAD_GATEWAY | StatusCode::NOT_IMPLEMENTED
+                ) && (what.contains("reach=") || what.contains("boost="))),
+            "{what}: {status} {body}"
+        );
+        if relative_field(what, name) && value.starts_with("now") {
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{what}");
+            assert!(
+                body["error"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("relative time"),
+                "{what}: {body}"
+            );
+        }
+    };
+    for (path, item) in doc["paths"].as_object().unwrap() {
+        for (method, operation) in item.as_object().unwrap() {
+            let method = method.to_ascii_uppercase();
+            let parameters = operation["parameters"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            let fill = |except: Option<&str>, value: &str| {
+                let mut target = path.clone();
+                for p in &parameters {
+                    if p["in"] == "path" {
+                        let name = p["name"].as_str().unwrap();
+                        let v = if Some(name) == except {
+                            encode(value)
+                        } else {
+                            id.into()
+                        };
+                        target = target.replace(&format!("{{{name}}}"), &v);
+                    }
+                }
+                target
+            };
+            let body_schema = {
+                let schema = &operation["requestBody"]["content"]["application/json"]["schema"];
+                match schema["$ref"].as_str() {
+                    Some(r) => doc["components"]["schemas"][r.rsplit('/').next().unwrap()].clone(),
+                    None => schema.clone(),
+                }
+            };
+            let is_array = |schema: &Value| {
+                schema["type"] == "array"
+                    || schema["type"]
+                        .as_array()
+                        .is_some_and(|t| t.iter().any(|t| t == "array"))
+            };
+            // A minimal valid body for the operation, so query and path checks reach handlers.
+            let base_body = body_schema["properties"].as_object().map(|properties| {
+                let mut body = serde_json::Map::new();
+                for name in body_schema["required"].as_array().into_iter().flatten() {
+                    let name = name.as_str().unwrap();
+                    let value = if is_array(&properties[name]) {
+                        json!([id])
+                    } else if name == "since" {
+                        json!("now")
+                    } else {
+                        json!("https://example.org/")
+                    };
+                    body.insert(name.to_owned(), value);
+                }
+                if body.is_empty() {
+                    // Exactly one of the optional lists (resources/lookup).
+                    if let Some((name, _)) = properties.iter().find(|(_, s)| is_array(s)) {
+                        body.insert(name.clone(), json!([id]));
+                    }
+                }
+                body
+            });
+            for p in &parameters {
+                let name = p["name"].as_str().unwrap();
+                let targets = values.iter().map(|v| (v.to_string(), encode(v))).chain(
+                    raw_values.iter().filter(|_| p["in"] == "query").map(|v| {
+                        (
+                            v.replace("%2B", "+").replace("%FF", "\u{FFFD}"),
+                            v.to_string(),
+                        )
+                    }),
+                );
+                for (value, encoded) in targets {
+                    let target = if p["in"] == "path" {
+                        fill(Some(name), &value)
+                    } else {
+                        format!("{}?{name}={encoded}{}", fill(None, ""), companions(name))
+                    };
+                    let body = base_body.clone().map(Value::Object);
+                    let (status, response) = send_raw(&app, &method, &target, body).await;
+                    check(
+                        status,
+                        &response,
+                        &format!("{method} {target}"),
+                        name,
+                        &value,
+                    );
+                    sent += 1;
+                }
+            }
+            if let (Some(properties), Some(base)) =
+                (body_schema["properties"].as_object(), &base_body)
+            {
+                for (field, schema) in properties {
+                    for value in values {
+                        let mut body = base.clone();
+                        if !base.contains_key(field) && is_array(schema) {
+                            // The other list goes, so exactly one list is sent.
+                            body.retain(|k, _| !is_array(&properties[k.as_str()]));
+                        }
+                        body.insert(
+                            field.clone(),
+                            if is_array(schema) {
+                                json!([value])
+                            } else {
+                                json!(value)
+                            },
+                        );
+                        let target = fill(None, "");
+                        let what = format!("{method} {target} {field}={value}");
+                        let (status, response) =
+                            send_raw(&app, &method, &target, Some(Value::Object(body))).await;
+                        check(status, &response, &what, field, value);
+                        // Text fields (strings, string lists, string-or-integer) must reach the
+                        // handler; integer fields rightly refuse a string at the JSON shape.
+                        let textual = is_array(schema)
+                            || schema["oneOf"].is_array()
+                            || schema["type"] == "string"
+                            || schema["type"]
+                                .as_array()
+                                .is_some_and(|t| t.iter().any(|t| t == "string"));
+                        if textual {
+                            assert_ne!(
+                                status,
+                                StatusCode::UNPROCESSABLE_ENTITY,
+                                "{what}: the value must reach the handler, not stop at JSON shape"
+                            );
+                        } else {
+                            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{what}");
+                        }
+                        sent += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        sent > 400,
+        "only {sent} requests: the sweep lost its routes"
+    );
+    assert_eq!(panics.get(), 0, "no handler panicked");
+}
+
+/// Page two of a relative-window search resolves `now` at the
+/// cursor's pinned instant, so an event that started between the two page fetches is not skipped.
+#[sqlx::test(migrations = "../../migrations")]
+async fn relative_windows_are_pinned_by_the_search_cursor(pool: PgPool) {
+    let start: DateTime<Utc> = "2036-06-01T10:00:20Z".parse().unwrap();
+    let (now, clock) = test_clock(start);
+    let mut ids = vec![];
+    for (i, offset) in [10i64, 20].into_iter().enumerate() {
+        let uri = format!("https://events.example/soon-{i}");
+        let id = store::ensure_resource(&pool, &uri).await.unwrap();
+        let mut doc = ResourceMeta::new(&uri, "web", 86400);
+        doc.set_type("Event");
+        doc.name = Some(format!("Soon {i}"));
+        doc.start = Some(start + chrono::Duration::seconds(offset));
+        doc.end = doc.start.map(|s| s + chrono::Duration::hours(1));
+        store::save_document(&pool, &id, 0, &doc).await.unwrap();
+        sqlx::query("INSERT INTO reference(resource_id,kind,author,label,object_path,created_at) VALUES($1,'tag',$2,'soon',$1,now())")
+            .bind(&id)
+            .bind("y".repeat(52))
+            .execute(&pool)
+            .await
+            .unwrap();
+        ids.push(id);
+    }
+    let mut state = AppState::new(pool, Config::default()).unwrap();
+    state.clock = Some(clock);
+    let app = api::router(state);
+    let path = "/v1/search?type=Event&from=now&sort=start&limit=1";
+    let (code, page) = call(&app, "GET", path, None).await;
+    assert_eq!(code, 200, "{page}");
+    assert_eq!(page["items"][0]["id"], ids[0]);
+    let cursor = page["cursor"].as_str().unwrap().to_owned();
+    // A minute later `now` alone would resolve after both starts.
+    *now.lock().unwrap() = start + chrono::Duration::minutes(1);
+    let (code, next) = call(&app, "GET", &format!("{path}&cursor={cursor}"), None).await;
+    assert_eq!(code, 200, "{next}");
+    assert_eq!(
+        next["items"][0]["id"], ids[1],
+        "page two keeps page one's window"
+    );
+    let (_, fresh) = call(&app, "GET", path, None).await;
+    assert_eq!(fresh["items"], json!([]), "a new query uses the new minute");
+}
+
+/// A relative `since` in /v1/changes/lookup keeps the first page's window on
+/// later cursor pages instead of re-resolving `now`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn change_lookup_pins_a_relative_since_per_cursor(pool: PgPool) {
+    let minute: DateTime<Utc> = "2036-06-01T10:00:00Z".parse().unwrap();
+    let uri = "https://example.org/changing";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    for second in [10, 20, 30] {
+        sqlx::query("INSERT INTO resource_change(resource_id,class,fields,after,source,at) VALUES($1,'details',ARRAY['name'],$2,'web',$3)")
+            .bind(&id)
+            .bind(json!({"name": format!("v{second}")}))
+            .bind(minute + chrono::Duration::seconds(second))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let (now, clock) = test_clock(minute + chrono::Duration::seconds(40));
+    let mut state = AppState::new(pool, Config::default()).unwrap();
+    state.clock = Some(clock);
+    let app = api::router(state);
+    let page = |cursor: Option<i64>| {
+        let mut body = json!({"resource_ids":[id],"since":"now","limit":1});
+        if let Some(c) = cursor {
+            body["cursor"] = json!(c);
+        }
+        body
+    };
+    let (status, first) = send_raw(&app, "POST", "/v1/changes/lookup", Some(page(None))).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["lines"].as_array().unwrap().len(), 1);
+    let cursor = first["next_cursor"].as_i64().unwrap();
+    // The next minute: `now` alone would start after every line.
+    *now.lock().unwrap() = minute + chrono::Duration::seconds(70);
+    let (status, second) =
+        send_raw(&app, "POST", "/v1/changes/lookup", Some(page(Some(cursor)))).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(
+        second["lines"][0]["at"],
+        (minute + chrono::Duration::seconds(20)).timestamp_millis(),
+        "page two keeps the first page's window: {second}"
+    );
+    let (_, fresh) = send_raw(&app, "POST", "/v1/changes/lookup", Some(page(None))).await;
+    assert_eq!(
+        fresh["lines"],
+        json!([]),
+        "a new lookup uses the new minute"
+    );
+}
+
+/// A panicking handler under the public layer stack answers the fixed 500
+/// body with the CORS header and increments `pinakes_api_panics_total`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_panic_backstop_answers_500_with_cors_and_counts(pool: PgPool) {
+    let state = AppState::new(pool, Config::default()).unwrap();
+    let panics = state.metrics.api_panics.clone();
+    async fn boom() -> &'static str {
+        panic!("test panic")
+    }
+    let app = api::with_public_layers(Router::new().route("/boom", get(boom)), state);
+    let mut request = Request::builder()
+        .uri("/boom")
+        .header("origin", "https://pubky.app")
+        .body(Body::empty())
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.12:1234".parse::<SocketAddr>().unwrap(),
+    ));
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.headers()["access-control-allow-origin"], "*");
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).unwrap(),
+        json!({"error":"internal server error"})
+    );
+    assert_eq!(panics.get(), 1);
+}
+
+/// The admin listener's backstop, behind the bearer check: without the
+/// token a 401 and the handler never runs; with it a 500 with the fixed body, no CORS header,
+/// and the panic counter incremented.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_admin_backstop_sits_behind_the_bearer_check(pool: PgPool) {
+    let config = Config {
+        admin_token: Some("admin-test-token".into()),
+        ..Default::default()
+    };
+    let state = AppState::new(pool, config).unwrap();
+    let panics = state.metrics.api_panics.clone();
+    static RAN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    async fn boom() -> &'static str {
+        RAN.fetch_add(1, Ordering::SeqCst);
+        panic!("test panic")
+    }
+    let app = api::with_admin_layers(Router::new().route("/boom", get(boom)), state);
+    let send = |token: Option<&'static str>| {
+        let app = app.clone();
+        async move {
+            let mut request = Request::builder()
+                .uri("/boom")
+                .header("origin", "https://pubky.app");
+            if let Some(t) = token {
+                request = request.header("authorization", format!("Bearer {t}"));
+            }
+            let mut request = request.body(Body::empty()).unwrap();
+            request.extensions_mut().insert(axum::extract::ConnectInfo(
+                "127.0.0.13:1234".parse::<SocketAddr>().unwrap(),
+            ));
+            app.oneshot(request).await.unwrap()
+        }
+    };
+    let refused = send(None).await;
+    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(RAN.load(Ordering::SeqCst), 0, "the handler never ran");
+    assert_eq!(panics.get(), 0);
+    let response = send(Some("admin-test-token")).await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(response
+        .headers()
+        .get("access-control-allow-origin")
+        .is_none());
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).unwrap(),
+        json!({"error":"internal server error"})
+    );
+    assert_eq!(RAN.load(Ordering::SeqCst), 1);
+    assert_eq!(panics.get(), 1);
+}
+
+/// The cursor cap sits one second below the cursor line, so `at`/`seq`
+/// inversions from concurrent inserts are absorbed.
+#[test]
+fn the_lookup_cursor_cap_absorbs_inversions() {
+    let at = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+    let cursor = at("2036-06-01T10:00:10.500Z");
+    assert_eq!(
+        pinakes_core::change_api::capped_since(at("2036-06-01T10:01:00Z"), cursor),
+        at("2036-06-01T10:00:09.500Z")
+    );
+    // A window already older than the cursor stays as it is.
+    assert_eq!(
+        pinakes_core::change_api::capped_since(at("2036-06-01T09:00:00Z"), cursor),
+        at("2036-06-01T09:00:00Z")
+    );
+    // No second to subtract at the earliest instant; the cap is the cursor's time.
+    assert_eq!(
+        pinakes_core::change_api::capped_since(
+            at("2036-06-01T10:01:00Z"),
+            DateTime::<Utc>::MIN_UTC
+        ),
+        DateTime::<Utc>::MIN_UTC
+    );
+}
+
+/// A card's attribution: OSM data and timezone boundaries derived from coordinates are ODbL, so
+/// an event whose zone came from its coordinates carries the boundary data's attribution.
+#[sqlx::test(migrations = "../../migrations")]
+async fn cards_carry_the_timezone_boundary_attribution(pool: PgPool) {
+    let uri = "https://example.org/zoned-event";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut doc = ResourceMeta::new(uri, "jsonld", 86400);
+    doc.type_name = "Event".into();
+    doc.type_path = vec!["Thing".into(), "Event".into()];
+    doc.name = Some("Zoned".into());
+    doc.start = Some("2036-06-01T10:00:00Z".parse().unwrap());
+    doc.event.tz = Some("Europe/Zurich".into());
+    doc.event.timezone_attribution = Some(pinakes_core::event::time::ATTRIBUTION.into());
+    // A nameless organizer without a URL is no organizer, never `""`.
+    doc.event.organizer = Some(pinakes_core::event::Organizer {
+        name: " ".into(),
+        url: None,
+    });
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let (code, card) = call(&app, "GET", &format!("/v1/resources/{id}"), None).await;
+    assert_eq!(code, 200, "{card}");
+    assert_eq!(card["attribution"], pinakes_core::event::time::ATTRIBUTION);
+    assert_eq!(card["tz"], "Europe/Zurich");
+    assert!(card["organizer"].is_null(), "{card}");
+    // A venue that is an OSM place supplies its own credit; both are kept.
+    let mut placed = doc.clone();
+    placed.attribution = Some("© OpenStreetMap contributors (ODbL)".into());
+    placed.fetched_at += 1000;
+    store::save_document(&pool, &id, 0, &placed).await.unwrap();
+    let (_, card) = call(&app, "GET", &format!("/v1/resources/{id}"), None).await;
+    let credit = card["attribution"].as_str().unwrap();
+    assert!(
+        credit.contains("OpenStreetMap contributors (ODbL)"),
+        "{credit}"
+    );
+    assert!(
+        credit.contains(pinakes_core::event::time::ATTRIBUTION),
+        "{credit}"
+    );
+}
+
+/// A card's `stream`, as its document stores it: on a resource read and on the lookup's cards,
+/// in the shape the OpenAPI document declares. A card without one has no `stream` at all.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_card_carries_its_stream(pool: PgPool) {
+    let uri = "https://podcast.example/feed?guid=episode-1";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut doc = ResourceMeta::new(uri, "media", 86400);
+    doc.set_type("PodcastEpisode");
+    doc.name = Some("Episode One".into());
+    doc.stream = pinakes_core::model::Stream::public(
+        "https://cdn.podcast.example/episode-1.mp3",
+        "audio/mpeg",
+        Some(1800),
+        false,
+    );
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let other = "https://example.org/article";
+    let other_id = store::ensure_resource(&pool, other).await.unwrap();
+    store::save_document(&pool, &other_id, 0, &ResourceMeta::new(other, "web", 86400))
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let stream = json!({
+        "url": "https://cdn.podcast.example/episode-1.mp3",
+        "type": "audio/mpeg",
+        "duration_s": 1800,
+        "preview": false
+    });
+    let (code, card) = call(&app, "GET", &format!("/v1/resources/{id}"), None).await;
+    assert_eq!(code, 200, "{card}");
+    assert_eq!(card["stream"], stream);
+    let (code, cards) = call(
+        &app,
+        "POST",
+        "/v1/resources/lookup",
+        Some(json!({"resource_ids": [id, other_id]})),
+    )
+    .await;
+    assert_eq!(code, 200, "{cards}");
+    assert_eq!(cards[0]["stream"], stream);
+    assert!(cards[1].get("stream").is_none(), "{cards}");
+}
+
+/// A card's `embed`: the frame its document stores (its oEmbed answer's), settled for its type
+/// (a podcast episode's fixed-height frame is its player), on a read, a lookup and a search; a
+/// card whose link is gone shows none, even when its link names a player.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_card_carries_its_embed(pool: PgPool) {
+    let uri = "https://podcast.example/episodes/1";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut doc = ResourceMeta::new(uri, "web", 86400);
+    doc.set_type("PodcastEpisode");
+    doc.name = Some("Episode One".into());
+    doc.embed = pinakes_core::embed::from_oembed(
+        &json!({"type": "rich", "provider_name": "Podcast Host", "height": 150,
+            "html": "<iframe src=\"https://player.podcast.example.com/e/1\" width=\"100%\" height=\"150\" allow=\"autoplay\"></iframe>"}),
+        &url::Url::parse("https://podcast.example/oembed").unwrap(),
+    );
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let gone = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+    let gone_id = store::ensure_resource(&pool, gone).await.unwrap();
+    let mut missing = ResourceMeta::new(gone, "jsonld", 86400);
+    missing.status = pinakes_core::model::Status::Missing;
+    // Gone once it is found so twice.
+    for _ in 0..2 {
+        missing.fetched_at += 1000;
+        store::save_document(&pool, &gone_id, 0, &missing)
+            .await
+            .unwrap();
+    }
+    // A post Mastodon's API answered for has its server's frame; one read over ActivityPub alone
+    // may be on a server without one.
+    let mut posts = vec![];
+    for (uri, source) in [
+        (
+            "https://mastodon.social/@Mastodon/117466985005297414",
+            "mastodon",
+        ),
+        ("https://pleroma.example/@someone/1", "activitypub"),
+    ] {
+        let post_id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut post = ResourceMeta::new(uri, source, 86400);
+        post.set_type("SocialMediaPosting");
+        post.name = Some("A post".into());
+        store::save_document(&pool, &post_id, 0, &post)
+            .await
+            .unwrap();
+        posts.push(post_id);
+    }
+    // A video found gone whose later read failed: its document stays `missing`, its row says
+    // `error`, and its own link (a referenced one) names a player. No frame comes back.
+    let failed = "https://www.youtube.com/watch?v=9bZkp7q19f0";
+    let failed_id = store::ensure_resource(&pool, failed).await.unwrap();
+    let mut gone_doc = ResourceMeta::new(failed, "jsonld", 86400);
+    gone_doc.status = pinakes_core::model::Status::Missing;
+    for _ in 0..2 {
+        gone_doc.fetched_at += 1000;
+        store::save_document(&pool, &failed_id, 0, &gone_doc)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','videos','/pub/app/tags/gone',now())")
+        .bind(&failed_id)
+        .bind(author(1))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource SET status='error' WHERE id=$1")
+        .bind(&failed_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let embed = json!({
+        "provider": "podcast-host",
+        "kind": "audio",
+        "src": "https://player.podcast.example.com/e/1",
+        "height": 150,
+        "aspect": null,
+        "allow": [],
+        "autoplay_param": null
+    });
+    let (code, card) = call(&app, "GET", &format!("/v1/resources/{id}"), None).await;
+    assert_eq!(code, 200, "{card}");
+    assert_eq!(card["embed"], embed);
+    let (code, cards) = call(
+        &app,
+        "POST",
+        "/v1/resources/lookup",
+        Some(json!({"resource_ids": [id, gone_id, posts[0], posts[1], failed_id]})),
+    )
+    .await;
+    assert_eq!(code, 200, "{cards}");
+    assert_eq!(cards[0]["embed"], embed);
+    assert_eq!(cards[1]["status"], "missing", "{cards}");
+    assert_eq!(cards[1]["embed"], Value::Null, "{cards}");
+    assert_eq!(
+        cards[2]["embed"]["src"], "https://mastodon.social/@Mastodon/117466985005297414/embed",
+        "{cards}"
+    );
+    assert_eq!(
+        (&cards[2]["embed"]["provider"], &cards[2]["embed"]["kind"]),
+        (&json!("mastodon"), &json!("post"))
+    );
+    assert_eq!(cards[3]["embed"], Value::Null, "{cards}");
+    assert_eq!(cards[4]["status"], "error", "{cards}");
+    assert_eq!(cards[4]["refs"], json!([failed]), "{cards}");
+    assert_eq!(cards[4]["embed"], Value::Null, "{cards}");
+}
+
+/// The stored document, with its internal fields, is on the admin listener only; the public
+/// card leaves those fields out.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_stored_document_is_an_admin_read(pool: PgPool) {
+    let ids = seed(&pool).await;
+    let state = AppState::new(pool, Config::default()).unwrap();
+    let (public, admin) = (api::router(state.clone()), api::admin_router(state));
+    let path = format!("/v1/resources/{}/document", ids[0]);
+    let (code, doc) = admin_call(&admin, "GET", &path, None).await;
+    assert_eq!(code, 200, "{doc}");
+    assert_eq!(doc["source"], "web");
+    assert!(doc["ttl_secs"].is_number(), "{doc}");
+    // The public check refuses it: the operation is admin-only.
+    assert!(!common::validate(&[common::document()], "GET", &path, 200, &doc).is_empty());
+    assert_eq!(call(&public, "GET", &path, None).await.0, 404);
+    let (_, card) = call(&public, "GET", &format!("/v1/resources/{}", ids[0]), None).await;
+    for internal in [
+        "source",
+        "ttl_secs",
+        "group_keys",
+        "attributes",
+        "warnings",
+        "content_type",
+        "content_length",
+        "details",
+    ] {
+        assert!(card.get(internal).is_none(), "{internal}: {card}");
+    }
+    let unknown = "/v1/resources/00000000000000000000000000000000/document";
+    assert_eq!(admin_call(&admin, "GET", unknown, None).await.0, 404);
+    assert_eq!(
+        admin_call(&admin, "GET", "/v1/resources/bad/document", None)
+            .await
+            .0,
+        400
+    );
+}
+
+/// A tracking variant is an alias: read by its ID or URI it answers with the root's card, its
+/// tag counts for the root in search, and the root's changes are its changes.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_alias_reads_as_its_root_everywhere(pool: PgPool) {
+    let clean = "https://example.org/talk";
+    let variant = "https://example.org/talk?utm_source=newsletter&fbclid=x";
+    let alias = store::ensure_resource(&pool, variant).await.unwrap();
+    let root = identity(clean).unwrap().0;
+    assert_ne!(alias, root);
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','talks','/pub/app/tags/t',now())")
+        .bind(&alias)
+        .bind(author(1))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    store::recompute_scores(&mut tx, std::slice::from_ref(&alias))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    // The page claims other URLs as itself (`@id`, `sameAs`), as Wikipedia's Lugano article does:
+    // claims, not aliases.
+    let page = r#"<title>Talk</title><script type="application/ld+json">{"@type":"Article","@id":"https://www.wikidata.org/entity/Q7024","name":"Talk","url":"https://example.org/talk","sameAs":["https://www.wikidata.org/entity/Q7024","https://www.lugano.ch/"]}</script>"#;
+    let fetched = common::fetched(
+        url::Url::parse(clean).unwrap(),
+        200,
+        "text/html".into(),
+        page.as_bytes().into(),
+    );
+    let doc = pinakes_core::resolver::html::off_runtime(|| {
+        pinakes_core::resolver::web::extract(clean, &fetched, 86400).unwrap()
+    })
+    .doc;
+    assert_eq!(doc.name.as_deref(), Some("Talk"));
+    store::save_document(&pool, &root, 0, &doc).await.unwrap();
+    let pool_for_checks = pool.clone();
+    let app = api::router(AppState::new(pool, Config::default()).unwrap());
+    let (code, card) = call(&app, "GET", &format!("/v1/resources/{alias}"), None).await;
+    assert_eq!(code, 200, "{card}");
+    assert_eq!(
+        (card["id"].as_str(), card["name"].as_str()),
+        (Some(root.as_str()), Some("Talk"))
+    );
+    // Its aliases are the spellings that resolve to it, never the page's claims.
+    assert_eq!(card["aliases"], json!([variant]), "{card}");
+    for claimed in [
+        "https://www.wikidata.org/entity/Q7024",
+        "https://www.lugano.ch/",
+    ] {
+        let by = format!(
+            "/v1/resources/by-uri?uri={}",
+            url::form_urlencoded::byte_serialize(claimed.as_bytes()).collect::<String>()
+        );
+        assert_eq!(call(&app, "GET", &by, None).await.0, 404, "{claimed}");
+    }
+    let (_, cards) = call(
+        &app,
+        "POST",
+        "/v1/resources/lookup",
+        Some(json!({"uris":[variant]})),
+    )
+    .await;
+    assert_eq!(cards[0]["id"], root.as_str());
+    // By URI: the variant answers with its root's card, an unknown link is a 404 and nothing is
+    // fetched, and the read carries an ETag that a revalidation answers with 304.
+    let encode = |v: &str| url::form_urlencoded::byte_serialize(v.as_bytes()).collect::<String>();
+    let by = format!("/v1/resources/by-uri?uri={}", encode(variant));
+    let (code, card) = call(&app, "GET", &by, None).await;
+    assert_eq!(code, 200, "{card}");
+    assert_eq!(card["id"], root.as_str());
+    let unknown = format!(
+        "/v1/resources/by-uri?uri={}",
+        encode("https://example.org/never-seen")
+    );
+    assert_eq!(call(&app, "GET", &unknown, None).await.0, 404);
+    let known: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM resource WHERE uri='https://example.org/never-seen')",
+    )
+    .fetch_one(&pool_for_checks)
+    .await
+    .unwrap();
+    assert!(!known, "a by-uri read never creates or fetches a resource");
+    assert_eq!(
+        call(&app, "GET", "/v1/resources/by-uri?uri=x", None)
+            .await
+            .0,
+        400
+    );
+    let send = |etag: Option<String>| {
+        let app = app.clone();
+        let by = by.clone();
+        async move {
+            let mut request = Request::builder().uri(&by);
+            if let Some(etag) = etag {
+                request = request.header("if-none-match", etag);
+            }
+            let mut request = request.body(Body::empty()).unwrap();
+            request.extensions_mut().insert(axum::extract::ConnectInfo(
+                "127.0.0.2:1234".parse::<SocketAddr>().unwrap(),
+            ));
+            app.oneshot(request).await.unwrap()
+        }
+    };
+    let first = send(None).await;
+    assert_eq!(first.headers()["cache-control"], "public, max-age=30");
+    let etag = first.headers()["etag"].to_str().unwrap().to_owned();
+    assert_eq!(send(Some(etag)).await.status(), 304);
+    let (_, found) = call(&app, "GET", "/v1/search?tags=talks", None).await;
+    let ids: Vec<&str> = found["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec![root.as_str()], "{found}");
+    let (_, lines) = call(
+        &app,
+        "POST",
+        "/v1/changes/lookup",
+        Some(json!({"resource_ids":[alias],"since":"0001-01-01T00:00:00Z"})),
+    )
+    .await;
+    // The alias's own line says which root answers for it, then the root's own lines follow.
+    assert_eq!(
+        lines["lines"][0],
+        json!({"seq":lines["lines"][0]["seq"],"resource_id":alias,"at":lines["lines"][0]["at"],"class":"aliased","fields":["root"],"root":root}),
+        "{lines}"
+    );
+    assert_eq!(lines["lines"][1]["resource_id"], root.as_str(), "{lines}");
+    assert!(lines["lines"][1].get("root").is_none());
+}
+
+/// `facet=host` lists the services of the whole filtered set with the name their cards show,
+/// `facet=category` the categories (here a place's OpenStreetMap `key/value`), each value as
+/// its filter takes it: filtering by an entry finds exactly its count. A host `pubky://`
+/// objects use is not a service. Every facet combines with the others, in any order, and the
+/// page's limit never changes a count.
+#[sqlx::test(migrations = "../../migrations")]
+async fn host_and_category_facets_count_what_their_filters_take(pool: PgPool) {
+    let links: [(&str, &str, Option<&str>, Option<&str>); 7] = [
+        (
+            "https://www.youtube.com/watch?v=aaaaaaaaaaa",
+            "VideoObject",
+            None,
+            Some("YouTube"),
+        ),
+        (
+            "https://www.youtube.com/watch?v=bbbbbbbbbbb",
+            "VideoObject",
+            None,
+            Some("YouTube"),
+        ),
+        (
+            "https://en.wikipedia.org/wiki/Zurich",
+            "Article",
+            None,
+            Some("Wiki"),
+        ),
+        (
+            "https://cafe.example.com/",
+            "CafeOrCoffeeShop",
+            Some("amenity/cafe"),
+            None,
+        ),
+        (
+            "https://bar.example.com/",
+            "CafeOrCoffeeShop",
+            Some("amenity/cafe"),
+            Some(""),
+        ),
+        (
+            "https://museum.example.com/",
+            "Museum",
+            Some("tourism/museum"),
+            Some("The Museum"),
+        ),
+        (
+            "https://www.youtube.com/watch?v=ccccccccccc",
+            "VideoObject",
+            None,
+            Some("YouTube"),
+        ),
+    ];
+    // A host whose first link (by URI) is not one the service's parser knows, and whose
+    // documents name no site: the name still comes from one of its links.
+    let unread: [(&str, &str, Option<&str>, Option<&str>); 2] = [
+        ("https://music.apple.com/", "WebPage", None, Some("")),
+        (
+            "https://music.apple.com/us/album/x/1440857781",
+            "MusicAlbum",
+            None,
+            Some(""),
+        ),
+    ];
+    for (i, (uri, kind, category, site)) in links.iter().chain(&unread).enumerate() {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut doc = ResourceMeta::new(uri, "web", 86400);
+        doc.name = Some(format!("Link {i}"));
+        doc.set_type(kind);
+        doc.category = category.map(str::to_owned);
+        if let Some(site) = site {
+            doc.site = (*site).into();
+        }
+        store::save_document(&pool, &id, 0, &doc).await.unwrap();
+        sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','facets',$3,now())")
+            .bind(&id)
+            .bind(author(i))
+            .bind(format!("/pub/app/tags/f{i}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let pubky = format!("pubky://{}/pub/mapky.app/posts/0034A0X7NJ52G", author(9));
+    let id = store::ensure_resource(&pool, &pubky).await.unwrap();
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','facets','/pub/app/tags/p',now())")
+        .bind(&id)
+        .bind(author(9))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let (code, page) = call(&app, "GET", "/v1/search?facet=host,category&limit=1", None).await;
+    assert_eq!(code, 200, "{page}");
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    // Most first, then by host; the site of a service Pinakes knows by its URL, else the name
+    // the documents give, else the host.
+    assert_eq!(
+        page["facets"]["host"],
+        json!([
+            {"host":"www.youtube.com","site":"YouTube","count":3},
+            {"host":"music.apple.com","site":"Apple Music","count":2},
+            {"host":"bar.example.com","site":"bar.example.com","count":1},
+            {"host":"cafe.example.com","site":"cafe.example.com","count":1},
+            {"host":"en.wikipedia.org","site":"Wikipedia (en)","count":1},
+            {"host":"museum.example.com","site":"The Museum","count":1}
+        ]),
+        "{page}"
+    );
+    assert_eq!(
+        page["facets"]["category"],
+        json!([
+            {"category":"amenity/cafe","count":2},
+            {"category":"tourism/museum","count":1}
+        ])
+    );
+    assert!(page["facets"].get("type").is_none() && page["facets"].get("tags").is_none());
+    // Each entry, as its filter, finds exactly its count.
+    let entries = |key: &str| page["facets"][key].as_array().unwrap().clone();
+    for (key, entries) in [("host", entries("host")), ("category", entries("category"))] {
+        for entry in entries {
+            let value = entry[key].as_str().unwrap();
+            let (code, found) = call(
+                &app,
+                "GET",
+                &format!("/v1/search?{key}={}", value.replace('/', "%2F")),
+                None,
+            )
+            .await;
+            assert_eq!(code, 200, "{found}");
+            assert_eq!(
+                found["items"].as_array().unwrap().len() as i64,
+                entry["count"].as_i64().unwrap(),
+                "{key}={value}"
+            );
+        }
+    }
+    // The counts are of the filtered set: the type and host filters narrow them.
+    let (_, page) = call(
+        &app,
+        "GET",
+        "/v1/search?type=CafeOrCoffeeShop&facet=category,host",
+        None,
+    )
+    .await;
+    assert_eq!(
+        page["facets"]["category"],
+        json!([{"category":"amenity/cafe","count":2}])
+    );
+    assert_eq!(page["facets"]["host"].as_array().unwrap().len(), 2);
+    let (_, page) = call(
+        &app,
+        "GET",
+        "/v1/search?host=www.youtube.com&facet=host,category",
+        None,
+    )
+    .await;
+    assert_eq!(
+        page["facets"]["host"],
+        json!([{"host":"www.youtube.com","site":"YouTube","count":3}])
+    );
+    assert_eq!(page["facets"]["category"], json!([]));
+    // All four together, in any order, with the same counts as alone.
+    let (code, all) = call(
+        &app,
+        "GET",
+        "/v1/search?facet=category,tags,host,type&collapse=group",
+        None,
+    )
+    .await;
+    assert_eq!(code, 200, "{all}");
+    for facet in ["host", "tags", "type", "category"] {
+        let (_, alone) = call(&app, "GET", &format!("/v1/search?facet={facet}"), None).await;
+        assert_eq!(all["facets"][facet], alone["facets"][facet], "{facet}");
+    }
+    assert_eq!(
+        all["facets"]["tags"],
+        json!([{"label":"facets","count":10}])
+    );
+    assert_eq!(all["facets"]["category"].as_array().unwrap().len(), 2);
+}
+
+/// `host` takes up to 10 hosts, comma-separated: links on any of them, each host exactly as the
+/// links' URLs name it (spaces around one left out). One host finds what it found before; a
+/// repeat counts once; the host facet
+/// counts the picked hosts each on its own (as the type facet counts the picked types); over 10
+/// hosts, or an empty one, is a 400 that names `host` and echoes none of them; a cursor pages only
+/// the hosts that made it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn search_host_takes_several_hosts(pool: PgPool) {
+    let links = [
+        "https://one.example.com/a",
+        "https://one.example.com/b",
+        "https://two.example.com/c",
+        "https://three.example.com/d",
+        "https://www.two.example.com/e",
+    ];
+    for (i, uri) in links.iter().enumerate() {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut doc = ResourceMeta::new(uri, "web", 86400);
+        doc.name = Some(format!("Song {i}"));
+        doc.set_type("MusicRecording");
+        store::save_document(&pool, &id, 0, &doc).await.unwrap();
+        sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','hosts',$3,now())")
+            .bind(&id)
+            .bind(author(i))
+            .bind(format!("/pub/app/tags/h{i}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let uris = |page: &Value| {
+        let mut v: Vec<String> = page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["uri"].as_str().unwrap().to_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    for (query, found) in [
+        ("host=one.example.com", vec![0, 1]),
+        ("host=one.example.com,two.example.com", vec![0, 1, 2]),
+        ("host=two.example.com,one.example.com", vec![0, 1, 2]),
+        ("host=one.example.com,one.example.com", vec![0, 1]),
+        (
+            "host=two.example.com,www.two.example.com,three.example.com",
+            vec![2, 3, 4],
+        ),
+        // Exactly as the URLs name them (no case folding), spaces around a host left out.
+        ("host=one.example.com,%20two.example.com%20", vec![0, 1, 2]),
+        ("host=ONE.EXAMPLE.COM", vec![]),
+        ("host=example.com", vec![]),
+    ] {
+        let (code, page) = call(&app, "GET", &format!("/v1/search?{query}"), None).await;
+        assert_eq!(code, 200, "{query}: {page}");
+        let mut want: Vec<String> = found.iter().map(|&i| links[i].to_owned()).collect();
+        want.sort();
+        assert_eq!(uris(&page), want, "{query}");
+    }
+    // The host facet counts each picked host on its own; the others are not in the set.
+    let (_, page) = call(
+        &app,
+        "GET",
+        "/v1/search?host=one.example.com,two.example.com&facet=host&limit=1",
+        None,
+    )
+    .await;
+    let counts: Vec<(String, i64)> = page["facets"]["host"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e["host"].as_str().unwrap().to_owned(),
+                e["count"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        counts,
+        vec![
+            ("one.example.com".to_owned(), 2),
+            ("two.example.com".to_owned(), 1)
+        ],
+        "{page}"
+    );
+    // 10 hosts are taken, 11 are not; an empty one is refused; the refusal names no host.
+    let ten = (0..9)
+        .map(|i| format!("h{i}.example.com"))
+        .chain(["one.example.com".to_owned()])
+        .collect::<Vec<_>>()
+        .join(",");
+    let (code, page) = call(&app, "GET", &format!("/v1/search?host={ten}"), None).await;
+    assert_eq!(code, 200, "{page}");
+    assert_eq!(uris(&page).len(), 2);
+    let eleven = format!("{ten},two.example.com");
+    // 257 bytes, naming a host the refusal must not repeat
+    let long = format!("{}.example.com", "x".repeat(245));
+    for bad in [
+        eleven.as_str(),
+        "one.example.com,",
+        ",one.example.com",
+        "one.example.com,,two.example.com",
+        "one.example.com,%20,two.example.com",
+        "",
+        long.as_str(),
+    ] {
+        let (code, page) = call(&app, "GET", &format!("/v1/search?host={bad}"), None).await;
+        assert_eq!(code, 400, "{bad}: {page}");
+        let error = page["error"].as_str().unwrap();
+        assert!(error.starts_with("host takes 1–10 hosts"), "{error}");
+        assert!(!error.contains("example"), "{error}");
+    }
+    // A cursor pages only the hosts that made it.
+    let (_, first) = call(
+        &app,
+        "GET",
+        "/v1/search?host=one.example.com,two.example.com&limit=1",
+        None,
+    )
+    .await;
+    let cursor = first["cursor"].as_str().unwrap().to_owned();
+    let (code, next) = call(
+        &app,
+        "GET",
+        &format!("/v1/search?host=one.example.com,two.example.com&limit=1&cursor={cursor}"),
+        None,
+    )
+    .await;
+    assert_eq!(code, 200, "{next}");
+    assert_ne!(uris(&next), uris(&first));
+    let (code, _) = call(
+        &app,
+        "GET",
+        &format!("/v1/search?host=one.example.com&limit=1&cursor={cursor}"),
+        None,
+    )
+    .await;
+    assert_eq!(code, 400);
+}
+
+/// A Pubky object described by its content is social content: a 200-character excerpt that
+/// refreshes within the hour, and once the object is confirmed gone the card loses the excerpt
+/// and search no longer matches it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_deleted_pubky_post_loses_its_excerpt(pool: PgPool) {
+    let uri = format!("pubky://{}/pub/mapky.app/posts/0034A0X7NJ52G", author(7));
+    let id = store::ensure_resource(&pool, &uri).await.unwrap();
+    let body = json!({"content": format!("Sunrise over the lake {}", "x".repeat(400))});
+    let doc = pinakes_core::resolver::pubky_apps::card_at(
+        &uri,
+        "application/json",
+        body.to_string().as_bytes(),
+        86400,
+        Utc::now(),
+    );
+    assert!(pinakes_core::resolver::cards::social(&doc));
+    assert_eq!(doc.description.as_ref().unwrap().chars().count(), 200);
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','lake','/pub/app/tags/l',now())")
+        .bind(&id)
+        .bind(author(1))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let found = |q: &'static str| {
+        let app = app.clone();
+        async move {
+            call(&app, "GET", &format!("/v1/search?q={q}"), None)
+                .await
+                .1["items"]
+                .as_array()
+                .unwrap()
+                .len()
+        }
+    };
+    assert_eq!(found("sunrise").await, 1);
+    let mut gone = ResourceMeta::new(&uri, "pubky", 3600);
+    gone.status = pinakes_core::model::Status::Missing;
+    for _ in 0..2 {
+        gone.fetched_at += 1000;
+        store::save_document(&pool, &id, 0, &gone).await.unwrap();
+    }
+    let (_, card) = call(&app, "GET", &format!("/v1/resources/{id}"), None).await;
+    assert_eq!(card["status"], "missing", "{card}");
+    assert!(card["description"].is_null(), "{card}");
+    assert_eq!(found("sunrise").await, 0);
+}
+
+/// A Mastodon post whose author opted out of search indexing keeps its card, but its text is
+/// never found by `q=`, and its change history keeps no text: what was kept before goes, and the
+/// opt-out line itself carries only its kind and time.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_opted_out_post_is_not_searched_and_keeps_no_history_text(pool: PgPool) {
+    let uri = "https://mastodon.social/@Gargron/1";
+    // The post's card from the Mastodon source; without it in this build there is nothing to test.
+    let card = |file: &'static str, at: i64| async move {
+        let api = "https://mastodon.social/api/v1/statuses/1";
+        let mut doc =
+            common::source_card("mastodon", uri, &[(api, 200, "application/json", file)]).await?;
+        doc.fetched_at = at;
+        Some(doc)
+    };
+    let Some(first) = card("status-1.json", 1000).await else {
+        return;
+    };
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    store::save_document(&pool, &id, 0, &first).await.unwrap();
+    // The usual `/@{user}/{id}` spelling, saved with the full card before it became an alias of
+    // the post's ActivityPub id.
+    let spelling = "https://mastodon.social/@Gargron/1/";
+    let alias_id = store::ensure_resource(&pool, spelling).await.unwrap();
+    let mut early = card("status-1.json", 900).await.unwrap();
+    early.url = spelling.into();
+    store::save_document(&pool, &alias_id, 0, &early)
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    let line = pinakes_core::alias::assign(
+        &mut tx,
+        &alias_id,
+        &pinakes_core::alias::Alias {
+            root: uri.into(),
+            basis: "identifier",
+        },
+    )
+    .await
+    .unwrap();
+    pinakes_core::alias::record(&mut tx, line.into_iter().collect())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','hello','/pub/app/tags/h',now())")
+        .bind(&id)
+        .bind(author(1))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let found = |q: &'static str| {
+        let app = app.clone();
+        async move {
+            call(&app, "GET", &format!("/v1/search?q={q}"), None)
+                .await
+                .1["items"]
+                .as_array()
+                .unwrap()
+                .len()
+        }
+    };
+    assert_eq!(found("hello").await, 1);
+    let texts = || {
+        sqlx::query_scalar::<_, i64>("SELECT (SELECT count(*) FROM resource_change WHERE resource_id IN ($1,$2) AND (before::text ILIKE '%hello%' OR after::text ILIKE '%hello%' OR before::text ILIKE '%Rochko%' OR after::text ILIKE '%Rochko%')) + (SELECT count(*) FROM resource WHERE id=$2 AND (doc::text ILIKE '%hello%' OR doc::text ILIKE '%Rochko%' OR name ILIKE '%hello%'))")
+            .bind(&id)
+            .bind(&alias_id)
+            .fetch_one(&pool)
+    };
+    assert!(texts().await.unwrap() > 1);
+
+    // The author opts out: the card stays, its text is no longer searched or kept.
+    let opted = card("status-1-opted-out.json", 2000).await.unwrap();
+    assert_eq!(opted.attributes["opted_out"], "true");
+    assert_eq!(opted.description.as_deref(), Some("Hello world"));
+    store::save_document(&pool, &id, 0, &opted).await.unwrap();
+    assert_eq!(found("hello").await, 0);
+    assert_eq!(found("Gargron").await, 0);
+    assert_eq!(texts().await.unwrap(), 0);
+    let (lines, with_documents): (i64, i64) = sqlx::query_as(
+        "SELECT count(*), count(*) FILTER (WHERE before IS NOT NULL OR after IS NOT NULL) FROM resource_change WHERE resource_id=$1",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((lines, with_documents), (1, 0));
+    // The alias keeps its `aliased` line (the root it points at) and nothing of the post.
+    let alias_lines: Vec<(String, Option<serde_json::Value>)> = sqlx::query_as(
+        "SELECT class, after FROM resource_change WHERE resource_id=$1 ORDER BY seq",
+    )
+    .bind(&alias_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(
+        alias_lines
+            .iter()
+            .any(|(class, after)| class == "aliased" && after.is_some()),
+        "{alias_lines:?}"
+    );
+    assert!(
+        alias_lines
+            .iter()
+            .all(|(class, after)| class == "aliased" || after.is_none()),
+        "{alias_lines:?}"
+    );
+    let (_, read) = call(&app, "GET", &format!("/v1/resources/{id}"), None).await;
+    assert_eq!(read["name"], "Hello world", "{read}");
+}
+
+/// A spelling with its own full card that becomes an alias of a Mastodon post after its author
+/// opted out keeps none of the post's text, at once: not in its card, its search text or its
+/// history.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_spelling_that_joins_an_opted_out_post_keeps_none_of_its_text(pool: PgPool) {
+    let uri = "https://mastodon.social/@Gargron/1";
+    let card = |file: &'static str, at: i64| async move {
+        let api = "https://mastodon.social/api/v1/statuses/1";
+        let mut doc =
+            common::source_card("mastodon", uri, &[(api, 200, "application/json", file)]).await?;
+        doc.fetched_at = at;
+        Some(doc)
+    };
+    let Some(opted) = card("status-1-opted-out.json", 2000).await else {
+        return;
+    };
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    store::save_document(&pool, &id, 0, &opted).await.unwrap();
+    let spelling = "https://mastodon.social/@Gargron/1/";
+    let alias_id = store::ensure_resource(&pool, spelling).await.unwrap();
+    let mut full = card("status-1.json", 2100).await.unwrap();
+    full.url = spelling.into();
+    store::save_document(&pool, &alias_id, 0, &full)
+        .await
+        .unwrap();
+    let texts = || {
+        sqlx::query_scalar::<_, i64>("SELECT (SELECT count(*) FROM resource_change WHERE resource_id=$1 AND (coalesce(before::text,'')||coalesce(after::text,'')) ~* 'hello|Rochko') + (SELECT count(*) FROM resource WHERE id=$1 AND ((coalesce(doc::text,'')||coalesce(name,'')) ~* 'hello|Rochko' OR coalesce(search_text::text,'') ~* 'hello|rochko'))")
+            .bind(&alias_id)
+            .fetch_one(&pool)
+    };
+    assert!(texts().await.unwrap() > 1);
+    let mut tx = pool.begin().await.unwrap();
+    let line = pinakes_core::alias::assign(
+        &mut tx,
+        &alias_id,
+        &pinakes_core::alias::Alias {
+            root: uri.into(),
+            basis: "identifier",
+        },
+    )
+    .await
+    .unwrap();
+    pinakes_core::alias::record(&mut tx, line.into_iter().collect())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(texts().await.unwrap(), 0);
+}
+
+/// A post whose author opted out and that an earlier build then stored as gone kept its facts
+/// (the author, the content warning) and its also-on results: gone wins over the opt-out, so the
+/// repair leaves it the gone card, nothing derived, and a second run changes nothing.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_repair_scrubs_a_gone_post_that_had_opted_out(pool: PgPool) {
+    let uri = "https://mastodon.social/@Gargron/1";
+    let api = "https://mastodon.social/api/v1/statuses/1";
+    let Some(mut opted) = common::source_card(
+        "mastodon",
+        uri,
+        &[(api, 200, "application/json", "status-1-opted-out.json")],
+    )
+    .await
+    else {
+        return;
+    };
+    opted.fetched_at = 2000;
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    store::save_document(&pool, &id, 0, &opted).await.unwrap();
+    // Its deletion as an earlier build stored it: the opted-out card, missing.
+    sqlx::query("UPDATE resource SET status='missing',doc=jsonb_set(doc,'{status}','\"missing\"') WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO resource_fact(resource_id,name,value,source,expires_at) VALUES($1,'title','Hello world','titles',now()+interval '1 day')")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO derived_link(resource_id,link_id,uri,site,source,via,kind,expires_at) VALUES($1,repeat('a',32),'https://web.archive.org/web/2016/https://mastodon.social/@Gargron/1','web.archive.org','wayback','wayback','archived',now()+interval '1 day')")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let attributes = || {
+        sqlx::query_scalar::<_, Value>("SELECT doc->'attributes' FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+    };
+    assert!(attributes().await.unwrap()["opted_out"] == "true");
+
+    assert_eq!(pinakes_core::changes::scrub_stored(&pool).await.unwrap(), 1);
+    assert_eq!(attributes().await.unwrap(), json!({}));
+    let derived: i64 = sqlx::query_scalar("SELECT (SELECT count(*) FROM resource_fact WHERE resource_id=$1)+(SELECT count(*) FROM derived_link WHERE resource_id=$1)")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(derived, 0);
+    assert_eq!(pinakes_core::changes::scrub_stored(&pool).await.unwrap(), 0);
+}
+
+/// One viewer's sets on the fixture graph: friends are author `friend`, the reach set
+/// (`wot_2`) is author `wot`, following is everyone.
+async fn graph_nexus(friend: usize, wot: usize) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = Router::new()
+        .route(
+            "/v1/user/{id}/friends",
+            get(move || async move { Json(vec![author(friend)]) }),
+        )
+        .route(
+            "/v1/user/{id}/following",
+            get(|| async { Json((0..5).map(author).collect::<Vec<_>>()) }),
+        )
+        .route(
+            "/v1/user/{id}/reach-set",
+            get(move || async move {
+                (
+                    [("etag", "\"set-1\"")],
+                    Json(json!({"authors": [author(wot)], "truncated": false})),
+                )
+            }),
+        );
+    let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{addr}"), task)
+}
+fn ids_of(page: &Value) -> Vec<String> {
+    page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap().to_owned())
+        .collect()
+}
+/// `boost` ranks the cards the set's authors referenced first and leaves nothing out; `reach`
+/// with the same set keeps only those. `wot_2` answers 501 until the Nexus serves the reach-set
+/// route, then reads it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_boost_ranks_the_viewers_set_first_and_never_filters(pool: PgPool) {
+    let ids = seed(&pool).await;
+    // Each item is tagged by its own author (item 0 twice, by one author): the default ranking
+    // ties them and orders them by ID. The friend is the author of the last item but item 0,
+    // the reach set's the author of the one before it.
+    let plain_app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let (_, page) = call(&plain_app, "GET", "/v1/search?limit=50", None).await;
+    let plain = ids_of(&page);
+    assert_eq!(plain.len(), 5);
+    let order: Vec<usize> = plain
+        .iter()
+        .map(|id| ids.iter().position(|i| i == id).unwrap())
+        .filter(|i| *i != 0)
+        .collect();
+    let (friend, wot) = (order[3], order[2]);
+    let (nexus_url, task) = graph_nexus(friend, wot).await;
+    let config = Config {
+        nexus_url: nexus_url.clone(),
+        ..Default::default()
+    };
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
+    let viewer = author(9999);
+    let get = |path: String| {
+        let app = app.clone();
+        async move {
+            let (code, page) = call(&app, "GET", &path, None).await;
+            assert_eq!(code, 200, "{path}: {page}");
+            page
+        }
+    };
+    assert_ne!(plain[0], ids[friend]);
+    // Boosted by the friend who tagged it, the friend's item leads, and all five are still there.
+    let boosted = ids_of(&get(format!("/v1/search?boost=friends&viewer={viewer}")).await);
+    assert_eq!(boosted[0], ids[friend], "{boosted:?}");
+    let (mut a, mut b) = (plain.clone(), boosted.clone());
+    a.sort();
+    b.sort();
+    assert_eq!(a, b, "a boost never filters");
+    // `sort=activity` is the default ranking said out loud: the same boosted page.
+    assert_eq!(
+        ids_of(
+            &get(format!(
+                "/v1/search?boost=friends&viewer={viewer}&sort=activity"
+            ))
+            .await
+        ),
+        boosted
+    );
+    // The same set as `reach` is a filter: the friend's item alone.
+    assert_eq!(
+        ids_of(&get(format!("/v1/search?reach=friends&viewer={viewer}")).await),
+        [ids[friend].clone()]
+    );
+    // Trending in the window: a reference by the set counts twice, so the friend's item (one
+    // tag) ties item 0 (two tags) at the top.
+    let trending = ids_of(
+        &get(format!(
+            "/v1/search?sort=trending&window=90d&boost=friends&viewer={viewer}"
+        ))
+        .await,
+    );
+    assert_eq!(trending.len(), 5);
+    let mut top: Vec<_> = trending[..2].to_vec();
+    top.sort();
+    let mut expected = vec![ids[0].clone(), ids[friend].clone()];
+    expected.sort();
+    assert_eq!(top, expected, "{trending:?}");
+    // A set everyone is in boosts every card alike: the default order stays.
+    assert_eq!(
+        ids_of(&get(format!("/v1/search?boost=following&viewer={viewer}")).await),
+        plain
+    );
+    // With `q` the default is `sort=relevance`: every item matches `rust` alike (the name's
+    // first word, the tag), so the boosted activity score alone orders them, as above.
+    assert_eq!(
+        ids_of(&get(format!("/v1/search?q=rust&boost=friends&viewer={viewer}")).await),
+        boosted
+    );
+    // The boost is part of the page's identity: its cursor and ETag differ from the plain ones.
+    let (_, page) = call(&app, "GET", "/v1/search?limit=2", None).await;
+    let cursor = page["cursor"].as_str().unwrap().to_owned();
+    let (code, _) = call(
+        &app,
+        "GET",
+        &format!("/v1/search?limit=2&boost=friends&viewer={viewer}&cursor={cursor}"),
+        None,
+    )
+    .await;
+    assert_eq!(code, 400);
+    // `wot_2` without the reach-set route: 501 with a plain message, before any Nexus request.
+    for set in ["boost", "reach"] {
+        let (code, body) = call(
+            &app,
+            "GET",
+            &format!("/v1/search?{set}=wot_2&viewer={viewer}"),
+            None,
+        )
+        .await;
+        assert_eq!(code, 501, "{body}");
+        assert!(body["error"].as_str().unwrap().contains("not supported"));
+    }
+    // With it: the set the route names.
+    let app = api::router(
+        AppState::new(
+            pool,
+            Config {
+                nexus_url,
+                nexus_reach_set: true,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+    );
+    let (code, page) = call(
+        &app,
+        "GET",
+        &format!("/v1/search?boost=wot_2&viewer={viewer}"),
+        None,
+    )
+    .await;
+    assert_eq!(code, 200, "{page}");
+    assert_eq!(ids_of(&page)[0], ids[wot]);
+    assert_eq!(ids_of(&page).len(), 5);
+    let (_, page) = call(
+        &app,
+        "GET",
+        &format!("/v1/search?reach=wot_2&viewer={viewer}"),
+        None,
+    )
+    .await;
+    assert_eq!(ids_of(&page), [ids[wot].clone()]);
+    task.abort();
+}
+
+/// A boost reads the set's references once, not once per card: 10,000 cards each referenced by
+/// the friend answer well inside the five-second statement timeout.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_boost_over_many_cards_answers_in_time(pool: PgPool) {
+    let friend = 3;
+    sqlx::query("INSERT INTO resource(id,uri) SELECT md5('many'||i),'https://many.example.org/'||i FROM generate_series(1,10000) i")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) SELECT md5('many'||i),$1,'tag','many','/pub/app/tags/many-'||i,now() FROM generate_series(1,10000) i")
+        .bind(author(friend))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("ANALYZE").execute(&pool).await.unwrap();
+    let (nexus_url, _task) = graph_nexus(friend, friend).await;
+    // The API's own pool: its five-second statement timeout is the bound. A boost that reads the
+    // set once per card runs past it and answers 500, not 200.
+    let api_pool = api::pool_options()
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let app = api::router(
+        AppState::new(
+            api_pool.clone(),
+            Config {
+                nexus_url,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+    );
+    let viewer = author(9999);
+    let started = std::time::Instant::now();
+    let (code, page) = call(
+        &app,
+        "GET",
+        &format!("/v1/search?limit=20&boost=friends&viewer={viewer}"),
+        None,
+    )
+    .await;
+    assert_eq!(code, 200, "{page}");
+    assert_eq!(ids_of(&page).len(), 20);
+    api_pool.close().await;
+    // A target below the timeout: a loaded machine never fails it.
+    if started.elapsed() > std::time::Duration::from_secs(4) {
+        eprintln!(
+            "SOFT performance target exceeded: boosted search {:?} (target 4 s)",
+            started.elapsed()
+        );
+    }
+}
+
+/// A reference from 1900 (in range) boosts nothing and breaks nothing: its decay is clamped to
+/// zero instead of underflowing a double, in the boost and in the plain ranking.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_old_reference_neither_boosts_nor_breaks_a_search(pool: PgPool) {
+    let ids = seed(&pool).await;
+    let friend = 1;
+    let (nexus_url, _task) = graph_nexus(friend, friend).await;
+    let app = api::router(
+        AppState::new(
+            pool.clone(),
+            Config {
+                nexus_url,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+    );
+    let viewer = author(9999);
+    // Item 2 keeps its current reference by its author and gets one from the friend in 1900; a
+    // new card has only a reference from 1900.
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','old','/pub/app/tags/old-2','1900-01-01T00:00:00Z')")
+        .bind(&ids[2])
+        .bind(author(friend))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let lone = store::ensure_resource(&pool, "https://example.org/item/1900")
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','old','/pub/app/tags/old-lone','1900-01-01T00:00:00Z')")
+        .bind(&lone)
+        .bind(author(friend))
+        .execute(&pool)
+        .await
+        .unwrap();
+    for path in [
+        "/v1/search?limit=50".to_owned(),
+        format!("/v1/search?limit=50&boost=friends&viewer={viewer}"),
+    ] {
+        let (code, page) = call(&app, "GET", &path, None).await;
+        assert_eq!(code, 200, "{path}: {page}");
+        assert!(ids_of(&page).contains(&lone), "{path}: {page}");
+    }
+    // The friend's current reference still leads the boosted page; the old one adds nothing.
+    let (_, page) = call(
+        &app,
+        "GET",
+        &format!("/v1/search?boost=friends&viewer={viewer}"),
+        None,
+    )
+    .await;
+    assert_eq!(ids_of(&page)[0], ids[friend], "{page}");
+}
+
+/// A resource for the relevance tests: its name, description and type, tagged `label` by
+/// `taggers` distinct authors (from `first` on), with its activity score computed.
+async fn relevance_card(
+    pool: &PgPool,
+    n: usize,
+    (name, description, type_name): (&str, &str, &str),
+    (label, first, taggers): (&str, usize, usize),
+) -> String {
+    let uri = format!("https://example.org/relevance/{n}");
+    let id = store::ensure_resource(pool, &uri).await.unwrap();
+    let mut doc = ResourceMeta::new(&uri, "web", 86400);
+    doc.name = Some(name.into());
+    doc.description = Some(description.into());
+    doc.set_type(type_name);
+    store::save_document(pool, &id, 0, &doc).await.unwrap();
+    for a in first..first + taggers {
+        sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag',$3,$4,now())")
+            .bind(&id)
+            .bind(author(a))
+            .bind(label)
+            .bind(format!("/pub/app/tags/{n}-{a}"))
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+    let mut tx = pool.begin().await.unwrap();
+    store::recompute_scores(&mut tx, std::slice::from_ref(&id))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    id
+}
+
+/// `q` ranks by relevance unless `sort` says otherwise: a name match first (exact, then the
+/// words as a phrase, then a partial name), then a tag label (equal, then holding the word),
+/// then the description, and the activity score only among equal matches. So the popular
+/// podcast and media player whose descriptions merely mention music come after the music cards,
+/// which `sort=activity` (the old order) puts behind them. Cursors page the same order, facets
+/// and filters are unchanged, and `sort=relevance` without `q` is refused.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_text_search_ranks_the_best_match_first(pool: PgPool) {
+    let podcast = relevance_card(
+        &pool,
+        1,
+        (
+            "Lex Fridman Podcast",
+            "Conversations about science, technology, history, philosophy and music.",
+            "PodcastSeries",
+        ),
+        ("podcast", 100, 6),
+    )
+    .await;
+    let player = relevance_card(
+        &pool,
+        2,
+        (
+            "VLC media player",
+            "Plays most music and video files.",
+            "SoftwareApplication",
+        ),
+        ("software", 200, 5),
+    )
+    .await;
+    let band = relevance_card(
+        &pool,
+        3,
+        ("Daft Punk", "French electronic music duo.", "MusicGroup"),
+        ("music", 300, 1),
+    )
+    .await;
+    let album = relevance_card(
+        &pool,
+        4,
+        (
+            "Music for Airports",
+            "Ambient album by Brian Eno.",
+            "MusicAlbum",
+        ),
+        ("ambient", 400, 1),
+    )
+    .await;
+    let musicals = relevance_card(
+        &pool,
+        5,
+        ("Musicals Tonight", "Broadway listings.", "WebPage"),
+        ("theatre", 500, 2),
+    )
+    .await;
+    let exact = relevance_card(
+        &pool,
+        6,
+        ("  MUSIC ", "A page.", "WebPage"),
+        ("page", 600, 1),
+    )
+    .await;
+    let kraftwerk = relevance_card(
+        &pool,
+        7,
+        ("Kraftwerk", "German electronic music band.", "MusicGroup"),
+        ("electronic-music", 700, 1),
+    )
+    .await;
+    // Matches nothing: neither its name nor its description holds the word.
+    relevance_card(
+        &pool,
+        8,
+        ("Kind of Blue", "Jazz album.", "MusicAlbum"),
+        ("music", 800, 3),
+    )
+    .await;
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let get = |path: String| {
+        let app = app.clone();
+        async move {
+            let (code, page) = call(&app, "GET", &path, None).await;
+            assert_eq!(code, 200, "{path}: {page}");
+            page
+        }
+    };
+    let relevance = [
+        exact.clone(),     // the name is `music`: 4·9
+        album.clone(),     // the name holds the word: 3·9
+        musicals.clone(),  // a partial name: 1·9
+        band.clone(),      // tagged `music` (2·3) and the word in the description (2)
+        kraftwerk.clone(), // a label holding the word (1·3) and the description (2)
+        podcast.clone(),   // the description alone (2), six taggers
+        player.clone(),    // the description alone (2), five taggers
+    ];
+    assert_eq!(ids_of(&get("/v1/search?q=music".into()).await), relevance);
+    assert_eq!(
+        ids_of(&get("/v1/search?q=music&sort=relevance".into()).await),
+        relevance
+    );
+    // The activity order the default used to be: the most tagged first, whatever the match.
+    let activity = ids_of(&get("/v1/search?q=music&sort=activity".into()).await);
+    assert_eq!(
+        activity[..3],
+        [podcast.clone(), player.clone(), musicals.clone()]
+    );
+    let (mut a, mut b) = (activity.clone(), relevance.to_vec());
+    a.sort();
+    b.sort();
+    assert_eq!(a, b, "the sort never changes what matches");
+    // Filters keep working: the music groups alone, the tagged band first.
+    assert_eq!(
+        ids_of(&get("/v1/search?q=music&type=MusicGroup".into()).await),
+        [band.clone(), kraftwerk.clone()]
+    );
+    assert_eq!(
+        ids_of(&get("/v1/search?q=music&tags=music".into()).await),
+        std::slice::from_ref(&band)
+    );
+    // Facets count the same set under either sort; collapse keeps the order (no groups here).
+    let facets = get("/v1/search?q=music&facet=type,tags".into()).await["facets"].clone();
+    assert_eq!(
+        facets,
+        get("/v1/search?q=music&facet=type,tags&sort=activity".into()).await["facets"]
+    );
+    assert_eq!(
+        ids_of(&get("/v1/search?q=music&collapse=group".into()).await),
+        relevance
+    );
+    // Paging two at a time walks the same order, each card once.
+    let mut paged = vec![];
+    let mut cursor: Option<String> = None;
+    loop {
+        let path = match &cursor {
+            Some(c) => format!("/v1/search?q=music&limit=2&cursor={c}"),
+            None => "/v1/search?q=music&limit=2".into(),
+        };
+        let page = get(path).await;
+        paged.extend(ids_of(&page));
+        match page["cursor"].as_str() {
+            Some(c) => cursor = Some(c.to_owned()),
+            None => break,
+        }
+        assert!(paged.len() < 20, "paging never ends: {paged:?}");
+    }
+    assert_eq!(paged, relevance);
+    // A relevance cursor belongs to its sort: with another one it is refused.
+    let first = get("/v1/search?q=music&limit=2".into()).await;
+    let cursor = first["cursor"].as_str().unwrap();
+    let (code, _) = call(
+        &app,
+        "GET",
+        &format!("/v1/search?q=music&limit=2&sort=activity&cursor={cursor}"),
+        None,
+    )
+    .await;
+    assert_eq!(code, 400);
+    // Several words: the tag `daft-punk` equals `daft punk`; a name with both words first.
+    let single = relevance_card(
+        &pool,
+        9,
+        (
+            "Get Lucky",
+            "A single by Daft Punk with Pharrell Williams.",
+            "MusicRecording",
+        ),
+        ("daft-punk", 900, 1),
+    )
+    .await;
+    let mention = relevance_card(
+        &pool,
+        10,
+        ("Homework", "The first album by daft punk.", "MusicAlbum"),
+        ("house", 1000, 4),
+    )
+    .await;
+    // `Get Lucky` and `Homework` both name the band in the description; the single's tag ranks
+    // it above the album's four taggers.
+    assert_eq!(
+        ids_of(&get("/v1/search?q=daft%20punk".into()).await),
+        [band.clone(), single, mention]
+    );
+    // `sort=relevance` ranks by `q`: without one (or with an empty one) it is a 400 that says so.
+    for path in [
+        "/v1/search?sort=relevance",
+        "/v1/search?q=&sort=relevance",
+        "/v1/search?sort=relevance&tags=music",
+    ] {
+        let (code, body) = call(&app, "GET", path, None).await;
+        assert_eq!(code, 400, "{path}: {body}");
+        assert!(
+            body["error"].as_str().unwrap().contains("needs q"),
+            "{path}: {body}"
+        );
+    }
+    let (code, _) = call(
+        &app,
+        "GET",
+        &format!("/v1/search?q=music&sort=relevance&related={band}"),
+        None,
+    )
+    .await;
+    assert_eq!(code, 400, "related ranks its own rows");
+    // Without `q` the default stays `activity`.
+    assert_eq!(
+        ids_of(&get("/v1/search?type=MusicGroup".into()).await),
+        ids_of(&get("/v1/search?type=MusicGroup&sort=activity".into()).await)
+    );
+}
+
+/// A short `q` (up to three letters or digits) matches a name only where a word starts, and the
+/// description by whole words: `lol` never finds the Hausa decks whose names hold `jimloli`, `ai`
+/// never finds `Rain` or `Saint`, `btc` never finds `Debtcleaner`, while `LOLcats`, `Airbnb`,
+/// `btcpayserver` and `lightningnetwork/lnd` (for `lnd`) are still found. Longer text still matches inside a name, and so does a script
+/// written without spaces between words.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_short_query_matches_word_starts_not_inside_words(pool: PgPool) {
+    let deck = relevance_card(
+        &pool,
+        1,
+        (
+            "Turanci: kalmomi da jimloli 3,000 mafi amfani",
+            "Za a fara da jimloli 60 na tsira, sannan kalmomi bisa yawan amfani.",
+            "LearningResource",
+        ),
+        ("hausa", 100, 3),
+    )
+    .await;
+    let basics = relevance_card(
+        &pool,
+        2,
+        (
+            "Tushen Turanci: jimloli, lambobi da kalmomin yau da kullum",
+            "Katunan farko 65: jimlolin da ake bukata a Turanci.",
+            "LearningResource",
+        ),
+        ("hausa", 200, 2),
+    )
+    .await;
+    let cats = relevance_card(
+        &pool,
+        3,
+        ("LOLcats archive", "Captioned cat pictures.", "WebPage"),
+        ("cats", 300, 1),
+    )
+    .await;
+    let slang = relevance_card(
+        &pool,
+        4,
+        ("Internet slang", "Why people write lol and brb.", "Article"),
+        ("slang", 400, 1),
+    )
+    .await;
+    let slop = relevance_card(
+        &pool,
+        5,
+        ("AI slop on the web", "Spam is unwanted reach.", "Article"),
+        ("spam", 500, 1),
+    )
+    .await;
+    let airbnb = relevance_card(
+        &pool,
+        6,
+        ("Airbnb", "Holiday rentals.", "WebApplication"),
+        ("travel", 600, 1),
+    )
+    .await;
+    let photos = relevance_card(
+        &pool,
+        7,
+        (
+            "Photo sorter",
+            "Sorts pictures with AI.",
+            "SoftwareApplication",
+        ),
+        ("photos", 700, 1),
+    )
+    .await;
+    // Each holds the short text inside a word only, and has the most taggers.
+    for (n, name, description) in [
+        (8, "Rain", "A song."),
+        (9, "Saint Joseph's Day", "Public holiday in Ticino."),
+        (10, "Debtcleaner", "Pay off loans."),
+    ] {
+        relevance_card(
+            &pool,
+            n,
+            (name, description, "WebPage"),
+            ("popular", n * 100, 5),
+        )
+        .await;
+    }
+    let btcpay = relevance_card(
+        &pool,
+        11,
+        (
+            "btcpayserver/btcpayserver",
+            "A self-hosted payment server.",
+            "SoftwareApplication",
+        ),
+        ("bitcoin", 1100, 1),
+    )
+    .await;
+    let map = relevance_card(
+        &pool,
+        12,
+        (
+            "BTC Map - Merchant",
+            "Find places to spend sats.",
+            "WebPage",
+        ),
+        ("bitcoin", 1200, 2),
+    )
+    .await;
+    let lnd = relevance_card(
+        &pool,
+        14,
+        (
+            "lightningnetwork/lnd",
+            "Lightning Network Daemon.",
+            "SoftwareApplication",
+        ),
+        ("lightning", 1400, 1),
+    )
+    .await;
+    let izmir = relevance_card(
+        &pool,
+        15,
+        ("İzmir", "A city on the Aegean coast.", "Place"),
+        ("city", 1500, 1),
+    )
+    .await;
+    let slow = relevance_card(
+        &pool,
+        16,
+        ("A slow song", "Music.", "MusicRecording"),
+        ("ballad", 1600, 1),
+    )
+    .await;
+    relevance_card(
+        &pool,
+        17,
+        ("As lop", "Music.", "MusicRecording"),
+        ("ballad", 1700, 2),
+    )
+    .await;
+    let trademark = relevance_card(
+        &pool,
+        18,
+        ("Acme™Zqx", "A brand.", "WebPage"),
+        ("brand", 1800, 1),
+    )
+    .await;
+    relevance_card(
+        &pool,
+        19,
+        ("x²zqy", "A formula.", "WebPage"),
+        ("math", 1900, 2),
+    )
+    .await;
+    let dotted = relevance_card(
+        &pool,
+        21,
+        ("ACME・Zqw", "Katakana middle dot.", "WebPage"),
+        ("brand", 2100, 2),
+    )
+    .await;
+    let mixed = relevance_card(
+        &pool,
+        22,
+        ("我的AI助手", "聊天。", "SoftwareApplication"),
+        ("assistant", 2200, 1),
+    )
+    .await;
+    let chinese = relevance_card(
+        &pool,
+        13,
+        ("流行音乐精选", "精选歌曲。", "MusicPlaylist"),
+        ("music", 1300, 1),
+    )
+    .await;
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let get = |path: String| {
+        let app = app.clone();
+        async move {
+            let (code, page) = call(&app, "GET", &path, None).await;
+            assert_eq!(code, 200, "{path}: {page}");
+            ids_of(&page)
+        }
+    };
+    // A name word that starts so (9), then the whole word in the description (2).
+    let lol = [cats.clone(), slang.clone()];
+    assert_eq!(get("/v1/search?q=lol".into()).await, lol);
+    assert_eq!(get("/v1/search?q=LOL".into()).await, lol);
+    // The name's whole word (3·9), a name word that starts so (9), the description's word (2).
+    // A Latin word right after a script written without spaces starts there (`我的AI助手`); where
+    // it ranks depends on how the text parser splits the mixed run: only that it is found counts.
+    let ai = [slop.clone(), airbnb.clone(), photos.clone()];
+    let found = get("/v1/search?q=ai".into()).await;
+    assert!(found.contains(&mixed), "{found:?}");
+    assert_eq!(
+        found
+            .iter()
+            .filter(|id| **id != mixed)
+            .cloned()
+            .collect::<Vec<_>>(),
+        ai
+    );
+    let mut by_activity = get("/v1/search?q=ai&sort=activity".into()).await;
+    by_activity.sort();
+    let mut sorted = found.clone();
+    sorted.sort();
+    assert_eq!(by_activity, sorted, "the sort never changes what matches");
+    assert_eq!(
+        get("/v1/search?q=btc".into()).await,
+        [map.clone(), btcpay.clone()]
+    );
+    // A sign that is neither a letter nor a digit starts a word too (`owner/repo`, `™`, `・`);
+    // a superscript digit is a digit. Two partial name matches: the one with more taggers first.
+    assert_eq!(get("/v1/search?q=lnd".into()).await, [lnd]);
+    assert_eq!(get("/v1/search?q=zq".into()).await, [dotted, trademark]);
+    // The name is lowered as for `ILIKE`, so a capital with its own case rule still starts a word
+    // (where the database's locale lowers `İ` to `i` at all: a UTF-8 one, not plain C).
+    let unicode_lower: bool = sqlx::query_scalar("SELECT lower('İ')='i'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    if unicode_lower {
+        assert_eq!(get("/v1/search?q=izm".into()).await, [izmir]);
+    }
+    // Several short words (`a s`: three characters): in order, apart only by white space, each
+    // at a word start; `As lop` holds both but not so.
+    assert_eq!(get("/v1/search?q=a%20s".into()).await, [slow]);
+    assert!(get("/v1/search?q=s%20a".into()).await.is_empty());
+    // Longer text still matches inside a name: the deck with more taggers first.
+    assert_eq!(
+        get("/v1/search?q=jimlo".into()).await,
+        [deck.clone(), basics.clone()]
+    );
+    // No spaces between words: a short text is found inside the run.
+    assert_eq!(
+        get("/v1/search?q=%E9%9F%B3%E4%B9%90".into()).await,
+        [chinese]
+    );
+}
