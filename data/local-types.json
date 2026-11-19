@@ -1,0 +1,17 @@
+{
+  "BitcoinAddress": [
+    "Thing"
+  ],
+  "BitcoinBlock": [
+    "Thing"
+  ],
+  "BitcoinTransaction": [
+    "Thing"
+  ],
+  "LightningChannel": [
+    "Thing"
+  ],
+  "LightningNode": [
+    "Thing"
+  ]
+}
