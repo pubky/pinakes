@@ -5245,13 +5245,17 @@ async fn link_sources_follow_tombstones_relinks_and_shared_sites(pool: PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_page_inherits_an_ics_uid_only_from_its_own_origin(pool: PgPool) {
     use pinakes_core::resolver::Resolver;
+    // Ahead of the clock: the page's calendar file is read from a month back of now, so a fixed
+    // date would drop out of it in time.
+    let at = Utc::now() + Duration::days(30);
+    let (date, day) = (at.format("%Y-%m-%d"), at.format("%Y%m%d"));
     let page = |name: &str| {
         format!(
-            r#"<html><head><title>{name}</title><script type="application/ld+json">{{"@context":"https://schema.org","@type":"Event","name":"{name}","startDate":"2027-03-01T19:00:00"}}</script></head><body><a href="/{name}.ics">Add to calendar</a></body></html>"#
+            r#"<html><head><title>{name}</title><script type="application/ld+json">{{"@context":"https://schema.org","@type":"Event","name":"{name}","startDate":"{date}T19:00:00"}}</script></head><body><a href="/{name}.ics">Add to calendar</a></body></html>"#
         )
     };
     let ics = |uid: &str| {
-        format!("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:{uid}\r\nDTSTART;TZID=Europe/Zurich:20270301T190000\r\nSUMMARY:Talk\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
+        format!("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:{uid}\r\nDTSTART;TZID=Europe/Zurich:{day}T190000\r\nSUMMARY:Talk\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
     };
     let r = html_platform(
         &pool,
