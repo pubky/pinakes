@@ -1,0 +1,79 @@
+[package]
+name = "pinakes-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+base64.workspace = true
+blake3 = { workspace = true, features = ["traits-preview"] }
+chrono.workspace = true
+futures-util.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
+utoipa.workspace = true
+utoipa-swagger-ui.workspace = true
+# Signed packets only: PKARR records come from relays through Egress (`resolver::pkarr_relays`).
+pkarr = { version = "=8.1.0", default-features = false, features = ["signed_packet"] }
+getrandom = "0.4"
+hmac = "0.13"
+# Page cursors as bytes (`collections`); already built for pubky-common.
+postcard = { version = "1.1", default-features = false, features = ["alloc"] }
+scraper = "0.24"
+# The HTML named character references (the same table scraper's parser uses).
+markup5ever = "=0.35.0"
+# scraper's own parser and tree, fed in pieces under a CPU budget (`resolver::html`).
+html5ever = "=0.35.0"
+# The parse budget is the parsing thread's CPU time (`clock_gettime`).
+libc = "0.2"
+toml = "0.9"
+ipnet = "2"
+async-stream = "0.3"
+prometheus = "0.14"
+chrono-tz = "=0.10.4"
+percent-encoding = "2"
+rrule = "=0.14.0"
+roxmltree = "=0.21.1"
+# Streams a feed body cut off at the page cap, to complete it after its last whole item.
+quick-xml = "=0.37.5"
+sha1 = "=0.10.7"
+sha2 = "=0.10.9"
+tzf-rs = { version = "=1.1.4", default-features = false }
+nostr = { version = "=0.45.5", default-features = false, features = ["std"] }
+tokio-tungstenite = { version = "=0.28.0", features = ["rustls-tls-webpki-roots"] }
+psl = "=2.1.241"
+tower-http = { version = "=0.6.11", default-features = false, features = ["catch-panic"] }
+flate2 = "=1.1.10"
+httpdate = "=1.0.3"
+# The MCP endpoint (`agents::mcp`): the official Rust SDK, its stateless Streamable HTTP server.
+rmcp = { version = "=3.7.0", default-features = false, features = ["server", "transport-streamable-http-server"] }
+# An MCP tool's request to the public routes (`agents::mcp`).
+tower = { version = "0.5", features = ["util"] }
+
+# The post envelope app posts are written on (`resolver::pubky_apps::posts`): the pin Nexus and
+# the music node use.
+pubky-social-specs = "=1.0.0-rc.1"
+
+[[example]]
+name = "e2e_stack"
+# Its unit tests (the live sample selection) run with the workspace's tests.
+test = true
+
+[dev-dependencies]
+# scraper's tree nodes, named by a test of the rebuilt tree (`resolver::html`).
+ego-tree = "=0.10.0"
+secp256k1 = "=0.30.0"
+serde_yaml_ng = "0.10"
+tokio = { workspace = true, features = ["test-util"] }
+tracing-subscriber = { version = "0.3", features = ["json"] }
+http-body-util = "0.1"

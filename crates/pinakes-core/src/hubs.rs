@@ -1,0 +1,2160 @@
+//! Exact hub lookups for "also on": MusicBrainz and Wikidata.
+//!
+//! A hub answers one exact question (this URL, this MBID, this Q-id, this external ID) and never
+//! a fuzzy one: no title or name matching. Each lookup is a pure parser over a recorded or live
+//! response plus a thin fetch through [`Egress`], so the per-host budgets (MusicBrainz 1/s,
+//! Wikimedia 200/min) and the egress policy apply. A missing object is `Ok(None)`; a busy or
+//! rate-limited hub is a [`RetryLater`] error, so the caller keeps its previous rows.
+//!
+//! The join keys a source records come from [`key`]: `mb:recording:{mbid}`,
+//! `mb:release:{mbid}`, `mb:release-group:{mbid}`, `mb:artist:{mbid}` and `wikidata:{Q-id}`.
+use crate::resolver::{
+    egress::{Egress, FetchOptions, Fetched},
+    RetryLater,
+};
+use anyhow::{bail, Result};
+use serde_json::Value;
+use std::collections::BTreeMap;
+
+/// The level of a MusicBrainz entity. A key never crosses levels: a recording joins recordings,
+/// a release group joins release groups.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MbKind {
+    Recording,
+    Release,
+    ReleaseGroup,
+    Artist,
+}
+impl MbKind {
+    /// The entity's name in the MusicBrainz API and in its key namespace.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Recording => "recording",
+            Self::Release => "release",
+            Self::ReleaseGroup => "release-group",
+            Self::Artist => "artist",
+        }
+    }
+    pub(crate) fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "recording" => Self::Recording,
+            "release" => Self::Release,
+            "release-group" | "release_group" => Self::ReleaseGroup,
+            "artist" => Self::Artist,
+            _ => return None,
+        })
+    }
+}
+
+/// Join keys, built only from validated identifiers.
+pub mod key {
+    use super::MbKind;
+    /// `mb:{kind}:{mbid}` for a canonical (lower-case, hyphenated) MBID.
+    pub fn mb(kind: MbKind, mbid: &str) -> Option<String> {
+        super::mbid(mbid).map(|m| format!("mb:{}:{m}", kind.as_str()))
+    }
+    /// `wikidata:{Q-id}` for an item ID (`Q` and digits, no leading zero).
+    pub fn wikidata(qid: &str) -> Option<String> {
+        super::qid(qid).map(|q| format!("wikidata:{q}"))
+    }
+}
+
+/// A canonical MBID: 36 bytes, lower-case hex in 8-4-4-4-12 groups. Upper case is folded; any
+/// other spelling is refused.
+pub fn mbid(s: &str) -> Option<String> {
+    let s = s.to_ascii_lowercase();
+    let groups: Vec<&str> = s.split('-').collect();
+    let shape = groups.iter().map(|g| g.len()).collect::<Vec<_>>() == [8, 4, 4, 4, 12];
+    (shape
+        && groups
+            .iter()
+            .all(|g| g.bytes().all(|b| b.is_ascii_hexdigit())))
+    .then_some(s)
+}
+/// A Wikidata item ID: `Q` and 1–12 digits without a leading zero.
+pub fn qid(s: &str) -> Option<String> {
+    let digits = s.strip_prefix('Q')?;
+    ((1..=12).contains(&digits.len())
+        && !digits.starts_with('0')
+        && digits.bytes().all(|b| b.is_ascii_digit()))
+    .then(|| s.to_owned())
+}
+
+/// A hub's 410: what was asked for is gone for good. An error like any other unexpected status
+/// for every caller ("… answered 410"); the music enrichment alone reads it as a 404
+/// (`music_enrichment`), which leaves its other callers' handling of a hub's answer as it was.
+#[derive(Clone, Copy, Debug)]
+pub struct Gone {
+    pub hub: &'static str,
+}
+impl std::fmt::Display for Gone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} answered 410", self.hub)
+    }
+}
+impl std::error::Error for Gone {}
+
+/// A hub's answer as JSON: `None` for 404, a retry for 429/503 (and other 5xx) and for an API
+/// error Wikidata sends with 200 (`ratelimited`, `maxlag`; an unknown ID is an answer), [`Gone`]
+/// for 410, an error for anything else that is not 200 JSON.
+fn json(fetched: &Fetched, hub: &'static str) -> Result<Option<Value>> {
+    let busy = || -> anyhow::Error {
+        RetryLater {
+            class: if hub == "musicbrainz" {
+                "musicbrainz_busy"
+            } else {
+                "wikidata_busy"
+            },
+            seconds: fetched.retry_after_secs.clamp(60, 3600),
+        }
+        .into()
+    };
+    match fetched.status {
+        200 => {
+            let v: Value = serde_json::from_slice(&fetched.body)?;
+            match v["error"]["code"].as_str() {
+                Some(code) if hub == "wikidata" && code != "no-such-entity" => Err(busy()),
+                _ => Ok(Some(v)),
+            }
+        }
+        404 => Ok(None),
+        410 => Err(Gone { hub }.into()),
+        429 | 500..=599 => Err(busy()),
+        status => bail!("{hub} answered {status}"),
+    }
+}
+/// The body cap for Wikidata entities: a much-edited item carries megabytes of claims (Signal's
+/// is 2.6 MB), above the egress default of 1 MB.
+pub const WIKIDATA_CAP: usize = 8 * 1024 * 1024;
+/// The body cap for MusicBrainz answers: an artist or release with very many URL relations
+/// exceeds the egress default too.
+pub const MUSICBRAINZ_CAP: usize = 8 * 1024 * 1024;
+fn options(hub: &str) -> FetchOptions {
+    FetchOptions {
+        accept: Some("application/json".into()),
+        body_cap: match hub {
+            "wikidata" => Some(WIKIDATA_CAP),
+            "musicbrainz" => Some(MUSICBRAINZ_CAP),
+            _ => None,
+        },
+        ..Default::default()
+    }
+}
+async fn get(egress: &Egress, url: &str, hub: &'static str) -> Result<Option<Value>> {
+    // Shared flights and a short cache: two sources asking the same thing ask once.
+    let fetched = egress.discover(url, &options(hub), 3600).await?;
+    let answer = json(&fetched, hub);
+    // A busy answer (Wikidata's `maxlag` comes with 200) is no answer to keep for an hour: the
+    // next ask fetches again.
+    if answer
+        .as_ref()
+        .err()
+        .is_some_and(|e| e.downcast_ref::<RetryLater>().is_some())
+    {
+        egress.shorten_discovery(url, &options(hub), 1).await?;
+    }
+    answer
+}
+/// Cache `body` (status 200, JSON) or a 404 as the answer to `url`, a lookup a batch covered.
+async fn seed(egress: &Egress, url: &str, hub: &str, answer: Option<&Value>) -> Result<()> {
+    let fetched = Fetched {
+        permanent_redirect: false,
+        truncated: false,
+        validators: Default::default(),
+        url: url::Url::parse(url)?,
+        status: if answer.is_some() { 200 } else { 404 },
+        retry_after_secs: 60,
+        location: None,
+        content_type: "application/json".into(),
+        body: serde_json::to_vec(answer.unwrap_or(&serde_json::json!({"error": "Not Found"})))?,
+    };
+    egress.seed(url, &options(hub), 3600, fetched).await
+}
+
+pub mod musicbrainz {
+    //! MusicBrainz `ws/2`: what a URL is linked to, and an entity's URL relations, ISRCs and
+    //! barcode.
+    use super::*;
+
+    /// The public web service; `[also_on.sources.musicbrainz] base_url` names a mirror instead.
+    pub const BASE: &str = "https://musicbrainz.org/ws/2";
+
+    /// A MusicBrainz page's path segments after `/ws/2/` when it has one (`musicbrainz.org`,
+    /// `www.` and `beta.`, http or https, a trailing slash and parameters dropped).
+    fn page_segments(uri: &str) -> Option<Vec<String>> {
+        let url = url::Url::parse(uri).ok()?;
+        if !matches!(url.scheme(), "http" | "https")
+            || !matches!(
+                url.host_str()?,
+                "musicbrainz.org" | "www.musicbrainz.org" | "beta.musicbrainz.org"
+            )
+        {
+            return None;
+        }
+        let mut segments: Vec<String> = url
+            .path_segments()?
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if segments.get(..2) == Some(&["ws".to_owned(), "2".to_owned()]) {
+            segments.drain(..2);
+        }
+        Some(segments)
+    }
+    /// A link to a recording, release, release group or artist (its page or its web service
+    /// record): the entity, its MBID and its page `https://musicbrainz.org/{kind}/{mbid}`.
+    pub fn entity_link(uri: &str) -> Option<(MbKind, String, String)> {
+        let segments = page_segments(uri)?;
+        let [kind, id] = segments.as_slice() else {
+            return None;
+        };
+        let kind = match kind.as_str() {
+            "recording" => MbKind::Recording,
+            "release" => MbKind::Release,
+            "release-group" => MbKind::ReleaseGroup,
+            "artist" => MbKind::Artist,
+            _ => return None,
+        };
+        let mbid = mbid(id)?;
+        let page = format!("https://musicbrainz.org/{}/{mbid}", kind.as_str());
+        Some((kind, mbid, page))
+    }
+    /// A link to an ISRC's page (`/isrc/{ISRC}`): the ISRC as keys store it and its page.
+    pub fn isrc_link(uri: &str) -> Option<(String, String)> {
+        let segments = page_segments(uri)?;
+        let ["isrc", code] = segments.iter().map(String::as_str).collect::<Vec<_>>()[..] else {
+            return None;
+        };
+        let isrc = crate::music::isrc(code)?;
+        let page = format!("https://musicbrainz.org/isrc/{isrc}");
+        Some((isrc, page))
+    }
+
+    /// One URL relation of an entity: the relation type (`free streaming`, `streaming`,
+    /// `purchase for download`, `discogs`, …) and the URL.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct UrlRelation {
+        pub kind: String,
+        pub url: String,
+    }
+    /// A MusicBrainz entity as a source needs it.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct Entity {
+        pub kind: MbKind,
+        pub mbid: String,
+        pub title: Option<String>,
+        /// Current URL relations (ended ones are left out), in the hub's order.
+        pub urls: Vec<UrlRelation>,
+        /// Recordings: their ISRCs (an attribute, never a key).
+        pub isrcs: Vec<String>,
+        /// Releases: the barcode (UPC/EAN), an attribute.
+        pub barcode: Option<String>,
+        /// Releases: their release group.
+        pub release_group: Option<String>,
+        /// The artist credit as MusicBrainz writes it ("A feat. B").
+        pub artist: Option<String>,
+        /// The MBIDs of the artists in the credit, in its order (each once).
+        pub artist_ids: Vec<String>,
+        /// Recordings: the disambiguation comment ("live, 2008-06-01: Wembley"), when there is
+        /// one; MusicBrainz keeps a live recording's title bare and says so here.
+        pub disambiguation: Option<String>,
+        /// Recordings: whether it is a video.
+        pub video: bool,
+        /// Recordings: the length in milliseconds.
+        pub length_ms: Option<u64>,
+        /// Artists: `Person`, `Group`, `Orchestra`, `Choir`, `Character` or `Other`.
+        pub artist_type: Option<String>,
+        /// What MusicBrainz says about the entity beyond its links ([`About`]).
+        pub about: About,
+    }
+    /// What MusicBrainz says about an entity in the same answer: plain text and codes as it
+    /// gives them, each checked for its form and left out otherwise.
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub struct About {
+        /// The comment that tells it from others of the same name ("frenchcore artist").
+        pub disambiguation: Option<String>,
+        /// Artists: the ISO 3166-1 code of their country (`NL`), and their area's name.
+        pub country: Option<String>,
+        pub area: Option<String>,
+        /// Its genres with their vote counts (`inc=genres`), each name once with its highest
+        /// count, by name.
+        pub genres: Vec<(String, u64)>,
+        /// Artists: the begin and end of their life span, `YYYY`, `YYYY-MM` or `YYYY-MM-DD`.
+        pub begin: Option<String>,
+        pub end: Option<String>,
+        /// Release groups: the primary type (`Album`, `Single`, `EP`, …).
+        pub release_type: Option<String>,
+        /// Release groups and recordings: the date of the first release, as `begin`.
+        pub first_release_date: Option<String>,
+        /// Release groups, recordings and artists: their rating on MusicBrainz (`inc=ratings`).
+        /// A release has none of its own (its answer nests its release group's, which is not
+        /// read as the release's).
+        pub rating: Option<Rating>,
+        /// Releases: whether the Cover Art Archive holds a front cover for it that it shows
+        /// (`cover-art-archive`: `front`, and not `darkened`).
+        pub cover_art_front: bool,
+    }
+    /// A MusicBrainz rating: the average of its users' votes, 0 to 5, and how many voted.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct Rating {
+        pub value: f64,
+        pub votes: u64,
+    }
+    /// An entity's `rating` object: `None` when nobody voted (MusicBrainz then gives a `null`
+    /// value and a count of 0) or the value is missing or not within 0 to 5.
+    fn rating(v: &Value) -> Option<Rating> {
+        let votes = v["votes-count"].as_u64().filter(|n| *n >= 1)?;
+        let value = v["value"]
+            .as_f64()
+            .filter(|x| x.is_finite() && (0.0..=5.0).contains(x))?;
+        Some(Rating { value, votes })
+    }
+    /// A partial date as MusicBrainz writes it: `YYYY`, `YYYY-MM` or `YYYY-MM-DD`.
+    fn date(v: &Value) -> Option<String> {
+        let s = v.as_str()?;
+        let parts: Vec<&str> = s.split('-').collect();
+        let digits = |p: &str, n: usize| p.len() == n && p.bytes().all(|b| b.is_ascii_digit());
+        let ok = match parts.as_slice() {
+            [y] => digits(y, 4),
+            [y, m] => digits(y, 4) && digits(m, 2),
+            [y, m, d] => digits(y, 4) && digits(m, 2) && digits(d, 2),
+            _ => false,
+        };
+        ok.then(|| s.to_owned())
+    }
+    /// A short plain-text value: trimmed, not empty, without control characters.
+    fn text(v: &Value) -> Option<String> {
+        let s = v.as_str()?.trim();
+        (!s.is_empty() && !s.chars().any(char::is_control)).then(|| s.to_owned())
+    }
+    fn about(kind: MbKind, v: &Value) -> About {
+        let artist = kind == MbKind::Artist;
+        let mut genres: BTreeMap<String, u64> = BTreeMap::new();
+        for (name, count) in v["genres"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|g| Some((text(&g["name"])?, g["count"].as_u64()?)))
+        {
+            let most = genres.entry(name).or_default();
+            *most = (*most).max(count);
+        }
+        let genres = genres.into_iter().collect();
+        About {
+            disambiguation: text(&v["disambiguation"]),
+            country: artist
+                .then(|| v["country"].as_str())
+                .flatten()
+                .filter(|c| c.len() == 2 && c.bytes().all(|b| b.is_ascii_uppercase()))
+                .map(str::to_owned),
+            area: artist.then(|| text(&v["area"]["name"])).flatten(),
+            genres,
+            begin: artist.then(|| date(&v["life-span"]["begin"])).flatten(),
+            end: artist.then(|| date(&v["life-span"]["end"])).flatten(),
+            release_type: (kind == MbKind::ReleaseGroup)
+                .then(|| text(&v["primary-type"]))
+                .flatten(),
+            first_release_date: matches!(kind, MbKind::ReleaseGroup | MbKind::Recording)
+                .then(|| date(&v["first-release-date"]))
+                .flatten(),
+            rating: (kind != MbKind::Release)
+                .then(|| rating(&v["rating"]))
+                .flatten(),
+            cover_art_front: kind == MbKind::Release
+                && v["cover-art-archive"]["front"] == true
+                && v["cover-art-archive"]["darkened"] != true,
+        }
+    }
+    /// What a URL is linked to: each current target with its level.
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub struct UrlTargets {
+        pub targets: Vec<(MbKind, String)>,
+    }
+
+    fn relations(v: &Value) -> Vec<UrlRelation> {
+        v["relations"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|r| r["target-type"] == "url" && r["ended"] != true)
+            .filter_map(|r| {
+                Some(UrlRelation {
+                    kind: r["type"].as_str()?.to_owned(),
+                    url: r["url"]["resource"].as_str()?.to_owned(),
+                })
+            })
+            .collect()
+    }
+    /// `GET /url?resource=…&inc=…-rels`: the entities a URL is related to.
+    pub fn parse_url(v: &Value) -> UrlTargets {
+        let mut targets: Vec<(MbKind, String)> = v["relations"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|r| r["ended"] != true)
+            .filter_map(|r| {
+                // The target sits under its type's name (`recording`, `release_group`, …).
+                let name = r["target-type"].as_str()?;
+                Some((MbKind::parse(name)?, mbid(r[name]["id"].as_str()?)?))
+            })
+            .collect();
+        targets.sort();
+        targets.dedup();
+        UrlTargets { targets }
+    }
+    /// An artist credit: each name and its join phrase, in order.
+    fn credit(v: &Value) -> Option<String> {
+        let credit: String = v["artist-credit"]
+            .as_array()?
+            .iter()
+            .map(|c| {
+                format!(
+                    "{}{}",
+                    c["name"].as_str().unwrap_or_default(),
+                    c["joinphrase"].as_str().unwrap_or_default()
+                )
+            })
+            .collect();
+        let credit = credit.trim();
+        (!credit.is_empty()).then(|| credit.to_owned())
+    }
+    /// The MBIDs of the artists an entity's credit names, each once, in the credit's order.
+    fn artist_ids(v: &Value) -> Vec<String> {
+        let mut ids: Vec<String> = v["artist-credit"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|c| mbid(c["artist"]["id"].as_str()?))
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        ids.retain(|id| seen.insert(id.clone()));
+        ids
+    }
+    /// `GET /{kind}/{mbid}?inc=url-rels…`.
+    pub fn parse_entity(kind: MbKind, v: &Value) -> Option<Entity> {
+        let mut isrcs: Vec<String> = v["isrcs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|s| s.len() == 12 && s.bytes().all(|b| b.is_ascii_alphanumeric()))
+            .map(str::to_ascii_uppercase)
+            .collect();
+        isrcs.sort();
+        isrcs.dedup();
+        Some(Entity {
+            kind,
+            mbid: mbid(v["id"].as_str()?)?,
+            title: v["title"]
+                .as_str()
+                .or_else(|| v["name"].as_str())
+                .map(str::to_owned),
+            urls: relations(v),
+            isrcs,
+            barcode: v["barcode"]
+                .as_str()
+                .filter(|b| (8..=14).contains(&b.len()) && b.bytes().all(|c| c.is_ascii_digit()))
+                .map(str::to_owned),
+            release_group: v["release-group"]["id"].as_str().and_then(mbid),
+            artist: credit(v),
+            artist_ids: artist_ids(v),
+            disambiguation: v["disambiguation"]
+                .as_str()
+                .map(str::trim)
+                .filter(|d| !d.is_empty())
+                .map(str::to_owned),
+            video: v["video"].as_bool().unwrap_or(false),
+            length_ms: v["length"]
+                .as_u64()
+                .filter(|ms| (1..=86_400_000).contains(ms)),
+            artist_type: (kind == MbKind::Artist)
+                .then(|| v["type"].as_str())
+                .flatten()
+                .filter(|t| t.len() <= 32 && t.bytes().all(|b| b.is_ascii_alphabetic()))
+                .map(str::to_owned),
+            about: about(kind, v),
+        })
+    }
+    /// What an entity read asks for besides the entity: its URL relations and genres, a
+    /// recording's ISRCs, a release's release group and the artist credit, and the rating of
+    /// the levels MusicBrainz rates (recordings, release groups, artists; a release has no
+    /// rating of its own).
+    fn inc(kind: MbKind) -> &'static str {
+        match kind {
+            MbKind::Recording => "url-rels+isrcs+artist-credits+genres+ratings",
+            MbKind::Release => "url-rels+release-groups+artist-credits+genres",
+            MbKind::ReleaseGroup => "url-rels+artist-credits+genres+ratings",
+            MbKind::Artist => "url-rels+genres+ratings",
+        }
+    }
+    /// The Wikidata item an entity's own URL relations name ([`own_item`]).
+    #[derive(Clone, Debug, PartialEq)]
+    pub enum OwnItem {
+        /// Exactly one item.
+        Item(String),
+        /// No `wikidata` relation.
+        None,
+        /// `wikidata` relations that name several items, or none that is an item.
+        Unclear,
+    }
+    /// The item `urls`' current `wikidata` relations name, by its exact Q-id
+    /// (`wikidata::item_link`); a relation that names no item (a property, a lexeme, a
+    /// malformed link) names nothing, and when no relation names an item the answer is
+    /// [`OwnItem::Unclear`].
+    pub fn own_item(urls: &[UrlRelation]) -> OwnItem {
+        let relations: Vec<&UrlRelation> = urls.iter().filter(|r| r.kind == "wikidata").collect();
+        let mut items: Vec<String> = relations
+            .iter()
+            .filter_map(|r| super::wikidata::item_link(&r.url).map(|(qid, _)| qid))
+            .collect();
+        items.sort();
+        items.dedup();
+        match items.as_slice() {
+            [one] => OwnItem::Item(one.clone()),
+            _ if relations.is_empty() => OwnItem::None,
+            _ => OwnItem::Unclear,
+        }
+    }
+    /// The URL lookup for `link` at the web service `base` (exact; MusicBrainz stores URLs as
+    /// given, so the link is sent as the card has it).
+    pub fn url_lookup(base: &str, link: &str) -> String {
+        let mut url = url::Url::parse(&format!("{base}/url")).expect("a checked base URL");
+        url.query_pairs_mut()
+            .append_pair("resource", link)
+            .append_pair(
+                "inc",
+                "recording-rels+release-rels+release-group-rels+artist-rels",
+            )
+            .append_pair("fmt", "json");
+        url.into()
+    }
+    pub fn entity_lookup(base: &str, kind: MbKind, mbid: &str) -> String {
+        format!("{base}/{}/{mbid}?inc={}&fmt=json", kind.as_str(), inc(kind))
+    }
+    /// The batched URL lookup: what each of `links` is linked to, in one request.
+    pub fn urls_lookup(base: &str, links: &[String]) -> String {
+        let mut url = url::Url::parse(&format!("{base}/url")).expect("a checked base URL");
+        {
+            let mut query = url.query_pairs_mut();
+            for link in links {
+                query.append_pair("resource", link);
+            }
+            query
+                .append_pair(
+                    "inc",
+                    "recording-rels+release-rels+release-group-rels+artist-rels",
+                )
+                .append_pair("fmt", "json");
+        }
+        url.into()
+    }
+    /// At most this many links per batched URL lookup (MusicBrainz takes 100; the request line
+    /// stays short).
+    pub const URL_BATCH: usize = 50;
+    /// Ask MusicBrainz about many links at once and cache each link's answer as its own lookup's
+    /// (`url` then asks nothing). An answer applies only to the URL MusicBrainz echoes, byte for
+    /// byte; a link left out is unknown (its 404 cached) only when the answer is whole
+    /// (`url-count` answers) and every echo matched a link asked. A link a hub may store under
+    /// several spellings (an Apple Music link's storefronts, `music::hub_spellings`) is asked
+    /// under each. Best effort: a failed batch caches nothing, and its links ask alone; a busy
+    /// MusicBrainz stops the batches.
+    pub async fn prefetch_urls(egress: &Egress, base: &str, links: &[String]) -> Result<usize> {
+        let mut seeded = 0;
+        let spellings: Vec<String> = links
+            .iter()
+            .flat_map(|l| crate::music::hub_spellings(l))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        for chunk in spellings.chunks(URL_BATCH) {
+            let v = match get(egress, &urls_lookup(base, chunk), "musicbrainz").await {
+                Ok(Some(v)) => v,
+                Ok(None) => continue,
+                Err(e) if e.downcast_ref::<RetryLater>().is_some() => return Err(e),
+                Err(_) => continue,
+            };
+            seeded += read_batch(egress, base, chunk, &v).await?.1;
+        }
+        Ok(seeded)
+    }
+    /// What each of `links` (at most [`URL_BATCH`]) is linked to, in as few requests as their
+    /// spellings allow (`music::hub_spellings`, at most [`URL_BATCH`] a request) and nothing
+    /// more: `None` for a link MusicBrainz doesn't know or leaves out of its answer, the union of
+    /// its spellings' targets otherwise. An error is a request's (a busy MusicBrainz's among
+    /// them); no link asks again alone. Answers are cached as each spelling's own lookup's, as
+    /// [`prefetch_urls`] does.
+    pub async fn urls(
+        egress: &Egress,
+        base: &str,
+        links: &[String],
+    ) -> Result<Vec<Option<UrlTargets>>> {
+        anyhow::ensure!(
+            links.len() <= URL_BATCH,
+            "at most {URL_BATCH} links a request"
+        );
+        // Each spelling with the link it spells, in request-sized runs.
+        let asked: Vec<(usize, String)> = links
+            .iter()
+            .enumerate()
+            .flat_map(|(n, l)| {
+                crate::music::hub_spellings(l)
+                    .into_iter()
+                    .map(move |s| (n, s))
+            })
+            .collect();
+        let mut out: Vec<Option<UrlTargets>> = links.iter().map(|_| None).collect();
+        for chunk in asked.chunks(URL_BATCH) {
+            let spellings: Vec<String> = chunk.iter().map(|(_, s)| s.clone()).collect();
+            let Some(v) = get(egress, &urls_lookup(base, &spellings), "musicbrainz").await? else {
+                continue;
+            };
+            let (answers, _) = read_batch(egress, base, &spellings, &v).await?;
+            for ((n, _), answer) in chunk.iter().zip(answers) {
+                if let Some(found) = answer.map(parse_url) {
+                    out[*n] = Some(merged(out[*n].take(), found));
+                }
+            }
+        }
+        Ok(out)
+    }
+    /// Two answers for spellings of one link: every target, each once.
+    fn merged(a: Option<UrlTargets>, b: UrlTargets) -> UrlTargets {
+        let mut targets = a.map(|a| a.targets).unwrap_or_default();
+        targets.extend(b.targets);
+        targets.sort();
+        targets.dedup();
+        UrlTargets { targets }
+    }
+    /// A batch answer `v` to `chunk`: each link's answer (`None` when left out), and how many
+    /// links it caches as their own lookup's: an echoed answer, and a link left out when the
+    /// answer is whole and exact (MusicBrainz doesn't know it).
+    async fn read_batch<'v>(
+        egress: &Egress,
+        base: &str,
+        chunk: &[String],
+        v: &'v Value,
+    ) -> Result<(Vec<Option<&'v Value>>, usize)> {
+        let answers: Vec<&Value> = v["urls"].as_array().into_iter().flatten().collect();
+        let whole = v["url-count"].as_u64() == Some(answers.len() as u64);
+        let exact = whole
+            && answers.iter().all(|a| {
+                a["resource"]
+                    .as_str()
+                    .is_some_and(|r| chunk.iter().any(|l| l == r))
+            });
+        let mut out = vec![];
+        let mut seeded = 0;
+        for link in chunk {
+            let answer = answers
+                .iter()
+                .find(|a| a["resource"].as_str() == Some(link.as_str()))
+                .copied();
+            out.push(answer);
+            if answer.is_none() && !exact {
+                continue;
+            }
+            seed(egress, &url_lookup(base, link), "musicbrainz", answer).await?;
+            seeded += 1;
+        }
+        Ok((out, seeded))
+    }
+    /// What `link` is linked to; `None` when MusicBrainz does not know the URL. A link a hub may
+    /// store under several spellings (an Apple Music link's storefronts) is asked under each, in
+    /// one request, and takes every spelling's targets. `base` is the web service ([`BASE`] or a
+    /// mirror).
+    pub async fn url(egress: &Egress, base: &str, link: &str) -> Result<Option<UrlTargets>> {
+        let spellings = crate::music::hub_spellings(link);
+        if let [one] = spellings.as_slice() {
+            return Ok(get(egress, &url_lookup(base, one), "musicbrainz")
+                .await?
+                .map(|v| parse_url(&v)));
+        }
+        Ok(urls(egress, base, std::slice::from_ref(&link.to_owned()))
+            .await?
+            .pop()
+            .flatten())
+    }
+    /// A recording's original album: of its official albums, the earliest release of a release
+    /// group that is an Album with no secondary type (not a compilation, live or remix album);
+    /// the release group's title.
+    pub async fn original_album(
+        egress: &Egress,
+        base: &str,
+        recording: &str,
+    ) -> Result<Option<String>> {
+        let Some(recording) = mbid(recording) else {
+            return Ok(None);
+        };
+        let url = format!("{base}/release?recording={recording}&type=album&status=official&inc=release-groups&limit=100&fmt=json");
+        Ok(get(egress, &url, "musicbrainz")
+            .await?
+            .and_then(|v| parse_original_album(&v)))
+    }
+    pub fn parse_original_album(v: &Value) -> Option<String> {
+        v["releases"]
+            .as_array()?
+            .iter()
+            .filter(|r| {
+                let group = &r["release-group"];
+                group["primary-type"] == "Album"
+                    && group["secondary-types"]
+                        .as_array()
+                        .is_none_or(Vec::is_empty)
+            })
+            .filter_map(|r| {
+                let date = r["date"].as_str().filter(|d| d.len() >= 4)?;
+                let title = r["release-group"]["title"].as_str()?.trim();
+                (!title.is_empty()).then_some((date, title))
+            })
+            .min()
+            .map(|(_, title)| title.to_owned())
+    }
+    /// One deliberately bounded release page for recording containment/artwork. A cap is not
+    /// a transient failure; true HTTP/shape failures still retry and preserve prior evidence.
+    pub async fn recording_releases(
+        egress: &Egress,
+        base: &str,
+        recording: &str,
+    ) -> Result<Vec<Value>> {
+        let url = format!("{base}/release?recording={recording}&status=official&inc=release-groups+media+url-rels&limit=100&fmt=json");
+        let Some(v) = get(egress, &url, "musicbrainz").await? else {
+            return Ok(Vec::new());
+        };
+        let Some(rows) = v.get("releases").and_then(Value::as_array) else {
+            return Err(RetryLater {
+                class: "musicbrainz_release_shape",
+                seconds: 60,
+            }
+            .into());
+        };
+        let Some(count) = v.get("release-count").and_then(Value::as_u64) else {
+            return Err(RetryLater {
+                class: "musicbrainz_release_shape",
+                seconds: 60,
+            }
+            .into());
+        };
+        if count > rows.len() as u64 || rows.len() > 100 {
+            tracing::debug!(recording, count, "recording release page bounded");
+        }
+        Ok(rows.iter().take(100).cloned().collect())
+    }
+
+    /// The official releases MusicBrainz lists for `query` (`recording={mbid}&type=album`,
+    /// `release-group={mbid}`), each with its release group, media and URL relations: up to
+    /// `pages` pages of 100, in MusicBrainz's order (not by date); and whether that is every one
+    /// (as many as its `release-count` says). A page it doesn't answer, or the page cap, leaves
+    /// the list incomplete.
+    pub async fn releases(
+        egress: &Egress,
+        base: &str,
+        query: &str,
+        pages: usize,
+    ) -> Result<(Vec<Value>, bool)> {
+        let mut releases = vec![];
+        let mut count = None;
+        for page in 0..pages {
+            let offset = if page == 0 {
+                String::new()
+            } else {
+                format!("&offset={}", page * 100)
+            };
+            let url = format!(
+                "{base}/release?{query}&status=official&inc=release-groups+media+url-rels&limit=100{offset}&fmt=json"
+            );
+            let Some(v) = get(egress, &url, "musicbrainz").await? else {
+                return Ok((releases, false));
+            };
+            let batch = v["releases"].as_array().cloned().unwrap_or_default();
+            count = v["release-count"].as_u64().map(|c| c as usize);
+            let empty = batch.is_empty();
+            releases.extend(batch);
+            if empty || count.is_some_and(|c| releases.len() >= c) {
+                break;
+            }
+        }
+        let complete = count.is_some_and(|c| releases.len() >= c);
+        Ok((releases, complete))
+    }
+    /// A recording an ISRC is on, with its length when MusicBrainz states one.
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct IsrcRecording {
+        pub mbid: String,
+        pub length_ms: Option<u64>,
+    }
+    /// The recordings an ISRC is on; `None` when MusicBrainz does not know the ISRC.
+    pub async fn isrc(
+        egress: &Egress,
+        base: &str,
+        isrc: &str,
+    ) -> Result<Option<Vec<IsrcRecording>>> {
+        let Some(isrc) = crate::music::isrc(isrc) else {
+            return Ok(None);
+        };
+        Ok(get(
+            egress,
+            &format!("{base}/isrc/{isrc}?fmt=json"),
+            "musicbrainz",
+        )
+        .await?
+        .map(|v| parse_isrc(&v)))
+    }
+    /// `GET /release?query=barcode:…`: the releases carrying exactly `upc` (a GTIN-13; a
+    /// 12-digit UPC-A is asked for in both spellings, as MusicBrainz stores barcodes as given),
+    /// each once; empty when MusicBrainz has none. The search matches the barcode field alone,
+    /// and the answer is checked against it.
+    pub async fn barcode(egress: &Egress, base: &str, upc: &str) -> Result<Vec<String>> {
+        let Some(upc) = crate::barcode::gtin13(upc) else {
+            return Ok(vec![]);
+        };
+        Ok(get(egress, &barcode_lookup(base, &upc), "musicbrainz")
+            .await?
+            .map(|v| parse_barcode(&v, &upc))
+            .unwrap_or_default())
+    }
+    pub fn barcode_lookup(base: &str, upc: &str) -> String {
+        let query = match upc.strip_prefix('0').filter(|_| upc.len() == 13) {
+            Some(short) => format!("barcode:({upc} OR {short})"),
+            None => format!("barcode:{upc}"),
+        };
+        let mut url = url::Url::parse(&format!("{base}/release")).expect("a checked base URL");
+        url.query_pairs_mut()
+            .append_pair("query", &query)
+            .append_pair("fmt", "json")
+            .append_pair("limit", "10");
+        url.into()
+    }
+    /// The releases of a barcode search whose barcode is `upc` once normalised, each once.
+    pub fn parse_barcode(v: &Value, upc: &str) -> Vec<String> {
+        let mut ids: Vec<String> = v["releases"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|r| {
+                r["barcode"]
+                    .as_str()
+                    .and_then(crate::barcode::gtin13)
+                    .is_some_and(|b| b == upc)
+            })
+            .filter_map(|r| mbid(r["id"].as_str()?))
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+    /// `GET /isrc/{ISRC}`: the recordings, each once, by MBID.
+    pub fn parse_isrc(v: &Value) -> Vec<IsrcRecording> {
+        let mut recordings: Vec<IsrcRecording> = v["recordings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|r| {
+                Some(IsrcRecording {
+                    mbid: mbid(r["id"].as_str()?)?,
+                    length_ms: r["length"]
+                        .as_u64()
+                        .filter(|ms| (1..=86_400_000).contains(ms)),
+                })
+            })
+            .collect();
+        recordings.sort();
+        recordings.dedup_by(|a, b| a.mbid == b.mbid);
+        recordings
+    }
+    /// A work a recording is a performance of, with the work's own URL relations.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct Work {
+        pub mbid: String,
+        pub urls: Vec<UrlRelation>,
+    }
+    /// A recording with the works it performs and their URL relations, in one read.
+    pub fn works_lookup(base: &str, recording: &str) -> String {
+        format!("{base}/recording/{recording}?inc=work-rels+work-level-rels+url-rels&fmt=json")
+    }
+    /// The works a `works_lookup` answer's recording is a current performance of, each once.
+    pub fn parse_works(v: &Value) -> Vec<Work> {
+        let mut works: Vec<Work> = v["relations"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|r| {
+                r["target-type"] == "work" && r["type"] == "performance" && r["ended"] != true
+            })
+            .filter_map(|r| {
+                Some(Work {
+                    mbid: mbid(r["work"]["id"].as_str()?)?,
+                    urls: relations(&r["work"]),
+                })
+            })
+            .collect();
+        works.sort_by(|a, b| a.mbid.cmp(&b.mbid));
+        works.dedup_by(|a, b| a.mbid == b.mbid);
+        works
+    }
+    /// The works a recording performs; none when the MBID is unknown.
+    pub async fn works(egress: &Egress, base: &str, recording: &str) -> Result<Vec<Work>> {
+        let Some(id) = mbid(recording) else {
+            return Ok(vec![]);
+        };
+        Ok(get(egress, &works_lookup(base, &id), "musicbrainz")
+            .await?
+            .map(|v| parse_works(&v))
+            .unwrap_or_default())
+    }
+    /// One entity with its URL relations; `None` when the MBID is unknown.
+    pub async fn entity(
+        egress: &Egress,
+        base: &str,
+        kind: MbKind,
+        id: &str,
+    ) -> Result<Option<Entity>> {
+        let Some(id) = mbid(id) else {
+            return Ok(None);
+        };
+        Ok(get(egress, &entity_lookup(base, kind, &id), "musicbrainz")
+            .await?
+            .and_then(|v| parse_entity(kind, &v)))
+    }
+}
+
+pub mod cover_art {
+    //! The Cover Art Archive (MusicBrainz's): the front cover of a release or a release group,
+    //! by its MBID.
+    //!
+    //! One request a cover: `GET /{release|release-group}/{mbid}/front-500` with the redirect
+    //! kept, not followed. The archive answers a cover it holds with a redirect to the file on
+    //! archive.org, whose name carries the MBID of the release the cover is of
+    //! (`https://archive.org/download/mbid-{release}/mbid-{release}-{image id}_thumb500.jpg`),
+    //! and a release or release group without one with 404. A release group's cover is one of
+    //! its releases', which the archive chooses. The image a card stores is that release's
+    //! `front-500` thumbnail on the archive's own host (its documented address, served over
+    //! https), so the image and its credit name the same release; nothing is downloaded.
+    use super::*;
+
+    /// The archive's API.
+    pub const BASE: &str = "https://coverartarchive.org";
+    /// The address of the `kind` entity `mbid`'s front cover, 500 pixels wide: a release's or a
+    /// release group's (`None` for another kind, or an MBID that is not one).
+    pub fn front_500(kind: MbKind, mbid: &str) -> Option<String> {
+        let mbid = super::mbid(mbid)?;
+        matches!(kind, MbKind::Release | MbKind::ReleaseGroup)
+            .then(|| format!("{BASE}/{}/{mbid}/front-500", kind.as_str()))
+    }
+    /// A front cover the archive holds.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct Front {
+        /// The 500-pixel thumbnail of the release's front cover ([`front_500`]).
+        pub image: String,
+        /// The release the cover is of (for a release, itself).
+        pub release: String,
+    }
+    /// The release a redirect to a front cover's 500-pixel thumbnail names, written exactly as
+    /// `https://archive.org/download/mbid-{release}/mbid-{release}-{image id}_thumb500.jpg`
+    /// (the same canonical MBID twice, an image ID of digits); `None` for any other address.
+    pub fn redirect_release(location: &str) -> Option<String> {
+        let url = url::Url::parse(location).ok()?;
+        if url.scheme() != "https"
+            || url.host_str() != Some("archive.org")
+            || url.port().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return None;
+        }
+        let segments: Vec<&str> = url.path_segments()?.collect();
+        let ["download", item, file] = segments.as_slice() else {
+            return None;
+        };
+        let release = super::mbid(item.strip_prefix("mbid-")?)?;
+        // The item's own name: canonical MBIDs only (an upper-case one is another spelling).
+        if *item != format!("mbid-{release}") {
+            return None;
+        }
+        let image_id = file
+            .strip_prefix(&format!("{item}-"))?
+            .strip_suffix("_thumb500.jpg")?;
+        ((1..=20).contains(&image_id.len()) && image_id.bytes().all(|b| b.is_ascii_digit()))
+            .then_some(release)
+    }
+    /// The archive's answer to a `front_500` request for the `kind` entity `mbid`: a redirect to
+    /// a file of a release ([`redirect_release`]) is its front cover; for a release, a file of
+    /// that release only. 404 (and 410) is none. 429 and 5xx are a retry; any other answer (a
+    /// redirect to another address, another status) proves nothing and is an error, so the
+    /// caller keeps what it had.
+    pub fn read_front(kind: MbKind, mbid: &str, fetched: &Fetched) -> Result<Option<Front>> {
+        match fetched.status {
+            301 | 302 | 303 | 307 | 308 => {}
+            404 | 410 => return Ok(None),
+            429 | 500..=599 => {
+                return Err(RetryLater {
+                    class: "cover_art_busy",
+                    seconds: fetched.retry_after_secs.clamp(60, 3600),
+                }
+                .into())
+            }
+            status => bail!("the Cover Art Archive answered {status}"),
+        }
+        let Some(release) = fetched.location.as_deref().and_then(redirect_release) else {
+            bail!("the Cover Art Archive redirected to an address that names no release's cover");
+        };
+        if kind == MbKind::Release && super::mbid(mbid).as_deref() != Some(release.as_str()) {
+            bail!("the Cover Art Archive redirected to another release's cover");
+        }
+        match front_500(MbKind::Release, &release) {
+            Some(image) => Ok(Some(Front { image, release })),
+            None => bail!("no cover address for release {release}"),
+        }
+    }
+    fn options() -> FetchOptions {
+        FetchOptions {
+            accept: Some("image/*".into()),
+            keep_redirect: true,
+            ..Default::default()
+        }
+    }
+    /// The front cover of release or release group `mbid` ([`read_front`]), in one request; an
+    /// answer is kept an hour. `None` for another kind of entity, without a request.
+    pub async fn front(egress: &Egress, kind: MbKind, mbid: &str) -> Result<Option<Front>> {
+        let Some(url) = front_500(kind, mbid) else {
+            return Ok(None);
+        };
+        let fetched = egress.discover(&url, &options(), 3600).await?;
+        let front = read_front(kind, mbid, &fetched);
+        if front
+            .as_ref()
+            .err()
+            .is_some_and(|e| e.downcast_ref::<RetryLater>().is_some())
+        {
+            egress.shorten_discovery(&url, &options(), 1).await?;
+        }
+        front
+    }
+}
+
+pub mod wikidata {
+    //! Wikidata: an item's best-rank external IDs and its Wikipedia (and other) sitelinks, and
+    //! the item that carries one external ID.
+    use super::*;
+
+    pub const API: &str = "https://www.wikidata.org/w/api.php";
+
+    /// An item as a source needs it.
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub struct Item {
+        pub qid: String,
+        /// External-ID and string claims at their best rank (preferred if any, else normal;
+        /// deprecated never), by property.
+        pub ids: BTreeMap<String, Vec<String>>,
+        /// Sitelinks: site (`enwiki`, `dewiki`, `commonswiki`, …) → page URL.
+        pub sitelinks: BTreeMap<String, String>,
+        /// The items this one says replaced it (P1366, "replaced by") and that it replaces
+        /// (P1365), at their best rank: a discontinued product and its successor.
+        pub replaced_by: Vec<String>,
+        pub replaces: Vec<String>,
+        /// The works this one is an edition or translation of (P629), at their best rank.
+        pub edition_of: Vec<String>,
+        /// The classes it is an instance of (P31), at their best rank: a disambiguation page's
+        /// item is one of Q4167410.
+        pub instance_of: Vec<String>,
+    }
+    impl Item {
+        pub fn id(&self, property: &str) -> &[String] {
+            self.ids.get(property).map_or(&[], Vec::as_slice)
+        }
+    }
+    /// The item found by an exact external ID.
+    #[derive(Clone, Debug, PartialEq)]
+    pub enum Found {
+        None,
+        One(Box<Item>),
+        /// Several items carry the ID at their best rank: no item is chosen.
+        Ambiguous(usize),
+    }
+
+    /// `wbgetentities` with `props=claims|sitelinks/urls`.
+    pub fn parse_entities(v: &Value) -> Vec<Item> {
+        let mut items: Vec<Item> = v["entities"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter_map(|(id, e)| {
+                if e.get("missing").is_some() || e["type"] != "item" {
+                    return None;
+                }
+                let qid = qid(e["id"].as_str().unwrap_or(id))?;
+                let mut ids = BTreeMap::new();
+                for (property, claims) in e["claims"].as_object().into_iter().flatten() {
+                    let claims = claims.as_array().map_or(&[][..], Vec::as_slice);
+                    let rank = if claims.iter().any(|c| c["rank"] == "preferred") {
+                        "preferred"
+                    } else {
+                        "normal"
+                    };
+                    let values: Vec<String> = claims
+                        .iter()
+                        .filter(|c| c["rank"] == rank)
+                        .map(|c| &c["mainsnak"])
+                        .filter(|s| {
+                            s["snaktype"] == "value"
+                                && matches!(s["datatype"].as_str(), Some("external-id" | "string"))
+                        })
+                        .filter_map(|s| s["datavalue"]["value"].as_str())
+                        .map(str::to_owned)
+                        .collect();
+                    if !values.is_empty() {
+                        ids.insert(property.clone(), values);
+                    }
+                }
+                let sitelinks = e["sitelinks"]
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|(site, l)| Some((site.clone(), l["url"].as_str()?.to_owned())))
+                    .collect();
+                Some(Item {
+                    qid,
+                    ids,
+                    sitelinks,
+                    replaced_by: item_values(&e["claims"]["P1366"]),
+                    edition_of: item_values(&e["claims"]["P629"]),
+                    replaces: item_values(&e["claims"]["P1365"]),
+                    instance_of: item_values(&e["claims"]["P31"]),
+                })
+            })
+            .collect();
+        items.sort_by(|a, b| a.qid.cmp(&b.qid));
+        items
+    }
+    /// The items an item-valued property names, at its best rank (preferred if any, else
+    /// normal; deprecated never).
+    fn item_values(claims: &Value) -> Vec<String> {
+        let claims = claims.as_array().map_or(&[][..], Vec::as_slice);
+        let rank = if claims.iter().any(|c| c["rank"] == "preferred") {
+            "preferred"
+        } else {
+            "normal"
+        };
+        claims
+            .iter()
+            .filter(|c| c["rank"] == rank && c["mainsnak"]["snaktype"] == "value")
+            .filter_map(|c| qid(c["mainsnak"]["datavalue"]["value"]["id"].as_str()?))
+            .collect()
+    }
+    /// The item a Wikidata item link names, with the link's canonical form
+    /// (`https://www.wikidata.org/wiki/{Q-id}`): `/wiki/Q…`, `/entity/Q…` and
+    /// `/wiki/Special:EntityPage/Q…`, on `www.`, `m.` or the bare host.
+    pub fn item_link(uri: &str) -> Option<(String, String)> {
+        let url = url::Url::parse(uri).ok()?;
+        if !matches!(url.scheme(), "http" | "https")
+            || !matches!(
+                url.host_str()?,
+                "www.wikidata.org" | "m.wikidata.org" | "wikidata.org"
+            )
+        {
+            return None;
+        }
+        let id = url
+            .path()
+            .strip_prefix("/wiki/Special:EntityPage/")
+            .or_else(|| url.path().strip_prefix("/wiki/"))
+            .or_else(|| url.path().strip_prefix("/entity/"))?;
+        let qid = qid(id)?;
+        let canonical = format!("https://www.wikidata.org/wiki/{qid}");
+        Some((qid, canonical))
+    }
+    /// `list=search` hits as item IDs.
+    pub fn parse_search(v: &Value) -> Vec<String> {
+        v["query"]["search"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|h| qid(h["title"].as_str()?))
+            .collect()
+    }
+    /// At most this many items per batched read (Wikidata takes 50; an item can be megabytes).
+    pub const ITEM_BATCH: usize = 10;
+    /// Read many items at once and cache each one as its own read's answer (`items` with one
+    /// Q-id then asks nothing). Best effort: a batch past the body cap caches nothing.
+    pub async fn prefetch_items(egress: &Egress, qids: &[String]) -> Result<usize> {
+        let mut seeded = 0;
+        for chunk in qids.chunks(ITEM_BATCH) {
+            let Ok(Some(v)) = get(egress, &entities_lookup(chunk), "wikidata").await else {
+                continue;
+            };
+            for qid in chunk {
+                if let Some(entity) = v["entities"].get(qid) {
+                    let one = serde_json::json!({"entities": {qid.as_str(): entity}});
+                    seed(
+                        egress,
+                        &entities_lookup(std::slice::from_ref(qid)),
+                        "wikidata",
+                        Some(&one),
+                    )
+                    .await?;
+                    seeded += 1;
+                }
+            }
+        }
+        Ok(seeded)
+    }
+    pub fn entities_lookup(qids: &[String]) -> String {
+        format!(
+            "{API}?action=wbgetentities&ids={}&props=claims%7Csitelinks%2Furls&format=json",
+            qids.join("%7C")
+        )
+    }
+    /// A property ID (`P` and digits) and an external-ID value the search syntax can carry
+    /// exactly (letters, digits and `._:-/`, at most 200 bytes; a Trakt ID is `shows/breaking-bad`).
+    fn statement(property: &str, value: &str) -> Option<String> {
+        let digits = property.strip_prefix('P')?;
+        let property_ok = (1..=8).contains(&digits.len())
+            && !digits.starts_with('0')
+            && digits.bytes().all(|b| b.is_ascii_digit());
+        let value_ok = (1..=200).contains(&value.len())
+            && value.bytes().all(|b| {
+                b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-' | b'/')
+            });
+        (property_ok && value_ok).then(|| format!("haswbstatement:{property}={value}"))
+    }
+    /// The most items one `haswbstatement` search returns (and `item_with` reads back).
+    pub const SEARCH_LIMIT: usize = 5;
+    pub fn search_lookup(property: &str, value: &str) -> Option<String> {
+        let query = statement(property, value)?;
+        let mut url = url::Url::parse(API).expect("constant URL");
+        url.query_pairs_mut()
+            .append_pair("action", "query")
+            .append_pair("list", "search")
+            .append_pair("srsearch", &query)
+            .append_pair("srlimit", &SEARCH_LIMIT.to_string())
+            .append_pair("format", "json");
+        Some(url.into())
+    }
+    /// The value a page's link holds for a property whose formatter is `template` (`$1` for the
+    /// value): the inverse of the URL a property table builds, so a page any table links to is
+    /// also a starting point (`item_with`). Host case, `www.` and the scheme never matter. In the
+    /// path, the value is what lies between the template's text around `$1` (decoded; a trailing
+    /// `/` is the page's); in the query, the named parameter's value, whatever else the query
+    /// holds (`hl=`). The caller validates the value as the property's.
+    pub fn template_value(template: &str, uri: &str) -> Option<String> {
+        let (head, tail) = template.split_once("$1")?;
+        let url = url::Url::parse(uri).ok()?;
+        if !matches!(url.scheme(), "https" | "http")
+            || url.port().is_some()
+            || !url.username().is_empty()
+            || url.password().is_some()
+        {
+            return None;
+        }
+        let (_, rest) = head.split_once("://")?;
+        let (host, path_head) = rest.split_once('/').unwrap_or((rest, ""));
+        let bare = |h: &str| h.trim_start_matches("www.").to_ascii_lowercase();
+        if bare(url.host_str()?) != bare(host) {
+            return None;
+        }
+        let decode = |v: &str| {
+            percent_encoding::percent_decode_str(v)
+                .decode_utf8()
+                .ok()
+                .map(|v| v.into_owned())
+        };
+        let value = match path_head.split_once('?') {
+            // `/path?name=$1`: the same path, the named parameter.
+            Some((path, query)) => {
+                let name = query.strip_suffix('=')?;
+                if !tail.is_empty()
+                    || url.path().trim_end_matches('/') != format!("/{path}").trim_end_matches('/')
+                {
+                    return None;
+                }
+                url.query_pairs()
+                    .find(|(k, _)| k == name)
+                    .map(|(_, v)| v.into_owned())?
+            }
+            None => {
+                let rest = url.path().strip_prefix(&format!("/{path_head}"))?;
+                let rest = rest.trim_end_matches('/');
+                let rest = rest
+                    .strip_suffix(tail.trim_end_matches('/'))
+                    .unwrap_or(rest);
+                decode(rest)?
+            }
+        };
+        (!value.is_empty()).then_some(value)
+    }
+    /// One item's pages on every site and its English description, alone (no claims).
+    pub fn pages_lookup(qid: &str) -> String {
+        format!("{API}?action=wbgetentities&ids={qid}&props=sitelinks%2Furls%7Cdescriptions&languages=en&format=json")
+    }
+    /// The badges Wikidata gives a sitelink to a redirect ("sitelink to redirect", "intentional
+    /// sitelink to redirect"): the page it names is about something else (a song's redirects to
+    /// its album).
+    pub const REDIRECT_BADGES: [&str; 2] = ["Q70893996", "Q70894304"];
+    /// An item's pages on other sites and its English description.
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub struct Pages {
+        /// Site (`enwiki`, `dewiki`, …) → page URL; a sitelink to a redirect is left out.
+        pub sitelinks: BTreeMap<String, String>,
+        /// The English description, trimmed; `None` when empty.
+        pub description: Option<String>,
+    }
+    /// A `pages_lookup` answer: the one item it holds (which may be the item an ID redirects
+    /// to); `None` when it holds none, or several.
+    pub fn parse_pages(v: &Value) -> Option<Pages> {
+        let entities = v["entities"].as_object()?;
+        let mut items = entities
+            .values()
+            .filter(|e| e.get("missing").is_none() && e["type"] == "item");
+        let (Some(item), None) = (items.next(), items.next()) else {
+            return None;
+        };
+        let sitelinks = item["sitelinks"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(_, link)| {
+                !link["badges"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|b| b.as_str().is_some_and(|b| REDIRECT_BADGES.contains(&b)))
+            })
+            .filter_map(|(site, link)| Some((site.clone(), link["url"].as_str()?.to_owned())))
+            .collect();
+        let description = item["descriptions"]["en"]["value"]
+            .as_str()
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+            .map(str::to_owned);
+        Some(Pages {
+            sitelinks,
+            description,
+        })
+    }
+    /// Item `qid`'s pages and English description; `None` when the item is unknown.
+    pub async fn pages(egress: &Egress, qid: &str) -> Result<Option<Pages>> {
+        let Some(qid) = super::qid(qid) else {
+            return Ok(None);
+        };
+        Ok(get(egress, &pages_lookup(&qid), "wikidata")
+            .await?
+            .and_then(|v| parse_pages(&v)))
+    }
+    /// One item's claims of one property alone.
+    pub fn claims_lookup(qid: &str, property: &str) -> String {
+        format!("{API}?action=wbgetclaims&entity={qid}&property={property}&format=json")
+    }
+    /// The Commons file names a `claims_lookup` answer holds for `property`, at its best rank
+    /// (preferred if any, else normal; deprecated never), in order.
+    pub fn parse_files(v: &Value, property: &str) -> Vec<String> {
+        let claims = v["claims"][property]
+            .as_array()
+            .map_or(&[][..], Vec::as_slice);
+        let rank = if claims.iter().any(|c| c["rank"] == "preferred") {
+            "preferred"
+        } else {
+            "normal"
+        };
+        claims
+            .iter()
+            .filter(|c| {
+                // A claim without a rank is a normal one.
+                c["rank"].as_str().unwrap_or("normal") == rank
+                    && c["mainsnak"]["snaktype"] == "value"
+                    && c["mainsnak"]["datatype"] == "commonsMedia"
+            })
+            .filter_map(|c| c["mainsnak"]["datavalue"]["value"].as_str())
+            .map(str::to_owned)
+            .collect()
+    }
+    /// The Commons files item `qid` names for `property` (`P18`, its image).
+    pub async fn files(egress: &Egress, qid: &str, property: &str) -> Result<Vec<String>> {
+        let Some(qid) = super::qid(qid) else {
+            return Ok(vec![]);
+        };
+        Ok(get(egress, &claims_lookup(&qid, property), "wikidata")
+            .await?
+            .map(|v| parse_files(&v, property))
+            .unwrap_or_default())
+    }
+    /// Up to 50 items by ID; unknown or redirected-away IDs are left out.
+    pub async fn items(egress: &Egress, qids: &[String]) -> Result<Vec<Item>> {
+        let mut qids: Vec<String> = qids.iter().filter_map(|q| qid(q)).collect();
+        qids.sort();
+        qids.dedup();
+        qids.truncate(50);
+        if qids.is_empty() {
+            return Ok(vec![]);
+        }
+        Ok(get(egress, &entities_lookup(&qids), "wikidata")
+            .await?
+            .map(|v| parse_entities(&v))
+            .unwrap_or_default())
+    }
+    /// The one item carrying `value` for `property` at its best rank. The search index only
+    /// proposes; each hit is read back and its claim compared byte for byte, so a stale index
+    /// or a deprecated claim never joins. Two or more verified items are ambiguous.
+    pub async fn item_with(egress: &Egress, property: &str, value: &str) -> Result<Found> {
+        let Some(lookup) = search_lookup(property, value) else {
+            return Ok(Found::None);
+        };
+        let answer = get(egress, &lookup, "wikidata").await?;
+        // More items carry the value than the search returned: whichever one verifies, others
+        // went unread, so no item is chosen.
+        let total = answer
+            .as_ref()
+            .and_then(|v| v["query"]["searchinfo"]["totalhits"].as_u64())
+            .unwrap_or(0);
+        if total > SEARCH_LIMIT as u64 {
+            return Ok(Found::Ambiguous(total as usize));
+        }
+        let hits = answer.map(|v| parse_search(&v)).unwrap_or_default();
+        let read = match items(egress, &hits).await {
+            // Items over the cap together: each alone. One over it alone can't be verified, so
+            // the search has no answer (its refusal).
+            Err(e) if hits.len() > 1 && crate::resolver::egress::over_cap(&e) => {
+                let mut read = vec![];
+                for qid in &hits {
+                    read.extend(items(egress, std::slice::from_ref(qid)).await?);
+                }
+                read
+            }
+            read => read?,
+        };
+        Ok(verified(read, property, value))
+    }
+    /// The verification step of [`item_with`]. Of several items carrying the ID, one that
+    /// another of them replaces (its "replaced by", or the other's "replaces": TextSecure and
+    /// Signal share Signal's Android package) is the past and gives way to its successor.
+    pub fn verified(items: Vec<Item>, property: &str, value: &str) -> Found {
+        let mut matching: Vec<Item> = items
+            .into_iter()
+            .filter(|i| i.id(property).iter().any(|v| v == value))
+            .collect();
+        if matching.len() > 1 {
+            let succeeded = |old: &Item| {
+                matching.iter().any(|new| {
+                    new.qid != old.qid
+                        && (old.replaced_by.contains(&new.qid) || new.replaces.contains(&old.qid))
+                })
+            };
+            let past: Vec<String> = matching
+                .iter()
+                .filter(|i| succeeded(i))
+                .map(|i| i.qid.clone())
+                .collect();
+            matching.retain(|i| !past.contains(&i.qid));
+        }
+        match matching.len() {
+            0 => Found::None,
+            1 => Found::One(Box::new(matching.remove(0))),
+            n => Found::Ambiguous(n),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    /// An item's pages leave out a sitelink to a redirect; its English description is trimmed,
+    /// and an empty one is none.
+    #[test]
+    fn an_items_pages_and_description() {
+        let v = serde_json::json!({"entities": {"Q3780426": {"type": "item", "id": "Q3780426",
+            "descriptions": {"en": {"language": "en", "value": " British musician "}},
+            "sitelinks": {
+                "enwiki": {"site": "enwiki", "badges": ["Q70893996"], "url": "https://en.wikipedia.org/wiki/Richard_Colburn"},
+                "dewiki": {"site": "dewiki", "badges": ["Q17437798"], "url": "https://de.wikipedia.org/wiki/Richard_Colburn"}}}}});
+        let pages = wikidata::parse_pages(&v).unwrap();
+        assert_eq!(pages.description.as_deref(), Some("British musician"));
+        assert_eq!(
+            pages.sitelinks.keys().collect::<Vec<_>>(),
+            ["dewiki"],
+            "a redirect's page is another's"
+        );
+        let v = serde_json::json!({"entities": {"Q1": {"type": "item", "id": "Q1", "descriptions": {"en": {"value": "  "}}}}});
+        assert_eq!(wikidata::parse_pages(&v), Some(Default::default()));
+        let v = serde_json::json!({"entities": {"Q1": {"id": "Q1", "missing": ""}}});
+        assert_eq!(wikidata::parse_pages(&v), None);
+    }
+
+    /// A page's link holds the value its property's URL template has in place of `$1`: in the
+    /// path (decoded, with or without a trailing slash, on either scheme, with or without
+    /// `www.`) or in a named query parameter (whatever else the query holds).
+    #[test]
+    fn a_template_gives_back_the_value_a_link_holds() {
+        let value = wikidata::template_value;
+        let rotten = "https://www.rottentomatoes.com/$1";
+        for uri in [
+            "https://www.rottentomatoes.com/m/1009113-halloween",
+            "http://rottentomatoes.com/m/1009113-halloween/",
+            "https://WWW.RottenTomatoes.com/m/1009113-halloween?utm_source=x",
+        ] {
+            assert_eq!(
+                value(rotten, uri).as_deref(),
+                Some("m/1009113-halloween"),
+                "{uri}"
+            );
+        }
+        assert_eq!(
+            value(
+                "https://www.mobygames.com/game/$1/",
+                "https://www.mobygames.com/game/73001/"
+            )
+            .as_deref(),
+            Some("73001")
+        );
+        assert_eq!(
+            value(
+                "https://www.pcgamingwiki.com/wiki/$1",
+                "https://www.pcgamingwiki.com/wiki/The_Witcher_3:_Wild_Hunt"
+            )
+            .as_deref(),
+            Some("The_Witcher_3:_Wild_Hunt")
+        );
+        assert_eq!(
+            value(
+                "https://www.google.com/maps?cid=$1",
+                "https://www.google.com/maps?hl=de&cid=10222232094831998944"
+            )
+            .as_deref(),
+            Some("10222232094831998944")
+        );
+        for (template, uri) in [
+            (rotten, "https://www.rottentomatoes.com/"),
+            (rotten, "https://rottentomatoes.example/m/x"),
+            (rotten, "https://www.rottentomatoes.com:8443/m/x"),
+            (rotten, "https://:secret@www.rottentomatoes.com/m/x"),
+            (
+                "https://www.google.com/maps?cid=$1",
+                "https://www.google.com/maps?q=Paris",
+            ),
+            (
+                "https://www.google.com/maps?cid=$1",
+                "https://www.google.com/search?cid=1",
+            ),
+            ("https://mubi.com/films/$1", "https://mubi.com/en/films/1"),
+            (
+                "https://letterboxd.com/film/$1/",
+                "ftp://letterboxd.com/film/x/",
+            ),
+        ] {
+            assert_eq!(value(template, uri), None, "{uri}");
+        }
+    }
+
+    /// Two items carrying one Android package: TextSecure, "replaced by" Signal, and Signal,
+    /// which "replaces" it. The successor is the package's item; either statement alone is
+    /// enough, and two items unrelated by succession stay ambiguous.
+    #[test]
+    fn a_successor_wins_over_the_item_it_replaces() {
+        let package = "org.thoughtcrime.securesms";
+        let entity = |q: &str, extra: serde_json::Value| {
+            let mut claims = serde_json::json!({"P3418": [{"rank": "normal", "mainsnak": {
+                "snaktype": "value", "datatype": "external-id", "datavalue": {"value": package}}}]});
+            for (p, v) in extra.as_object().unwrap() {
+                claims[p] = serde_json::json!([{"rank": "normal", "mainsnak": {"snaktype": "value",
+                    "datatype": "wikibase-item", "datavalue": {"value": {"entity-type": "item", "id": v}}}}]);
+            }
+            (
+                q.to_owned(),
+                serde_json::json!({"type": "item", "id": q, "claims": claims}),
+            )
+        };
+        let found = |old: serde_json::Value, new: serde_json::Value| {
+            let (a, b) = (entity("Q15871857", old), entity("Q19718090", new));
+            let v = serde_json::json!({"entities": {a.0: a.1, b.0: b.1}});
+            wikidata::verified(wikidata::parse_entities(&v), "P3418", package)
+        };
+        let signal =
+            |f: &wikidata::Found| matches!(f, wikidata::Found::One(i) if i.qid == "Q19718090");
+        let both = found(
+            serde_json::json!({"P1366": "Q19718090"}),
+            serde_json::json!({"P1365": "Q15871857"}),
+        );
+        assert!(signal(&both), "{both:?}");
+        let replaced_by = found(
+            serde_json::json!({"P1366": "Q19718090"}),
+            serde_json::json!({}),
+        );
+        assert!(signal(&replaced_by), "{replaced_by:?}");
+        let replaces = found(
+            serde_json::json!({}),
+            serde_json::json!({"P1365": "Q15871857"}),
+        );
+        assert!(signal(&replaces), "{replaces:?}");
+        let unrelated = found(serde_json::json!({}), serde_json::json!({}));
+        assert_eq!(unrelated, wikidata::Found::Ambiguous(2));
+        // A successor named outside the candidates decides nothing.
+        let elsewhere = found(serde_json::json!({"P1366": "Q42"}), serde_json::json!({}));
+        assert_eq!(elsewhere, wikidata::Found::Ambiguous(2));
+    }
+
+    /// Items over the cap together are read one by one, so one never sinks the other's answer;
+    /// one over it alone is no answer (its refusal).
+    #[tokio::test(start_paused = true)]
+    async fn items_over_the_cap_together_are_read_alone() {
+        let search = wikidata::search_lookup("P4983", "1396").unwrap();
+        let both = wikidata::entities_lookup(&["Q1".into(), "Q2".into()]);
+        let (one, two) = (
+            wikidata::entities_lookup(&["Q1".into()]),
+            wikidata::entities_lookup(&["Q2".into()]),
+        );
+        let item = |q: &str, v: &str| {
+            serde_json::to_vec(
+                &serde_json::json!({"entities": {q: {"type": "item", "id": q,
+                "claims": {"P4983": [{"rank": "normal", "mainsnak": {"snaktype": "value",
+                    "datatype": "external-id", "datavalue": {"value": v}}}]}}}}),
+            )
+            .unwrap()
+        };
+        let hits = br#"{"query":{"search":[{"title":"Q1"},{"title":"Q2"}]}}"#.to_vec();
+        let (egress, recorded) = crate::sources::fixture::egress(vec![
+            (&search, 200, "application/json", hits.clone()),
+            (&both, 200, "!too-large", vec![]),
+            (&one, 200, "application/json", item("Q1", "1396")),
+            (&two, 200, "application/json", item("Q2", "9999")),
+        ]);
+        let found = wikidata::item_with(&egress, "P4983", "1396").await.unwrap();
+        assert!(
+            matches!(&found, wikidata::Found::One(i) if i.qid == "Q1"),
+            "{found:?}"
+        );
+        assert!(recorded.asked().contains(&both), "{:?}", recorded.asked());
+        // Q2 over the cap alone: the search can't be verified.
+        let (egress, _) = crate::sources::fixture::egress(vec![
+            (&search, 200, "application/json", hits),
+            (&both, 200, "!too-large", vec![]),
+            (&one, 200, "application/json", item("Q1", "1396")),
+            (&two, 200, "!too-large", vec![]),
+        ]);
+        let error = wikidata::item_with(&egress, "P4983", "1396")
+            .await
+            .unwrap_err();
+        assert!(crate::resolver::egress::over_cap(&error), "{error:#}");
+    }
+
+    /// A search that found more items than it returned is ambiguous, even when only one of the
+    /// returned items verifies: the others went unread.
+    #[tokio::test(start_paused = true)]
+    async fn more_hits_than_returned_are_ambiguous() {
+        let search = wikidata::search_lookup("P4983", "1396").unwrap();
+        let one = wikidata::entities_lookup(&["Q1".into()]);
+        let item = serde_json::to_vec(&serde_json::json!({"entities": {"Q1": {"type": "item",
+            "id": "Q1", "claims": {"P4983": [{"rank": "normal", "mainsnak": {"snaktype": "value",
+            "datatype": "external-id", "datavalue": {"value": "1396"}}}]}}}}))
+        .unwrap();
+        let answer = |total: usize| {
+            serde_json::to_vec(
+                &serde_json::json!({"query": {"searchinfo": {"totalhits": total},
+                "search": [{"title": "Q1"}]}}),
+            )
+            .unwrap()
+        };
+        for (total, expected) in [
+            (1, None),
+            (wikidata::SEARCH_LIMIT, None),
+            (wikidata::SEARCH_LIMIT + 1, Some(wikidata::SEARCH_LIMIT + 1)),
+        ] {
+            let (egress, _) = crate::sources::fixture::egress(vec![
+                (&search, 200, "application/json", answer(total)),
+                (&one, 200, "application/json", item.clone()),
+            ]);
+            let found = wikidata::item_with(&egress, "P4983", "1396").await.unwrap();
+            match expected {
+                None => assert!(
+                    matches!(&found, wikidata::Found::One(i) if i.qid == "Q1"),
+                    "{total}: {found:?}"
+                ),
+                Some(n) => assert_eq!(found, wikidata::Found::Ambiguous(n), "{total}"),
+            }
+        }
+    }
+
+    /// Wikidata's `maxlag` comes with 200: the answer is busy, and the next ask fetches again
+    /// instead of reading it from the cache for an hour.
+    #[tokio::test(start_paused = true)]
+    async fn a_busy_answer_is_asked_again() {
+        let url = wikidata::search_lookup("P4983", "1396").unwrap();
+        let (egress, recorded) = crate::sources::fixture::egress(vec![(
+            &url,
+            200,
+            "application/json",
+            br#"{"error":{"code":"maxlag","info":"Waiting for a database server"}}"#.to_vec(),
+        )]);
+        for _ in 0..2 {
+            let error = wikidata::item_with(&egress, "P4983", "1396")
+                .await
+                .unwrap_err();
+            assert!(error.downcast_ref::<RetryLater>().is_some(), "{error:#}");
+            tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        }
+        assert_eq!(recorded.asked().len(), 2);
+    }
+    fn fixture(name: &str) -> Value {
+        let path = format!("{}/tests/fixtures/hubs/{name}", env!("CARGO_MANIFEST_DIR"));
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    /// Every spelling of a MusicBrainz entity or ISRC page is one link; other pages are not.
+    #[test]
+    fn musicbrainz_links_name_their_entity() {
+        let recording = "b1a9c0e9-d987-4042-ae91-78d6a3267d69";
+        for uri in [
+            "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69",
+            "http://musicbrainz.org/recording/B1A9C0E9-D987-4042-AE91-78D6A3267D69/",
+            "https://beta.musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69",
+            "https://www.musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69?x=1",
+            "https://musicbrainz.org/ws/2/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69?inc=isrcs&fmt=json",
+        ] {
+            assert_eq!(
+                musicbrainz::entity_link(uri),
+                Some((
+                    MbKind::Recording,
+                    recording.to_owned(),
+                    format!("https://musicbrainz.org/recording/{recording}")
+                )),
+                "{uri}"
+            );
+        }
+        let group = "https://musicbrainz.org/release-group/1f2e3d4c-5b6a-4978-8695-a4b3c2d1e0f9";
+        assert_eq!(
+            musicbrainz::entity_link(group).map(|(kind, ..)| kind),
+            Some(MbKind::ReleaseGroup)
+        );
+        assert_eq!(
+            musicbrainz::isrc_link("https://musicbrainz.org/isrc/gbum71029604"),
+            Some((
+                "GBUM71029604".to_owned(),
+                "https://musicbrainz.org/isrc/GBUM71029604".to_owned()
+            ))
+        );
+        for other in [
+            "https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711/releases",
+            "https://musicbrainz.org/work/a74b1b7f-71a5-4011-9441-d0b5e4122711",
+            "https://musicbrainz.org/recording/not-an-mbid",
+            "https://musicbrainz.org.evil.example/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69",
+            "https://musicbrainz.org/isrc/NOTANISRC",
+            "ftp://musicbrainz.org/isrc/GBUM71029604",
+        ] {
+            assert!(
+                musicbrainz::entity_link(other).is_none()
+                    && musicbrainz::isrc_link(other).is_none(),
+                "{other}"
+            );
+        }
+    }
+
+    /// Wikidata sends a rate limit as a 200 with an `error`: busy, never "no item".
+    #[test]
+    fn a_wikidata_error_sent_with_200_is_busy() {
+        let answer = |body: &str| Fetched {
+            retry_after_secs: 5,
+            ..Fetched::answer(
+                url::Url::parse("https://www.wikidata.org/w/api.php").unwrap(),
+                200,
+                "application/json".into(),
+                body.as_bytes().to_vec(),
+            )
+        };
+        let limited = answer(r#"{"error":{"code":"ratelimited","info":"slow down"}}"#);
+        let err = json(&limited, "wikidata").unwrap_err();
+        assert!(err.downcast_ref::<RetryLater>().is_some(), "{err:#}");
+        let unknown = answer(r#"{"error":{"code":"no-such-entity","id":"Q0"}}"#);
+        assert!(json(&unknown, "wikidata").unwrap().is_some());
+        assert!(json(&limited, "musicbrainz").unwrap().is_some());
+    }
+    /// A 410 is an error for every caller, as before, of its own type ([`Gone`]) so that the music
+    /// enrichment alone can read it as gone; a 404 is no answer.
+    #[test]
+    fn a_hubs_410_is_gone_and_still_an_error() {
+        let answer = |status: u16| Fetched {
+            retry_after_secs: 0,
+            ..Fetched::answer(
+                url::Url::parse("https://musicbrainz.org/ws/2/artist/x").unwrap(),
+                status,
+                "application/json".into(),
+                b"{}".to_vec(),
+            )
+        };
+        for hub in ["musicbrainz", "wikidata"] {
+            let err = json(&answer(410), hub).unwrap_err();
+            assert!(err.downcast_ref::<Gone>().is_some(), "{err:#}");
+            assert_eq!(err.to_string(), format!("{hub} answered 410"));
+            assert!(json(&answer(404), hub).unwrap().is_none());
+            let other = json(&answer(403), hub).unwrap_err();
+            assert!(other.downcast_ref::<Gone>().is_none(), "{other:#}");
+        }
+    }
+
+    /// The archive's redirect names the release a cover is of only when it is written exactly
+    /// as archive.org writes a front cover's 500-pixel thumbnail; the card's image is then that
+    /// release's `front-500` on the archive's own host. A release's cover is its own file only.
+    #[test]
+    fn a_cover_is_the_release_its_redirect_names() {
+        const RG: &str = "8e8a594f-2175-38c7-a871-abb68ec363e7";
+        const R: &str = "e7ba3cb7-a074-45ee-870f-3baeb6d3e8bf";
+        let file = |item: &str, name: &str| format!("https://archive.org/download/{item}/{name}");
+        let recorded = file(
+            &format!("mbid-{R}"),
+            &format!("mbid-{R}-12708426541_thumb500.jpg"),
+        );
+        assert_eq!(cover_art::redirect_release(&recorded).as_deref(), Some(R));
+        let upper = R.to_ascii_uppercase();
+        for refused in [
+            recorded.replace("https:", "http:"),
+            recorded.replace("archive.org", "evil.example"),
+            recorded.replace("archive.org", "ia800.us.archive.org"),
+            recorded.replace("archive.org/", "archive.org:8443/"),
+            format!("{recorded}?x=1"),
+            recorded.replace("_thumb500", "_thumb250"),
+            recorded.replace("12708426541", "12708426541a"),
+            recorded.replace("12708426541", ""),
+            file(
+                &format!("mbid-{R}"),
+                "mbid-00000000-0000-4000-8000-000000000001-1_thumb500.jpg",
+            ),
+            file(
+                &format!("mbid-{upper}"),
+                &format!("mbid-{upper}-1_thumb500.jpg"),
+            ),
+            format!("https://archive.org/download/mbid-{R}/x/mbid-{R}-1_thumb500.jpg"),
+            "not a url".to_owned(),
+        ] {
+            assert_eq!(cover_art::redirect_release(&refused), None, "{refused}");
+        }
+        let answer = |status: u16, location: Option<&str>| Fetched {
+            retry_after_secs: 120,
+            location: location.map(str::to_owned),
+            ..Fetched::answer(
+                url::Url::parse("https://coverartarchive.org/x").unwrap(),
+                status,
+                "text/plain".into(),
+                vec![],
+            )
+        };
+        let front = cover_art::read_front(MbKind::ReleaseGroup, RG, &answer(307, Some(&recorded)))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            front,
+            cover_art::Front {
+                image: format!("https://coverartarchive.org/release/{R}/front-500"),
+                release: R.to_owned(),
+            }
+        );
+        // A release's cover is its own file, never another release's.
+        assert!(cover_art::read_front(MbKind::Release, RG, &answer(307, Some(&recorded))).is_err());
+        assert!(
+            cover_art::read_front(MbKind::Release, R, &answer(307, Some(&recorded)))
+                .unwrap()
+                .is_some()
+        );
+        for none in [answer(404, None), answer(410, None)] {
+            assert!(cover_art::read_front(MbKind::ReleaseGroup, RG, &none)
+                .unwrap()
+                .is_none());
+        }
+        // An answer that proves nothing is an error (the stored cover stays), not a retry.
+        for unclear in [
+            answer(200, None),
+            answer(403, None),
+            answer(307, None),
+            answer(307, Some("https://example.org/cover.jpg")),
+        ] {
+            let err = cover_art::read_front(MbKind::ReleaseGroup, RG, &unclear).unwrap_err();
+            assert!(err.downcast_ref::<RetryLater>().is_none(), "{err:#}");
+        }
+        for busy in [429, 503] {
+            let err =
+                cover_art::read_front(MbKind::ReleaseGroup, RG, &answer(busy, None)).unwrap_err();
+            assert_eq!(err.downcast_ref::<RetryLater>().unwrap().seconds, 120);
+        }
+        // Only releases and release groups have covers, by a canonical MBID.
+        assert_eq!(
+            cover_art::front_500(MbKind::ReleaseGroup, &RG.to_ascii_uppercase()).as_deref(),
+            Some("https://coverartarchive.org/release-group/8e8a594f-2175-38c7-a871-abb68ec363e7/front-500")
+        );
+        assert_eq!(cover_art::front_500(MbKind::Recording, RG), None);
+        assert_eq!(cover_art::front_500(MbKind::Artist, RG), None);
+        assert_eq!(cover_art::front_500(MbKind::Release, "8e8a594f"), None);
+    }
+
+    /// A rating needs a vote and a value within 0 to 5; a release's answer nests its release
+    /// group's rating, which is not the release's.
+    #[test]
+    fn a_rating_needs_votes_and_a_value_in_range() {
+        let entity = |kind: MbKind, rating: Value| {
+            let mut v =
+                serde_json::json!({"id": "8e8a594f-2175-38c7-a871-abb68ec363e7", "title": "T"});
+            v["rating"] = rating;
+            musicbrainz::parse_entity(kind, &v).unwrap().about.rating
+        };
+        use serde_json::json;
+        assert_eq!(
+            entity(
+                MbKind::ReleaseGroup,
+                json!({"value": 4.45, "votes-count": 43})
+            ),
+            Some(musicbrainz::Rating {
+                value: 4.45,
+                votes: 43
+            })
+        );
+        for kind in [MbKind::Artist, MbKind::Recording] {
+            assert!(entity(kind, json!({"value": 5, "votes-count": 1})).is_some());
+        }
+        for none in [
+            json!({"value": null, "votes-count": 0}),
+            json!({"value": 4.0, "votes-count": 0}),
+            json!({"value": null, "votes-count": 3}),
+            json!({"value": 5.5, "votes-count": 3}),
+            json!({"value": -1, "votes-count": 3}),
+            json!({"value": "4", "votes-count": 3}),
+            json!({"votes-count": 3}),
+            Value::Null,
+        ] {
+            assert_eq!(entity(MbKind::ReleaseGroup, none.clone()), None, "{none}");
+        }
+        assert_eq!(
+            entity(MbKind::Release, json!({"value": 4.45, "votes-count": 43})),
+            None
+        );
+        let release = json!({"id": "4c8af71f-5746-4981-92d7-0d6c64db1155", "title": "T",
+            "release-group": {"id": "8e8a594f-2175-38c7-a871-abb68ec363e7",
+                              "rating": {"value": 4.45, "votes-count": 43}},
+            "cover-art-archive": {"front": true, "darkened": false}});
+        let release = musicbrainz::parse_entity(MbKind::Release, &release).unwrap();
+        assert_eq!(release.about.rating, None);
+        assert!(release.about.cover_art_front);
+    }
+
+    /// The Cover Art Archive shows a release's front cover when MusicBrainz says it has one that
+    /// is not darkened; only a release's answer says so.
+    #[test]
+    fn a_release_says_whether_the_archive_shows_its_front_cover() {
+        use serde_json::json;
+        let front = |kind: MbKind, caa: Value| {
+            let v = json!({"id": "4c8af71f-5746-4981-92d7-0d6c64db1155", "title": "T",
+                           "cover-art-archive": caa});
+            musicbrainz::parse_entity(kind, &v)
+                .unwrap()
+                .about
+                .cover_art_front
+        };
+        assert!(front(
+            MbKind::Release,
+            json!({"front": true, "darkened": false, "count": 2})
+        ));
+        assert!(!front(MbKind::Release, json!({"front": false, "count": 1})));
+        assert!(!front(
+            MbKind::Release,
+            json!({"front": true, "darkened": true})
+        ));
+        assert!(!front(MbKind::Release, Value::Null));
+        assert!(!front(MbKind::ReleaseGroup, json!({"front": true})));
+    }
+
+    /// The Wikidata item an entity's relations name: one item, however often; several, or
+    /// only links to no item, are unclear; no relation is none.
+    #[test]
+    fn an_entitys_own_item_is_one_item_link() {
+        let rel = |kind: &str, url: &str| musicbrainz::UrlRelation {
+            kind: kind.into(),
+            url: url.into(),
+        };
+        use musicbrainz::{own_item, OwnItem};
+        let one = rel("wikidata", "https://www.wikidata.org/wiki/Q283221");
+        assert_eq!(
+            own_item(std::slice::from_ref(&one)),
+            OwnItem::Item("Q283221".into())
+        );
+        assert_eq!(
+            own_item(&[
+                one.clone(),
+                rel("wikidata", "https://m.wikidata.org/wiki/Q283221"),
+                rel("wikidata", "https://www.wikidata.org/wiki/Property:P18"),
+            ]),
+            OwnItem::Item("Q283221".into())
+        );
+        assert_eq!(
+            own_item(&[one, rel("wikidata", "https://www.wikidata.org/wiki/Q1")]),
+            OwnItem::Unclear
+        );
+        for malformed in [
+            "https://www.wikidata.org/wiki/Property:P18",
+            "https://www.wikidata.org/wiki/Q0283221",
+            "https://example.org/wiki/Q283221",
+            "https://www.wikidata.org/wiki/L1",
+        ] {
+            assert_eq!(
+                own_item(&[rel("wikidata", malformed)]),
+                OwnItem::Unclear,
+                "{malformed}"
+            );
+        }
+        assert_eq!(
+            own_item(&[rel("discogs", "https://www.wikidata.org/wiki/Q283221")]),
+            OwnItem::None
+        );
+    }
+
+    #[test]
+    fn keys_take_only_canonical_identifiers() {
+        let id = "9f9cf187-d6f9-437f-9d98-d59cdbd52757";
+        assert_eq!(
+            key::mb(MbKind::Recording, id).as_deref(),
+            Some("mb:recording:9f9cf187-d6f9-437f-9d98-d59cdbd52757")
+        );
+        assert_eq!(
+            key::mb(MbKind::ReleaseGroup, &id.to_ascii_uppercase()).as_deref(),
+            Some("mb:release-group:9f9cf187-d6f9-437f-9d98-d59cdbd52757")
+        );
+        for bad in [
+            "",
+            "9f9cf187d6f9437f9d98d59cdbd52757",
+            "9f9cf187-d6f9-437f-9d98-d59cdbd5275g",
+            "{9f9cf187-d6f9-437f-9d98-d59cdbd52757}",
+        ] {
+            assert!(key::mb(MbKind::Artist, bad).is_none(), "{bad}");
+        }
+        assert_eq!(
+            key::wikidata("Q202996").as_deref(),
+            Some("wikidata:Q202996")
+        );
+        for bad in [
+            "Q",
+            "Q0",
+            "Q012",
+            "q202996",
+            "P436",
+            "Q202996 ",
+            "Q1234567890123",
+        ] {
+            assert!(key::wikidata(bad).is_none(), "{bad}");
+        }
+        // Every key a constructor builds is a key the store accepts.
+        assert!(crate::also_on::valid_key(
+            &key::mb(MbKind::ReleaseGroup, id).unwrap()
+        ));
+        assert!(crate::also_on::valid_key(&key::wikidata("Q42").unwrap()));
+    }
+
+    #[test]
+    fn musicbrainz_url_entity_and_release_parsers() {
+        let track = musicbrainz::parse_url(&fixture("mb-url-spotify-track.json"));
+        assert_eq!(
+            track.targets,
+            [(
+                MbKind::Recording,
+                "9f9cf187-d6f9-437f-9d98-d59cdbd52757".to_owned()
+            )]
+        );
+        let album = musicbrainz::parse_url(&fixture("mb-url-spotify-album.json"));
+        assert_eq!(album.targets[0].0, MbKind::Release);
+        let recording =
+            musicbrainz::parse_entity(MbKind::Recording, &fixture("mb-recording.json")).unwrap();
+        assert_eq!(recording.isrcs, ["GBAYE9701376", "GBBKS1700108"]);
+        assert!(recording
+            .urls
+            .iter()
+            .any(|u| u.url == "https://www.deezer.com/track/138539973"));
+        let release =
+            musicbrainz::parse_entity(MbKind::Release, &fixture("mb-release.json")).unwrap();
+        assert_eq!(release.barcode.as_deref(), Some("634904078164"));
+        let search = serde_json::json!({"releases": [
+            {"id": "70477949-9da4-4fb3-ba60-268ff6f3a62c", "barcode": "4018939306052"},
+            {"id": "11111111-2222-4333-8444-555555555555", "barcode": "4018939306052"},
+            {"id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", "barcode": "4018939306069"},
+            {"id": "99999999-8888-4777-8666-555555555555", "barcode": "018939306052"}
+        ]});
+        assert_eq!(
+            musicbrainz::parse_barcode(&search, "4018939306052"),
+            [
+                "11111111-2222-4333-8444-555555555555",
+                "70477949-9da4-4fb3-ba60-268ff6f3a62c"
+            ]
+        );
+        assert!(
+            musicbrainz::barcode_lookup("https://musicbrainz.org/ws/2", "0196874054246")
+                .contains("barcode%3A%280196874054246+OR+196874054246%29")
+        );
+        assert_eq!(
+            release.release_group.as_deref(),
+            Some("b1392450-e666-3926-a536-22c65f834433")
+        );
+        assert!(release
+            .urls
+            .iter()
+            .any(|u| u.url == "https://radiohead.bandcamp.com/album/ok-computer"));
+        let group =
+            musicbrainz::parse_entity(MbKind::ReleaseGroup, &fixture("mb-release-group.json"))
+                .unwrap();
+        assert!(group.urls.iter().all(|u| !u.url.is_empty()));
+        assert!(musicbrainz::url_lookup(
+            musicbrainz::BASE,
+            "https://open.spotify.com/track/x?si=1&a=b"
+        )
+        .contains("resource=https%3A%2F%2Fopen.spotify.com%2Ftrack%2Fx%3Fsi%3D1%26a%3Db"));
+    }
+
+    #[test]
+    fn wikidata_best_rank_ids_sitelinks_and_ambiguity() {
+        let items = wikidata::parse_entities(&fixture("wd-entities.json"));
+        assert_eq!(
+            items.iter().map(|i| i.qid.as_str()).collect::<Vec<_>>(),
+            ["Q202996", "Q33328630"]
+        );
+        let ok = &items[0];
+        assert_eq!(ok.id("P436"), ["b1392450-e666-3926-a536-22c65f834433"]);
+        assert_eq!(
+            ok.sitelinks.get("enwiki").map(String::as_str),
+            Some("https://en.wikipedia.org/wiki/OK_Computer")
+        );
+        assert!(ok.id("P31").is_empty(), "items are not external IDs");
+        // Both items carry the release group at normal rank: no item is chosen.
+        assert_eq!(
+            wikidata::verified(
+                items.clone(),
+                "P436",
+                "b1392450-e666-3926-a536-22c65f834433"
+            ),
+            wikidata::Found::Ambiguous(2)
+        );
+        assert_eq!(
+            wikidata::verified(items.clone(), "P2205", "2fGCAYUMssLKiUAoNdxGLx"),
+            wikidata::Found::One(Box::new(items[0].clone()))
+        );
+        // Byte for byte: a different case is another ID.
+        assert_eq!(
+            wikidata::verified(items, "P2205", "2FGCAYUMSSLKIUAONDXGLX"),
+            wikidata::Found::None
+        );
+        assert_eq!(
+            wikidata::parse_search(&fixture("wd-search-p436.json")),
+            ["Q202996", "Q33328630"]
+        );
+        // The search syntax only carries plain IDs.
+        assert!(wikidata::search_lookup("P436", "a b").is_none());
+        assert!(wikidata::search_lookup("P0436", "x").is_none());
+        assert!(wikidata::search_lookup("P436", "b1392450-e666").is_some());
+        assert!(wikidata::search_lookup("P8013", "shows/breaking-bad")
+            .unwrap()
+            .contains("haswbstatement%3AP8013%3Dshows%2Fbreaking-bad"));
+    }
+
+    #[test]
+    fn a_deprecated_claim_never_counts_and_preferred_wins() {
+        let v = serde_json::json!({"entities":{"Q1":{"type":"item","id":"Q1","claims":{
+            "P1":[{"rank":"deprecated","mainsnak":{"snaktype":"value","datatype":"external-id","datavalue":{"value":"old"}}},
+                  {"rank":"normal","mainsnak":{"snaktype":"value","datatype":"external-id","datavalue":{"value":"n"}}}],
+            "P2":[{"rank":"preferred","mainsnak":{"snaktype":"value","datatype":"external-id","datavalue":{"value":"best"}}},
+                  {"rank":"normal","mainsnak":{"snaktype":"value","datatype":"external-id","datavalue":{"value":"other"}}}],
+            "P3":[{"rank":"normal","mainsnak":{"snaktype":"novalue","datatype":"external-id"}}]}},
+            "Q2":{"id":"Q2","missing":""}}});
+        let items = wikidata::parse_entities(&v);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id("P1"), ["n"]);
+        assert_eq!(items[0].id("P2"), ["best"]);
+        assert!(items[0].id("P3").is_empty());
+    }
+}

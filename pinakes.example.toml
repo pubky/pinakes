@@ -1,0 +1,301 @@
+# Operator choices only. Every cap, timeout, budget, backoff and refresh tier has a default and
+# can be changed in an optional [limits] section; the table of limits is in docs/operations.md.
+# Any key can also be set by environment variable: PINAKES__SECTION__KEY (e.g.
+# PINAKES__LIMITS__RESOLVER_CONCURRENCY=8).
+
+# Use a peer-authenticated Unix socket locally, or a secret supplied via PINAKES__DATABASE_URL.
+database_url = "postgresql:///pinakes?host=/var/run/postgresql"
+listen = "127.0.0.1:8090"
+admin_listen = "127.0.0.1:9090"
+# admin_token = "" # Prefer PINAKES__ADMIN_TOKEN; required for a non-loopback admin bind.
+# admin_hosts = [] # Names a scraper reaches the admin listener by, besides localhost and IP addresses.
+nexus_url = "http://127.0.0.1:8080" # A Nexus serving the /v1 feed and batch view. No credentials here: a Nexus behind them gets PINAKES_NEXUS_AUTHORIZATION.
+nexus_reach_set = false # The Nexus serves the /v1 reach-set route: search takes reach=wot_2 and boost=wot_2.
+
+[web]
+enabled = true
+# Follow RSS alternates (podcast feeds) on pages without a typed card.
+discover_feeds = false
+# MusicBrainz cards take an image (Wikimedia Commons) and a description (Wikipedia, or the item's
+# English description) from the entity's Wikidata item, with their credits. Off: MusicBrainz's
+# card alone.
+music_enrichment = true
+
+[pubky]
+# Objects of other apps, fetched through the egress policy from the homeserver's public HTTPS
+# domain; homeservers with only key-pinned endpoints are unreachable. See docs/operations.md.
+enabled = true
+# The PKARR relays that name each owner's homeserver (HTTPS, through the egress policy; every
+# record's signature is checked here).
+pkarr_relays = ["https://pkarr.pubky.app", "https://pkarr.pubky.org"]
+
+[geo]
+# geo: URIs and map links that name a point, resolved offline; points never group.
+enabled = true
+
+# Referenced OSM objects, including aliases; no search/reverse-geocoding proxy.
+# The public Nominatim is for a small development run; deployments use their own URL. A hosted
+# Nominatim's URL carries its key: set it as PINAKES__OSM__NOMINATIM_URL in the environment file.
+[osm]
+enabled = true
+nominatim_url = "https://nominatim.openstreetmap.org"
+requests_per_second = 0.5 # The public host allows at most one request per second.
+# The ODbL dump file (osm_place.ndjson.gz), rewritten daily; it needs room for every cached place.
+dump_dir = "/var/lib/pinakes/dumps"
+
+# Card resolvers; HTTP fallbacks can still use web.
+[cards.media]
+enabled = true
+discover_feeds = false # Podcast feed scanning from media pages.
+[cards.isbn]
+enabled = true
+[cards.doi]
+enabled = true
+[cards.nostr]
+enabled = true
+[cards.activitypub]
+enabled = true
+[cards.official]
+# Cards read from a service's own API (docs/sources), one switch per source below.
+enabled = true
+
+# Official-API sources, in alphabetical order (docs/sources/README.md).
+[sources.app_store]
+enabled = true
+[sources.artic]
+enabled = true
+[sources.bluesky]
+enabled = true
+[sources.castro]
+enabled = true
+[sources.cleveland]
+enabled = true
+[sources.clinicaltrials]
+enabled = true
+[sources.commons]
+enabled = true
+[sources.courtlistener]
+enabled = true
+[sources.discogs]
+enabled = true
+[sources.discourse]
+enabled = true
+[sources.docker_hub]
+enabled = true
+[sources.ecfr]
+enabled = true
+[sources.eur_lex]
+enabled = true
+[sources.facebook]
+enabled = true
+[sources.fdroid]
+enabled = true
+[sources.federal_register]
+enabled = true
+[sources.fedlex]
+enabled = true
+[sources.feed]
+enabled = true
+[sources.figshare]
+enabled = true
+[sources.flathub]
+enabled = true
+[sources.forgejo]
+enabled = true
+[sources.fountain]
+enabled = true
+[sources.gbif]
+enabled = true
+[sources.ghost]
+enabled = true
+[sources.github]
+enabled = true
+# token = "" # A fine-grained token (public repositories, read-only): off without one.
+[sources.gitlab]
+enabled = true
+[sources.gleif]
+enabled = true
+[sources.google_play]
+enabled = true
+[sources.govinfo]
+enabled = true
+[sources.greenhouse]
+enabled = true
+[sources.hacker_news]
+enabled = true
+[sources.huggingface]
+enabled = true
+[sources.inaturalist]
+enabled = true
+[sources.instagram]
+enabled = true
+[sources.internet_archive]
+enabled = true
+[sources.legislation_gov_uk]
+enabled = true
+[sources.linkedin]
+enabled = true
+[sources.lobsters]
+enabled = true
+[sources.mastodon]
+enabled = true
+[sources.media_records]
+enabled = true
+[sources.mempool]
+enabled = true
+[sources.met]
+enabled = true
+[sources.open_food_facts]
+enabled = true
+[sources.pdb]
+enabled = true
+[sources.pinterest]
+enabled = true
+[sources.podcast_index]
+enabled = true
+[sources.pubchem]
+enabled = true
+[sources.public_inbox]
+enabled = true
+[sources.reddit]
+enabled = true
+[sources.ror]
+enabled = true
+[sources.sec]
+enabled = true
+[sources.shopify]
+enabled = true
+[sources.snap_store]
+enabled = true
+[sources.stack_exchange]
+enabled = true
+[sources.stacker_news]
+enabled = true
+[sources.substack]
+enabled = true
+[sources.swiss_parliament]
+enabled = true
+[sources.telegram]
+enabled = true
+[sources.threads]
+enabled = true
+[sources.tiktok]
+enabled = true
+[sources.twitch]
+enabled = true
+[sources.uk_parliament_bills]
+enabled = true
+[sources.uniprot]
+enabled = true
+[sources.usgs]
+enabled = true
+[sources.wordpress]
+enabled = true
+[sources.x]
+enabled = true
+[sources.zefix]
+enabled = true
+[sources.zenodo]
+enabled = true
+
+[media]
+oembed = "when_needed" # "always" restores eager registry discovery.
+
+[event]
+enabled = true
+calendars = true
+geocoding = true
+# A recurring series whose DTSTART is UTC (...Z) expands in UTC, as RFC 5545 says, unless its zone
+# comes from a source chosen here: "x_wr_timezone" (default: an explicit X-WR-TIMEZONE, Google's
+# exports, or a TZID), "coordinates" (also default_timezone and coordinate-derived zones) or
+# "never".
+utc_series_wall_clock = "x_wr_timezone"
+# default_timezone = "Europe/Zurich" # For floating ICS times only.
+# Event cards name other events that are possibly the same one (maybe_same): "on" or "off".
+same_event_hint = "on"
+
+# Event platforms (data/event-adapters.json); effective policies: /v1/info.
+[event.adapters]
+enabled = true
+derive_resources = true # Derived links: NIP-52 calendar members, BTC Map event websites.
+websocket = true # Nostr relays: one relay hint, after both HTTP indexers miss.
+
+# Each platform takes enabled and key. Missing keys disable only that platform; secrets never
+# appear in /v1/info.
+# [event.adapters.platforms.ticketmaster]
+# key = "" # Supply through protected config or PINAKES__EVENT__ADAPTERS__PLATFORMS__TICKETMASTER__KEY.
+# [event.adapters.platforms.resident_advisor]
+# enabled = true # Unofficial GraphQL, fragile and off by default.
+
+[http]
+# Sent in the User-Agent, pinakes/<version> (+https://pubky.app; <contact>). Empty: the links of
+# sources that need a contact wait. An address naming github is refused. Set your own address:
+# contact = "operator@example.org"
+
+[egress]
+# Exact names or *.example.org. An empty allow list permits all public hosts.
+# Lists never override the IP policy. Deny wins.
+allow_hosts = []
+deny_hosts = []
+
+[groups]
+enabled = true
+# "corroborated" joins an event page to its date in the organiser calendar its platform names
+# (a Meetup date and its group's calendar). It also turns on the general ICS UID join across
+# publishers (both located within 500 m, starting within 300 s, names alike), which a determined
+# publisher can copy (docs/operations.md). "off" makes neither join.
+cross_container_occurrences = "corroborated"
+same_recording_hint = "on" # Recording cards name recordings that are possibly the same one (maybe_same).
+
+# "Also on": the same thing on other services, from hubs and exact lookups (docs/api.md).
+[also_on]
+enabled = true
+derive_links = true # Off: keys and facts only; no derived links on cards, nor joins by them.
+# apple_storefront = "us" # The storefront (country code) the album, book and podcast lookups ask.
+# [also_on.sources.<id>]
+# enabled = false # Turn one source off.
+# [also_on.sources.musicbrainz]
+# base_url = "https://musicbrainz.org/ws/2" # A mirror's web service, for every MusicBrainz read.
+# Podcast Index is asked only with a key and secret: supply them through
+# PINAKES__PODCAST_INDEX__KEY and PINAKES__PODCAST_INDEX__SECRET (see .env.example).
+# [also_on.sources.discogs]
+# token = "" # A Discogs personal access token: images on Discogs cards.
+# key = "" # Or a Discogs app's consumer key and secret (PINAKES_DISCOGS_CONSUMER_KEY and
+# secret = "" # PINAKES_DISCOGS_CONSUMER_SECRET): the same. The token wins when both are set.
+
+# The tidal source asks TIDAL only with a client ID and secret: supply them through
+# PINAKES_TIDAL_CLIENT_ID and PINAKES_TIDAL_CLIENT_SECRET (see .env.example).
+
+[tidal]
+country = "US" # The TIDAL catalogue's country (ISO 3166-1 alpha-2, upper case).
+
+# The tmdb source asks TMDB only with a credential: supply it through TMDB_API_KEY (see
+# .env.example). enabled = false switches it off with the key set.
+
+[tmdb]
+enabled = true
+
+# The Spotify app credentials spotify and spotify_isrc share (spotify_api.rs): set them through
+# PINAKES_SPOTIFY_CLIENT_ID and PINAKES_SPOTIFY_CLIENT_SECRET (see .env.example), or here.
+
+[spotify]
+# client_id = ""
+# client_secret = ""
+
+[api]
+# Applied to every public route (/v1, the agents' guide and /mcp) using the direct peer IP.
+requests_per_minute = 120
+# Browser origins allowed to call the public listener (CORS). ["*"] allows any origin (the public
+# API takes no cookies or tokens); list exact origins such as "https://pubky.app" to restrict;
+# [] sends no CORS headers. The admin listener never sends CORS headers.
+cors_allow_origins = ["*"]
+# Swagger UI for the public OpenAPI document at /swagger-ui; /v1/openapi.json stays either way.
+swagger_ui = true
+# The MCP endpoint for AI agents at POST /mcp (docs/api.md, Agents); /llms.txt stays either way.
+mcp = true
+
+[canary]
+enabled = true # Periodic event-platform canaries, reported in metrics.
+
+# [limits]
+# resolver_concurrency = 2 # pubky and each card resolver; web_concurrency (4) for web and events
