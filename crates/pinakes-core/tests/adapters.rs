@@ -2195,12 +2195,15 @@ fn all_page_and_calendar_adapters_parse_their_public_contracts() {
         .iter()
         .filter(|d| d.parser == "ics_link" || d.parser == "calendar")
     {
-        let bytes=b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:contract\r\nDTSTART;TZID=Europe/Zurich:20261020T190000\r\nDTEND;TZID=Europe/Zurich:20261020T210000\r\nSUMMARY:Contract fixture\r\nSTATUS:CANCELLED\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        // A date ahead of the clock: the calendar parse keeps events from the wall clock's
+        // `months_back` on, so a fixed date would drop out of the container in time.
+        let day = (Utc::now() + Duration::days(30)).format("%Y%m%d");
+        let bytes = format!("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:contract\r\nDTSTART;TZID=Europe/Zurich:{day}T190000\r\nDTEND;TZID=Europe/Zurich:{day}T210000\r\nSUMMARY:Contract fixture\r\nSTATUS:CANCELLED\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n");
         let f = common::fetched(
             uri.parse().unwrap(),
             200,
             "text/calendar".into(),
-            bytes.to_vec(),
+            bytes.into_bytes(),
         );
         let doc = adapters::service::calendar_document(uri, d, &f, &cfg)
             .unwrap()
@@ -2208,7 +2211,10 @@ fn all_page_and_calendar_adapters_parse_their_public_contracts() {
         let event = doc
             .container
             .as_ref()
-            .map(|c| &c.occurrences[0].doc)
+            .map(|c| {
+                assert_eq!(c.occurrences.len(), 1, "{}", d.id);
+                &c.occurrences[0].doc
+            })
             .unwrap_or(&doc);
         assert_eq!(event.name.as_deref(), Some("Contract fixture"), "{}", d.id);
         assert_eq!(event.event.tz.as_deref(), Some("Europe/Zurich"));
