@@ -176,9 +176,7 @@ async fn hub_keys_join_and_derived_links_reach_the_cards(pool: PgPool) {
     let sources: Vec<Arc<dyn Source>> = vec![hub.clone()];
     let cx = cx(Config::default());
     drain(&pool, &cx, &sources).await;
-    groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let card = get(&app, &format!("/v1/resources/{a}")).await;
     assert_eq!(card["group"]["size"], 2, "{card}");
@@ -671,19 +669,35 @@ async fn saves_make_sources_due_and_unknown_sources_are_refused(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(due(pool.clone()).await, 1);
-    // An alias spelling is never a subject.
-    let alias = store::ensure_resource(&pool, &format!("{uri}?utm_source=x"))
+    // An alias spelling is never a subject: a saved page that is another link's alias, due and
+    // answered as its root is, runs no lookup; its root runs its own.
+    let spelling = "https://open.spotify.com/track/d1-spelling";
+    let alias = page(&pool, spelling, "Track").await;
+    let mut tx = pool.begin().await.unwrap();
+    let line = pinakes_core::alias::assign(
+        &mut tx,
+        &alias,
+        &pinakes_core::alias::Alias {
+            root: uri.into(),
+            basis: "identifier",
+        },
+    )
+    .await
+    .unwrap();
+    pinakes_core::alias::record(&mut tx, line.into_iter().collect())
         .await
         .unwrap();
-    assert_ne!(alias, id);
-    hub.answer(&format!("{uri}?utm_source=x"), Ok(Found::default()));
+    tx.commit().await.unwrap();
+    sqlx::query("INSERT INTO also_on_dirty(resource_id) VALUES($1),($2) ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=now()")
+        .bind(&id)
+        .bind(&alias)
+        .execute(&pool)
+        .await
+        .unwrap();
+    hub.answer(uri, Ok(Found::default()));
+    hub.answer(spelling, Ok(Found::default()));
     drain(&pool, &cx(Config::default()), &sources).await;
-    assert!(!hub
-        .calls
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|u| u.contains("utm_source")));
+    assert_eq!(*hub.calls.lock().unwrap(), [uri]);
     let unknown =
         toml::from_str::<Config>("[also_on.sources.nope]\nenabled = false\n").map(|c| c.validate());
     assert!(matches!(unknown, Ok(Err(_))), "{unknown:?}");
@@ -794,10 +808,9 @@ async fn facts_are_shown_checked_and_never_join(pool: PgPool) {
         read["facts"],
         json!({"artist": "Radiohead", "isrc": "GBAYE9701376; GBBKS1700108"})
     );
-    // The same ISRC on both links joins nothing: a fact is not a key.
-    groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    // The same ISRC on both links joins nothing: a fact is not a key. Every unit is grouped
+    // anew, so the run has read both links as they are now.
+    common::regroup_all(&pool, &Default::default()).await;
     let grouped: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM group_unit WHERE resource_id IN ($1,$2) AND group_id IS NOT NULL",
     )
@@ -807,6 +820,24 @@ async fn facts_are_shown_checked_and_never_join(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(grouped, 0);
+    // The same two links with one exact key each are one group: the fact alone kept them apart.
+    for id in [&ia, &ib] {
+        also_on::record(
+            &pool,
+            id,
+            "hub",
+            Found {
+                keys: vec![key("mb:recording:e00ebb77-541e-41f3-86ba-a90530414922")],
+                ..Default::default()
+            },
+            Duration::from_secs(86_400),
+            &Config::default().also_on,
+        )
+        .await
+        .unwrap();
+    }
+    common::drain_groups(&pool, &Default::default()).await;
+    assert!(common::one_group(&pool, &[&ia, &ib]).await);
     // A link without facts has none.
     let other = page(&pool, "https://tidal.com/track/9", "Song").await;
     assert!(get(&app, &format!("/v1/resources/{other}")).await["facts"].is_null());
@@ -1158,9 +1189,7 @@ async fn trending_counts_references_inside_the_window(pool: PgPool) {
     }
     let sources: Vec<Arc<dyn Source>> = vec![hub];
     drain(&pool, &cx(Config::default()), &sources).await;
-    groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     assert_eq!(
         rows("/v1/search?sort=trending&collapse=group").await.len(),
         1
@@ -1426,9 +1455,7 @@ async fn a_shared_q_id_never_joins_two_recordings(pool: PgPool) {
     }
     let sources: Vec<Arc<dyn Source>> = vec![hub];
     drain(&pool, &cx(Config::default()), &sources).await;
-    groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     let group = |id: String| {
         let pool = pool.clone();
         async move {
@@ -1532,9 +1559,7 @@ async fn a_removed_source_s_keys_keep_their_single_object_rule(pool: PgPool) {
     }
     let sources: Vec<Arc<dyn Source>> = vec![hub];
     drain(&pool, &cx(Config::default()), &sources).await;
-    groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     let group = |ids: &[String]| {
         let pool = pool.clone();
         let ids = ids.to_vec();
@@ -1646,9 +1671,7 @@ async fn a_shared_key_never_joins_two_places_crates_or_games(pool: PgPool) {
     }
     let sources: Vec<Arc<dyn Source>> = vec![hub];
     drain(&pool, &cx(Config::default()), &sources).await;
-    groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     for ids in pairs {
         let groups: Vec<Option<String>> = sqlx::query_scalar(
             "SELECT g.group_id FROM unnest($1::text[]) i(id) LEFT JOIN group_unit g ON g.resource_id=i.id",
@@ -1690,9 +1713,7 @@ async fn a_tagged_btc_map_link_joins_its_osm_object(pool: PgPool) {
     );
     let sources: Vec<Arc<dyn Source>> = vec![btcmap];
     drain(&pool, &cx(Config::default()), &sources).await;
-    groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     let groups: Vec<Option<String>> = sqlx::query_scalar(
         "SELECT g.group_id FROM unnest($1::text[]) i(id) LEFT JOIN group_unit g ON g.resource_id=i.id",
     )
@@ -1765,9 +1786,7 @@ async fn a_tagged_member_and_a_derived_link_of_one_service_show_once(pool: PgPoo
     }
     let sources: Vec<Arc<dyn Source>> = vec![hub];
     drain(&pool, &cx(Config::default()), &sources).await;
-    groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let read = lookup_card(&app, &card).await;
     let mut shown: Vec<String> = read["also_on"]
@@ -1915,9 +1934,7 @@ async fn two_tagged_spellings_of_a_derived_link_show_once(pool: PgPool) {
     }
     let sources: Vec<Arc<dyn Source>> = vec![hub];
     drain(&pool, &cx(Config::default()), &sources).await;
-    groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let read = lookup_card(&app, &card).await;
     let sites: Vec<&str> = read["also_on"]
@@ -1978,9 +1995,7 @@ async fn a_page_naming_itself_after_a_service_takes_no_slot(pool: PgPool) {
     }
     let sources: Vec<Arc<dyn Source>> = vec![hub];
     drain(&pool, &cx(Config::default()), &sources).await;
-    groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let read = get(&app, &format!("/v1/resources/{card}")).await;
     let entries: Vec<(String, bool)> = read["also_on"]
@@ -2216,9 +2231,7 @@ async fn a_music_typed_impostor_takes_no_slot_and_hides_nothing(pool: PgPool) {
     }
     let sources: Vec<Arc<dyn Source>> = vec![hub];
     drain(&pool, &cx(Config::default()), &sources).await;
-    groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     for id in &ids {
         let read = get(&app, &format!("/v1/resources/{id}")).await;
@@ -2278,9 +2291,7 @@ async fn a_non_object_page_on_a_service_host_takes_no_slot(pool: PgPool) {
     }
     let sources: Vec<Arc<dyn Source>> = vec![hub];
     drain(&pool, &cx(Config::default()), &sources).await;
-    groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let read = get(&app, &format!("/v1/resources/{}", ids[0])).await;
     let entries: Vec<(String, bool)> = read["also_on"]
@@ -2335,9 +2346,7 @@ async fn a_shared_repository_link_with_a_tab_is_the_repository_once(pool: PgPool
     }
     let sources: Vec<Arc<dyn Source>> = vec![hub];
     drain(&pool, &cx(Config::default()), &sources).await;
-    groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let read = lookup_card(&app, &ids[0]).await;
     let entries: Vec<(String, String, bool)> = read["also_on"]
@@ -2496,9 +2505,7 @@ async fn a_link_an_exact_lookup_names_joins_by_its_key(pool: PgPool) {
             "https://tidal.com/album/1 -".to_owned()
         ]
     );
-    groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     let group = |id: String| {
         let pool = pool.clone();
         async move {
@@ -2540,9 +2547,7 @@ async fn a_link_an_exact_lookup_names_joins_by_its_key(pool: PgPool) {
         .unwrap();
     drain(&pool, &cx(on), &sources).await;
     assert!(named().await.is_empty());
-    groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     assert_eq!(group(y).await, None);
 }
 
@@ -2608,9 +2613,7 @@ async fn a_card_shows_one_link_per_service(pool: PgPool) {
     );
     let sources: Vec<Arc<dyn Source>> = vec![hub];
     drain(&pool, &cx(Config::default()), &sources).await;
-    groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     sqlx::query("INSERT INTO reference(resource_id,author,kind,object_path,label,created_at) SELECT id,repeat('a',52),'tag','/pub/test/tags/'||id,'music',now() FROM unnest($1::text[]) id")
         .bind(&ids)
         .execute(&pool)
@@ -2778,7 +2781,7 @@ async fn a_run_takes_the_write_order_as_saves_do(pool: PgPool) {
         .await
         .unwrap();
     let recording = run(pool.clone(), id.clone());
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    common::lock_waiters_reach(&pool, 1, "the run behind the exclusive writer").await;
     assert!(
         !recording.is_finished(),
         "the run waits for the exclusive writer"
@@ -4218,9 +4221,7 @@ async fn a_switched_off_source_shows_nothing_until_it_is_on_again(pool: PgPool) 
     for on in [true, false, true] {
         let config = config(on);
         also_on::configure(&pool, &config).await.unwrap();
-        groups::drain(&pool, &Default::default(), 100)
-            .await
-            .unwrap();
+        common::drain_groups(&pool, &Default::default()).await;
         let app = api::router(AppState::new(pool.clone(), config).unwrap());
         let card = get(&app, &format!("/v1/resources/{}", ids[0])).await;
         let listed = post(&app, "/v1/resources/lookup", json!({"ids": [ids[0]]})).await;
@@ -4530,14 +4531,48 @@ fn an_earlier_list_of_sources_reads_as_unknown_fingerprints() {
 
 /// A maybe (a match by metadata) derived first never holds a link an exact source names later:
 /// the exact row takes it over with its key; the maybe source's next run neither writes it back
-/// nor deletes it.
+/// nor deletes it. While the row is a maybe, the card and the link's own card stay apart, though
+/// the card holds the key the exact source names the link by; the exact row joins them.
 #[sqlx::test(migrations = "../../migrations")]
 async fn an_exact_link_replaces_a_maybe_of_the_same_link(pool: PgPool) {
     let uri = "https://www.youtube.com/watch?v=bSnlKl_PoQU";
-    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let id = page(&pool, uri, "Song").await;
     let cfg = Config::default().also_on;
     let ttl = Duration::from_secs(86_400);
     let deezer = "https://www.deezer.com/track/4091937401";
+    // The link is a tagged card too, and the card holds the recording's ISRC as a key.
+    let target = page(&pool, deezer, "Song").await;
+    also_on::record(
+        &pool,
+        &id,
+        "key_test",
+        Found {
+            keys: vec![Key {
+                key: "isrc:GBUM71029604".into(),
+                via: "key_test".into(),
+            }],
+            ..Default::default()
+        },
+        ttl,
+        &cfg,
+    )
+    .await
+    .unwrap();
+    // The groups of the card and of the link's card, each computed anew.
+    let grouped = || {
+        let pool = pool.clone();
+        let both = vec![id.clone(), target.clone()];
+        async move {
+            common::regroup_all(&pool, &Default::default()).await;
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT group_id FROM group_unit WHERE resource_id=ANY($1) ORDER BY resource_id",
+            )
+            .bind(&both)
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+        }
+    };
     let found = |link: Link| Found {
         links: vec![link],
         ..Default::default()
@@ -4558,6 +4593,15 @@ async fn an_exact_link_replaces_a_maybe_of_the_same_link(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(row().await, ["maybe_test maybe -"]);
+    // The row names the link's card, and joins nothing.
+    let named: Vec<String> =
+        sqlx::query_scalar("SELECT link_id FROM derived_link WHERE resource_id=$1")
+            .bind(&id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(named, std::slice::from_ref(&target));
+    assert_eq!(grouped().await, [None, None]);
     // A maybe never carries a key, whatever its source sets.
     also_on::record(
         &pool,
@@ -4570,13 +4614,17 @@ async fn an_exact_link_replaces_a_maybe_of_the_same_link(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(row().await, ["maybe_test maybe -"]);
-    // The exact source names the same link by an ISRC: its row, with the key.
+    assert_eq!(grouped().await, [None, None]);
+    // The exact source names the same link by an ISRC: its row, with the key, and the two cards
+    // are one group.
     let exact = Link::new(deezer, "Deezer", "exact_test").keyed("isrc:GBUM71029604");
     also_on::record(&pool, &id, "exact_test", found(exact), ttl, &cfg)
         .await
         .unwrap();
     let taken = ["exact_test - isrc:GBUM71029604"];
     assert_eq!(row().await, taken);
+    let joined = grouped().await;
+    assert!(joined[0].is_some() && joined[0] == joined[1], "{joined:?}");
     // The maybe source again, and then without the link: the exact row stays.
     also_on::record(&pool, &id, "maybe_test", found(maybe()), ttl, &cfg)
         .await
@@ -4586,6 +4634,8 @@ async fn an_exact_link_replaces_a_maybe_of_the_same_link(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(row().await, taken);
+    let still = grouped().await;
+    assert!(still[0].is_some() && still[0] == still[1], "{still:?}");
 }
 
 /// A run asks once which sources hold rows of its resource, however many sources do not apply

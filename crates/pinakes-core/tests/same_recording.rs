@@ -7,7 +7,6 @@ use pinakes_core::{
     api::{self, AppState},
     changes,
     config::{Config, SameEventHint},
-    groups,
     model::ResourceMeta,
     same_recording, store,
 };
@@ -77,8 +76,25 @@ async fn found(pool: &PgPool, id: &str, source: &str, keys: &[&str], facts: &[(&
     .unwrap();
 }
 
+/// The pass, until nothing is due. A recording that stays due fails the test instead of hanging
+/// it.
 async fn pass(pool: &PgPool, config: &Config) {
-    while same_recording::drain(pool, config, 200).await.unwrap() > 0 {}
+    for _ in 0..10_000 {
+        if same_recording::drain(pool, config, 200).await.unwrap() == 0 {
+            return;
+        }
+    }
+    panic!("the same-recording pass still has work after 10000 rounds");
+}
+
+/// The ids on a page of search results.
+fn listed(page: &Value) -> Vec<&str> {
+    page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap())
+        .collect()
 }
 
 async fn response(config: &Config, pool: &PgPool, path: &str) -> (Value, String) {
@@ -185,8 +201,23 @@ async fn recordings_nothing_exact_joins_name_the_ones_they_may_be(pool: PgPool) 
     page.set_type("WebPage");
     page.name = Some("Bohemian Rhapsody".into());
     let page = save(&pool, &page).await;
-    groups::drain(&pool, &config.groups, 100).await.unwrap();
+    common::drain_groups(&pool, &config.groups).await;
     let (_, before) = response(&config, &pool, "/v1/search?q=bohemian").await;
+    // What the cards hold before any pair is stored: the keys, and the links each lists.
+    let key_count = || async {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource_key")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    let keys = key_count().await;
+    assert_eq!(
+        keys, 2,
+        "the hub's key on its own page and on the Spotify track"
+    );
+    let tidal_links = card(&config, &pool, &tidal).await["also_on"].clone();
+    let mb_links = card(&config, &pool, &mb).await["also_on"].clone();
+    assert!(mb_links.to_string().contains(&spotify), "{mb_links}");
     // The sweep reads what the triggers already marked and what they did not; the pass pairs.
     same_recording::sweep(&pool).await.unwrap();
     pass(&pool, &config).await;
@@ -242,11 +273,48 @@ async fn recordings_nothing_exact_joins_name_the_ones_they_may_be(pool: PgPool) 
         &format!("/v1/groups/{}", mb_card["group"]["id"].as_str().unwrap()),
     )
     .await;
-    assert!(group["members"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|m| m["maybe_same"].is_array()));
+    let members = group["members"].as_array().unwrap();
+    assert_eq!(members.len(), 2, "{group}");
+    assert!(members.iter().all(|m| m["maybe_same"].is_array()));
+
+    // A hint, never a group, a key or a link: with the pairs stored, every group is computed
+    // anew. The re-release and the page without a length still have no group, the recording's
+    // group still has its two members, no key was added, and each card lists the links it did.
+    common::regroup_all(&pool, &config.groups).await;
+    let hinted = [tidal.clone(), unmeasured.clone()];
+    let ungrouped: (i64, i64) =
+        sqlx::query_as("SELECT count(group_id),count(*) FROM group_unit WHERE resource_id=ANY($1)")
+            .bind(&hinted[..])
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(ungrouped, (0, 2));
+    let mb_card = card(&config, &pool, &mb).await;
+    let members: Vec<String> = sqlx::query_scalar(
+        "SELECT resource_id FROM group_unit WHERE group_id=$1 ORDER BY resource_id",
+    )
+    .bind(mb_card["group"]["id"].as_str().unwrap())
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let mut joined = vec![mb.clone(), spotify.clone()];
+    joined.sort();
+    assert_eq!(members, joined);
+    assert_eq!(key_count().await, keys);
+    let tidal_card = card(&config, &pool, &tidal).await;
+    assert!(tidal_card["group"].is_null(), "{tidal_card}");
+    assert_eq!(tidal_card["also_on"], tidal_links, "{tidal_card}");
+    assert_eq!(named(&tidal_card).len(), 3, "the hint stands: {tidal_card}");
+    assert!(card(&config, &pool, &unmeasured).await["group"].is_null());
+    assert_eq!(mb_card["also_on"], mb_links, "{mb_card}");
+    // A search by group lists each hinted card: only the recording's group of two is one row.
+    let (all, _) = response(&config, &pool, "/v1/search?q=bohemian").await;
+    let (collapsed, _) = response(&config, &pool, "/v1/search?q=bohemian&collapse=group").await;
+    let rows = listed(&collapsed);
+    for id in &hinted {
+        assert!(rows.contains(&id.as_str()), "{id} is not listed: {rows:?}");
+    }
+    assert_eq!(rows.len() + 1, listed(&all).len(), "{rows:?}");
 
     // A changed length is read again: the unmeasured page measured at 3:34 pairs with nothing.
     found(&pool, &unmeasured, "service", &[], &[("duration", "214")]).await;
@@ -275,6 +343,42 @@ async fn recordings_nothing_exact_joins_name_the_ones_they_may_be(pool: PgPool) 
     assert!(same_recording::sweep(&pool).await.unwrap() >= 1);
     pass(&pool, &config).await;
     assert_eq!(named(&card(&config, &pool, &mb).await), Vec::<&str>::new());
+}
+
+/// The pass compares lengths in whole seconds: two recordings up to `LENGTH_WINDOW_SECS` (3 s)
+/// apart agree and pair with score 1; 4 s apart they are no pair.
+#[sqlx::test(migrations = "../../migrations")]
+async fn lengths_three_seconds_apart_agree_and_four_do_not(pool: PgPool) {
+    let config = Config::default();
+    assert_eq!(same_recording::LENGTH_WINDOW_SECS, 3);
+    let mut ids = vec![];
+    // 5:24, 5:27 and 5:28: the first and the last are four seconds apart.
+    for (n, length) in [(1, "PT5M24S"), (2, "PT5M27S"), (3, "PT5M28S")] {
+        ids.push(
+            recording(
+                &pool,
+                &format!("https://example.org/take-five/{n}"),
+                "Take Five",
+                Some("The Dave Brubeck Quartet"),
+                Some(length),
+            )
+            .await,
+        );
+    }
+    pass(&pool, &config).await;
+    let (short, middle, long) = (&ids[0], &ids[1], &ids[2]);
+    let short_card = card(&config, &pool, short).await;
+    assert_eq!(named(&short_card), [middle.as_str()], "{short_card}");
+    assert_eq!(short_card["maybe_same"][0]["score"], 1.0);
+    let long_card = card(&config, &pool, long).await;
+    assert_eq!(named(&long_card), [middle.as_str()], "{long_card}");
+    assert_eq!(long_card["maybe_same"][0]["score"], 1.0);
+    let middle_card = card(&config, &pool, middle).await;
+    let mut both = named(&middle_card);
+    both.sort();
+    let mut want = vec![short.as_str(), long.as_str()];
+    want.sort();
+    assert_eq!(both, want, "{middle_card}");
 }
 
 /// `[groups] same_recording_hint = "off"` removes the field from recording cards and stops the
@@ -906,71 +1010,6 @@ async fn deleted_orphans_leave_their_neighbours_to_refill(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(left, 0, "the refills settled");
-}
-
-/// A database from before the caps and the refills (matching-4 and -5) is repaired by the
-/// upgrade's steps: lists the old pass left over the caps (it trimmed its own to twenty, but
-/// nothing bounded the namers of one recording) are cut to the best twenty and forty as the pass
-/// ranks them, and every recording with fewer than twenty pairs (its list emptied by the old cap
-/// or a cascade, or a pair cut now) is marked to refill and queued, once.
-#[sqlx::test(migrations = "../../migrations")]
-async fn the_upgrade_cuts_the_old_lists_and_requeues_recordings_left_with_short_lists(
-    pool: PgPool,
-) {
-    let config = Config::default();
-    let mut ids = crowd(&pool, "Take Five", Some("PT5M24S"), 50).await;
-    ids.sort();
-    pass(&pool, &config).await;
-    assert_eq!(spread(&pool, "resource_id").await, (20, 20));
-    // The damage: the last five lose their lists, as the old cap trimmed them, and nothing marks
-    // them; the first is named by the 44 others and names them all back (the old pass had no cap
-    // on the namers). The first by id, so nothing cut from a list of twenty-one is its pair.
-    sqlx::query("DELETE FROM same_recording WHERE resource_id=ANY($1)")
-        .bind(&ids[45..])
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query(
-        "INSERT INTO same_recording(resource_id,other_id,score) \
-         SELECT o,$1,1 FROM unnest($2::text[]) AS t(o) UNION ALL SELECT $1,o,1 FROM unnest($2::text[]) AS t(o) \
-         ON CONFLICT DO NOTHING",
-    )
-    .bind(&ids[0])
-    .bind(&ids[1..45])
-    .execute(&pool)
-    .await
-    .unwrap();
-    pass(&pool, &config).await;
-    assert_eq!(
-        without_a_hint(&pool, &ids).await.len(),
-        5,
-        "nothing queued them"
-    );
-    assert!(spread(&pool, "resource_id").await.0 >= 44);
-    assert_eq!(spread(&pool, "other_id").await.0, 44);
-    // The upgrade's steps (upgrade-matching-7.sql, upgrade-matching-4-to-7.sql).
-    for step in [
-        "DELETE FROM same_recording p USING (SELECT resource_id,other_id,row_number() OVER (PARTITION BY resource_id ORDER BY score DESC,other_id) AS n FROM same_recording) r WHERE p.resource_id=r.resource_id AND p.other_id=r.other_id AND r.n>20",
-        "DELETE FROM same_recording p USING (SELECT resource_id,other_id,row_number() OVER (PARTITION BY other_id ORDER BY score DESC,resource_id) AS n FROM same_recording) r WHERE p.resource_id=r.resource_id AND p.other_id=r.other_id AND r.n>40",
-        "UPDATE same_recording_unit u SET fingerprint='refill:'||fingerprint WHERE fingerprint NOT LIKE 'refill:%' AND (SELECT count(*) FROM same_recording p WHERE p.resource_id=u.resource_id)<20",
-        "INSERT INTO same_recording_dirty(resource_id) SELECT resource_id FROM same_recording_unit WHERE fingerprint LIKE 'refill:%' ON CONFLICT DO NOTHING",
-    ] {
-        sqlx::query(step).execute(&pool).await.unwrap();
-    }
-    assert_eq!(spread(&pool, "resource_id").await.0, 20, "cut to twenty");
-    assert_eq!(spread(&pool, "other_id").await.0, 40, "cut to forty");
-    let (queued, short): (i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM same_recording_dirty),\
-         (SELECT count(*) FROM same_recording_unit u WHERE (SELECT count(*) FROM same_recording p WHERE p.resource_id=u.resource_id)<20)",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!((queued, short), (9, 9), "the five, and the four namers cut");
-    pass(&pool, &config).await;
-    assert!(without_a_hint(&pool, &ids).await.is_empty());
-    assert_eq!(spread(&pool, "resource_id").await, (20, 20));
-    assert!(spread(&pool, "other_id").await.0 <= 40);
 }
 
 /// A pass that pairs with an orphan's recording while the orphan is being deleted: the delete

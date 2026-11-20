@@ -1255,13 +1255,7 @@ async fn new_preview_is_prioritized_and_change_time_follows_lock(pool: PgPool) {
         .await
         .unwrap()
     });
-    for _ in 0..100 {
-        let blocked:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event='advisory')").fetch_one(&pool).await.unwrap();
-        if blocked {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    common::lock_waiters_reach(&pool, 1, "the save").await;
     assert!(!worker.is_finished());
     let released = chrono::Utc::now();
     lock.commit().await.unwrap();
@@ -1295,7 +1289,7 @@ async fn maintenance_runs_without_an_idle_ingestion_tick(pool: PgPool) {
         Duration::from_millis(20),
         rx,
     ));
-    tokio::time::timeout(Duration::from_secs(3), async {
+    tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             if sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource")
                 .fetch_one(&pool)

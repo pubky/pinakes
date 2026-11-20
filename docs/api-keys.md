@@ -122,7 +122,7 @@ cards using it are read. A rising value means the key is wrong, expired or revok
 restart (keys are read only at start; the count resets then). The alert clears six hours after
 the last refusal, or at the restart for GitHub, CourtListener and Discogs, which stop sending a
 refused key until then. Spotify shows refusals while the app
-owner has no Premium plan ([Spotify](sources/spotify.md)).
+owner has no Premium plan.
 With the daemon stopped, `pinakesd --config <path> reextract also-on` queues fresh joins;
 `reextract web official` refreshes stored official-source cards. Start the daemon again and
 check representative cards, not just process health. See [re-extraction](operations.md#database)

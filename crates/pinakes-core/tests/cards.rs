@@ -336,42 +336,57 @@ async fn the_media_route_never_sends_a_link_that_carries_a_credential_to_oembed(
             ))
         }
     }
-    for (policy, uri) in [
+    // Each link with a credential, beside the same link without: only the second is the
+    // provider's to answer for.
+    for (policy, uri, plain) in [
         (
             cards::OembedPolicy::WhenNeeded,
             "https://www.youtube.com/watch?v=abc&token=x",
+            "https://www.youtube.com/watch?v=abc",
         ),
-        (cards::OembedPolicy::Always, "https://vimeo.com/123?sig=x"),
+        (
+            cards::OembedPolicy::Always,
+            "https://vimeo.com/123?sig=x",
+            "https://vimeo.com/123",
+        ),
         (
             cards::OembedPolicy::WhenNeeded,
             "https://vimeo.com/123?key=x",
+            "https://vimeo.com/123",
         ),
     ] {
-        let seen = Arc::new(Seen(Mutex::default()));
-        let mut cfg = Config::default();
-        cfg.media.oembed = policy;
-        let r = CardResolver {
-            kind: "media",
-            config: Arc::new(cfg),
-            web: WebResolver {
-                oembed_policy: Default::default(),
-                cards: None,
-                events: None,
-                config: Default::default(),
-                egress: Egress::with_backends(
-                    Default::default(),
-                    Arc::new(PublicDns),
-                    seen.clone(),
-                ),
-            },
-        };
-        assert!(r.resolve(uri).await.is_ok(), "{uri}");
-        let requests = seen.0.lock().unwrap();
-        assert!(!requests.is_empty(), "{uri}");
-        assert!(
-            requests.iter().all(|r| !r.contains("oembed")),
-            "{uri}: {requests:?}"
-        );
+        for (link, credential) in [(plain, false), (uri, true)] {
+            let seen = Arc::new(Seen(Mutex::default()));
+            let mut cfg = Config::default();
+            cfg.media.oembed = policy;
+            let r = CardResolver {
+                kind: "media",
+                config: Arc::new(cfg),
+                web: WebResolver {
+                    oembed_policy: Default::default(),
+                    cards: None,
+                    events: None,
+                    config: Default::default(),
+                    egress: Egress::with_backends(
+                        common::unpaced_egress_config(),
+                        Arc::new(PublicDns),
+                        seen.clone(),
+                    ),
+                },
+            };
+            let card = r.resolve(link).await.unwrap();
+            let requests = seen.0.lock().unwrap();
+            assert_eq!(
+                requests.iter().any(|r| r.contains("oembed")),
+                !credential,
+                "{link}: {requests:?}"
+            );
+            // The page itself is read from its own site, with or without the provider.
+            assert!(requests.iter().any(|r| r == link), "{link}: {requests:?}");
+            if credential {
+                assert_eq!(card.name.as_deref(), Some("Page"), "{link}");
+            }
+        }
     }
 }
 /// A page that redirects to a link carrying a credential is read there, but the oEmbed endpoint it
@@ -999,6 +1014,37 @@ fn identifier_dates_domains_media_attributes_and_social_excerpt() {
     assert_eq!(d.ttl_secs, 3600);
     let d=cards::activitypub(base.as_str(),&json!({"type":"Note","id":base.as_str(),"content":"unlisted text","to":["https://social.example/followers"],"cc":["https://www.w3.org/ns/activitystreams#Public"]}),&base,86400).unwrap();
     assert!(!serde_json::to_string(&d).unwrap().contains("unlisted text"));
+}
+/// An ActivityPub object makes a card only when the answer came from the link's publisher and
+/// the object's `id` is that publisher's too. Each case breaks one of the two.
+#[test]
+fn an_activitypub_object_is_the_links_publishers_in_answer_and_id() {
+    let uri = "https://social.example/@alice";
+    let object = |id: &str| json!({"type":"Person","id":id,"preferredUsername":"alice"});
+    let own: Url = "https://social.example/users/alice".parse().unwrap();
+    let card = cards::activitypub(
+        uri,
+        &object("https://social.example/users/alice"),
+        &own,
+        3600,
+    )
+    .unwrap();
+    assert_eq!(card.name.as_deref(), Some("alice"));
+    assert_eq!(card.aliases, ["https://social.example/users/alice"]);
+    // The answer came from another publisher; the `id` it states is the link's.
+    let foreign: Url = "https://attacker.example/users/alice".parse().unwrap();
+    assert!(cards::activitypub(
+        uri,
+        &object("https://social.example/users/alice"),
+        &foreign,
+        3600
+    )
+    .is_none());
+    // The link's publisher answered, with an object whose `id` is another publisher's: its
+    // `id` would become an alias of this link.
+    assert!(
+        cards::activitypub(uri, &object("https://victim.example/users/bob"), &own, 3600).is_none()
+    );
 }
 #[sqlx::test(migrations = "../../migrations")]
 async fn bad_identifiers_are_final_missing_and_ap_promotes_to_worker(pool: sqlx::PgPool) {

@@ -489,9 +489,7 @@ async fn fixture(pool: &PgPool) {
         .await
         .unwrap();
         pinakes_core::groups::reconcile(pool, &id, &Default::default()).await;
-        pinakes_core::groups::drain(pool, &Default::default(), 100)
-            .await
-            .unwrap();
+        common::drain_groups(pool, &Default::default()).await;
     }
     // What the books, podcasts and films sources would record: an edition's work, ISBN and
     // pages, a show's Apple ID and GUID, a film's IMDb ID and Wikidata item (the show and the
@@ -627,9 +625,7 @@ async fn fixture(pool: &PgPool) {
             .unwrap();
             pinakes_core::groups::reconcile(pool, &id, &Default::default()).await;
         }
-        pinakes_core::groups::drain(pool, &Default::default(), 100)
-            .await
-            .unwrap();
+        common::drain_groups(pool, &Default::default()).await;
     }
     // Seed labels, by the seed identity.
     for (uri, labels) in [

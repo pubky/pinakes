@@ -1,7 +1,7 @@
 //! The `musicbrainz_entity` also-on source.
 use crate::{
     also_on::{Context, Found, Key, Source, Subject},
-    hubs::{self, musicbrainz, MbKind},
+    hubs::{self, musicbrainz, wikidata, MbKind},
     music::Level,
 };
 use anyhow::Result;
@@ -173,5 +173,116 @@ impl MusicBrainzEntitySource {
             found.facts.push(fact);
         }
         Ok(found)
+    }
+}
+
+/// The Wikidata item a MusicBrainz artist or release group may be keyed by: the one item its own
+/// current `wikidata` URL relations name (`musicbrainz::own_item`, the item link parsed by
+/// `wikidata::item_link`). Relations that name several items name none. A recording or a
+/// release has none: MusicBrainz relates Wikidata items to artists and release groups (and
+/// works), and an item a recording's or release's relation named would be its song's or its
+/// album's, another level's (a key never crosses levels).
+fn own_wikidata_item(entity: &musicbrainz::Entity) -> Option<String> {
+    if !matches!(entity.kind, MbKind::Artist | MbKind::ReleaseGroup) {
+        return None;
+    }
+    match musicbrainz::own_item(&entity.urls) {
+        musicbrainz::OwnItem::Item(qid) => Some(qid),
+        musicbrainz::OwnItem::None | musicbrainz::OwnItem::Unclear => None,
+    }
+}
+/// The `wikidata:` key of a MusicBrainz artist or release group ([`own_wikidata_item`], made by
+/// `hubs::key::wikidata` as every producer makes it), when that item, read back, is exactly an
+/// item of the entity's kind (`music_enrichment::ItemKind::of`: an artist's for an artist, a
+/// release group's for a release group) that names this MBID and no other for its level (P434,
+/// P436). A key is stricter than the enrichment's text and image: an item that is a work's too
+/// (a single's song's) or carries no
+/// identifier yet keys nothing, so a key never joins an album to a song or an artist to anything
+/// but itself. An item that is unknown, gone or too large to read keys nothing; a busy Wikidata
+/// is an error.
+async fn own_wikidata_key(
+    egress: &crate::resolver::egress::Egress,
+    entity: &musicbrainz::Entity,
+) -> Result<Option<Key>> {
+    let Some(qid) = own_wikidata_item(entity) else {
+        return Ok(None);
+    };
+    let item = match wikidata::items(egress, std::slice::from_ref(&qid)).await {
+        Ok(items) => items.into_iter().find(|i| i.qid == qid),
+        Err(e)
+            if crate::resolver::egress::over_cap(&e)
+                || e.downcast_ref::<crate::hubs::Gone>().is_some() =>
+        {
+            None
+        }
+        Err(e) => return Err(e),
+    };
+    Ok(item
+        .filter(|item| keys_entity(entity, item))
+        .and_then(|item| hubs::key::wikidata(&item.qid))
+        .map(|key| Key {
+            key,
+            via: "musicbrainz".into(),
+        }))
+}
+/// Whether `item` may key `entity` ([`own_wikidata_key`]): exactly of its kind, naming this one
+/// MBID at its level; for a release group, naming no recording either (P4404): an album's item
+/// that also carries a recording's ID is a single's and its track's at once, and the page's own
+/// key takes only an item that is the album's alone.
+fn keys_entity(entity: &musicbrainz::Entity, item: &wikidata::Item) -> bool {
+    use crate::music_enrichment::{mbid_property, ItemKind};
+    ItemKind::of(item) == ItemKind::of_entity(entity.kind)
+        && item.id(mbid_property(entity.kind)) == [entity.mbid.as_str()]
+        && (entity.kind != MbKind::ReleaseGroup || item.id("P4404").is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An artist's or release group's own `wikidata` relation names the item it may be keyed
+    /// by; a recording's or a release's never does, and relations that name no item, or
+    /// several, name none.
+    #[test]
+    fn own_wikidata_items_stay_at_their_level() {
+        let entity = |kind: MbKind, urls: &[&str]| musicbrainz::Entity {
+            kind,
+            mbid: "8e8a594f-2175-38c7-a871-abb68ec363e7".into(),
+            title: None,
+            urls: urls
+                .iter()
+                .map(|u| musicbrainz::UrlRelation {
+                    kind: "wikidata".into(),
+                    url: (*u).into(),
+                })
+                .collect(),
+            isrcs: vec![],
+            barcode: None,
+            release_group: None,
+            artist: None,
+            artist_ids: vec![],
+            disambiguation: None,
+            video: false,
+            length_ms: None,
+            artist_type: None,
+            about: Default::default(),
+        };
+        let item = "https://www.wikidata.org/wiki/Q283221";
+        for kind in [MbKind::Artist, MbKind::ReleaseGroup] {
+            assert_eq!(
+                own_wikidata_item(&entity(kind, &[item])).as_deref(),
+                Some("Q283221")
+            );
+        }
+        for kind in [MbKind::Recording, MbKind::Release] {
+            assert!(own_wikidata_item(&entity(kind, &[item])).is_none());
+        }
+        for urls in [
+            &["https://www.wikidata.org/wiki/Property:P18"][..],
+            &[item, "https://www.wikidata.org/wiki/Q1"][..],
+            &[][..],
+        ] {
+            assert!(own_wikidata_item(&entity(MbKind::ReleaseGroup, urls)).is_none());
+        }
     }
 }

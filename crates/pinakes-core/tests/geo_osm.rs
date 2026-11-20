@@ -403,13 +403,20 @@ async fn unknown_objects_are_missing_429_defers_and_category_filters(pool: PgPoo
         0
     );
     state.limited.store(false, Ordering::SeqCst);
-    // Without Nominatim's answer an object is missing; the editing API is never asked.
+    // Without Nominatim's answer an object is missing. The resolver asks the one server it is
+    // configured with: its lookup for each object, and no other path (so nothing in place of
+    // the lookup, such as the editing API's `/api/0.6/…`).
+    let asked = state.calls.lock().await.len();
     for kind in ["node", "way", "relation"] {
         let doc = resolver
             .resolve(&format!("https://www.openstreetmap.org/{kind}/222"))
             .await
             .unwrap();
         assert_eq!(doc.status, Status::Missing);
+    }
+    let lookups = state.calls.lock().await[asked..].concat();
+    for id in ["N222", "W222", "R222"] {
+        assert!(lookups.iter().any(|l| l == id), "{id}: {lookups:?}");
     }
     assert!(state.paths.lock().await.is_empty());
     let uri = "https://www.openstreetmap.org/node/240109189";

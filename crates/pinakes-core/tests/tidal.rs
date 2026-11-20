@@ -4,7 +4,6 @@
 use pinakes_core::{
     also_on::{self, SourceOptions},
     config::Config,
-    groups,
     resolver::egress::{Egress, FetchOptions, Fetched, Transport},
 };
 use std::{
@@ -336,9 +335,7 @@ async fn a_tidal_barcode_joins_apple_music_and_deezer(pool: sqlx::PgPool) {
             "https://www.deezer.com/album/320429237 deezer upc:4018939306052",
         ]
     );
-    groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     let group = "SELECT coalesce(group_id,'-') FROM group_unit WHERE resource_id=$1";
     let joined = rows(&pool, group, &hydra).await;
     assert_ne!(joined, ["-"]);

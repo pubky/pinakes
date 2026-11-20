@@ -34,8 +34,9 @@ pub struct Answer {
     pub body: Vec<u8>,
 }
 
-/// Answers every recorded URL as it was recorded, a Wikidata search nobody recorded with no
-/// hits, and anything else with a test failure; records each request.
+/// Answers every recorded URL as it was recorded, a read of Wikidata items with the recorded
+/// entities answer that holds them all, a Wikidata search nobody recorded with no hits, and
+/// anything else with a test failure; records each request.
 pub struct Recorded {
     pub answers: BTreeMap<String, Answer>,
     pub seen: Mutex<Vec<String>>,
@@ -243,14 +244,22 @@ impl Transport for Recorded {
         });
         let answer = match self.answers.get(url.as_str()).cloned().or(search) {
             Some(answer) => answer,
-            // The recorded entities answer holds every item the tests read.
-            None if url.host_str() == Some("www.wikidata.org") && query("ids") => self
-                .answers
-                .iter()
-                .find(|(u, _)| u.contains("action=wbgetentities"))
-                .unwrap()
-                .1
-                .clone(),
+            // A read of items is answered by a recorded entities answer that holds every item
+            // asked for (as an item or as missing).
+            None if url.host_str() == Some("www.wikidata.org") && query("ids") => {
+                let asked = param(url, "ids").unwrap_or_default();
+                self.answers
+                    .iter()
+                    .filter(|(u, _)| u.contains("action=wbgetentities"))
+                    .find(|(_, a)| {
+                        serde_json::from_slice::<serde_json::Value>(&a.body).is_ok_and(|v| {
+                            asked.split('|').all(|id| v["entities"].get(id).is_some())
+                        })
+                    })
+                    .unwrap_or_else(|| panic!("unrecorded request {url}"))
+                    .1
+                    .clone()
+            }
             None if url.host_str() == Some("www.wikidata.org") && query("srsearch") => Answer {
                 status: 200,
                 location: None,

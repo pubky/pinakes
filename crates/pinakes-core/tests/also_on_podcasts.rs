@@ -313,6 +313,7 @@ async fn a_copy_that_claims_a_shows_apple_id_joins_nothing_of_it() {
 
 #[tokio::test]
 async fn a_refused_podcast_index_key_fails_nothing() {
+    let _turn = common::REFUSALS.lock().await;
     // Podcast Index refuses the key (401): everything else still counts.
     let recorded = Recorded::with_recorded(&[("podcasts", "pi-byitunesid-401")]);
     let cx = cx(recorded.clone(), indexed());
@@ -332,8 +333,7 @@ async fn a_refused_podcast_index_key_fails_nothing() {
     assert_eq!(found.retry_after, None);
     // Part of the answer is missing: nothing the source recorded before is deleted.
     assert_eq!(found.keep_stored, pinakes_core::also_on::Keep::All);
-    // The refusal is counted where an alert reads it; a rate limit (429) is not. No other test
-    // here has Podcast Index refuse.
+    // The refusal is counted where an alert reads it; a rate limit (429) is not.
     assert!(common::token_refusals("podcast_index") > before);
     let limited = Recorded::with(&[(
         "https://api.podcastindex.org/api/1.0/podcasts/byitunesid?id=1200361736",
@@ -368,6 +368,7 @@ async fn a_refused_podcast_index_key_fails_nothing() {
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_refused_podcast_index_key_keeps_an_index_cards_apple_key(pool: sqlx::PgPool) {
     use pinakes_core::{also_on, model::ResourceMeta, store};
+    let _turn = common::REFUSALS.lock().await;
     let uri = "https://podcastindex.org/podcast/920666";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
     let mut doc = ResourceMeta::new(uri, "media", 86400);

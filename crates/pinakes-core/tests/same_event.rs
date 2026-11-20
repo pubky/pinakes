@@ -67,8 +67,41 @@ async fn save(pool: &PgPool, doc: &ResourceMeta) -> String {
     id
 }
 
+/// The pass, until nothing is due. A unit that stays due fails the test instead of hanging it.
 async fn pass(pool: &PgPool, config: &Config) {
-    while same_event::drain(pool, config, 200).await.unwrap() > 0 {}
+    for _ in 0..10_000 {
+        if same_event::drain(pool, config, 200).await.unwrap() == 0 {
+            return;
+        }
+    }
+    panic!("the same-event pass still has work after 10000 rounds");
+}
+
+/// How many of `ids` have a unit in a group, of how many units they have.
+async fn grouped(pool: &PgPool, ids: &[String]) -> (i64, i64) {
+    sqlx::query_as("SELECT count(group_id),count(*) FROM group_unit WHERE resource_id=ANY($1)")
+        .bind(ids)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// The keys stored for any resource.
+async fn key_count(pool: &PgPool) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM resource_key")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// The ids on a page of search results.
+fn listed(page: &Value) -> Vec<&str> {
+    page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap())
+        .collect()
 }
 
 async fn get(config: &Config, pool: &PgPool, path: &str) -> Value {
@@ -113,6 +146,7 @@ async fn one_meetup_on_three_sites_names_the_others(pool: PgPool) {
         Some(north(&WATTWIL, 400.0)),
     )
     .await;
+    let keys = key_count(&pool).await;
     pass(&pool, &Config::default()).await;
     let c = card(&pool, &meetup).await;
     let mut others = named(&c);
@@ -133,13 +167,33 @@ async fn one_meetup_on_three_sites_names_the_others(pool: PgPool) {
         .map(|m| m["score"].as_f64().unwrap())
         .collect();
     assert!(scores.windows(2).all(|w| w[0] >= w[1]), "best first");
-    assert_eq!(c["maybe_same"], c["maybe_same"]);
     // Symmetric: each names the meetup.
     for id in [&luma, &site] {
         assert!(named(&card(&pool, id).await).contains(&meetup.as_str()));
     }
-    // A hint, never a group: each keeps its own card and no group forms from it.
-    assert!(c["group"].is_null());
+    // A hint, never a group: with the pairs stored, every group is computed anew, and each
+    // event still has its own card, no group and no key.
+    common::regroup_all(&pool, &Config::default().groups).await;
+    let hinted = [meetup.clone(), luma.clone(), site.clone()];
+    assert_eq!(grouped(&pool, &hinted).await, (0, 3));
+    assert_eq!(key_count(&pool).await, keys);
+    for id in &hinted {
+        let own = card(&pool, id).await;
+        assert!(own["group"].is_null(), "{own}");
+        assert!(!named(&own).is_empty(), "the hint stands: {own}");
+    }
+    // Nothing is collapsed: a search by group lists each of the three.
+    let collapsed = get(
+        &Config::default(),
+        &pool,
+        "/v1/search?type=Event&collapse=group",
+    )
+    .await;
+    let mut rows = listed(&collapsed);
+    rows.sort();
+    let mut all: Vec<&str> = hinted.iter().map(String::as_str).collect();
+    all.sort();
+    assert_eq!(rows, all);
     // Search cards carry it too.
     let page = get(&Config::default(), &pool, "/v1/search?type=Event").await;
     let row = page["items"]
@@ -176,7 +230,23 @@ async fn a_card_shows_three_and_its_details_ten(pool: PgPool) {
     // A resource read names up to ten; a search card up to three.
     let c = card(&pool, &first).await;
     assert_eq!(c["maybe_same"].as_array().unwrap().len(), 10);
-    // Nothing is counted: no group, and search lists every page.
+    // Nothing is counted: with every group computed anew after the pass, no unit has a group,
+    // and search lists every page, collapsed by group or not.
+    common::regroup_all(&pool, &Config::default().groups).await;
+    let (in_a_group, units): (i64, i64) =
+        sqlx::query_as("SELECT count(group_id),count(*) FROM group_unit")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((in_a_group, units), (0, 12));
+    assert!(card(&pool, &first).await["group"].is_null());
+    let collapsed = get(
+        &Config::default(),
+        &pool,
+        "/v1/search?type=Event&collapse=group",
+    )
+    .await;
+    assert_eq!(listed(&collapsed).len(), 12);
     let page = get(&Config::default(), &pool, "/v1/search?type=Event").await;
     assert_eq!(page["items"].as_array().unwrap().len(), 12);
     let row = page["items"]
@@ -1355,104 +1425,6 @@ async fn paired_units_that_expire_together_are_dropped_by_the_sweep(pool: PgPool
     );
 }
 
-/// A database damaged before the fix (units whose lists the old trimming or a cascade emptied,
-/// with current fingerprints and no dirty row) is repaired by the upgrade's step: every unit with
-/// fewer than twenty pairs is marked to refill and its resource queued, once.
-#[sqlx::test(migrations = "../../migrations")]
-async fn the_upgrade_requeues_units_left_with_short_lists(pool: PgPool) {
-    let ids = crowd(&pool, "Bitcoin Meetup Wattwil", soon(), &WATTWIL, 30).await;
-    pass(&pool, &Config::default()).await;
-    assert_eq!(most(&pool, "unit_id").await, 20);
-    // The damage: five units lose their lists, as the old cap trimmed them, and nothing marks them.
-    sqlx::query("DELETE FROM same_event WHERE unit_id=ANY($1)")
-        .bind(&ids[..5])
-        .execute(&pool)
-        .await
-        .unwrap();
-    pass(&pool, &Config::default()).await;
-    for id in &ids[..5] {
-        assert!(stored(&pool, id).await.is_empty(), "nothing queued them");
-    }
-    // The upgrade's step (upgrade-same-event-refill-5.sql).
-    sqlx::query("UPDATE same_event_unit u SET fingerprint='refill:'||fingerprint WHERE fingerprint NOT LIKE 'refill:%' AND (SELECT count(*) FROM same_event p WHERE p.unit_id=u.unit_id)<20")
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO same_event_dirty(resource_id) SELECT DISTINCT resource_id FROM same_event_unit WHERE fingerprint LIKE 'refill:%' ON CONFLICT DO NOTHING")
-        .execute(&pool)
-        .await
-        .unwrap();
-    let queued: i64 = sqlx::query_scalar("SELECT count(*) FROM same_event_dirty")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(queued, 5, "the five, not the full lists");
-    pass(&pool, &Config::default()).await;
-    for id in &ids[..5] {
-        assert_eq!(stored(&pool, id).await.len(), 20, "{id} refilled");
-    }
-}
-
-/// A database from the pass before the caps (up to a hundred pairs per unit, and nothing bounding
-/// the namers of one unit) is repaired by the upgrade's steps: every list is cut to the best
-/// twenty and every unit's namers to forty, as the pass ranks them, and every unit left with fewer
-/// than twenty pairs (its list emptied by the old cap or a cascade, or cut now) is marked to
-/// refill and its resource queued, once; the pass then leaves none without a hint.
-#[sqlx::test(migrations = "../../migrations")]
-async fn the_upgrade_cuts_the_old_lists_to_the_caps_and_requeues_the_short_ones(pool: PgPool) {
-    let ids = crowd(&pool, "Bitcoin Meetup Wattwil", soon(), &WATTWIL, 101).await;
-    pass(&pool, &Config::default()).await;
-    assert_eq!(most(&pool, "unit_id").await, 20);
-    // The old pass's graph: each of 101 units names the hundred others (its cap) and is named by
-    // them (no cap); the fingerprints are current and nothing is queued, so the pass leaves it.
-    sqlx::query("DELETE FROM same_event")
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query(
-        "INSERT INTO same_event(unit_id,other_id,score) \
-         SELECT a.unit_id,b.unit_id,1 FROM same_event_unit a JOIN same_event_unit b ON b.unit_id<>a.unit_id",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-    pass(&pool, &Config::default()).await;
-    assert_eq!(most(&pool, "unit_id").await, 100);
-    assert_eq!(most(&pool, "other_id").await, 100);
-    // The upgrade's steps (upgrade-same-event-refill-5.sql).
-    for step in [
-        "DELETE FROM same_event p USING (SELECT unit_id,other_id,row_number() OVER (PARTITION BY unit_id ORDER BY score DESC,other_id) AS n FROM same_event) r WHERE p.unit_id=r.unit_id AND p.other_id=r.other_id AND r.n>20",
-        "DELETE FROM same_event p USING (SELECT unit_id,other_id,row_number() OVER (PARTITION BY other_id ORDER BY score DESC,unit_id) AS n FROM same_event) r WHERE p.unit_id=r.unit_id AND p.other_id=r.other_id AND r.n>40",
-        "UPDATE same_event_unit u SET fingerprint='refill:'||fingerprint WHERE fingerprint NOT LIKE 'refill:%' AND (SELECT count(*) FROM same_event p WHERE p.unit_id=u.unit_id)<20",
-        "INSERT INTO same_event_dirty(resource_id) SELECT DISTINCT resource_id FROM same_event_unit WHERE fingerprint LIKE 'refill:%' ON CONFLICT DO NOTHING",
-    ] {
-        sqlx::query(step).execute(&pool).await.unwrap();
-    }
-    assert_eq!(most(&pool, "unit_id").await, 20, "cut to twenty");
-    assert_eq!(most(&pool, "other_id").await, 40, "cut to forty");
-    // Every unit kept the twenty lowest ids, so those twenty keep their forty lowest namers and
-    // the sixty units after those lose every pair: those are queued, no other.
-    let (queued, short): (i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM same_event_dirty),\
-         (SELECT count(*) FROM same_event_unit u WHERE (SELECT count(*) FROM same_event p WHERE p.unit_id=u.unit_id)<20)",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!((queued, short), (60, 60));
-    pass(&pool, &Config::default()).await;
-    for id in &ids {
-        assert!(!stored(&pool, id).await.is_empty(), "{id} has no hint");
-    }
-    assert_eq!(most(&pool, "unit_id").await, 20);
-    assert!(most(&pool, "other_id").await <= 40);
-    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM same_event_dirty")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(left, 0, "the refills settled");
-}
-
 /// A pass that pairs with an orphan's unit while the orphan is being deleted: the delete locks the
 /// orphan's units before it collects their namers, so the pass's pair (committed while the delete
 /// waits for it) is seen and its owner marked; without the lock the cascade would take the pair
@@ -1607,8 +1579,8 @@ async fn a_read_in_a_dense_crowd_examines_a_bounded_number_of_candidates(pool: P
 
 /// The caps are the operator's: with `limits.same_event_incoming_kept = 3`, the pass leaves no
 /// unit named by more than three (so in a crowd of twelve the units read after the first three
-/// find every other full and name none: a cap that small is the operator's choice), and
-/// `limits.same_event_drop_batch` is the sweep's step.
+/// find every other full and name none: a cap that small is the operator's choice), and with
+/// `limits.same_event_drop_batch = 2` the sweep drops five expired units in three transactions.
 #[sqlx::test(migrations = "../../migrations")]
 async fn the_caps_come_from_the_limits(pool: PgPool) {
     let config = Config::from_value(
@@ -1629,6 +1601,29 @@ async fn the_caps_come_from_the_limits(pool: PgPool) {
     }
     assert!((3..12).contains(&with), "{with} units with a hint");
     assert_eq!(same_event::sweep(&pool, &config).await.unwrap(), 0);
+    // Five units that started three days ago, named by none: the sweep drops them two to a
+    // transaction, and each transaction that drops any moves the search revision once.
+    sqlx::query("INSERT INTO same_event_unit(unit_id,resource_id,fingerprint,start_at,name_key,numbers,all_day) \
+        SELECT 'expired/'||i,$1,'f',now()-interval '3 days','bitcoin meetup wattwil','{}',false FROM generate_series(1,5) i")
+        .bind(&ids[0])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let revision = || async {
+        sqlx::query_scalar::<_, i64>("SELECT revision FROM search_revision")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    let before = revision().await;
+    assert_eq!(same_event::sweep(&pool, &config).await.unwrap(), 0);
+    assert_eq!(revision().await - before, 3, "2+2+1: three transactions");
+    let expired: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM same_event_unit WHERE unit_id LIKE 'expired/%'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(expired, 0);
     assert!(
         Config::from_value(serde_json::json!({"limits": {"same_event_incoming_kept": 0}})).is_err()
     );

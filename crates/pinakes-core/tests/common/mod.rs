@@ -4,6 +4,7 @@
 //! through the router (`get`, `get_from`), a saved card, a log buffer.
 #![allow(dead_code)]
 pub mod media;
+pub mod spotify_api;
 use serde_json::Value;
 use std::collections::BTreeSet;
 
@@ -15,6 +16,10 @@ pub fn token_refusals(source: &str) -> u64 {
         .find(|(s, _)| *s == source)
         .map_or(0, |(_, n)| n)
 }
+/// Held by a test while it asserts an exact difference of `token_refusals`, and by every other
+/// test of the same file that has that source's credential refused: the counter is the
+/// process's, so only tests that take turns can tell their own refusals from another's.
+pub static REFUSALS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// A schema with its `$ref` followed; a dangling reference is an error and checks nothing.
 fn resolve<'a>(doc: &'a Value, schema: &'a Value, at: &str, errors: &mut Vec<String>) -> &'a Value {
@@ -264,7 +269,7 @@ pub async fn source_card(
     };
     Some(source.resolve(&cx, uri).await.unwrap())
 }
-/// Recorded answers by exact URL; anything else is a 404.
+/// Recorded answers by exact URL; a request for anything else fails the test.
 struct Recorded(std::collections::BTreeMap<String, (u16, String, Vec<u8>)>);
 #[async_trait::async_trait]
 impl pinakes_core::resolver::egress::Transport for Recorded {
@@ -273,11 +278,11 @@ impl pinakes_core::resolver::egress::Transport for Recorded {
         url: &url::Url,
         _: &[std::net::SocketAddr],
     ) -> anyhow::Result<pinakes_core::resolver::egress::Fetched> {
-        let (status, kind, body) = self.0.get(url.as_str()).cloned().unwrap_or((
-            404,
-            "text/html".into(),
-            b"not found".to_vec(),
-        ));
+        let (status, kind, body) = self
+            .0
+            .get(url.as_str())
+            .cloned()
+            .unwrap_or_else(|| panic!("unrecorded request {url}"));
         Ok(fetched(url.clone(), status, kind, body))
     }
 }
@@ -335,6 +340,39 @@ pub async fn drain_groups(pool: &sqlx::PgPool, cfg: &pinakes_core::groups::Group
             .unwrap_or_else(|e| panic!("grouping {id}: {e:#}"));
         tx.commit().await.unwrap();
     }
+}
+/// Every unit's group computed anew, as after a change of the grouping policy
+/// (`groups::configure`): what grouping last read of each resource is forgotten, so no run is
+/// skipped as unchanged, each resource with a unit is marked, and the runs are drained
+/// (`drain_groups`). For a test of what grouping never reads: the run after the write under test
+/// is a real one. Fails when a run is left waiting (more than a hundred resources, or one not due).
+pub async fn regroup_all(pool: &sqlx::PgPool, cfg: &pinakes_core::groups::GroupConfig) {
+    sqlx::query("DELETE FROM group_input")
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO group_dirty(resource_id) SELECT DISTINCT resource_id FROM group_unit ON CONFLICT DO NOTHING")
+        .execute(pool)
+        .await
+        .unwrap();
+    drain_groups(pool, cfg).await;
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM group_dirty")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0, "a group run is left waiting");
+}
+/// Whether the resources `ids`, of one unit each, share one group: the control of a test about
+/// what grouped members do not do, or about what does not group.
+pub async fn one_group(pool: &sqlx::PgPool, ids: &[&str]) -> bool {
+    let ids: Vec<String> = ids.iter().map(|id| (*id).to_owned()).collect();
+    let groups: Vec<Option<String>> =
+        sqlx::query_scalar("SELECT group_id FROM group_unit WHERE resource_id=ANY($1)")
+            .bind(&ids)
+            .fetch_all(pool)
+            .await
+            .unwrap();
+    groups.len() == ids.len() && groups[0].is_some() && groups.iter().all(|g| *g == groups[0])
 }
 /// This thread's CPU time, for a bound on the cost of a hostile input: it holds under any load on
 /// the machine, where a wall-clock bound does not.

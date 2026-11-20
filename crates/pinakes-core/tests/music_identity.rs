@@ -5,7 +5,6 @@ use pinakes_core::{
     also_on::{self, Found, Key, Link},
     api::{self, AppState},
     config::Config,
-    groups,
     model::ResourceMeta,
     store,
 };
@@ -71,7 +70,7 @@ async fn held_exact_edges_share_keys_in_both_directions(pool: PgPool) {
         .await
         .unwrap();
     }
-    groups::drain(&pool, &cfg.groups, 100).await.unwrap();
+    common::drain_groups(&pool, &cfg.groups).await;
     let app = api::router(AppState::new(pool.clone(), cfg).unwrap());
     let mut group = None;
     for id in [&a, &b, &c] {

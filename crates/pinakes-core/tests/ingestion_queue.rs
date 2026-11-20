@@ -243,7 +243,7 @@ async fn repeated_tag_puts_and_dels_are_harmless(pool: PgPool) {
     assert_eq!(tags(&pool, &seeds).await.len(), 2);
 }
 #[sqlx::test(migrations = "../../migrations")]
-async fn epoch_headers_length_reset_and_transaction_rollback(pool: PgPool) {
+async fn epoch_headers_length_reset_and_a_refused_page_writes_nothing(pool: PgPool) {
     let limits = IngestConfig::default();
     let metrics = Metrics::new().unwrap();
     let a = change("https://example.org/a", "author-a", "/pub/app/tags/a");
@@ -311,12 +311,39 @@ async fn epoch_headers_length_reset_and_transaction_rollback(pool: PgPool) {
     assert_eq!(keyed, [identity(&a.uri).unwrap().0]);
     assert_eq!(ingest::cursor(&pool, "fixture").await.unwrap().cursor, 3);
     assert_eq!(metrics.ingest_rejected.with_label_values(&["uri"]).get(), 1);
+    // The same page again, from the cursor it was first asked with: not applied, not counted.
     assert!(
         !ingest::apply(&pool, "fixture", &saved, &invalid, &limits, &metrics)
             .await
             .unwrap()
     );
     assert_eq!(metrics.ingest_rejected.with_label_values(&["uri"]).get(), 1);
+    assert_eq!(refs(&pool).await, 2);
+    // A page whose next cursor does not follow from the one asked is refused whole: an error,
+    // none of its lines written, the cursor where it was.
+    let saved = ingest::cursor(&pool, "fixture").await.unwrap();
+    let mut late = a.clone();
+    late.object_path = "/pub/app/tags/late".into();
+    late.label = Some("late".into());
+    let skipping = FeedPage {
+        page: Changes {
+            lines: vec![late],
+            next_cursor: saved.cursor + 2,
+            skipped: Default::default(),
+        },
+        epoch: None,
+        length: saved.cursor + 2,
+    };
+    let error = ingest::apply(&pool, "fixture", &saved, &skipping, &limits, &metrics)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("cursor progression"),
+        "{error:#}"
+    );
+    assert_eq!(refs(&pool).await, 2);
+    let after = ingest::cursor(&pool, "fixture").await.unwrap();
+    assert_eq!((after.cursor, after.epoch), (saved.cursor, saved.epoch));
 }
 /// A feed reset is logged by the Nexus's host: its user info, path and query stay out of the
 /// line, whatever the URL holds.
@@ -928,8 +955,8 @@ async fn answers_about_the_link_still_dead_letter(pool: PgPool) {
 async fn durable_queue_backoff_dead_letter_refresh_and_fencing(pool: PgPool) {
     let cfg = QueueConfig {
         max_failures: 2,
-        backoff_secs: 2,
-        max_backoff_secs: 10,
+        backoff_secs: 60,
+        max_backoff_secs: 300,
         ..Default::default()
     };
     let id = store::ensure_resource(&pool, "https://example.org/")
@@ -947,7 +974,9 @@ async fn durable_queue_backoff_dead_letter_refresh_and_fencing(pool: PgPool) {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert!(seconds > 1.0 && seconds <= 2.0);
+    // The first backoff, less the time since the failure was written (half of it at most, so a
+    // slow machine does not fail this).
+    assert!(seconds > 30.0 && seconds <= 60.0, "{seconds}");
     sqlx::query("UPDATE resource SET next_attempt_at=now()-interval '1 second'")
         .execute(&pool)
         .await
@@ -967,15 +996,15 @@ async fn durable_queue_backoff_dead_letter_refresh_and_fencing(pool: PgPool) {
         .await
         .unwrap();
     assert!(queue::claim(&pool, "web", &cfg).await.unwrap().is_none());
-    assert_eq!(queue::backoff(&cfg, 1), 2);
-    assert_eq!(queue::backoff(&cfg, 2), 4);
-    assert_eq!(queue::backoff(&cfg, 99), 10);
+    assert_eq!(queue::backoff(&cfg, 1), 60);
+    assert_eq!(queue::backoff(&cfg, 2), 120);
+    assert_eq!(queue::backoff(&cfg, 99), 300);
     sqlx::query("UPDATE resource SET dead_letter=false,next_attempt_at=now(),attempts=0")
         .execute(&pool)
         .await
         .unwrap();
     let third = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
-    // A worker completing an expired lease cannot overwrite a newer worker's result.
+    // A worker whose link was claimed again since (`first`, two claims ago) writes nothing.
     queue::run_job(&pool, &FakeResolver { fail: false }, &cfg, &first)
         .await
         .unwrap();
@@ -993,6 +1022,82 @@ async fn durable_queue_backoff_dead_letter_refresh_and_fencing(pool: PgPool) {
         queue::claim(&pool, "web", &cfg).await.unwrap().unwrap().id,
         id
     );
+}
+/// A lease that ran out (its worker died, or hangs) is taken by the next claim, once; a held
+/// lease is not. The worker that held the old lease is fenced by the claim's generation: what it
+/// finishes afterwards, as a card or as a failure, changes nothing.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_expired_lease_is_retaken_once_and_the_old_worker_is_fenced(pool: PgPool) {
+    let cfg = QueueConfig::default();
+    let id = store::ensure_resource(&pool, "https://example.org/leased")
+        .await
+        .unwrap();
+    let old = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    assert_eq!(old.id, id);
+    // A lease that still holds keeps every other worker out.
+    assert!(queue::claim(&pool, "web", &cfg).await.unwrap().is_none());
+    sqlx::query("UPDATE resource SET lease_until=now()-interval '1 second' WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let new = queue::claim(&pool, "web", &cfg)
+        .await
+        .unwrap()
+        .expect("an expired lease is claimed again");
+    assert_eq!(
+        (new.id.as_str(), new.generation),
+        (id.as_str(), old.generation + 1)
+    );
+    assert!(
+        queue::claim(&pool, "web", &cfg).await.unwrap().is_none(),
+        "the expired lease was taken twice"
+    );
+    // The link's status, attempts, whether a lease holds it, generation and last error.
+    let row = || {
+        let (pool, id) = (pool.clone(), id.clone());
+        async move {
+            sqlx::query_as::<_, (String, i32, bool, i64, Option<String>)>(
+                "SELECT status,attempts,coalesce(lease_until>now(),false),generation,last_error FROM resource WHERE id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let held = ("pending".to_owned(), 0, true, new.generation, None);
+    assert_eq!(row().await, held);
+    // The old worker finishes late, with a card and then with a failure: neither is written,
+    // and the new worker's lease stays.
+    queue::run_job(&pool, &FakeResolver { fail: false }, &cfg, &old)
+        .await
+        .unwrap();
+    assert_eq!(row().await, held);
+    queue::run_job(&pool, &FakeResolver { fail: true }, &cfg, &old)
+        .await
+        .unwrap();
+    queue::failed(&pool, &old, &cfg, "parse").await.unwrap();
+    assert_eq!(row().await, held);
+    let name = || {
+        let (pool, id) = (pool.clone(), id.clone());
+        async move {
+            sqlx::query_scalar::<_, Option<String>>("SELECT doc->>'name' FROM resource WHERE id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(name().await, None, "the fenced worker stored a card");
+    // The worker that holds the lease finishes the job.
+    queue::run_job(&pool, &FakeResolver { fail: false }, &cfg, &new)
+        .await
+        .unwrap();
+    let done = row().await;
+    assert_eq!((done.0.as_str(), done.1), ("ok", 0));
+    assert_eq!(name().await.as_deref(), Some("Resolved once"));
+    assert!(queue::claim(&pool, "web", &cfg).await.unwrap().is_none());
 }
 #[sqlx::test(migrations = "../../migrations")]
 async fn documents_promote_spatial_time_type_and_category_columns(pool: PgPool) {
@@ -1935,15 +2040,25 @@ async fn resolver_panic_is_a_failed_job_and_next_batch_can_run(pool: PgPool) {
         .await
         .unwrap();
     let resolver = PanicOnce(std::sync::atomic::AtomicBool::new(true));
-    let job = queue::Job {
-        id: id.clone(),
-        uri: "https://example.org/poison".into(),
-        generation: 0,
-        attempts: 0,
-    };
+    // Claimed as a worker claims it, so the job holds a lease when its resolver panics.
+    let job = queue::claim(&pool, "web", &QueueConfig::default())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.id, id);
     queue::run_batch(&pool, &resolver, &QueueConfig::default(), &[job])
         .await
         .unwrap();
+    // The poisoned link is a failed job like any other: one attempt, its lease given back, due
+    // again after the backoff, and no dead letter yet.
+    let poisoned: (String, i32, bool, bool, bool) = sqlx::query_as(
+        "SELECT status,attempts,lease_until IS NULL,dead_letter,next_attempt_at>now() FROM resource WHERE id=$1",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(poisoned, ("error".into(), 1, true, false, true));
     let id = store::ensure_resource(&pool, "https://example.org/healthy")
         .await
         .unwrap();
@@ -2228,13 +2343,15 @@ async fn reextract_requeues_the_selected_routes_without_validators(pool: PgPool)
 /// Aliases an earlier build made outlive its rules until `reextract` checks them: a LinkedIn
 /// `/posts/` link and a Reddit comment's permalink, once aliases of the activity and the post,
 /// answer for themselves again and are re-queued, each with an `aliased` line naming itself; a
-/// post spelling under a stale root moves to the post's root. A page's canonical and an alias
-/// the rules still make stay.
+/// post spelling under a stale root moves to the post's root, and an alias the rules still make
+/// stays. Each service's links are checked while its source is in the build. What `reextract`
+/// does with any alias, whatever made it, is in
+/// `reextract_releases_moves_and_keeps_aliases_by_the_rules_of_their_uris`.
 #[sqlx::test(migrations = "../../migrations")]
 async fn reextract_moves_or_releases_the_aliases_rules_no_longer_make(pool: PgPool) {
-    if pinakes_core::sources::by_name("linkedin").is_none()
-        || pinakes_core::sources::by_name("reddit").is_none()
-    {
+    let linkedin = pinakes_core::sources::by_name("linkedin").is_some();
+    let reddit = pinakes_core::sources::by_name("reddit").is_some();
+    if !linkedin && !reddit {
         return;
     }
     let post = "https://www.reddit.com/comments/1k3d0pk/";
@@ -2244,26 +2361,20 @@ async fn reextract_moves_or_releases_the_aliases_rules_no_longer_make(pool: PgPo
     let comment = "https://www.reddit.com/r/announcements/comments/1k3d0pk/a_title/abcdefg/";
     let spelling = "https://old.reddit.com/r/announcements/comments/1k3d0pk/a_title/";
     let short = "https://redd.it/1k3d0pk";
-    let page = "https://example.org/a/";
-    let canonical = "https://example.org/a";
-    // A link an official API named as another object's (no rule of its URI names that root).
-    let named = "https://example.org/release/1";
-    let record = "https://example.org/record/1";
     let mut ids = std::collections::BTreeMap::new();
-    for uri in [
-        post, stale, posts, activity, comment, spelling, short, page, canonical, named, record,
-    ] {
+    for uri in [post, stale, posts, activity, comment, spelling, short] {
         ids.insert(uri, store::ensure_resource(&pool, uri).await.unwrap());
     }
     // As an earlier build left them: aliases without a route, their roots holding the cards.
-    for (alias, root, basis) in [
-        (posts, activity, "identifier"),
-        (comment, post, "identifier"),
-        (spelling, stale, "identifier"),
-        (short, post, "identifier"),
-        (page, canonical, "canonical"),
-        (named, record, "source"),
+    for (alias, root, basis, source) in [
+        (posts, activity, "identifier", linkedin),
+        (comment, post, "identifier", reddit),
+        (spelling, stale, "identifier", reddit),
+        (short, post, "identifier", reddit),
     ] {
+        if !source {
+            continue;
+        }
         sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,$3) ON CONFLICT(alias_id) DO UPDATE SET root_id=excluded.root_id,basis=excluded.basis")
             .bind(&ids[alias])
             .bind(&ids[root])
@@ -2286,29 +2397,20 @@ async fn reextract_moves_or_releases_the_aliases_rules_no_longer_make(pool: PgPo
                 .unwrap()
         }
     };
-    // The stale root counts the spelling's reference, as an earlier build scored it.
-    sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','x','/pub/app/tags/stale',now())")
-        .bind(&ids[spelling])
-        .bind(author("stale"))
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO resource_score(resource_id,score,updated_at,newest_at) VALUES($1,1,now(),now())")
-        .bind(&ids[stale])
-        .execute(&pool)
-        .await
-        .unwrap();
     // A route none of them is on leaves them all.
     queue::reextract(&pool, &["osm".into()]).await.unwrap();
-    assert_eq!(root_of(posts).await, Some(ids[activity].clone()));
-    assert_eq!(root_of(spelling).await, Some(ids[stale].clone()));
+    if linkedin {
+        assert_eq!(root_of(posts).await, Some(ids[activity].clone()));
+    }
+    if reddit {
+        assert_eq!(root_of(spelling).await, Some(ids[stale].clone()));
+    }
 
-    sqlx::query("DELETE FROM group_dirty")
-        .execute(&pool)
-        .await
-        .unwrap();
     queue::reextract(&pool, &["all".into()]).await.unwrap();
-    for uri in [posts, comment] {
+    for (uri, source) in [(posts, linkedin), (comment, reddit)] {
+        if !source {
+            continue;
+        }
         assert_eq!(root_of(uri).await, None, "{uri} answers for itself");
         let (resolver, due): (Option<String>, bool) =
             sqlx::query_as("SELECT resolver,next_attempt_at<=now() FROM resource WHERE id=$1")
@@ -2327,17 +2429,96 @@ async fn reextract_moves_or_releases_the_aliases_rules_no_longer_make(pool: PgPo
         .flatten();
         assert_eq!(root.as_ref(), Some(&ids[uri]), "{uri}'s line names itself");
     }
-    assert_eq!(root_of(spelling).await, Some(ids[post].clone()));
-    assert_eq!(root_of(short).await, Some(ids[post].clone()));
-    assert_eq!(root_of(page).await, Some(ids[canonical].clone()));
+    if reddit {
+        assert_eq!(root_of(spelling).await, Some(ids[post].clone()));
+        assert_eq!(root_of(short).await, Some(ids[post].clone()));
+    }
+}
+
+/// What `reextract` does with an alias follows from the rules of its URI and the basis it was
+/// made on, whatever source made it. One no rule names any more answers for itself again: it is
+/// re-queued on its route with an `aliased` line naming itself, its reference counts for it and
+/// no longer for its old root, and both regroup. One whose rule names another root moves there,
+/// and the root it leaves is rescored. A page's own canonical, an official API's answer and an
+/// alias the rules still make stay. A route none of them is on leaves them all.
+#[sqlx::test(migrations = "../../migrations")]
+async fn reextract_releases_moves_and_keeps_aliases_by_the_rules_of_their_uris(pool: PgPool) {
+    // No rule of its URI names a root for it: an earlier build's alias, on another route's root.
+    let own = "https://example.org/own-page";
+    let old_root = "geo:46.0,8.9";
+    // A tracking spelling under a root that is not its page.
+    let tracked = "https://example.org/post?utm_source=share";
+    let post = "https://example.org/post";
+    let stale = "https://example.org/stale-root";
+    // A tracking spelling under its page.
+    let kept = "https://example.org/kept?utm_source=share";
+    let kept_root = "https://example.org/kept";
+    let page = "https://example.org/a/";
+    let canonical = "https://example.org/a";
+    // A link an official API named as another object's (no rule of its URI names that root).
+    let named = "https://example.org/release/1";
+    let record = "https://example.org/record/1";
+    assert_eq!(pinakes_core::alias::root(own), None);
+    assert_eq!(pinakes_core::resolver::classify(own), Some("web"));
+    assert_eq!(pinakes_core::resolver::classify(old_root), Some("geo"));
     assert_eq!(
-        root_of(named).await,
-        Some(ids[record].clone()),
-        "an API's answer is no rule of the URI: it stays"
+        pinakes_core::alias::root(tracked)
+            .map(|a| a.root)
+            .as_deref(),
+        Some(post)
     );
-    // The spelling moved: its reference counts for the post, no longer for the stale root.
-    let scored = |id: String| {
-        let pool = pool.clone();
+    let mut ids = std::collections::BTreeMap::new();
+    for uri in [
+        own, old_root, tracked, post, stale, kept, kept_root, page, canonical, named, record,
+    ] {
+        ids.insert(uri, store::ensure_resource(&pool, uri).await.unwrap());
+    }
+    for (alias, root, basis) in [
+        (own, old_root, "identifier"),
+        (tracked, stale, "identifier"),
+        (kept, kept_root, "tracking"),
+        (page, canonical, "canonical"),
+        (named, record, "source"),
+    ] {
+        sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,$3) ON CONFLICT(alias_id) DO UPDATE SET root_id=excluded.root_id,basis=excluded.basis")
+            .bind(&ids[alias])
+            .bind(&ids[root])
+            .bind(basis)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("UPDATE resource r SET resolver=NULL,status='ok',next_attempt_at=now()+interval '30 days' FROM resource_alias a WHERE a.alias_id=r.id")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Each alias's one reference counts for its root, which holds the score.
+    for (alias, root) in [(own, old_root), (tracked, stale)] {
+        sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','x',$3,now())")
+            .bind(&ids[alias])
+            .bind(author(alias))
+            .bind(format!("/pub/app/tags/{}", ids[alias]))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO resource_score(resource_id,score,updated_at,newest_at) VALUES($1,1,now(),now())")
+            .bind(&ids[root])
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let root_of = |uri: &str| {
+        let (pool, id) = (pool.clone(), ids[uri].clone());
+        async move {
+            sqlx::query_scalar::<_, String>("SELECT root_id FROM resource_alias WHERE alias_id=$1")
+                .bind(id)
+                .fetch_optional(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let scored = |uri: &str| {
+        let (pool, id) = (pool.clone(), ids[uri].clone());
         async move {
             sqlx::query_scalar::<_, bool>(
                 "SELECT EXISTS(SELECT 1 FROM resource_score WHERE resource_id=$1)",
@@ -2348,35 +2529,85 @@ async fn reextract_moves_or_releases_the_aliases_rules_no_longer_make(pool: PgPo
             .unwrap()
         }
     };
-    assert!(
-        !scored(ids[stale].clone()).await,
-        "the old root is rescored"
-    );
-    assert!(scored(ids[post].clone()).await);
-    let dirty: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM group_dirty WHERE resource_id=ANY($1)")
-            .bind(vec![ids[posts].clone(), ids[activity].clone()])
+    let dirty = |uri: &str| {
+        let (pool, id) = (pool.clone(), ids[uri].clone());
+        async move {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM group_dirty WHERE resource_id=$1)",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    // A route none of them is on leaves them all.
+    queue::reextract(&pool, &["osm".into()]).await.unwrap();
+    assert_eq!(root_of(own).await, Some(ids[old_root].clone()));
+    assert_eq!(root_of(tracked).await, Some(ids[stale].clone()));
+
+    sqlx::query("DELETE FROM group_dirty")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // The aliases' route. The released one's old root is on another, so `reextract` itself
+    // writes nothing to that row.
+    queue::reextract(&pool, &["web".into()]).await.unwrap();
+    assert_eq!(root_of(own).await, None, "it answers for itself");
+    let (resolver, due, status): (Option<String>, bool, String) =
+        sqlx::query_as("SELECT resolver,next_attempt_at<=now(),status FROM resource WHERE id=$1")
+            .bind(&ids[own])
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(dirty, 2, "the released alias and its old root regroup");
+    assert_eq!(
+        (resolver.as_deref(), due, status.as_str()),
+        (Some("web"), true, "ok"),
+        "it is re-queued on its route"
+    );
+    let line: Option<String> = sqlx::query_scalar(
+        "SELECT after->>'root' FROM resource_change WHERE resource_id=$1 AND class='aliased' ORDER BY seq DESC LIMIT 1",
+    )
+    .bind(&ids[own])
+    .fetch_optional(&pool)
+    .await
+    .unwrap()
+    .flatten();
+    assert_eq!(line.as_ref(), Some(&ids[own]), "its line names itself");
+    assert!(
+        scored(own).await && !scored(old_root).await,
+        "the released alias's reference counts for it, no longer for its old root"
+    );
+    assert!(
+        dirty(own).await && dirty(old_root).await,
+        "the released alias and its old root regroup"
+    );
+    // The spelling moved: its reference counts for its page, no longer for the stale root.
+    assert_eq!(root_of(tracked).await, Some(ids[post].clone()));
+    assert!(!scored(stale).await, "the old root is rescored");
+    assert!(scored(post).await);
+    assert_eq!(root_of(kept).await, Some(ids[kept_root].clone()));
+    assert_eq!(root_of(page).await, Some(ids[canonical].clone()));
+    assert_eq!(
+        root_of(named).await,
+        Some(ids[record].clone()),
+        "an API's answer is no rule of the URI: it stays"
+    );
 }
 
 /// A spelling whose rule names a link that is itself a stale alias moves to that link once it is
 /// released, never to the link's old root, in one batch of `reextract` and across two (the
-/// spelling's batch read first). Here, LinkedIn's `/posts/` link and its `?utm_source=` spelling
-/// were both aliases of the activity.
+/// spelling's batch read first). Here, a page and its `?utm_source=` spelling were both aliases
+/// of another page (`activity`), which no rule of the page's URI names.
 #[sqlx::test(migrations = "../../migrations")]
 async fn reextract_releases_a_link_before_moving_its_spellings(pool: PgPool) {
-    if pinakes_core::sources::by_name("linkedin").is_none() {
-        return;
-    }
-    let activity = "https://www.linkedin.com/feed/update/urn:li:activity:7517918134654218241";
-    let posts = "https://www.linkedin.com/posts/linkedin_activity-7517918134654218241-7OWA";
+    let activity = "https://example.org/activity/first";
+    let posts = "https://example.org/posts/first-activity";
+    assert_eq!(pinakes_core::alias::root(posts), None);
     let id = |uri: &str| identity(uri).unwrap().0;
     let (activity_id, posts_id) = (id(activity), id(posts));
-    // The share spelling whose ID sorts before the link's.
-    let spelling = (0..64)
+    // The first share spelling whose ID sorts before the link's.
+    let spelling = (0u32..)
         .map(|n| format!("{posts}?utm_source=share{n}"))
         .find(|u| id(u) < posts_id)
         .unwrap();

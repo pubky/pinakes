@@ -68,9 +68,7 @@ async fn recorded(
             .unwrap();
         ids.push(id);
     }
-    pinakes_core::groups::drain(pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(pool, &Default::default()).await;
     ids
 }
 

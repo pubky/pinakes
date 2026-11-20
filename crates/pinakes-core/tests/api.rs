@@ -132,7 +132,7 @@ async fn send(
     (status, value)
 }
 #[sqlx::test(migrations = "../../migrations")]
-async fn every_read_route_and_document_projection(pool: PgPool) {
+async fn info_the_openapi_document_a_card_read_and_lookup(pool: PgPool) {
     let ids = seed(&pool).await;
     let state = AppState::new(pool, Config::default()).unwrap();
     let app = api::router(state);
@@ -434,6 +434,30 @@ async fn search_filters_facets_true_keyset_and_invalid_options(pool: PgPool) {
     ] {
         let (code, v) = call(&app, "GET", &format!("/v1/search?{query}"), None).await;
         assert_eq!(code, 400, "{query}: {v}");
+    }
+    // The length caps count bytes: `q` and `category` take 256 each, a tag 128. A value of
+    // exactly the cap is searched; one character more is refused with the cap named. `%C3%A9`
+    // is one character of two bytes.
+    let filter = "filter exceeds 256 bytes";
+    let tag = "tags allows at most 5 labels, or 3 with match=all; each is 1–128 bytes";
+    for (parameter, character, bytes, cap, refusal) in [
+        ("q", "a", 1, 256, filter),
+        ("q", "%C3%A9", 2, 256, filter),
+        ("category", "a", 1, 256, filter),
+        ("category", "%C3%A9", 2, 256, filter),
+        ("tags", "a", 1, 128, tag),
+        ("tags", "%C3%A9", 2, 128, tag),
+    ] {
+        let search = |characters: usize| {
+            let app = app.clone();
+            let path = format!("/v1/search?{parameter}={}", character.repeat(characters));
+            async move { call(&app, "GET", &path, None).await }
+        };
+        let (code, v) = search(cap / bytes).await;
+        assert_eq!(code, 200, "{parameter} of {cap} bytes: {v}");
+        let (code, v) = search(cap / bytes + 1).await;
+        assert_eq!(code, 400, "{parameter} over {cap} bytes: {v}");
+        assert_eq!(v["error"], refusal, "{parameter}");
     }
 }
 /// `exclude_type` lists every card of another type: each type left out with its subtypes, a link
@@ -1004,10 +1028,10 @@ fn the_per_client_share_is_off_unless_set() {
     assert!(Config::from_value(json!({"limits": {"preview_new_per_client_per_hour": 0}})).is_ok());
 }
 
-/// `store::ensure_resource_created` says whether its call created the row: a preview keeps its
-/// place in the hour only then, so two first requests for one link take one place between them.
+/// `store::ensure_resource_created` says whether its call created the row: the first call for a
+/// link did, a second did not.
 #[sqlx::test(migrations = "../../migrations")]
-async fn only_the_request_that_stores_a_link_keeps_its_place(pool: PgPool) {
+async fn ensure_resource_created_says_which_call_stored_the_link(pool: PgPool) {
     let uri = "https://example.org/once";
     let (id, created) = store::ensure_resource_created(&pool, uri).await.unwrap();
     assert!(created);
@@ -1015,6 +1039,79 @@ async fn only_the_request_that_stores_a_link_keeps_its_place(pool: PgPool) {
         store::ensure_resource_created(&pool, uri).await.unwrap(),
         (id, false)
     );
+}
+
+/// Two first inserts of one link at the same moment both find the row: neither fails, one says
+/// it stored the link and the other that it found it there. Thirty links, each inserted by two
+/// tasks that a lock on the table holds at the insert and lets go together.
+#[sqlx::test(migrations = "../../migrations")]
+async fn two_first_inserts_of_one_link_at_the_same_moment_both_find_the_row(pool: PgPool) {
+    for n in 0..30 {
+        let uri = format!("https://example.org/at-once/{n}");
+        let mut held = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE resource IN SHARE ROW EXCLUSIVE MODE")
+            .execute(&mut *held)
+            .await
+            .unwrap();
+        let insert = || {
+            let (pool, uri) = (pool.clone(), uri.clone());
+            tokio::spawn(async move { store::ensure_resource_created(&pool, &uri).await })
+        };
+        let (first, second) = (insert(), insert());
+        common::lock_waiters_reach(&pool, 2, "an insert of the link").await;
+        held.commit().await.unwrap();
+        let mut stored = Vec::new();
+        for insert in [first, second] {
+            let (_, created) = insert
+                .await
+                .unwrap()
+                .unwrap_or_else(|e| panic!("link {n}: {e:#}"));
+            stored.push(created);
+        }
+        stored.sort();
+        assert_eq!(stored, [false, true], "link {n}");
+    }
+}
+
+/// Two first requests for one link, at once, take one place of the hour's new previews between
+/// them: both take one before the link is stored, the request that stores it keeps its place and
+/// the other gives its place back. Here both reach the insert while a lock on the table holds
+/// them there; of an hour of two places, one is then left for another link, and none after it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn only_the_request_that_stores_a_link_keeps_its_place(pool: PgPool) {
+    let config = Config::from_value(json!({"limits": {"preview_new_per_hour": 2}})).unwrap();
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
+    // Reads of `resource` pass this lock (each request finds the link unknown and takes a
+    // place); its inserts wait for it.
+    let mut held = pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE resource IN SHARE ROW EXCLUSIVE MODE")
+        .execute(&mut *held)
+        .await
+        .unwrap();
+    let twice = "https://example.org/twice";
+    let (first, second, ()) = tokio::join!(
+        resolve_from(&app, &pool, "127.0.0.2", twice),
+        resolve_from(&app, &pool, "127.0.0.3", twice),
+        async {
+            common::lock_waiters_reach(&pool, 2, "a first request for the link").await;
+            held.commit().await.unwrap();
+        }
+    );
+    for (code, _, stored) in [first, second] {
+        assert!((code == 200 || code == 202) && stored, "{code}");
+    }
+    // One place was kept and one given back: a second link is stored, a third finds the hour
+    // full.
+    let (code, _, stored) =
+        resolve_from(&app, &pool, "127.0.0.4", "https://example.org/another").await;
+    assert!(
+        (code == 200 || code == 202) && stored,
+        "the place given back is free: {code}"
+    );
+    let (code, _, stored) =
+        resolve_from(&app, &pool, "127.0.0.5", "https://example.org/a-third").await;
+    assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE, "one place was kept");
+    assert!(!stored);
 }
 
 #[sqlx::test(migrations = "../../migrations")]
@@ -1219,80 +1316,166 @@ async fn a_pending_preview_is_waited_for_by_its_status_and_read_once(pool: PgPoo
     assert_eq!(common::counted(&connection, card_reads).await - before, 1);
 }
 
-/// What happens to a preview while it is waited for decides the answer: a link deleted
-/// meanwhile is a 404, and one that became an alias answers with its root's card as soon as the
-/// root has one.
-#[sqlx::test(migrations = "../../migrations")]
-async fn a_preview_that_goes_or_becomes_an_alias_while_waited_for(pool: PgPool) {
-    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
-    // Runs `change` on the link's row once the request has stored it.
-    let meanwhile = |uri: &'static str, change: &'static str, root: Option<String>| {
-        let pool = pool.clone();
-        tokio::spawn(async move {
-            let id = loop {
-                let id: Option<String> = sqlx::query_scalar("SELECT id FROM resource WHERE uri=$1")
-                    .bind(uri)
-                    .fetch_optional(&pool)
+/// `POST /v1/resolve` for `uri`, with the request's statements on `resource` let through one at
+/// a time: a lock on the table holds each until this lets it go. Two of the wait's reads of the
+/// row's status are let through as they are (the row is pending), and while the third waits at
+/// the lock `change` is run (a statement over `$1`, the link's ID, and `$2`, `root`), so that
+/// read is the first to see it. The answer; how many status reads waited at the lock up to and
+/// with the one that saw the change (fewer than three: the request answered before it); and how
+/// many came after it. The API's connection must have the status read prepared already: a
+/// statement stops at the lock once more the first time, to be prepared. A request that has not
+/// answered after thirty seconds, ten times its wait's window, fails the test.
+async fn resolved_with_a_change_at_its_third_read(
+    app: &Router,
+    pool: &PgPool,
+    uri: &'static str,
+    change: &str,
+    root: Option<&str>,
+) -> (StatusCode, Value, usize, usize) {
+    let (id, _, _) = identity(uri).unwrap();
+    let hold = "LOCK TABLE resource IN ACCESS EXCLUSIVE MODE";
+    let mut gate = pool.begin().await.unwrap();
+    sqlx::query(hold).execute(&mut *gate).await.unwrap();
+    // The document declares no 404 for this route: the answer is not checked against it.
+    let request = tokio::spawn({
+        let app = app.clone();
+        async move {
+            send(
+                &app,
+                "POST",
+                "/v1/resolve",
+                Some(json!({ "uri": uri })),
+                |_, _, _, _| {},
+            )
+            .await
+        }
+    });
+    let (reads, after) = (std::cell::Cell::new(0), std::cell::Cell::new(0));
+    let gated = async {
+        loop {
+            // The statement of the request that waits at the lock now; none once it has
+            // answered.
+            let waiting: Option<String> = loop {
+                let waiting: Option<String> = sqlx::query_scalar("SELECT query FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' LIMIT 1")
+                    .fetch_optional(pool)
                     .await
                     .unwrap();
-                if let Some(id) = id {
-                    break id;
+                if waiting.is_some() || request.is_finished() {
+                    break waiting;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
             };
-            sqlx::query(change)
-                .bind(id)
-                .bind(root)
-                .execute(&pool)
-                .await
-                .unwrap();
-        })
+            let Some(statement) = waiting else {
+                break;
+            };
+            if statement.starts_with("SELECT status FROM resource") {
+                if reads.get() == 3 {
+                    after.set(after.get() + 1);
+                } else {
+                    reads.set(reads.get() + 1);
+                    if reads.get() == 3 {
+                        sqlx::query(change)
+                            .bind(&id)
+                            .bind(root)
+                            .execute(&mut *gate)
+                            .await
+                            .unwrap();
+                    }
+                }
+            }
+            gate.commit().await.unwrap();
+            gate = pool.begin().await.unwrap();
+            sqlx::query(hold).execute(&mut *gate).await.unwrap();
+        }
+        gate.commit().await.unwrap();
     };
-    let gone = meanwhile(
-        "https://example.org/gone-meanwhile",
-        "DELETE FROM resource WHERE id=$1 AND $2::text IS NULL",
-        None,
-    );
-    let start = std::time::Instant::now();
-    // The document declares no 404 for this route: the answer is not checked against it.
-    let (code, answer) = send(
-        &app,
-        "POST",
-        "/v1/resolve",
-        Some(json!({"uri":"https://example.org/gone-meanwhile"})),
-        |_, _, _, _| {},
-    )
-    .await;
-    gone.await.unwrap();
-    assert_eq!(code, 404);
-    assert_eq!(answer["error"], "resource expired");
-    // Answered when the row went, not at the end of the window.
-    assert!(start.elapsed() < std::time::Duration::from_secs(3));
+    let limit = std::time::Duration::from_secs(30);
+    if tokio::time::timeout(limit, gated).await.is_err() {
+        request.abort();
+        panic!(
+            "no answer after {limit:?}: {} reads of the status up to the change, {} after it",
+            reads.get(),
+            after.get()
+        );
+    }
+    let (code, answer) = request.await.unwrap();
+    (code, answer, reads.get(), after.get())
+}
 
-    let root = store::ensure_resource(&pool, "https://example.org/root")
+/// What happens to a preview while it is waited for decides the answer: a link deleted
+/// meanwhile is a 404, and one that became an alias answers with its root's card as soon as the
+/// root has one. Either answer follows the change, not the end of the window. The change is
+/// made during the wait, while its third read of the row's status waits at a lock: two reads
+/// before it found the row pending, that read answers the request, and no read of the status
+/// comes after it. A wait that slept its window out after one read would answer before the
+/// change, and one that went on past the change would read again. Reads are counted, not timed
+/// (the scans of the request's one connection too): only a machine that stalls for the three
+/// seconds of the window itself changes the count.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_preview_that_goes_or_becomes_an_alias_while_waited_for(pool: PgPool) {
+    // One connection for the API: its backend's own count of the scans of `resource` and
+    // `resource_alias`, which every read of the status makes at least one of.
+    let connection = common::one_connection(&pool).await;
+    let app = api::router(AppState::new(connection.clone(), Config::default()).unwrap());
+    let scans = "SELECT coalesce(sum(coalesce(seq_scan,0)+coalesce(idx_scan,0)),0)::int8 FROM pg_stat_user_tables WHERE relname IN ('resource','resource_alias')";
+    // Well above what a request scans when its wait ends at the change, and well under the
+    // sixty reads a wait held to its end adds (3 s at 50 ms).
+    let held = 40;
+    let root = store::ensure_resource(&connection, "https://example.org/root")
         .await
         .unwrap();
     let mut doc = ResourceMeta::new("https://example.org/root", "web", 86400);
     doc.name = Some("Root".into());
-    store::save_document(&pool, &root, 0, &doc).await.unwrap();
-    let aliased = meanwhile(
-        "https://example.org/alias-meanwhile",
-        "INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'canonical')",
-        Some(root.clone()),
-    );
-    let start = std::time::Instant::now();
-    let (code, answer) = call(
+    store::save_document(&connection, &root, 0, &doc)
+        .await
+        .unwrap();
+    // One request first, so the API's connection has the wait's read of the status prepared:
+    // each time that read stops at the lock from here on is one read.
+    let (code, known) = call(
         &app,
         "POST",
         "/v1/resolve",
-        Some(json!({"uri":"https://example.org/alias-meanwhile"})),
+        Some(json!({"uri":"https://example.org/root"})),
     )
     .await;
-    aliased.await.unwrap();
+    assert_eq!((code, &known["name"]), (StatusCode::OK, &json!("Root")));
+
+    let before = common::counted(&connection, scans).await;
+    let (code, answer, reads, after) = resolved_with_a_change_at_its_third_read(
+        &app,
+        &pool,
+        "https://example.org/gone-meanwhile",
+        "DELETE FROM resource WHERE id=$1 AND $2::text IS NULL",
+        None,
+    )
+    .await;
+    let scanned = common::counted(&connection, scans).await - before;
+    assert_eq!(reads, 3, "answered {code} before the row went: {answer}");
+    assert_eq!(code, 404);
+    assert_eq!(answer["error"], "resource expired");
+    // Answered by the read that found the row gone, not at the end of the window.
+    assert_eq!(after, 0, "reads of the status after the row went");
+    assert!(scanned < held, "{scanned} scans");
+
+    let before = common::counted(&connection, scans).await;
+    let (code, answer, reads, after) = resolved_with_a_change_at_its_third_read(
+        &app,
+        &pool,
+        "https://example.org/alias-meanwhile",
+        "INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'canonical')",
+        Some(&root),
+    )
+    .await;
+    let scanned = common::counted(&connection, scans).await - before;
+    assert_eq!(
+        reads, 3,
+        "answered {code} before it became an alias: {answer}"
+    );
     assert_eq!(code, 200);
     assert_eq!(answer["id"], root.as_str());
     assert_eq!(answer["name"], "Root");
-    assert!(start.elapsed() < std::time::Duration::from_secs(3));
+    assert_eq!(after, 0, "reads of the status after it became an alias");
+    assert!(scanned < held, "{scanned} scans");
 }
 
 #[sqlx::test(migrations = "../../migrations")]
@@ -1325,6 +1508,151 @@ async fn public_budget_covers_reads_and_evicts_old_ips(pool: PgPool) {
         read_from(&app, "/v1/info", "127.0.0.1:1").await,
         200,
         "oldest IP is evicted instead of denying all new clients"
+    );
+}
+
+/// The budgets count the address of the connection, never one a header names (forwarded headers
+/// are not trusted): a client over its budget stays refused whatever `X-Forwarded-For`,
+/// `Forwarded` or `X-Real-IP` it sends, and a header naming that client takes nothing from
+/// another connection's budget. So for the per-IP budget of every route and for a preview's.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_forwarded_header_never_changes_whose_budget_is_spent(pool: PgPool) {
+    /// `method path` from `peer` (`address:port`) with `header`, when one is given: the status.
+    async fn status_from(
+        app: &Router,
+        method: &str,
+        path: &str,
+        peer: &str,
+        header: Option<(&str, &str)>,
+        body: Option<Value>,
+    ) -> StatusCode {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json");
+        if let Some((name, value)) = header {
+            request = request.header(name, value);
+        }
+        let mut request = request
+            .body(body.map_or_else(Body::empty, |v| Body::from(v.to_string())))
+            .unwrap();
+        request.extensions_mut().insert(axum::extract::ConnectInfo(
+            peer.parse::<SocketAddr>().unwrap(),
+        ));
+        app.clone().oneshot(request).await.unwrap().status()
+    }
+    // The headers a proxy names a client with, each naming `address`.
+    let naming = |address: &str| {
+        [
+            ("x-forwarded-for", address.to_owned()),
+            ("forwarded", format!("for={address}")),
+            ("x-real-ip", address.to_owned()),
+        ]
+    };
+    let (spent, other) = ("127.0.0.2:1234", "127.0.0.3:1234");
+
+    // The per-IP budget of the public routes: three requests a minute.
+    let config = Config {
+        api: pinakes_core::config::ApiConfig {
+            requests_per_minute: 3,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
+    for _ in 0..3 {
+        assert_eq!(
+            status_from(&app, "GET", "/v1/info", spent, None, None).await,
+            200
+        );
+    }
+    assert_eq!(
+        status_from(&app, "GET", "/v1/info", spent, None, None).await,
+        429
+    );
+    for (name, value) in naming("203.0.113.9") {
+        assert_eq!(
+            status_from(
+                &app,
+                "GET",
+                "/v1/info",
+                spent,
+                Some((name, value.as_str())),
+                None
+            )
+            .await,
+            429,
+            "{name} naming another client"
+        );
+    }
+    // Another connection has its own three, though each request names the client that is over.
+    for (name, value) in naming("127.0.0.2") {
+        assert_eq!(
+            status_from(
+                &app,
+                "GET",
+                "/v1/info",
+                other,
+                Some((name, value.as_str())),
+                None
+            )
+            .await,
+            200,
+            "{name} naming the client over its budget"
+        );
+    }
+
+    // A preview's own budget: one a minute per address. The link is known, so each preview
+    // that is served answers at once.
+    let config = Config {
+        preview: pinakes_core::config::PreviewConfig {
+            requests_per_minute: 1,
+            uri_requests_per_minute: 10,
+            cache_capacity: 100,
+        },
+        ..Default::default()
+    };
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
+    let uri = "https://example.org/known";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut doc = ResourceMeta::new(uri, "web", 86400);
+    doc.name = Some("Known".into());
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let preview = || Some(json!({ "uri": uri }));
+    assert_eq!(
+        status_from(&app, "POST", "/v1/resolve", spent, None, preview()).await,
+        200
+    );
+    assert_eq!(
+        status_from(&app, "POST", "/v1/resolve", spent, None, preview()).await,
+        429
+    );
+    for (name, value) in naming("203.0.113.9") {
+        assert_eq!(
+            status_from(
+                &app,
+                "POST",
+                "/v1/resolve",
+                spent,
+                Some((name, value.as_str())),
+                preview()
+            )
+            .await,
+            429,
+            "{name} naming another client"
+        );
+    }
+    assert_eq!(
+        status_from(
+            &app,
+            "POST",
+            "/v1/resolve",
+            other,
+            Some(("x-forwarded-for", "127.0.0.2")),
+            preview()
+        )
+        .await,
+        200
     );
 }
 
@@ -4320,9 +4648,9 @@ async fn two_reach_reads_share_one_deadline(pool: PgPool) {
 }
 
 /// A boost reads the set's references once, not once per card: 10,000 cards each referenced by
-/// the friend answer well inside the five-second statement timeout.
+/// the friend answer inside the API pool's five-second statement timeout.
 #[sqlx::test(migrations = "../../migrations")]
-async fn a_boost_over_many_cards_answers_in_time(pool: PgPool) {
+async fn a_boost_over_many_cards_answers_within_the_statement_timeout(pool: PgPool) {
     let friend = 3;
     sqlx::query("INSERT INTO resource(id,uri) SELECT md5('many'||i),'https://many.example.org/'||i FROM generate_series(1,10000) i")
         .execute(&pool)
@@ -4352,7 +4680,6 @@ async fn a_boost_over_many_cards_answers_in_time(pool: PgPool) {
         .unwrap(),
     );
     let viewer = author(9999);
-    let started = std::time::Instant::now();
     let (code, page) = call(
         &app,
         "GET",
@@ -4363,13 +4690,6 @@ async fn a_boost_over_many_cards_answers_in_time(pool: PgPool) {
     assert_eq!(code, 200, "{page}");
     assert_eq!(ids_of(&page).len(), 20);
     api_pool.close().await;
-    // A target below the timeout: a loaded machine never fails it.
-    if started.elapsed() > std::time::Duration::from_secs(4) {
-        eprintln!(
-            "SOFT performance target exceeded: boosted search {:?} (target 4 s)",
-            started.elapsed()
-        );
-    }
 }
 
 /// A reference from 1900 (in range) boosts nothing and breaks nothing: its decay is clamped to

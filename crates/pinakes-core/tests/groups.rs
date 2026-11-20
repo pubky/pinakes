@@ -62,6 +62,14 @@ async fn gid(pool: &PgPool, id: &str) -> String {
         .await
         .unwrap()
 }
+/// `gid` of each resource, in the order given.
+async fn gids(pool: &PgPool, ids: &[&String]) -> Vec<String> {
+    let mut groups = Vec::new();
+    for id in ids {
+        groups.push(gid(pool, id).await);
+    }
+    groups
+}
 /// Runs the grouping of `id` again when its last run was deferred on an error (`group_failed`),
 /// without `groups::reconcile`'s statement timeout, and says whether it did. On a loaded machine
 /// one statement of a run can outlast that timeout; these tests are about what a run decides,
@@ -256,22 +264,23 @@ async fn group_fence_ignores_unrelated_saves_and_retries_changed_inputs(pool: Pg
         let id = b.clone();
         let pending =
             tokio::spawn(async move { groups::reconcile(&pool2, &id, &Default::default()).await });
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query='SELECT pg_advisory_xact_lock_shared($1)')")
-                    .fetch_one(&pool).await.unwrap();
-                if waiting { break; }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        }).await.unwrap();
+        common::lock_waiters_reach(&pool, 1, "the group run").await;
         sqlx::query("UPDATE resource SET doc=jsonb_set(doc,'{name}', '\"Concurrent save\"'),name='Concurrent save' WHERE id=$1")
             .bind(changed).execute(&mut *writer).await.unwrap();
+        let committed = std::time::Instant::now();
         writer.commit().await.unwrap();
         assert_eq!(pending.await.unwrap(), changed == &other);
         if changed == &b {
             let retry:(i32,f64)=sqlx::query_as("SELECT fence_attempts,extract(epoch FROM(next_attempt_at-now()))::float8 FROM group_dirty WHERE resource_id=$1").bind(&b).fetch_one(&pool).await.unwrap();
             assert_eq!(retry.0, 1);
-            assert!(retry.1 > 4.0 && retry.1 <= 10.0);
+            // The retry was set after the commit, 5 to 10 seconds ahead: what is left of it and
+            // the time since the commit are together at least 5 seconds, however late this read.
+            let since = committed.elapsed().as_secs_f64();
+            assert!(
+                retry.1 <= 10.0 && retry.1 + since >= 5.0,
+                "{} s left, {since} s after the commit",
+                retry.1
+            );
             for _ in 0..3 {
                 sqlx::query("UPDATE resource SET group_revision=group_revision+1 WHERE id=$1")
                     .bind(&b)
@@ -361,13 +370,16 @@ async fn evidence_loss_splits_and_curation_preserves_identity(pool: PgPool) {
     groups::curate(&pool, &id, curate(vec![a.clone()]), &Default::default())
         .await
         .unwrap();
-    assert_ne!(gid(&pool, &far).await, id);
-    assert_eq!(
-        store::ensure_resource(&pool, "doi:10.5555/one")
+    // Setting the members again replaces them: the group keeps its ID with the member that
+    // stays, and the one left out is pinned nowhere and stands alone.
+    let pinned: Vec<(String, String)> =
+        sqlx::query_as("SELECT unit_id,group_id FROM group_override ORDER BY unit_id")
+            .fetch_all(&pool)
             .await
-            .unwrap(),
-        a
-    );
+            .unwrap();
+    assert_eq!(pinned, [(a.clone(), id.clone())]);
+    assert_eq!(gid(&pool, &a).await, id);
+    assert_eq!(gid(&pool, &far).await, far);
 }
 
 /// A group is a hint: every member keeps its own card, references, ranking and counts; each card
@@ -622,6 +634,82 @@ async fn forged_or_colon_uids_never_join_across_feeds(pool: PgPool) {
     pair.sort();
     assert_eq!(groups, vec![(2, pair.clone()), (2, pair)]);
 }
+/// Saves the calendar feed `uri` with one event per `(uid, summary)`, each at `date` and at one
+/// place: the feed's ID.
+async fn calendar_feed(pool: &PgPool, uri: &str, date: &str, events: &[(&str, &str)]) -> String {
+    use pinakes_core::{config::EventConfig, event::calendar};
+    let id = store::ensure_resource(pool, uri).await.unwrap();
+    let events: String = events
+        .iter()
+        .map(|(uid, summary)| {
+            format!("BEGIN:VEVENT\r\nUID:{uid}\r\nDTSTART:{date}\r\nSUMMARY:{summary}\r\nGEO:47;8\r\nEND:VEVENT\r\n")
+        })
+        .collect();
+    let text = format!("BEGIN:VCALENDAR\r\nVERSION:2.0\r\n{events}END:VCALENDAR\r\n");
+    let d = calendar::parse(
+        uri,
+        text.as_bytes(),
+        &EventConfig::default(),
+        chrono::Utc::now(),
+    )
+    .unwrap();
+    store_document(pool, &id, &d).await;
+    id
+}
+/// In the corroborated mode one UID joins two feeds' events only when their names are alike
+/// too: at one time and place, the pair with one name joins and the pair with unlike names
+/// stays apart. Alike is half of the names' trigrams in common: a pair at exactly half joins,
+/// one just under it does not.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_uid_joins_two_feeds_only_under_like_names(pool: PgPool) {
+    let date = (chrono::Utc::now() + chrono::Duration::days(1))
+        .format("%Y%m%dT%H%M%SZ")
+        .to_string();
+    let one = calendar_feed(
+        &pool,
+        "https://one.example/a.ics",
+        &date,
+        &[
+            ("alike", "Harbour jazz night"),
+            ("unlike", "Harbour jazz night"),
+            // Against "Alpha" (6 trigrams): 6 of 12 in common, and 6 of 13.
+            ("half", "Alpha Gamma"),
+            ("under", "Alpha Gammas"),
+        ],
+    )
+    .await;
+    let other = calendar_feed(
+        &pool,
+        "https://other.example/b.ics",
+        &date,
+        &[
+            ("alike", "Harbour Jazz Night"),
+            ("unlike", "Annual budget meeting"),
+            ("half", "Alpha"),
+            ("under", "Alpha"),
+        ],
+    )
+    .await;
+    let cfg = groups::GroupConfig {
+        cross_container_occurrences: groups::CrossContainerOccurrences::Corroborated,
+        ..Default::default()
+    };
+    for id in [&one, &other] {
+        reconciled(&pool, id, &cfg).await;
+    }
+    drained(&pool, &cfg).await;
+    // Each group: its events' UID, its size, and how many feeds it spans.
+    let joined: Vec<(String, i64, i64)> = sqlx::query_as(
+        "SELECT occurrence->>'uid',count(*),count(DISTINCT resource_id) FROM group_unit WHERE group_id IS NOT NULL GROUP BY group_id,occurrence->>'uid' ORDER BY 1",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        joined,
+        [("alike".to_owned(), 2, 2), ("half".to_owned(), 2, 2)]
+    );
+}
 use chrono::Timelike;
 
 #[test]
@@ -736,6 +824,332 @@ async fn curating_an_automatic_id_pins_exactly_requested_members(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(count, 1);
+}
+
+/// A curation outlives every later run. Members an operator joined with no evidence stay
+/// together, and a member an operator took out of its group stays out and joins nothing through
+/// its keys (the two cards it bridged stay apart), when a member is saved again with other keys
+/// and when the grouping policy changes. A curation over the member cap, or while grouping is
+/// off, is refused.
+#[sqlx::test(migrations = "../../migrations")]
+async fn curated_members_stay_as_curated_through_saves_and_a_policy_change(pool: PgPool) {
+    let members = |ids: &[&String]| groups::Curation {
+        members: ids
+            .iter()
+            .map(|id| groups::Member {
+                resource_id: (*id).clone(),
+                occurrence: None,
+            })
+            .collect(),
+    };
+    // A join: a card and a page with no key in common.
+    let kept_card = card(&pool, "kept", &[], None).await;
+    let (kept_page, _) = save(&pool, "kept-page", &[], None).await;
+    let joined = "d".repeat(32);
+    groups::curate(
+        &pool,
+        &joined,
+        members(&[&kept_card, &kept_page]),
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    // A split: one page cites two cards that both name it, so the three are one group; the
+    // page is then pinned alone.
+    let left = card(&pool, "left", &["bridge"], None).await;
+    let right = card(&pool, "right", &["bridge"], None).await;
+    let (bridge, _) = save(&pool, "bridge", &["left", "right"], None).await;
+    let automatic = gid(&pool, &bridge).await;
+    assert_ne!(automatic, bridge);
+    assert_eq!(gid(&pool, &left).await, automatic);
+    assert_eq!(gid(&pool, &right).await, automatic);
+    let split = "e".repeat(32);
+    groups::curate(&pool, &split, members(&[&bridge]), &Default::default())
+        .await
+        .unwrap();
+    let all = [&kept_card, &kept_page, &bridge, &left, &right];
+    let curated = vec![
+        joined.clone(),
+        joined.clone(),
+        split.clone(),
+        left.clone(),
+        right.clone(),
+    ];
+    assert_eq!(gids(&pool, &all).await, curated, "as curated");
+    // Each member saved again with other keys: only the curation holds the first two together,
+    // and the page still cites both cards.
+    save(&pool, "kept-page", &["elsewhere"], None).await;
+    assert_eq!(gids(&pool, &all).await, curated, "the joined page saved");
+    card(&pool, "kept", &["another-page"], None).await;
+    assert_eq!(gids(&pool, &all).await, curated, "the joined card saved");
+    save(&pool, "bridge", &["left", "right", "third"], None).await;
+    assert_eq!(gids(&pool, &all).await, curated, "the pinned page saved");
+    card(&pool, "left", &["bridge", "another-page"], None).await;
+    assert_eq!(gids(&pool, &all).await, curated, "a bridged card saved");
+    // A policy change runs every unit again.
+    let cfg = groups::GroupConfig {
+        cross_container_occurrences: groups::CrossContainerOccurrences::Corroborated,
+        ..Default::default()
+    };
+    assert!(groups::configure(&pool, &cfg).await.unwrap());
+    common::drain_groups(&pool, &cfg).await;
+    let waiting: i64 = sqlx::query_scalar("SELECT count(*) FROM group_dirty")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(waiting, 0);
+    assert_eq!(gids(&pool, &all).await, curated, "after a policy change");
+    for (refusing, error) in [
+        (
+            groups::GroupConfig {
+                max_members: 1,
+                ..Default::default()
+            },
+            "invalid group member count",
+        ),
+        (
+            groups::GroupConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            "invalid or disabled group",
+        ),
+    ] {
+        let refused = groups::curate(&pool, &split, members(&[&bridge, &left]), &refusing)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            refused.downcast_ref::<groups::CurationError>().map(|e| e.0),
+            Some(error),
+            "{refused:#}"
+        );
+    }
+    // A member that is no resource ID, and one that is no unit, are refused too.
+    for (member, error) in [
+        ("not-an-id".to_owned(), "invalid member ID"),
+        ("f".repeat(32), "unknown group member"),
+    ] {
+        let refused = groups::curate(
+            &pool,
+            &split,
+            members(&[&bridge, &member]),
+            &Default::default(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            refused.downcast_ref::<groups::CurationError>().map(|e| e.0),
+            Some(error),
+            "{refused:#}"
+        );
+    }
+    assert_eq!(gids(&pool, &all).await, curated, "after refused curations");
+}
+/// Saves the calendar feed `uri` with one series of two daily dates from `start` (one UID, two
+/// recurrence IDs) named `summary`, and has its groups run: the feed's ID.
+async fn series_feed(pool: &PgPool, uri: &str, uid: &str, summary: &str, start: &str) -> String {
+    use pinakes_core::{config::EventConfig, event::calendar};
+    let id = store::ensure_resource(pool, uri).await.unwrap();
+    let text = format!("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:{uid}\r\nDTSTART:{start}\r\nRRULE:FREQ=DAILY;COUNT=2\r\nSUMMARY:{summary}\r\nGEO:47;8\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n");
+    let d = calendar::parse(
+        uri,
+        text.as_bytes(),
+        &EventConfig::default(),
+        chrono::Utc::now(),
+    )
+    .unwrap();
+    store_document(pool, &id, &d).await;
+    id
+}
+/// A feed's occurrence units, in the order of their dates: each unit's ID and the member that
+/// names it.
+async fn occurrences(pool: &PgPool, feed: &str) -> Vec<(String, groups::Member)> {
+    let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT unit_id,occurrence->>'uid',occurrence->>'recurrence_id' FROM group_unit WHERE resource_id=$1 AND occurrence_key<>'' ORDER BY occurrence_key",
+    )
+    .bind(feed)
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    rows.into_iter()
+        .map(|(unit, uid, recurrence_id)| {
+            (
+                unit,
+                groups::Member {
+                    resource_id: feed.to_owned(),
+                    occurrence: Some(pinakes_core::event::storage::OccurrenceRef {
+                        uid,
+                        recurrence_id,
+                    }),
+                },
+            )
+        })
+        .collect()
+}
+/// An operator curates single dates of feeds' series: a member is the one occurrence its `uid`
+/// and `recurrence_id` name, not its feed and not the series' other date. The curated dates stay
+/// one group, and every other unit outside it, when a feed is saved again and when the grouping
+/// policy changes. A member named twice is set once: one pin, one membership.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_curated_occurrence_stays_as_curated_and_a_member_named_twice_is_set_once(pool: PgPool) {
+    let start = (chrono::Utc::now() + chrono::Duration::days(1))
+        .format("%Y%m%dT%H%M%SZ")
+        .to_string();
+    let (one_uri, other_uri) = ("https://one.example/s.ics", "https://other.example/s.ics");
+    let one = series_feed(&pool, one_uri, "series-one", "Morning run", &start).await;
+    let other = series_feed(&pool, other_uri, "series-other", "Evening swim", &start).await;
+    // A member of its own: the unit, and the occurrence that names it.
+    let member = |(unit, m): &(String, groups::Member)| {
+        (
+            unit.clone(),
+            groups::Member {
+                resource_id: m.resource_id.clone(),
+                occurrence: m.occurrence.as_ref().map(|o| {
+                    pinakes_core::event::storage::OccurrenceRef {
+                        uid: o.uid.clone(),
+                        recurrence_id: o.recurrence_id.clone(),
+                    }
+                }),
+            },
+        )
+    };
+    let (of_one, of_other) = (
+        occurrences(&pool, &one).await,
+        occurrences(&pool, &other).await,
+    );
+    // Two dates each, told apart by the recurrence ID alone.
+    for dates in [&of_one, &of_other] {
+        assert_eq!(dates.len(), 2);
+        let (first, second) = (
+            dates[0].1.occurrence.as_ref().unwrap(),
+            dates[1].1.occurrence.as_ref().unwrap(),
+        );
+        assert_eq!(first.uid, second.uid);
+        assert_ne!(first.recurrence_id, second.recurrence_id);
+    }
+    // The group's units, and its pins, each in the order of their IDs.
+    let state = |pool: PgPool, group: String| async move {
+        let members: Vec<String> =
+            sqlx::query_scalar("SELECT unit_id FROM group_unit WHERE group_id=$1 ORDER BY unit_id")
+                .bind(&group)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let pins: Vec<String> = sqlx::query_scalar(
+            "SELECT unit_id FROM group_override WHERE group_id=$1 ORDER BY unit_id",
+        )
+        .bind(&group)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let grouped: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM group_unit WHERE group_id IS NOT NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        (members, pins, grouped)
+    };
+    assert_eq!(
+        state(pool.clone(), "c".repeat(32)).await.2,
+        0,
+        "no feed's dates group by themselves"
+    );
+    // The first date of one series with the second of the other.
+    let group = "c".repeat(32);
+    let (first, second) = (member(&of_one[0]), member(&of_other[1]));
+    let mut units = vec![first.0.clone(), second.0.clone()];
+    units.sort();
+    let curated = (units.clone(), units.clone(), 2);
+    groups::curate(
+        &pool,
+        &group,
+        groups::Curation {
+            members: vec![member(&of_one[0]).1, member(&of_other[1]).1],
+        },
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        state(pool.clone(), group.clone()).await,
+        curated,
+        "as curated"
+    );
+    // Each feed saved again under another name.
+    series_feed(&pool, one_uri, "series-one", "Morning run, moved", &start).await;
+    drained(&pool, &Default::default()).await;
+    assert_eq!(
+        state(pool.clone(), group.clone()).await,
+        curated,
+        "the first feed saved"
+    );
+    series_feed(
+        &pool,
+        other_uri,
+        "series-other",
+        "Evening swim, moved",
+        &start,
+    )
+    .await;
+    drained(&pool, &Default::default()).await;
+    assert_eq!(
+        state(pool.clone(), group.clone()).await,
+        curated,
+        "the second feed saved"
+    );
+    // A policy change runs every unit again.
+    let cfg = groups::GroupConfig {
+        cross_container_occurrences: groups::CrossContainerOccurrences::Corroborated,
+        ..Default::default()
+    };
+    assert!(groups::configure(&pool, &cfg).await.unwrap());
+    common::drain_groups(&pool, &cfg).await;
+    let waiting: i64 = sqlx::query_scalar("SELECT count(*) FROM group_dirty")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(waiting, 0);
+    assert_eq!(
+        state(pool.clone(), group.clone()).await,
+        curated,
+        "after a policy change"
+    );
+    // A member named twice beside the other: still one pin and one membership each.
+    groups::curate(
+        &pool,
+        &group,
+        groups::Curation {
+            members: vec![
+                member(&of_one[0]).1,
+                member(&of_other[1]).1,
+                member(&of_one[0]).1,
+            ],
+        },
+        &cfg,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        state(pool.clone(), group.clone()).await,
+        curated,
+        "a member named twice"
+    );
+    // One member named twice and no other: the group is that one date, and the other left it.
+    groups::curate(
+        &pool,
+        &group,
+        groups::Curation {
+            members: vec![member(&of_one[0]).1, member(&of_one[0]).1],
+        },
+        &cfg,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        state(pool.clone(), group.clone()).await,
+        (vec![first.0.clone()], vec![first.0.clone()], 1),
+        "one member named twice"
+    );
 }
 #[sqlx::test(migrations = "../../migrations")]
 async fn group_failure_keeps_document_and_drain_advances(pool: PgPool) {
@@ -1414,10 +1828,17 @@ async fn lock_contention_retries_shortly_without_charging(pool: PgPool) {
     for _ in 0..6 {
         sqlx::query("INSERT INTO group_dirty(resource_id) VALUES($1) ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=now()")
             .bind(&a).execute(&pool).await.unwrap();
+        let began = std::time::Instant::now();
         assert!(!groups::reconcile(&pool, &a, &Default::default()).await);
         let (fence, attempts, error, delay): (i32, i32, String, f64) = sqlx::query_as("SELECT fence_attempts,attempts,last_error,extract(epoch FROM next_attempt_at-now())::float8 FROM group_dirty WHERE resource_id=$1").bind(&a).fetch_one(&pool).await.unwrap();
         assert_eq!((fence, attempts, error.as_str()), (0, 0, "lock_busy"));
-        assert!((0.5..=3.1).contains(&delay), "{delay}");
+        // Parked 1 to 3 seconds ahead at some time since the run began: what is left of the
+        // wait and the time since then are together at least a second, however late this read.
+        let since = began.elapsed().as_secs_f64();
+        assert!(
+            delay <= 3.1 && delay + since >= 1.0,
+            "{delay} s left, {since} s after the run began"
+        );
     }
     sqlx::query("SELECT pg_advisory_unlock($1)")
         .bind(pinakes_core::locks::GROUP)
@@ -1889,6 +2310,14 @@ async fn a_newcomer_never_joins_past_an_unfinished_key(pool: PgPool) {
     assert!(reconciled(&pool, &id, &tight(2)).await);
     assert_eq!(gid(&pool, &id).await, id);
     assert_eq!(gid(&pool, &card).await, group);
+    // The run did leave keys unfinished: the far pages' were over its budget.
+    let parked: i32 =
+        sqlx::query_scalar("SELECT parked_keys FROM group_input WHERE resource_id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(parked > 0);
 }
 
 /// Past the budget a chain whose bridging key is unfinished keeps every member in its group.
@@ -1914,6 +2343,158 @@ async fn a_chain_with_an_unfinished_bridge_stays_whole(pool: PgPool) {
     for id in [&a, &b, &left, &right] {
         assert_eq!(gid(&pool, id).await, group, "{id}");
     }
+    // The run did leave the bridge's key unfinished.
+    let parked: i32 =
+        sqlx::query_scalar("SELECT parked_keys FROM group_input WHERE resource_id=$1")
+            .bind(&b)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(parked > 0);
+}
+
+/// Past `max_members` a key's members are the first it admitted, and they stay so: the units
+/// the cap leaves out join nothing, and no later run or save of any of the five changes who is
+/// in.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_member_cap_keeps_the_first_admitted_and_later_runs_agree(pool: PgPool) {
+    let cfg = groups::GroupConfig {
+        max_members: 3,
+        ..Default::default()
+    };
+    // One hub key on five pages, each admitted by a run of its own, in this order.
+    let mut units = Vec::new();
+    for n in 0..5 {
+        let (id, _) = save(&pool, &format!("capped{n}"), &[], None).await;
+        sqlx::query("INSERT INTO resource_key(resource_id,key,source,via,expires_at) VALUES($1,'isrc:QZCAP2600001','test','test',now()+interval '1 day')")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(reconciled(&pool, &id, &cfg).await);
+        units.push(id);
+    }
+    let all: Vec<&String> = units.iter().collect();
+    let group = gid(&pool, &units[0]).await;
+    assert_ne!(group, units[0]);
+    let expected = vec![
+        group.clone(),
+        group.clone(),
+        group.clone(),
+        units[3].clone(),
+        units[4].clone(),
+    ];
+    assert_eq!(gids(&pool, &all).await, expected, "as admitted");
+    // Every unit run again, the last admitted first: each run reads the key from its own side.
+    for id in units.iter().rev() {
+        sqlx::query("DELETE FROM group_input WHERE resource_id=$1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(reconciled(&pool, id, &cfg).await);
+        assert_eq!(gids(&pool, &all).await, expected, "after {id} ran again");
+    }
+    // A save of a unit the cap left out, and of one it kept.
+    let queue = pinakes_core::config::QueueConfig {
+        groups: cfg.clone(),
+        ..Default::default()
+    };
+    for n in [4, 0] {
+        let uri = format!("https://example.org/capped{n}");
+        let mut d = ResourceMeta::new(&uri, "web", 86400);
+        d.name = Some(format!("capped{n} saved again"));
+        d.set_type("MusicRecording");
+        pinakes_core::changes::save(&pool, &units[n], 0, &d, &queue)
+            .await
+            .unwrap();
+        rerun_failed(&pool, &units[n], &cfg).await;
+        assert_eq!(
+            gids(&pool, &all).await,
+            expected,
+            "after capped{n} was saved again"
+        );
+    }
+}
+
+/// Saves that share group keys, all at once: a run that meets another is done again later, and
+/// once none is waiting every card is in one group with all the pages that cite it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn concurrent_saves_sharing_keys_end_in_one_group_per_card(pool: PgPool) {
+    const CARDS: usize = 4;
+    const PAGES: usize = 5;
+    // Every resource and document exists before any save, so only the saves run together.
+    let mut sets: Vec<Vec<String>> = Vec::new();
+    let mut docs: Vec<(String, ResourceMeta)> = Vec::new();
+    for c in 0..CARDS {
+        let doi = format!("10.5555/at-once-{c}");
+        let pages: Vec<String> = (0..PAGES)
+            .map(|p| format!("https://example.org/at-once-{c}-{p}"))
+            .collect();
+        let uri = format!("doi:{doi}");
+        let mut d = ResourceMeta::new(&uri, "doi", 86400);
+        d.name = Some(format!("at-once-{c} card"));
+        d.set_type("ScholarlyArticle");
+        group_keys::add(&mut d, "doi", &doi);
+        for page in &pages {
+            group_keys::add(&mut d, "registry", page);
+        }
+        let mut set = vec![store::ensure_resource(&pool, &uri).await.unwrap()];
+        docs.push((set[0].clone(), d));
+        for page in &pages {
+            let mut d = ResourceMeta::new(page, "web", 86400);
+            d.name = Some(format!("at-once-{c} page"));
+            d.set_type("MusicRecording");
+            group_keys::add(&mut d, "cites_doi", &doi);
+            let id = store::ensure_resource(&pool, page).await.unwrap();
+            docs.push((id.clone(), d));
+            set.push(id);
+        }
+        set.sort();
+        sets.push(set);
+    }
+    // The test's own pool holds five connections; the writers share eight of their own, so
+    // several saves run at any moment.
+    let writers = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(8)
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let saves: Vec<_> = docs
+        .into_iter()
+        .map(|(id, doc)| {
+            let writers = writers.clone();
+            tokio::spawn(async move { store::save_document(&writers, &id, 0, &doc).await })
+        })
+        .collect();
+    tokio::time::timeout(std::time::Duration::from_secs(120), async {
+        for save in saves {
+            save.await.unwrap().unwrap();
+        }
+    })
+    .await
+    .expect("the saves ended");
+    writers.close().await;
+    common::drain_groups(&pool, &Default::default()).await;
+    let waiting: i64 = sqlx::query_scalar("SELECT count(*) FROM group_dirty")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(waiting, 0);
+    let mut groups = std::collections::BTreeSet::new();
+    for set in &sets {
+        let group = gid(&pool, &set[0]).await;
+        let members: Vec<String> = sqlx::query_scalar(
+            "SELECT resource_id FROM group_unit WHERE group_id=$1 ORDER BY resource_id",
+        )
+        .bind(&group)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(&members, set);
+        groups.insert(group);
+    }
+    assert_eq!(groups.len(), CARDS);
 }
 
 /// A unit can leave a group and pair again any number of times: each new pair gets a fresh ID.
@@ -1980,8 +2561,31 @@ async fn an_expired_member_leaves_its_group(pool: PgPool) {
     let (card, page) = pair(&pool, "expiring", None).await;
     let group = gid(&pool, &card).await;
     assert_ne!(group, card);
-    sqlx::query("UPDATE resource SET orphaned_at=now()-interval '30 days' WHERE id=$1")
-        .bind(&page)
+    // A second expiring resource is a curated group's member: its pin goes with it.
+    let (pinned, _) = save(&pool, "pinned", &[], None).await;
+    groups::curate(
+        &pool,
+        &"b".repeat(32),
+        groups::Curation {
+            members: vec![groups::Member {
+                resource_id: pinned.clone(),
+                occurrence: None,
+            }],
+        },
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    let pins = || async {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM group_override WHERE unit_id=$1")
+            .bind(&pinned)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    assert_eq!(pins().await, 1);
+    sqlx::query("UPDATE resource SET orphaned_at=now()-interval '30 days' WHERE id=ANY($1)")
+        .bind(vec![page.clone(), pinned.clone()])
         .execute(&pool)
         .await
         .unwrap();
@@ -1989,8 +2593,9 @@ async fn an_expired_member_leaves_its_group(pool: PgPool) {
         pinakes_core::changes::delete_orphans(&pool, 7)
             .await
             .unwrap(),
-        1
+        2
     );
+    assert_eq!(pins().await, 0);
     let count = |sql: &'static str| {
         let pool = pool.clone();
         let page = page.clone();
@@ -2005,7 +2610,6 @@ async fn an_expired_member_leaves_its_group(pool: PgPool) {
     for sql in [
         "SELECT count(*) FROM group_unit WHERE resource_id=$1",
         "SELECT count(*) FROM resource_group WHERE resource_id=$1",
-        "SELECT count(*) FROM group_override WHERE unit_id=$1",
     ] {
         assert_eq!(count(sql).await, 0, "{sql}");
     }
@@ -2104,18 +2708,7 @@ async fn removing_a_hub_key_and_saving_its_resource_take_locks_in_one_order(pool
                 .await
         }
     });
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'DELETE FROM resource_key%')")
-                .fetch_one(&pool).await.unwrap();
-            if waiting {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap();
+    common::lock_waiters_reach(&pool, 1, "the key's removal").await;
     // The save's new document marks the resource dirty.
     sqlx::query("UPDATE resource SET doc=jsonb_set(doc,'{name}','\"Saved\"') WHERE id=$1")
         .bind(&id)
@@ -2162,18 +2755,7 @@ async fn removing_a_group_unit_and_saving_a_member_take_locks_in_one_order(pool:
                 .await
         }
     });
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'DELETE FROM group_unit%')")
-                .fetch_one(&pool).await.unwrap();
-            if waiting {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap();
+    common::lock_waiters_reach(&pool, 1, "the unit's removal").await;
     sqlx::query("UPDATE resource SET doc=jsonb_set(doc,'{name}','\"Saved\"') WHERE id=$1")
         .bind(&page)
         .execute(&mut *saving)

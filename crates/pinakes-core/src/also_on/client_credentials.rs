@@ -443,6 +443,73 @@ mod tests {
         let s = self::slot(&slot).await;
         assert!(s.token.is_none() && s.refused_until.is_some_and(|u| u > now));
     }
+    /// A token endpoint that issues `token-1`, `token-2`, …, each good for an hour.
+    struct Tokens(std::sync::atomic::AtomicUsize);
+    #[async_trait::async_trait]
+    impl crate::resolver::egress::Transport for Tokens {
+        async fn get(
+            &self,
+            url: &url::Url,
+            _: &[std::net::SocketAddr],
+        ) -> Result<crate::resolver::egress::Fetched> {
+            let n = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            Ok(crate::resolver::egress::Fetched::answer(
+                url.clone(),
+                200,
+                "application/json".into(),
+                format!(r#"{{"access_token":"token-{n}","expires_in":3600}}"#).into_bytes(),
+            ))
+        }
+    }
+    struct Public;
+    #[async_trait::async_trait]
+    impl crate::resolver::egress::Dns for Public {
+        async fn lookup(&self, _: &str, port: u16) -> Result<Vec<std::net::SocketAddr>> {
+            Ok(vec![std::net::SocketAddr::new(
+                [93, 184, 216, 34].into(),
+                port,
+            )])
+        }
+    }
+    /// The token in hand is used until a minute before the service's `expires_in` is over; from
+    /// then on the next lookup asks for a new one, and that one is in hand.
+    #[tokio::test]
+    async fn a_token_past_its_time_is_replaced_and_one_in_hand_is_not_asked_for_again() {
+        let tokens = Arc::new(Tokens(Default::default()));
+        let cx = Context {
+            egress: crate::resolver::egress::Egress::with_backends(
+                crate::config::EgressConfig {
+                    host_requests_per_second: 1000.0,
+                    ..Default::default()
+                },
+                Arc::new(Public),
+                tokens.clone(),
+            ),
+            config: Arc::new(crate::config::Config::default()),
+        };
+        let key = slot_key(&API, "expiry-id", "expiry-secret");
+        let asked = || tokens.0.load(std::sync::atomic::Ordering::SeqCst);
+        let token = || async {
+            self::slot(&key)
+                .await
+                .token(&API, &cx, "expiry-id", "expiry-secret")
+                .await
+                .unwrap()
+        };
+        // None in hand: one is asked for, and kept for the hour less a minute.
+        assert_eq!((token().await.as_str(), asked()), ("token-1", 1));
+        {
+            let s = self::slot(&key).await;
+            let issued = s.token.as_ref().unwrap();
+            assert_eq!(issued.until - issued.at, Duration::from_secs(3540));
+        }
+        // In hand: the endpoint is not asked.
+        assert_eq!((token().await.as_str(), asked()), ("token-1", 1));
+        // Its time is over now.
+        self::slot(&key).await.token.as_mut().unwrap().until = Instant::now();
+        assert_eq!((token().await.as_str(), asked()), ("token-2", 2));
+        assert_eq!((token().await.as_str(), asked()), ("token-2", 2));
+    }
     #[tokio::test]
     async fn a_wait_the_service_asked_for_holds_every_request() {
         let slot = slot_key(&API, "busy-id", "busy-secret");

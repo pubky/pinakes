@@ -1332,6 +1332,132 @@ async fn feed_transport_stream_cap_wrong_type_sniff_and_page_cap() {
     assert_eq!(page.body.len(), pinakes_core::resolver::egress::BODY_CAP);
     server.abort();
 }
+/// The egress' own transport decodes a `Content-Encoding` body, and the caps count the decoded
+/// bytes: a few kilobytes on the wire that unpack past the cap are refused, or cut as a page is.
+#[tokio::test]
+async fn a_compressed_body_is_capped_by_its_decoded_size() {
+    use pinakes_core::resolver::egress::{over_cap, PinnedTransport, BODY_CAP};
+    use std::io::Write;
+    fn gzip(plain: &[u8]) -> Vec<u8> {
+        let mut packed = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        packed.write_all(plain).unwrap();
+        packed.finish().unwrap()
+    }
+    let small = gzip(br#"{"ok":true}"#);
+    let large = gzip(&vec![b'x'; 4 * BODY_CAP]);
+    assert!(large.len() < BODY_CAP / 16, "{} bytes", large.len());
+    let answer = |kind: &'static str, body: Vec<u8>| {
+        get(move || {
+            let body = body.clone();
+            async move { ([("content-type", kind), ("content-encoding", "gzip")], body) }
+        })
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = Router::new()
+        .route("/small", answer("application/json", small))
+        .route("/json", answer("application/json", large.clone()))
+        .route("/page", answer("text/html", large));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    // The transport connects to the addresses it is given, at the URL's port.
+    let at = |path: &str| -> url::Url {
+        format!("http://packed.example:{}{path}", addr.port())
+            .parse()
+            .unwrap()
+    };
+    let options = FetchOptions::default();
+    let read = PinnedTransport
+        .get_with(&at("/small"), &[addr], &options)
+        .await
+        .unwrap();
+    assert_eq!(read.body, br#"{"ok":true}"#);
+    let error = PinnedTransport
+        .get_with(&at("/json"), &[addr], &options)
+        .await
+        .unwrap_err();
+    assert!(over_cap(&error), "{error:#}");
+    let page = PinnedTransport
+        .get_with(&at("/page"), &[addr], &options)
+        .await
+        .unwrap();
+    assert!(page.truncated);
+    assert_eq!(page.body.len(), BODY_CAP);
+    server.abort();
+}
+/// A server that accepts the connection and never answers: the egress' own transport gives up
+/// at its ten seconds, and the failure is a timeout. The test takes those ten seconds.
+#[tokio::test]
+async fn a_server_that_never_answers_is_a_timeout() {
+    use pinakes_core::resolver::egress::PinnedTransport;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    // Every connection is accepted and held, with no answer.
+    let server = tokio::spawn(async move {
+        let mut held = Vec::new();
+        loop {
+            held.push(listener.accept().await.unwrap().0);
+        }
+    });
+    let url: url::Url = format!("http://silent.example:{}/page", addr.port())
+        .parse()
+        .unwrap();
+    let options = FetchOptions::default();
+    let started = std::time::Instant::now();
+    let answer = tokio::time::timeout(
+        std::time::Duration::from_secs(25),
+        PinnedTransport.get_with(&url, &[addr], &options),
+    )
+    .await
+    .expect("the transport gives up on its own");
+    let waited = started.elapsed();
+    server.abort();
+    let error = answer.unwrap_err();
+    assert_eq!(
+        pinakes_core::resolver::error_class(&error),
+        "timeout",
+        "{error:#}"
+    );
+    // The connection was made (no connect failure after 5 s): the wait was for the answer.
+    assert!(waited >= std::time::Duration::from_secs(9), "{waited:?}");
+}
+/// A private or local address is refused however its literal is spelt (octal, hexadecimal, one
+/// number, IPv4 inside IPv6): the link's host is read as the address it names, and no request
+/// is made. A public address in octal passes the check and reaches the transport.
+#[tokio::test]
+async fn an_address_literal_is_refused_by_what_it_names_not_how_it_is_spelt() {
+    let egress = common::offline_egress(Default::default());
+    for uri in [
+        "http://127.0.0.1/",
+        "http://0177.0.0.1/",
+        "http://0x7f.0.0.1/",
+        "http://0x7f000001/",
+        "http://017700000001/",
+        "http://2130706433/",
+        // 192.168.0.1 and 169.254.169.254.
+        "http://0300.0250.0.1/",
+        "http://0251.0376.0251.0376/",
+        "http://[::ffff:127.0.0.1]/",
+        "http://[::ffff:7f00:1]/",
+    ] {
+        let error = egress.fetch(uri).await.unwrap_err();
+        assert_eq!(
+            pinakes_core::resolver::error_class(&error),
+            "policy",
+            "{uri}: {error:#}"
+        );
+        assert!(
+            format!("{error:#}").contains("egress refused non-public address"),
+            "{uri}: {error:#}"
+        );
+    }
+    // 8.8.8.8 in octal: allowed, so the request is made, to the address it names (and fails:
+    // this egress has no network).
+    let error = egress.fetch("http://010.010.010.010/").await.unwrap_err();
+    assert!(
+        format!("{error:#}").contains("no network in tests: 8.8.8.8"),
+        "{error:#}"
+    );
+}
 #[test]
 fn remaining_calendar_pitfalls_dates_lists_split_uids_alt_images_and_horizons() {
     let body=cal(&format!("X-WR-TIMEZONE:Europe/Zurich\n{}\n{}\n{}",event("UID:base@google.com\nDTSTART;TZID=Europe/Zurich:20261020T180000\nRRULE:FREQ=WEEKLY;UNTIL=20261101T170000Z\nEXDATE;TZID=Europe/Zurich:20261027T180000,20261103T180000\nRDATE;VALUE=DATE:20261022\nSUMMARY:Before split\nX-ALT-DESC;FMTTYPE=text/HTML:<p>Poster<img src=\"https://example.org/img.png\"></p>"),event("UID:base_R20261101T180000@google.com\nDTSTART;TZID=Europe/Zurich:20261101T180000\nRRULE:FREQ=WEEKLY;COUNT=2\nSUMMARY:After split"),event("UID:date\nDTSTART;VALUE=DATE:20261025\nDTEND;VALUE=DATE:20261027\nSUMMARY:Two days\nSTATUS:CANCELLED")));
@@ -1597,7 +1723,26 @@ fn malformed_events_are_isolated_and_hostile_work_is_bounded() {
     let rdates = cal(&event(
         "UID:r\nDTSTART:20261020T120000Z\nRDATE:20261021T120000Z,20261022T120000Z,20261023T120000Z",
     ));
-    assert!(calendar::parse("https://example.org/f.ics", rdates.as_bytes(), &cfg, now()).is_err());
+    assert!(
+        calendar::parse("https://example.org/f.ics", rdates.as_bytes(), &cfg, now())
+            .unwrap_err()
+            .to_string()
+            .contains("RDATE work budget")
+    );
+    // The same dates within the limit are read.
+    let cfg = EventConfig {
+        max_date_values: 3,
+        ..Default::default()
+    };
+    assert_eq!(
+        calendar::parse("https://example.org/f.ics", rdates.as_bytes(), &cfg, now())
+            .unwrap()
+            .container
+            .unwrap()
+            .occurrences
+            .len(),
+        4
+    );
     let long = cal(&event(&format!(
         "UID:long\nDTSTART:20261020T120000Z\nSUMMARY:{}",
         "a".repeat(65537)
@@ -1608,7 +1753,9 @@ fn malformed_events_are_isolated_and_hostile_work_is_bounded() {
         &EventConfig::default(),
         now()
     )
-    .is_err());
+    .unwrap_err()
+    .to_string()
+    .contains("calendar physical line cap"));
 }
 
 #[test]
@@ -1735,7 +1882,10 @@ async fn performers_record_where_the_fetch_ended_on_every_path(pool: PgPool) {
     );
     let service = pinakes_core::event::service::EventService {
         pool: pool.clone(),
-        config: EventConfig::default(),
+        config: EventConfig {
+            geocoding: false,
+            ..Default::default()
+        },
         osm: Arc::new(OsmResolver::new(pool, OsmConfig::default()).unwrap()),
     };
     let asked = "https://www.songkick.com/concerts/43402127-radiohead-at-rac-arena";
@@ -2714,6 +2864,71 @@ fn structured_feed_work_is_bounded() {
             .to_string()
             .contains("item cap")
     );
+}
+
+#[test]
+fn ics_caps_are_enforced() {
+    let message = |body: &str, cfg: &EventConfig| {
+        calendar::parse("https://example.org/f.ics", body.as_bytes(), cfg, now())
+            .unwrap_err()
+            .to_string()
+    };
+    let read = |body: &str, cfg: &EventConfig| {
+        calendar::parse("https://example.org/f.ics", body.as_bytes(), cfg, now())
+            .unwrap()
+            .container
+            .unwrap()
+            .occurrences
+    };
+    // Nesting: a component may sit eight deep, the calendar and the event included.
+    let nested = |depth: usize| {
+        format!(
+            "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:deep\nDTSTART:20261020T120000Z\nSUMMARY:Deep\n{}{}END:VEVENT\nEND:VCALENDAR\n",
+            "BEGIN:X-LEVEL\n".repeat(depth - 2),
+            "END:X-LEVEL\n".repeat(depth - 2)
+        )
+    };
+    assert_eq!(read(&nested(8), &EventConfig::default()).len(), 1);
+    assert_eq!(
+        message(&nested(9), &EventConfig::default()),
+        "calendar nesting cap"
+    );
+    // Components: the calendar and each event count.
+    let three = cal(&[
+        event("UID:a\nDTSTART:20261020T120000Z\nSUMMARY:A"),
+        event("UID:b\nDTSTART:20261021T120000Z\nSUMMARY:B"),
+        event("UID:c\nDTSTART:20261022T120000Z\nSUMMARY:C"),
+    ]
+    .join("\n"));
+    let components = |max_components| EventConfig {
+        max_components,
+        ..Default::default()
+    };
+    assert_eq!(read(&three, &components(4)).len(), 3);
+    assert_eq!(message(&three, &components(3)), "calendar component cap");
+    // Occurrences of the whole feed.
+    let occurrences = |max_occurrences_per_feed| EventConfig {
+        max_occurrences_per_feed,
+        ..Default::default()
+    };
+    assert_eq!(read(&three, &occurrences(3)).len(), 3);
+    assert_eq!(message(&three, &occurrences(2)), "calendar occurrence cap");
+    // An unfolded line: each physical line is within the cap, the line they fold into is not.
+    let folded = cal(&event(&format!(
+        "UID:fold\nDTSTART:20261020T120000Z\nSUMMARY:{}\n {}",
+        "a".repeat(40),
+        "b".repeat(40)
+    )));
+    let line = |max_line_bytes| EventConfig {
+        max_line_bytes,
+        ..Default::default()
+    };
+    let whole = read(&folded, &line(128));
+    assert_eq!(
+        whole[0].doc.name.as_deref(),
+        Some(format!("{}{}", "a".repeat(40), "b".repeat(40)).as_str())
+    );
+    assert_eq!(message(&folded, &line(64)), "calendar unfolded line cap");
 }
 
 struct ReviewSnapshots {
@@ -4114,18 +4329,7 @@ async fn retention_waits_for_a_writer_holding_nothing_else(pool: PgPool) {
             let pool = pool.clone();
             async move { pinakes_core::changes::retain(&pool, 90).await }
         });
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock')")
-                    .fetch_one(&pool).await.unwrap();
-                if waiting {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .unwrap();
+        common::lock_waiters_reach(&pool, 1, "retention").await;
         sqlx::query("UPDATE resource SET group_revision=group_revision+1 WHERE id=$1")
             .bind(next)
             .execute(&mut *writer)
@@ -4267,7 +4471,7 @@ fn a_rule_whose_periods_would_hold_too_many_dates_is_never_expanded() {
                 event(&bad),
                 event("UID:good\nDTSTART:20261020T120000Z\nSUMMARY:Healthy")
             ));
-            let began = std::time::Instant::now();
+            let began = common::thread_cpu_time();
             let container = calendar::parse(
                 "https://example.org/feed.ics",
                 body.as_bytes(),
@@ -4278,7 +4482,7 @@ fn a_rule_whose_periods_would_hold_too_many_dates_is_never_expanded() {
             .container
             .unwrap();
             assert!(
-                began.elapsed() < std::time::Duration::from_secs(5),
+                common::thread_cpu_time() - began < std::time::Duration::from_secs(5),
                 "{rule}"
             );
             let mut uids: Vec<&str> = container
@@ -4473,13 +4677,13 @@ fn an_event_with_two_rules_or_an_exception_rule_is_left_out() {
 fn a_rule_with_a_huge_interval_expands_within_the_deadline() {
     // The library builds one period at a time: a yearly rule every 10,000 years builds its first
     // year, then steps past the calendar's end and stops, well within the parse deadline.
-    let began = std::time::Instant::now();
+    let began = common::thread_cpu_time();
     let container = parse(&cal(&event(
         "UID:i\nDTSTART:20261020T120000Z\nRRULE:FREQ=YEARLY;INTERVAL=10000\nSUMMARY:i",
     )))
     .container
     .unwrap();
-    assert!(began.elapsed() < std::time::Duration::from_secs(2));
+    assert!(common::thread_cpu_time() - began < std::time::Duration::from_secs(2));
     assert_eq!(container.occurrences.len(), 1);
     assert!(container.warnings.is_empty(), "{:?}", container.warnings);
 }
@@ -4629,7 +4833,10 @@ async fn an_artists_concert_list_on_a_platform_is_the_artist_through_the_whole_r
     );
     let service = pinakes_core::event::service::EventService {
         pool: pool.clone(),
-        config: EventConfig::default(),
+        config: EventConfig {
+            geocoding: false,
+            ..Default::default()
+        },
         osm: Arc::new(OsmResolver::new(pool, OsmConfig::default()).unwrap()),
     };
     let asked = "https://www.songkick.com/artists/253846-radiohead";
@@ -4693,7 +4900,10 @@ async fn an_event_naming_the_pages_canonical_is_the_pages_event_through_the_whol
     );
     let service = pinakes_core::event::service::EventService {
         pool: pool.clone(),
-        config: EventConfig::default(),
+        config: EventConfig {
+            geocoding: false,
+            ..Default::default()
+        },
         osm: Arc::new(OsmResolver::new(pool, OsmConfig::default()).unwrap()),
     };
     let asked = "https://gigs.example/concert/amp";
@@ -4767,6 +4977,13 @@ async fn an_event_page_reached_at_a_credential_resolves_nothing_back_to_it(pool:
         .page(uri, &fetched, card, &egress, deadline)
         .await
         .unwrap();
+    // The page's event was read: its name and date come from nowhere else.
+    assert_eq!(doc.type_name, "Event");
+    assert_eq!(doc.name.as_deref(), Some("Gig"));
+    assert_eq!(
+        doc.start,
+        Some("2027-01-20T18:00:00Z".parse::<DateTime<Utc>>().unwrap())
+    );
     let json = serde_json::to_string(&doc).unwrap();
     assert!(!json.contains("SECRET"), "{json}");
 }
@@ -4815,7 +5032,7 @@ fn html_page(url: &str, body: &str) -> Fetched {
 async fn an_activitypub_alternate_reached_at_a_credential_resolves_nothing_back_to_it(
     pool: PgPool,
 ) {
-    let (_, egress, service) = protocol_service(&pool);
+    let (transport, egress, service) = protocol_service(&pool);
     let uri = "https://events.example/ap-alt";
     let mut fetched = html_page(
         uri,
@@ -4829,6 +5046,17 @@ async fn an_activitypub_alternate_reached_at_a_credential_resolves_nothing_back_
         .page(uri, &fetched, card, &egress, deadline)
         .await
         .unwrap();
+    // The alternate was fetched to where it redirects, and read: only it names the zone.
+    assert!(
+        transport
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(path, _, _)| path == "/ap-alt-landed"),
+        "the alternate was never followed"
+    );
+    assert_eq!(doc.event.tz.as_deref(), Some("Europe/Paris"));
     let json = serde_json::to_string(&doc).unwrap();
     assert!(!json.contains("SECRET"), "{json}");
 }
@@ -4888,9 +5116,9 @@ fn a_zone_name_is_bounded_and_named_by_its_last_parts() {
         "America/Argentina/Buenos_Aires"
     );
     assert!(time::zone(&format!("{}Europe/Zurich", "/".repeat(150))).is_none());
-    let started = std::time::Instant::now();
+    let started = common::thread_cpu_time();
     assert!(time::zone(&"/".repeat(1_000_000)).is_none());
-    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    assert!(common::thread_cpu_time() - started < std::time::Duration::from_secs(1));
 }
 /// A calendar's properties are counted over all its components, and a line needs a name: a
 /// nameless one fails the calendar, or inside an event that event alone.
