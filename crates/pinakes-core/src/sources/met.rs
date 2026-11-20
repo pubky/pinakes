@@ -86,7 +86,7 @@ pub fn parse(status: u16, raw: &[u8], id: u64) -> Result<Option<Card>> {
     card.name = text(&v["title"]);
     let public_domain = v["isPublicDomain"].as_bool();
     if public_domain == Some(true) {
-        // The web-sized image; `primaryImage` is the full-resolution original.
+        // The web-sized image, else the full-resolution original (`primaryImage`).
         card.image = text(&v["primaryImageSmall"])
             .or_else(|| text(&v["primaryImage"]))
             .and_then(|u| image_url(&u));
