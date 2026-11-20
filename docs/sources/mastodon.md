@@ -8,7 +8,10 @@ quotes at most 200 characters, refreshes within the hour and is removed once the
 
 A link of the shape `https://{server}/@{account}/{id}` or
 `https://{server}/users/{account}/statuses/{id}` (with a numeric post id) is read from
-`https://{server}/api/v1/statuses/{id}`. A post is keyed on its ActivityPub id, which the API
+`https://{server}/api/v1/statuses/{id}`. The post must belong to the account the
+link names: the answer's `account.acct`, compared without case. `@{account}@{server}` may name an
+account of `{server}` itself; the `/users/…` form names only the server's own accounts. A link
+that names another account gets an ordinary web card. A post is keyed on its ActivityPub id, which the API
 names: every address of it on its own server becomes an alias of that id after its first fetch.
 A server's copy of another server's post (`https://{other}/@{account}@{server}/{id}`), or any
 answer naming an id on another host, keeps its own card, with the id as the `activitypub_id`

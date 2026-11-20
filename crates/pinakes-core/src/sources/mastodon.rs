@@ -28,10 +28,13 @@ fn account(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"_.-@".contains(&b))
 }
 
-/// A post on an instance: `https://{host}/@{account}/{id}` or `/users/{account}/statuses/{id}`.
+/// A post on an instance: `https://{host}/@{account}/{id}`, or `/users/{account}/statuses/{id}`
+/// (the form of a post's ActivityPub id, so the account is one of the server's own).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Target {
     pub host: String,
+    /// The account the link names: `name`, or `name@server`.
+    pub account: String,
     pub id: String,
 }
 
@@ -42,15 +45,27 @@ impl Target {
             return None;
         }
         let segments: Vec<&str> = url.path_segments()?.collect();
-        let id = match segments.as_slice() {
-            [user, id] if user.strip_prefix('@').is_some_and(account) => status_id(id)?,
-            ["users", user, "statuses", id] if account(user) => status_id(id)?,
+        let (user, id) = match segments.as_slice() {
+            [user, id] => (user.strip_prefix('@')?, status_id(id)?),
+            ["users", user, "statuses", id] if !user.contains('@') => (*user, status_id(id)?),
             _ => return None,
         };
-        Some(Self {
+        account(user).then_some(Self {
             host: url.host_str()?.to_ascii_lowercase(),
+            account: user.to_owned(),
             id: id.to_owned(),
         })
+    }
+    /// Whether `acct` (a status's `account.acct`: `name` for an account of the server,
+    /// `name@server` for another server's) is the account the link names, whatever the case. A
+    /// link may name an account of its own server with the server (`name@{host}`).
+    fn names(&self, acct: &str) -> bool {
+        self.account.eq_ignore_ascii_case(acct)
+            || self.account.split_once('@').is_some_and(|(name, server)| {
+                !acct.contains('@')
+                    && name.eq_ignore_ascii_case(acct)
+                    && server.eq_ignore_ascii_case(&self.host)
+            })
     }
 }
 
@@ -61,7 +76,7 @@ fn plain(html: &str) -> String {
 }
 
 /// The card of a status, or `None` when the instance says it does not exist. A body that is not
-/// a Mastodon status is `Declined`.
+/// a Mastodon status, or a status of another account than the link's, is `Declined`.
 pub fn card(
     mut doc: ResourceMeta,
     target: &Target,
@@ -82,8 +97,12 @@ pub fn card(
         return Err(Declined.into());
     };
     anyhow::ensure!(id == target.id, "the instance answered for another post");
-    let ap = web_url(&ap).context("no ActivityPub id")?;
     let account = &v["account"];
+    // The post's id under another account's name is not an address of the post.
+    if !text(&account["acct"]).is_some_and(|acct| target.names(&acct)) {
+        return Err(Declined.into());
+    }
+    let ap = web_url(&ap).context("no ActivityPub id")?;
     let content = text(&v["content"]).map(|c| plain(&c)).unwrap_or_default();
     let warning = text(&v["spoiler_text"]);
     doc.set_type("SocialMediaPosting");
@@ -243,6 +262,9 @@ mod tests {
     fn read(file: &str) -> Vec<u8> {
         crate::sources::fixture::read("mastodon", file)
     }
+    fn link(uri: &str) -> Target {
+        Target::of_uri(uri).unwrap_or_else(|| panic!("{uri}"))
+    }
 
     #[test]
     fn addresses() {
@@ -259,12 +281,10 @@ mod tests {
                 "113000000000000000",
             ),
         ] {
+            let target = link(uri);
             assert_eq!(
-                Target::of_uri(uri),
-                Some(Target {
-                    host: host.into(),
-                    id: id.into()
-                }),
+                (target.host.as_str(), target.id.as_str()),
+                (host, id),
                 "{uri}"
             );
         }
@@ -281,10 +301,7 @@ mod tests {
 
     #[test]
     fn statuses() {
-        let target = Target {
-            host: "mastodon.social".into(),
-            id: "1".into(),
-        };
+        let target = link("https://mastodon.social/@Gargron/1");
         let base = ResourceMeta::new("https://mastodon.social/@Gargron/1", "mastodon", 3600);
         let doc = card(base.clone(), &target, 200, &read("status-1.json"))
             .unwrap()
@@ -300,10 +317,7 @@ mod tests {
             Some("https://mastodon.social/users/Gargron/statuses/1")
         );
         assert!(doc.image.is_some());
-        let media = Target {
-            host: "mastodon.social".into(),
-            id: "116929144390213579".into(),
-        };
+        let media = link("https://mastodon.social/@Mastodon/116929144390213579");
         let doc = card(
             base.clone(),
             &media,
@@ -326,10 +340,7 @@ mod tests {
 
     #[test]
     fn an_author_who_opted_out_keeps_a_card_marked_opted_out() {
-        let target = Target {
-            host: "mastodon.social".into(),
-            id: "1".into(),
-        };
+        let target = link("https://mastodon.social/@Gargron/1");
         let base = ResourceMeta::new("https://mastodon.social/@Gargron/1", "mastodon", 3600);
         let doc = card(base.clone(), &target, 200, &read("status-1-opted-out.json"))
             .unwrap()
@@ -346,6 +357,57 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!doc.attributes.contains_key("opted_out"));
+    }
+
+    #[test]
+    fn a_post_under_another_accounts_name_is_not_the_links() {
+        let base = ResourceMeta::new("https://mastodon.social/@Gargron/1", "mastodon", 3600);
+        let post = read("status-1.json");
+        // Post 1 is Gargron's: its id under any other account is no address of it.
+        for uri in [
+            "https://mastodon.social/@anyone/1",
+            "https://mastodon.social/users/anyone/statuses/1",
+            "https://mastodon.social/@Gargron@example.org/1",
+            "https://mastodon.social/@Gargron.x/1",
+        ] {
+            let error = card(base.clone(), &link(uri), 200, &post).unwrap_err();
+            assert!(error.is::<Declined>(), "{uri}: {error}");
+        }
+        // The account in another case, or named with its server, is the same account.
+        for uri in [
+            "https://mastodon.social/@gargron/1",
+            "https://mastodon.social/users/GARGRON/statuses/1",
+            "https://mastodon.social/@Gargron@Mastodon.Social/1",
+        ] {
+            let doc = card(base.clone(), &link(uri), 200, &post).unwrap().unwrap();
+            assert_eq!(doc.attributes["author"], "Gargron", "{uri}");
+        }
+        // A copy on another server names the account with its server.
+        let mut copy: Value = serde_json::from_slice(&post).unwrap();
+        copy["account"]["acct"] = "Gargron@mastodon.social".into();
+        let copy = serde_json::to_vec(&copy).unwrap();
+        let seen = link("https://fosstodon.org/@gargron@mastodon.social/1");
+        let doc = card(base.clone(), &seen, 200, &copy).unwrap().unwrap();
+        assert_eq!(doc.source_root, None);
+        for uri in [
+            "https://fosstodon.org/@Gargron/1",
+            "https://fosstodon.org/@Gargron@fosstodon.org/1",
+        ] {
+            let error = card(base.clone(), &link(uri), 200, &copy).unwrap_err();
+            assert!(error.is::<Declined>(), "{uri}: {error}");
+        }
+        // A status that names no account is not Mastodon's.
+        let mut nameless: Value = serde_json::from_slice(&post).unwrap();
+        nameless["account"]["acct"] = Value::Null;
+        let nameless = serde_json::to_vec(&nameless).unwrap();
+        let ours = link("https://mastodon.social/@Gargron/1");
+        let error = card(base, &ours, 200, &nameless).unwrap_err();
+        assert!(error.is::<Declined>());
+        // The ActivityPub form names an account of the server itself.
+        assert_eq!(
+            Target::of_uri("https://mastodon.social/users/Gargron@mastodon.social/statuses/1"),
+            None
+        );
     }
 
     #[test]
@@ -366,11 +428,8 @@ mod tests {
     fn another_hosts_id_roots_nothing() {
         // A server answering with another host's ActivityPub id (here someone else's post, as a
         // hostile server could) keeps its own card: no alias of that post, no page elsewhere.
-        let evil = Target {
-            host: "evil.example".into(),
-            id: "1".into(),
-        };
-        let base = ResourceMeta::new("https://evil.example/@a/1", "mastodon", 3600);
+        let evil = link("https://evil.example/@Gargron/1");
+        let base = ResourceMeta::new("https://evil.example/@Gargron/1", "mastodon", 3600);
         let doc = card(base.clone(), &evil, 200, &read("status-1.json"))
             .unwrap()
             .unwrap();
@@ -378,10 +437,7 @@ mod tests {
         assert!(!doc.attributes.contains_key("page_url"));
         let mut hostile: Value = serde_json::from_slice(&read("status-1.json")).unwrap();
         hostile["uri"] = "https://www.paypal.com/signin".into();
-        let ours = Target {
-            host: "mastodon.social".into(),
-            id: "1".into(),
-        };
+        let ours = link("https://mastodon.social/@Gargron/1");
         let doc = card(base, &ours, 200, &serde_json::to_vec(&hostile).unwrap())
             .unwrap()
             .unwrap();
