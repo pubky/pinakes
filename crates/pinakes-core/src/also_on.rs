@@ -948,7 +948,9 @@ pub async fn record(
 
 /// Run the sources of `ids` again in ten minutes, those `editions` reads (a MusicBrainz key): a change of
 /// their groups (a member joining or leaving, a link becoming an alias) changes the links their
-/// cards may show, which it places.
+/// cards may show, which it places. A card that is due stays due; any other is due ten minutes
+/// from now, one the worker holds too: its lease moves, so the batch's end leaves the mark
+/// standing as it does a save's (`drain_leased`), and the card runs again after this run.
 pub(crate) async fn requeue_placed(
     tx: &mut Transaction<'_, Postgres>,
     ids: &[String],
@@ -957,7 +959,7 @@ pub(crate) async fn requeue_placed(
         return Ok(());
     }
     // In ten minutes: the changes a regrouping makes at once come to one run per card.
-    sqlx::query("INSERT INTO also_on_dirty(resource_id,next_attempt_at) SELECT DISTINCT k.resource_id,now()+interval '10 minutes' FROM resource_key k WHERE k.resource_id=ANY($1) AND (k.key LIKE 'mb:recording:%' OR k.key LIKE 'mb:release:%' OR k.key LIKE 'mb:release-group:%') ORDER BY 1 ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=least(also_on_dirty.next_attempt_at,excluded.next_attempt_at)")
+    sqlx::query("INSERT INTO also_on_dirty(resource_id,next_attempt_at) SELECT DISTINCT k.resource_id,now()+interval '10 minutes' FROM resource_key k WHERE k.resource_id=ANY($1) AND (k.key LIKE 'mb:recording:%' OR k.key LIKE 'mb:release:%' OR k.key LIKE 'mb:release-group:%') ORDER BY 1 ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=excluded.next_attempt_at WHERE also_on_dirty.next_attempt_at>now()")
         .bind(ids)
         .execute(&mut **tx)
         .await?;
@@ -1184,7 +1186,8 @@ pub async fn drain_leased(
         .collect::<Vec<_>>()
         .await;
     // A change saved while a resource was read marked it due again (its lease became now): that
-    // mark stands, so the change is read too. So does another worker's claim after this lease
+    // mark stands, so the change is read too. So does a regrouping's (`requeue_placed`: ten
+    // minutes from then), and another worker's claim after this lease
     // ran out. The next attempt is written only while the row still holds this run's lease,
     // however long the batch took; the count of failed runs and the error are always written.
     let next = |at: &str| {

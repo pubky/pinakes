@@ -2977,6 +2977,103 @@ async fn a_change_saved_during_a_run_is_read_again(pool: PgPool) {
     assert!(later);
 }
 
+/// A source during whose lookup another card joins the subject's group: it records the
+/// recording's key for `other` and runs the grouping, as a second card's run and the group task
+/// would while this card's batch is claimed.
+struct JoinedMeanwhile {
+    pool: PgPool,
+    other: String,
+    recording: &'static str,
+}
+#[async_trait]
+impl Source for JoinedMeanwhile {
+    fn id(&self) -> &'static str {
+        "joined_meanwhile"
+    }
+    fn applies(&self, subject: &Subject) -> bool {
+        subject.status == "ok" && subject.id != self.other
+    }
+    fn ttl(&self) -> Duration {
+        Duration::from_secs(86_400)
+    }
+    async fn lookup(&self, cx: &Context, _: &Subject) -> anyhow::Result<Found> {
+        also_on::record(
+            &self.pool,
+            &self.other,
+            "hub",
+            Found {
+                keys: vec![key(self.recording)],
+                ..Default::default()
+            },
+            Duration::from_secs(86_400),
+            &cx.config.also_on,
+        )
+        .await?;
+        common::drain_groups(&self.pool, &Default::default()).await;
+        Ok(Found {
+            keys: vec![key("isrc:USIR10211559")],
+            ..Default::default()
+        })
+    }
+}
+
+/// A regrouping marks the cards it moves to run again in ten minutes (`editions` places their
+/// group's links). The mark stands for a card the worker holds too: the end of its batch does
+/// not write the lifetime over it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_regrouping_during_a_run_brings_the_card_back(pool: PgPool) {
+    let recording = "mb:recording:8f3471b5-7e6a-48da-86a9-c1c07a0f47ae";
+    let card = page(&pool, "https://open.spotify.com/track/regrouped", "Regrouped").await;
+    let other = page(&pool, "https://tidal.com/track/491206012", "Regrouped").await;
+    let cx = cx(Config::default());
+    also_on::record(
+        &pool,
+        &card,
+        "hub",
+        Found {
+            keys: vec![key(recording)],
+            ..Default::default()
+        },
+        Duration::from_secs(86_400),
+        &cx.config.also_on,
+    )
+    .await
+    .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
+    let group = || {
+        let pool = pool.clone();
+        let card = card.clone();
+        async move {
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT group_id FROM group_unit WHERE resource_id=$1",
+            )
+            .bind(&card)
+            .fetch_optional(&pool)
+            .await
+            .unwrap()
+            .flatten()
+        }
+    };
+    assert_eq!(group().await, None);
+    let sources: Vec<Arc<dyn Source>> = vec![Arc::new(JoinedMeanwhile {
+        pool: pool.clone(),
+        other: other.clone(),
+        recording,
+    })];
+    drain(&pool, &cx, &sources).await;
+    // The card's group changed while its run was claimed.
+    assert!(group().await.is_some());
+    let (due_in, attempts, error): (f64, i32, Option<String>) = sqlx::query_as(
+        "SELECT extract(epoch FROM next_attempt_at-now())::float8,attempts,last_error FROM also_on_dirty WHERE resource_id=$1",
+    )
+    .bind(&card)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((attempts, error), (0, None));
+    assert!((300.0..=600.0).contains(&due_in), "{due_in}");
+}
+
 /// A link that carries a credential is never sent to another service: no also-on source looks it
 /// up, while a plain link in the same batch is.
 #[sqlx::test(migrations = "../../migrations")]
