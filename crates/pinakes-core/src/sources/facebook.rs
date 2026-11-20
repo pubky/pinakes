@@ -119,15 +119,25 @@ impl Target {
     }
 }
 
-/// The card of a page from its tags: its name, its about text (the description after
-/// `Name. N followers · N talking about this.`, in the page's language) and its picture.
+/// The card of a page by its link alone, "Profile on facebook.com" with the name the link
+/// spells: what a page without tags gives. Such a page (a consent page, Facebook's generic
+/// page) does not say whether the page exists.
+fn plain_page(doc: ResourceMeta, name: &str) -> ResourceMeta {
+    let mut doc = Shape::Profile.card(doc, SITE);
+    doc.set_type("Organization");
+    social::fact(&mut doc, "handle", Some(name.to_owned()));
+    doc
+}
+
+/// The card of a page from its tags, or `None` when the page names nothing: its name, its about
+/// text (the description after `Name. N followers · N talking about this.`, in the page's
+/// language) and its picture.
 pub fn page_card(doc: ResourceMeta, name: &str, tags: &OpenGraph) -> Option<ResourceMeta> {
     let title = tags.title.as_deref()?.trim();
     if title.is_empty() {
         return None;
     }
-    let mut doc = Shape::Profile.card(doc, SITE);
-    doc.set_type("Organization");
+    let mut doc = plain_page(doc, name);
     doc.name = Some(title.to_owned());
     doc.description = tags.description.as_deref().and_then(|d| {
         let rest = d
@@ -143,7 +153,6 @@ pub fn page_card(doc: ResourceMeta, name: &str, tags: &OpenGraph) -> Option<Reso
         (!about.is_empty()).then(|| social::excerpt(about, 200))
     });
     doc.image = tags.image.clone();
-    social::fact(&mut doc, "handle", Some(name.to_owned()));
     Some(doc)
 }
 
@@ -199,7 +208,7 @@ impl Source for Facebook {
                 Body::Read { body, .. } => {
                     let tags = crate::resolver::html::blocking(move || social::open_graph(&body))
                         .await??;
-                    page_card(doc, name, &tags).unwrap_or_else(|| cx.missing(uri, self))
+                    page_card(doc.clone(), name, &tags).unwrap_or_else(|| plain_page(doc, name))
                 }
                 Body::Missing => cx.missing(uri, self),
                 Body::Blocked => social::blocked(doc, Shape::Profile, SITE),
@@ -298,5 +307,33 @@ mod tests {
         assert!(doc.image.as_deref().unwrap().starts_with("https://"));
         assert_eq!(doc.attributes["handle"], "facebook");
         assert!(page_card(base, "x", &OpenGraph::default()).is_none());
+    }
+
+    /// A 200 page without tags (a consent page, Facebook's generic page) does not say whether
+    /// the page exists: the plain card, not `missing`.
+    #[tokio::test(start_paused = true)]
+    async fn a_page_without_tags_is_the_plain_card() {
+        let page = "https://www.facebook.com/facebook";
+        let (egress, _) = crate::sources::fixture::egress(vec![(
+            page,
+            200,
+            "text/html",
+            b"<html><head><title>Facebook</title></head><body><p>Allow cookies to continue.</p></body></html>"
+                .to_vec(),
+        )]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let doc = Facebook
+            .resolve(&cx, "https://m.facebook.com/Facebook/")
+            .await
+            .unwrap();
+        assert_eq!(doc.status, crate::model::Status::Ok);
+        assert_eq!(doc.type_name, "Organization");
+        assert_eq!(doc.name.as_deref(), Some("Profile on facebook.com"));
+        assert_eq!(doc.attributes["handle"], "facebook");
+        assert!(!doc.attributes.contains_key("blocked"));
+        assert_eq!(doc.source_root.as_deref(), Some(page));
     }
 }

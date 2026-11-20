@@ -18,7 +18,9 @@ photos, share links and `profile.php` links are not read.
 
 - A page: `GET https://www.facebook.com/{name}`, its Open Graph tags (the name, and a
   description of its counts and about text in the page's language). A page that does not
-  exist, like anything shown to accounts only, redirects to the sign-in page.
+  exist, like anything shown to accounts only, redirects to the sign-in page. An answer
+  without tags gives the plain card, "Profile on facebook.com", with the name: it does not say
+  the page is gone.
 - A post or video: `GET` of its root; what comes back without an account is the sign-in
   redirect, so the card is the plain one, "Post on facebook.com" (with its page) or "Video on
   facebook.com".

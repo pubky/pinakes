@@ -16,7 +16,9 @@ capitalised name are aliases of them. Boards and `pin.it` short links are not re
 - A pin: `GET https://www.pinterest.com/oembed.json?url={root}`, the documented oEmbed
   endpoint. A 400 or 404 (Pinterest answers "Url was not found") is `missing`.
 - A profile: `GET https://www.pinterest.com/{name}/`, its Open Graph tags and JSON-LD. A page
-  that is no profile's (no such name) is `missing`.
+  that is no profile's (Pinterest answers its generic page, with status 200, for a name it
+  does not know) gives the plain card, "Profile on pinterest.com", with the name: it does not
+  say the profile is gone. A 404 or 410 is `missing`.
 
 A request Pinterest refuses (a challenge, 401 or 403) gives the card of the link's shape alone,
 "Post on pinterest.com" or "Profile on pinterest.com", with the `blocked` fact: the link still

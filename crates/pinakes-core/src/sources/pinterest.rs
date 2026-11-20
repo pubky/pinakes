@@ -128,20 +128,29 @@ pub fn pin_card(doc: ResourceMeta, v: &Value) -> ResourceMeta {
     doc
 }
 
-/// The card of a profile from its page, or `None` when the page is not a profile's (no such
-/// name): its name, bio and avatar as the extractor read them from its Open Graph tags and
-/// JSON-LD.
+/// The card of a profile by its link alone, "Profile on pinterest.com" with the name the link
+/// spells: what a page that is not a profile's gives. Pinterest answers its generic page, with
+/// status 200, for a name it does not know, so that page does not say whether the profile
+/// exists.
+fn plain_profile(doc: ResourceMeta, name: &str) -> ResourceMeta {
+    let mut doc = Shape::Profile.card(doc, SITE);
+    social::fact(&mut doc, "handle", Some(name.to_owned()));
+    doc
+}
+
+/// The card of a profile from its page, or `None` when the page is not a profile's (Pinterest's
+/// generic page): its name, bio and avatar as the extractor read them from its Open Graph tags
+/// and JSON-LD.
 pub fn profile_card(doc: ResourceMeta, name: &str, page: &ResourceMeta) -> Option<ResourceMeta> {
     if page.type_name != "Person" || page.name.is_none() {
         return None;
     }
-    let mut doc = Shape::Profile.card(doc, SITE);
+    let mut doc = plain_profile(doc, name);
     social::take(&mut doc, page);
     doc.description = doc
         .description
         .as_deref()
         .map(|bio| social::excerpt(bio, 200));
-    social::fact(&mut doc, "handle", Some(name.to_owned()));
     Some(doc)
 }
 
@@ -223,9 +232,8 @@ impl Source for Pinterest {
                 Oembed::Blocked => social::blocked(doc, Shape::Post, SITE),
             },
             Target::Profile(name) => match social::page(cx, &target.root()).await? {
-                Page::Read { doc: page, .. } => {
-                    profile_card(doc, name, &page).unwrap_or_else(|| cx.missing(uri, self))
-                }
+                Page::Read { doc: page, .. } => profile_card(doc.clone(), name, &page)
+                    .unwrap_or_else(|| plain_profile(doc, name)),
                 Page::Missing => cx.missing(uri, self),
                 Page::Blocked => social::blocked(doc, Shape::Profile, SITE),
             },
@@ -308,6 +316,31 @@ mod tests {
             .starts_with("https://i.pinimg.com/"));
         let missing: Value = serde_json::from_slice(&read("oembed-missing.json")).unwrap();
         assert!(missing["error"].is_string());
+    }
+
+    /// The page Pinterest answers for a name it does not know is its generic page, with status
+    /// 200 and no profile tags: the plain card, not `missing`.
+    #[tokio::test(start_paused = true)]
+    async fn a_page_that_is_no_profile_is_the_plain_card() {
+        let profile = "https://www.pinterest.com/thisuserdoesnotexist12345x/";
+        let (egress, _) = crate::sources::fixture::egress(vec![(
+            profile,
+            200,
+            "text/html",
+            read("profile-missing.html.gz"),
+        )]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let doc = Pinterest.resolve(&cx, profile).await.unwrap();
+        assert_eq!(doc.status, crate::model::Status::Ok);
+        assert_eq!(doc.type_name, "Person");
+        assert_eq!(doc.name.as_deref(), Some("Profile on pinterest.com"));
+        assert_eq!(doc.attributes["handle"], "thisuserdoesnotexist12345x");
+        assert!(!doc.attributes.contains_key("blocked"));
+        assert_eq!((doc.description, doc.image), (None, None));
+        assert_eq!(doc.source_root.as_deref(), Some(profile));
     }
 
     #[test]

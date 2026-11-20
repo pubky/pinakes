@@ -13,7 +13,9 @@ of them.
 ## What it reads
 
 - A channel: `GET https://www.twitch.tv/{login}`, its Open Graph tags (`Name - Twitch`). A page
-  titled Twitch's own way names no channel: `missing`.
+  that is not a profile's (Twitch answers its generic page, with status 200, for a channel that
+  does not exist) gives the plain card, "Profile on twitch.tv", with the login: it does not say
+  the channel is gone. A 404 or 410 is `missing`.
 - A video: `GET https://www.twitch.tv/videos/{id}`, its Open Graph tags
   (`Title - login on Twitch`).
 - A clip: `GET https://clips.twitch.tv/{slug}`. Twitch names a clip only to a browser, so the

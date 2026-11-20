@@ -25,7 +25,9 @@ URN's page is shown to accounts only. The host without `www.` or with a country 
 - A post: `GET` of its root. A page offering to sign in instead of the post gives the plain
   card.
 
-The tags are read as written: LinkedIn's JSON-LD describes recent posts, not the page.
+The tags are read as written: LinkedIn's JSON-LD describes recent posts, not the page. A
+profile's or company's page answered without them gives the plain card, "Profile on
+linkedin.com", with the slug: it does not say the object is gone.
 LinkedIn answers many requests without an account with HTTP 999 or its sign-in page; such a
 request gives the card of the link's shape alone, "Profile on linkedin.com" or "Post on
 linkedin.com", with the `blocked` fact: the link still resolves, groups and counts. So does a
