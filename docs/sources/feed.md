@@ -30,8 +30,10 @@ item says nothing about the host, which is asked again.
 ## Card
 
 `Article` (from an RSS or Atom feed) or `NewsArticle` (from a news sitemap), named by the item's
-title and described by its description (at most 300 characters), with its image. `from`
-is `feed`.
+title and described by its description (at most 300 characters), with its image. An RSS item's
+image is its `media:thumbnail`, an `enclosure` typed as an image, or a `media:content` that is an
+image by its `medium` or, without one, by its `type` (no `type` counts as an image; a video or a
+sound does not). `from` is `feed`.
 
 | Fact | Meaning |
 | --- | --- |

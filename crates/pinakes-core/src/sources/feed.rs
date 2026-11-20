@@ -107,14 +107,20 @@ pub fn entries(body: &[u8]) -> Vec<Entry> {
                 let Some(link) = text_of(node, "link") else {
                     continue;
                 };
+                let image_type = |c: &roxmltree::Node<'_, '_>| {
+                    c.attribute("type").map(|t| t.starts_with("image/"))
+                };
                 let image = node
                     .children()
                     .filter(|c| c.is_element())
-                    .find(|c| {
-                        matches!(c.tag_name().name(), "content" | "thumbnail")
-                            && c.attribute("medium").is_none_or(|m| m == "image")
-                            || c.tag_name().name() == "enclosure"
-                                && c.attribute("type").is_some_and(|t| t.starts_with("image/"))
+                    .find(|c| match (c.tag_name().name(), c.attribute("medium")) {
+                        ("content" | "thumbnail", Some(medium)) => medium == "image",
+                        ("thumbnail", None) => true,
+                        // `media:content` that names no medium: a video or a sound by its
+                        // type is not the picture.
+                        ("content", None) => image_type(c).unwrap_or(true),
+                        ("enclosure", _) => image_type(c).unwrap_or(false),
+                        _ => false,
                     })
                     .and_then(|c| c.attribute("url"))
                     .map(str::to_owned);
@@ -459,6 +465,46 @@ mod tests {
                 "{other}"
             );
         }
+    }
+
+    /// An item's `media:content` is its image by its `medium`, else by its `type`: a video is
+    /// not the picture, and the thumbnail after it is.
+    #[test]
+    fn a_video_is_not_an_items_image() {
+        let image = |media: &str| {
+            let rss = format!(
+                r#"<rss xmlns:media="http://search.yahoo.com/mrss/"><channel><item>
+                <link>https://a.example/post/1</link><title>A post</title>{media}</item></channel></rss>"#
+            );
+            entries(rss.as_bytes()).remove(0).image
+        };
+        let video = r#"<media:content url="https://a.example/v.mp4" type="video/mp4"/>"#;
+        let thumbnail = r#"<media:thumbnail url="https://a.example/t.jpg"/>"#;
+        assert_eq!(image(video), None);
+        assert_eq!(
+            image(&format!("{video}{thumbnail}")).as_deref(),
+            Some("https://a.example/t.jpg")
+        );
+        assert_eq!(
+            image(r#"<media:content url="https://a.example/s.mp3" type="audio/mpeg"/>"#),
+            None
+        );
+        for picture in [
+            r#"<media:content url="https://a.example/p.jpg"/>"#,
+            r#"<media:content url="https://a.example/p.jpg" type="image/jpeg"/>"#,
+            r#"<media:content url="https://a.example/p.jpg" medium="image"/>"#,
+            r#"<enclosure url="https://a.example/p.jpg" type="image/jpeg"/>"#,
+        ] {
+            assert_eq!(
+                image(picture).as_deref(),
+                Some("https://a.example/p.jpg"),
+                "{picture}"
+            );
+        }
+        assert_eq!(
+            image(r#"<media:content url="https://a.example/v.mp4" medium="video"/>"#),
+            None
+        );
     }
 
     /// A sitemap's entries are counted, not its elements: a link far down a long news sitemap
