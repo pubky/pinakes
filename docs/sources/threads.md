@@ -23,7 +23,8 @@ handle is taken from that address, else from the last `(@handle)` of the page's 
 
 A request Threads refuses (a sign-in redirect, a challenge, 401 or 403) gives the card of the
 link's shape alone, "Post on threads.com" or "Profile on threads.com", with the `blocked`
-fact: the link still resolves, groups and counts.
+fact: the link still resolves, groups and counts. So does a page Threads withholds where the
+request came from (451): it is not `missing`.
 
 ## Card
 

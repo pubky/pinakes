@@ -28,7 +28,8 @@ URN's page is shown to accounts only. The host without `www.` or with a country 
 The tags are read as written: LinkedIn's JSON-LD describes recent posts, not the page.
 LinkedIn answers many requests without an account with HTTP 999 or its sign-in page; such a
 request gives the card of the link's shape alone, "Profile on linkedin.com" or "Post on
-linkedin.com", with the `blocked` fact: the link still resolves, groups and counts.
+linkedin.com", with the `blocked` fact: the link still resolves, groups and counts. So does a
+page LinkedIn withholds where the request came from (451): it is not `missing`.
 
 ## Card
 

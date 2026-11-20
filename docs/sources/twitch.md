@@ -20,7 +20,8 @@ of them.
   card is the plain one, "Video on twitch.tv", with the channel when the link spells it.
 
 A request Twitch refuses (a challenge, 401 or 403) gives the card of the link's shape alone
-with the `blocked` fact: the link still resolves, groups and counts.
+with the `blocked` fact: the link still resolves, groups and counts. So does a page Twitch
+withholds where the request came from (451): it is not `missing`.
 
 ## Card
 

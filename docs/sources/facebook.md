@@ -24,7 +24,8 @@ photos, share links and `profile.php` links are not read.
   facebook.com".
 
 A request Facebook refuses (the sign-in redirect, a challenge, 401 or 403) gives the card of
-the link's shape alone with the `blocked` fact: the link still resolves, groups and counts.
+the link's shape alone with the `blocked` fact: the link still resolves, groups and counts. So
+does a page Facebook withholds where the request came from (451): it is not `missing`.
 
 ## Card
 

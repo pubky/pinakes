@@ -318,6 +318,28 @@ mod tests {
         );
     }
 
+    /// A post withheld where the request came from (451) is not a post that is gone: the blocked
+    /// card, not `missing`.
+    #[tokio::test(start_paused = true)]
+    async fn a_withheld_post_is_blocked_not_missing() {
+        let post = "https://www.instagram.com/p/C2vXx0yPvYq/";
+        let (egress, _) = crate::sources::fixture::egress(vec![(
+            post,
+            451,
+            "text/html",
+            b"<html><title>Unavailable</title></html>".to_vec(),
+        )]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let doc = Instagram.resolve(&cx, post).await.unwrap();
+        assert_eq!(doc.status, crate::model::Status::Ok);
+        assert_eq!(doc.type_name, "SocialMediaPosting");
+        assert_eq!(doc.attributes["blocked"], "true");
+        assert_eq!(doc.source_root.as_deref(), Some(post));
+    }
+
     #[test]
     fn a_profile_from_tags_or_without_them() {
         let base = ResourceMeta::new("https://www.instagram.com/instagram/", "instagram", 3600);

@@ -1,9 +1,10 @@
 //! What the social-platform sources share. Each reads its platform's public page (its Open
 //! Graph tags, with any JSON-LD) or its oEmbed endpoint, never an account's view, and gives one
 //! of three cards: a post, a profile or a video. A platform that refuses the request (a sign-in
-//! redirect, a challenge page, a 401 or 403, or a status of its own that its source names) still
-//! gets a card, of the link's shape alone, marked `blocked`: the link resolves, groups and counts
-//! while the platform shows the object to accounts only.
+//! redirect, a challenge page, a 401 or 403, a 451, or a status of its own that its source names)
+//! still gets a card, of the link's shape alone, marked `blocked`: the link resolves, groups and
+//! counts while the platform shows the object to accounts only or withholds it where the request
+//! came from.
 pub use super::excerpt;
 use super::Context;
 use crate::{
@@ -68,9 +69,10 @@ pub enum Page {
         doc: Box<ResourceMeta>,
         url: url::Url,
     },
-    /// The platform says there is no such object.
+    /// The platform says there is no such object (404, 410).
     Missing,
-    /// The platform refused the request.
+    /// The platform refused the request, or withholds the page where the request came from
+    /// (451): that says nothing about whether the object exists.
     Blocked,
 }
 
@@ -103,8 +105,8 @@ pub async fn page(cx: &Context<'_>, url: &str) -> Result<Page> {
     };
     match fetched.status {
         200 => {}
-        404 | 410 | 451 => return Ok(Page::Missing),
-        401 | 403 => return Ok(Page::Blocked),
+        404 | 410 => return Ok(Page::Missing),
+        401 | 403 | 451 => return Ok(Page::Blocked),
         s => bail!("the site answered {s}"),
     }
     let (uri, ttl, ended_at) = (url.to_owned(), cx.ttl, fetched.url.clone());
@@ -131,7 +133,8 @@ pub fn take(doc: &mut ResourceMeta, page: &ResourceMeta) {
 /// What an oEmbed endpoint answered for a link.
 pub enum Oembed {
     Found(Value),
-    /// The provider says there is no such object (404, or 400 naming the link).
+    /// The provider says there is no such object: a 404, or any 400 (how a provider answers a
+    /// link it does not know; the answer's body is not read).
     Missing,
     Blocked,
 }
@@ -178,8 +181,8 @@ pub async fn page_body(cx: &Context<'_>, url: &str, refused: &[u16]) -> Result<B
             body: String::from_utf8_lossy(&fetched.body).into_owned(),
             url: fetched.url,
         },
-        404 | 410 | 451 => Body::Missing,
-        401 | 403 => Body::Blocked,
+        404 | 410 => Body::Missing,
+        401 | 403 | 451 => Body::Blocked,
         s => bail!("the site answered {s}"),
     })
 }
@@ -378,6 +381,24 @@ mod tests {
             ),
             Some("upstream")
         );
+    }
+
+    /// A 451 is a page withheld where the request came from, not an object that does not exist:
+    /// the blocked card, so nothing stored is purged as gone.
+    #[tokio::test(start_paused = true)]
+    async fn a_451_is_blocked_not_missing() {
+        let profile = "https://example.com/someone";
+        let (egress, _) = crate::sources::fixture::egress(vec![(
+            profile,
+            451,
+            "text/html",
+            b"<html><title>Unavailable</title></html>".to_vec(),
+        )]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        assert!(matches!(page(&cx, profile).await, Ok(Page::Blocked)));
     }
 
     #[test]
