@@ -94,12 +94,11 @@ pub fn post_api(page: &Fetched) -> Option<(Url, u64)> {
             shortlink = url
                 .query_pairs()
                 .find(|(k, _)| k == "p")
-                .and_then(|(_, v)| post_id(&v))
-                .map(|id| (url.clone(), id));
+                .and_then(|(_, v)| post_id(&v));
         }
     }
     // `?rest_route=` works with and without pretty permalinks.
-    let (_, id) = shortlink?;
+    let id = shortlink?;
     let record = Url::parse(&format!(
         "{}/?rest_route=/wp/v2/posts/{id}",
         base.origin().ascii_serialization()
