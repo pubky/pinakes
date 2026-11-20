@@ -14,7 +14,8 @@ fedlex.data.admin.ch, in any language (`/de`, `/fr`, `/it`, `/rm`, `/en`) or art
 
 A dated version, `…/eli/cc/{a}/{b}/{yyyymmdd}[/…]`, is its own resource with the root
 `https://fedlex.data.admin.ch/eli/cc/{a}/{b}/{yyyymmdd}`: the act's card with a `version_date`
-fact and the version's page.
+fact and the version's page. A date with a one-digit day (`2024033`) is an alias of the
+eight-digit root.
 
 An old classified-compilation address,
 `https://www.admin.ch/opc/{lang}/classified-compilation/{number}/index.html`, is read by its

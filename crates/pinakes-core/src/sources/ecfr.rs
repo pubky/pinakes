@@ -41,6 +41,12 @@ fn section(value: &str) -> Option<&str> {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.'))
     .then_some(value)
 }
+/// A link's date as `YYYY-MM-DD`. The parser also reads `2020-1-1` and `+2020-01-01`: the date
+/// kept is the parsed one written out, so each day has one root.
+fn date(value: &str) -> Option<String> {
+    let date = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").ok()?;
+    Some(date.format("%Y-%m-%d").to_string())
+}
 
 impl Target {
     /// `https://www.ecfr.gov/{current|on/YYYY-MM-DD}/title-{t}/…/section-{s}` or `…/part-{p}`.
@@ -54,11 +60,7 @@ impl Target {
         let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
         let (date, rest) = match segments.as_slice() {
             ["current", rest @ ..] => (None, rest),
-            ["on", date, rest @ ..]
-                if chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok() =>
-            {
-                (Some((*date).to_owned()), rest)
-            }
+            ["on", on, rest @ ..] => (Some(date(on)?), rest),
             _ => return None,
         };
         let title = title(rest.first()?.strip_prefix("title-")?)?;
@@ -327,6 +329,30 @@ mod tests {
         assert_eq!(
             section(17, "240.10b-5", Some("2020-01-01")).api_url(),
             "https://www.ecfr.gov/api/versioner/v1/ancestry/2020-01-01/title-17.json?section=240.10b-5"
+        );
+    }
+
+    /// A date written another way (`2020-1-1`, `+2020-01-01`) names the same day's text: its
+    /// link is an alias of the `YYYY-MM-DD` root.
+    #[test]
+    fn a_date_written_another_way_is_the_same_days_root() {
+        let root = "https://www.ecfr.gov/on/2020-01-01/title-17/section-240.10b-5";
+        for uri in [
+            "https://www.ecfr.gov/on/2020-1-1/title-17/section-240.10b-5",
+            "https://www.ecfr.gov/on/2020-01-1/title-17/section-240.10b-5",
+            "https://www.ecfr.gov/on/+2020-01-01/title-17/part-240/section-240.10b-5",
+        ] {
+            assert_eq!(
+                Target::of_uri(uri),
+                Some(section(17, "240.10b-5", Some("2020-01-01"))),
+                "{uri}"
+            );
+            assert_eq!(Ecfr.alias_root(uri).as_deref(), Some(root), "{uri}");
+        }
+        assert_eq!(Ecfr.alias_root(root), None);
+        assert_eq!(
+            Target::of_uri("https://www.ecfr.gov/on/2020-13-01/title-17/section-240.10b-5"),
+            None
         );
     }
 
