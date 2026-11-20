@@ -148,7 +148,8 @@ pub struct Message {
     pub excerpt: Option<String>,
 }
 
-/// Headers as (lowercase name → first value), unfolded; and the body after them.
+/// Headers as (lowercase name → first value), unfolded and each cut at `HEADER_CAP`; and the
+/// body after them.
 fn headers(text: &str) -> (BTreeMap<String, String>, &str) {
     let mut map = BTreeMap::new();
     let mut current: Option<(String, String)> = None;
@@ -163,8 +164,11 @@ fn headers(text: &str) -> (BTreeMap<String, String>, &str) {
         }
         if line.starts_with([' ', '\t']) {
             if let Some((_, value)) = current.as_mut() {
-                value.push(' ');
-                value.push_str(line.trim());
+                if value.len() < HEADER_CAP {
+                    value.push(' ');
+                    let room = HEADER_CAP - value.len();
+                    value.push_str(capped(line.trim(), room));
+                }
             }
             continue;
         }
@@ -172,7 +176,10 @@ fn headers(text: &str) -> (BTreeMap<String, String>, &str) {
             map.entry(name).or_insert(value);
         }
         if let Some((name, value)) = line.split_once(':') {
-            current = Some((name.trim().to_ascii_lowercase(), value.trim().to_owned()));
+            current = Some((
+                name.trim().to_ascii_lowercase(),
+                capped(value.trim(), HEADER_CAP).to_owned(),
+            ));
         }
     }
     if let Some((name, value)) = current {
@@ -238,51 +245,103 @@ fn quoted_printable(text: &str, header: bool) -> Vec<u8> {
     out
 }
 
+/// The longest header value kept, in bytes: a longer one is cut there.
+const HEADER_CAP: usize = 8 * 1024;
+/// The longest charset name and payload of one encoded word, in bytes (RFC 2047 allows 75
+/// characters for the whole word; mailers write longer ones).
+const CHARSET_MAX: usize = 64;
+const PAYLOAD_MAX: usize = 1024;
+
+/// `value` up to `max` bytes, cut at a character.
+fn capped(value: &str, max: usize) -> &str {
+    let mut end = value.len().min(max);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
+
+/// Where the next `?=` of a header is, asked at rising positions: each stretch of the header is
+/// searched once, however many `=?` it holds.
+#[derive(Default)]
+struct Ends {
+    from: usize,
+    at: Option<usize>,
+    searched: bool,
+}
+impl Ends {
+    fn next(&mut self, value: &str, from: usize) -> Option<usize> {
+        if !self.searched || from < self.from || self.at.is_some_and(|at| at < from) {
+            self.at = value.get(from..)?.find("?=").map(|i| from + i);
+            self.searched = true;
+        }
+        self.from = from;
+        self.at
+    }
+}
+
+/// The encoded word that starts at `start` (an `=?`) in `value`: its text and where it ends.
+/// The charset is looked for within `CHARSET_MAX` bytes and a payload over `PAYLOAD_MAX` is no
+/// word, so one `=?` costs a bounded amount of work.
+fn encoded_word(value: &str, start: usize, ends: &mut Ends) -> Option<(String, usize)> {
+    let bytes = value.as_bytes();
+    let cs_at = start + 2;
+    let cs_len = bytes
+        .get(cs_at..)?
+        .iter()
+        .take(CHARSET_MAX + 1)
+        .position(|b| *b == b'?')?;
+    let enc = *bytes.get(cs_at + cs_len + 1)?;
+    if !matches!(enc, b'B' | b'b' | b'Q' | b'q') || bytes.get(cs_at + cs_len + 2) != Some(&b'?') {
+        return None;
+    }
+    let payload_at = cs_at + cs_len + 3;
+    let end = ends.next(value, payload_at)?;
+    if end - payload_at > PAYLOAD_MAX {
+        return None;
+    }
+    let payload = value.get(payload_at..end)?;
+    let decoded = match enc {
+        b'B' | b'b' => base64::engine::general_purpose::STANDARD
+            .decode(payload.trim())
+            .ok()?,
+        _ => quoted_printable(payload, true),
+    };
+    let cs = value.get(cs_at..cs_at + cs_len)?;
+    Some((
+        charset(&decoded, cs.split('*').next().unwrap_or(cs)),
+        end + 2,
+    ))
+}
+
 /// RFC 2047 encoded words (`=?UTF-8?Q?…?=`, `=?utf-8?B?…?=`) as text; whitespace between two
-/// encoded words is dropped.
+/// encoded words is dropped. Linear in the header's length.
 pub fn header_text(value: &str) -> String {
     let mut out = String::new();
-    let mut rest = value;
+    let mut at = 0;
     let mut after_word = false;
-    while let Some(start) = rest.find("=?") {
-        let (before, word) = rest.split_at(start);
-        let decoded = (|| {
-            let inner = &word[2..];
-            let (cs, inner) = inner.split_once('?')?;
-            let (enc, inner) = inner.split_once('?')?;
-            let end = inner.find("?=")?;
-            let payload = &inner[..end];
-            let bytes = match enc {
-                "B" | "b" => base64::engine::general_purpose::STANDARD
-                    .decode(payload.trim())
-                    .ok()?,
-                "Q" | "q" => quoted_printable(payload, true),
-                _ => return None,
-            };
-            let consumed = 2 + cs.len() + 1 + enc.len() + 1 + end + 2;
-            Some((
-                charset(&bytes, cs.split('*').next().unwrap_or(cs)),
-                consumed,
-            ))
-        })();
-        match decoded {
-            Some((text, consumed)) => {
+    let mut ends = Ends::default();
+    while let Some(found) = value[at..].find("=?") {
+        let start = at + found;
+        let before = &value[at..start];
+        match encoded_word(value, start, &mut ends) {
+            Some((text, end)) => {
                 if !(after_word && before.trim().is_empty()) {
                     out.push_str(before);
                 }
                 out.push_str(&text);
-                rest = &word[consumed..];
+                at = end;
                 after_word = true;
             }
             None => {
                 out.push_str(before);
                 out.push_str("=?");
-                rest = &word[2..];
+                at = start + 2;
                 after_word = false;
             }
         }
     }
-    out.push_str(rest);
+    out.push_str(&value[at..]);
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -585,7 +644,12 @@ impl Source for PublicInbox {
             }
         }
         ARCHIVES.set(&host, true);
-        let mut doc = card(cx.card(uri, self), &target, parse(&f.body)?)?;
+        // A parse slot, not the runtime's thread: the body is a megabyte of a host's own text.
+        let (doc, body) = (cx.card(uri, self), f.body);
+        let mut doc = crate::resolver::html::blocking(move || {
+            parse(&body).and_then(|message| card(doc, &target, message))
+        })
+        .await??;
         doc.site = host;
         Ok(doc)
     }
@@ -694,6 +758,62 @@ mod tests {
             Some("Hello there")
         );
         assert!(parse(b"<html>not a message</html>").is_err());
+        // A word's charset and payload are bounded; a longer one stays as written.
+        let long = format!("=?utf-8?Q?{}?=", "a".repeat(PAYLOAD_MAX + 1));
+        assert_eq!(header_text(&long), long);
+        assert_eq!(header_text("=?utf-8?Q?a?= =?x?Q?b?= =?bad =?utf-8?b?Yw==?="), "ab =?bad c");
+        // A header is kept up to its cap, folded lines included.
+        let folded = format!(
+            "Message-ID: <c@x>\nSubject: {}\n {}\n y\n\nbody",
+            "é".repeat(100),
+            "x".repeat(2 * HEADER_CAP)
+        );
+        let subject = parse(folded.as_bytes()).unwrap().subject.unwrap();
+        assert_eq!(subject.len(), HEADER_CAP);
+        assert!(subject.starts_with('é') && subject.ends_with('x'));
+    }
+
+    /// A megabyte of `=?` that never forms an encoded word is decoded in one pass, whatever the
+    /// shape: a decoder that searched the rest of the header once per `=?` would take minutes.
+    #[test]
+    fn a_hostile_header_is_decoded_in_linear_time() {
+        let megabyte = |unit: &str, tail: &str| {
+            let mut text = unit.repeat(1_000_000 / unit.len());
+            text.push_str(tail);
+            text
+        };
+        let hostile = vec![
+            megabyte("=???x", ""),
+            megabyte("=?a?B?x", ""),
+            megabyte("=?a?B?x", "?="),
+            megabyte("=?a?Q?x", "?="),
+            megabyte("=?", "?="),
+            megabyte("=?a?x!", "?="),
+            megabyte("=?é", "?="),
+        ];
+        // On a thread of its own, so a quadratic decoder fails this test after a minute instead
+        // of holding the run for as long as it takes.
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let started = crate::capability::thread_cpu_time();
+            let mut lengths = vec![];
+            for header in &hostile {
+                lengths.push((header.len(), header_text(header).len()));
+                // The whole message path: a subject of that size is cut at the cap.
+                let mbox = format!("Message-ID: <h@x>\nSubject: {header}\n\nbody\n");
+                let subject = parse(mbox.as_bytes()).unwrap().subject.unwrap_or_default();
+                assert!(subject.len() <= HEADER_CAP, "{}", subject.len());
+            }
+            let _ = done.send((crate::capability::thread_cpu_time() - started, lengths));
+        });
+        let (used, lengths) = result
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("header decoding did not finish within a minute");
+        assert!(used < std::time::Duration::from_secs(10), "{used:?}");
+        // Nothing decoded: the text comes back as written (whitespace aside).
+        for (given, decoded) in lengths {
+            assert!(decoded <= given, "{decoded} > {given}");
+        }
     }
 
     #[test]
