@@ -38,8 +38,9 @@ A `SocialMediaPosting` named by the start of its text (or its content warning, w
 the text it hides), with its first attachment's preview unless it is marked sensitive (else the
 author's avatar).
 
-An author who opted out of search indexing (the account's `indexable: false` or `noindex: true`,
-the flag behind the profile's `robots` `noindex` tag) keeps a normal card, the link preview
+An author whose posts are not for search (the account has not opted in to full-text search of
+its public posts, `indexable: false`, or asked search engines not to index its profile,
+`noindex: true`, the flag behind the profile's `robots` `noindex` tag) keeps a normal card, the link preview
 Mastodon itself shows, with the `opted_out` fact. Its text is never found by search (`q=`), and
 its change history keeps no text: what was kept before the opt-out goes, and its change lines
 carry only their kind, fields and time. The spellings of the post saved before they became its

@@ -139,8 +139,9 @@ pub fn card(
             v["favourites_count"].as_u64().map(|n| n.to_string()),
         ),
         ("content_warning", warning),
-        // An author who opted out of search indexing: the card stays a link preview, as
-        // Mastodon shows one, but its text is never searchable nor kept in the change history.
+        // An author whose posts are not for search (`opted_out`): the card stays a link
+        // preview, as Mastodon shows one, but its text is never searchable nor kept in the
+        // change history.
         ("opted_out", opted_out(account).then(|| "true".into())),
         ("activitypub_id", Some(ap.to_string())),
         (
@@ -161,8 +162,9 @@ pub fn card(
     Ok(Some(doc))
 }
 
-/// Whether an account opted out of search indexing (`indexable: false`, or `noindex`, which
-/// the profile's `robots` meta tag also carries).
+/// Whether an account's posts are not for search: it has not opted in to full-text search of
+/// its public posts (`indexable: false`), or asked search engines not to index its profile
+/// (`noindex`, which the profile's `robots` meta tag also carries).
 fn opted_out(account: &Value) -> bool {
     account["indexable"] == false || account["noindex"] == true
 }
