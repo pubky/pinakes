@@ -30,11 +30,21 @@ struct Fake {
     /// A service asked to wait this long (`RetryLater`), per URI.
     waits: Mutex<BTreeMap<String, u64>>,
     calls: Mutex<Vec<String>>,
+    /// Its lifetime when not a day.
+    lifetime: Option<Duration>,
 }
 impl Fake {
     fn new(id: &'static str) -> Arc<Self> {
         Arc::new(Self {
             id,
+            ..Default::default()
+        })
+    }
+    /// A fake whose rows live `lifetime` (a day by default).
+    fn lasting(id: &'static str, lifetime: Duration) -> Arc<Self> {
+        Arc::new(Self {
+            id,
+            lifetime: Some(lifetime),
             ..Default::default()
         })
     }
@@ -55,7 +65,7 @@ impl Source for Fake {
         subject.status == "ok" && self.answers.lock().unwrap().contains_key(&subject.uri)
     }
     fn ttl(&self) -> Duration {
-        Duration::from_secs(86_400)
+        self.lifetime.unwrap_or(Duration::from_secs(86_400))
     }
     async fn lookup(&self, _: &Context, subject: &Subject) -> anyhow::Result<Found> {
         self.calls.lock().unwrap().push(subject.uri.clone());
@@ -3818,6 +3828,22 @@ async fn a_secondary_service_that_fails_for_good_stops_bringing_the_card_back(po
     hub.answer(uri, answer(false));
     drain(&pool, &cx, &sources).await;
     assert_eq!(state().await.1, 0);
+    // A source whose rows live thirty days: once capped, its card still runs again after a day
+    // (`CAPPED_RETRY`), so an outage that ends is over for it within a day.
+    let month = Fake::lasting("datacite", Duration::from_secs(30 * 86_400));
+    month.answer(uri, answer(true));
+    let month: Vec<Arc<dyn Source>> = vec![month];
+    sqlx::query("UPDATE also_on_dirty SET attempts=$2 WHERE resource_id=$1")
+        .bind(&id)
+        .bind(also_on::PARTIAL_RETRIES)
+        .execute(&pool)
+        .await
+        .unwrap();
+    drain(&pool, &cx, &month).await;
+    let (due_in, attempts) = state().await;
+    assert_eq!(attempts, also_on::PARTIAL_RETRIES + 1);
+    assert!((86_300.0..=86_400.0).contains(&due_in), "{due_in}");
+    assert_eq!(wikidata_links().await, 1);
 }
 
 /// A source that fails for good (a refused request, a wall) brings the card back with backoff
@@ -3881,6 +3907,21 @@ async fn a_source_that_fails_for_good_stops_bringing_the_card_back(pool: PgPool)
     drain(&pool, &cx, &sources).await;
     let (_, attempts, error, _) = state().await;
     assert_eq!((attempts, error), (0, None));
+    // A source whose rows live thirty days: once capped, its card still runs again after a day
+    // (`CAPPED_RETRY`), so an outage that ends is over for it within a day.
+    let month = Fake::lasting("datacite", Duration::from_secs(30 * 86_400));
+    month.answer(uri, Err(anyhow::anyhow!("timed out")));
+    let month: Vec<Arc<dyn Source>> = vec![month];
+    sqlx::query("UPDATE also_on_dirty SET attempts=$2 WHERE resource_id=$1")
+        .bind(&id)
+        .bind(also_on::PARTIAL_RETRIES)
+        .execute(&pool)
+        .await
+        .unwrap();
+    drain(&pool, &cx, &month).await;
+    let (due_in, attempts, _, keys) = state().await;
+    assert_eq!((attempts, keys), (also_on::PARTIAL_RETRIES + 1, 1));
+    assert!((86_300.0..=86_400.0).contains(&due_in), "{due_in}");
 }
 
 /// A run with part of its answer missing (a service failed or refused the operator's

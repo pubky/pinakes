@@ -837,13 +837,13 @@ social post found gone gets no lookups, and its rows are dropped: nothing is der
 archived copy included. Its deletion takes it off the queue; `reextract` and a failed refresh put
 it back on, and the worker then runs no source for it and drops its queue row. A lookup that ran
 while it was found gone writes nothing, nor does one whose link became an alias meanwhile. A
-source that fails or panics keeps its earlier rows and retries with backoff (after six failed runs in a row, at the sources' lifetime); the others' results
+source that fails or panics keeps its earlier rows and retries with backoff (after six failed runs in a row, once a day, or at the sources' lifetime when shorter); the others' results
 stand and the worker goes on (a panic is logged as an error). A source that asks a secondary
 service besides its own (its page names which) keeps what the link and the other services gave
 when that service fails: the link's own key is recorded, nothing the source recorded before is deleted, the failure is counted in
 `pinakes_also_on_service_errors_total{service,class}`, and the run comes back after a failed
 run's backoff instead of after the source's lifetime: five minutes, doubling to an hour while the
-service keeps failing, or the wait the service named when longer; after six such runs in a row the next is at the source's lifetime. A run in which every service
+service keeps failing, or the wait the service named when longer; after six such runs in a row it comes back once a day (or at the source's lifetime when shorter), so a lasting failure costs a run a day and an outage that ends is over for the card within a day, before any of its rows expire. A run in which every service
 answers resets it and replaces the source's rows. A service that refuses the operator's credentials brings no run back early, and deletes nothing either. So only a run in which every service answered removes a row; one no service gives any more otherwise leaves when it expires, at most twice the source's lifetime after it was last found.
 The sources run in the order [docs/sources](sources/README.md#also-on) lists them (each page says
 what its source reads and costs); `[also_on] apple_storefront` (`us`, a

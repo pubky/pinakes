@@ -178,7 +178,7 @@ pub struct Found {
     /// A secondary service the source asks failed, so its part is missing from this run: what
     /// the run found stands, and the worker brings the run back after its backoff, as for a
     /// failed run (five minutes, doubling to an hour), or after this wait (the one the service
-    /// named) when longer; after [`PARTIAL_RETRIES`] such runs in a row, at the source's lifetime.
+    /// named) when longer; after [`PARTIAL_RETRIES`] such runs in a row, after [`CAPPED_RETRY`].
     /// The source sets `keep_stored` too ([`Keep::All`]), so nothing it gave before is deleted
     /// meanwhile.
     pub retry_after: Option<Duration>,
@@ -1272,9 +1272,9 @@ pub async fn drain_leased(
             // A secondary service failed: what the run found is recorded, and the run comes back
             // after a failed run's backoff, so a service that keeps failing is asked less and
             // less often (up to hourly), or after the wait it named when longer; never after the
-            // lifetime. After `PARTIAL_RETRIES` such runs in a row the service is taken to fail
-            // for good, and the run comes back at the lifetime. A run with every service
-            // answering resets the count.
+            // lifetime. After `PARTIAL_RETRIES` such runs in a row the failure is taken to last,
+            // and the run comes back after `CAPPED_RETRY` (a day, or the lifetime when shorter).
+            // A run with every service answering resets the count.
             Ok(Some(Next {
                 lifetime,
                 partial: Some(asked),
@@ -1282,7 +1282,7 @@ pub async fn drain_leased(
             })) => {
                 sqlx::query(&format!(
                     "UPDATE also_on_dirty SET attempts=attempts+1,last_error=NULL,{} WHERE resource_id=$1",
-                    next("now()+CASE WHEN attempts>=$6 THEN $3 ELSE least($3,make_interval(secs => greatest($5::float8,least($4::float8*power(2,least(attempts,6)),3600)))) END")
+                    next("now()+CASE WHEN attempts>=$6 THEN $7 ELSE least($3,make_interval(secs => greatest($5::float8,least($4::float8*power(2,least(attempts,6)),3600)))) END")
                 ))
                 .bind(&id)
                 .bind(lease)
@@ -1290,6 +1290,7 @@ pub async fn drain_leased(
                 .bind(cfg.retry_secs as f64)
                 .bind(asked.as_secs().min(86_400) as f64)
                 .bind(PARTIAL_RETRIES)
+                .bind(capped(lifetime))
                 .execute(pool)
                 .await?;
             }
@@ -1305,13 +1306,13 @@ pub async fn drain_leased(
             // A source failed: what the others found is recorded, the failed one's rows stay, and
             // the run comes back after a failed run's backoff, or after the wait a service named
             // when longer. After `PARTIAL_RETRIES` such runs in a row (a source that fails for
-            // good: a refused request, a wall) it comes back at the lifetime, as one that keeps
-            // missing a secondary service does.
+            // good: a refused request, a wall) it comes back after `CAPPED_RETRY`, as one that
+            // keeps missing a secondary service does.
             Ok(Some(Next {
                 lifetime,
                 failed: Some(error),
                 ..
-            })) => failed_run(pool, cfg, &id, lease, &error, Some(lifetime)).await?,
+            })) => failed_run(pool, cfg, &id, lease, &error, Some(capped(lifetime))).await?,
             // The run could not be done at all (a database error): it is retried with backoff.
             Err(error) => failed_run(pool, cfg, &id, lease, &error, None).await?,
         }
@@ -1320,15 +1321,15 @@ pub async fn drain_leased(
 }
 /// Writes a failed run's outcome for `id` against its `lease` (`drain_leased`): the error's
 /// class, one more failed run, and the next attempt after the backoff (`also_on_retry_secs`
-/// doubling to an hour, or the wait the error names when longer), or at `lifetime` once
-/// [`PARTIAL_RETRIES`] failed runs came before this one.
+/// doubling to an hour, or the wait the error names when longer), or after `capped` (the
+/// lifetime held to [`CAPPED_RETRY`]) once [`PARTIAL_RETRIES`] failed runs came before this one.
 async fn failed_run(
     pool: &PgPool,
     cfg: &AlsoOnConfig,
     id: &str,
     lease: DateTime<Utc>,
     error: &anyhow::Error,
-    lifetime: Option<chrono::Duration>,
+    capped: Option<chrono::Duration>,
 ) -> Result<()> {
     tracing::warn!(resource=%id, kind=crate::resolver::error_class(error), "also-on lookup will retry");
     // A service that said how long to wait is waited for at least that long.
@@ -1342,15 +1343,24 @@ async fn failed_run(
         .bind(cfg.retry_secs as f64)
         .bind(asked)
         .bind(PARTIAL_RETRIES)
-        .bind(lifetime)
+        .bind(capped)
         .execute(pool)
         .await?;
     Ok(())
 }
-/// How many runs in a row a failing secondary service brings back early (after the backoff of a
-/// failed run, which reaches an hour at the fifth): after them the service is taken to fail for
-/// good, and the card runs again at its sources' lifetime, as a card without the failure does.
+/// How many runs in a row a failing source or secondary service brings back early (after the
+/// backoff of a failed run, which reaches an hour at the fifth): after them the failure is taken
+/// to last, and the card runs again after [`CAPPED_RETRY`].
 pub const PARTIAL_RETRIES: i32 = 6;
+/// When a card whose failures reached [`PARTIAL_RETRIES`] runs again: after a day, or its
+/// sources' lifetime when shorter. A failure that lasts costs a run a day; an outage that ends
+/// is over for the card within a day, long before any of its rows (kept twice the lifetime)
+/// can expire.
+pub const CAPPED_RETRY: Duration = Duration::from_secs(86_400);
+/// [`CAPPED_RETRY`], or `lifetime` when shorter.
+fn capped(lifetime: chrono::Duration) -> chrono::Duration {
+    chrono::Duration::from_std(CAPPED_RETRY).map_or(lifetime, |cap| lifetime.min(cap))
+}
 /// When a resource's next also-on run is due.
 struct Next {
     /// The shortest lifetime among the sources that ran.
