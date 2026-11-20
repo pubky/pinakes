@@ -173,11 +173,6 @@ fn feed_form(d: &Definition, path: &str) -> bool {
     pattern.push_str(rest);
     canary_link_matches(pattern.trim_end_matches('/'), path.trim_end_matches('/'))
 }
-/// Whether `uri` is an organiser calendar a platform derives for its event pages
-/// (`Definition::container_feed`).
-pub fn names_organiser_calendar(uri: &str) -> bool {
-    organiser_calendar_of(uri).is_some()
-}
 /// Whether `url` is where platform `d` answers an organiser calendar itself: over https on the
 /// default port, from a host it declares (`Definition::domains`, the host or a subdomain, as
 /// `detect` reads them), at the calendar's path form, without userinfo or a query.
@@ -197,7 +192,7 @@ fn platform_calendar_location(d: &Definition, url: &Url) -> bool {
         && feed_form(d, url.path())
 }
 /// The answer for `uri` (a `webcal:` link read over https). An organiser calendar
-/// (`names_organiser_calendar`) is the platform's own answer or none: it is fetched without
+/// (`organiser_calendar_of`) is the platform's own answer or none: it is fetched without
 /// following redirects, and only a redirect to where the platform answers it itself
 /// (`platform_calendar_location`) is followed, up to three, HTTP or in-page (a meta refresh, a
 /// script or "Redirecting" stub), so every spelling the platform

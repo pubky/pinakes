@@ -951,8 +951,6 @@ impl Config {
         self.egress.contact = self.http.contact.trim().to_owned();
         self.osm.contact = self.egress.contact.clone();
         self.web.musicbrainz_base = self.also_on.musicbrainz_base().to_owned();
-        // The Pubky apps' event readers bound recurrence rules as calendars do.
-        self.pubky.max_period_dates = self.event.max_period_dates;
         // A source's published limits, for hosts the operator does not rate.
         self.egress.source_rates = crate::sources::budgets()
             .chain(crate::also_on::budgets())
@@ -1371,12 +1369,6 @@ mod tests {
                 "{key}={value}"
             );
         }
-    }
-    #[test]
-    fn the_pubky_readers_take_the_recurrence_period_limit() {
-        assert_eq!(Config::default().pubky.max_period_dates, 100_000);
-        let cfg = with(serde_json::json!({"limits":{"event_max_period_dates":2}})).unwrap();
-        assert_eq!(cfg.pubky.max_period_dates, 2);
     }
     #[test]
     fn the_recurrence_period_limit_has_a_default_and_bounds() {

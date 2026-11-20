@@ -74,8 +74,6 @@ pub struct Object<'a> {
     pub owner: &'a str,
     /// When the object is read: what its expiry, end or next occurrence is measured against.
     pub now: chrono::DateTime<chrono::Utc>,
-    /// The most dates one period of a recurrence rule may hold (`event::time::rrule_bounded`).
-    pub max_period_dates: usize,
     vars: Vec<(&'static str, String)>,
 }
 impl Object<'_> {
@@ -200,25 +198,6 @@ pub fn card_at(
     ttl: u64,
     now: chrono::DateTime<chrono::Utc>,
 ) -> ResourceMeta {
-    card_with(
-        uri,
-        content_type,
-        body,
-        ttl,
-        now,
-        crate::event::time::MAX_PERIOD_DATES,
-    )
-}
-/// The card of an object fetched at `now`, its recurrence rules bounded by `max_period_dates`
-/// (`limits.event_max_period_dates`).
-pub fn card_with(
-    uri: &str,
-    content_type: &str,
-    body: &[u8],
-    ttl: u64,
-    now: chrono::DateTime<chrono::Utc>,
-    max_period_dates: usize,
-) -> ResourceMeta {
     let mut doc = ResourceMeta::new(uri, "pubky", ttl);
     doc.set_type("CreativeWork");
     doc.attributes
@@ -238,7 +217,6 @@ pub fn card_with(
                 uri,
                 owner: &owner,
                 now,
-                max_period_dates,
                 vars,
             };
             let read = match json.as_ref().filter(|v| v.is_object()) {
@@ -343,7 +321,6 @@ pub fn open_in(uri: &str) -> Vec<OpenIn> {
                 uri,
                 owner: &owner,
                 now: chrono::Utc::now(),
-                max_period_dates: crate::event::time::MAX_PERIOD_DATES,
                 vars,
             },
             kind.open_in,

@@ -110,10 +110,6 @@ pub fn listed(items: &[roxmltree::Node<'_, '_>], feed: &Url, partial: bool) -> L
         cut: false,
     }
 }
-/// The latest [`KEPT`] episodes among a feed's items ([`listed`]).
-pub fn from_items(items: &[roxmltree::Node<'_, '_>], feed: &Url) -> Vec<Episode> {
-    listed(items, feed, false).episodes
-}
 /// The episodes a fetched feed lists ([`from_feed_listed`]).
 pub fn from_feed(f: &crate::resolver::egress::Fetched) -> Option<Vec<Episode>> {
     from_feed_listed(f).map(|l| l.episodes)
