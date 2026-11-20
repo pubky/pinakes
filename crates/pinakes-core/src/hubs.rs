@@ -634,6 +634,12 @@ pub mod musicbrainz {
         chunk: &[String],
         v: &'v Value,
     ) -> Result<(Vec<Option<&'v Value>>, usize)> {
+        // One link is the single lookup ([`url_lookup`] builds the same request), and MusicBrainz
+        // answers it in that lookup's shape, without a `urls` list: the answer is the link's,
+        // and the request cached it as the link's own lookup.
+        if let ([_], None) = (chunk, v["urls"].as_array()) {
+            return Ok((vec![Some(v)], 1));
+        }
         let answers: Vec<&Value> = v["urls"].as_array().into_iter().flatten().collect();
         let whole = v["url-count"].as_u64() == Some(answers.len() as u64);
         let exact = whole
@@ -1696,6 +1702,57 @@ mod tests {
             tokio::time::advance(std::time::Duration::from_secs(2)).await;
         }
         assert_eq!(recorded.asked().len(), 2);
+    }
+    /// Spellings one over a full request leave a request of one link, which MusicBrainz answers
+    /// as the single lookup (no `urls` list): the link is found, as in a batch.
+    #[tokio::test(start_paused = true)]
+    async fn a_trailing_batch_of_one_link_is_read_as_the_single_lookup() {
+        let recording = "9f9cf187-d6f9-437f-9d98-d59cdbd52757";
+        // Two Apple Music links (each asked under every storefront) and eleven others: one
+        // spelling more than a request takes.
+        let mut links: Vec<String> = vec![
+            "https://music.apple.com/album/1097861387".into(),
+            "https://music.apple.com/album/1440650428".into(),
+        ];
+        links.extend((0..11).map(|n| format!("https://tidal.com/track/10000{n:02}")));
+        let spellings: Vec<String> = links
+            .iter()
+            .flat_map(|l| crate::music::hub_spellings(l))
+            .collect();
+        assert_eq!(spellings.len(), musicbrainz::URL_BATCH + 1);
+        let last = links.last().unwrap().clone();
+        assert_eq!(spellings.last(), Some(&last));
+        let batch =
+            musicbrainz::urls_lookup(musicbrainz::BASE, &spellings[..musicbrainz::URL_BATCH]);
+        let single = musicbrainz::url_lookup(musicbrainz::BASE, &last);
+        let (egress, recorded) = crate::sources::fixture::egress(vec![
+            (
+                &batch,
+                200,
+                "application/json",
+                br#"{"url-offset":0,"url-count":0,"urls":[]}"#.to_vec(),
+            ),
+            (
+                &single,
+                200,
+                "application/json",
+                serde_json::to_vec(&serde_json::json!({"resource": last, "relations": [
+                    {"type": "streaming", "target-type": "recording", "ended": false,
+                     "recording": {"id": recording}}
+                ]}))
+                .unwrap(),
+            ),
+        ]);
+        let found = musicbrainz::urls(&egress, musicbrainz::BASE, &links)
+            .await
+            .unwrap();
+        assert_eq!(recorded.asked(), [batch.clone(), single.clone()]);
+        assert_eq!(found.len(), links.len());
+        assert!(found[..links.len() - 1].iter().all(Option::is_none));
+        assert_eq!(
+            found.last().unwrap().as_ref().map(|t| t.targets.clone()),
+            Some(vec![(MbKind::Recording, recording.to_owned())])
+        );
     }
     fn fixture(name: &str) -> Value {
         let path = format!("{}/tests/fixtures/hubs/{name}", env!("CARGO_MANIFEST_DIR"));
