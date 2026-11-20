@@ -4907,3 +4907,77 @@ fn calendar_properties_are_counted_and_need_a_name() {
     assert_eq!(container.occurrences[0].uid, "good");
     assert!(container.warnings.contains(&"invalid_vevent_line".into()));
 }
+/// A floating event's end is kept as written, like its start: a zone found later moves both.
+#[test]
+fn a_floating_event_s_end_moves_with_its_start() {
+    let mut doc = parse(&cal(&event(
+        "UID:floating\nDTSTART:20261020T180000\nDTEND:20261020T200000\nSUMMARY:Floating",
+    )))
+    .container
+    .unwrap()
+    .occurrences[0]
+        .doc
+        .clone();
+    assert_eq!(
+        doc.event.start_local.as_deref(),
+        Some("2026-10-20 18:00:00")
+    );
+    assert_eq!(doc.event.end_local.as_deref(), Some("2026-10-20 20:00:00"));
+    doc.event.tz = Some("Europe/Zurich".into());
+    page::finalize(&mut doc, false);
+    assert_eq!(doc.start.unwrap().to_rfc3339(), "2026-10-20T16:00:00+00:00");
+    assert_eq!(doc.end.unwrap().to_rfc3339(), "2026-10-20T18:00:00+00:00");
+}
+/// A recurring all-day series in a calendar that names no zone keeps each occurrence's own date
+/// through the service (`EventService::container`, which finishes every row), and each is
+/// stored.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_zone_less_all_day_series_keeps_each_date(pool: PgPool) {
+    let service = pinakes_core::event::service::EventService {
+        pool: pool.clone(),
+        config: Default::default(),
+        osm: Arc::new(OsmResolver::new(pool.clone(), OsmConfig::default()).unwrap()),
+    };
+    let first = (Utc::now() - Duration::days(7)).date_naive();
+    let body = cal(&event(&format!(
+        "UID:weekly\nDTSTART;VALUE=DATE:{}\nRRULE:FREQ=WEEKLY;COUNT=6\nSUMMARY:Weekly",
+        first.format("%Y%m%d")
+    )));
+    let uri = "https://example.org/weekly.ics";
+    let fetched = common::fetched(
+        uri.parse().unwrap(),
+        200,
+        "text/calendar".into(),
+        body.into_bytes(),
+    );
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let doc = service
+        .container(uri, &fetched, deadline)
+        .await
+        .unwrap()
+        .unwrap();
+    let rows = &doc.container.as_ref().unwrap().occurrences;
+    let starts: Vec<_> = rows
+        .iter()
+        .map(|o| o.doc.start.unwrap().date_naive())
+        .collect();
+    let expected: Vec<_> = (0..6).map(|i| first + Duration::days(7 * i)).collect();
+    assert_eq!(starts, expected);
+    for row in rows {
+        let (start, end) = (row.doc.start.unwrap(), row.doc.end.unwrap());
+        assert_eq!(end - start, Duration::days(1));
+        assert_eq!(
+            row.doc.event.start_local,
+            Some(start.naive_utc().to_string())
+        );
+    }
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let stored: i64 =
+        sqlx::query_scalar("SELECT count(DISTINCT start_at) FROM occurrence WHERE resource_id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, 6);
+}

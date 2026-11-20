@@ -694,8 +694,13 @@ fn document(
     if start.zone.is_none() && !c.value("DTSTART").unwrap().ends_with('Z') {
         doc.event.start_local = Some(start.wall.to_string());
     }
+    // An end without a zone, like such a start, is kept as written: a zone found later (the
+    // venue's) moves both.
+    let mut end_wall = doc.event.start_local.is_some();
     doc.end = if let Some(p) = c.get("DTEND") {
-        Some(zones.stamp(p, &p.value)?.at)
+        let end = zones.stamp(p, &p.value)?;
+        end_wall &= end.zone.is_none() && !p.value.ends_with('Z');
+        Some(end.at)
     } else if let Some(v) = c.value("DURATION") {
         Some(
             start
@@ -717,6 +722,9 @@ fn document(
         Some(start.at)
     };
     ensure!(doc.end >= doc.start, "end before start");
+    if end_wall {
+        doc.event.end_local = doc.end.map(|end| end.naive_utc().to_string());
+    }
     doc.event.event_status = Some(if cal.value("METHOD") == Some("CANCEL") {
         EventStatus::Cancelled
     } else {
@@ -1148,6 +1156,7 @@ pub fn parse(
                 doc.start = dated.start;
                 doc.end = dated.end;
                 doc.event.start_local = None;
+                doc.event.end_local = None;
                 start = stamp;
                 start.zone = Some(tz.clone());
                 start.source = ZoneSource::Coordinates;
@@ -1354,6 +1363,14 @@ pub fn parse(
                         d.start = override_doc.start;
                         d.end = override_doc.end;
                     }
+                }
+                // Times without a zone are kept as written, each occurrence its own: a zone
+                // found later (the venue's) reads them again.
+                if d.event.start_local.is_some() {
+                    d.event.start_local = d.start.map(|at| at.naive_utc().to_string());
+                }
+                if d.event.end_local.is_some() {
+                    d.event.end_local = d.end.map(|at| at.naive_utc().to_string());
                 }
                 Ok(Some(Occurrence {
                     uid: uid.clone(),
