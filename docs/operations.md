@@ -187,19 +187,20 @@ a connection of its own for its whole life. Resolver, host, author, reach-cache 
 process-local, and the lock keeps their guarantees. Every daemon version takes the same key, so a
 second daemon on a database refuses to start. No other lock uses that key (`pinakes_core::locks`).
 The lock is its session's: the daemon checks every ten seconds that the session is alive and
-answers within ten seconds. It stops at once when the session's connection has failed (a
-PostgreSQL restart, a dropped connection), and when two checks in a row get no answer in time (a
-database that does not answer; one slow answer stops nothing), since another daemon or a
+answers within ten seconds. It stops at once when the session has ended (its connection failed,
+PostgreSQL restarted or shut down, an administrator ended the session), and when two checks in a
+row get no answer in time or an error that leaves the session open (a database that does not
+answer, a cancelled statement; one of them stops nothing), since another daemon or a
 `reextract` could then start beside it. A daemon that has lost the lock, running or already
 stopping, claims no more work and gives open requests, running jobs and background passes two
-seconds from then, not `limits.shutdown_grace_secs`: what still runs is dropped. A job cut off
-before its save is read again when its lease runs out; one cut off after it keeps the card it
-saved, and the steps after the save (the alias its page names, an episode's pages) wait for its
-next full read: a read the site answers 304 does not run them, so they can wait until the page
-changes. So a daemon's workers and background passes run without the lock for 32 seconds at
-most: 30 to notice a session that is gone without its connection failing, and those two. The
-process ends once its database connections are closed (up to 5 seconds more), in which a
-request still open may be answered.
+seconds from then, or `limits.shutdown_grace_secs` when that is shorter, not the full grace:
+what still runs is dropped. A job cut off before its save is read again when its lease runs out;
+one cut off after it keeps the card it saved, and the steps after the save (the alias its page
+names, an episode's pages) wait for its next full read: a read the site answers 304 does not run
+them, so they can wait until the page changes. So a daemon's workers and background passes run
+without the lock for 32 seconds at most: 30 to notice a session that is gone without its
+connection failing, and those two. The process ends once its database connections are closed (up
+to 5 seconds more), in which a request still open may be answered.
 
 **Stopping and restarting.** `pinakesd` stops with a non-zero status when it loses the instance
 lock, when one of its background tasks ends by itself or panics (ingestion, grouping,
@@ -209,10 +210,12 @@ and fall behind. Run it under a supervisor that starts it again (`Restart=on-fai
 container restart policy). On SIGTERM or SIGINT it stops taking work, lets open requests,
 running jobs and background passes finish for up to `limits.shutdown_grace_secs`, closes its
 database connections (up to 5 seconds more) and exits 0, or non-zero when a task panicked while
-stopping; what still runs after the grace is dropped (a job cut off there is read again when its
-lease runs out). Give the supervisor's stop timeout more than the two together
-(`TimeoutStopSec`, `stop_grace_period`). A signal during startup, `--migrate` or `reextract`
-stops them too (`--migrate` and `reextract` then exit non-zero).
+stopping; what still runs after the grace is dropped. A job cut off there before its save is
+read again when its lease runs out; one cut off after it keeps the card it saved, and the steps
+after the save wait for its next full read, as after a lost lock. Give the supervisor's stop
+timeout more than the two together (`TimeoutStopSec`, `stop_grace_period`). A signal during
+startup, `--migrate` or `reextract` stops them too (`--migrate` and `reextract` then exit
+non-zero).
 
 **Re-extraction.** A parser or routing change reaches stored documents through one command, run
 while the daemon is stopped (it takes the instance lock):

@@ -185,7 +185,8 @@ async fn supervise(
         tracing::error!(task = name, "a background task ended; stopping the daemon");
     }
     let lost_grace = pinakes_core::locks::LOST_GRACE;
-    let mut ends = tokio::time::Instant::now() + if lost { grace.min(lost_grace) } else { grace };
+    let stopping = tokio::time::Instant::now();
+    let mut ends = stopping + if lost { grace.min(lost_grace) } else { grace };
     let _ = shutdown.send(true);
     // A task or worker that panics while it stops is a failure too.
     let mut panicked: Option<&'static str> = None;
@@ -219,8 +220,9 @@ async fn supervise(
         }
     };
     if !finished {
+        // The grace this stop had: shorter than the configured one after a lost lock.
         tracing::warn!(
-            grace_secs = grace.as_secs(),
+            grace_secs = ends.duration_since(stopping).as_secs_f64(),
             lock_lost = lost,
             "shutdown grace passed; stopping with work still running"
         );

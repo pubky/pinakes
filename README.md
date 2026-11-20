@@ -155,7 +155,7 @@ scripts/test
 e2e driver's own Node tests (`npm test --prefix e2e`, so it needs Node 20 or newer) and
 `scripts/check-ops`. Integration tests create their own disposable databases and never touch the
 development database. HTTP tests use local servers, injected transports and recorded fixtures.
-The tests that run `scripts/verify-osm-boundary` also need `psql`, `pg_dump` and `rg`.
+The tests that run `scripts/verify-osm-boundary` also need `psql`, `pg_dump`, `rg` and `python3`.
 
 End-to-end checks ([e2e/README.md](e2e/README.md)) need Node 20 or newer too:
 
