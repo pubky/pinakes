@@ -82,6 +82,10 @@ pub struct Config {
     pub queue: QueueConfig,
     #[serde(skip)]
     pub preview: PreviewConfig,
+    /// Seconds a stopping daemon gives open requests, running jobs and background passes to
+    /// finish.
+    #[serde(skip)]
+    pub shutdown_grace_secs: u64,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -120,7 +124,16 @@ impl Sections {
                     .iter()
                     .find(|s| s.name == name)
                     .with_context(|| format!("unknown config section [{name}]"))?;
-                let shown = (section.shown)(value).with_context(|| format!("[{name}]"))?;
+                // A value of the wrong type is named by its section and what was expected,
+                // never by the value: the deserializer's message quotes it.
+                let shown = (section.shown)(value).map_err(|error| {
+                    match error.downcast_ref::<serde_json::Error>() {
+                        Some(shape) => {
+                            anyhow::anyhow!("[{name}]: {}", without_value(&shape.to_string()))
+                        }
+                        None => error.context(format!("[{name}]")),
+                    }
+                })?;
                 Ok((name.as_str(), shown))
             })
             .collect()
@@ -280,41 +293,48 @@ pub(crate) fn apply_env(
         .into_iter()
         .filter_map(|(k, v)| k.strip_prefix("PINAKES__").map(|s| (s.to_lowercase(), v)))
     {
-        let parts: Vec<_> = key.split("__").collect();
-        let in_map = |depth: usize| {
-            ENV_MAPS
-                .iter()
-                .any(|m| m.len() <= depth && m.iter().zip(&parts).all(|(a, b)| a == b))
-        };
-        let mut node = &mut *value;
-        for (depth, part) in parts[..parts.len() - 1].iter().enumerate() {
-            if in_map(depth) && node.get(*part).is_none() {
-                node.as_object_mut()
-                    .context("unknown config section")?
-                    .insert(part.to_string(), serde_json::json!({}));
-            }
-            node = node.get_mut(*part).context("unknown config section")?;
-        }
-        let last = parts[parts.len() - 1];
-        let created = node.get(last).is_none() && in_map(parts.len() - 1);
-        if created {
-            let new = if last == "enabled" || HOST_RATES.iter().zip(&parts).all(|(a, b)| a == b) {
-                serde_json::from_str(&val).context("env override requires JSON value")?
-            } else {
-                serde_json::Value::String(val)
-            };
+        // The variable, never its value: it may be a secret.
+        apply_override(value, &key, val)
+            .with_context(|| format!("environment variable PINAKES__{}", key.to_uppercase()))?;
+    }
+    Ok(())
+}
+/// One `PINAKES__SECTION__KEY` override (`key` is `section__key`, in lower case).
+fn apply_override(value: &mut serde_json::Value, key: &str, val: String) -> Result<()> {
+    let parts: Vec<_> = key.split("__").collect();
+    let in_map = |depth: usize| {
+        ENV_MAPS
+            .iter()
+            .any(|m| m.len() <= depth && m.iter().zip(&parts).all(|(a, b)| a == b))
+    };
+    let mut node = &mut *value;
+    for (depth, part) in parts[..parts.len() - 1].iter().enumerate() {
+        if in_map(depth) && node.get(*part).is_none() {
             node.as_object_mut()
                 .context("unknown config section")?
-                .insert(last.to_string(), new);
-            continue;
+                .insert(part.to_string(), serde_json::json!({}));
         }
-        let target = node.get_mut(last).context("unknown config key")?;
-        *target = if target.is_string() || (target.is_null() && val != "null") {
-            serde_json::Value::String(val)
-        } else {
-            serde_json::from_str(&val).context("env override requires JSON value")?
-        };
+        node = node.get_mut(*part).context("unknown config section")?;
     }
+    let last = parts[parts.len() - 1];
+    let created = node.get(last).is_none() && in_map(parts.len() - 1);
+    if created {
+        let new = if last == "enabled" || HOST_RATES.iter().zip(&parts).all(|(a, b)| a == b) {
+            serde_json::from_str(&val).context("env override requires JSON value")?
+        } else {
+            serde_json::Value::String(val)
+        };
+        node.as_object_mut()
+            .context("unknown config section")?
+            .insert(last.to_string(), new);
+        return Ok(());
+    }
+    let target = node.get_mut(last).context("unknown config key")?;
+    *target = if target.is_string() || (target.is_null() && val != "null") {
+        serde_json::Value::String(val)
+    } else {
+        serde_json::from_str(&val).context("env override requires JSON value")?
+    };
     Ok(())
 }
 impl Config {
@@ -365,6 +385,7 @@ impl Config {
             groups: Default::default(),
             preview: PreviewConfig::default(),
             api: ApiConfig::default(),
+            shutdown_grace_secs: 30,
         }
     }
 }
@@ -738,6 +759,8 @@ impl Default for QueueConfig {
 pub struct PreviewConfig {
     pub requests_per_minute: usize,
     pub uri_requests_per_minute: usize,
+    /// The same table's size when a preview adds its client address and link: past it the
+    /// oldest entry (an API client's too) is forgotten, with what it had used.
     pub cache_capacity: usize,
 }
 impl Default for PreviewConfig {
@@ -824,8 +847,14 @@ impl Default for SearchConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct ApiConfig {
     pub requests_per_minute: usize,
+    /// The entries the rate limiter's table holds when an API request adds a client address
+    /// (the preview limiter shares the table), and the addresses the dump download limiter
+    /// remembers per hour: past it the oldest is forgotten, with what it had used.
     #[serde(skip)]
     pub cache_capacity: usize,
+    /// Seconds a request may take before it is answered 504, on either listener.
+    #[serde(skip)]
+    pub request_timeout_secs: u64,
     #[serde(skip)]
     pub reach_cost: usize,
     #[serde(skip)]
@@ -844,6 +873,7 @@ impl Default for ApiConfig {
         Self {
             requests_per_minute: 120,
             cache_capacity: 10000,
+            request_timeout_secs: 30,
             reach_cost: 6,
             related_cost: 6,
             cors_allow_origins: vec!["*".into()],
@@ -898,10 +928,10 @@ impl Config {
     pub fn load(path: Option<&Path>) -> Result<Self> {
         let mut value = Self::defaults()?;
         if let Some(path) = path {
-            let file: toml::Value = toml::from_str(
-                &std::fs::read_to_string(path)
-                    .with_context(|| format!("read {}", path.display()))?,
-            )?;
+            let text = std::fs::read_to_string(path)
+                .with_context(|| format!("read {}", path.display()))?;
+            let file: toml::Value =
+                toml::from_str(&text).map_err(|e| syntax_error(path, &text, &e))?;
             let file = serde_json::to_value(file)?;
             merge(&mut value, file);
         }
@@ -921,7 +951,10 @@ impl Config {
     }
     /// A configuration from its file form (sections plus `[limits]`), validated.
     pub fn from_value(value: serde_json::Value) -> Result<Self> {
-        let mut cfg: Self = serde_json::from_value(value)?;
+        let mut cfg: Self = match serde_json::from_value(value.clone()) {
+            Ok(cfg) => cfg,
+            Err(error) => return Err(shape_error(&value, &error)),
+        };
         cfg.nexus_authorization = cfg
             .nexus_authorization
             .take()
@@ -936,12 +969,42 @@ impl Config {
                 })?;
             }
         }
+        // A rate is looked up by the host as the egress names it: lower case, an IDN in
+        // punycode. A key that names no single host (a pattern, a URL) would pace nothing.
+        let mut rates = BTreeMap::new();
+        for (key, rate) in &cfg.limits.host_rates {
+            let host = host_rule(key).filter(|host| !host.starts_with("*.")).with_context(|| {
+                format!("limits.host_rates: {key:?} is not a host name (one host, no `*.`, no scheme or path)")
+            })?;
+            anyhow::ensure!(
+                rates.insert(host, *rate).is_none(),
+                "limits.host_rates: {key:?} names a host another key names too"
+            );
+        }
+        cfg.limits.host_rates = rates;
         let limits = cfg.limits.clone();
         limits.apply(&mut cfg);
         cfg.queue.groups = cfg.groups.clone();
         cfg.share_contact();
         cfg.validate()?;
         Ok(cfg)
+    }
+    /// Whether `nexus_authorization` would cross a network in clear: it is set, and `nexus_url`
+    /// is `http://` on a host that is neither this machine nor a private address, by its name
+    /// or address as written (a name that resolves to a private address is not looked up).
+    pub fn nexus_authorization_in_clear(&self) -> bool {
+        let Ok(url) = url::Url::parse(&self.nexus_url) else {
+            return false;
+        };
+        let local = match url.host() {
+            Some(url::Host::Domain(name)) => name == "localhost" || name.ends_with(".localhost"),
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+            Some(url::Host::Ipv6(ip)) => {
+                ip.is_loopback() || ip.is_unique_local() || (ip.segments()[0] & 0xffc0) == 0xfe80
+            }
+            None => false,
+        };
+        self.nexus_authorization.is_some() && url.scheme() == "http" && !local
     }
     /// Every HTTP client sends `http.contact` (`resolver::egress::user_agent`).
     fn share_contact(&mut self) {
@@ -1218,7 +1281,9 @@ impl Config {
             || !(1..=168).contains(&self.osm.dump_every_hours)
             || !(1..=1000).contains(&self.osm.dump_downloads_per_hour)
             || !(1..=10000).contains(&self.api.requests_per_minute)
-            || !(2..=100000).contains(&self.api.cache_capacity)
+            || !(100..=100000).contains(&self.api.cache_capacity)
+            || !(5..=600).contains(&self.api.request_timeout_secs)
+            || !(1..=600).contains(&self.shutdown_grace_secs)
             || !(2..=100).contains(&self.api.reach_cost)
             || !(2..=100).contains(&self.api.related_cost)
             || !(1..=60).contains(&self.search.reach_timeout_secs)
@@ -1266,7 +1331,7 @@ impl Config {
             || !(1..=86400).contains(&self.queue.missing_ttl_secs)
             || self.preview.requests_per_minute == 0
             || self.preview.uri_requests_per_minute == 0
-            || !(1..=100000).contains(&self.preview.cache_capacity)
+            || !(100..=100000).contains(&self.preview.cache_capacity)
             || !(1..=87600).contains(&self.preview_grace_hours)
             || !(1..=1_000_000).contains(&self.preview_new_per_hour)
             || self.preview_new_per_client_per_hour > 1_000_000
@@ -1304,6 +1369,61 @@ fn host_rule(rule: &str) -> Option<String> {
         }
         ip if !wild => Some(ip.to_string()),
         _ => None,
+    }
+}
+/// A config file that is not TOML: where, and what the parser expected. Never the parser's own
+/// text, which quotes the line, and the line may hold a secret.
+fn syntax_error(path: &Path, text: &str, error: &toml::de::Error) -> anyhow::Error {
+    let place = error.span().map(|span| {
+        // By bytes: a span's start is no promise of a character boundary.
+        let before = &text.as_bytes()[..span.start.min(text.len())];
+        let line = before.iter().filter(|b| **b == b'\n').count() + 1;
+        let column = before.rsplit(|b| *b == b'\n').next().map_or(0, <[u8]>::len) + 1;
+        format!(" at line {line}, byte {column}")
+    });
+    anyhow::anyhow!(
+        "{} is not valid TOML{}: {}",
+        path.display(),
+        place.unwrap_or_default(),
+        error.message()
+    )
+}
+/// A deserializer's message without the value it found: "invalid type: integer `5`, expected a
+/// string" keeps "invalid type, expected a string". The value may be a secret; what was
+/// expected (the last `, expected`, since a quoted value may hold those words) is not.
+fn without_value(message: &str) -> String {
+    let kinds = ["invalid type: ", "invalid value: ", "unknown variant "];
+    let Some(kind) = kinds.iter().find(|kind| message.starts_with(**kind)) else {
+        return message.to_owned();
+    };
+    let kind = kind.trim_end_matches([':', ' ']);
+    match message.rfind(", expected ") {
+        Some(expected) => format!("{kind}{}", &message[expected..]),
+        None => kind.to_owned(),
+    }
+}
+/// A configuration of the wrong shape (a number where a string belongs, an unknown key): the
+/// section it is in and what was expected. Never the value found, which the deserializer's
+/// message quotes and which may be a secret.
+fn shape_error(value: &serde_json::Value, error: &serde_json::Error) -> anyhow::Error {
+    let message = without_value(&error.to_string());
+    // The section: the one that, put back to its default, lets the rest load.
+    let defaults = Config::defaults().ok();
+    let section = value.as_object().and_then(|sections| {
+        sections.keys().find(|key| {
+            let mut rest = value.clone();
+            match defaults.as_ref().and_then(|d| d.get(key.as_str())) {
+                Some(default) => rest[key.as_str()] = default.clone(),
+                None => {
+                    rest.as_object_mut().map(|o| o.remove(key.as_str()));
+                }
+            }
+            serde_json::from_value::<Config>(rest).is_ok()
+        })
+    });
+    match section {
+        Some(section) => anyhow::anyhow!("invalid configuration in `{section}`: {message}"),
+        None => anyhow::anyhow!("invalid configuration: {message}"),
     }
 }
 /// An upstream service's URL is a web URL with a host, and holds no secret: no user info, query
@@ -2136,6 +2256,145 @@ mod tests {
             with(serde_json::json!({"limits":{"resolver_requests_per_second":1e-320}})).is_err()
         );
     }
+    /// A config file that does not parse, or holds a value of the wrong type, is reported by
+    /// place and expectation: the line's text and the value, which may be a secret, stay out.
+    #[test]
+    fn a_config_error_names_the_place_and_never_the_text() {
+        let path = std::env::temp_dir().join(format!("pinakes-bad-{}.toml", std::process::id()));
+        std::fs::write(
+            &path,
+            "listen = \"127.0.0.1:8090\"\nadmin_token = \"s3cret-admin-token\n",
+        )
+        .unwrap();
+        let error = format!("{:#}", Config::load(Some(&path)).unwrap_err());
+        std::fs::remove_file(&path).unwrap();
+        assert!(error.contains("is not valid TOML at line 2"), "{error}");
+        assert!(!error.contains("s3cret"), "{error}");
+        let error = format!(
+            "{:#}",
+            with(serde_json::json!({"admin_token": 8675309})).unwrap_err()
+        );
+        assert!(error.contains("`admin_token`"), "{error}");
+        assert!(error.contains("expected"), "{error}");
+        assert!(!error.contains("8675309"), "{error}");
+        let error = format!(
+            "{:#}",
+            with(serde_json::json!({"groups": {"cross_container_occurrences": "s3cret"}}))
+                .unwrap_err()
+        );
+        assert!(error.contains("`groups`"), "{error}");
+        assert!(!error.contains("s3cret"), "{error}");
+        // A quoted value that holds the deserializer's own words gives none of itself away.
+        assert_eq!(
+            without_value("invalid type: string \"s3cret, expected more\", expected u64"),
+            "invalid type, expected u64"
+        );
+        // A source's own section is typed by its source: the same holds there.
+        for section in crate::also_on::sections() {
+            let default = (section.default)();
+            let Some(key) = default
+                .as_object()
+                .and_then(|o| o.iter().find(|(_, v)| v.is_string() || v.is_null()))
+                .map(|(k, _)| k.clone())
+            else {
+                continue;
+            };
+            let Err(error) = with(serde_json::json!({section.name: {key: 8675309}})) else {
+                continue;
+            };
+            let error = format!("{error:#}");
+            assert!(error.contains(&format!("[{}]", section.name)), "{error}");
+            assert!(!error.contains("8675309"), "{}: {error}", section.name);
+        }
+    }
+    /// A refused `PINAKES__…` override names its variable, and never its value.
+    #[test]
+    fn a_refused_override_names_its_variable() {
+        for (name, value) in [
+            ("PINAKES__NO_SUCH__KEY", "s3cret"),
+            ("PINAKES__API__NO_SUCH_KEY", "s3cret"),
+            ("PINAKES__API__MCP", "s3cret"),
+        ] {
+            let mut config = Config::defaults().unwrap();
+            let error = apply_env(&mut config, [(name.to_owned(), value.to_owned())]).unwrap_err();
+            let error = format!("{error:#}");
+            assert!(error.contains(name), "{error}");
+            assert!(!error.contains("s3cret"), "{error}");
+        }
+    }
+    /// A `limits.host_rates` key is a host as the egress names it; one that names no single
+    /// host stops the load instead of pacing nothing.
+    #[test]
+    fn host_rate_keys_are_canonical_hosts() {
+        let cfg = with(serde_json::json!({"limits":{"host_rates":{"Example.ORG": 0.5}}})).unwrap();
+        assert_eq!(cfg.egress.host_rates.get("example.org"), Some(&0.5));
+        assert_eq!(cfg.limits.host_rates.get("example.org"), Some(&0.5));
+        let twice =
+            serde_json::json!({"limits":{"host_rates":{"Example.org": 0.5, "example.org": 2.0}}});
+        assert!(format!("{:#}", with(twice).unwrap_err()).contains("limits.host_rates"));
+        for bad in [
+            "*.example.org",
+            "https://example.org/",
+            "example.org/path",
+            "",
+        ] {
+            let error = with(serde_json::json!({"limits":{"host_rates":{bad: 0.5}}})).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("limits.host_rates"),
+                "{bad}: {error:#}"
+            );
+        }
+    }
+    /// The Nexus credential is flagged only when it would cross a network in clear.
+    #[test]
+    fn a_nexus_credential_over_plain_http_is_flagged_off_the_local_network() {
+        let clear = |url: &str, authorization: Option<&str>| {
+            with(serde_json::json!({"nexus_url": url, "nexus_authorization": authorization}))
+                .unwrap()
+                .nexus_authorization_in_clear()
+        };
+        assert!(clear("http://nexus.example.org", Some("Bearer x")));
+        assert!(clear("http://203.0.113.7:8080", Some("Bearer x")));
+        for (url, authorization) in [
+            ("http://nexus.example.org", None),
+            ("https://nexus.example.org", Some("Bearer x")),
+            ("http://127.0.0.1:8080", Some("Bearer x")),
+            ("http://localhost:8080", Some("Bearer x")),
+            ("http://10.0.0.5:8080", Some("Bearer x")),
+            ("http://[::1]:8080", Some("Bearer x")),
+            ("http://[fe80::1]:8080", Some("Bearer x")),
+        ] {
+            assert!(!clear(url, authorization), "{url}");
+        }
+    }
+    /// The limiter sizes and the two deadlines are range-checked.
+    #[test]
+    fn limiter_sizes_and_deadlines_are_bounded() {
+        let cfg = Config::default();
+        assert_eq!(cfg.api.request_timeout_secs, 30);
+        assert_eq!(cfg.shutdown_grace_secs, 30);
+        for (key, value) in [
+            ("api_cache_capacity", 99),
+            ("api_cache_capacity", 100_001),
+            ("preview_cache_capacity", 99),
+            ("request_timeout_secs", 4),
+            ("request_timeout_secs", 601),
+            ("shutdown_grace_secs", 0),
+            ("shutdown_grace_secs", 601),
+        ] {
+            assert!(
+                with(serde_json::json!({"limits":{key:value}})).is_err(),
+                "{key}={value}"
+            );
+        }
+        let cfg =
+            with(serde_json::json!({"limits":{"request_timeout_secs":5,"shutdown_grace_secs":7}}))
+                .unwrap();
+        assert_eq!(
+            (cfg.api.request_timeout_secs, cfg.shutdown_grace_secs),
+            (5, 7)
+        );
+    }
     #[test]
     fn the_example_config_loads_and_lists_only_operator_choices() {
         let path =
@@ -2324,8 +2583,12 @@ limits! {
     collapse_refs_per_member: usize = |c| c.search.collapse_refs_per_member => [|c, v| c.search.collapse_refs_per_member = v],
     /// Largest `near` radius (metres).
     max_radius_m: f64 = |c| c.search.max_radius_m => [|c, v| c.search.max_radius_m = v],
-    /// API response cache entries.
+    /// Entries the rate limiter remembers when an API request adds a client address (100–100000). It shares one table with the preview limiter; past it the oldest entry is forgotten with its used budget. Also the client addresses the dump download limiter remembers per hour.
     api_cache_capacity: usize = |c| c.api.cache_capacity => [|c, v| c.api.cache_capacity = v],
+    /// Seconds a request may take on either listener before it is answered 504 (5–600).
+    request_timeout_secs: u64 = |c| c.api.request_timeout_secs => [|c, v| c.api.request_timeout_secs = v],
+    /// Seconds a stopping daemon gives open requests, running jobs and background passes to finish.
+    shutdown_grace_secs: u64 = |c| c.shutdown_grace_secs => [|c, v| c.shutdown_grace_secs = v],
     /// Budget units a search costs for each of `reach` and `boost`.
     reach_cost: usize = |c| c.api.reach_cost => [|c, v| c.api.reach_cost = v],
     /// Budget units a related search costs.
@@ -2334,7 +2597,7 @@ limits! {
     preview_requests_per_minute: usize = |c| c.preview.requests_per_minute => [|c, v| c.preview.requests_per_minute = v],
     /// Preview requests per minute per URI.
     preview_uri_requests_per_minute: usize = |c| c.preview.uri_requests_per_minute => [|c, v| c.preview.uri_requests_per_minute = v],
-    /// Preview cache entries.
+    /// The same table's size when a preview adds its client address and link (100–100000); past it the oldest entry (an API client's too) is forgotten with its used budget.
     preview_cache_capacity: usize = |c| c.preview.cache_capacity => [|c, v| c.preview.cache_capacity = v],
     /// New previews per hour for the whole instance; over it `POST /v1/resolve` answers 503.
     preview_new_per_hour: usize = |c| c.preview_new_per_hour => [|c, v| c.preview_new_per_hour = v],

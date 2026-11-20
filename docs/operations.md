@@ -56,12 +56,14 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `related_seed_links` | `32` | Seed links a related page samples: of the resource, its group's members and their aliases, the ones with the newest tags, at most this many. |
 | `collapse_refs_per_member` | `10000` | References counted per group member when `collapse=group` picks a group's row. |
 | `max_radius_m` | `200000.0` | Largest `near` radius (metres). |
-| `api_cache_capacity` | `10000` | API response cache entries. |
+| `api_cache_capacity` | `10000` | Entries the rate limiter remembers when an API request adds a client address (100–100000). It shares one table with the preview limiter; past it the oldest entry is forgotten with its used budget, so keep it above the clients, preview clients and previewed links seen in a minute. Also the client addresses the dump download limiter remembers per hour. |
+| `request_timeout_secs` | `30` | Seconds a request may take on either listener before it is answered 504 (5–600). |
+| `shutdown_grace_secs` | `30` | Seconds a stopping daemon gives open requests, running jobs and background passes to finish. |
 | `reach_cost` | `6` | Budget units a search costs for each of `reach` and `boost`. |
 | `related_cost` | `6` | Budget units a related search costs. |
 | `preview_requests_per_minute` | `30` | Preview requests per minute per client. |
 | `preview_uri_requests_per_minute` | `30` | Preview requests per minute per URI. |
-| `preview_cache_capacity` | `10000` | Preview cache entries. |
+| `preview_cache_capacity` | `10000` | The same table's size when a preview adds its client address and link (100–100000); past it the oldest entry (an API client's too) is forgotten with its used budget. Keep it equal to `api_cache_capacity`. |
 | `preview_new_per_hour` | `1000` | New previews per hour for the whole instance; over it `POST /v1/resolve` answers 503. |
 | `preview_new_per_client_per_hour` | `0` | New previews per hour one client address may take (0: no share); over it `POST /v1/resolve` answers 429. |
 | `podcast_items` | `2000` | Podcast feed items read per scan (a show's list looks at its first 2000 and keeps the newest 1000). |
