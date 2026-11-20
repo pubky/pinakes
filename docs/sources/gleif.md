@@ -18,7 +18,7 @@ links all name the same page and are not read as records.
 ## What it reads
 
 `GET https://api.gleif.org/api/v1/lei-records/{LEI}` (about 3 KB). An LEI GLEIF does not know is
-`missing`.
+`missing`; a record without a legal name is an error, not a card.
 
 ## Card
 

@@ -65,7 +65,7 @@ pub fn card(
     let entity = &a["entity"];
     doc.set_type("Organization");
     doc.site = "GLEIF".into();
-    doc.name = text(&entity["legalName"]["name"]);
+    doc.name = Some(text(&entity["legalName"]["name"]).context("no title")?);
     let address = &entity["legalAddress"];
     for (key, value) in [
         (
@@ -309,5 +309,33 @@ mod tests {
         .is_none());
         let nestle = read("lei_KY37LUS27QQX7BB93L28_nestle.json");
         assert!(card(base("x:y"), "5493001KJTIIGC8Y1R12", 200, &nestle).is_err());
+    }
+
+    /// A record without a legal name is an error, not a card without a name.
+    #[test]
+    fn a_record_without_a_legal_name_is_an_error() {
+        let lei = "KY37LUS27QQX7BB93L28";
+        let recorded: Value =
+            serde_json::from_slice(&read("lei_KY37LUS27QQX7BB93L28_nestle.json")).unwrap();
+        for name in [Value::Null, Value::from(""), Value::from("  ")] {
+            let mut record = recorded.clone();
+            record["data"]["attributes"]["entity"]["legalName"]["name"] = name.clone();
+            let body = serde_json::to_vec(&record).unwrap();
+            let error = card(
+                ResourceMeta::new("lei:KY37LUS27QQX7BB93L28", "gleif", 3600),
+                lei,
+                200,
+                &body,
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), "no title", "{name}");
+        }
+        let mut record = recorded;
+        record["data"]["attributes"]["entity"]
+            .as_object_mut()
+            .unwrap()
+            .remove("legalName");
+        let body = serde_json::to_vec(&record).unwrap();
+        assert!(card(ResourceMeta::new("lei:x", "gleif", 3600), lei, 200, &body).is_err());
     }
 }
