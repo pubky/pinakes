@@ -20,10 +20,13 @@ a longer name: the link gets an ordinary web card.
 
 Project pages are read on gitlab.com, framagit.org, gitlab.freedesktop.org, gitlab.gnome.org,
 invent.kde.org and salsa.debian.org, and on any host that answered as GitLab within the last
-day. The `/-/` shapes are read on any host; one that answers otherwise, fails or does not answer
-is remembered for a day, in memory, and gets ordinary web cards. A known instance is never
-marked as not GitLab. A page shaped like a project that the API does
-not know (a group, a user, an old page address) gets an ordinary web card too. Issues and merge
+day. The `/-/` shapes are read on any host. A host answers as GitLab with the object asked for
+(a project with its path, a branch or tag with its commit, a release with its tag, a list of
+commits) or with GitLab's own error (`{"message": "404 …"}`); one that answers otherwise, fails
+or does not answer is remembered for a day, in memory, and gets ordinary web cards. A known
+instance is never marked as not GitLab. A page shaped like a project that the API does
+not know (a group, a user, an old page address) gets an ordinary web card too, and so does one
+on a host learned this way whose answer is not a project of that host. Issues and merge
 requests are not read.
 
 The address the API gives a project (`web_url`) is its root; every other spelling becomes an

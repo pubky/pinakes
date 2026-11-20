@@ -215,6 +215,13 @@ pub fn is_gitlab(body: &[u8]) -> bool {
         })
 }
 
+/// The string a 200 answer holds when it is the object asked for, as a JSON pointer: a project's
+/// path, a branch's or tag's commit, a release's tag, the first commit of a list.
+const PROJECT: &str = "/path_with_namespace";
+const REF: &str = "/commit/id";
+const RELEASE: &str = "/tag_name";
+const COMMITS: &str = "/0/id";
+
 fn json(body: &[u8]) -> Result<Value> {
     serde_json::from_slice(body).context("the instance answered no JSON")
 }
@@ -486,8 +493,9 @@ impl Source for Gitlab {
             return Err(Declined.into());
         }
         let json = FetchOptions::json();
-        // The first answer from an unknown host says whether it is GitLab.
-        let get = |url: String| {
+        // The first answer from an unknown host says whether it is GitLab: GitLab's own error
+        // shape, or a 200 that holds `field`, the string the object asked for always has.
+        let get = |url: String, field: &'static str| {
             let host = host.clone();
             let json = json.clone();
             async move {
@@ -505,95 +513,112 @@ impl Source for Gitlab {
                     Err(e) if unknown && !super::own_rate_limit(&e) => return not_gitlab(),
                     Err(e) => return Err(e),
                 };
-                if f.status != 200 && !is_gitlab(&f.body) {
-                    return not_gitlab();
+                // On 200: whether the JSON answer is the object asked for.
+                let object = match f.status {
+                    200 => serde_json::from_slice::<Value>(&f.body)
+                        .ok()
+                        .map(|v| v.pointer(field).is_some_and(Value::is_string)),
+                    _ => None,
+                };
+                match object {
+                    Some(true) => INSTANCES.set(&host, true),
+                    // An instance's answer without it (no commit touches a path) is read as
+                    // it is; from an unknown host it does not show GitLab.
+                    Some(false) if !unknown => {}
+                    None if f.status != 200 && is_gitlab(&f.body) => INSTANCES.set(&host, true),
+                    _ => return not_gitlab(),
                 }
-                if f.status == 200 && serde_json::from_slice::<Value>(&f.body).is_err() {
-                    return not_gitlab();
-                }
-                INSTANCES.set(&host, true);
                 Ok::<_, anyhow::Error>(f)
             }
         };
-        let doc =
-            match &target.object {
-                Object::Project => {
-                    let f = get(target.api()).await?;
-                    match f.status {
-                        200 => Some(project_card(cx.card(uri, self), &host, &f.body)?),
-                        // A namespace or another page shaped like a project: an ordinary web card.
-                        404 => return Err(Declined.into()),
-                        s => anyhow::bail!("GitLab answered {s}"),
+        let doc = match &target.object {
+            Object::Project => {
+                let f = get(target.api(), PROJECT).await?;
+                match f.status {
+                    200 => match project_card(cx.card(uri, self), &host, &f.body) {
+                        Ok(doc) => Some(doc),
+                        // On a learned host, a page shaped like a project may be any page.
+                        Err(_) if !KNOWN.contains(&host.as_str()) => return Err(Declined.into()),
+                        Err(e) => return Err(e),
+                    },
+                    // A namespace or another page shaped like a project: an ordinary web card.
+                    404 => return Err(Declined.into()),
+                    s => anyhow::bail!("GitLab answered {s}"),
+                }
+            }
+            Object::Tag { tag } => {
+                let url = format!("{}/repository/tags/{}", target.api(), param(tag));
+                let f = get(url, REF).await?;
+                match f.status {
+                    200 => Some(ref_card(
+                        cx.card(uri, self),
+                        &target,
+                        RefKind::Tag,
+                        tag,
+                        true,
+                        &f.body,
+                    )?),
+                    404 => None,
+                    s => anyhow::bail!("GitLab answered {s}"),
+                }
+            }
+            Object::Release { tag } => {
+                let f = get(format!("{}/releases/{}", target.api(), param(tag)), RELEASE).await?;
+                match f.status {
+                    200 => Some(release_card(cx.card(uri, self), &target, tag, &f.body)?),
+                    404 => None,
+                    s => anyhow::bail!("GitLab answered {s}"),
+                }
+            }
+            Object::At { blob, .. } => {
+                let mut found = None;
+                'splits: for (reference, path) in target.splits() {
+                    if sha(&reference) {
+                        found = Some((RefKind::Commit, reference, path, None));
+                        break;
+                    }
+                    for (kind, list) in [(RefKind::Branch, "branches"), (RefKind::Tag, "tags")] {
+                        let url =
+                            format!("{}/repository/{list}/{}", target.api(), param(&reference));
+                        let f = get(url, REF).await?;
+                        match f.status {
+                            200 => {
+                                found = Some((kind, reference, path, Some(f.body)));
+                                break 'splits;
+                            }
+                            404 => continue,
+                            s => anyhow::bail!("GitLab answered {s}"),
+                        }
                     }
                 }
-                Object::Tag { tag } => {
-                    let f = get(format!("{}/repository/tags/{}", target.api(), param(tag))).await?;
-                    match f.status {
-                        200 => Some(ref_card(
+                match found {
+                    // The ref may be one of the longer names not tried: the page's web card.
+                    None if target.longer_ref() => return Err(Declined.into()),
+                    None => None,
+                    Some((kind, reference, path, Some(body))) if path.is_empty() => Some(ref_card(
+                        cx.card(uri, self),
+                        &target,
+                        kind,
+                        &reference,
+                        false,
+                        &body,
+                    )?),
+                    Some((kind, reference, path, _)) => {
+                        let f = get(commits_url(&target, &reference, &path), COMMITS).await?;
+                        file_card(
                             cx.card(uri, self),
                             &target,
-                            RefKind::Tag,
-                            tag,
-                            true,
+                            kind,
+                            *blob,
+                            &reference,
+                            &path,
+                            f.status,
                             &f.body,
-                        )?),
-                        404 => None,
-                        s => anyhow::bail!("GitLab answered {s}"),
+                        )?
                     }
                 }
-                Object::Release { tag } => {
-                    let f = get(format!("{}/releases/{}", target.api(), param(tag))).await?;
-                    match f.status {
-                        200 => Some(release_card(cx.card(uri, self), &target, tag, &f.body)?),
-                        404 => None,
-                        s => anyhow::bail!("GitLab answered {s}"),
-                    }
-                }
-                Object::At { blob, .. } => {
-                    let mut found = None;
-                    'splits: for (reference, path) in target.splits() {
-                        if sha(&reference) {
-                            found = Some((RefKind::Commit, reference, path, None));
-                            break;
-                        }
-                        for (kind, list) in [(RefKind::Branch, "branches"), (RefKind::Tag, "tags")]
-                        {
-                            let url =
-                                format!("{}/repository/{list}/{}", target.api(), param(&reference));
-                            let f = get(url).await?;
-                            match f.status {
-                                200 => {
-                                    found = Some((kind, reference, path, Some(f.body)));
-                                    break 'splits;
-                                }
-                                404 => continue,
-                                s => anyhow::bail!("GitLab answered {s}"),
-                            }
-                        }
-                    }
-                    match found {
-                        // The ref may be one of the longer names not tried: the page's web card.
-                        None if target.longer_ref() => return Err(Declined.into()),
-                        None => None,
-                        Some((kind, reference, path, Some(body))) if path.is_empty() => Some(
-                            ref_card(cx.card(uri, self), &target, kind, &reference, false, &body)?,
-                        ),
-                        Some((kind, reference, path, _)) => {
-                            let f = get(commits_url(&target, &reference, &path)).await?;
-                            file_card(
-                                cx.card(uri, self),
-                                &target,
-                                kind,
-                                *blob,
-                                &reference,
-                                &path,
-                                f.status,
-                                &f.body,
-                            )?
-                        }
-                    }
-                }
-            };
+            }
+        };
         let mut doc = doc.unwrap_or_else(|| cx.missing(uri, self));
         doc.site = host;
         Ok(doc)
@@ -883,6 +908,67 @@ mod tests {
             .unwrap_err()
             .is::<Declined>());
         assert_eq!(recorded.asked().len(), asked);
+    }
+
+    /// An unknown host is GitLab when its 200 answer is the object asked for. Any other JSON
+    /// leaves the host's links to the web route.
+    #[tokio::test(start_paused = true)]
+    async fn a_200_that_is_not_the_object_asked_for_is_not_gitlab() {
+        let (egress, _) = fixture::egress(vec![(
+            "https://json.example/api/v4/projects/a%2Fb/repository/branches/main",
+            200,
+            JSON,
+            b"{}".to_vec(),
+        )]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let link = "https://json.example/a/b/-/tree/main";
+        let error = Gitlab.resolve(&cx, link).await.unwrap_err();
+        assert!(error.is::<Declined>(), "{error}");
+        assert!(!Gitlab.reads(link));
+        assert!(!Gitlab.reads("https://json.example/a/b"));
+    }
+
+    /// On a host learned as GitLab, a page shaped like a project whose answer is no project of
+    /// that host gets a web card.
+    #[tokio::test(start_paused = true)]
+    async fn a_learned_host_s_page_that_is_no_project_is_declined() {
+        let api = "https://learned.example/api/v4/projects";
+        let (egress, _) = fixture::egress(vec![
+            (
+                &format!("{api}/a%2Fb/repository/branches/master"),
+                200,
+                JSON,
+                read("branch-master.json"),
+            ),
+            (&format!("{api}/team%2Fhandbook"), 200, JSON, b"{}".to_vec()),
+            // A project whose page is on another host.
+            (
+                &format!("{api}/inkscape%2Finkscape"),
+                200,
+                JSON,
+                read("project-inkscape.json"),
+            ),
+        ]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let doc = Gitlab
+            .resolve(&cx, "https://learned.example/a/b/-/tree/master")
+            .await
+            .unwrap();
+        assert_eq!(doc.attributes["branch"], "master");
+        for page in [
+            "https://learned.example/team/handbook",
+            "https://learned.example/inkscape/inkscape",
+        ] {
+            assert!(Gitlab.reads(page), "{page}");
+            let error = Gitlab.resolve(&cx, page).await.unwrap_err();
+            assert!(error.is::<Declined>(), "{page}: {error}");
+        }
     }
 
     #[tokio::test(start_paused = true)]
