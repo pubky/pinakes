@@ -416,13 +416,14 @@ pub fn facts(doc: &ResourceMeta) -> Option<std::collections::BTreeMap<String, St
 pub mod read {
     use serde_json::Value;
 
-    /// The first of `keys` that holds a non-empty string, trimmed.
+    /// The first of `keys` that holds a non-empty string, trimmed, without the NUL characters
+    /// no stored text may hold.
     pub fn text(v: &Value, keys: &[&str]) -> Option<String> {
         keys.iter()
             .find_map(|k| v.get(*k).and_then(Value::as_str))
-            .map(str::trim)
+            .map(|s| s.replace('\0', ""))
+            .map(|s| s.trim().to_owned())
             .filter(|s| !s.is_empty())
-            .map(str::to_owned)
     }
     /// A number as a fact: an integer without a fraction, else as written.
     pub fn number(v: &Value) -> Option<String> {

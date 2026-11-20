@@ -2132,6 +2132,32 @@ fn oembed_field(v: &Value, field: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A NUL in a page's JSON-LD (`"name": "A\u0000B"`), which no stored text may hold, is
+    /// dropped from the card's texts, its facts and its event fields: the card saves.
+    #[test]
+    fn a_nul_in_json_ld_is_dropped_from_the_card() {
+        let url = "https://nul.example.org/event";
+        let body = r#"{"@type":"Event","name":"A\u0000B","description":"Doors\u0000 at eight",
+            "startDate":"2026-12-20T18:00:00Z",
+            "organizer":{"@type":"Organization","name":"Club\u0000 Zero"},
+            "location":{"@type":"Place","name":"Hall\u0000 1",
+                "address":{"streetAddress":"Via\u0000 Nassa 5","addressLocality":"Lugano"}}}"#;
+        let f = Fetched::answer(
+            Url::parse(url).unwrap(),
+            200,
+            "application/ld+json".into(),
+            body.as_bytes().to_vec(),
+        );
+        let doc = extract(url, &f, 3600)
+            .unwrap()
+            .doc
+            .bounded(ATTRIBUTES)
+            .unwrap();
+        assert_eq!(doc.name.as_deref(), Some("AB"));
+        assert_eq!(doc.description.as_deref(), Some("Doors at eight"));
+        let stored = serde_json::to_string(&doc).unwrap();
+        assert!(!stored.contains("\\u0000"), "{stored}");
+    }
     /// A feed is a DataFeed named by its own title on every route: Atom (bitcoinops.org's,
     /// served as `application/xml`; GitHub's releases), JSON Feed (jsonfeed.org's own), RSS and
     /// RSS 1.0, also cut off at the page cap. Recorded answers are in `tests/fixtures/web/feeds`.
