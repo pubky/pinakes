@@ -264,7 +264,7 @@ pub async fn source_card(
     };
     Some(source.resolve(&cx, uri).await.unwrap())
 }
-/// Recorded answers by exact URL; anything else is a 404.
+/// Recorded answers by exact URL; a request for anything else fails the test.
 struct Recorded(std::collections::BTreeMap<String, (u16, String, Vec<u8>)>);
 #[async_trait::async_trait]
 impl pinakes_core::resolver::egress::Transport for Recorded {
@@ -273,11 +273,11 @@ impl pinakes_core::resolver::egress::Transport for Recorded {
         url: &url::Url,
         _: &[std::net::SocketAddr],
     ) -> anyhow::Result<pinakes_core::resolver::egress::Fetched> {
-        let (status, kind, body) = self.0.get(url.as_str()).cloned().unwrap_or((
-            404,
-            "text/html".into(),
-            b"not found".to_vec(),
-        ));
+        let (status, kind, body) = self
+            .0
+            .get(url.as_str())
+            .cloned()
+            .unwrap_or_else(|| panic!("unrecorded request {url}"));
         Ok(fetched(url.clone(), status, kind, body))
     }
 }

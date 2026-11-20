@@ -296,7 +296,12 @@ async fn an_address_card_lists_its_latest_transactions(pool: PgPool) {
     assert!(put_off.related.is_empty());
     let soon = put_off.refresh_by.unwrap() - chrono::Utc::now();
     assert!(soon <= chrono::Duration::hours(1) && soon > chrono::Duration::minutes(50));
-    let refused = read_card(&root, &[record]).await;
+    // The list refused (a 404 for it): the card stands without it, and is not read again early.
+    let refused = read_card(
+        &root,
+        &[record, (txs, 404, "text/plain", "tx-missing.txt".into())],
+    )
+    .await;
     assert_eq!(refused.status, pinakes_core::model::Status::Ok);
     assert!(refused.related.is_empty());
     assert_eq!(refused.refresh_by, None);
