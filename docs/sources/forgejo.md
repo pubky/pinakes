@@ -3,7 +3,8 @@
 Repositories, branches, tags, releases and files on Forgejo and Gitea instances: Codeberg,
 gitea.com and any other. Everything is read from the instance's API (`/api/v1/repos/…`), never
 from its pages: Codeberg answers deep pages with a bot challenge, which is never solved. No key;
-Codeberg allows 2,000 requests per 10 minutes (one per second here).
+Codeberg allows 2,000 requests per 10 minutes (Pinakes asks at `limits.host_requests_per_second`,
+one a second by default).
 
 ## Links
 

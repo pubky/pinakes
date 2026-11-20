@@ -86,12 +86,20 @@ fn options(token: &str) -> FetchOptions {
 }
 
 /// Whether a 403 is GitHub's rate limit: its `message` names one ("API rate limit exceeded for
-/// …", "You have exceeded a secondary rate limit. …").
+/// …", "You have exceeded a secondary rate limit. …", "… an abuse detection mechanism …"), or
+/// the answer carries no message to read.
 fn rate_limit(body: &[u8]) -> bool {
-    serde_json::from_slice::<Value>(body)
+    match serde_json::from_slice::<Value>(body)
         .ok()
         .and_then(|v| text(&v["message"]))
-        .is_some_and(|message| message.to_ascii_lowercase().contains("rate limit"))
+    {
+        Some(message) => {
+            let message = message.to_ascii_lowercase();
+            message.contains("rate limit") || message.contains("abuse detection")
+        }
+        // An answer that says nothing readable is taken as the limit: a wait keeps the card.
+        None => true,
+    }
 }
 
 /// A repository's card from `GET /repos/{owner}/{repo}` with `token`. A path GitHub has no

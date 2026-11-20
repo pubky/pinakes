@@ -2,7 +2,7 @@
 
 Projects, branches, tags, releases and files on gitlab.com and any other GitLab instance, read
 from the instance's API (`/api/v4/projects/…`). No key; gitlab.com allows 500 unauthenticated API
-requests per minute (one per second here).
+requests per minute (Pinakes asks at `limits.host_requests_per_second`, one a second by default).
 
 ## Links
 

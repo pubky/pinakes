@@ -2,7 +2,9 @@
 
 Media files on Wikimedia Commons (photos, drawings, video, audio), read from the Commons
 MediaWiki API by file name. No key. Wikimedia asks anonymous clients for a descriptive
-User-Agent, one request at a time and well under five a second; Pinakes keeps to one a second.
+User-Agent, one request at a time and well under five a second; Pinakes asks at the host's pace
+(`limits.host_requests_per_second`, one a second by default, never above Wikimedia's 200 a
+minute).
 
 ## Links
 

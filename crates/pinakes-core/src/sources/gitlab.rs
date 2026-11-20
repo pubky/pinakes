@@ -523,11 +523,16 @@ impl Source for Gitlab {
                         .map(|v| v.pointer(field).is_some_and(Value::is_string)),
                     _ => None,
                 };
+                let empty = serde_json::from_slice::<Value>(&f.body)
+                    .is_ok_and(|v| v.as_array().is_some_and(Vec::is_empty));
                 match object {
                     Some(true) => INSTANCES.set(&host, true),
                     // An instance's answer without it (no commit touches a path) is read as
                     // it is; from an unknown host it does not show GitLab.
                     Some(false) if !unknown => {}
+                    // An empty list is an instance's answer too (no commit touches the path):
+                    // it shows nothing about an unknown host, which is asked again.
+                    Some(false) if empty => return Err(Declined.into()),
                     None if f.status != 200 && is_gitlab(&f.body) => INSTANCES.set(&host, true),
                     _ => return not_gitlab(),
                 }
