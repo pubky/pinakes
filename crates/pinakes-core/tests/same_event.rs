@@ -71,6 +71,33 @@ async fn pass(pool: &PgPool, config: &Config) {
     while same_event::drain(pool, config, 200).await.unwrap() > 0 {}
 }
 
+/// How many of `ids` have a unit in a group, of how many units they have.
+async fn grouped(pool: &PgPool, ids: &[String]) -> (i64, i64) {
+    sqlx::query_as("SELECT count(group_id),count(*) FROM group_unit WHERE resource_id=ANY($1)")
+        .bind(ids)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// The keys stored for any resource.
+async fn key_count(pool: &PgPool) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM resource_key")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// The ids on a page of search results.
+fn listed(page: &Value) -> Vec<&str> {
+    page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap())
+        .collect()
+}
+
 async fn get(config: &Config, pool: &PgPool, path: &str) -> Value {
     let app = api::router(AppState::new(pool.clone(), config.clone()).unwrap());
     let mut request = Request::get(path).body(Body::empty()).unwrap();
@@ -113,6 +140,7 @@ async fn one_meetup_on_three_sites_names_the_others(pool: PgPool) {
         Some(north(&WATTWIL, 400.0)),
     )
     .await;
+    let keys = key_count(&pool).await;
     pass(&pool, &Config::default()).await;
     let c = card(&pool, &meetup).await;
     let mut others = named(&c);
@@ -133,13 +161,33 @@ async fn one_meetup_on_three_sites_names_the_others(pool: PgPool) {
         .map(|m| m["score"].as_f64().unwrap())
         .collect();
     assert!(scores.windows(2).all(|w| w[0] >= w[1]), "best first");
-    assert_eq!(c["maybe_same"], c["maybe_same"]);
     // Symmetric: each names the meetup.
     for id in [&luma, &site] {
         assert!(named(&card(&pool, id).await).contains(&meetup.as_str()));
     }
-    // A hint, never a group: each keeps its own card and no group forms from it.
-    assert!(c["group"].is_null());
+    // A hint, never a group: with the pairs stored, every group is computed anew, and each
+    // event still has its own card, no group and no key.
+    common::regroup_all(&pool, &Config::default().groups).await;
+    let hinted = [meetup.clone(), luma.clone(), site.clone()];
+    assert_eq!(grouped(&pool, &hinted).await, (0, 3));
+    assert_eq!(key_count(&pool).await, keys);
+    for id in &hinted {
+        let own = card(&pool, id).await;
+        assert!(own["group"].is_null(), "{own}");
+        assert!(!named(&own).is_empty(), "the hint stands: {own}");
+    }
+    // Nothing is collapsed: a search by group lists each of the three.
+    let collapsed = get(
+        &Config::default(),
+        &pool,
+        "/v1/search?type=Event&collapse=group",
+    )
+    .await;
+    let mut rows = listed(&collapsed);
+    rows.sort();
+    let mut all: Vec<&str> = hinted.iter().map(String::as_str).collect();
+    all.sort();
+    assert_eq!(rows, all);
     // Search cards carry it too.
     let page = get(&Config::default(), &pool, "/v1/search?type=Event").await;
     let row = page["items"]
@@ -176,7 +224,23 @@ async fn a_card_shows_three_and_its_details_ten(pool: PgPool) {
     // A resource read names up to ten; a search card up to three.
     let c = card(&pool, &first).await;
     assert_eq!(c["maybe_same"].as_array().unwrap().len(), 10);
-    // Nothing is counted: no group, and search lists every page.
+    // Nothing is counted: with every group computed anew after the pass, no unit has a group,
+    // and search lists every page, collapsed by group or not.
+    common::regroup_all(&pool, &Config::default().groups).await;
+    let (in_a_group, units): (i64, i64) =
+        sqlx::query_as("SELECT count(group_id),count(*) FROM group_unit")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((in_a_group, units), (0, 12));
+    assert!(card(&pool, &first).await["group"].is_null());
+    let collapsed = get(
+        &Config::default(),
+        &pool,
+        "/v1/search?type=Event&collapse=group",
+    )
+    .await;
+    assert_eq!(listed(&collapsed).len(), 12);
     let page = get(&Config::default(), &pool, "/v1/search?type=Event").await;
     assert_eq!(page["items"].as_array().unwrap().len(), 12);
     let row = page["items"]

@@ -4496,14 +4496,48 @@ fn an_earlier_list_of_sources_reads_as_unknown_fingerprints() {
 
 /// A maybe (a match by metadata) derived first never holds a link an exact source names later:
 /// the exact row takes it over with its key; the maybe source's next run neither writes it back
-/// nor deletes it.
+/// nor deletes it. While the row is a maybe, the card and the link's own card stay apart, though
+/// the card holds the key the exact source names the link by; the exact row joins them.
 #[sqlx::test(migrations = "../../migrations")]
 async fn an_exact_link_replaces_a_maybe_of_the_same_link(pool: PgPool) {
     let uri = "https://www.youtube.com/watch?v=bSnlKl_PoQU";
-    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let id = page(&pool, uri, "Song").await;
     let cfg = Config::default().also_on;
     let ttl = Duration::from_secs(86_400);
     let deezer = "https://www.deezer.com/track/4091937401";
+    // The link is a tagged card too, and the card holds the recording's ISRC as a key.
+    let target = page(&pool, deezer, "Song").await;
+    also_on::record(
+        &pool,
+        &id,
+        "key_test",
+        Found {
+            keys: vec![Key {
+                key: "isrc:GBUM71029604".into(),
+                via: "key_test".into(),
+            }],
+            ..Default::default()
+        },
+        ttl,
+        &cfg,
+    )
+    .await
+    .unwrap();
+    // The groups of the card and of the link's card, each computed anew.
+    let grouped = || {
+        let pool = pool.clone();
+        let both = vec![id.clone(), target.clone()];
+        async move {
+            common::regroup_all(&pool, &Default::default()).await;
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT group_id FROM group_unit WHERE resource_id=ANY($1) ORDER BY resource_id",
+            )
+            .bind(&both)
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+        }
+    };
     let found = |link: Link| Found {
         links: vec![link],
         ..Default::default()
@@ -4524,6 +4558,15 @@ async fn an_exact_link_replaces_a_maybe_of_the_same_link(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(row().await, ["maybe_test maybe -"]);
+    // The row names the link's card, and joins nothing.
+    let named: Vec<String> =
+        sqlx::query_scalar("SELECT link_id FROM derived_link WHERE resource_id=$1")
+            .bind(&id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(named, std::slice::from_ref(&target));
+    assert_eq!(grouped().await, [None, None]);
     // A maybe never carries a key, whatever its source sets.
     also_on::record(
         &pool,
@@ -4536,13 +4579,17 @@ async fn an_exact_link_replaces_a_maybe_of_the_same_link(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(row().await, ["maybe_test maybe -"]);
-    // The exact source names the same link by an ISRC: its row, with the key.
+    assert_eq!(grouped().await, [None, None]);
+    // The exact source names the same link by an ISRC: its row, with the key, and the two cards
+    // are one group.
     let exact = Link::new(deezer, "Deezer", "exact_test").keyed("isrc:GBUM71029604");
     also_on::record(&pool, &id, "exact_test", found(exact), ttl, &cfg)
         .await
         .unwrap();
     let taken = ["exact_test - isrc:GBUM71029604"];
     assert_eq!(row().await, taken);
+    let joined = grouped().await;
+    assert!(joined[0].is_some() && joined[0] == joined[1], "{joined:?}");
     // The maybe source again, and then without the link: the exact row stays.
     also_on::record(&pool, &id, "maybe_test", found(maybe()), ttl, &cfg)
         .await
@@ -4552,6 +4599,8 @@ async fn an_exact_link_replaces_a_maybe_of_the_same_link(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(row().await, taken);
+    let still = grouped().await;
+    assert!(still[0].is_some() && still[0] == still[1], "{still:?}");
 }
 
 /// A run asks once which sources hold rows of its resource, however many sources do not apply

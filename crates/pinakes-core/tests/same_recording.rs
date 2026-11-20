@@ -80,6 +80,16 @@ async fn pass(pool: &PgPool, config: &Config) {
     while same_recording::drain(pool, config, 200).await.unwrap() > 0 {}
 }
 
+/// The ids on a page of search results.
+fn listed(page: &Value) -> Vec<&str> {
+    page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap())
+        .collect()
+}
+
 async fn response(config: &Config, pool: &PgPool, path: &str) -> (Value, String) {
     let app = api::router(AppState::new(pool.clone(), config.clone()).unwrap());
     let mut request = Request::get(path).body(Body::empty()).unwrap();
@@ -186,6 +196,21 @@ async fn recordings_nothing_exact_joins_name_the_ones_they_may_be(pool: PgPool) 
     let page = save(&pool, &page).await;
     common::drain_groups(&pool, &config.groups).await;
     let (_, before) = response(&config, &pool, "/v1/search?q=bohemian").await;
+    // What the cards hold before any pair is stored: the keys, and the links each lists.
+    let key_count = || async {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource_key")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    let keys = key_count().await;
+    assert_eq!(
+        keys, 2,
+        "the hub's key on its own page and on the Spotify track"
+    );
+    let tidal_links = card(&config, &pool, &tidal).await["also_on"].clone();
+    let mb_links = card(&config, &pool, &mb).await["also_on"].clone();
+    assert!(mb_links.to_string().contains(&spotify), "{mb_links}");
     // The sweep reads what the triggers already marked and what they did not; the pass pairs.
     same_recording::sweep(&pool).await.unwrap();
     pass(&pool, &config).await;
@@ -241,11 +266,48 @@ async fn recordings_nothing_exact_joins_name_the_ones_they_may_be(pool: PgPool) 
         &format!("/v1/groups/{}", mb_card["group"]["id"].as_str().unwrap()),
     )
     .await;
-    assert!(group["members"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|m| m["maybe_same"].is_array()));
+    let members = group["members"].as_array().unwrap();
+    assert_eq!(members.len(), 2, "{group}");
+    assert!(members.iter().all(|m| m["maybe_same"].is_array()));
+
+    // A hint, never a group, a key or a link: with the pairs stored, every group is computed
+    // anew. The re-release and the page without a length still have no group, the recording's
+    // group still has its two members, no key was added, and each card lists the links it did.
+    common::regroup_all(&pool, &config.groups).await;
+    let hinted = [tidal.clone(), unmeasured.clone()];
+    let ungrouped: (i64, i64) =
+        sqlx::query_as("SELECT count(group_id),count(*) FROM group_unit WHERE resource_id=ANY($1)")
+            .bind(&hinted[..])
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(ungrouped, (0, 2));
+    let mb_card = card(&config, &pool, &mb).await;
+    let members: Vec<String> = sqlx::query_scalar(
+        "SELECT resource_id FROM group_unit WHERE group_id=$1 ORDER BY resource_id",
+    )
+    .bind(mb_card["group"]["id"].as_str().unwrap())
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let mut joined = vec![mb.clone(), spotify.clone()];
+    joined.sort();
+    assert_eq!(members, joined);
+    assert_eq!(key_count().await, keys);
+    let tidal_card = card(&config, &pool, &tidal).await;
+    assert!(tidal_card["group"].is_null(), "{tidal_card}");
+    assert_eq!(tidal_card["also_on"], tidal_links, "{tidal_card}");
+    assert_eq!(named(&tidal_card).len(), 3, "the hint stands: {tidal_card}");
+    assert!(card(&config, &pool, &unmeasured).await["group"].is_null());
+    assert_eq!(mb_card["also_on"], mb_links, "{mb_card}");
+    // A search by group lists each hinted card: only the recording's group of two is one row.
+    let (all, _) = response(&config, &pool, "/v1/search?q=bohemian").await;
+    let (collapsed, _) = response(&config, &pool, "/v1/search?q=bohemian&collapse=group").await;
+    let rows = listed(&collapsed);
+    for id in &hinted {
+        assert!(rows.contains(&id.as_str()), "{id} is not listed: {rows:?}");
+    }
+    assert_eq!(rows.len() + 1, listed(&all).len(), "{rows:?}");
 
     // A changed length is read again: the unmeasured page measured at 3:34 pairs with nothing.
     found(&pool, &unmeasured, "service", &[], &[("duration", "214")]).await;

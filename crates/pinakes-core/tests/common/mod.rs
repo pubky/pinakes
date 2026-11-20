@@ -337,6 +337,27 @@ pub async fn drain_groups(pool: &sqlx::PgPool, cfg: &pinakes_core::groups::Group
         tx.commit().await.unwrap();
     }
 }
+/// Every unit's group computed anew, as after a change of the grouping policy
+/// (`groups::configure`): what grouping last read of each resource is forgotten, so no run is
+/// skipped as unchanged, each resource with a unit is marked, and the runs are drained
+/// (`drain_groups`). For a test of what grouping never reads: the run after the write under test
+/// is a real one. Fails when a run is left waiting (more than a hundred resources, or one not due).
+pub async fn regroup_all(pool: &sqlx::PgPool, cfg: &pinakes_core::groups::GroupConfig) {
+    sqlx::query("DELETE FROM group_input")
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO group_dirty(resource_id) SELECT DISTINCT resource_id FROM group_unit ON CONFLICT DO NOTHING")
+        .execute(pool)
+        .await
+        .unwrap();
+    drain_groups(pool, cfg).await;
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM group_dirty")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0, "a group run is left waiting");
+}
 /// This thread's CPU time, for a bound on the cost of a hostile input: it holds under any load on
 /// the machine, where a wall-clock bound does not.
 pub fn thread_cpu_time() -> std::time::Duration {
