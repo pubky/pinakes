@@ -1404,16 +1404,23 @@ fn recurrence_local_days_coordinate_zones_exclusion_budget_and_categories() {
         max_recurrence_steps: 10,
         ..Default::default()
     };
-    assert!(calendar::parse(
+    // A series past the step cap is its own failure, not the feed's.
+    let skipped = calendar::parse(
         "https://example.org/f.ics",
         cal(&event(
-            "UID:expensive\nDTSTART:19000101T000000Z\nRRULE:FREQ=HOURLY"
+            "UID:expensive\nDTSTART:19000101T000000Z\nRRULE:FREQ=HOURLY",
         ))
         .as_bytes(),
         &cfg,
-        now()
+        now(),
     )
-    .is_err());
+    .unwrap()
+    .container
+    .unwrap();
+    assert!(skipped.occurrences.is_empty());
+    assert!(skipped
+        .warnings
+        .contains(&"invalid_vevent_recurrence".into()));
     let body = cal(&event(
         "UID:noise\nDTSTART:20261020T120000Z\nX-UNKNOWN-EXPORT:one",
     ));
@@ -4937,6 +4944,33 @@ fn a_line_folded_inside_a_character_unfolds_whole() {
         c.occurrences[0].doc.name.as_deref(),
         Some("Caf\u{fffd} Lugano")
     );
+}
+/// A series that needs more steps than the cap to reach the horizon is skipped with a warning;
+/// the feed's other events stay.
+#[test]
+fn a_series_past_the_step_cap_is_skipped_beside_healthy_events() {
+    let body = cal(&format!(
+        "{}\n{}",
+        event("UID:old\nDTSTART:20260101T080000Z\nRRULE:FREQ=HOURLY\nSUMMARY:Hourly"),
+        event("UID:good\nDTSTART:20261020T120000Z\nSUMMARY:Healthy")
+    ));
+    let cfg = EventConfig {
+        max_recurrence_steps: 1000,
+        ..Default::default()
+    };
+    let container = calendar::parse("https://example.org/feed.ics", body.as_bytes(), &cfg, now())
+        .unwrap()
+        .container
+        .unwrap();
+    let uids: Vec<&str> = container
+        .occurrences
+        .iter()
+        .map(|o| o.uid.as_str())
+        .collect();
+    assert_eq!(uids, ["good"]);
+    assert!(container
+        .warnings
+        .contains(&"invalid_vevent_recurrence".into()));
 }
 /// A calendar's history counts against no cap: 12,000 past single events beside one upcoming
 /// parse to that one, under a revision cap of 10,000. A past event that shares its UID with

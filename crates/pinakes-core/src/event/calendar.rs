@@ -206,6 +206,24 @@ fn components(bytes: &[u8], cfg: &EventConfig, deadline: std::time::Instant) -> 
     ensure!(root.name == "VCALENDAR", "expected VCALENDAR");
     Ok(root)
 }
+/// The feed's deadline or a date-value limit met while its dates are worked out. In a series'
+/// expansion it fails the feed; any other error there skips the event with a warning.
+#[derive(Debug)]
+struct Budget(&'static str);
+impl std::fmt::Display for Budget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+impl std::error::Error for Budget {}
+/// `Ok` while `within`; else the [`Budget`] error named `what`.
+fn budget(within: bool, what: &'static str) -> Result<()> {
+    if within {
+        Ok(())
+    } else {
+        Err(Budget(what).into())
+    }
+}
 #[derive(Clone, Debug)]
 struct Stamp {
     at: DateTime<Utc>,
@@ -249,10 +267,10 @@ impl Zones<'_> {
                     })
                     .flatten()
                 {
-                    ensure!(
+                    budget(
                         std::time::Instant::now() < self.deadline,
-                        "VTIMEZONE work budget"
-                    );
+                        "VTIMEZONE work budget",
+                    )?;
                     let wall = at.with_timezone(&offset).naive_local();
                     if self.at_wall(stamp, wall).is_ok_and(|v| v == at) {
                         return Ok(wall);
@@ -370,16 +388,15 @@ fn transitions(
 ) -> Result<Vec<Transition>> {
     let mut transitions = vec![];
     let mut values = 0usize;
-    let mut budget = || -> Result<()> {
+    let mut spend = || -> Result<()> {
         values += 1;
-        ensure!(
+        budget(
             values <= max_date_values && std::time::Instant::now() < deadline,
-            "VTIMEZONE work budget"
-        );
-        Ok(())
+            "VTIMEZONE work budget",
+        )
     };
     for o in &c.children {
-        budget()?;
+        spend()?;
         let start = time::naive(o.value("DTSTART").context("VTIMEZONE DTSTART")?)
             .context("VTIMEZONE date")?;
         let from = time::fixed(o.value("TZOFFSETFROM").context("VTIMEZONE FROM")?)
@@ -400,7 +417,7 @@ fn transitions(
                 .and_utc()
                 .with_timezone(&rrule::Tz::UTC);
             for date in set.limit().into_iter() {
-                budget()?;
+                spend()?;
                 if date > end {
                     break;
                 }
@@ -409,7 +426,7 @@ fn transitions(
         }
         for p in o.props.iter().filter(|p| p.name == "RDATE") {
             for value in p.value.split(',') {
-                budget()?;
+                spend()?;
                 if let Some(date) = time::naive(value) {
                     dates.push(date);
                 }
@@ -457,10 +474,10 @@ impl Zones<'_> {
     }
     fn custom_time(&self, c: &Component, wall: NaiveDateTime) -> Result<DateTime<Utc>> {
         use chrono::Datelike;
-        ensure!(
+        budget(
             std::time::Instant::now() < self.deadline,
-            "VTIMEZONE work budget"
-        );
+            "VTIMEZONE work budget",
+        )?;
         let key = (c.value("TZID").unwrap_or("").to_owned(), wall.year());
         let mut cache = self.transitions.borrow_mut();
         if !cache.contains_key(&key) {
@@ -481,10 +498,10 @@ impl Zones<'_> {
             .map(|t| t.1)
             .context("empty VTIMEZONE")?;
         for &(at, from, to) in transitions {
-            ensure!(
+            budget(
                 std::time::Instant::now() < self.deadline,
-                "VTIMEZONE work budget"
-            );
+                "VTIMEZONE work budget",
+            )?;
             let delta = to.local_minus_utc() - from.local_minus_utc();
             if delta > 0
                 && wall >= at
@@ -1026,10 +1043,13 @@ fn expand(
         let mut included = 0;
         let dates = bounded.then(|| set.limit().into_iter());
         for (steps, d) in dates.into_iter().flatten().enumerate() {
-            ensure!(
-                steps < cfg.max_recurrence_steps && std::time::Instant::now() < deadline,
-                "recurrence work budget"
-            );
+            budget(
+                std::time::Instant::now() < deadline,
+                "recurrence work budget",
+            )?;
+            // A series that needs more steps than the cap (an hourly one years old) is this
+            // event's error, not the feed's.
+            ensure!(steps < cfg.max_recurrence_steps, "recurrence step cap");
             // The first instance is DTSTART itself: its wall time may be ambiguous (the repeated
             // autumn hour), and mapping it back could name the other instant as a second date.
             let at = if d.naive_utc() == wall_start {
@@ -1056,10 +1076,10 @@ fn expand(
     for p in c.props.iter().filter(|p| p.name == "RDATE") {
         for v in p.value.split(',') {
             values += 1;
-            ensure!(
+            budget(
                 values <= cfg.max_date_values && std::time::Instant::now() < deadline,
-                "RDATE work budget"
-            );
+                "RDATE work budget",
+            )?;
             let (s, end) = v.split_once('/').map_or((v, None), |(s, e)| (s, Some(e)));
             let at = zones.series_stamp(p, s, start)?.at;
             let duration = end
@@ -1086,10 +1106,10 @@ fn expand(
     for p in c.props.iter().filter(|p| p.name == "EXDATE") {
         for v in p.value.split(',') {
             values += 1;
-            ensure!(
+            budget(
                 values <= cfg.max_date_values && std::time::Instant::now() < deadline,
-                "EXDATE work budget"
-            );
+                "EXDATE work budget",
+            )?;
             let s = zones.series_stamp(p, v, start)?;
             if s.date {
                 dates.insert(s.wall.date());
@@ -1326,7 +1346,7 @@ pub fn parse(
             &mut container.warnings,
         ) {
             Ok(v) => v,
-            Err(e) if e.to_string().contains("budget") => return Err(e),
+            Err(e) if e.is::<Budget>() => return Err(e),
             Err(_) => {
                 container.warnings.push("invalid_vevent_recurrence".into());
                 continue;
