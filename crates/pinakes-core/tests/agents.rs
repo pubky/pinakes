@@ -497,6 +497,8 @@ async fn a_tool_call_spends_the_same_per_ip_budget(pool: PgPool) {
     let (error, answer) = call(&app, "search", json!({"q": "concert"})).await;
     assert!(error);
     assert_eq!(answer["status"], 429, "{answer}");
+    // The REST route's `Retry-After` comes with it.
+    assert_eq!(answer["retry_after_s"], 60, "{answer}");
     // The next message is over budget itself.
     let (code, headers, _) = raw(
         &app,

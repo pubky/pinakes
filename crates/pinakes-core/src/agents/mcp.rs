@@ -77,6 +77,8 @@ struct Failure {
     status: u16,
     error: String,
     url: Option<String>,
+    /// The seconds the REST route's `Retry-After` names, when it sent one.
+    retry_after: Option<u64>,
 }
 impl Failure {
     fn bad(error: impl Into<String>) -> Self {
@@ -84,19 +86,25 @@ impl Failure {
             status: 400,
             error: error.into(),
             url: None,
+            retry_after: None,
         }
     }
     fn result(self) -> CallToolResult {
         let hint = match self.status {
             400 => "fix the argument the error names",
             404 => "unknown here: nobody referenced it on Pubky, or it has not been read; try `card` with resolve: true, or `search` by q or key",
-            429 => "over the per-IP budget: wait a minute, then ask fewer, larger questions",
-            502..=504 => "an upstream did not answer in time: retry once",
+            429 => "over a per-IP limit: wait `retry_after_s` seconds (a minute when absent), then ask fewer, larger questions",
+            503 => "not available for now (the instance's new previews for this hour are taken): wait `retry_after_s` seconds; a link the index knows still reads",
+            501 => "this instance does not serve that: for `wot_2`, use `following` or `friends`",
+            502 | 504 => "not answered in time (an upstream, or the request's own deadline): retry once",
             _ => "retry once",
         };
         let mut body = json!({"error": self.error, "status": self.status, "hint": hint});
         if let Some(url) = self.url {
             body["url"] = url.into();
+        }
+        if let Some(seconds) = self.retry_after {
+            body["retry_after_s"] = seconds.into();
         }
         CallToolResult::error(vec![ContentBlock::text(body.to_string())])
     }
@@ -129,12 +137,18 @@ impl Tools {
             .await
             .unwrap_or_else(|never| match never {});
         let status = response.status();
+        let retry_after = response
+            .headers()
+            .get(header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse().ok());
         let bytes = axum::body::to_bytes(response.into_body(), ANSWER_CAP)
             .await
             .map_err(|_| Failure {
                 status: 500,
                 error: "the answer was too large to read".into(),
                 url: Some(url.clone()),
+                retry_after: None,
             })?;
         let value: Value = serde_json::from_slice(&bytes).unwrap_or_else(|_| {
             json!({"error": String::from_utf8_lossy(&bytes).chars().take(300).collect::<String>()})
@@ -147,6 +161,7 @@ impl Tools {
                     .unwrap_or("request failed")
                     .to_owned(),
                 url: Some(url),
+                retry_after,
             });
         }
         Ok(value)
@@ -335,6 +350,7 @@ impl Tools {
                 status: 500,
                 error: "the card ids could not be read".into(),
                 url: None,
+                retry_after: None,
             })?;
             for id in &ids {
                 let root = roots
@@ -389,6 +405,7 @@ impl Tools {
                         status: e.0.as_u16(),
                         error: e.1,
                         url: None,
+                        retry_after: None,
                     })?;
             }
             views.extend(
@@ -400,6 +417,7 @@ impl Tools {
                         status: 502,
                         error: "the Nexus this instance reads did not answer the batch resource view (POST /v1/stream/resources/by_ids)".into(),
                         url: None,
+                        retry_after: None,
                     })?,
             );
         }
@@ -514,7 +532,7 @@ pub fn tools() -> Vec<Tool> {
                 "sort":{"type":"string","enum":["relevance","activity","recent","distance","start","trending"],"description":"relevance (default with q: name match, then tag labels, then description; activity breaks ties; needs q), activity (default without q), recent, distance (needs near), start (earliest first), trending (with window)."},
                 "window":{"type":"string","description":"With sort trending: how far back, 1h to 90d, default 7d."},
                 "collapse":{"type":"string","enum":["group"],"description":"group: one row per group of links that are the same thing."},
-                "reach":{"type":"string","enum":["following","friends"],"description":"Only links that the viewer's follows (or friends) referenced. Needs viewer."},
+                "reach":{"type":"string","enum":["following","friends","wot_2"],"description":"Only links that the viewer's follows (or friends, or two steps of follows) referenced. Needs viewer. wot_2 only where the instance has it."},
                 "boost":{"type":"string","enum":["following","friends","wot_2"],"description":"Rank first the links the viewer's follows (or friends, or two steps of follows) referenced, leaving nothing out. Needs viewer; with the default sort, relevance or trending. wot_2 only where the instance has it."},
                 "viewer":{"type":"string","description":"With reach or boost: a 52-character pubky public key."},
                 "limit":{"type":"integer","minimum":1,"maximum":500,"description":"Cards per page, default 50."},
@@ -1265,6 +1283,7 @@ mod tests {
             status: 429,
             error: "API rate limit exceeded".into(),
             url: Some("https://pinakes.example/v1/search?q=x".into()),
+            retry_after: None,
         }
         .result();
         assert_eq!(result.is_error, Some(true));
@@ -1273,6 +1292,26 @@ mod tests {
         };
         let body: Value = serde_json::from_str(&text.text).unwrap();
         assert_eq!(body["status"], 429);
-        assert!(body["hint"].as_str().unwrap().contains("wait a minute"));
+        assert!(body["hint"].as_str().unwrap().contains("a minute"));
+        assert!(body.get("retry_after_s").is_none());
+        // A refusal that names its wait (a new preview when the instance's hour is taken)
+        // carries the seconds, and is not told to retry at once.
+        let result = Failure {
+            status: 503,
+            error: "the instance's new previews for this hour are taken".into(),
+            url: Some("https://pinakes.example/v1/resolve".into()),
+            retry_after: Some(1800),
+        }
+        .result();
+        let ContentBlock::Text(text) = &result.content[0] else {
+            panic!("text content")
+        };
+        let body: Value = serde_json::from_str(&text.text).unwrap();
+        assert_eq!(body["retry_after_s"], 1800);
+        let hint = body["hint"].as_str().unwrap();
+        assert!(
+            hint.contains("retry_after_s") && !hint.contains("retry once"),
+            "{hint}"
+        );
     }
 }

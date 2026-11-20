@@ -2047,8 +2047,10 @@ characters), `image`, `site`, `point`, `start`, `end`, `group`, `also_on` (`uri`
 `id`, `refs`, `derived`, `kind` when present), `refs`,
 `occurrence` and `attribution`, and adds `url`, the card's full read
 (`GET /v1/resources/{id}`); every answer names the REST URL of its full result. A failed request
-is the tool's error (`isError`), its text `{error, status, hint, url}` with the route's status
-and message; an unknown tool is a JSON-RPC error.
+is the tool's error (`isError`), its text `{error, status, hint, url?, retry_after_s?}` with the
+route's status and message, and the seconds of its `Retry-After` when it sent one (a 429, or
+the 503 of a new preview when the instance's hour is taken); an unknown tool is a JSON-RPC
+error.
 
 **A browser on `/mcp`.** A `GET /mcp` that accepts `text/html` answers a short HTML page: what
 the endpoint is, the Claude Code line (`claude mcp add --transport http pinakes {base}/mcp`),
