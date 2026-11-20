@@ -9,8 +9,8 @@ a profile from its page's Open Graph tags. Posts are social content: the card qu
 A post is named by its author's handle and its id, a profile by the handle:
 `https://x.com/{handle}/status/{id}` and `https://x.com/{handle}` are the roots. twitter.com,
 the `www.` and `mobile.` hosts, a capitalised handle and anything after the id (a photo's
-number) are aliases of them. `https://x.com/i/web/status/{id}` names a post without its
-author: the root is known once X names the author.
+number) are aliases of them. `https://x.com/i/web/status/{id}` and `https://x.com/i/status/{id}`
+name a post without its author: the root is known once X names the author.
 
 ## What it reads
 
