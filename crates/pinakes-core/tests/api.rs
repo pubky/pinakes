@@ -30,6 +30,9 @@ use std::{
 };
 use tower::ServiceExt;
 
+/// When `seed` says its tags were made (2026-09-21T14:13:20Z).
+const SEEDED_AT_MS: i64 = 1_790_000_000_000;
+
 async fn seed(pool: &PgPool) -> Vec<String> {
     let saved = ingest::cursor(pool, "fixture").await.unwrap();
     let mut lines = vec![];
@@ -49,7 +52,7 @@ async fn seed(pool: &PgPool) -> Vec<String> {
                 author: author(i),
                 object_path: format!("/pub/app/tags/{i}-{label}"),
                 label: Some(label.into()),
-                at: 1_790_000_000_000,
+                at: SEEDED_AT_MS,
             });
         }
     }
@@ -4049,7 +4052,12 @@ async fn a_boost_ranks_the_viewers_set_first_and_never_filters(pool: PgPool) {
         nexus_url: nexus_url.clone(),
         ..Default::default()
     };
-    let app = api::router(AppState::new(pool.clone(), config).unwrap());
+    let mut state = AppState::new(pool.clone(), config).unwrap();
+    // `window=90d` counts back from the API's clock: pin it a day after the seed's tags, so
+    // they stay inside the window whatever the date.
+    let seeded = DateTime::from_timestamp_millis(SEEDED_AT_MS).unwrap();
+    state.clock = Some(test_clock(seeded + chrono::Duration::days(1)).1);
+    let app = api::router(state);
     let viewer = author(9999);
     let get = |path: String| {
         let app = app.clone();
