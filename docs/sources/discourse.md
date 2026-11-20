@@ -22,7 +22,8 @@ about that topic alone.
 ## What it reads
 
 `GET https://{host}/t/{id}.json`, `…/t/{id}/{n}.json` or `…/posts/{id}.json`. A topic or post the
-forum says does not exist is `missing`.
+forum says does not exist (a 404, or a 410 for a deleted one, with the `error_type` `not_found`)
+is `missing`.
 
 ## Card
 

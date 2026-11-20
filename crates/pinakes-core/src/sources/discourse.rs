@@ -102,15 +102,17 @@ fn excerpt(html: &str) -> String {
     super::excerpt(&crate::resolver::cards::plain(html), 200)
 }
 
-/// Discourse answers JSON; anything else (a 404 page, a challenge) is another site.
+/// Discourse answers JSON; anything else (a 404 page, a challenge) is another site. `None` when
+/// the forum says the topic or post does not exist: a 404, or a 410 (deleted), with its
+/// `error_type` `not_found`.
 fn json(status: u16, body: &[u8]) -> Result<Option<Value>> {
     let Ok(v) = serde_json::from_slice::<Value>(body) else {
         return Err(Declined.into());
     };
     match status {
         200 => Ok(Some(v)),
-        404 if v["error_type"] == "not_found" => Ok(None),
-        401 | 403 | 404 | 405 => Err(Declined.into()),
+        404 | 410 if v["error_type"] == "not_found" => Ok(None),
+        401 | 403 | 404 | 405 | 410 => Err(Declined.into()),
         s => anyhow::bail!("the forum answered {s}"),
     }
 }
@@ -495,5 +497,21 @@ mod tests {
             topic_card(base(), HOST, 304, None, 404, &read("not-discourse.html")).unwrap_err();
         assert!(other.is::<Declined>());
         assert!(topic_card(base(), HOST, 305, None, 200, &read("topic-304.json")).is_err());
+    }
+
+    #[test]
+    fn a_410_is_gone_as_a_404_is() {
+        // A deleted topic or post: 410 with Discourse's `error_type`.
+        let gone = br#"{"errors":["This topic has been deleted."],"error_type":"not_found"}"#;
+        assert!(topic_card(base(), HOST, 304, None, 410, gone)
+            .unwrap()
+            .is_none());
+        assert!(post_card(base(), HOST, 790, 410, gone).unwrap().is_none());
+        // Without it the 410 is another program's, as such a 404 is.
+        for status in [404, 410] {
+            let other =
+                topic_card(base(), HOST, 304, None, status, br#"{"error":"Gone"}"#).unwrap_err();
+            assert!(other.is::<Declined>(), "{status}: {other}");
+        }
     }
 }
