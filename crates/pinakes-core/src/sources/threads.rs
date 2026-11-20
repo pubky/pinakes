@@ -4,7 +4,7 @@
 //! `https://www.threads.com/@{handle}[/post/{code}]`.
 use super::{
     social::{self, Page, Shape},
-    web_url, Context, Example, Source,
+    Context, Example, Source,
 };
 use crate::model::ResourceMeta;
 use anyhow::{Context as _, Result};

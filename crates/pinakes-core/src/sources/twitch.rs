@@ -6,7 +6,7 @@
 //! `https://clips.twitch.tv/{slug}`.
 use super::{
     social::{self, Page, Shape},
-    web_url, Context, Example, Source,
+    Context, Example, Source,
 };
 use crate::model::ResourceMeta;
 use anyhow::{Context as _, Result};

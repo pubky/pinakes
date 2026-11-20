@@ -25,6 +25,13 @@ const API: &str = "https://api.discogs.com";
 
 pub use crate::music::discogs::{of_link, of_uri, root, Kind};
 
+/// The object a Discogs link names, for the card route: a link with a port, a user name or a
+/// password is not Discogs' own link form (`kit::web_url`).
+fn link(uri: &str) -> Option<(Kind, u64)> {
+    super::kit::web_url(uri)?;
+    of_uri(uri)
+}
+
 /// The credential the daemon started with (`configure`).
 static CREDENTIAL: RwLock<Option<Credential>> = RwLock::new(None);
 
@@ -285,10 +292,10 @@ impl Source for Discogs {
         configure(config);
     }
     fn reads(&self, uri: &str) -> bool {
-        of_uri(uri).is_some()
+        link(uri).is_some()
     }
     fn alias_root(&self, uri: &str) -> Option<String> {
-        let (kind, id) = of_uri(uri)?;
+        let (kind, id) = link(uri)?;
         let root = root(kind, id);
         let (_, normalized, _) = crate::model::identity(uri).ok()?;
         (root != normalized).then_some(root)
@@ -316,7 +323,7 @@ impl Source for Discogs {
         ]
     }
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
-        let (kind, id) = of_uri(uri).ok_or_else(|| anyhow::anyhow!("not a Discogs link"))?;
+        let (kind, id) = link(uri).ok_or_else(|| anyhow::anyhow!("not a Discogs link"))?;
         let credential = CREDENTIAL.read().unwrap_or_else(|e| e.into_inner()).clone();
         let (record, authenticated) = record(cx.egress, kind, id, credential.as_ref()).await?;
         Ok(record

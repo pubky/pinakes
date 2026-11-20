@@ -6,7 +6,7 @@
 //! `/feed/update/urn:li:activity:{id}`.
 use super::{
     social::{self, Body, OpenGraph, Shape},
-    web_url, Context, Example, Source,
+    Context, Example, Source,
 };
 use crate::model::ResourceMeta;
 use anyhow::{Context as _, Result};
