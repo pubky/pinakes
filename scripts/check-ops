@@ -5,10 +5,10 @@ cd "$(dirname "$0")/.."
 # the daemon registers.
 export DATABASE_URL="${DATABASE_URL:-postgresql:///postgres?host=/var/run/postgresql}"
 cargo test -p pinakes-core --test changes ops_artifacts_reference_registered_metrics
-# The rules' syntax, where promtool is installed.
+# The rules' syntax and lint (a lint finding fails), where promtool is installed.
 pinakes_promtool="${PROMTOOL:-promtool}"
 if command -v "$pinakes_promtool" >/dev/null 2>&1; then
-  "$pinakes_promtool" check rules ops/alerts.yml
+  "$pinakes_promtool" check rules --lint-fatal ops/alerts.yml
 else
   printf '%s\n' 'promtool is not installed; the rules were checked against the metric registry only.'
 fi

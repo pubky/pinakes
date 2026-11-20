@@ -111,5 +111,5 @@ resets the count.
 
 Run `scripts/check-ops`: it runs the test that parses the rules and the dashboard and checks
 every metric they name, and every fetch outcome a rule matches, against an initialized registry,
-then, when promtool is installed, `promtool check rules`. `scripts/test` runs it, so a renamed or unregistered
+then, when promtool is installed, `promtool check rules --lint-fatal` (a lint finding fails). `scripts/test` runs it, so a renamed or unregistered
 metric fails CI with or without promtool.
