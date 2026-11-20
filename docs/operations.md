@@ -840,11 +840,11 @@ while it was found gone writes nothing, nor does one whose link became an alias 
 source that fails or panics keeps its earlier rows and retries with backoff; the others' results
 stand and the worker goes on (a panic is logged as an error). A source that asks a secondary
 service besides its own (its page names which) keeps what the link and the other services gave
-when that service fails: the link's own key is recorded, the failure is counted in
+when that service fails: the link's own key is recorded, nothing the source recorded before is deleted, the failure is counted in
 `pinakes_also_on_service_errors_total{service,class}`, and the run comes back after a failed
 run's backoff instead of after the source's lifetime: five minutes, doubling to an hour while the
 service keeps failing, or the wait the service named when longer; after six such runs in a row the next is at the source's lifetime. A run in which every service
-answers resets it. A service that refuses the operator's credentials brings no run back early, and what its source recorded before stays.
+answers resets it and replaces the source's rows. A service that refuses the operator's credentials brings no run back early: the keys and links it gave before stay, and the other services' answers replace theirs.
 The sources run in the order [docs/sources](sources/README.md#also-on) lists them (each page says
 what its source reads and costs); `[also_on] apple_storefront` (`us`, a
 two-letter country code) is the storefront the iTunes lookups ask and the Apple Books and Apple

@@ -378,8 +378,13 @@ pub(crate) fn secondary<T>(
     }
 }
 
-/// `found` as recorded, with `retry` set when a secondary service failed.
+/// `found` as recorded, with `retry` set when a secondary service failed; then none of the rows
+/// the source recorded before is deleted until the run comes back (`also_on::Keep::All`): the
+/// failed service's part is not in this answer.
 pub(crate) fn with_retry(mut found: also_on::Found, retry: Option<Duration>) -> also_on::Found {
+    if retry.is_some() {
+        found.keep_stored = also_on::Keep::All;
+    }
     found.retry_after = retry;
     found
 }

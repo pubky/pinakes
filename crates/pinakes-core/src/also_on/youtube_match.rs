@@ -11,8 +11,8 @@
 //! title, compared as `same_recording` compares them (`matching`), and a length within
 //! [`MATCH_WINDOW_SECS`]; none or several give nothing for that service (of the first page of
 //! answers). TIDAL failing fails the lookup (which keeps every earlier link) unless the run has a
-//! Deezer match, which then stands, and the run comes back later; TIDAL refusing the credentials
-//! brings no run back early and leaves the links an earlier run found. A page YouTube serves only after
+//! Deezer match, which then stands beside the links an earlier run found, and the run comes back
+//! later (TIDAL refusing the credentials brings it back at its lifetime). A page YouTube serves only after
 //! a sign-in (`LOGIN_REQUIRED`, which it answers some hosts for some videos) is no
 //! answer: the lookup is retried hours later; a page over the cap is nothing, and is not retried.
 //! It runs after `deezer` and `tidal_isrc`, and before `editions`.
@@ -176,17 +176,16 @@ impl Source for YoutubeMatch {
                 Err(error) if found.links.is_empty() => return Err(error),
                 // With a Deezer match, that stands (a TIDAL failure that lasts never holds it
                 // back); the run comes back after the wait TIDAL named, else after five minutes,
-                // and a TIDAL link an earlier run found is out until then. Refused credentials
-                // last: the run comes back at its lifetime, and the links an earlier run found
-                // stay beside the Deezer match (a TIDAL one too).
+                // or for refused credentials, which last, at its lifetime. The links an earlier
+                // run found stay beside the Deezer match (a TIDAL one too): both services' links
+                // are this source's, under one `via`, so none is deleted (`Keep::All`).
                 Err(error) => {
                     tracing::debug!(
                         kind = crate::resolver::error_class(&error),
                         "TIDAL's search failed; the Deezer match stands"
                     );
-                    if super::client_credentials::refused(&error) {
-                        found.keep_stored = true;
-                    } else {
+                    found.keep_stored = super::Keep::All;
+                    if !super::client_credentials::refused(&error) {
                         let seconds = error
                             .downcast_ref::<RetryLater>()
                             .map_or(super::client_credentials::REFUSAL_HOLD, |r| r.seconds);

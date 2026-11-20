@@ -345,9 +345,9 @@ async fn without_its_switch_or_a_service_to_search_nothing_is_asked(pool: sqlx::
 }
 
 /// TIDAL failing, by refusing the credentials (403) or with an answer the source does not expect
-/// (400), leaves the run's Deezer match standing. After an unexpected answer the run comes back
-/// in five minutes, and the TIDAL link an earlier run found is out until then; refused
-/// credentials bring no run back early, so that link stays.
+/// (400), leaves the run's Deezer match standing beside the links an earlier run found (a TIDAL
+/// one too). After an unexpected answer the run comes back in five minutes; refused credentials
+/// bring no run back early.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_tidal_failure_keeps_the_deezer_match(pool: sqlx::PgPool) {
     let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
@@ -371,7 +371,7 @@ async fn a_tidal_failure_keeps_the_deezer_match(pool: sqlx::PgPool) {
             400,
             ("unexpected-match-id", "unexpected-match-secret"),
             290.0..=300.0,
-            vec![deezer],
+            vec![tidal, deezer],
         ),
     ] {
         sqlx::query("DELETE FROM derived_link")

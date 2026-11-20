@@ -1089,7 +1089,9 @@ impl Podcasts {
     /// What the source finds for `subject`, and the episode's enclosures it heard of.
     async fn find(cx: &Context, subject: &Subject, heard: &mut Heard) -> Result<Found> {
         let mut found = Found::default();
-        let mut deferred = Deferred::default();
+        // The feed is read only once Podcast Index vouched for it: while Podcast Index refuses
+        // the key, the rows the feed gave stay with its own.
+        let mut deferred = Deferred::depending(&[("podcastindex", "feed")]);
         let Some(podcast) = podcast(subject) else {
             return Ok(found);
         };

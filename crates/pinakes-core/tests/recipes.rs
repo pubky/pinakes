@@ -529,7 +529,7 @@ async fn fixture(pool: &PgPool) {
                     retry_after: None,
                     editions: vec![],
                     keep: vec![],
-                    keep_stored: false,
+                    keep_stored: pinakes_core::also_on::Keep::Nothing,
                     keys: vec![
                         key("openlibrary:edition:OL7353617M", "openlibrary"),
                         key("openlibrary:work:OL45804W", "openlibrary"),
@@ -553,7 +553,7 @@ async fn fixture(pool: &PgPool) {
                     retry_after: None,
                     editions: vec![],
                     keep: vec![],
-                    keep_stored: false,
+                    keep_stored: pinakes_core::also_on::Keep::Nothing,
                     keys: vec![
                         key("podcast:apple:1200361736", "itunes"),
                         key(
@@ -583,7 +583,7 @@ async fn fixture(pool: &PgPool) {
                     retry_after: None,
                     editions: vec![],
                     keep: vec![],
-                    keep_stored: false,
+                    keep_stored: pinakes_core::also_on::Keep::Nothing,
                     keys: vec![key("gtin:0840440422266", "page")],
                     links: vec![],
                     facts: vec![],
@@ -597,7 +597,7 @@ async fn fixture(pool: &PgPool) {
                     retry_after: None,
                     editions: vec![],
                     keep: vec![],
-                    keep_stored: false,
+                    keep_stored: pinakes_core::also_on::Keep::Nothing,
                     keys: vec![key("imdb:tt0111161", "imdb")],
                     facts: vec![
                         Fact::new("wikidata", "Q172241"),

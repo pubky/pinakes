@@ -3739,13 +3739,44 @@ async fn a_secondary_service_that_fails_for_good_stops_bringing_the_card_back(po
     let uri = "https://example.org/forever";
     let id = page(&pool, uri, "Forever").await;
     let hub = Fake::new("datacite");
+    // The whole answer: the registry's key and a link another service names (Wikidata's). A
+    // partial one has the key only, as a source answers while that service fails, keeping what
+    // it gave before (`Keep::All`).
+    let wikidata = || Link::new("https://www.wikidata.org/wiki/Q42", "Wikidata", "wikidata");
     let answer = |failed: bool| {
         Ok(Found {
             keys: vec![key("doi:10.1000/y")],
+            links: if failed { vec![] } else { vec![wikidata()] },
             retry_after: failed.then_some(Duration::from_secs(60)),
+            keep_stored: if failed {
+                also_on::Keep::All
+            } else {
+                also_on::Keep::Nothing
+            },
             ..Default::default()
         })
     };
+    let wikidata_links = || {
+        let pool = pool.clone();
+        let id = id.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM derived_link WHERE resource_id=$1 AND via='wikidata'",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    hub.answer(uri, answer(false));
+    drain(
+        &pool,
+        &cx(Config::default()),
+        &[hub.clone() as Arc<dyn Source>],
+    )
+    .await;
+    assert_eq!(wikidata_links().await, 1);
     hub.answer(uri, answer(true));
     let sources: Vec<Arc<dyn Source>> = vec![hub.clone()];
     let cx = cx(Config::default());
@@ -3775,37 +3806,56 @@ async fn a_secondary_service_that_fails_for_good_stops_bringing_the_card_back(po
     let (due_in, attempts) = state().await;
     assert_eq!(attempts, also_on::PARTIAL_RETRIES);
     assert!((3590.0..=3600.0).contains(&due_in), "{due_in}");
-    // Still failing: the source's lifetime (a day), this run and the next.
+    // Still failing: the source's lifetime (a day), this run and the next. What the failed
+    // service gave before stays meanwhile, though no run comes back early for it.
     for more in 1..=2 {
         drain(&pool, &cx, &sources).await;
         let (due_in, attempts) = state().await;
         assert_eq!(attempts, also_on::PARTIAL_RETRIES + more);
         assert!((86_300.0..=86_400.0).contains(&due_in), "{more}: {due_in}");
+        assert_eq!(wikidata_links().await, 1, "{more}");
     }
     hub.answer(uri, answer(false));
     drain(&pool, &cx, &sources).await;
     assert_eq!(state().await.1, 0);
 }
 
-/// A run that could not ask one of its services, which refuses the operator's credentials
-/// (`Found::keep_stored`), adds what it found to the rows its source holds and deletes none of
-/// them; any other run replaces them.
+/// A run with part of its answer missing leaves rows its source recorded before
+/// (`Found::keep_stored`). While a service refuses the operator's credentials, the keys and links
+/// it gave stay (by their `via`), and its facts, while the services that answered have theirs
+/// replaced: a changed iTunes answer replaces iTunes' key beside a refused Podcast Index key.
+/// After a failed request every row stays until the run comes back; a whole answer replaces them.
 #[sqlx::test(migrations = "../../migrations")]
-async fn a_run_that_keeps_its_stored_rows_only_adds_to_them(pool: PgPool) {
-    use pinakes_core::also_on::Fact;
-    let uri = "https://www.youtube.com/watch?v=bSnlKl_PoQU";
+async fn a_run_that_keeps_its_stored_rows_keeps_those_its_answer_misses(pool: PgPool) {
+    use pinakes_core::also_on::{Fact, Keep};
+    let uri = "https://podcasts.apple.com/us/podcast/the-daily/id1200361736";
     let id = page(&pool, uri, "Kept").await;
-    let source = Fake::new("mixed");
+    let source = Fake::new("podcasts");
+    let via = |k: &str, via: &str| Key {
+        key: k.into(),
+        via: via.into(),
+    };
+    let guid = "podcast:guid:304b84f0-07b0-5265-b6b7-da5cf5aeb56e";
     source.answer(
         uri,
         Ok(Found {
-            keys: vec![key("isrc:USIR10211559")],
-            links: vec![Link::new(
-                "https://tidal.com/track/534050211",
-                "TIDAL",
-                "mixed",
+            keys: vec![
+                via("podcast:apple:1200361736", "itunes"),
+                via(guid, "podcastindex"),
+            ],
+            links: vec![
+                Link::new(
+                    "https://podcastindex.org/podcast/1",
+                    "Podcast Index",
+                    "podcastindex",
+                ),
+                Link::new("https://pca.st/itunes/1200361736", "Pocket Casts", "itunes"),
+                Link::new("https://daily.example/ep/1", "daily.example", "feed"),
+            ],
+            facts: vec![Fact::new(
+                "podcast_guid",
+                "304b84f0-07b0-5265-b6b7-da5cf5aeb56e",
             )],
-            facts: vec![Fact::new("artist", "Queen")],
             ..Default::default()
         }),
     );
@@ -3816,40 +3866,64 @@ async fn a_run_that_keeps_its_stored_rows_only_adds_to_them(pool: PgPool) {
         let pool = pool.clone();
         let id = id.clone();
         async move {
-            sqlx::query_scalar::<_, String>("SELECT 'key '||key FROM resource_key WHERE resource_id=$1 UNION SELECT 'link '||site FROM derived_link WHERE resource_id=$1 UNION SELECT 'fact '||name FROM resource_fact WHERE resource_id=$1 ORDER BY 1")
+            let mut rows = sqlx::query_scalar::<_, String>("SELECT 'key '||key FROM resource_key WHERE resource_id=$1 UNION SELECT 'link '||site FROM derived_link WHERE resource_id=$1 UNION SELECT 'fact '||name FROM resource_fact WHERE resource_id=$1")
                 .bind(&id)
                 .fetch_all(&pool)
                 .await
-                .unwrap()
+                .unwrap();
+            rows.sort();
+            rows
         }
     };
-    let second = |keep_stored: bool| {
+    let kept_ones = |keep_stored: Keep| {
         Ok(Found {
-            keys: vec![key("upc:0602498688373")],
+            keys: vec![via("podcast:apple:1200361737", "itunes")],
             links: vec![Link::new(
-                "https://www.deezer.com/track/4091937401",
-                "Deezer",
-                "mixed",
+                "https://overcast.fm/itunes1200361737",
+                "Overcast",
+                "itunes",
             )],
             keep_stored,
             ..Default::default()
         })
     };
-    source.answer(uri, second(true));
+    // Podcast Index refuses the key (and the feed is read only with its vouching): iTunes now
+    // answers another show. Its key and link are replaced; Podcast Index's and the feed's stay.
+    source.answer(
+        uri,
+        kept_ones(Keep::Services(vec!["feed".into(), "podcastindex".into()])),
+    );
     drain(&pool, &cx, &sources).await;
     assert_eq!(
         rows().await,
         [
-            "fact artist",
-            "key isrc:USIR10211559",
-            "key upc:0602498688373",
-            "link Deezer",
-            "link TIDAL"
+            "fact podcast_guid",
+            "key podcast:apple:1200361737",
+            &format!("key {guid}"),
+            "link Overcast",
+            "link Podcast Index",
+            "link daily.example",
         ]
     );
-    source.answer(uri, second(false));
+    // A failed request: nothing is deleted, what was found is added.
+    source.answer(
+        uri,
+        Ok(Found {
+            keys: vec![via("podcast:apple:1200361738", "itunes")],
+            retry_after: Some(Duration::from_secs(60)),
+            keep_stored: Keep::All,
+            ..Default::default()
+        }),
+    );
     drain(&pool, &cx, &sources).await;
-    assert_eq!(rows().await, ["key upc:0602498688373", "link Deezer"]);
+    assert_eq!(rows().await.len(), 7);
+    // A whole answer replaces them all.
+    source.answer(uri, kept_ones(Keep::Nothing));
+    drain(&pool, &cx, &sources).await;
+    assert_eq!(
+        rows().await,
+        ["key podcast:apple:1200361737", "link Overcast"]
+    );
 }
 
 /// A key, a link or a fact two sources vouch for is the row of the one that recorded it first.

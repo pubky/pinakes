@@ -57,6 +57,6 @@ request at a time), then one Deezer search and one TIDAL search, each shared for
 rate limit or an outage of YouTube or Deezer (`youtube_busy`, Deezer's quota) is retried, keeping
 the links an earlier run found. A watch page over 3 MB gives nothing and is not retried. TIDAL failing (a rate limit, an unexpected
 answer) fails the run, which keeps every link an earlier run found, unless the run has a Deezer
-match: that is recorded without a TIDAL link (an earlier TIDAL link is out until the retry), and
+match: that is recorded beside the links an earlier run found (a TIDAL one too), and
 the run comes back after the wait TIDAL named, else after five minutes. TIDAL refusing the credentials brings no run back early: a Deezer match is recorded, the links an earlier run found stay (a TIDAL one too), and the video is read again at its usual time. After an upgrade that adds
 it, `pinakesd reextract also-on` asks for every stored video at once.

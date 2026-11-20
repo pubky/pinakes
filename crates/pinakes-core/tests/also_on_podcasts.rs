@@ -330,7 +330,12 @@ async fn a_refused_podcast_index_key_fails_nothing() {
     // A refused key lasts: the run does not come back early for it, and what the source
     // recorded with Podcast Index's answers before stays beside what the others answered now.
     assert_eq!(found.retry_after, None);
-    assert!(found.keep_stored);
+    // The rows Podcast Index's answers gave, and the feed's (read only once Podcast Index vouches
+    // for it), stay; iTunes' and Wikidata's are replaced by this run's.
+    assert_eq!(
+        found.keep_stored,
+        pinakes_core::also_on::Keep::Services(vec!["feed".into(), "podcastindex".into()])
+    );
     // The refusal is counted where an alert reads it; a rate limit (429) is not. No other test
     // here has Podcast Index refuse.
     assert!(common::token_refusals("podcast_index") > before);

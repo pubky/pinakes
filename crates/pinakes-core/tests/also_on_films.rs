@@ -187,6 +187,12 @@ async fn a_failing_wikidata_brings_the_run_back() {
             "{status}: {:?}",
             found.retry_after
         );
+        // Wikidata's links from an earlier run stay until the run comes back for them.
+        assert_eq!(
+            found.keep_stored,
+            pinakes_core::also_on::Keep::All,
+            "{status}"
+        );
         assert!(
             !recorded
                 .seen()
