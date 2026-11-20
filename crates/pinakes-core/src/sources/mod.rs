@@ -757,14 +757,17 @@ fn alias_root_with(uri: &str, switches: Option<&SourcesConfig>) -> Option<String
 pub fn invalid(uri: &str) -> bool {
     REGISTRY.iter().any(|s| s.invalid(uri))
 }
-/// The switched-on sources' host rates, for hosts the operator did not set: one rate per host,
-/// the lowest when two sources name it. A switched-off source (one without its token too) asks
-/// nothing, so it paces nothing.
-pub fn budgets(switches: &SourcesConfig) -> impl Iterator<Item = (&'static str, f64)> {
+/// The host rates of the sources that ask their hosts, for hosts the operator did not set: one
+/// rate per host, the lowest when two sources name it. A source asks its hosts while it is on, or
+/// while its also-on half (the also-on source of the same name, which reads the same service) is;
+/// one that is off with its half (or without its token) asks nothing, so it paces nothing.
+pub fn budgets(config: &Config) -> impl Iterator<Item = (&'static str, f64)> {
     lowest(
         REGISTRY
             .iter()
-            .filter(|s| switches.enabled(s.name()))
+            .filter(|s| {
+                config.sources.enabled(s.name()) || crate::also_on::enabled_by_id(config, s.name())
+            })
             .flat_map(|s| s.budgets().iter().copied()),
     )
     .into_iter()
@@ -1932,8 +1935,9 @@ mod tests {
         }
     }
 
-    /// A switched-off source paces no host, and a source that needs a token paces none without
-    /// one.
+    /// A switched-off source paces no host while its also-on half (if it has one) is off too, and
+    /// a source that needs a token paces none without one. While the half is on, it reads the
+    /// same service, so the host keeps its pace.
     #[test]
     fn only_a_switched_on_source_paces_its_host() {
         let paced = |config: &Config, host: &str| config.egress.source_rates.contains_key(host);
@@ -1962,8 +1966,18 @@ mod tests {
                 assert_eq!(on.egress.source_rates[*host], *rate, "{name}");
                 let mut value = Config::defaults().unwrap();
                 value["sources"][name] = serde_json::json!({ "enabled": false });
-                let off = Config::from_value(value).unwrap();
-                assert!(!paced(&off, host), "{name} is off and still paces {host}");
+                let off = Config::from_value(value.clone()).unwrap();
+                let half = crate::also_on::registered().iter().any(|s| s.id() == name);
+                assert_eq!(
+                    paced(&off, host),
+                    half,
+                    "{name} is off; its also-on half reads {host}: {half}"
+                );
+                if half {
+                    value["also_on"]["sources"][name] = serde_json::json!({ "enabled": false });
+                    let both = Config::from_value(value).unwrap();
+                    assert!(!paced(&both, host), "{name} and its half are off: {host}");
+                }
             }
         }
     }

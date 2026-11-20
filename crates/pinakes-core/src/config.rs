@@ -951,7 +951,7 @@ impl Config {
         // The Pubky apps' event readers bound recurrence rules as calendars do.
         self.pubky.max_period_dates = self.event.max_period_dates;
         // A source's published limits, for hosts the operator does not rate.
-        self.egress.source_rates = crate::sources::budgets(&self.sources)
+        self.egress.source_rates = crate::sources::budgets(self)
             .chain(crate::also_on::budgets())
             .map(|(host, rate)| (host.to_owned(), rate))
             .collect();
@@ -2079,7 +2079,7 @@ mod tests {
     }
     #[test]
     fn source_budgets_never_override_the_operator() {
-        let budgets: Vec<_> = crate::sources::budgets(&Config::default().sources).collect();
+        let budgets: Vec<_> = crate::sources::budgets(&Config::default()).collect();
         let Some((host, rate)) = budgets.first().copied() else {
             return;
         };
