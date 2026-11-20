@@ -199,7 +199,8 @@ seconds from then at most (less when its shutdown grace ends sooner), not the fu
 what still runs is dropped. A job cut off before its save is read again when its lease runs out;
 one cut off after it keeps the card it saved, and the steps after the save (the alias its page
 names, an episode's pages) wait for its next full read: a read the site answers 304 does not run
-them, so they can wait until the page changes. So a daemon's workers and background passes run
+them, so they can wait until the page changes, and a card the save made final has no next read
+until `pinakesd reextract <route>`. So a daemon's workers and background passes run
 without the lock for 32 seconds at most: 30 to notice a session that is gone without its
 connection failing, and those two. The process ends once its database connections are closed (up
 to 5 seconds more), in which a request still open may be answered.
@@ -214,7 +215,8 @@ running jobs and background passes finish for up to `limits.shutdown_grace_secs`
 database connections (up to 5 seconds more) and exits 0, or non-zero when a task panicked while
 stopping; what still runs after the grace is dropped. A job cut off there before its save is
 read again when its lease runs out; one cut off after it keeps the card it saved, and the steps
-after the save wait for its next full read, as after a lost lock. Give the supervisor's stop
+after the save wait for its next full read (for a card the save made final, until
+`pinakesd reextract <route>`), as after a lost lock. Give the supervisor's stop
 timeout more than the two together (`TimeoutStopSec`, `stop_grace_period`). A signal during
 startup, `--migrate` or `reextract` stops them too (`--migrate` and `reextract` then exit
 non-zero).

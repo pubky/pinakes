@@ -1295,7 +1295,8 @@ impl Worker {
     /// steps that follow it. A daemon whose shutdown grace ends first drops the worker
     /// where it is: a job cut off before its save is read again when its lease runs out; one
     /// cut off after it keeps the card it saved, and the steps after the save wait for its
-    /// next full read (a read the site answers 304 does not run them).
+    /// next full read (a read the site answers 304 does not run them; a card the save made
+    /// final waits for `pinakesd reextract`).
     async fn run(self, mut shutdown: watch::Receiver<bool>) {
         let mut canary_check = Instant::now();
         while !*shutdown.borrow() {
