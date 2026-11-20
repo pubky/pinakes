@@ -1367,6 +1367,17 @@ async fn part(
     }
 }
 
+/// What `parse` reads from a fetched answer, in a parse slot: a transaction's record or an
+/// address's list can be megabytes (`TXS_CAP`), more than the async runtime should parse and
+/// sort.
+async fn parsed<T, F>(f: Fetched, parse: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce(u16, &[u8]) -> Result<T> + Send + 'static,
+{
+    crate::resolver::html::blocking(move || parse(f.status, &f.body)).await?
+}
+
 /// The tip height.
 async fn read_tip(cx: &super::Context<'_>, to: Api, network: Network) -> Result<u64> {
     let tip = fetch(cx, &tip_request(to, network).context("tip")?).await?;
@@ -1395,7 +1406,8 @@ async fn read(
         target.object = Object::Block(BlockRef::Hash(hash));
     }
     let f = fetch(cx, &request(to, &target).context("no reader")?).await?;
-    let Some(mut card) = parse(f.status, &f.body, &target)? else {
+    let read = target.clone();
+    let Some(mut card) = parsed(f, move |status, body| parse(status, body, &read)).await? else {
         return Ok(None);
     };
     let (n, mut named, mut soon) = (target.network, true, false);
@@ -1467,9 +1479,16 @@ async fn read(
             }
         }
         Object::Address(addr) => {
-            let txs = part(cx, txs_request(to, n, addr), by)
-                .await
-                .and_then(|f| parse_address_txs(f.status, &f.body, n, addr));
+            let txs = match part(cx, txs_request(to, n, addr), by).await {
+                Ok(f) => {
+                    let addr = addr.clone();
+                    parsed(f, move |status, body| {
+                        parse_address_txs(status, body, n, &addr)
+                    })
+                    .await
+                }
+                Err(e) => Err(e),
+            };
             match txs {
                 Ok(txs) => {
                     let count = |name: &str| card.details.get(name).and_then(Value::as_u64);
@@ -2353,6 +2372,44 @@ mod tests {
             ttl: 3600,
         };
         Mempool.resolve(&cx, uri).await
+    }
+
+    /// A transaction's record and an address's list of transactions are parsed in a parse slot,
+    /// never on the async runtime: each can be megabytes.
+    #[tokio::test(start_paused = true)]
+    async fn big_records_are_parsed_in_a_parse_slot() {
+        use crate::resolver::html::counted;
+        let api = "https://mempool.space/api";
+        let bech = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq";
+        let answers = vec![
+            (
+                format!("{api}/tx/{PIZZA}"),
+                200,
+                "application/json",
+                read("tx-pizza.json.gz"),
+            ),
+            (
+                format!("{api}/address/{bech}"),
+                200,
+                "application/json",
+                read("address-bech32.json"),
+            ),
+            (
+                format!("{api}/address/{bech}/txs"),
+                200,
+                "application/json",
+                read("address-bech32-txs.json.gz"),
+            ),
+        ];
+        for (uri, jobs) in [
+            (format!("btc:tx/{PIZZA}"), 1),
+            (format!("btc:address/{bech}"), 2),
+        ] {
+            let before = counted::jobs();
+            let doc = resolve(&uri, &answers).await.unwrap();
+            assert_eq!(doc.status, crate::model::Status::Ok, "{uri}");
+            assert_eq!(counted::jobs() - before, jobs, "{uri}");
+        }
     }
 
     /// A settled block read from mempool.space is complete: no early read again. Read from
