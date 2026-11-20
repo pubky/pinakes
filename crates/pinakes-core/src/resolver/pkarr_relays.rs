@@ -60,8 +60,10 @@ pub struct Relays {
     /// (`FetchOptions::slot_wait`; a slot further away is the egress's free `rate_limited`
     /// wait: it says nothing of the relay, so no charge), then its request, from when it has the
     /// slot, at most this deadline (`FetchOptions::request_deadline`; a relay that has not
-    /// answered by then failed). An ask takes at most `RELAY_SLOT_WAIT` plus this deadline: with
-    /// the deadline at most 8 s (its validated range), 9.5 s of a resolution's 10 s.
+    /// answered by then failed). A redirect is not followed (`keep_redirect`: the relay
+    /// failed). An ask takes at most `RELAY_SLOT_WAIT` plus this deadline, besides the relay
+    /// host's DNS lookup before it: with the deadline at most 8 s (its validated range), 9.5 s
+    /// of a resolution's 10 s.
     deadline: Duration,
     egress: Egress,
     state: Mutex<State>,
@@ -119,6 +121,9 @@ impl Relays {
             body_cap: Some(PAYLOAD_CAP),
             request_deadline: Some(self.deadline),
             slot_wait: Some(RELAY_SLOT_WAIT),
+            // A relay answers a key's packet where it is asked: a redirect is a failed relay,
+            // never followed (each hop would take another slot wait and deadline).
+            keep_redirect: true,
             ..Default::default()
         };
         let answers = futures_util::future::join_all(self.relays.iter().map(|relay| {

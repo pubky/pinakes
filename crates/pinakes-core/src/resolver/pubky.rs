@@ -285,6 +285,8 @@ mod tests {
         stalling: Mutex<Vec<&'static str>>,
         /// Relay hosts that answer only after this long.
         slow: Mutex<Vec<(&'static str, Duration)>>,
+        /// Relay hosts that answer every request with a redirect to another path of theirs.
+        redirecting: Mutex<Vec<&'static str>>,
         /// Relay hosts that answer 429 with this `Retry-After` (seconds).
         limited: Mutex<Vec<(&'static str, u64)>>,
         /// What one relay host serves for one key instead.
@@ -328,6 +330,18 @@ mod tests {
                 .map(|(_, after)| *after);
             if let Some(after) = slow {
                 tokio::time::sleep(after).await;
+            }
+            if self.redirecting.lock().unwrap().contains(&host) {
+                let response = axum::http::Response::builder()
+                    .status(302)
+                    .header(
+                        "location",
+                        format!("https://{host}/elsewhere{}", url.path()),
+                    )
+                    .body(vec![]);
+                let response = reqwest::Response::from(response.unwrap());
+                return crate::resolver::egress::read_response_with(url.clone(), response, options)
+                    .await;
             }
             let limited = self
                 .limited
@@ -439,6 +453,7 @@ mod tests {
             refusing: Mutex::default(),
             stalling: Mutex::default(),
             slow: Mutex::default(),
+            redirecting: Mutex::default(),
             limited: Mutex::default(),
             serve: Mutex::default(),
             relay_requests: Mutex::default(),
@@ -980,6 +995,40 @@ mod tests {
             );
             assert!(!crate::resolver::unreached(&error), "{answering} {error:#}");
         }
+    }
+
+    /// A relay that answers with a redirect is a failed relay, asked once: the redirect is not
+    /// followed, and the other relay's packet is used.
+    #[tokio::test]
+    async fn a_relay_that_redirects_is_a_failed_relay() {
+        let owner = Keypair::random();
+        let relays = ["https://relay.example", "https://relay2.example"];
+        let net = network(&[direct(&owner)], ok());
+        net.redirecting.lock().unwrap().push("relay.example");
+        let doc = resolver_on(net.clone(), &["8.8.8.8"], "8.8.4.4", &relays)
+            .resolve(&object(&owner))
+            .await
+            .unwrap();
+        assert_eq!(doc.name.as_deref(), Some("A deck"));
+        let asked = |net: &Net| {
+            net.relay_requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|u| u.starts_with("https://relay.example/"))
+                .count()
+        };
+        assert_eq!(asked(&net), 1);
+        // The redirecting relay alone: a failed relay, named by its answer.
+        let net = network(&[direct(&owner)], ok());
+        net.redirecting.lock().unwrap().push("relay.example");
+        let error = resolver_on(net.clone(), &["8.8.8.8"], "8.8.4.4", &relays[..1])
+            .resolve(&object(&owner))
+            .await
+            .unwrap_err();
+        assert_eq!(crate::resolver::error_class(&error), "connect", "{error:#}");
+        assert!(format!("{error:#}").contains("answered 302"), "{error:#}");
+        assert_eq!(asked(&net), 1);
     }
 
     /// A relay that accepts the request and never answers is given up at its own deadline,

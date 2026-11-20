@@ -351,7 +351,8 @@ forge one, and Pinakes never uses a packet older than the newest it remembers fo
 memory is an accepted limit: it holds the newest timestamp of at most 10,000 keys, apart from the
 cache, and forgets the oldest timestamps of uncached keys first; a forgotten key, or any key
 after a restart, takes the newest packet the relays serve again. A relay that times out, is
-refused by the policy or serves a packet that does not verify is a `connect` failure, retried
+refused by the policy, answers with a redirect (never followed) or serves a packet that does not
+verify is a `connect` failure, retried
 with the usual backoff and, like any failure, dead-lettered after `limits.max_failures`. When no
 relay answered, because each one that failed refused or reset the connection (or Egress waited
 for its host budget, or the request would have waited more than 1.5 s for the relay's host, or
