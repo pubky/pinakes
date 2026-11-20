@@ -3731,6 +3731,62 @@ async fn a_regrouping_after_the_lease_ran_out_brings_the_card_back(pool: PgPool)
     assert!((-61.0..=-59.0).contains(&due_in), "{due_in}");
 }
 
+/// A secondary service that keeps failing brings its card back early only so often: after
+/// `PARTIAL_RETRIES` such runs in a row the next run is at the source's lifetime, and stays
+/// there while the service fails. A run with every service answering starts the count again.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_secondary_service_that_fails_for_good_stops_bringing_the_card_back(pool: PgPool) {
+    let uri = "https://example.org/forever";
+    let id = page(&pool, uri, "Forever").await;
+    let hub = Fake::new("datacite");
+    let answer = |failed: bool| {
+        Ok(Found {
+            keys: vec![key("doi:10.1000/y")],
+            retry_after: failed.then_some(Duration::from_secs(60)),
+            ..Default::default()
+        })
+    };
+    hub.answer(uri, answer(true));
+    let sources: Vec<Arc<dyn Source>> = vec![hub.clone()];
+    let cx = cx(Config::default());
+    let state = || {
+        let pool = pool.clone();
+        let id = id.clone();
+        async move {
+            sqlx::query_as::<_, (f64, i32)>(
+                "SELECT extract(epoch FROM next_attempt_at-now())::float8,attempts FROM also_on_dirty WHERE resource_id=$1",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    drain(&pool, &cx, &sources).await;
+    assert_eq!(state().await.1, 1);
+    // The last early run: an hour, the backoff's ceiling.
+    sqlx::query("UPDATE also_on_dirty SET attempts=$2 WHERE resource_id=$1")
+        .bind(&id)
+        .bind(also_on::PARTIAL_RETRIES - 1)
+        .execute(&pool)
+        .await
+        .unwrap();
+    drain(&pool, &cx, &sources).await;
+    let (due_in, attempts) = state().await;
+    assert_eq!(attempts, also_on::PARTIAL_RETRIES);
+    assert!((3590.0..=3600.0).contains(&due_in), "{due_in}");
+    // Still failing: the source's lifetime (a day), this run and the next.
+    for more in 1..=2 {
+        drain(&pool, &cx, &sources).await;
+        let (due_in, attempts) = state().await;
+        assert_eq!(attempts, also_on::PARTIAL_RETRIES + more);
+        assert!((86_300.0..=86_400.0).contains(&due_in), "{more}: {due_in}");
+    }
+    hub.answer(uri, answer(false));
+    drain(&pool, &cx, &sources).await;
+    assert_eq!(state().await.1, 0);
+}
+
 /// A key, a link or a fact two sources vouch for is the row of the one that recorded it first.
 /// Once that source is switched off, or let the row expire, the other takes the row over at its
 /// next run, so the card keeps what a live source vouches for; the resource, and the one a keyed

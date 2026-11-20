@@ -178,7 +178,7 @@ pub struct Found {
     /// A secondary service the source asks failed, so its part is missing from this run: what
     /// the run found stands, and the worker brings the run back after its backoff, as for a
     /// failed run (five minutes, doubling to an hour), or after this wait (the one the service
-    /// named) when longer; never after the source's lifetime.
+    /// named) when longer; after [`PARTIAL_RETRIES`] such runs in a row, at the source's lifetime.
     pub retry_after: Option<Duration>,
     /// Where links of the resource's group sit among its releases (`link_release`).
     pub editions: Vec<Edition>,
@@ -1243,14 +1243,16 @@ pub async fn drain_leased(
             // A secondary service failed: what the run found is recorded, and the run comes back
             // after a failed run's backoff, so a service that keeps failing is asked less and
             // less often (up to hourly), or after the wait it named when longer; never after the
-            // lifetime. A run with every service answering resets the count.
+            // lifetime. After `PARTIAL_RETRIES` such runs in a row the service is taken to fail
+            // for good, and the run comes back at the lifetime. A run with every service
+            // answering resets the count.
             Ok(Some(Next {
                 lifetime,
                 partial: Some(asked),
             })) => {
                 sqlx::query(&format!(
                     "UPDATE also_on_dirty SET attempts=attempts+1,last_error=NULL,{} WHERE resource_id=$1",
-                    next("now()+least($3,make_interval(secs => greatest($5::float8,least($4::float8*power(2,least(attempts,6)),3600))))")
+                    next("now()+CASE WHEN attempts>=$6 THEN $3 ELSE least($3,make_interval(secs => greatest($5::float8,least($4::float8*power(2,least(attempts,6)),3600)))) END")
                 ))
                 .bind(&id)
                 .bind(lease)
@@ -1273,6 +1275,7 @@ pub async fn drain_leased(
                 tracing::warn!(resource=%id, kind=crate::resolver::error_class(&error), "also-on lookup will retry");
                 // A service that said how long to wait is waited for at least that long.
                 let asked = error
+                .bind(PARTIAL_RETRIES)
                     .downcast_ref::<crate::resolver::RetryLater>()
                     .map_or(0, |r| r.seconds.min(86_400)) as f64;
                 sqlx::query(&format!(
@@ -1307,6 +1310,10 @@ async fn stored_sources(
 ) -> Result<std::collections::HashSet<String>> {
     Ok(sqlx::query_scalar::<_, String>("SELECT source FROM resource_key WHERE resource_id=$1 UNION SELECT source FROM derived_link WHERE resource_id=$1 UNION SELECT source FROM resource_fact WHERE resource_id=$1 UNION SELECT source FROM link_release WHERE resource_id=$1")
         .bind(resource_id)
+/// How many runs in a row a failing secondary service brings back early (after the backoff of a
+/// failed run, which reaches an hour at the fifth): after them the service is taken to fail for
+/// good, and the card runs again at its sources' lifetime, as a card without the failure does.
+pub const PARTIAL_RETRIES: i32 = 6;
         .fetch_all(pool)
         .await?
         .into_iter()
