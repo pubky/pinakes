@@ -8,13 +8,23 @@ use std::{collections::BTreeMap, sync::OnceLock};
 pub const ATTRIBUTION: &str =
     "Timezone Boundary Builder / OpenStreetMap contributors (ODbL-1.0), tzf-rel 2025c";
 
+/// The longest zone name read. The longest IANA name is 32 bytes; a prefixed one (Outlook's)
+/// about twice that.
+const ZONE_NAME_BYTES: usize = 128;
+/// A time zone by its IANA name, a prefixed IANA name, or a Windows or Rails name. `None` for a
+/// name longer than `ZONE_NAME_BYTES`.
 pub fn zone(name: &str) -> Option<Tz> {
     let name = name.trim().trim_matches('"');
+    if name.len() > ZONE_NAME_BYTES {
+        return None;
+    }
     if let Ok(t) = name.parse() {
         return Some(t);
     }
-    // Outlook also emits /freeassociation.sourceforge.net/Tzfile/Europe/Zurich.
-    for (i, _) in name.match_indices('/') {
+    // Outlook also emits /freeassociation.sourceforge.net/Tzfile/Europe/Zurich. An IANA name
+    // has at most three parts, so the name's last four endings are tried, the longest first.
+    let slashes: Vec<usize> = name.rmatch_indices('/').take(4).map(|(i, _)| i).collect();
+    for i in slashes.into_iter().rev() {
         if let Ok(t) = name[i + 1..].parse() {
             return Some(t);
         }

@@ -170,9 +170,18 @@ fn positive(digits: &str) -> Option<i64> {
     }
     digits.parse::<i64>().ok().filter(|id| *id > 0)
 }
+/// When a link is read again after the upstream refused Pinakes (401, 403) without saying when.
+const DENIED_RETRY_SECS: u64 = 900;
 fn copy_error(error: &anyhow::Error) -> anyhow::Error {
     if let Some(retry) = error.downcast_ref::<super::RetryLater>() {
         return retry.clone().into();
+    }
+    // An answer's class and status stay on each job's copy, for its stored error and log line.
+    if let (Some(class), Some(status)) = (
+        error.downcast_ref::<super::ErrorClass>(),
+        error.downcast_ref::<super::Upstream>(),
+    ) {
+        return anyhow::Error::new(*class).context(super::Upstream(status.0));
     }
     if error.is::<super::NotModified>() {
         return super::NotModified.into();
@@ -309,6 +318,9 @@ pub struct OsmResolver {
 }
 impl OsmResolver {
     pub fn new(pool: PgPool, config: OsmConfig) -> Result<Self> {
+        // A client of its own, outside `Egress`: it asks only the Nominatim URL the operator
+        // sets (`osm.nominatim_url`), which no reference steers; it follows no redirect and
+        // reads at most 2 MiB (`request`).
         let client = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
@@ -327,6 +339,17 @@ impl OsmResolver {
     pub(crate) async fn request(&self, url: reqwest::Url) -> Result<Option<Value>> {
         // One lock covers the request too: all batches and fallback calls share the host budget.
         let mut next = self.next.lock().await;
+        // A cooldown the upstream asked for (its 429 or 5xx) is not slept through with the lock
+        // held: the job is put off until then, without a request and without a charge, as
+        // Egress does for a host slot further away than `MAX_SLOT_WAIT`.
+        let wait = next.saturating_duration_since(Instant::now());
+        if wait > super::egress::MAX_SLOT_WAIT {
+            return Err(super::RetryLater {
+                class: "rate_limited",
+                seconds: wait.as_secs() + 1,
+            }
+            .into());
+        }
         tokio::time::sleep_until(*next).await;
         let public = public_upstream(&url);
         let rate = if public {
@@ -379,7 +402,26 @@ impl OsmResolver {
         if matches!(status.as_u16(), 404 | 410) {
             return Ok(None);
         }
-        ensure!(status.is_success(), "OSM upstream HTTP {status}");
+        // The upstream refuses Pinakes (a key expired or out of quota), which says nothing of
+        // the link: it is read again later and never dead-letters for it.
+        if matches!(status.as_u16(), 401 | 403) {
+            return Err(super::RetryLater {
+                class: "upstream_denied",
+                seconds: retry_after_named(response.headers()).unwrap_or(DENIED_RETRY_SECS),
+            }
+            .into());
+        }
+        if !status.is_success() {
+            // A redirect is no client error: this client follows none, so the operator's
+            // Nominatim URL names the wrong place.
+            let class = if status.is_redirection() {
+                "http_3xx"
+            } else {
+                "http_4xx"
+            };
+            return Err(anyhow::Error::new(super::ErrorClass(class))
+                .context(super::Upstream(status.as_u16())));
+        }
         let mut bytes = Vec::new();
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {

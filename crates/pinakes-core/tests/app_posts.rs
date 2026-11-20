@@ -10,7 +10,7 @@ use pinakes_core::{
     nexus::{Change, Changes, FeedPage, Kind, Op},
     queue,
     resolver::Resolver,
-    resolver::{classify, pubky_apps::card_with, pubky_apps::posts::AppKind},
+    resolver::{classify, pubky_apps::card_at, pubky_apps::posts::AppKind},
     telemetry::Metrics,
 };
 use pubky_social_specs::{traits::TimestampId, PostEnvelope};
@@ -36,13 +36,12 @@ fn now() -> DateTime<Utc> {
 }
 /// The card of a post's latest version, read at `now()`.
 fn card(uri: &str, version: &Value) -> ResourceMeta {
-    card_with(
+    card_at(
         uri,
         "application/octet-stream",
         &serde_json::to_vec(version).unwrap(),
         3600,
         now(),
-        pinakes_core::event::time::MAX_PERIOD_DATES,
     )
 }
 fn no_card(doc: &ResourceMeta) -> bool {
@@ -806,13 +805,12 @@ impl Resolver for Version {
         true
     }
     async fn resolve(&self, uri: &str) -> anyhow::Result<ResourceMeta> {
-        Ok(card_with(
+        Ok(card_at(
             uri,
             "application/octet-stream",
             &serde_json::to_vec(&self.0).unwrap(),
             7 * 86_400,
             Utc::now(),
-            pinakes_core::event::time::MAX_PERIOD_DATES,
         ))
     }
 }

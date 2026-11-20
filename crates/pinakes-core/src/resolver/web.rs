@@ -354,11 +354,12 @@ impl WebResolver {
                 return Err(super::NotModified.into());
             }
             let observation = crate::telemetry::last_fetch();
-            // Past the page cap: a page cut where its long head closes, or a whole page within the
-            // head budget (`egress::page_fits`).
+            // Past the page cap: an HTML page read on to the head budget
+            // (`limits.html_head_bytes`), whole or cut there (`egress::page_fits`); any other
+            // page that long is refused.
             anyhow::ensure!(
                 super::egress::page_fits(&fetched),
-                "non-feed page exceeds 1 MB"
+                "non-feed page exceeds its read cap"
             );
             let input_uri = uri.to_owned();
             let input = fetched.clone();
@@ -577,10 +578,18 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
         return Ok(out);
     }
     if fetched.content_type == "application/pdf" {
+        // The file's name as written, not as encoded (`Annual%20Report.pdf`); a link ending
+        // in `/` names none.
         out.doc.name = landed(uri, fetched)
             .path_segments()
             .and_then(|mut s| s.next_back())
-            .map(str::to_owned);
+            .map(|s| {
+                percent_encoding::percent_decode_str(s)
+                    .decode_utf8_lossy()
+                    .trim()
+                    .to_owned()
+            })
+            .filter(|s| !s.is_empty());
         return Ok(out);
     }
     let read = as_read(fetched);
@@ -683,11 +692,15 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
             .filter_map(|u| origin_url(&fetched.url, u).and_then(|u| entity_identity(&u)))
             .any(|id| page.contains(&id))
     };
-    if let Some(best) = (1..scripts.len()).fold((!scripts.is_empty()).then_some(0), |best, i| {
-        best.filter(|b| rank(&scripts[i]) <= rank(&scripts[*b]))
-            .or(Some(i))
-    }) {
-        let (entity, head) = &scripts[best];
+    // Each script is ranked once; a page of many scripts stops when its parse job is over.
+    let mut ranks = Vec::with_capacity(scripts.len());
+    for script in &scripts {
+        if super::html::job_over() {
+            return Err(super::html::job_ended());
+        }
+        ranks.push(rank(script));
+    }
+    if let Some((entity, head)) = first_of_highest(ranks.into_iter().zip(&scripts)) {
         apply_jsonld(
             &mut out.doc,
             entity,
@@ -698,17 +711,12 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
         // A plugin's body Article can outrank the head's WebPage for the card; the head's
         // identity claims still apply.
         if !head {
-            let head_best = scripts
-                .iter()
-                .filter(|(_, head)| *head)
-                .fold(None, |best, (v, _)| match best {
-                    Some(b)
-                        if entity_priority(v, &fetched.url) <= entity_priority(b, &fetched.url) =>
-                    {
-                        Some(b)
-                    }
-                    _ => Some(v),
-                });
+            let head_best = first_of_highest(
+                scripts
+                    .iter()
+                    .filter(|(_, head)| *head)
+                    .map(|(v, _)| (entity_priority(v, &fetched.url), v)),
+            );
             if let Some(v) = head_best {
                 jsonld_claims(&mut out.doc, v, &fetched.url);
             }
@@ -885,9 +893,19 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
             }
         }
     }
+    // The page's own title: the head's, else the first outside an inline SVG (whose `<title>`
+    // names a drawing).
     out.title = html
-        .select(&selector("title"))
+        .select(&selector("head > title"))
         .next()
+        .or_else(|| {
+            html.select(&selector("title")).find(|title| {
+                !title
+                    .ancestors()
+                    .take(super::html::MAX_ANCESTORS)
+                    .any(|a| a.value().as_element().is_some_and(|e| e.name() == "svg"))
+            })
+        })
         .map(|el| el.text().collect::<String>().trim().to_owned())
         .map(|t| titled(&t));
     out.description = meta.get("description").cloned();
@@ -914,11 +932,6 @@ const BODY_META: &[&str] = &[
 /// Title separators before a site suffix.
 const TITLE_SEPARATORS: &[&str] = &[" • ", " | ", " - ", " – ", " — ", " · "];
 
-/// A page title without its site suffix: the part after its last separator, when that part
-/// names the site as a whole word (one of `sites`, such as its `og:site_name` or its own JSON-LD
-/// name, or the head of one before a `:`, `-` or `|`; or its host's registrable label), e.g. "TFTC: A
-/// Bitcoin Podcast • Listen on Fountain". A site's root page keeps its title, and so does a
-/// title that would be left empty.
 /// The content types only a feed is served as.
 const FEED_TYPES: &[&str] = &[
     "application/rss+xml",
@@ -1081,6 +1094,11 @@ fn xml_feed(body: &str) -> Option<(Option<String>, Option<String>)> {
         .filter(|_| !rdf || rdf_channel)
         .map(|_| (title, description))
 }
+/// A page title without its site suffix: the part after its last separator, when that part
+/// names the site as a whole word (one of `sites`, such as its `og:site_name` or its own JSON-LD
+/// name, or the head of one before a `:`, `-` or `|`; or its host's registrable label), e.g. "TFTC: A
+/// Bitcoin Podcast • Listen on Fountain". A site's root page keeps its title, and so does a
+/// title that would be left empty.
 pub(crate) fn without_site_suffix(title: &str, sites: &[String], url: &Url, root: bool) -> String {
     let title = title.trim();
     if root {
@@ -1187,7 +1205,6 @@ pub(crate) fn decoded(s: &str) -> String {
     out.push_str(rest);
     out
 }
-/// The character reference `tail` starts with (`&name;`, `&#n;`, `&#xh;`) and its length.
 /// The characters HTML reads numeric references 128–159 as (Windows-1252); an unassigned one
 /// stays a control character.
 const WINDOWS_1252: [char; 32] = [
@@ -1196,6 +1213,7 @@ const WINDOWS_1252: [char; 32] = [
     '\u{90}', '\u{2018}', '\u{2019}', '\u{201c}', '\u{201d}', '\u{2022}', '\u{2013}', '\u{2014}',
     '\u{2dc}', '\u{2122}', '\u{161}', '\u{203a}', '\u{153}', '\u{9d}', '\u{17e}', '\u{178}',
 ];
+/// The character reference `tail` starts with (`&name;`, `&#n;`, `&#xh;`) and its length.
 fn reference(tail: &str) -> Option<(String, usize)> {
     let end = tail[1..]
         .char_indices()
@@ -1362,19 +1380,43 @@ fn schema_type(v: &Value) -> Option<&str> {
         .filter_map(Value::as_str)
         .find(|s| !crate::model::type_path(s).is_empty())
 }
-fn entity_priority(v: &Value, base: &Url) -> u8 {
-    if let Some(values) = v.as_array() {
-        return values
-            .iter()
-            .map(|v| entity_priority(v, base))
-            .max()
-            .unwrap_or(0);
+/// The first item of the highest rank, each rank computed once.
+fn first_of_highest<R: PartialOrd, T>(ranked: impl Iterator<Item = (R, T)>) -> Option<T> {
+    let mut best: Option<(R, T)> = None;
+    for (rank, item) in ranked {
+        if best.as_ref().is_none_or(|(highest, _)| rank > *highest) {
+            best = Some((rank, item));
+        }
     }
-    let nested = main_entity(v)
-        .or_else(|| v.get("@graph"))
-        .map(|v| entity_priority(v, base))
-        .unwrap_or(0);
-    type_priority(v, base).max(nested)
+    best.map(|(_, item)| item)
+}
+/// How far a walk over a script's nodes goes (`all_nodes`, `entity_priority`): the first
+/// `NODE_ENTRIES` entries of each array, `NODE_DEPTH` levels down. No page's own entity sits
+/// further in, and a hostile script costs no more than these.
+const NODE_ENTRIES: usize = 256;
+const NODE_DEPTH: usize = 6;
+/// The highest priority (`type_priority`) of a node, its main entity and its graph, as far as
+/// `NODE_ENTRIES` and `NODE_DEPTH` reach.
+fn entity_priority(v: &Value, base: &Url) -> u8 {
+    fn within(v: &Value, base: &Url, depth: usize) -> u8 {
+        if depth > NODE_DEPTH {
+            return 0;
+        }
+        if let Some(values) = v.as_array() {
+            return values
+                .iter()
+                .take(NODE_ENTRIES)
+                .map(|v| within(v, base, depth + 1))
+                .max()
+                .unwrap_or(0);
+        }
+        let nested = main_entity(v)
+            .or_else(|| v.get("@graph"))
+            .map(|v| within(v, base, depth + 1))
+            .unwrap_or(0);
+        type_priority(v, base).max(nested)
+    }
+    within(v, base, 0)
 }
 /// A node's own priority, ignoring nested entities: 110 for the page's own recipe, 100 for other
 /// content, 90 for a recipe of another page, 80 for WebPage, 20 for publisher and navigation
@@ -1516,13 +1558,13 @@ fn main_entity(v: &Value) -> Option<&Value> {
 /// Every object node of a script's value, through its arrays, `@graph` and `mainEntity`, each
 /// with whether it sits in a list of several main entities.
 fn all_nodes<'a>(v: &'a Value, out: &mut Vec<(&'a Value, bool)>, depth: usize, in_list: bool) {
-    if depth > 6 {
+    if depth > NODE_DEPTH {
         return;
     }
     match v {
         Value::Array(a) => a
             .iter()
-            .take(256)
+            .take(NODE_ENTRIES)
             .for_each(|v| all_nodes(v, out, depth + 1, in_list)),
         Value::Object(_) => {
             out.push((v, in_list));
@@ -1658,11 +1700,8 @@ fn entity_identity(url: &str) -> Option<String> {
 /// Wikidata item for every page. Returns whether claims were donated.
 fn jsonld_claims(doc: &mut ResourceMeta, v: &Value, base: &Url) -> bool {
     if let Some(values) = v.as_array() {
-        let best = values.iter().fold(None, |best, v| match best {
-            Some(b) if entity_priority(v, base) <= entity_priority(b, base) => Some(b),
-            _ => Some(v),
-        });
-        return best.is_some_and(|b| jsonld_claims(doc, b, base));
+        return first_of_highest(values.iter().map(|v| (entity_priority(v, base), v)))
+            .is_some_and(|b| jsonld_claims(doc, b, base));
     }
     for nested in [main_entity(v), v.get("@graph")].into_iter().flatten() {
         if jsonld_claims(doc, nested, base) {
@@ -1796,21 +1835,21 @@ fn selected<'a>(v: &'a Value, base: &Url, vouched: bool) -> Option<(&'a Value, b
 /// outranks another event it lists, and one naming no page, when vouched for, outranks one
 /// naming another page; the first of equals.
 fn best_node<'a>(values: &'a [Value], base: &Url, vouched: bool) -> Option<&'a Value> {
+    // The page's identity once for the array, and each node's rank once: an array of any
+    // length costs one look at each of its nodes.
+    let page = crate::event::page::page_identity(base.as_str());
     let rank = |v: &Value| {
+        let names = page.as_ref().and_then(|page| {
+            crate::event::page::names_page_in(v, base, std::slice::from_ref(page))
+        });
         (
             !site_node(v, base),
             entity_priority(v, base),
-            crate::event::page::owns_page(v, base),
-            crate::event::page::names_page(v, base).unwrap_or(vouched),
+            names == Some(true),
+            names.unwrap_or(vouched),
         )
     };
-    let mut best = values.first()?;
-    for value in values.iter().skip(1) {
-        if rank(value) > rank(best) {
-            best = value;
-        }
-    }
-    Some(best)
+    first_of_highest(values.iter().map(|v| (rank(v), v)))
 }
 /// What the head says the page is about, from its page nodes (a `WebPage` naming the page or
 /// none): the nodes their main entity names (`node_key`: `{"@id": "#product"}`), or none for a
@@ -2112,6 +2151,75 @@ fn oembed_field(v: &Value, field: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A page is named by its head's title, never by an inline SVG's; a PDF by its file's name
+    /// as written.
+    #[test]
+    fn a_page_s_title_is_its_head_s_and_a_pdf_s_name_is_decoded() {
+        let title = |body: &str| {
+            let url = "https://titles.example.org/page";
+            let f = Fetched::answer(
+                Url::parse(url).unwrap(),
+                200,
+                "text/html".into(),
+                body.as_bytes().to_vec(),
+            );
+            extract(url, &f, 3600).unwrap().title
+        };
+        let icon = "<svg><title>Icon</title><path d='M0 0'/></svg>";
+        assert_eq!(
+            title(&format!(
+                "<html><head></head><body>{icon}<h1>Welcome</h1></body></html>"
+            )),
+            None
+        );
+        assert_eq!(
+            title(&format!(
+                "<html><head><title>Page</title></head><body>{icon}</body></html>"
+            ))
+            .as_deref(),
+            Some("Page")
+        );
+        let pdf = |url: &str| {
+            let f = Fetched::answer(
+                Url::parse(url).unwrap(),
+                200,
+                "application/pdf".into(),
+                vec![],
+            );
+            extract(url, &f, 3600).unwrap().doc.name
+        };
+        assert_eq!(
+            pdf("https://files.example.org/reports/Annual%20Report.pdf").as_deref(),
+            Some("Annual Report.pdf")
+        );
+        assert_eq!(pdf("https://files.example.org/reports/"), None);
+    }
+    /// A NUL in a page's JSON-LD (`"name": "A\u0000B"`), which no stored text may hold, is
+    /// dropped from the card's texts, its facts and its event fields: the card saves.
+    #[test]
+    fn a_nul_in_json_ld_is_dropped_from_the_card() {
+        let url = "https://nul.example.org/event";
+        let body = r#"{"@type":"Event","name":"A\u0000B","description":"Doors\u0000 at eight",
+            "startDate":"2026-12-20T18:00:00Z",
+            "organizer":{"@type":"Organization","name":"Club\u0000 Zero"},
+            "location":{"@type":"Place","name":"Hall\u0000 1",
+                "address":{"streetAddress":"Via\u0000 Nassa 5","addressLocality":"Lugano"}}}"#;
+        let f = Fetched::answer(
+            Url::parse(url).unwrap(),
+            200,
+            "application/ld+json".into(),
+            body.as_bytes().to_vec(),
+        );
+        let doc = extract(url, &f, 3600)
+            .unwrap()
+            .doc
+            .bounded(ATTRIBUTES)
+            .unwrap();
+        assert_eq!(doc.name.as_deref(), Some("AB"));
+        assert_eq!(doc.description.as_deref(), Some("Doors at eight"));
+        let stored = serde_json::to_string(&doc).unwrap();
+        assert!(!stored.contains("\\u0000"), "{stored}");
+    }
     /// A feed is a DataFeed named by its own title on every route: Atom (bitcoinops.org's,
     /// served as `application/xml`; GitHub's releases), JSON Feed (jsonfeed.org's own), RSS and
     /// RSS 1.0, also cut off at the page cap. Recorded answers are in `tests/fixtures/web/feeds`.
@@ -3573,9 +3681,11 @@ mod tests {
         );
     }
 
-    /// A page's wall check and its card are read from one parse of its body. An answer the wall
-    /// check settles without a parse is parsed once, for the card, when it is read as HTML, and
-    /// never otherwise. The head's alternates come from the same tree.
+    /// Within `extract`, a page's wall check and its card are read from one parse of its body
+    /// (the egress has parsed an HTML answer once before, for its own wall check, in a worker
+    /// of its own). An answer the wall check settles without a parse is parsed once, for the
+    /// card, when it is read as HTML, and never otherwise. The head's alternates come from the
+    /// same tree.
     #[test]
     fn a_page_is_parsed_once_for_its_wall_check_and_its_card() {
         let read = |content_type: &str, status: u16, body: &str| {

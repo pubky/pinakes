@@ -29,6 +29,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `resolver_concurrency` | `2` | Concurrent jobs per pubky or card resolver. |
 | `resolver_requests_per_second` | `2.0` | Jobs per second per pubky or card resolver. |
 | `resolver_ttl_secs` | `86400` | Default document lifetime (seconds) for web, pubky and card resolvers. |
+| `pkarr_relay_timeout_ms` | `4000` | How long one PKARR relay may take to answer (milliseconds, 100–7000), from when its request is sent; a relay slower than this is a failed relay, and the others' packets are used. A request that would wait more than 1.5 s for the relay's host to be free is not sent and is put off without a charge. A whole ask (its DNS lookup and reading the answer too) ends within 1.5 s + this + 0.5 s. |
 | `music_enrichment_timeout_ms` | `8000` | How long a MusicBrainz card's enrichment may take, within the card's own read (milliseconds, 100–13000); past it, the card keeps its stored image and description. |
 | `music_enrichment_retry_secs` | `3600` | The earliest a MusicBrainz card whose enrichment, or a Wikidata item's card whose Commons image, failed for a while (a timeout, a 429, a 5xx) is read again (seconds, 60–604800): it waits at least twice as long as since its last reading, up to its own refresh time, so a failure on a routine refresh waits for the next. |
 | `music_image_width` | `640` | The width of the Commons thumbnail an enriched card or a Wikidata item's card asks for (pixels, 20–4096); Commons serves the next of its standard sizes (960 for 640). |
@@ -66,7 +67,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `preview_cache_capacity` | `10000` | The same table's size when a preview adds its client address and link (100–100000); past it the oldest entry (an API client's too) is forgotten with its used budget. Keep it equal to `api_cache_capacity`. |
 | `preview_new_per_hour` | `1000` | New previews per hour for the whole instance; over it `POST /v1/resolve` answers 503. |
 | `preview_new_per_client_per_hour` | `0` | New previews per hour one client address may take (0: no share); over it `POST /v1/resolve` answers 429. |
-| `podcast_items` | `2000` | Podcast feed items read per scan (a show's list looks at its first 2000 and keeps the newest 1000). |
+| `podcast_items` | `2000` | Podcast feed items read for a show's or an episode's card. A show's episode list looks at a feed's first 2000 items at most (fewer on a feed's own card when this is lower) and keeps the newest 1000. |
 | `group_max_members` | `256` | Most members of one automatic group. |
 | `group_max_distance_m` | `500.0` | Farthest two located members of one group (metres). |
 | `group_max_graph_units` | `20000` | Units one grouping pass may read. |
@@ -82,6 +83,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `event_max_occurrences_per_series` | `50` | Most occurrences one series expands to. |
 | `event_max_occurrences_per_feed` | `10000` | Most occurrences one feed yields. |
 | `event_max_components` | `100000` | Most components one calendar may hold. |
+| `event_max_properties` | `1000000` | Most properties one calendar may hold, over all its components. |
 | `event_max_revisions` | `10000` | Most revisions of one event (RECURRENCE-ID overrides). |
 | `event_max_document_bytes` | `8388608` | Largest retained event document set per feed (bytes). |
 | `event_max_recurrence_steps` | `100000` | Most recurrence steps one series may take. |
@@ -322,9 +324,13 @@ that cannot run it does not start). All the parses of one job (a page's extracti
 answer with many HTML descriptions, a calendar's events) share one worker and its limits: 1 s of
 CPU time (10 s in a debug build), 1 GiB of memory and a wall-clock deadline. Past any of them, or
 as soon as the job's caller stops waiting, the worker dies, every later parse of the job fails
-at once, the parse slot is freed, and the resource is recorded as `too_complex`: final, with no
-card (an earlier card is cleared, and the change recorded), until `pinakesd reextract` revives it
-(the daemon logs `an HTML parse did not end within its limits`, once per job). Text without
+at once and the parse slot is freed (the daemon logs `an HTML parse did not end within its
+limits`, once per job). Past the CPU time or the memory, or with a tree of more nodes than the
+cap below, the resource is recorded as `too_complex`: final, with no card (an earlier card is
+cleared, and the change recorded), until `pinakesd reextract` revives it. A worker killed at the
+wall-clock deadline, one that ended by itself (killed from outside) and a caller that stopped
+waiting say nothing about the page: the read fails as `timeout`, the card stays, and the link is
+read again with the timeout backoff (charged from the fourth in a row). Text without
 markup (no `<`) is parsed in the daemon, in linear time, without a worker, but only while the
 job is within its limits: once it is over, it parses no plain text either.
 The tree a worker answers with keeps no node more than 256 elements deep and at most 500,000
@@ -417,18 +423,22 @@ a CDN or reverse proxy may cache it by its `ETag`.
 Pinakes fetches a `pubky://` object through the egress policy above. It reads the owner's
 `_pubky` PKARR record (following a delegation to the homeserver's key, at most seven deep) from
 the PKARR relays in `pubky.pkarr_relays` (by default `https://pkarr.pubky.app` and
-`https://pkarr.pubky.org`), asked together: a GET through the egress policy (an answer above
-8 KB refused, whatever its content type), a 404 meaning no record. Pinakes checks every packet's
+`https://pkarr.pubky.org`), asked together, each for at most `limits.pkarr_relay_timeout_ms`: a
+GET through the egress policy (an answer above 8 KB refused, whatever its content type), a 404
+meaning no record. Pinakes checks every packet's
 signature against the owner's key and uses the newest packet that verifies. A relay can withhold
 a record (when every relay answers 404, the owner has no record for five minutes) but cannot
 forge one, and Pinakes never uses a packet older than the newest it remembers for that key. That
 memory is an accepted limit: it holds the newest timestamp of at most 10,000 keys, apart from the
 cache, and forgets the oldest timestamps of uncached keys first; a forgotten key, or any key
 after a restart, takes the newest packet the relays serve again. A relay that times out, is
-refused by the policy or serves a packet that does not verify is a `connect` failure, retried
+refused by the policy, answers with a redirect (never followed) or serves a packet that does not
+verify is a `connect` failure, retried
 with the usual backoff and, like any failure, dead-lettered after `limits.max_failures`. When no
 relay answered, because each one that failed refused or reset the connection (or Egress waited
-for its host budget), the failure never reached an answer and never dead-letters.
+for its host budget, or the request would have waited more than 1.5 s for the relay's host, or
+the relay answered 429), the failure never reached an answer and never dead-letters; after a
+429 the link is read again when the relay's `Retry-After` says.
 Verified packets are kept for their smallest record TTL, between five minutes
 and a day (10,000 keys at most). It then takes the first endpoint with a public HTTPS (ICANN)
 domain and GETs the object path there with the `pubky-host` header, as Pubky clients address
@@ -811,8 +821,11 @@ takes its group calendar, its UID and its token alias at its next read;
 `pinakesd reextract event_platform` reads every event
 platform's links at once. A numeric Meetup page that becomes its token's alias leaves its
 group, as every alias does, and an operator's curation of it (`PUT /v1/groups/{id}`) goes with
-it: curate the token page again after its first read. Self-hosted Pretix, Eventyay, Gathio, Gancio and Mobilizon are detected from page
-signatures, a heuristic that can cost one bounded discovery request. Authenticated APIs never
+it: curate the token page again after its first read. Self-hosted Pretix, Eventyay, Gathio, Gancio, Mobilizon and hitobito are detected from what
+the software itself puts in its pages (its assets, its `generator` meta, its export link, its
+application shell), never from its name in a page's text. A detected page costs one bounded
+request more, to the host the page answered from (for Mobilizon a GraphQL POST to its `/api`);
+when that request fails the page's own card stands, with no warning and no drift counted. Authenticated APIs never
 redirect, and credentials are removed from retained URLs and errors.
 
 Cursor feeds (an event portal, BTC Map) keep their checkpoints in
@@ -1100,9 +1113,10 @@ changes, canaries, the queue, ingestion lag and grouping. Admin `GET /v1/info` h
 manifests, resolver status (aliases left out: their roots answer for them), counts (`aliases`
 among them), ingestion, source and canary state; public `/v1/info` shows
 only the version, what the instance resolves, the limits a client must respect and the OSM
-licence. Stored errors are sanitized classes (dns, connect, timeout, http_4xx, http_5xx, parse,
-policy, too_large for an answer past its size cap, too_complex for a page whose parse did not
-end within its limits; rate_limited for a link waiting for its host's budget). A failed resolve
+licence. Stored errors are sanitized classes (dns, connect, timeout, http_3xx for a redirect the
+OSM upstream answered, http_4xx, http_5xx, parse,
+policy, too_large for an answer past its size cap, too_complex for a page whose parse ran past
+its CPU, memory or node limit; rate_limited for a link waiting for its host's budget). A failed resolve
 is logged at warn as `resolution failed`, with the resource id (`resource_id`), the link's host
 (`host`; its scheme for a link without one, never its path), this class (`kind`) and the
 upstream HTTP status when one was answered (`status`), never the error's text. A source's health

@@ -1075,17 +1075,21 @@ fn manifests_cover_every_platform_and_keys_disable_without_exposing_credentials(
             ..Default::default()
         },
     );
-    let target = adapters::service::endpoint(
+    let (target, options) = adapters::service::endpoint(
         adapters::definition("ticketmaster").unwrap(),
         "https://app.ticketmaster.com/discovery/v2/events/abc.json",
         None,
         &cfg,
     )
     .unwrap()
-    .unwrap()
-    .0;
-    assert!(target.contains("/abc.json?"));
+    .unwrap();
+    // The key is a query credential of the request, never part of the address.
+    assert!(target.ends_with("/abc.json"), "{target}");
     assert!(!target.contains(".json.json"));
+    assert_eq!(
+        options.query_secret,
+        Some(("apikey", "secret-fixture-key".to_owned()))
+    );
     let m = adapters::manifest(adapters::definition("ticketmaster").unwrap(), &cfg);
     assert!(m.enabled);
     assert!(!serde_json::to_string(&m)
@@ -1509,10 +1513,13 @@ async fn cursor_deltas_tombstones_rollback_hold_reset_and_compare_swap(pool: PgP
 }
 
 fn signed(kind: u16, created: u64, tags: &[&[&str]]) -> nostr::event::Event {
+    signed_content(kind, created, "Fixture description", tags)
+}
+fn signed_content(kind: u16, created: u64, content: &str, tags: &[&[&str]]) -> nostr::event::Event {
     use nostr::prelude::*;
     // Deliberately public deterministic fixture key; never used for a real identity.
     let keys = Keys::parse(&"01".repeat(32)).unwrap();
-    let unsigned = EventBuilder::new(Kind::from(kind), "Fixture description")
+    let unsigned = EventBuilder::new(Kind::from(kind), content)
         .tags(tags.iter().map(|t| Tag::parse(t.iter().copied()).unwrap()))
         .custom_created_at(Timestamp::from_secs(created))
         .finalize_unsigned(keys.public_key());
@@ -1880,6 +1887,87 @@ async fn nostr_calendar_queues_members_and_reads_accepted_children(pool: PgPool)
     );
 }
 
+/// A calendar that lists a member twice, with a text far past a card's, is read and saved: the
+/// member is one row, the calendar's own card is cut like any card.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_nostr_calendar_listing_a_member_twice_with_a_long_text_is_saved(pool: PgPool) {
+    use pinakes_core::event::adapters::nostr::{self as nip52, Target};
+    let at = (Utc::now() + Duration::days(1)).timestamp().to_string();
+    let child = signed(
+        31923,
+        100,
+        &[&["d", "twice"], &["title", "Member"], &["start", &at]],
+    );
+    let reference = format!("31923:{}:twice", child.pubkey.to_hex());
+    let parent = signed_content(
+        31924,
+        101,
+        &"A long calendar text. ".repeat(1000),
+        &[
+            &["d", "twice-calendar"],
+            &["title", "Calendar"],
+            &["a", &reference],
+            &["a", &reference],
+        ],
+    );
+    let parent_uri =
+        Target::coordinate(&format!("31924:{}:twice-calendar", parent.pubkey.to_hex()))
+            .unwrap()
+            .uri()
+            .unwrap();
+    let parent_id = store::ensure_resource(&pool, &parent_uri).await.unwrap();
+    let (egress, _) = mock_egress(vec![(200, json!([parent]))]);
+    // The first read queues the member; once the member has its card, the calendar reads.
+    let pending = nip52::resolve(&parent_uri, &egress, &EventConfig::default(), &pool, false)
+        .await
+        .unwrap_err();
+    assert!(pending.is::<pinakes_core::resolver::RetryLater>());
+    let child_uri = Target::coordinate(&reference).unwrap().uri().unwrap();
+    let child_id = pinakes_core::model::identity(&child_uri).unwrap().0;
+    let member = nip52::parse(&child_uri, &child).unwrap();
+    store::save_document(&pool, &child_id, 0, &member)
+        .await
+        .unwrap();
+    let doc = nip52::resolve(&parent_uri, &egress, &EventConfig::default(), &pool, false)
+        .await
+        .unwrap();
+    assert_eq!(doc.container.as_ref().unwrap().occurrences.len(), 1);
+    assert!(doc.description.as_ref().unwrap().len() <= 2048);
+    store::save_document(&pool, &parent_id, 0, &doc)
+        .await
+        .unwrap();
+}
+/// Of an event's several `g` tags the finest that reads places it; one that does not read
+/// changes nothing.
+#[test]
+fn a_nostr_event_is_placed_by_its_finest_geohash() {
+    use pinakes_core::event::adapters::nostr::{self as nip52, Target};
+    let at = (Utc::now() + Duration::days(1)).timestamp().to_string();
+    let place = |tags: &[&[&str]]| {
+        let start = ["start", at.as_str()];
+        let mut all: Vec<&[&str]> = vec![&["d", "placed"], &["title", "Placed"], &start];
+        all.extend_from_slice(tags);
+        let event = signed(31923, 100, &all);
+        let uri = Target::coordinate(&format!("31923:{}:placed", event.pubkey.to_hex()))
+            .unwrap()
+            .uri()
+            .unwrap();
+        let point = nip52::parse(&uri, &event).unwrap().location.unwrap();
+        (point.lat, point.lon)
+    };
+    let fine = place(&[&["g", "u0m70q"]]);
+    assert_ne!(fine, place(&[&["g", "u0"]]));
+    assert_eq!(
+        place(&[&["g", "u0m"], &["g", "u0m70q"], &["g", "!"], &["g", "u0"]]),
+        fine
+    );
+    // A pair of coordinates is finer than any geohash.
+    assert_eq!(
+        place(&[&["g", "46.0051", "8.9528"], &["g", "u0m70q"]]),
+        (46.0051, 8.9528)
+    );
+}
+
 async fn install_cursor(pool: &PgPool, uri: &str, value: &str) {
     let id = store::ensure_resource(pool, uri).await.unwrap();
     sqlx::query("INSERT INTO event_fetch(resource_id,adapter_cursor) VALUES($1,$2) ON CONFLICT(resource_id) DO UPDATE SET adapter_cursor=$2")
@@ -2023,16 +2111,46 @@ fn own_calendar_links_and_deterministic_platform_endpoints() {
         .unwrap(),
         "https://tickets.example/org/current/ical/"
     );
+    // Share links as a browser shows them (a view and a date after the token) and of an install
+    // below a path of its own; spelled in parts, as no file holds a share link's form but the
+    // check's own samples.
+    let exported = "https://cloud.example/remote.php/dav/public-calendars/abc?export";
+    let viewed = format!(
+        "{}/dayGridMonth/now",
+        "https://cloud.example/apps/calendar/p/abc"
+    );
+    let embedded = format!(
+        "https://example.org/cloud/index.php/apps/calendar/{}/abc",
+        "embed"
+    );
+    let below = format!(
+        "https://example.org/cloud/remote.php/dav/{}/abc?export",
+        "public-calendars"
+    );
     for (id, uri, expected) in [
         (
             "nextcloud",
             "https://cloud.example/apps/calendar/p/abc",
-            "https://cloud.example/remote.php/dav/public-calendars/abc?export",
+            exported,
         ),
+        // The share's token, not the view and date after it; below the install's own path.
+        ("nextcloud", viewed.as_str(), exported),
+        ("nextcloud", embedded.as_str(), below.as_str()),
         (
             "petzi",
             "https://www.petzi.ch/en/events/123-name/",
             "https://www.petzi.ch/en/events/123-name.ics",
+        ),
+        // A query or a fragment is the page's, never the file's.
+        (
+            "tito",
+            "https://ti.to/org/event/?source=mail#tickets",
+            "https://ti.to/org/event.ics",
+        ),
+        (
+            "pretix",
+            "https://pretix.eu/org/event/?voucher=X",
+            "https://pretix.eu/org/event/ical/",
         ),
         (
             "gathio",
@@ -2048,6 +2166,15 @@ fn own_calendar_links_and_deterministic_platform_endpoints() {
             expected
         );
     }
+    // A site's root names no event: no file is guessed for it.
+    assert!(endpoint(
+        adapters::definition("tito").unwrap(),
+        "https://ti.to/",
+        None,
+        &cfg
+    )
+    .unwrap()
+    .is_none());
     let f = common::fetched(base, 200, "text/html".into(), vec![]);
     for (id, uri, expected) in [
         (
@@ -2313,7 +2440,16 @@ async fn platform_ua_config_class_c_and_secret_projection(pool: PgPool) {
         .resolve("https://www.ticketmaster.com/event/fixture")
         .await
         .unwrap();
-    assert!(t.seen.lock().unwrap()[0].0.contains("apikey=test-secret"));
+    // The key is the wire's alone: the address the egress handles names none.
+    {
+        let seen = t.seen.lock().unwrap();
+        assert!(!seen[0].0.contains("test-secret"), "{}", seen[0].0);
+        assert!(seen[0].1.sensitive);
+        assert_eq!(
+            seen[0].1.query_secret,
+            Some(("apikey", "test-secret".to_owned()))
+        );
+    }
     assert!(!serde_json::to_string(&doc).unwrap().contains("test-secret"));
     // A refused key (401, 403) is counted where an alert reads it; a rate limit (429) is not.
     // No other test here has Ticketmaster refuse.
@@ -3506,47 +3642,83 @@ async fn luma_calendar_discovery_and_non_calendar_client_url(pool: PgPool) {
     assert_eq!(doc.container.unwrap().occurrences.len(), 1);
 }
 
-struct HintedGraphql;
+/// A page on no declared platform's host, as `body`, landing (after a redirect) on
+/// `final.example`; the GraphQL API there answers an error. Records every request.
+struct HintedGraphql {
+    body: &'static str,
+    seen: Mutex<Vec<String>>,
+}
 #[async_trait::async_trait]
 impl Transport for HintedGraphql {
     async fn get(&self, u: &url::Url, _: &[SocketAddr]) -> anyhow::Result<Fetched> {
+        self.seen.lock().unwrap().push(u.to_string());
         let api = u.path() == "/api";
+        let mut answered = u.clone();
+        if !api {
+            answered.set_host(Some("final.example")).unwrap();
+        }
         Ok(common::fetched(
-            u.clone(),
+            answered,
             200,
             if api { "application/json" } else { "text/html" }.into(),
             if api {
                 br#"{"errors":[{"message":"not that GraphQL API"}]}"#.to_vec()
             } else {
-                b"<title>A page about mobilizon</title>".to_vec()
+                self.body.as_bytes().to_vec()
             },
         ))
     }
 }
+/// A platform's name in a page's text is no sign of the platform: nothing more is asked. A
+/// page that is the platform's application shell is asked for at the host it answered from,
+/// and a failed answer there neither vetoes the page nor marks it: no warning, no drift.
 #[sqlx::test(migrations = "../../migrations")]
 async fn unregistered_platform_hint_cannot_veto_page(pool: PgPool) {
     use pinakes_core::{queue, resolver::Resolver};
     let uri = "https://generic.example/events/86a665ae-e495-4e4f-88d4-4cffd44a82f1";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
-    let r = platform(
-        &pool,
-        EventConfig {
-            geocoding: false,
-            ..Default::default()
-        },
-        Egress::with_backends(
-            Default::default(),
-            Arc::new(AdapterDns),
-            Arc::new(HintedGraphql),
-        ),
+    let read = |body: &'static str| {
+        let transport = Arc::new(HintedGraphql {
+            body,
+            seen: Mutex::default(),
+        });
+        let r = platform(
+            &pool,
+            EventConfig {
+                geocoding: false,
+                ..Default::default()
+            },
+            Egress::with_backends(Default::default(), Arc::new(AdapterDns), transport.clone()),
+        );
+        (r, transport)
+    };
+    // The word alone, in the title and the text (also "gancio", an Italian word).
+    let (r, transport) = read(
+        "<title>A page about mobilizon</title><p>Mobilizon, pretix, eventyay, gathio, hitobito: un gancio.</p>",
     );
     let doc = r.resolve(uri).await.unwrap();
     assert_eq!(doc.name.as_deref(), Some("A page about mobilizon"));
-    assert!(doc
-        .event
-        .warnings
-        .iter()
-        .any(|w| w == "enrichment_unavailable"));
+    assert!(doc.event.warnings.is_empty(), "{:?}", doc.event.warnings);
+    assert_eq!(*transport.seen.lock().unwrap(), [uri]);
+    // Mobilizon's application shell: its API is asked, where the page answered.
+    let (r, transport) = read(
+        r#"<title>A meetup</title><link phx-track-static rel="stylesheet" href="/assets/main.css"><noscript>We're sorry but Mobilizon doesn't work properly without JavaScript enabled.</noscript><div id="app"></div>"#,
+    );
+    let metrics = pinakes_core::telemetry::Metrics::new().unwrap();
+    let (doc, observations) =
+        pinakes_core::telemetry::observe(&metrics, &r.manifest(), r.resolve(uri)).await;
+    let doc = doc.unwrap();
+    assert_eq!(doc.name.as_deref(), Some("A meetup"));
+    assert!(doc.event.warnings.is_empty(), "{:?}", doc.event.warnings);
+    assert_eq!(
+        *transport.seen.lock().unwrap(),
+        [uri, "https://final.example/api"]
+    );
+    assert!(
+        observations.iter().all(|o| o.outcome != "drift"),
+        "{:?}",
+        observations.iter().map(|o| o.outcome).collect::<Vec<_>>()
+    );
     queue::run_job(
         &pool,
         &r,

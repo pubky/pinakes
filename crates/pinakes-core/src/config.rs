@@ -438,6 +438,8 @@ pub struct EventConfig {
     #[serde(skip)]
     pub max_components: usize,
     #[serde(skip)]
+    pub max_properties: usize,
+    #[serde(skip)]
     pub max_event_revisions: usize,
     #[serde(skip)]
     pub max_event_document_bytes: usize,
@@ -480,6 +482,7 @@ impl Default for EventConfig {
             max_occurrences_per_series: 50,
             max_occurrences_per_feed: 10000,
             max_components: 100000,
+            max_properties: 1_000_000,
             max_event_revisions: 10000,
             max_event_document_bytes: 8 * 1024 * 1024,
             max_recurrence_steps: 100000,
@@ -644,10 +647,10 @@ pub struct ResolverConfig {
     /// sources' (`[also_on.sources.musicbrainz] base_url`); empty is the public one.
     #[serde(skip)]
     pub musicbrainz_base: String,
-    /// `pubky` only: the most dates one period of a recurrence rule may hold
-    /// (`limits.event_max_period_dates`), for the Pubky apps' event readers.
+    /// `pubky` only: how long one PKARR relay may take to answer
+    /// (`limits.pkarr_relay_timeout_ms`).
     #[serde(skip)]
-    pub max_period_dates: usize,
+    pub pkarr_relay_timeout_ms: u64,
     /// `web.music_enrichment` only: a MusicBrainz page's card takes an image and a description,
     /// with their credits, from its Wikidata item (`music_enrichment`). Off, the card is
     /// MusicBrainz's alone.
@@ -674,7 +677,7 @@ impl Default for ResolverConfig {
             requests_per_second: 2.0,
             ttl_secs: 86400,
             musicbrainz_base: String::new(),
-            max_period_dates: crate::event::time::MAX_PERIOD_DATES,
+            pkarr_relay_timeout_ms: 4000,
             music_enrichment: true,
             music_enrichment_timeout_ms: 8000,
             music_enrichment_retry_secs: 3600,
@@ -1033,8 +1036,6 @@ impl Config {
         self.egress.contact = self.http.contact.trim().to_owned();
         self.osm.contact = self.egress.contact.clone();
         self.web.musicbrainz_base = self.also_on.musicbrainz_base().to_owned();
-        // The Pubky apps' event readers bound recurrence rules as calendars do.
-        self.pubky.max_period_dates = self.event.max_period_dates;
         // A source's published limits, for hosts the operator does not rate.
         self.egress.source_rates = crate::sources::budgets()
             .chain(crate::also_on::budgets())
@@ -1200,6 +1201,9 @@ impl Config {
         {
             bail!("limits.html_head_bytes must be 1–16 MB");
         }
+        if !(100..=7000).contains(&self.pubky.pkarr_relay_timeout_ms) {
+            bail!("limits.pkarr_relay_timeout_ms must be 100–7000");
+        }
         let w = &self.web;
         if !(100..=13000).contains(&w.music_enrichment_timeout_ms)
             || !(60..=604800).contains(&w.music_enrichment_retry_secs)
@@ -1224,6 +1228,7 @@ impl Config {
             || !(1..=1000).contains(&e.max_occurrences_per_series)
             || !(1..=10000).contains(&e.max_occurrences_per_feed)
             || !(1..=100000).contains(&e.max_components)
+            || !(1..=10_000_000).contains(&e.max_properties)
             || !(1..=10000).contains(&e.max_event_revisions)
             || !(1024..=32 * 1024 * 1024).contains(&e.max_event_document_bytes)
             || !(1..=1000000).contains(&e.max_recurrence_steps)
@@ -1514,12 +1519,6 @@ mod tests {
                 "{key}={value}"
             );
         }
-    }
-    #[test]
-    fn the_pubky_readers_take_the_recurrence_period_limit() {
-        assert_eq!(Config::default().pubky.max_period_dates, 100_000);
-        let cfg = with(serde_json::json!({"limits":{"event_max_period_dates":2}})).unwrap();
-        assert_eq!(cfg.pubky.max_period_dates, 2);
     }
     #[test]
     fn the_recurrence_period_limit_has_a_default_and_bounds() {
@@ -2591,6 +2590,9 @@ limits! {
         |c, v| c.cards.media.ttl_secs = v, |c, v| c.cards.isbn.ttl_secs = v,
         |c, v| c.cards.doi.ttl_secs = v, |c, v| c.cards.nostr.ttl_secs = v,
         |c, v| c.cards.activitypub.ttl_secs = v, |c, v| c.cards.official.ttl_secs = v],
+    /// How long one PKARR relay may take to answer (milliseconds, 100–7000); a relay slower than
+    /// this is a failed relay, and the others' packets are used.
+    pkarr_relay_timeout_ms: u64 = |c| c.pubky.pkarr_relay_timeout_ms => [|c, v| c.pubky.pkarr_relay_timeout_ms = v],
     /// How long a MusicBrainz card's enrichment may take, within the card's own read
     /// (milliseconds, 100–13000); past it, the card keeps its stored image and description.
     music_enrichment_timeout_ms: u64 = |c| c.web.music_enrichment_timeout_ms => [|c, v| c.web.music_enrichment_timeout_ms = v],
@@ -2703,6 +2705,8 @@ limits! {
     event_max_occurrences_per_feed: usize = |c| c.event.max_occurrences_per_feed => [|c, v| c.event.max_occurrences_per_feed = v],
     /// Most components one calendar may hold.
     event_max_components: usize = |c| c.event.max_components => [|c, v| c.event.max_components = v],
+    /// Most properties one calendar may hold, over all its components.
+    event_max_properties: usize = |c| c.event.max_properties => [|c, v| c.event.max_properties = v],
     /// Most revisions of one event (RECURRENCE-ID overrides).
     event_max_revisions: usize = |c| c.event.max_event_revisions => [|c, v| c.event.max_event_revisions = v],
     /// Largest retained event document set per feed (bytes).

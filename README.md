@@ -94,14 +94,17 @@ schema upgrades require a reviewed in-place procedure; disposable local database
 ([operations](docs/operations.md#database)).
 
 **Egress.** Every fetch a reference can steer goes through one client (`resolver/egress.rs`):
-public HTTP(S) only, every DNS answer checked and pinned, private and metadata addresses refused,
-at most three redirects (each checked again), a 10-second timeout and a 1 MB body cap (an HTML
-page is read on to `limits.html_head_bytes`, 4 MB by default; 8 MB for MusicBrainz and Wikidata
+public HTTP(S) only (and, for a `nostr:` link, one bounded `wss` connection to the relay it
+names, under the same address rules), every DNS answer checked and pinned, private and metadata
+addresses refused, at most three redirects (each checked again), a 10-second timeout and a 1 MB
+cap for a page (an HTML page is read up to `limits.html_head_bytes`, 4 MB by default; a calendar up to
+`limits.event_feed_body_bytes`; 8 MB for podcast feeds and for MusicBrainz and Wikidata
 answers). Requests to one host go one at a time, paced to
 `limits.host_requests_per_second` or the host's published rate. Discovery reads (also-on
 lookups, oEmbed, feed discovery) are cached and shared between concurrent readers. Card images
 stay origin URLs and are never fetched; a link that is itself an image resolves to an ImageObject
-card. Nominatim and Nexus are trusted upstreams outside this policy.
+card. Nominatim and Nexus are trusted upstreams outside this policy, each with a client of its own
+for the URL the operator sets.
 
 ## Run locally
 

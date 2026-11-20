@@ -416,17 +416,27 @@ pub fn parse(uri: &str, event: &Event) -> Result<ResourceMeta> {
             ..Default::default()
         });
     }
+    // Of several `g` tags (a place is often tagged at every precision) the finest one that
+    // reads places the event: a pair of coordinates before any geohash, then the longest
+    // geohash. A tag that does not read changes nothing.
+    let mut finest = 0usize;
     for t in event.tags.iter() {
         let a = t.as_slice();
         if a.first().is_some_and(|k| k == "g") {
-            doc.location = if a.len() >= 3 {
+            let read = if a.len() >= 3 {
                 a[1].parse::<f64>()
                     .ok()
                     .zip(a[2].parse::<f64>().ok())
                     .and_then(|(lat, lon)| page::point(&json!({"latitude":lat,"longitude":lon})))
+                    .map(|point| (usize::MAX, point))
             } else {
-                a.get(1).and_then(|s| geohash(s))
+                a.get(1)
+                    .and_then(|s| geohash(s).map(|point| (s.len(), point)))
             };
+            if let Some((precision, point)) = read.filter(|(precision, _)| *precision > finest) {
+                finest = precision;
+                doc.location = Some(point);
+            }
         }
         if a.first().is_some_and(|k| k == "t") {
             if let Some(v) = a.get(1) {
@@ -532,7 +542,9 @@ pub async fn resolve(
     doc.source = "nip52".into();
     doc.name = tag(&event, "title").map(str::to_owned);
     doc.description = Some(event.content.clone());
-    let refs: Vec<_> = event
+    // The calendar's own card is cut to a card's caps, as an event's is.
+    let mut doc = doc.bounded(crate::resolver::web::ATTRIBUTES)?;
+    let mut refs: Vec<_> = event
         .tags
         .iter()
         .filter_map(|t| {
@@ -552,6 +564,9 @@ pub async fn resolve(
         })
         .filter(|t| matches!(t.kind, Some(31922 | 31923)))
         .collect();
+    // A member listed twice is one member: one row under one key.
+    let mut listed_once = std::collections::HashSet::new();
+    refs.retain(|t| listed_once.insert((t.kind, t.author.clone(), t.identifier.clone())));
     ensure!(
         refs.len() <= cfg.adapters.max_calendar_members,
         "Nostr calendar member cap exceeded"
