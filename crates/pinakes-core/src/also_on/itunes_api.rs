@@ -15,13 +15,16 @@ pub(crate) fn options() -> FetchOptions {
     }
 }
 /// One iTunes Search or Lookup answer (`url` in the configured storefront), shared for an hour;
-/// `None` for an answer that is no result list (4xx). A rate limit or an outage is retried.
+/// `None` only for a 404 or a 400 (an ID iTunes cannot read: asking again answers the same). A
+/// rate limit or an outage is retried after the wait it names; any other status is a failure,
+/// never "none", so the run that asked is retried and its stored rows stay.
 pub(crate) async fn answer(cx: &Context, url: &str) -> Result<Option<Value>> {
     let fetched = cx.egress.discover(url, &options(), 3600).await?;
     match fetched.status {
         200 => {}
+        400 | 404 => return Ok(None),
         429 | 500..=599 => return Err(super::media::busy("itunes_busy", &fetched)),
-        _ => return Ok(None),
+        status => anyhow::bail!("itunes answered {status}"),
     }
     // iTunes answers `text/javascript` with leading newlines.
     Ok(Some(serde_json::from_slice(fetched.body.trim_ascii())?))
@@ -43,4 +46,92 @@ pub(crate) async fn track_album(cx: &Context, track: &str) -> Result<Option<Stri
             .map(|id| id.to_string())
         })
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::resolver::{
+        egress::{Dns, Egress, Fetched, Transport},
+        RetryLater,
+    };
+    use async_trait::async_trait;
+    use std::{net::SocketAddr, sync::Arc};
+
+    struct Public;
+    #[async_trait]
+    impl Dns for Public {
+        async fn lookup(&self, _: &str, port: u16) -> Result<Vec<SocketAddr>> {
+            Ok(vec![SocketAddr::new("8.8.8.8".parse()?, port)])
+        }
+    }
+    /// iTunes' lookup, answering with the status its `id` names (a result list for 200).
+    struct Lookup;
+    #[async_trait]
+    impl Transport for Lookup {
+        async fn get(&self, url: &url::Url, a: &[SocketAddr]) -> Result<Fetched> {
+            self.get_with(url, a, &FetchOptions::default()).await
+        }
+        async fn get_with(
+            &self,
+            url: &url::Url,
+            _: &[SocketAddr],
+            _: &FetchOptions,
+        ) -> Result<Fetched> {
+            let id = url
+                .query_pairs()
+                .find(|(key, _)| key == "id")
+                .map(|(_, id)| id.into_owned())
+                .unwrap_or_default();
+            let status: u16 = id.parse()?;
+            let body = if status == 200 {
+                "\n\n\n{\"resultCount\":0,\"results\":[]}"
+            } else {
+                "{}"
+            };
+            Ok(Fetched::answer(
+                url.clone(),
+                status,
+                "text/javascript".into(),
+                body.as_bytes().to_vec(),
+            ))
+        }
+    }
+
+    /// iTunes has none only when it answers a result list without the thing, or a 404. A
+    /// refusal (403) or another status it gives no meaning to here is a failure, and an outage
+    /// is a wait: neither reads as "none", which would clear what the source stored for the
+    /// card.
+    #[tokio::test]
+    async fn only_a_404_is_none() {
+        let mut egress = crate::config::EgressConfig {
+            host_requests_per_second: 1000.0,
+            ..Default::default()
+        };
+        egress.host_rates.insert("itunes.apple.com".into(), 1000.0);
+        let cx = Context {
+            egress: Egress::with_backends(egress, Arc::new(Public), Arc::new(Lookup)),
+            config: Arc::new(crate::config::Config::default()),
+        };
+        let found = lookup(&cx, "200").await.unwrap().unwrap();
+        assert_eq!(found["resultCount"], 0);
+        assert_eq!(lookup(&cx, "404").await.unwrap(), None);
+        // An ID iTunes cannot read (400) is no object either: it answers the same every time.
+        assert_eq!(lookup(&cx, "400").await.unwrap(), None);
+        for status in ["403", "401", "408"] {
+            let failed = match lookup(&cx, status).await {
+                Ok(answer) => panic!("{status} answered {answer:?}"),
+                Err(error) => error,
+            };
+            assert!(
+                failed.downcast_ref::<RetryLater>().is_none(),
+                "{status}: {failed:#}"
+            );
+        }
+        let busy = lookup(&cx, "503").await.unwrap_err();
+        assert_eq!(
+            busy.downcast_ref::<RetryLater>().map(|r| r.class),
+            Some("itunes_busy")
+        );
+    }
 }
