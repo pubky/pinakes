@@ -67,6 +67,16 @@ fn mb_url(resource: &str) -> (u16, Vec<u8>) {
             ]}))
             .unwrap(),
         ),
+        // A track MusicBrainz relates to the edit of "Never Gonna Give You Up", which shares its
+        // ISRC with the album version.
+        "https://tidal.com/track/491206015" => (
+            200,
+            serde_json::to_vec(&serde_json::json!({"resource": resource, "relations": [
+                {"type": "streaming", "target-type": "recording", "ended": false,
+                 "recording": {"id": "e00ebb77-541e-41f3-86ba-a90530414922"}}
+            ]}))
+            .unwrap(),
+        ),
         // A track MusicBrainz relates to recording …36, whose fifth ISRC it shares with …35.
         "https://tidal.com/track/1000005" => (
             200,
@@ -3419,6 +3429,19 @@ async fn a_shared_isrc_names_the_recording_the_tracks_length_picks(pool: sqlx::P
     store::save_document(&pool, &deezer_id, 0, &d)
         .await
         .unwrap();
+    // The edit's own MusicBrainz page, and a track MusicBrainz relates to the edit by URL whose
+    // page states no ISRC: both read the edit's record, which lists the shared ISRC.
+    let mut of_the_edit = vec![];
+    for uri in [
+        "https://musicbrainz.org/recording/e00ebb77-541e-41f3-86ba-a90530414922",
+        "https://tidal.com/track/491206015",
+    ] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut d = ResourceMeta::new(uri, "jsonld", 86400);
+        d.set_type("MusicRecording");
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        of_the_edit.push(id);
+    }
     let t = Arc::new(Recorded {
         seen: Mutex::default(),
     });
@@ -3474,6 +3497,19 @@ async fn a_shared_isrc_names_the_recording_the_tracks_length_picks(pool: sqlx::P
     );
     for id in &ids {
         assert_eq!(rows(facts, id.clone()).await, ["isrc GBARL9300135"]);
+    }
+    // The recording's own record lists the shared ISRC as well: on its page and on a link
+    // MusicBrainz relates to it, the recording is the key and the ISRC a fact, so Deezer is not
+    // asked by the ISRC for either.
+    for id in &of_the_edit {
+        let recorded = rows(keys, id.clone()).await;
+        assert!(recorded.iter().any(|k| k.starts_with(edit)), "{recorded:?}");
+        assert!(
+            !recorded.iter().any(|k| k.starts_with("isrc:")),
+            "{recorded:?}"
+        );
+        assert_eq!(rows(facts, id.clone()).await, ["isrc GBARL9300135"]);
+        assert!(rows(deezer_links, id.clone()).await.is_empty());
     }
     let own = rows(keys, deezer_id.clone()).await;
     assert!(own.contains(&format!("{album} deezer deezer")), "{own:?}");

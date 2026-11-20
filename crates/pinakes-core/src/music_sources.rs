@@ -227,6 +227,20 @@ pub(crate) async fn isrc_recording(cx: &Context, isrc: &str) -> Result<Option<St
         IsrcMatch::Unknown | IsrcMatch::Picked { .. } | IsrcMatch::Shared => None,
     })
 }
+/// Whether an ISRC that `mbid`'s own record carries may key that recording: MusicBrainz's lookup
+/// of the ISRC names this recording alone, or knows no recording with it (the ISRC is then its
+/// own key, as [`isrc_key`] keys a service's track). One on recordings that disagree, or one
+/// that names another recording, is a fact: as a key it would join whichever recording's group
+/// took it first.
+pub(crate) async fn isrc_is_own(cx: &Context, isrc: &str, mbid: &str) -> Result<bool> {
+    let base = cx.config.also_on.musicbrainz_base();
+    Ok(match isrc_match(cx, isrc, None).await? {
+        IsrcMatch::Unknown => true,
+        IsrcMatch::One(one) => recording_key(&cx.egress, base, &one).await? == mbid,
+        IsrcMatch::Duplicates { standing, .. } => standing == mbid,
+        IsrcMatch::Picked { .. } | IsrcMatch::Shared => false,
+    })
+}
 /// The MBID every producer keys a recording by (`mb:recording:…`): the recording that stands for
 /// its duplicates ([`standing`]), else its own. The one function behind every recording key: a
 /// service's own ISRC ([`isrc_match`]: duplicates and a duration's pick), a URL relation and a
@@ -876,9 +890,10 @@ pub fn artist_link(url: &str) -> Option<ArtistLink> {
 /// (`kind`, `ids`): their MBIDs (the release group's alone for several releases), the recording's
 /// ISRCs and the release's barcode as keys, their facts, and their current links on music
 /// services at `level`, each keyed by the entity MusicBrainz names it on. Nothing when an entity
-/// is unknown, or when several releases are of different release groups. `shared` are ISRCs
-/// known to be on several recordings (the one a track's length picked among them): they stay
-/// facts, never keys, as a key would join whichever recording's group took it first.
+/// is unknown, or when several releases are of different release groups. An ISRC is a key only
+/// when it is this recording's alone ([`isrc_is_own`]; for a duplicate, when it names the one
+/// that stands for it, [`isrc_recording`]). `shared` are ISRCs already known to be on several
+/// recordings (the one a track's length picked among them): they stay facts without a lookup.
 pub(crate) async fn entities_found(
     cx: &Context,
     base: &str,
@@ -917,8 +932,10 @@ pub(crate) async fn entities_found(
     };
     let stands = duplicates.clone().filter(|s| *s != entity.mbid);
     let own = stands.as_deref().unwrap_or(&entity.mbid);
-    // A duplicate's ISRCs are keys only when each names the same standing recording on its own:
-    // one it shares with a recording that disagrees stays a fact.
+    // A recording's ISRCs are keys only when each names this recording on its own (for a
+    // duplicate, the one that stands for it): one it shares with a recording that disagrees
+    // stays a fact, whether the recording stands alone, in a set, or in one that cannot be
+    // settled.
     let mut isrcs: Vec<&String> = vec![];
     for isrc in entity
         .isrcs
@@ -926,13 +943,12 @@ pub(crate) async fn entities_found(
         .filter(|i| !shared.contains(i))
         .take(MAX_ISRC_KEYS)
     {
-        match &duplicates {
-            Some(standing) => {
-                if isrc_recording(cx, isrc).await?.as_ref() == Some(standing) {
-                    isrcs.push(isrc);
-                }
-            }
-            None => isrcs.push(isrc),
+        let keyed = match &duplicates {
+            Some(standing) => isrc_recording(cx, isrc).await?.as_ref() == Some(standing),
+            None => isrc_is_own(cx, isrc, &entity.mbid).await?,
+        };
+        if keyed {
+            isrcs.push(isrc);
         }
     }
     // Several releases: the release group's key alone, so editions stay apart.
