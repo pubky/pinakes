@@ -49,6 +49,8 @@ fn daemon(config: &Path, args: &[&str]) -> Command {
     for (key, _) in std::env::vars().filter(|(key, _)| key.starts_with("PINAKES__")) {
         command.env_remove(key);
     }
+    // The daemon's default log filter, whatever the caller's.
+    command.env_remove("RUST_LOG");
     command
 }
 /// Run a command that exits by itself, within a minute.
@@ -187,7 +189,8 @@ async fn the_daemon_stops_when_it_loses_the_instance_lock(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(ended, [true], "one session holds the instance lock");
-    let status = tokio::time::timeout(Duration::from_secs(45), serving.wait())
+    // At most the lock check's interval and its answer's wait, then the stop itself.
+    let status = tokio::time::timeout(Duration::from_secs(90), serving.wait())
         .await
         .expect("pinakesd stops once its instance lock is gone")
         .unwrap();

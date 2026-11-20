@@ -238,6 +238,7 @@ async fn start(
     // Both listeners are bound before any task or worker starts: from here on nothing waits,
     // so a signal during startup never cuts off a worker that has claimed a job.
     let admin = tokio::net::TcpListener::bind(&config.admin_listen).await?;
+    let admin_address = admin.local_addr()?;
     let listener = tokio::net::TcpListener::bind(&config.listen).await?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let mut tasks = Tasks::default();
@@ -355,8 +356,8 @@ async fn start(
             shutdown_rx.clone(),
         ),
     );
-    warn_admin_listener(admin.local_addr()?);
-    warn_admin_without_token(admin.local_addr()?, config.admin_token.is_some());
+    warn_admin_listener(admin_address);
+    warn_admin_without_token(admin_address, config.admin_token.is_some());
     let admin_app = api::admin_router(state.clone());
     let mut admin_shutdown = shutdown_rx.clone();
     tasks.spawn("admin listener", async move {

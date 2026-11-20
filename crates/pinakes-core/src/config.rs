@@ -973,12 +973,18 @@ impl Config {
         // punycode. A key that names no single host (a pattern, a URL) would pace nothing.
         let mut rates = BTreeMap::new();
         for (key, rate) in &cfg.limits.host_rates {
+            // A key that is a URL is not repeated: it may carry credentials.
+            let shown = if key.contains("://") || key.contains('@') {
+                "a key that is a URL".to_owned()
+            } else {
+                format!("{key:?}")
+            };
             let host = host_rule(key).filter(|host| !host.starts_with("*.")).with_context(|| {
-                format!("limits.host_rates: {key:?} is not a host name (one host, no `*.`, no scheme or path)")
+                format!("limits.host_rates: {shown} is not a host name (one host, no `*.`, no scheme or path)")
             })?;
             anyhow::ensure!(
                 rates.insert(host, *rate).is_none(),
-                "limits.host_rates: {key:?} names a host another key names too"
+                "limits.host_rates: {shown} names a host another key names too"
             );
         }
         cfg.limits.host_rates = rates;
@@ -2332,6 +2338,10 @@ mod tests {
         let twice =
             serde_json::json!({"limits":{"host_rates":{"Example.org": 0.5, "example.org": 2.0}}});
         assert!(format!("{:#}", with(twice).unwrap_err()).contains("limits.host_rates"));
+        let secret = with(
+            serde_json::json!({"limits":{"host_rates":{"https://user:s3cret@example.org/": 1.0}}}),
+        );
+        assert!(!format!("{:#}", secret.unwrap_err()).contains("s3cret"));
         for bad in [
             "*.example.org",
             "https://example.org/",
