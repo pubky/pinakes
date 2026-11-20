@@ -1318,45 +1318,30 @@ async fn a_pending_preview_is_waited_for_by_its_status_and_read_once(pool: PgPoo
 
 /// What happens to a preview while it is waited for decides the answer: a link deleted
 /// meanwhile is a 404, and one that became an alias answers with its root's card as soon as the
-/// root has one. Either answer follows the change, not the end of the window.
+/// root has one. Either answer follows the change, not the end of the window: the wait reads
+/// the row's status every 50 ms, so a wait that ends at the change reads it once or twice, and
+/// one held to the end of its three seconds some sixty times. The reads are counted, not timed:
+/// their number does not grow with the load on the machine.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_preview_that_goes_or_becomes_an_alias_while_waited_for(pool: PgPool) {
-    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
-    // Runs `change` on the link's row once the request has stored it: when the change was made.
-    let meanwhile = |uri: &'static str, change: &'static str, root: Option<String>| {
-        let pool = pool.clone();
-        tokio::spawn(async move {
-            let id = loop {
-                let id: Option<String> = sqlx::query_scalar("SELECT id FROM resource WHERE uri=$1")
-                    .bind(uri)
-                    .fetch_optional(&pool)
-                    .await
-                    .unwrap();
-                if let Some(id) = id {
-                    break id;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            };
-            sqlx::query(change)
-                .bind(id)
-                .bind(root)
-                .execute(&pool)
-                .await
-                .unwrap();
-            std::time::Instant::now()
-        })
-    };
-    // The wait reads the row's status every 50 ms, so the answer follows the change at once. The
-    // change is made as soon as the row is stored, so an answer held to the end of the
-    // three-second window comes almost three seconds after it. Two seconds between the two
-    // tells them apart, counted from the change: the time the request and the change take to
-    // start on a loaded machine is not in it.
-    let prompt = std::time::Duration::from_secs(2);
-    let gone = meanwhile(
-        "https://example.org/gone-meanwhile",
-        "DELETE FROM resource WHERE id=$1 AND $2::text IS NULL",
-        None,
-    );
+    // One connection for everything here: its backend's own count of the scans of `resource`
+    // and `resource_alias`, which every read of the status makes at least one of.
+    let connection = common::one_connection(&pool).await;
+    let app = api::router(AppState::new(connection.clone(), Config::default()).unwrap());
+    let scans = "SELECT coalesce(sum(coalesce(seq_scan,0)+coalesce(idx_scan,0)),0)::int8 FROM pg_stat_user_tables WHERE relname IN ('resource','resource_alias')";
+    // Well above what a request scans when its wait ends at the change, and well under the
+    // sixty reads a wait held to its end adds (3 s at 50 ms).
+    let held = 40;
+    // The change is made by the request's own write that queues the link (a trigger on it), so
+    // it is there before the wait first reads the row.
+    for statement in [
+        "CREATE FUNCTION gone_meanwhile() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN DELETE FROM resource WHERE id=NEW.id; RETURN NULL; END $$",
+        "CREATE TRIGGER gone_meanwhile AFTER UPDATE OF priority_at ON resource FOR EACH ROW WHEN (NEW.uri='https://example.org/gone-meanwhile') EXECUTE FUNCTION gone_meanwhile()",
+        "CREATE FUNCTION alias_meanwhile() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO resource_alias(alias_id,root_id,basis) VALUES(NEW.id,TG_ARGV[0],'canonical'); RETURN NULL; END $$",
+    ] {
+        sqlx::query(statement).execute(&connection).await.unwrap();
+    }
+    let before = common::counted(&connection, scans).await;
     // The document declares no 404 for this route: the answer is not checked against it.
     let (code, answer) = send(
         &app,
@@ -1366,25 +1351,25 @@ async fn a_preview_that_goes_or_becomes_an_alias_while_waited_for(pool: PgPool) 
         |_, _, _, _| {},
     )
     .await;
-    let answered = std::time::Instant::now();
-    let went = gone.await.unwrap();
+    let reads = common::counted(&connection, scans).await - before;
     assert_eq!(code, 404);
     assert_eq!(answer["error"], "resource expired");
     // Answered when the row went, not at the end of the window.
-    let after = answered.saturating_duration_since(went);
-    assert!(after < prompt, "answered {after:?} after the row went");
+    assert!(reads < held, "{reads} scans after the row went");
 
-    let root = store::ensure_resource(&pool, "https://example.org/root")
+    let root = store::ensure_resource(&connection, "https://example.org/root")
         .await
         .unwrap();
     let mut doc = ResourceMeta::new("https://example.org/root", "web", 86400);
     doc.name = Some("Root".into());
-    store::save_document(&pool, &root, 0, &doc).await.unwrap();
-    let aliased = meanwhile(
-        "https://example.org/alias-meanwhile",
-        "INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'canonical')",
-        Some(root.clone()),
-    );
+    store::save_document(&connection, &root, 0, &doc)
+        .await
+        .unwrap();
+    sqlx::query(&format!("CREATE TRIGGER alias_meanwhile AFTER UPDATE OF priority_at ON resource FOR EACH ROW WHEN (NEW.uri='https://example.org/alias-meanwhile') EXECUTE FUNCTION alias_meanwhile('{root}')"))
+        .execute(&connection)
+        .await
+        .unwrap();
+    let before = common::counted(&connection, scans).await;
     let (code, answer) = call(
         &app,
         "POST",
@@ -1392,16 +1377,11 @@ async fn a_preview_that_goes_or_becomes_an_alias_while_waited_for(pool: PgPool) 
         Some(json!({"uri":"https://example.org/alias-meanwhile"})),
     )
     .await;
-    let answered = std::time::Instant::now();
-    let became = aliased.await.unwrap();
+    let reads = common::counted(&connection, scans).await - before;
     assert_eq!(code, 200);
     assert_eq!(answer["id"], root.as_str());
     assert_eq!(answer["name"], "Root");
-    let after = answered.saturating_duration_since(became);
-    assert!(
-        after < prompt,
-        "answered {after:?} after it became an alias"
-    );
+    assert!(reads < held, "{reads} scans after it became an alias");
 }
 
 #[sqlx::test(migrations = "../../migrations")]
