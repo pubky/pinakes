@@ -258,6 +258,92 @@ async fn html_hops_share_http_redirect_budget_and_recheck_egress() {
     assert!(result.unwrap_err().is::<interstitial::Blocked>());
     assert_eq!(obs[0].outcome, "blocked");
 }
+/// A site whose every page reads as an article, and which sends three of them elsewhere: one to
+/// a sign-in path of its own host, one to its sign-in host, one to another page.
+struct Gated {
+    calls: Mutex<Vec<String>>,
+}
+#[async_trait]
+impl Transport for Gated {
+    async fn get(&self, u: &Url, _: &[SocketAddr]) -> Result<Fetched> {
+        self.calls.lock().unwrap().push(u.to_string());
+        let mut f = page(
+            u.as_str(),
+            &format!(
+                "<title>Members</title><body><p>{}</p></body>",
+                "Useful article text. ".repeat(120)
+            ),
+            200,
+        );
+        let target = match (u.host_str().unwrap_or_default(), u.path()) {
+            ("www.example.org", "/members/1") => "/signin",
+            ("www.example.org", "/members/2") => "https://login.example.org/session",
+            ("www.example.org", "/members/3") => "/about",
+            _ => return Ok(f),
+        };
+        f.status = 302;
+        f.location = Some(target.into());
+        Ok(f)
+    }
+}
+/// A page the site redirects to its sign-in page is a wall for the resolver, whatever the page
+/// it lands on says; the same page asked for by its own address is a page.
+#[tokio::test]
+async fn a_page_redirected_to_sign_in_is_a_wall_for_the_resolver() {
+    let gated = Arc::new(Gated {
+        calls: Mutex::default(),
+    });
+    let resolver = web::WebResolver {
+        oembed_policy: Default::default(),
+        cards: None,
+        events: None,
+        config: Default::default(),
+        egress: Egress::with_backends(
+            EgressConfig {
+                host_requests_per_second: 1000.0,
+                ..Default::default()
+            },
+            Arc::new(PublicDns),
+            gated.clone(),
+        ),
+    };
+    for (asked, landed) in [
+        (
+            "https://www.example.org/members/1",
+            "https://www.example.org/signin",
+        ),
+        (
+            "https://www.example.org/members/2",
+            "https://login.example.org/session",
+        ),
+    ] {
+        let error = resolver.resolve(asked).await.unwrap_err();
+        assert!(error.is::<interstitial::Blocked>(), "{asked}: {error:#}");
+        assert!(
+            gated
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|call| call == landed),
+            "{asked} was never followed to {landed}"
+        );
+        let own = resolver.resolve(landed).await.unwrap();
+        assert_eq!(own.name.as_deref(), Some("Members"), "{landed}");
+    }
+    // A redirect to another page of the site is followed to that page.
+    let moved = resolver
+        .resolve("https://www.example.org/members/3")
+        .await
+        .unwrap();
+    assert_eq!(moved.name.as_deref(), Some("Members"));
+    assert!(gated
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|call| call == "https://www.example.org/about"));
+}
 struct Wall;
 #[async_trait]
 impl Resolver for Wall {

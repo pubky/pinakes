@@ -435,6 +435,30 @@ async fn search_filters_facets_true_keyset_and_invalid_options(pool: PgPool) {
         let (code, v) = call(&app, "GET", &format!("/v1/search?{query}"), None).await;
         assert_eq!(code, 400, "{query}: {v}");
     }
+    // The length caps count bytes: `q` and `category` take 256 each, a tag 128. A value of
+    // exactly the cap is searched; one character more is refused with the cap named. `%C3%A9`
+    // is one character of two bytes.
+    let filter = "filter exceeds 256 bytes";
+    let tag = "tags allows at most 5 labels, or 3 with match=all; each is 1–128 bytes";
+    for (parameter, character, bytes, cap, refusal) in [
+        ("q", "a", 1, 256, filter),
+        ("q", "%C3%A9", 2, 256, filter),
+        ("category", "a", 1, 256, filter),
+        ("category", "%C3%A9", 2, 256, filter),
+        ("tags", "a", 1, 128, tag),
+        ("tags", "%C3%A9", 2, 128, tag),
+    ] {
+        let search = |characters: usize| {
+            let app = app.clone();
+            let path = format!("/v1/search?{parameter}={}", character.repeat(characters));
+            async move { call(&app, "GET", &path, None).await }
+        };
+        let (code, v) = search(cap / bytes).await;
+        assert_eq!(code, 200, "{parameter} of {cap} bytes: {v}");
+        let (code, v) = search(cap / bytes + 1).await;
+        assert_eq!(code, 400, "{parameter} over {cap} bytes: {v}");
+        assert_eq!(v["error"], refusal, "{parameter}");
+    }
 }
 /// `exclude_type` lists every card of another type: each type left out with its subtypes, a link
 /// with no type yet left out too (the type facet does not count it), with `type` both apply, the
@@ -1325,6 +1349,151 @@ async fn public_budget_covers_reads_and_evicts_old_ips(pool: PgPool) {
         read_from(&app, "/v1/info", "127.0.0.1:1").await,
         200,
         "oldest IP is evicted instead of denying all new clients"
+    );
+}
+
+/// The budgets count the address of the connection, never one a header names (forwarded headers
+/// are not trusted): a client over its budget stays refused whatever `X-Forwarded-For`,
+/// `Forwarded` or `X-Real-IP` it sends, and a header naming that client takes nothing from
+/// another connection's budget. So for the per-IP budget of every route and for a preview's.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_forwarded_header_never_changes_whose_budget_is_spent(pool: PgPool) {
+    /// `method path` from `peer` (`address:port`) with `header`, when one is given: the status.
+    async fn status_from(
+        app: &Router,
+        method: &str,
+        path: &str,
+        peer: &str,
+        header: Option<(&str, &str)>,
+        body: Option<Value>,
+    ) -> StatusCode {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json");
+        if let Some((name, value)) = header {
+            request = request.header(name, value);
+        }
+        let mut request = request
+            .body(body.map_or_else(Body::empty, |v| Body::from(v.to_string())))
+            .unwrap();
+        request.extensions_mut().insert(axum::extract::ConnectInfo(
+            peer.parse::<SocketAddr>().unwrap(),
+        ));
+        app.clone().oneshot(request).await.unwrap().status()
+    }
+    // The headers a proxy names a client with, each naming `address`.
+    let naming = |address: &str| {
+        [
+            ("x-forwarded-for", address.to_owned()),
+            ("forwarded", format!("for={address}")),
+            ("x-real-ip", address.to_owned()),
+        ]
+    };
+    let (spent, other) = ("127.0.0.2:1234", "127.0.0.3:1234");
+
+    // The per-IP budget of the public routes: three requests a minute.
+    let config = Config {
+        api: pinakes_core::config::ApiConfig {
+            requests_per_minute: 3,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
+    for _ in 0..3 {
+        assert_eq!(
+            status_from(&app, "GET", "/v1/info", spent, None, None).await,
+            200
+        );
+    }
+    assert_eq!(
+        status_from(&app, "GET", "/v1/info", spent, None, None).await,
+        429
+    );
+    for (name, value) in naming("203.0.113.9") {
+        assert_eq!(
+            status_from(
+                &app,
+                "GET",
+                "/v1/info",
+                spent,
+                Some((name, value.as_str())),
+                None
+            )
+            .await,
+            429,
+            "{name} naming another client"
+        );
+    }
+    // Another connection has its own three, though each request names the client that is over.
+    for (name, value) in naming("127.0.0.2") {
+        assert_eq!(
+            status_from(
+                &app,
+                "GET",
+                "/v1/info",
+                other,
+                Some((name, value.as_str())),
+                None
+            )
+            .await,
+            200,
+            "{name} naming the client over its budget"
+        );
+    }
+
+    // A preview's own budget: one a minute per address. The link is known, so each preview
+    // that is served answers at once.
+    let config = Config {
+        preview: pinakes_core::config::PreviewConfig {
+            requests_per_minute: 1,
+            uri_requests_per_minute: 10,
+            cache_capacity: 100,
+        },
+        ..Default::default()
+    };
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
+    let uri = "https://example.org/known";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut doc = ResourceMeta::new(uri, "web", 86400);
+    doc.name = Some("Known".into());
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let preview = || Some(json!({ "uri": uri }));
+    assert_eq!(
+        status_from(&app, "POST", "/v1/resolve", spent, None, preview()).await,
+        200
+    );
+    assert_eq!(
+        status_from(&app, "POST", "/v1/resolve", spent, None, preview()).await,
+        429
+    );
+    for (name, value) in naming("203.0.113.9") {
+        assert_eq!(
+            status_from(
+                &app,
+                "POST",
+                "/v1/resolve",
+                spent,
+                Some((name, value.as_str())),
+                preview()
+            )
+            .await,
+            429,
+            "{name} naming another client"
+        );
+    }
+    assert_eq!(
+        status_from(
+            &app,
+            "POST",
+            "/v1/resolve",
+            other,
+            Some(("x-forwarded-for", "127.0.0.2")),
+            preview()
+        )
+        .await,
+        200
     );
 }
 

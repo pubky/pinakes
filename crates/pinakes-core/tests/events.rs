@@ -1332,6 +1332,58 @@ async fn feed_transport_stream_cap_wrong_type_sniff_and_page_cap() {
     assert_eq!(page.body.len(), pinakes_core::resolver::egress::BODY_CAP);
     server.abort();
 }
+/// The egress' own transport decodes a `Content-Encoding` body, and the caps count the decoded
+/// bytes: a few kilobytes on the wire that unpack past the cap are refused, or cut as a page is.
+#[tokio::test]
+async fn a_compressed_body_is_capped_by_its_decoded_size() {
+    use pinakes_core::resolver::egress::{over_cap, PinnedTransport, BODY_CAP};
+    use std::io::Write;
+    fn gzip(plain: &[u8]) -> Vec<u8> {
+        let mut packed = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        packed.write_all(plain).unwrap();
+        packed.finish().unwrap()
+    }
+    let small = gzip(br#"{"ok":true}"#);
+    let large = gzip(&vec![b'x'; 4 * BODY_CAP]);
+    assert!(large.len() < BODY_CAP / 16, "{} bytes", large.len());
+    let answer = |kind: &'static str, body: Vec<u8>| {
+        get(move || {
+            let body = body.clone();
+            async move { ([("content-type", kind), ("content-encoding", "gzip")], body) }
+        })
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = Router::new()
+        .route("/small", answer("application/json", small))
+        .route("/json", answer("application/json", large.clone()))
+        .route("/page", answer("text/html", large));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    // The transport connects to the addresses it is given, at the URL's port.
+    let at = |path: &str| -> url::Url {
+        format!("http://packed.example:{}{path}", addr.port())
+            .parse()
+            .unwrap()
+    };
+    let options = FetchOptions::default();
+    let read = PinnedTransport
+        .get_with(&at("/small"), &[addr], &options)
+        .await
+        .unwrap();
+    assert_eq!(read.body, br#"{"ok":true}"#);
+    let error = PinnedTransport
+        .get_with(&at("/json"), &[addr], &options)
+        .await
+        .unwrap_err();
+    assert!(over_cap(&error), "{error:#}");
+    let page = PinnedTransport
+        .get_with(&at("/page"), &[addr], &options)
+        .await
+        .unwrap();
+    assert!(page.truncated);
+    assert_eq!(page.body.len(), BODY_CAP);
+    server.abort();
+}
 #[test]
 fn remaining_calendar_pitfalls_dates_lists_split_uids_alt_images_and_horizons() {
     let body=cal(&format!("X-WR-TIMEZONE:Europe/Zurich\n{}\n{}\n{}",event("UID:base@google.com\nDTSTART;TZID=Europe/Zurich:20261020T180000\nRRULE:FREQ=WEEKLY;UNTIL=20261101T170000Z\nEXDATE;TZID=Europe/Zurich:20261027T180000,20261103T180000\nRDATE;VALUE=DATE:20261022\nSUMMARY:Before split\nX-ALT-DESC;FMTTYPE=text/HTML:<p>Poster<img src=\"https://example.org/img.png\"></p>"),event("UID:base_R20261101T180000@google.com\nDTSTART;TZID=Europe/Zurich:20261101T180000\nRRULE:FREQ=WEEKLY;COUNT=2\nSUMMARY:After split"),event("UID:date\nDTSTART;VALUE=DATE:20261025\nDTEND;VALUE=DATE:20261027\nSUMMARY:Two days\nSTATUS:CANCELLED")));
@@ -1597,7 +1649,26 @@ fn malformed_events_are_isolated_and_hostile_work_is_bounded() {
     let rdates = cal(&event(
         "UID:r\nDTSTART:20261020T120000Z\nRDATE:20261021T120000Z,20261022T120000Z,20261023T120000Z",
     ));
-    assert!(calendar::parse("https://example.org/f.ics", rdates.as_bytes(), &cfg, now()).is_err());
+    assert!(
+        calendar::parse("https://example.org/f.ics", rdates.as_bytes(), &cfg, now())
+            .unwrap_err()
+            .to_string()
+            .contains("RDATE work budget")
+    );
+    // The same dates within the limit are read.
+    let cfg = EventConfig {
+        max_date_values: 3,
+        ..Default::default()
+    };
+    assert_eq!(
+        calendar::parse("https://example.org/f.ics", rdates.as_bytes(), &cfg, now())
+            .unwrap()
+            .container
+            .unwrap()
+            .occurrences
+            .len(),
+        4
+    );
     let long = cal(&event(&format!(
         "UID:long\nDTSTART:20261020T120000Z\nSUMMARY:{}",
         "a".repeat(65537)
@@ -1608,7 +1679,9 @@ fn malformed_events_are_isolated_and_hostile_work_is_bounded() {
         &EventConfig::default(),
         now()
     )
-    .is_err());
+    .unwrap_err()
+    .to_string()
+    .contains("calendar physical line cap"));
 }
 
 #[test]
@@ -2714,6 +2787,71 @@ fn structured_feed_work_is_bounded() {
             .to_string()
             .contains("item cap")
     );
+}
+
+#[test]
+fn ics_caps_are_enforced() {
+    let message = |body: &str, cfg: &EventConfig| {
+        calendar::parse("https://example.org/f.ics", body.as_bytes(), cfg, now())
+            .unwrap_err()
+            .to_string()
+    };
+    let read = |body: &str, cfg: &EventConfig| {
+        calendar::parse("https://example.org/f.ics", body.as_bytes(), cfg, now())
+            .unwrap()
+            .container
+            .unwrap()
+            .occurrences
+    };
+    // Nesting: a component may sit eight deep, the calendar and the event included.
+    let nested = |depth: usize| {
+        format!(
+            "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:deep\nDTSTART:20261020T120000Z\nSUMMARY:Deep\n{}{}END:VEVENT\nEND:VCALENDAR\n",
+            "BEGIN:X-LEVEL\n".repeat(depth - 2),
+            "END:X-LEVEL\n".repeat(depth - 2)
+        )
+    };
+    assert_eq!(read(&nested(8), &EventConfig::default()).len(), 1);
+    assert_eq!(
+        message(&nested(9), &EventConfig::default()),
+        "calendar nesting cap"
+    );
+    // Components: the calendar and each event count.
+    let three = cal(&[
+        event("UID:a\nDTSTART:20261020T120000Z\nSUMMARY:A"),
+        event("UID:b\nDTSTART:20261021T120000Z\nSUMMARY:B"),
+        event("UID:c\nDTSTART:20261022T120000Z\nSUMMARY:C"),
+    ]
+    .join("\n"));
+    let components = |max_components| EventConfig {
+        max_components,
+        ..Default::default()
+    };
+    assert_eq!(read(&three, &components(4)).len(), 3);
+    assert_eq!(message(&three, &components(3)), "calendar component cap");
+    // Occurrences of the whole feed.
+    let occurrences = |max_occurrences_per_feed| EventConfig {
+        max_occurrences_per_feed,
+        ..Default::default()
+    };
+    assert_eq!(read(&three, &occurrences(3)).len(), 3);
+    assert_eq!(message(&three, &occurrences(2)), "calendar occurrence cap");
+    // An unfolded line: each physical line is within the cap, the line they fold into is not.
+    let folded = cal(&event(&format!(
+        "UID:fold\nDTSTART:20261020T120000Z\nSUMMARY:{}\n {}",
+        "a".repeat(40),
+        "b".repeat(40)
+    )));
+    let line = |max_line_bytes| EventConfig {
+        max_line_bytes,
+        ..Default::default()
+    };
+    let whole = read(&folded, &line(128));
+    assert_eq!(
+        whole[0].doc.name.as_deref(),
+        Some(format!("{}{}", "a".repeat(40), "b".repeat(40)).as_str())
+    );
+    assert_eq!(message(&folded, &line(64)), "calendar unfolded line cap");
 }
 
 struct ReviewSnapshots {

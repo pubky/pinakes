@@ -1000,6 +1000,37 @@ fn identifier_dates_domains_media_attributes_and_social_excerpt() {
     let d=cards::activitypub(base.as_str(),&json!({"type":"Note","id":base.as_str(),"content":"unlisted text","to":["https://social.example/followers"],"cc":["https://www.w3.org/ns/activitystreams#Public"]}),&base,86400).unwrap();
     assert!(!serde_json::to_string(&d).unwrap().contains("unlisted text"));
 }
+/// An ActivityPub object makes a card only when the answer came from the link's publisher and
+/// the object's `id` is that publisher's too. Each case breaks one of the two.
+#[test]
+fn an_activitypub_object_is_the_links_publishers_in_answer_and_id() {
+    let uri = "https://social.example/@alice";
+    let object = |id: &str| json!({"type":"Person","id":id,"preferredUsername":"alice"});
+    let own: Url = "https://social.example/users/alice".parse().unwrap();
+    let card = cards::activitypub(
+        uri,
+        &object("https://social.example/users/alice"),
+        &own,
+        3600,
+    )
+    .unwrap();
+    assert_eq!(card.name.as_deref(), Some("alice"));
+    assert_eq!(card.aliases, ["https://social.example/users/alice"]);
+    // The answer came from another publisher; the `id` it states is the link's.
+    let foreign: Url = "https://attacker.example/users/alice".parse().unwrap();
+    assert!(cards::activitypub(
+        uri,
+        &object("https://social.example/users/alice"),
+        &foreign,
+        3600
+    )
+    .is_none());
+    // The link's publisher answered, with an object whose `id` is another publisher's: its
+    // `id` would become an alias of this link.
+    assert!(
+        cards::activitypub(uri, &object("https://victim.example/users/bob"), &own, 3600).is_none()
+    );
+}
 #[sqlx::test(migrations = "../../migrations")]
 async fn bad_identifiers_are_final_missing_and_ap_promotes_to_worker(pool: sqlx::PgPool) {
     use pinakes_core::{queue, store};

@@ -623,6 +623,183 @@ async fn a_tool_call_spends_the_same_per_ip_budget(pool: PgPool) {
     assert_eq!(headers["retry-after"], "60");
 }
 
+/// `POST /mcp` with a body of exactly `bytes` bytes: a `tools/list` message, then the spaces
+/// JSON allows after a value.
+async fn padded_message(app: &Router, bytes: usize) -> (StatusCode, Value) {
+    let mut body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).to_string();
+    body.push_str(&" ".repeat(bytes - body.len()));
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .header("host", "pinakes.example")
+        .header("mcp-protocol-version", "2025-06-18")
+        .body(Body::from(body))
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.2:1234".parse::<SocketAddr>().unwrap(),
+    ));
+    let response = app.clone().oneshot(request).await.unwrap();
+    let (status, headers) = (response.status(), response.headers().clone());
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (status, rpc_answer(&headers, bytes.to_vec()))
+}
+
+/// An MCP message's body is at most 2 MB, as a REST body is: a body of exactly that is read and
+/// answered, and one byte more is a 413 with no answer to the message.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_message_over_the_body_cap_is_refused(pool: PgPool) {
+    const CAP: usize = 2 * 1024 * 1024;
+    let app = api::router(AppState::new(pool, Config::default()).unwrap());
+    let (status, answer) = padded_message(&app, CAP).await;
+    assert_eq!(status, 200, "{answer}");
+    assert!(answer["result"]["tools"].is_array(), "{answer}");
+    let (status, answer) = padded_message(&app, CAP + 1).await;
+    assert_eq!(status, 413, "{answer}");
+    assert!(answer["result"].is_null(), "{answer}");
+}
+
+/// `social` takes at most 100 card ids and links together, each link at most 2048 bytes. A call
+/// at either bound is answered from the Nexus; one over it is the tool's 400, and the Nexus is
+/// not asked.
+#[sqlx::test(migrations = "../../migrations")]
+async fn social_refuses_more_than_100_entries_and_an_over_long_link(pool: PgPool) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let ids = seed(&pool).await;
+    // A Nexus that knows no link and counts what it is asked.
+    let asked = std::sync::Arc::new(AtomicUsize::new(0));
+    let counter = asked.clone();
+    let fake = Router::new().route(
+        "/v1/stream/resources/by_ids",
+        post(move || {
+            let counter = counter.clone();
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Json(json!([]))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let nexus_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, fake).await.unwrap() });
+    let config = Config {
+        nexus_url,
+        ..Config::default()
+    };
+    let app = api::router(AppState::new(pool, config).unwrap());
+    let links = |n: usize| -> Vec<String> {
+        (0..n)
+            .map(|i| format!("https://example.org/link/{i}"))
+            .collect()
+    };
+    let too_many = "`ids` (card ids) and `uris` (links) take 1–100 entries together";
+
+    // The three seeded cards and 97 links: 100 entries, each answered.
+    let (error, answer) = call(&app, "social", json!({"ids": ids, "uris": links(97)})).await;
+    assert!(!error, "{answer}");
+    assert_eq!(answer["items"].as_array().unwrap().len(), 100, "{answer}");
+    let served = asked.load(Ordering::SeqCst);
+    assert!(served > 0, "the Nexus was asked about the 100 entries");
+    // One more, as ids and links together or as links alone.
+    for arguments in [
+        json!({"ids": ids, "uris": links(98)}),
+        json!({"uris": links(101)}),
+    ] {
+        let (error, answer) = call(&app, "social", arguments).await;
+        assert!(error, "{answer}");
+        assert_eq!(answer["status"], 400, "{answer}");
+        assert_eq!(answer["error"], too_many, "{answer}");
+    }
+    assert_eq!(asked.load(Ordering::SeqCst), served);
+
+    // A link of exactly 2048 bytes is asked about; one byte more is refused.
+    let link = |bytes: usize| {
+        let start = "https://example.org/";
+        format!("{start}{}", "a".repeat(bytes - start.len()))
+    };
+    let (error, answer) = call(&app, "social", json!({"uris": [link(2048)]})).await;
+    assert!(!error, "{answer}");
+    assert_eq!(answer["items"][0]["uri"], link(2048), "{answer}");
+    let served = asked.load(Ordering::SeqCst);
+    let (error, answer) = call(
+        &app,
+        "social",
+        json!({"uris": ["https://example.org/short", link(2049)]}),
+    )
+    .await;
+    assert!(error, "{answer}");
+    assert_eq!(answer["status"], 400, "{answer}");
+    assert_eq!(
+        answer["error"], "`uris` are links of at most 2048 bytes",
+        "{answer}"
+    );
+    assert_eq!(asked.load(Ordering::SeqCst), served);
+}
+
+/// `card` with `resolve: true` is the one tool call that stores a link: it is a preview, and
+/// spends the caller's preview budget, the one `POST /v1/resolve` spends. With the budget spent,
+/// the next such call is the tool's 429 with the route's `Retry-After` and stores nothing. A
+/// read without `resolve` stores nothing and spends none of it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_card_read_with_resolve_spends_the_preview_budget(pool: PgPool) {
+    async fn stored(pool: &PgPool, uri: &str) -> bool {
+        let (id, _, _) = identity(uri).unwrap();
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource WHERE id=$1)")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+    let config = Config {
+        preview: pinakes_core::config::PreviewConfig {
+            requests_per_minute: 1,
+            uri_requests_per_minute: 1,
+            cache_capacity: 100,
+        },
+        ..Config::default()
+    };
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
+    let (unread, first, second) = (
+        "https://example.org/unread",
+        "https://example.org/first",
+        "https://example.org/second",
+    );
+    // Without `resolve` an unknown link is a 404, and nothing is stored.
+    let (error, answer) = call(&app, "card", json!({"uri": unread})).await;
+    assert!(error, "{answer}");
+    assert_eq!(answer["status"], 404, "{answer}");
+    assert!(!stored(&pool, unread).await);
+    // With it the link is stored and queued: its card, pending, is the answer.
+    let (error, answer) = call(&app, "card", json!({"uri": first, "resolve": true})).await;
+    assert!(!error, "{answer}");
+    assert_eq!(answer["card"]["uri"], first, "{answer}");
+    assert_eq!(answer["card"]["status"], "pending", "{answer}");
+    assert!(stored(&pool, first).await);
+    // That was this address's one preview of the minute.
+    let (error, answer) = call(&app, "card", json!({"uri": second, "resolve": true})).await;
+    assert!(error, "{answer}");
+    assert_eq!(answer["status"], 429, "{answer}");
+    assert_eq!(answer["error"], "preview rate limit exceeded", "{answer}");
+    assert_eq!(answer["retry_after_s"], 60, "{answer}");
+    assert!(!stored(&pool, second).await);
+    // The REST route counts the same budget for the same address.
+    let (code, _, _) = raw(
+        &app,
+        "POST",
+        "/v1/resolve",
+        &[("content-type", "application/json")],
+        Some(json!({"uri": second})),
+    )
+    .await;
+    assert_eq!(code, 429);
+    assert!(!stored(&pool, second).await);
+    // A read without `resolve` asks for no preview: still the 404, not the budget's 429.
+    let (error, answer) = call(&app, "card", json!({"uri": second, "resolve": false})).await;
+    assert!(error, "{answer}");
+    assert_eq!(answer["status"], 404, "{answer}");
+}
+
 #[sqlx::test(migrations = "../../migrations")]
 async fn no_admin_route_is_reachable_through_mcp(pool: PgPool) {
     let ids = seed(&pool).await;
