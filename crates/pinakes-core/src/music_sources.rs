@@ -223,7 +223,11 @@ pub(crate) async fn isrc_recording(cx: &Context, isrc: &str) -> Result<Option<St
 /// took it first.
 pub(crate) async fn isrc_is_own(cx: &Context, isrc: &str, mbid: &str) -> Result<bool> {
     let base = cx.config.also_on.musicbrainz_base();
-    Ok(match isrc_match(cx, isrc, None).await? {
+    // A lookup over MusicBrainz's cap tells nothing: the ISRC is not known to be its own.
+    let Some(found) = secondary(isrc_match(cx, isrc, None).await)? else {
+        return Ok(false);
+    };
+    Ok(match found {
         IsrcMatch::Unknown => true,
         IsrcMatch::One(one) => recording_key(&cx.egress, base, &one).await? == mbid,
         IsrcMatch::Duplicates { standing, .. } => standing == mbid,
@@ -762,7 +766,7 @@ pub(crate) fn own_wikidata_item(entity: &musicbrainz::Entity) -> Option<String> 
 /// item of the entity's kind (`music_enrichment::ItemKind::of`: an artist's for an artist, a
 /// release group's for a release group) that names this MBID and no other for its level (P434,
 /// P436). A key is stricter than the enrichment's text and image: an item that is a work's too
-/// (a single's song's, which a track can be keyed by through its streaming IDs) or carries no
+/// (a single's song's) or carries no
 /// identifier yet keys nothing, so a key never joins an album to a song or an artist to anything
 /// but itself. An item that is unknown, gone or too large to read keys nothing; a busy Wikidata
 /// is an error.
@@ -792,10 +796,9 @@ pub(crate) async fn own_wikidata_key(
         }))
 }
 /// Whether `item` may key `entity` ([`own_wikidata_key`]): exactly of its kind, naming this one
-/// MBID at its level; for a release group, naming no recording either (P4404). An album's item
-/// that also carries a recording's ID is a single's track's too: the `wikidata` source keys a
-/// streaming track by it ([`recording_item`]), so as the album's key it would join the track to
-/// the album.
+/// MBID at its level; for a release group, naming no recording either (P4404): an album's item
+/// that also carries a recording's ID is a single's and its track's at once, and the page's own
+/// key takes only an item that is the album's alone.
 pub(crate) fn keys_entity(entity: &musicbrainz::Entity, item: &wikidata::Item) -> bool {
     use crate::music_enrichment::{mbid_property, ItemKind};
     ItemKind::of(item) == ItemKind::of_entity(entity.kind)
@@ -1248,16 +1251,22 @@ pub(crate) fn recording_item(item: &wikidata::Item) -> bool {
     ItemKind::of(item) == ItemKind::Recording && item.id("P4404").len() == 1
 }
 /// Whether an item is one album: a release group's item by the same classifier (one that is its
-/// single's song's too counts) that names no recording (P4404). An album's item that also
-/// carries a recording's ID is a single's track's too ([`keys_entity`]): as the album's key it
-/// would join the track to the album. An item with no MusicBrainz or Discogs album ID is of
-/// unknown level and keys nothing.
+/// single's song's too counts). Such an item is never a recording's ([`recording_item`]), so no
+/// track is keyed by it. An item with no MusicBrainz or Discogs album ID is of unknown level and
+/// keys nothing.
 pub(crate) fn album_item(item: &wikidata::Item) -> bool {
     use crate::music_enrichment::ItemKind;
     matches!(
         ItemKind::of(item),
         ItemKind::ReleaseGroup | ItemKind::WorkAndGroup
-    ) && item.id("P4404").is_empty()
+    )
+}
+/// Whether an item is one edition of an album: a release's item by the same classifier, or one
+/// with no MusicBrainz identifier yet; never an album's, a recording's, a work's or an artist's.
+/// The item a Discogs release's ID (P2206) names is taken only when it is one.
+pub(crate) fn edition_item(item: &wikidata::Item) -> bool {
+    use crate::music_enrichment::ItemKind;
+    matches!(ItemKind::of(item), ItemKind::Release | ItemKind::Bare)
 }
 /// The music-service pages an item's best-rank IDs name at `level`, unkeyed.
 pub(crate) fn item_links(item: &wikidata::Item, level: Level) -> Vec<Link> {
@@ -1272,15 +1281,22 @@ pub(crate) fn item_links(item: &wikidata::Item, level: Level) -> Vec<Link> {
 /// An item's keys and same-level links: at track level only a recording item's
 /// ([`recording_item`]), at album level only an album item's ([`album_item`]).
 pub fn found(item: &wikidata::Item, level: Level) -> Found {
-    let mut found = Found::default();
     let of_level = match level {
         Level::Track => recording_item(item),
         Level::Album => album_item(item),
         _ => true,
     };
-    if !of_level {
-        return found;
+    if of_level {
+        item_found(item, level)
+    } else {
+        Found::default()
     }
+}
+/// An item's keys and same-level links, for an item the caller knows to be of `level`: its Q-id,
+/// its one MusicBrainz ID at the level, and its service pages at the level, each keyed by the
+/// Q-id so a tagged link that is one joins.
+pub(crate) fn item_found(item: &wikidata::Item, level: Level) -> Found {
+    let mut found = Found::default();
     if let Some(key) = hubs::key::wikidata(&item.qid) {
         found.keys.push(Key {
             key,
@@ -1297,8 +1313,6 @@ pub fn found(item: &wikidata::Item, level: Level) -> Found {
             });
         }
     }
-    // Keyed by the item (one recording at track level, one album at album level), so a tagged
-    // link that is one joins.
     let named = hubs::key::wikidata(&item.qid);
     found.links = item_links(item, level);
     for link in &mut found.links {
@@ -1696,8 +1710,7 @@ mod tests {
         );
         assert_eq!(super::found(&two, Level::Track), Found::default());
         // An album takes an album's item only. A single's item that names its track's recording
-        // too keys the track (when it is a recording's item), so it never keys the album: the two
-        // would be one group.
+        // too is the album's and never the track's: no Q-id keys both.
         let album = ("P2205", "6dVIqQ8qmQ5GBnJ9shOYGE");
         let group = ("P436", "b1392450-e666-3926-a536-22c65f834433");
         let at_album = |ids: &[(&str, &str)]| super::found(&item(ids), Level::Album);
@@ -1714,13 +1727,26 @@ mod tests {
             .links
             .iter()
             .all(|l| l.key.as_deref() == Some("wikidata:Q1")));
+        let single_and_track = [album, group, spotify, recording];
+        assert_eq!(keys_of(&at_album(&single_and_track)).len(), 2);
         assert_eq!(
-            at_album(&[album, group, spotify, recording]),
+            super::found(&item(&single_and_track), Level::Track),
             Found::default()
         );
         // An item of unknown level (no MusicBrainz or Discogs album ID) keys nothing either.
         assert_eq!(at_album(&[album]), Found::default());
         assert_eq!(at_album(&[album, work]), Found::default());
+        // An edition's item (a release's, or one with no MusicBrainz ID yet) is what a Discogs
+        // release takes; an album's, a recording's or a work's is not one.
+        assert!(edition_item(&item(&[album])));
+        assert!(edition_item(&item(&[album, ("P5813", group.1)])));
+        assert!(!edition_item(&item(&[album, group])));
+        assert!(!edition_item(&item(&[album, recording])));
+        assert!(!edition_item(&item(&[album, work])));
+        assert_eq!(
+            keys_of(&item_found(&item(&[album]), Level::Album)),
+            ["wikidata:Q1"]
+        );
         // A single's song's item that is its release group's too is the album's.
         let mut single = item(&[album, group]);
         single.instance_of = vec!["Q134556".into()];
