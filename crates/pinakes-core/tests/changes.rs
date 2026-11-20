@@ -528,6 +528,11 @@ async fn an_over_cap_canary_is_inconclusive(pool: PgPool) {
         .await
         .unwrap()
         .unwrap();
+    // Two failed runs came before it: an inconclusive run neither adds to them nor clears them.
+    sqlx::query("UPDATE source_state SET canary_failures=2 WHERE source='web'")
+        .execute(&pool)
+        .await
+        .unwrap();
     canary::run_manifest(&pool, &OverCap, &manifest, &config, &metrics, generation)
         .await
         .unwrap();
@@ -538,7 +543,7 @@ async fn an_over_cap_canary_is_inconclusive(pool: PgPool) {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!((ok, failures), (None, 0));
+    assert_eq!((ok, failures), (None, 2));
     assert_eq!((last_error, source_failures), (None, 0));
     metrics.refresh(&pool).await.unwrap();
     let text = metrics.encode().unwrap();
@@ -551,6 +556,66 @@ async fn an_over_cap_canary_is_inconclusive(pool: PgPool) {
         text.contains("pinakes_fetch_total{mode=\"resource\",outcome=\"ok\",source=\"web\"} 1"),
         "{text}"
     );
+}
+/// A canary whose reader panics on the sample, or answers a page with no field read.
+struct Sample(Option<ResourceMeta>);
+#[async_trait::async_trait]
+impl Resolver for Sample {
+    fn name(&self) -> &'static str {
+        "web"
+    }
+    fn matches(&self, _: &str) -> bool {
+        true
+    }
+    async fn resolve(&self, _: &str) -> anyhow::Result<ResourceMeta> {
+        Ok(self.0.clone().expect("the reader panicked on the sample"))
+    }
+    fn refresh_after(&self, _: &ResourceMeta) -> Duration {
+        Duration::from_secs(3600)
+    }
+}
+async fn run_web_canary(pool: &PgPool, sample: &Sample) -> (Option<bool>, i32, Vec<String>) {
+    let config = CanaryConfig::default();
+    let manifest = adapter::manifest("web");
+    let metrics = Metrics::new().unwrap();
+    let _ = canary::claim(pool, &manifest, &config).await.unwrap();
+    sqlx::query("UPDATE source_state SET canary_due_at=now() WHERE source='web'")
+        .execute(pool)
+        .await
+        .unwrap();
+    let generation = canary::claim(pool, &manifest, &config)
+        .await
+        .unwrap()
+        .unwrap();
+    canary::run_manifest(pool, sample, &manifest, &config, &metrics, generation)
+        .await
+        .unwrap();
+    sqlx::query_as(
+        "SELECT canary_ok,canary_failures,canary_missing FROM source_state WHERE source='web'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+/// A reader that panics on the canary's sample is a failed canary: the run returns (so the
+/// worker that ran it goes on) and the failure is recorded.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_canary_whose_reader_panics_is_a_failed_canary(pool: PgPool) {
+    let (ok, failures, _) = run_web_canary(&pool, &Sample(None)).await;
+    assert_eq!((ok, failures), (Some(false), 1));
+}
+/// The web manifest expects no field of a page, but its canary's page has a title: a canary
+/// that fetched the page and read no name has failed.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_web_canary_needs_a_name(pool: PgPool) {
+    let mut page = ResourceMeta::new("https://example.org/", "web", 86400);
+    let (ok, failures, missing) = run_web_canary(&pool, &Sample(Some(page.clone()))).await;
+    assert_eq!((ok, failures), (Some(false), 1));
+    assert_eq!(missing, ["name"]);
+    page.name = Some("Example Domain".into());
+    let (ok, failures, missing) = run_web_canary(&pool, &Sample(Some(page))).await;
+    assert_eq!((ok, failures), (Some(true), 0));
+    assert!(missing.is_empty());
 }
 #[sqlx::test(migrations = "../../migrations")]
 async fn canary_bookkeeping_metrics_and_separate_listener(pool: PgPool) {

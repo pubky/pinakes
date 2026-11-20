@@ -1725,6 +1725,84 @@ async fn author_budgets_defer_without_counting_a_failure(pool: PgPool) {
     assert!(budget.admit(&pool, &second, 0.1).await.unwrap());
 }
 
+/// One author's many new links do not hold up another author's: once the first author is over
+/// budget, its other due links are given their turns at its rate, and the next claim is the
+/// other author's link. A link both tagged, a lookup's place in the queue and the author's
+/// `geo:` links (which no budget covers) are left alone.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_refused_author_s_links_wait_their_turn_behind_no_one_else_s(pool: PgPool) {
+    let mut lines: Vec<Change> = (0..50)
+        .map(|n| {
+            change(
+                &format!("https://flood.example.org/{n:02}"),
+                "a",
+                &format!("/pub/app/tags/{n:02}"),
+            )
+        })
+        .collect();
+    let shared = "https://flood.example.org/shared";
+    lines.push(change(shared, "a", "/pub/app/tags/shared"));
+    lines.push(change(shared, "b", "/pub/app/tags/shared-too"));
+    lines.push(change("geo:46,8", "a", "/pub/app/tags/geo"));
+    batch(&pool, lines, Some("one")).await;
+    // The flood is due before the link both tagged, and that before the other author's own.
+    sqlx::query("UPDATE resource SET next_attempt_at=now()-CASE WHEN uri=$1 THEN interval '30 seconds' ELSE interval '1 minute' END")
+        .bind(shared)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let other = "https://quiet.example.org/one";
+    batch(
+        &pool,
+        vec![change(other, "b", "/pub/app/tags/quiet")],
+        Some("one"),
+    )
+    .await;
+    let cfg = QueueConfig::default();
+    let budget = queue::AuthorBudget::default();
+    let first = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    let second = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    assert!(second.uri.starts_with("https://flood.example.org/"));
+    // A lookup moved one of the flood's links to the front of the queue.
+    let looked_up: String = sqlx::query_scalar(
+        "UPDATE resource SET priority_at=now() WHERE id=(SELECT id FROM resource WHERE uri LIKE 'https://flood.example.org/__' AND lease_until IS NULL ORDER BY id LIMIT 1) RETURNING uri",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    // One link in ten seconds for the author: the first runs, the second is refused.
+    assert!(budget.admit(&pool, &first, 0.1).await.unwrap());
+    assert!(!budget.admit(&pool, &second, 0.1).await.unwrap());
+    // The next claims are the looked-up link and the links the other author can sponsor, not
+    // the flood's third link.
+    let mut next = vec![];
+    while let Some(job) = queue::claim(&pool, "web", &cfg).await.unwrap() {
+        next.push(job.uri);
+    }
+    assert_eq!(next, [looked_up.as_str(), shared, other]);
+    let geo_due: bool =
+        sqlx::query_scalar("SELECT next_attempt_at<=now() FROM resource WHERE uri LIKE 'geo:%'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(geo_due, "a geo link is under no author budget");
+    // The flood waits in the order it was due, ten seconds apart (the author's rate), no
+    // attempt charged; the refused link is first again.
+    let waits: Vec<(String, f64, i32)> = sqlx::query_as(
+        "SELECT uri,extract(epoch FROM next_attempt_at-now())::float8,attempts FROM resource WHERE uri LIKE 'https://flood.example.org/__' AND lease_until IS NULL ORDER BY next_attempt_at,id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(waits.len(), 48);
+    assert_eq!(waits[0].0, second.uri);
+    for (turn, (uri, wait, attempts)) in waits.iter().enumerate() {
+        let expected = 10.0 * (turn + 1) as f64;
+        assert!((*wait - expected).abs() < 5.0, "{uri} turn {turn}: {wait}");
+        assert_eq!(*attempts, 0, "{uri}");
+    }
+}
+
 #[sqlx::test(migrations = "../../migrations")]
 async fn new_reference_reopens_final_pages_but_never_geo(pool: PgPool) {
     let page = change("https://example.org/final", "a", "/pub/app/tags/a");
@@ -2962,6 +3040,58 @@ async fn a_too_complex_canary_records_its_outcome(pool: PgPool) {
         );
     }
 }
+/// Every source a running resolver reads has its fetch series from the start, at 0, not only the
+/// five base routes: a rule on `increase()` reads its first drift, 429 or wall as a rise.
+#[sqlx::test(migrations = "../../migrations")]
+async fn every_running_resolver_s_sources_have_their_series_from_the_start(pool: PgPool) {
+    use pinakes_core::resolver::egress::{Egress, Fetched, Transport};
+    use std::sync::Arc;
+    /// No request is made: the workers are stopped before they claim anything.
+    struct NoNetwork;
+    #[async_trait::async_trait]
+    impl Transport for NoNetwork {
+        async fn get(&self, _: &url::Url, _: &[std::net::SocketAddr]) -> anyhow::Result<Fetched> {
+            anyhow::bail!("no network in this test")
+        }
+    }
+    // The sources that have a `drift` series at 0.
+    fn sources(metrics: &Metrics) -> std::collections::BTreeSet<String> {
+        metrics
+            .encode()
+            .unwrap()
+            .lines()
+            .filter(|l| l.starts_with("pinakes_fetch_total{") && l.contains("outcome=\"drift\""))
+            .filter(|l| l.ends_with(" 0"))
+            .filter_map(|l| Some(l.split("source=\"").nth(1)?.split('"').next()?.to_owned()))
+            .collect()
+    }
+    let metrics = Arc::new(Metrics::new().unwrap());
+    let base = sources(&metrics);
+    assert_eq!(base.len(), 5, "{base:?}");
+    let mut config = pinakes_core::config::Config::default();
+    config.pubky.enabled = false;
+    config.canary.enabled = false;
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let mut workers = queue::spawn_with_egress(
+        pool.clone(),
+        config.clone(),
+        Arc::new(tokio::sync::Notify::new()),
+        shutdown,
+        metrics.clone(),
+        Egress::with_backends(
+            config.egress.clone(),
+            Arc::new(PublicDns),
+            Arc::new(NoNetwork),
+        ),
+    )
+    .unwrap();
+    stop.send(true).unwrap();
+    while workers.join_next().await.is_some() {}
+    let all = sources(&metrics);
+    assert!(all.is_superset(&base));
+    assert!(all.len() > base.len(), "{all:?}");
+}
+
 /// A worker meets a page over its size cap: the job finishes with its attempt counted, the lease
 /// goes at once (no fetch again after a lease), and the worker logs no persistence failure.
 #[sqlx::test(migrations = "../../migrations")]

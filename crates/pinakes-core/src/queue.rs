@@ -16,6 +16,8 @@ use tokio::{
     time::Instant,
 };
 
+/// How long one link's read may take. Fixed, not a limit: the resolvers set their own inner
+/// deadlines below it (a card's enrichment, a relay's answer), and a job's lease is sized from it.
 pub const RESOLVE_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, FromRow)]
@@ -25,6 +27,7 @@ pub struct Job {
     pub attempts: i32,
     pub generation: i64,
 }
+/// One job of `resolver`, for tests: the daemon's workers claim through [`claim_sources`].
 pub async fn claim(pool: &PgPool, resolver: &str, cfg: &QueueConfig) -> Result<Option<Job>> {
     Ok(claim_batch(pool, resolver, cfg, 1).await?.pop())
 }
@@ -53,18 +56,6 @@ pub async fn claim_sources(
         RETURNING id,uri,attempts,generation"#).bind(sources).bind(cfg.lease_secs.max(15 * size as u64 + 10) as f64).bind(size as i64).fetch_all(pool).await?)
 }
 
-/// `pinakesd reextract`: re-run `classify` on the selected rows (every row for `all`, else the
-/// rows routed to or classified as one of `routes`) and re-queue them now, in batches of 1000.
-/// Each loses its HTTP validators and, on the OSM route, its cache entry, so its next fetch
-/// re-extracts instead of answering 304 or reading the cache. A row entering or leaving the OSM
-/// route swaps its identity envelope and becomes pending, as does an OSM-host URL moving to web
-/// (which may hold no facts there); other rows keep their document until the fetch replaces it.
-/// Leases are fenced by the generation bump. The re-queued rows' also-on lookups are queued too:
-/// a card that comes back unchanged would not run them, and their results may predate a source
-/// or a key the upgrade added. `also-on` queues every resource's also-on lookups, without a
-/// fetch. A selected alias whose URI a rule now gives another root moves to it, and one no rule
-/// names any more answers for itself again and is re-queued (`alias::release`). The daemon must
-/// not be running (the caller holds the instance lock).
 /// `reextract`'s arguments: `all`, `also-on`, or route and card-kind names.
 pub fn check_routes(routes: &[String]) -> Result<()> {
     anyhow::ensure!(
@@ -104,6 +95,18 @@ type ReextractRow = (
     Option<String>,
     Option<String>,
 );
+/// `pinakesd reextract`: re-run `classify` on the selected rows (every row for `all`, else the
+/// rows routed to or classified as one of `routes`) and re-queue them now, in batches of 1000.
+/// Each loses its HTTP validators and, on the OSM route, its cache entry, so its next fetch
+/// re-extracts instead of answering 304 or reading the cache. A row entering or leaving the OSM
+/// route swaps its identity envelope and becomes pending, as does an OSM-host URL moving to web
+/// (which may hold no facts there); other rows keep their document until the fetch replaces it.
+/// Leases are fenced by the generation bump. The re-queued rows' also-on lookups are queued too:
+/// a card that comes back unchanged would not run them, and their results may predate a source
+/// or a key the upgrade added. `also-on` queues every resource's also-on lookups, without a
+/// fetch. A selected alias whose URI a rule now gives another root moves to it, and one no rule
+/// names any more answers for itself again and is re-queued (`alias::release`). The daemon must
+/// not be running (the caller holds the instance lock).
 pub async fn reextract(pool: &PgPool, routes: &[String]) -> Result<u64> {
     check_routes(routes)?;
     if routes.iter().any(|r| r == "also-on") {
@@ -455,6 +458,8 @@ async fn resolve(
         })
         .and_then(|r| r)
 }
+/// One job run alone with the default refresh tiers, for tests: the daemon's workers run every
+/// job, single or batched, through `run_batch_config`.
 pub async fn run_job(
     pool: &PgPool,
     resolver: &dyn Resolver,
@@ -740,58 +745,30 @@ async fn finish_job(
         };
         doc.validate(attrs)?;
         crate::changes::save(pool, &job.id, job.generation, &doc, cfg).await?;
-        // An official API names the object's root (`source_root`), or the page names itself (its
-        // head canonical, or the end of an all-permanent redirect chain) up to a trailing slash
-        // and tracking, or as the other spelling of its event on a platform that gives each
-        // event two (`alias::event_spelling`): the link is an alias of that URL, which is fetched
-        // in its place from now on. Other claimed URLs are never candidates.
-        if doc.status == Status::Ok {
-            if let Some(alias) = doc
-                .source_root
-                .as_deref()
-                .and_then(|root| crate::alias::source(&job.uri, root))
-                .or_else(|| {
-                    doc.alias_candidates
-                        .iter()
-                        .find_map(|a| crate::alias::canonical(&job.uri, a))
-                        .or_else(|| {
-                            doc.event_spellings
-                                .iter()
-                                .find_map(|a| crate::alias::event_spelling(&job.uri, a))
-                        })
-                })
-            {
-                let mut tx = pool.begin().await?;
-                crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
-                crate::alias::lock(&mut tx).await?;
-                // The generation fence covers the alias too: a stale job writes nothing.
-                let current: Option<String> = sqlx::query_scalar(
-                    "SELECT id FROM resource WHERE id=$1 AND generation=$2 FOR UPDATE",
-                )
-                .bind(&job.id)
-                .bind(job.generation)
-                .fetch_optional(&mut *tx)
-                .await?;
-                if current.is_some() {
-                    let line = crate::alias::assign(&mut tx, &job.id, &alias).await?;
-                    crate::alias::record(&mut tx, line.into_iter().collect()).await?;
-                }
-                tx.commit().await?;
+        // The card is saved. What follows it are transactions of their own: when one fails the
+        // card stays as saved, the job is no failure, and the step runs again at the next read.
+        let after = std::panic::AssertUnwindSafe(after_save(pool, job, &doc))
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("the steps after the save panicked")));
+        if let Err(error) = after {
+            tracing::warn!(resource_id=%job.id,host=%crate::resolver::log_host(&job.uri),kind=crate::resolver::error_class(&error),resolver=resolver.name(),"a saved card's alias step failed; the link is read again in full");
+            // The step's inputs (the page's canonical, an episode's page) come only with a
+            // full read: the link is read again after the first backoff, without its
+            // validators, and no attempt is charged. When this cannot be written either, the
+            // step waits for the card's own next full read.
+            let again = async {
+                sqlx::query("UPDATE event_fetch SET validators='{}' WHERE resource_id=$1 AND validators<>'{}'")
+                    .bind(&job.id)
+                    .execute(pool)
+                    .await?;
+                sqlx::query("UPDATE resource SET final=false,refresh_at=now()+$3*interval '1 second',next_attempt_at=now()+$3*interval '1 second' WHERE id=$1 AND generation=$2")
+                    .bind(&job.id).bind(job.generation).bind(cfg.backoff_secs as f64).execute(pool).await?;
+                anyhow::Ok(())
+            };
+            if let Err(error) = again.await {
+                tracing::warn!(resource_id=%job.id,error=%crate::resolver::log_error(&error),"the re-read after a failed alias step was not scheduled");
             }
-            // A podcast episode read from its feed item: the page the item links, on the feed's
-            // own site, becomes an alias of this card, and a page it no longer names lets go
-            // (`episodes::join_page`, `episodes::release_pages`).
-            if doc.episode_item {
-                let page = doc.episode_page.as_deref();
-                crate::episodes::release_pages(pool, &job.id, job.generation, page, false).await?;
-                if let Some(page) = page {
-                    crate::episodes::join_page(pool, &job.id, job.generation, &job.uri, page)
-                        .await?;
-                }
-            }
-        } else if doc.status == Status::Missing && crate::episodes::names_an_item(&job.uri) {
-            // The item has left its feed: the pages joined to its card answer for themselves.
-            crate::episodes::release_pages(pool, &job.id, job.generation, None, true).await?;
         }
         Ok(())
     }
@@ -852,6 +829,65 @@ async fn finish_job(
     }
     Ok(())
 }
+/// What follows a saved card: its alias and, for a podcast episode, its pages.
+async fn after_save(pool: &PgPool, job: &Job, doc: &crate::model::ResourceMeta) -> Result<()> {
+    #[cfg(test)]
+    tests::maybe_fail_after_save(&job.uri)?;
+    // An official API names the object's root (`source_root`), or the page names itself (its
+    // head canonical, or the end of an all-permanent redirect chain) up to a trailing slash
+    // and tracking, or as the other spelling of its event on a platform that gives each
+    // event two (`alias::event_spelling`): the link is an alias of that URL, which is fetched
+    // in its place from now on. Other claimed URLs are never candidates.
+    if doc.status == Status::Ok {
+        if let Some(alias) = doc
+            .source_root
+            .as_deref()
+            .and_then(|root| crate::alias::source(&job.uri, root))
+            .or_else(|| {
+                doc.alias_candidates
+                    .iter()
+                    .find_map(|a| crate::alias::canonical(&job.uri, a))
+                    .or_else(|| {
+                        doc.event_spellings
+                            .iter()
+                            .find_map(|a| crate::alias::event_spelling(&job.uri, a))
+                    })
+            })
+        {
+            let mut tx = pool.begin().await?;
+            crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
+            crate::alias::lock(&mut tx).await?;
+            // The generation fence covers the alias too: a stale job writes nothing.
+            let current: Option<String> = sqlx::query_scalar(
+                "SELECT id FROM resource WHERE id=$1 AND generation=$2 FOR UPDATE",
+            )
+            .bind(&job.id)
+            .bind(job.generation)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if current.is_some() {
+                let line = crate::alias::assign(&mut tx, &job.id, &alias).await?;
+                crate::alias::record(&mut tx, line.into_iter().collect()).await?;
+            }
+            tx.commit().await?;
+        }
+        // A podcast episode read from its feed item: the page the item links, on the feed's
+        // own site, becomes an alias of this card, and a page it no longer names lets go
+        // (`episodes::join_page`, `episodes::release_pages`).
+        if doc.episode_item {
+            let page = doc.episode_page.as_deref();
+            crate::episodes::release_pages(pool, &job.id, job.generation, page, false).await?;
+            if let Some(page) = page {
+                crate::episodes::join_page(pool, &job.id, job.generation, &job.uri, page).await?;
+            }
+        }
+    } else if doc.status == Status::Missing && crate::episodes::names_an_item(&job.uri) {
+        // The item has left its feed: the pages joined to its card answer for themselves.
+        crate::episodes::release_pages(pool, &job.id, job.generation, None, true).await?;
+    }
+    Ok(())
+}
+/// A batch run with the default refresh tiers, for tests and the e2e stack.
 pub async fn run_batch(
     pool: &PgPool,
     resolver: &dyn Resolver,
@@ -883,6 +919,20 @@ async fn run_batch_config(
     refresh: &crate::config::RefreshConfig,
     jobs: &[Job],
 ) -> Result<()> {
+    let deadline = RESOLVE_TIMEOUT * jobs.len() as u32;
+    run_batch_within(pool, resolver, cfg, refresh, jobs, deadline).await
+}
+/// `run_batch_config` with the batch's deadline given. A batch that passes it is a timeout for
+/// each of its jobs, as a resolver's own timeout is (`timed_out`: the first `timeout_grace` in a
+/// row charge no attempt), and is not counted as a parser error.
+async fn run_batch_within(
+    pool: &PgPool,
+    resolver: &dyn Resolver,
+    cfg: &QueueConfig,
+    refresh: &crate::config::RefreshConfig,
+    jobs: &[Job],
+    deadline: Duration,
+) -> Result<()> {
     let uris = jobs.iter().map(|j| j.uri.clone()).collect::<Vec<_>>();
     let confirming = confirming(pool, jobs).await?;
     let resolve = async {
@@ -893,10 +943,11 @@ async fn run_batch_config(
             resolve.await
         }
     };
-    let results = tokio::time::timeout(RESOLVE_TIMEOUT * jobs.len() as u32, resolve).await;
+    let results = tokio::time::timeout(deadline, resolve).await;
+    let late = results.is_err();
     let results = match results {
         Ok(Ok(results)) if results.len() == jobs.len() => results,
-        Err(_) if resolver.name() == "osm" => jobs
+        Err(_) => jobs
             .iter()
             .map(|_| {
                 Err(crate::resolver::RetryLater {
@@ -908,13 +959,15 @@ async fn run_batch_config(
             .collect(),
         _ => jobs
             .iter()
-            .map(|_| Err(anyhow::anyhow!("batch timeout or invalid response count")))
+            .map(|_| Err(anyhow::anyhow!("batch panic or invalid response count")))
             .collect(),
     };
-    if results.iter().any(|r| {
-        r.as_ref()
-            .is_err_and(|e| !e.is::<crate::resolver::NotModified>())
-    }) {
+    if !late
+        && results.iter().any(|r| {
+            r.as_ref()
+                .is_err_and(|e| !e.is::<crate::resolver::NotModified>())
+        })
+    {
         crate::telemetry::parser_error();
     }
     let class = results.iter().find_map(|r| match r {
@@ -959,11 +1012,25 @@ async fn run_batch_config(
     }
     failure.map_or(Ok(()), Err)
 }
+/// The links one refusal puts off at most (`AuthorBudget::admit_or_spread`). Fixed: it bounds
+/// one statement's row writes, and a longer backlog is put off a batch at a time.
+const SPREAD_BATCH: i64 = 1000;
 /// Limits new work attributable to a public author, across both resolver kinds.
 #[derive(Default)]
 pub struct AuthorBudget(Mutex<HashMap<String, Instant>>);
 impl AuthorBudget {
+    /// Whether `job` may run now: one of its sponsors has budget left. A refused job goes back
+    /// to the queue for when the first of them has.
     pub async fn admit(&self, pool: &PgPool, job: &Job, rate: f64) -> Result<bool> {
+        Ok(self.admit_or_spread(pool, job, rate).await?.is_none())
+    }
+    /// `admit`; for a refused job, the other due links it put off (`Some`). A refused job's
+    /// sponsors are all over budget, so the other due links only they tagged would be refused
+    /// in turn, one claim each, ahead of every other author's links: each is given its turn at
+    /// the sponsors' rate instead, in one statement, and the queue goes on with the others'.
+    /// Links with another sponsor (an alias, a derived link's parent, another author) are left
+    /// to their own claim.
+    async fn admit_or_spread(&self, pool: &PgPool, job: &Job, rate: f64) -> Result<Option<u64>> {
         let authors: Vec<String> = sqlx::query_scalar(
             "WITH inputs AS (SELECT $1::text AS id UNION SELECT alias_id FROM resource_alias WHERE root_id=$1)
             SELECT DISTINCT author FROM (
@@ -976,7 +1043,7 @@ impl AuthorBudget {
         .fetch_all(pool)
         .await?;
         if authors.is_empty() {
-            return Ok(true);
+            return Ok(None);
         }
         let now = Instant::now();
         let mut budgets = self.0.lock().await;
@@ -985,7 +1052,7 @@ impl AuthorBudget {
         let author = authors.iter().find(|a| !budgets.contains_key(*a));
         if let Some(author) = author {
             budgets.insert(author.clone(), now + Duration::from_secs_f64(1.0 / rate));
-            return Ok(true);
+            return Ok(None);
         }
         let delay = authors
             .iter()
@@ -996,7 +1063,49 @@ impl AuthorBudget {
         drop(budgets);
         sqlx::query("UPDATE resource SET lease_until=NULL,next_attempt_at=now()+$3*interval '1 second' WHERE id=$1 AND generation=$2")
             .bind(&job.id).bind(job.generation).bind(delay.as_secs_f64()).execute(pool).await?;
-        Ok(false)
+        // The n-th of the other due links waits n turns of the sponsors' budgets after the job,
+        // `SPREAD_BATCH` of them at a time (the next refusal takes the next). Rows a worker
+        // holds are passed over; a lookup's or a preview's place is kept, and so are `geo:`
+        // links, which no budget covers. Only a refused link that is itself such a plain link
+        // puts the others off: one that is not (a derived link, an alias's root, a looked-up
+        // link) waits its own turn and moves no other.
+        let spread = sqlx::query(
+            "WITH due AS (
+                SELECT r.id,r.next_attempt_at FROM resource r
+                WHERE r.id<>$1 AND NOT r.final AND NOT r.dead_letter AND r.next_attempt_at<=now()
+                  AND r.priority_at IS NULL AND (r.lease_until IS NULL OR r.lease_until<now())
+                  AND r.resolver IS DISTINCT FROM 'geo'
+                  AND r.id IN (SELECT f.resource_id FROM reference f WHERE f.author=ANY($2) AND f.kind<>'post')
+                  AND NOT EXISTS(SELECT 1 FROM reference f WHERE f.resource_id=r.id AND f.kind<>'post' AND f.author<>ALL($2))
+                  AND NOT EXISTS(SELECT 1 FROM resource_derivation d WHERE d.child_id=r.id)
+                  AND NOT EXISTS(SELECT 1 FROM resource_alias a WHERE a.root_id=r.id)
+                  AND NOT EXISTS(SELECT 1 FROM resource_alias a WHERE a.alias_id=r.id)
+                  AND (SELECT j.priority_at IS NULL
+                         AND NOT EXISTS(SELECT 1 FROM resource_derivation d WHERE d.child_id=j.id)
+                         AND NOT EXISTS(SELECT 1 FROM resource_alias a WHERE a.root_id=j.id)
+                       FROM resource j WHERE j.id=$1)
+                ORDER BY r.next_attempt_at,r.id LIMIT $5
+                FOR UPDATE OF r SKIP LOCKED
+            ), turns AS (SELECT id,row_number() OVER (ORDER BY next_attempt_at,id) AS n FROM due)
+            UPDATE resource SET next_attempt_at=now()+($3+turns.n*$4)*interval '1 second' FROM turns WHERE resource.id=turns.id",
+        )
+        .bind(&job.id)
+        .bind(&authors)
+        .bind(delay.as_secs_f64())
+        .bind(1.0 / (rate * authors.len() as f64))
+        .bind(SPREAD_BATCH)
+        .execute(pool)
+        .await;
+        // The refused job is back in the queue either way: a deferral that failed puts nothing
+        // off, and the other links are refused at their own claims.
+        Ok(Some(match spread {
+            Ok(done) => done.rows_affected(),
+            Err(error) => {
+                let error = anyhow::Error::from(error);
+                tracing::warn!(error=%crate::resolver::log_error(&error),"an over-budget author's other links were not put off");
+                0
+            }
+        }))
     }
 }
 
@@ -1103,64 +1212,159 @@ pub fn spawn_with_egress(
         ));
     }
     for (resolver, budget) in resolvers {
+        // Every source this resolver reads has its series from the start, at 0, so its first
+        // drift, 429 or cancellation is a rise an alert reads.
+        for manifest in resolver.manifests() {
+            metrics.source_series(&manifest);
+        }
         let rate = Arc::new(Mutex::new(Instant::now()));
         for _ in 0..budget.concurrency {
-            let authors = authors.clone();
-            let metrics = metrics.clone();
-            let refresh = config.refresh.clone();
-            let canary = config.canary.clone();
-            let (pool, resolver, cfg, wake, mut shutdown, rate) = (
-                pool.clone(),
-                resolver.clone(),
-                config.queue.clone(),
-                wake.clone(),
-                shutdown.clone(),
-                rate.clone(),
-            );
-            workers.spawn(async move {
-                let mut canary_check=Instant::now();
-                loop {
-                    tokio::select! {
-                        _=shutdown.changed()=>break,
-                        _=async {
-                            { let mut next=rate.lock().await; tokio::time::sleep_until(*next).await; *next=Instant::now()+Duration::from_secs_f64(1.0/budget.requests_per_second); }
-                            if Instant::now()>=canary_check {
-                                canary_check=Instant::now()+Duration::from_secs(60);
-                            // One suspension for the manifests whose canary may not run, one claim among the rest.
-                            let (allowed,refused):(Vec<_>,Vec<_>)=resolver.manifests().into_iter().partition(|m| resolver.canary_allowed_for(m));
-                            let refused:Vec<&str>=refused.iter().map(|m| m.source.as_str()).collect();
-                            if let Err(e)=crate::canary::suspend(&pool,&refused).await {tracing::warn!(error=%crate::resolver::log_error(&e),"canary suspension failed");}
-                            match crate::canary::claim_due(&pool,&allowed,&canary).await {
-                                Ok(Some((manifest,generation)))=>{if let Err(e)=crate::canary::run_manifest(&pool,resolver.as_ref(),manifest,&canary,&metrics,generation).await {tracing::warn!(error=%crate::resolver::log_error(&e),"canary bookkeeping failed");}return;},
-                                Err(e)=>tracing::warn!(error=%crate::resolver::log_error(&e),"canary claim failed"),
-                                _=>{}
-                            }
-                            }
-                            match claim_sources(&pool,&resolver.queue_sources(),&cfg,resolver.batch_size()).await {
-                                Ok(jobs) if !jobs.is_empty()=>{
-                                    let result=async {
-                                        if resolver.name()=="geo" || authors.admit(&pool,&jobs[0],cfg.author_requests_per_second).await? {
-                                            let (result,_)=crate::telemetry::observe(&metrics,&resolver.manifest_for(&jobs[0].uri),run_batch_config(&pool,resolver.as_ref(),&cfg,&refresh,&jobs)).await;
-                                            result?;
-                                        } else {
-                                            for job in jobs.iter().skip(1) {
-                                                sqlx::query("UPDATE resource SET lease_until=NULL,next_attempt_at=now()+interval '1 second' WHERE id=$1 AND generation=$2").bind(&job.id).bind(job.generation).execute(&pool).await?;
-                                            }
-                                        }
-                                        Ok::<_,anyhow::Error>(())
-                                    }.await;
-                                    if let Err(e)=result { tracing::error!(error=%crate::resolver::log_error(&e),"queue persistence failed"); }
-                                },
-                                Ok(_)=>{ tokio::select! { _=wake.notified()=>{},_=tokio::time::sleep(Duration::from_millis(250))=>{} } },
-                                Err(e)=>{ tracing::error!(error=%crate::resolver::log_error(&e),"queue claim failed"); tokio::time::sleep(Duration::from_secs(1)).await; }
-                            }
-                        }=>{}
-                    }
-                }
-            });
+            let worker = Worker {
+                pool: pool.clone(),
+                resolver: resolver.clone(),
+                requests_per_second: budget.requests_per_second,
+                cfg: config.queue.clone(),
+                refresh: config.refresh.clone(),
+                canary: config.canary.clone(),
+                authors: authors.clone(),
+                metrics: metrics.clone(),
+                wake: wake.clone(),
+                rate: rate.clone(),
+            };
+            workers.spawn(worker.run(shutdown.clone()));
         }
     }
     Ok(workers)
+}
+
+/// One worker of a resolver; the resolver's workers share its pacing slot (`rate`).
+struct Worker {
+    pool: PgPool,
+    resolver: Arc<dyn Resolver>,
+    requests_per_second: f64,
+    cfg: QueueConfig,
+    refresh: crate::config::RefreshConfig,
+    canary: crate::config::CanaryConfig,
+    authors: Arc<AuthorBudget>,
+    metrics: Arc<crate::telemetry::Metrics>,
+    wake: Arc<Notify>,
+    rate: Arc<Mutex<Instant>>,
+}
+impl Worker {
+    /// Until shutdown: wait for the pacing slot, run a due canary or claim a batch, and run it.
+    /// Shutdown ends the waiting at once. A batch already claimed is finished first, so no job
+    /// stops between its save and the steps that follow it.
+    async fn run(self, mut shutdown: watch::Receiver<bool>) {
+        let mut canary_check = Instant::now();
+        while !*shutdown.borrow() {
+            let jobs = tokio::select! {
+                _ = shutdown.changed() => break,
+                jobs = self.next(&mut canary_check) => jobs,
+            };
+            if jobs.is_empty() {
+                continue;
+            }
+            let work = self.finish(&jobs);
+            tokio::pin!(work);
+            tokio::select! {
+                _ = &mut work => {}
+                _ = shutdown.changed() => {
+                    work.await;
+                    break;
+                }
+            }
+        }
+    }
+    /// The next batch, after the resolver's pacing slot; none when a canary ran instead, the
+    /// queue held nothing due (after a short wait) or the claim failed.
+    async fn next(&self, canary_check: &mut Instant) -> Vec<Job> {
+        {
+            let mut next = self.rate.lock().await;
+            tokio::time::sleep_until(*next).await;
+            *next = Instant::now() + Duration::from_secs_f64(1.0 / self.requests_per_second);
+        }
+        let (pool, resolver) = (&self.pool, self.resolver.as_ref());
+        if Instant::now() >= *canary_check {
+            *canary_check = Instant::now() + Duration::from_secs(60);
+            // One suspension for the manifests whose canary may not run, one claim among the rest.
+            let (allowed, refused): (Vec<_>, Vec<_>) = resolver
+                .manifests()
+                .into_iter()
+                .partition(|m| resolver.canary_allowed_for(m));
+            let refused: Vec<&str> = refused.iter().map(|m| m.source.as_str()).collect();
+            if let Err(e) = crate::canary::suspend(pool, &refused).await {
+                tracing::warn!(error=%crate::resolver::log_error(&e),"canary suspension failed");
+            }
+            match crate::canary::claim_due(pool, &allowed, &self.canary).await {
+                Ok(Some((manifest, generation))) => {
+                    if let Err(e) = crate::canary::run_manifest(
+                        pool,
+                        resolver,
+                        manifest,
+                        &self.canary,
+                        &self.metrics,
+                        generation,
+                    )
+                    .await
+                    {
+                        tracing::warn!(error=%crate::resolver::log_error(&e),"canary bookkeeping failed");
+                    }
+                    return vec![];
+                }
+                Err(e) => {
+                    tracing::warn!(error=%crate::resolver::log_error(&e),"canary claim failed")
+                }
+                _ => {}
+            }
+        }
+        let sources = resolver.queue_sources();
+        match claim_sources(pool, &sources, &self.cfg, resolver.batch_size()).await {
+            Ok(jobs) if !jobs.is_empty() => jobs,
+            Ok(_) => {
+                tokio::select! {
+                    _ = self.wake.notified() => {}
+                    _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+                }
+                vec![]
+            }
+            Err(e) => {
+                tracing::error!(error=%crate::resolver::log_error(&e),"queue claim failed");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                vec![]
+            }
+        }
+    }
+    /// Run a claimed batch, or put it back when its first job's author is over budget.
+    async fn finish(&self, jobs: &[Job]) {
+        let (pool, resolver) = (&self.pool, self.resolver.as_ref());
+        let result = async {
+            let refused = if resolver.name() == "geo" {
+                None
+            } else {
+                let rate = self.cfg.author_requests_per_second;
+                self.authors.admit_or_spread(pool, &jobs[0], rate).await?
+            };
+            let Some(spread) = refused else {
+                let manifest = resolver.manifest_for(&jobs[0].uri);
+                let run = run_batch_config(pool, resolver, &self.cfg, &self.refresh, jobs);
+                let (result, _) = crate::telemetry::observe(&self.metrics, &manifest, run).await;
+                return result;
+            };
+            for job in jobs.iter().skip(1) {
+                sqlx::query("UPDATE resource SET lease_until=NULL,next_attempt_at=now()+interval '1 second' WHERE id=$1 AND generation=$2").bind(&job.id).bind(job.generation).execute(pool).await?;
+            }
+            // The refusal fetched nothing. When it put the author's other links off, the next
+            // claim finds another author's link: it need not wait for the pacing slot.
+            if spread > 0 {
+                *self.rate.lock().await = Instant::now();
+            }
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::error!(error=%crate::resolver::log_error(&e),"queue persistence failed");
+        }
+    }
 }
 
 /// The seconds to a card's next fetch when it changes by itself at `by` (an incident expires, an
@@ -1196,5 +1400,127 @@ mod refresh_by_tests {
         // A deadline passed or a moment away: in a minute. A final card is fetched then too.
         assert_eq!(refresh_by(week, Some(now - Duration::hours(1)), now), 60);
         assert_eq!(refresh_by(0, Some(now + Duration::hours(1)), now), 3600);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ResourceMeta;
+
+    /// Links whose steps after the save fail, standing in for a database error there.
+    static FAILS_AFTER_SAVE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    pub(super) fn maybe_fail_after_save(uri: &str) -> Result<()> {
+        let fails = FAILS_AFTER_SAVE.lock().unwrap();
+        anyhow::ensure!(!fails.iter().any(|u| u == uri), "the alias step failed");
+        Ok(())
+    }
+
+    /// A web resolver that answers a page after `0` (never, within a test, when it is long).
+    struct After(Duration);
+    #[async_trait::async_trait]
+    impl Resolver for After {
+        fn name(&self) -> &'static str {
+            "web"
+        }
+        fn matches(&self, _: &str) -> bool {
+            true
+        }
+        async fn resolve(&self, uri: &str) -> Result<ResourceMeta> {
+            tokio::time::sleep(self.0).await;
+            let mut doc = ResourceMeta::new(uri, "web", 100);
+            doc.name = Some("A page".into());
+            Ok(doc)
+        }
+        fn refresh_after(&self, _: &ResourceMeta) -> Duration {
+            Duration::from_secs(100)
+        }
+    }
+    async fn claimed(pool: &PgPool, uri: &str) -> Job {
+        let id = crate::store::ensure_resource(pool, uri).await.unwrap();
+        sqlx::query("UPDATE resource SET orphaned_at=NULL WHERE id=$1")
+            .bind(&id)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO reference(resource_id,kind,author,label,object_path,created_at,unit_key) VALUES($1,'tag',$2,'t','',now(),'tag:t')")
+            .bind(&id)
+            .bind("y".repeat(52))
+            .execute(pool)
+            .await
+            .unwrap();
+        let job = claim(pool, "web", &QueueConfig::default())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.id, id);
+        job
+    }
+    async fn row(pool: &PgPool, id: &str) -> (String, i32, i32, bool, Option<String>) {
+        sqlx::query_as(
+            "SELECT status,attempts,timeout_streak,dead_letter,last_error FROM resource WHERE id=$1",
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// The daemon's path (a batch): a job that passes its deadline is a timeout, which the first
+    /// `timeout_grace` times charges no attempt, whatever the resolver.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_batch_past_its_deadline_is_a_timeout_not_a_parse_failure(pool: PgPool) {
+        let cfg = QueueConfig::default();
+        let job = claimed(&pool, "https://slow.example.org/page").await;
+        let slow = After(Duration::from_secs(3600));
+        run_batch_within(
+            &pool,
+            &slow,
+            &cfg,
+            &Default::default(),
+            std::slice::from_ref(&job),
+            Duration::from_millis(50),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            row(&pool, &job.id).await,
+            ("pending".into(), 0, 1, false, Some("timeout".into()))
+        );
+    }
+
+    /// A failure in what follows the save (the alias a page names) leaves the saved card as it
+    /// is: `ok`, with no attempt charged.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_failure_after_the_save_leaves_the_saved_card(pool: PgPool) {
+        let cfg = QueueConfig::default();
+        let uri = "https://after-save.example.org/page";
+        let job = claimed(&pool, uri).await;
+        FAILS_AFTER_SAVE.lock().unwrap().push(uri.into());
+        run_batch(
+            &pool,
+            &After(Duration::ZERO),
+            &cfg,
+            std::slice::from_ref(&job),
+        )
+        .await
+        .unwrap();
+        assert_eq!(row(&pool, &job.id).await, ("ok".into(), 0, 0, false, None));
+        // The link is read again in full after the first backoff, so the step runs again.
+        let (again, is_final): (f64, bool) = sqlx::query_as(
+            "SELECT extract(epoch FROM next_attempt_at-now())::float8,final FROM resource WHERE id=$1",
+        )
+        .bind(&job.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(again > 0.0 && again <= cfg.backoff_secs as f64, "{again}");
+        assert!(!is_final);
+        let name: Option<String> = sqlx::query_scalar("SELECT name FROM resource WHERE id=$1")
+            .bind(&job.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(name.as_deref(), Some("A page"));
     }
 }

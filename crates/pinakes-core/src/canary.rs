@@ -6,6 +6,7 @@ use crate::{
     telemetry::Metrics,
 };
 use anyhow::Result;
+use futures_util::FutureExt;
 use sqlx::PgPool;
 use std::time::Duration;
 
@@ -54,6 +55,21 @@ pub async fn claim_due<'a>(
             .map(|m| (m, generation))
     }))
 }
+/// The fields a canary's card must hold: the manifest's expected ones. The web route expects
+/// none of a page (any page may lack any field), so its canary, a page known to have a title,
+/// must have its `name`: it proves a reader returned a field, not only that the fetch answered.
+fn expected_fields(manifest: &Manifest) -> Vec<String> {
+    let mut fields = manifest.expected_fields.clone();
+    if manifest.source == "web" && fields.is_empty() {
+        fields.push("name".into());
+    }
+    fields
+}
+fn missing_fields(manifest: &Manifest, doc: &ResourceMeta) -> Vec<String> {
+    let mut canary = manifest.clone();
+    canary.expected_fields = expected_fields(manifest);
+    canary.missing_fields(doc)
+}
 pub async fn record(
     pool: &PgPool,
     manifest: &Manifest,
@@ -67,15 +83,16 @@ pub async fn record(
         .is_some_and(crate::resolver::egress::over_cap)
     {
         // An over-budget sample is inconclusive. Keep the size policy and retry the
-        // next moving-window sample, without claiming either health or an outage.
-        sqlx::query("UPDATE source_state SET canary_at=now(),canary_ok=NULL,canary_missing='{}',canary_failures=0,canary_due_at=now()+$3*interval '1 second',canary_lease_until=NULL WHERE source=$1 AND canary_generation=$2")
+        // next moving-window sample, without claiming either health or an outage: the streak
+        // of failures before it stays as it is.
+        sqlx::query("UPDATE source_state SET canary_at=now(),canary_ok=NULL,canary_missing='{}',canary_due_at=now()+$3*interval '1 second',canary_lease_until=NULL WHERE source=$1 AND canary_generation=$2")
             .bind(&manifest.source).bind(generation).bind(interval as f64).execute(pool).await?;
         return Ok(());
     }
     let missing = result
         .as_ref()
-        .map(|doc| manifest.missing_fields(doc))
-        .unwrap_or_else(|_| manifest.expected_fields.clone());
+        .map(|doc| missing_fields(manifest, doc))
+        .unwrap_or_else(|_| expected_fields(manifest));
     let ok = result
         .as_ref()
         .is_ok_and(|doc| doc.status == Status::Ok && missing.is_empty());
@@ -92,13 +109,15 @@ pub async fn run_manifest(
     generation: i64,
 ) -> Result<()> {
     let (result, observations) = crate::telemetry::observe(metrics, manifest, async {
-        let result = tokio::time::timeout(Duration::from_secs(15), async {
+        let probe = tokio::time::timeout(Duration::from_secs(15), async {
             let target = resolver.canary_target(manifest).await?;
             resolver.probe_manifest(&target, manifest).await
-        })
-        .await
-        .map_err(anyhow::Error::from)
-        .and_then(|r| r);
+        });
+        // A reader that panics on the sample is a failed canary, and the worker goes on.
+        let result = match std::panic::AssertUnwindSafe(probe).catch_unwind().await {
+            Ok(result) => result.map_err(anyhow::Error::from).and_then(|r| r),
+            Err(_) => Err(anyhow::anyhow!("the canary's reader panicked")),
+        };
         // An over-budget sample is inconclusive (`record`), never a parse failure.
         if result
             .as_ref()

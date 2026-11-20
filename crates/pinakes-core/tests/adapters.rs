@@ -3331,7 +3331,9 @@ async fn public_canary_redaction_unknown_size_and_disabled_nostr(pool: PgPool) {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(state, (None, 0));
+    // An inconclusive sample claims neither health nor an outage: the streak of failed runs
+    // before it stays as it is.
+    assert_eq!(state, (None, 12));
     let uri = "nostr:naddr1invalid-fixture";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
     let (egress, t) = mock_egress(vec![]);
