@@ -837,6 +837,129 @@ async fn batch_failures_are_per_object_and_upstream_retries_do_not_charge(pool: 
     server.abort();
 }
 
+/// One resolver, as the daemon runs it: after a 429 with `Retry-After: 600` the next batch is
+/// put off for the rest of that wait at once, with no request, no sleep under the shared lock
+/// and no charge.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_cooldown_defers_the_next_batch_at_once(pool: PgPool) {
+    use std::sync::atomic::AtomicUsize;
+    let hits = Arc::new(AtomicUsize::new(0));
+    let seen = hits.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new().route(
+        "/lookup",
+        get(move || {
+            let seen = seen.clone();
+            async move {
+                seen.fetch_add(1, Ordering::SeqCst);
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [("retry-after", "600")],
+                    "retry",
+                )
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let config = OsmConfig {
+        nominatim_url: url.into(),
+        requests_per_second: 1000.0,
+        ..Default::default()
+    };
+    let resolver = OsmResolver::new(pool.clone(), config).unwrap();
+    let cfg = QueueConfig::default();
+    for id in [11, 12] {
+        store::ensure_resource(&pool, &format!("https://www.openstreetmap.org/node/{id}"))
+            .await
+            .unwrap();
+        let jobs = queue::claim_batch(&pool, "osm", &cfg, 50).await.unwrap();
+        assert_eq!(jobs.len(), 1);
+        let started = std::time::Instant::now();
+        queue::run_batch(&pool, &resolver, &cfg, &jobs)
+            .await
+            .unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        let (attempts, dead, delay, error): (i32, bool, f64, Option<String>) = sqlx::query_as(
+            "SELECT attempts,dead_letter,extract(epoch FROM next_attempt_at-now())::float8,last_error FROM resource WHERE osm_id=$1",
+        )
+        .bind(id as i64)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((attempts, dead), (0, false), "node {id}");
+        assert!(delay > 590.0 && delay <= 601.0, "node {id}: {delay}");
+        assert_eq!(
+            error.as_deref(),
+            Some(if id == 11 { "http_4xx" } else { "rate_limited" })
+        );
+    }
+    // The second batch sent nothing.
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    server.abort();
+}
+
+/// An upstream that refuses Pinakes (401 or 403: a key expired or out of quota) says nothing of
+/// the link: no charge, no dead letter, read again later. Another answer that is no place data
+/// is the link's failure, stored by its status class.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_refused_upstream_key_is_not_the_link_s_failure(pool: PgPool) {
+    use std::sync::atomic::AtomicU16;
+    let code = Arc::new(AtomicU16::new(401));
+    let mode = code.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new().route(
+        "/lookup",
+        get(move || {
+            let mode = mode.clone();
+            async move { StatusCode::from_u16(mode.load(Ordering::SeqCst)).unwrap() }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let config = OsmConfig {
+        nominatim_url: url.into(),
+        requests_per_second: 1000.0,
+        ..Default::default()
+    };
+    store::ensure_resource(&pool, "https://www.openstreetmap.org/node/21")
+        .await
+        .unwrap();
+    let cfg = QueueConfig::default();
+    for (status, class, attempts) in [
+        (401, "upstream_denied", 0),
+        (403, "upstream_denied", 0),
+        (400, "http_4xx", 1),
+    ] {
+        code.store(status, Ordering::SeqCst);
+        sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE osm_id=21")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let jobs = queue::claim_batch(&pool, "osm", &cfg, 50).await.unwrap();
+        assert_eq!(jobs.len(), 1, "{status}");
+        let resolver = OsmResolver::new(pool.clone(), config.clone()).unwrap();
+        queue::run_batch(&pool, &resolver, &cfg, &jobs)
+            .await
+            .unwrap();
+        let row: (i32, bool, Option<String>) =
+            sqlx::query_as("SELECT attempts,dead_letter,last_error FROM resource WHERE osm_id=21")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            row,
+            (attempts, false, Some(class.to_owned())),
+            "status {status}"
+        );
+    }
+    server.abort();
+}
+
 #[sqlx::test(migrations = "../../migrations")]
 async fn object_spellings_are_aliases_of_one_object(pool: PgPool) {
     let (mock, resolver, server) = mock(&pool).await;

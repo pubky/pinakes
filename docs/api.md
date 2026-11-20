@@ -1954,8 +1954,11 @@ through the OSM resolver, including object aliases: `/{type}/{id}/history[/{vers
 URL, so one resource and one cached `osm_place` row serve them all. OSM cards carry `attribution`; details
 add the category, address and bbox. Any other URL on an OSM host (user pages, map views,
 changesets, notes) is refused before any fetch: status `error`, a link-only card, stored once
-as final. Batch 429, 5xx, timeouts and oversized bodies defer jobs without charging an attempt,
-honouring a Retry-After of up to one hour.
+as final. A batch's 429, 5xx or oversized answer defers its jobs without charging an attempt,
+honouring a Retry-After of up to one hour; jobs claimed during that wait are put off to its end
+without a request. A 401 or 403 (the operator's key refused) is read again later and never
+dead-letters; after three days of refusals the link turns `unreachable`, read with the usual
+backoff. A timeout is charged from the fourth in a row (`limits.timeout_grace`).
 
 `geo:` URIs (RFC 5870, altitude and uncertainty ignored; other CRSs are errors) and location
 links resolve offline as Place points (`geo.enabled`): OSM marker links (`/?mlat=&mlon=`), OSM
