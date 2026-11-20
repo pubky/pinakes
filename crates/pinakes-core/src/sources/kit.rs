@@ -3,7 +3,9 @@
 //! and small readers for JSON values.
 //!
 //! Builders and parsers perform no I/O. A builder returns the `Request` to send; `fetch` sends it
-//! through Egress and the status and body go to the matching parser. A parser returns `Ok(None)`
+//! through Egress and the status and body go to the matching parser. The sources that read one
+//! record with one request are written this way; one that asks several things, sends a
+//! credential or reads a page builds its `FetchOptions` and calls `Context::fetch` in `resolve`. A parser returns `Ok(None)`
 //! when the service answers that the object does not exist, and an error for anything else it
 //! cannot read (a malformed body, or an answer for a different object); rate limits and server
 //! errors never reach it (`Context::fetch` turns them into `RetryLater`).

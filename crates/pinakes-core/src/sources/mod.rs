@@ -1,5 +1,8 @@
-//! Cards read from a service's own keyless API instead of its HTML page: exact where the page is
-//! bot-walled, thin or moved.
+//! Cards read from a service's own API instead of its HTML page: exact where the page is
+//! bot-walled, thin or moved. Most APIs need no key; a few sources read with the operator's
+//! token (`Source::takes_token`) and are off without it. Where a service has no API for an
+//! object, its source reads the service's own page (its tags or embedded record); page hooks and
+//! wall hooks improve a web card instead of claiming links.
 //!
 //! A source is one module, `sources/<name>.rs`, whose unit struct implements [`Source`] and is
 //! listed once in [`REGISTRY`] (with its `pub mod` line). Its documentation is
@@ -192,9 +195,11 @@ pub trait Source: Send + Sync {
         &[]
     }
     /// The service's published limits per host, as `(host, requests_per_second)`; a windowed
-    /// limit is given as its average rate (60 per minute → 1.0). The rate becomes the host's
-    /// default (`limits.host_rates` overrides it). Egress never has more than one request in
-    /// flight per host, which meets any limit on concurrent requests.
+    /// limit is given as its average rate (60 per minute → 1.0). The rate lowers the host's
+    /// default (`limits.host_requests_per_second`), never raises it: one above the default
+    /// changes nothing until the operator raises the default. `limits.host_rates` overrides
+    /// both. Egress never has more than one request in flight per host, which meets any limit on
+    /// concurrent requests.
     fn budgets(&self) -> &'static [Budget] {
         &[]
     }
