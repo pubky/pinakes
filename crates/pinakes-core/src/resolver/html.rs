@@ -812,9 +812,12 @@ impl Job {
     }
 
     fn start(&self, worker: &Worker) -> anyhow::Result<Process> {
+        // The worker reads hostile markup: it gets none of the daemon's environment (the
+        // database URL, keys and tokens), only its arguments and the text on its stdin.
         let mut child = Command::new(&worker.program)
             .args(&worker.args)
             .arg(self.budget.as_secs().max(1).to_string())
+            .env_clear()
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -2217,6 +2220,31 @@ mod tests {
         assert!(job
             .parse_with(Kind::Fragment, "plain", Some(&missing))
             .is_ok());
+    }
+
+    /// A worker is started without the daemon's environment: no variable of this process (cargo
+    /// sets several for a test) reaches it.
+    #[test]
+    fn a_worker_gets_none_of_the_daemon_s_environment() {
+        assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some());
+        let seen = std::env::temp_dir().join(format!("pinakes-worker-env-{}", std::process::id()));
+        let worker = Worker {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                "/usr/bin/env > \"$0\"".into(),
+                seen.clone().into_os_string(),
+            ],
+        };
+        let mut job = Job::new(PARSE_BUDGET, Arc::default());
+        // The script answers nothing: the parse fails, the worker has run.
+        assert!(job
+            .parse_with(Kind::Fragment, "<b>x</b>", Some(&worker))
+            .is_err());
+        let environment = std::fs::read_to_string(&seen).unwrap();
+        let _ = std::fs::remove_file(&seen);
+        assert!(!environment.contains("CARGO"), "{environment}");
+        assert!(!environment.contains("DATABASE_URL"), "{environment}");
     }
 
     /// A parse that ended for a reason outside the page is a timeout, read again with the card
