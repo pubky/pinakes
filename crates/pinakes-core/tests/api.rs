@@ -1322,7 +1322,9 @@ async fn a_pending_preview_is_waited_for_by_its_status_and_read_once(pool: PgPoo
 /// the lock `change` is run (a statement over `$1`, the link's ID, and `$2`, `root`), so that
 /// read is the first to see it. The answer; how many status reads waited at the lock up to and
 /// with the one that saw the change (fewer than three: the request answered before it); and how
-/// many came after it.
+/// many came after it. The API's connection must have the status read prepared already: a
+/// statement stops at the lock once more the first time, to be prepared. A request that has not
+/// answered after thirty seconds, ten times its wait's window, fails the test.
 async fn resolved_with_a_change_at_its_third_read(
     app: &Router,
     pool: &PgPool,
@@ -1348,49 +1350,56 @@ async fn resolved_with_a_change_at_its_third_read(
             .await
         }
     });
-    let (mut reads, mut after) = (0, 0);
-    let started = std::time::Instant::now();
-    loop {
-        // The statement of the request that waits at the lock now; none once it has answered.
-        let waiting: Option<String> = loop {
-            let waiting: Option<String> = sqlx::query_scalar("SELECT query FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' LIMIT 1")
-                .fetch_optional(pool)
-                .await
-                .unwrap();
-            if waiting.is_some() || request.is_finished() {
-                break waiting;
-            }
-            assert!(
-                started.elapsed() < std::time::Duration::from_secs(120),
-                "the request neither asks nor answers"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-        };
-        let Some(statement) = waiting else {
-            break;
-        };
-        if statement.starts_with("SELECT status FROM resource") {
-            if reads == 3 {
-                after += 1;
-            } else {
-                reads += 1;
-                if reads == 3 {
-                    sqlx::query(change)
-                        .bind(&id)
-                        .bind(root)
-                        .execute(&mut *gate)
-                        .await
-                        .unwrap();
+    let (reads, after) = (std::cell::Cell::new(0), std::cell::Cell::new(0));
+    let gated = async {
+        loop {
+            // The statement of the request that waits at the lock now; none once it has
+            // answered.
+            let waiting: Option<String> = loop {
+                let waiting: Option<String> = sqlx::query_scalar("SELECT query FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' LIMIT 1")
+                    .fetch_optional(pool)
+                    .await
+                    .unwrap();
+                if waiting.is_some() || request.is_finished() {
+                    break waiting;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            };
+            let Some(statement) = waiting else {
+                break;
+            };
+            if statement.starts_with("SELECT status FROM resource") {
+                if reads.get() == 3 {
+                    after.set(after.get() + 1);
+                } else {
+                    reads.set(reads.get() + 1);
+                    if reads.get() == 3 {
+                        sqlx::query(change)
+                            .bind(&id)
+                            .bind(root)
+                            .execute(&mut *gate)
+                            .await
+                            .unwrap();
+                    }
                 }
             }
+            gate.commit().await.unwrap();
+            gate = pool.begin().await.unwrap();
+            sqlx::query(hold).execute(&mut *gate).await.unwrap();
         }
         gate.commit().await.unwrap();
-        gate = pool.begin().await.unwrap();
-        sqlx::query(hold).execute(&mut *gate).await.unwrap();
+    };
+    let limit = std::time::Duration::from_secs(30);
+    if tokio::time::timeout(limit, gated).await.is_err() {
+        request.abort();
+        panic!(
+            "no answer after {limit:?}: {} reads of the status up to the change, {} after it",
+            reads.get(),
+            after.get()
+        );
     }
-    gate.commit().await.unwrap();
     let (code, answer) = request.await.unwrap();
-    (code, answer, reads, after)
+    (code, answer, reads.get(), after.get())
 }
 
 /// What happens to a preview while it is waited for decides the answer: a link deleted
@@ -1420,6 +1429,16 @@ async fn a_preview_that_goes_or_becomes_an_alias_while_waited_for(pool: PgPool) 
     store::save_document(&connection, &root, 0, &doc)
         .await
         .unwrap();
+    // One request first, so the API's connection has the wait's read of the status prepared:
+    // each time that read stops at the lock from here on is one read.
+    let (code, known) = call(
+        &app,
+        "POST",
+        "/v1/resolve",
+        Some(json!({"uri":"https://example.org/root"})),
+    )
+    .await;
+    assert_eq!((code, &known["name"]), (StatusCode::OK, &json!("Root")));
 
     let before = common::counted(&connection, scans).await;
     let (code, answer, reads, after) = resolved_with_a_change_at_its_third_read(
