@@ -6,7 +6,8 @@ use async_trait::async_trait;
 
 pub struct Lobsters;
 
-/// A story's short id: six lower-case letters and digits.
+/// A story's short id, with or without `.json`: 3 to 12 lower-case letters and digits (Lobsters
+/// gives six).
 fn short_id(value: &str) -> Option<&str> {
     let value = value.strip_suffix(".json").unwrap_or(value);
     ((3..=12).contains(&value.len())

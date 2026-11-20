@@ -1,8 +1,9 @@
 //! Mastodon posts, read from the instance's own API (`/api/v1/statuses/{id}`) on any instance.
-//! A post is keyed on its ActivityPub id: every address of it, on its own server or seen through
-//! another, becomes one resource. No key; Mastodon allows 300 requests per 5 minutes per address.
-//! A server that is not Mastodon (or refuses unauthenticated reads) is remembered, and its links
-//! get ordinary web cards.
+//! A post is keyed on its ActivityPub id: every address of it on its own server becomes one
+//! resource; a copy seen through another server keeps its own card. No key; Mastodon allows 300
+//! requests per 5 minutes per address. A server whose answer is not JSON is remembered as not
+//! Mastodon, and its links get ordinary web cards. A JSON refusal (a private post, a server that
+//! refuses unauthenticated reads) gives that link a web card and marks nothing.
 use super::{text, web_url, Context, Declined, Example, HostMemo, Source};
 use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::{Context as _, Result};
