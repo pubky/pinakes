@@ -19,8 +19,9 @@ of the API: the first one, two or three segments are tried as the branch (or tag
 first. When none of them is a branch (or tag) and the link has more segments, the name may be a
 longer one: the link gets an ordinary web card.
 
-Repository pages are read on codeberg.org and gitea.com, and on any host that answered as an
-instance within the last day. The deeper shapes (`/src/branch/…`, `/releases/tag/…`) are read on
+Repository pages and release links (`/releases/tag/…`, a shape GitHub's release links have too)
+are read on codeberg.org and gitea.com, and on any host that answered as an instance within the
+last day. The `/src/…` shapes (`/src/branch/…`, `/src/tag/…`, `/src/commit/…`) are read on
 any host: an unknown host is first asked for `/api/v1/version`, which must answer exactly as
 Forgejo and Gitea do (`{"version": "…"}`, the value a version such as `1.22.0` or
 `11.0.1+gitea-1.22.0`). The answer is remembered for a day, in memory: a host that answers

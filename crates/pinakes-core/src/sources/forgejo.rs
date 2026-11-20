@@ -1,8 +1,9 @@
 //! Forgejo and Gitea instances (Codeberg, gitea.com and any other): repositories, branches,
 //! tags, releases and files, read from the instance's API (`/api/v1/repos/…`), never from its
 //! pages (Codeberg answers deep pages with a bot challenge, which is never solved). No key;
-//! Codeberg allows 2,000 requests per 10 minutes. Another host is asked once a day whether it
-//! runs Forgejo or Gitea (`/api/v1/version`); one that does not gets ordinary web cards.
+//! Codeberg allows 2,000 requests per 10 minutes. Another host is asked once a day, for a
+//! `/src/…` link, whether it runs Forgejo or Gitea (`/api/v1/version`); one that does not gets
+//! ordinary web cards.
 use super::{list, text, web_url, Budget, Context, Declined, Example, HostMemo, Source};
 use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::{Context as _, Result};
@@ -15,7 +16,7 @@ pub struct Forgejo;
 /// Which hosts answered as Forgejo or Gitea, and which did not.
 static INSTANCES: LazyLock<HostMemo> = LazyLock::new(HostMemo::default);
 
-/// Instances known without asking; their repository pages are read too.
+/// Instances known without asking; their repository pages and release links are read too.
 const KNOWN: &[&str] = &["codeberg.org", "gitea.com"];
 
 /// First path segments that are the instance's own pages, never an owner.
@@ -182,10 +183,12 @@ impl Target {
             _ => false,
         }
     }
-    /// Whether only a Forgejo or Gitea instance has links of this shape. A bare `/{owner}/{repo}`
-    /// is read on known instances only.
+    /// Whether only a Forgejo or Gitea instance has links of this shape:
+    /// `src/{branch|tag|commit}/…`. A bare `/{owner}/{repo}` and `releases/tag/{tag}`, which is
+    /// GitHub's release link shape too, are read on known instances and on hosts that answered
+    /// as one.
     fn distinctive(&self) -> bool {
-        self.object != Object::Repo
+        matches!(self.object, Object::At { .. })
     }
 }
 
@@ -676,7 +679,7 @@ mod tests {
             }
         );
 
-        // Repository pages are read on known instances; deeper shapes on any host.
+        // Repository pages are read on known instances; the `src/…` shapes on any host.
         assert!(Forgejo.reads("https://codeberg.org/forgejo/forgejo"));
         assert!(Forgejo.reads("https://gitea.com/gitea/tea"));
         assert!(!Forgejo.reads("https://example.org/about/team"));
@@ -956,6 +959,41 @@ mod resolve_tests {
             .await
             .unwrap_err()
             .is::<Declined>());
+    }
+
+    /// `releases/tag/{tag}` is GitHub's release link shape too: it is read on known instances
+    /// and on a host that answered as one, never on a host not asked yet.
+    #[tokio::test(start_paused = true)]
+    async fn a_release_link_is_read_on_instances_only() {
+        let release = "https://releases.example/a/b/releases/tag/v1";
+        for uri in ["https://github.com/o/r/releases/tag/v1", release] {
+            assert!(!Forgejo.reads(uri), "{uri}");
+        }
+        assert!(Forgejo.reads("https://codeberg.org/forgejo/forgejo/releases/tag/v11.0.1"));
+        // A `src/…` link is read on any host, which is asked whether it is an instance.
+        let (egress, _) = fixture::egress(vec![
+            (
+                "https://releases.example/api/v1/version",
+                200,
+                JSON,
+                read("gitea-version.json"),
+            ),
+            (
+                "https://releases.example/api/v1/repos/a/b/branches/main",
+                200,
+                JSON,
+                read("branch-forgejo.json"),
+            ),
+        ]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let branch = "https://releases.example/a/b/src/branch/main";
+        assert!(Forgejo.reads(branch));
+        let doc = Forgejo.resolve(&cx, branch).await.unwrap();
+        assert_eq!(doc.attributes["branch"], "main");
+        assert!(Forgejo.reads(release));
     }
 
     #[tokio::test(start_paused = true)]
