@@ -684,8 +684,8 @@ while there was work, else after five seconds. An event's normalised name, place
 are stored once read, and its pairs are matched among the events already read through their start
 index, round those starting within 50 hours (an all-day listing and a timed one on one local date may start that far apart, each in its own zone). An event keeps its best twenty pairs and is named by at most forty
 (`limits.same_event_incoming_kept`), and never names one whose forty all rank above it; a read
-examines at most a hundred candidates, with room or not, and one that runs out with room left
-goes on from where it stopped in a later read; one that changes or goes (out of the window, or
+examines at most a hundred candidates among at most a thousand events it visits, with room or not, and one that runs out of either with room left
+goes on from where it stopped in a later read (so one read is bounded, while an event with room left still visits every event starting within those 50 hours, over as many reads as that takes); one that changes or goes (out of the window, or
 deleted as an orphan) takes its pairs from the events that named it, and those are queued to
 refill their lists, as is one whose pair the caps pushed out. An hourly sweep drops events that
 started over a day ago, `limits.same_event_drop_batch` (500) a transaction, and queues those that entered the window, changed
@@ -849,14 +849,14 @@ social post found gone gets no lookups, and its rows are dropped: nothing is der
 archived copy included. Its deletion takes it off the queue; `reextract` and a failed refresh put
 it back on, and the worker then runs no source for it and drops its queue row. A lookup that ran
 while it was found gone writes nothing, nor does one whose link became an alias meanwhile. A
-source that fails or panics keeps its earlier rows and retries with backoff; the others' results
+source that fails or panics keeps its earlier rows and retries with backoff (after six failed runs in a row, once a day, or at the sources' lifetime when shorter); the others' results
 stand and the worker goes on (a panic is logged as an error). A source that asks a secondary
 service besides its own (its page names which) keeps what the link and the other services gave
-when that service fails: the link's own key is recorded, the failure is counted in
+when that service fails: the link's own key is recorded, nothing the source recorded before is deleted, the failure is counted in
 `pinakes_also_on_service_errors_total{service,class}`, and the run comes back after a failed
 run's backoff instead of after the source's lifetime: five minutes, doubling to an hour while the
-service keeps failing, or the wait the service named when longer. A run in which every service
-answers resets it.
+service keeps failing, or the wait the service named when longer; after six such runs in a row it comes back once a day (or at the source's lifetime when shorter), so a lasting failure costs a run a day and an outage that ends is over for the card within a day, before any of its rows expire. A run in which every service
+answers resets it and replaces the source's rows. A service that refuses the operator's credentials brings no run back early, and deletes nothing either. So only a run in which every service answered removes a row; one no service gives any more otherwise leaves when it expires, at most twice the source's lifetime after it was last found.
 The sources run in the order [docs/sources](sources/README.md#also-on) lists them (each page says
 what its source reads and costs); `[also_on] apple_storefront` (`us`, a
 two-letter country code) is the storefront the iTunes lookups ask and the Apple Books and Apple

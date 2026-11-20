@@ -1,7 +1,8 @@
 //! A MusicBrainz card's image and description, from the entity's Wikidata item: its Wikipedia
 //! article's summary or the item's English description, and its image on Wikimedia Commons, each
 //! with its credit (`model::Credit`). A release or release group with no free Commons file takes
-//! its front cover from the Cover Art Archive, by its MBID ([`cover`]).
+//! its front cover from the Cover Art Archive, by its MBID, and a recording that of an official
+//! release it is on ([`cover`]).
 //!
 //! Only exact identifiers lead there, never a name. The item is the one the entity's own
 //! `wikidata` URL relation names; without such a relation, the one item that carries the

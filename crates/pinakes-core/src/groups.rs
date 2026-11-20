@@ -1284,6 +1284,9 @@ pub async fn curate(pool: &PgPool, id: &str, body: Curation, cfg: &GroupConfig) 
         units.push(unit);
         previous.extend(old);
     }
+    // A member named twice is set once.
+    units.sort();
+    units.dedup();
     previous.push(id.into());
     sqlx::query("INSERT INTO \"group\"(id,curated) VALUES($1,true) ON CONFLICT(id) DO UPDATE SET curated=true").bind(id).execute(&mut *tx).await?;
     let removed: Vec<String> =

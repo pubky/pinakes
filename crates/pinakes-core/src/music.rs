@@ -181,6 +181,10 @@ pub fn parse(uri: &str) -> Option<Link> {
         }
         "youtube.com" | "m.youtube.com" | "music.youtube.com" => match segments.as_slice() {
             ["watch"] => youtube_video(&query("v")?),
+            // The player's two forms that name no video: a playlist (`list`), and whatever a
+            // channel streams now (`channel`), which is no one object.
+            ["embed", "videoseries"] => youtube_playlist(&query("list")?),
+            ["embed", "live_stream"] => None,
             ["shorts" | "embed" | "live", id] => youtube_video(id),
             // A channel: the artist's own page on YouTube.
             ["channel", id] if id.len() == 24 && id.starts_with("UC") && token(id, 24, 24) => link(
@@ -189,18 +193,7 @@ pub fn parse(uri: &str) -> Option<Link> {
                 id,
                 format!("https://www.youtube.com/channel/{id}"),
             ),
-            ["playlist"] => {
-                let list = query("list")?;
-                if !token(&list, 8, 64) {
-                    return None;
-                }
-                link(
-                    Service::YouTube,
-                    Level::Playlist,
-                    &list,
-                    format!("https://www.youtube.com/playlist?list={list}"),
-                )
-            }
+            ["playlist"] => youtube_playlist(&query("list")?),
             _ => None,
         },
         "youtu.be" => match segments.as_slice() {
@@ -556,6 +549,17 @@ fn youtube_video(id: &str) -> Option<Link> {
         format!("https://www.youtube.com/watch?v={id}"),
     )
 }
+fn youtube_playlist(list: &str) -> Option<Link> {
+    if !token(list, 8, 64) {
+        return None;
+    }
+    link(
+        Service::YouTube,
+        Level::Playlist,
+        list,
+        format!("https://www.youtube.com/playlist?list={list}"),
+    )
+}
 /// The storefronts a hub may store an Apple Music link under (MusicBrainz keeps the storefront
 /// an editor browsed), asked together ([`hub_spellings`]).
 pub const APPLE_STOREFRONTS: &[&str] = &[
@@ -826,6 +830,17 @@ mod tests {
                 "https://www.youtube.com/playlist?list=OLAK5uy_nc6afxSnmK8OFML8dF9q_0D1MBMXsGnL4",
                 Level::Playlist,
             ),
+            // The player's playlist form is the playlist, never a video called "videoseries".
+            (
+                "https://www.youtube.com/embed/videoseries?list=OLAK5uy_nc6afxSnmK8OFML8dF9q_0D1MBMXsGnL4",
+                "https://www.youtube.com/playlist?list=OLAK5uy_nc6afxSnmK8OFML8dF9q_0D1MBMXsGnL4",
+                Level::Playlist,
+            ),
+            (
+                "https://www.youtube.com/embed/dQw4w9WgXcQ",
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                Level::Video,
+            ),
             (
                 "https://www.deezer.com/fr/track/138539973",
                 "https://www.deezer.com/track/138539973",
@@ -1060,6 +1075,11 @@ mod tests {
             "https://music.apple.com/album/x/1/2/3",
             "https://www.youtube.com/watch?v=short",
             "https://www.youtube.com/@radiohead",
+            // The player's forms that name no video: a playlist without a list, a live stream.
+            "https://www.youtube.com/embed/videoseries",
+            "https://www.youtube.com/embed/videoseries?list=x",
+            "https://www.youtube.com/embed/live_stream?channel=UCq19-LqvG35A-30oyAiPiqA",
+            "https://music.youtube.com/embed/live_stream",
             "https://www.deezer.com/en/track/abc",
             "https://deezer.page.link/xyz",
             "https://on.soundcloud.com/abc",

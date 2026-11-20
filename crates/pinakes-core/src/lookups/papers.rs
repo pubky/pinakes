@@ -84,9 +84,20 @@ pub fn arxiv_links(id: &str, via: &'static str) -> Vec<Link> {
     ]
 }
 
-/// Unpaywall's record for a DOI. Needs the contact setting.
+/// Whether a DOI can be a request's path as it is: none of its segments is `.` or `..`, which a
+/// URL resolves, so the request would be for another path of the service.
+fn path_safe(doi: &str) -> bool {
+    !doi.split('/')
+        .any(|segment| segment == "." || segment == "..")
+}
+
+/// Unpaywall's record for a DOI. Needs the contact setting. No request for a DOI with a `.` or
+/// `..` segment ([`path_safe`]).
 pub fn unpaywall_request(doi: &str, contact_email: &str) -> Option<Request> {
     let email = contact(contact_email)?;
+    if !path_safe(doi) {
+        return None;
+    }
     Request::get(&format!(
         "https://api.unpaywall.org/v2/{}?email={}",
         encode_path(doi),
@@ -342,8 +353,12 @@ pub fn parse_datacite_versions(
     Ok((found, Some(id.clone())))
 }
 
-/// Crossref's record of a journal DOI, as its publisher deposited it.
+/// Crossref's record of a journal DOI, as its publisher deposited it. No request for a DOI with
+/// a `.` or `..` segment ([`path_safe`]).
 pub fn crossref_request(doi: &str) -> Option<Request> {
+    if !path_safe(doi) {
+        return None;
+    }
     Request::get(&format!(
         "https://api.crossref.org/works/{}",
         encode_path(doi)
@@ -1014,6 +1029,32 @@ mod tests {
         ] {
             assert_eq!(arxiv_from_uri(uri), None, "{uri}");
         }
+    }
+
+    /// A DOI whose segments walk out of its path asks nothing: the URL would resolve them and
+    /// name another path of the service. A DOI with dots inside a segment is asked as it is.
+    #[test]
+    fn a_doi_with_dot_segments_is_never_a_request_path() {
+        for doi in [
+            "10.1234/../../x",
+            "10.1234/..",
+            "10.1234/./x",
+            "10.1234/a/../../../x",
+        ] {
+            assert!(unpaywall_request(doi, "ops@example.org").is_none(), "{doi}");
+            assert!(crossref_request(doi).is_none(), "{doi}");
+        }
+        assert_eq!(
+            unpaywall_request("10.1234/a..b/c.d", "ops@example.org")
+                .unwrap()
+                .url
+                .as_str(),
+            "https://api.unpaywall.org/v2/10.1234/a..b/c.d?email=ops%40example.org"
+        );
+        assert_eq!(
+            crossref_request("10.1234/a..b/c.d").unwrap().url.as_str(),
+            "https://api.crossref.org/works/10.1234/a..b/c.d"
+        );
     }
 
     #[test]

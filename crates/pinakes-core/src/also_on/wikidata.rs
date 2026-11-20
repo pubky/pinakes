@@ -53,11 +53,16 @@ impl WikidataSource {
             wikidata::Found::One(item) => item,
             _ => return Ok(Found::default()),
         };
-        // An item with a Discogs release is an edition's only when it is not the album's.
-        if property == DISCOGS_RELEASE && ["P1954", "P436"].iter().any(|p| !item.id(p).is_empty()) {
-            return Ok(Found::default());
-        }
-        let mut found = found(&item, level);
+        // An item with a Discogs release is an edition's only when it is not the album's (nor a
+        // recording's, a work's or an artist's): the release takes an edition's item as it is.
+        let mut found = if property == DISCOGS_RELEASE {
+            if !edition_item(&item) {
+                return Ok(Found::default());
+            }
+            item_found(&item, level)
+        } else {
+            found(&item, level)
+        };
         // A recording item's MBID is keyed as every producer keys a recording (`recording_key`:
         // the one that stands for its duplicates); a replaced MBID stays as `mbid_was`, so
         // `key=mbid:` still finds the track by it.

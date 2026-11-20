@@ -117,7 +117,7 @@ impl PerformersSource {
                 .filter_map(|(link, t)| Some((link, t?)))
                 .collect(),
             // A page that owns none of its performers' links can be keyed by no answer: what it
-            // says is recorded without MusicBrainz (a key an earlier rule gave goes now), and
+            // says is recorded without MusicBrainz (a key it holds from MusicBrainz goes), and
             // MusicBrainz is asked again after its retry time. A page that owns one keeps its
             // previous rows until MusicBrainz answers.
             Err(e)

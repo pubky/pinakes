@@ -67,6 +67,16 @@ fn mb_url(resource: &str) -> (u16, Vec<u8>) {
             ]}))
             .unwrap(),
         ),
+        // A track MusicBrainz relates to the edit of "Never Gonna Give You Up", which shares its
+        // ISRC with the album version.
+        "https://tidal.com/track/491206015" => (
+            200,
+            serde_json::to_vec(&serde_json::json!({"resource": resource, "relations": [
+                {"type": "streaming", "target-type": "recording", "ended": false,
+                 "recording": {"id": "e00ebb77-541e-41f3-86ba-a90530414922"}}
+            ]}))
+            .unwrap(),
+        ),
         // A track MusicBrainz relates to recording …36, whose fifth ISRC it shares with …35.
         "https://tidal.com/track/1000005" => (
             200,
@@ -141,7 +151,7 @@ impl Transport for Recorded {
                 vec![],
             ));
         }
-        // Spotify's token and Web API (`spotify`): the track REPORT-matching names, written by
+        // Spotify's token and Web API (`spotify`): one track, written by
         // hand in the API's shape (Spotify refused to answer the owner's app; tests/spotify.rs).
         if let Some(host @ ("accounts.spotify.com" | "api.spotify.com")) = url.host_str() {
             self.seen
@@ -1902,7 +1912,7 @@ async fn one_recording_stands_for_its_duplicates_on_every_path(pool: sqlx::PgPoo
 /// for it, and the tagged Apple link joins (Cut to the Feeling). A TIDAL track's own ISRC names
 /// the one Deezer track. Off by default, nothing asks Deezer.
 /// Spotify's own record of a track (`spotify`): its ISRC, which MusicBrainz gives to one
-/// recording, joins the track to that recording's page (REPORT-matching P1).
+/// recording, joins the track to that recording's page.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_spotify_track_joins_the_musicbrainz_recording(pool: sqlx::PgPool) {
     if !has(&["spotify", "musicbrainz", "musicbrainz_entity"]) {
@@ -2022,7 +2032,7 @@ async fn spotify_falls_back_to_musicbrainz(pool: sqlx::PgPool, spotify: Option<&
                 "accounts.spotify.com/api/token",
                 "api.spotify.com/v1/tracks/6LgJvl0Xdtc73RJ1mmpotq",
             ],
-            Some("spotify_auth".to_owned()),
+            None,
         ),
         None => (&[], None),
     };
@@ -2051,7 +2061,7 @@ async fn spotify_falls_back_to_musicbrainz(pool: sqlx::PgPool, spotify: Option<&
             "mb:recording:9f9cf187-d6f9-437f-9d98-d59cdbd52757 musicbrainz",
         ]
     );
-    // The refusal waits out its hold; what MusicBrainz gave stands meanwhile.
+    // The refusal fails no run; what MusicBrainz gave stands.
     let last_error: Option<String> =
         sqlx::query_scalar("SELECT last_error FROM also_on_dirty WHERE resource_id=$1")
             .bind(&ids[0])
@@ -3424,6 +3434,23 @@ async fn a_shared_isrc_names_the_recording_the_tracks_length_picks(pool: sqlx::P
     store::save_document(&pool, &deezer_id, 0, &d)
         .await
         .unwrap();
+    // The edit's own MusicBrainz page, and a track MusicBrainz relates to the edit by URL whose
+    // page states no ISRC: both read the edit's record, which lists the shared ISRC.
+    let mut of_the_edit = vec![];
+    for uri in [
+        "https://musicbrainz.org/recording/e00ebb77-541e-41f3-86ba-a90530414922",
+        "https://tidal.com/track/491206015",
+    ] {
+        // The page is read by its own source.
+        if uri.starts_with("https://musicbrainz.org/") && !has(&["musicbrainz_entity"]) {
+            continue;
+        }
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut d = ResourceMeta::new(uri, "jsonld", 86400);
+        d.set_type("MusicRecording");
+        store::save_document(&pool, &id, 0, &d).await.unwrap();
+        of_the_edit.push(id);
+    }
     let t = Arc::new(Recorded {
         seen: Mutex::default(),
     });
@@ -3479,6 +3506,19 @@ async fn a_shared_isrc_names_the_recording_the_tracks_length_picks(pool: sqlx::P
     );
     for id in &ids {
         assert_eq!(rows(facts, id.clone()).await, ["isrc GBARL9300135"]);
+    }
+    // The recording's own record lists the shared ISRC as well: on its page and on a link
+    // MusicBrainz relates to it, the recording is the key and the ISRC a fact, so Deezer is not
+    // asked by the ISRC for either.
+    for id in &of_the_edit {
+        let recorded = rows(keys, id.clone()).await;
+        assert!(recorded.iter().any(|k| k.starts_with(edit)), "{recorded:?}");
+        assert!(
+            !recorded.iter().any(|k| k.starts_with("isrc:")),
+            "{recorded:?}"
+        );
+        assert_eq!(rows(facts, id.clone()).await, ["isrc GBARL9300135"]);
+        assert!(rows(deezer_links, id.clone()).await.is_empty());
     }
     let own = rows(keys, deezer_id.clone()).await;
     assert!(own.contains(&format!("{album} deezer deezer")), "{own:?}");
@@ -3831,7 +3871,7 @@ async fn disagreeing_recording_keys_are_kept_and_counted(pool: sqlx::PgPool) {
 
 /// A read the duplicate walk makes besides the subject's own, over MusicBrainz's cap, settles
 /// nothing and empties no run: a track MusicBrainz relates to a recording whose ISRC it shares
-/// with a recording over the cap keeps its own MBID and that recording's links, as on main; a
+/// with a recording over the cap keeps its own MBID and that recording's links; a
 /// track whose Wikidata item names a recording over the cap keeps Wikidata's own key (the raw
 /// P4404 MBID).
 #[sqlx::test(migrations = "../../migrations")]

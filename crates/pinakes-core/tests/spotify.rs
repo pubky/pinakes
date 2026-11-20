@@ -21,7 +21,7 @@ use common::{hubs_fixture as fixture, media::PublicDns, save_card as save, strin
 
 /// A made-up Spotify album ID (22 base-62 characters) with HYDRA 3D's barcode as a UPC-A.
 const ALBUM: &str = "0hydra3DexampleAlbum01";
-/// "Bohemian Rhapsody - Remastered 2011", the track REPORT-matching names.
+/// "Bohemian Rhapsody - Remastered 2011".
 const TRACK: &str = "7tFiyTwD0nx5a1eklYtX2J";
 /// `GET /v1/albums/{ALBUM}`, the members read: `id`, `type`, `external_ids.upc`.
 fn album_body() -> Vec<u8> {
@@ -455,10 +455,10 @@ async fn without_credentials_nothing_asks_spotify(pool: sqlx::PgPool) {
 }
 
 /// Credentials the token endpoint refuses, and an app the API refuses (403, as for an owner
-/// without Premium): a refusal of the credentials, retried after the hold, asking Spotify
-/// nothing meanwhile; what Spotify gave before stays.
+/// without Premium): a refusal of the credentials, which fails no run and asks Spotify nothing
+/// while it is held; what Spotify gave before stays.
 #[sqlx::test(migrations = "../../migrations")]
-async fn refused_credentials_keep_what_spotify_gave_and_retry_later(pool: sqlx::PgPool) {
+async fn refused_credentials_keep_what_spotify_gave(pool: sqlx::PgPool) {
     let album = save(
         &pool,
         &format!("https://open.spotify.com/album/{ALBUM}"),
@@ -518,8 +518,8 @@ async fn refused_credentials_keep_what_spotify_gave_and_retry_later(pool: sqlx::
             rows(&pool, KEYS, &album).await,
             ["upc:4018939306052 spotify"]
         );
-        assert_eq!(queued().await.as_deref(), Some("spotify_auth"));
-        // The refusal is kept five minutes: the retry asks Spotify nothing.
+        assert_eq!(queued().await, None);
+        // The refusal is kept five minutes: a run within them asks Spotify nothing.
         let seen = run(&pool, config(Some(pair)), answers).await;
         assert!(spotify_requests(&seen).is_empty(), "{seen:?}");
     }
@@ -855,7 +855,7 @@ async fn an_album_with_a_barcode_key_gets_its_spotify_album(pool: sqlx::PgPool) 
         "{seen:?}"
     );
     assert_eq!(rows(&pool, links, &hydra).await, expected);
-    // Spotify refusing the app (no Premium): the link stays, the lookup waits out the hold.
+    // Spotify refusing the app (no Premium): the link stays, and no run fails.
     run(
         &pool,
         config(Some(("upc-refused-id", "upc-refused-secret"))),
@@ -866,5 +866,5 @@ async fn an_album_with_a_barcode_key_gets_its_spotify_album(pool: sqlx::PgPool) 
     )
     .await;
     assert_eq!(rows(&pool, links, &hydra).await, expected);
-    assert_eq!(queued().await.as_deref(), Some("spotify_auth"));
+    assert_eq!(queued().await, None);
 }

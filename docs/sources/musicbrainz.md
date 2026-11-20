@@ -4,7 +4,8 @@ One of the music sources of [also on](../api.md#also-on): links on music service
 
 `musicbrainz`: what MusicBrainz relates the link to (one recording, release or release group,
 or artist; several are ambiguous and give nothing), that entity's current links on music
-services, and its MBIDs, the recording's ISRCs (up to eight) and the release's barcode as keys
+services, and its MBIDs, the recording's ISRCs (up to eight; one MusicBrainz also gives to a
+recording that disagrees is a fact, not a key) and the release's barcode as keys
 (`mb:recording:…`, `mb:release:…`, `mb:release-group:…`, `mb:artist:…`, `isrc:…`,
 `upc:…`). A track MusicBrainz does not relate by URL takes the recording its page's own ISRC
 is on when the page's service vouches for the ISRC (TIDAL's) and
@@ -38,8 +39,8 @@ they name, and one for a track's original album). The duplicate check (an ISRC M
 gives to several recordings, [an ISRC on several recordings](README.md#an-isrc-on-several-recordings))
 costs, for a recording a link is related to, one ISRC lookup per ISRC of the recording and,
 where several recordings share one, each of their records (at most 8 recordings, 16 ISRC
-lookups and 32 recording reads per walk), all cached; a duplicate's other ISRCs are each looked up
-once more to see whether they name the same recording. The worker asks MusicBrainz about a batch's
+lookups and 32 recording reads per walk), all cached; a recording's ISRCs (a duplicate's other ISRCs too) are each looked up
+once more, from that cache, to see whether they name the same recording. The worker asks MusicBrainz about a batch's
 links' URLs together ([operations](../operations.md#also-on)); an Apple Music link, which
 MusicBrainz stores under the storefront an editor browsed, is asked under twenty storefronts'
 spellings in one request.

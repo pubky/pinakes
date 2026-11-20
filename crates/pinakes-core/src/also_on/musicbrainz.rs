@@ -182,5 +182,5 @@ async fn album_item_links(cx: &Context, group: &musicbrainz::Entity) -> Result<V
     if !matches!(item.id("P436"), [mbid] if *mbid == group.mbid) {
         return Ok(vec![]);
     }
-    Ok(found(item, Level::Album).links)
+    Ok(item_links(item, Level::Album))
 }

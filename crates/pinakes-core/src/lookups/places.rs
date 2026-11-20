@@ -350,12 +350,8 @@ pub mod also_on {
             };
             let url = crate::wikipedia::item_lookup(&article)?;
             let (status, body) = get(cx, url.as_str(), "wikipedia_busy").await?;
-            if status != 200 {
-                return Ok(None);
-            }
-            Ok(crate::wikipedia::parse_item(&serde_json::from_slice(
-                &body,
-            )?))
+            // Only an article its Wikipedia does not have, or one without an item, is "none".
+            crate::wikipedia::item_answer(status, &body)
         }
     }
 
@@ -399,8 +395,9 @@ pub mod also_on {
 
     /// A place's page on a map or review site (`places::place_page`): the one Wikidata item
     /// carrying the page's value (read back and compared exactly; several are ambiguous and give
-    /// nothing), its Q-id as key, its one OSM object (when it names exactly one) as key and link,
-    /// and its Wikidata page, other place links and Wikipedia editions as links.
+    /// nothing), its Q-id as key when the item carries no other value for the page's site, its
+    /// one OSM object (when it names exactly one) as key and link, and its Wikidata page, other
+    /// place links and Wikipedia editions as links.
     pub struct WikidataPlaces;
 
     #[async_trait]
@@ -432,7 +429,10 @@ pub mod also_on {
                 return Ok(also_on::Found::default());
             };
             let mut found = crate::lookups::Found::default();
-            found.push_key(items::key(&hub.qid));
+            // An item naming several pages on this site is not this one page's.
+            if crate::hubs::wikidata::only_value(&hub, pid, &value) {
+                found.push_key(items::key(&hub.qid));
+            }
             // The item's OSM objects with a valid id (a malformed statement names none): its one
             // object, when it names exactly one, is a key and a link.
             let objects: Vec<crate::model::OsmId> = places::objects(&raw)
@@ -662,6 +662,31 @@ pub mod also_on {
             }
         }
 
+        /// An item that names two Tripadvisor locations is not either page's: its Q-id is no key
+        /// of the page, and what else the item names stays.
+        #[tokio::test(start_paused = true)]
+        async fn an_item_with_two_values_on_the_site_gives_no_item_key() {
+            let search = "https://www.wikidata.org/w/api.php?action=query&list=search&srsearch=haswbstatement%3AP3134%3D188151&srlimit=5&format=json";
+            let mut v: serde_json::Value =
+                serde_json::from_slice(&read("wikidata-q243.json")).unwrap();
+            v["entities"]["Q243"]["claims"]["P3134"]
+                .as_array_mut()
+                .unwrap()
+                .push(
+                    serde_json::json!({"mainsnak": {"snaktype": "value", "property": "P3134",
+                    "datavalue": {"value": "188152", "type": "string"}, "datatype": "external-id"},
+                    "type": "statement", "rank": "normal"}),
+                );
+            let cx = context(vec![
+                (search, 200, JSON, read("wikidata-search-p3134-188151.json")),
+                (&entity("Q243"), 200, JSON, serde_json::to_vec(&v).unwrap()),
+            ]);
+            let page = at("https://www.tripadvisor.com/Attraction_Review-g187147-d188151-Reviews-Eiffel_Tower-Paris_Ile_de_France.html");
+            let found = WikidataPlaces.lookup(&cx, &page).await.unwrap();
+            assert_eq!(keys(&found), ["osm:way/5013364"]);
+            assert!(found.links.iter().any(|l| l.site == "Wikidata"));
+        }
+
         /// The Eiffel Tower's Tripadvisor page on the German site finds its item by the location
         /// number alone: the item's Q-id and its one OSM way are keys, and its OSM, Wikidata,
         /// Google Maps, Yelp and Wikipedia pages are links, never Tripadvisor itself.
@@ -791,6 +816,39 @@ pub mod also_on {
                 Some("Q64")
             )));
             assert!(!WikidataOsm.applies(&subject("https://example.org/", None)));
+        }
+
+        /// A Wikipedia that refuses or is busy is an error, so the run comes back; only an
+        /// article its Wikipedia does not have names no item.
+        #[tokio::test(start_paused = true)]
+        async fn a_failed_article_read_is_an_error_and_a_missing_article_is_nothing() {
+            let wiki = "https://en.wikipedia.org/w/api.php?action=query&prop=pageprops&ppprop=wikibase_item&titles=Paris&redirects=1&format=json";
+            let article = subject("https://en.wikipedia.org/wiki/Paris", None);
+            for (status, body) in [
+                (403, &b"{}"[..]),
+                (503, &b"{}"[..]),
+                (
+                    200,
+                    &br#"{"error":{"code":"ratelimited","info":"slow down"}}"#[..],
+                ),
+            ] {
+                let cx = context(vec![(wiki, status, JSON, body.to_vec())]);
+                assert!(WikidataOsm.lookup(&cx, &article).await.is_err(), "{status}");
+            }
+            for (status, body) in [
+                (404, &b"{}"[..]),
+                (
+                    200,
+                    &br#"{"batchcomplete":"","query":{"pages":{"-1":{"ns":0,"title":"Paris","missing":""}}}}"#[..],
+                ),
+            ] {
+                let cx = context(vec![(wiki, status, JSON, body.to_vec())]);
+                assert_eq!(
+                    WikidataOsm.lookup(&cx, &article).await.unwrap(),
+                    Default::default(),
+                    "{status}"
+                );
+            }
         }
 
         #[test]

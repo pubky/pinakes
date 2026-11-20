@@ -232,3 +232,59 @@ async fn album_link_does_not_union_track_groups(pool: PgPool) {
         );
     }
 }
+/// A solo artist's card is a `Person`: on MusicBrainz or a music service it takes its group's
+/// keys and image like any other music card. A `Person` page anywhere else takes neither.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_solo_artists_card_takes_its_groups_keys_and_image(pool: PgPool) {
+    let cfg = Config::default();
+    let artist = "mb:artist:a74b1b7f-71a5-4011-9441-d0b5e4122711";
+    let item = "wikidata:Q7259";
+    let mb_uri = "https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711";
+    let spotify_uri = "https://open.spotify.com/artist/4Z8W4fKeB5YxbusRsdQVPb";
+    let page_uri = "https://example.org/people/ada";
+    let other_uri = "https://example.com/ada";
+    let mb = save(&pool, mb_uri, "Person", true).await;
+    let spotify = save(&pool, spotify_uri, "Person", false).await;
+    let page = save(&pool, page_uri, "Person", true).await;
+    let other = save(&pool, other_uri, "Person", false).await;
+    for (id, key, uri, site) in [
+        (&mb, artist, spotify_uri, "Spotify"),
+        (&page, item, other_uri, "Example"),
+    ] {
+        also_on::record(
+            &pool,
+            id,
+            "musicbrainz",
+            Found {
+                keys: vec![Key {
+                    key: key.into(),
+                    via: "musicbrainz".into(),
+                }],
+                links: vec![Link::new(uri, site, "musicbrainz").keyed(key)],
+                ..Default::default()
+            },
+            Duration::from_secs(86400),
+            &cfg.also_on,
+        )
+        .await
+        .unwrap();
+    }
+    common::drain_groups(&pool, &cfg.groups).await;
+    let app = api::router(AppState::new(pool.clone(), cfg).unwrap());
+    let has_key = |card: &Value, key: &str| {
+        card["keys"]
+            .as_array()
+            .unwrap()
+            .contains(&Value::String(key.into()))
+    };
+    let v = read(&app, &spotify).await;
+    assert_eq!(v["group"]["size"], 2, "{v}");
+    assert_eq!(v["type"], "Person", "{v}");
+    assert_eq!(v["image"], IMAGE, "{v}");
+    assert!(has_key(&v, artist), "{v}");
+    // The other pair is grouped the same way, and is no music card.
+    let v = read(&app, &other).await;
+    assert_eq!(v["group"]["size"], 2, "{v}");
+    assert!(v["image"].is_null(), "{v}");
+    assert!(!has_key(&v, item), "{v}");
+}

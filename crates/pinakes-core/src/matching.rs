@@ -1,11 +1,10 @@
 //! How two cards' names are compared when nothing exact joins them: a recording's title and an
-//! artist's name in the form the possible-duplicates signal and the duplicates reports read.
+//! artist's name in the form the same-recording hint reads.
 //! Never a key on its own: a normalised name equal to another is a candidate, and only beside
 //! facts that agree (the artist, a length within seconds). The one place it decides a key is
 //! `music_sources::agree`, where MusicBrainz already ties the recordings by one ISRC.
 //!
-//! The same-recording pass stores each recording's keys (`same_recording_unit`), so a report
-//! can group by them.
+//! The same-recording pass stores each recording's keys (`same_recording_unit`).
 //!
 //! A title is lower-cased, and its tags (in brackets, or after ` - ` as Spotify writes them)
 //! are read one by one: a tag that keeps the recording's identity goes ("Remastered 2011",
@@ -113,7 +112,7 @@ fn before_credit(text: &str) -> &str {
     text
 }
 /// A bracketed tag: the text inside the innermost `(…)` or `[…]` from `open`, when the group
-/// closes before another opens (as the SQL function's pattern reads it).
+/// closes before another opens.
 fn group_end(chars: &[char], open: usize) -> Option<usize> {
     chars[open + 1..]
         .iter()
@@ -192,8 +191,8 @@ pub fn recording_title(title: &str) -> String {
 /// are compared.
 pub fn artist_name(credit: &str) -> String {
     let lower = credit.to_lowercase();
-    let first = before_credit(&lower);
-    let mut first = first;
+    // Without the space a cut credit leaves: a name's last word is no separator ("Lil Nas X").
+    let mut first = before_credit(&lower).trim_end();
     for separator in [" & ", ", ", " with ", " x ", " vs ", " vs. ", " / "] {
         if let Some(at) = first.find(separator) {
             first = &first[..at];
@@ -271,6 +270,9 @@ mod tests {
             ("A, B and C", "a"),
             ("Simon & Garfunkel", "simon"),
             ("Jay-Z x Kanye West", "jay z"),
+            ("Lil Nas X", "lil nas x"),
+            ("Lil Nas X feat. Billy Ray Cyrus", "lil nas x"),
+            ("Lil Nas X ft. Billy Ray Cyrus & Someone", "lil nas x"),
             ("Beyoncé", "beyoncé"),
             ("", ""),
         ] {

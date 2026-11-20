@@ -234,6 +234,24 @@ pub fn parse_item(v: &Value) -> Option<String> {
         .values()
         .find_map(|p| p["pageprops"]["wikibase_item"].as_str().and_then(hubs::qid))
 }
+/// What an article's own Wikipedia answered [`item_lookup`] with: the article's Wikidata item, or
+/// `None` when that Wikipedia has no such article or the article has no item (a 404, or a page
+/// without `wikibase_item`). Any other status, an API error sent with 200 and a body that is no
+/// JSON are errors, so a read that failed is never taken for "no item" (the callers turn 429 and
+/// 5xx into a retry first).
+pub fn item_answer(status: u16, body: &[u8]) -> anyhow::Result<Option<String>> {
+    match status {
+        200 => {
+            let v: Value = serde_json::from_slice(body)?;
+            if let Some(code) = v["error"]["code"].as_str() {
+                anyhow::bail!("wikipedia error: {code}");
+            }
+            Ok(parse_item(&v))
+        }
+        404 => Ok(None),
+        status => anyhow::bail!("wikipedia answered {status}"),
+    }
+}
 /// An item's keys and links, without `own` (the article itself).
 pub fn found(item: &wikidata::Item, own: &Article) -> Found {
     let mut found = Found {

@@ -41,9 +41,9 @@ credentials (the token endpoint refuses them, the API answers 403, or it rejects
 minute old) are logged (`TIDAL refused the client credentials`) and counted in
 `pinakes_also_on_service_errors_total{service="tidal"}` (class `refused`, `forbidden` or
 `rejected`) and in `pinakes_source_token_refusals_total{source="tidal"}`, which the
-`ProviderKeyRefused` alert reads; the TIDAL links read meanwhile keep what TIDAL gave them before and retry later
-(`tidal_auth`, after the five-minute hold, then backing off to hourly), and TIDAL is asked again
-when the hold ends. A rate limit
+`ProviderKeyRefused` alert reads; the TIDAL links read meanwhile keep what TIDAL gave them before, their runs do not fail
+(the source is passed over as one without credentials, so a link is read again at its usual time, or at once with `pinakesd reextract also-on`), and TIDAL is asked again
+once the five-minute hold has ended. A rate limit
 or an outage (429, 5xx) is waited out: no TIDAL request, batched or single, before the time it
 asked for (`Retry-After`, a minute to an hour) has passed, and the links retry after it
 (`tidal_busy`; a failure the cache replays meanwhile reports the same). TIDAL's answers are

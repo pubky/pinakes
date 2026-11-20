@@ -218,8 +218,9 @@ pub mod also_on {
 
     /// An app's own store page: its store key, and through the one Wikidata item carrying that
     /// store's ID (read back and compared exactly; an item its successor replaces gives way to
-    /// it; several others are ambiguous and give nothing), the item's Q-id, its other store IDs
-    /// as keys and its other stores as links.
+    /// it; several others are ambiguous and give nothing), the item's Q-id as key when the item
+    /// carries no other ID on that store, its other store IDs as keys and its other stores as
+    /// links.
     pub struct AppStores;
 
     #[async_trait]
@@ -267,7 +268,10 @@ pub mod also_on {
             };
             if let Some(hub) = hub {
                 if let Some((raw, _)) = item(cx, &hub.qid).await? {
-                    found.push_key(items::key(&hub.qid));
+                    // An item naming several IDs on this store is not this one page's.
+                    if hubs::wikidata::only_value(&hub, pid, &app.id) {
+                        found.push_key(items::key(&hub.qid));
+                    }
                     for key in item_keys(&raw) {
                         found.push_key(key);
                     }
@@ -405,6 +409,53 @@ pub mod also_on {
                 "the link's own key, not Wikidata's"
             );
             assert!(sites(&found).is_empty());
+        }
+
+        /// An item that names two Google Play packages is not either page's: its Q-id is no key
+        /// of the page. The same item with the one package keys it.
+        #[tokio::test(start_paused = true)]
+        async fn an_item_with_two_packages_on_the_store_gives_no_item_key() {
+            use crate::lookups::fixture::{context, read, JSON};
+            let search = hubs::wikidata::search_lookup("P3418", "de.danoeh.antennapod").unwrap();
+            let entity = hubs::wikidata::entities_lookup(&["Q16927599".to_owned()]);
+            let item = |second: bool| {
+                let mut v: serde_json::Value =
+                    serde_json::from_slice(&read("wikidata-q16927599.json.gz")).unwrap();
+                if second {
+                    v["entities"]["Q16927599"]["claims"]["P3418"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(serde_json::json!({"mainsnak": {"snaktype": "value",
+                            "property": "P3418",
+                            "datavalue": {"value": "de.danoeh.antennapod.debug", "type": "string"},
+                            "datatype": "external-id"}, "type": "statement", "rank": "normal"}));
+                }
+                serde_json::to_vec(&v).unwrap()
+            };
+            let page = at("https://play.google.com/store/apps/details?id=de.danoeh.antennapod");
+            for (second, keyed) in [(false, true), (true, false)] {
+                let cx = context(vec![
+                    (
+                        search.as_str(),
+                        200,
+                        JSON,
+                        read("wikidata-search-p3418-antennapod.json"),
+                    ),
+                    (entity.as_str(), 200, JSON, item(second)),
+                ]);
+                let found = AppStores.lookup(&cx, &page).await.unwrap();
+                let k = keys(&found);
+                assert!(k.contains(&"android:de.danoeh.antennapod"), "{k:?}");
+                assert_eq!(k.contains(&"wikidata:Q16927599"), keyed, "{second}: {k:?}");
+                // Its other stores stay links either way.
+                assert!(
+                    sites(&found).contains(
+                        &"F-Droid https://f-droid.org/packages/de.danoeh.antennapod".to_owned()
+                    ),
+                    "{second}: {:?}",
+                    sites(&found)
+                );
+            }
         }
     }
 }

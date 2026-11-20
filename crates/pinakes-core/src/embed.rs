@@ -319,9 +319,10 @@ fn youtube_id(s: &str) -> bool {
         b.is_ascii_alphanumeric() || b"_-".contains(&b)
     })
 }
-/// A video, a playlist (`/playlist?list=`) or a channel by its ID (`/channel/UC…`, its videos
-/// or home tab: its uploads, playlist `UU…`), on youtube.com, its www., m. and music. hosts and
-/// youtu.be.
+/// A video, a playlist (`/playlist?list=`, or the player's own `/embed/videoseries?list=`) or a
+/// channel by its ID (`/channel/UC…`, its videos or home tab: its uploads, playlist `UU…`), on
+/// youtube.com, its www., m. and music. hosts and youtu.be. The player's live form
+/// (`/embed/live_stream?channel=`) names no one video and has no player.
 fn youtube(uri: &str) -> Option<Embed> {
     let url = https_on(
         uri,
@@ -356,7 +357,7 @@ fn youtube(uri: &str) -> Option<Embed> {
         })
     };
     match path.as_slice() {
-        ["playlist"] => query(&url, "list")
+        ["playlist"] | ["embed", "videoseries"] => query(&url, "list")
             .filter(|l| list(l))
             .map(|l| player(format!("videoseries?list={l}&enablejsapi=1&rel=0"))),
         ["channel", channel] | ["channel", channel, "videos" | "featured"] => channel
@@ -370,6 +371,7 @@ fn youtube(uri: &str) -> Option<Embed> {
         ["watch"] => query(&url, "v")
             .filter(|id| youtube_id(id))
             .map(|id| player(format!("{id}?enablejsapi=1&rel=0"))),
+        ["embed", "live_stream"] => None,
         ["embed" | "shorts" | "live" | "v", id] if youtube_id(id) => {
             Some(player(format!("{id}?enablejsapi=1&rel=0")))
         }
@@ -1293,6 +1295,15 @@ mod tests {
                 "https://www.youtube.com/playlist?list=PLFgquLnL59alCl_2TQvOiD5Vgm1hCaGSI",
                 "https://www.youtube-nocookie.com/embed/videoseries?list=PLFgquLnL59alCl_2TQvOiD5Vgm1hCaGSI&enablejsapi=1&rel=0",
             ),
+            // The player's own playlist form keeps its list.
+            (
+                "https://www.youtube.com/embed/videoseries?list=PLFgquLnL59alCl_2TQvOiD5Vgm1hCaGSI",
+                "https://www.youtube-nocookie.com/embed/videoseries?list=PLFgquLnL59alCl_2TQvOiD5Vgm1hCaGSI&enablejsapi=1&rel=0",
+            ),
+            (
+                "https://www.youtube.com/embed/dQw4w9WgXcQ",
+                "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?enablejsapi=1&rel=0",
+            ),
             (
                 "https://www.youtube.com/channel/UC_kRDKYrUlrbtrSiyu5Tflg",
                 "https://www.youtube-nocookie.com/embed/videoseries?list=UU_kRDKYrUlrbtrSiyu5Tflg&enablejsapi=1&rel=0",
@@ -1437,6 +1448,10 @@ mod tests {
             "http://www.youtube.com/watch?v=dQw4w9WgXcQ",
             "https://www.youtube.com/watch?v=short",
             "https://www.youtube.com/@handle",
+            // The player's forms that name no video: a playlist without a list, a live stream.
+            "https://www.youtube.com/embed/videoseries",
+            "https://www.youtube.com/embed/videoseries?list=x",
+            "https://www.youtube.com/embed/live_stream?channel=UC_kRDKYrUlrbtrSiyu5Tflg",
             "https://www.youtube.com:8443/watch?v=dQw4w9WgXcQ",
             "https://user:pw@www.youtube.com/watch?v=dQw4w9WgXcQ",
             "https://vimeo.com/about",
