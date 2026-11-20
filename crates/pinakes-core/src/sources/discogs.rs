@@ -1,8 +1,9 @@
 //! Discogs artists, masters (an album across its editions) and releases (one edition), read from
 //! its API (`api.discogs.com`): its web pages answer bots with a wall. No key: 25 requests a
-//! minute. An optional personal token (`[also_on.sources.discogs] token`), or an app's consumer
-//! key and secret (`key` and `secret`, or `PINAKES_DISCOGS_CONSUMER_KEY` and
-//! `PINAKES_DISCOGS_CONSUMER_SECRET`), gives 60 a minute and images on the cards; the token wins
+//! minute. A credential gives 60 a minute and images on the cards. It comes from the also-on
+//! source's table, `[also_on.sources.discogs]`, which the card route reads too
+//! (`[sources.discogs]` takes none): a personal `token`, or an app's consumer `key` and `secret`
+//! (or `PINAKES_DISCOGS_CONSUMER_KEY` and `PINAKES_DISCOGS_CONSUMER_SECRET`); the token wins
 //! when both are set. Neither ever reaches a log or an error.
 use super::{text, Budget, Context, Example, Source};
 use crate::event::adapters::SecretKey;
