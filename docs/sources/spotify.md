@@ -84,8 +84,8 @@ endpoint refuses them, the API answers 403, or it rejects a token under a minute
 (`Spotify refused the client credentials`) and counted in
 `pinakes_also_on_service_errors_total{service="spotify"}` (class `refused`, `forbidden` or
 `rejected`) and in `pinakes_source_token_refusals_total{source="spotify"}`, which the
-`ProviderKeyRefused` alert reads; the Spotify links read meanwhile keep what Spotify gave them before and retry later
-(`spotify_auth`, after the five-minute hold), and Spotify is asked again when the hold ends. A
+`ProviderKeyRefused` alert reads; the Spotify links read meanwhile keep what Spotify gave them before, their runs do not fail
+(the source is passed over as one without credentials), and Spotify is asked again once the five-minute hold has ended. A
 rate limit or an outage (429, 5xx) is waited out: no Spotify request before the time it asked
 for (`Retry-After`, a minute to an hour) has passed, and the links retry after it
 (`spotify_busy`). Spotify's answers are cached by the credential pair, not the token, so a new
@@ -103,17 +103,15 @@ credentials (above):
 - the log line `Spotify refused the client credentials` with `status` 403 and `class`
   `forbidden`, `pinakes_also_on_service_errors_total{service="spotify",class="forbidden"}`, and
   `pinakes_source_token_refusals_total{source="spotify"}` rising, so `ProviderKeyRefused` fires;
-- the Spotify links read meanwhile keep what Spotify gave them before and wait with
-  `spotify_auth` in `also_on_dirty.last_error`;
+- the Spotify links read meanwhile keep what Spotify gave them before; the source is passed
+  over as one without credentials, so their other sources' results are recorded and the run
+  does not fail;
 - the refusal is held five minutes, and Spotify is asked nothing while it holds, so it gets one
   token request and one API request at most every five minutes, each answered 403 again;
-- each link's own retry is a failed also-on run's: `limits.also_on_retry_secs` (five minutes)
-  after its first refusal, doubling with each one after, up to an hour.
+- each link is read again at its usual time (the sources' lifetime), not sooner.
 
 The remedy is the owner's: take out or renew Premium on the account that owns the app. Spotify
-then answers the same app again, with no new credentials and no restart. Pinakes asks it at the
-first link retry due after the hold has ended, and that retry is the link's own: five minutes
-after a link's first refusal, then 10, 20 and 40 minutes, and an hour after its fifth and each
-one after. To ask for every link at once, run `pinakesd reextract also-on` with the daemon
+then answers the same app again, with no new credentials and no restart. Pinakes asks it when
+a link is next read. To ask for every link at once, run `pinakesd reextract also-on` with the daemon
 stopped (it queues every resource's also-on lookups, not only Spotify's). Until then, to stop
 asking, remove the credentials or turn the source off (`[also_on.sources.spotify] enabled = false`).

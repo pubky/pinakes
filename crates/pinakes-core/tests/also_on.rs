@@ -3168,6 +3168,100 @@ async fn the_longest_wait_among_failing_sources_sets_the_retry(pool: PgPool) {
     }
 }
 
+/// A source that records a key until its service refuses the operator's credentials: a
+/// `RetryLater` of an `_auth` class, as `also_on::client_credentials` reports a refusal.
+#[derive(Default)]
+struct Refusable {
+    refused: Mutex<bool>,
+}
+#[async_trait]
+impl Source for Refusable {
+    fn id(&self) -> &'static str {
+        "refusable"
+    }
+    fn applies(&self, subject: &Subject) -> bool {
+        subject.status == "ok"
+    }
+    fn ttl(&self) -> Duration {
+        Duration::from_secs(2 * 86_400)
+    }
+    async fn lookup(&self, _: &Context, _: &Subject) -> anyhow::Result<Found> {
+        if *self.refused.lock().unwrap() {
+            return Err(pinakes_core::resolver::RetryLater {
+                class: "refusable_auth",
+                seconds: 300,
+            }
+            .into());
+        }
+        Ok(Found {
+            keys: vec![key("upc:0602498688373")],
+            ..Default::default()
+        })
+    }
+}
+
+/// A source whose service refuses the operator's credentials is passed over as one that is not
+/// ready: the rows it recorded stay, the card's other sources are recorded, and the run neither
+/// fails nor comes back early, so the card is read again at the shortest lifetime of its sources.
+#[sqlx::test(migrations = "../../migrations")]
+async fn refused_credentials_fail_no_run_and_keep_the_sources_rows(pool: PgPool) {
+    let uri = "https://open.spotify.com/track/refused";
+    let id = page(&pool, uri, "Refused").await;
+    let steady = Fake::new("steady");
+    steady.answer(
+        uri,
+        Ok(Found {
+            keys: vec![key("isrc:USIR10211559")],
+            ..Default::default()
+        }),
+    );
+    let refusable = Arc::new(Refusable::default());
+    let sources: Vec<Arc<dyn Source>> = vec![refusable.clone(), steady.clone()];
+    let cx = cx(Config::default());
+    let state = || {
+        let pool = pool.clone();
+        let id = id.clone();
+        async move {
+            let keys: Vec<String> = sqlx::query_scalar(
+                "SELECT key||' '||source FROM resource_key WHERE resource_id=$1 ORDER BY key",
+            )
+            .bind(&id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            let (due_in, attempts, error): (f64, i32, Option<String>) = sqlx::query_as(
+                "SELECT extract(epoch FROM next_attempt_at-now())::float8,attempts,last_error FROM also_on_dirty WHERE resource_id=$1",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            (keys, due_in, attempts, error)
+        }
+    };
+    let both: Vec<String> = vec![
+        "isrc:USIR10211559 steady".into(),
+        "upc:0602498688373 refusable".into(),
+    ];
+    drain(&pool, &cx, &sources).await;
+    let (keys, due_in, attempts, error) = state().await;
+    assert_eq!((keys, attempts, error), (both.clone(), 0, None));
+    assert!((86_300.0..=86_400.0).contains(&due_in), "{due_in}");
+    // Refused: the same rows, no failed run, due at the other source's lifetime (a day).
+    *refusable.refused.lock().unwrap() = true;
+    drain(&pool, &cx, &sources).await;
+    let (keys, due_in, attempts, error) = state().await;
+    assert_eq!((keys, attempts, error), (both.clone(), 0, None));
+    assert!((86_300.0..=86_400.0).contains(&due_in), "{due_in}");
+    assert_eq!(steady.calls.lock().unwrap().len(), 2);
+    // Alone, it keeps its rows and its card comes back at its own lifetime (two days).
+    let alone: Vec<Arc<dyn Source>> = vec![refusable.clone()];
+    drain(&pool, &cx, &alone).await;
+    let (keys, due_in, attempts, error) = state().await;
+    assert_eq!((keys, attempts, error), (both.clone(), 0, None));
+    assert!((172_700.0..=172_800.0).contains(&due_in), "{due_in}");
+}
+
 /// A source that reads gone links, as the archive lookup does: an archived copy and a fact. It
 /// counts its calls.
 #[derive(Default)]

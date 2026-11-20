@@ -2032,7 +2032,7 @@ async fn spotify_falls_back_to_musicbrainz(pool: sqlx::PgPool, spotify: Option<&
                 "accounts.spotify.com/api/token",
                 "api.spotify.com/v1/tracks/6LgJvl0Xdtc73RJ1mmpotq",
             ],
-            Some("spotify_auth".to_owned()),
+            None,
         ),
         None => (&[], None),
     };
@@ -2061,7 +2061,7 @@ async fn spotify_falls_back_to_musicbrainz(pool: sqlx::PgPool, spotify: Option<&
             "mb:recording:9f9cf187-d6f9-437f-9d98-d59cdbd52757 musicbrainz",
         ]
     );
-    // The refusal waits out its hold; what MusicBrainz gave stands meanwhile.
+    // The refusal fails no run; what MusicBrainz gave stands.
     let last_error: Option<String> =
         sqlx::query_scalar("SELECT last_error FROM also_on_dirty WHERE resource_id=$1")
             .bind(&ids[0])

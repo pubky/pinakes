@@ -1281,7 +1281,8 @@ async fn stored_sources(
 
 /// One resource: every enabled source that applies runs; each success replaces its rows. Ok
 /// with when the next run is due, Ok(None) when no source applies, Err when any source failed
-/// (the others' results are kept).
+/// (the others' results are kept). A source whose service refuses the operator's credentials
+/// (`client_credentials::refused`) is passed over as one that is not ready: its rows stay.
 async fn one(
     pool: &PgPool,
     cx: &Context,
@@ -1375,6 +1376,15 @@ async fn one(
                     .bind(id)
                     .fetch_all(pool)
                     .await?;
+            }
+            // A service that refuses the operator's credentials: its source is not ready, as one
+            // without credentials. Its rows stay, and the run neither fails nor comes back early
+            // for it (the refusal is logged and counted where it is met, `client_credentials`):
+            // the card's sources are asked again at their lifetime, this one too.
+            Err(error) if client_credentials::refused(&error) => {
+                tracing::debug!(resource = %id, source = source.id(), "also-on source passed over: its credentials are refused");
+                let lifetime = source.ttl();
+                next = Some(next.map_or(lifetime, |n| n.min(lifetime)));
             }
             Err(error) => {
                 // The longest wait any failing source asked for sets the retry.

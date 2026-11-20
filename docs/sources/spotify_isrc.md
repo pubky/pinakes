@@ -28,8 +28,8 @@ No keys of the resource and no facts. Spotify's own tracks and albums are not as
 every source that keys a track's ISRC or an album's barcode (`deezer` among them).
 
 Spotify answers an app in development mode only while its owner has an active Premium
-subscription; else every request is refused (403) and the lookup is held five minutes
-(`spotify_auth`), as for `spotify`.
+subscription; else every request is refused (403): the refusal is held five minutes
+(`spotify_auth`) and the source is passed over meanwhile, as for `spotify`.
 
 ## Operations
 

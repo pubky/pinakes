@@ -354,7 +354,7 @@ async fn without_credentials_nothing_asks_tidal(pool: sqlx::PgPool) {
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn refused_credentials_keep_what_tidal_gave_and_retry_later(pool: sqlx::PgPool) {
+async fn refused_credentials_keep_what_tidal_gave(pool: sqlx::PgPool) {
     let hydra = save(&pool, "https://tidal.com/album/199574241", "MusicAlbum").await;
     // A first run with credentials TIDAL accepts.
     run(
@@ -364,7 +364,7 @@ async fn refused_credentials_keep_what_tidal_gave_and_retry_later(pool: sqlx::Pg
     )
     .await;
     assert_eq!(rows(&pool, KEYS, &hydra).await, ["upc:4018939306052 tidal"]);
-    // Then TIDAL refuses them: one token request, no API request, the key kept, a retry queued.
+    // Then TIDAL refuses them: one token request, no API request, the key kept, no failed run.
     let refused = config(Some(("refused-id", "refused-secret")));
     let refuse = Answers {
         refuse: true,
@@ -385,8 +385,8 @@ async fn refused_credentials_keep_what_tidal_gave_and_retry_later(pool: sqlx::Pg
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(queued.as_deref(), Some("tidal_auth"));
-    // The refusal is kept five minutes: the retry asks TIDAL nothing.
+    assert_eq!(queued, None);
+    // The refusal is kept five minutes: a run within them asks TIDAL nothing.
     let seen = run(&pool, refused, refuse).await;
     assert!(!seen.iter().any(|s| s.contains("tidal.com")), "{seen:?}");
 }
@@ -443,9 +443,10 @@ async fn a_forbidden_answer_is_a_refusal_of_the_credentials(pool: sqlx::PgPool) 
         "{seen:?}"
     );
     let (error, seconds) = due(&pool, &hydra).await;
-    assert_eq!(error.as_deref(), Some("tidal_auth"));
-    // The refusal's hold: five minutes.
-    assert!((290.0..=300.0).contains(&seconds), "{seconds}");
+    // The source is passed over as one that is not ready: no failed run, and the next at the
+    // source's lifetime.
+    assert_eq!(error, None);
+    assert!(seconds > 3600.0, "{seconds}");
     assert!(rows(&pool, KEYS, &hydra).await.is_empty());
     // Within the five minutes the refusal holds, nothing asks TIDAL, not even for a token.
     let seen = run(&pool, config, forbidden).await;
