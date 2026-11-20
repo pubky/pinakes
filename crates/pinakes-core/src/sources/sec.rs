@@ -9,7 +9,6 @@ use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use serde_json::Value;
-use url::Url;
 
 /// What an EDGAR link names.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -151,10 +150,7 @@ fn archive_path(path: &str) -> Option<Target> {
 
 impl Target {
     pub fn of_uri(uri: &str) -> Option<Self> {
-        let url = Url::parse(uri).ok()?;
-        if !matches!(url.scheme(), "https" | "http") {
-            return None;
-        }
+        let url = super::kit::web_url(uri)?;
         let query = |name: &str| {
             url.query_pairs()
                 .find(|(k, _)| k.eq_ignore_ascii_case(name))
@@ -1087,7 +1083,9 @@ mod tests {
     /// nothing is asked of EDGAR.
     #[tokio::test(start_paused = true)]
     async fn a_release_does_not_wait_for_a_contact() {
-        let docket = Url::parse(&docket_url("34-999999")).unwrap().to_string();
+        let docket = url::Url::parse(&docket_url("34-999999"))
+            .unwrap()
+            .to_string();
         let (egress, recorded) = crate::sources::fixture::egress(vec![(
             docket.as_str(),
             200,
