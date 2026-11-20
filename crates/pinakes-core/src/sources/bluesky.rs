@@ -114,6 +114,15 @@ pub fn resolved_did(body: &[u8]) -> Option<String> {
     v["did"].as_str().filter(|d| did(d)).map(str::to_owned)
 }
 
+/// Whether a `resolveHandle` error (400) says the handle names no account, as Bluesky words it
+/// (`InvalidRequest`, "Unable to resolve handle") or as a plain `NotFound`.
+pub fn unknown_handle(body: &[u8]) -> bool {
+    matches!(
+        error_name(body).as_deref(),
+        Some("InvalidRequest" | "NotFound" | "HandleNotFound")
+    )
+}
+
 /// Whether an account carries the `!no-unauthenticated` self-label.
 fn no_unauthenticated(labels: &Value) -> bool {
     labels
@@ -121,23 +130,34 @@ fn no_unauthenticated(labels: &Value) -> bool {
         .is_some_and(|l| l.iter().any(|l| l["val"] == "!no-unauthenticated"))
 }
 
-/// The card of a post from `getPostThread`, or `None` when the post does not exist.
+/// What an error answer (400) names in `error`, when it is JSON.
+fn error_name(body: &[u8]) -> Option<String> {
+    let v: Value = serde_json::from_slice(body).ok()?;
+    v["error"].as_str().map(str::to_owned)
+}
+
+/// The card of a post from `getPostThread`, or `None` when Bluesky says the post does not exist
+/// (`NotFound`, or a `#notFoundPost` or `#blockedPost` thread). Any other answer it cannot read
+/// is an error: the stored card stays.
 pub fn post_card(
     mut doc: ResourceMeta,
     at_uri: &str,
     status: u16,
     body: &[u8],
 ) -> Result<Option<ResourceMeta>> {
-    let v: Value = serde_json::from_slice(body).unwrap_or_default();
-    match status {
-        200 => {}
-        400 if v["error"] == "NotFound" => return Ok(None),
+    let v: Value = match status {
+        200 => serde_json::from_slice(body).context("Bluesky answered no JSON")?,
+        400 if error_name(body).as_deref() == Some("NotFound") => return Ok(None),
         s => anyhow::bail!("Bluesky answered {s}"),
-    }
+    };
     let thread = &v["thread"];
-    if thread["$type"] != "app.bsky.feed.defs#threadViewPost" {
-        // A blocked or deleted post (`#notFoundPost`, `#blockedPost`).
-        return Ok(None);
+    match thread["$type"].as_str() {
+        Some("app.bsky.feed.defs#threadViewPost") => {}
+        // A deleted or blocked post.
+        Some("app.bsky.feed.defs#notFoundPost" | "app.bsky.feed.defs#blockedPost") => {
+            return Ok(None)
+        }
+        _ => anyhow::bail!("Bluesky answered no post thread"),
     }
     let post = &thread["post"];
     anyhow::ensure!(post["uri"] == at_uri, "Bluesky answered for another post");
@@ -194,18 +214,17 @@ pub fn profile_card(
     status: u16,
     body: &[u8],
 ) -> Result<Option<ResourceMeta>> {
-    let v: Value = serde_json::from_slice(body).unwrap_or_default();
-    match status {
-        200 => {}
+    let v: Value = match status {
+        200 => serde_json::from_slice(body).context("Bluesky answered no JSON")?,
         400 if matches!(
-            v["error"].as_str(),
+            error_name(body).as_deref(),
             Some("InvalidRequest" | "NotFound" | "AccountTakedown")
         ) =>
         {
             return Ok(None)
         }
         s => anyhow::bail!("Bluesky answered {s}"),
-    }
+    };
     anyhow::ensure!(v["did"] == did_, "Bluesky answered for another actor");
     doc.set_type("Person");
     doc.site = "bsky.app".into();
@@ -319,7 +338,7 @@ impl Source for Bluesky {
                 .await?;
             match f.status {
                 200 => resolved_did(&f.body).context("no DID")?,
-                400 => return Ok(cx.missing(uri, self)),
+                400 if unknown_handle(&f.body) => return Ok(cx.missing(uri, self)),
                 s => anyhow::bail!("Bluesky answered {s}"),
             }
         };
@@ -474,6 +493,38 @@ mod tests {
             &read("bsky-thread-3mxzez2m7wk2r.json")
         )
         .is_err());
+
+        // Bluesky's own word for a deleted or blocked post is "gone"; an answer that says
+        // nothing readable (an empty or HTML body, another shape) is an error, so the stored
+        // card stays.
+        for gone in ["notFoundPost", "blockedPost"] {
+            let body = format!(
+                r#"{{"thread":{{"$type":"app.bsky.feed.defs#{gone}","uri":"{missing}"}}}}"#
+            );
+            assert!(post_card(base.clone(), &missing, 200, body.as_bytes())
+                .unwrap()
+                .is_none());
+        }
+        let unreadable: [&[u8]; 4] = [
+            b"<html>",
+            b"",
+            b"{}",
+            br#"{"thread":{"$type":"app.bsky.feed.defs#somethingNew"}}"#,
+        ];
+        for unreadable in unreadable {
+            assert!(
+                post_card(base.clone(), &missing, 200, unreadable).is_err(),
+                "{}",
+                String::from_utf8_lossy(unreadable)
+            );
+            assert!(profile_card(base.clone(), DID, 200, unreadable).is_err());
+        }
+        assert!(post_card(base.clone(), &missing, 400, b"<html>").is_err());
+        assert!(unknown_handle(
+            br#"{"error":"InvalidRequest","message":"Unable to resolve handle"}"#
+        ));
+        assert!(!unknown_handle(b"<html>bad request</html>"));
+        assert!(!unknown_handle(br#"{"error":"RateLimitExceeded"}"#));
 
         let doc = profile_card(base, DID, 200, &read("bsky-profile-bsky-app.json"))
             .unwrap()

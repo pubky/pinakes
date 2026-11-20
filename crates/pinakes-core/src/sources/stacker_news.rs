@@ -63,6 +63,7 @@ pub fn card(
         // Their text may repeat the request, link and all: only that there was an error.
         anyhow::bail!("Stacker News answered an error");
     }
+    anyhow::ensure!(v["data"].is_object(), "Stacker News answered no data");
     let node = &v["data"]["item"];
     if node.is_null() || !node["deletedAt"].is_null() {
         return Ok(None);
@@ -323,5 +324,8 @@ mod tests {
         .unwrap()
         .is_none());
         assert!(card(base(2), 2, 200, &read("sn-item-1.json")).is_err());
+        // An answer without `data` says nothing about the item: an error, not "gone".
+        assert!(card(base(1), 1, 200, b"{}").is_err());
+        assert!(card(base(1), 1, 200, br#"{"data":null}"#).is_err());
     }
 }

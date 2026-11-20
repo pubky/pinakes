@@ -236,7 +236,10 @@ pub fn card(
         return Err(error);
     }
     anyhow::ensure!(status == 200, "Stack Exchange answered {status}");
-    let Some(q) = v["items"].as_array().and_then(|items| items.first()) else {
+    let items = v["items"]
+        .as_array()
+        .context("Stack Exchange answered no items")?;
+    let Some(q) = items.first() else {
         return Ok(None);
     };
     anyhow::ensure!(
@@ -628,6 +631,8 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(card(base(&t), &t, 200, &read("se-stackoverflow-11227809.json")).is_err());
+        // An answer without `items` says nothing about the question: an error, not "gone".
+        assert!(card(base(&t), &t, 200, b"{}").is_err());
         let quota = br#"{"error_id":502,"error_message":"too many requests from this IP, more requests available in 82800 seconds","error_name":"throttle_violation"}"#;
         let error = card(base(&t), &t, 400, quota).unwrap_err();
         assert_eq!(
