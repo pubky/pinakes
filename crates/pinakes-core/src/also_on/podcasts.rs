@@ -239,8 +239,8 @@ pub fn derived_guid(feed_url: &str) -> Option<String> {
     ))
 }
 /// The largest podcast feed this source reads (a show's whole back catalogue; the page cap is
-/// 1 MiB).
-pub const PODCAST_FEED_CAP: usize = 8 * 1024 * 1024;
+/// 1 MiB): as far as a show's feed is read for its episodes (`episodes::FEED_READ`).
+pub const PODCAST_FEED_CAP: usize = crate::episodes::FEED_READ;
 
 /// Whether iTunes' feed for a show (`itunes`) is one of `feeds`.
 fn apple_feed(itunes: Option<&str>, feeds: &[Option<&str>]) -> bool {

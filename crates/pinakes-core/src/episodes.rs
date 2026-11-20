@@ -34,10 +34,10 @@ pub const PAGE: usize = 20;
 /// How many of a feed's items are looked at for them: feeds list newest first, and a few are
 /// out of order.
 const SCANNED: usize = 2 * KEPT;
-/// How far a feed read for its episodes goes (`FetchOptions::feed_read`): past the page cap, to
-/// the largest podcast feed the podcasts source reads, cut there at its last whole item. A
-/// show's whole back catalogue fits in it as a rule (Darknet Diaries' 183 episodes are 1.06 MB).
-pub const FEED_READ: usize = crate::also_on::podcasts::PODCAST_FEED_CAP;
+/// How far a feed read for its episodes goes (`FetchOptions::feed_read`): past the page cap
+/// (1 MiB), to 8 MiB, cut there at its last whole item. A show's whole back catalogue fits in
+/// it as a rule (Darknet Diaries' 183 episodes are 1.06 MB).
+pub const FEED_READ: usize = 8 * 1024 * 1024;
 /// The options of a read of a feed for its episodes: as any read ([`FEED_READ`]).
 pub fn feed_options() -> crate::resolver::egress::FetchOptions {
     crate::resolver::egress::FetchOptions {
