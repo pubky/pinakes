@@ -419,7 +419,9 @@ pub fn router(state: AppState) -> Router {
     let mut all = routes.clone().merge(crate::agents::routes());
     if state.config.api.mcp {
         // The tools answer through the REST routes, under the same layers. Their calls are not
-        // counted as requests of their own: the MCP message that made them is.
+        // counted as requests of their own (the MCP message that made them is), and their
+        // deadline is shorter than the message's, so a call that takes too long is the tool's
+        // failure, with its hint, and not a 504 in place of the MCP answer.
         let rest = public_layers(routes, state.clone(), false);
         // A GET (and so a HEAD) is a browser's or a probe's (`agents::mcp_get`); every other
         // method is MCP's.
@@ -465,13 +467,22 @@ fn rest_routes() -> Router<AppState> {
 pub fn with_public_layers(routes: Router<AppState>, state: AppState) -> Router {
     public_layers(routes, state, true)
 }
-/// `with_public_layers`, with or without the request count.
-fn public_layers(routes: Router<AppState>, state: AppState, counted: bool) -> Router {
-    let mut router = panic_backstop(routes, &state, "public")
-        .layer(axum::middleware::from_fn_with_state(
+/// `with_public_layers` for the listener itself (`outer`: counted, the whole deadline) or for
+/// the calls an MCP tool makes through it (not counted, a deadline two seconds shorter).
+fn public_layers(routes: Router<AppState>, state: AppState, outer: bool) -> Router {
+    let routes = panic_backstop(routes, &state, "public");
+    let routes = if outer {
+        routes.layer(axum::middleware::from_fn_with_state(
             state.clone(),
             request_deadline,
         ))
+    } else {
+        routes.layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            tool_deadline,
+        ))
+    };
+    let mut router = routes
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             cors_preflight,
@@ -485,7 +496,7 @@ fn public_layers(routes: Router<AppState>, state: AppState, counted: bool) -> Ro
             cors_headers,
         ))
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024));
-    if counted {
+    if outer {
         router = router.layer(axum::middleware::from_fn_with_state(
             state.clone(),
             public_requests,
@@ -505,6 +516,27 @@ async fn request_deadline(
     next: axum::middleware::Next,
 ) -> Response {
     let deadline = Duration::from_secs(state.config.api.request_timeout_secs);
+    within(deadline, request, next).await
+}
+/// The deadline of a REST call an MCP tool makes: two seconds inside the MCP message's own.
+async fn tool_deadline(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let secs = state
+        .config
+        .api
+        .request_timeout_secs
+        .saturating_sub(2)
+        .max(1);
+    within(Duration::from_secs(secs), request, next).await
+}
+async fn within(
+    deadline: Duration,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
     match tokio::time::timeout(deadline, next.run(request)).await {
         Ok(response) => response,
         Err(_) => ApiError(
@@ -4094,13 +4126,16 @@ const METRICS_REFRESH: Duration = Duration::from_secs(8);
 /// value: the answer is 503 then, never zeros that would read as facts (an ingestion that
 /// never succeeded).
 async fn metrics(State(state): State<AppState>) -> Result<Response, ApiError> {
-    let refresh = tokio::time::timeout(METRICS_REFRESH, state.metrics.refresh(&state.pool))
+    // Within the request's own deadline too, so the answer is the registry and not a 504.
+    let deadline = Duration::from_secs(state.config.api.request_timeout_secs.saturating_sub(1));
+    let wait = METRICS_REFRESH.min(deadline);
+    let refresh = tokio::time::timeout(wait, state.metrics.refresh(&state.pool))
         .await
         .unwrap_or_else(|_| Err(anyhow::anyhow!("the database read took too long")));
     if let Err(error) = refresh {
         state.metrics.refresh_failures.inc();
         tracing::warn!(error=%crate::resolver::log_error(&error),"metrics refresh failed");
-        if !state.metrics.ever_refreshed().await {
+        if !state.metrics.ever_refreshed() {
             return Err(ApiError(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "metrics are not ready: the database has not been read yet".into(),

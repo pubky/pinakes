@@ -28,6 +28,8 @@ pub const OUTCOMES: &[&str] = &[
 pub struct Metrics {
     registry: Registry,
     refresh_lock: Arc<tokio::sync::Mutex<Option<Instant>>>,
+    /// Whether a refresh ever succeeded, readable without waiting for one that runs.
+    refreshed_once: Arc<std::sync::atomic::AtomicBool>,
     pub fetch: IntCounterVec,
     pub discovery: IntCounterVec,
     pub duration: HistogramVec,
@@ -264,6 +266,7 @@ impl Metrics {
             group_key_conflicts,
             registry,
             refresh_lock: Arc::default(),
+            refreshed_once: Arc::default(),
             ingest_lag,
             ingest_success,
             ingest_resets,
@@ -300,8 +303,9 @@ impl Metrics {
         self.success.with_label_values(&[&manifest.source]);
     }
     /// Whether the database gauges were ever read: before that they hold no value, only zeros.
-    pub async fn ever_refreshed(&self) -> bool {
-        self.refresh_lock.lock().await.is_some()
+    pub fn ever_refreshed(&self) -> bool {
+        self.refreshed_once
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
     pub async fn refresh(&self, pool: &PgPool) -> Result<()> {
         let mut refreshed = self.refresh_lock.lock().await;
@@ -408,6 +412,8 @@ impl Metrics {
                 .set(groups.try_get(state)?);
         }
         *refreshed = Some(Instant::now());
+        self.refreshed_once
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
     pub fn encode(&self) -> Result<String> {

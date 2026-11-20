@@ -492,13 +492,25 @@ async fn a_tool_call_spends_the_same_per_ip_budget(pool: PgPool) {
     seed(&pool).await;
     let mut config = Config::default();
     config.api.requests_per_minute = 1;
-    let app = api::router(AppState::new(pool, config).unwrap());
+    let state = AppState::new(pool, config).unwrap();
+    let metrics = state.metrics.clone();
+    let app = api::router(state);
     // The MCP message takes the one unit; the tool's search finds the budget spent.
     let (error, answer) = call(&app, "search", json!({"q": "concert"})).await;
     assert!(error);
     assert_eq!(answer["status"], 429, "{answer}");
     // The REST route's `Retry-After` comes with it.
     assert_eq!(answer["retry_after_s"], 60, "{answer}");
+    // The message is one request, counted under `/mcp`: the REST call the tool made is not
+    // counted again.
+    let counted = metrics.encode().unwrap();
+    assert!(
+        counted.contains(
+            "pinakes_api_requests_total{listener=\"public\",route=\"/mcp\",status=\"200\"} 1"
+        ),
+        "{counted}"
+    );
+    assert!(!counted.contains("route=\"/v1/search\""), "{counted}");
     // The next message is over budget itself.
     let (code, headers, _) = raw(
         &app,
