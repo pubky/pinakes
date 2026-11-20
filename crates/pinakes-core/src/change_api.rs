@@ -69,7 +69,8 @@ pub struct ChangeLookup {
     #[schema(minimum = 1, maximum = 500)]
     pub limit: Option<usize>,
 }
-/// The changes to `ids` since `since`, after `cursor`.
+/// The changes to `ids` since `since`, after `cursor`. Only what a line serves is read: the
+/// journal's own columns, never the two documents a line holds.
 async fn query(
     state: &AppState,
     cursor: Option<i64>,
@@ -82,14 +83,14 @@ async fn query(
     if cursor < 0 || !(1..=500).contains(&limit) {
         return Err(ApiError::bad("invalid change cursor or limit"));
     }
-    let mut sql=QueryBuilder::<Postgres>::new("WITH head AS (SELECT coalesce(min(seq)-1,0) AS oldest,coalesce(max(seq),0) AS newest FROM resource_change), filtered AS (SELECT * FROM change_document c WHERE c.seq>");
+    let mut sql=QueryBuilder::<Postgres>::new("WITH head AS (SELECT coalesce(min(seq)-1,0) AS oldest,coalesce(max(seq),0) AS newest FROM resource_change), filtered AS (SELECT c.seq,c.resource_id,c.occurrence_key,c.at,c.class,c.fields,CASE WHEN c.class='aliased' THEN c.after->>'root' END AS root FROM resource_change c WHERE c.seq>");
     sql.push_bind(cursor);
     // An alias's changes are its root's, beside its own (the line that made it one).
     sql.push(" AND c.resource_id IN (SELECT x FROM unnest(")
         .push_bind(ids)
         .push("::text[]) w(id) LEFT JOIN resource_alias a ON a.alias_id=w.id CROSS JOIN LATERAL (VALUES (w.id),(a.root_id)) v(x) WHERE x IS NOT NULL)");
     sql.push(" AND c.at>=").push_bind(since);
-    sql.push(" ORDER BY seq LIMIT ").push_bind((limit+1) as i64).push(") SELECT head.*,coalesce((SELECT jsonb_agg((to_jsonb(c)-'occurrence_key'-'at') || jsonb_build_object('at',floor(extract(epoch FROM at)*1000)::bigint,'occurrence',occurrence_key,'root',CASE WHEN class='aliased' THEN after->>'root' END) ORDER BY seq) FROM filtered c),'[]') AS lines FROM head");
+    sql.push(" ORDER BY seq LIMIT ").push_bind((limit+1) as i64).push(") SELECT head.*,coalesce((SELECT jsonb_agg(jsonb_build_object('seq',seq,'resource_id',resource_id,'class',class,'fields',fields,'at',floor(extract(epoch FROM at)*1000)::bigint,'occurrence',occurrence_key,'root',root) ORDER BY seq) FROM filtered c),'[]') AS lines FROM head");
     let row = sql.build().fetch_one(&state.pool).await?;
     let oldest: i64 = row.try_get("oldest")?;
     if cursor > 0 && cursor < oldest {

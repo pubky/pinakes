@@ -5,9 +5,9 @@ deck, a room, a marketplace listing. Pinakes fetches such a `pubky://` object fr
 homeserver and gives it a card. pubky.app's own objects (posts, profiles) and the social specs'
 objects (`/pub/social/…`, any version: posts, events, rsvps, availability, tags, ratings) are
 Nexus's and never fetched: social events and availability come from Nexus.
-Neither are the old Mapky and Eventky layouts (`/pub/mapky.app/…`,
-`/pub/eventky.app/…`) fetched, whose data is disregarded: routes now come as [posts](#posts),
-events and availability as social posts. An object of any of these namespaces has no card, as a
+Objects under `/pub/mapky.app/…` and `/pub/eventky.app/…` are never fetched either: routes come
+as [posts](#posts), events and availability as social posts. An object of any of these namespaces
+has no card, as a
 left-out path of a profiled app (below): its post lines are dropped, a link to it gets no route,
 and the resolver gives it no card without a request.
 
@@ -22,8 +22,8 @@ a profiled app's namespace keeps nothing of a card it had, neither on its card n
 history (the lines stay, with their kind, fields and time), and is checked again as missing
 links are; an object of an app without a profile keeps its last card under `missing`, as other
 links do, except its posts (`/pub/{app}/v1/posts/{id}`, read as posts in every namespace), which
-keep nothing either. An object stored before its path was left out becomes `missing` at once when it is
-read again (its next refresh, or `pinakesd reextract pubky`), without a request.
+keep nothing either. A stored object whose path its app's profile leaves out becomes `missing` at
+once when it is read again (its next refresh, or `pinakesd reextract pubky`), without a request.
 
 Profiles are Pinakes's own code, one file per app (`resolver/pubky_apps/<app>.rs`). Nothing is
 read from the apps themselves or from a registry outside this repository.
@@ -58,7 +58,7 @@ cards and media, `srs/`, `subscriptions/`, `settings.json`, `tags/`.
 | --- | --- |
 | `rooms/{room}` | `Conversation`: `name`, `topic`. Only a listed room of the format's version 1 (`"v": 1`, `visibility: public`); any other has no card |
 
-No client link until rooms.pubky.app is live (the client's address today is a hosting
+No client link while rooms.pubky.app does not resolve (the client's address is a hosting
 provider's subdomain): the profile's `links_off` says so, and pinakesd logs it at startup
 ("open_in links are off") while the pubky resolver is on. Never fetched: `members/`, `messages/`, `reactions/`,
 `bans/`, `mutes/`, `tags/`, `profile.json`.
@@ -94,7 +94,7 @@ namespace and kind (`resolver/pubky_apps/posts.rs`):
 | `maps` `route` | A `Trip`: its `name`, `description`, its first waypoint as the point, the box of its `geo:` waypoints, and `activity`, `distance_m`, `duration_s`, `elevation_gain_m`, `elevation_loss_m` and the number of waypoints as facts |
 | `music` `session` | A `BroadcastEvent` from `started_at` to `expires_at` (open-ended without one), with the track it `embed`s, its `host` and its `source`'s `service` as facts. Named by its optional `name` (100 characters), else "Listening session"; its author (the owner's key) is the `author` fact, so the card shows whose it is, as clients name it. Never untitled |
 | `music` `listening` | Now playing: a `ListenAction` from `started_at` to `expires_at`, with the track it `embed`s and its `source`'s `service` as facts, named by its optional `name`, else "Now playing", with the `author` fact, as a session. Current from `started_at` (a minute's grace for the writer's clock), for at most a day |
-| any other namespace, any kind | The general card ([any other app](#any-other-app)) of its content: a JSON object's standard fields, or a text's excerpt; with its `namespace` and `kind` as facts (a namespace with a control character, a NUL among them, or over 100 characters has no card). `events` is one (its availability is now a social kind) |
+| any other namespace, any kind | The general card ([any other app](#any-other-app)) of its content: a JSON object's standard fields, or a text's excerpt; with its `namespace` and `kind` as facts (a namespace with a control character, a NUL among them, or over 100 characters has no card). `events` is one (availability is a social kind) |
 
 **Expiry.** A card with an expiry (a session's or a listening's `expires_at`) is read again when
 it passes (`refresh_by`, which the queue keeps over its usual TTL, at least a minute away). Once

@@ -882,6 +882,11 @@ pub fn identity(uri: &str) -> Result<(String, String, String)> {
         bail!("URI must be 1–2048 bytes");
     }
     let (uri, scheme) = crate::identity::normalize_uri(uri).map_err(anyhow::Error::msg)?;
+    // A URI the URL parser refuses keeps its text as written. A control character in it names
+    // no link, and PostgreSQL stores no NUL in text.
+    if uri.bytes().any(|b| b.is_ascii_control()) {
+        bail!("URI holds a control character");
+    }
     let id = crate::identity::resource_id(&uri);
     Ok((id, uri, scheme))
 }
@@ -895,6 +900,26 @@ pub fn valid_id(id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A URI the URL parser refuses keeps its text as written: one with a control character in
+    /// it (a NUL, which PostgreSQL stores in no text) is no link. One the parser reads has its
+    /// control characters cut or percent-encoded, and is a link.
+    #[test]
+    fn a_uri_with_a_control_character_is_refused() {
+        for uri in [
+            "http://example.org:99999/\0",
+            "http://exa\0mple.org/",
+            "http://[::1\0]/",
+            "http://example.org:99999/a\nb",
+        ] {
+            assert!(identity(uri).is_err(), "{uri:?}");
+        }
+        for (uri, normalized) in [
+            ("https://example.org/a\0b", "https://example.org/a%00b"),
+            ("nostr:note1abc\0", "nostr:note1abc"),
+        ] {
+            assert_eq!(identity(uri).unwrap().1, normalized, "{uri:?}");
+        }
+    }
     /// A provider's name is its stored and served form: the SQL that finds its credits by name
     /// (`changes::retain`, `api::info`) matches what is stored.
     #[test]

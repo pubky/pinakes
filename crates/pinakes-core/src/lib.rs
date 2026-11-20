@@ -59,16 +59,15 @@ pub fn configure_sources(config: &config::Config) {
 }
 
 /// Create the schema (`migrations/0001_schema.sql`) on an empty database; a database that has it
-/// is left as it is. A database built from another version of the file is refused with the
-/// remedy: until the first deployment a schema change edits that file, and databases are
-/// recreated.
+/// is left as it is. A database built from another version of the file is refused, with where
+/// the way on is described: nothing is altered or dropped.
 pub async fn migrate(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     use sqlx::migrate::MigrateError;
     match MIGRATOR.run(pool).await {
         Err(MigrateError::VersionMismatch(_) | MigrateError::VersionMissing(_)) => anyhow::bail!(
-            "this database was built from another version of migrations/0001_schema.sql; \
-             recreate it (dropdb, createdb, then pinakesd --migrate) as docs/operations.md \
-             describes"
+            "this database was built from another version of migrations/0001_schema.sql and is \
+             left as it is; docs/operations.md (Database) says how to move to a database of this \
+             version"
         ),
         result => Ok(result?),
     }

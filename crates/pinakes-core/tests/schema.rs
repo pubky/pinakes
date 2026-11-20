@@ -23,7 +23,9 @@ async fn a_database_from_another_schema_is_refused_with_the_remedy(pool: PgPool)
         edited.contains("another version of migrations/0001_schema.sql"),
         "{edited}"
     );
-    assert!(edited.contains("recreate it"), "{edited}");
+    // It names where the way on is described, and no command that drops the database.
+    assert!(edited.contains("docs/operations.md (Database)"), "{edited}");
+    assert!(!edited.contains("dropdb"), "{edited}");
 
     // The numbered chain: versions the file no longer has.
     sqlx::query("DELETE FROM _sqlx_migrations")
@@ -38,5 +40,5 @@ async fn a_database_from_another_schema_is_refused_with_the_remedy(pool: PgPool)
     .await
     .unwrap();
     let chain = pinakes_core::migrate(&pool).await.unwrap_err().to_string();
-    assert!(chain.contains("recreate it"), "{chain}");
+    assert!(chain.contains("docs/operations.md (Database)"), "{chain}");
 }

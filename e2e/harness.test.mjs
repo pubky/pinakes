@@ -179,7 +179,7 @@ test('the card kept after waiting for a name meets every expectation, not only t
   }
   const good = { ...first, name: 'OK Computer' };
   assert.equal(await expectCard(tag, first, async () => good, 50), good);
-  // Codex's case through the re-read: a moved root whose named card is on another site.
+  // Through the re-read: a moved root whose named card is on another site.
   const docs = new Map([['music', first]]);
   const report = { samples: [{ kind: 'music', uri: tag.uri, resource_id: 'a', type: 'MusicAlbum', status: 'ok', site: 'Music' }] };
   const root = { ...first, id: 'b' };
@@ -188,7 +188,7 @@ test('the card kept after waiting for a name meets every expectation, not only t
   assert.equal(docs.get('music').id, 'a'); assert.equal(report.samples[0].site, 'Music');
 });
 test('a card that moved after the type search must still be of the sample\'s type, ancestors included', async () => {
-  // Codex's case: an Article sample whose root is a WebPage, read again after the type search.
+  // An Article sample whose root is a WebPage, read again after the type search.
   const tag = { kind: 'article', uri: 'https://x.example/a', type: 'Article' };
   const first = { id: 'a', status: 'ok', type: 'Article' };
   const isA = async (c, type) => c.type === type || (c.type === 'MusicEvent' && type === 'Event');
@@ -209,7 +209,7 @@ test('a card that moved after the type search must still be of the sample\'s typ
 });
 
 test('a card whose link became a spelling of another root before the first type search is judged as that root', async () => {
-  // Codex's case: the sample's first card (a MusicEvent, id a) is never listed under Event, since
+  // The sample's first card (a MusicEvent, id a) is never listed under Event, since
   // the link became a spelling of root b meanwhile; b is listed. `isA` as runFlow answers it.
   const tag = { kind: 'event', uri: 'https://x.example/e', type: 'Event' };
   const a = { id: 'a', status: 'ok', type: 'MusicEvent' };

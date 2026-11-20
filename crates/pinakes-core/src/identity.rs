@@ -67,7 +67,9 @@ fn normalize_parsed_url(parsed: &Url) -> String {
             Some(pos) => &full[..pos],
             None => full,
         };
-        return without_fragment.to_string();
+        // A space before the fragment would be cut when the result is read again: cut it here,
+        // so a normalized URI normalizes to itself.
+        return without_fragment.trim_end_matches(' ').to_string();
     }
 
     let host = parsed
@@ -156,6 +158,22 @@ mod tests {
         let (uri, scheme) = normalize_uri("nostr:note1abc123...").unwrap();
         assert_eq!(uri, "nostr:note1abc123...");
         assert_eq!(scheme, "nostr");
+    }
+
+    /// A normalized URI normalizes to itself, also when a space came before its fragment.
+    #[test]
+    fn a_normalized_opaque_uri_normalizes_to_itself() {
+        for input in [
+            "nostr:abc #x",
+            "nostr:abc  #x",
+            "nostr:abc#x",
+            "mailto:a@example.org #x",
+        ] {
+            let (once, _) = normalize_uri(input).unwrap();
+            let (twice, _) = normalize_uri(&once).unwrap();
+            assert_eq!(once, twice, "{input:?}");
+        }
+        assert_eq!(normalize_uri("nostr:abc #x").unwrap().0, "nostr:abc");
     }
 
     #[test]

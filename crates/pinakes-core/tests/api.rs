@@ -735,7 +735,10 @@ async fn polls_the_http_feed_and_replays_without_duplicates(pool: PgPool) {
         )
         .await
         .unwrap(),
-        2
+        ingest::Poll {
+            lines: 2,
+            again: true
+        }
     );
     assert_eq!(
         ingest::poll_once(
@@ -747,7 +750,10 @@ async fn polls_the_http_feed_and_replays_without_duplicates(pool: PgPool) {
         )
         .await
         .unwrap(),
-        0
+        ingest::Poll {
+            lines: 0,
+            again: false
+        }
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM reference")
@@ -756,6 +762,51 @@ async fn polls_the_http_feed_and_replays_without_duplicates(pool: PgPool) {
             .unwrap(),
         1
     );
+    task.abort();
+}
+
+/// A feed that starts over (its epoch is another) is no batch: the poll reports no lines read
+/// and no poll to follow at once, so the daemon waits before it reads the feed again from zero.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_poll_that_resets_the_feed_reads_no_lines_and_waits(pool: PgPool) {
+    let (_, uri, _) = identity("https://example.org/feed").unwrap();
+    let line = Change {
+        op: Op::Put,
+        uri,
+        kind: Kind::Tag,
+        author: author(0),
+        object_path: "/pub/app/tags/one".into(),
+        label: None,
+        at: Utc::now().timestamp_millis(),
+    };
+    let (url, _, task) = mock_nexus(vec![line]).await;
+    let nexus = Nexus::new(&url, None).unwrap();
+    let metrics = Metrics::new().unwrap();
+    let limits = IngestConfig::default();
+    let poll = || ingest::poll_once(&pool, &url, &nexus, &limits, &metrics);
+    let read = ingest::Poll {
+        lines: 1,
+        again: true,
+    };
+    assert_eq!(poll().await.unwrap(), read);
+    sqlx::query("UPDATE feed_cursor SET epoch='an-earlier-epoch'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        poll().await.unwrap(),
+        ingest::Poll {
+            lines: 0,
+            again: false
+        }
+    );
+    let (cursor, resets, references): (i64, i64, i64) =
+        sqlx::query_as("SELECT cursor,resets,(SELECT count(*) FROM reference) FROM feed_cursor")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((cursor, resets, references), (0, 1, 0));
+    assert_eq!(poll().await.unwrap(), read);
     task.abort();
 }
 
@@ -2397,6 +2448,7 @@ async fn multibyte_input_never_panics_any_public_route(pool: PgPool) {
         "near" => "&radius=1000",
         "reach" | "boost" => "&viewer=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
         "viewer" => "&reach=following",
+        "window" => "&sort=trending",
         _ => "",
     };
     // Relative times exist on search (`from`, `to`) and the change lookup (`since`); the
@@ -2657,6 +2709,332 @@ async fn change_lookup_pins_a_relative_since_per_cursor(pool: PgPool) {
         json!([]),
         "a new lookup uses the new minute"
     );
+}
+
+/// Every request is counted by its route's path template and its status, the budget's 429 and
+/// an unknown path included; no ID or path a client sent becomes a label.
+#[sqlx::test(migrations = "../../migrations")]
+async fn requests_are_counted_by_route_template_and_status(pool: PgPool) {
+    let mut config = Config::default();
+    config.api.requests_per_minute = 4;
+    let state = AppState::new(pool, config).unwrap();
+    let metrics = state.metrics.clone();
+    let app = api::router(state);
+    let id = "0123456789abcdef0123456789abcdef";
+    for (target, status) in [
+        (format!("/v1/resources/{id}"), StatusCode::NOT_FOUND),
+        (
+            "/v1/search?sort=trending&window=%C3%A9".into(),
+            StatusCode::BAD_REQUEST,
+        ),
+        ("/v1/no-such-route/s3cret".into(), StatusCode::NOT_FOUND),
+        ("/v1/info".into(), StatusCode::OK),
+        ("/v1/info".into(), StatusCode::TOO_MANY_REQUESTS),
+    ] {
+        assert_eq!(
+            send_raw(&app, "GET", &target, None).await.0,
+            status,
+            "{target}"
+        );
+    }
+    let text = metrics.encode().unwrap();
+    for series in [
+        "pinakes_api_requests_total{listener=\"public\",route=\"/v1/resources/{id}\",status=\"404\"} 1",
+        "pinakes_api_requests_total{listener=\"public\",route=\"/v1/search\",status=\"400\"} 1",
+        "pinakes_api_requests_total{listener=\"public\",route=\"unmatched\",status=\"404\"} 1",
+        "pinakes_api_requests_total{listener=\"public\",route=\"/v1/info\",status=\"200\"} 1",
+        "pinakes_api_requests_total{listener=\"public\",route=\"/v1/info\",status=\"429\"} 1",
+        "pinakes_api_requests_total{listener=\"admin\",route=\"unmatched\",status=\"404\"} 0",
+        "pinakes_api_request_duration_seconds_count{listener=\"public\",route=\"/v1/info\"} 2",
+    ] {
+        assert!(text.contains(series), "{series}\n{text}");
+    }
+    assert!(!text.contains(id) && !text.contains("s3cret"), "{text}");
+}
+
+/// A request that takes longer than `limits.request_timeout_secs` is answered 504, and
+/// counted.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_request_past_its_deadline_is_answered_504(pool: PgPool) {
+    let mut config = Config::default();
+    config.api.request_timeout_secs = 1;
+    let state = AppState::new(pool, config).unwrap();
+    let metrics = state.metrics.clone();
+    async fn slow() -> &'static str {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        "late"
+    }
+    let routes = Router::new().route("/slow", get(slow));
+    for (app, listener) in [
+        (
+            api::with_public_layers(routes.clone(), state.clone()),
+            "public",
+        ),
+        (api::with_admin_layers(routes, state), "admin"),
+    ] {
+        let started = std::time::Instant::now();
+        let (status, body) = send_raw(&app, "GET", "/slow", None).await;
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{listener}");
+        assert_eq!(body, json!({"error":"the request took too long"}));
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+        assert!(metrics.encode().unwrap().contains(&format!(
+            "pinakes_api_requests_total{{listener=\"{listener}\",route=\"/slow\",status=\"504\"}} 1"
+        )));
+    }
+}
+
+/// `/metrics` answers whatever the database does: when the gauges cannot be read they keep
+/// their last values, the process's own counters are served, and the failure is counted. Until
+/// the gauges have been read once there is no value to keep: the answer is 503.
+#[sqlx::test(migrations = "../../migrations")]
+async fn metrics_are_served_when_their_database_read_fails(pool: PgPool) {
+    sqlx::query("INSERT INTO feed_cursor(nexus,cursor,feed_length) VALUES('fixture',3,10)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // A daemon whose database was never read: no gauge has a value.
+    let gone = api::pool_options()
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .unwrap();
+    gone.close().await;
+    let never = api::admin_router(AppState::new(gone, Config::default()).unwrap());
+    let (status, _) = send_raw(&never, "GET", "/metrics", None).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    // One whose gauges were read, and whose database then goes away.
+    let state = AppState::new(pool.clone(), Config::default()).unwrap();
+    state.metrics.api_panics.inc();
+    let admin = api::admin_router(state);
+    let (status, body) = send_raw(&admin, "GET", "/metrics", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body
+        .as_str()
+        .unwrap()
+        .contains("pinakes_ingest_lag_lines 7"));
+    pool.close().await;
+    // A read is kept for 15 seconds: the next scrape after that asks the database again.
+    tokio::time::sleep(std::time::Duration::from_secs(16)).await;
+    let (status, body) = send_raw(&admin, "GET", "/metrics", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let text = body.as_str().unwrap();
+    for series in [
+        "pinakes_metrics_refresh_failures_total 1",
+        "pinakes_ingest_lag_lines 7",
+        "pinakes_api_panics_total 1",
+    ] {
+        assert!(text.contains(series), "{series}\n{text}");
+    }
+}
+
+/// The queue's gauges are read by a statement of their own, after every other gauge. When it
+/// alone fails (here it waits for a lock on `reference` until the API pool's statement timeout
+/// ends it), every other gauge holds what was just read, the queue's keep their last values and
+/// the failure is counted. A daemon whose first read goes so serves its other gauges and no
+/// queue series, not a 503; the queue's gauges come with the next read that succeeds.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_failed_queue_read_leaves_only_the_queue_gauges_stale(pool: PgPool) {
+    const PENDING: &str = "pinakes_queue_depth{resolver=\"web\",state=\"pending\"}";
+    const RESOURCES: &str = "pinakes_resources{resolver=\"web\",status=\"pending\"}";
+    async fn link(pool: &PgPool, uri: &str) {
+        let id = store::ensure_resource(pool, uri).await.unwrap();
+        sqlx::query("UPDATE resource SET next_attempt_at=now()-interval '1 second' WHERE id=$1")
+            .bind(id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+    async fn scrape(admin: &Router) -> String {
+        let (status, body) = send_raw(admin, "GET", "/metrics", None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        body.as_str().unwrap().to_owned()
+    }
+    fn holds(text: &str, series: &[String]) {
+        for line in series {
+            assert!(text.lines().any(|l| l == line), "{line}\n{text}");
+        }
+    }
+    sqlx::query("INSERT INTO feed_cursor(nexus,cursor,feed_length) VALUES('fixture',3,10)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    link(&pool, "https://queue-gauge.example.org/one").await;
+    // The API's pool: its statements end after five seconds.
+    let api_pool = api::pool_options()
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let admin = api::admin_router(AppState::new(api_pool.clone(), Config::default()).unwrap());
+    holds(
+        &scrape(&admin).await,
+        &[
+            "pinakes_ingest_lag_lines 7".into(),
+            format!("{RESOURCES} 1"),
+            format!("{PENDING} 1"),
+            "pinakes_metrics_refresh_failures_total 0".into(),
+        ],
+    );
+    // More lag and one more link due; then only the queue's statement cannot be answered.
+    sqlx::query("UPDATE feed_cursor SET feed_length=12")
+        .execute(&pool)
+        .await
+        .unwrap();
+    link(&pool, "https://queue-gauge.example.org/two").await;
+    let mut held = pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE reference IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *held)
+        .await
+        .unwrap();
+    // A read is kept for 15 seconds: the next scrape after that asks the database again.
+    tokio::time::sleep(std::time::Duration::from_secs(16)).await;
+    holds(
+        &scrape(&admin).await,
+        &[
+            "pinakes_ingest_lag_lines 9".into(),
+            format!("{RESOURCES} 2"),
+            format!("{PENDING} 1"),
+            "pinakes_metrics_refresh_failures_total 1".into(),
+        ],
+    );
+    // A daemon whose first read finds the queue's statement so.
+    let first = api::admin_router(AppState::new(api_pool, Config::default()).unwrap());
+    let text = scrape(&first).await;
+    holds(
+        &text,
+        &[
+            "pinakes_ingest_lag_lines 9".into(),
+            format!("{RESOURCES} 2"),
+            "pinakes_metrics_refresh_failures_total 1".into(),
+        ],
+    );
+    assert!(!text.contains("pinakes_queue_depth{"), "{text}");
+    assert!(!text.contains("pinakes_refresh_overdue{"), "{text}");
+    // A failed read is not kept: the next scrape reads again, the queue too.
+    held.rollback().await.unwrap();
+    holds(
+        &scrape(&first).await,
+        &[
+            format!("{PENDING} 2"),
+            "pinakes_metrics_refresh_failures_total 1".into(),
+        ],
+    );
+}
+
+/// A trending page counts references in a window that ends at the request's instant: with no
+/// write in between, the page is answered 304 within the minute and read again after it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_trending_page_is_not_answered_304_once_its_window_has_moved(pool: PgPool) {
+    seed(&pool).await;
+    let start: DateTime<Utc> = "2036-06-01T10:00:20Z".parse().unwrap();
+    let (now, clock) = test_clock(start);
+    let mut state = AppState::new(pool, Config::default()).unwrap();
+    state.clock = Some(clock);
+    let app = api::router(state);
+    let read = |target: &'static str, etag: Option<String>| {
+        let app = app.clone();
+        async move {
+            let mut request = Request::builder().uri(target);
+            if let Some(etag) = etag {
+                request = request.header("if-none-match", etag);
+            }
+            let mut request = request.body(Body::empty()).unwrap();
+            request.extensions_mut().insert(axum::extract::ConnectInfo(
+                "127.0.0.1:1".parse::<SocketAddr>().unwrap(),
+            ));
+            let response = app.oneshot(request).await.unwrap();
+            (
+                response.status(),
+                response.headers()["etag"].to_str().unwrap().to_owned(),
+            )
+        }
+    };
+    let trending = "/v1/search?sort=trending&window=1h";
+    let plain = "/v1/search?tags=rust";
+    let (_, trending_etag) = read(trending, None).await;
+    let (_, plain_etag) = read(plain, None).await;
+    *now.lock().unwrap() = start + chrono::Duration::seconds(30);
+    let (status, _) = read(trending, Some(trending_etag.clone())).await;
+    assert_eq!(status, StatusCode::NOT_MODIFIED, "the same minute");
+    *now.lock().unwrap() = start + chrono::Duration::minutes(2);
+    let (status, moved) = read(trending, Some(trending_etag.clone())).await;
+    assert_eq!(status, StatusCode::OK, "the window moved");
+    assert_ne!(moved, trending_etag);
+    // A page no window of which moves with the clock keeps its ETag.
+    let (status, _) = read(plain, Some(plain_etag)).await;
+    assert_eq!(status, StatusCode::NOT_MODIFIED);
+}
+
+/// A filter that cannot be read is refused by its parameter's name and in the route's own words,
+/// never with a number or date parser's message; an episodes page refuses unknown parameters.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_refused_filter_names_its_parameter(pool: PgPool) {
+    let app = api::router(AppState::new(pool, Config::default()).unwrap());
+    for (target, error) in [
+        (
+            "/v1/search?from=yesterday",
+            "from: invalid time: RFC 3339, Unix milliseconds or relative to now",
+        ),
+        (
+            "/v1/search?to=2026-13-01T00:00:00Z",
+            "to: invalid time: RFC 3339, Unix milliseconds or relative to now",
+        ),
+        ("/v1/search?bbox=1,2,3,x", "bbox: invalid coordinates"),
+        (
+            "/v1/search?near=46.0,x&radius=10",
+            "near: invalid coordinates",
+        ),
+        (
+            "/v1/search?near=46.0,8.9&radius=far",
+            "radius must be a number of metres",
+        ),
+    ] {
+        let (status, body) = send_raw(&app, "GET", target, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{target}");
+        assert_eq!(body["error"], error, "{target}");
+    }
+    let id = "0123456789abcdef0123456789abcdef";
+    let (status, _) = send_raw(
+        &app,
+        "GET",
+        &format!("/v1/resources/{id}/episodes?nope=1"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = send_raw(
+        &app,
+        "GET",
+        &format!("/v1/resources/{id}/episodes?limit=5"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// The lookup's cap comes before any entry is read: a request over it is refused for its size,
+/// whatever its entries are.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_lookup_over_its_cap_is_refused_before_its_entries_are_read(pool: PgPool) {
+    let app = api::router(AppState::new(pool, Config::default()).unwrap());
+    let mut uris = vec!["no scheme".to_owned()];
+    uris.extend((0..500).map(|n| format!("https://example.org/{n}")));
+    for body in [
+        json!({ "uris": uris }),
+        json!({ "ids": vec!["not an id"; 501] }),
+        json!({ "uris": [] }),
+    ] {
+        let (status, answer) = send_raw(&app, "POST", "/v1/resources/lookup", Some(body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(answer["error"], "lookup requires 1–500 entries");
+    }
+    let (status, answer) = send_raw(
+        &app,
+        "POST",
+        "/v1/resources/lookup",
+        Some(json!({"uris": ["no scheme"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_ne!(answer["error"], "lookup requires 1–500 entries");
 }
 
 /// A panicking handler under the public layer stack answers the fixed 500
@@ -3883,6 +4261,61 @@ async fn a_boost_ranks_the_viewers_set_first_and_never_filters(pool: PgPool) {
     )
     .await;
     assert_eq!(ids_of(&page), [ids[wot].clone()]);
+    task.abort();
+}
+
+/// A search that reads two sets (`reach` and `boost`) gives both one deadline of
+/// `limits.reach_timeout_secs`: two reads that each end inside it, but not together, answer the
+/// reach's own 502 when it passes, not a later answer that the request's deadline could cut
+/// off. Either read alone is in time.
+#[sqlx::test(migrations = "../../migrations")]
+async fn two_reach_reads_share_one_deadline(pool: PgPool) {
+    let slow = || async {
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        Json(vec![author(1)])
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let nexus = Router::new()
+        .route("/v1/user/{id}/friends", get(slow))
+        .route("/v1/user/{id}/following", get(slow));
+    let task = tokio::spawn(async move { axum::serve(listener, nexus).await.unwrap() });
+    let mut config = Config {
+        nexus_url: format!("http://{addr}"),
+        ..Default::default()
+    };
+    config.search.reach_timeout_secs = 2;
+    let app = api::router(AppState::new(pool, config).unwrap());
+    let started = std::time::Instant::now();
+    let (code, body) = call(
+        &app,
+        "GET",
+        &format!(
+            "/v1/search?reach=following&boost=friends&viewer={}",
+            author(7)
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(code, 502, "{body}");
+    let took = started.elapsed();
+    assert!(
+        (std::time::Duration::from_millis(1950)..std::time::Duration::from_millis(2600))
+            .contains(&took),
+        "{took:?}"
+    );
+    // The first set was read in time and is cached; the second, alone, is in time too.
+    let (code, body) = call(
+        &app,
+        "GET",
+        &format!(
+            "/v1/search?reach=following&boost=friends&viewer={}",
+            author(7)
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(code, 200, "{body}");
     task.abort();
 }
 

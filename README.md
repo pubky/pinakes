@@ -97,7 +97,7 @@ schema upgrades require a reviewed in-place procedure; disposable local database
 public HTTP(S) only (and, for a `nostr:` link, one bounded `wss` connection to the relay it
 names, under the same address rules), every DNS answer checked and pinned, private and metadata
 addresses refused, at most three redirects (each checked again), a 10-second timeout and a 1 MB
-cap for a page (an HTML page is read up to `limits.html_head_bytes`, a calendar up to
+cap for a page (an HTML page is read up to `limits.html_head_bytes`, 4 MB by default; a calendar up to
 `limits.event_feed_body_bytes`; 8 MB for podcast feeds and for MusicBrainz and Wikidata
 answers). Requests to one host go one at a time, paced to
 `limits.host_requests_per_second` or the host's published rate. Discovery reads (also-on
@@ -123,8 +123,9 @@ scripts/dev
 
 `scripts/dev` migrates the database, starts `pinakesd` on port 8090 (admin on 9090) and tails
 `.runtime/pinakesd.log`. Point `nexus_url` at a Nexus that serves the resource changes feed. The
-local superuser is for development only; a deployment uses a migration role and a restricted
-application role.
+local superuser is for development only: in a deployment a superuser creates the database and
+its extensions, and the daemon connects as the database's owner, no superuser
+([operations](docs/operations.md#database)).
 
 ```sh
 curl http://127.0.0.1:8090/v1/info
@@ -157,7 +158,7 @@ scripts/test
 e2e driver's own Node tests (`npm test --prefix e2e`, so it needs Node 20 or newer) and
 `scripts/check-ops`. Integration tests create their own disposable databases and never touch the
 development database. HTTP tests use local servers, injected transports and recorded fixtures.
-The tests that run `scripts/verify-osm-boundary` also need `psql`, `pg_dump` and `rg`.
+The tests that run `scripts/verify-osm-boundary` also need `psql`, `pg_dump`, `rg` and `python3`.
 
 End-to-end checks ([e2e/README.md](e2e/README.md)) need Node 20 or newer too:
 

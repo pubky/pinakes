@@ -415,6 +415,16 @@ pub async fn save(
     let accepted: Option<Value> = row.try_get("accepted")?;
     // A never-observed object can be missing without having been created or cancelled.
     let before = accepted.filter(|v| v.get("type").is_some() && row.get::<bool, _>("ever_existed"));
+    // A stored card this build cannot read (a field or a value it does not know) is no card to
+    // keep or compare with: the new reading replaces it, where failing here would fail every
+    // later save of the resource.
+    let before = before.filter(|v| {
+        let readable = serde_json::from_value::<ResourceMeta>(v.clone()).is_ok();
+        if !readable {
+            tracing::warn!(resource = %id, "the stored card does not read as a card; this reading replaces it");
+        }
+        readable
+    });
     // Both drift guards read the stored row's type path, so a page cannot shed `Event` in the
     // same refresh to slip past either one: a page that lost its start for a fetch (a consent
     // wall, a date that failed to parse) keeps its card. A reading that decided the page is no
@@ -462,18 +472,13 @@ pub async fn save(
     let app_missing = doc.status == Status::Missing
         && doc.source == "pubky"
         && crate::resolver::pubky_apps::known(&doc.url);
-    if social_missing || opted_out {
+    if opted_out {
         sqlx::query("DELETE FROM resource_change WHERE resource_id=$1")
             .bind(id)
             .execute(&mut *tx)
             .await?;
-    }
-    if social_missing || opted_out {
         // Spellings saved before they became aliases of this post kept its text too.
         scrub_aliases_of(&mut tx, id).await?;
-    }
-    if social_missing {
-        forget_derived(&mut tx, &[id.to_owned()]).await?;
     }
     if doc.status == Status::Missing {
         let fetched = chrono::DateTime::from_timestamp_millis(doc.fetched_at)
@@ -528,6 +533,17 @@ pub async fn save(
             }
             tx.commit().await?;
             return Ok(());
+        }
+        // The missing answer is confirmed. A gone social post keeps nothing of the post: its
+        // change lines, what its spellings kept of it and its also-on results go now, never on
+        // the one unconfirmed answer above, which may be a transient 404 for a post still there.
+        if social_missing {
+            sqlx::query("DELETE FROM resource_change WHERE resource_id=$1")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+            scrub_aliases_of(&mut tx, id).await?;
+            forget_derived(&mut tx, &[id.to_owned()]).await?;
         }
         // A Pubky app's object without a card (withheld by its content, gone, or at a path its
         // profile leaves out) keeps nothing of its earlier card, in its document or in its
@@ -715,6 +731,7 @@ const CLEANUP_PAUSE: std::time::Duration = std::time::Duration::from_millis(50);
 /// Delete resources orphaned for `grace_days`. A derived child's grace counts from its link's
 /// expiry, not from its creation: a lapsed link (a calendar that failed for a day, an event link
 /// past its cap) keeps its child, and its row for a later revival, through the same grace.
+/// For tests: the daemon's maintenance runs `delete_orphans_within`.
 pub async fn delete_orphans(pool: &PgPool, grace_days: u32) -> Result<u64> {
     delete_orphans_within(pool, grace_days, grace_days.saturating_mul(24), || false).await
 }
@@ -764,11 +781,14 @@ async fn delete_orphan_batch(
         {
             let before = normalize(&doc);
             let change = diff(Some(&before), None).unwrap();
+            // A post whose author opted out keeps no text in its history (`save`): its
+            // `deleted` line carries its kind, fields and time only.
+            let kept = (!opted_out(&doc)).then_some(before);
             append(
                 &mut tx,
                 &id,
                 source.as_deref().unwrap_or("unknown"),
-                Some(before),
+                kept,
                 None,
                 change,
                 None,
@@ -793,21 +813,36 @@ async fn delete_orphan_batch(
     tx.commit().await?;
     Ok(rows.len() as u64)
 }
+/// The change lines one retention transaction deletes. Fixed: it bounds how long the sequence
+/// lock is held, whatever the backlog.
+const RETAIN_BATCH: i64 = 10_000;
 /// Delete change lines older than `days`, and those holding a value of a provider whose values
 /// are kept for less (`CreditProvider::change_days_cap`) older than that cap; then the OSM versions and occurrences nothing
 /// refers to any more.
 pub async fn retain(pool: &PgPool, days: u32) -> Result<()> {
     // The change history is kept to its days even when an occurrence step fails.
     let occurrences = retain_occurrences(pool).await;
+    // In batches, each a transaction: the sequence lock stops every writer's append while it is
+    // held, so a long backlog (the first run after a long stop) lets writers in between two.
+    loop {
+        let mut tx = pool.begin().await?;
+        lock_sequence(&mut tx).await?;
+        // The sequence is the last lock a writer takes, so holding it this never waits for a
+        // line a writer holds (an opted-out post deleting its history before it appends): those
+        // lines go with that writer, or at the next run.
+        let deleted = sqlx::query("DELETE FROM resource_change WHERE seq IN (SELECT seq FROM resource_change WHERE at<now()-$1*interval '1 day' FOR UPDATE SKIP LOCKED LIMIT $2)")
+            .bind(days as f64)
+            .bind(RETAIN_BATCH)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        tx.commit().await?;
+        if deleted < RETAIN_BATCH as u64 {
+            break;
+        }
+    }
     let mut tx = pool.begin().await?;
     lock_sequence(&mut tx).await?;
-    // The sequence is the last lock a writer takes, so holding it this never waits for a line a
-    // writer holds (an opted-out post deleting its history before it appends): those lines go
-    // with that writer, or at the next run.
-    sqlx::query("DELETE FROM resource_change WHERE seq IN (SELECT seq FROM resource_change WHERE at<now()-$1*interval '1 day' FOR UPDATE SKIP LOCKED)")
-        .bind(days as f64)
-        .execute(&mut *tx)
-        .await?;
     // A line that holds a value of a provider whose values are kept for less goes after
     // that many days (`CreditProvider::change_days_cap`; TMDB's 120), whatever `days` says and
     // whether or not the provider's source is on now.

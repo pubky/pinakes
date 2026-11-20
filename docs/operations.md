@@ -34,7 +34,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `music_enrichment_retry_secs` | `3600` | The earliest a MusicBrainz card whose enrichment, or a Wikidata item's card whose Commons image, failed for a while (a timeout, a 429, a 5xx) is read again (seconds, 60–604800): it waits at least twice as long as since its last reading, up to its own refresh time, so a failure on a routine refresh waits for the next. |
 | `music_image_width` | `640` | The width of the Commons thumbnail an enriched card or a Wikidata item's card asks for (pixels, 20–4096); Commons serves the next of its standard sizes (960 for 640). |
 | `host_requests_per_second` | `1.0` | Requests per second to any one upstream host. |
-| `host_rates` | `{}` | Per-host overrides of `host_requests_per_second`. |
+| `host_rates` | `{}` | Per-host overrides of `host_requests_per_second`. Each key is one host name (`api.example.org`; an IPv6 address in brackets), read without regard to case. A key that is a pattern (`*.example.org`), a URL or a name with a path, or two keys for one host, stop startup. |
 | `html_head_bytes` | `4194304` | How far an HTML page past the 1 MB page cap is read (bytes); nothing in the page stops the read earlier. |
 | `max_failures` | `5` | Failures before a resource dead-letters. |
 | `timeout_grace` | `3` | Timeouts tolerated before they count as failures. |
@@ -48,7 +48,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `osm_ttl_secs` | `2592000` | OSM place cache lifetime (seconds). |
 | `osm_dump_every_hours` | `24` | Hours between two writes of the ODbL dump file. |
 | `osm_dump_downloads_per_hour` | `6` | ODbL dump downloads per hour per client address. |
-| `reach_timeout_secs` | `5` | Nexus reach deadline per search (seconds). |
+| `reach_timeout_secs` | `5` | Nexus reach deadline per search (seconds, 1–60, and more than two seconds below `request_timeout_secs`). |
 | `related_taggers` | `200` | Taggers a related page samples: the authors of a resource's most recent tags, at most this many. |
 | `related_window_days` | `365` | Days a related page looks back, for those taggers and their tags. |
 | `related_refs_per_tagger` | `1000` | References a related page reads per sampled tagger (their most recent). |
@@ -57,12 +57,14 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `related_seed_links` | `32` | Seed links a related page samples: of the resource, its group's members and their aliases, the ones with the newest tags, at most this many. |
 | `collapse_refs_per_member` | `10000` | References counted per group member when `collapse=group` picks a group's row. |
 | `max_radius_m` | `200000.0` | Largest `near` radius (metres). |
-| `api_cache_capacity` | `10000` | API response cache entries. |
+| `api_cache_capacity` | `10000` | Entries the rate limiter remembers when an API request adds a client address (100–100000). It shares one table with the preview limiter; past it the oldest entry is forgotten with its used budget, so keep it above the clients, preview clients and previewed links seen in a minute. Also the client addresses the dump download limiter remembers per hour. |
+| `request_timeout_secs` | `30` | Seconds a request may take on either listener before it is answered 504 (8–600). An MCP tool call has two seconds less for all its reads together, and answers a tool error past that. |
+| `shutdown_grace_secs` | `30` | Seconds a stopping daemon gives open requests, running jobs and background passes to finish (1–600). |
 | `reach_cost` | `6` | Budget units a search costs for each of `reach` and `boost`. |
 | `related_cost` | `6` | Budget units a related search costs. |
 | `preview_requests_per_minute` | `30` | Preview requests per minute per client. |
 | `preview_uri_requests_per_minute` | `30` | Preview requests per minute per URI. |
-| `preview_cache_capacity` | `10000` | Preview cache entries. |
+| `preview_cache_capacity` | `10000` | The same table's size when a preview adds its client address and link (100–100000); past it the oldest entry (an API client's too) is forgotten with its used budget. Keep it equal to `api_cache_capacity`. |
 | `preview_new_per_hour` | `1000` | New previews per hour for the whole instance; over it `POST /v1/resolve` answers 503. |
 | `preview_new_per_client_per_hour` | `0` | New previews per hour one client address may take (0: no share); over it `POST /v1/resolve` answers 429. |
 | `podcast_items` | `2000` | Podcast feed items read for a show's or an episode's card. A show's episode list looks at a feed's first 2000 items at most (fewer on a feed's own card when this is lower) and keeps the newest 1000. |
@@ -115,6 +117,14 @@ Supported: PostgreSQL 16–18 with PostGIS 3.4+ and `pg_trgm`.
 on an empty database and exits; the daemon does the same at startup, and so does `reextract`. A
 database that already has it is left as it is.
 
+**Roles.** A superuser creates the database and its two extensions once (`CREATE EXTENSION
+postgis; CREATE EXTENSION pg_trgm;`: PostGIS takes a superuser). The role in `database_url` is
+no superuser. It owns the database (`createdb -O <role>`), or at least has `CREATE` on its
+`public` schema: `--migrate`, the daemon and `reextract` all connect as that one role, it
+creates the tables, and every start checks the migration history with a statement
+(`CREATE TABLE IF NOT EXISTS _sqlx_migrations`) that PostgreSQL refuses to a role without
+`CREATE` on the schema, also when the table exists.
+
 Schema changes edit `0001_schema.sql`; this is not an incremental migration runner. A daemon
 refuses a database built from a different schema version. For a production upgrade, back up and
 restore-test first, apply a reviewed upgrade procedure while stopped, and prove the resulting
@@ -127,6 +137,43 @@ copy, run the actual target binary through migration and daemon startup and veri
 workers before production rollout. There is no general automatic in-place upgrade command.
 Do not drop a production database to upgrade it: a feed replay cannot restore operator curation
 or the change journal.
+
+**Moving to a new database.** Where no in-place procedure exists, a new database of the target
+version takes over. The index is rebuilt from the Nexus feed; curation and the change journal are
+carried over by hand:
+
+1. Stop the daemon and back the old database up (`pg_dump`).
+2. Save the curated groups from the old database, one row per member:
+
+   ```sql
+   \copy (SELECT o.group_id, u.resource_id, u.occurrence_key FROM group_override o JOIN group_unit u USING (unit_id) ORDER BY 1, 2, 3) TO 'curation.csv' CSV
+   ```
+
+3. Create the new database with its extensions and run the target binary's `pinakesd --migrate`.
+4. Copy the change journal before the new daemon first starts, so the cursors clients hold stay
+   valid (it copies the lines and their sequence). The two versions' `resource_change` tables
+   must have the same columns (`\d resource_change` in each):
+
+   ```sh
+   DATABASE_URL="$OLD_DATABASE_URL" scripts/pg-env pg_dump --data-only --table=resource_change --file=resource_change.sql
+   DATABASE_URL="$NEW_DATABASE_URL" scripts/pg-env psql -v ON_ERROR_STOP=1 --single-transaction --file=resource_change.sql
+   ```
+
+   Run the second command only when the first has succeeded: it loads the whole file or
+   nothing. `scripts/pg-env` runs a command with libpq's `PG*` variables set from
+   `DATABASE_URL`, so neither URL, nor a password in it, stands on a command line, where the
+   process table shows it. Setting `PGHOST`, `PGUSER`, `PGDATABASE` and a `PGPASSFILE` for each
+   command does the same.
+
+5. Start the daemon on the new database. It reads the feed from zero and reads every link
+   again; each card gets a `created` line of its own.
+6. When a curated group's members are stored and grouped again (a resource's ID is the same in
+   both databases while both versions normalize its URI alike: it is the hash of the normalized
+   URI), put the group back with the admin
+   `PUT /v1/groups/{id}` ([API](api.md#groups)). A member is `{"resource_id": …, "occurrence":
+   null}` for an empty `occurrence_key`, and `{"resource_id": …, "occurrence": {"uid": …,
+   "recurrence_id": …}}` for a key `["<uid>","<recurrence id>"]` (no `recurrence_id` when the
+   second is empty).
 
 Only for a disposable local development database:
 
@@ -141,6 +188,38 @@ A database advisory lock, the instance lock, allows one daemon per database. The
 a connection of its own for its whole life. Resolver, host, author, reach-cache and IP budgets are
 process-local, and the lock keeps their guarantees. Every daemon version takes the same key, so a
 second daemon on a database refuses to start. No other lock uses that key (`pinakes_core::locks`).
+The lock is its session's: the daemon checks every ten seconds that the session is alive and
+answers within ten seconds. It stops at once when the session has ended (its connection failed,
+PostgreSQL restarted or shut down, an administrator ended the session), and when two checks in a
+row get no answer in time or an error that leaves the session open (a database that does not
+answer, a cancelled statement; one of them stops nothing), since another daemon or a
+`reextract` could then start beside it. A daemon that has lost the lock, running or already
+stopping, claims no more work and gives open requests, running jobs and background passes two
+seconds from then at most (less when its shutdown grace ends sooner), not the full grace:
+what still runs is dropped. A job cut off before its save is read again when its lease runs out;
+one cut off after it keeps the card it saved, and the steps after the save (the alias its page
+names, an episode's pages) wait for its next full read: a read the site answers 304 does not run
+them, so they can wait until the page changes, and a card the save made final is read again only
+when a new reference reopens it (a read the site may answer 304 too) or
+`pinakesd reextract <route>` reads it in full. So a daemon's workers and background passes run
+without the lock for 32 seconds at most: 30 to notice a session that is gone without its
+connection failing, and those two. The process ends once its database connections are closed (up
+to 5 seconds more), in which a request still open may be answered.
+
+**Stopping and restarting.** `pinakesd` stops with a non-zero status when it loses the instance
+lock, when one of its background tasks ends by itself or panics (ingestion, grouping,
+maintenance, the ODbL dump, a queue worker, a listener), or when a hint pass or also-on panics
+(those end by themselves when switched off): a daemon that kept answering with a dead loop would look healthy
+and fall behind. Run it under a supervisor that starts it again (`Restart=on-failure`, a
+container restart policy). On SIGTERM or SIGINT it stops taking work, lets open requests,
+running jobs and background passes finish for up to `limits.shutdown_grace_secs`, closes its
+database connections (up to 5 seconds more) and exits 0, or non-zero when a task panicked while
+stopping; what still runs after the grace is dropped. A job cut off there before its save is
+read again when its lease runs out; one cut off after it keeps the card it saved, and the steps
+after the save wait for its next full read, as after a lost lock. Give the supervisor's stop
+timeout more than the two together (`TimeoutStopSec`, `stop_grace_period`). A signal during
+startup, `--migrate` or `reextract` stops them too (`--migrate` and `reextract` then exit
+non-zero).
 
 **Re-extraction.** A parser or routing change reaches stored documents through one command, run
 while the daemon is stopped (it takes the instance lock):
@@ -168,8 +247,8 @@ line names its own ID. Every release comes before any move, so a spelling whose 
 released link moves to that link, never to the root the link had. An alias a page's canonical made
 (basis `canonical`) or an official API's answer made (basis `source`) is no rule of its URI and
 stays, as does the alias of a link whose source is switched off (`[sources.x] enabled = false`
-silences its rule; what it merged before stays merged). To fix the aliases an earlier build made,
-run `reextract all`: the links concerned
+silences its rule; what it merged before stays merged). `reextract all` checks every stored link
+against the alias rules: the links concerned
 classify to several routes (a Reddit comment's link to `media`, a LinkedIn post's to
 `official`). The selected rows' [also-on](#also-on) lookups are
 queued too: a card that comes back unchanged would not run them again, so results read by an
@@ -191,6 +270,10 @@ It prints `scrubbed N posts gone or opted out`, then the re-queued count.
 UPDATE resource SET dead_letter=false, attempts=0, next_attempt_at=now(),
   lease_until=NULL, generation=generation+1 WHERE id='<resource_id>';
 ```
+
+`pinakesd reextract <route>` revives a route's dead letters too: every row it re-queues gets
+`dead_letter=false` and `attempts=0`. It runs with the daemon stopped and reads the whole route
+again.
 
 **Grouping rebuild.** The daemon stores its grouping policy (its limits and mode) and
 re-queues every membership when it changes, so a changed `groups.cross_container_occurrences`
@@ -427,14 +510,16 @@ The agents' guide (`/llms.txt`, `/skill.md`, the index at `/`) and the MCP endpo
 `api.mcp`, default on) are on the public listener under the same per-IP budget
 ([api](api.md#agents)). The MCP endpoint is stateless and read-only, takes no credentials and
 accepts any `Host`; terminate TLS at the reverse proxy and pass `X-Forwarded-Proto`, so the guide
-names the public `https` URL. Turning `api.mcp` off removes `/mcp` and its link from the index;
-the guide stays.
+names the public `https` URL. The proxy must pass the public `Host` too: the guide's base URL is
+the `Host` the daemon receives (in nginx, `proxy_set_header Host $host;`). Turning `api.mcp` off
+removes `/mcp` and its link from the index; the guide stays.
 
 ## Ingestion
 
 `pinakesd` polls the Nexus reference feed (`GET /v1/resources/changes`) every `limits.poll_secs`. Pinakes keys each line on its
 `uri`, normalized and hashed into its own ID (Nexus's `resource_id` is not read); a URI that does
-not normalize is rejected (`uri`). A line's author must be 52
+not normalize, or that still holds a control character once normalized (one the URL parser
+refuses keeps its text), is rejected (`uri`). A line's author must be 52
 lowercase z-base-32 characters; labels and object paths must be non-empty, NUL-free and within
 `limits.max_label_bytes` and `limits.max_object_path_bytes`. A page is parsed line by line: a line
 of a kind this build does not read (`unknown_kind`, a newer Nexus's) or one it cannot parse
@@ -452,7 +537,15 @@ line names its feed position only, never its content). A panic anywhere else in 
 batch's score update or cursor write, say) is an error: the batch rolls back, the cursor holds,
 `pinakes_ingest_panics_total` counts it and the poll is retried. A feed epoch change, or a
 cursor beyond the feed's length, clears the reference projection and scores and restarts at
-zero; resource documents stay through the grace period. A resource without references is
+zero, after one `limits.poll_secs` wait; resource documents stay through the grace period.
+The cursor is kept under `nexus_url` as written. After `nexus_url` changes (another Nexus, or
+another spelling of the same one, such as a trailing slash) the new feed is read from zero and
+the references read from the old one stay beside it: the daemon logs a warning at each start
+that names the other feed's host. The other feed's cursor row also stays in
+`pinakes_ingest_lag_lines`. To start over with the new feed alone, stop the daemon and
+clear the projection as a feed reset does
+(`UPDATE resource SET orphaned_at=coalesce(orphaned_at,now()); TRUNCATE reference, resource_score, feed_cursor;`):
+the next start reads the configured feed from zero. A resource without references is
 deleted `limits.grace_days` after it became orphaned. One nothing ever referenced (a link only
 previewed with `POST /v1/resolve`) goes after `limits.preview_grace_hours` (a day) instead: its
 orphan time is still the instant it was created, as a reference clears it and losing the last
@@ -484,7 +577,7 @@ versionless (`pubky://<author>/pub/<namespace>/v1/posts/{id}`), and its `object_
 file written (`…/{id}/{editId}.json`). The URI must be a post in its author's own storage (else
 `uri`) and the object path a version file directly in it (else `object_path`). Social events and
 rsvps are indexed by Nexus. A `post` line in a namespace
-Pinakes never fetches (`social`, `pubky.app`, and the old `mapky.app` and `eventky.app`, read
+Pinakes never fetches (`social`, `pubky.app`, `mapky.app` and `eventky.app`, read
 decoded, so `%73ocial` is `social`) is rejected (`never_fetched`), creating no resource or
 reference and fetching nothing. Letter case is kept, as the resolver keeps it: `Social` is another
 app's namespace. A namespace that is not one path segment once decoded (not UTF-8, an encoded `/`,
@@ -601,9 +694,8 @@ save, cleared when the card is cleared or scrubbed; the newest 1000 of a feed's 
 with whether the feed lists older ones in `podcast_episode_list` (written and cleared with the
 rows), and served by
 `GET /v1/resources/{id}/episodes`
-([API](api.md#episodes)). A show stored without a list gets one when it is read again:
-`reextract all` reads them all (feed cards are `media`, Podcast Index pages `official`, player
-pages `web`).
+([API](api.md#episodes)). A show's list fills when the show is read; `reextract all` reads every
+show again at once (feed cards are `media`, Podcast Index pages `official`, player pages `web`).
 
 A challenge page (a bot wall, captcha or sign-in redirect) is a failed fetch: the resource turns
 `unreachable` and is retried with the normal backoff, dead-lettering after
@@ -726,8 +818,9 @@ a script, a "Redirecting" stub), is not followed, on the platform route and on t
 alike, whatever that answer's status or body: nothing there is fetched, the stored dates stay,
 and `last_error` is `off_origin`. It is read again with the
 queue's backoff (`limits.backoff_secs` doubling up to `limits.max_backoff_secs`); that streak
-never counts toward the dead letter, and any other answer starts it over. After an upgrade, Meetup pages take their group calendar, their UID and
-their token alias at their next read; `pinakesd reextract event_platform` reads every event
+never counts toward the dead letter, and any other answer starts it over. A stored Meetup page
+takes its group calendar, its UID and its token alias at its next read;
+`pinakesd reextract event_platform` reads every event
 platform's links at once. A numeric Meetup page that becomes its token's alias leaves its
 group, as every alias does, and an operator's curation of it (`PUT /v1/groups/{id}`) goes with
 it: curate the token page again after its first read. Self-hosted Pretix, Eventyay, Gathio, Gancio, Mobilizon and hitobito are detected from what
@@ -796,7 +889,7 @@ it), or after an upgrade that adds or changes also-on sources, run `pinakesd --c
 (or `reextract all`, which includes it): until then links already stored keep the results of
 their last run for up to the source's lifetime (30 days). After an upgrade that changes how links
 are spelled, typed or named (aliases of a canonical link, a card's service in `site`), run
-`reextract all`: stored cards keep what the older build gave them until each is fetched again.
+`reextract all`: a stored card stays as its last read left it until it is fetched again.
 `spotify_isrc` (with the Spotify credentials) costs one Spotify search per ISRC key of a track on
 another service, and per barcode key of an album a search and up to three album reads, cached an
 hour, on Spotify's pace. `tidal_isrc` (with the TIDAL credentials) costs one TIDAL request per ISRC
@@ -805,8 +898,8 @@ or barcode key of a track or album on another service, on `tidal`'s pace and tok
 per track a Deezer, Spotify or TIDAL read and an iTunes lookup, and per label upload on YouTube a
 watch page (up to 3 MB) and a Deezer and a TIDAL search; each runs its part only while the source
 of that service runs (`deezer`, `spotify`, `tidal`, `tidal_isrc`, `itunes`). Every one of them is
-on by default (`[also_on.sources.<id>] enabled = false` turns one off); after the upgrade that adds
-them, `reextract also-on` asks for every stored track and album at once. The duplicate
+on by default (`[also_on.sources.<id>] enabled = false` turns one off);
+`reextract also-on` asks for every stored track and album at once. The duplicate
 check of the music sources (an ISRC MusicBrainz gives to several recordings) costs MusicBrainz
 reads on a common path: for a recording MusicBrainz relates a link to, one ISRC lookup per ISRC
 of the recording and, where several recordings share one, each of their records (at most 8
@@ -1002,8 +1095,8 @@ changes or goes (no longer a recording, or deleted as an orphan)
 takes its pairs from the recordings that named it, and those are queued to refill their lists, as
 is one whose pair the caps pushed out. Each change to the pairs moves the search revision in its
 own transaction, so a search page's `ETag` covers the hints it shows. An hourly sweep, which also
-runs at startup, queues recordings never read (a database from before the
-hint) and drops the units of resources that are no longer recordings. Requests only read the
+runs at startup, queues recordings never read (one saved while the hint was off) and drops the
+units of resources that are no longer recordings. Requests only read the
 stored pairs, leaving out the card's own group members. `"off"` stops the pass and removes the
 field from recording cards (and from `/v1/openapi.json` when the event hint is off
 too); the stored pairs stay.
@@ -1061,7 +1154,7 @@ current as the provider keeps its listing: an expired event listed first is stil
 Any other platform reads its fixed sample, which its `canary_note` says when to rotate. See
 [ops/README.md](../ops/README.md) for alert rules, the dashboard and scrape setup;
 `scripts/check-ops` checks every alert and dashboard metric against the registry (and runs
-`promtool check rules` when installed).
+`promtool check rules --lint-fatal` when installed, so a lint finding fails too).
 
 The capability-URL guard (`scripts/verify-no-capability-urls`, run by the tests) scans every
 tracked and new source file for capability URLs; synthetic fixture URLs are allowed only in

@@ -653,6 +653,7 @@ type Row = (
     Option<String>,
 );
 #[derive(Deserialize, utoipa::IntoParams)]
+#[serde(deny_unknown_fields)]
 pub struct EpisodeQuery {
     /// At most this many, newest first: 1–20, default 20.
     pub limit: Option<usize>,
