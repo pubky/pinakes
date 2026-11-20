@@ -78,7 +78,9 @@ impl PubkyResolver {
 
     /// The latest version of a post (`pubky_apps::Kind::versions`): its folder listed newest
     /// first, one entry, a version file directly in it. `Err` with the listing when the folder
-    /// answers no version (a listing that fails, or holds none, as 404).
+    /// answers no version (a listing that fails, or holds none, as 404). A listing whose first
+    /// line is no entry of this owner is not read as "no version": it fails as `parse`, so a
+    /// homeserver that lists in another form does not turn every post `missing`.
     async fn latest(&self, post: &Url) -> Result<std::result::Result<Url, Fetched>> {
         let mut folder = post.clone();
         folder.set_path(&format!("{}/", post.path().trim_end_matches('/')));
@@ -88,15 +90,28 @@ impl PubkyResolver {
             return Ok(Err(listed));
         }
         let owner = post.host_str().unwrap_or_default();
-        let version = std::str::from_utf8(&listed.body)
-            .ok()
-            .and_then(|body| body.lines().next())
+        let unread = || {
+            anyhow::Error::new(ErrorClass("parse"))
+                .context("the folder listing's first line is no entry of this owner")
+        };
+        let first = std::str::from_utf8(&listed.body)
+            .map_err(|_| unread())?
+            .lines()
+            .next()
             .map(str::trim)
-            .and_then(|line| {
+            .filter(|line| !line.is_empty());
+        let entry = match first {
+            // An empty folder.
+            None => None,
+            Some(line) => Some(
                 line.strip_prefix("pubky://")
                     .or_else(|| line.strip_prefix("pubky"))
-            })
-            .and_then(|rest| rest.strip_prefix(owner))
+                    .and_then(|rest| rest.strip_prefix(owner))
+                    .filter(|path| path.starts_with('/'))
+                    .ok_or_else(unread)?,
+            ),
+        };
+        let version = entry
             .and_then(|path| path.strip_prefix(folder.path()))
             .filter(|file| {
                 file.ends_with(".json")
@@ -824,6 +839,20 @@ mod tests {
             [listing.clone(), format!("{post}/0034B.json")]
         );
 
+        // A first line that is no entry of this owner (a listing in a form Pinakes does not
+        // read) is a failure, never "no version": the card and its history stay.
+        for body in [
+            "<html>listing</html>".to_owned(),
+            format!("{post}/0034B.json"),
+            format!(
+                "pubky://{}{post}/0034B.json",
+                Keypair::random().public_key()
+            ),
+        ] {
+            serve(&listing, 200, "text/plain", body.clone());
+            let error = resolver.resolve(&uri).await.unwrap_err();
+            assert_eq!(crate::resolver::error_class(&error), "parse", "{body}");
+        }
         // An empty folder, one gone, and one listing a file outside it: missing, nothing more
         // fetched.
         for (status, body) in [
