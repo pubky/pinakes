@@ -359,6 +359,26 @@ pub async fn clear(pool: &PgPool, id: &str, generation: i64, last_error: &str) -
     tx.commit().await?;
     Ok(())
 }
+/// How long a stored card that says more outlasts answers of the link's shape alone
+/// (`ResourceMeta::shape_only`), in milliseconds from its last read: twice the wait of a missing
+/// answer for its confirming fetch (`queue.missing_ttl_secs`, at least an hour; two hours by
+/// default). A social card is read at least hourly, so a page that answers without its tags for
+/// one read keeps its card, and one that does so for two reads in a row (as two missing answers
+/// confirmed a gone page) gets the plain card.
+pub fn shape_only_keep_ms(cfg: &crate::config::QueueConfig) -> i64 {
+    let secs = cfg.missing_ttl_secs.max(3600).saturating_mul(2);
+    i64::try_from(secs.saturating_mul(1000)).unwrap_or(i64::MAX)
+}
+/// Whether a stored card says more than `plain`, a card of its link's shape alone: another name,
+/// a description, an image, or a fact the plain card lacks.
+fn says_more_than(stored: &Value, plain: &ResourceMeta) -> bool {
+    stored["name"].as_str() != plain.name.as_deref()
+        || stored["description"].is_string()
+        || stored["image"].is_string()
+        || stored["attributes"]
+            .as_object()
+            .is_some_and(|facts| facts.keys().any(|k| !plain.attributes.contains_key(k)))
+}
 pub async fn save(
     pool: &PgPool,
     id: &str,
@@ -454,16 +474,24 @@ pub async fn save(
         doc.event.warnings.truncate(16);
     }
     // A card of the link's shape alone (a page that answered without what its card reads) says
-    // nothing new: a stored card that says more stays, read again at its time.
+    // nothing new. A stored card that says more stays as it was last read (its `fetched_at` is
+    // that read's), for `shape_only_keep_ms` from that read; the next read comes at this
+    // reading's time. A page that answers without its tags for longer (an account gone, whose
+    // site answers its generic page) gets the plain card then.
     if shape_only && doc.status == Status::Ok {
-        let says_more = |v: &&Value| {
-            v["status"] == "ok" && (v["description"].is_string() || v["image"].is_string())
-        };
-        if let Some(stored) = before.as_ref().filter(says_more) {
-            let mut retained = stored.clone();
-            retained["fetched_at"] = json!(doc.fetched_at);
-            retained["ttl_secs"] = json!(doc.ttl_secs);
-            doc = serde_json::from_value(retained)?;
+        let keep = shape_only_keep_ms(cfg);
+        let kept = before.as_ref().filter(|stored| {
+            stored["status"] == "ok"
+                && says_more_than(stored, &doc)
+                && doc
+                    .fetched_at
+                    .saturating_sub(stored["fetched_at"].as_i64().unwrap_or(0))
+                    < keep
+        });
+        if let Some(stored) = kept {
+            let mut kept = stored.clone();
+            kept["ttl_secs"] = json!(doc.ttl_secs);
+            doc = serde_json::from_value(kept)?;
         }
     }
     let social_missing = doc.status == Status::Missing

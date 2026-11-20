@@ -26,14 +26,15 @@ lower-case letters (a country's site, `de.linkedin.com`), a capitalised slug and
 - A post: `GET` of its root. A page offering to sign in instead of the post gives the plain
   card.
 
-The tags are read as written: LinkedIn's JSON-LD describes recent posts, not the page. A
-profile's or company's page answered without them gives the plain card, "Profile on
-linkedin.com", with the slug: it does not say the object is gone, and it never replaces a stored card that has
-text or a picture.
-LinkedIn answers many requests without an account with HTTP 999 or its sign-in page; such a
-request gives the card of the link's shape alone, "Profile on linkedin.com" or "Post on
-linkedin.com", with the `blocked` fact: the link still resolves, groups and counts. So does a
-page LinkedIn withholds where the request came from (451): it is not `missing`.
+The tags are read as written: LinkedIn's JSON-LD describes recent posts, not the page. A profile's
+or company's page answered without them gives the plain card, "Profile on linkedin.com", with the
+slug: it does not say the object is gone, and a stored card that says more (another name, text, a
+picture or facts) stays, as last read, for two hours from that read (by default; twice
+`queue.missing_ttl_secs`, at least an hour each): a page answered without tags for that long gets
+the plain card. LinkedIn answers many requests without an account with HTTP 999 or its sign-in page;
+such a request gives the card of the link's shape alone, "Profile on linkedin.com" or "Post on
+linkedin.com", with the `blocked` fact: the link still resolves, groups and counts. So does a page
+LinkedIn withholds where the request came from (451): it is not `missing`.
 
 ## Card
 

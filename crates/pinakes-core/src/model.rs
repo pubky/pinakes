@@ -491,8 +491,9 @@ pub struct ResourceMeta {
     #[schema(ignore)]
     pub withheld: bool,
     /// A card of the link's shape alone, made from a page that answered without what its card
-    /// reads (a social site's shell or consent page): it never replaces a stored card that says
-    /// more (`changes::save`), and a link never read gets it. Never stored.
+    /// reads (a social site's shell or consent page): a stored card that says more stays for a
+    /// bounded time from its last read (`changes::shape_only_keep_ms`), and a link never read gets
+    /// it. Never stored.
     #[serde(skip)]
     #[schema(ignore)]
     pub shape_only: bool,

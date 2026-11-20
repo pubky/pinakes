@@ -852,16 +852,98 @@ async fn a_shape_only_card_never_replaces_a_card_that_says_more(pool: PgPool) {
         stored(fresh_id.clone()).await,
         (Some("Profile on social.example".into()), None)
     );
-    // A stored card of the shape alone is replaced as any card is.
-    let mut renamed = plain(fresh, good.fetched_at + 1);
-    renamed.name = Some("Profile on social.example (2)".into());
-    store::save_document(&pool, &fresh_id, 0, &renamed)
+    // A stored card of the shape alone says no more than a new one: it is replaced as any card
+    // is (here by one with a fact the link names).
+    let mut more = plain(fresh, good.fetched_at + 1);
+    more.attributes
+        .insert("handle".into(), "someone-else".into());
+    store::save_document(&pool, &fresh_id, 0, &more)
         .await
         .unwrap();
-    assert_eq!(
-        stored(fresh_id).await.0.as_deref(),
-        Some("Profile on social.example (2)")
-    );
+    let handle: Option<String> =
+        sqlx::query_scalar("SELECT doc->'attributes'->>'handle' FROM resource WHERE id=$1")
+            .bind(&fresh_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(handle.as_deref(), Some("someone-else"));
+}
+
+/// The keep is bounded and general. A stored card that says more by its name or a fact alone
+/// is kept too; a kept card stays as last read (its `fetched_at` is not renewed) and its next
+/// read is still scheduled; once its last read is older than `shape_only_keep_ms` (an account
+/// gone, whose site answers its generic page), the plain card replaces it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_kept_card_stays_as_last_read_and_only_for_a_while(pool: PgPool) {
+    let cfg = QueueConfig::default();
+    let keep = changes::shape_only_keep_ms(&cfg);
+    assert_eq!(keep, 2 * 3600 * 1000);
+    let row = |id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_as::<_, (Option<String>, Option<i64>, bool, f64)>(
+                "SELECT doc->>'name', (doc->>'fetched_at')::bigint, final, \
+                 extract(epoch FROM next_attempt_at-now())::float8 FROM resource WHERE id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let card = |uri: &str, name: &str, at: i64, shape_only: bool| {
+        let mut doc = ResourceMeta::new(uri, "web", 3600);
+        doc.set_type("Person");
+        doc.name = Some(name.into());
+        doc.fetched_at = at;
+        doc.shape_only = shape_only;
+        doc
+    };
+    let plain = "Profile on social.example";
+    let now = chrono::Utc::now().timestamp_millis();
+    for (path, stored, has_fact) in [("name-only", "Some One", false), ("fact-only", plain, true)] {
+        let uri = format!("https://social.example/in/{path}");
+        let id = store::ensure_resource(&pool, &uri).await.unwrap();
+        // The last read that said more, an hour ago.
+        let mut good = card(&uri, stored, now - 3600 * 1000, false);
+        if has_fact {
+            good.attributes.insert("followers".into(), "12".into());
+        }
+        store::save_document(&pool, &id, 0, &good).await.unwrap();
+        store::save_document(&pool, &id, 0, &card(&uri, plain, now, true))
+            .await
+            .unwrap();
+        let (name, fetched, last, next) = row(id.clone()).await;
+        assert_eq!(name.as_deref(), Some(stored), "{path}");
+        assert_eq!(fetched, Some(good.fetched_at), "{path}: fetched_at renewed");
+        assert!(
+            !last && next > 3500.0 && next <= 3600.0,
+            "{path}: next read {next}"
+        );
+        if has_fact {
+            let fact: Option<String> = sqlx::query_scalar(
+                "SELECT doc->'attributes'->>'followers' FROM resource WHERE id=$1",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(fact.as_deref(), Some("12"));
+        }
+        // Still without its tags once the last good read is older than the bound: the plain
+        // card.
+        store::save_document(
+            &pool,
+            &id,
+            0,
+            &card(&uri, plain, good.fetched_at + keep, true),
+        )
+        .await
+        .unwrap();
+        let (name, fetched, ..) = row(id.clone()).await;
+        assert_eq!(name.as_deref(), Some(plain), "{path}");
+        assert_eq!(fetched, Some(good.fetched_at + keep), "{path}");
+    }
 }
 
 #[sqlx::test(migrations = "../../migrations")]
