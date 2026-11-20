@@ -1321,8 +1321,9 @@ impl Config {
         {
             bail!("invalid OSM or spatial budget (public Nominatim maximum 1 request/s)");
         }
-        // A reach read that outlasts the request is a 504 where it would be the reach's own
-        // answer, and through MCP the tool call's deadline comes first.
+        // A search's reach reads share this one deadline (`Nexus::reach_by`). Reads that
+        // outlast the request are a 504 where they would be the reach's own answer, and
+        // through MCP the tool call's deadline comes first.
         if self.search.reach_timeout_secs >= self.api.tool_timeout().as_secs() {
             bail!(
                 "limits.reach_timeout_secs must be more than {TOOL_MARGIN_SECS} seconds below limits.request_timeout_secs"

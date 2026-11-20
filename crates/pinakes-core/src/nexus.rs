@@ -235,10 +235,26 @@ impl Nexus {
             .map_err(reqwest::Error::without_url)?;
         bounded_json(response).await
     }
+    /// When the reach reads of a search that starts now end: `limits.reach_timeout_secs` from
+    /// now, for all of them together ([`Nexus::reach_by`]).
+    pub fn reach_deadline(&self) -> tokio::time::Instant {
+        tokio::time::Instant::now() + self.reach_timeout
+    }
+    /// [`Nexus::reach_by`] with a deadline of its own.
+    pub async fn reach(&self, viewer: &str, reach: &str) -> Result<ReachSet> {
+        self.reach_by(viewer, reach, self.reach_deadline()).await
+    }
     /// A viewer's reach set of one kind (`reach_kind`), cached in memory per viewer and kind for
     /// five minutes; a `wot_2` set is then asked again with its `ETag`, and an unchanged answer
-    /// (304) keeps it. Nothing is stored beyond this process.
-    pub async fn reach(&self, viewer: &str, reach: &str) -> Result<ReachSet> {
+    /// (304) keeps it. Nothing is stored beyond this process. A read that has not ended by
+    /// `deadline` is an error: a search that reads two sets (`reach` and `boost`) gives both
+    /// one deadline, so the two never take more than `limits.reach_timeout_secs` together.
+    pub async fn reach_by(
+        &self,
+        viewer: &str,
+        reach: &str,
+        deadline: tokio::time::Instant,
+    ) -> Result<ReachSet> {
         if !valid_author(viewer) || !reach_kind(reach) {
             bail!("invalid reach request");
         }
@@ -268,7 +284,7 @@ impl Nexus {
                 Ok((self.fetch_reach(viewer, reach).await?, None))
             }
         };
-        let (result, etag) = tokio::time::timeout(self.reach_timeout, fetch)
+        let (result, etag) = tokio::time::timeout_at(deadline, fetch)
             .await
             .context("Nexus reach deadline exceeded")??;
         let mut cache = self.cache.lock().await;

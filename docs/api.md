@@ -821,9 +821,10 @@ reach-set route, `GET /v1/user/{viewer}/reach-set?depth=2` (`{authors, truncated
 with an `ETag`), only where the operator says the Nexus serves it (`nexus_reach_set = true`;
 else `wot_2` answers 501): it is kept five minutes, then asked again with its `ETag` and kept
 while Nexus answers 304. `reach_truncated: true` warns that the `reach` or `boost` set was
-capped. All pages share `limits.reach_timeout_secs` (5 s); an incomplete list is not cached. An
-unknown Nexus user has an empty reach; a Nexus error or the deadline returns 502. Sets live in the
-daemon's memory only; nothing per viewer is stored.
+capped. All pages a search reads, of its `reach` and its `boost` set together, share
+`limits.reach_timeout_secs` (5 s); an incomplete list is not cached. An unknown Nexus user has an
+empty reach; a Nexus error or the deadline returns 502. Sets live in the daemon's memory only;
+nothing per viewer is stored.
 
 `reach` filters: only references by authors in the set count, for the rows and every count.
 `boost` ranks and never filters: with the default ranking a card gains `2 · ln(1 + n)` for the

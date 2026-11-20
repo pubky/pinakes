@@ -2528,12 +2528,15 @@ pub async fn search(
             "wot_2 is not supported: the Nexus this instance reads serves no reach set".into(),
         ));
     }
-    // The `reach` filter's set and the `boost` set, each read from Nexus (cached per viewer).
+    // The `reach` filter's set and the `boost` set, each read from Nexus (cached per viewer),
+    // under one deadline: two reads take no longer than one may.
+    let reach_deadline = state.nexus.reach_deadline();
     let mut sets = vec![];
     for kind in [&q.reach, &q.boost] {
         sets.push(match (&q.viewer, kind) {
             (Some(viewer), Some(kind)) => {
-                Some(state.nexus.reach(viewer, kind).await.map_err(|e| {
+                let set = state.nexus.reach_by(viewer, kind, reach_deadline).await;
+                Some(set.map_err(|e| {
                     tracing::warn!(error=%crate::resolver::log_error(&e),"reach unavailable");
                     ApiError(StatusCode::BAD_GATEWAY, "Nexus reach unavailable".into())
                 })?)

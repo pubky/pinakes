@@ -4264,6 +4264,61 @@ async fn a_boost_ranks_the_viewers_set_first_and_never_filters(pool: PgPool) {
     task.abort();
 }
 
+/// A search that reads two sets (`reach` and `boost`) gives both one deadline of
+/// `limits.reach_timeout_secs`: two reads that each end inside it, but not together, answer the
+/// reach's own 502 when it passes, not a later answer that the request's deadline could cut
+/// off. Either read alone is in time.
+#[sqlx::test(migrations = "../../migrations")]
+async fn two_reach_reads_share_one_deadline(pool: PgPool) {
+    let slow = || async {
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        Json(vec![author(1)])
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let nexus = Router::new()
+        .route("/v1/user/{id}/friends", get(slow))
+        .route("/v1/user/{id}/following", get(slow));
+    let task = tokio::spawn(async move { axum::serve(listener, nexus).await.unwrap() });
+    let mut config = Config {
+        nexus_url: format!("http://{addr}"),
+        ..Default::default()
+    };
+    config.search.reach_timeout_secs = 1;
+    let app = api::router(AppState::new(pool, config).unwrap());
+    let started = std::time::Instant::now();
+    let (code, body) = call(
+        &app,
+        "GET",
+        &format!(
+            "/v1/search?reach=following&boost=friends&viewer={}",
+            author(7)
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(code, 502, "{body}");
+    let took = started.elapsed();
+    assert!(
+        (std::time::Duration::from_millis(950)..std::time::Duration::from_millis(1350))
+            .contains(&took),
+        "{took:?}"
+    );
+    // The first set was read in time and is cached; the second, alone, is in time too.
+    let (code, body) = call(
+        &app,
+        "GET",
+        &format!(
+            "/v1/search?reach=following&boost=friends&viewer={}",
+            author(7)
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(code, 200, "{body}");
+    task.abort();
+}
+
 /// A boost reads the set's references once, not once per card: 10,000 cards each referenced by
 /// the friend answer well inside the five-second statement timeout.
 #[sqlx::test(migrations = "../../migrations")]
