@@ -288,20 +288,26 @@ pub(crate) async fn get(cx: &Context, url: &str, class: &'static str) -> Result<
 }
 
 /// One Wikidata item, as the raw entity (for every claim type, URLs included) and as the hub
-/// reads it (external IDs and sitelinks), or `None` when it has none or its answer is over the
-/// cap. The request is the hub's own, so both share its cache.
+/// reads it (external IDs and sitelinks), or `None` when it has none, Wikidata does not know the
+/// ID, or its answer is over the cap. The request is the hub's own and is read as the hub reads
+/// it, so both share its cache: a busy Wikidata, one that says so with 200 too (`maxlag`,
+/// `ratelimited`), is a retry and no answer the cache keeps.
 pub(crate) async fn item(cx: &Context, qid: &str) -> Result<Option<(Value, hubs::wikidata::Item)>> {
-    let url = hubs::wikidata::entities_lookup(&[qid.to_owned()]);
     // An item over its read's cap is no answer: asking again would read the same megabytes.
-    let (status, body) = match get(cx, &url, "wikidata_busy").await {
+    let answer = match hubs::wikidata::entities_answer(&cx.egress, &[qid.to_owned()]).await {
         Err(error) if crate::resolver::egress::over_cap(&error) => return Ok(None),
         answer => answer?,
     };
-    if status == 404 {
+    let Some(answer) = answer else {
         return Ok(None);
+    };
+    if let Some(error) = answer.get("error") {
+        if error["code"] == "no-such-entity" {
+            return Ok(None);
+        }
+        bail!("wikidata error: {}", error["code"]);
     }
     // One parse of the body (up to the hubs' cap) for both readings.
-    let answer = wikidata::parse_answer(status, &body)?;
     let hub = hubs::wikidata::parse_entities(&answer)
         .into_iter()
         .find(|i| i.qid == qid);
@@ -571,6 +577,37 @@ mod tests {
             wikidata::wikidata_item(&s);
             service_name(&s);
         }
+    }
+
+    /// Wikidata's `maxlag` comes with 200: the item's read is a retry, and the next ask fetches
+    /// again instead of reading the error from the cache for an hour. An ID Wikidata says it
+    /// does not know is an answer: no item.
+    #[tokio::test(start_paused = true)]
+    async fn a_wikidata_error_sent_with_200_is_a_retry_and_is_asked_again() {
+        let url = hubs::wikidata::entities_lookup(&["Q243".to_owned()]);
+        let context = |body: &[u8]| {
+            let (egress, recorded) = crate::sources::fixture::egress(vec![(
+                url.as_str(),
+                200,
+                "application/json",
+                body.to_vec(),
+            )]);
+            let cx = Context {
+                egress,
+                config: Default::default(),
+            };
+            (cx, recorded)
+        };
+        let (cx, recorded) =
+            context(br#"{"error":{"code":"maxlag","info":"Waiting for a database server"}}"#);
+        for _ in 0..2 {
+            let error = item(&cx, "Q243").await.unwrap_err();
+            assert!(error.downcast_ref::<RetryLater>().is_some(), "{error:#}");
+            tokio::time::advance(Duration::from_secs(2)).await;
+        }
+        assert_eq!(recorded.asked().len(), 2);
+        let (cx, _) = context(br#"{"error":{"code":"no-such-entity","info":"no such entity"}}"#);
+        assert!(item(&cx, "Q243").await.unwrap().is_none());
     }
 
     #[test]

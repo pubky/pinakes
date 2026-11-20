@@ -1396,6 +1396,16 @@ pub mod wikidata {
             .map(|v| parse_entities(&v))
             .unwrap_or_default())
     }
+    /// The `wbgetentities` answer for `qids` as JSON, for a reader that needs the entities as
+    /// Wikidata sends them (the request [`items`] makes for the same IDs, so both share its
+    /// cached answer): `None` for a 404. A busy Wikidata, one that says so with 200 too, is a
+    /// retry and no answer the cache keeps.
+    pub(crate) async fn entities_answer(
+        egress: &Egress,
+        qids: &[String],
+    ) -> Result<Option<Value>> {
+        get(egress, &entities_lookup(qids), "wikidata").await
+    }
     /// The one item carrying `value` for `property` at its best rank. The search index only
     /// proposes; each hit is read back and its claim compared byte for byte, so a stale index
     /// or a deprecated claim never joins. Two or more verified items are ambiguous.
