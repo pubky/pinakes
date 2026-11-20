@@ -2242,15 +2242,20 @@ pub(crate) fn trend_window(window: Option<&str>) -> Result<chrono::Duration, Api
         return Ok(chrono::Duration::days(7));
     };
     let bad = || ApiError::bad("window is {n}h or {n}d, from 1h to 90d");
-    let (number, unit) = window.split_at(window.len().saturating_sub(1));
+    // The unit by suffix, never by byte index: the value may end in any character.
+    let (number, hours) = match (window.strip_suffix('h'), window.strip_suffix('d')) {
+        (Some(number), _) => (number, true),
+        (_, Some(number)) => (number, false),
+        _ => return Err(bad()),
+    };
     if number.is_empty() || number.len() > 4 || !number.bytes().all(|b| b.is_ascii_digit()) {
         return Err(bad());
     }
     let n: i64 = number.parse().map_err(|_| bad())?;
-    let span = match unit {
-        "h" => chrono::Duration::hours(n),
-        "d" => chrono::Duration::days(n),
-        _ => return Err(bad()),
+    let span = if hours {
+        chrono::Duration::hours(n)
+    } else {
+        chrono::Duration::days(n)
     };
     if span < chrono::Duration::hours(1) || span > chrono::Duration::days(90) {
         return Err(bad());
@@ -4119,6 +4124,22 @@ pub async fn curate_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The trending window is `{n}h` or `{n}d`; any other text, whatever its last character,
+    /// is refused and never panics.
+    #[test]
+    fn the_trend_window_refuses_text_that_ends_in_any_character() {
+        let hours = |w| trend_window(Some(w)).ok().map(|d| d.num_hours());
+        assert_eq!(hours("1h"), Some(1));
+        assert_eq!(hours("90d"), Some(90 * 24));
+        assert_eq!(trend_window(None).unwrap().num_days(), 7);
+        for bad in [
+            "", "h", "d", "é", "1é", "1😀", "😀", "0h", "91d", "2161h", "1m", "-1d", "1.5d", "h1",
+            "12345h", "1hh",
+        ] {
+            assert!(trend_window(Some(bad)).is_err(), "{bad:?}");
+        }
+    }
 
     /// Exact members use Card.refs' bounded ranking; repeated members in a response share it.
     #[sqlx::test(migrations = "../../migrations")]

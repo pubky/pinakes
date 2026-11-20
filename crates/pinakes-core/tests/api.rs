@@ -2394,6 +2394,7 @@ async fn multibyte_input_never_panics_any_public_route(pool: PgPool) {
         "near" => "&radius=1000",
         "reach" | "boost" => "&viewer=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
         "viewer" => "&reach=following",
+        "window" => "&sort=trending",
         _ => "",
     };
     // Relative times exist on search (`from`, `to`) and the change lookup (`since`); the
