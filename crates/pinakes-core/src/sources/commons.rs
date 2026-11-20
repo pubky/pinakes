@@ -12,7 +12,7 @@
 //! time and well under five a second. Every file has its own licence and author, which the card
 //! carries as its attribution.
 use super::kit::{
-    fetch, float, host_and_segments, html_text, json, text, web_url, Card, Point, Request,
+    fetch, float, host_and_segments, html_text, json, number, text, web_url, Card, Point, Request,
 };
 use super::{Example, Source};
 use crate::model::ResourceMeta;
@@ -49,10 +49,7 @@ fn title(raw: &str) -> Option<Target> {
 }
 
 fn page_id(raw: &str) -> Option<Target> {
-    raw.parse()
-        .ok()
-        .filter(|id| *id > 0 && raw.len() <= 12)
-        .map(Target::PageId)
+    number(raw, 12).map(Target::PageId)
 }
 
 /// What a Commons link names: a file description page or the API's query for one file.
@@ -482,6 +479,9 @@ mod tests {
             "https://commons.wikimedia.org/w/index.php?title=File:Bitcoin.svg&diff=prev&oldid=1",
             "https://commons.wikimedia.org/w/index.php?curid=0",
             "https://commons.wikimedia.org/w/index.php?curid=abc",
+            // A page id is digits only.
+            "https://commons.wikimedia.org/w/index.php?curid=%2B30202095",
+            "https://commons.wikimedia.org/w/api.php?action=query&pageids=%2B30202095",
             "https://commons.wikimedia.org/w/api.php?titles=File:A.jpg%7CFile:B.jpg",
             "https://commons.wikimedia.org/wiki/File:a%2541.jpg",
         ] {
