@@ -1075,17 +1075,21 @@ fn manifests_cover_every_platform_and_keys_disable_without_exposing_credentials(
             ..Default::default()
         },
     );
-    let target = adapters::service::endpoint(
+    let (target, options) = adapters::service::endpoint(
         adapters::definition("ticketmaster").unwrap(),
         "https://app.ticketmaster.com/discovery/v2/events/abc.json",
         None,
         &cfg,
     )
     .unwrap()
-    .unwrap()
-    .0;
-    assert!(target.contains("/abc.json?"));
+    .unwrap();
+    // The key is a query credential of the request, never part of the address.
+    assert!(target.ends_with("/abc.json"), "{target}");
     assert!(!target.contains(".json.json"));
+    assert_eq!(
+        options.query_secret,
+        Some(("apikey", "secret-fixture-key".to_owned()))
+    );
     let m = adapters::manifest(adapters::definition("ticketmaster").unwrap(), &cfg);
     assert!(m.enabled);
     assert!(!serde_json::to_string(&m)
@@ -2023,16 +2027,46 @@ fn own_calendar_links_and_deterministic_platform_endpoints() {
         .unwrap(),
         "https://tickets.example/org/current/ical/"
     );
+    // Share links as a browser shows them (a view and a date after the token) and of an install
+    // below a path of its own; spelled in parts, as no file holds a share link's form but the
+    // check's own samples.
+    let exported = "https://cloud.example/remote.php/dav/public-calendars/abc?export";
+    let viewed = format!(
+        "{}/dayGridMonth/now",
+        "https://cloud.example/apps/calendar/p/abc"
+    );
+    let embedded = format!(
+        "https://example.org/cloud/index.php/apps/calendar/{}/abc",
+        "embed"
+    );
+    let below = format!(
+        "https://example.org/cloud/remote.php/dav/{}/abc?export",
+        "public-calendars"
+    );
     for (id, uri, expected) in [
         (
             "nextcloud",
             "https://cloud.example/apps/calendar/p/abc",
-            "https://cloud.example/remote.php/dav/public-calendars/abc?export",
+            exported,
         ),
+        // The share's token, not the view and date after it; below the install's own path.
+        ("nextcloud", viewed.as_str(), exported),
+        ("nextcloud", embedded.as_str(), below.as_str()),
         (
             "petzi",
             "https://www.petzi.ch/en/events/123-name/",
             "https://www.petzi.ch/en/events/123-name.ics",
+        ),
+        // A query or a fragment is the page's, never the file's.
+        (
+            "tito",
+            "https://ti.to/org/event/?source=mail#tickets",
+            "https://ti.to/org/event.ics",
+        ),
+        (
+            "pretix",
+            "https://pretix.eu/org/event/?voucher=X",
+            "https://pretix.eu/org/event/ical/",
         ),
         (
             "gathio",
@@ -2048,6 +2082,15 @@ fn own_calendar_links_and_deterministic_platform_endpoints() {
             expected
         );
     }
+    // A site's root names no event: no file is guessed for it.
+    assert!(endpoint(
+        adapters::definition("tito").unwrap(),
+        "https://ti.to/",
+        None,
+        &cfg
+    )
+    .unwrap()
+    .is_none());
     let f = common::fetched(base, 200, "text/html".into(), vec![]);
     for (id, uri, expected) in [
         (
@@ -2313,7 +2356,16 @@ async fn platform_ua_config_class_c_and_secret_projection(pool: PgPool) {
         .resolve("https://www.ticketmaster.com/event/fixture")
         .await
         .unwrap();
-    assert!(t.seen.lock().unwrap()[0].0.contains("apikey=test-secret"));
+    // The key is the wire's alone: the address the egress handles names none.
+    {
+        let seen = t.seen.lock().unwrap();
+        assert!(!seen[0].0.contains("test-secret"), "{}", seen[0].0);
+        assert!(seen[0].1.sensitive);
+        assert_eq!(
+            seen[0].1.query_secret,
+            Some(("apikey", "test-secret".to_owned()))
+        );
+    }
     assert!(!serde_json::to_string(&doc).unwrap().contains("test-secret"));
     // A refused key (401, 403) is counted where an alert reads it; a rate limit (429) is not.
     // No other test here has Ticketmaster refuse.
