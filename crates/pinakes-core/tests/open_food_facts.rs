@@ -133,13 +133,22 @@ async fn a_database_page_is_a_credited_product() {
         doc.attribution.as_deref(),
         Some("© Open Food Facts contributors, ODbL 1.0")
     );
-    // A product page on the food database that holds a beauty product: Open Beauty Facts' card.
+    assert_eq!(
+        doc.source_root.as_deref(),
+        Some("https://world.openfoodfacts.org/product/3017620422003")
+    );
+    // A product page on the food database that holds a beauty product: Open Beauty Facts' card,
+    // under the product's root there.
     let doc = source
         .resolve(&cx, "https://world.openfoodfacts.org/product/80466468")
         .await
         .unwrap();
     assert_eq!(doc.site, "Open Beauty Facts");
     assert_eq!(doc.attributes["gtin"], "0000080466468");
+    assert_eq!(
+        doc.source_root.as_deref(),
+        Some("https://world.openbeautyfacts.org/product/80466468")
+    );
     let doc = source
         .resolve(&cx, "https://world.openfoodfacts.org/product/0602557656527")
         .await

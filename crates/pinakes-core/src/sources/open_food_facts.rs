@@ -87,6 +87,13 @@ pub fn of_uri(uri: &str) -> Option<(&'static Database, String, String)> {
 pub fn root(database: &Database, spelled: &str) -> String {
     format!("https://world.{}/product/{spelled}", database.host)
 }
+/// The root of a product a database holds: its page there by the barcode as the record spells it
+/// (`code`, the GTIN-13, for a record that names none). Every link to the product is an alias of
+/// it, whichever spelling of the barcode or database the link names.
+pub fn record_root(database: &Database, code: &str, product: &Value) -> String {
+    let spelled = product["code"].as_str().map_or(code, str::trim);
+    root(database, spelled)
+}
 
 /// What a database answered for a barcode.
 pub enum Answer {
@@ -145,7 +152,8 @@ pub fn facts(product: &Value) -> Vec<(&'static str, String)> {
     .collect()
 }
 
-/// The card of a database's product (`doc` for its page), from `database`'s record.
+/// The card of a database's product (`doc` for its page), from `database`'s record, under the
+/// record's root.
 pub fn card(
     mut doc: ResourceMeta,
     database: &Database,
@@ -161,6 +169,7 @@ pub fn card(
         .filter(|u| super::web_url(u).is_some())
         .map(str::to_owned);
     doc.attribution = Some(database.credit());
+    doc.source_root = Some(record_root(database, code, product));
     Product {
         gtin: Some(code.to_owned()),
         brand: text(product, "brands").map(str::to_owned),
@@ -318,10 +327,9 @@ pub mod also_on {
                         database = other;
                     }
                     Answer::Product(product) => {
-                        let spelled = product["code"].as_str().unwrap_or(&code).to_owned();
                         found.links.push(
                             Link::new(
-                                super::root(database, &spelled),
+                                super::record_root(database, &code, &product),
                                 database.site,
                                 "open_food_facts",
                             )
@@ -452,5 +460,49 @@ mod tests {
             Answer::None
         ));
         assert!(answer("3017620422003", 503, b"busy").is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn every_link_to_a_product_has_its_records_root() {
+        let json = "application/json";
+        let food = DATABASES[0].api("3017620422003");
+        let elsewhere = DATABASES[0].api("0000080466468");
+        let beauty = DATABASES[1].api("0000080466468");
+        let (egress, _) = crate::sources::fixture::egress(vec![
+            (food.as_str(), 200, json, read("off-3017620422003.json")),
+            (
+                elsewhere.as_str(),
+                404,
+                json,
+                read("off-0000080466468.json"),
+            ),
+            (beauty.as_str(), 200, json, read("obf-0000080466468.json")),
+        ]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let nutella = "https://world.openfoodfacts.org/product/3017620422003";
+        let dove = "https://world.openbeautyfacts.org/product/80466468";
+        for (uri, root) in [
+            (nutella, nutella),
+            // The barcode with a leading zero (its GTIN-14).
+            (
+                "https://world.openfoodfacts.org/product/03017620422003",
+                nutella,
+            ),
+            (dove, dove),
+            // The barcode in full; the database's record drops the leading zeros.
+            (
+                "https://world.openbeautyfacts.org/product/0000080466468",
+                dove,
+            ),
+            // A page on a database that holds the barcode as another type of product.
+            ("https://world.openfoodfacts.org/product/80466468", dove),
+        ] {
+            let doc = OpenFoodFacts.resolve(&cx, uri).await.unwrap();
+            assert_eq!(doc.status, crate::model::Status::Ok, "{uri}");
+            assert_eq!(doc.source_root.as_deref(), Some(root), "{uri}");
+        }
     }
 }
