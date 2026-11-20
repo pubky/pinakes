@@ -64,7 +64,10 @@ pub fn card(
         anyhow::bail!("Stacker News answered an error");
     }
     anyhow::ensure!(v["data"].is_object(), "Stacker News answered no data");
-    let node = &v["data"]["item"];
+    // `item: null` is its "no such item"; an answer without `item` says nothing about it.
+    let node = v["data"]
+        .get("item")
+        .context("Stacker News answered no item")?;
     if node.is_null() || !node["deletedAt"].is_null() {
         return Ok(None);
     }
@@ -327,5 +330,10 @@ mod tests {
         // An answer without `data` says nothing about the item: an error, not "gone".
         assert!(card(base(1), 1, 200, b"{}").is_err());
         assert!(card(base(1), 1, 200, br#"{"data":null}"#).is_err());
+        // Only an explicit `item: null` is "no such item"; `data` without `item` is an error.
+        assert!(card(base(1), 1, 200, br#"{"data":{}}"#).is_err());
+        assert!(card(base(1), 1, 200, br#"{"data":{"item":null}}"#)
+            .unwrap()
+            .is_none());
     }
 }

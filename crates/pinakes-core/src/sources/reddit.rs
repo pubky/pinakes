@@ -132,9 +132,12 @@ pub fn post_card(doc: ResourceMeta, id: &str, v: &Value) -> Result<Option<Resour
     let children = v[0]["data"]["children"]
         .as_array()
         .context("Reddit answered no listing")?;
-    let Some(post) = children.first().and_then(|c| c["data"].as_object()) else {
+    let Some(first) = children.first() else {
         return Ok(None);
     };
+    let post = first["data"]
+        .as_object()
+        .context("Reddit answered a listing entry that is no post")?;
     let post = Value::Object(post.clone());
     anyhow::ensure!(post["id"] == id, "Reddit answered for another post");
     if gone(&post) {
@@ -462,7 +465,13 @@ mod tests {
         assert!(post_card(base.clone(), "1k3d0pk", &empty)
             .unwrap()
             .is_none());
-        for unreadable in [serde_json::json!({}), serde_json::json!([{"data": {}}])] {
+        for unreadable in [
+            serde_json::json!({}),
+            serde_json::json!([{"data": {}}]),
+            // A listing whose first entry is no post.
+            serde_json::json!([{"data": {"children": [{"kind": "t3"}]}}]),
+            serde_json::json!([{"data": {"children": [null]}}]),
+        ] {
             assert!(
                 post_card(base.clone(), "1k3d0pk", &unreadable).is_err(),
                 "{unreadable}"
