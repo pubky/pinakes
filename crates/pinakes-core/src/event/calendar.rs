@@ -841,6 +841,42 @@ fn document(
     doc = doc.bounded(&[])?;
     Ok((doc, start))
 }
+/// Whether an event can give no date in the horizon, whatever zone it turns out to be in: a
+/// single date (no RRULE, RDATE or RECURRENCE-ID) more than two days outside it, of an event
+/// alone with its UID (`uids`: how many events carry each). An event whose key is not its UID
+/// (it has none, or its link is Eventfrog's, which names it) is never left out.
+fn past_or_far(
+    c: &Component,
+    zones: &Zones<'_>,
+    uids: &BTreeMap<String, usize>,
+    lo: DateTime<Utc>,
+    hi: DateTime<Utc>,
+) -> bool {
+    if ["RRULE", "RDATE", "RECURRENCE-ID"]
+        .iter()
+        .any(|name| c.get(name).is_some())
+    {
+        return false;
+    }
+    let Some(uid) = c.text("UID").filter(|uid| !uid.is_empty()) else {
+        return false;
+    };
+    if uids.get(&uid) != Some(&1)
+        || c.value("URL")
+            .is_some_and(|u| u.to_ascii_lowercase().contains("eventfrog."))
+    {
+        return false;
+    }
+    let Some(start) = c.get("DTSTART").and_then(|p| zones.stamp(p, &p.value).ok()) else {
+        return false;
+    };
+    let margin = Duration::days(2);
+    lo.checked_sub_signed(margin)
+        .is_some_and(|lo| start.at < lo)
+        || hi
+            .checked_add_signed(margin)
+            .is_some_and(|hi| start.at > hi)
+}
 /// A stamp that expands in UTC: its published instant, no zone.
 fn utc_series(start: &Stamp) -> Stamp {
     Stamp {
@@ -1118,6 +1154,13 @@ pub fn parse(
     );
     let mut retained_bytes = 0usize;
     let mut events: BTreeMap<(String, String), EventRevision<'_>> = BTreeMap::new();
+    // How many events carry each UID: one that shares its UID may replace or be replaced by
+    // another revision, so only an event alone with its UID is left out below.
+    let eventfrog = base.host_str().is_some_and(|s| s.starts_with("eventfrog."));
+    let mut uids: BTreeMap<String, usize> = BTreeMap::new();
+    for c in cal.children.iter().filter(|c| c.name == "VEVENT") {
+        *uids.entry(c.text("UID").unwrap_or_default()).or_default() += 1;
+    }
     for c in cal.children.iter().filter(|c| c.name == "VEVENT") {
         ensure!(
             std::time::Instant::now() < deadline,
@@ -1125,6 +1168,11 @@ pub fn parse(
         );
         if c.invalid {
             container.warnings.push("invalid_vevent_line".into());
+            continue;
+        }
+        // A calendar's history (an export lists every past event) is not read: no document is
+        // built for an event that can give no date in the horizon, and it counts against no cap.
+        if !eventfrog && past_or_far(c, &zones, &uids, lo, hi) {
             continue;
         }
         let (mut doc, mut start) = match document(c, &cal, &base, &zones) {

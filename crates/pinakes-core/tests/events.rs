@@ -4907,6 +4907,46 @@ fn calendar_properties_are_counted_and_need_a_name() {
     assert_eq!(container.occurrences[0].uid, "good");
     assert!(container.warnings.contains(&"invalid_vevent_line".into()));
 }
+/// A calendar's history counts against no cap: 12,000 past single events beside one upcoming
+/// parse to that one, under a revision cap of 10,000. A past event that shares its UID with
+/// another revision is still read, so the newer revision decides.
+#[test]
+fn a_calendars_history_counts_against_no_cap() {
+    let cfg = EventConfig {
+        parse_timeout_ms: 5000,
+        ..Default::default()
+    };
+    let read = |body: String| {
+        calendar::parse("https://example.org/feed.ics", body.as_bytes(), &cfg, now())
+            .unwrap()
+            .container
+            .unwrap()
+    };
+    let past: Vec<String> = (0..12_000)
+        .map(|i| {
+            event(&format!(
+                "UID:past{i}\nDTSTART:2020{:02}{:02}T120000Z\nSUMMARY:Past {i}",
+                i % 12 + 1,
+                i % 28 + 1
+            ))
+        })
+        .collect();
+    let next = event("UID:next\nDTSTART:20261020T120000Z\nSUMMARY:Next");
+    let container = read(cal(&format!("{}\n{next}", past.join("\n"))));
+    let uids: Vec<&str> = container
+        .occurrences
+        .iter()
+        .map(|o| o.uid.as_str())
+        .collect();
+    assert_eq!(uids, ["next"]);
+    let container = read(cal(&format!(
+        "{}\n{}",
+        event("UID:moved\nSEQUENCE:1\nDTSTART:20261020T120000Z\nSUMMARY:Stale"),
+        event("UID:moved\nSEQUENCE:2\nDTSTART:20200101T120000Z\nSUMMARY:Moved to the past")
+    )));
+    assert!(container.occurrences.is_empty());
+    assert!(container.warnings.contains(&"duplicate_uid".into()));
+}
 /// A floating event's end is kept as written, like its start: a zone found later moves both.
 #[test]
 fn a_floating_event_s_end_moves_with_its_start() {
