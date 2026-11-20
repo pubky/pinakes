@@ -675,7 +675,7 @@ while there was work, else after five seconds. An event's normalised name, place
 are stored once read, and its pairs are matched among the events already read through their start
 index, round those starting within 50 hours (an all-day listing and a timed one on one local date may start that far apart, each in its own zone). An event keeps its best twenty pairs and is named by at most forty
 (`limits.same_event_incoming_kept`), and never names one whose forty all rank above it; a read
-examines at most a hundred candidates, with room or not, and one that runs out with room left
+examines at most a hundred candidates among at most a thousand events it visits, with room or not, and one that runs out of either with room left
 goes on from where it stopped in a later read; one that changes or goes (out of the window, or
 deleted as an orphan) takes its pairs from the events that named it, and those are queued to
 refill their lists, as is one whose pair the caps pushed out. An hourly sweep drops events that

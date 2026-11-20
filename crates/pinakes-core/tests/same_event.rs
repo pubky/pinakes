@@ -1799,3 +1799,263 @@ async fn a_read_in_a_dense_crowd_visits_its_candidates_and_none_of_the_rest(pool
         "{rows} rows of same_event_unit visited for a hundred examined"
     );
 }
+
+/// `n` units named `name` at `at`, written straight to the table as `units` writes them: the
+/// first starts at `start`, each next one `step_secs` later, so they stand in the ring in the
+/// order of the ids returned (`prefix` repeated and a number).
+#[allow(clippy::too_many_arguments)]
+async fn units_named(
+    pool: &PgPool,
+    prefix: char,
+    n: usize,
+    name: &str,
+    start: DateTime<Utc>,
+    step_secs: i64,
+    at: &Point,
+    all_day: bool,
+    tz: Option<&str>,
+) -> Vec<String> {
+    let ids: Vec<String> = (0..n)
+        .map(|i| format!("{}{i:04x}", prefix.to_string().repeat(28)))
+        .collect();
+    sqlx::query("INSERT INTO resource(id,uri) SELECT id,'https://example.org/'||id FROM unnest($1::text[]) AS t(id)")
+        .bind(&ids)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO same_event_unit(unit_id,resource_id,fingerprint,start_at,name_key,numbers,point,all_day,tz) \
+         SELECT id,id,'stored',$2::timestamptz+(n-1)*$3::bigint*interval '1 second',same_event_name($4),same_event_numbers($4),ST_SetSRID(ST_MakePoint($5,$6),4326),$7,$8 \
+         FROM unnest($1::text[]) WITH ORDINALITY AS t(id,n)",
+    )
+    .bind(&ids)
+    .bind(start)
+    .bind(step_secs)
+    .bind(name)
+    .bind(at.lon)
+    .bind(at.lat)
+    .bind(all_day)
+    .bind(tz)
+    .execute(pool)
+    .await
+    .unwrap();
+    ids
+}
+
+/// A read among units that are no candidates visits a bounded number of them (`same_event::WALK`,
+/// ten times the candidates it examines at most), stops at the last one visited and goes on from
+/// there in the next read, so a candidate beyond them is found a few reads later and none is
+/// lost. A timed event's read takes the units starting within five minutes of it first (those
+/// exactly five minutes off too): a timed candidate is found by the first read, however many
+/// other events start within fifty hours. Counted on one connection's statistics, as the dense
+/// crowd's read is.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_read_among_units_that_are_no_candidates_visits_a_bounded_number(pool: PgPool) {
+    use chrono::TimeZone;
+    // `same_event::WALK`.
+    const WALK: i64 = 10 * same_event::SCAN;
+    let one = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    let at_three = |days: i64| {
+        let day = (Utc::now() + Duration::days(days)).date_naive();
+        Utc.from_utc_datetime(&day.and_hms_opt(3, 0, 0).unwrap())
+    };
+    let zurich = Point {
+        lat: 47.3769,
+        lon: 8.5417,
+    };
+
+    // A timed event at 03:00 UTC. The same event on three other pages, five and two minutes
+    // earlier and five minutes later; 2,500 other events from an hour later on, a second apart;
+    // and beyond them an all-day listing of the same event on the same date (in Honolulu, where
+    // that date begins at 10:00 UTC).
+    let start = at_three(17);
+    let me = event(
+        &pool,
+        "https://example.org/mine",
+        "Bitcoin Meetup Wattwil",
+        start,
+        Some(WATTWIL),
+    )
+    .await;
+    let mut near = units_named(
+        &pool,
+        'b',
+        2,
+        "Bitcoin Meetup Wattwil",
+        start - Duration::seconds(same_event::SECONDS),
+        180,
+        &WATTWIL,
+        false,
+        None,
+    )
+    .await;
+    near.extend(
+        units_named(
+            &pool,
+            '1',
+            1,
+            "Bitcoin Meetup Wattwil",
+            start + Duration::seconds(same_event::SECONDS),
+            0,
+            &WATTWIL,
+            false,
+            None,
+        )
+        .await,
+    );
+    near.sort();
+    let others_start = start + Duration::hours(1);
+    let others = units_named(
+        &pool,
+        'a',
+        2500,
+        "Lightning Workshop Zurich",
+        others_start,
+        1,
+        &zurich,
+        false,
+        None,
+    )
+    .await;
+    let listing = units_named(
+        &pool,
+        'c',
+        1,
+        "Bitcoin Meetup Wattwil",
+        start + Duration::hours(7),
+        0,
+        &WATTWIL,
+        true,
+        Some("Pacific/Honolulu"),
+    )
+    .await;
+    let other_at = |i: usize| {
+        Some((
+            others[i].clone(),
+            others_start + Duration::seconds(i as i64),
+        ))
+    };
+
+    // The pairs stored, in id order.
+    let pairs = |id: String| {
+        let pool = pool.clone();
+        async move {
+            let mut pairs = stored(&pool, &id).await;
+            pairs.sort();
+            pairs
+        }
+    };
+
+    // The first read: the three within five minutes, then the others as far as the bound.
+    let (_, walked_before) = visited(&one).await;
+    let (_, examined) = same_event::read_examined(&one, &me).await.unwrap();
+    let (_, walked_after) = visited(&one).await;
+    let walked = walked_after - walked_before;
+    assert!(
+        walked <= WALK + same_event::SCAN,
+        "{walked} entries of the start index for one read among {} units",
+        others.len() + 4
+    );
+    assert_eq!(examined, 3, "the three within five minutes");
+    assert_eq!(pairs(me.clone()).await, near);
+    assert_eq!(
+        stopped_at(&pool, &me).await,
+        other_at(WALK as usize - 4),
+        "stopped at the last unit visited: the three and 997 others"
+    );
+    let marked: bool = sqlx::query_scalar(
+        "SELECT fingerprint LIKE 'refill:%' FROM same_event_unit WHERE unit_id=$1",
+    )
+    .bind(&me)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(marked, "a read that stopped is read again");
+    // The second goes on from there, a thousand further, and keeps its pairs.
+    let (_, examined) = same_event::read_examined(&pool, &me).await.unwrap();
+    assert_eq!(examined, 0);
+    assert_eq!(pairs(me.clone()).await, near);
+    assert_eq!(
+        stopped_at(&pool, &me).await,
+        other_at(2 * WALK as usize - 4)
+    );
+    // The third reaches the all-day listing beyond the others and the end of the ring.
+    let (_, examined) = same_event::read_examined(&pool, &me).await.unwrap();
+    assert_eq!(examined, 1, "the all-day listing");
+    let mut all = near.clone();
+    all.extend(listing.clone());
+    all.sort();
+    assert_eq!(pairs(me.clone()).await, all);
+    assert_eq!(stopped_at(&pool, &me).await, None, "the read ended");
+
+    // An all-day event ten days later: its candidates may start anywhere within fifty hours, so
+    // its read walks them all, a thousand a read. 1,200 other events from 01:00 UTC on, and the
+    // same event at 20:00 UTC on another page.
+    let midnight = at_three(27) - Duration::hours(3);
+    let mut doc = ResourceMeta::new("https://example.org/all-day", "event_platform", 86400);
+    doc.set_type("Event");
+    doc.name = Some("Bitcoin Konferenz Wattwil".into());
+    doc.start = Some(midnight);
+    doc.event.all_day = Some(true);
+    doc.location = Some(WATTWIL);
+    let day = save(&pool, &doc).await;
+    let crowd_start = midnight + Duration::hours(1);
+    let crowd = units_named(
+        &pool,
+        'd',
+        1200,
+        "Lightning Workshop Zurich",
+        crowd_start,
+        1,
+        &zurich,
+        false,
+        None,
+    )
+    .await;
+    let evening = units_named(
+        &pool,
+        'e',
+        1,
+        "Bitcoin Konferenz Wattwil",
+        midnight + Duration::hours(20),
+        0,
+        &WATTWIL,
+        false,
+        None,
+    )
+    .await;
+    let (_, walked_before) = visited(&one).await;
+    let (_, examined) = same_event::read_examined(&one, &day).await.unwrap();
+    let (_, walked_after) = visited(&one).await;
+    let walked = walked_after - walked_before;
+    assert!(
+        walked <= WALK + same_event::SCAN,
+        "{walked} entries of the start index for one read among {} units",
+        crowd.len() + 1
+    );
+    assert_eq!(examined, 0);
+    assert!(stored(&pool, &day).await.is_empty());
+    assert_eq!(
+        stopped_at(&pool, &day).await,
+        Some((
+            crowd[WALK as usize - 1].clone(),
+            crowd_start + Duration::seconds(WALK - 1)
+        )),
+        "stopped at the thousandth unit visited"
+    );
+    // The queue reads it again until its ring ends: the pair is found and nothing stays due.
+    pass(&pool, &Config::default()).await;
+    assert_eq!(stored(&pool, &day).await, evening);
+    assert_eq!(stopped_at(&pool, &day).await, None, "the read ended");
+    let (due, stopped): (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM same_event_dirty),(SELECT count(*) FROM same_event_unit WHERE scan_after IS NOT NULL OR fingerprint LIKE 'refill:%')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((due, stopped), (0, 0), "every read ended");
+}
