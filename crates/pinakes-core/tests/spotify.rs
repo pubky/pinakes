@@ -7,7 +7,6 @@
 use pinakes_core::{
     also_on::{self, SourceOptions},
     config::Config,
-    groups,
     model::ResourceMeta,
     resolver::egress::{Egress, FetchOptions, Fetched, Transport},
     store,
@@ -432,9 +431,7 @@ async fn a_spotify_barcode_joins_apple_music_and_deezer(pool: sqlx::PgPool) {
         .await,
         ["isrc GBUM71029604"]
     );
-    groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     let group = "SELECT coalesce(group_id,'-') FROM group_unit WHERE resource_id=$1";
     let joined = rows(&pool, group, &album).await;
     assert_ne!(joined, ["-"]);

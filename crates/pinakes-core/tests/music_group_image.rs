@@ -6,7 +6,6 @@ use pinakes_core::{
     also_on::{self, Found, Key, Link},
     api::{self, AppState},
     config::Config,
-    groups,
     model::ResourceMeta,
     store,
 };
@@ -80,7 +79,7 @@ async fn exact_chain_shares_image_credit_and_also_on_both_ways(pool: PgPool) {
         .await
         .unwrap();
     }
-    groups::drain(&pool, &cfg.groups, 100).await.unwrap();
+    common::drain_groups(&pool, &cfg.groups).await;
     let app = api::router(AppState::new(pool.clone(), cfg.clone()).unwrap());
     for id in [&a, &b, &c] {
         let v = read(&app, id).await;
@@ -114,7 +113,7 @@ async fn exact_chain_shares_image_credit_and_also_on_both_ways(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
-    groups::drain(&pool, &cfg.groups, 100).await.unwrap();
+    common::drain_groups(&pool, &cfg.groups).await;
     assert!(read(&app, &c).await["image"].is_null());
 }
 #[derive(Clone, Default)]
@@ -171,7 +170,7 @@ async fn committed_music_groups_are_logged_and_capped(pool: PgPool) {
         .unwrap();
         ids.push(id);
     }
-    groups::drain(&pool, &cfg.groups, 100).await.unwrap();
+    common::drain_groups(&pool, &cfg.groups).await;
     let sizes: Vec<i64> = sqlx::query_scalar(
         "SELECT count(*) FROM group_unit WHERE group_id IS NOT NULL GROUP BY group_id",
     )
@@ -222,7 +221,7 @@ async fn album_link_does_not_union_track_groups(pool: PgPool) {
         .await
         .unwrap();
     }
-    groups::drain(&pool, &cfg.groups, 100).await.unwrap();
+    common::drain_groups(&pool, &cfg.groups).await;
     let app = api::router(AppState::new(pool.clone(), cfg).unwrap());
     for id in [&a, &b, &album] {
         let v = read(&app, id).await;

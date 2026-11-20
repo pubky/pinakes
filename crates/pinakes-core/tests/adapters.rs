@@ -4964,9 +4964,7 @@ async fn claim_shaped_pages_never_merge(pool: PgPool) {
             .unwrap();
         ids.push(id);
     }
-    pinakes_core::groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     let (resolved, aliases, grouped): (i64, i64, i64) = sqlx::query_as(
         "SELECT (SELECT count(*) FROM resource WHERE status='ok'),(SELECT count(*) FROM resource_alias),(SELECT count(*) FROM group_unit WHERE group_id IS NOT NULL)",
     )

@@ -758,9 +758,7 @@ async fn a_tagged_member_wins_only_on_as_good_a_release(pool: PgPool) {
         .await
         .unwrap();
     }
-    pinakes_core::groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     also_on::record(
         &pool,
         &card,
@@ -873,9 +871,7 @@ async fn no_member_on_the_cards_own_service_shows(pool: PgPool) {
         .await
         .unwrap();
     }
-    pinakes_core::groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     // Grouped (its document names no service), it shows on the card's list nowhere.
     let grouped: Option<String> =
         sqlx::query_scalar("SELECT group_id FROM group_unit WHERE resource_id=$1")
@@ -923,9 +919,7 @@ async fn a_group_that_changes_places_its_cards_links_again(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    pinakes_core::groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     let mut due: Vec<String> = sqlx::query_scalar("SELECT resource_id FROM also_on_dirty")
         .fetch_all(&pool)
         .await
@@ -1133,9 +1127,7 @@ async fn a_member_on_another_release_comes_after_an_unplaced_link(pool: PgPool) 
         .await
         .unwrap();
     }
-    pinakes_core::groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     also_on::record(
         &pool,
         &card,
@@ -1226,9 +1218,7 @@ async fn pages_of_the_cards_own_service_take_no_slot(pool: PgPool) {
         .await
         .unwrap();
     }
-    pinakes_core::groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     also_on::record(
         &pool,
         &card,
@@ -1284,9 +1274,7 @@ async fn an_alias_assignment_places_its_groups_links_again(pool: PgPool) {
         .await
         .unwrap();
     }
-    pinakes_core::groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     sqlx::query("DELETE FROM also_on_dirty")
         .execute(&pool)
         .await
@@ -1443,9 +1431,7 @@ async fn an_album_cards_own_pages_stay_from_run_to_run(pool: PgPool) {
     let shown = tails(also_on(&pool, &card, true).await);
     assert!(shown.contains(&"1441464".to_owned()), "{shown:?}");
     assert!(!shown.contains(&"521185".to_owned()), "{shown:?}");
-    pinakes_core::groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     let later: bool = sqlx::query_scalar(
         "SELECT next_attempt_at>now()+interval '1 day' FROM also_on_dirty WHERE resource_id=$1",
     )
@@ -1510,9 +1496,7 @@ async fn a_placed_member_survives_the_cap(pool: PgPool) {
         .await
         .unwrap();
     }
-    pinakes_core::groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     // The member last by ID is on the card's own release.
     members.sort();
     let (_, last) = members.last().unwrap().clone();

@@ -5,7 +5,6 @@ use pinakes_core::{
     also_on,
     api::{self, AppState},
     config::Config,
-    groups,
     model::ResourceMeta,
     resolver::egress::{Egress, FetchOptions, Fetched, Transport},
     store,
@@ -148,9 +147,7 @@ async fn an_apps_store_links_join_one_group(pool: sqlx::PgPool) {
     also_on::drain(&pool, &cx, &also_on::registry(), 100)
         .await
         .unwrap();
-    groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     let group_of = |id: String| {
         let pool = pool.clone();
         async move {
@@ -246,9 +243,7 @@ async fn an_app_wikidata_lacks_is_only_possibly_the_same(pool: sqlx::PgPool) {
     also_on::drain(&pool, &cx, &also_on::registry(), 100)
         .await
         .unwrap();
-    groups::drain(&pool, &Default::default(), 100)
-        .await
-        .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
     let facts: Vec<String> = sqlx::query_scalar(
         "SELECT value FROM resource_fact WHERE name='app_match' AND resource_id=ANY($1) ORDER BY value",
     )

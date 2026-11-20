@@ -7,7 +7,6 @@ use pinakes_core::{
     api::{self, AppState},
     changes,
     config::{Config, SameEventHint},
-    groups,
     model::ResourceMeta,
     same_recording, store,
 };
@@ -185,7 +184,7 @@ async fn recordings_nothing_exact_joins_name_the_ones_they_may_be(pool: PgPool) 
     page.set_type("WebPage");
     page.name = Some("Bohemian Rhapsody".into());
     let page = save(&pool, &page).await;
-    groups::drain(&pool, &config.groups, 100).await.unwrap();
+    common::drain_groups(&pool, &config.groups).await;
     let (_, before) = response(&config, &pool, "/v1/search?q=bohemian").await;
     // The sweep reads what the triggers already marked and what they did not; the pass pairs.
     same_recording::sweep(&pool).await.unwrap();
