@@ -128,6 +128,36 @@ workers before production rollout. There is no general automatic in-place upgrad
 Do not drop a production database to upgrade it: a feed replay cannot restore operator curation
 or the change journal.
 
+**Moving to a new database.** Where no in-place procedure exists, a new database of the target
+version takes over. The index is rebuilt from the Nexus feed; curation and the change journal are
+carried over by hand:
+
+1. Stop the daemon and back the old database up (`pg_dump`).
+2. Save the curated groups from the old database, one row per member:
+
+   ```sql
+   \copy (SELECT o.group_id, u.resource_id, u.occurrence_key FROM group_override o JOIN group_unit u USING (unit_id) ORDER BY 1, 2, 3) TO 'curation.csv' CSV
+   ```
+
+3. Create the new database with its extensions and run the target binary's `pinakesd --migrate`.
+4. Copy the change journal before the new daemon first starts, so the cursors clients hold stay
+   valid (it copies the lines and their sequence). The two versions' `resource_change` tables
+   must have the same columns (`\d resource_change` in each):
+
+   ```sh
+   pg_dump --data-only --table=resource_change "$OLD_DATABASE_URL" | psql -v ON_ERROR_STOP=1 "$NEW_DATABASE_URL"
+   ```
+
+5. Start the daemon on the new database. It reads the feed from zero and reads every link
+   again; each card gets a `created` line of its own.
+6. When a curated group's members are stored and grouped again (a resource's ID is the same in
+   both databases while both versions normalize its URI alike: it is the hash of the normalized
+   URI), put the group back with the admin
+   `PUT /v1/groups/{id}` ([API](api.md#groups)). A member is `{"resource_id": …, "occurrence":
+   null}` for an empty `occurrence_key`, and `{"resource_id": …, "occurrence": {"uid": …,
+   "recurrence_id": …}}` for a key `["<uid>","<recurrence id>"]` (no `recurrence_id` when the
+   second is empty).
+
 Only for a disposable local development database:
 
 ```sh
