@@ -39,6 +39,9 @@ const MAX_ENDPOINTS: usize = 64;
 /// are paced at one request a second by default, so an ask behind one other request waits about
 /// that long; one behind a stalled request, or several, is put off instead (`Relays::deadline`).
 const RELAY_SLOT_WAIT: Duration = Duration::from_millis(1500);
+/// What a whole relay ask may take beyond its slot wait and its request: the relay host's DNS
+/// lookup and the reading of its answer (`Relays::deadline`).
+const RELAY_ASK_MARGIN: Duration = Duration::from_millis(500);
 
 struct Cached {
     expires: Instant,
@@ -55,15 +58,16 @@ struct State {
 pub struct Relays {
     relays: Vec<Url>,
     /// How long one relay has to answer (`limits.pkarr_relay_timeout_ms`), so that a relay that
-    /// stalls does not hold back another's packet. An ask is two steps, each bounded once inside
-    /// the egress: its wait for the relay host's slot, at most `RELAY_SLOT_WAIT`
-    /// (`FetchOptions::slot_wait`; a slot further away is the egress's free `rate_limited`
-    /// wait: it says nothing of the relay, so no charge), then its request, from when it has the
-    /// slot, at most this deadline (`FetchOptions::request_deadline`; a relay that has not
-    /// answered by then failed). A redirect is not followed (`keep_redirect`: the relay
-    /// failed). An ask takes at most `RELAY_SLOT_WAIT` plus this deadline, besides the relay
-    /// host's DNS lookup before it: with the deadline at most 8 s (its validated range), 9.5 s
-    /// of a resolution's 10 s.
+    /// stalls does not hold back another's packet. Three bounds, none of which adds to another:
+    /// - the wait for the relay host's slot, at most `RELAY_SLOT_WAIT` (`FetchOptions::slot_wait`):
+    ///   a slot further away is the egress's free `rate_limited` wait, no charge;
+    /// - the request, from when it has the slot, at most this deadline
+    ///   (`FetchOptions::request_deadline`); a redirect is not followed (`keep_redirect`);
+    /// - the whole ask (the host's DNS lookup and the reading of its answer too), at most
+    ///   `RELAY_SLOT_WAIT` + this deadline + `RELAY_ASK_MARGIN`.
+    ///
+    /// Past the second or the third the relay failed. With the deadline at most 7 s (its
+    /// validated range) an ask ends within 9 s of a resolution's 10 s.
     deadline: Duration,
     egress: Egress,
     state: Mutex<State>,
@@ -130,7 +134,16 @@ impl Relays {
             let url = format!("{}/{z32}", relay.as_str().trim_end_matches('/'));
             let options = &options;
             async move {
-                match self.egress.fetch_with(&url, options).await {
+                let ask = RELAY_SLOT_WAIT + self.deadline + RELAY_ASK_MARGIN;
+                let Ok(answer) =
+                    tokio::time::timeout(ask, self.egress.fetch_with(&url, options)).await
+                else {
+                    return Answer::Failed(format!(
+                        "{relay} did not answer within {} ms",
+                        ask.as_millis()
+                    ));
+                };
+                match answer {
                     Ok(fetched) if fetched.status == 404 => Answer::Missing,
                     Ok(fetched) if (200..300).contains(&fetched.status) => {
                         match SignedPacket::from_relay_payload(key, &fetched.body.into()) {

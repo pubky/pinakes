@@ -261,10 +261,15 @@ mod tests {
     struct FixedDns {
         homeserver: Vec<SocketAddr>,
         relay: Vec<SocketAddr>,
+        /// Relay hosts whose lookup never answers.
+        stalling: Arc<Mutex<Vec<&'static str>>>,
     }
     #[async_trait]
     impl Dns for FixedDns {
         async fn lookup(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>> {
+            if self.stalling.lock().unwrap().contains(&host) {
+                return std::future::pending().await;
+            }
             match (host, port) {
                 ("homeserver.example", 9443 | 443) => Ok(self.homeserver.clone()),
                 ("relay.example" | "relay2.example", 443) => Ok(self.relay.clone()),
@@ -287,6 +292,8 @@ mod tests {
         slow: Mutex<Vec<(&'static str, Duration)>>,
         /// Relay hosts that answer every request with a redirect to another path of theirs.
         redirecting: Mutex<Vec<&'static str>>,
+        /// Relay hosts whose DNS lookup never answers (`FixedDns::stalling`).
+        dns_stalling: Arc<Mutex<Vec<&'static str>>>,
         /// Relay hosts that answer 429 with this `Retry-After` (seconds).
         limited: Mutex<Vec<(&'static str, u64)>>,
         /// What one relay host serves for one key instead.
@@ -454,6 +461,7 @@ mod tests {
             stalling: Mutex::default(),
             slow: Mutex::default(),
             redirecting: Mutex::default(),
+            dns_stalling: Arc::default(),
             limited: Mutex::default(),
             serve: Mutex::default(),
             relay_requests: Mutex::default(),
@@ -485,6 +493,7 @@ mod tests {
         let dns = FixedDns {
             homeserver: addresses(dns, 9443),
             relay: addresses(&[relay], 443),
+            stalling: net.dns_stalling.clone(),
         };
         let egress = Egress::with_backends(cfg, Arc::new(dns), net);
         let config = ResolverConfig {
@@ -995,6 +1004,28 @@ mod tests {
             );
             assert!(!crate::resolver::unreached(&error), "{answering} {error:#}");
         }
+    }
+
+    /// A relay whose DNS lookup never answers is given up with its whole ask, inside the read:
+    /// the other relay's packet is used.
+    #[tokio::test(start_paused = true)]
+    async fn a_relay_whose_lookup_stalls_does_not_hold_back_another_s_packet() {
+        let owner = Keypair::random();
+        let relays = ["https://relay.example", "https://relay2.example"];
+        let net = network(&[direct(&owner)], ok());
+        net.dns_stalling.lock().unwrap().push("relay.example");
+        let started = tokio::time::Instant::now();
+        let doc = resolver_on(net, &["8.8.8.8"], "8.8.4.4", &relays)
+            .resolve(&object(&owner))
+            .await
+            .unwrap();
+        assert_eq!(doc.name.as_deref(), Some("A deck"));
+        // Its slot wait, its deadline (4 s) and the margin: 6 s of the 10 s read.
+        assert!(
+            started.elapsed() < Duration::from_secs(7),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     /// A relay that answers with a redirect is a failed relay, asked once: the redirect is not
