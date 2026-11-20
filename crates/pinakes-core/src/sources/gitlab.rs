@@ -246,7 +246,9 @@ pub fn project_card(mut doc: ResourceMeta, host: &str, body: &[u8]) -> Result<Re
         .context("no project page")?;
     doc.set_type("SoftwareSourceCode");
     doc.name = Some(path);
-    doc.description = text(&v["description"]);
+    doc.description = text(&v["description"])
+        .map(|d| super::without_addresses(&d))
+        .filter(|d| !d.is_empty());
     doc.image = text(&v["avatar_url"]).filter(|u| web_url(u).is_some());
     let topics: Vec<String> = v["topics"]
         .as_array()
@@ -784,6 +786,19 @@ mod tests {
         assert_eq!(doc.name.as_deref(), Some("inkscape/inkscape Inkscape 1.4"));
         assert_eq!(doc.attributes["published"], "2024-10-12T22:00:00.000Z");
         assert!(!doc.description.unwrap().contains("**"));
+    }
+
+    /// A card never publishes an address: a project's description loses one.
+    #[test]
+    fn a_description_holds_no_address() {
+        let mut record: Value = serde_json::from_slice(&read("project-inkscape.json")).unwrap();
+        record["description"] = "A vector editor. Write to ann@example.org for help".into();
+        let record = serde_json::to_vec(&record).unwrap();
+        let doc = project_card(base(), "gitlab.com", &record).unwrap();
+        assert_eq!(
+            doc.description.as_deref(),
+            Some("A vector editor. Write to for help")
+        );
     }
 
     #[tokio::test(start_paused = true)]

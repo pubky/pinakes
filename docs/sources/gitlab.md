@@ -50,7 +50,7 @@ A ref, path, tag or release the project does not have is `missing`.
 description, with its avatar as the image; a ref `{project} · {ref}`, described by its latest
 commit's title; a file `{path} · {project}`, described by the title of the latest commit that
 changed it; a release `{project} {release name}`, described by the start of its notes. No commit
-author's name or address is published.
+author's name or address is published, and an e-mail address in a description is left out.
 
 | Fact | Meaning |
 | --- | --- |

@@ -52,7 +52,8 @@ codeberg.org or gitea.com.
 with its avatar as the image; a branch or tag `{owner}/{repo} · {name}`, described by its
 commit's first line; a file `{path} · {owner}/{repo}`, described by the first line of the latest
 commit that changed it; a release `{owner}/{repo} {release name}`, described by the start of its
-notes. No commit author's name or address is published.
+notes. No commit author's name or address is published, and an e-mail address in a description
+is left out.
 
 | Fact | Meaning |
 | --- | --- |

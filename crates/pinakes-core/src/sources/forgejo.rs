@@ -241,7 +241,9 @@ pub fn repo_card(mut doc: ResourceMeta, host: &str, body: &[u8]) -> Result<Resou
         .context("no repository page")?;
     doc.set_type("SoftwareSourceCode");
     doc.name = Some(full);
-    doc.description = text(&v["description"]);
+    doc.description = text(&v["description"])
+        .map(|d| super::without_addresses(&d))
+        .filter(|d| !d.is_empty());
     doc.image = text(&v["avatar_url"]).filter(|u| web_url(u).is_some());
     let topics: Vec<String> = v["topics"]
         .as_array()
@@ -730,6 +732,20 @@ mod tests {
         // The page must be on the host asked.
         assert!(repo_card(base(uri), "gitea.com", &read("repo-forgejo.json")).is_err());
         assert!(repo_card(base(uri), "codeberg.org", &read("repo-missing.json")).is_err());
+    }
+
+    /// A card never publishes an address: a repository's description loses one.
+    #[test]
+    fn a_description_holds_no_address() {
+        let uri = "https://codeberg.org/forgejo/forgejo";
+        let mut record: Value = serde_json::from_slice(&read("repo-forgejo.json")).unwrap();
+        record["description"] = "A forge. Write to ann@example.org for help".into();
+        let record = serde_json::to_vec(&record).unwrap();
+        let doc = repo_card(base(uri), "codeberg.org", &record).unwrap();
+        assert_eq!(
+            doc.description.as_deref(),
+            Some("A forge. Write to for help")
+        );
     }
 
     #[test]
