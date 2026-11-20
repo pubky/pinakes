@@ -26,6 +26,7 @@ const RESERVED: &[&str] = &[
     "emails",
     "explore",
     "legal",
+    "login",
     "nametag",
     "oauth",
     "p",
@@ -267,6 +268,18 @@ mod tests {
             Instagram.alias_root("https://www.instagram.com/p/C2vXx0yPvYq/"),
             None
         );
+    }
+
+    /// Instagram's sign-in page is no profile's name.
+    #[test]
+    fn the_sign_in_page_is_no_profile() {
+        for uri in [
+            "https://www.instagram.com/login",
+            "https://instagram.com/Login/",
+        ] {
+            assert_eq!(Target::of_uri(uri), None, "{uri}");
+            assert!(!Instagram.reads(uri), "{uri}");
+        }
     }
 
     #[test]

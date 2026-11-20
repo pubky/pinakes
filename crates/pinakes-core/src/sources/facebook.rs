@@ -17,6 +17,7 @@ pub struct Facebook;
 const SITE: &str = "facebook.com";
 /// First path segments that are Facebook's own pages, never a page's name.
 const RESERVED: &[&str] = &[
+    "about",
     "ads",
     "business",
     "dialog",
@@ -33,7 +34,9 @@ const RESERVED: &[&str] = &[
     "l.php",
     "live",
     "login",
+    "login.php",
     "marketplace",
+    "me",
     "messages",
     "notifications",
     "pages",
@@ -48,7 +51,9 @@ const RESERVED: &[&str] = &[
     "privacy",
     "profile.php",
     "public",
+    "r.php",
     "reel",
+    "reels",
     "search",
     "settings",
     "share",
@@ -292,6 +297,22 @@ mod tests {
             Facebook.alias_root("https://www.facebook.com/facebook"),
             None
         );
+    }
+
+    /// Facebook's own pages (sign-in, sign-up, the reels feed, about, the viewer's own profile)
+    /// are no page's name.
+    #[test]
+    fn facebooks_own_pages_are_no_page() {
+        for uri in [
+            "https://www.facebook.com/login.php",
+            "https://www.facebook.com/r.php",
+            "https://www.facebook.com/reels/",
+            "https://www.facebook.com/about",
+            "https://m.facebook.com/Me",
+        ] {
+            assert_eq!(Target::of_uri(uri), None, "{uri}");
+            assert!(!Facebook.reads(uri), "{uri}");
+        }
     }
 
     #[test]
