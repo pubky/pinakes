@@ -5,8 +5,8 @@
 //! id in upper case. An extended id (`pdb_00004hhb`) names the same entry while it starts with
 //! `pdb_0000`. Coordinate files (`files.rcsb.org`) are files of an entry, not the entry.
 //!
-//! An obsolete entry is gone from the Data API (404) and is missing; `status_request` says which
-//! entry replaced it. The data is CC0.
+//! An obsolete entry is gone from the Data API (404) and is missing; the entry that replaced it
+//! is not looked up. The data is CC0.
 use super::{
     kit::{fetch, float, host_and_segments, int, json, text, time, web_url, Card, Key, Request},
     Example, Source,
