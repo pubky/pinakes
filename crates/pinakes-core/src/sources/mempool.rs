@@ -655,15 +655,17 @@ pub fn page(target: &Target) -> String {
 }
 
 /// Where a request goes: mempool.space, or the Esplora API at blockstream.info, the fallback
-/// reader for on-chain objects (mainnet, testnet and signet). Esplora's records have the shapes
-/// of mempool.space's, so the same parsers read them, with the same roots and pages.
+/// reader for on-chain objects on mainnet, testnet and signet (`esplora_base`); testnet4 and
+/// Lightning objects have no fallback. Esplora's records have the shapes of mempool.space's, so
+/// the same parsers read them, with the same roots and pages.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Api {
     Mempool,
     Esplora,
 }
 
-/// The Esplora API base at blockstream.info, or `None` for a network it does not serve.
+/// The Esplora API base at blockstream.info for a network the fallback reads: mainnet, testnet
+/// and signet. `None` for testnet4, which is read from mempool.space only.
 fn esplora_base(network: Network) -> Option<&'static str> {
     match network {
         Network::Mainnet => Some("https://blockstream.info/api"),
@@ -1557,7 +1559,7 @@ impl Source for Mempool {
             "first_seen",
             "created",
             "closed",
-            // Blocks
+            // Blocks (`tx_count` also on addresses, `size` and `weight` also on transactions)
             "height",
             "hash",
             "tx_count",

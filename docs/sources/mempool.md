@@ -106,7 +106,8 @@ no request. Each is a link of the card's own object (above).
   `/api/v1/lightning/channels?public_key={key}&status=open`. A transaction's and a channel's
   come with their own record;
 - the fallback: the same paths (`/api/block/{hash}` for blocks) at
-  `https://blockstream.info/api` (`/testnet/api`, `/signet/api`; no testnet4 and no Lightning).
+  `https://blockstream.info/api` (`/testnet/api`, `/signet/api`). Testnet4 and Lightning objects
+  have no fallback: they are read from mempool.space only.
 
 ## Card
 
@@ -125,7 +126,8 @@ The card types are local, not schema.org: `BitcoinBlock`, `BitcoinTransaction`,
 | --- | --- |
 | `page_url` | The object's page on mempool.space |
 | `height`, `hash`, `previous_block` | Block height, hash and previous block's hash |
-| `tx_count`, `size`, `weight` | Transactions in the block, size in bytes, weight units |
+| `tx_count` | A block's transactions; an address's confirmed transactions |
+| `size`, `weight` | A block's or a transaction's size in bytes and its weight units |
 | `pool` | The mining pool, as mempool.space names it |
 | `total_fees`, `reward` | In satoshis |
 | `median_fee_rate` | sat/vB |
