@@ -1,6 +1,5 @@
 //! Substack publications, posts and profiles, from their pages' Open Graph tags and JSON-LD. A
-//! publication's card names its RSS feed (`/feed`), which the feed source reads when a link
-//! names it. No key, no account. Every spelling (`open.substack.com/pub/{name}/p/{slug}`, the
+//! publication's card names its RSS feed (`/feed`). No key, no account. Every spelling (`open.substack.com/pub/{name}/p/{slug}`, the
 //! hosts with `www.`) is one resource at `https://{name}.substack.com/[p/{slug}]` or
 //! `https://substack.com/@{user}`.
 use super::{

@@ -371,7 +371,7 @@ open each one's card. Each entry is `{rel, uri, name?, amount_sat?, at?}`:
 - A `rel` lists at most 10 entries; when there are more, `related_total` gives their number
   (`{"input": 400}`). Entries come in the order below; inputs, outputs and channels the largest
   first.
-- The list is read with the card and stored with it ([mempool.space](sources/mempool.md#related),
+- The list is read with the card and stored with it (mempool.space,
   an episode's feed or its page's source): it changes when the card is read again, never on a
   read of the resource. It is not the
   `related=` search ([Related](#related)), which ranks what a link's taggers also referenced.
