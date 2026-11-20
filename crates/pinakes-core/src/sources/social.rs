@@ -53,7 +53,7 @@ impl Shape {
 }
 
 /// `doc`, a card of the link's shape alone made from a page that answered without what the card
-/// reads: a stored card that says more stays for a while (`ResourceMeta::shape_only`).
+/// reads: a stored card that says more stays until a confirming read (`ResourceMeta::shape_only`).
 pub fn shape_only(mut doc: ResourceMeta) -> ResourceMeta {
     doc.shape_only = true;
     doc

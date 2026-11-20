@@ -927,17 +927,38 @@ async fn a_card_that_says_more_by_its_name_or_a_fact_is_kept(pool: PgPool) {
     }
 }
 
-/// A kept card stays as it was last read: its `fetched_at` is that read's, not this one's, and
-/// its next read is scheduled at this reading's lifetime (neither now nor never).
+/// A page answered without its tags, on a stored card that says more, is a first missing answer:
+/// the card stays as last read (no change line, its `fetched_at` that read's) and the confirming
+/// read comes `queue.missing_ttl_secs` later, whatever the card's own lifetime (a profile's is a
+/// day); the confirming read stores the plain card. A good read in between clears the observation.
 #[sqlx::test(migrations = "../../migrations")]
-async fn a_kept_card_keeps_its_last_read_time_and_is_read_again(pool: PgPool) {
-    let uri = "https://social.example/in/kept";
+async fn a_tagless_read_waits_for_its_confirming_read_as_a_missing_one(pool: PgPool) {
+    let cfg = QueueConfig::default();
+    let streak = |id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i32>("SELECT missing_streak FROM resource WHERE id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let day = 86_400;
+    let at = |doc: ResourceMeta| ResourceMeta {
+        ttl_secs: day,
+        ..doc
+    };
+    let uri = "https://social.example/in/day-old";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
     let now = chrono::Utc::now().timestamp_millis();
-    let mut good = person(uri, "Some One", now - 3600 * 1000, false);
+    let mut good = at(person(uri, "Some One", now - day as i64 * 1000, false));
     good.description = Some("Builds bridges.".into());
     store::save_document(&pool, &id, 0, &good).await.unwrap();
-    store::save_document(&pool, &id, 0, &person(uri, PLAIN, now, true))
+    let lines = classes(&pool, &id).await;
+
+    // The first tagless read, a day after the last good one: kept, read again an hour later.
+    store::save_document(&pool, &id, 0, &at(person(uri, PLAIN, now, true)))
         .await
         .unwrap();
     let (name, fetched, last, next) = kept_row(&pool, &id).await;
@@ -947,48 +968,34 @@ async fn a_kept_card_keeps_its_last_read_time_and_is_read_again(pool: PgPool) {
         Some(good.fetched_at),
         "fetched_at renewed by a keep"
     );
+    let wait = cfg.missing_ttl_secs.max(3600) as f64;
     assert!(
-        !last && next > 3500.0 && next <= 3600.0,
+        !last && next > wait - 60.0 && next <= wait,
         "next read in {next} s"
     );
-}
+    assert_eq!(streak(id.clone()).await, 1);
+    assert_eq!(classes(&pool, &id).await, lines);
 
-/// The keep is bounded: once the last read that said more is `shape_only_keep_ms` old (an
-/// account gone, whose site answers its generic page), the plain card replaces the stored one.
-#[sqlx::test(migrations = "../../migrations")]
-async fn a_kept_card_gives_way_to_the_plain_card_after_the_bound(pool: PgPool) {
-    let keep = changes::shape_only_keep_ms(&QueueConfig::default());
-    assert_eq!(keep, 2 * 3600 * 1000);
-    let uri = "https://social.example/in/gone";
-    let id = store::ensure_resource(&pool, uri).await.unwrap();
-    let mut good = person(
-        uri,
-        "Some One",
-        chrono::Utc::now().timestamp_millis(),
-        false,
-    );
-    good.description = Some("Builds bridges.".into());
-    store::save_document(&pool, &id, 0, &good).await.unwrap();
-    // Within the bound the card is kept; at the bound the plain card takes its place.
-    for (after, name) in [
-        (keep / 2, "Some One"),
-        (keep - 1, "Some One"),
-        (keep, PLAIN),
-    ] {
-        store::save_document(
-            &pool,
-            &id,
-            0,
-            &person(uri, PLAIN, good.fetched_at + after, true),
-        )
+    // A good read in between clears the observation; the next tagless read is a first one again.
+    let mut again = good.clone();
+    again.fetched_at = now + 1;
+    store::save_document(&pool, &id, 0, &again).await.unwrap();
+    assert_eq!(streak(id.clone()).await, 0);
+    store::save_document(&pool, &id, 0, &at(person(uri, PLAIN, now + 2, true)))
         .await
         .unwrap();
-        assert_eq!(
-            kept_row(&pool, &id).await.0.as_deref(),
-            Some(name),
-            "{after} ms"
-        );
-    }
+    assert_eq!(kept_row(&pool, &id).await.0.as_deref(), Some("Some One"));
+    assert_eq!(streak(id.clone()).await, 1);
+
+    // The confirming read stores the plain card, and the observation is over.
+    let confirming = now + 2 + cfg.missing_ttl_secs as i64 * 1000;
+    store::save_document(&pool, &id, 0, &at(person(uri, PLAIN, confirming, true)))
+        .await
+        .unwrap();
+    let (name, fetched, ..) = kept_row(&pool, &id).await;
+    assert_eq!(name.as_deref(), Some(PLAIN));
+    assert_eq!(fetched, Some(confirming));
+    assert_eq!(streak(id.clone()).await, 0);
 }
 
 #[sqlx::test(migrations = "../../migrations")]

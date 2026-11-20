@@ -20,9 +20,9 @@ photos, share links and `profile.php` links are not read.
   its counts and about text in the page's language). A page that does not exist, like anything shown
   to accounts only, redirects to the sign-in page. An answer without tags gives the plain card,
   "Profile on facebook.com", with the name: it does not say the page is gone, and a stored card that
-  says more (another name, text, a picture or facts) stays, as last read, for two hours from that
-  read (by default; twice `queue.missing_ttl_secs`, at least an hour each): a page answered without
-  tags for that long gets the plain card.
+  says more (another name, text, a picture or facts) stays, as last read, until a second read an
+  hour later (`queue.missing_ttl_secs`) answers the same, as a missing answer is confirmed: then the
+  plain card replaces it.
 - A post or video: `GET` of its root. Nothing is read from the answer: the card is the link's
   shape alone, "Post on facebook.com" (with its page) or "Video on facebook.com". What comes
   back without an account is the sign-in redirect, a refused request: that card has the

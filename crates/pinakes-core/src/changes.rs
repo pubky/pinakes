@@ -359,16 +359,6 @@ pub async fn clear(pool: &PgPool, id: &str, generation: i64, last_error: &str) -
     tx.commit().await?;
     Ok(())
 }
-/// How long a stored card that says more outlasts answers of the link's shape alone
-/// (`ResourceMeta::shape_only`), in milliseconds from its last read: twice the wait of a missing
-/// answer for its confirming fetch (`queue.missing_ttl_secs`, at least an hour; two hours by
-/// default). A social card is read at least hourly, so a page that answers without its tags for
-/// one read keeps its card, and one that does so for two reads in a row (as two missing answers
-/// confirmed a gone page) gets the plain card.
-pub fn shape_only_keep_ms(cfg: &crate::config::QueueConfig) -> i64 {
-    let secs = cfg.missing_ttl_secs.max(3600).saturating_mul(2);
-    i64::try_from(secs.saturating_mul(1000)).unwrap_or(i64::MAX)
-}
 /// Whether a stored card says more than `plain`, a card of its link's shape alone: another name,
 /// a description, an image, or a fact the plain card lacks.
 fn says_more_than(stored: &Value, plain: &ResourceMeta) -> bool {
@@ -473,27 +463,15 @@ pub async fn save(
         doc.event.warnings.dedup();
         doc.event.warnings.truncate(16);
     }
-    // A card of the link's shape alone (a page that answered without what its card reads) says
-    // nothing new. A stored card that says more stays as it was last read (its `fetched_at` is
-    // that read's), for `shape_only_keep_ms` from that read; the next read comes at this
-    // reading's time. A page that answers without its tags for longer (an account gone, whose
-    // site answers its generic page) gets the plain card then.
-    if shape_only && doc.status == Status::Ok {
-        let keep = shape_only_keep_ms(cfg);
-        let kept = before.as_ref().filter(|stored| {
-            stored["status"] == "ok"
-                && says_more_than(stored, &doc)
-                && doc
-                    .fetched_at
-                    .saturating_sub(stored["fetched_at"].as_i64().unwrap_or(0))
-                    < keep
-        });
-        if let Some(stored) = kept {
-            let mut kept = stored.clone();
-            kept["ttl_secs"] = json!(doc.ttl_secs);
-            doc = serde_json::from_value(kept)?;
-        }
-    }
+    // A card of the link's shape alone (a page that answered without what its card reads) on a
+    // stored card that says more is taken as a missing answer is: the stored card stays until a
+    // second fresh fetch answers the same, `missing_ttl_secs` later, which stores the plain card.
+    // A good read in between clears the observation. A link never read gets the plain card.
+    let shapeless = shape_only
+        && doc.status == Status::Ok
+        && before
+            .as_ref()
+            .is_some_and(|stored| stored["status"] == "ok" && says_more_than(stored, &doc));
     let social_missing = doc.status == Status::Missing
         && before.as_ref().is_some_and(|v| {
             serde_json::from_value::<ResourceMeta>(v.clone())
@@ -517,7 +495,7 @@ pub async fn save(
     if social_missing {
         forget_derived(&mut tx, &[id.to_owned()]).await?;
     }
-    if doc.status == Status::Missing {
+    if doc.status == Status::Missing || shapeless {
         let fetched = chrono::DateTime::from_timestamp_millis(doc.fetched_at)
             .context("invalid fetch time")?;
         let last: Option<chrono::DateTime<chrono::Utc>> = row.try_get("last_missing_at")?;
@@ -562,6 +540,7 @@ pub async fn save(
             tracing::info!(
                 resource = %id,
                 retry_secs = retry,
+                shapeless,
                 "a missing answer waits for its confirming fetch"
             );
             let retry = retry as f64;
@@ -570,6 +549,13 @@ pub async fn save(
             }
             tx.commit().await?;
             return Ok(());
+        }
+        if shapeless {
+            // Confirmed: the plain card, stored as any card is, and the observation is over.
+            sqlx::query("UPDATE resource SET missing_streak=0,last_missing_at=NULL,timeout_streak=0 WHERE id=$1")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
         }
         // A Pubky app's object without a card (withheld by its content, gone, or at a path its
         // profile leaves out) keeps nothing of its earlier card, in its document or in its
@@ -580,7 +566,7 @@ pub async fn save(
                 .execute(&mut *tx)
                 .await?;
         }
-        if let Some(before) = before.as_ref().filter(|_| !app_missing) {
+        if let Some(before) = before.as_ref().filter(|_| !app_missing && !shapeless) {
             let mut retained = before.clone();
             retained["fetched_at"] = json!(doc.fetched_at);
             retained["ttl_secs"] = json!(doc.ttl_secs);

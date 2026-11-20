@@ -19,8 +19,8 @@ of them.
   is not a profile's (Twitch answers its generic page, with status 200, for a channel that does not
   exist) gives the plain card, "Profile on twitch.tv", with the login: it does not say the channel
   is gone, and a stored card that says more (another name, text, a picture or facts) stays, as last
-  read, for two hours from that read (by default; twice `queue.missing_ttl_secs`, at least an hour
-  each): a page answered without tags for that long gets the plain card. A 404 or 410 is `missing`.
+  read, until a second read an hour later (`queue.missing_ttl_secs`) answers the same, as a missing
+  answer is confirmed: then the plain card replaces it. A 404 or 410 is `missing`.
 - A video: `GET https://www.twitch.tv/videos/{id}`, its Open Graph tags
   (`Title - login on Twitch`).
 - A clip: `GET https://clips.twitch.tv/{slug}`. Twitch names a clip only to a browser, so the
