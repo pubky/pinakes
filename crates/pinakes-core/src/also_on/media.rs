@@ -127,32 +127,21 @@ pub(crate) fn retry_wait(error: &anyhow::Error) -> u64 {
 }
 
 /// What failed secondary requests leave of a lookup: the failure to pass on, so a request that
-/// failed is never read as "the service has nothing" and the run comes back for its part.
+/// failed is never read as "the service has nothing" and the run comes back for its part, and
+/// whether any request failed at all, so the lookup's answer deletes none of what the source
+/// recorded before ([`Deferred::finish`]).
 #[derive(Default)]
 pub(crate) struct Deferred {
     /// The failure to pass on.
     failure: Option<anyhow::Error>,
-    /// The services that refused the operator's credentials (`client_credentials::refused`).
-    refused: Vec<&'static str>,
-    /// Services asked only with another's answer, by that one: the rows of each stay while the
-    /// one it needs refuses ([`Deferred::depending`]).
-    depends: &'static [(&'static str, &'static str)],
+    /// A request failed, whether or not it brings the run back.
+    incomplete: bool,
 }
 impl Deferred {
-    /// A `Deferred` for a lookup that asks `depends`' second service only with the first's
-    /// answer: while the first refuses the credentials, the second's rows stay as well.
-    pub(crate) fn depending(depends: &'static [(&'static str, &'static str)]) -> Self {
-        Self {
-            depends,
-            ..Default::default()
-        }
-    }
     /// The answer, or `None` after counting the failure. The failure is kept (of several, the
     /// one with the longest wait, [`retry_wait`]) unless asking again would end the same way: an
-    /// answer over its read's cap, or a request the egress's rules refuse. Refused credentials
-    /// last too, and bring no run back: the service is remembered, so the rows the source
-    /// recorded with its answers stay ([`Deferred::finish`]). `service` is the `via` of the rows
-    /// its answers give.
+    /// answer over its read's cap, a request the egress's rules refuse, or refused credentials
+    /// (`client_credentials::refused`), which bring no run back.
     pub(crate) fn take<T>(
         &mut self,
         service: &'static str,
@@ -164,12 +153,11 @@ impl Deferred {
                 let class = crate::resolver::error_class(&error);
                 crate::telemetry::also_on_service_error(service, class);
                 tracing::debug!(service, class, "also-on service failed; the lookup goes on");
-                let lasting = class == "policy" || crate::resolver::egress::over_cap(&error);
-                if super::client_credentials::refused(&error) {
-                    if !self.refused.contains(&service) {
-                        self.refused.push(service);
-                    }
-                } else if !lasting
+                self.incomplete = true;
+                let lasting = class == "policy"
+                    || crate::resolver::egress::over_cap(&error)
+                    || super::client_credentials::refused(&error);
+                if !lasting
                     && self
                         .failure
                         .as_ref()
@@ -181,24 +169,15 @@ impl Deferred {
             }
         }
     }
-    /// The lookup's answer. After a failure: the failure itself when nothing was found (no key,
-    /// link, fact or place), so the source's stored rows stay and the run is retried; else what
-    /// was found, with the wait after which the run comes back for the rest
-    /// (`Found::retry_after`), and none of the source's stored rows is deleted meanwhile
-    /// ([`Keep::All`]). After refused credentials alone, the keys and links of the services
-    /// that refused (and of those asked only with their answers) stay, and the others' are
-    /// replaced ([`Keep::Services`]).
+    /// The lookup's answer. After any failure, none of the source's stored rows is deleted
+    /// ([`Keep::All`]): what was found is added to them, as the failed service's part, and what
+    /// other services are asked with it, is missing. A failure that asking again may end: the
+    /// failure itself when nothing was found (no key, link, fact or place), so the run is
+    /// retried; else what was found, with the wait after which the run comes back for the rest
+    /// (`Found::retry_after`).
     pub(crate) fn finish(self, mut found: Found) -> Result<Found> {
-        if !self.refused.is_empty() {
-            let mut kept: Vec<String> = self.refused.iter().map(|s| (*s).to_owned()).collect();
-            for (needed, dependent) in self.depends {
-                if self.refused.contains(needed) {
-                    kept.push((*dependent).to_owned());
-                }
-            }
-            kept.sort();
-            kept.dedup();
-            found.keep_stored = Keep::Services(kept);
+        if self.incomplete {
+            found.keep_stored = Keep::All;
         }
         let Some(failure) = self.failure else {
             return Ok(found);
@@ -212,7 +191,6 @@ impl Deferred {
         }
         let wait = std::time::Duration::from_secs(retry_wait(&failure));
         found.retry_after = Some(found.retry_after.map_or(wait, |asked| asked.max(wait)));
-        found.keep_stored = Keep::All;
         Ok(found)
     }
 }
@@ -980,7 +958,8 @@ mod tests {
         assert_eq!(deferred.take("wikidata", Ok(Some(1))), Some(1));
         assert_eq!(deferred.take("tvmaze", Ok(None::<u8>)), None);
         assert_eq!(deferred.finish(some()).unwrap(), some());
-        // An answer over its cap, or a request the egress refuses, is no answer for good.
+        // An answer over its cap, or a request the egress refuses, is no answer for good: no
+        // run comes back for it, and nothing stored is deleted.
         let over_cap = || -> Result<Option<()>> {
             Err(crate::resolver::egress::BodyTooLarge { cap: 1 }.into())
         };
@@ -990,12 +969,14 @@ mod tests {
         let mut deferred = Deferred::default();
         assert_eq!(deferred.take("wikidata", over_cap()), None);
         assert_eq!(deferred.take("tvmaze", refused()), None);
-        assert_eq!(deferred.finish(some()).unwrap(), some());
+        let found = deferred.finish(some()).unwrap();
+        assert_eq!((found.retry_after, found.keep_stored), (None, Keep::All));
+        assert_eq!(found.keys, some().keys);
         let mut deferred = Deferred::default();
         assert_eq!(deferred.take("wikidata", over_cap()), None);
-        assert_eq!(deferred.finish(Found::default()).unwrap(), Found::default());
-        // Refused credentials last too: no retry, and the rows the refused service gave before
-        // stay beside what was found.
+        let found = deferred.finish(Found::default()).unwrap();
+        assert_eq!((found.keys.len(), found.keep_stored), (0, Keep::All));
+        // Refused credentials last too: no retry, and nothing stored is deleted.
         let no_key = || -> Result<Option<()>> {
             Err(RetryLater {
                 class: "unit_auth",
@@ -1006,31 +987,22 @@ mod tests {
         let mut deferred = Deferred::default();
         assert_eq!(deferred.take("podcastindex", no_key()), None);
         let found = deferred.finish(some()).unwrap();
-        assert_eq!(
-            (found.retry_after, found.keep_stored),
-            (None, Keep::Services(vec!["podcastindex".into()]))
-        );
+        assert_eq!((found.retry_after, found.keep_stored), (None, Keep::All));
         let mut deferred = Deferred::default();
         assert_eq!(deferred.take("podcastindex", no_key()), None);
         let found = deferred.finish(Found::default()).unwrap();
-        assert!(found.keys.is_empty());
-        assert_eq!(
-            found.keep_stored,
-            Keep::Services(vec!["podcastindex".into()])
-        );
-        // A service asked only with the refused one's answer keeps its rows too; a refusal with
-        // a failure besides comes back for the failure, and keeps everything until then.
-        let mut deferred = Deferred::depending(&[("podcastindex", "feed")]);
-        assert_eq!(deferred.take("podcastindex", no_key()), None);
-        assert_eq!(deferred.take("itunes", Ok(Some(1))), Some(1));
-        assert_eq!(
-            deferred.finish(some()).unwrap().keep_stored,
-            Keep::Services(vec!["feed".into(), "podcastindex".into()])
-        );
-        let mut deferred = Deferred::depending(&[("podcastindex", "feed")]);
+        assert_eq!((found.keys.len(), found.keep_stored), (0, Keep::All));
+        // A refusal with a failure besides comes back for the failure.
+        let mut deferred = Deferred::default();
         assert_eq!(deferred.take("podcastindex", no_key()), None);
         assert_eq!(deferred.take("wikidata", timeout()), None);
-        assert_eq!(deferred.finish(some()).unwrap().keep_stored, Keep::All);
+        let found = deferred.finish(some()).unwrap();
+        assert_eq!(found.keep_stored, Keep::All);
+        assert!(found.retry_after.is_some());
+        // Every service answered: the run's answer replaces the stored rows.
+        let mut deferred = Deferred::default();
+        assert_eq!(deferred.take("itunes", Ok(Some(1))), Some(1));
+        assert_eq!(deferred.finish(some()).unwrap().keep_stored, Keep::Nothing);
     }
 
     #[test]

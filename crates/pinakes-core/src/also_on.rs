@@ -179,34 +179,30 @@ pub struct Found {
     /// the run found stands, and the worker brings the run back after its backoff, as for a
     /// failed run (five minutes, doubling to an hour), or after this wait (the one the service
     /// named) when longer; after [`PARTIAL_RETRIES`] such runs in a row, at the source's lifetime.
-    /// The source sets `keep_stored` too ([`Keep::All`]), so what the failed service gave before
-    /// stays meanwhile.
+    /// The source sets `keep_stored` too ([`Keep::All`]), so nothing it gave before is deleted
+    /// meanwhile.
     pub retry_after: Option<Duration>,
     /// Where links of the resource's group sit among its releases (`link_release`).
     pub editions: Vec<Edition>,
     /// Links whose place this run could not tell (a lookup failed, credentials were refused, a
     /// list was cut short, a cap was reached): their earlier places stay as recorded.
     pub keep: Vec<String>,
-    /// Which of the rows the source recorded before stay when this run did not find them
-    /// again ([`Keep`]): all are replaced unless part of the answer is missing.
+    /// Whether the rows the source recorded before and did not find again are deleted
+    /// ([`Keep`]): only when every service the source asked answered.
     pub keep_stored: Keep,
 }
-/// What a run does with the rows its source recorded before and did not find again, chosen by
-/// the source when part of its answer is missing. A row that stays keeps its own expiry; places
-/// among releases (`link_release`) follow `Found::keep` whatever this says.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// What a run does with the rows its source recorded before and did not find again. A row that
+/// stays keeps its own expiry, so one that no service gives any more leaves when it expires (at
+/// most twice the source's lifetime after it was last found). Places among releases
+/// (`link_release`) follow `Found::keep` whatever this says.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Keep {
-    /// They are deleted: the run's answer is whole.
+    /// They are deleted: every service the source asked answered, and the run's answer is whole.
     #[default]
     Nothing,
-    /// Services the lookup asks beside others gave no answer that will change soon (they refuse
-    /// the operator's credentials): the keys and links whose `via` is one of these stay, and
-    /// those of every other service are replaced by this run's. Facts name no service, and
-    /// stay.
-    Services(Vec<String>),
-    /// A request failed and the run comes back for it (`Found::retry_after`): none is deleted,
-    /// and what the run found is added. A service that failed may have left others unasked,
-    /// whose rows carry their own `via`, so the rows cannot be told apart by it.
+    /// A service the source asks failed or refused the operator's credentials, so part of the
+    /// answer is missing, and so may be what other services are asked with: none is deleted,
+    /// and what the run found is added.
     All,
 }
 /// A link placed for one card: on a MusicBrainz release, `rank` 0 when it is the card's own, then
@@ -862,8 +858,8 @@ fn normal_key(key: &str) -> Option<String> {
     }
 }
 /// Replace `source`'s keys and links for `resource_id` with `found` (checked and bounded); they
-/// live for twice `ttl`. A run with part of its answer missing leaves the rows
-/// `Found::keep_stored` names ([`Keep`]).
+/// live for twice `ttl`. A run with part of its answer missing deletes none of the source's rows
+/// (`Found::keep_stored`, [`Keep`]).
 pub async fn record(
     pool: &PgPool,
     resource_id: &str,
@@ -873,7 +869,7 @@ pub async fn record(
     cfg: &AlsoOnConfig,
 ) -> Result<()> {
     anyhow::ensure!(token(source), "invalid source id {source}");
-    let mut keep_stored = found.keep_stored.clone();
+    let mut keep_stored = found.keep_stored;
     let (mut keys, mut links, mut facts, mut placed) = checked(resource_id, found, cfg);
     let expires = Utc::now()
         + chrono::Duration::from_std(ttl.saturating_mul(2)).unwrap_or(chrono::Duration::days(60));
@@ -944,16 +940,9 @@ pub async fn record(
         .iter()
         .map(|k| serde_json::json!({"key": k.key, "via": k.via}))
         .collect();
-    match &keep_stored {
-        Keep::Nothing => {
-            sqlx::query("DELETE FROM resource_key WHERE resource_id=$1 AND source=$2 AND NOT key=ANY(SELECT v->>'key' FROM jsonb_array_elements($3) v)")
-                .bind(resource_id).bind(source).bind(Value::from(key_rows.clone())).execute(&mut *tx).await?;
-        }
-        Keep::Services(kept) => {
-            sqlx::query("DELETE FROM resource_key WHERE resource_id=$1 AND source=$2 AND NOT key=ANY(SELECT v->>'key' FROM jsonb_array_elements($3) v) AND NOT via=ANY($4)")
-                .bind(resource_id).bind(source).bind(Value::from(key_rows.clone())).bind(kept).execute(&mut *tx).await?;
-        }
-        Keep::All => {}
+    if keep_stored == Keep::Nothing {
+        sqlx::query("DELETE FROM resource_key WHERE resource_id=$1 AND source=$2 AND NOT key=ANY(SELECT v->>'key' FROM jsonb_array_elements($3) v)")
+            .bind(resource_id).bind(source).bind(Value::from(key_rows.clone())).execute(&mut *tx).await?;
     }
     // A key whose source is switched off, or let it expire, is this source's from now on: no
     // read shows such a row, though this source vouches for the key. `key` is set so that the
@@ -967,16 +956,9 @@ pub async fn record(
         .iter()
         .map(|(id, uri, l)| serde_json::json!({"id": id, "uri": uri, "site": l.site, "via": l.via, "kind": l.kind, "at": l.at, "key": l.key}))
         .collect();
-    match &keep_stored {
-        Keep::Nothing => {
-            sqlx::query("DELETE FROM derived_link WHERE resource_id=$1 AND source=$2 AND NOT link_id=ANY(SELECT v->>'id' FROM jsonb_array_elements($3) v)")
-                .bind(resource_id).bind(source).bind(Value::from(link_rows.clone())).execute(&mut *tx).await?;
-        }
-        Keep::Services(kept) => {
-            sqlx::query("DELETE FROM derived_link WHERE resource_id=$1 AND source=$2 AND NOT link_id=ANY(SELECT v->>'id' FROM jsonb_array_elements($3) v) AND NOT via=ANY($4)")
-                .bind(resource_id).bind(source).bind(Value::from(link_rows.clone())).bind(kept).execute(&mut *tx).await?;
-        }
-        Keep::All => {}
+    if keep_stored == Keep::Nothing {
+        sqlx::query("DELETE FROM derived_link WHERE resource_id=$1 AND source=$2 AND NOT link_id=ANY(SELECT v->>'id' FROM jsonb_array_elements($3) v)")
+            .bind(resource_id).bind(source).bind(Value::from(link_rows.clone())).execute(&mut *tx).await?;
     }
     // A keyed link this run takes over from a source that is switched off or let it expire
     // (below) names its resource again with the same key: that resource is regrouped, as the

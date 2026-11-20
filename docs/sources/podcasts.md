@@ -98,7 +98,7 @@ Podcast Index is asked only with a key and secret: `[podcast_index] key` and `se
 api.podcastindex.org). Without them a show joins through its Apple ID only: no GUID is a key, a
 feed gets no Apple ID, a Podcast Index page has nothing to read, and episodes join only by their
 Apple track. The key and secret never appear in logs, the operator info or errors. A refused key
-fails no lookup and brings no run back early: what the other services answer is recorded, and what the source recorded with Podcast Index's answers before stays until it expires. An outage of a secondary service keeps what the other services answered,
+fails no lookup and brings no run back early: what the other services answer is added, and nothing the source recorded before is deleted (a row no service gives any more leaves when it expires). An outage of a secondary service keeps what the other services answered,
 and the run comes back after a failed run's wait; when nothing at all was found the lookup fails and the stored rows stay. Such failures of a secondary service
 (Podcast Index, iTunes, Wikidata, the feed) are counted in
 `pinakes_also_on_service_errors_total{service,class}`; a refused key (401 or 403) is also counted

@@ -3820,13 +3820,12 @@ async fn a_secondary_service_that_fails_for_good_stops_bringing_the_card_back(po
     assert_eq!(state().await.1, 0);
 }
 
-/// A run with part of its answer missing leaves rows its source recorded before
-/// (`Found::keep_stored`). While a service refuses the operator's credentials, the keys and links
-/// it gave stay (by their `via`), and its facts, while the services that answered have theirs
-/// replaced: a changed iTunes answer replaces iTunes' key beside a refused Podcast Index key.
-/// After a failed request every row stays until the run comes back; a whole answer replaces them.
+/// A run with part of its answer missing (a service failed or refused the operator's
+/// credentials) deletes none of the rows its source recorded before (`Found::keep_stored`): a
+/// changed iTunes answer beside a refused Podcast Index key adds iTunes' new key, and the old
+/// one stays until it expires. A run in which every service answered replaces them.
 #[sqlx::test(migrations = "../../migrations")]
-async fn a_run_that_keeps_its_stored_rows_keeps_those_its_answer_misses(pool: PgPool) {
+async fn a_run_with_part_of_its_answer_missing_deletes_nothing(pool: PgPool) {
     use pinakes_core::also_on::{Fact, Keep};
     let uri = "https://podcasts.apple.com/us/podcast/the-daily/id1200361736";
     let id = page(&pool, uri, "Kept").await;
@@ -3887,24 +3886,37 @@ async fn a_run_that_keeps_its_stored_rows_keeps_those_its_answer_misses(pool: Pg
             ..Default::default()
         })
     };
-    // Podcast Index refuses the key (and the feed is read only with its vouching): iTunes now
-    // answers another show. Its key and link are replaced; Podcast Index's and the feed's stay.
-    source.answer(
-        uri,
-        kept_ones(Keep::Services(vec!["feed".into(), "podcastindex".into()])),
-    );
+    let expiry = || {
+        let pool = pool.clone();
+        let id = id.clone();
+        async move {
+            sqlx::query_scalar::<_, f64>("SELECT extract(epoch FROM expires_at)::float8 FROM resource_key WHERE resource_id=$1 AND key='podcast:apple:1200361736'")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let old_expiry = expiry().await;
+    // Podcast Index refuses the key; iTunes now answers another show. Its new key and link are
+    // added; every row recorded before stays, iTunes' old ones too, until they expire.
+    source.answer(uri, kept_ones(Keep::All));
     drain(&pool, &cx, &sources).await;
     assert_eq!(
         rows().await,
         [
             "fact podcast_guid",
+            "key podcast:apple:1200361736",
             "key podcast:apple:1200361737",
             &format!("key {guid}"),
             "link Overcast",
+            "link Pocket Casts",
             "link Podcast Index",
             "link daily.example",
         ]
     );
+    // The old key keeps the expiry its own run gave it: no run refreshes what it no longer finds.
+    assert_eq!(expiry().await, old_expiry);
     // A failed request: nothing is deleted, what was found is added.
     source.answer(
         uri,
@@ -3916,7 +3928,7 @@ async fn a_run_that_keeps_its_stored_rows_keeps_those_its_answer_misses(pool: Pg
         }),
     );
     drain(&pool, &cx, &sources).await;
-    assert_eq!(rows().await.len(), 7);
+    assert_eq!(rows().await.len(), 9);
     // A whole answer replaces them all.
     source.answer(uri, kept_ones(Keep::Nothing));
     drain(&pool, &cx, &sources).await;

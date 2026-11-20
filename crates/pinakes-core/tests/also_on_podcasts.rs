@@ -330,12 +330,8 @@ async fn a_refused_podcast_index_key_fails_nothing() {
     // A refused key lasts: the run does not come back early for it, and what the source
     // recorded with Podcast Index's answers before stays beside what the others answered now.
     assert_eq!(found.retry_after, None);
-    // The rows Podcast Index's answers gave, and the feed's (read only once Podcast Index vouches
-    // for it), stay; iTunes' and Wikidata's are replaced by this run's.
-    assert_eq!(
-        found.keep_stored,
-        pinakes_core::also_on::Keep::Services(vec!["feed".into(), "podcastindex".into()])
-    );
+    // Part of the answer is missing: nothing the source recorded before is deleted.
+    assert_eq!(found.keep_stored, pinakes_core::also_on::Keep::All);
     // The refusal is counted where an alert reads it; a rate limit (429) is not. No other test
     // here has Podcast Index refuse.
     assert!(common::token_refusals("podcast_index") > before);
@@ -364,6 +360,72 @@ async fn a_refused_podcast_index_key_fails_nothing() {
         .await
         .unwrap_err();
     assert!(error.is::<RetryLater>(), "{error:#}");
+}
+
+/// A podcastindex.org card asks iTunes and Wikidata only with Podcast Index's answer: while
+/// Podcast Index refuses the key it asks nobody, and the `podcast:apple:` key and the links an
+/// earlier run recorded stay, with no failed run and no early one.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_refused_podcast_index_key_keeps_an_index_cards_apple_key(pool: sqlx::PgPool) {
+    use pinakes_core::{also_on, model::ResourceMeta, store};
+    let uri = "https://podcastindex.org/podcast/920666";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut doc = ResourceMeta::new(uri, "media", 86400);
+    doc.set_type("PodcastSeries");
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let config = indexed();
+    // What an earlier run, with the key accepted, recorded for the card.
+    also_on::record(
+        &pool,
+        &id,
+        "podcasts",
+        Found {
+            keys: vec![also_on::Key {
+                key: "podcast:apple:1584274529".into(),
+                via: "itunes".into(),
+            }],
+            links: vec![also_on::Link::new(
+                "https://podcasts.apple.com/podcast/id1584274529",
+                "Apple Podcasts",
+                "itunes",
+            )],
+            ..Default::default()
+        },
+        std::time::Duration::from_secs(86_400),
+        &config.also_on,
+    )
+    .await
+    .unwrap();
+    let refused = Recorded::with(&[(
+        "https://api.podcastindex.org/api/1.0/podcasts/byfeedid?id=920666",
+        401,
+        "{}",
+    )]);
+    let sources: Vec<_> = also_on::registry()
+        .into_iter()
+        .filter(|s| s.id() == "podcasts")
+        .collect();
+    sqlx::query("INSERT INTO also_on_dirty(resource_id) VALUES($1) ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=now()")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    also_on::drain(&pool, &cx(refused, config), &sources, 100)
+        .await
+        .unwrap();
+    let rows: Vec<String> = sqlx::query_scalar("SELECT key FROM resource_key WHERE resource_id=$1 UNION ALL SELECT site FROM derived_link WHERE resource_id=$1 ORDER BY 1")
+        .bind(&id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, ["Apple Podcasts", "podcast:apple:1584274529"]);
+    let (error, due_in): (Option<String>, f64) = sqlx::query_as("SELECT last_error,extract(epoch FROM next_attempt_at-now())::float8 FROM also_on_dirty WHERE resource_id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(error, None);
+    assert!(due_in > 3600.0, "{due_in}");
 }
 
 #[tokio::test]

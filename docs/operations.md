@@ -844,7 +844,7 @@ when that service fails: the link's own key is recorded, nothing the source reco
 `pinakes_also_on_service_errors_total{service,class}`, and the run comes back after a failed
 run's backoff instead of after the source's lifetime: five minutes, doubling to an hour while the
 service keeps failing, or the wait the service named when longer; after six such runs in a row the next is at the source's lifetime. A run in which every service
-answers resets it and replaces the source's rows. A service that refuses the operator's credentials brings no run back early: the keys and links it gave before stay, and the other services' answers replace theirs.
+answers resets it and replaces the source's rows. A service that refuses the operator's credentials brings no run back early, and deletes nothing either. So only a run in which every service answered removes a row; one no service gives any more otherwise leaves when it expires, at most twice the source's lifetime after it was last found.
 The sources run in the order [docs/sources](sources/README.md#also-on) lists them (each page says
 what its source reads and costs); `[also_on] apple_storefront` (`us`, a
 two-letter country code) is the storefront the iTunes lookups ask and the Apple Books and Apple
