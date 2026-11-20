@@ -769,8 +769,8 @@ impl Podcasts {
         let f = Self::itunes(cx, &episodes_request(show, sf)).await?;
         parse_episodes(f.status, &f.body, show)
     }
-    /// A signed Podcast Index request, when the operator configured its key and Podcast Index
-    /// accepts it.
+    /// A signed Podcast Index request, when the operator configured its key; a key Podcast
+    /// Index refuses is an error, a refusal of the credentials.
     async fn index_get(
         cx: &Context,
         url: &str,
@@ -781,10 +781,14 @@ impl Podcasts {
         let options = pi_options(key, secret);
         let fetched = cx.egress.fetch_with(url, &options).await?;
         crate::podcast_index_api::note_refusal(fetched.status);
-        // A refused key lasts: Podcast Index answers nothing then, as without a key, and no run
-        // comes back early for it.
+        // A refused key lasts: a refusal of the credentials, which brings no run back early and
+        // leaves what this source recorded with Podcast Index's answers where it is (`Deferred`).
         if matches!(fetched.status, 401 | 403) {
-            return Ok(None);
+            return Err(RetryLater {
+                class: "podcast_index_auth",
+                seconds: super::client_credentials::REFUSAL_HOLD,
+            }
+            .into());
         }
         Ok(Some(fetched))
     }

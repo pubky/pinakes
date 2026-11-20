@@ -129,11 +129,18 @@ pub(crate) fn retry_wait(error: &anyhow::Error) -> u64 {
 /// What failed secondary requests leave of a lookup: the failure to pass on, so a request that
 /// failed is never read as "the service has nothing" and the run comes back for its part.
 #[derive(Default)]
-pub(crate) struct Deferred(Option<anyhow::Error>);
+pub(crate) struct Deferred {
+    /// The failure to pass on.
+    failure: Option<anyhow::Error>,
+    /// A service refused the operator's credentials (`client_credentials::refused`).
+    refused: bool,
+}
 impl Deferred {
     /// The answer, or `None` after counting the failure. The failure is kept (of several, the
     /// one with the longest wait, [`retry_wait`]) unless asking again would end the same way: an
-    /// answer over its read's cap, or a request the egress's rules refuse.
+    /// answer over its read's cap, or a request the egress's rules refuse. Refused credentials
+    /// last too, and bring no run back: they are remembered, so what the source recorded with
+    /// that service's answers stays ([`Deferred::finish`]).
     pub(crate) fn take<T>(
         &mut self,
         service: &'static str,
@@ -146,13 +153,15 @@ impl Deferred {
                 crate::telemetry::also_on_service_error(service, class);
                 tracing::debug!(service, class, "also-on service failed; the lookup goes on");
                 let lasting = class == "policy" || crate::resolver::egress::over_cap(&error);
-                if !lasting
+                if super::client_credentials::refused(&error) {
+                    self.refused = true;
+                } else if !lasting
                     && self
-                        .0
+                        .failure
                         .as_ref()
                         .is_none_or(|kept| retry_wait(kept) < retry_wait(&error))
                 {
-                    self.0 = Some(error);
+                    self.failure = Some(error);
                 }
                 None
             }
@@ -161,9 +170,11 @@ impl Deferred {
     /// The lookup's answer. After a failure: the failure itself when nothing was found (no key,
     /// link, fact or place), so the source's stored rows stay and the run is retried; else what
     /// was found, with the wait after which the run comes back for the rest
-    /// (`Found::retry_after`).
+    /// (`Found::retry_after`). After refused credentials, what the source recorded before stays
+    /// beside what was found (`Found::keep_stored`).
     pub(crate) fn finish(self, mut found: Found) -> Result<Found> {
-        let Some(failure) = self.0 else {
+        found.keep_stored |= self.refused;
+        let Some(failure) = self.failure else {
             return Ok(found);
         };
         if found.keys.is_empty()
@@ -953,6 +964,23 @@ mod tests {
         let mut deferred = Deferred::default();
         assert_eq!(deferred.take("wikidata", over_cap()), None);
         assert_eq!(deferred.finish(Found::default()).unwrap(), Found::default());
+        // Refused credentials last too: no retry, and what the source recorded before stays
+        // beside what was found.
+        let no_key = || -> Result<Option<()>> {
+            Err(RetryLater {
+                class: "unit_auth",
+                seconds: crate::also_on::client_credentials::REFUSAL_HOLD,
+            }
+            .into())
+        };
+        let mut deferred = Deferred::default();
+        assert_eq!(deferred.take("podcastindex", no_key()), None);
+        let found = deferred.finish(some()).unwrap();
+        assert_eq!((found.retry_after, found.keep_stored), (None, true));
+        let mut deferred = Deferred::default();
+        assert_eq!(deferred.take("podcastindex", no_key()), None);
+        let found = deferred.finish(Found::default()).unwrap();
+        assert!(found.keep_stored && found.keys.is_empty());
     }
 
     #[test]

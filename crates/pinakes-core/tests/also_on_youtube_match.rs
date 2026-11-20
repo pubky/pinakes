@@ -345,7 +345,9 @@ async fn without_its_switch_or_a_service_to_search_nothing_is_asked(pool: sqlx::
 }
 
 /// TIDAL failing, by refusing the credentials (403) or with an answer the source does not expect
-/// (400), leaves the run's Deezer match standing; the run comes back after five minutes.
+/// (400), leaves the run's Deezer match standing. After an unexpected answer the run comes back
+/// in five minutes, and the TIDAL link an earlier run found is out until then; refused
+/// credentials bring no run back early, so that link stays.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_tidal_failure_keeps_the_deezer_match(pool: sqlx::PgPool) {
     let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
@@ -353,27 +355,36 @@ async fn a_tidal_failure_keeps_the_deezer_match(pool: sqlx::PgPool) {
         return;
     }
     let queen = save(&pool, "bSnlKl_PoQU").await;
-    // A pair per case: a refusal holds its pair's slot. Refused credentials count as TIDAL not
-    // searched (the video is read again at the source's lifetime); any other failure brings the
-    // run back after five minutes.
-    for (status, pair, wait) in [
+    let deezer = "https://www.deezer.com/track/4091937401 - youtube_match maybe";
+    let tidal = "https://tidal.com/track/534050211 - youtube_match maybe";
+    // A pair per case: a refusal holds its pair's slot. Refused credentials leave the video to
+    // be read again at the source's lifetime; any other failure brings the run back after five
+    // minutes.
+    for (status, pair, wait, kept) in [
         (
             403,
             ("refused-match-id", "refused-match-secret"),
             3_601.0..=f64::INFINITY,
+            vec![tidal, deezer],
         ),
         (
             400,
             ("unexpected-match-id", "unexpected-match-secret"),
             290.0..=300.0,
+            vec![deezer],
         ),
     ] {
-        for sql in [
-            "DELETE FROM derived_link",
-            "UPDATE also_on_dirty SET attempts=0",
-        ] {
-            sqlx::query(sql).execute(&pool).await.unwrap();
-        }
+        sqlx::query("DELETE FROM derived_link")
+            .execute(&pool)
+            .await
+            .unwrap();
+        // An earlier run's links: Deezer's match, and a TIDAL one as such a run would record it.
+        run(&pool, config(true, true, None), Answers::default()).await;
+        sqlx::query("INSERT INTO derived_link(resource_id,link_id,uri,site,source,via,kind,expires_at) SELECT resource_id,md5('https://tidal.com/track/534050211'),'https://tidal.com/track/534050211','TIDAL',source,via,kind,expires_at FROM derived_link WHERE resource_id=$1 AND source='youtube_match'")
+            .bind(&queen)
+            .execute(&pool)
+            .await
+            .unwrap();
         run(
             &pool,
             config(true, true, Some(pair)),
@@ -383,11 +394,7 @@ async fn a_tidal_failure_keeps_the_deezer_match(pool: sqlx::PgPool) {
             },
         )
         .await;
-        assert_eq!(
-            links(&pool, &queen).await,
-            ["https://www.deezer.com/track/4091937401 - youtube_match maybe"],
-            "{status}"
-        );
+        assert_eq!(links(&pool, &queen).await, kept, "{status}");
         let (error, seconds): (Option<String>, f64) = sqlx::query_as("SELECT last_error, extract(epoch FROM next_attempt_at-now())::float8 FROM also_on_dirty WHERE resource_id=$1")
             .bind(&queen)
             .fetch_one(&pool)

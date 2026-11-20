@@ -3787,6 +3787,71 @@ async fn a_secondary_service_that_fails_for_good_stops_bringing_the_card_back(po
     assert_eq!(state().await.1, 0);
 }
 
+/// A run that could not ask one of its services, which refuses the operator's credentials
+/// (`Found::keep_stored`), adds what it found to the rows its source holds and deletes none of
+/// them; any other run replaces them.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_run_that_keeps_its_stored_rows_only_adds_to_them(pool: PgPool) {
+    use pinakes_core::also_on::Fact;
+    let uri = "https://www.youtube.com/watch?v=bSnlKl_PoQU";
+    let id = page(&pool, uri, "Kept").await;
+    let source = Fake::new("mixed");
+    source.answer(
+        uri,
+        Ok(Found {
+            keys: vec![key("isrc:USIR10211559")],
+            links: vec![Link::new(
+                "https://tidal.com/track/534050211",
+                "TIDAL",
+                "mixed",
+            )],
+            facts: vec![Fact::new("artist", "Queen")],
+            ..Default::default()
+        }),
+    );
+    let sources: Vec<Arc<dyn Source>> = vec![source.clone()];
+    let cx = cx(Config::default());
+    drain(&pool, &cx, &sources).await;
+    let rows = || {
+        let pool = pool.clone();
+        let id = id.clone();
+        async move {
+            sqlx::query_scalar::<_, String>("SELECT 'key '||key FROM resource_key WHERE resource_id=$1 UNION SELECT 'link '||site FROM derived_link WHERE resource_id=$1 UNION SELECT 'fact '||name FROM resource_fact WHERE resource_id=$1 ORDER BY 1")
+                .bind(&id)
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let second = |keep_stored: bool| {
+        Ok(Found {
+            keys: vec![key("upc:0602498688373")],
+            links: vec![Link::new(
+                "https://www.deezer.com/track/4091937401",
+                "Deezer",
+                "mixed",
+            )],
+            keep_stored,
+            ..Default::default()
+        })
+    };
+    source.answer(uri, second(true));
+    drain(&pool, &cx, &sources).await;
+    assert_eq!(
+        rows().await,
+        [
+            "fact artist",
+            "key isrc:USIR10211559",
+            "key upc:0602498688373",
+            "link Deezer",
+            "link TIDAL"
+        ]
+    );
+    source.answer(uri, second(false));
+    drain(&pool, &cx, &sources).await;
+    assert_eq!(rows().await, ["key upc:0602498688373", "link Deezer"]);
+}
+
 /// A key, a link or a fact two sources vouch for is the row of the one that recorded it first.
 /// Once that source is switched off, or let the row expire, the other takes the row over at its
 /// next run, so the card keeps what a live source vouches for; the resource, and the one a keyed

@@ -185,6 +185,11 @@ pub struct Found {
     /// Links whose place this run could not tell (a lookup failed, credentials were refused, a
     /// list was cut short, a cap was reached): their earlier places stay as recorded.
     pub keep: Vec<String>,
+    /// A service this lookup asks beside others refused the operator's credentials, so its part
+    /// is missing from this run and a retry soon would miss it too: the rows the source recorded
+    /// before stay as they are (none is deleted; each expires in its own time), and what this run
+    /// found is added to them.
+    pub keep_stored: bool,
 }
 /// A link placed for one card: on a MusicBrainz release, `rank` 0 when it is the card's own, then
 /// 1, 2, … for the original edition's releases by date; or (rank 1000, no `release`) on another
@@ -839,7 +844,8 @@ fn normal_key(key: &str) -> Option<String> {
     }
 }
 /// Replace `source`'s keys and links for `resource_id` with `found` (checked and bounded); they
-/// live for twice `ttl`.
+/// live for twice `ttl`. With `Found::keep_stored`, `found` is added to the rows the source holds
+/// and none of them is deleted.
 pub async fn record(
     pool: &PgPool,
     resource_id: &str,
@@ -849,6 +855,7 @@ pub async fn record(
     cfg: &AlsoOnConfig,
 ) -> Result<()> {
     anyhow::ensure!(token(source), "invalid source id {source}");
+    let mut keep_stored = found.keep_stored;
     let (mut keys, mut links, mut facts, mut placed) = checked(resource_id, found, cfg);
     let expires = Utc::now()
         + chrono::Duration::from_std(ttl.saturating_mul(2)).unwrap_or(chrono::Duration::days(60));
@@ -888,6 +895,7 @@ pub async fn record(
         .is_some_and(|doc| crate::changes::gone_social(&doc))
     {
         (keys, links, facts, placed) = Default::default();
+        keep_stored = false;
     }
     // Observed, never decided: every producer keys the recording that stands for a set of
     // duplicates (`music_sources::recording_key`), so two MusicBrainz recordings on one resource
@@ -918,8 +926,10 @@ pub async fn record(
         .iter()
         .map(|k| serde_json::json!({"key": k.key, "via": k.via}))
         .collect();
-    sqlx::query("DELETE FROM resource_key WHERE resource_id=$1 AND source=$2 AND NOT key=ANY(SELECT v->>'key' FROM jsonb_array_elements($3) v)")
-        .bind(resource_id).bind(source).bind(Value::from(key_rows.clone())).execute(&mut *tx).await?;
+    if !keep_stored {
+        sqlx::query("DELETE FROM resource_key WHERE resource_id=$1 AND source=$2 AND NOT key=ANY(SELECT v->>'key' FROM jsonb_array_elements($3) v)")
+            .bind(resource_id).bind(source).bind(Value::from(key_rows.clone())).execute(&mut *tx).await?;
+    }
     // A key whose source is switched off, or let it expire, is this source's from now on: no
     // read shows such a row, though this source vouches for the key. `key` is set so that the
     // resource is regrouped as for a new key (the triggers on `key`).
@@ -932,8 +942,10 @@ pub async fn record(
         .iter()
         .map(|(id, uri, l)| serde_json::json!({"id": id, "uri": uri, "site": l.site, "via": l.via, "kind": l.kind, "at": l.at, "key": l.key}))
         .collect();
-    sqlx::query("DELETE FROM derived_link WHERE resource_id=$1 AND source=$2 AND NOT link_id=ANY(SELECT v->>'id' FROM jsonb_array_elements($3) v)")
-        .bind(resource_id).bind(source).bind(Value::from(link_rows.clone())).execute(&mut *tx).await?;
+    if !keep_stored {
+        sqlx::query("DELETE FROM derived_link WHERE resource_id=$1 AND source=$2 AND NOT link_id=ANY(SELECT v->>'id' FROM jsonb_array_elements($3) v)")
+            .bind(resource_id).bind(source).bind(Value::from(link_rows.clone())).execute(&mut *tx).await?;
+    }
     // A keyed link this run takes over from a source that is switched off or let it expire
     // (below) names its resource again with the same key: that resource is regrouped, as the
     // link's trigger does only for a key that changes.
@@ -949,8 +961,10 @@ pub async fn record(
         .iter()
         .map(|f| serde_json::json!({"name": f.name, "value": f.value}))
         .collect();
-    sqlx::query("DELETE FROM resource_fact WHERE resource_id=$1 AND source=$2 AND NOT (name,value) IN (SELECT v->>'name',v->>'value' FROM jsonb_array_elements($3) v)")
-        .bind(resource_id).bind(source).bind(Value::from(fact_rows.clone())).execute(&mut *tx).await?;
+    if !keep_stored {
+        sqlx::query("DELETE FROM resource_fact WHERE resource_id=$1 AND source=$2 AND NOT (name,value) IN (SELECT v->>'name',v->>'value' FROM jsonb_array_elements($3) v)")
+            .bind(resource_id).bind(source).bind(Value::from(fact_rows.clone())).execute(&mut *tx).await?;
+    }
     // A recording's artist or length taken over from a switched-off source (below) counts for
     // the same-recording hint again: the recording is read again, as the fact's trigger marks it
     // only for a value that changes or a row that had expired.
@@ -966,8 +980,10 @@ pub async fn record(
         .map(|(id, e)| serde_json::json!({"id": id, "release": e.release, "rank": e.rank}))
         .collect();
     // A link whose place this run could not tell keeps the one recorded before.
-    sqlx::query("DELETE FROM link_release WHERE resource_id=$1 AND source=$2 AND NOT link_id=ANY(SELECT v->>'id' FROM jsonb_array_elements($3) v) AND NOT link_id=ANY($4)")
-        .bind(resource_id).bind(source).bind(Value::from(edition_rows.clone())).bind(&placed.keep).execute(&mut *tx).await?;
+    if !keep_stored {
+        sqlx::query("DELETE FROM link_release WHERE resource_id=$1 AND source=$2 AND NOT link_id=ANY(SELECT v->>'id' FROM jsonb_array_elements($3) v) AND NOT link_id=ANY($4)")
+            .bind(resource_id).bind(source).bind(Value::from(edition_rows.clone())).bind(&placed.keep).execute(&mut *tx).await?;
+    }
     sqlx::query("INSERT INTO link_release(resource_id,link_id,release,rank,source,expires_at) SELECT $1,v->>'id',v->>'release',(v->>'rank')::smallint,$2,$4 FROM jsonb_array_elements($3) v ON CONFLICT(resource_id,link_id) DO UPDATE SET release=excluded.release,rank=excluded.rank,seen_at=now(),expires_at=excluded.expires_at WHERE link_release.source=excluded.source")
         .bind(resource_id).bind(source).bind(Value::from(edition_rows)).bind(expires).execute(&mut *tx).await?;
     tx.commit().await?;
@@ -1259,6 +1275,7 @@ pub async fn drain_leased(
                 .bind(lifetime)
                 .bind(cfg.retry_secs as f64)
                 .bind(asked.as_secs().min(86_400) as f64)
+                .bind(PARTIAL_RETRIES)
                 .execute(pool)
                 .await?;
             }
@@ -1275,7 +1292,6 @@ pub async fn drain_leased(
                 tracing::warn!(resource=%id, kind=crate::resolver::error_class(&error), "also-on lookup will retry");
                 // A service that said how long to wait is waited for at least that long.
                 let asked = error
-                .bind(PARTIAL_RETRIES)
                     .downcast_ref::<crate::resolver::RetryLater>()
                     .map_or(0, |r| r.seconds.min(86_400)) as f64;
                 sqlx::query(&format!(
@@ -1294,6 +1310,10 @@ pub async fn drain_leased(
     }
     Ok(handled)
 }
+/// How many runs in a row a failing secondary service brings back early (after the backoff of a
+/// failed run, which reaches an hour at the fifth): after them the service is taken to fail for
+/// good, and the card runs again at its sources' lifetime, as a card without the failure does.
+pub const PARTIAL_RETRIES: i32 = 6;
 /// When a resource's next also-on run is due.
 struct Next {
     /// The shortest lifetime among the sources that ran.
@@ -1310,10 +1330,6 @@ async fn stored_sources(
 ) -> Result<std::collections::HashSet<String>> {
     Ok(sqlx::query_scalar::<_, String>("SELECT source FROM resource_key WHERE resource_id=$1 UNION SELECT source FROM derived_link WHERE resource_id=$1 UNION SELECT source FROM resource_fact WHERE resource_id=$1 UNION SELECT source FROM link_release WHERE resource_id=$1")
         .bind(resource_id)
-/// How many runs in a row a failing secondary service brings back early (after the backoff of a
-/// failed run, which reaches an hour at the fifth): after them the service is taken to fail for
-/// good, and the card runs again at its sources' lifetime, as a card without the failure does.
-pub const PARTIAL_RETRIES: i32 = 6;
         .fetch_all(pool)
         .await?
         .into_iter()
