@@ -718,7 +718,16 @@ fn checked(
         .collect();
     keys.sort();
     keys.dedup_by(|a, b| a.key == b.key);
+    // As for facts: the cap cuts the many keys of one namespace (a recording's ISRCs) before a
+    // namespace's one key (its MBID, its Q-id), so those always fit.
+    let namespace = |key: &str| key.rsplit_once(':').map_or(key, |(n, _)| n).to_owned();
+    let mut per_namespace: std::collections::HashMap<String, usize> = Default::default();
+    for k in &keys {
+        *per_namespace.entry(namespace(&k.key)).or_default() += 1;
+    }
+    keys.sort_by_key(|k| per_namespace[&namespace(&k.key)] > 1);
     keys.truncate(cfg.keys_per_source);
+    keys.sort();
     // In the source's order (its best first), each link once.
     let mut links = Vec::new();
     let mut seen = std::collections::HashSet::new();

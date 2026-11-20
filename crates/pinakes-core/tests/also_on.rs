@@ -3023,7 +3023,12 @@ impl Source for JoinedMeanwhile {
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_regrouping_during_a_run_brings_the_card_back(pool: PgPool) {
     let recording = "mb:recording:8f3471b5-7e6a-48da-86a9-c1c07a0f47ae";
-    let card = page(&pool, "https://open.spotify.com/track/regrouped", "Regrouped").await;
+    let card = page(
+        &pool,
+        "https://open.spotify.com/track/regrouped",
+        "Regrouped",
+    )
+    .await;
     let other = page(&pool, "https://tidal.com/track/491206012", "Regrouped").await;
     let cx = cx(Config::default());
     also_on::record(
@@ -3237,6 +3242,44 @@ async fn the_facts_caps_floor_keeps_a_recordings_single_valued_facts(pool: PgPoo
         assert!(stored.contains(&name.to_owned()), "{name}: {stored:?}");
     }
     assert_eq!(stored.iter().filter(|n| *n == "isrc").count(), 5);
+}
+
+/// A source's keys are capped as its facts are: the cap cuts the many keys of one namespace (a
+/// recording's ISRCs) before a namespace's one key (its MBID), which always fits.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_sources_single_keys_survive_its_cap(pool: PgPool) {
+    let id = page(&pool, "https://open.spotify.com/track/keycap", "Track").await;
+    let mut config = Config::default();
+    config.also_on.keys_per_source = 3;
+    let recording = "mb:recording:00000000-0000-4000-8000-00000000000f";
+    let mut keys: Vec<Key> = (10..18)
+        .map(|n| key(&format!("isrc:AAAAA26000{n}")))
+        .collect();
+    keys.push(key(recording));
+    also_on::record(
+        &pool,
+        &id,
+        "music",
+        Found {
+            keys,
+            ..Default::default()
+        },
+        Duration::from_secs(60),
+        &config.also_on,
+    )
+    .await
+    .unwrap();
+    let stored: Vec<String> = sqlx::query_scalar(
+        "SELECT key FROM resource_key WHERE resource_id=$1 ORDER BY key COLLATE \"C\"",
+    )
+    .bind(&id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        stored,
+        ["isrc:AAAAA2600010", "isrc:AAAAA2600011", recording]
+    );
 }
 
 /// Two sources fail, the first asking for an hour, the second for five minutes: the resource is
