@@ -322,6 +322,9 @@ impl Source for LegislationGovUk {
         let xml = FetchOptions {
             accept: Some("application/xml".into()),
             extra_types: &["application/xml"],
+            // A cap of its own: a larger record is refused (the introduction below), where an
+            // XML body without one is cut and no longer parses.
+            body_cap: Some(crate::resolver::egress::BODY_CAP),
             ..Default::default()
         };
         let f = match cx.fetch(&item.data_url(), &xml).await {
@@ -358,6 +361,39 @@ mod tests {
     }
     fn base(item: &Item) -> ResourceMeta {
         ResourceMeta::new(&item.root(), "legislation_gov_uk", 3600)
+    }
+
+    /// A provision over the page cap takes its card from the introduction: the read sets a cap
+    /// of its own, so the body is refused rather than cut into XML that no longer parses.
+    #[tokio::test(start_paused = true)]
+    async fn a_provision_over_the_cap_reads_the_introduction() {
+        let mut cut = read("ukpga_2018_12_section_1_2020-01-31.xml");
+        cut.truncate(cut.len() / 2);
+        let (egress, recorded) = crate::sources::fixture::egress(vec![
+            (
+                "https://www.legislation.gov.uk/ukpga/2018/12/section/1/data.xml",
+                200,
+                "!large-xml",
+                cut,
+            ),
+            (
+                "https://www.legislation.gov.uk/ukpga/2018/12/introduction/data.xml",
+                200,
+                "application/xml",
+                read("ukpga_2018_12_introduction.xml"),
+            ),
+        ]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let doc = LegislationGovUk
+            .resolve(&cx, "https://www.legislation.gov.uk/ukpga/2018/12/section/1")
+            .await
+            .unwrap();
+        assert_eq!(doc.status, crate::model::Status::Ok);
+        assert!(doc.name.is_some());
+        assert_eq!(recorded.asked().len(), 2, "{:?}", recorded.asked());
     }
 
     #[test]

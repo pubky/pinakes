@@ -482,6 +482,9 @@ impl Source for Govinfo {
                 &FetchOptions {
                     accept: Some("application/xml".into()),
                     extra_types: &["application/xml", "text/xml"],
+                    // A cap of its own: a larger record is refused (the minimal card below),
+                    // where an XML body without one is cut and no longer parses.
+                    body_cap: Some(crate::resolver::egress::BODY_CAP),
                     ..Default::default()
                 },
             )
@@ -517,6 +520,30 @@ mod tests {
         Target::Law {
             package: "PLAW-117publ58".into(),
         }
+    }
+
+    /// A record over the page cap gives the card its link names: the read sets a cap of its
+    /// own, so the body is refused rather than cut into XML that no longer parses.
+    #[tokio::test(start_paused = true)]
+    async fn a_record_over_the_cap_gets_the_minimal_card() {
+        let mut cut = read("mods_pkg_PLAW-117publ58.xml.gz");
+        cut.truncate(cut.len() / 2);
+        let (egress, _) = crate::sources::fixture::egress(vec![(
+            "https://www.govinfo.gov/metadata/pkg/PLAW-117publ58/mods.xml",
+            200,
+            "!large-xml",
+            cut,
+        )]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let doc = Govinfo
+            .resolve(&cx, "https://www.govinfo.gov/app/details/PLAW-117publ58")
+            .await
+            .unwrap();
+        assert_eq!(doc.name.as_deref(), Some("Public Law 117-58"));
+        assert_eq!(doc.type_name, "Legislation");
     }
 
     #[test]

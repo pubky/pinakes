@@ -1065,8 +1065,10 @@ pub(crate) mod fixture {
 
     /// An egress that answers recorded responses by exact URL (anything else is a 404) and
     /// remembers the URLs asked, in order. A redirect's body is its `Location`; the content type
-    /// `!too-large` answers a body over its read's cap. Pair it with `#[tokio::test(start_paused = true)]`:
-    /// the per-host spacing then costs no time.
+    /// `!too-large` answers a body over its read's cap, and `!large-xml` an XML body over the page
+    /// cap as the real read treats one: refused when the read sets `body_cap`, otherwise cut (the
+    /// route's body is the cut text). Pair it with `#[tokio::test(start_paused = true)]`: the
+    /// per-host spacing then costs no time.
     pub fn egress(
         routes: Vec<(&str, u16, &'static str, Vec<u8>)>,
     ) -> (crate::resolver::egress::Egress, std::sync::Arc<Recorded>) {
@@ -1102,6 +1104,31 @@ pub(crate) mod fixture {
     }
     #[async_trait::async_trait]
     impl crate::resolver::egress::Transport for Recorded {
+        async fn get_with(
+            &self,
+            url: &url::Url,
+            addresses: &[std::net::SocketAddr],
+            options: &crate::resolver::egress::FetchOptions,
+        ) -> anyhow::Result<crate::resolver::egress::Fetched> {
+            match self.routes.get(url.as_str()) {
+                Some((status, "!large-xml", body)) => {
+                    self.asked.lock().unwrap().push(url.to_string());
+                    if let Some(cap) = options.body_cap {
+                        return Err(crate::resolver::egress::BodyTooLarge { cap }.into());
+                    }
+                    Ok(crate::resolver::egress::Fetched {
+                        truncated: true,
+                        ..crate::resolver::egress::Fetched::answer(
+                            url.clone(),
+                            *status,
+                            "application/xml".into(),
+                            body.clone(),
+                        )
+                    })
+                }
+                _ => self.get(url, addresses).await,
+            }
+        }
         async fn get(
             &self,
             url: &url::Url,
