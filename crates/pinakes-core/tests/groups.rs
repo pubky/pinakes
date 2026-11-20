@@ -945,6 +945,212 @@ async fn curated_members_stay_as_curated_through_saves_and_a_policy_change(pool:
     }
     assert_eq!(gids(&pool, &all).await, curated, "after refused curations");
 }
+/// Saves the calendar feed `uri` with one series of two daily dates from `start` (one UID, two
+/// recurrence IDs) named `summary`, and has its groups run: the feed's ID.
+async fn series_feed(pool: &PgPool, uri: &str, uid: &str, summary: &str, start: &str) -> String {
+    use pinakes_core::{config::EventConfig, event::calendar};
+    let id = store::ensure_resource(pool, uri).await.unwrap();
+    let text = format!("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:{uid}\r\nDTSTART:{start}\r\nRRULE:FREQ=DAILY;COUNT=2\r\nSUMMARY:{summary}\r\nGEO:47;8\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n");
+    let d = calendar::parse(
+        uri,
+        text.as_bytes(),
+        &EventConfig::default(),
+        chrono::Utc::now(),
+    )
+    .unwrap();
+    store_document(pool, &id, &d).await;
+    id
+}
+/// A feed's occurrence units, in the order of their dates: each unit's ID and the member that
+/// names it.
+async fn occurrences(pool: &PgPool, feed: &str) -> Vec<(String, groups::Member)> {
+    let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT unit_id,occurrence->>'uid',occurrence->>'recurrence_id' FROM group_unit WHERE resource_id=$1 AND occurrence_key<>'' ORDER BY occurrence_key",
+    )
+    .bind(feed)
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    rows.into_iter()
+        .map(|(unit, uid, recurrence_id)| {
+            (
+                unit,
+                groups::Member {
+                    resource_id: feed.to_owned(),
+                    occurrence: Some(pinakes_core::event::storage::OccurrenceRef {
+                        uid,
+                        recurrence_id,
+                    }),
+                },
+            )
+        })
+        .collect()
+}
+/// An operator curates single dates of feeds' series: a member is the one occurrence its `uid`
+/// and `recurrence_id` name, not its feed and not the series' other date. The curated dates stay
+/// one group, and every other unit outside it, when a feed is saved again and when the grouping
+/// policy changes. A member named twice is set once: one pin, one membership.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_curated_occurrence_stays_as_curated_and_a_member_named_twice_is_set_once(pool: PgPool) {
+    let start = (chrono::Utc::now() + chrono::Duration::days(1))
+        .format("%Y%m%dT%H%M%SZ")
+        .to_string();
+    let (one_uri, other_uri) = ("https://one.example/s.ics", "https://other.example/s.ics");
+    let one = series_feed(&pool, one_uri, "series-one", "Morning run", &start).await;
+    let other = series_feed(&pool, other_uri, "series-other", "Evening swim", &start).await;
+    // A member of its own: the unit, and the occurrence that names it.
+    let member = |(unit, m): &(String, groups::Member)| {
+        (
+            unit.clone(),
+            groups::Member {
+                resource_id: m.resource_id.clone(),
+                occurrence: m.occurrence.as_ref().map(|o| {
+                    pinakes_core::event::storage::OccurrenceRef {
+                        uid: o.uid.clone(),
+                        recurrence_id: o.recurrence_id.clone(),
+                    }
+                }),
+            },
+        )
+    };
+    let (of_one, of_other) = (
+        occurrences(&pool, &one).await,
+        occurrences(&pool, &other).await,
+    );
+    // Two dates each, told apart by the recurrence ID alone.
+    for dates in [&of_one, &of_other] {
+        assert_eq!(dates.len(), 2);
+        let (first, second) = (
+            dates[0].1.occurrence.as_ref().unwrap(),
+            dates[1].1.occurrence.as_ref().unwrap(),
+        );
+        assert_eq!(first.uid, second.uid);
+        assert_ne!(first.recurrence_id, second.recurrence_id);
+    }
+    // The group's units, and its pins, each in the order of their IDs.
+    let state = |pool: PgPool, group: String| async move {
+        let members: Vec<String> =
+            sqlx::query_scalar("SELECT unit_id FROM group_unit WHERE group_id=$1 ORDER BY unit_id")
+                .bind(&group)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let pins: Vec<String> = sqlx::query_scalar(
+            "SELECT unit_id FROM group_override WHERE group_id=$1 ORDER BY unit_id",
+        )
+        .bind(&group)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let grouped: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM group_unit WHERE group_id IS NOT NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        (members, pins, grouped)
+    };
+    assert_eq!(
+        state(pool.clone(), "c".repeat(32)).await.2,
+        0,
+        "no feed's dates group by themselves"
+    );
+    // The first date of one series with the second of the other.
+    let group = "c".repeat(32);
+    let (first, second) = (member(&of_one[0]), member(&of_other[1]));
+    let mut units = vec![first.0.clone(), second.0.clone()];
+    units.sort();
+    let curated = (units.clone(), units.clone(), 2);
+    groups::curate(
+        &pool,
+        &group,
+        groups::Curation {
+            members: vec![member(&of_one[0]).1, member(&of_other[1]).1],
+        },
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        state(pool.clone(), group.clone()).await,
+        curated,
+        "as curated"
+    );
+    // Each feed saved again under another name.
+    series_feed(&pool, one_uri, "series-one", "Morning run, moved", &start).await;
+    drained(&pool, &Default::default()).await;
+    assert_eq!(
+        state(pool.clone(), group.clone()).await,
+        curated,
+        "the first feed saved"
+    );
+    series_feed(
+        &pool,
+        other_uri,
+        "series-other",
+        "Evening swim, moved",
+        &start,
+    )
+    .await;
+    drained(&pool, &Default::default()).await;
+    assert_eq!(
+        state(pool.clone(), group.clone()).await,
+        curated,
+        "the second feed saved"
+    );
+    // A policy change runs every unit again.
+    let cfg = groups::GroupConfig {
+        cross_container_occurrences: groups::CrossContainerOccurrences::Corroborated,
+        ..Default::default()
+    };
+    assert!(groups::configure(&pool, &cfg).await.unwrap());
+    common::drain_groups(&pool, &cfg).await;
+    let waiting: i64 = sqlx::query_scalar("SELECT count(*) FROM group_dirty")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(waiting, 0);
+    assert_eq!(
+        state(pool.clone(), group.clone()).await,
+        curated,
+        "after a policy change"
+    );
+    // A member named twice beside the other: still one pin and one membership each.
+    groups::curate(
+        &pool,
+        &group,
+        groups::Curation {
+            members: vec![
+                member(&of_one[0]).1,
+                member(&of_other[1]).1,
+                member(&of_one[0]).1,
+            ],
+        },
+        &cfg,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        state(pool.clone(), group.clone()).await,
+        curated,
+        "a member named twice"
+    );
+    // One member named twice and no other: the group is that one date, and the other left it.
+    groups::curate(
+        &pool,
+        &group,
+        groups::Curation {
+            members: vec![member(&of_one[0]).1, member(&of_one[0]).1],
+        },
+        &cfg,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        state(pool.clone(), group.clone()).await,
+        (vec![first.0.clone()], vec![first.0.clone()], 1),
+        "one member named twice"
+    );
+}
 #[sqlx::test(migrations = "../../migrations")]
 async fn group_failure_keeps_document_and_drain_advances(pool: PgPool) {
     let a = card(&pool, "ga", &["gb"], None).await;
