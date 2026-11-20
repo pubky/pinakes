@@ -100,7 +100,7 @@ fn a_calendar_past_its_parse_budget_is_refused() {
                 parse_timeout_ms: 1,
                 ..Default::default()
             },
-            chrono::Utc::now(),
+            calendar_now(),
         )
     })
     .unwrap_err();
@@ -354,6 +354,12 @@ async fn a_cancelled_job_refuses_the_rest_of_a_plain_answer() {
     );
 }
 
+/// The instant the 1,000-event calendar is read at: two weeks before its events, so the parse
+/// keeps all of them whatever the wall clock says.
+fn calendar_now() -> chrono::DateTime<chrono::Utc> {
+    "2026-10-18T00:00:00Z".parse().unwrap()
+}
+
 /// A 1,000-event calendar as calendars are written: plain locations and descriptions with a
 /// meeting link, and an HTML description per event (over 150 KB).
 fn thousand_event_calendar() -> String {
@@ -382,7 +388,7 @@ fn a_thousand_event_calendar_parses_in_its_budget_with_the_worker() {
             "https://example.org/calendar.ics",
             ics.as_bytes(),
             &Default::default(),
-            chrono::Utc::now(),
+            calendar_now(),
         )
     })
     .unwrap();
