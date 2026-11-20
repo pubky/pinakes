@@ -669,19 +669,35 @@ async fn saves_make_sources_due_and_unknown_sources_are_refused(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(due(pool.clone()).await, 1);
-    // An alias spelling is never a subject.
-    let alias = store::ensure_resource(&pool, &format!("{uri}?utm_source=x"))
+    // An alias spelling is never a subject: a saved page that is another link's alias, due and
+    // answered as its root is, runs no lookup; its root runs its own.
+    let spelling = "https://open.spotify.com/track/d1-spelling";
+    let alias = page(&pool, spelling, "Track").await;
+    let mut tx = pool.begin().await.unwrap();
+    let line = pinakes_core::alias::assign(
+        &mut tx,
+        &alias,
+        &pinakes_core::alias::Alias {
+            root: uri.into(),
+            basis: "identifier",
+        },
+    )
+    .await
+    .unwrap();
+    pinakes_core::alias::record(&mut tx, line.into_iter().collect())
         .await
         .unwrap();
-    assert_ne!(alias, id);
-    hub.answer(&format!("{uri}?utm_source=x"), Ok(Found::default()));
+    tx.commit().await.unwrap();
+    sqlx::query("INSERT INTO also_on_dirty(resource_id) VALUES($1),($2) ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=now()")
+        .bind(&id)
+        .bind(&alias)
+        .execute(&pool)
+        .await
+        .unwrap();
+    hub.answer(uri, Ok(Found::default()));
+    hub.answer(spelling, Ok(Found::default()));
     drain(&pool, &cx(Config::default()), &sources).await;
-    assert!(!hub
-        .calls
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|u| u.contains("utm_source")));
+    assert_eq!(*hub.calls.lock().unwrap(), [uri]);
     let unknown =
         toml::from_str::<Config>("[also_on.sources.nope]\nenabled = false\n").map(|c| c.validate());
     assert!(matches!(unknown, Ok(Err(_))), "{unknown:?}");

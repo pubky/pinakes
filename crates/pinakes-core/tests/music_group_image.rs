@@ -214,9 +214,24 @@ async fn committed_music_groups_are_logged_and_capped(pool: PgPool) {
     .unwrap();
     assert!(sizes.contains(&2));
     assert!(sizes.iter().all(|n| *n <= 2), "{sizes:?}");
+    // The subscriber is the process's: the cap is reported from a blocking thread, which a
+    // thread's own subscriber never sees. So each line is told from a sibling test's by a value
+    // only this test has: one of its resources, and its cap of 2.
     let text = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
-    assert!(text.contains("group reconciliation committed"), "{text}");
-    assert!(text.contains("group size cap reached"), "{text}");
+    assert!(
+        text.lines().any(|line| {
+            line.contains("group reconciliation committed")
+                && ids.iter().any(|id| line.contains(id.as_str()))
+        }),
+        "{text}"
+    );
+    assert!(
+        text.lines().any(|line| {
+            line.contains("group size cap reached")
+                && line.split_whitespace().any(|field| field == "cap=2")
+        }),
+        "{text}"
+    );
 }
 /// Two tracks of one album each name the album with a link keyed by the album's own key. A
 /// link's key belongs to what it names: the album takes it, the tracks do not, so neither track

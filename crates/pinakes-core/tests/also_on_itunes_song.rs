@@ -322,11 +322,9 @@ async fn a_busy_itunes_keeps_the_song(pool: sqlx::PgPool) {
     )
     .await;
     assert_eq!(links(&pool, &lucky).await, [GET_LUCKY]);
-    let error: Option<String> =
-        sqlx::query_scalar("SELECT last_error FROM also_on_dirty WHERE resource_id=$1")
-            .bind(&lucky)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    // The retry is queued for the hour iTunes asked for (`Retry-After: 3600`), not the worker's
+    // own first backoff of a minute or two.
+    let (error, seconds) = common::also_on_due(&pool, &lucky).await;
     assert!(error.is_some(), "a retry is queued");
+    assert!((3500.0..=3600.5).contains(&seconds), "{error:?}: {seconds}");
 }

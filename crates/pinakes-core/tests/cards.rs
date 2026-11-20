@@ -336,42 +336,57 @@ async fn the_media_route_never_sends_a_link_that_carries_a_credential_to_oembed(
             ))
         }
     }
-    for (policy, uri) in [
+    // Each link with a credential, beside the same link without: only the second is the
+    // provider's to answer for.
+    for (policy, uri, plain) in [
         (
             cards::OembedPolicy::WhenNeeded,
             "https://www.youtube.com/watch?v=abc&token=x",
+            "https://www.youtube.com/watch?v=abc",
         ),
-        (cards::OembedPolicy::Always, "https://vimeo.com/123?sig=x"),
+        (
+            cards::OembedPolicy::Always,
+            "https://vimeo.com/123?sig=x",
+            "https://vimeo.com/123",
+        ),
         (
             cards::OembedPolicy::WhenNeeded,
             "https://vimeo.com/123?key=x",
+            "https://vimeo.com/123",
         ),
     ] {
-        let seen = Arc::new(Seen(Mutex::default()));
-        let mut cfg = Config::default();
-        cfg.media.oembed = policy;
-        let r = CardResolver {
-            kind: "media",
-            config: Arc::new(cfg),
-            web: WebResolver {
-                oembed_policy: Default::default(),
-                cards: None,
-                events: None,
-                config: Default::default(),
-                egress: Egress::with_backends(
-                    Default::default(),
-                    Arc::new(PublicDns),
-                    seen.clone(),
-                ),
-            },
-        };
-        assert!(r.resolve(uri).await.is_ok(), "{uri}");
-        let requests = seen.0.lock().unwrap();
-        assert!(!requests.is_empty(), "{uri}");
-        assert!(
-            requests.iter().all(|r| !r.contains("oembed")),
-            "{uri}: {requests:?}"
-        );
+        for (link, credential) in [(plain, false), (uri, true)] {
+            let seen = Arc::new(Seen(Mutex::default()));
+            let mut cfg = Config::default();
+            cfg.media.oembed = policy;
+            let r = CardResolver {
+                kind: "media",
+                config: Arc::new(cfg),
+                web: WebResolver {
+                    oembed_policy: Default::default(),
+                    cards: None,
+                    events: None,
+                    config: Default::default(),
+                    egress: Egress::with_backends(
+                        common::unpaced_egress_config(),
+                        Arc::new(PublicDns),
+                        seen.clone(),
+                    ),
+                },
+            };
+            let card = r.resolve(link).await.unwrap();
+            let requests = seen.0.lock().unwrap();
+            assert_eq!(
+                requests.iter().any(|r| r.contains("oembed")),
+                !credential,
+                "{link}: {requests:?}"
+            );
+            // The page itself is read from its own site, with or without the provider.
+            assert!(requests.iter().any(|r| r == link), "{link}: {requests:?}");
+            if credential {
+                assert_eq!(card.name.as_deref(), Some("Page"), "{link}");
+            }
+        }
     }
 }
 /// A page that redirects to a link carrying a credential is read there, but the oEmbed endpoint it

@@ -1579,8 +1579,8 @@ async fn a_read_in_a_dense_crowd_examines_a_bounded_number_of_candidates(pool: P
 
 /// The caps are the operator's: with `limits.same_event_incoming_kept = 3`, the pass leaves no
 /// unit named by more than three (so in a crowd of twelve the units read after the first three
-/// find every other full and name none: a cap that small is the operator's choice), and
-/// `limits.same_event_drop_batch` is the sweep's step.
+/// find every other full and name none: a cap that small is the operator's choice), and with
+/// `limits.same_event_drop_batch = 2` the sweep drops five expired units in three transactions.
 #[sqlx::test(migrations = "../../migrations")]
 async fn the_caps_come_from_the_limits(pool: PgPool) {
     let config = Config::from_value(
@@ -1601,6 +1601,29 @@ async fn the_caps_come_from_the_limits(pool: PgPool) {
     }
     assert!((3..12).contains(&with), "{with} units with a hint");
     assert_eq!(same_event::sweep(&pool, &config).await.unwrap(), 0);
+    // Five units that started three days ago, named by none: the sweep drops them two to a
+    // transaction, and each transaction that drops any moves the search revision once.
+    sqlx::query("INSERT INTO same_event_unit(unit_id,resource_id,fingerprint,start_at,name_key,numbers,all_day) \
+        SELECT 'expired/'||i,$1,'f',now()-interval '3 days','bitcoin meetup wattwil','{}',false FROM generate_series(1,5) i")
+        .bind(&ids[0])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let revision = || async {
+        sqlx::query_scalar::<_, i64>("SELECT revision FROM search_revision")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    let before = revision().await;
+    assert_eq!(same_event::sweep(&pool, &config).await.unwrap(), 0);
+    assert_eq!(revision().await - before, 3, "2+2+1: three transactions");
+    let expired: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM same_event_unit WHERE unit_id LIKE 'expired/%'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(expired, 0);
     assert!(
         Config::from_value(serde_json::json!({"limits": {"same_event_incoming_kept": 0}})).is_err()
     );

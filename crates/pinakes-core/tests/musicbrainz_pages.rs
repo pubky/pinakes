@@ -1,4 +1,7 @@
-//! Captured MusicBrainz/Deezer wire shapes for the owner's unmatched ISRC card.
+//! A MusicBrainz recording's, release's and ISRC's page through the also-on sources that read it
+//! and through the card's enrichment, against captured MusicBrainz and Deezer answers
+//! (`tests/fixtures/shared/music_matching`): which exact lookups a page gets, that an album a
+//! recording is on is a fact and never its key, and whose cover an ISRC's page takes.
 mod common;
 use pinakes_core::{
     also_on::{self, Subject},

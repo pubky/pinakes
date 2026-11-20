@@ -4903,6 +4903,13 @@ async fn an_event_page_reached_at_a_credential_resolves_nothing_back_to_it(pool:
         .page(uri, &fetched, card, &egress, deadline)
         .await
         .unwrap();
+    // The page's event was read: its name and date come from nowhere else.
+    assert_eq!(doc.type_name, "Event");
+    assert_eq!(doc.name.as_deref(), Some("Gig"));
+    assert_eq!(
+        doc.start,
+        Some("2027-01-20T18:00:00Z".parse::<DateTime<Utc>>().unwrap())
+    );
     let json = serde_json::to_string(&doc).unwrap();
     assert!(!json.contains("SECRET"), "{json}");
 }
@@ -4951,7 +4958,7 @@ fn html_page(url: &str, body: &str) -> Fetched {
 async fn an_activitypub_alternate_reached_at_a_credential_resolves_nothing_back_to_it(
     pool: PgPool,
 ) {
-    let (_, egress, service) = protocol_service(&pool);
+    let (transport, egress, service) = protocol_service(&pool);
     let uri = "https://events.example/ap-alt";
     let mut fetched = html_page(
         uri,
@@ -4965,6 +4972,17 @@ async fn an_activitypub_alternate_reached_at_a_credential_resolves_nothing_back_
         .page(uri, &fetched, card, &egress, deadline)
         .await
         .unwrap();
+    // The alternate was fetched to where it redirects, and read: only it names the zone.
+    assert!(
+        transport
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(path, _, _)| path == "/ap-alt-landed"),
+        "the alternate was never followed"
+    );
+    assert_eq!(doc.event.tz.as_deref(), Some("Europe/Paris"));
     let json = serde_json::to_string(&doc).unwrap();
     assert!(!json.contains("SECRET"), "{json}");
 }

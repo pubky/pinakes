@@ -2549,9 +2549,12 @@ async fn recorded_public_adapter_responses_replay_without_network(pool: PgPool) 
     let records: Vec<Value> =
         serde_json::from_slice(&std::fs::read(root.join("responses.json")).unwrap()).unwrap();
     let mut responses = std::collections::HashMap::new();
+    // The requests recorded as failed, with the transport's error.
+    let mut failed = std::collections::HashMap::new();
     for r in records {
         let uri = r["uri"].as_str().unwrap();
         let result = if let Some(error) = r["error"].as_str() {
+            failed.insert(uri.to_owned(), error.to_owned());
             Err(error.to_owned())
         } else {
             let mut body = vec![];
@@ -2625,7 +2628,23 @@ async fn recorded_public_adapter_responses_replay_without_network(pool: PgPool) 
         };
         let result = platform.probe_manifest(&target, &manifest).await;
         if case["error"] == true {
-            assert!(result.is_err(), "{id}");
+            let Err(error) = result else {
+                panic!("{id}: no error");
+            };
+            // The recorded failure, not a request nobody recorded (which this transport fails
+            // as well): the transport's own error where the request failed (a page over the
+            // cap), else a retry for the status recorded (a 503).
+            let text = format!("{error:#}");
+            assert!(!text.contains("uncaptured fixture request"), "{id}: {text}");
+            match failed.get(&target) {
+                Some(reason) => assert!(text.contains(reason.as_str()), "{id}: {text}"),
+                None => assert!(
+                    error
+                        .downcast_ref::<pinakes_core::resolver::RetryLater>()
+                        .is_some(),
+                    "{id}: {text}"
+                ),
+            }
             continue;
         }
         let doc = result.unwrap_or_else(|e| panic!("{id}: {e}"));
@@ -2642,6 +2661,33 @@ async fn recorded_public_adapter_responses_replay_without_network(pool: PgPool) 
         );
         assert_eq!(json!(doc.event.tz), case["tz"], "{id}");
     }
+}
+
+/// Every adapter that reads something (a mode other than `none`), is on and needs no key has a
+/// recorded case in `tests/fixtures/adapters/cases.json`, which
+/// `recorded_public_adapter_responses_replay_without_network` replays; and every case is an
+/// adapter of the table.
+#[test]
+fn every_readable_keyless_adapter_has_a_recorded_case() {
+    // Proton has no public sample: a shared calendar's link is a credential.
+    const UNRECORDED: &[&str] = &["proton"];
+    let cases: Vec<Value> =
+        serde_json::from_str(include_str!("fixtures/adapters/cases.json")).unwrap();
+    let recorded: std::collections::BTreeSet<&str> =
+        cases.iter().map(|c| c["id"].as_str().unwrap()).collect();
+    for id in &recorded {
+        assert!(
+            adapters::definition(id).is_some(),
+            "{id}: a case of no adapter"
+        );
+    }
+    let without: Vec<&str> = adapters::definitions()
+        .iter()
+        .filter(|d| d.mode != pinakes_core::adapter::Mode::None && d.enabled && !d.requires_key)
+        .map(|d| d.id.as_str())
+        .filter(|id| !recorded.contains(id))
+        .collect();
+    assert_eq!(without, UNRECORDED);
 }
 
 fn platform(

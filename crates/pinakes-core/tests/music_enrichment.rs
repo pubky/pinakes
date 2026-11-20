@@ -374,7 +374,7 @@ impl Transport for Recorded {
         }
         let (status, retry_after, body) = match (host.as_str(), path.as_str()) {
             // Controlled negative for these Wikidata/work tests. Positive recording-cover
-            // responses are captured and exercised separately in music_matching.rs.
+            // responses are captured and exercised separately in musicbrainz_pages.rs.
             ("musicbrainz.org", "/ws/2/release")
                 if query("recording") == "833f00e1-781f-4edd-90e4-e52712618862" =>
             {

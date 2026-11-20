@@ -132,7 +132,7 @@ async fn send(
     (status, value)
 }
 #[sqlx::test(migrations = "../../migrations")]
-async fn every_read_route_and_document_projection(pool: PgPool) {
+async fn info_the_openapi_document_a_card_read_and_lookup(pool: PgPool) {
     let ids = seed(&pool).await;
     let state = AppState::new(pool, Config::default()).unwrap();
     let app = api::router(state);
@@ -1028,10 +1028,10 @@ fn the_per_client_share_is_off_unless_set() {
     assert!(Config::from_value(json!({"limits": {"preview_new_per_client_per_hour": 0}})).is_ok());
 }
 
-/// `store::ensure_resource_created` says whether its call created the row: a preview keeps its
-/// place in the hour only then, so two first requests for one link take one place between them.
+/// `store::ensure_resource_created` says whether its call created the row: the first call for a
+/// link did, a second did not.
 #[sqlx::test(migrations = "../../migrations")]
-async fn only_the_request_that_stores_a_link_keeps_its_place(pool: PgPool) {
+async fn ensure_resource_created_says_which_call_stored_the_link(pool: PgPool) {
     let uri = "https://example.org/once";
     let (id, created) = store::ensure_resource_created(&pool, uri).await.unwrap();
     assert!(created);
@@ -1039,6 +1039,47 @@ async fn only_the_request_that_stores_a_link_keeps_its_place(pool: PgPool) {
         store::ensure_resource_created(&pool, uri).await.unwrap(),
         (id, false)
     );
+}
+
+/// Two first requests for one link, at once, take one place of the hour's new previews between
+/// them: both take one before the link is stored, the request that stores it keeps its place and
+/// the other gives its place back. Here both reach the insert while a lock on the table holds
+/// them there; of an hour of two places, one is then left for another link, and none after it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn only_the_request_that_stores_a_link_keeps_its_place(pool: PgPool) {
+    let config = Config::from_value(json!({"limits": {"preview_new_per_hour": 2}})).unwrap();
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
+    // Reads of `resource` pass this lock (each request finds the link unknown and takes a
+    // place); its inserts wait for it.
+    let mut held = pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE resource IN SHARE ROW EXCLUSIVE MODE")
+        .execute(&mut *held)
+        .await
+        .unwrap();
+    let twice = "https://example.org/twice";
+    let (first, second, ()) = tokio::join!(
+        resolve_from(&app, &pool, "127.0.0.2", twice),
+        resolve_from(&app, &pool, "127.0.0.3", twice),
+        async {
+            common::lock_waiters_reach(&pool, 2, "a first request for the link").await;
+            held.commit().await.unwrap();
+        }
+    );
+    for (code, _, stored) in [first, second] {
+        assert!((code == 200 || code == 202) && stored, "{code}");
+    }
+    // One place was kept and one given back: a second link is stored, a third finds the hour
+    // full.
+    let (code, _, stored) =
+        resolve_from(&app, &pool, "127.0.0.4", "https://example.org/another").await;
+    assert!(
+        (code == 200 || code == 202) && stored,
+        "the place given back is free: {code}"
+    );
+    let (code, _, stored) =
+        resolve_from(&app, &pool, "127.0.0.5", "https://example.org/a-third").await;
+    assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE, "one place was kept");
+    assert!(!stored);
 }
 
 #[sqlx::test(migrations = "../../migrations")]
@@ -4501,9 +4542,9 @@ async fn two_reach_reads_share_one_deadline(pool: PgPool) {
 }
 
 /// A boost reads the set's references once, not once per card: 10,000 cards each referenced by
-/// the friend answer well inside the five-second statement timeout.
+/// the friend answer inside the API pool's five-second statement timeout.
 #[sqlx::test(migrations = "../../migrations")]
-async fn a_boost_over_many_cards_answers_in_time(pool: PgPool) {
+async fn a_boost_over_many_cards_answers_within_the_statement_timeout(pool: PgPool) {
     let friend = 3;
     sqlx::query("INSERT INTO resource(id,uri) SELECT md5('many'||i),'https://many.example.org/'||i FROM generate_series(1,10000) i")
         .execute(&pool)
@@ -4533,7 +4574,6 @@ async fn a_boost_over_many_cards_answers_in_time(pool: PgPool) {
         .unwrap(),
     );
     let viewer = author(9999);
-    let started = std::time::Instant::now();
     let (code, page) = call(
         &app,
         "GET",
@@ -4544,13 +4584,6 @@ async fn a_boost_over_many_cards_answers_in_time(pool: PgPool) {
     assert_eq!(code, 200, "{page}");
     assert_eq!(ids_of(&page).len(), 20);
     api_pool.close().await;
-    // A target below the timeout: a loaded machine never fails it.
-    if started.elapsed() > std::time::Duration::from_secs(4) {
-        eprintln!(
-            "SOFT performance target exceeded: boosted search {:?} (target 4 s)",
-            started.elapsed()
-        );
-    }
 }
 
 /// A reference from 1900 (in range) boosts nothing and breaks nothing: its decay is clamped to

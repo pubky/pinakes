@@ -243,7 +243,7 @@ async fn repeated_tag_puts_and_dels_are_harmless(pool: PgPool) {
     assert_eq!(tags(&pool, &seeds).await.len(), 2);
 }
 #[sqlx::test(migrations = "../../migrations")]
-async fn epoch_headers_length_reset_and_transaction_rollback(pool: PgPool) {
+async fn epoch_headers_length_reset_and_a_refused_page_writes_nothing(pool: PgPool) {
     let limits = IngestConfig::default();
     let metrics = Metrics::new().unwrap();
     let a = change("https://example.org/a", "author-a", "/pub/app/tags/a");
@@ -311,12 +311,39 @@ async fn epoch_headers_length_reset_and_transaction_rollback(pool: PgPool) {
     assert_eq!(keyed, [identity(&a.uri).unwrap().0]);
     assert_eq!(ingest::cursor(&pool, "fixture").await.unwrap().cursor, 3);
     assert_eq!(metrics.ingest_rejected.with_label_values(&["uri"]).get(), 1);
+    // The same page again, from the cursor it was first asked with: not applied, not counted.
     assert!(
         !ingest::apply(&pool, "fixture", &saved, &invalid, &limits, &metrics)
             .await
             .unwrap()
     );
     assert_eq!(metrics.ingest_rejected.with_label_values(&["uri"]).get(), 1);
+    assert_eq!(refs(&pool).await, 2);
+    // A page whose next cursor does not follow from the one asked is refused whole: an error,
+    // none of its lines written, the cursor where it was.
+    let saved = ingest::cursor(&pool, "fixture").await.unwrap();
+    let mut late = a.clone();
+    late.object_path = "/pub/app/tags/late".into();
+    late.label = Some("late".into());
+    let skipping = FeedPage {
+        page: Changes {
+            lines: vec![late],
+            next_cursor: saved.cursor + 2,
+            skipped: Default::default(),
+        },
+        epoch: None,
+        length: saved.cursor + 2,
+    };
+    let error = ingest::apply(&pool, "fixture", &saved, &skipping, &limits, &metrics)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("cursor progression"),
+        "{error:#}"
+    );
+    assert_eq!(refs(&pool).await, 2);
+    let after = ingest::cursor(&pool, "fixture").await.unwrap();
+    assert_eq!((after.cursor, after.epoch), (saved.cursor, saved.epoch));
 }
 /// A feed reset is logged by the Nexus's host: its user info, path and query stay out of the
 /// line, whatever the URL holds.
