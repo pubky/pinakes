@@ -39,15 +39,32 @@ pub async fn claim_batch(
 ) -> Result<Vec<Job>> {
     claim_sources(pool, &[resolver], cfg, size).await
 }
+/// Whether somebody references the row of `resource`, as `effective_reference` counts it (an
+/// alias's references count for its root, a post's own row for nothing), written against the
+/// tables so each probe reads an index: `reference` by resource, `resource_alias` by alias and
+/// by root. The view's resource is computed (`coalesce(root, resource)`), which no index serves.
+macro_rules! referenced {
+    () => {
+        "(EXISTS(SELECT 1 FROM reference f WHERE f.resource_id=resource.id AND f.kind<>'post') \
+            AND NOT EXISTS(SELECT 1 FROM resource_alias a WHERE a.alias_id=resource.id) \
+          OR EXISTS(SELECT 1 FROM resource_alias a JOIN reference f ON f.resource_id=a.alias_id \
+            WHERE a.root_id=resource.id AND f.kind<>'post'))"
+    };
+}
 /// What makes a row of `resource` one a worker may take now: due, not final, not a dead letter,
 /// not leased, and not a derived link nothing keeps (every derivation of it has ended and nobody
 /// references it; it stays until its cleanup). The claim takes rows by it and the `pending`
-/// gauge counts rows by it (`telemetry`), so the gauge holds only work a worker will do.
-pub(crate) const CLAIMABLE: &str = "NOT dead_letter AND NOT final AND next_attempt_at<=now() \
+/// gauge counts rows by it (`telemetry`), whichever resolver they are for: a row of a route
+/// that is switched off is due by it, though no worker runs to claim it.
+pub(crate) const CLAIMABLE: &str = concat!(
+    "NOT dead_letter AND NOT final AND next_attempt_at<=now() \
     AND (lease_until IS NULL OR lease_until<now()) \
     AND (NOT EXISTS(SELECT 1 FROM resource_derivation d WHERE d.child_id=resource.id) \
       OR EXISTS(SELECT 1 FROM resource_derivation d WHERE d.child_id=resource.id AND (d.expires_at IS NULL OR d.expires_at>now())) \
-      OR EXISTS(SELECT 1 FROM effective_reference f WHERE f.resource_id=resource.id))";
+      OR ",
+    referenced!(),
+    ")"
+);
 static CLAIM: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     format!(
         "UPDATE resource SET lease_until=now()+$2*interval '1 second', generation=generation+1 \
@@ -1685,5 +1702,227 @@ mod tests {
                 );
             }
         }
+    }
+    /// The claim's reference test, alone.
+    const REFERENCED: &str = referenced!();
+    /// What it stands for: a row of the view.
+    const VIEWED: &str =
+        "EXISTS(SELECT 1 FROM effective_reference f WHERE f.resource_id=resource.id)";
+
+    /// The claim's reference test reads the tables and means what the view means: over direct,
+    /// alias and post references it is true for the same rows, and the claim's condition takes
+    /// the same rows with either. Every link here but the calendar is a derived link whose
+    /// derivation has ended, so only a reference makes it claimable.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn the_claim_reads_references_as_the_view_counts_them(pool: PgPool) {
+        // Each link, what references it (`-` nothing), and the link it is an alias of.
+        let links = [
+            ("calendar", "-", None),
+            ("unreferenced", "-", None),
+            ("tagged", "tag", None),
+            ("replied-and-embedded", "reply embed", None),
+            ("post-only", "post", None),
+            ("post-and-collection", "post collection", None),
+            // An alias's references count for its root, and not for itself.
+            ("root-of-tagged-alias", "-", None),
+            ("tagged-alias", "tag", Some("root-of-tagged-alias")),
+            ("root-of-post-alias", "-", None),
+            ("post-alias", "post", Some("root-of-post-alias")),
+            ("tagged-root-of-bare-alias", "tag", None),
+            ("bare-alias", "-", Some("tagged-root-of-bare-alias")),
+            ("post-root-of-embedded-alias", "post", None),
+            (
+                "embedded-alias",
+                "embed",
+                Some("post-root-of-embedded-alias"),
+            ),
+            // An alias of an alias: each reference counts one step up, as the view reads it.
+            ("top", "-", None),
+            ("middle", "tag", Some("top")),
+            ("bottom", "tag", Some("middle")),
+        ];
+        let uri = |name: &str| format!("https://references.example.org/{name}");
+        let mut ids = std::collections::HashMap::new();
+        for (name, _, _) in links {
+            let id = if name == "calendar" {
+                crate::store::ensure_resource(&pool, &uri(name)).await
+            } else {
+                crate::store::derive_resource(&pool, &uri("calendar"), &uri(name), "test", 100)
+                    .await
+                    .map(|id| id.expect("a derived link"))
+            };
+            ids.insert(name, id.unwrap());
+        }
+        for (name, kinds, root) in links {
+            for (n, kind) in kinds.split(' ').filter(|k| *k != "-").enumerate() {
+                sqlx::query("INSERT INTO reference(resource_id,kind,author,label,object_path,created_at) VALUES($1,$2,$3,CASE WHEN $2='tag' THEN 't' END,$4,now())")
+                    .bind(&ids[name])
+                    .bind(kind)
+                    .bind("y".repeat(52))
+                    .bind(format!("/pub/app/{name}/{n}"))
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+            if let Some(root) = root {
+                sqlx::query(
+                    "INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'canonical')",
+                )
+                .bind(&ids[name])
+                .bind(&ids[root])
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+        }
+        sqlx::query("UPDATE resource_derivation SET expires_at=now()-interval '1 hour'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE resource SET resolver='web',final=false,dead_letter=false,lease_until=NULL,next_attempt_at=now()-interval '1 second'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let names = |ids_found: Vec<String>| {
+            let mut found: Vec<&str> = ids
+                .iter()
+                .filter(|(_, id)| ids_found.contains(id))
+                .map(|(name, _)| *name)
+                .collect();
+            found.sort_unstable();
+            found
+        };
+        let referenced = [
+            "middle",
+            "post-and-collection",
+            "post-root-of-embedded-alias",
+            "replied-and-embedded",
+            "root-of-tagged-alias",
+            "tagged",
+            "tagged-root-of-bare-alias",
+            "top",
+        ];
+        for test in [REFERENCED, VIEWED] {
+            let found: Vec<String> =
+                sqlx::query_scalar(&format!("SELECT id FROM resource WHERE {test}"))
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(names(found), referenced, "{test}");
+        }
+        // The claim's whole condition, with the view in the test's place, takes the same rows.
+        assert!(CLAIMABLE.contains(REFERENCED));
+        let mut claimable = referenced.to_vec();
+        claimable.push("calendar");
+        claimable.sort_unstable();
+        for condition in [CLAIMABLE.to_owned(), CLAIMABLE.replace(REFERENCED, VIEWED)] {
+            let found: Vec<String> =
+                sqlx::query_scalar(&format!("SELECT id FROM resource WHERE {condition}"))
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(names(found), claimable, "{condition}");
+        }
+        let jobs = claim_batch(&pool, "web", &QueueConfig::default(), 50)
+            .await
+            .unwrap();
+        assert_eq!(
+            names(jobs.into_iter().map(|job| job.id).collect()),
+            claimable
+        );
+    }
+
+    /// Every scan of `reference` in a plan: its node type and the condition its index reads by
+    /// (an index scan's, or a bitmap scan's, which its heap scan repeats).
+    fn reference_scans(plan: &serde_json::Value, found: &mut Vec<(String, String)>) {
+        if plan["Relation Name"] == "reference" {
+            let condition = plan["Index Cond"]
+                .as_str()
+                .or(plan["Recheck Cond"].as_str())
+                .unwrap_or_default();
+            found.push((
+                plan["Node Type"].as_str().unwrap_or_default().to_owned(),
+                condition.to_owned(),
+            ));
+        }
+        for child in plan["Plans"].as_array().into_iter().flatten() {
+            reference_scans(child, found);
+        }
+    }
+
+    /// The claim and the `pending` gauge find a row's references through the reference index,
+    /// one probe by resource for the row and one for each alias of it: neither reads every
+    /// reference for a row. 56,000 references of 25,000 links, 2,000 of them derived links
+    /// whose derivation has ended (500 nothing references, 500 referenced through an alias
+    /// alone). `work_mem` is at its smallest, as it is next to a production table: the
+    /// references do not fit a hash the planner could build in one pass, so its plan is the
+    /// probe each row gets.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn the_reference_probe_reads_an_index(pool: PgPool) {
+        // Seeded on one connection without triggers: what they keep up (grouping, scores) plays
+        // no part here.
+        let mut seed = pool.acquire().await.unwrap();
+        for statement in [
+            "SET session_replication_role = replica",
+            "INSERT INTO resource(id,uri,resolver,next_attempt_at) SELECT md5('r'||n),'https://example.org/r'||n,'web',now()-interval '1 second' FROM generate_series(1,20000) n",
+            "INSERT INTO resource(id,uri,resolver,next_attempt_at) SELECT md5('a'||n),'https://example.org/a'||n,'web',now()-interval '1 second' FROM generate_series(1,5000) n",
+            "INSERT INTO resource_alias(alias_id,root_id,basis) SELECT md5('a'||n),md5('r'||n),'canonical' FROM generate_series(1,5000) n",
+            "INSERT INTO reference(resource_id,kind,author,label,object_path,created_at) SELECT md5('r'||n),CASE k WHEN 1 THEN 'tag' ELSE 'post' END,lpad(n::text,52,'y'),CASE k WHEN 1 THEN 't' END,'/pub/app/r/'||k,now()-n*interval '1 second' FROM generate_series(1001,20000) n,generate_series(1,2) k",
+            "INSERT INTO reference(resource_id,kind,author,label,object_path,created_at) SELECT md5('a'||n),'tag',lpad(n::text,52,'y'),'t','/pub/app/a/'||k,now()-n*interval '1 second' FROM generate_series(501,5000) n,generate_series(1,4) k",
+            "INSERT INTO resource_derivation(parent_id,child_id,adapter,expires_at) SELECT md5('r20000'),md5('r'||n),'test',now()-interval '1 hour' FROM generate_series(1,2000) n",
+            "RESET session_replication_role",
+        ] {
+            sqlx::query(statement).execute(&mut *seed).await.unwrap();
+        }
+        drop(seed);
+        sqlx::query("VACUUM ANALYZE").execute(&pool).await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("SET LOCAL work_mem='64kB'")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let gauge: serde_json::Value = sqlx::query_scalar(&format!(
+            "EXPLAIN (FORMAT JSON) {}",
+            *crate::telemetry::QUEUE_DEPTH
+        ))
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        let claim: serde_json::Value =
+            sqlx::query_scalar(&format!("EXPLAIN (FORMAT JSON) {}", *CLAIM))
+                .bind(vec!["web"])
+                .bind(60.0)
+                .bind(10_i64)
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+        for (name, plan) in [("gauge", gauge), ("claim", claim)] {
+            let mut scans = vec![];
+            reference_scans(&plan[0]["Plan"], &mut scans);
+            // The row's own references and its aliases'.
+            assert_eq!(scans.len(), 2, "{name}: {plan}");
+            for (node, condition) in &scans {
+                assert!(
+                    node != "Seq Scan" && condition.contains("resource_id"),
+                    "{name}: {node} {condition}: {plan}"
+                );
+            }
+        }
+        drop(tx);
+        // The probes' answer is the view's (read in one pass, with the memory for it): every
+        // link but the 500 nothing keeps.
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("SET LOCAL work_mem='64MB'")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let pending: (i64, i64) = sqlx::query_as(&format!(
+            "SELECT count(*) FILTER(WHERE {CLAIMABLE}),count(*) FILTER(WHERE {}) FROM resource",
+            CLAIMABLE.replace(REFERENCED, VIEWED)
+        ))
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        assert_eq!(pending, (24_500, 24_500));
     }
 }

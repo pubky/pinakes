@@ -2,7 +2,7 @@ use crate::{
     adapter::Manifest,
     model::{ResourceMeta, Status},
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use prometheus::{
     Encoder, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
     Registry, TextEncoder,
@@ -243,7 +243,7 @@ impl Metrics {
             queue: metric!(
                 IntGaugeVec,
                 "pinakes_queue_depth",
-                "Resource jobs a worker may claim now (pending), leased and dead",
+                "Resource jobs due by the claim's condition (pending; a switched-off route's rows too), leased and dead",
                 &["resolver", "state"]
             ),
             overdue: metric!(
@@ -308,25 +308,27 @@ impl Metrics {
         self.resets.with_label_values(&[&manifest.source]);
         self.success.with_label_values(&[&manifest.source]);
     }
-    /// Whether the database gauges were ever read: before that they hold no value, only zeros.
+    /// Whether the database gauges were ever read (all but the queue's, which have no series
+    /// until their own read): before that they hold no value, only zeros.
     pub fn ever_refreshed(&self) -> bool {
         self.refreshed_once
             .load(std::sync::atomic::Ordering::Relaxed)
     }
+    /// Read the database gauges, at most once in 15 seconds. In two steps, each all or nothing:
+    /// every gauge but the queue's, then the queue's (`pinakes_queue_depth`,
+    /// `pinakes_refresh_overdue`). An error is a refresh that did not finish; the caller counts
+    /// it.
     pub async fn refresh(&self, pool: &PgPool) -> Result<()> {
         let mut refreshed = self.refresh_lock.lock().await;
         if refreshed.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(15)) {
             return Ok(());
         }
-        // Every read first, then the gauges: a read that fails (the API pool's statement
-        // timeout, a database restart) leaves every gauge at its last value, none half reset.
+        // Every read of a step first, then its gauges: a read that fails (the API pool's
+        // statement timeout, a database restart) leaves its gauges at their last values, none
+        // half reset.
         let feed=sqlx::query("SELECT coalesce(sum(greatest(feed_length-cursor,0)),0)::bigint AS lag,coalesce(extract(epoch FROM max(updated_at)),0)::bigint AS success,coalesce(sum(resets),0)::bigint AS resets FROM feed_cursor").fetch_one(pool).await?;
         let sources=sqlx::query("SELECT *,coalesce(extract(epoch FROM last_success_at),0)::bigint AS success FROM source_state").fetch_all(pool).await?;
         let resources=sqlx::query("SELECT resolver,status,count(*) AS n FROM resource WHERE resolver IS NOT NULL GROUP BY resolver,status").fetch_all(pool).await?;
-        // `pending` is what a worker may claim now, by the claim's own condition: a derived link
-        // nothing keeps is never claimed and is not counted.
-        let queue = format!("SELECT resolver,count(*) FILTER(WHERE dead_letter) AS dead,count(*) FILTER(WHERE NOT dead_letter AND lease_until>now()) AS leased,count(*) FILTER(WHERE {}) AS pending,count(*) FILTER(WHERE NOT final AND NOT dead_letter AND refresh_at<now()) AS overdue FROM resource WHERE resolver IS NOT NULL GROUP BY resolver", crate::queue::CLAIMABLE);
-        let queue = sqlx::query(&queue).fetch_all(pool).await?;
         let groups=sqlx::query("SELECT (SELECT count(*) FROM group_input WHERE parked_keys>0 AND NOT settled_stopped) AS parked,(SELECT count(*) FROM group_dirty WHERE last_error='work_budget') AS stopped,(SELECT count(*) FROM group_input WHERE settled_stopped) AS settled,(SELECT count(*) FROM group_input WHERE key_conflicts>0) AS conflicts").fetch_one(pool).await?;
         // A resource nothing ever referenced keeps the instant it was created as its orphan time;
         // a derived child and a venue are kept for their parent and event, not as previews. The
@@ -378,16 +380,8 @@ impl Metrics {
                     .set(source.try_get::<i32, _>("canary_failures")? as i64);
             }
         }
-        self.queue.reset();
-        self.overdue.reset();
         self.resources.reset();
         for manifest in crate::adapter::manifests() {
-            for state in ["pending", "leased", "dead"] {
-                self.queue
-                    .with_label_values(&[&manifest.source, state])
-                    .set(0);
-            }
-            self.overdue.with_label_values(&[&manifest.source]).set(0);
             for status in ["ok", "pending", "missing", "unreachable", "error"] {
                 self.resources
                     .with_label_values(&[&manifest.source, status])
@@ -402,6 +396,33 @@ impl Metrics {
                 ])
                 .set(row.try_get("n")?);
         }
+        self.group_key_conflicts.set(groups.try_get("conflicts")?);
+        self.preview_backlog.set(previews);
+        for state in ["parked", "stopped", "settled"] {
+            self.group_budget
+                .with_label_values(&[state])
+                .set(groups.try_get(state)?);
+        }
+        self.refreshed_once
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        // The queue's gauges last, from a statement of their own: it is the one read that
+        // weighs every row of `resource` by the claim's condition. When it fails or is cut off,
+        // every gauge above holds what was just read, the queue's gauges keep their last values
+        // (no series before their first read), and the refresh as a whole has failed.
+        let queue = sqlx::query(&QUEUE_DEPTH)
+            .fetch_all(pool)
+            .await
+            .context("the queue gauges were not read")?;
+        self.queue.reset();
+        self.overdue.reset();
+        for manifest in crate::adapter::manifests() {
+            for state in ["pending", "leased", "dead"] {
+                self.queue
+                    .with_label_values(&[&manifest.source, state])
+                    .set(0);
+            }
+            self.overdue.with_label_values(&[&manifest.source]).set(0);
+        }
         for row in queue {
             let resolver: String = row.try_get("resolver")?;
             for state in ["pending", "leased", "dead"] {
@@ -413,16 +434,7 @@ impl Metrics {
                 .with_label_values(&[&resolver])
                 .set(row.try_get("overdue")?);
         }
-        self.group_key_conflicts.set(groups.try_get("conflicts")?);
-        self.preview_backlog.set(previews);
-        for state in ["parked", "stopped", "settled"] {
-            self.group_budget
-                .with_label_values(&[state])
-                .set(groups.try_get(state)?);
-        }
         *refreshed = Some(Instant::now());
-        self.refreshed_once
-            .store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
     pub fn encode(&self) -> Result<String> {
@@ -434,6 +446,19 @@ impl Metrics {
         serde_json::json!(self.registry.gather().iter().map(|family|serde_json::json!({"name":family.name(),"samples":family.get_metric().iter().map(|m|serde_json::json!({"labels":m.get_label().iter().map(|l|(l.name(),l.value())).collect::<std::collections::BTreeMap<_,_>>(),"counter":m.get_counter().value(),"gauge":m.get_gauge().value(),"histogram_count":m.get_histogram().sample_count()})).collect::<Vec<_>>()})).collect::<Vec<_>>())
     }
 }
+/// The queue's gauges by resolver: dead letters, leased rows, rows due by the claim's own
+/// condition (`pending`: a derived link nothing keeps is never claimed and is not counted; a
+/// row of a route that is switched off is, though no worker claims it) and refreshes overdue.
+pub(crate) static QUEUE_DEPTH: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "SELECT resolver,count(*) FILTER(WHERE dead_letter) AS dead,\
+         count(*) FILTER(WHERE NOT dead_letter AND lease_until>now()) AS leased,\
+         count(*) FILTER(WHERE {}) AS pending,\
+         count(*) FILTER(WHERE NOT final AND NOT dead_letter AND refresh_at<now()) AS overdue \
+         FROM resource WHERE resolver IS NOT NULL GROUP BY resolver",
+        crate::queue::CLAIMABLE
+    )
+});
 fn sync_counter(counter: &IntCounter, value: i64) {
     let target = value.max(0) as u64;
     let old = counter.get();

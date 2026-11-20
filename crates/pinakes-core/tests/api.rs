@@ -2826,6 +2826,99 @@ async fn metrics_are_served_when_their_database_read_fails(pool: PgPool) {
     }
 }
 
+/// The queue's gauges are read by a statement of their own, after every other gauge. When it
+/// alone fails (here it waits for a lock on `reference` until the API pool's statement timeout
+/// ends it), every other gauge holds what was just read, the queue's keep their last values and
+/// the failure is counted. A daemon whose first read goes so serves its other gauges and no
+/// queue series, not a 503; the queue's gauges come with the next read that succeeds.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_failed_queue_read_leaves_only_the_queue_gauges_stale(pool: PgPool) {
+    const PENDING: &str = "pinakes_queue_depth{resolver=\"web\",state=\"pending\"}";
+    const RESOURCES: &str = "pinakes_resources{resolver=\"web\",status=\"pending\"}";
+    async fn link(pool: &PgPool, uri: &str) {
+        let id = store::ensure_resource(pool, uri).await.unwrap();
+        sqlx::query("UPDATE resource SET next_attempt_at=now()-interval '1 second' WHERE id=$1")
+            .bind(id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+    async fn scrape(admin: &Router) -> String {
+        let (status, body) = send_raw(admin, "GET", "/metrics", None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        body.as_str().unwrap().to_owned()
+    }
+    fn holds(text: &str, series: &[String]) {
+        for line in series {
+            assert!(text.lines().any(|l| l == line), "{line}\n{text}");
+        }
+    }
+    sqlx::query("INSERT INTO feed_cursor(nexus,cursor,feed_length) VALUES('fixture',3,10)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    link(&pool, "https://queue-gauge.example.org/one").await;
+    // The API's pool: its statements end after five seconds.
+    let api_pool = api::pool_options()
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let admin = api::admin_router(AppState::new(api_pool.clone(), Config::default()).unwrap());
+    holds(
+        &scrape(&admin).await,
+        &[
+            "pinakes_ingest_lag_lines 7".into(),
+            format!("{RESOURCES} 1"),
+            format!("{PENDING} 1"),
+            "pinakes_metrics_refresh_failures_total 0".into(),
+        ],
+    );
+    // More lag and one more link due; then only the queue's statement cannot be answered.
+    sqlx::query("UPDATE feed_cursor SET feed_length=12")
+        .execute(&pool)
+        .await
+        .unwrap();
+    link(&pool, "https://queue-gauge.example.org/two").await;
+    let mut held = pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE reference IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *held)
+        .await
+        .unwrap();
+    // A read is kept for 15 seconds: the next scrape after that asks the database again.
+    tokio::time::sleep(std::time::Duration::from_secs(16)).await;
+    holds(
+        &scrape(&admin).await,
+        &[
+            "pinakes_ingest_lag_lines 9".into(),
+            format!("{RESOURCES} 2"),
+            format!("{PENDING} 1"),
+            "pinakes_metrics_refresh_failures_total 1".into(),
+        ],
+    );
+    // A daemon whose first read finds the queue's statement so.
+    let first = api::admin_router(AppState::new(api_pool, Config::default()).unwrap());
+    let text = scrape(&first).await;
+    holds(
+        &text,
+        &[
+            "pinakes_ingest_lag_lines 9".into(),
+            format!("{RESOURCES} 2"),
+            "pinakes_metrics_refresh_failures_total 1".into(),
+        ],
+    );
+    assert!(!text.contains("pinakes_queue_depth{"), "{text}");
+    assert!(!text.contains("pinakes_refresh_overdue{"), "{text}");
+    // A failed read is not kept: the next scrape reads again, the queue too.
+    held.rollback().await.unwrap();
+    holds(
+        &scrape(&first).await,
+        &[
+            format!("{PENDING} 2"),
+            "pinakes_metrics_refresh_failures_total 1".into(),
+        ],
+    );
+}
+
 /// A trending page counts references in a window that ends at the request's instant: with no
 /// write in between, the page is answered 304 within the minute and read again after it.
 #[sqlx::test(migrations = "../../migrations")]

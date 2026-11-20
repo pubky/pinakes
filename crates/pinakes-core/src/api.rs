@@ -4099,7 +4099,9 @@ const METRICS_REFRESH: Duration = Duration::from_secs(8);
 /// (`pinakes_metrics_refresh_failures_total`), so a slow or failed read never hides the
 /// process's own counters from a scrape. Until the gauges have been read once they hold no
 /// value: the answer is 503 then, never zeros that would read as facts (an ingestion that
-/// never succeeded).
+/// never succeeded). The queue's gauges are read last, by a statement of their own
+/// (`Metrics::refresh`): when that alone fails, the other gauges hold what was just read and
+/// the queue's keep their last values (no series before their first read).
 async fn metrics(State(state): State<AppState>) -> Result<Response, ApiError> {
     // Within the request's own deadline too, so the answer is the registry and not a 504.
     let deadline = Duration::from_secs(state.config.api.request_timeout_secs.saturating_sub(1));

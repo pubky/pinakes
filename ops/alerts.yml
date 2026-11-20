@@ -8,8 +8,13 @@ groups:
       - alert: MetricsMissing
         expr: absent(pinakes_ingest_last_success_timestamp_seconds)
         for: 5m
-        labels: {severity: critical}
+        labels: {severity: critical, reason: no_series}
         annotations: {summary: "No Pinakes metrics for five minutes: the daemon is down or its /metrics is not scraped"}
+      - alert: MetricsMissing
+        expr: up{job="pinakes"} == 0
+        for: 5m
+        labels: {severity: critical, reason: target_down}
+        annotations: {summary: "Pinakes target {{ $labels.instance }} has not answered a /metrics scrape for five minutes"}
       - alert: MetricsStale
         expr: increase(pinakes_metrics_refresh_failures_total[5m]) > 0
         for: 15m

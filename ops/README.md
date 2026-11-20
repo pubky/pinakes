@@ -41,7 +41,7 @@ No messages are sent or contact points provisioned by these files.
 | `pinakes_canary_ok{source}` | Latest executed canary result, 0/1 |
 | `pinakes_canary_fields_missing{source}` | Missing declared fields in the last canary |
 | `pinakes_canary_consecutive_failures{source}` | Failed canary runs in a row, kept across restarts, so an alert counts runs, not scrapes |
-| `pinakes_queue_depth{resolver,state}` | Jobs a worker may claim now (`pending`), currently leased or dead. Pending is counted by the claim's own condition: future refreshes are not in it, and neither is a derived link whose derivation has ended and that nobody references (it is not read while nothing keeps it, and stays until its cleanup) |
+| `pinakes_queue_depth{resolver,state}` | Jobs due (`pending`), currently leased or dead. Pending is counted by the claim's own condition: future refreshes are not in it, and neither is a derived link whose derivation has ended and that nobody references (it is not read while nothing keeps it, and stays until its cleanup). The rows of a route that is switched off (`[web]`, `[pubky]`, `[geo]` or `[osm]` with `enabled = false`) are counted: ingestion still stores that route's links, and no worker claims them |
 | `pinakes_refresh_overdue{resolver}` | Non-final resources past refresh time, including failed jobs but excluding dead letters. A link never read has no refresh time and is not counted here: it is `pending` in `pinakes_queue_depth` |
 | `pinakes_group_budget_resources{state}` | Resources whose last grouping run parked a key that alone exceeded the work cap (`parked`), stopped on the run cap and retries hourly (`stopped`), or settled after 24 stopped runs on unchanged input (`settled`) |
 | `pinakes_group_key_conflict_resources` | Resources whose last grouping run refused a join that would put two MusicBrainz IDs, Q-ids or Discogs IDs of one kind in a group (usually a wrong ID on a hub) |
@@ -49,7 +49,7 @@ No messages are sent or contact points provisioned by these files.
 | `pinakes_api_panics_total` | API requests (public or admin listener) whose handler panicked and were answered 500 |
 | `pinakes_api_requests_total{listener,route,status}` | Requests answered, by listener (`public`, `admin`), route and status. The route is the path template (`/v1/resources/{id}`), `unmatched` for a path no route has; never the path asked. A 429 of the per-address budget and a 504 of `limits.request_timeout_secs` are counted. A tool call on `/mcp` counts once, there: the REST routes it calls are not counted again |
 | `pinakes_api_request_duration_seconds{listener,route}` | Time from a request to its response's head (a streamed body, the dump, is not in it) |
-| `pinakes_metrics_refresh_failures_total` | Scrapes whose read of the database failed or took over 8 seconds (one second less than `limits.request_timeout_secs` when that is shorter): `/metrics` still answered, with the database gauges (queue, overdue, resources, canaries, ingestion lag and last success) at their last values. Until those gauges have been read once, `/metrics` answers 503 instead |
+| `pinakes_metrics_refresh_failures_total` | Scrapes whose read of the database failed or took over 8 seconds (one second less than `limits.request_timeout_secs` when that is shorter): `/metrics` still answered, with the database gauges it could not read at their last values. The queue's gauges (`pinakes_queue_depth`, `pinakes_refresh_overdue`) are read last, by a statement of their own: when that alone fails, the others (resources, canaries, ingestion lag and last success, groups, previews) are fresh and only the queue's are stale, with no series at all before their first read. Until the other gauges have been read once, `/metrics` answers 503 instead |
 | `pinakes_preview_refused_total{limit}` | New previews `POST /v1/resolve` refused: `instance` (503, the hourly capacity `limits.preview_new_per_hour` taken) or `client` (429, one address's share `limits.preview_new_per_client_per_hour`, when set) |
 | `pinakes_preview_backlog` | Resources nothing ever referenced (only previewed), each kept for `limits.preview_grace_hours`; derived children and venues are not counted |
 | `pinakes_discovery_decisions_total{kind,decision}` | Optional metadata discovery decisions (a request may come from cache) |
@@ -80,13 +80,20 @@ The thresholds are defaults to tune per deployment. `IngestionStalled` has separ
 rules for 15 minutes without success and 10 minutes above 1000 lag, avoiding an
 extra delay on the first condition. `MetricsMissing` fires when Prometheus has had no Pinakes
 series for five minutes (the daemon is down, or the scrape fails), so one failed scrape or a
-restart is not reported as stalled ingestion; `MetricsStale` when the scrape answers but the
-database gauges failed to refresh repeatedly over fifteen minutes. `CanaryDown` uses the durable failure
+restart is not reported as stalled ingestion (`reason="no_series"`). Its second rule,
+`up{job="pinakes"} == 0` (`reason="target_down"`), fires for each target that has not answered
+for five minutes: a Prometheus that scrapes several instances still has the others' series when
+one is down. It reads the scrape job's name, `pinakes` above; change the rule when the job has
+another name. `MetricsStale` fires when the
+scrape answers but the database gauges, or the queue's alone, failed to refresh repeatedly over
+fifteen minutes. `CanaryDown` uses the durable failure
 streak, not repeated Prometheus scrapes of one failed run. For `FeedHeld`, `CursorReset`,
 `SchemaDrift` and `RateLimited`, a new event stays visible for an hour. `WallUp` counts a
 source's fetches refused with 401, 403 or 451 (`unreachable`) and those a recognised bot wall
 answered (`blocked`). `QueueBacklog` has two rules: refreshes overdue, and jobs due and
-unclaimed (`pinakes_queue_depth{state="pending"}`, which holds the links never read).
+unclaimed (`pinakes_queue_depth{state="pending"}`, which holds the links never read). On an
+instance that switches a route off, that route's links stay due and its `pending` rule fires
+once a thousand have arrived: leave that `resolver` out of the rule there.
 `ApiErrors` (critical) is the share of public requests answered 500 or 504, `ApiRateLimited`
 the share answered 429; both need twenty requests in five minutes.
 
