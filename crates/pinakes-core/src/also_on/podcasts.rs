@@ -288,7 +288,7 @@ pub fn read_feed(body: &[u8], item: Option<ItemBy<'_>>) -> Result<FeedRead> {
         "https://github.com/Podcastindex-org/podcast-namespace/blob/main/docs/1.0.md",
     ];
     let text = String::from_utf8_lossy(body);
-    let xml = roxmltree::Document::parse(&text)?;
+    let xml = crate::resolver::xml::parse(&text)?;
     let channel = xml
         .root_element()
         .children()

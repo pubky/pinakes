@@ -1606,11 +1606,8 @@ pub fn structured_feed(
         }
     } else {
         let text = std::str::from_utf8(bytes)?;
-        let options = roxmltree::ParsingOptions {
-            nodes_limit: cfg.max_components.saturating_mul(16).min(u32::MAX as usize) as u32,
-            ..Default::default()
-        };
-        let Ok(xml) = roxmltree::Document::parse_with_options(text, options) else {
+        let nodes = cfg.max_components.saturating_mul(16).min(u32::MAX as usize) as u32;
+        let Ok(xml) = crate::resolver::xml::parse_capped(text, nodes) else {
             return Ok(None);
         };
         if !matches!(xml.root_element().tag_name().name(), "rss" | "feed" | "RDF") {

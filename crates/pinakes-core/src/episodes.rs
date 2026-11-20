@@ -143,7 +143,7 @@ fn read_feed(f: &crate::resolver::egress::Fetched) -> Option<Listed> {
     } else {
         &text
     };
-    let xml = roxmltree::Document::parse(body).ok()?;
+    let xml = crate::resolver::xml::parse(body).ok()?;
     if !xml.root_element().has_tag_name("rss")
         || !xml.descendants().any(|n| n.has_tag_name("channel"))
     {

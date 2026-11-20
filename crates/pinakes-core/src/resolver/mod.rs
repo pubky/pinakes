@@ -13,6 +13,7 @@ pub mod pkarr_relays;
 pub mod pubky;
 pub mod pubky_apps;
 pub mod web;
+pub mod xml;
 
 #[async_trait]
 pub trait Resolver: Send + Sync {

@@ -1150,7 +1150,7 @@ fn podcast_body(
     } else {
         body
     };
-    let xml = roxmltree::Document::parse(body)?;
+    let xml = super::xml::parse(body)?;
     let mut items: Vec<_> = xml
         .descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == "item")
