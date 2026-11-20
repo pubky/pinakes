@@ -1021,7 +1021,8 @@ changes, canaries, the queue, ingestion lag and grouping. Admin `GET /v1/info` h
 manifests, resolver status (aliases left out: their roots answer for them), counts (`aliases`
 among them), ingestion, source and canary state; public `/v1/info` shows
 only the version, what the instance resolves, the limits a client must respect and the OSM
-licence. Stored errors are sanitized classes (dns, connect, timeout, http_4xx, http_5xx, parse,
+licence. Stored errors are sanitized classes (dns, connect, timeout, http_3xx for a redirect the
+OSM upstream answered, http_4xx, http_5xx, parse,
 policy, too_large for an answer past its size cap, too_complex for a page whose parse ran past
 its CPU, memory or node limit; rate_limited for a link waiting for its host's budget). A failed resolve
 is logged at warn as `resolution failed`, with the resource id (`resource_id`), the link's host

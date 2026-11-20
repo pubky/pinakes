@@ -412,7 +412,14 @@ impl OsmResolver {
             .into());
         }
         if !status.is_success() {
-            return Err(anyhow::Error::new(super::ErrorClass("http_4xx"))
+            // A redirect is no client error: this client follows none, so the operator's
+            // Nominatim URL names the wrong place.
+            let class = if status.is_redirection() {
+                "http_3xx"
+            } else {
+                "http_4xx"
+            };
+            return Err(anyhow::Error::new(super::ErrorClass(class))
                 .context(super::Upstream(status.as_u16())));
         }
         let mut bytes = Vec::new();

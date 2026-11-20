@@ -905,7 +905,7 @@ async fn a_cooldown_defers_the_next_batch_at_once(pool: PgPool) {
 
 /// An upstream that refuses Pinakes (401 or 403: a key expired or out of quota) says nothing of
 /// the link: no charge, no dead letter, read again later. Another answer that is no place data
-/// is the link's failure, stored by its status class.
+/// is the link's failure, stored by its status class (a redirect as `http_3xx`).
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_refused_upstream_key_is_not_the_link_s_failure(pool: PgPool) {
     use std::sync::atomic::AtomicU16;
@@ -934,6 +934,8 @@ async fn a_refused_upstream_key_is_not_the_link_s_failure(pool: PgPool) {
         (401, "upstream_denied", 0),
         (403, "upstream_denied", 0),
         (400, "http_4xx", 1),
+        // A redirect (the client follows none) is stored as one, not as a client error.
+        (302, "http_3xx", 2),
     ] {
         code.store(status, Ordering::SeqCst);
         sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE osm_id=21")
