@@ -1593,10 +1593,10 @@ async fn reextract_makes_object_shortlinks_aliases_and_refuses_osm_host_pages(po
 }
 
 /// `scripts/verify-osm-boundary` against this test database. Where the tools it runs (`psql`,
-/// `pg_dump`, `rg`) are missing it fails under `scripts/test` and is None, with a message,
+/// `pg_dump`, `rg`, `python3`) are missing it fails under `scripts/test` and is None, with a message,
 /// under a bare `cargo test`.
 async fn boundary_script(pool: &PgPool) -> Option<std::process::Output> {
-    for tool in ["psql", "pg_dump", "rg"] {
+    for tool in ["psql", "pg_dump", "rg", "python3"] {
         if std::process::Command::new(tool)
             .arg("--version")
             .output()

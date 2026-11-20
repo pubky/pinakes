@@ -101,7 +101,7 @@ the next refusal. GitHub, CourtListener and Discogs stop sending a refused key
 until restart (the first two then give their links web cards), so theirs holds until a restart
 resets the count.
 
-Run `scripts/check-ops` for promtool syntax validation. Without promtool it runs the Rust
-YAML/metric-registry test instead. `scripts/test` also parses
-the YAML/dashboard and checks every referenced metric against an initialized
-registry, so a renamed/unregistered metric fails CI even without promtool.
+Run `scripts/check-ops`: it runs the test that parses the rules and the dashboard and checks
+every metric they name, and every fetch outcome a rule matches, against an initialized registry,
+then, when promtool is installed, `promtool check rules`. `scripts/test` runs it, so a renamed or unregistered
+metric fails CI with or without promtool.

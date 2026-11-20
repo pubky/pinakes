@@ -228,8 +228,7 @@ class Quality(unittest.TestCase):
 
     def test_ci_database_urls_parse_as_urls(self):
         # sqlx's PgConnectOptions and the tests' url::Url::parse follow WHATWG: a user before an
-        # empty host is EmptyHost (url 2.5.8 parser.rs after_double_slash). Hosted run
-        # 42741557415 failed 11 sqlx::test tests on exactly that.
+        # empty host is EmptyHost (url 2.5.8 parser.rs after_double_slash).
         urls = [workflow()['env']['DATABASE_URL']]
         urls += re.findall(r"smoke_db='([^']+)'", (ROOT / 'scripts/ci/container-smoke').read_text())
         self.assertEqual(len(urls), 2)
@@ -413,7 +412,7 @@ class Release(unittest.TestCase):
         manifest = w['jobs']['manifest']
         self.assertEqual(manifest['if'], job['if'])
         self.assertIn('scripts/ci/publish-manifest', steps(manifest))
-        self.assertNotIn('secrets.', str(job.get('env', {})))
+        self.assertNotIn('env', job)
 
     def test_publish_smokes_the_exact_pushed_platform_image(self):
         job = workflow()['jobs']['publish']

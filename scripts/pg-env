@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+"""pg-env COMMAND...: run COMMAND with the PG* variables libpq parses $DATABASE_URL into.
+
+psql and pg_dump then connect by their environment, so the URL (and any password in it) never
+stands on a command line, where the process table shows it. A refusal is in this script's own
+words: libpq's message quotes the part of the URL it could not read, which may be a password.
+"""
+import ctypes
+import ctypes.util
+import os
+import sys
+
+
+class Option(ctypes.Structure):
+    _fields_ = [(n, ctypes.c_char_p) for n in ("keyword", "envvar", "compiled", "val", "label", "dispchar")] + [("dispsize", ctypes.c_int)]
+
+
+def refuse(reason):
+    print(f"pg-env: {reason}", file=sys.stderr)
+    sys.exit(2)
+
+
+if len(sys.argv) < 2:
+    refuse("usage: DATABASE_URL=... scripts/pg-env COMMAND...")
+url = os.environ.get("DATABASE_URL")
+if not url:
+    refuse("set DATABASE_URL")
+pq = ctypes.CDLL(ctypes.util.find_library("pq") or "libpq.so.5")
+pq.PQconninfoParse.restype = ctypes.POINTER(Option)
+pq.PQconninfoParse.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_char_p)]
+options = pq.PQconninfoParse(url.encode(), ctypes.byref(ctypes.c_char_p()))
+if not options:
+    refuse("DATABASE_URL is not a connection string libpq can read")
+i = 0
+while options[i].keyword:
+    option = options[i]
+    if option.val is not None:
+        if not option.envvar:
+            # The keyword is from libpq's table of parameters, not from the URL.
+            refuse(f"DATABASE_URL sets {option.keyword.decode()}, which libpq reads from no environment variable")
+        os.environ[option.envvar.decode()] = option.val.decode()
+    i += 1
+del os.environ["DATABASE_URL"]
+os.execvp(sys.argv[1], sys.argv[1:])

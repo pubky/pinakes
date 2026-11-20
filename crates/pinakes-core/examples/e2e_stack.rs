@@ -367,15 +367,13 @@ async fn stack(args: Vec<String>) -> Result<()> {
         }
     }
     let recipes = args.get(1).is_some_and(|s| s == "--live-recipes");
-    // A cancelled recipe run (the runner's SIGTERM, a terminal's SIGINT) stops, and its database
-    // is still dropped. Listening from before the database exists leaves no moment it would leak.
-    // The other modes keep their own handling: SIGTERM shuts them down, SIGINT kills them.
+    // A cancelled run stops, and its database is still dropped: a terminal's SIGINT in every
+    // mode, and the runner's SIGTERM for a recipe run (the other modes shut down on SIGTERM by
+    // themselves). Listening from before the database exists leaves no moment it would leak.
     use tokio::signal::unix::{signal, SignalKind};
-    let mut cancel = if recipes {
-        Some((
-            signal(SignalKind::terminate())?,
-            signal(SignalKind::interrupt())?,
-        ))
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    let mut terminate = if recipes {
+        Some(signal(SignalKind::terminate())?)
     } else {
         None
     };
@@ -399,16 +397,27 @@ async fn stack(args: Vec<String>) -> Result<()> {
         .max_connections(16)
         .connect_with(options)
         .await?;
-    let result = if let Some((term, interrupt)) = &mut cancel {
-        tokio::select! {
-            result = run_recipes(pool.clone()) => result,
-            _ = term.recv() => Err(anyhow::anyhow!("interrupted")),
-            _ = interrupt.recv() => Err(anyhow::anyhow!("interrupted")),
+    let work = async {
+        if recipes {
+            run_recipes(pool.clone()).await
+        } else if let Some(samples) = live {
+            run_live(pool.clone(), samples).await
+        } else {
+            run(pool.clone(), fixture).await
         }
-    } else if let Some(samples) = live {
-        run_live(pool.clone(), samples).await
-    } else {
-        run(pool.clone(), fixture).await
+    };
+    let terminated = async {
+        match &mut terminate {
+            Some(terminate) => {
+                terminate.recv().await;
+            }
+            None => std::future::pending().await,
+        }
+    };
+    let result = tokio::select! {
+        result = work => result,
+        _ = interrupt.recv() => Err(anyhow::anyhow!("interrupted")),
+        _ = terminated => Err(anyhow::anyhow!("interrupted")),
     };
     pool.close().await;
     sqlx::query(&format!("DROP DATABASE {database} WITH (FORCE)"))
