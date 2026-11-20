@@ -1012,7 +1012,9 @@ among them), ingestion, source and canary state; public `/v1/info` shows
 only the version, what the instance resolves, the limits a client must respect and the OSM
 licence. Stored errors are sanitized classes (dns, connect, timeout, http_4xx, http_5xx, parse,
 policy, too_large for an answer past its size cap, too_complex for a page whose parse did not
-end within its limits; rate_limited for a link waiting for its host's budget). A failed resolve
+end within its limits; rate_limited for a link waiting for its host's budget). A link that only
+waits for the daemon's own pace (its host's budget, or a cached failure replayed) is logged at
+debug (`resolution waits for its host`). A failed resolve
 is logged at warn as `resolution failed`, with the resource id (`resource_id`), the link's host
 (`host`; its scheme for a link without one, never its path), this class (`kind`) and the
 upstream HTTP status when one was answered (`status`), never the error's text. A source's health
