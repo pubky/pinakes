@@ -4874,3 +4874,36 @@ fn a_zone_name_is_bounded_and_named_by_its_last_parts() {
     assert!(time::zone(&"/".repeat(1_000_000)).is_none());
     assert!(started.elapsed() < std::time::Duration::from_secs(1));
 }
+/// A calendar's properties are counted over all its components, and a line needs a name: a
+/// nameless one fails the calendar, or inside an event that event alone.
+#[test]
+fn calendar_properties_are_counted_and_need_a_name() {
+    let uri = "https://example.org/feed.ics";
+    let cfg = EventConfig {
+        max_properties: 1000,
+        ..Default::default()
+    };
+    let lines = |n: usize| format!("BEGIN:VCALENDAR\n{}END:VCALENDAR\n", "X-A:1\n".repeat(n));
+    assert!(calendar::parse(uri, lines(1000).as_bytes(), &cfg, now()).is_ok());
+    let error = calendar::parse(uri, lines(1001).as_bytes(), &cfg, now()).unwrap_err();
+    assert!(
+        error.to_string().contains("calendar property cap"),
+        "{error:#}"
+    );
+    let nameless = format!("BEGIN:VCALENDAR\n{}END:VCALENDAR\n", ":\n".repeat(10));
+    let error = calendar::parse(uri, nameless.as_bytes(), &cfg, now()).unwrap_err();
+    assert!(
+        error.to_string().contains("content line without a name"),
+        "{error:#}"
+    );
+    let container = parse(&cal(&format!(
+        "{}\n{}",
+        event("UID:bad\nDTSTART:20261020T120000Z\n:x\nSUMMARY:Nameless line"),
+        event("UID:good\nDTSTART:20261020T120000Z\nSUMMARY:Healthy")
+    )))
+    .container
+    .unwrap();
+    assert_eq!(container.occurrences.len(), 1);
+    assert_eq!(container.occurrences[0].uid, "good");
+    assert!(container.warnings.contains(&"invalid_vevent_line".into()));
+}

@@ -67,6 +67,7 @@ fn property(line: &str) -> Result<Property> {
         })
         .context("content line missing colon")?;
     let fields = split_quoted(&line[..i], ';');
+    ensure!(!fields[0].trim().is_empty(), "content line without a name");
     let mut params = BTreeMap::new();
     for p in &fields[1..] {
         let (k, v) = p.split_once('=').context("invalid parameter")?;
@@ -120,6 +121,7 @@ fn components(bytes: &[u8], cfg: &EventConfig, deadline: std::time::Instant) -> 
     let mut root = None;
     let mut pending = String::new();
     let mut count = 0usize;
+    let mut properties = 0usize;
     let mut consume = |line: &str| -> Result<()> {
         if line.trim().is_empty() {
             return Ok(());
@@ -152,6 +154,8 @@ fn components(bytes: &[u8], cfg: &EventConfig, deadline: std::time::Instant) -> 
                 root = Some(node);
             }
         } else {
+            properties += 1;
+            ensure!(properties <= cfg.max_properties, "calendar property cap");
             stack
                 .last_mut()
                 .context("property outside calendar")?

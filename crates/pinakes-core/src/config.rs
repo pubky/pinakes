@@ -417,6 +417,8 @@ pub struct EventConfig {
     #[serde(skip)]
     pub max_components: usize,
     #[serde(skip)]
+    pub max_properties: usize,
+    #[serde(skip)]
     pub max_event_revisions: usize,
     #[serde(skip)]
     pub max_event_document_bytes: usize,
@@ -459,6 +461,7 @@ impl Default for EventConfig {
             max_occurrences_per_series: 50,
             max_occurrences_per_feed: 10000,
             max_components: 100000,
+            max_properties: 1_000_000,
             max_event_revisions: 10000,
             max_event_document_bytes: 8 * 1024 * 1024,
             max_recurrence_steps: 100000,
@@ -1139,6 +1142,7 @@ impl Config {
             || !(1..=1000).contains(&e.max_occurrences_per_series)
             || !(1..=10000).contains(&e.max_occurrences_per_feed)
             || !(1..=100000).contains(&e.max_components)
+            || !(1..=10_000_000).contains(&e.max_properties)
             || !(1..=10000).contains(&e.max_event_revisions)
             || !(1024..=32 * 1024 * 1024).contains(&e.max_event_document_bytes)
             || !(1..=1000000).contains(&e.max_recurrence_steps)
@@ -2372,6 +2376,8 @@ limits! {
     event_max_occurrences_per_feed: usize = |c| c.event.max_occurrences_per_feed => [|c, v| c.event.max_occurrences_per_feed = v],
     /// Most components one calendar may hold.
     event_max_components: usize = |c| c.event.max_components => [|c, v| c.event.max_components = v],
+    /// Most properties one calendar may hold, over all its components.
+    event_max_properties: usize = |c| c.event.max_properties => [|c, v| c.event.max_properties = v],
     /// Most revisions of one event (RECURRENCE-ID overrides).
     event_max_revisions: usize = |c| c.event.max_event_revisions => [|c, v| c.event.max_event_revisions = v],
     /// Largest retained event document set per feed (bytes).

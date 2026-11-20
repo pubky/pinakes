@@ -80,6 +80,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `event_max_occurrences_per_series` | `50` | Most occurrences one series expands to. |
 | `event_max_occurrences_per_feed` | `10000` | Most occurrences one feed yields. |
 | `event_max_components` | `100000` | Most components one calendar may hold. |
+| `event_max_properties` | `1000000` | Most properties one calendar may hold, over all its components. |
 | `event_max_revisions` | `10000` | Most revisions of one event (RECURRENCE-ID overrides). |
 | `event_max_document_bytes` | `8388608` | Largest retained event document set per feed (bytes). |
 | `event_max_recurrence_steps` | `100000` | Most recurrence steps one series may take. |
