@@ -869,80 +869,125 @@ async fn a_shape_only_card_never_replaces_a_card_that_says_more(pool: PgPool) {
     assert_eq!(handle.as_deref(), Some("someone-else"));
 }
 
-/// The keep is bounded and general. A stored card that says more by its name or a fact alone
-/// is kept too; a kept card stays as last read (its `fetched_at` is not renewed) and its next
-/// read is still scheduled; once its last read is older than `shape_only_keep_ms` (an account
-/// gone, whose site answers its generic page), the plain card replaces it.
+/// The stored row of a card: its name, `fetched_at`, whether it is final and when it is read next
+/// (seconds from now).
+async fn kept_row(pool: &PgPool, id: &str) -> (Option<String>, Option<i64>, bool, f64) {
+    sqlx::query_as(
+        "SELECT doc->>'name', (doc->>'fetched_at')::bigint, final, \
+         extract(epoch FROM next_attempt_at-now())::float8 FROM resource WHERE id=$1",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+/// A person's card of `uri` named `name`, read at `at` (ms); `shape_only` for the plain card of
+/// a page answered without its tags.
+fn person(uri: &str, name: &str, at: i64, shape_only: bool) -> ResourceMeta {
+    let mut doc = ResourceMeta::new(uri, "web", 3600);
+    doc.set_type("Person");
+    doc.name = Some(name.into());
+    doc.fetched_at = at;
+    doc.shape_only = shape_only;
+    doc
+}
+const PLAIN: &str = "Profile on social.example";
+
+/// A stored card that says more by its name alone, or by a fact alone, is kept for a page
+/// answered without its tags.
 #[sqlx::test(migrations = "../../migrations")]
-async fn a_kept_card_stays_as_last_read_and_only_for_a_while(pool: PgPool) {
-    let cfg = QueueConfig::default();
-    let keep = changes::shape_only_keep_ms(&cfg);
-    assert_eq!(keep, 2 * 3600 * 1000);
-    let row = |id: String| {
-        let pool = pool.clone();
-        async move {
-            sqlx::query_as::<_, (Option<String>, Option<i64>, bool, f64)>(
-                "SELECT doc->>'name', (doc->>'fetched_at')::bigint, final, \
-                 extract(epoch FROM next_attempt_at-now())::float8 FROM resource WHERE id=$1",
-            )
-            .bind(id)
-            .fetch_one(&pool)
-            .await
-            .unwrap()
-        }
-    };
-    let card = |uri: &str, name: &str, at: i64, shape_only: bool| {
-        let mut doc = ResourceMeta::new(uri, "web", 3600);
-        doc.set_type("Person");
-        doc.name = Some(name.into());
-        doc.fetched_at = at;
-        doc.shape_only = shape_only;
-        doc
-    };
-    let plain = "Profile on social.example";
+async fn a_card_that_says_more_by_its_name_or_a_fact_is_kept(pool: PgPool) {
     let now = chrono::Utc::now().timestamp_millis();
-    for (path, stored, has_fact) in [("name-only", "Some One", false), ("fact-only", plain, true)] {
+    for (path, name, fact) in [
+        ("name-only", "Some One", None),
+        ("fact-only", PLAIN, Some("12")),
+    ] {
         let uri = format!("https://social.example/in/{path}");
         let id = store::ensure_resource(&pool, &uri).await.unwrap();
-        // The last read that said more, an hour ago.
-        let mut good = card(&uri, stored, now - 3600 * 1000, false);
-        if has_fact {
-            good.attributes.insert("followers".into(), "12".into());
+        let mut good = person(&uri, name, now - 3600 * 1000, false);
+        if let Some(fact) = fact {
+            good.attributes.insert("followers".into(), fact.into());
         }
         store::save_document(&pool, &id, 0, &good).await.unwrap();
-        store::save_document(&pool, &id, 0, &card(&uri, plain, now, true))
+        store::save_document(&pool, &id, 0, &person(&uri, PLAIN, now, true))
             .await
             .unwrap();
-        let (name, fetched, last, next) = row(id.clone()).await;
-        assert_eq!(name.as_deref(), Some(stored), "{path}");
-        assert_eq!(fetched, Some(good.fetched_at), "{path}: fetched_at renewed");
-        assert!(
-            !last && next > 3500.0 && next <= 3600.0,
-            "{path}: next read {next}"
+        assert_eq!(
+            kept_row(&pool, &id).await.0.as_deref(),
+            Some(name),
+            "{path}"
         );
-        if has_fact {
-            let fact: Option<String> = sqlx::query_scalar(
-                "SELECT doc->'attributes'->>'followers' FROM resource WHERE id=$1",
-            )
-            .bind(&id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-            assert_eq!(fact.as_deref(), Some("12"));
-        }
-        // Still without its tags once the last good read is older than the bound: the plain
-        // card.
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT doc->'attributes'->>'followers' FROM resource WHERE id=$1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored.as_deref(), fact, "{path}");
+    }
+}
+
+/// A kept card stays as it was last read: its `fetched_at` is that read's, not this one's, and
+/// its next read is scheduled at this reading's lifetime (neither now nor never).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_kept_card_keeps_its_last_read_time_and_is_read_again(pool: PgPool) {
+    let uri = "https://social.example/in/kept";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let now = chrono::Utc::now().timestamp_millis();
+    let mut good = person(uri, "Some One", now - 3600 * 1000, false);
+    good.description = Some("Builds bridges.".into());
+    store::save_document(&pool, &id, 0, &good).await.unwrap();
+    store::save_document(&pool, &id, 0, &person(uri, PLAIN, now, true))
+        .await
+        .unwrap();
+    let (name, fetched, last, next) = kept_row(&pool, &id).await;
+    assert_eq!(name.as_deref(), Some("Some One"));
+    assert_eq!(
+        fetched,
+        Some(good.fetched_at),
+        "fetched_at renewed by a keep"
+    );
+    assert!(
+        !last && next > 3500.0 && next <= 3600.0,
+        "next read in {next} s"
+    );
+}
+
+/// The keep is bounded: once the last read that said more is `shape_only_keep_ms` old (an
+/// account gone, whose site answers its generic page), the plain card replaces the stored one.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_kept_card_gives_way_to_the_plain_card_after_the_bound(pool: PgPool) {
+    let keep = changes::shape_only_keep_ms(&QueueConfig::default());
+    assert_eq!(keep, 2 * 3600 * 1000);
+    let uri = "https://social.example/in/gone";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut good = person(
+        uri,
+        "Some One",
+        chrono::Utc::now().timestamp_millis(),
+        false,
+    );
+    good.description = Some("Builds bridges.".into());
+    store::save_document(&pool, &id, 0, &good).await.unwrap();
+    // Within the bound the card is kept; at the bound the plain card takes its place.
+    for (after, name) in [
+        (keep / 2, "Some One"),
+        (keep - 1, "Some One"),
+        (keep, PLAIN),
+    ] {
         store::save_document(
             &pool,
             &id,
             0,
-            &card(&uri, plain, good.fetched_at + keep, true),
+            &person(uri, PLAIN, good.fetched_at + after, true),
         )
         .await
         .unwrap();
-        let (name, fetched, ..) = row(id.clone()).await;
-        assert_eq!(name.as_deref(), Some(plain), "{path}");
-        assert_eq!(fetched, Some(good.fetched_at + keep), "{path}");
+        assert_eq!(
+            kept_row(&pool, &id).await.0.as_deref(),
+            Some(name),
+            "{after} ms"
+        );
     }
 }
 
