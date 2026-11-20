@@ -1546,20 +1546,21 @@ fn malformed_events_are_isolated_and_hostile_work_is_bounded() {
     .into_bytes();
     let i = body.windows(7).position(|b| b == b"invalid").unwrap();
     body[i] = 0xff;
-    assert_eq!(
-        calendar::parse(
-            "https://example.org/f.ics",
-            &body,
-            &EventConfig::default(),
-            now()
-        )
-        .unwrap()
-        .container
-        .unwrap()
+    // A byte that is no UTF-8 is read as U+FFFD: the event stays.
+    let read = calendar::parse(
+        "https://example.org/f.ics",
+        &body,
+        &EventConfig::default(),
+        now(),
+    )
+    .unwrap()
+    .container
+    .unwrap();
+    assert_eq!(read.occurrences.len(), 2);
+    assert!(read
         .occurrences
-        .len(),
-        1
-    );
+        .iter()
+        .any(|o| o.doc.name.as_deref() == Some("\u{fffd}nvalid")));
     let large = cal(&event(&format!(
         "UID:bounded\nDTSTART:20261020T120000Z\nRRULE:FREQ=DAILY\nSUMMARY:{}\nDESCRIPTION:{}",
         "x".repeat(32000),
@@ -4906,6 +4907,36 @@ fn calendar_properties_are_counted_and_need_a_name() {
     assert_eq!(container.occurrences.len(), 1);
     assert_eq!(container.occurrences[0].uid, "good");
     assert!(container.warnings.contains(&"invalid_vevent_line".into()));
+}
+/// A line folded inside a character (RFC 5545 folds at octets) unfolds whole, and a feed that is
+/// not UTF-8 keeps its events, the unreadable bytes replaced.
+#[test]
+fn a_line_folded_inside_a_character_unfolds_whole() {
+    let read = |body: &[u8]| {
+        calendar::parse(
+            "https://example.org/feed.ics",
+            body,
+            &EventConfig::default(),
+            now(),
+        )
+        .unwrap()
+    };
+    let folded = b"BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:fold\r\nDTSTART:20261020T120000Z\r\nSUMMARY:Caf\xc3\r\n \xa9 Lugano\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    let c = read(folded).container.unwrap();
+    assert_eq!(c.occurrences.len(), 1, "{:?}", c.warnings);
+    assert_eq!(
+        c.occurrences[0].doc.name.as_deref(),
+        Some("Caf\u{e9} Lugano")
+    );
+    let latin1 = b"BEGIN:VCALENDAR\nX-WR-CALNAME:Caf\xe9\nBEGIN:VEVENT\nUID:latin\nDTSTART:20261020T120000Z\nSUMMARY:Caf\xe9 Lugano\nEND:VEVENT\nEND:VCALENDAR\n";
+    let doc = read(latin1);
+    assert_eq!(doc.name.as_deref(), Some("Caf\u{fffd}"));
+    let c = doc.container.unwrap();
+    assert_eq!(c.occurrences.len(), 1, "{:?}", c.warnings);
+    assert_eq!(
+        c.occurrences[0].doc.name.as_deref(),
+        Some("Caf\u{fffd} Lugano")
+    );
 }
 /// A calendar's history counts against no cap: 12,000 past single events beside one upcoming
 /// parse to that one, under a revision cap of 10,000. A past event that shares its UID with

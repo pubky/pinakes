@@ -119,7 +119,7 @@ fn unescape(s: &str) -> String {
 fn components(bytes: &[u8], cfg: &EventConfig, deadline: std::time::Instant) -> Result<Component> {
     let mut stack: Vec<Component> = vec![];
     let mut root = None;
-    let mut pending = String::new();
+    let mut pending: Vec<u8> = vec![];
     let mut count = 0usize;
     let mut properties = 0usize;
     let mut consume = |line: &str| -> Result<()> {
@@ -174,25 +174,32 @@ fn components(bytes: &[u8], cfg: &EventConfig, deadline: std::time::Instant) -> 
             line.len() <= cfg.max_line_bytes,
             "calendar physical line cap"
         );
-        let line = std::str::from_utf8(line)
-            .unwrap_or("INVALID_CONTENT_LINE")
-            .trim_end_matches('\r');
-        if line.starts_with([' ', '\t']) {
+        // Lines unfold as bytes and decode whole: a fold may fall inside a character (RFC 5545
+        // folds at octets). Bytes that are no UTF-8 (a Latin-1 feed) read as U+FFFD.
+        let mut line = line;
+        while let Some(rest) = line.strip_suffix(b"\r") {
+            line = rest;
+        }
+        if matches!(line.first(), Some(b' ' | b'\t')) {
             ensure!(!pending.is_empty(), "orphan folded line");
             ensure!(
                 pending.len() + line.len() <= cfg.max_line_bytes,
                 "calendar unfolded line cap"
             );
-            pending.push_str(&line[1..]);
+            pending.extend_from_slice(&line[1..]);
         } else {
             if !pending.is_empty() {
-                consume(&pending)?;
+                consume(&String::from_utf8_lossy(&pending))?;
             }
-            pending = line.trim_start_matches('\u{feff}').into();
+            while let Some(rest) = line.strip_prefix("\u{feff}".as_bytes()) {
+                line = rest;
+            }
+            pending.clear();
+            pending.extend_from_slice(line);
         }
     }
     if !pending.is_empty() {
-        consume(&pending)?;
+        consume(&String::from_utf8_lossy(&pending))?;
     }
     ensure!(stack.is_empty(), "truncated calendar");
     let root = root.context("empty calendar")?;
