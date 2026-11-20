@@ -1289,9 +1289,10 @@ struct Worker {
 }
 impl Worker {
     /// Until shutdown: wait for the pacing slot, run a due canary or claim a batch, and run it.
-    /// Shutdown ends the wait for the slot at once. A claim, a canary and a claimed batch are
-    /// finished first, so no row stays leased with no worker and no job stops between its save
-    /// and the steps that follow it. A daemon whose shutdown grace ends first drops the worker
+    /// Shutdown ends the wait for the slot at once, and a worker that has its slot claims
+    /// nothing once the daemon stops (`next`). A canary and a claimed batch are finished
+    /// first, so no row stays leased with no worker and no job stops between its save and the
+    /// steps that follow it. A daemon whose shutdown grace ends first drops the worker
     /// where it is: a job cut off before its save is read again when its lease runs out; one
     /// cut off after it keeps the card it saved, and the steps after the save wait for its
     /// next full read (a read the site answers 304 does not run them).
@@ -1303,7 +1304,7 @@ impl Worker {
                 _ = shutdown.changed() => break,
                 slot = self.pace() => slot,
             };
-            let jobs = self.next(&mut canary_check).await;
+            let jobs = self.next(&mut canary_check, slot, &shutdown).await;
             if jobs.is_empty() {
                 continue;
             }
@@ -1317,11 +1318,26 @@ impl Worker {
         *next = Instant::now() + Duration::from_secs_f64(1.0 / self.requests_per_second);
         *next
     }
+    /// Give the pacing slot `slot` back, unless another worker has taken the next one since.
+    async fn give_back(&self, slot: Instant) {
+        let mut next = self.rate.lock().await;
+        if *next == slot {
+            *next = Instant::now();
+        }
+    }
     /// The next batch; none when a canary ran instead, the queue held nothing due (after a
-    /// short wait) or the claim failed.
-    async fn next(&self, canary_check: &mut Instant) -> Vec<Job> {
+    /// short wait), the claim failed or the daemon is stopping. `slot` is the pacing slot this
+    /// worker took. A daemon told to stop (a signal, a lost instance lock) while the worker
+    /// had its slot starts no canary and claims nothing: the slot is given back. When the stop
+    /// comes while the claim is on its way, the rows it leased are released, unread.
+    async fn next(
+        &self,
+        canary_check: &mut Instant,
+        slot: Instant,
+        shutdown: &watch::Receiver<bool>,
+    ) -> Vec<Job> {
         let (pool, resolver) = (&self.pool, self.resolver.as_ref());
-        if Instant::now() >= *canary_check {
+        if Instant::now() >= *canary_check && !*shutdown.borrow() {
             *canary_check = Instant::now() + Duration::from_secs(60);
             // One suspension for the manifests whose canary may not run, one claim among the rest.
             let (allowed, refused): (Vec<_>, Vec<_>) = resolver
@@ -1354,8 +1370,29 @@ impl Worker {
                 _ => {}
             }
         }
+        if *shutdown.borrow() {
+            self.give_back(slot).await;
+            return vec![];
+        }
         let sources = resolver.queue_sources();
         match claim_sources(pool, &sources, &self.cfg, resolver.batch_size()).await {
+            Ok(jobs) if !jobs.is_empty() && *shutdown.borrow() => {
+                // Fenced by the claim's generation: a row claimed again since is left alone.
+                for job in &jobs {
+                    if let Err(e) = sqlx::query(
+                        "UPDATE resource SET lease_until=NULL WHERE id=$1 AND generation=$2",
+                    )
+                    .bind(&job.id)
+                    .bind(job.generation)
+                    .execute(pool)
+                    .await
+                    {
+                        tracing::warn!(resource_id=%job.id,error=%crate::resolver::log_error(&e),"a row claimed while stopping keeps its lease until it runs out");
+                    }
+                }
+                self.give_back(slot).await;
+                vec![]
+            }
             Ok(jobs) if !jobs.is_empty() => jobs,
             Ok(_) => {
                 tokio::select! {
@@ -1395,10 +1432,7 @@ impl Worker {
             // claim finds another author's link: it need not wait for the pacing slot, which
             // is given back unless another worker has taken the next one since.
             if spread > 0 {
-                let mut next = self.rate.lock().await;
-                if *next == slot {
-                    *next = Instant::now();
-                }
+                self.give_back(slot).await;
             }
             anyhow::Ok(())
         }
@@ -1706,6 +1740,119 @@ mod tests {
             }
         }
     }
+    /// A due link somebody references, not claimed.
+    async fn due(pool: &PgPool, uri: &str) -> String {
+        let job = claimed(pool, uri).await;
+        sqlx::query("UPDATE resource SET lease_until=NULL WHERE id=$1")
+            .bind(&job.id)
+            .execute(pool)
+            .await
+            .unwrap();
+        job.id
+    }
+    /// A web worker whose pacing slot is `slot`.
+    fn worker(pool: &PgPool, slot: Instant) -> Worker {
+        Worker {
+            pool: pool.clone(),
+            resolver: Arc::new(After(Duration::ZERO)),
+            requests_per_second: 1.0,
+            cfg: QueueConfig::default(),
+            refresh: Default::default(),
+            canary: Default::default(),
+            authors: Default::default(),
+            metrics: Arc::new(crate::telemetry::Metrics::new().unwrap()),
+            wake: Default::default(),
+            rate: Arc::new(Mutex::new(slot)),
+        }
+    }
+    /// A link's lease (whether it has one) and its generation.
+    async fn lease(pool: &PgPool, id: &str) -> (bool, i64) {
+        sqlx::query_as("SELECT lease_until IS NOT NULL,generation FROM resource WHERE id=$1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// A daemon told to stop after a worker took its pacing slot (a signal, a lost instance
+    /// lock): the worker leases nothing, starts no canary and gives its slot back. The same
+    /// worker, not stopping, claims the link.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_stopping_worker_claims_nothing(pool: PgPool) {
+        let id = due(&pool, "https://stopping.example.org/page").await;
+        let before = lease(&pool, &id).await;
+        assert!(!before.0);
+        let slot = Instant::now() + Duration::from_secs(3600);
+        let worker = worker(&pool, slot);
+        let (stop, shutdown) = watch::channel(false);
+        stop.send(true).unwrap();
+        // A canary is due as well: the web route has one, first seen now.
+        let mut canary_check = Instant::now();
+        let jobs = worker.next(&mut canary_check, slot, &shutdown).await;
+        assert!(jobs.is_empty());
+        assert_eq!(lease(&pool, &id).await, before, "no lease, no claim");
+        let canaries: i64 = sqlx::query_scalar("SELECT count(*) FROM source_state")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(canaries, 0, "no canary was seeded or claimed");
+        assert!(
+            *worker.rate.lock().await <= Instant::now(),
+            "the slot is back"
+        );
+
+        let (_running, shutdown) = watch::channel(false);
+        let mut later = Instant::now() + Duration::from_secs(3600);
+        let jobs = worker.next(&mut later, slot, &shutdown).await;
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(lease(&pool, &id).await, (true, before.1 + 1));
+    }
+
+    /// The stop comes while the claim is on its way (the statement waits for a table lock
+    /// here): the row it leased is released at once, unread, and can be claimed again.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_claim_that_lands_after_the_stop_is_released(pool: PgPool) {
+        let id = due(&pool, "https://stopping.example.org/in-flight").await;
+        let generation = lease(&pool, &id).await.1;
+        let slot = Instant::now() + Duration::from_secs(3600);
+        let worker = worker(&pool, slot);
+        let (stop, shutdown) = watch::channel(false);
+        let mut held = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE resource IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *held)
+            .await
+            .unwrap();
+        let mut later = Instant::now() + Duration::from_secs(3600);
+        let next = worker.next(&mut later, slot, &shutdown);
+        let release = async {
+            // Until the claim waits for the table.
+            loop {
+                let waiting: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM pg_locks WHERE NOT granted AND relation='resource'::regclass",
+                )
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if waiting > 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            stop.send(true).unwrap();
+            held.commit().await.unwrap();
+        };
+        let (jobs, ()) = tokio::join!(next, release);
+        assert!(jobs.is_empty(), "the batch is not run");
+        // Claimed (its generation moved) and released.
+        assert_eq!(lease(&pool, &id).await, (false, generation + 1));
+        assert!(
+            *worker.rate.lock().await <= Instant::now(),
+            "the slot is back"
+        );
+        let again = claim(&pool, "web", &QueueConfig::default()).await.unwrap();
+        assert_eq!(again.map(|job| job.id), Some(id));
+    }
+
     /// The claim's reference test, alone.
     const REFERENCED: &str = referenced!();
     /// What it stands for: a row of the view.
