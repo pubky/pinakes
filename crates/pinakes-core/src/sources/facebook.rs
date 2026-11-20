@@ -195,7 +195,7 @@ impl Source for Facebook {
         let target = Target::of_uri(uri).context("not a Facebook link")?;
         let doc = cx.card(uri, self);
         let mut doc = match &target {
-            Target::Page(name) => match social::page_body(cx, &target.root()).await? {
+            Target::Page(name) => match social::page_body(cx, &target.root(), &[]).await? {
                 Body::Read { body, .. } => {
                     let tags = crate::resolver::html::blocking(move || social::open_graph(&body))
                         .await??;
@@ -207,7 +207,7 @@ impl Source for Facebook {
             // Posts and videos are shown to accounts only; the page answers the sign-in
             // redirect, a plain card.
             Target::Post { page, .. } => {
-                let mut doc = match social::page_body(cx, &target.root()).await? {
+                let mut doc = match social::page_body(cx, &target.root(), &[]).await? {
                     Body::Missing => cx.missing(uri, self),
                     Body::Read { .. } => Shape::Post.card(doc, SITE),
                     Body::Blocked => social::blocked(doc, Shape::Post, SITE),
@@ -215,7 +215,7 @@ impl Source for Facebook {
                 social::fact(&mut doc, "author", Some(page.clone()));
                 doc
             }
-            Target::Video(_) => match social::page_body(cx, &target.root()).await? {
+            Target::Video(_) => match social::page_body(cx, &target.root(), &[]).await? {
                 Body::Missing => cx.missing(uri, self),
                 Body::Read { .. } => Shape::Video.card(doc, SITE),
                 Body::Blocked => social::blocked(doc, Shape::Video, SITE),

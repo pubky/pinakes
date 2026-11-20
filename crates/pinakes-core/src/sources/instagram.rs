@@ -204,7 +204,7 @@ impl Source for Instagram {
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
         let target = Target::of_uri(uri).context("not an Instagram link")?;
         let doc = cx.card(uri, self);
-        let mut doc = match social::page_body(cx, &target.root()).await? {
+        let mut doc = match social::page_body(cx, &target.root(), &[]).await? {
             Body::Read { body, .. } => {
                 let tags =
                     crate::resolver::html::blocking(move || social::open_graph(&body)).await??;
@@ -292,6 +292,30 @@ mod tests {
         assert_eq!(doc.image.as_deref(), Some("https://example.com/a.jpg"));
         // A reel quotes its caption: social content, as a post is.
         assert!(Instagram.social(&doc));
+    }
+
+    /// Instagram has no status of its own for a refusal: a 999 is a server error as any status
+    /// above 500 is, a retry and not the blocked card.
+    #[tokio::test(start_paused = true)]
+    async fn a_999_is_a_server_error() {
+        let profile = "https://www.instagram.com/instagram/";
+        let (egress, _) = crate::sources::fixture::egress(vec![(
+            profile,
+            999,
+            "text/html",
+            b"<html></html>".to_vec(),
+        )]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let error = Instagram.resolve(&cx, profile).await.unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<crate::resolver::RetryLater>()
+                .map(|retry| retry.class),
+            Some("upstream")
+        );
     }
 
     #[test]

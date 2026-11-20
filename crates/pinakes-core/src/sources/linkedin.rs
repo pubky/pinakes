@@ -15,6 +15,8 @@ use async_trait::async_trait;
 pub struct LinkedIn;
 
 const SITE: &str = "linkedin.com";
+/// LinkedIn's status for a request it refuses without an account.
+const REFUSED: &[u16] = &[999];
 
 /// A profile or company slug: letters, digits, `-`, `_` and percent-encoded characters.
 fn slug(value: &str) -> bool {
@@ -275,7 +277,7 @@ impl Source for LinkedIn {
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
         let target = Target::of_uri(uri).context("not a LinkedIn link")?;
         let doc = cx.card(uri, self);
-        let mut doc = match social::page_body(cx, &target.root()).await? {
+        let mut doc = match social::page_body(cx, &target.root(), REFUSED).await? {
             Body::Read { body, .. } => {
                 let tags =
                     crate::resolver::html::blocking(move || social::open_graph(&body)).await??;
