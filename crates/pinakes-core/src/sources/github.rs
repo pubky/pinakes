@@ -57,6 +57,7 @@ pub fn repository(uri: &str) -> Option<(String, String)> {
 #[derive(Debug)]
 pub enum Answer {
     Card(Box<ResourceMeta>),
+    /// A repository the token reads but the public cannot: no public object.
     Missing,
     /// The token was refused (401): read without it.
     Refused,
@@ -81,7 +82,9 @@ fn options(token: &str) -> FetchOptions {
     }
 }
 
-/// A repository's card from `GET /repos/{owner}/{repo}` with `token`.
+/// A repository's card from `GET /repos/{owner}/{repo}` with `token`. A path GitHub has no
+/// repository for (404) is declined: it may be another page of the site (an advisory, a
+/// two-part site page), so the web route reads it and says whether it is gone.
 pub async fn read(
     cx: &Context<'_>,
     doc: ResourceMeta,
@@ -105,7 +108,7 @@ pub async fn read(
         },
         301 | 302 | 307 | 308 => Ok(Answer::Moved),
         401 => Ok(Answer::Refused),
-        404 => Ok(Answer::Missing),
+        404 => Err(Declined.into()),
         // GitHub's rate limit answers 403 or 429.
         403 | 408 | 429 | 500..=599 => Err(crate::resolver::RetryLater {
             class: "rate_limited",
@@ -255,6 +258,8 @@ mod tests {
             ("https://github.com/BurntSushi", None),
             ("https://github.com/orgs/rust-lang", None),
             ("https://github.com/topics/rust", None),
+            ("https://github.com/advisories/GHSA-jfh8-c2jp-5v3q", None),
+            ("https://github.com/Solutions/ci-cd", None),
             ("https://github.com/-x/y", None),
             ("https://gist.github.com/a/b", None),
             ("https://example.org/a/b", None),
@@ -449,7 +454,7 @@ mod tests {
             .unwrap());
     }
 
-    /// The fetch that confirms a missing answer asks GitHub again for a cached 404, but replays a
+    /// A confirming fetch asks GitHub again for a cached 404, but replays a
     /// cached 403: GitHub's rate limit, a wait (`FetchOptions::waits`) it must not cut short.
     #[tokio::test(start_paused = true)]
     async fn a_confirmation_keeps_github_s_rate_limit() {
@@ -486,8 +491,8 @@ mod tests {
                         .is_some());
                 }
             } else {
-                assert!(matches!(first.unwrap(), Answer::Missing));
-                assert!(matches!(again.unwrap(), Answer::Missing));
+                assert!(first.unwrap_err().is::<Declined>());
+                assert!(again.unwrap_err().is::<Declined>());
             }
         }
         assert_eq!(asked("/repos/busy/repo"), 1, "the rate limit was cut short");
@@ -521,18 +526,22 @@ mod tests {
         assert!(
             matches!(answer, Answer::Card(ref d) if d.name.as_deref() == Some("BurntSushi/ripgrep"))
         );
-        assert!(matches!(
-            read(
+        // A path GitHub has no repository for (a site page shaped like one, a deleted
+        // repository) is the web route's to read, never `missing` on the API's word.
+        for (owner, repo) in [("a", "missing"), ("advisories", "GHSA-jfh8-c2jp-5v3q")] {
+            let answer = read(
                 &cx,
-                doc("https://github.com/a/missing"),
-                "a",
-                "missing",
-                "good-token"
+                doc(&format!("https://github.com/{owner}/{repo}")),
+                owner,
+                repo,
+                "good-token",
             )
-            .await
-            .unwrap(),
-            Answer::Missing
-        ));
+            .await;
+            assert!(
+                answer.is_err_and(|e| e.is::<Declined>()),
+                "{owner}/{repo} is not declined"
+            );
+        }
         // A renamed repository's redirect is answered, never followed with the token.
         assert!(matches!(
             read(
@@ -562,7 +571,7 @@ mod tests {
         assert!(seen
             .iter()
             .all(|(url, auth)| url.starts_with("https://api.github.com/") && auth.is_some()));
-        assert_eq!(seen.len(), 4, "{seen:?}");
+        assert_eq!(seen.len(), 5, "{seen:?}");
     }
 
     /// Without a token the source is off: its links get ordinary web cards.

@@ -13,7 +13,8 @@ own pages at the root (`/store`, `/docs`, `/blog`, `/publisher/…`, …) are no
 ## What it reads
 
 `GET https://api.snapcraft.io/v2/snaps/info/{name}?fields=title,summary,publisher,media,website,license,categories`.
-A snap the store does not know (404, `resource-not-found`) is `missing`. Because the request
+A name the store does not know (404, `resource-not-found`) gets a web card (the link may be
+another page of the site), which is `missing` when the page is gone too. Because the request
 carries a header, a redirect is refused rather than followed.
 
 ## Card

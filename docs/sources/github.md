@@ -14,7 +14,7 @@ never appears in logs, errors, metrics, `Debug` output or cards.
 
 Only public repositories get cards. If the token can read private repositories, a record GitHub
 marks `private` (or with any `visibility` but `public`) gives no card and no key: the link is
-`missing`, as a repository that doesn't exist is, and the record leaves the in-memory discovery
+`missing`, and the record leaves the in-memory discovery
 cache at once instead of staying for its hour.
 
 GitHub allows 5,000 requests an hour with a token; Pinakes keeps its default host pace (1 a
@@ -33,8 +33,9 @@ gists are not read; they get web cards.
 
 ## What it reads
 
-`GET https://api.github.com/repos/{owner}/{repo}` (about 5 KB). A repository GitHub does not have
-(or does not show) is `missing`. A renamed one answers a redirect, which is not followed with the
+`GET https://api.github.com/repos/{owner}/{repo}` (about 5 KB). A path GitHub has no
+repository for (404: a deleted repository, or another page of the site shaped like one) gets a
+web card, which is `missing` when the page is gone too. A renamed one answers a redirect, which is not followed with the
 token: its link gets a web card, which follows it. GitHub's rate limit (403, 429) retries later.
 
 ## Card
