@@ -31,7 +31,8 @@ pub const INATURALIST_SITES: [&str; 23] = [
     "naturalista.uy",
 ];
 
-/// A positive decimal id of at most `max` digits, without leading zeros.
+/// A positive decimal id of at most `max` digits, read as a number (`kit::number`), so leading
+/// zeros name the same id.
 fn id(value: &str, max: usize) -> Option<u64> {
     number(value, max)
 }

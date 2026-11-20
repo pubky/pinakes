@@ -31,7 +31,8 @@ pub enum Object {
     Taxon(u64),
 }
 
-/// A positive decimal id, without leading zeros.
+/// A positive decimal id of at most 12 digits, read as a number (`kit::number`), so leading
+/// zeros name the same id. A root holds the id without them (`from_root`).
 fn number(value: &str) -> Option<u64> {
     super::kit::number(value, 12)
 }
