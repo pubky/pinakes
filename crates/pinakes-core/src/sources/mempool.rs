@@ -34,7 +34,8 @@ pub const SETTLED_DEPTH: u64 = 6;
 /// outputs, an address's transactions, a node's channels and peers.
 pub const RELATED_EACH: usize = 10;
 /// When a card with a part not there yet (a block's next block, a transaction's block) or not
-/// read (its request was put off) is read again, at the latest.
+/// read (its request was put off; a block's pool, fees and reward, which Esplora's record lacks)
+/// is read again, at the latest.
 const READ_AGAIN_SECS: i64 = 3600;
 /// How long the requests for a card's `related` parts may take, from the start of its read: the
 /// rest of the official route's limit (`resolver::cards`, 14 s) stays for the card's own record
@@ -1325,7 +1326,8 @@ pub struct Mempool;
 /// What `read` found: the card; whether its root names the link for good (always, except for a
 /// block by height that is not yet `settled`); and whether to read it again within the hour
 /// (`READ_AGAIN_SECS`): a part of it is not there yet (a best-chain block's settled next block,
-/// a transaction's block) or a request for one was put off (`RetryLater`).
+/// a transaction's block), a request for one was put off (`RetryLater`), or it is a block read
+/// from Esplora, whose record has no pool, fees or reward.
 struct Read {
     card: Card,
     named: bool,
@@ -1393,6 +1395,9 @@ async fn read(
     let (n, mut named, mut soon) = (target.network, true, false);
     match &target.object {
         Object::Block(BlockRef::Hash(hash)) => {
+            // Esplora's block record has no pool, fees or reward: mempool.space's come with a
+            // later read.
+            soon |= to == Api::Esplora;
             // Its place in the best chain: whether its height names it (read by height, which
             // needs both), and its next block, linked once that is settled too.
             let status = if by_height {
@@ -2290,6 +2295,86 @@ mod tests {
         let other = "00000000b747d47c3b38161693ad05e26924b3775a8be669751f969da836311e";
         assert!(parse_block(200, &read("block-481824.json"), Network::Mainnet, other).is_err());
         assert!(parse_block(429, b"", Network::Mainnet, HASH).is_err());
+    }
+
+    /// The answers to a read of the example block by hash on one API (`record` its block
+    /// record's path), from the files of `dir`.
+    fn block_answers(
+        api: &str,
+        record: &str,
+        dir: &str,
+    ) -> Vec<(String, u16, &'static str, Vec<u8>)> {
+        let file = |name: &str| read(&format!("{dir}{name}"));
+        vec![
+            (
+                format!("{api}/{record}/{HASH}"),
+                200,
+                "application/json",
+                file("block-481824.json"),
+            ),
+            (
+                format!("{api}/block/{HASH}/status"),
+                200,
+                "application/json",
+                file("block-481824-status.json"),
+            ),
+            (
+                format!("{api}/blocks/tip/height"),
+                200,
+                "text/plain",
+                read("tip-height-1111.txt"),
+            ),
+            (
+                format!("{api}/block/{HASH}/txid/0"),
+                200,
+                "text/plain",
+                file("block-481824-txid-0.txt"),
+            ),
+        ]
+    }
+
+    async fn resolve(
+        uri: &str,
+        answers: &[(String, u16, &'static str, Vec<u8>)],
+    ) -> Result<ResourceMeta> {
+        let routes = answers
+            .iter()
+            .map(|(url, status, kind, body)| (url.as_str(), *status, *kind, body.clone()))
+            .collect();
+        let (egress, _) = fixture::egress(routes);
+        let cx = crate::sources::Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        Mempool.resolve(&cx, uri).await
+    }
+
+    /// A settled block read from mempool.space is complete: no early read again. Read from
+    /// Esplora while mempool.space fails, it has no pool, fees or reward and is read again
+    /// within the hour.
+    #[tokio::test(start_paused = true)]
+    async fn a_block_read_from_esplora_is_read_again_soon() {
+        let root = format!("btc:block/{HASH}");
+        let answers = block_answers("https://mempool.space/api", "v1/block", "");
+        let doc = resolve(&root, &answers).await.unwrap();
+        assert_eq!(doc.attributes["pool"], "BTCC");
+        assert_eq!(doc.refresh_by, None);
+
+        let mut answers = block_answers("https://blockstream.info/api", "block", "esplora/");
+        answers.push((
+            format!("https://mempool.space/api/v1/block/{HASH}"),
+            503,
+            "application/json",
+            b"{}".to_vec(),
+        ));
+        let doc = resolve(&root, &answers).await.unwrap();
+        assert_eq!(doc.status, crate::model::Status::Ok);
+        assert_eq!(doc.attributes["height"], "481824");
+        for fact in ["pool", "total_fees", "reward", "median_fee_rate"] {
+            assert!(!doc.attributes.contains_key(fact), "{fact}");
+        }
+        let soon = doc.refresh_by.expect("read again soon") - chrono::Utc::now();
+        assert!(soon <= chrono::Duration::hours(1) && soon > chrono::Duration::minutes(50));
     }
 
     #[test]

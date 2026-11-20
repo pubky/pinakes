@@ -173,8 +173,9 @@ Each card lists the objects it points at in the resource read's `related`
   the mempool (its block comes later) and a block in the best chain whose next block is not
   settled yet (or that has none yet). A part refused for good (a 404, an answer that cannot be
   read) is left out until the card's own refresh. A read again that cannot fetch a part leaves
-  it out until the read after. The
-  Esplora fallback reads the same parts, but has no pool, no reward and no Lightning.
+  it out until the read after. The Esplora fallback reads the same parts, but has no Lightning,
+  and its block record has no `pool`, `total_fees`, `reward` or `median_fee_rate`: a block card
+  read from it is read again within the hour, for mempool.space's record.
 - An address's list is read up to 4 MB (a few dozen whole transactions); a larger one (an
   exchange's batch payouts) is left out. A part put off again and again (a server error, the
   budget) reads the card again every hour while it lasts.
