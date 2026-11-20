@@ -490,8 +490,8 @@ impl Context<'_> {
         DEADLINE.try_with(|d| *d).ok()
     }
     /// A GET (or, with `options.json_body`, a POST) through the egress policy. A rate limit
-    /// (429, answered by egress with the class `http_4xx`), a request timeout (408) and a server
-    /// error become `RetryLater` (`retry`); other statuses are the caller's to read. At most
+    /// (429), a request timeout (408) and a server error become `RetryLater` (`retry`, classes
+    /// `http_4xx` and `upstream`); other statuses are the caller's to read. At most
     /// `MAX_HEADERS` extra headers (`options.headers`, e.g. a service's own identification
     /// header); connection, credential and User-Agent headers are refused.
     pub async fn fetch(&self, url: &str, options: &FetchOptions) -> Result<Fetched> {
@@ -761,18 +761,24 @@ pub fn invalid(uri: &str) -> bool {
 /// the lowest when two sources name it. A switched-off source (one without its token too) asks
 /// nothing, so it paces nothing.
 pub fn budgets(switches: &SourcesConfig) -> impl Iterator<Item = (&'static str, f64)> {
-    let mut rates: BTreeMap<&'static str, f64> = BTreeMap::new();
-    for (host, rate) in REGISTRY
-        .iter()
-        .filter(|s| switches.enabled(s.name()))
-        .flat_map(|s| s.budgets().iter().copied())
-    {
-        rates
+    lowest(
+        REGISTRY
+            .iter()
+            .filter(|s| switches.enabled(s.name()))
+            .flat_map(|s| s.budgets().iter().copied()),
+    )
+    .into_iter()
+}
+/// One rate per host: the lowest named for it.
+fn lowest(rates: impl Iterator<Item = (&'static str, f64)>) -> BTreeMap<&'static str, f64> {
+    let mut lowest: BTreeMap<&'static str, f64> = BTreeMap::new();
+    for (host, rate) in rates {
+        lowest
             .entry(host)
             .and_modify(|r| *r = r.min(rate))
             .or_insert(rate);
     }
-    rates.into_iter()
+    lowest
 }
 
 /// Every attribute a card on the `official` or web route may store: the web keys and every
@@ -826,14 +832,14 @@ pub async fn resolve(
     Ok(Some(doc.bounded(attributes())?))
 }
 
-/// A request timeout or a rate limit (408, 429: class `rate_limited`) and a server error (class
-/// `upstream`): retry later, after at least a minute. Egress answers a 429 itself (class
-/// `http_4xx`) before a source sees it, so one reaches here only from a read that asked for the
-/// error's body (`FetchOptions::error_json`). The class of a 408 is also that of the daemon's own
-/// budget wait, which `own_rate_limit` and the queue read it as.
+/// A request timeout or a rate limit (408, 429: class `http_4xx`, as egress classes the 429 it
+/// answers itself) and a server error (class `upstream`): retry later, after at least a minute.
+/// A 429 reaches here only from a read that asked for the error's body
+/// (`FetchOptions::error_json`). The class `rate_limited` is the daemon's own budget wait alone
+/// (`own_rate_limit`), never a service's answer.
 pub(crate) fn retry(f: &Fetched) -> Result<()> {
     let class = match f.status {
-        408 | 429 => "rate_limited",
+        408 | 429 => "http_4xx",
         s if s >= 500 => "upstream",
         _ => return Ok(()),
     };
@@ -1105,8 +1111,8 @@ pub(crate) mod fixture {
     /// drops it (kept for a wall's page and for a read with `error_json`). A redirect's body is
     /// its `Location`; the content type
     /// `!too-large` answers a body over its read's cap, and `!large-xml` an XML body over the page
-    /// cap as the real read treats one: refused when the read sets `body_cap`, otherwise cut (the
-    /// route's body is the cut text). Pair it with `#[tokio::test(start_paused = true)]`: the
+    /// cap as the real read treats one of a read without a feed cap: refused when the read sets
+    /// `body_cap`, otherwise cut (the route's body is the cut text). Pair it with `#[tokio::test(start_paused = true)]`: the
     /// per-host spacing then costs no time.
     pub fn egress(
         routes: Vec<(&str, u16, &'static str, Vec<u8>)>,
@@ -1887,8 +1893,47 @@ mod tests {
         assert_eq!(full.get("new.example"), Some(true));
     }
 
+    /// What a service answers is never the daemon's own budget wait: a request timeout and a
+    /// rate limit are `http_4xx`, a server error `upstream`.
+    #[test]
+    fn a_services_answer_is_not_the_daemons_own_wait() {
+        let answer = |status: u16| {
+            Fetched::answer(
+                url::Url::parse("https://api.example/x").unwrap(),
+                status,
+                "application/json".into(),
+                vec![],
+            )
+        };
+        for (status, class) in [(408, "http_4xx"), (429, "http_4xx"), (503, "upstream")] {
+            let error = retry(&answer(status)).unwrap_err();
+            let wait = error
+                .downcast_ref::<crate::resolver::RetryLater>()
+                .expect("a retry");
+            assert_eq!(wait.class, class, "{status}");
+            assert!(wait.seconds >= 60);
+            assert!(!own_rate_limit(&error), "{status}");
+        }
+        assert!(retry(&answer(404)).is_ok());
+        let own = anyhow::Error::new(crate::resolver::RetryLater {
+            class: "rate_limited",
+            seconds: 7,
+        });
+        assert!(own_rate_limit(&own));
+    }
+
+    /// A host two sources name gets the lower rate, in either order.
+    #[test]
+    fn the_lowest_rate_of_a_host_wins() {
+        let rates = [("a.example", 2.0), ("b.example", 0.5), ("a.example", 0.2)];
+        for rates in [rates.to_vec(), rates.iter().rev().copied().collect()] {
+            let lowest: Vec<_> = lowest(rates.into_iter()).into_iter().collect();
+            assert_eq!(lowest, [("a.example", 0.2), ("b.example", 0.5)]);
+        }
+    }
+
     /// A switched-off source paces no host, and a source that needs a token paces none without
-    /// one; a host two sources name gets the lower rate.
+    /// one.
     #[test]
     fn only_a_switched_on_source_paces_its_host() {
         let paced = |config: &Config, host: &str| config.egress.source_rates.contains_key(host);

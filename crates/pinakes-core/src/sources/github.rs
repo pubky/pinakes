@@ -106,7 +106,7 @@ fn rate_limit(body: &[u8]) -> bool {
 /// repository for (404) is declined: it may be another page of the site (an advisory, a
 /// two-part site page), so the web route reads it and says whether it is gone. A 403 that is
 /// not the rate limit (access to the repository is blocked) is declined too. The rate limit is
-/// a wait of class `rate_limited`, a timeout or a server error one of class `upstream`.
+/// a wait of class `http_4xx`, a timeout or a server error one of class `upstream`.
 pub async fn read(
     cx: &Context<'_>,
     doc: ResourceMeta,
@@ -139,8 +139,8 @@ pub async fn read(
         401 => Ok(Answer::Refused),
         404 => Err(Declined.into()),
         // GitHub's rate limit answers 429, or 403 with a message that names it.
-        429 => wait("rate_limited"),
-        403 if rate_limit(&f.body) => wait("rate_limited"),
+        429 => wait("http_4xx"),
+        403 if rate_limit(&f.body) => wait("http_4xx"),
         403 => Err(Declined.into()),
         408 | 500..=599 => wait("upstream"),
         status => anyhow::bail!("GitHub answered {status}"),
@@ -569,8 +569,8 @@ mod tests {
         assert_eq!(
             answers,
             [
-                ("busy", Some("rate_limited"), false),
-                ("slow", Some("rate_limited"), false),
+                ("busy", Some("http_4xx"), false),
+                ("slow", Some("http_4xx"), false),
                 ("blocked", None, true),
                 ("down", Some("upstream"), false),
             ]

@@ -208,7 +208,7 @@ async fn a_rate_limited_lightning_node_is_only_a_retry() {
     if !has("mempool") {
         return;
     }
-    for (key, class) in [(BUSY, "http_4xx"), (SLOW, "rate_limited")] {
+    for (key, class) in [(BUSY, "http_4xx"), (SLOW, "http_4xx")] {
         let error = official()
             .resolve(&format!("https://mempool.space/lightning/node/{key}"))
             .await
