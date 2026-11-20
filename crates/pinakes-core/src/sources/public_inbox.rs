@@ -63,6 +63,17 @@ fn message_id(value: &str) -> Option<String> {
             .any(|c| c.is_whitespace() || c.is_control() || "<>/".contains(c)))
     .then_some(id)
 }
+/// Whether a Message-ID's domain ends in a label of letters only (`example.org`, `localhost`).
+/// A version after an `@` does not (`gin@v1.9.1`, `bootstrap@5.3.0`, `react@18`).
+fn lettered_domain(id: &str) -> bool {
+    id.rsplit_once('@')
+        .and_then(|(_, domain)| domain.rsplit('.').next())
+        .is_some_and(|label| !label.is_empty() && label.bytes().all(|b| b.is_ascii_alphabetic()))
+}
+/// Whether `host` is an archive: one known without asking, or one that answered an mbox.
+fn archive(host: &str) -> bool {
+    KNOWN.contains(&host) || ARCHIVES.get(host) == Some(true)
+}
 fn path_part(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
@@ -108,7 +119,11 @@ impl Target {
                 _ => None,
             };
         }
-        let at = segments.iter().rposition(|s| message_id(s).is_some())?;
+        // On a host that is not an archive as far as is known, a package's version after an
+        // `@` is no Message-ID.
+        let strict = !archive(&host);
+        let mid = |s: &str| message_id(s).filter(|id| !strict || lettered_domain(id));
+        let at = segments.iter().rposition(|&s| mid(s).is_some())?;
         let (before, after) = (&segments[..at], &segments[at + 1..]);
         if before.is_empty()
             || before.len() > 4
@@ -120,7 +135,7 @@ impl Target {
         Some(Self::Message {
             host,
             base: format!("/{}", before.join("/")),
-            mid: message_id(segments[at])?,
+            mid: mid(segments[at])?,
         })
     }
     /// The message's page in its archive.
@@ -138,6 +153,7 @@ impl Target {
 /// A message as its mbox headers and first text part say.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Message {
+    /// The subject, without any address in it.
     pub subject: Option<String>,
     /// The sender's display name; the address is never kept.
     pub author: Option<String>,
@@ -468,7 +484,7 @@ pub fn parse(raw: &[u8]) -> Result<Message> {
     Ok(Message {
         subject: headers
             .get("subject")
-            .map(|s| header_text(s))
+            .map(|s| super::without_addresses(&header_text(s)))
             .filter(|s| !s.is_empty()),
         author,
         date,
@@ -602,7 +618,7 @@ impl Source for PublicInbox {
         if ARCHIVES.get(&host) == Some(false) {
             return Err(Declined.into());
         }
-        let known = KNOWN.contains(&host.as_str()) || ARCHIVES.get(&host) == Some(true);
+        let known = archive(&host);
         let raw = format!("{}raw", target.root().context("a message has a root")?);
         let f = match cx
             .fetch(
@@ -615,6 +631,7 @@ impl Source for PublicInbox {
             )
             .await
         {
+            Ok(f) => f,
             // A message too large to read (attachments): its page gets an ordinary web card.
             Err(e)
                 if e.chain()
@@ -622,7 +639,12 @@ impl Source for PublicInbox {
             {
                 return Err(Declined.into())
             }
-            f => f?,
+            // So does the page of a host not known as an archive whose `/raw` cannot be read.
+            // A wait (this daemon's own host budget, a 429, a server error) is no answer.
+            Err(e) if !known && e.downcast_ref::<crate::resolver::RetryLater>().is_none() => {
+                return Err(Declined.into())
+            }
+            Err(e) => return Err(e),
         };
         // lore.kernel.org serves the mbox as `text/plain`; it still starts with a `From ` line.
         let mbox = f.content_type.contains("mbox")
@@ -634,8 +656,8 @@ impl Source for PublicInbox {
                 doc.site = host;
                 return Ok(doc);
             }
-            // A missing message says nothing about the host; any other answer does.
-            404 => return Err(Declined.into()),
+            // Any other answer, a 404 too, says the host is no archive, unless it is known as
+            // one: a link shaped like a message is not asked about again for a day.
             _ => {
                 if !known {
                     ARCHIVES.set(&host, false);
@@ -963,15 +985,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(doc.status, Status::Missing);
-        // Another host: a missing message (404) says nothing about it, any other answer that
-        // is no mbox makes its links ordinary web cards from now on.
-        let other = "https://lists.example.org/devel/abc@example.org/";
-        assert!(PublicInbox
-            .resolve(&cx, other)
-            .await
-            .unwrap_err()
-            .is::<Declined>());
-        assert!(PublicInbox.reads(other));
+        // Another host: an answer that is no mbox makes its links ordinary web cards from now
+        // on.
         let page = "https://pages.example.org/devel/abc@example.org/";
         assert!(PublicInbox
             .resolve(&cx, page)
@@ -979,5 +994,87 @@ mod tests {
             .unwrap_err()
             .is::<Declined>());
         assert!(!PublicInbox.reads(page));
+    }
+
+    #[test]
+    fn a_version_after_an_at_is_no_message() {
+        for uri in [
+            "https://pkg.go.dev/github.com/gin-gonic/gin@v1.9.1",
+            "https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/",
+            "https://unpkg.com/react@18/",
+        ] {
+            assert!(!PublicInbox.reads(uri), "{uri}");
+            assert_eq!(Target::of_uri(uri), None, "{uri}");
+        }
+        // A known archive's Message-IDs are taken as they come.
+        assert!(PublicInbox.reads("https://gnusha.org/pi/bitcoindev/20260101.1234@host-01/"));
+        assert!(PublicInbox.reads("https://lists.example.com/devel/abc@localhost/"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_host_without_the_message_is_not_asked_again() {
+        let learned = "https://inbox.example.net/list/atCSAVprBE-tAnN3@erisian.com.au/";
+        let (egress, recorded) = fixture::egress(vec![(
+            &format!("{learned}raw"),
+            200,
+            "application/mbox; charset=UTF-8",
+            read("raw-towns.mbox"),
+        )]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        // A host that is no archive answers 404 for `/raw`: its next link is a web page.
+        let first = "https://plain.example.net/devel/abc@example.org/";
+        let next = "https://plain.example.net/devel/def@example.org/";
+        assert!(PublicInbox
+            .resolve(&cx, first)
+            .await
+            .unwrap_err()
+            .is::<Declined>());
+        assert!(!PublicInbox.reads(next));
+        assert!(PublicInbox
+            .resolve(&cx, next)
+            .await
+            .unwrap_err()
+            .is::<Declined>());
+        assert_eq!(recorded.asked(), [format!("{first}raw")]);
+
+        // A host that answered an mbox is an archive: a message it does not have is missing,
+        // and its Message-IDs are taken as they come.
+        let numbered = "https://inbox.example.net/list/20260101.1234@host-01/";
+        assert!(!PublicInbox.reads(numbered));
+        let doc = PublicInbox.resolve(&cx, learned).await.unwrap();
+        assert_eq!(doc.type_name, "EmailMessage");
+        assert!(PublicInbox.reads(numbered));
+        let doc = PublicInbox.resolve(&cx, numbered).await.unwrap();
+        assert_eq!(doc.status, Status::Missing);
+        assert!(PublicInbox.reads(numbered));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_probe_that_fails_gives_the_page_its_web_card() {
+        // `/raw` redirects to itself: the fetch is refused after three redirects.
+        let raw = "https://loop.example.net/devel/abc@example.org/raw";
+        let (egress, _) = fixture::egress(vec![(raw, 302, "text/html", raw.as_bytes().to_vec())]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let error = PublicInbox
+            .resolve(&cx, "https://loop.example.net/devel/abc@example.org/")
+            .await
+            .unwrap_err();
+        assert!(error.is::<Declined>(), "{error:#}");
+    }
+
+    #[test]
+    fn a_subject_holds_no_address() {
+        let mbox = "Message-ID: <s@example.org>\n\
+                    Subject: Re: ask bob@example.org or <ann@example.org> about the patch\n\nbody\n";
+        let uri = "https://gnusha.org/pi/bitcoindev/s@example.org/";
+        let message = parse(mbox.as_bytes()).unwrap();
+        let doc = card(base(uri), &Target::of_uri(uri).unwrap(), message).unwrap();
+        assert_eq!(doc.name.as_deref(), Some("Re: ask or about the patch"));
     }
 }
