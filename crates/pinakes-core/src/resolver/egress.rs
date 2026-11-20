@@ -28,6 +28,17 @@ impl std::fmt::Display for BodyTooLarge {
     }
 }
 impl std::error::Error for BodyTooLarge {}
+
+/// A request that had its host slot and was not answered within its caller's deadline
+/// ([`FetchOptions::request_deadline`]).
+#[derive(Clone, Copy, Debug)]
+pub struct RequestDeadline(pub Duration);
+impl std::fmt::Display for RequestDeadline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "no answer within {} ms", self.0.as_millis())
+    }
+}
+impl std::error::Error for RequestDeadline {}
 /// Whether `error` is, or wraps, a body over its read's cap.
 pub fn over_cap(error: &anyhow::Error) -> bool {
     error.chain().any(|c| c.is::<BodyTooLarge>())
@@ -239,6 +250,11 @@ pub struct FetchOptions {
     /// (`pkarr_relays::PAYLOAD_TYPES`).
     pub extra_types: &'static [&'static str],
     pub validators: Validators,
+    /// How long the request itself may take, once it has its host slot: connecting, sending and
+    /// the whole answer, of each hop. The wait for the slot does not count (a request queued
+    /// behind its host's pace is not a slow host). Past it the fetch fails as
+    /// [`RequestDeadline`]. Without one, only the fetch's own ten seconds bound it.
+    pub request_deadline: Option<Duration>,
 }
 impl std::fmt::Debug for Fetched {
     /// The body's length, never the body: a token endpoint's answer holds the token.
@@ -295,6 +311,7 @@ impl std::fmt::Debug for FetchOptions {
             .field("error_json", &self.error_json)
             .field("extra_types", &self.extra_types)
             .field("validators", &self.validators)
+            .field("request_deadline", &self.request_deadline)
             .finish()
     }
 }
@@ -1093,7 +1110,14 @@ impl Egress {
                 ..options.clone()
             };
             let options = &with_agent;
-            let mut response = self.transport.get_with(&url, &addresses, options).await?;
+            // The slot is taken: a caller's deadline for the request starts here.
+            let sent = self.transport.get_with(&url, &addresses, options);
+            let mut response = match options.request_deadline {
+                Some(deadline) => tokio::time::timeout(deadline, sent)
+                    .await
+                    .map_err(|_| RequestDeadline(deadline))??,
+                None => sent.await?,
+            };
             observation.status(response.status);
             drop(observation);
             if matches!(response.status, 301 | 302 | 303 | 307 | 308) {

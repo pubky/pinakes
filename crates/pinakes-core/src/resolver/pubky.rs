@@ -433,6 +433,22 @@ mod tests {
         })
     }
     fn resolver_on(net: Arc<Net>, dns: &[&str], relay: &str, relays: &[&str]) -> PubkyResolver {
+        // No per-host pacing in tests: the relays and the homeserver answer at once.
+        let cfg = crate::config::EgressConfig {
+            host_requests_per_second: 1_000_000.0,
+            ..Default::default()
+        };
+        resolver_with(net, dns, relay, relays, cfg, ResolverConfig::default())
+    }
+    /// [`resolver_on`] with an egress and a resolver configuration of the test's own.
+    fn resolver_with(
+        net: Arc<Net>,
+        dns: &[&str],
+        relay: &str,
+        relays: &[&str],
+        cfg: crate::config::EgressConfig,
+        config: ResolverConfig,
+    ) -> PubkyResolver {
         let addresses = |list: &[&str], port| {
             list.iter()
                 .map(|a| SocketAddr::new(a.parse().unwrap(), port))
@@ -442,15 +458,10 @@ mod tests {
             homeserver: addresses(dns, 9443),
             relay: addresses(&[relay], 443),
         };
-        // No per-host pacing in tests: the relays and the homeserver answer at once.
-        let cfg = crate::config::EgressConfig {
-            host_requests_per_second: 1_000_000.0,
-            ..Default::default()
-        };
         let egress = Egress::with_backends(cfg, Arc::new(dns), net);
         let config = ResolverConfig {
             pkarr_relays: relays.iter().map(|r| r.to_string()).collect(),
-            ..Default::default()
+            ..config
         };
         PubkyResolver::new(config, egress).unwrap()
     }
@@ -989,6 +1000,43 @@ mod tests {
             format!("{error:#}").contains("did not answer within"),
             "{error:#}"
         );
+    }
+
+    /// A relay's deadline starts when its request has the relay host's slot: an ask that waits
+    /// for the host's pace longer than the deadline is not a relay that failed, and is answered.
+    #[tokio::test(start_paused = true)]
+    async fn a_relay_s_deadline_does_not_count_the_wait_for_its_host_slot() {
+        let (first, second) = (Keypair::random(), Keypair::random());
+        let net = network(&[direct(&first), direct(&second)], ok());
+        // The relay host takes a request every two seconds; a relay has one second to answer.
+        let mut cfg = crate::config::EgressConfig {
+            host_requests_per_second: 1_000_000.0,
+            ..Default::default()
+        };
+        cfg.host_rates.insert("relay.example".into(), 0.5);
+        let config = ResolverConfig {
+            pkarr_relay_timeout_ms: 1000,
+            ..Default::default()
+        };
+        let resolver = resolver_with(
+            net.clone(),
+            &["8.8.8.8"],
+            "8.8.4.4",
+            &["https://relay.example"],
+            cfg,
+            config,
+        );
+        resolver.resolve(&object(&first)).await.unwrap();
+        let started = tokio::time::Instant::now();
+        let doc = resolver.resolve(&object(&second)).await.unwrap();
+        assert_eq!(doc.name.as_deref(), Some("A deck"));
+        // It waited for its slot, longer than the relay's deadline.
+        assert!(
+            started.elapsed() > Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(net.relay_requests.lock().unwrap().len(), 2);
     }
 
     /// A relay's 429 keeps its `Retry-After`: when no relay gave an answer about the key, the

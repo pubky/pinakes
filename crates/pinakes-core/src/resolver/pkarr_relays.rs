@@ -50,8 +50,10 @@ struct State {
 }
 pub struct Relays {
     relays: Vec<Url>,
-    /// How long one relay may take to answer (`limits.pkarr_relay_timeout_ms`): shorter than a
-    /// resolution's own deadline, so a relay that stalls does not hold back another's packet.
+    /// How long one relay may take to answer (`limits.pkarr_relay_timeout_ms`), from when the
+    /// request has its host slot (`FetchOptions::request_deadline`): shorter than a
+    /// resolution's own deadline, so a relay that stalls does not hold back another's packet,
+    /// while an ask queued behind the relay host's pace is not a relay that stalled.
     deadline: Duration,
     egress: Egress,
     state: Mutex<State>,
@@ -106,21 +108,14 @@ impl Relays {
             extra_types: PAYLOAD_TYPES,
             // Whatever the relay says the body is, HTML too.
             body_cap: Some(PAYLOAD_CAP),
+            request_deadline: Some(self.deadline),
             ..Default::default()
         };
         let answers = futures_util::future::join_all(self.relays.iter().map(|relay| {
             let url = format!("{}/{z32}", relay.as_str().trim_end_matches('/'));
             let options = &options;
             async move {
-                let asked =
-                    tokio::time::timeout(self.deadline, self.egress.fetch_with(&url, options));
-                let Ok(answer) = asked.await else {
-                    return Answer::Failed(format!(
-                        "{relay} did not answer within {} ms",
-                        self.deadline.as_millis()
-                    ));
-                };
-                match answer {
+                match self.egress.fetch_with(&url, options).await {
                     Ok(fetched) if fetched.status == 404 => Answer::Missing,
                     Ok(fetched) if (200..300).contains(&fetched.status) => {
                         match SignedPacket::from_relay_payload(key, &fetched.body.into()) {
@@ -133,6 +128,12 @@ impl Relays {
                     Ok(fetched) => Answer::Failed(format!("{relay} answered {}", fetched.status)),
                     Err(error) if super::unreached(&error) => {
                         Answer::Unreached(format!("{relay}: {error:#}"))
+                    }
+                    Err(error) if error.is::<super::egress::RequestDeadline>() => {
+                        Answer::Failed(format!(
+                            "{relay} did not answer within {} ms",
+                            self.deadline.as_millis()
+                        ))
                     }
                     Err(error) => match error.downcast_ref::<super::RetryLater>() {
                         Some(wait) if matches!(wait.class, "rate_limited" | "http_4xx") => {

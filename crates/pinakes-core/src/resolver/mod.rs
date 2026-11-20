@@ -319,7 +319,11 @@ pub fn error_class(error: &anyhow::Error) -> &'static str {
     if let Some(retry) = error.downcast_ref::<RetryLater>() {
         return retry.class;
     }
-    if error.is::<tokio::time::error::Elapsed>() {
+    if error.is::<tokio::time::error::Elapsed>()
+        || error
+            .chain()
+            .any(|cause| cause.is::<egress::RequestDeadline>())
+    {
         return "timeout";
     }
     if error.chain().any(|cause| cause.is::<Unreached>()) {
