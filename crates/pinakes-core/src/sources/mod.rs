@@ -484,8 +484,9 @@ impl Context<'_> {
     pub fn deadline(&self) -> Option<tokio::time::Instant> {
         DEADLINE.try_with(|d| *d).ok()
     }
-    /// A GET (or, with `options.json_body`, a POST) through the egress policy. Rate limits and
-    /// server errors become `RetryLater`; other statuses are the caller's to read. At most
+    /// A GET (or, with `options.json_body`, a POST) through the egress policy. A rate limit
+    /// (429, answered by egress with the class `http_4xx`), a request timeout (408) and a server
+    /// error become `RetryLater` (`retry`); other statuses are the caller's to read. At most
     /// `MAX_HEADERS` extra headers (`options.headers`, e.g. a service's own identification
     /// header); connection, credential and User-Agent headers are refused.
     pub async fn fetch(&self, url: &str, options: &FetchOptions) -> Result<Fetched> {
@@ -518,7 +519,8 @@ fn check_headers(headers: &[(&'static str, String)]) -> Result<()> {
 }
 
 /// Whether an error is this daemon's own host budget (the slot is further away than a fetch
-/// may wait), which says nothing about the host's answer.
+/// may wait, which egress answers with the class `rate_limited`), which says nothing about the
+/// host's answer.
 pub fn own_rate_limit(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<crate::resolver::RetryLater>()
@@ -807,8 +809,11 @@ pub async fn resolve(
     Ok(Some(doc.bounded(attributes())?))
 }
 
-/// Rate limits and timeouts (408, 429: class `rate_limited`) and server errors (class `upstream`):
-/// retry later, after at least a minute.
+/// A request timeout or a rate limit (408, 429: class `rate_limited`) and a server error (class
+/// `upstream`): retry later, after at least a minute. Egress answers a 429 itself (class
+/// `http_4xx`) before a source sees it, so one reaches here only from a read that asked for the
+/// error's body (`FetchOptions::error_json`). The class of a 408 is also that of the daemon's own
+/// budget wait, which `own_rate_limit` and the queue read it as.
 pub(crate) fn retry(f: &Fetched) -> Result<()> {
     let class = match f.status {
         408 | 429 => "rate_limited",
