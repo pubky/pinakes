@@ -410,8 +410,7 @@ pub fn release_card(
     Ok(doc)
 }
 
-/// Whether `/api/v1/version` answered as Forgejo or Gitea.
-/// Whether `/api/v1/version` answered as Forgejo or Gitea do: exactly `{"version": "…"}`, the
+/// Whether `/api/v1/version` answered as Forgejo and Gitea do: exactly `{"version": "…"}`, the
 /// value a version (`1.22.0`, `11.0.1+gitea-1.22.0`, `16.0.0-dev-785-465b60ef+gitea-1.22.0`).
 pub fn is_instance(status: u16, body: &[u8]) -> bool {
     status == 200
