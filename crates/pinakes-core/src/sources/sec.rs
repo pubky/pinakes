@@ -666,12 +666,9 @@ impl Source for Sec {
         ]
     }
     fn budgets(&self) -> &'static [Budget] {
-        // EDGAR allows ten requests per second in total.
-        &[
-            ("www.sec.gov", 5.0),
-            ("sec.gov", 2.0),
-            ("data.sec.gov", 2.0),
-        ]
+        // EDGAR allows ten requests per second in total. A `sec.gov` link is read from
+        // `www.sec.gov`.
+        &[("www.sec.gov", 5.0), ("data.sec.gov", 2.0)]
     }
     fn examples(&self) -> &'static [Example] {
         &[
@@ -1063,6 +1060,21 @@ mod tests {
         let doc = release_card(base(uri), "34-106268", "34-106268.pdf", None);
         assert_eq!(doc.type_name, "Report");
         assert_eq!(doc.name.as_deref(), Some("Release No. 34-106268"));
+    }
+
+    /// A budget names a host the source asks: filings at `www.sec.gov` (also for a `sec.gov`
+    /// link), companies at `data.sec.gov`.
+    #[test]
+    fn every_budget_host_is_one_the_source_asks() {
+        let hosts: Vec<&str> = Sec.budgets().iter().map(|(host, _)| *host).collect();
+        assert_eq!(hosts, ["www.sec.gov", "data.sec.gov"]);
+        let Some(Target::Filing { cik, accession }) =
+            Target::of_uri("https://sec.gov/Archives/edgar/data/2103612/000110465926000959/")
+        else {
+            panic!("a filing");
+        };
+        let header = filing_url(cik, &accession, &format!("{accession}.hdr.sgml"));
+        assert!(header.starts_with("https://www.sec.gov/"), "{header}");
     }
 
     #[tokio::test]
