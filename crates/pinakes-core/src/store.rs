@@ -277,7 +277,10 @@ async fn insert_resource_created(
     }
     Ok((None, created))
 }
-/// `insert_resource` without the alias check, for roots; whether it inserted the row.
+/// `insert_resource` without the alias check, for roots; whether it inserted the row. The
+/// insert names no conflict target: `uri` is unique as `id` is (the one is the other's hash), and
+/// with `id` alone as the target, two writers inserting one link at the same moment could leave
+/// the second to fail on `uri`'s index instead of finding the row there.
 pub(crate) async fn insert_plain(
     tx: &mut Transaction<'_, Postgres>,
     id: &str,
@@ -287,7 +290,7 @@ pub(crate) async fn insert_plain(
         .ok()
         .and_then(|u| u.host_str().map(str::to_owned));
     let osm = crate::resolver::osm::parse_id(uri);
-    let inserted = sqlx::query("INSERT INTO resource(id, uri, host, resolver,osm_type,osm_id,doc,type_path) VALUES($1,$2,$3,$4,$5,$6,CASE WHEN $6::bigint IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('type','Place','url',$2::text,'osm_id',$5::text||'/'||$6::text,'source','osm','status','pending') END,CASE WHEN $6::bigint IS NULL THEN '{}'::text[] ELSE NULL END) ON CONFLICT(id) DO NOTHING")
+    let inserted = sqlx::query("INSERT INTO resource(id, uri, host, resolver,osm_type,osm_id,doc,type_path) VALUES($1,$2,$3,$4,$5,$6,CASE WHEN $6::bigint IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('type','Place','url',$2::text,'osm_id',$5::text||'/'||$6::text,'source','osm','status','pending') END,CASE WHEN $6::bigint IS NULL THEN '{}'::text[] ELSE NULL END) ON CONFLICT DO NOTHING")
         .bind(id).bind(uri).bind(host).bind(classify(uri)).bind(osm.as_ref().map(|o|&o.osm_type)).bind(osm.as_ref().map(|o|o.id)).execute(&mut **tx).await?;
     Ok(inserted.rows_affected() == 1)
 }
