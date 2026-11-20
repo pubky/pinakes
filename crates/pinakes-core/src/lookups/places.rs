@@ -399,8 +399,9 @@ pub mod also_on {
 
     /// A place's page on a map or review site (`places::place_page`): the one Wikidata item
     /// carrying the page's value (read back and compared exactly; several are ambiguous and give
-    /// nothing), its Q-id as key, its one OSM object (when it names exactly one) as key and link,
-    /// and its Wikidata page, other place links and Wikipedia editions as links.
+    /// nothing), its Q-id as key when the item carries no other value for the page's site, its
+    /// one OSM object (when it names exactly one) as key and link, and its Wikidata page, other
+    /// place links and Wikipedia editions as links.
     pub struct WikidataPlaces;
 
     #[async_trait]
@@ -432,7 +433,10 @@ pub mod also_on {
                 return Ok(also_on::Found::default());
             };
             let mut found = crate::lookups::Found::default();
-            found.push_key(items::key(&hub.qid));
+            // An item naming several pages on this site is not this one page's.
+            if crate::hubs::wikidata::only_value(&hub, pid, &value) {
+                found.push_key(items::key(&hub.qid));
+            }
             // The item's OSM objects with a valid id (a malformed statement names none): its one
             // object, when it names exactly one, is a key and a link.
             let objects: Vec<crate::model::OsmId> = places::objects(&raw)
@@ -660,6 +664,29 @@ pub mod also_on {
                 let found = WikidataPlaces.lookup(&cx, &page).await.unwrap();
                 assert_eq!(keys(&found), expected, "{keep_way}");
             }
+        }
+
+        /// An item that names two Tripadvisor locations is not either page's: its Q-id is no key
+        /// of the page, and what else the item names stays.
+        #[tokio::test(start_paused = true)]
+        async fn an_item_with_two_values_on_the_site_gives_no_item_key() {
+            let search = "https://www.wikidata.org/w/api.php?action=query&list=search&srsearch=haswbstatement%3AP3134%3D188151&srlimit=5&format=json";
+            let mut v: serde_json::Value =
+                serde_json::from_slice(&read("wikidata-q243.json")).unwrap();
+            v["entities"]["Q243"]["claims"]["P3134"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({"mainsnak": {"snaktype": "value", "property": "P3134",
+                    "datavalue": {"value": "188152", "type": "string"}, "datatype": "external-id"},
+                    "type": "statement", "rank": "normal"}));
+            let cx = context(vec![
+                (search, 200, JSON, read("wikidata-search-p3134-188151.json")),
+                (&entity("Q243"), 200, JSON, serde_json::to_vec(&v).unwrap()),
+            ]);
+            let page = at("https://www.tripadvisor.com/Attraction_Review-g187147-d188151-Reviews-Eiffel_Tower-Paris_Ile_de_France.html");
+            let found = WikidataPlaces.lookup(&cx, &page).await.unwrap();
+            assert_eq!(keys(&found), ["osm:way/5013364"]);
+            assert!(found.links.iter().any(|l| l.site == "Wikidata"));
         }
 
         /// The Eiffel Tower's Tripadvisor page on the German site finds its item by the location

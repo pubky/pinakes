@@ -1450,6 +1450,13 @@ pub mod wikidata {
             n => Found::Ambiguous(n),
         }
     }
+    /// Whether `value` is the only value `item` carries for `property` at its best rank. An item
+    /// with several (a game and its expansion pass, two packages of one app, two pages of one
+    /// place) is not one page's: its Q-id is no key of a page that is one of them.
+    pub fn only_value(item: &Item, property: &str, value: &str) -> bool {
+        let values = item.id(property);
+        !values.is_empty() && values.iter().all(|v| v == value)
+    }
 }
 
 #[cfg(test)]
