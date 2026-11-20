@@ -280,12 +280,12 @@ pub fn show_feed(url: &Url) -> Url {
 /// no enclosure), which is no episode. One function names items for the episode list and for
 /// the resolver, so every `uri` the list gives resolves to its episode's card.
 pub fn item_identity(item: roxmltree::Node<'_, '_>, feed: &Url) -> Option<ItemIdentity> {
+    // The first element of the name that has text: an Atom link (`href`, no text) before the
+    // item's `<link>` is not its page.
     let text = |name: &str| {
         item.children()
-            .find(|c| c.is_element() && c.tag_name().name() == name)
-            .and_then(|c| c.text())
-            .map(str::trim)
-            .filter(|t| !t.is_empty())
+            .filter(|c| c.is_element() && c.tag_name().name() == name)
+            .find_map(|c| c.text().map(str::trim).filter(|t| !t.is_empty()))
             .map(str::to_owned)
     };
     let link = |s: &str| crate::resolver::web::origin_url(feed, s).filter(|u| u.len() <= 2048);
@@ -1576,6 +1576,20 @@ mod tests {
         let listed = serde_json::to_string(&from_feed(&f).unwrap()).unwrap();
         assert!(!listed.contains("utm_"), "{listed}");
         assert!(!listed.contains("fbclid"), "{listed}");
+    }
+
+    /// An item's page is its `<link>` with text: an Atom link element before it (an `href`, no
+    /// text) does not hide it.
+    #[test]
+    fn an_atom_link_before_an_items_link_is_not_its_page() {
+        let body = feed(
+            r#"<item><title>One</title><atom:link xmlns:atom="http://www.w3.org/2005/Atom" rel="alternate" href="https://other.example/one"/><link>https://show.example/one</link><enclosure url="https://cdn.example/1.mp3" type="audio/mpeg"/></item>"#,
+        );
+        let f = fetched(&body, false);
+        let xml = roxmltree::Document::parse(&body).unwrap();
+        let item = xml.descendants().find(|n| n.has_tag_name("item")).unwrap();
+        let one = item_identity(item, &f.url).unwrap();
+        assert_eq!(one.page.as_deref(), Some("https://show.example/one"));
     }
 
     /// A feed item's URI: the feed's address with the item's `guid`, a `guid` the address held
