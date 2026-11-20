@@ -350,12 +350,8 @@ pub mod also_on {
             };
             let url = crate::wikipedia::item_lookup(&article)?;
             let (status, body) = get(cx, url.as_str(), "wikipedia_busy").await?;
-            if status != 200 {
-                return Ok(None);
-            }
-            Ok(crate::wikipedia::parse_item(&serde_json::from_slice(
-                &body,
-            )?))
+            // Only an article its Wikipedia does not have, or one without an item, is "none".
+            crate::wikipedia::item_answer(status, &body)
         }
     }
 
@@ -676,9 +672,11 @@ pub mod also_on {
             v["entities"]["Q243"]["claims"]["P3134"]
                 .as_array_mut()
                 .unwrap()
-                .push(serde_json::json!({"mainsnak": {"snaktype": "value", "property": "P3134",
+                .push(
+                    serde_json::json!({"mainsnak": {"snaktype": "value", "property": "P3134",
                     "datavalue": {"value": "188152", "type": "string"}, "datatype": "external-id"},
-                    "type": "statement", "rank": "normal"}));
+                    "type": "statement", "rank": "normal"}),
+                );
             let cx = context(vec![
                 (search, 200, JSON, read("wikidata-search-p3134-188151.json")),
                 (&entity("Q243"), 200, JSON, serde_json::to_vec(&v).unwrap()),
@@ -818,6 +816,39 @@ pub mod also_on {
                 Some("Q64")
             )));
             assert!(!WikidataOsm.applies(&subject("https://example.org/", None)));
+        }
+
+        /// A Wikipedia that refuses or is busy is an error, so the run comes back; only an
+        /// article its Wikipedia does not have names no item.
+        #[tokio::test(start_paused = true)]
+        async fn a_failed_article_read_is_an_error_and_a_missing_article_is_nothing() {
+            let wiki = "https://en.wikipedia.org/w/api.php?action=query&prop=pageprops&ppprop=wikibase_item&titles=Paris&redirects=1&format=json";
+            let article = subject("https://en.wikipedia.org/wiki/Paris", None);
+            for (status, body) in [
+                (403, &b"{}"[..]),
+                (503, &b"{}"[..]),
+                (
+                    200,
+                    &br#"{"error":{"code":"ratelimited","info":"slow down"}}"#[..],
+                ),
+            ] {
+                let cx = context(vec![(wiki, status, JSON, body.to_vec())]);
+                assert!(WikidataOsm.lookup(&cx, &article).await.is_err(), "{status}");
+            }
+            for (status, body) in [
+                (404, &b"{}"[..]),
+                (
+                    200,
+                    &br#"{"batchcomplete":"","query":{"pages":{"-1":{"ns":0,"title":"Paris","missing":""}}}}"#[..],
+                ),
+            ] {
+                let cx = context(vec![(wiki, status, JSON, body.to_vec())]);
+                assert_eq!(
+                    WikidataOsm.lookup(&cx, &article).await.unwrap(),
+                    Default::default(),
+                    "{status}"
+                );
+            }
         }
 
         #[test]
