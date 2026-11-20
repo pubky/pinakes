@@ -685,15 +685,8 @@ impl Source for Sec {
         ]
     }
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
-        // EDGAR refuses requests whose User-Agent has no email address: wait for one.
-        if cx.contact().is_none() {
-            return Err(crate::resolver::RetryLater {
-                class: "disabled",
-                seconds: 3600,
-            }
-            .into());
-        }
         let target = Target::of_uri(uri).context("not an EDGAR link")?;
+        // A release is read from the Federal Register: nothing is asked of EDGAR.
         if let Target::Release { release, file } = &target {
             let json = FetchOptions::json();
             let f = cx.fetch(&docket_url(release), &json).await?;
@@ -706,6 +699,14 @@ impl Source for Sec {
                 None => None,
             };
             return Ok(release_card(cx.card(uri, self), release, file, document));
+        }
+        // EDGAR refuses requests whose User-Agent has no email address: wait for one.
+        if cx.contact().is_none() {
+            return Err(crate::resolver::RetryLater {
+                class: "disabled",
+                seconds: 3600,
+            }
+            .into());
         }
         if let Target::Company { cik } = target {
             let url = format!("https://data.sec.gov/submissions/CIK{cik:010}.json");
@@ -1080,6 +1081,34 @@ mod tests {
         };
         let header = filing_url(cik, &accession, &format!("{accession}.hdr.sgml"));
         assert!(header.starts_with("https://www.sec.gov/"), "{header}");
+    }
+
+    /// A release is read from the Federal Register: its link does not wait for a contact, and
+    /// nothing is asked of EDGAR.
+    #[tokio::test(start_paused = true)]
+    async fn a_release_does_not_wait_for_a_contact() {
+        let docket = Url::parse(&docket_url("34-999999")).unwrap().to_string();
+        let (egress, recorded) = crate::sources::fixture::egress(vec![(
+            docket.as_str(),
+            200,
+            "application/json",
+            read("fr-docket-34-999999.json"),
+        )]);
+        assert_eq!(egress.contact(), None);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let doc = Sec
+            .resolve(
+                &cx,
+                "https://www.sec.gov/files/rules/sro/nasdaqtx/2026/34-999999.pdf",
+            )
+            .await
+            .unwrap();
+        assert_eq!(doc.status, crate::model::Status::Ok);
+        assert_eq!(doc.name.as_deref(), Some("Release No. 34-999999"));
+        assert_eq!(recorded.asked(), [docket]);
     }
 
     #[tokio::test]

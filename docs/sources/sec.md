@@ -5,8 +5,9 @@ card comes from its header (`{accession}.hdr.sgml`, about 1 KB); the filed docum
 often several megabytes, are never fetched. Public data; no key. EDGAR's [access
 rules](https://www.sec.gov/os/accessing-edgar-data) ask for at most ten requests per second and a
 User-Agent with an email address: while `http.contact` is empty, EDGAR links wait (they are retried
-hourly) instead of being sent. The source keeps well under that limit: five requests per second
-for `www.sec.gov` (where a `sec.gov` link is read too) and two for `data.sec.gov`, never above
+hourly) instead of being sent; an SRO release, read from the Federal Register, does not wait.
+The source keeps well under that limit: five requests per second for `www.sec.gov` (where a
+`sec.gov` link is read too) and two for `data.sec.gov`, never above
 `limits.host_requests_per_second` (one by default).
 
 ## Links
