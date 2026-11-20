@@ -3659,6 +3659,78 @@ async fn a_lookup_whose_resource_became_an_alias_writes_nothing(pool: PgPool) {
     assert_eq!(derived(&pool, &id).await, 0);
 }
 
+/// The mark stands as well for a card whose lease ran out before the regrouping, while its batch
+/// still runs: the lease moves, so the batch's end does not find it unchanged. A due card no
+/// worker holds stays due through a regrouping.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_regrouping_after_the_lease_ran_out_brings_the_card_back(pool: PgPool) {
+    let recording = "mb:recording:e00ebb77-541e-41f3-86ba-a90530414922";
+    let card = page(&pool, "https://open.spotify.com/track/outlived", "Outlived").await;
+    let other = page(&pool, "https://tidal.com/track/491206013", "Outlived").await;
+    let cx = cx(Config::default());
+    let hub = |id: String| {
+        let (pool, cx) = (pool.clone(), cx.clone());
+        async move {
+            also_on::record(
+                &pool,
+                &id,
+                "hub",
+                Found {
+                    keys: vec![key(recording)],
+                    ..Default::default()
+                },
+                Duration::from_secs(86_400),
+                &cx.config.also_on,
+            )
+            .await
+            .unwrap();
+            common::drain_groups(&pool, &Default::default()).await;
+        }
+    };
+    hub(card.clone()).await;
+    let sources: Vec<Arc<dyn Source>> = vec![Arc::new(JoinedMeanwhile {
+        pool: pool.clone(),
+        other: other.clone(),
+        recording,
+    })];
+    sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // A lease of no time at all: it has run out when the lookup regroups.
+    also_on::drain_leased(&pool, &cx, &sources, 100, Duration::ZERO)
+        .await
+        .unwrap();
+    let due = || {
+        let pool = pool.clone();
+        let card = card.clone();
+        async move {
+            sqlx::query_as::<_, (f64, i32, Option<String>)>(
+                "SELECT extract(epoch FROM next_attempt_at-now())::float8,attempts,last_error FROM also_on_dirty WHERE resource_id=$1",
+            )
+            .bind(&card)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let (due_in, attempts, error) = due().await;
+    assert_eq!((attempts, error), (0, None));
+    assert!(due_in <= 600.0, "{due_in}");
+    // The card is due and no worker holds it: another regrouping leaves it due.
+    let third = page(&pool, "https://www.deezer.com/track/3750996073", "Outlived").await;
+    sqlx::query(
+        "UPDATE also_on_dirty SET next_attempt_at=now()-interval '1 minute' WHERE resource_id=$1",
+    )
+    .bind(&card)
+    .execute(&pool)
+    .await
+    .unwrap();
+    hub(third).await;
+    let (due_in, ..) = due().await;
+    assert!((-61.0..=-59.0).contains(&due_in), "{due_in}");
+}
+
 /// A key, a link or a fact two sources vouch for is the row of the one that recorded it first.
 /// Once that source is switched off, or let the row expire, the other takes the row over at its
 /// next run, so the card keeps what a live source vouches for; the resource, and the one a keyed

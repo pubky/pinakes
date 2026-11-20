@@ -976,11 +976,12 @@ pub async fn record(
 
 /// Run the sources of `ids` again in ten minutes, those `editions` reads (a MusicBrainz key): a change of
 /// their groups (a member joining or leaving, a link becoming an alias) changes the links their
-/// cards may show, which it places. A card that is due stays due, and one due later than ten
-/// minutes from now is due then. One due sooner keeps its time, a microsecond later: were that
-/// time the worker's lease on it, the batch's end must not find the lease unchanged
-/// (`drain_leased` writes the next run only over its own lease), so the mark stands as a save's
-/// does and the card runs again when the lease has run out.
+/// cards may show, which it places. A card due later than ten minutes from now is due then. One
+/// due sooner, or due already, keeps its time, a microsecond later: were that time the worker's
+/// lease on it (one that has run out while its batch still runs, too), the batch's end must not
+/// find the lease unchanged (`drain_leased` writes the next run only over its own lease), so the
+/// mark stands as a save's does and the card runs again when the lease has run out. A due card
+/// no worker holds stays due.
 pub(crate) async fn requeue_placed(
     tx: &mut Transaction<'_, Postgres>,
     ids: &[String],
@@ -989,7 +990,7 @@ pub(crate) async fn requeue_placed(
         return Ok(());
     }
     // In ten minutes: the changes a regrouping makes at once come to one run per card.
-    sqlx::query("INSERT INTO also_on_dirty(resource_id,next_attempt_at) SELECT DISTINCT k.resource_id,now()+interval '10 minutes' FROM resource_key k WHERE k.resource_id=ANY($1) AND (k.key LIKE 'mb:recording:%' OR k.key LIKE 'mb:release:%' OR k.key LIKE 'mb:release-group:%') ORDER BY 1 ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=CASE WHEN also_on_dirty.next_attempt_at>excluded.next_attempt_at THEN excluded.next_attempt_at ELSE also_on_dirty.next_attempt_at+interval '1 microsecond' END WHERE also_on_dirty.next_attempt_at>now()")
+    sqlx::query("INSERT INTO also_on_dirty(resource_id,next_attempt_at) SELECT DISTINCT k.resource_id,now()+interval '10 minutes' FROM resource_key k WHERE k.resource_id=ANY($1) AND (k.key LIKE 'mb:recording:%' OR k.key LIKE 'mb:release:%' OR k.key LIKE 'mb:release-group:%') ORDER BY 1 ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=CASE WHEN also_on_dirty.next_attempt_at>excluded.next_attempt_at THEN excluded.next_attempt_at ELSE also_on_dirty.next_attempt_at+interval '1 microsecond' END")
         .bind(ids)
         .execute(&mut **tx)
         .await?;
