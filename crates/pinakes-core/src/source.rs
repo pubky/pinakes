@@ -17,9 +17,10 @@ pub const ERROR_CLASSES: &[&str] = &[
 
 pub async fn outcome(pool: &PgPool, source: &str, error: Option<&str>) -> Result<()> {
     let error = error.map(|value| {
-        // A redirect the upstream answered (stored on a link as `http_3xx`) is the source's
-        // client-side error: its configured URL names the wrong place.
-        if value == "http_3xx" {
+        // A redirect the upstream answered (stored on a link as `http_3xx`) and an upstream that
+        // refused Pinakes (`upstream_denied`: a key expired or out of quota) are the source's
+        // client-side errors: its configured URL or key is wrong.
+        if matches!(value, "http_3xx" | "upstream_denied") {
             "http_4xx"
         } else if ERROR_CLASSES.contains(&value) {
             value
