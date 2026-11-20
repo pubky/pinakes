@@ -78,13 +78,27 @@ fn options(token: &str) -> FetchOptions {
         keep_redirect: true,
         // Its rate limit answers 403 (`read`): a wait, which a confirmation replays.
         waits: &[403],
+        // An error answer keeps its JSON body: a 403's `message` says whether it is the rate
+        // limit. A 429 comes as it is, for `read` to class.
+        error_json: true,
         ..Default::default()
     }
 }
 
+/// Whether a 403 is GitHub's rate limit: its `message` names one ("API rate limit exceeded for
+/// …", "You have exceeded a secondary rate limit. …").
+fn rate_limit(body: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|v| text(&v["message"]))
+        .is_some_and(|message| message.to_ascii_lowercase().contains("rate limit"))
+}
+
 /// A repository's card from `GET /repos/{owner}/{repo}` with `token`. A path GitHub has no
 /// repository for (404) is declined: it may be another page of the site (an advisory, a
-/// two-part site page), so the web route reads it and says whether it is gone.
+/// two-part site page), so the web route reads it and says whether it is gone. A 403 that is
+/// not the rate limit (access to the repository is blocked) is declined too. The rate limit is
+/// a wait of class `rate_limited`, a timeout or a server error one of class `upstream`.
 pub async fn read(
     cx: &Context<'_>,
     doc: ResourceMeta,
@@ -95,6 +109,13 @@ pub async fn read(
     let options = options(token);
     let url = format!("{API}/repos/{owner}/{repo}");
     let f = cx.egress.discover(&url, &options, 3600).await?;
+    let wait = |class: &'static str| -> Result<Answer> {
+        Err(crate::resolver::RetryLater {
+            class,
+            seconds: f.retry_after_secs.clamp(60, 3600),
+        }
+        .into())
+    };
     match f.status {
         200 => match card(doc, &f.body)? {
             Some(card) => Ok(Answer::Card(Box::new(card))),
@@ -109,12 +130,11 @@ pub async fn read(
         301 | 302 | 307 | 308 => Ok(Answer::Moved),
         401 => Ok(Answer::Refused),
         404 => Err(Declined.into()),
-        // GitHub's rate limit answers 403 or 429.
-        403 | 408 | 429 | 500..=599 => Err(crate::resolver::RetryLater {
-            class: "rate_limited",
-            seconds: f.retry_after_secs.clamp(60, 3600),
-        }
-        .into()),
+        // GitHub's rate limit answers 429, or 403 with a message that names it.
+        429 => wait("rate_limited"),
+        403 if rate_limit(&f.body) => wait("rate_limited"),
+        403 => Err(Declined.into()),
+        408 | 500..=599 => wait("upstream"),
         status => anyhow::bail!("GitHub answered {status}"),
     }
 }
@@ -381,6 +401,19 @@ mod tests {
                     br#"{"message":"API rate limit exceeded"}"#.to_vec(),
                     None,
                 ),
+                // Its secondary rate limit.
+                ("/repos/slow/repo", _) => (
+                    403,
+                    br#"{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}"#.to_vec(),
+                    None,
+                ),
+                // A 403 that is not a rate limit.
+                ("/repos/blocked/repo", _) => (
+                    403,
+                    br#"{"message":"Repository access blocked"}"#.to_vec(),
+                    None,
+                ),
+                ("/repos/down/repo", _) => (503, b"{}".to_vec(), None),
                 _ => (404, fixture::read("github", "repo-missing.json"), None),
             };
             Ok(crate::resolver::egress::Fetched {
@@ -497,6 +530,50 @@ mod tests {
         }
         assert_eq!(asked("/repos/busy/repo"), 1, "the rate limit was cut short");
         assert_eq!(asked("/repos/a/missing"), 2);
+    }
+
+    /// A 403 is a wait only when its message names a rate limit: any other 403 (access to the
+    /// repository is blocked) is the web route's page. A server error is a wait of its own class.
+    #[tokio::test(start_paused = true)]
+    async fn only_a_rate_limit_403_is_a_wait() {
+        let api = std::sync::Arc::new(Api {
+            seen: Default::default(),
+        });
+        let egress = crate::resolver::egress::Egress::with_backends(
+            Default::default(),
+            std::sync::Arc::new(fixture::PublicDns),
+            api.clone(),
+        );
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let mut answers = Vec::new();
+        for owner in ["busy", "slow", "blocked", "down"] {
+            let doc = cx.card(&format!("https://github.com/{owner}/repo"), &Github);
+            let answer = read(&cx, doc, owner, "repo", "good-token").await;
+            let error = answer.expect_err("no card");
+            let class = error
+                .downcast_ref::<crate::resolver::RetryLater>()
+                .map(|retry| retry.class);
+            answers.push((owner, class, error.is::<Declined>()));
+        }
+        assert_eq!(
+            answers,
+            [
+                ("busy", Some("rate_limited"), false),
+                ("slow", Some("rate_limited"), false),
+                ("blocked", None, true),
+                ("down", Some("upstream"), false),
+            ]
+        );
+    }
+
+    /// The request asks for an error answer's JSON body: a 403's message says whether it is the
+    /// rate limit, and the egress drops an error's JSON body unless asked.
+    #[test]
+    fn an_error_answer_keeps_its_json_body() {
+        assert!(options("good-token").error_json);
     }
 
     #[tokio::test(start_paused = true)]

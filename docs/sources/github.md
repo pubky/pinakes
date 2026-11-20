@@ -36,7 +36,11 @@ gists are not read; they get web cards.
 `GET https://api.github.com/repos/{owner}/{repo}` (about 5 KB). A path GitHub has no
 repository for (404: a deleted repository, or another page of the site shaped like one) gets a
 web card, which is `missing` when the page is gone too. A renamed one answers a redirect, which is not followed with the
-token: its link gets a web card, which follows it. GitHub's rate limit (403, 429) retries later.
+token: its link gets a web card, which follows it.
+
+GitHub's rate limit retries later: a 429, or a 403 whose message names a rate limit. Any other
+403 (GitHub blocks access to the repository) gets a web card. A timeout or a server error (408,
+5xx) retries later too.
 
 ## Card
 
