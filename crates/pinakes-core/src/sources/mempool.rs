@@ -1083,7 +1083,11 @@ pub(crate) fn tx_card(v: &Value, network: Network, txid: &str) -> Result<Card> {
     card.detail("outputs", vout.map(Vec::len));
     card.detail(
         "output_value",
-        vout.map(|o| o.iter().filter_map(|x| x["value"].as_u64()).sum::<u64>()),
+        vout.map(|o| {
+            o.iter()
+                .filter_map(|x| x["value"].as_u64())
+                .fold(0u64, u64::saturating_add)
+        }),
     );
     card.detail(
         "coinbase",
@@ -2441,6 +2445,21 @@ mod tests {
             parse_tx(404, &read("tx-missing.txt"), Network::Mainnet, PIZZA).unwrap(),
             None
         );
+    }
+
+    /// Output values that pass `u64` together (a malformed record) give the largest value, as
+    /// the other satoshi sums do.
+    #[test]
+    fn output_values_past_u64_saturate() {
+        let body = format!(
+            r#"{{"txid":"{PIZZA}","status":{{"confirmed":false}},"vin":[],"vout":[{{"value":{}}},{{"value":2}}]}}"#,
+            u64::MAX - 1
+        );
+        let card = parse_tx(200, body.as_bytes(), Network::Mainnet, PIZZA)
+            .unwrap()
+            .unwrap();
+        assert_eq!(card.details["outputs"], 2);
+        assert_eq!(card.details["output_value"], u64::MAX);
     }
 
     #[test]
