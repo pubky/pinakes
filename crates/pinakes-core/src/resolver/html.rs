@@ -371,7 +371,7 @@ async fn permit(parses: &Arc<Semaphore>) -> anyhow::Result<OwnedSemaphorePermit>
         })
     })
     .await?;
-    Ok(permit.context("the caller stopped waiting")??)
+    Ok(permit.context(CALLER_GONE)??)
 }
 
 /// Run a parse on a thread of its own, outside the runtime and its permits, as one parse job,
@@ -415,6 +415,21 @@ pub fn job_over() -> bool {
     })
 }
 
+/// The error for work in a job that stopped because the job is over ([`job_over`]): the job's
+/// own reason when a parse ended it, else its caller gone or its deadline passed.
+pub fn job_ended() -> anyhow::Error {
+    let reason = JOB.with(|j| {
+        j.borrow()
+            .as_ref()
+            .map_or(CALLER_GONE, |job| match job.over {
+                Some(reason) => reason,
+                None if job.cancelled.load(Ordering::SeqCst) => CALLER_GONE,
+                None => WALL_DEADLINE,
+            })
+    });
+    TooComplex { reason }.into()
+}
+
 fn check_slot() {
     debug_assert!(
         JOB.with(|j| j.borrow().is_some()) || tokio::runtime::Handle::try_current().is_err(),
@@ -422,10 +437,26 @@ fn check_slot() {
     );
 }
 
-/// A parse that did not end within its limits: the page gets no card (`too_complex`).
+/// The reasons a parse job ends for that say nothing about the page: its caller gone, a
+/// worker slower than the job's wall deadline (a loaded host), a worker that ended by itself or
+/// was killed from outside (the kernel's memory killer).
+const CALLER_GONE: &str = "the caller stopped waiting";
+const WALL_DEADLINE: &str = "the wall deadline";
+const WORKER_ENDED: &str = "the worker ended early";
+
+/// A parse that did not end within its limits. Past the CPU budget, the memory limit or the
+/// node cap the page gets no card (`too_complex`); a parse that ended for a reason outside the
+/// page (`transient`) is read again later (`timeout`).
 #[derive(Debug)]
 pub struct TooComplex {
     pub reason: &'static str,
+}
+impl TooComplex {
+    /// Whether the parse ended for a reason outside the page (the wall deadline, a worker that
+    /// ended early, a caller that stopped waiting): the next read may parse it.
+    pub fn transient(&self) -> bool {
+        matches!(self.reason, CALLER_GONE | WALL_DEADLINE | WORKER_ENDED)
+    }
 }
 impl std::fmt::Display for TooComplex {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -701,10 +732,10 @@ impl Job {
             return Err(TooComplex { reason }.into());
         }
         if self.cancelled.load(Ordering::SeqCst) {
-            return Err(self.end_with("the caller stopped waiting", text));
+            return Err(self.end_with(CALLER_GONE, text));
         }
         if Instant::now() >= self.deadline {
-            return Err(self.end_with("the wall deadline", text));
+            return Err(self.end_with(WALL_DEADLINE, text));
         }
         // Text without a `<` holds no markup: the tokenizer reads it in linear time and there is
         // no tree to build, so it is parsed here (a calendar's plain descriptions). It counts
@@ -808,9 +839,9 @@ impl Job {
                 loop {
                     let running = slot.as_mut()?;
                     let reason = if cancelled.load(Ordering::SeqCst) {
-                        Some("the caller stopped waiting")
+                        Some(CALLER_GONE)
                     } else if Instant::now() >= deadline {
-                        Some("the wall deadline")
+                        Some(WALL_DEADLINE)
                     } else {
                         None
                     };
@@ -863,7 +894,7 @@ impl Job {
     /// End the worker and say why it ended: closed, killed, or dead at a limit.
     fn stop(&mut self) -> &'static str {
         let Some(process) = self.process.take() else {
-            return "the worker ended early";
+            return WORKER_ENDED;
         };
         drop(process.stdin);
         drop(process.stdout);
@@ -882,7 +913,7 @@ impl Job {
             Some(Ok(status)) if matches!(status.signal(), Some(libc::SIGABRT | libc::SIGSEGV)) => {
                 "the memory limit"
             }
-            _ => "the worker ended early",
+            _ => WORKER_ENDED,
         }
     }
 
@@ -2186,6 +2217,48 @@ mod tests {
         assert!(job
             .parse_with(Kind::Fragment, "plain", Some(&missing))
             .is_ok());
+    }
+
+    /// A parse that ended for a reason outside the page is a timeout, read again with the card
+    /// kept: a worker that exits by itself (as one killed from outside does), and one still
+    /// running at the job's wall deadline. A worker dead at its CPU budget stays `too_complex`.
+    #[test]
+    fn a_worker_that_ends_early_or_late_is_a_timeout() {
+        let shell = |script: &str| Worker {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), script.into()],
+        };
+        let mut job = Job::new(PARSE_BUDGET, Arc::default());
+        let error = job
+            .parse_with(Kind::Fragment, "<b>x</b>", Some(&shell("exit 1")))
+            .unwrap_err();
+        let parse = error.downcast_ref::<TooComplex>().expect("too complex");
+        assert_eq!(parse.reason, "the worker ended early");
+        assert!(parse.transient());
+        assert_eq!(crate::resolver::error_class(&error), "timeout");
+
+        let mut job = Job::new(PARSE_BUDGET, Arc::default());
+        job.deadline = Instant::now() + Duration::from_millis(300);
+        let error = job
+            .parse_with(
+                Kind::Fragment,
+                "<b>x</b>",
+                Some(&shell("exec /bin/sleep 30")),
+            )
+            .unwrap_err();
+        let parse = error.downcast_ref::<TooComplex>().expect("too complex");
+        assert_eq!(parse.reason, "the wall deadline");
+        assert_eq!(crate::resolver::error_class(&error), "timeout");
+
+        for (reason, class) in [
+            ("the caller stopped waiting", "timeout"),
+            ("the CPU budget", "too_complex"),
+            ("the memory limit", "too_complex"),
+            ("more nodes than the cap", "too_complex"),
+        ] {
+            let error: anyhow::Error = TooComplex { reason }.into();
+            assert_eq!(crate::resolver::error_class(&error), class, "{reason}");
+        }
     }
 
     /// A CPU budget no parse of a test reaches: a page cut short at the budget is a smaller tree,
