@@ -929,7 +929,7 @@ async fn a_card_that_says_more_by_its_name_or_a_fact_is_kept(pool: PgPool) {
 
 /// A page answered without its tags, on a stored card that says more, is a first missing answer:
 /// the card stays as last read (no change line, its `fetched_at` that read's) and the confirming
-/// read comes `queue.missing_ttl_secs` later, whatever the card's own lifetime (a profile's is a
+/// read comes `limits.missing_ttl_secs` later, whatever the card's own lifetime (a profile's is a
 /// day); the confirming read stores the plain card. A good read in between clears the observation.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_tagless_read_waits_for_its_confirming_read_as_a_missing_one(pool: PgPool) {

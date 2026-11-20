@@ -29,7 +29,7 @@ lower-case letters (a country's site, `de.linkedin.com`), a capitalised slug and
 The tags are read as written: LinkedIn's JSON-LD describes recent posts, not the page. A profile's
 or company's page answered without them gives the plain card, "Profile on linkedin.com", with the
 slug: it does not say the object is gone, and a stored card that says more (another name, text, a
-picture or facts) stays, as last read, until a second read an hour later (`queue.missing_ttl_secs`)
+picture or facts) stays, as last read, until a second read an hour later (`limits.missing_ttl_secs`)
 answers the same, as a missing answer is confirmed: then the plain card replaces it. LinkedIn
 answers many requests without an account with HTTP 999 or its sign-in page; such a request gives the
 card of the link's shape alone, "Profile on linkedin.com" or "Post on linkedin.com", with the

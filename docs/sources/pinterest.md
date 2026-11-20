@@ -20,7 +20,7 @@ capitalised name are aliases of them. Boards and `pin.it` short links are not re
   is no profile's (Pinterest answers its generic page, with status 200, for a name it does not know)
   gives the plain card, "Profile on pinterest.com", with the name: it does not say the profile is
   gone, and a stored card that says more (another name, text, a picture or facts) stays, as last
-  read, until a second read an hour later (`queue.missing_ttl_secs`) answers the same, as a missing
+  read, until a second read an hour later (`limits.missing_ttl_secs`) answers the same, as a missing
   answer is confirmed: then the plain card replaces it. A 404 or 410 is `missing`.
 
 A request Pinterest refuses (a challenge, 401 or 403) gives the card of the link's shape alone,
