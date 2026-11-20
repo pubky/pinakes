@@ -65,6 +65,32 @@ pub async fn cursor(pool: &PgPool, nexus: &str) -> Result<Cursor> {
             .await?,
     )
 }
+/// The feeds other than `nexus` that have a cursor in this database, by host. The references
+/// are the projection of one Nexus feed, and a cursor is kept under `nexus_url` as written: a
+/// database that has read another feed (or the same one under another spelling of its URL)
+/// keeps that feed's cursor and the references read from it.
+pub async fn other_feeds(pool: &PgPool, nexus: &str) -> Result<Vec<String>> {
+    let others: Vec<String> =
+        sqlx::query_scalar("SELECT nexus FROM feed_cursor WHERE nexus<>$1 ORDER BY nexus")
+            .bind(nexus)
+            .fetch_all(pool)
+            .await?;
+    // The host only, as every log line names a URL (docs/operations.md).
+    Ok(others
+        .iter()
+        .map(|url| crate::resolver::log_host(url))
+        .collect())
+}
+/// What `apply` did with a page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Applied {
+    /// The page's lines and the cursor past them are committed.
+    Batch,
+    /// Another poller moved the cursor first: nothing was written.
+    Lost,
+    /// The feed started over: the references are cleared and the cursor is at zero.
+    Reset,
+}
 /// Returns false when another poller won the cursor or a reset needs a fresh page zero.
 ///
 /// Each line runs in a savepoint: a line whose work panics rolls back alone and is skipped,
@@ -79,6 +105,16 @@ pub async fn apply(
     limits: &IngestConfig,
     metrics: &Metrics,
 ) -> Result<bool> {
+    Ok(apply_page(pool, nexus, requested, feed, limits, metrics).await? == Applied::Batch)
+}
+async fn apply_page(
+    pool: &PgPool,
+    nexus: &str,
+    requested: &Cursor,
+    feed: &FeedPage,
+    limits: &IngestConfig,
+    metrics: &Metrics,
+) -> Result<Applied> {
     let mut tx = pool.begin().await?;
     // Reference state is a projection of one configured Nexus; serialize rebuilds with batches.
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
@@ -91,7 +127,7 @@ pub async fn apply(
             .fetch_one(&mut *tx)
             .await?;
     if saved.cursor != requested.cursor || saved.epoch != requested.epoch {
-        return Ok(false);
+        return Ok(Applied::Lost);
     }
     let changed = matches!((&saved.epoch, &feed.epoch), (Some(a),Some(b)) if a != b);
     let epoch = feed.epoch.as_ref().or(saved.epoch.as_ref());
@@ -106,10 +142,12 @@ pub async fn apply(
     store::lock_writers(&mut tx, order).await?;
     crate::alias::lock(&mut tx).await?;
     if reset {
-        sqlx::query("TRUNCATE reference, resource_score")
+        // Every resource row is rewritten first: `TRUNCATE` takes its tables' exclusive locks,
+        // which then last only for the cursor update and the commit, not for the rewrite.
+        sqlx::query("UPDATE resource SET orphaned_at=coalesce(orphaned_at,now())")
             .execute(&mut *tx)
             .await?;
-        sqlx::query("UPDATE resource SET orphaned_at=coalesce(orphaned_at,now())")
+        sqlx::query("TRUNCATE reference, resource_score")
             .execute(&mut *tx)
             .await?;
         sqlx::query("UPDATE feed_cursor SET cursor=0, epoch=$2, feed_length=$3, updated_at=now(),resets=resets+1 WHERE nexus=$1")
@@ -120,11 +158,11 @@ pub async fn apply(
             nexus = %crate::resolver::log_host(nexus),
             "Nexus feed reset; rebuilding references"
         );
-        return Ok(false);
+        return Ok(Applied::Reset);
     }
     // The page's lines, those skipped while parsing included: the cursor moves past them all.
     let read = feed.page.read();
-    if read > 1000
+    if read > crate::nexus::FEED_PAGE
         || feed.page.next_cursor != requested.cursor + read as i64
         || feed.page.next_cursor > feed.length
     {
@@ -190,7 +228,7 @@ pub async fn apply(
             .inc_by(count);
         tracing::warn!(reason, count, "rejected Nexus feed lines");
     }
-    Ok(true)
+    Ok(Applied::Batch)
 }
 /// One line's work inside the batch's transaction: the reason when it is rejected.
 async fn apply_line(
@@ -241,7 +279,9 @@ async fn apply_line(
             #[cfg(test)]
             tests::maybe_panic(line);
             if old.as_deref() != Some(&id) {
-                sqlx::query("UPDATE resource SET final=false,refresh_at=now(),next_attempt_at=now(),dead_letter=false,attempts=0 WHERE id=$1 AND final AND resolver<>'geo' AND $2>resolved_at").bind(&id).bind(timestamp(Some(line.at))?).execute(&mut **tx).await?;
+                // A new reference reopens a finished card: the line's own, or, when the line
+                // names an alias, its root, which holds the card.
+                sqlx::query("UPDATE resource SET final=false,refresh_at=now(),next_attempt_at=now(),dead_letter=false,attempts=0 WHERE id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1) AND final AND resolver<>'geo' AND $2>resolved_at").bind(&id).bind(timestamp(Some(line.at))?).execute(&mut **tx).await?;
             }
             if post {
                 expedite(tx, &id, line.at).await?;
@@ -374,17 +414,45 @@ fn timestamp(ms: Option<i64>) -> Result<Option<DateTime<Utc>>> {
     ms.map(|ms| DateTime::from_timestamp_millis(ms).context("invalid feed timestamp"))
         .transpose()
 }
+/// What one poll did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Poll {
+    /// The feed lines the committed batch read, those it skipped or rejected included: how far
+    /// the cursor moved. 0 when no batch was committed.
+    pub lines: usize,
+    /// Whether the next poll follows at once: the cursor moved, so more may wait, or another
+    /// poller moved it. False when the feed held nothing new and after a reset, which waits
+    /// `limits.poll_secs` before the feed is read again from zero.
+    pub again: bool,
+}
 pub async fn poll_once(
     pool: &PgPool,
     nexus_url: &str,
     nexus: &Nexus,
     limits: &IngestConfig,
     metrics: &Metrics,
-) -> Result<usize> {
+) -> Result<Poll> {
     let cursor = cursor(pool, nexus_url).await?;
     let page = nexus.changes(cursor.cursor).await?;
-    let applied = apply(pool, nexus_url, &cursor, &page, limits, metrics).await?;
-    Ok(if applied { page.page.lines.len() } else { 1000 })
+    Ok(
+        match apply_page(pool, nexus_url, &cursor, &page, limits, metrics).await? {
+            Applied::Batch => {
+                let lines = page.page.read();
+                Poll {
+                    lines,
+                    again: lines > 0,
+                }
+            }
+            Applied::Lost => Poll {
+                lines: 0,
+                again: true,
+            },
+            Applied::Reset => Poll {
+                lines: 0,
+                again: false,
+            },
+        },
+    )
 }
 
 #[cfg(test)]
@@ -595,7 +663,14 @@ mod tests {
         let applied = poll_once(&pool, &url, &nexus, &limits, &metrics)
             .await
             .unwrap();
-        assert_eq!(applied, 2);
+        // The six lines of the page were read, four of them skipped: more may wait.
+        assert_eq!(
+            applied,
+            Poll {
+                lines: 6,
+                again: true
+            }
+        );
         assert_eq!(
             tagged(&pool).await,
             ["https://example.org/first", "https://example.org/last"]

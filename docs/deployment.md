@@ -119,9 +119,8 @@ Provision repository or explicitly granted organization Actions secrets before p
 - `DOCKERHUB_USERNAME`: a Docker Hub account allowed to push `synonymsoft/pinakes`.
 - `DOCKERHUB_TOKEN`: that account's token with write access to the image repository.
 
-Publishing is configured; this document does not establish that an image has been published or
-that the registry credentials are available. PR and `main` jobs need neither secret and never
-write to the registry. The workflow creates no Git tags, release objects or deployments.
+PR and `main` jobs need neither secret and never write to the registry. The workflow creates no
+Git tags, release objects or deployments.
 Only a pushed, valid `v`-prefixed SemVer tag (at most 128 characters) can publish:
 
 | Git tag | Image tags under `registry-1.docker.io/synonymsoft/pinakes` |
@@ -163,7 +162,7 @@ docker buildx imagetools inspect "registry-1.docker.io/synonymsoft/pinakes:$VERS
 | Prometheus and Alertmanager | Evaluate admin `/metrics` and the supplied alerts | Small deployment; retention and scrape frequency set disk use | Private scrape path; [ops setup](../ops/README.md) includes alerts and a Grafana dashboard. |
 | MusicBrainz mirror (optional) | Higher music-lookup throughput via `also_on.sources.musicbrainz.base_url` | Size for the chosen mirror/search-index components, not a fixed 100 GB allowance | The hosted API's IP allowance is shared; a mirror is optional, not another provider key. [Server documentation](https://musicbrainz.org/doc/MusicBrainz_Server). |
 | Photon (later, for clients) | Client place-search type-ahead, not called by Pinakes | Regional or planet index; provision against the selected [Photon dump](https://github.com/komoot/photon#setting-photon-up-with-the-release-binaries-and-extracts) | Clients call it directly; do not add a Pinakes autocomplete proxy. |
-| Map tiles (later, for clients) | Client map drawing, not called by Pinakes | A regional/planet PMTiles file plus CDN/static storage; capacity depends on the selected build | MapLibre + self-hosted [Protomaps PMTiles](https://docs.protomaps.com/deploy/) is an option. Do not rely on OSM's donation-funded tile servers for production capacity; their [usage policy](https://operations.osmfoundation.org/policies/tiles/) is not a blanket ban on all production use. |
+| Map tiles (later, for clients) | Client map drawing, not called by Pinakes | A regional/planet PMTiles file plus CDN/static storage; capacity depends on the selected build | MapLibre + self-hosted [Protomaps PMTiles](https://docs.protomaps.com/deploy/) is an option. Do not rely on OSM's donation-funded tile servers for production capacity ([usage policy](https://operations.osmfoundation.org/policies/tiles/)). |
 
 ## Nominatim
 
@@ -185,12 +184,11 @@ The public `nominatim.openstreetmap.org` is for a small development run only
 
 ## Storage model
 
-Staging and production can share read-only self-hosted datasets/services, such as Nominatim or
-an optional MusicBrainz mirror, where their capacity, data licence and access rules permit it.
-Budget staging traffic so it cannot consume production's provider allowance or service capacity.
-Photon and map tiles remain separate client services, not Pinakes startup requirements; a
-MusicBrainz mirror is optional too. Sharing a read endpoint is not permission to share writable
-databases, admin credentials or environment/security boundaries. See [credential sharing](api-keys.md#optional-provider-credentials).
+Staging and production can share read-only self-hosted services, such as Nominatim or an
+optional MusicBrainz mirror. Budget staging traffic so it cannot consume production's provider
+allowance or service capacity. Photon and map tiles are separate client services, not Pinakes
+startup requirements; a MusicBrainz mirror is optional too. Each environment keeps its own
+database, admin token and secrets. See [credential sharing](api-keys.md#optional-provider-credentials).
 
 **Measured baseline, 2026-11-02:** the public production graph had **225 Resource targets with
 1,198 incoming TAGGED edges**. Tags on Post or User targets are not Pinakes external-link tags.
@@ -241,6 +239,9 @@ not just `resource`, and budget backup retention separately from the table's sin
   to any other, so a web page that points its own name at this machine reaches nothing. A scraper
   that reaches it by a name (another container's `pinakes:9090`) needs that name in
   `admin_hosts = ["pinakes"]`.
+- A request that takes longer than `limits.request_timeout_secs` (30) is answered 504. The
+  listeners set no limit on connections, idle time or how slowly a request's headers arrive:
+  those are the proxy's to set.
 - The public API ignores forwarded client-IP headers. Behind a proxy its direct-peer budget is
   shared by that proxy's users; enforce per-client limits at the edge. For the same reason leave
   `limits.preview_new_per_client_per_hour` at 0 behind a proxy: a share of new previews keyed on
@@ -272,9 +273,9 @@ not just `resource`, and budget backup retention separately from the table's sin
 3. Check public `/v1/info`, representative cards/searches, private admin info and queue progress.
    Process health alone does not verify ingestion or credentialed enrichment.
 4. Scrape private `/metrics`, evaluate the [supplied rules](../ops/README.md), and alert on stalled
-   ingestion, dead letters, queue backlog and canary failures. `canary.enabled` controls periodic
-   real provider requests; review the platform canary notes before enabling them.
+   ingestion, dead letters, queue backlog and canary failures. Canaries are on by default and
+   send real requests to providers every `limits.canary_interval_secs` (6 hours);
+   `canary.enabled = false` stops them ([monitoring](operations.md#monitoring)).
 5. Keep OSM attribution and the dump available. Do not put caches in front of deleted social
-   excerpts that outlive the service's refresh/purge behaviour. Use source-specific attribution
-   and retention rules from the [source catalogue](sources/README.md), not assumptions that every
-   provider's data has the same licence.
+   excerpts that outlive the service's refresh/purge behaviour. Each source's licence, attribution
+   and limits are on its page in the [source catalogue](sources/README.md).

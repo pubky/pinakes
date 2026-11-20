@@ -115,6 +115,14 @@ pub struct ReachSet {
 /// A viewer's set, cached by viewer and kind: when it was read, the set, and the reach-set
 /// route's `ETag` it came with (`wot_2` only).
 type ReachCache = Arc<Mutex<HashMap<(String, String), (Instant, ReachSet, Option<String>)>>>;
+/// The feed lines one poll asks for; Nexus's page cap. Fixed: it is the feed's contract, not an
+/// operator's choice.
+pub const FEED_PAGE: usize = 1000;
+/// How long one request to the Nexus may take: a feed page, a reach list, a batch view. Fixed;
+/// a search's reach reads have a shorter deadline of their own (`limits.reach_timeout_secs`).
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// The largest answer read from the Nexus (a feed page of `FEED_PAGE` lines fits well below).
+const BODY_CAP: usize = 8 * 1024 * 1024;
 /// How long a set answers searches before it is read again.
 const REACH_FRESH: Duration = Duration::from_secs(300);
 /// How long a `wot_2` set and its `ETag` are kept to ask Nexus whether it changed.
@@ -169,7 +177,7 @@ impl Nexus {
                 .no_proxy()
                 .default_headers(headers)
                 .redirect(reqwest::redirect::Policy::none())
-                .timeout(Duration::from_secs(10))
+                .timeout(REQUEST_TIMEOUT)
                 .build()?,
             cache: Arc::default(),
             reach_timeout,
@@ -179,7 +187,7 @@ impl Nexus {
         let response = self
             .client
             .get(format!("{}/v1/resources/changes", self.base))
-            .query(&[("cursor", cursor), ("limit", 1000)])
+            .query(&[("cursor", cursor), ("limit", FEED_PAGE as i64)])
             .send()
             .await
             .and_then(reqwest::Response::error_for_status)
@@ -227,10 +235,26 @@ impl Nexus {
             .map_err(reqwest::Error::without_url)?;
         bounded_json(response).await
     }
+    /// When the reach reads of a search that starts now end: `limits.reach_timeout_secs` from
+    /// now, for all of them together ([`Nexus::reach_by`]).
+    pub fn reach_deadline(&self) -> tokio::time::Instant {
+        tokio::time::Instant::now() + self.reach_timeout
+    }
+    /// [`Nexus::reach_by`] with a deadline of its own.
+    pub async fn reach(&self, viewer: &str, reach: &str) -> Result<ReachSet> {
+        self.reach_by(viewer, reach, self.reach_deadline()).await
+    }
     /// A viewer's reach set of one kind (`reach_kind`), cached in memory per viewer and kind for
     /// five minutes; a `wot_2` set is then asked again with its `ETag`, and an unchanged answer
-    /// (304) keeps it. Nothing is stored beyond this process.
-    pub async fn reach(&self, viewer: &str, reach: &str) -> Result<ReachSet> {
+    /// (304) keeps it. Nothing is stored beyond this process. A read that has not ended by
+    /// `deadline` is an error: a search that reads two sets (`reach` and `boost`) gives both
+    /// one deadline, so the two never take more than `limits.reach_timeout_secs` together.
+    pub async fn reach_by(
+        &self,
+        viewer: &str,
+        reach: &str,
+        deadline: tokio::time::Instant,
+    ) -> Result<ReachSet> {
         if !valid_author(viewer) || !reach_kind(reach) {
             bail!("invalid reach request");
         }
@@ -260,7 +284,7 @@ impl Nexus {
                 Ok((self.fetch_reach(viewer, reach).await?, None))
             }
         };
-        let (result, etag) = tokio::time::timeout(self.reach_timeout, fetch)
+        let (result, etag) = tokio::time::timeout_at(deadline, fetch)
             .await
             .context("Nexus reach deadline exceeded")??;
         let mut cache = self.cache.lock().await;
@@ -400,7 +424,7 @@ async fn bounded_bytes(mut response: reqwest::Response) -> Result<Vec<u8>> {
         .await
         .map_err(reqwest::Error::without_url)?
     {
-        if bytes.len() + chunk.len() > 8 * 1024 * 1024 {
+        if bytes.len() + chunk.len() > BODY_CAP {
             bail!("Nexus response exceeded 8 MB");
         }
         bytes.extend_from_slice(&chunk);

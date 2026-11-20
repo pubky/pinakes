@@ -82,8 +82,7 @@ server addresses), TikTok (answers without metadata), Facebook and Instagram (an
 The media resolver matches registry URL schemes locally, uses JSON-capable provider
 endpoints, and applies normal DNS/redirect/size/host budgets to every request. It
 retains typed metadata and origin image URLs only; it never serves embed HTML or
-rehosts media. Provider membership is not a promise that its public endpoint is
-available or permits a particular use.
+rehosts media.
 
 Group origin checks use the compiled `psl = 2.1.241` public suffix data pinned in
 Cargo.lock, including private suffixes. The dependency’s Cargo manifest declares MIT/Apache-2.0;

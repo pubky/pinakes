@@ -29,10 +29,12 @@ impl Bbox {
 }
 fn coordinates(raw: &str, count: usize) -> Result<Vec<f64>> {
     ensure!(raw.len() <= 256, "coordinate filter too long");
+    // The reason in the route's own words, never the number parser's.
     let values = raw
         .split(',')
         .map(str::parse::<f64>)
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|_| anyhow::anyhow!("invalid coordinates"))?;
     ensure!(
         values.len() == count && values.iter().all(|v| v.is_finite()),
         "invalid coordinates"
@@ -79,7 +81,11 @@ pub fn timestamp_at(raw: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>> {
     let at = if let Ok(ms) = raw.parse::<i64>() {
         DateTime::from_timestamp_millis(ms).context("timestamp out of range")?
     } else {
-        DateTime::parse_from_rfc3339(raw)?.with_timezone(&Utc)
+        DateTime::parse_from_rfc3339(raw)
+            .map_err(|_| {
+                anyhow::anyhow!("invalid time: RFC 3339, Unix milliseconds or relative to now")
+            })?
+            .with_timezone(&Utc)
     };
     crate::event::time::bounded(at).context("timestamp out of range")
 }
@@ -106,22 +112,28 @@ impl Filters {
             q.sort.as_deref() != Some("distance") || q.near.is_some(),
             "sort=distance requires near"
         );
+        // Each refusal names its parameter.
+        let named = |name: &'static str| move |e: anyhow::Error| anyhow::anyhow!("{name}: {e}");
         let mut out = Self {
-            bbox: q.bbox.as_deref().map(Bbox::parse).transpose()?,
+            bbox: q
+                .bbox
+                .as_deref()
+                .map(|raw| Bbox::parse(raw).map_err(named("bbox")))
+                .transpose()?,
             from: q
                 .from
                 .as_deref()
-                .map(|raw| timestamp_at(raw, now))
+                .map(|raw| timestamp_at(raw, now).map_err(named("from")))
                 .transpose()?,
             to: q
                 .to
                 .as_deref()
-                .map(|raw| timestamp_at(raw, now))
+                .map(|raw| timestamp_at(raw, now).map_err(named("to")))
                 .transpose()?,
             ..Default::default()
         };
         if let Some(raw) = &q.near {
-            let p = coordinates(raw, 2)?;
+            let p = coordinates(raw, 2).map_err(named("near"))?;
             ensure!(
                 (-90.0..=90.0).contains(&p[0]) && (-180.0..=180.0).contains(&p[1]),
                 "invalid near point"
@@ -130,7 +142,8 @@ impl Filters {
                 .radius
                 .as_deref()
                 .context("near requires radius in metres")?
-                .parse::<f64>()?;
+                .parse::<f64>()
+                .map_err(|_| anyhow::anyhow!("radius must be a number of metres"))?;
             ensure!(
                 radius.is_finite() && radius > 0.0 && radius <= config.max_radius_m,
                 "radius exceeds configured metre range"

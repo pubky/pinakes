@@ -49,6 +49,8 @@ fn daemon(config: &Path, args: &[&str]) -> Command {
     for (key, _) in std::env::vars().filter(|(key, _)| key.starts_with("PINAKES__")) {
         command.env_remove(key);
     }
+    // The daemon's default log filter, whatever the caller's.
+    command.env_remove("RUST_LOG");
     command
 }
 /// Run a command that exits by itself, within a minute.
@@ -147,5 +149,57 @@ async fn the_daemon_saves_a_link_and_reextracts_while_it_owns_its_database(pool:
         String::from_utf8_lossy(&reextract.stderr)
     );
     assert!(String::from_utf8_lossy(&reextract.stdout).contains("re-queued 1 resources"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A daemon that loses the instance lock (its lock's database session ends, as in a PostgreSQL
+/// restart) stops by itself with a failure, so its supervisor starts it again and no second
+/// daemon or re-extraction runs beside it.
+#[sqlx::test(migrations = false)]
+async fn the_daemon_stops_when_it_loses_the_instance_lock(pool: PgPool) {
+    let dir =
+        Path::new(env!("CARGO_TARGET_TMPDIR")).join(pool.connect_options().get_database().unwrap());
+    let (config, base) = config(&pool, &dir);
+    let log = std::fs::File::create(dir.join("pinakesd.log")).unwrap();
+    let mut serving = daemon(&config, &[])
+        .stdout(log.try_clone().unwrap())
+        .stderr(log)
+        .spawn()
+        .unwrap();
+    let http = reqwest::Client::new();
+    let started = Instant::now();
+    while !http
+        .get(format!("{base}/v1/info"))
+        .send()
+        .await
+        .is_ok_and(|r| r.status().is_success())
+    {
+        assert!(serving.try_wait().unwrap().is_none(), "pinakesd exited");
+        assert!(started.elapsed() < Duration::from_secs(60), "not serving");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // End the session that holds the instance lock, and only that one.
+    let ended: Vec<bool> = sqlx::query_scalar(
+        "SELECT pg_terminate_backend(l.pid) FROM pg_locks l JOIN pg_database d ON d.oid=l.database \
+         WHERE d.datname=current_database() AND l.locktype='advisory' AND l.granted \
+           AND l.classid=0 AND l.objid::bigint=$1 AND l.pid<>pg_backend_pid()",
+    )
+    .bind(pinakes_core::locks::INSTANCE)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(ended, [true], "one session holds the instance lock");
+    // At most the lock check's interval and its answer's wait, then the stop itself.
+    let status = tokio::time::timeout(Duration::from_secs(90), serving.wait())
+        .await
+        .expect("pinakesd stops once its instance lock is gone")
+        .unwrap();
+    assert!(!status.success(), "{status}");
+    let log = std::fs::read_to_string(dir.join("pinakesd.log")).unwrap();
+    assert!(
+        log.contains("the instance lock's database session is gone or does not answer"),
+        "{log}"
+    );
+    assert!(log.contains("instance lock ended before shutdown"), "{log}");
     std::fs::remove_dir_all(dir).unwrap();
 }

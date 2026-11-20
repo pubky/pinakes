@@ -405,6 +405,10 @@ def failures(output):
 
 
 def worktree():
+    # The scratch worktree is HEAD: what is not committed is not in it.
+    dirty = subprocess.run(["git", "status", "--porcelain"], cwd=ROOT, capture_output=True, text=True).stdout.strip()
+    if dirty:
+        print("check-removals: WARNING: uncommitted changes are not checked (the scratch worktree is HEAD); commit them first", file=sys.stderr)
     wt = tempfile.mkdtemp(prefix="check-removal-")
     os.rmdir(wt)
     subprocess.run(["git", "worktree", "add", "-q", "--detach", wt, "HEAD"], cwd=ROOT, check=True)

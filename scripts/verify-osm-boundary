@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-for tool in rg psql pg_dump; do
+for tool in rg psql pg_dump python3; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "verify-osm-boundary: $tool is required but not installed" >&2
     exit 1
@@ -12,8 +12,10 @@ if rg -n 'osm[.]save\(|(?:INSERT INTO|UPDATE|DELETE FROM) osm_place' crates/pina
   echo 'Adapter writes to osm_place are forbidden' >&2
   exit 1
 fi
-pinakes_database_url="${DATABASE_URL:-postgresql:///pinakes?host=/var/run/postgresql}"
-psql --dbname="$pinakes_database_url" -v ON_ERROR_STOP=1 <<'SQL'
+# psql and pg_dump connect by the PG* variables of the URL (scripts/pg-env): the URL, and any
+# password in it, never stands on a command line.
+export DATABASE_URL="${DATABASE_URL:-postgresql:///pinakes?host=/var/run/postgresql}"
+scripts/pg-env psql -v ON_ERROR_STOP=1 <<'SQL'
 DO $$ BEGIN
 IF EXISTS(SELECT 1 FROM resource WHERE resolver='osm' AND
   (osm_type IS NULL OR osm_id IS NULL OR name IS NOT NULL OR point IS NOT NULL OR
@@ -56,4 +58,4 @@ SELECT table_name,column_name FROM information_schema.columns
  WHERE table_schema='public' AND column_name IN ('osm_type','osm_id') ORDER BY 1,2;
 SQL
 # Export only the derivative table; caller supplies a destination to retain the proof.
-pg_dump --dbname="$pinakes_database_url" --table=osm_place --no-owner --no-acl --file="${1:-/dev/null}"
+scripts/pg-env pg_dump --table=osm_place --no-owner --no-acl --file="${1:-/dev/null}"

@@ -23,6 +23,8 @@ pub async fn ensure_resource_created(pool: &PgPool, uri: &str) -> Result<(String
 }
 /// Admit derived identities once per parent, including across subsequent polls.
 /// The lineage survives refreshes so author budgets apply when the child is claimed.
+/// This form, with the default global cap and no expiry, is for tests: the adapters derive
+/// through `derive_resource_until` and `derive_resource_within`.
 pub async fn derive_resource(
     pool: &PgPool,
     parent: &str,
@@ -324,6 +326,7 @@ pub async fn recompute_scores(tx: &mut Transaction<'_, Postgres>, ids: &[String]
         WHERE r.id = ANY($1)"#).bind(ids).execute(&mut **tx).await?;
     Ok(())
 }
+/// One cleanup run, for tests: the daemon's maintenance runs `changes::delete_orphans_within`.
 pub async fn cleanup(pool: &PgPool, grace_days: u32, preview_grace_hours: u32) -> Result<u64> {
     crate::changes::delete_orphans_within(pool, grace_days, preview_grace_hours, || false).await
 }
@@ -333,6 +336,8 @@ pub async fn expedite(pool: &PgPool, ids: &[String]) -> Result<()> {
     sqlx::query("UPDATE resource SET priority_at=now() WHERE id=ANY($1) AND priority_at IS NULL AND (refresh_at IS NULL OR refresh_at<=now()) AND NOT final AND NOT dead_letter AND (lease_until IS NULL OR lease_until<now())").bind(ids).execute(pool).await?;
     Ok(())
 }
+/// A save with the default queue settings, for tests: the daemon's workers save through
+/// `changes::save` with the configured ones.
 pub async fn save_document(
     pool: &PgPool,
     id: &str,

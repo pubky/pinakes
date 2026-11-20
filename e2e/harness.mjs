@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { createInterface } from 'node:readline';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 import { PubkySpecsBuilder } from 'pubky-app-specs';
 
 export async function json(url, body, method = body === undefined ? 'GET' : 'POST') {
@@ -78,16 +79,18 @@ export async function liveRecipes(start, signal) {
   if (code !== 0) throw new Error(`The recipe stack exited with ${code ?? killed}`);
   return judgeRecipes(JSON.parse(lines.at(-1)).recipes);
 }
-/** `sql`'s unaligned output from psql, in `database` of the cluster at `cluster` (a libpq URL). A
- * failure names the cluster with its password masked, in the URL or its query: psql's own error
- * carries the whole command line. A cluster URL that does not parse is named not at all: the URL
- * parser's error carries its input. */
+/** `sql`'s unaligned output from psql, in `database` of the cluster at `cluster` (a libpq URL).
+ * psql connects by the PG* variables of the URL (`scripts/pg-env`): the URL, and any password in
+ * it, never stands on a command line. A failure names the cluster with its password masked, in
+ * the URL or its query. A cluster URL that does not parse is named not at all: the URL parser's
+ * error carries its input. */
 export function psql(cluster, database, sql) {
   let url;
   try { url = new URL(cluster); } catch { throw new Error('psql: the cluster URL does not parse'); }
   url.pathname = `/${database}`;
   try {
-    return execFileSync('psql', [url.href, '-Atc', sql], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    const pgEnv = fileURLToPath(new URL('../scripts/pg-env', import.meta.url));
+    return execFileSync(pgEnv, ['psql', '-Atc', sql], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, DATABASE_URL: url.href } }).trim();
   } catch (error) {
     const decoded = (() => { try { return decodeURIComponent(url.password); } catch { return url.password; } })();
     const secrets = [url.password, decoded, url.searchParams.get('password')].filter(Boolean);
@@ -346,6 +349,7 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
       const kinds = [...new Set(tags.map(tag => tag.type))].slice(0, 10);
       const anyKind = await findsEvery(`Pinakes type=${kinds.join(',')}`, () => search({ type: kinds.join(','), facet: 'type', limit: '500' }),
         tags.filter(t => kinds.includes(t.type)), docs, reread, timeout, signal);
+      assert(anyKind.facets.type.length > 0, 'the type facet lists the types searched for');
       for (const entry of anyKind.facets.type) {
         assert(entry.type_path.length > 0 && entry.type_path.at(-1) === entry.type, `facet type_path ends at ${entry.type}`);
       }

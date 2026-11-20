@@ -13,7 +13,7 @@ import subprocess
 PATTERN = re.compile(
     r"outlook\.(?:office365|live)\.com/owa/(?:0/)?calendar/"
     r"|icloud\.com/published/"
-    r"|(?:calendar|www)\.google\.com/calendar/ical/[^\s\"<>]*/private-"
+    r"|(?<![a-z0-9-])google\.com/calendar/ical/[^\s\"<>]*/private-"
     r"|(?:https?|webcals?)://[^\s\"<>/]+(?:/[^\s\"<>]*)?/remote\.php/dav/public-calendars/[^\s\"<>]"
     r"|(?:https?|webcals?)://[^\s\"<>/]+(?:/[^\s\"<>]*)?/apps/calendar/(?:p|embed)/[^\s\"<>]"
     r"|proton\.me/api/calendar/v1/url/|calendar\.proton\.me/share/", re.IGNORECASE)

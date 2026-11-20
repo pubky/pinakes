@@ -23,6 +23,7 @@ snapshot; a test fails when it is stale.
 | `POST /v1/resources/lookup` | Exactly one of `{"ids":[…]}` (alias `resource_ids`) or `{"uris":[…]}`, 1–500 entries | `[card]` in request order, duplicates kept, unknowns skipped |
 | `POST /v1/resolve` | `{"uri":"https://example.org/"}` | The card with the read's fields now or within 3 seconds; 202 with `status: "pending"` while queued, with `Retry-After` (seconds) when the next attempt is put off |
 | `GET /v1/resources/{id}/occurrences` | Optional RFC 3339 `from`, `to`, `limit` (1–500, default 100), signed `cursor` | `{items: [occurrence card], cursor}` |
+| `GET /v1/resources/{id}/episodes` | Optional `limit` (1–20, default 20), `offset` (0–1000, default 0), `q` (at most 256 bytes) | `{items: [episode], next_offset, truncated}`: a podcast show's latest episodes, newest first ([Episodes](#episodes)); 404 if unknown |
 | `GET /v1/resources/{id}/collections` | Optional `viewer` (a public key), `limit` (1–100, default 20), signed `cursor` | `{items: [{uri, author, indexed_at}], cursor}`: the public collections that hold the card's link ([Collections](#collections)); 404 if unknown |
 | `POST /v1/occurrences/lookup` | `{resource_ids?, uris?, from?, to?, limit?, cursor?}`: 1–500 feed IDs and links together | `{items: [occurrence card], cursor}` across the feeds, by start |
 | `GET /v1/groups/{id}` | 32-character group ID | `{id, type, curated, keys, members: [card]}`; 404 if unknown |
@@ -449,7 +450,8 @@ Three caveats:
   group formed differently has another ID (take `group.id` from either member's card).
 
 The examples live in `data/api-recipes.json`; `tests/recipes.rs` runs every one against a fixture
-of the same URIs and checks that this list matches. `scripts/e2e --live-recipes` (also run by
+of the same URIs and checks that every recipe's request line is in this section (a source's
+examples are named on its own page). `scripts/e2e --live-recipes` (also run by
 `--isolated-live`) resolves each `/v1/resolve` example live and checks its card's type, so an
 example whose page has gone stale fails there.
 
@@ -819,9 +821,10 @@ reach-set route, `GET /v1/user/{viewer}/reach-set?depth=2` (`{authors, truncated
 with an `ETag`), only where the operator says the Nexus serves it (`nexus_reach_set = true`;
 else `wot_2` answers 501): it is kept five minutes, then asked again with its `ETag` and kept
 while Nexus answers 304. `reach_truncated: true` warns that the `reach` or `boost` set was
-capped. All pages share `limits.reach_timeout_secs` (5 s); an incomplete list is not cached. An
-unknown Nexus user has an empty reach; a Nexus error or the deadline returns 502. Sets live in the
-daemon's memory only; nothing per viewer is stored.
+capped. All pages a search reads, of its `reach` and its `boost` set together, share
+`limits.reach_timeout_secs` (5 s); an incomplete list is not cached. An unknown Nexus user has an
+empty reach; a Nexus error or the deadline returns 502. Sets live in the daemon's memory only;
+nothing per viewer is stored.
 
 `reach` filters: only references by authors in the set count, for the rows and every count.
 `boost` ranks and never filters: with the default ranking a card gains `2 · ln(1 + n)` for the
@@ -833,8 +836,10 @@ an author in the set counts twice. `boost` takes no other `sort` and no `related
 given, each with its own set.
 
 **Caching.** Responses carry `Cache-Control: public, max-age=30` and an `ETag` over the
-parameters, the resolved time window, the ingestion cursors and epochs, a write revision, the
-same-event revision and the reach and boost sets' hashes and truncation; `If-None-Match` returns 304 when nothing changed.
+parameters, the resolved time window (and, for `sort=trending` and `related`, the minute of the
+request), the ingestion cursors and epochs, a write revision (the hint passes move it too) and
+the reach and boost sets' hashes and truncation; `If-None-Match` returns 304 when nothing
+changed.
 
 ## Related
 
@@ -1449,7 +1454,7 @@ event is paired within about five seconds of its save, once the events before it
 are read; an hourly sweep, which also runs at startup, queues events that entered the window or
 changed unseen. Search
 pages change their `ETag` when a hint on them changes. `[event] same_event_hint = "off"`
-([operations](operations.md#calendars-and-events)) removes the field from event cards and details
+([operations](operations.md#calendars-and-events)) removes the field from event cards
 and stops the pass (and from the OpenAPI document, with the recording hint off too).
 
 ## Possibly the same recording
@@ -1485,7 +1490,8 @@ changes (its page or the sources' facts); a request only reads them. Each record
 best twenty pairs and is named by at most forty others, so a change marks a bounded number of
 recordings to refill their lists; a read examines at most a hundred candidates, and one that
 runs out with room left goes on from the position it stopped at in a later read. An hourly sweep, which also
-runs at startup, reads recordings saved before the hint existed or while it was off. Search pages
+runs at startup, reads the recordings the pass has not read (one saved while the hint was off).
+Search pages
 change their `ETag` when a hint on them changes. `[groups] same_recording_hint = "off"`
 ([operations](operations.md#groups)) removes the field from recording cards and stops
 the pass.
@@ -1495,7 +1501,8 @@ the pass.
 An app's pages on different stores join one group when a Wikidata item names them (the `apps`
 lookup family). Without such an item, an app's store card (App Store, Google Play, F-Droid,
 Flathub, Snap Store) names the other store cards that are possibly the same app in `maybe_same`:
-`{id, uri, site, score}` by URI, up to three on a card and ten in its `details`. Two store cards
+`{id, uri, site, start, score}` by URI (`start` is `null`), up to three on a card and ten on a
+resource read. Two store cards
 are possibly the same app when their official websites have the same host (without `www.`) and
 their names are the same once both are in lower case with every run of other characters than
 letters and digits read as one space ("Signal - Private Messenger" and "Signal Private
@@ -1760,7 +1767,7 @@ counts by status.
   episode page's RSS link selects an episode. A feed card longer than the page cap is read again
   up to 8 MiB for its show's episodes, or for an episode past the first megabyte
   ([Episodes](#episodes)), and past that up to its last whole item there (the newest come first),
-  as is a feed of more items than `cards.podcast_items` (2000), so an episode past that is never
+  as is a feed of more items than `limits.podcast_items` (2000), so an episode past that is never
   marked missing. No embed HTML or media bytes are served.
 - **Event platforms**: the adapters in `data/event-adapters.json`. Each has an `enabled` switch
   and, where the platform needs one, a `key`; a missing key disables only that adapter and no key
@@ -1951,8 +1958,9 @@ through the OSM resolver, including object aliases: `/{type}/{id}/history[/{vers
 (`api.openstreetmap.org/api/0.6/{type}/{id}[/full][.json|.xml]`) and Nominatim
 `details`/`ui/details.html?osmtype=N|W|R&osmid=` (exactly one `osmtype` and `osmid`, no
 `place_id` or `postcode`). Every spelling is an [alias](#aliases) of the canonical object
-URL, so one resource and one cached `osm_place` row serve them all. OSM cards carry `attribution`; details
-add the category, address and bbox. Any other URL on an OSM host (user pages, map views,
+URL, so one resource and one cached `osm_place` row serve them all. OSM cards carry
+`attribution`; a resource read adds the category, address and bbox. Any other URL on an OSM host
+(user pages, map views,
 changesets, notes) is refused before any fetch: status `error`, a link-only card, stored once
 as final. A batch's 429, 5xx or oversized answer defers its jobs without charging an attempt,
 honouring a Retry-After of up to one hour; jobs claimed during that wait are put off to its end
@@ -2008,11 +2016,15 @@ timeout. The dump is written by the daemon,
 not by a request: its writer's read-only transaction lifts the statement timeout to drain a large
 snapshot, and the API only serves the file.
 
-Handler errors are `{"error": "…"}`; Axum's query and JSON parse errors may be text. Malformed
-query parameters and JSON return 400, JSON of the wrong shape 422, bodies over 2 MB 413.
+A handler's errors are `{"error": "…"}`, and so is a request the server could not read (a query,
+a path, a body), which keeps its status and says what the route takes, never the input; a path
+no route has (404) and a method a route does not take (405) have no body. Malformed
+query parameters and JSON return 400, JSON of the wrong shape 422, a body not sent as
+`application/json` 415, bodies over 2 MB 413.
 Internal errors return 500 without database details, and a handler panic is answered 500 by a
 backstop layer (logged with its path, counted in `pinakes_api_panics_total`), never a dropped
-connection. There are no resource write, social-state, reverse-geocoding or place-search
+connection. A request that takes longer than `limits.request_timeout_secs` (30 s) is answered
+504. There are no resource write, social-state, reverse-geocoding or place-search
 routes.
 
 ## Agents
@@ -2050,8 +2062,10 @@ characters), `image`, `site`, `point`, `start`, `end`, `group`, `also_on` (`uri`
 `id`, `refs`, `derived`, `kind` when present), `refs`,
 `occurrence` and `attribution`, and adds `url`, the card's full read
 (`GET /v1/resources/{id}`); every answer names the REST URL of its full result. A failed request
-is the tool's error (`isError`), its text `{error, status, hint, url}` with the route's status
-and message; an unknown tool is a JSON-RPC error.
+is the tool's error (`isError`), its text `{error, status, hint, url?, retry_after_s?}` with the
+route's status and message, and the seconds of its `Retry-After` when it sent one (a 429, or
+the 503 of a new preview when the instance's hour is taken); an unknown tool is a JSON-RPC
+error.
 
 **A browser on `/mcp`.** A `GET /mcp` that accepts `text/html` answers a short HTML page: what
 the endpoint is, the Claude Code line (`claude mcp add --transport http pinakes {base}/mcp`),
@@ -2063,7 +2077,10 @@ the JSON configuration other clients take, the tools' names and links to `/llms.
 requests cost on top (a `reach` search 6, `types` two requests, `social` its lookup plus one per 100 URIs it asks Nexus). Bodies are capped
 at 2 MB, as for every route; the routes keep their statement timeout, and `social` the Nexus
 client's 10-second timeout. When Nexus does not answer the batch view, `social` is the error
-`502`.
+`502`. A tool call has one deadline for all its requests together, two seconds inside
+`limits.request_timeout_secs` and counted from the start of the request that carries it: past
+it the tool's error is `504`, so the message is answered. The listener's own 504 is left for a
+message that has not arrived in full by the request's deadline.
 
 **No admin operation.** The tools' requests go to the public routes only, built afresh with no
 header of the MCP request, so the admin listener's routes and its token are out of reach. Any

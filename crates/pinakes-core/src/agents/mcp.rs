@@ -65,10 +65,12 @@ pub struct Tools {
     state: AppState,
 }
 
-/// What a tool needs from the MCP request: the caller's address and the base URL.
+/// What a tool needs from the MCP request: the caller's address, the base URL, and when the
+/// request's deadline started to run (`api::RequestStarted`; `None` outside a request).
 struct Caller {
     peer: Option<ConnectInfo<SocketAddr>>,
     base: String,
+    started: Option<std::time::Instant>,
 }
 
 /// A tool's failure, shown to the agent: the REST status and message, and what to do.
@@ -77,6 +79,8 @@ struct Failure {
     status: u16,
     error: String,
     url: Option<String>,
+    /// The seconds the REST route's `Retry-After` names, when it sent one.
+    retry_after: Option<u64>,
 }
 impl Failure {
     fn bad(error: impl Into<String>) -> Self {
@@ -84,25 +88,71 @@ impl Failure {
             status: 400,
             error: error.into(),
             url: None,
+            retry_after: None,
         }
     }
     fn result(self) -> CallToolResult {
         let hint = match self.status {
             400 => "fix the argument the error names",
             404 => "unknown here: nobody referenced it on Pubky, or it has not been read; try `card` with resolve: true, or `search` by q or key",
-            429 => "over the per-IP budget: wait a minute, then ask fewer, larger questions",
-            502..=504 => "an upstream did not answer in time: retry once",
+            429 => "over a per-IP limit: wait `retry_after_s` seconds (a minute when absent), then ask fewer, larger questions",
+            503 => "not available for now (the instance's new previews for this hour are taken): wait `retry_after_s` seconds; a link the index knows still reads",
+            501 => "this instance does not serve that: for `wot_2`, use `following` or `friends`",
+            502 | 504 => "not answered in time (an upstream, or the request's own deadline): retry once",
             _ => "retry once",
         };
         let mut body = json!({"error": self.error, "status": self.status, "hint": hint});
         if let Some(url) = self.url {
             body["url"] = url.into();
         }
+        if let Some(seconds) = self.retry_after {
+            body["retry_after_s"] = seconds.into();
+        }
         CallToolResult::error(vec![ContentBlock::text(body.to_string())])
     }
 }
 
 impl Tools {
+    /// One tool call, whatever it asks (several REST routes, the Nexus once per 100 links),
+    /// within one deadline: `ApiConfig::tool_timeout` from the start of the MCP message's
+    /// request, so it ends two seconds inside that request's own deadline however long the
+    /// message took to arrive and be read. A call past it is the tool's failure, a 504 with
+    /// its hint, written in those two seconds; a call that starts past it makes no request.
+    /// `None` when no tool has the name.
+    async fn run(
+        &self,
+        caller: &Caller,
+        name: &str,
+        args: &JsonObject,
+    ) -> Option<Result<Value, Failure>> {
+        type Call<'a> = std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Value, Failure>> + Send + 'a>,
+        >;
+        let call: Call<'_> = match name {
+            "search" => Box::pin(self.search(caller, args)),
+            "card" => Box::pin(self.card(caller, args)),
+            "lookup" => Box::pin(self.lookup(caller, args)),
+            "group" => Box::pin(self.group(caller, args)),
+            "types" => Box::pin(self.types(caller)),
+            "social" => Box::pin(self.social(caller, args)),
+            _ => return None,
+        };
+        let late = Failure {
+            status: 504,
+            error: "the tool call took too long".into(),
+            url: None,
+            retry_after: None,
+        };
+        let mut left = self.state.config.api.tool_timeout();
+        if let Some(started) = caller.started {
+            left = left.saturating_sub(started.elapsed());
+            if left.is_zero() {
+                return Some(Err(late));
+            }
+        }
+        Some(tokio::time::timeout(left, call).await.unwrap_or(Err(late)))
+    }
+
     /// A request to the public routes as the MCP caller, and its JSON answer.
     async fn rest(
         &self,
@@ -129,12 +179,18 @@ impl Tools {
             .await
             .unwrap_or_else(|never| match never {});
         let status = response.status();
+        let retry_after = response
+            .headers()
+            .get(header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse().ok());
         let bytes = axum::body::to_bytes(response.into_body(), ANSWER_CAP)
             .await
             .map_err(|_| Failure {
                 status: 500,
                 error: "the answer was too large to read".into(),
                 url: Some(url.clone()),
+                retry_after: None,
             })?;
         let value: Value = serde_json::from_slice(&bytes).unwrap_or_else(|_| {
             json!({"error": String::from_utf8_lossy(&bytes).chars().take(300).collect::<String>()})
@@ -147,6 +203,7 @@ impl Tools {
                     .unwrap_or("request failed")
                     .to_owned(),
                 url: Some(url),
+                retry_after,
             });
         }
         Ok(value)
@@ -335,6 +392,7 @@ impl Tools {
                 status: 500,
                 error: "the card ids could not be read".into(),
                 url: None,
+                retry_after: None,
             })?;
             for id in &ids {
                 let root = roots
@@ -389,6 +447,7 @@ impl Tools {
                         status: e.0.as_u16(),
                         error: e.1,
                         url: None,
+                        retry_after: None,
                     })?;
             }
             views.extend(
@@ -400,6 +459,7 @@ impl Tools {
                         status: 502,
                         error: "the Nexus this instance reads did not answer the batch resource view (POST /v1/stream/resources/by_ids)".into(),
                         url: None,
+                        retry_after: None,
                     })?,
             );
         }
@@ -448,21 +508,16 @@ impl ServerHandler for Tools {
         let caller = Caller {
             peer: parts.and_then(|p| p.extensions.get::<ConnectInfo<SocketAddr>>().copied()),
             base: parts.map_or_else(|| "http://localhost".into(), |p| base_url(&p.headers)),
+            started: parts
+                .and_then(|p| p.extensions.get::<crate::api::RequestStarted>())
+                .map(|started| started.0),
         };
         let args = request.arguments.unwrap_or_default();
-        let answer = match request.name.as_ref() {
-            "search" => self.search(&caller, &args).await,
-            "card" => self.card(&caller, &args).await,
-            "lookup" => self.lookup(&caller, &args).await,
-            "group" => self.group(&caller, &args).await,
-            "types" => self.types(&caller).await,
-            "social" => self.social(&caller, &args).await,
-            other => {
-                return Err(ErrorData::invalid_params(
-                    format!("no tool named {other}"),
-                    None,
-                ))
-            }
+        let Some(answer) = self.run(&caller, request.name.as_ref(), &args).await else {
+            return Err(ErrorData::invalid_params(
+                format!("no tool named {}", request.name),
+                None,
+            ));
         };
         Ok(match answer {
             Ok(value) => CallToolResult::success(vec![ContentBlock::text(value.to_string())]),
@@ -514,7 +569,7 @@ pub fn tools() -> Vec<Tool> {
                 "sort":{"type":"string","enum":["relevance","activity","recent","distance","start","trending"],"description":"relevance (default with q: name match, then tag labels, then description; activity breaks ties; needs q), activity (default without q), recent, distance (needs near), start (earliest first), trending (with window)."},
                 "window":{"type":"string","description":"With sort trending: how far back, 1h to 90d, default 7d."},
                 "collapse":{"type":"string","enum":["group"],"description":"group: one row per group of links that are the same thing."},
-                "reach":{"type":"string","enum":["following","friends"],"description":"Only links that the viewer's follows (or friends) referenced. Needs viewer."},
+                "reach":{"type":"string","enum":["following","friends","wot_2"],"description":"Only links that the viewer's follows (or friends, or two steps of follows) referenced. Needs viewer. wot_2 only where the instance has it."},
                 "boost":{"type":"string","enum":["following","friends","wot_2"],"description":"Rank first the links the viewer's follows (or friends, or two steps of follows) referenced, leaving nothing out. Needs viewer; with the default sort, relevance or trending. wot_2 only where the instance has it."},
                 "viewer":{"type":"string","description":"With reach or boost: a 52-character pubky public key."},
                 "limit":{"type":"integer","minimum":1,"maximum":500,"description":"Cards per page, default 50."},
@@ -1259,12 +1314,131 @@ mod tests {
         }
     }
 
+    /// A tool call has one deadline for all its requests: two that each end in time but
+    /// together do not are the tool's 504, at the deadline, where one alone is answered.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_tool_s_requests_share_one_deadline(pool: sqlx::PgPool) {
+        use std::time::{Duration, Instant};
+        let mut config = crate::config::Config::default();
+        // A tool call's deadline is two seconds inside this: two seconds.
+        config.api.request_timeout_secs = 4;
+        assert_eq!(config.api.tool_timeout(), Duration::from_secs(2));
+        let slow = || async {
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            axum::Json(json!({"items": [], "facets": {"type": []}, "resolves": []}))
+        };
+        let tools = Tools {
+            rest: Router::new()
+                .route("/v1/search", axum::routing::get(slow))
+                .route("/v1/info", axum::routing::get(slow)),
+            state: AppState::new(pool, config).unwrap(),
+        };
+        let caller = Caller {
+            peer: None,
+            base: "https://pinakes.example".into(),
+            started: None,
+        };
+        // `types` reads the search route and then the info route.
+        let started = Instant::now();
+        let failure = tools
+            .run(&caller, "types", &JsonObject::new())
+            .await
+            .expect("a tool")
+            .expect_err("two reads of 1.2 s within two seconds");
+        assert_eq!(failure.status, 504, "{failure:?}");
+        let took = started.elapsed();
+        assert!(took >= Duration::from_millis(1950), "{took:?}");
+        let ContentBlock::Text(text) = &failure.result().content[0] else {
+            panic!("text content")
+        };
+        let body: Value = serde_json::from_str(&text.text).unwrap();
+        assert_eq!(body["status"], 504);
+        assert!(body["hint"].as_str().unwrap().contains("retry once"));
+        // `lookup` reads the search route once: answered.
+        let one = tools
+            .run(
+                &caller,
+                "lookup",
+                &args(json!({"key": "isbn:9780140328721"})),
+            )
+            .await
+            .expect("a tool");
+        assert!(one.is_ok(), "{one:?}");
+        assert!(tools
+            .run(&caller, "no-such-tool", &JsonObject::new())
+            .await
+            .is_none());
+    }
+
+    /// A tool call's deadline counts from the start of the request that carries it: a message
+    /// that took a while to arrive leaves the tool the rest, so its 504 is still written inside
+    /// the request's own deadline, and a call that starts past the deadline asks nothing.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_tool_call_ends_inside_its_request_s_deadline(pool: sqlx::PgPool) {
+        use std::{
+            sync::atomic::{AtomicUsize, Ordering},
+            time::{Duration, Instant},
+        };
+        static ASKED: AtomicUsize = AtomicUsize::new(0);
+        let mut config = crate::config::Config::default();
+        // A tool call ends two seconds inside this: two seconds after the request started.
+        config.api.request_timeout_secs = 4;
+        let slow = || async {
+            ASKED.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            axum::Json(json!({"items": [], "facets": {"type": []}, "resolves": []}))
+        };
+        let tools = Tools {
+            rest: Router::new().route("/v1/search", axum::routing::get(slow)),
+            state: AppState::new(pool, config).unwrap(),
+        };
+        let caller = |ago: Duration| Caller {
+            peer: None,
+            base: "https://pinakes.example".into(),
+            started: Some(Instant::now() - ago),
+        };
+        let lookup = args(json!({"key": "isbn:9780140328721"}));
+        // The request has just started: one read of 1.2 s is answered.
+        let answered = tools.run(&caller(Duration::ZERO), "lookup", &lookup).await;
+        assert!(answered.expect("a tool").is_ok());
+        assert_eq!(ASKED.load(Ordering::SeqCst), 1);
+        // It started 1.5 s ago: half a second is left, and the read is cut off there.
+        let started = Instant::now();
+        let failure = tools
+            .run(&caller(Duration::from_millis(1500)), "lookup", &lookup)
+            .await
+            .expect("a tool")
+            .expect_err("a read of 1.2 s with 0.5 s left");
+        assert_eq!(failure.status, 504, "{failure:?}");
+        let took = started.elapsed();
+        assert!(took >= Duration::from_millis(450), "{took:?}");
+        assert_eq!(ASKED.load(Ordering::SeqCst), 2);
+        // It started three seconds ago, past the tool's deadline: nothing is asked.
+        let failure = tools
+            .run(&caller(Duration::from_secs(3)), "lookup", &lookup)
+            .await
+            .expect("a tool")
+            .expect_err("no time left");
+        assert_eq!(failure.status, 504, "{failure:?}");
+        assert_eq!(ASKED.load(Ordering::SeqCst), 2);
+        // A name no tool has is that, whatever the time.
+        assert!(tools
+            .run(
+                &caller(Duration::from_secs(3)),
+                "no-such-tool",
+                &JsonObject::new()
+            )
+            .await
+            .is_none());
+    }
+
     #[test]
     fn a_failure_says_what_to_do() {
         let result = Failure {
             status: 429,
             error: "API rate limit exceeded".into(),
             url: Some("https://pinakes.example/v1/search?q=x".into()),
+            retry_after: None,
         }
         .result();
         assert_eq!(result.is_error, Some(true));
@@ -1273,6 +1447,26 @@ mod tests {
         };
         let body: Value = serde_json::from_str(&text.text).unwrap();
         assert_eq!(body["status"], 429);
-        assert!(body["hint"].as_str().unwrap().contains("wait a minute"));
+        assert!(body["hint"].as_str().unwrap().contains("a minute"));
+        assert!(body.get("retry_after_s").is_none());
+        // A refusal that names its wait (a new preview when the instance's hour is taken)
+        // carries the seconds, and is not told to retry at once.
+        let result = Failure {
+            status: 503,
+            error: "the instance's new previews for this hour are taken".into(),
+            url: Some("https://pinakes.example/v1/resolve".into()),
+            retry_after: Some(1800),
+        }
+        .result();
+        let ContentBlock::Text(text) = &result.content[0] else {
+            panic!("text content")
+        };
+        let body: Value = serde_json::from_str(&text.text).unwrap();
+        assert_eq!(body["retry_after_s"], 1800);
+        let hint = body["hint"].as_str().unwrap();
+        assert!(
+            hint.contains("retry_after_s") && !hint.contains("retry once"),
+            "{hint}"
+        );
     }
 }

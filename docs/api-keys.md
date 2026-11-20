@@ -25,7 +25,7 @@ Rotate at the provider, update the protected environment and restart; never log 
 
 | Environment variable | Purpose | Provisioning and minimum access |
 | --- | --- | --- |
-| `PINAKES__DATABASE_URL` | PostgreSQL connection | A database dedicated to Pinakes. Provision extensions and schema with a migration role; the runtime role needs only the application's database access, not cluster superuser. Peer-authenticated sockets need no password. See [database operations](operations.md#database). |
+| `PINAKES__DATABASE_URL` | PostgreSQL connection | A database dedicated to Pinakes. A superuser creates it and its extensions; the role in the URL owns the database and is no superuser. Peer-authenticated sockets need no password. See [database operations](operations.md#database). |
 | `PINAKES__ADMIN_TOKEN` | Bearer authentication for admin routes, including metrics | Generate a long random token locally; required for non-loopback admin binds, recommended on loopback too (startup warns without one). Keep the listener private even with a token. |
 | `PINAKES__OSM__NOMINATIM_URL` | A hosted Nominatim whose base URL carries its key | Only for a keyed hosted Nominatim (see [deployment](deployment.md#nominatim)); a self-hosted one's URL is no secret and may stay in the TOML file. The key must be in the URL's path: user info, a query or a fragment is refused. Pinakes logs a request by its path below the base alone and shows the URL as `[REDACTED]`. |
 | `PINAKES_NEXUS_AUTHORIZATION` | Authorization for a protected Nexus | Obtain read access from the Nexus operator to the reference feed, reach lists/reach-set and resource batch view. Supply the entire header value, including `Bearer` or `Basic`. No redirect is followed; never put credentials in `nexus_url`. Omit for an unprotected Nexus. |
@@ -40,9 +40,9 @@ is needed. Share self-hosted read-only datasets similarly, with capacity and lic
 ([deployment](deployment.md#storage-model)), not writable databases or database/admin/Nexus secrets
 across security boundaries. Each environment still injects its credentials from its own protected
 secret store; sharing a provider allowance does not relax access controls or logging rules.
-Provider dashboards can require account verification or approval; a successful signup is not a
-promise of catalogue access. Request read-only public-data access, never publishing, ticket sales,
-private repositories, user libraries or account administration.
+Provider dashboards can require account verification or approval. Request read-only public-data
+access, never publishing, ticket sales, private repositories, user libraries or account
+administration.
 
 | Environment variable(s) | Obtain credentials / least privilege | What works without them |
 | --- | --- | --- |
@@ -95,18 +95,16 @@ allows at most one request/second and is not the production geocoder.
 [Spotify](https://developer.spotify.com/documentation/web-api/concepts/rate-limits) uses a rolling
 30-second window rather than a published universal requests/second figure.
 [Ticketmaster Discovery](https://developer.ticketmaster.com/products-and-docs/apis/discovery-api/v2/)
-defaults to 5,000 calls/day and 5 requests/second. These are provider ceilings, not promised throughput.
-For other keys use the provider/account quota, not an invented universal limit.
+defaults to 5,000 calls/day and 5 requests/second.
+For other keys use the provider's or the account's quota.
 
 No key is needed for MusicBrainz, Wikidata, Open Library or iTunes lookup. They still require
 identification, caching, attribution and provider-specific pacing; see their source pages.
-GovInfo's supported path does not use an api.data.gov key. FRED, Congress.gov and Companies House
-credentials are not current Pinakes configuration: do not provision unsupported variables.
+The GovInfo source needs no api.data.gov key.
 
 **The Deezer API** needs no key and is on by default; `[also_on.sources.deezer] enabled = false`
 turns it off. That stops Deezer API reads and hides that source's own stored results, not the
 Deezer website: Deezer links from MusicBrainz, Wikidata or links people reference stay.
-Odesli/song.link is not implemented; it is not a configured fallback or another key to obtain.
 
 Keep the attributions and OSM dump described in [operations](operations.md#deployment-and-egress).
 

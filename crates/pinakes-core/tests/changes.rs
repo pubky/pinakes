@@ -301,6 +301,129 @@ async fn paging_lookup_retention_and_deleted_history(pool: PgPool) {
     assert_eq!(changes_of(&app, &[&id], 1, 100).await.0, 410);
     assert_eq!(changes_of(&app, &[&id], 0, 100).await.0, 200);
 }
+/// One missing answer for a social post is not yet `missing`: its change lines and its also-on
+/// results stay, as its card does. The second, which confirms it, removes them.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_unconfirmed_missing_answer_keeps_a_social_post_s_lines_and_facts(pool: PgPool) {
+    let uri = "https://social.example/@author/1";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut post = ResourceMeta::new(uri, "activitypub", 86400);
+    post.set_type("SocialMediaPosting");
+    post.name = Some("A post".into());
+    store::save_document(&pool, &id, 0, &post).await.unwrap();
+    sqlx::query("INSERT INTO resource_fact(resource_id,name,value,source,expires_at) VALUES($1,'isrc','GBAYE0601498','musicbrainz',now()+interval '1 day')")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let kept = || async {
+        let facts: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM resource_fact WHERE resource_id=$1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        (classes(&pool, &id).await, facts)
+    };
+    assert_eq!(kept().await, (vec!["created".to_owned()], 1));
+    let mut missing = post.clone();
+    missing.status = Status::Missing;
+    missing.fetched_at += 1;
+    store::save_document(&pool, &id, 0, &missing).await.unwrap();
+    assert_eq!(kept().await, (vec!["created".to_owned()], 1));
+    missing.fetched_at += 1;
+    store::save_document(&pool, &id, 0, &missing).await.unwrap();
+    assert_eq!(kept().await, (vec![], 0));
+}
+
+/// Orphan cleanup keeps no text of an opted-out post either: its `deleted` line holds no
+/// document, as its other lines hold none.
+#[sqlx::test(migrations = "../../migrations")]
+async fn cleanup_keeps_no_document_of_an_opted_out_post(pool: PgPool) {
+    let mut ids = vec![];
+    for (uri, opted_out) in [
+        ("https://example.org/opted-out", true),
+        ("https://example.org/plain", false),
+    ] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut doc = ResourceMeta::new(uri, "web", 86400);
+        doc.name = Some("The text of the post".into());
+        if opted_out {
+            doc.attributes.insert("opted_out".into(), "true".into());
+        }
+        store::save_document(&pool, &id, 0, &doc).await.unwrap();
+        ids.push(id);
+    }
+    sqlx::query("UPDATE resource SET orphaned_at=now()-interval '10 days'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(store::cleanup(&pool, 7, 7 * 24).await.unwrap(), 2);
+    let deleted: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT resource_id,before IS NULL FROM resource_change WHERE class='deleted' ORDER BY seq",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let mut expected = vec![(ids[0].clone(), true), (ids[1].clone(), false)];
+    expected.sort();
+    let mut deleted = deleted;
+    deleted.sort();
+    assert_eq!(deleted, expected);
+    let texts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM resource_change WHERE resource_id=$1 AND (before IS NOT NULL OR after IS NOT NULL)",
+    )
+    .bind(&ids[0])
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(texts, 0);
+}
+
+/// A stored card this build cannot read (a value it does not know) does not fail the save over
+/// it: the new reading replaces it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_stored_card_that_does_not_read_is_replaced(pool: PgPool) {
+    let (id, mut doc) = seed(&pool, "https://example.org/unreadable").await;
+    sqlx::query(
+        "UPDATE resource SET doc=jsonb_set(doc,'{embed}','{\"kind\":\"no-such-kind\"}') WHERE id=$1",
+    )
+    .bind(&id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    doc.name = Some("Read again".into());
+    doc.fetched_at += 1;
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let (name, embed): (Option<String>, Option<Value>) =
+        sqlx::query_as("SELECT name,doc->'embed' FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(name.as_deref(), Some("Read again"));
+    assert_eq!(embed, None);
+    // A missing answer over such a card is saved too.
+    sqlx::query(
+        "UPDATE resource SET doc=jsonb_set(doc,'{embed}','{\"kind\":\"no-such-kind\"}') WHERE id=$1",
+    )
+    .bind(&id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    doc.status = Status::Missing;
+    for _ in 0..2 {
+        doc.fetched_at += 1;
+        store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    }
+    let status: String = sqlx::query_scalar("SELECT status FROM resource WHERE id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "missing");
+}
+
 /// A change lookup takes links as `POST /v1/resources/lookup` does, IDs, or both: a link reads
 /// as its ID, an alias spelling as its alias (its line names the root, then the root's lines
 /// follow), and an unknown link adds nothing.
@@ -528,6 +651,11 @@ async fn an_over_cap_canary_is_inconclusive(pool: PgPool) {
         .await
         .unwrap()
         .unwrap();
+    // Two failed runs came before it: an inconclusive run neither adds to them nor clears them.
+    sqlx::query("UPDATE source_state SET canary_failures=2 WHERE source='web'")
+        .execute(&pool)
+        .await
+        .unwrap();
     canary::run_manifest(&pool, &OverCap, &manifest, &config, &metrics, generation)
         .await
         .unwrap();
@@ -538,7 +666,7 @@ async fn an_over_cap_canary_is_inconclusive(pool: PgPool) {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!((ok, failures), (None, 0));
+    assert_eq!((ok, failures), (None, 2));
     assert_eq!((last_error, source_failures), (None, 0));
     metrics.refresh(&pool).await.unwrap();
     let text = metrics.encode().unwrap();
@@ -551,6 +679,66 @@ async fn an_over_cap_canary_is_inconclusive(pool: PgPool) {
         text.contains("pinakes_fetch_total{mode=\"resource\",outcome=\"ok\",source=\"web\"} 1"),
         "{text}"
     );
+}
+/// A canary whose reader panics on the sample, or answers a page with no field read.
+struct Sample(Option<ResourceMeta>);
+#[async_trait::async_trait]
+impl Resolver for Sample {
+    fn name(&self) -> &'static str {
+        "web"
+    }
+    fn matches(&self, _: &str) -> bool {
+        true
+    }
+    async fn resolve(&self, _: &str) -> anyhow::Result<ResourceMeta> {
+        Ok(self.0.clone().expect("the reader panicked on the sample"))
+    }
+    fn refresh_after(&self, _: &ResourceMeta) -> Duration {
+        Duration::from_secs(3600)
+    }
+}
+async fn run_web_canary(pool: &PgPool, sample: &Sample) -> (Option<bool>, i32, Vec<String>) {
+    let config = CanaryConfig::default();
+    let manifest = adapter::manifest("web");
+    let metrics = Metrics::new().unwrap();
+    let _ = canary::claim(pool, &manifest, &config).await.unwrap();
+    sqlx::query("UPDATE source_state SET canary_due_at=now() WHERE source='web'")
+        .execute(pool)
+        .await
+        .unwrap();
+    let generation = canary::claim(pool, &manifest, &config)
+        .await
+        .unwrap()
+        .unwrap();
+    canary::run_manifest(pool, sample, &manifest, &config, &metrics, generation)
+        .await
+        .unwrap();
+    sqlx::query_as(
+        "SELECT canary_ok,canary_failures,canary_missing FROM source_state WHERE source='web'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+/// A reader that panics on the canary's sample is a failed canary: the run returns (so the
+/// worker that ran it goes on) and the failure is recorded.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_canary_whose_reader_panics_is_a_failed_canary(pool: PgPool) {
+    let (ok, failures, _) = run_web_canary(&pool, &Sample(None)).await;
+    assert_eq!((ok, failures), (Some(false), 1));
+}
+/// The web manifest expects no field of a page, but its canary's page has a title: a canary
+/// that fetched the page and read no name has failed.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_web_canary_needs_a_name(pool: PgPool) {
+    let mut page = ResourceMeta::new("https://example.org/", "web", 86400);
+    let (ok, failures, missing) = run_web_canary(&pool, &Sample(Some(page.clone()))).await;
+    assert_eq!((ok, failures), (Some(false), 1));
+    assert_eq!(missing, ["name"]);
+    page.name = Some("Example Domain".into());
+    let (ok, failures, missing) = run_web_canary(&pool, &Sample(Some(page))).await;
+    assert_eq!((ok, failures), (Some(true), 0));
+    assert!(missing.is_empty());
 }
 #[sqlx::test(migrations = "../../migrations")]
 async fn canary_bookkeeping_metrics_and_separate_listener(pool: PgPool) {
@@ -668,6 +856,42 @@ async fn ops_artifacts_reference_registered_metrics(pool: PgPool) {
             .filter(|s| s.starts_with("pinakes_"))
         {
             assert!(names.contains(name), "unregistered alert metric {name}");
+        }
+        // Every fetch outcome a rule matches is one the daemon records.
+        let expr = rule["expr"].as_str().unwrap();
+        for matcher in expr.split("outcome=").skip(1) {
+            let value = matcher
+                .trim_start_matches('~')
+                .strip_prefix('"')
+                .and_then(|rest| rest.split('"').next())
+                .unwrap_or_else(|| panic!("an outcome matcher without a value in {expr}"));
+            for outcome in value.split('|') {
+                assert!(
+                    telemetry::OUTCOMES.contains(&outcome),
+                    "{}: no fetch has the outcome {outcome}",
+                    rule["alert"].as_str().unwrap()
+                );
+            }
+        }
+    }
+    // A recognised bot wall is its own outcome (`blocked`): the alert named for walls reads it.
+    assert!(rules.iter().any(|r| r["alert"].as_str() == Some("WallUp")
+        && r["expr"].as_str().unwrap().contains("blocked")));
+    // A link never read has no refresh time and is in no overdue count: the queue's own depth
+    // is alerted on too.
+    assert!(rules
+        .iter()
+        .any(|r| r["alert"].as_str() == Some("QueueBacklog")
+            && r["expr"]
+                .as_str()
+                .unwrap()
+                .contains("pinakes_queue_depth{state=\"pending\"}")));
+    // A missing series is its own alert with a wait, never the stalled-ingestion alert.
+    for rule in rules {
+        let expr = rule["expr"].as_str().unwrap();
+        if expr.contains("absent(") {
+            assert_eq!(rule["alert"].as_str(), Some("MetricsMissing"), "{expr}");
+            assert!(rule["for"].is_string(), "{expr}");
         }
     }
     // Every keyed source's refusals are a series from the start (at 0), and an alert reads them.

@@ -12,6 +12,7 @@
     "https://proton.me/api/calendar/v1/url/SECRET",
     "webcal://p29-caldav.icloud.com/published/SECRET",
     "https://www.google.com/calendar/ical/test/private-SECRET/basic.ics",
+    "https://google.com/calendar/ical/test/private-SECRET/basic.ics",
     "https://calendar.example.org/index.php/apps/calendar/p/SECRET",
     "https://calendar.example.org/nextcloud/remote.php/dav/public-calendars/SECRET/",
     "https://outlook.office365.com/%6Fwa/calendar/SECRET/calendar.ics"
