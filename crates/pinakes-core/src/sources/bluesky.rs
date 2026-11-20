@@ -40,9 +40,10 @@ fn handle(value: &str) -> bool {
                 && !label.ends_with('-')
         })
 }
-/// A record key: letters, digits and `.-_:~`.
+/// A record key: letters, digits and `.-_:~`, but not `.` or `..`, which a web address reads as
+/// steps of its path.
 fn rkey(value: &str) -> bool {
-    !value.is_empty()
+    !matches!(value, "" | "." | "..")
         && value.len() <= 512
         && value
             .bytes()
@@ -411,6 +412,19 @@ mod tests {
         ] {
             assert!(!Bluesky.reads(uri), "{uri}");
         }
+    }
+
+    #[test]
+    fn a_dot_is_not_a_record_key() {
+        for key in [".", ".."] {
+            let uri = format!("at://{DID}/app.bsky.feed.post/{key}");
+            assert_eq!(Target::of_uri(&uri), None, "{uri}");
+            assert!(!Bluesky.reads(&uri), "{uri}");
+            assert_eq!(Bluesky.alias_root(&uri), None, "{uri}");
+        }
+        // A key that only holds dots among other characters is one.
+        let uri = format!("at://{DID}/app.bsky.feed.post/a..b");
+        assert!(Target::of_uri(&uri).is_some_and(|t| t.post.as_deref() == Some("a..b")));
     }
 
     #[test]
