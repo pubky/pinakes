@@ -2004,7 +2004,8 @@ async fn an_entry_names_the_publishers_episode_page_and_its_other_links(pool: Pg
 
 /// A feed card's cut read whose read on gave nothing (`ResourceMeta::episodes_cut`: too slow, or
 /// the read failed) keeps the older episodes a longer stored list holds under its own, newer
-/// ones first, and what that list says of its feed; a list it shares no episode with, or a save
+/// ones first, and what that list says of its feed, when it names the stored list's two newest
+/// episodes (both, and those two are enough); a list it shares no episode with, or a save
 /// without the flag, replaces the stored list as before.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_failed_read_on_keeps_the_longer_stored_list(pool: PgPool) {
@@ -2111,6 +2112,63 @@ async fn a_failed_read_on_keeps_the_longer_stored_list(pool: PgPool) {
     assert_eq!(rows(&pool, &id).await, 101);
     let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
     assert_eq!(page["truncated"], true, "{page}");
+    // And when it is the stored list's second-newest episode without its newest: the cut must
+    // name both of the two newest to reach the list.
+    let whole: Vec<Episode> = (1..=183).rev().map(|n| episode(n, true)).collect();
+    show(&pool, uri, Some(whole)).await;
+    let mut list: Vec<Episode> = (201..=300).rev().map(|n| episode(n, true)).collect();
+    list.insert(0, episode(182, true));
+    store::save_document(&pool, &id, 0, &cut(list, true))
+        .await
+        .unwrap();
+    assert_eq!(rows(&pool, &id).await, 101);
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
+    assert_eq!(page["truncated"], true, "{page}");
+    // The two newest are enough: a cut of 98 new episodes above exactly those two reaches the
+    // list, and every stored episode below them joins.
+    let whole: Vec<Episode> = (1..=183).rev().map(|n| episode(n, true)).collect();
+    show(&pool, uri, Some(whole)).await;
+    let list: Vec<Episode> = (182..=281).rev().map(|n| episode(n, true)).collect();
+    store::save_document(&pool, &id, 0, &cut(list, true))
+        .await
+        .unwrap();
+    assert_eq!(rows(&pool, &id).await, 281);
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
+    assert_eq!(names(&page)[0], "Episode 281", "{page}");
+    assert_eq!(page["truncated"], false, "{page}");
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes?offset=98")).await;
+    assert_eq!(
+        names(&page)[..3],
+        ["Episode 183", "Episode 182", "Episode 181"],
+        "{page}"
+    );
+    // Two episodes on one date, the cut ending between them: the one it lacks joins after the
+    // one it holds, as the feed lists them, and neither stands in for the other.
+    let mut whole: Vec<Episode> = (1..=10).rev().map(|n| episode(n, true)).collect();
+    whole[3].published = whole[2].published;
+    assert_eq!(
+        (whole[2].guid.as_str(), whole[3].guid.as_str()),
+        ("ep-8", "ep-7")
+    );
+    show(&pool, uri, Some(whole)).await;
+    let list: Vec<Episode> = (8..=11).rev().map(|n| episode(n, true)).collect();
+    store::save_document(&pool, &id, 0, &cut(list, true))
+        .await
+        .unwrap();
+    assert_eq!(rows(&pool, &id).await, 11);
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
+    assert_eq!(
+        names(&page)[..6],
+        [
+            "Episode 11",
+            "Episode 10",
+            "Episode 9",
+            "Episode 8",
+            "Episode 7",
+            "Episode 6"
+        ],
+        "{page}"
+    );
     // A cut list the stored one shares nothing with (another feed's) is the list.
     let other: Vec<Episode> = (1..=100)
         .rev()

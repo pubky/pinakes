@@ -338,6 +338,42 @@ async fn recordings_nothing_exact_joins_name_the_ones_they_may_be(pool: PgPool) 
     assert_eq!(named(&card(&config, &pool, &mb).await), Vec::<&str>::new());
 }
 
+/// The pass compares lengths in whole seconds: two recordings up to `LENGTH_WINDOW_SECS` (3 s)
+/// apart agree and pair with score 1; 4 s apart they are no pair.
+#[sqlx::test(migrations = "../../migrations")]
+async fn lengths_three_seconds_apart_agree_and_four_do_not(pool: PgPool) {
+    let config = Config::default();
+    assert_eq!(same_recording::LENGTH_WINDOW_SECS, 3);
+    let mut ids = vec![];
+    // 5:24, 5:27 and 5:28: the first and the last are four seconds apart.
+    for (n, length) in [(1, "PT5M24S"), (2, "PT5M27S"), (3, "PT5M28S")] {
+        ids.push(
+            recording(
+                &pool,
+                &format!("https://example.org/take-five/{n}"),
+                "Take Five",
+                Some("The Dave Brubeck Quartet"),
+                Some(length),
+            )
+            .await,
+        );
+    }
+    pass(&pool, &config).await;
+    let (short, middle, long) = (&ids[0], &ids[1], &ids[2]);
+    let short_card = card(&config, &pool, short).await;
+    assert_eq!(named(&short_card), [middle.as_str()], "{short_card}");
+    assert_eq!(short_card["maybe_same"][0]["score"], 1.0);
+    let long_card = card(&config, &pool, long).await;
+    assert_eq!(named(&long_card), [middle.as_str()], "{long_card}");
+    assert_eq!(long_card["maybe_same"][0]["score"], 1.0);
+    let middle_card = card(&config, &pool, middle).await;
+    let mut both = named(&middle_card);
+    both.sort();
+    let mut want = vec![short.as_str(), long.as_str()];
+    want.sort();
+    assert_eq!(both, want, "{middle_card}");
+}
+
 /// `[groups] same_recording_hint = "off"` removes the field from recording cards and stops the
 /// pass; the OpenAPI document keeps the field while either hint is on.
 #[sqlx::test(migrations = "../../migrations")]
