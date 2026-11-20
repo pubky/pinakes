@@ -267,9 +267,9 @@ impl Source for Wordpress {
                 &record_url(&api),
                 &FetchOptions {
                     accept: Some("application/json".into()),
-                    // No redirect to another host (nor any other): the record is on the page's
-                    // origin or not read.
-                    sensitive: true,
+                    // No redirect to another host (nor any other) is followed: the record is on
+                    // the page's origin or not read.
+                    keep_redirect: true,
                     ..Default::default()
                 },
             )
@@ -436,6 +436,28 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(doc.attributes["wordpress_post"], "55992");
+        assert_eq!(recorded.asked(), [record]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_record_that_redirects_is_not_followed() {
+        let record = "https://bitcoinmagazine.com/wp-json/wp/v2/posts/55992?_embed=wp%3Afeaturedmedia&_fields=id%2Clink%2Ctitle%2Cexcerpt%2Cdate_gmt%2Cmodified_gmt%2C_links%2C_embedded";
+        let elsewhere = "https://other.example/wp-json/wp/v2/posts/55992";
+        let (egress, recorded) = fixture::egress(vec![
+            (record, 302, "text/html", elsewhere.as_bytes().to_vec()),
+            (elsewhere, 200, "application/json", read("post-55992.json")),
+        ]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let link = fixture::link("wordpress", "page-no-uptober");
+        // The page keeps its own card: the hook has nothing to add, and has not failed.
+        let improved = Wordpress
+            .page(&cx, PAGE, &page(Some(&link)), &web_card())
+            .await
+            .unwrap();
+        assert!(improved.is_none());
         assert_eq!(recorded.asked(), [record]);
     }
 }
