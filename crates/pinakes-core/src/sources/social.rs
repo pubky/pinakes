@@ -236,9 +236,10 @@ pub fn post_text(doc: &mut ResourceMeta, text: &str, by: Option<&str>) {
 }
 
 /// The name and the handle an Open Graph title carries: `Name (@handle) on X`,
-/// `Name (@handle) • Threads`.
+/// `Name (@handle) • Threads`. The handle is the last `(@…)` of the title: the name before it is
+/// the account's own text and may hold one too.
 pub fn name_and_handle(title: &str) -> (Option<String>, Option<String>) {
-    let Some((name, rest)) = title.split_once(" (@") else {
+    let Some((name, rest)) = title.rsplit_once(" (@") else {
         return (trimmed(title), None);
     };
     let handle = rest.split_once(')').map(|(handle, _)| handle);
@@ -289,6 +290,11 @@ mod tests {
             (Some("Twitch - Twitch".into()), None)
         );
         assert_eq!(name_and_handle("  "), (None, None));
+        // A display name is the account's own text: a handle written into it is not the handle.
+        assert_eq!(
+            name_and_handle("Zuck (@zuck) fan (@mallory) on Threads"),
+            (Some("Zuck (@zuck) fan".into()), Some("mallory".into()))
+        );
     }
 
     #[test]

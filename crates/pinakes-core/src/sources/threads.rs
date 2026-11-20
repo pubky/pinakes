@@ -92,8 +92,27 @@ fn invalid_post(url: &url::Url) -> bool {
             .any(|(k, v)| k == "error" && v == "invalid_post")
 }
 
+/// The post's own address with its author (`/@{handle}/post/{code}`), as its page gives it: its
+/// head's canonical link or the address a redirect ended at, when that names the post asked
+/// for. The handle and the root come from there, never from the title's text or from what the
+/// page's body says of itself.
+fn own_address(code: &str, ended_at: &url::Url, page: &ResourceMeta) -> Option<(String, String)> {
+    page.alias_candidates
+        .iter()
+        .map(String::as_str)
+        .chain((ended_at.as_str() != page.url).then_some(ended_at.as_str()))
+        .filter_map(Target::of_uri)
+        .find_map(|target| match &target {
+            Target::Post {
+                author: Some(author),
+                code: named,
+            } if named == code => Some((author.clone(), target.root()?)),
+            _ => None,
+        })
+}
+
 /// The card of a post from its page: the author its title names (`Name (@handle) on Threads`),
-/// its text and its image.
+/// its text and its image. A handle that is no Threads handle is not kept.
 pub fn post_card(doc: ResourceMeta, page: &ResourceMeta) -> ResourceMeta {
     let mut doc = Shape::Post.card(doc, SITE);
     let (name, handle) = page
@@ -101,6 +120,7 @@ pub fn post_card(doc: ResourceMeta, page: &ResourceMeta) -> ResourceMeta {
         .as_deref()
         .map(social::name_and_handle)
         .unwrap_or_default();
+    let handle = handle.filter(|h| social::handle(h, 30));
     let by = name.clone().or_else(|| handle.clone());
     social::post_text(
         &mut doc,
@@ -216,14 +236,15 @@ impl Source for Threads {
         };
         let mut doc = match social::page(cx, &target.page()).await? {
             Page::Read { url, .. } if invalid_post(&url) => cx.missing(uri, self),
-            Page::Read { doc: page, .. } => match &target {
+            Page::Read { doc: page, url } => match &target {
                 Target::Profile(handle) => profile_card(doc, handle, &page),
                 Target::Post { code, .. } => {
                     let mut doc = post_card(doc, &page);
-                    // A post reached by its code alone: its author's address is its root.
-                    if let Some(author) = doc.attributes.get("author") {
-                        doc.source_root =
-                            Some(format!("https://www.threads.com/@{author}/post/{code}"));
+                    // A post reached by its code alone, or under another handle: the address
+                    // its own page gives it is its root, and names its author.
+                    if let Some((author, root)) = own_address(code, &url, &page) {
+                        social::fact(&mut doc, "author", Some(author));
+                        doc.source_root = Some(root);
                     }
                     doc
                 }
@@ -350,5 +371,54 @@ mod tests {
         assert_eq!(doc.attributes["handle"], "threads");
         let doc = profile_card(base, "someone", &profile);
         assert_eq!(doc.name.as_deref(), Some("Profile on threads.com"));
+    }
+
+    /// A display name is the account's own text: a handle or a path written into it names
+    /// neither the author nor the post's root. Both come from the address the page gives itself.
+    #[tokio::test(start_paused = true)]
+    async fn a_display_name_names_neither_the_author_nor_the_root() {
+        let html = |title: &str, address: &str| {
+            format!(
+                r#"<html><head><title>{title}</title><meta property="og:title" content="{title}">
+                <meta property="og:description" content="A post."><meta property="og:url" content="{address}">
+                <link rel="canonical" href="{address}"></head><body></body></html>"#
+            )
+            .into_bytes()
+        };
+        let own = "https://www.threads.com/@mallory/post/Cspoofed01";
+        let (egress, _) = crate::sources::fixture::egress(vec![
+            (
+                "https://www.threads.com/t/Cspoofed01",
+                200,
+                "text/html",
+                html("Zuck (@zuck) fan (@mallory) on Threads", own),
+            ),
+            // A name with a path in the handle's place, and a page that names another post.
+            (
+                "https://www.threads.com/t/Cspoofed02",
+                200,
+                "text/html",
+                html(
+                    "M (@zuck/post/Creal00001#) on Threads",
+                    "https://www.threads.com/@zuck/post/Creal00001",
+                ),
+            ),
+        ]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let doc = Threads
+            .resolve(&cx, "https://www.threads.com/t/Cspoofed01")
+            .await
+            .unwrap();
+        assert_eq!(doc.attributes["author"], "mallory");
+        assert_eq!(doc.source_root.as_deref(), Some(own));
+        let doc = Threads
+            .resolve(&cx, "https://www.threads.com/t/Cspoofed02")
+            .await
+            .unwrap();
+        assert!(!doc.attributes.contains_key("author"), "{:?}", doc.attributes);
+        assert_eq!(doc.source_root, None);
     }
 }
