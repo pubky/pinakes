@@ -1161,8 +1161,7 @@ page's `offset` while more episodes match, else `null`, and `truncated` saying w
 lists older episodes than the list holds, as the show's last read of it found: that read ended
 before the feed did (past 8 MiB, below), or the feed has more than the 1000 kept (exactly 1000 is
 not). It is the same on every page, whatever `q`, so a client links the show on its own service
-for the rest. A list stored before this field holds what the upgrade gave it (`true` for a list
-that was full at the old 100, else `false`) until its show is read again. `q` lists only the episodes whose `name` holds it, in any
+for the rest. `q` lists only the episodes whose `name` holds it, in any
 letter case (Unicode's, as Rust folds it: `über` finds `ÜBER`); at most 256 bytes, spaces around
 it ignored, a blank `q` matching every episode; it pages the same way. Each item is
 `{uri, name, image, published, guid, stream, id?, aliases?}`. A show's card carries the first of them
@@ -1874,7 +1873,8 @@ record or a product database (their pages say which).
   a page's `mainEntity`, beside page metadata such as a `WebPage` or breadcrumbs or not). A
   `ProductGroup`
   names the barcode, article numbers and offers of the variant its address picks (its `url`, or
-  `?variant=`), else of its only variant, never the group's. A product's barcode is the key `gtin:`, so
+  `?variant=`), else of its only variant, never the group's: a group whose address picks none of
+  several variants names no barcode. A product's barcode is the key `gtin:`, so
   the same product on several shops is [one group](#groups), and `key=gtin:{barcode}` finds them
   all.
 - Its price and availability are facts with the time they were read, never identity: the cheapest
@@ -1894,7 +1894,7 @@ record or a product database (their pages say which).
 | `gtin` | GTIN-13 |
 | `brand`, `sku`, `mpn` | The brand, the shop's article number, the maker's part number |
 | `price`, `price_currency`, `availability`, `seller`, `price_at` | The cheapest offer's price, its ISO 4217 currency, its availability (`in_stock`, `out_of_stock`, `pre_order`, `back_order`, `discontinued`, `limited_availability`, `sold_out`, `in_store_only`, `online_only`, `reserved`, `made_to_order`), who sells it, and when that was read (RFC 3339) |
-| `asin` | An Amazon link's ASIN |
+| `asin`, `isbn` | An Amazon link's ASIN, and for a book the ISBN-10 that ASIN is |
 
 ## Questions
 
