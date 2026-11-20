@@ -246,10 +246,19 @@ pub fn card(
         q["question_id"].as_u64() == Some(target.id),
         "Stack Exchange answered for another question"
     );
-    let originals: Vec<String> = originals(q)
-        .into_iter()
-        .map(|id| format!("https://{}/questions/{id}", target.host))
-        .collect();
+    // The fact holds whole links only (the also-on half reads the ids back from it): as many
+    // of the first originals as fit an attribute's value. Two always fit, so a duplicate of
+    // several never reads as a duplicate of one.
+    let mut links: Vec<String> = Vec::new();
+    let mut length = 0;
+    for id in originals(q) {
+        let link = format!("https://{}/questions/{id}", target.host);
+        length += link.len() + if links.is_empty() { 0 } else { "; ".len() };
+        if length > crate::model::ATTRIBUTE_VALUE_CAP {
+            break;
+        }
+        links.push(link);
+    }
     Question {
         title: plain(&q["title"]),
         description: text(&q["body"])
@@ -267,7 +276,7 @@ pub fn card(
             .and_then(|t| chrono::DateTime::from_timestamp(t, 0))
             .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
         closed_reason: plain(&q["closed_reason"]),
-        duplicate_of: originals,
+        duplicate_of: links,
     }
     .apply(&mut doc);
     let tags: Vec<String> = super::texts(&q["tags"]);
@@ -647,6 +656,38 @@ mod tests {
             .downcast_ref::<crate::resolver::RetryLater>()
             .is_none());
         assert_eq!(crate::resolver::error_class(&error), "http_4xx");
+    }
+
+    #[test]
+    fn a_duplicate_of_many_names_whole_questions_only() {
+        // Eight originals with long ids on a long host: their links pass the attribute cap.
+        let t = Target {
+            host: "philosophy.meta.stackexchange.com".into(),
+            site: "philosophy.meta".into(),
+            id: 7,
+        };
+        let ids: Vec<u64> = (1..=8).map(|n| 100_000_000_000 + n).collect();
+        let mut v: Value = serde_json::from_slice(&read("se-stackoverflow-663171.json")).unwrap();
+        v["items"][0]["question_id"] = t.id.into();
+        v["items"][0]["closed_details"]["original_questions"] = ids
+            .iter()
+            .map(|id| serde_json::json!({ "question_id": id }))
+            .collect::<Vec<_>>()
+            .into();
+        let base = ResourceMeta::new(&t.root(), "stack_exchange", 3600);
+        let doc = card(base, &t, 200, &serde_json::to_vec(&v).unwrap())
+            .unwrap()
+            .unwrap();
+        // As stored, every link of the fact is one of the originals: the first three, which fit.
+        let stored = doc.bounded(crate::sources::attributes()).unwrap();
+        let fact = &stored.attributes["duplicate_of"];
+        assert!(fact.len() <= crate::model::ATTRIBUTE_VALUE_CAP);
+        let kept: Vec<Option<u64>> = fact
+            .split("; ")
+            .map(|link| of_uri(link).filter(|o| o.site == t.site).map(|o| o.id))
+            .collect();
+        let first: Vec<Option<u64>> = ids[..3].iter().copied().map(Some).collect();
+        assert_eq!(kept, first, "{fact}");
     }
 }
 

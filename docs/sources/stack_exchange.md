@@ -40,7 +40,7 @@ card.
 | `tags` | E.g. `python; string` |
 | `author`, `published` | Its asker and when it was asked (RFC 3339) |
 | `closed_reason` | Why it was closed (`Duplicate`, …) |
-| `duplicate_of` | For a duplicate, the question it repeats (several joined with `; `) |
+| `duplicate_of` | For a duplicate, the question it repeats (several joined with `; `: the first ones whose whole links fit 256 bytes, of 8 at most) |
 
 ## Also on
 
