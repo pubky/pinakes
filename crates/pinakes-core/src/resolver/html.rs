@@ -12,8 +12,11 @@
 //!    (`PARSE_MEMORY`). One `blocking` call is one job (`Job`): its parses share one worker,
 //!    started at the first and ended with the job, so they share its CPU budget and one wall
 //!    deadline, and a watchdog kills the worker at that deadline or as soon as the caller stops
-//!    waiting. Past any limit the parse fails as `TooComplex` (the failure kind `too_complex`):
-//!    no card. Every later parse of that job fails at once, so a loop over many fragments ends
+//!    waiting. Past the CPU budget or the memory limit the parse fails as `TooComplex` (the
+//!    failure kind `too_complex`): no card. A worker killed at the wall deadline, one that ended
+//!    by itself and a caller that stopped waiting say nothing about the page: the failure is a
+//!    `timeout`, the card stays and the page is read again (`TooComplex::transient`). Either
+//!    way every later parse of that job fails at once, so a loop over many fragments ends
 //!    within the job's budget too. The worker answers with the tree, within `MAX_DEPTH` (a deeper
 //!    node is left out) and `MAX_NODES` (more is `TooComplex`), so what the parent reads back is
 //!    bounded and linear to rebuild. Text without a `<` holds no markup and is parsed in this
@@ -803,12 +806,21 @@ impl Job {
     /// End the job's parsing for good, logged once, and the error for the parse that found it.
     fn end_with(&mut self, reason: &'static str, text: &str) -> anyhow::Error {
         self.over = Some(reason);
-        tracing::warn!(
-            reason,
-            bytes = text.len(),
-            "an HTML parse did not end within its limits; the page gets no card"
-        );
-        TooComplex { reason }.into()
+        let error = TooComplex { reason };
+        if error.transient() {
+            tracing::warn!(
+                reason,
+                bytes = text.len(),
+                "an HTML parse did not end within its limits; the page is read again later"
+            );
+        } else {
+            tracing::warn!(
+                reason,
+                bytes = text.len(),
+                "an HTML parse did not end within its limits; the page gets no card"
+            );
+        }
+        error.into()
     }
 
     fn start(&self, worker: &Worker) -> anyhow::Result<Process> {

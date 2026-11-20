@@ -243,9 +243,13 @@ that cannot run it does not start). All the parses of one job (a page's extracti
 answer with many HTML descriptions, a calendar's events) share one worker and its limits: 1 s of
 CPU time (10 s in a debug build), 1 GiB of memory and a wall-clock deadline. Past any of them, or
 as soon as the job's caller stops waiting, the worker dies, every later parse of the job fails
-at once, the parse slot is freed, and the resource is recorded as `too_complex`: final, with no
-card (an earlier card is cleared, and the change recorded), until `pinakesd reextract` revives it
-(the daemon logs `an HTML parse did not end within its limits`, once per job). Text without
+at once and the parse slot is freed (the daemon logs `an HTML parse did not end within its
+limits`, once per job). Past the CPU time or the memory, or with a tree of more nodes than the
+cap below, the resource is recorded as `too_complex`: final, with no card (an earlier card is
+cleared, and the change recorded), until `pinakesd reextract` revives it. A worker killed at the
+wall-clock deadline, one that ended by itself (killed from outside) and a caller that stopped
+waiting say nothing about the page: the read fails as `timeout`, the card stays, and the link is
+read again with the timeout backoff (charged from the fourth in a row). Text without
 markup (no `<`) is parsed in the daemon, in linear time, without a worker, but only while the
 job is within its limits: once it is over, it parses no plain text either.
 The tree a worker answers with keeps no node more than 256 elements deep and at most 500,000
@@ -1017,8 +1021,8 @@ manifests, resolver status (aliases left out: their roots answer for them), coun
 among them), ingestion, source and canary state; public `/v1/info` shows
 only the version, what the instance resolves, the limits a client must respect and the OSM
 licence. Stored errors are sanitized classes (dns, connect, timeout, http_4xx, http_5xx, parse,
-policy, too_large for an answer past its size cap, too_complex for a page whose parse did not
-end within its limits; rate_limited for a link waiting for its host's budget). A failed resolve
+policy, too_large for an answer past its size cap, too_complex for a page whose parse ran past
+its CPU, memory or node limit; rate_limited for a link waiting for its host's budget). A failed resolve
 is logged at warn as `resolution failed`, with the resource id (`resource_id`), the link's host
 (`host`; its scheme for a link without one, never its path), this class (`kind`) and the
 upstream HTTP status when one was answered (`status`), never the error's text. A source's health
