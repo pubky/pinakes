@@ -90,6 +90,8 @@ impl Daemon {
     }
 }
 
+/// The task that checks the instance lock: it ends before shutdown only when the lock is lost.
+const INSTANCE_LOCK: &str = "instance lock";
 /// The daemon's background tasks, by name.
 #[derive(Default)]
 struct Tasks(tokio::task::JoinSet<Ended>);
@@ -140,8 +142,10 @@ impl Tasks {
 /// Run until `stop` (a signal), or until a background task or a worker ends by itself or panics:
 /// a daemon that kept answering with a dead ingestion, grouping or cleanup loop would look
 /// healthy and fall behind. Then signal shutdown and give everything `grace` to finish; what
-/// still runs after it is dropped. An error names what ended early, so the process exits
-/// non-zero and its supervisor starts it again.
+/// still runs after it is dropped. When the task that ended is the instance lock's check, the
+/// lock is lost and the grace is `locks::LOST_GRACE` at most: nothing is finished without the
+/// lock. An error names what ended early, so the process exits non-zero and its supervisor
+/// starts it again.
 async fn supervise(
     stop: impl std::future::Future<Output = ()>,
     mut tasks: Tasks,
@@ -164,6 +168,11 @@ async fn supervise(
     if let Some(name) = failed {
         tracing::error!(task = name, "a background task ended; stopping the daemon");
     }
+    let grace = if failed == Some(INSTANCE_LOCK) {
+        grace.min(pinakes_core::locks::LOST_GRACE)
+    } else {
+        grace
+    };
     let _ = shutdown.send(true);
     // A task or worker that panics while it stops is a failure too.
     let mut panicked: Option<&'static str> = None;
@@ -245,7 +254,7 @@ async fn start(
     let instance_lock = std::sync::Arc::new(tokio::sync::Mutex::new(instance_lock));
     let watched =
         pinakes_core::locks::InstanceLock::watch(instance_lock.clone(), shutdown_rx.clone());
-    tasks.spawn("instance lock", async move {
+    tasks.spawn(INSTANCE_LOCK, async move {
         if watched.await {
             tracing::error!(
                 "the instance lock's database session is gone or does not answer; stopping"
@@ -705,6 +714,33 @@ mod tests {
         .unwrap();
         let waited = started.elapsed();
         assert!(waited >= Duration::from_millis(300) && waited < Duration::from_secs(5));
+    }
+    /// A daemon that has lost its instance lock gives its tasks `LOST_GRACE`, not the
+    /// shutdown grace: a worker in the middle of a batch is cut off there. Any other task that
+    /// ends leaves the full grace.
+    #[tokio::test]
+    async fn a_lost_instance_lock_cuts_the_grace_short() {
+        let grace = Duration::from_secs(4);
+        let lost = pinakes_core::locks::LOST_GRACE;
+        assert!(lost + Duration::from_millis(1500) < grace);
+        for (ended, least, most) in [
+            (INSTANCE_LOCK, lost, lost + Duration::from_millis(1500)),
+            ("ingestion", grace, grace + Duration::from_secs(2)),
+        ] {
+            let (stop, _shutdown) = watch::channel(false);
+            let mut tasks = Tasks::default();
+            tasks.spawn(ended, async {});
+            // A worker whose batch does not end.
+            let mut workers = tokio::task::JoinSet::new();
+            workers.spawn(std::future::pending::<()>());
+            let started = std::time::Instant::now();
+            let error = supervise(std::future::pending::<()>(), tasks, workers, stop, grace)
+                .await
+                .unwrap_err();
+            let waited = started.elapsed();
+            assert_eq!(error.to_string(), format!("{ended} ended before shutdown"));
+            assert!(waited >= least && waited < most, "{ended}: {waited:?}");
+        }
     }
     #[test]
     fn warns_when_the_admin_listener_has_no_token() {

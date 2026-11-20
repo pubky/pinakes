@@ -153,8 +153,13 @@ carried over by hand:
    must have the same columns (`\d resource_change` in each):
 
    ```sh
-   pg_dump --data-only --table=resource_change "$OLD_DATABASE_URL" | psql -v ON_ERROR_STOP=1 "$NEW_DATABASE_URL"
+   DATABASE_URL="$OLD_DATABASE_URL" scripts/pg-env pg_dump --data-only --table=resource_change \
+     | DATABASE_URL="$NEW_DATABASE_URL" scripts/pg-env psql -v ON_ERROR_STOP=1
    ```
+
+   `scripts/pg-env` runs a command with libpq's `PG*` variables set from `DATABASE_URL`, so
+   neither URL, nor a password in it, stands on a command line, where the process table shows
+   it. Setting `PGHOST`, `PGUSER`, `PGDATABASE` and a `PGPASSFILE` for each side does the same.
 
 5. Start the daemon on the new database. It reads the feed from zero and reads every link
    again; each card gets a `created` line of its own.
@@ -183,7 +188,11 @@ The lock is its session's: the daemon checks every ten seconds that the session 
 answers within ten seconds. It stops at once when the session's connection has failed (a
 PostgreSQL restart, a dropped connection), and when two checks in a row get no answer in time (a
 database that does not answer; one slow answer stops nothing), since another daemon or a
-`reextract` could then start beside it.
+`reextract` could then start beside it. A daemon that has lost the lock takes no new work and
+gives open requests, running jobs and background passes two seconds, not
+`limits.shutdown_grace_secs`: what still runs then is dropped (a job cut off is read again when
+its lease runs out). So a daemon whose lock is gone works beside another for 32 seconds at most:
+30 to notice a session that is gone without its connection failing, and those two.
 
 **Stopping and restarting.** `pinakesd` stops with a non-zero status when one of its background
 tasks ends by itself or panics (ingestion, grouping, maintenance, the ODbL dump, a queue worker,

@@ -48,10 +48,17 @@ pub async fn own_database(pool: &PgPool) -> Result<InstanceLock> {
     Ok(InstanceLock(connection))
 }
 /// How often the daemon checks that it still holds the instance lock ([`InstanceLock::watch`]),
-/// and how long one check may take. Fixed: it bounds how long two daemons could run on one
-/// database (three times this, for a session that is gone without its connection failing),
-/// which no deployment needs to tune.
+/// and how long one check may take. Fixed: with [`LOST_GRACE`] it bounds how long two daemons
+/// could run on one database, which no deployment needs to tune. A session that is gone
+/// without its connection failing is noticed within three times this (the wait and two checks
+/// with no answer), and the daemon's tasks are dropped `LOST_GRACE` later: 32 seconds.
 pub const LOCK_CHECK: std::time::Duration = std::time::Duration::from_secs(10);
+/// How long a daemon that has lost the instance lock gives its tasks to stop, in place of
+/// `limits.shutdown_grace_secs`: time for a statement in flight and an open response, no more.
+/// Fixed, as `LOCK_CHECK` is.
+/// Another daemon may already run on the database, so the workers' batches are cut off (a job
+/// cut off is read again when its lease runs out) instead of finished without the lock.
+pub const LOST_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 /// What one check of the lock's session found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Check {
@@ -77,9 +84,9 @@ impl InstanceLock {
     /// Check the lock every [`LOCK_CHECK`] until `shutdown`: `true` once it is lost, `false` at
     /// shutdown. It is lost at once when its session's connection fails, and when two checks in
     /// a row get no answer in time: one slow answer does not stop a daemon that still holds
-    /// its lock, and the check after it is made at once. Without the lock another `pinakesd`, or a `reextract`, could start on the
-    /// database, so a daemon that has lost it stops (its supervisor starts it again, and it
-    /// takes the lock anew).
+    /// its lock, and the check after it is made at once. Without the lock another `pinakesd`,
+    /// or a `reextract`, could start on the database, so a daemon that has lost it stops within
+    /// [`LOST_GRACE`] (its supervisor starts it again, and it takes the lock anew).
     pub async fn watch(
         lock: std::sync::Arc<tokio::sync::Mutex<Self>>,
         shutdown: tokio::sync::watch::Receiver<bool>,
