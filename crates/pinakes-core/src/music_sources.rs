@@ -4,25 +4,14 @@
 //! Who may vouch for a key: a hub (MusicBrainz, Wikidata) or a known music service's own record
 //! of its own object. Any other page's claim is a fact at most.
 //!
-//! - [`ServiceSource`]: the ISRC a music service's own track page states (its JSON-LD
-//!   `isrcCode`) as the key `isrc:…` when the service vouches for it (TIDAL,
-//!   `Service::vouches_isrc`), and as a fact with its artist, album and length.
-//! - `tidal` (with an operator's TIDAL client ID and secret): a TIDAL
-//!   album's barcode and a track's ISRC from TIDAL's own API, as keys.
-//! - [`MusicBrainzSource`]: what MusicBrainz relates the tagged link to (one recording, release
-//!   or artist; for a track it does not relate, the one recording its page's own ISRC is on; for
-//!   an album it does not relate, the releases carrying the album's barcode key),
-//!   that entity's current links on music services at the same level, and its MBIDs, ISRCs and
-//!   barcode as keys. An album link related to several releases of one release group (editions
-//!   MusicBrainz keeps apart) takes that release group: its key, and the links and facts every
-//!   one of those releases has.
-//! - [`DeezerSource`]: a Deezer
-//!   link's own ISRC or barcode from Deezer's API, as keys; for another service's track or album
-//!   with an ISRC or barcode key, the one Deezer track or album the API names for it, keyed.
-//! - [`ItunesSource`]: for an album with a barcode key, the Apple Music album iTunes'
-//!   `lookup?upc=` answers when exactly one album answers, keyed by the barcode.
-//! - [`WikidataSource`]: the one item carrying the link's service ID, that item's other music
-//!   service IDs at the same level as links, and its Q-id and MusicBrainz IDs as keys.
+//! The sources themselves are in `also_on/`, one module each, and each has its page in
+//! `docs/sources`: `service` (the ISRC a service's own track page states), `tidal` and `spotify`
+//! (a service's own record, by its API), `musicbrainz`, `musicbrainz_entity` and
+//! `musicbrainz_containment` (what MusicBrainz relates a link or its own page to), `wikidata`
+//! (the one item carrying the link's service ID), `deezer`, `spotify_isrc`, `tidal_isrc` and
+//! `itunes` (a service asked by the ISRC or barcode another source keyed), `itunes_song` and
+//! `youtube_match` (matches by metadata, never keys), `editions` (which link of a service a card
+//! shows) and `performers` (an event page's artists). This module holds what they share.
 //!
 //! The level is exact: a track lists tracks (and videos of the recording), an album lists
 //! albums (and YouTube's album playlists), an artist lists artist pages.
@@ -187,7 +176,7 @@ pub(crate) async fn isrc_match(
         Some([one]) => IsrcMatch::One(one.mbid.clone()),
         Some(several) => {
             // Recordings that agree are one; the whole connected set decides who stands for
-            // them. A set that cannot be settled keeps today's rule.
+            // them. A set that cannot be settled is read as recordings that disagree.
             let settled = match agreeing(&cx.egress, base, several).await? {
                 Some(entities) => match entities.as_slice() {
                     [one] => Some(IsrcMatch::One(one.mbid.clone())),
@@ -363,7 +352,7 @@ pub enum Standing {
     /// The set could not be settled within [`MAX_DUPLICATES`] recordings,
     /// [`MAX_DUPLICATE_LOOKUPS`] ISRC lookups and [`MAX_DUPLICATE_READS`] recording reads, a
     /// member could not be read, or the whole set does not agree (lengths drifting past the
-    /// window along a chain): today's rule applies (the recording keeps its own MBID, an ISRC on
+    /// window along a chain): the recording stands for itself (it keeps its own MBID, an ISRC on
     /// several recordings is a fact), which keys no second recording.
     Unclear,
 }
@@ -390,7 +379,7 @@ pub(crate) async fn standing(
 }
 /// A read the duplicate walk makes besides the subject's own (another recording's record, an
 /// ISRC's recordings): over MusicBrainz's cap it settles nothing (`None`, so the walk is
-/// [`Standing::Unclear`] and today's rule applies), never an error that would empty the
+/// [`Standing::Unclear`] and each recording stands for itself), never an error that would empty the
 /// source's run. Any other error is the read's own.
 fn secondary<T>(read: Result<T>) -> Result<Option<T>> {
     match read {
@@ -1700,7 +1689,10 @@ mod tests {
         let mut two = item(&[spotify]);
         two.ids.insert(
             "P4404".into(),
-            vec![recording.1.into(), "8f3471b5-7e6a-48da-86a9-c1c07a0f47ae".into()],
+            vec![
+                recording.1.into(),
+                "8f3471b5-7e6a-48da-86a9-c1c07a0f47ae".into(),
+            ],
         );
         assert_eq!(super::found(&two, Level::Track), Found::default());
         // An album takes an album's item only. A single's item that names its track's recording
@@ -1709,18 +1701,23 @@ mod tests {
         let album = ("P2205", "6dVIqQ8qmQ5GBnJ9shOYGE");
         let group = ("P436", "b1392450-e666-3926-a536-22c65f834433");
         let at_album = |ids: &[(&str, &str)]| super::found(&item(ids), Level::Album);
-        let keys_of = |found: &Found| -> Vec<String> {
-            found.keys.iter().map(|k| k.key.clone()).collect()
-        };
+        let keys_of =
+            |found: &Found| -> Vec<String> { found.keys.iter().map(|k| k.key.clone()).collect() };
         assert_eq!(
             keys_of(&at_album(&[album, group])),
-            ["wikidata:Q1", "mb:release-group:b1392450-e666-3926-a536-22c65f834433"]
+            [
+                "wikidata:Q1",
+                "mb:release-group:b1392450-e666-3926-a536-22c65f834433"
+            ]
         );
         assert!(at_album(&[album, group])
             .links
             .iter()
             .all(|l| l.key.as_deref() == Some("wikidata:Q1")));
-        assert_eq!(at_album(&[album, group, spotify, recording]), Found::default());
+        assert_eq!(
+            at_album(&[album, group, spotify, recording]),
+            Found::default()
+        );
         // An item of unknown level (no MusicBrainz or Discogs album ID) keys nothing either.
         assert_eq!(at_album(&[album]), Found::default());
         assert_eq!(at_album(&[album, work]), Found::default());
@@ -1732,7 +1729,10 @@ mod tests {
         let mut groups = item(&[album]);
         groups.ids.insert(
             "P436".into(),
-            vec![group.1.into(), "00000000-0000-4000-8000-000000000001".into()],
+            vec![
+                group.1.into(),
+                "00000000-0000-4000-8000-000000000001".into(),
+            ],
         );
         assert_eq!(
             keys_of(&super::found(&groups, Level::Album)),

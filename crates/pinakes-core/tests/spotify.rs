@@ -21,7 +21,7 @@ use common::{hubs_fixture as fixture, media::PublicDns, save_card as save, strin
 
 /// A made-up Spotify album ID (22 base-62 characters) with HYDRA 3D's barcode as a UPC-A.
 const ALBUM: &str = "0hydra3DexampleAlbum01";
-/// "Bohemian Rhapsody - Remastered 2011", the track REPORT-matching names.
+/// "Bohemian Rhapsody - Remastered 2011".
 const TRACK: &str = "7tFiyTwD0nx5a1eklYtX2J";
 /// `GET /v1/albums/{ALBUM}`, the members read: `id`, `type`, `external_ids.upc`.
 fn album_body() -> Vec<u8> {

@@ -377,7 +377,7 @@ async fn all_day_events_match_on_their_local_date(pool: PgPool) {
 
 /// An all-day listing in Auckland and a timed one at 21:00 in Los Angeles on one local date,
 /// same name and organizer: their starts are 40 to 42 hours apart (UTC+12 or +13 against UTC-7
-/// or -8), beyond the old reach of 36 hours. Whichever is read first, the one read later finds it.
+/// or -8). Whichever is read first, the one read later finds it.
 #[sqlx::test(migrations = "../../migrations")]
 async fn listings_on_one_local_date_in_far_zones_pair_whichever_is_read_first(pool: PgPool) {
     use chrono::TimeZone;

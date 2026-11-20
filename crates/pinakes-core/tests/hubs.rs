@@ -151,7 +151,7 @@ impl Transport for Recorded {
                 vec![],
             ));
         }
-        // Spotify's token and Web API (`spotify`): the track REPORT-matching names, written by
+        // Spotify's token and Web API (`spotify`): one track, written by
         // hand in the API's shape (Spotify refused to answer the owner's app; tests/spotify.rs).
         if let Some(host @ ("accounts.spotify.com" | "api.spotify.com")) = url.host_str() {
             self.seen
@@ -1912,7 +1912,7 @@ async fn one_recording_stands_for_its_duplicates_on_every_path(pool: sqlx::PgPoo
 /// for it, and the tagged Apple link joins (Cut to the Feeling). A TIDAL track's own ISRC names
 /// the one Deezer track. Off by default, nothing asks Deezer.
 /// Spotify's own record of a track (`spotify`): its ISRC, which MusicBrainz gives to one
-/// recording, joins the track to that recording's page (REPORT-matching P1).
+/// recording, joins the track to that recording's page.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_spotify_track_joins_the_musicbrainz_recording(pool: sqlx::PgPool) {
     if !has(&["spotify", "musicbrainz", "musicbrainz_entity"]) {
@@ -3862,7 +3862,7 @@ async fn disagreeing_recording_keys_are_kept_and_counted(pool: sqlx::PgPool) {
 
 /// A read the duplicate walk makes besides the subject's own, over MusicBrainz's cap, settles
 /// nothing and empties no run: a track MusicBrainz relates to a recording whose ISRC it shares
-/// with a recording over the cap keeps its own MBID and that recording's links, as on main; a
+/// with a recording over the cap keeps its own MBID and that recording's links; a
 /// track whose Wikidata item names a recording over the cap keeps Wikidata's own key (the raw
 /// P4404 MBID).
 #[sqlx::test(migrations = "../../migrations")]

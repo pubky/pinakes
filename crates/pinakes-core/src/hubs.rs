@@ -82,7 +82,7 @@ pub fn qid(s: &str) -> Option<String> {
 
 /// A hub's 410: what was asked for is gone for good. An error like any other unexpected status
 /// for every caller ("… answered 410"); the music enrichment alone reads it as a 404
-/// (`music_enrichment`), which leaves its other callers' handling of a hub's answer as it was.
+/// (`music_enrichment`).
 #[derive(Clone, Copy, Debug)]
 pub struct Gone {
     pub hub: &'static str,
@@ -1382,7 +1382,8 @@ pub mod wikidata {
             .map(|v| parse_files(&v, property))
             .unwrap_or_default())
     }
-    /// Up to 50 items by ID; unknown or redirected-away IDs are left out.
+    /// Up to 50 items by ID; an unknown ID is left out, a redirected one answers as the item it
+    /// redirects to.
     pub async fn items(egress: &Egress, qids: &[String]) -> Result<Vec<Item>> {
         let mut qids: Vec<String> = qids.iter().filter_map(|q| qid(q)).collect();
         qids.sort();
@@ -1400,10 +1401,7 @@ pub mod wikidata {
     /// Wikidata sends them (the request [`items`] makes for the same IDs, so both share its
     /// cached answer): `None` for a 404. A busy Wikidata, one that says so with 200 too, is a
     /// retry and no answer the cache keeps.
-    pub(crate) async fn entities_answer(
-        egress: &Egress,
-        qids: &[String],
-    ) -> Result<Option<Value>> {
+    pub(crate) async fn entities_answer(egress: &Egress, qids: &[String]) -> Result<Option<Value>> {
         get(egress, &entities_lookup(qids), "wikidata").await
     }
     /// The one item carrying `value` for `property` at its best rank. The search index only

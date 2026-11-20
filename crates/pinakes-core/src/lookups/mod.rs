@@ -1,7 +1,7 @@
 //! Exact lookups on external services, as pure request builders and response parsers, and the
 //! "also on" sources that run them ([`sources`]).
 //!
-//! The family modules perform no I/O. A builder returns the `Request` to send; a source fetches
+//! A builder returns the `Request` to send; a source fetches
 //! it through Egress and hands the status and body to the matching parser. Parsers return
 //! `Ok(None)` (or an empty result) when the service answers that the object does not exist, and
 //! an error for anything else they cannot read, so the caller retries later.

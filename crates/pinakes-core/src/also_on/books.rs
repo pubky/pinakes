@@ -533,8 +533,6 @@ impl Books {
         }
         deferred.finish(found)
     }
-    /// A work: its Open Library record (following merges to the work it is now), then its
-    /// Wikidata item.
     /// A book's page on another service: the one Wikidata item carrying the link's value, then
     /// the Open Library work or edition that item names (an edition item without one, the work
     /// it is an edition of), as from an Open Library link; the Open Library page is a link, and
@@ -590,6 +588,8 @@ impl Books {
         found.links.retain(|l| l.site != own);
         Ok(found)
     }
+    /// A work: its Open Library record (following merges to the work it is now), then its
+    /// Wikidata item.
     async fn work(cx: &Context, asked: &str) -> Result<Found> {
         let mut id = asked.to_owned();
         for _ in 0..3 {
