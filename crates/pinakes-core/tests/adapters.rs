@@ -1513,10 +1513,13 @@ async fn cursor_deltas_tombstones_rollback_hold_reset_and_compare_swap(pool: PgP
 }
 
 fn signed(kind: u16, created: u64, tags: &[&[&str]]) -> nostr::event::Event {
+    signed_content(kind, created, "Fixture description", tags)
+}
+fn signed_content(kind: u16, created: u64, content: &str, tags: &[&[&str]]) -> nostr::event::Event {
     use nostr::prelude::*;
     // Deliberately public deterministic fixture key; never used for a real identity.
     let keys = Keys::parse(&"01".repeat(32)).unwrap();
-    let unsigned = EventBuilder::new(Kind::from(kind), "Fixture description")
+    let unsigned = EventBuilder::new(Kind::from(kind), content)
         .tags(tags.iter().map(|t| Tag::parse(t.iter().copied()).unwrap()))
         .custom_created_at(Timestamp::from_secs(created))
         .finalize_unsigned(keys.public_key());
@@ -1881,6 +1884,87 @@ async fn nostr_calendar_queues_members_and_reads_accepted_children(pool: PgPool)
         t.seen.lock().unwrap().len(),
         1,
         "child network work stays in its own queue"
+    );
+}
+
+/// A calendar that lists a member twice, with a text far past a card's, is read and saved: the
+/// member is one row, the calendar's own card is cut like any card.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_nostr_calendar_listing_a_member_twice_with_a_long_text_is_saved(pool: PgPool) {
+    use pinakes_core::event::adapters::nostr::{self as nip52, Target};
+    let at = (Utc::now() + Duration::days(1)).timestamp().to_string();
+    let child = signed(
+        31923,
+        100,
+        &[&["d", "twice"], &["title", "Member"], &["start", &at]],
+    );
+    let reference = format!("31923:{}:twice", child.pubkey.to_hex());
+    let parent = signed_content(
+        31924,
+        101,
+        &"A long calendar text. ".repeat(1000),
+        &[
+            &["d", "twice-calendar"],
+            &["title", "Calendar"],
+            &["a", &reference],
+            &["a", &reference],
+        ],
+    );
+    let parent_uri =
+        Target::coordinate(&format!("31924:{}:twice-calendar", parent.pubkey.to_hex()))
+            .unwrap()
+            .uri()
+            .unwrap();
+    let parent_id = store::ensure_resource(&pool, &parent_uri).await.unwrap();
+    let (egress, _) = mock_egress(vec![(200, json!([parent]))]);
+    // The first read queues the member; once the member has its card, the calendar reads.
+    let pending = nip52::resolve(&parent_uri, &egress, &EventConfig::default(), &pool, false)
+        .await
+        .unwrap_err();
+    assert!(pending.is::<pinakes_core::resolver::RetryLater>());
+    let child_uri = Target::coordinate(&reference).unwrap().uri().unwrap();
+    let child_id = pinakes_core::model::identity(&child_uri).unwrap().0;
+    let member = nip52::parse(&child_uri, &child).unwrap();
+    store::save_document(&pool, &child_id, 0, &member)
+        .await
+        .unwrap();
+    let doc = nip52::resolve(&parent_uri, &egress, &EventConfig::default(), &pool, false)
+        .await
+        .unwrap();
+    assert_eq!(doc.container.as_ref().unwrap().occurrences.len(), 1);
+    assert!(doc.description.as_ref().unwrap().len() <= 2048);
+    store::save_document(&pool, &parent_id, 0, &doc)
+        .await
+        .unwrap();
+}
+/// Of an event's several `g` tags the finest that reads places it; one that does not read
+/// changes nothing.
+#[test]
+fn a_nostr_event_is_placed_by_its_finest_geohash() {
+    use pinakes_core::event::adapters::nostr::{self as nip52, Target};
+    let at = (Utc::now() + Duration::days(1)).timestamp().to_string();
+    let place = |tags: &[&[&str]]| {
+        let start = ["start", at.as_str()];
+        let mut all: Vec<&[&str]> = vec![&["d", "placed"], &["title", "Placed"], &start];
+        all.extend_from_slice(tags);
+        let event = signed(31923, 100, &all);
+        let uri = Target::coordinate(&format!("31923:{}:placed", event.pubkey.to_hex()))
+            .unwrap()
+            .uri()
+            .unwrap();
+        let point = nip52::parse(&uri, &event).unwrap().location.unwrap();
+        (point.lat, point.lon)
+    };
+    let fine = place(&[&["g", "u0m70q"]]);
+    assert_ne!(fine, place(&[&["g", "u0"]]));
+    assert_eq!(
+        place(&[&["g", "u0m"], &["g", "u0m70q"], &["g", "!"], &["g", "u0"]]),
+        fine
+    );
+    // A pair of coordinates is finer than any geohash.
+    assert_eq!(
+        place(&[&["g", "46.0051", "8.9528"], &["g", "u0m70q"]]),
+        (46.0051, 8.9528)
     );
 }
 
