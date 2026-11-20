@@ -42,7 +42,8 @@ const RESERVED: &[&str] = &[
 ];
 
 /// How many leading segments of `src/{branch|tag}/…` are tried as the ref name: a branch name
-/// can contain `/`, so the split is asked of the API, shortest first.
+/// can contain `/`, so the split is asked of the API, shortest first. A link with more, none of
+/// them a ref, is declined: the ref may be a longer name.
 const MAX_REF_SEGMENTS: usize = 3;
 
 fn name(value: &str) -> bool {
@@ -172,6 +173,14 @@ impl Target {
         (1..=most)
             .map(|n| (rest[..n].join("/"), rest[n..].join("/")))
             .collect()
+    }
+    /// Whether the ref may be longer than any split `splits` tries: the link has more leading
+    /// segments that could be the branch or tag than `MAX_REF_SEGMENTS`.
+    fn longer_ref(&self) -> bool {
+        match &self.object {
+            Object::At { kind, rest } => *kind != RefKind::Commit && rest.len() > MAX_REF_SEGMENTS,
+            _ => false,
+        }
     }
     /// Whether only a Forgejo or Gitea instance has links of this shape. A bare `/{owner}/{repo}`
     /// is read on known instances only.
@@ -574,6 +583,8 @@ impl Source for Forgejo {
                     }
                 }
                 match found {
+                    // The ref may be one of the longer names not tried: the page's web card.
+                    None if target.longer_ref() => return Err(Declined.into()),
                     None => None,
                     Some((reference, path, Some(body))) if path.is_empty() => Some(ref_card(
                         cx.card(uri, self),
@@ -856,6 +867,40 @@ mod resolve_tests {
             )
             .await
             .unwrap();
+        assert_eq!(doc.status, Status::Missing);
+    }
+
+    /// A branch no tried split finds is `missing` only when every split was tried. A link with
+    /// more segments may name a longer branch, so its page gets a web card.
+    #[tokio::test(start_paused = true)]
+    async fn a_branch_longer_than_the_splits_tried_is_declined() {
+        let routes: Vec<String> = [
+            "dependabot",
+            "dependabot/npm_and_yarn",
+            "dependabot/npm_and_yarn/babel",
+        ]
+        .iter()
+        .map(|name| format!("{API}/branches/{name}"))
+        .collect();
+        let (egress, recorded) = fixture::egress(
+            routes
+                .iter()
+                .map(|url| (url.as_str(), 404, JSON, read("branch-v11.0.json")))
+                .collect(),
+        );
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let page = "https://codeberg.org/forgejo/forgejo/src/branch/dependabot/npm_and_yarn/babel";
+        let answer = Forgejo.resolve(&cx, &format!("{page}/core-7.26.0")).await;
+        assert_eq!(recorded.asked(), routes);
+        assert!(
+            answer.is_err_and(|e| e.is::<Declined>()),
+            "a branch of four segments was not tried, yet the link is not declined"
+        );
+        // Every split of three segments was tried: the instance has no such branch.
+        let doc = Forgejo.resolve(&cx, page).await.unwrap();
         assert_eq!(doc.status, Status::Missing);
     }
 

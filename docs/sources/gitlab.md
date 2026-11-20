@@ -15,7 +15,8 @@ requests per minute (one per second here).
 
 A ref can contain `/`, so the split between ref and path is asked of the API: the first one, two
 or three segments are tried as a branch, then as a tag, shortest first. A 40-character commit id
-is the ref by itself.
+is the ref by itself. When none of them is a ref and the link has more segments, the ref may be
+a longer name: the link gets an ordinary web card.
 
 Project pages are read on gitlab.com, framagit.org, gitlab.freedesktop.org, gitlab.gnome.org,
 invent.kde.org and salsa.debian.org, and on any host that answered as GitLab within the last

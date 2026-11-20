@@ -26,7 +26,8 @@ const KNOWN: &[&str] = &[
     "salsa.debian.org",
 ];
 
-/// How many leading segments of `/-/tree/…` or `/-/blob/…` are tried as the ref name.
+/// How many leading segments of `/-/tree/…` or `/-/blob/…` are tried as the ref name. A link
+/// with more, none of them a ref, is declined: the ref may be a longer name.
 const MAX_REF_SEGMENTS: usize = 3;
 /// The deepest project path read (groups nest).
 const MAX_DEPTH: usize = 8;
@@ -169,6 +170,16 @@ impl Target {
         (1..=most)
             .map(|n| (rest[..n].join("/"), rest[n..].join("/")))
             .collect()
+    }
+    /// Whether the ref may be longer than any split `splits` tries: the link has more leading
+    /// segments that could be the ref than `MAX_REF_SEGMENTS`.
+    fn longer_ref(&self) -> bool {
+        match &self.object {
+            Object::At { blob, rest } => {
+                !sha(&rest[0]) && rest.len().saturating_sub(usize::from(*blob)) > MAX_REF_SEGMENTS
+            }
+            _ => false,
+        }
     }
     /// Whether only GitLab has links of this shape (`/-/…`).
     fn distinctive(&self) -> bool {
@@ -561,6 +572,8 @@ impl Source for Gitlab {
                         }
                     }
                     match found {
+                        // The ref may be one of the longer names not tried: the page's web card.
+                        None if target.longer_ref() => return Err(Declined.into()),
                         None => None,
                         Some((kind, reference, path, Some(body))) if path.is_empty() => Some(
                             ref_card(cx.card(uri, self), &target, kind, &reference, false, &body)?,
@@ -773,6 +786,41 @@ mod tests {
         );
         assert_eq!(doc.source_root.as_deref(), Some(uri));
         assert_eq!(recorded.asked().len(), 3);
+    }
+
+    /// A ref no tried split finds is `missing` only when every split was tried. A link with more
+    /// segments may name a longer ref, so its page gets a web card.
+    #[tokio::test(start_paused = true)]
+    async fn a_ref_longer_than_the_splits_tried_is_declined() {
+        let api = "https://gitlab.com/api/v4/projects/g%2Fp/repository";
+        let routes: Vec<String> = [
+            "dependabot",
+            "dependabot%2Fnpm_and_yarn",
+            "dependabot%2Fnpm_and_yarn%2Fbabel",
+        ]
+        .iter()
+        .flat_map(|name| ["branches", "tags"].map(|list| format!("{api}/{list}/{name}")))
+        .collect();
+        let (egress, recorded) = fixture::egress(
+            routes
+                .iter()
+                .map(|url| (url.as_str(), 404, JSON, read("branch-missing.json")))
+                .collect(),
+        );
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let page = "https://gitlab.com/g/p/-/tree/dependabot/npm_and_yarn/babel";
+        let answer = Gitlab.resolve(&cx, &format!("{page}/core-7.26.0")).await;
+        assert_eq!(recorded.asked(), routes);
+        assert!(
+            answer.is_err_and(|e| e.is::<Declined>()),
+            "a ref of four segments was not tried, yet the link is not declined"
+        );
+        // Every split of three segments was tried: GitLab has no such ref.
+        let doc = Gitlab.resolve(&cx, page).await.unwrap();
+        assert_eq!(doc.status, Status::Missing);
     }
 
     #[tokio::test(start_paused = true)]

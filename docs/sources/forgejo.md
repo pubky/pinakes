@@ -16,7 +16,8 @@ Codeberg allows 2,000 requests per 10 minutes (one per second here).
 
 A branch name can contain `/` (`v11.0/forgejo`), so the split between branch and path is asked
 of the API: the first one, two or three segments are tried as the branch (or tag), shortest
-first.
+first. When none of them is a branch (or tag) and the link has more segments, the name may be a
+longer one: the link gets an ordinary web card.
 
 Repository pages are read on codeberg.org and gitea.com, and on any host that answered as an
 instance within the last day. The deeper shapes (`/src/branch/…`, `/releases/tag/…`) are read on
