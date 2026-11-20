@@ -292,10 +292,7 @@ fn split_list(v: &Value) -> Vec<String> {
         .collect()
 }
 fn number(v: &Value) -> Option<String> {
-    let n = v
-        .as_f64()
-        .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
-        .filter(|n: &f64| n.is_finite() && *n >= 0.0)?;
+    let n = super::number(v)?;
     Some(if n.fract() == 0.0 {
         format!("{}", n as u64)
     } else {

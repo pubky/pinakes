@@ -1848,7 +1848,7 @@ described by the start of its text, as plain text.
 | `remote`, `remote_regions` | `true`, and the regions it accepts applicants from, joined with `; ` |
 | `salary_min`, `salary_max`, `salary_currency`, `salary_unit` | The base salary: a range or one amount in both, its ISO 4217 currency, per `HOUR`, `DAY`, `WEEK`, `MONTH` or `YEAR` |
 | `date_posted`, `valid_through` | As the posting gives them |
-| `apply_url` | Where to apply: its ApplyAction, else its own `url`, else the page when one applies there (`directApply`) |
+| `apply_url` | Where to apply: its ApplyAction, else its own `url`, else the page when one applies there (`directApply`); left out when longer than 256 bytes |
 | `job_status` | `open` or `closed`, at the time of the read |
 
 ## Products
@@ -1909,7 +1909,7 @@ characters, as a quoted post is), with its asker as `author` and when it was ask
 | Fact | Meaning |
 | --- | --- |
 | `answer_count`, `score` | Its answers and votes, as its site counts them |
-| `accepted_answer` | The address of the answer its asker accepted |
+| `accepted_answer` | The address of the answer its asker accepted (a page's own; left out when longer than 256 bytes) |
 | `closed_reason`, `duplicate_of` | Why it was closed, and the question it repeats (a link; several joined with `; `) |
 
 A question closed as a duplicate of one other question is in that question's group (a hint, as
