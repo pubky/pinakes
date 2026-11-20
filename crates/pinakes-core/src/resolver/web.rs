@@ -577,10 +577,18 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
         return Ok(out);
     }
     if fetched.content_type == "application/pdf" {
+        // The file's name as written, not as encoded (`Annual%20Report.pdf`); a link ending
+        // in `/` names none.
         out.doc.name = landed(uri, fetched)
             .path_segments()
             .and_then(|mut s| s.next_back())
-            .map(str::to_owned);
+            .map(|s| {
+                percent_encoding::percent_decode_str(s)
+                    .decode_utf8_lossy()
+                    .trim()
+                    .to_owned()
+            })
+            .filter(|s| !s.is_empty());
         return Ok(out);
     }
     let read = as_read(fetched);
@@ -884,9 +892,19 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
             }
         }
     }
+    // The page's own title: the head's, else the first outside an inline SVG (whose `<title>`
+    // names a drawing).
     out.title = html
-        .select(&selector("title"))
+        .select(&selector("head > title"))
         .next()
+        .or_else(|| {
+            html.select(&selector("title")).find(|title| {
+                !title
+                    .ancestors()
+                    .take(super::html::MAX_ANCESTORS)
+                    .any(|a| a.value().as_element().is_some_and(|e| e.name() == "svg"))
+            })
+        })
         .map(|el| el.text().collect::<String>().trim().to_owned())
         .map(|t| titled(&t));
     out.description = meta.get("description").cloned();
@@ -2132,6 +2150,49 @@ fn oembed_field(v: &Value, field: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A page is named by its head's title, never by an inline SVG's; a PDF by its file's name
+    /// as written.
+    #[test]
+    fn a_page_s_title_is_its_head_s_and_a_pdf_s_name_is_decoded() {
+        let title = |body: &str| {
+            let url = "https://titles.example.org/page";
+            let f = Fetched::answer(
+                Url::parse(url).unwrap(),
+                200,
+                "text/html".into(),
+                body.as_bytes().to_vec(),
+            );
+            extract(url, &f, 3600).unwrap().title
+        };
+        let icon = "<svg><title>Icon</title><path d='M0 0'/></svg>";
+        assert_eq!(
+            title(&format!(
+                "<html><head></head><body>{icon}<h1>Welcome</h1></body></html>"
+            )),
+            None
+        );
+        assert_eq!(
+            title(&format!(
+                "<html><head><title>Page</title></head><body>{icon}</body></html>"
+            ))
+            .as_deref(),
+            Some("Page")
+        );
+        let pdf = |url: &str| {
+            let f = Fetched::answer(
+                Url::parse(url).unwrap(),
+                200,
+                "application/pdf".into(),
+                vec![],
+            );
+            extract(url, &f, 3600).unwrap().doc.name
+        };
+        assert_eq!(
+            pdf("https://files.example.org/reports/Annual%20Report.pdf").as_deref(),
+            Some("Annual Report.pdf")
+        );
+        assert_eq!(pdf("https://files.example.org/reports/"), None);
+    }
     /// A NUL in a page's JSON-LD (`"name": "A\u0000B"`), which no stored text may hold, is
     /// dropped from the card's texts, its facts and its event fields: the card saves.
     #[test]

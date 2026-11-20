@@ -1419,15 +1419,16 @@ pub fn parse(
                 let mut sequence = *seq;
                 let mut changed = *modified;
                 // RANGE applies the shift and new fields to subsequent original instance keys.
-                let override_ = events.iter().rfind(|((u, r), (c, _, _, _, _))| {
-                    u == uid
-                        && !r.is_empty()
-                        && (r == &key
-                            || (r <= &key
-                                && c.get("RECURRENCE-ID")
+                // Only this event's revisions up to this key are looked at.
+                let override_ = events
+                    .range((uid.clone(), String::new())..=(uid.clone(), key.clone()))
+                    .rfind(|((_, r), (c, _, _, _, _))| {
+                        !r.is_empty()
+                            && (r == &key
+                                || c.get("RECURRENCE-ID")
                                     .and_then(|p| p.params.get("RANGE"))
-                                    .is_some_and(|s| s == "THISANDFUTURE")))
-                });
+                                    .is_some_and(|s| s == "THISANDFUTURE"))
+                    });
                 if let Some(((_, r), (c, override_doc, override_start, s, m))) = override_ {
                     let original = c.get("RECURRENCE-ID").context("override key")?;
                     let original = zones.series_stamp(original, &original.value, start)?;
@@ -1658,7 +1659,12 @@ pub fn structured_feed(
                 hash(format!("{}\n{start}\n{:?}", canonical_feed(uri), d.name).as_bytes())
             )
         });
-        ensure!(uid.len() <= 1024, "UID cap");
+        // An item whose id is too long is left out, as such an event of a calendar is; the
+        // feed's other items stay.
+        if uid.len() > 1024 {
+            container.warnings.push("invalid_feed_item_uid".into());
+            return Ok(());
+        }
         d = d.bounded(&[])?;
         let content_hash = hash(serde_json::to_string(&crate::changes::normalize(&d))?.as_bytes());
         ensure!(

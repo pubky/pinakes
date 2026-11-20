@@ -5144,3 +5144,27 @@ async fn an_event_takes_no_zone_from_another_event_at_its_venue(pool: PgPool) {
         format!("{}T180000", day(3))
     );
 }
+/// A feed item whose id is longer than a key holds is left out with a warning; the feed's
+/// other items stay.
+#[test]
+fn a_feed_item_with_too_long_an_id_is_left_out() {
+    let item = |id: &str, title: &str| {
+        json!({"id": id, "title": title, "url": format!("https://example.org/event/{title}"),
+            "_gancio": {"start_datetime": 1792522800}})
+    };
+    let feed = json!({"version": "https://jsonfeed.org/version/1",
+        "items": [item(&"x".repeat(1025), "long"), item("id1", "kept")]});
+    let c = calendar::structured_feed(
+        "https://example.org/json",
+        feed.to_string().as_bytes(),
+        &EventConfig::default(),
+        now(),
+    )
+    .unwrap()
+    .unwrap()
+    .container
+    .unwrap();
+    let uids: Vec<&str> = c.occurrences.iter().map(|o| o.uid.as_str()).collect();
+    assert_eq!(uids, ["id1"]);
+    assert!(c.warnings.contains(&"invalid_feed_item_uid".into()));
+}
