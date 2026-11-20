@@ -199,8 +199,9 @@ seconds from then at most (less when its shutdown grace ends sooner), not the fu
 what still runs is dropped. A job cut off before its save is read again when its lease runs out;
 one cut off after it keeps the card it saved, and the steps after the save (the alias its page
 names, an episode's pages) wait for its next full read: a read the site answers 304 does not run
-them, so they can wait until the page changes, and a card the save made final waits until a new
-reference reopens it or `pinakesd reextract <route>` reads it again. So a daemon's workers and background passes run
+them, so they can wait until the page changes, and a card the save made final is read again only
+when a new reference reopens it (a read the site may answer 304 too) or
+`pinakesd reextract <route>` reads it in full. So a daemon's workers and background passes run
 without the lock for 32 seconds at most: 30 to notice a session that is gone without its
 connection failing, and those two. The process ends once its database connections are closed (up
 to 5 seconds more), in which a request still open may be answered.
