@@ -179,9 +179,10 @@ impl Target {
         }
     }
 
-    /// The one address every spelling of this target is an alias of.
-    pub fn root(&self) -> String {
-        match self {
+    /// The one address every spelling of this target is an alias of. A release has none: it is
+    /// its own address.
+    pub fn root(&self) -> Option<String> {
+        Some(match self {
             Self::Filing { cik, accession } => format!(
                 "https://www.sec.gov/Archives/edgar/data/{cik}/{}/",
                 folder(accession)
@@ -197,18 +198,13 @@ impl Target {
             Self::Company { cik } => {
                 format!("https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik:010}")
             }
-            // A release is its own address.
-            Self::Release { .. } => String::new(),
-        }
+            Self::Release { .. } => return None,
+        })
     }
 }
 
 pub fn alias_root(uri: &str) -> Option<String> {
-    let target = Target::of_uri(uri)?;
-    if matches!(target, Target::Release { .. }) {
-        return None;
-    }
-    let root = target.root();
+    let root = Target::of_uri(uri)?.root()?;
     let (_, normalized, _) = crate::model::identity(uri).ok()?;
     (root != normalized).then_some(root)
 }
@@ -432,20 +428,18 @@ pub fn filing_card(
     }
     // A spelling under a co-registrant's (or owner's) CIK is an alias of the primary filer's.
     let accession = header.accession.clone();
-    doc.source_root = Some(
-        match document {
-            Some((file, _)) => Target::Document {
-                cik: *primary_cik,
-                accession,
-                file: file.to_owned(),
-            },
-            None => Target::Filing {
-                cik: *primary_cik,
-                accession,
-            },
-        }
-        .root(),
-    );
+    doc.source_root = match document {
+        Some((file, _)) => Target::Document {
+            cik: *primary_cik,
+            accession,
+            file: file.to_owned(),
+        },
+        None => Target::Filing {
+            cik: *primary_cik,
+            accession,
+        },
+    }
+    .root();
     if let Some((file, row)) = document {
         doc.attributes.insert("document".into(), file.into());
         if let Some((kind, description)) = row {
@@ -1060,6 +1054,17 @@ mod tests {
         let doc = release_card(base(uri), "34-106268", "34-106268.pdf", None);
         assert_eq!(doc.type_name, "Report");
         assert_eq!(doc.name.as_deref(), Some("Release No. 34-106268"));
+    }
+
+    /// A release is its own address: it has no root, and no empty one.
+    #[test]
+    fn a_release_has_no_root() {
+        let release =
+            Target::of_uri("https://www.sec.gov/files/rules/sro/nasdaqtx/2026/34-106268.pdf")
+                .unwrap();
+        assert_eq!(format!("{:?}", release.root()), "None");
+        let company = Target::Company { cik: 2070457 };
+        assert!(format!("{:?}", company.root()).contains("CIK=0002070457"));
     }
 
     /// A budget names a host the source asks: filings at `www.sec.gov` (also for a `sec.gov`
