@@ -1316,47 +1316,102 @@ async fn a_pending_preview_is_waited_for_by_its_status_and_read_once(pool: PgPoo
     assert_eq!(common::counted(&connection, card_reads).await - before, 1);
 }
 
+/// `POST /v1/resolve` for `uri`, with the request's statements on `resource` let through one at
+/// a time: a lock on the table holds each until this lets it go. Two of the wait's reads of the
+/// row's status are let through as they are (the row is pending), and while the third waits at
+/// the lock `change` is run (a statement over `$1`, the link's ID, and `$2`, `root`), so that
+/// read is the first to see it. The answer; how many status reads waited at the lock up to and
+/// with the one that saw the change (fewer than three: the request answered before it); and how
+/// many came after it.
+async fn resolved_with_a_change_at_its_third_read(
+    app: &Router,
+    pool: &PgPool,
+    uri: &'static str,
+    change: &str,
+    root: Option<&str>,
+) -> (StatusCode, Value, usize, usize) {
+    let (id, _, _) = identity(uri).unwrap();
+    let hold = "LOCK TABLE resource IN ACCESS EXCLUSIVE MODE";
+    let mut gate = pool.begin().await.unwrap();
+    sqlx::query(hold).execute(&mut *gate).await.unwrap();
+    // The document declares no 404 for this route: the answer is not checked against it.
+    let request = tokio::spawn({
+        let app = app.clone();
+        async move {
+            send(
+                &app,
+                "POST",
+                "/v1/resolve",
+                Some(json!({ "uri": uri })),
+                |_, _, _, _| {},
+            )
+            .await
+        }
+    });
+    let (mut reads, mut after) = (0, 0);
+    let started = std::time::Instant::now();
+    loop {
+        // The statement of the request that waits at the lock now; none once it has answered.
+        let waiting: Option<String> = loop {
+            let waiting: Option<String> = sqlx::query_scalar("SELECT query FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' LIMIT 1")
+                .fetch_optional(pool)
+                .await
+                .unwrap();
+            if waiting.is_some() || request.is_finished() {
+                break waiting;
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(120),
+                "the request neither asks nor answers"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        };
+        let Some(statement) = waiting else {
+            break;
+        };
+        if statement.starts_with("SELECT status FROM resource") {
+            if reads == 3 {
+                after += 1;
+            } else {
+                reads += 1;
+                if reads == 3 {
+                    sqlx::query(change)
+                        .bind(&id)
+                        .bind(root)
+                        .execute(&mut *gate)
+                        .await
+                        .unwrap();
+                }
+            }
+        }
+        gate.commit().await.unwrap();
+        gate = pool.begin().await.unwrap();
+        sqlx::query(hold).execute(&mut *gate).await.unwrap();
+    }
+    gate.commit().await.unwrap();
+    let (code, answer) = request.await.unwrap();
+    (code, answer, reads, after)
+}
+
 /// What happens to a preview while it is waited for decides the answer: a link deleted
 /// meanwhile is a 404, and one that became an alias answers with its root's card as soon as the
-/// root has one. Either answer follows the change, not the end of the window: the wait reads
-/// the row's status every 50 ms, so a wait that ends at the change reads it once or twice, and
-/// one held to the end of its three seconds some sixty times. The reads are counted, not timed:
-/// their number does not grow with the load on the machine.
+/// root has one. Either answer follows the change, not the end of the window. The change is
+/// made during the wait, while its third read of the row's status waits at a lock: two reads
+/// before it found the row pending, that read answers the request, and no read of the status
+/// comes after it. A wait that slept its window out after one read would answer before the
+/// change, and one that went on past the change would read again. Reads are counted, not timed
+/// (the scans of the request's one connection too): only a machine that stalls for the three
+/// seconds of the window itself changes the count.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_preview_that_goes_or_becomes_an_alias_while_waited_for(pool: PgPool) {
-    // One connection for everything here: its backend's own count of the scans of `resource`
-    // and `resource_alias`, which every read of the status makes at least one of.
+    // One connection for the API: its backend's own count of the scans of `resource` and
+    // `resource_alias`, which every read of the status makes at least one of.
     let connection = common::one_connection(&pool).await;
     let app = api::router(AppState::new(connection.clone(), Config::default()).unwrap());
     let scans = "SELECT coalesce(sum(coalesce(seq_scan,0)+coalesce(idx_scan,0)),0)::int8 FROM pg_stat_user_tables WHERE relname IN ('resource','resource_alias')";
     // Well above what a request scans when its wait ends at the change, and well under the
     // sixty reads a wait held to its end adds (3 s at 50 ms).
     let held = 40;
-    // The change is made by the request's own write that queues the link (a trigger on it), so
-    // it is there before the wait first reads the row.
-    for statement in [
-        "CREATE FUNCTION gone_meanwhile() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN DELETE FROM resource WHERE id=NEW.id; RETURN NULL; END $$",
-        "CREATE TRIGGER gone_meanwhile AFTER UPDATE OF priority_at ON resource FOR EACH ROW WHEN (NEW.uri='https://example.org/gone-meanwhile') EXECUTE FUNCTION gone_meanwhile()",
-        "CREATE FUNCTION alias_meanwhile() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO resource_alias(alias_id,root_id,basis) VALUES(NEW.id,TG_ARGV[0],'canonical'); RETURN NULL; END $$",
-    ] {
-        sqlx::query(statement).execute(&connection).await.unwrap();
-    }
-    let before = common::counted(&connection, scans).await;
-    // The document declares no 404 for this route: the answer is not checked against it.
-    let (code, answer) = send(
-        &app,
-        "POST",
-        "/v1/resolve",
-        Some(json!({"uri":"https://example.org/gone-meanwhile"})),
-        |_, _, _, _| {},
-    )
-    .await;
-    let reads = common::counted(&connection, scans).await - before;
-    assert_eq!(code, 404);
-    assert_eq!(answer["error"], "resource expired");
-    // Answered when the row went, not at the end of the window.
-    assert!(reads < held, "{reads} scans after the row went");
-
     let root = store::ensure_resource(&connection, "https://example.org/root")
         .await
         .unwrap();
@@ -1365,23 +1420,43 @@ async fn a_preview_that_goes_or_becomes_an_alias_while_waited_for(pool: PgPool) 
     store::save_document(&connection, &root, 0, &doc)
         .await
         .unwrap();
-    sqlx::query(&format!("CREATE TRIGGER alias_meanwhile AFTER UPDATE OF priority_at ON resource FOR EACH ROW WHEN (NEW.uri='https://example.org/alias-meanwhile') EXECUTE FUNCTION alias_meanwhile('{root}')"))
-        .execute(&connection)
-        .await
-        .unwrap();
+
     let before = common::counted(&connection, scans).await;
-    let (code, answer) = call(
+    let (code, answer, reads, after) = resolved_with_a_change_at_its_third_read(
         &app,
-        "POST",
-        "/v1/resolve",
-        Some(json!({"uri":"https://example.org/alias-meanwhile"})),
+        &pool,
+        "https://example.org/gone-meanwhile",
+        "DELETE FROM resource WHERE id=$1 AND $2::text IS NULL",
+        None,
     )
     .await;
-    let reads = common::counted(&connection, scans).await - before;
+    let scanned = common::counted(&connection, scans).await - before;
+    assert_eq!(reads, 3, "answered {code} before the row went: {answer}");
+    assert_eq!(code, 404);
+    assert_eq!(answer["error"], "resource expired");
+    // Answered by the read that found the row gone, not at the end of the window.
+    assert_eq!(after, 0, "reads of the status after the row went");
+    assert!(scanned < held, "{scanned} scans");
+
+    let before = common::counted(&connection, scans).await;
+    let (code, answer, reads, after) = resolved_with_a_change_at_its_third_read(
+        &app,
+        &pool,
+        "https://example.org/alias-meanwhile",
+        "INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'canonical')",
+        Some(&root),
+    )
+    .await;
+    let scanned = common::counted(&connection, scans).await - before;
+    assert_eq!(
+        reads, 3,
+        "answered {code} before it became an alias: {answer}"
+    );
     assert_eq!(code, 200);
     assert_eq!(answer["id"], root.as_str());
     assert_eq!(answer["name"], "Root");
-    assert!(reads < held, "{reads} scans after it became an alias");
+    assert_eq!(after, 0, "reads of the status after it became an alias");
+    assert!(scanned < held, "{scanned} scans");
 }
 
 #[sqlx::test(migrations = "../../migrations")]
