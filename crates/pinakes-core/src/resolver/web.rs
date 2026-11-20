@@ -354,11 +354,12 @@ impl WebResolver {
                 return Err(super::NotModified.into());
             }
             let observation = crate::telemetry::last_fetch();
-            // Past the page cap: a page cut where its long head closes, or a whole page within the
-            // head budget (`egress::page_fits`).
+            // Past the page cap: an HTML page read on to the head budget
+            // (`limits.html_head_bytes`), whole or cut there (`egress::page_fits`); any other
+            // page that long is refused.
             anyhow::ensure!(
                 super::egress::page_fits(&fetched),
-                "non-feed page exceeds 1 MB"
+                "non-feed page exceeds its read cap"
             );
             let input_uri = uri.to_owned();
             let input = fetched.clone();
@@ -931,11 +932,6 @@ const BODY_META: &[&str] = &[
 /// Title separators before a site suffix.
 const TITLE_SEPARATORS: &[&str] = &[" • ", " | ", " - ", " – ", " — ", " · "];
 
-/// A page title without its site suffix: the part after its last separator, when that part
-/// names the site as a whole word (one of `sites`, such as its `og:site_name` or its own JSON-LD
-/// name, or the head of one before a `:`, `-` or `|`; or its host's registrable label), e.g. "TFTC: A
-/// Bitcoin Podcast • Listen on Fountain". A site's root page keeps its title, and so does a
-/// title that would be left empty.
 /// The content types only a feed is served as.
 const FEED_TYPES: &[&str] = &[
     "application/rss+xml",
@@ -1098,6 +1094,11 @@ fn xml_feed(body: &str) -> Option<(Option<String>, Option<String>)> {
         .filter(|_| !rdf || rdf_channel)
         .map(|_| (title, description))
 }
+/// A page title without its site suffix: the part after its last separator, when that part
+/// names the site as a whole word (one of `sites`, such as its `og:site_name` or its own JSON-LD
+/// name, or the head of one before a `:`, `-` or `|`; or its host's registrable label), e.g. "TFTC: A
+/// Bitcoin Podcast • Listen on Fountain". A site's root page keeps its title, and so does a
+/// title that would be left empty.
 pub(crate) fn without_site_suffix(title: &str, sites: &[String], url: &Url, root: bool) -> String {
     let title = title.trim();
     if root {
@@ -1204,7 +1205,6 @@ pub(crate) fn decoded(s: &str) -> String {
     out.push_str(rest);
     out
 }
-/// The character reference `tail` starts with (`&name;`, `&#n;`, `&#xh;`) and its length.
 /// The characters HTML reads numeric references 128–159 as (Windows-1252); an unassigned one
 /// stays a control character.
 const WINDOWS_1252: [char; 32] = [
@@ -1213,6 +1213,7 @@ const WINDOWS_1252: [char; 32] = [
     '\u{90}', '\u{2018}', '\u{2019}', '\u{201c}', '\u{201d}', '\u{2022}', '\u{2013}', '\u{2014}',
     '\u{2dc}', '\u{2122}', '\u{161}', '\u{203a}', '\u{153}', '\u{9d}', '\u{17e}', '\u{178}',
 ];
+/// The character reference `tail` starts with (`&name;`, `&#n;`, `&#xh;`) and its length.
 fn reference(tail: &str) -> Option<(String, usize)> {
     let end = tail[1..]
         .char_indices()
@@ -3680,9 +3681,11 @@ mod tests {
         );
     }
 
-    /// A page's wall check and its card are read from one parse of its body. An answer the wall
-    /// check settles without a parse is parsed once, for the card, when it is read as HTML, and
-    /// never otherwise. The head's alternates come from the same tree.
+    /// Within `extract`, a page's wall check and its card are read from one parse of its body
+    /// (the egress has parsed an HTML answer once before, for its own wall check, in a worker
+    /// of its own). An answer the wall check settles without a parse is parsed once, for the
+    /// card, when it is read as HTML, and never otherwise. The head's alternates come from the
+    /// same tree.
     #[test]
     fn a_page_is_parsed_once_for_its_wall_check_and_its_card() {
         let read = |content_type: &str, status: u16, body: &str| {

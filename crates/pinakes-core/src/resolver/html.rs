@@ -1998,7 +1998,7 @@ mod tests {
     /// `<title>`, names alike in their first 32 bytes, and end tags that cannot close past a
     /// special element. Each is cut at its cap and parses at once.
     #[test]
-    fn markup_the_scan_once_misread_is_cut() {
+    fn more_hostile_markup_is_cut_at_its_cap() {
         let attributes = |tag: &str| {
             let mut text = format!("<title>Kept</title>{tag}");
             for n in 0..60_000 {

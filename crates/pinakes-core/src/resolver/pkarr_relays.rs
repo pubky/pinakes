@@ -1,6 +1,7 @@
 //! PKARR records through relays, fetched by `Egress` and verified here: a relay can withhold a
 //! record, never forge one, because every packet carries its owner's signature; and Pinakes
-//! never goes back to a packet older than the newest it remembers for that key.
+//! never goes back to a packet older than the newest it remembers for that key (a memory of
+//! 10,000 keys that a restart empties: after one, a relay can serve an older signed record).
 use super::{
     egress::{Egress, FetchOptions},
     ErrorClass,

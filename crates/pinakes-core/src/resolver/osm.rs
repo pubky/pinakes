@@ -318,6 +318,9 @@ pub struct OsmResolver {
 }
 impl OsmResolver {
     pub fn new(pool: PgPool, config: OsmConfig) -> Result<Self> {
+        // A client of its own, outside `Egress`: it asks only the Nominatim URL the operator
+        // sets (`osm.nominatim_url`), which no reference steers; it follows no redirect and
+        // reads at most 2 MiB (`request`).
         let client = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())

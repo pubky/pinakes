@@ -7,7 +7,7 @@
 //! `GET /v1/resources/{id}/episodes` (docs/api.md, Episodes); every show card carries the first
 //! [`ON_CARD`] that have a stream (`Card::episodes`, filled by [`on_cards`] from the stored rows).
 //!
-//! Why a route and a table, not a fact: a fact is one string of at most 512 bytes per name and a
+//! Why a route and a table, not a fact: a fact is one string of at most 256 bytes per name and a
 //! card's document is bounded at 8 KiB; a thousand episodes with their streams are neither. Why
 //! not occurrences: an episode has no instant to window by, no recurrence and no document of its
 //! own here; the list is the feed's head and nothing more. An entry is not a card: the episode's
@@ -1783,8 +1783,7 @@ mod tests {
         assert!(date("yesterday").is_none());
     }
 
-    /// The rules of PLAN-podcasts.md: public, direct audio, nothing signed, expiring or behind a
-    /// login.
+    /// A stream is public, direct audio: nothing signed, expiring or behind a login.
     #[test]
     fn a_stream_is_public_direct_audio() {
         let ok = |u: &str| Stream::public(u, "audio/mpeg", Some(10), false).is_some();
