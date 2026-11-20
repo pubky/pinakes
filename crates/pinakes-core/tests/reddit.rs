@@ -126,9 +126,6 @@ async fn a_refused_then_deleted_post_leaves_no_text_in_the_history(pool: sqlx::P
 /// text and all, is purged.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_deleted_posts_stub_leaves_no_text_in_the_history(pool: sqlx::PgPool) {
-    if pinakes_core::sources::by_name("reddit").is_none() {
-        return;
-    }
     let reddit = Arc::new(Listing::default());
     let resolver = CardResolver::new(
         "official",
@@ -281,9 +278,6 @@ async fn delete(pool: &sqlx::PgPool, reddit: &Listing, resolver: &CardResolver, 
 /// public read, whose `facts` are gone with them.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_deleted_posts_aliases_keep_none_of_its_text(pool: sqlx::PgPool) {
-    if pinakes_core::sources::by_name("reddit").is_none() {
-        return;
-    }
     let (reddit, resolver, id, at) = post(&pool).await;
     let alias_id = spelling(&pool, SUBREDDIT_SPELLING, at - 1).await;
     assert!(texts(&pool, &[&id, &alias_id]).await > 2);
@@ -350,9 +344,6 @@ async fn a_deleted_posts_aliases_keep_none_of_its_text(pool: sqlx::PgPool) {
 /// keeps none of its text either, at once: not in its card, its search text or its history.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_spelling_that_joins_a_deleted_post_keeps_none_of_its_text(pool: sqlx::PgPool) {
-    if pinakes_core::sources::by_name("reddit").is_none() {
-        return;
-    }
     let (reddit, resolver, id, at) = post(&pool).await;
     delete(&pool, &reddit, &resolver, &id, at).await;
     assert_eq!(texts(&pool, &[&id]).await, 0);
@@ -371,9 +362,6 @@ async fn a_spelling_that_joins_a_deleted_post_keeps_none_of_its_text(pool: sqlx:
 /// keeps its card, and a second run changes nothing.
 #[sqlx::test(migrations = "../../migrations")]
 async fn the_repair_scrubs_posts_stored_before_their_scrub(pool: sqlx::PgPool) {
-    if pinakes_core::sources::by_name("reddit").is_none() {
-        return;
-    }
     let (_, _, id, at) = post(&pool).await;
     let alias_id = spelling(&pool, SUBREDDIT_SPELLING, at - 1).await;
     // The post's deletion as an earlier build stored it: missing, with its card and history.
@@ -488,9 +476,6 @@ async fn fail(pool: &sqlx::PgPool, id: &str) {
 /// it and its spelling.
 #[sqlx::test(migrations = "../../migrations")]
 async fn the_repair_finds_a_gone_post_whose_refresh_failed(pool: sqlx::PgPool) {
-    if pinakes_core::sources::by_name("reddit").is_none() {
-        return;
-    }
     let (_, _, id, at) = post(&pool).await;
     let alias_id = spelling(&pool, SUBREDDIT_SPELLING, at - 1).await;
     sqlx::query("UPDATE resource SET status='missing',doc=jsonb_set(doc,'{status}','\"missing\"') WHERE id=$1")
@@ -514,9 +499,6 @@ async fn the_repair_finds_a_gone_post_whose_refresh_failed(pool: sqlx::PgPool) {
 /// repair finds nothing to do.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_failed_refresh_of_a_gone_post_brings_nothing_back(pool: sqlx::PgPool) {
-    if pinakes_core::sources::by_name("reddit").is_none() {
-        return;
-    }
     let (reddit, resolver, id, at) = post(&pool).await;
     let alias_id = spelling(&pool, SUBREDDIT_SPELLING, at - 1).await;
     delete(&pool, &reddit, &resolver, &id, at).await;
@@ -579,9 +561,6 @@ async fn assert_scrubbed(pool: &sqlx::PgPool, spellings: &[String]) {
 /// repair.
 #[sqlx::test(migrations = "../../migrations")]
 async fn the_repair_scrubs_every_spelling_of_a_post_with_many(pool: sqlx::PgPool) {
-    if pinakes_core::sources::by_name("reddit").is_none() {
-        return;
-    }
     let (_, _, id, _) = post(&pool).await;
     sqlx::query("UPDATE resource SET status='missing',doc=jsonb_set(doc,'{status}','\"missing\"') WHERE id=$1")
         .bind(&id)
@@ -596,9 +575,6 @@ async fn the_repair_scrubs_every_spelling_of_a_post_with_many(pool: sqlx::PgPool
 /// And by the save that confirms the post deleted.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_deleted_post_scrubs_every_spelling_of_many(pool: sqlx::PgPool) {
-    if pinakes_core::sources::by_name("reddit").is_none() {
-        return;
-    }
     let (reddit, resolver, id, at) = post(&pool).await;
     let spellings = many_spellings(&pool, &id, 1201).await;
     delete(&pool, &reddit, &resolver, &id, at).await;
@@ -627,9 +603,6 @@ async fn alias_entries_read(one: &sqlx::PgPool) -> i64 {
 /// its `NOT EXISTS`, as the planner chooses; that is not counted.
 #[sqlx::test(migrations = "../../migrations")]
 async fn the_repair_reads_each_spelling_once(pool: sqlx::PgPool) {
-    if pinakes_core::sources::by_name("reddit").is_none() {
-        return;
-    }
     // Every statement on the one connection, so no other's statistics land in the count.
     let one = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)

@@ -16,6 +16,16 @@ use common::{
     strings as rows,
 };
 
+/// The ISRC key of Bohemian Rhapsody's TIDAL page, as the source that reads a service's own page
+/// records it: these tests stand without that source.
+async fn isrc_key(pool: &sqlx::PgPool, id: &str) {
+    sqlx::query("INSERT INTO resource_key(resource_id,key,source,via,expires_at) VALUES($1,'isrc:GBUM71029604','test','test',now()+interval '1 day')")
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
 /// A track on another service with an ISRC key is looked up on Spotify by it (`spotify_isrc`):
 /// the Spotify tracks carrying exactly that ISRC become links keyed by the ISRC, a track the
 /// search lists with another ISRC is left out, Spotify's own tracks are not asked, a track with
@@ -36,6 +46,7 @@ async fn a_track_with_an_isrc_key_gets_its_spotify_link(pool: sqlx::PgPool) {
     store::save_document(&pool, &tidal_id, 0, &doc)
         .await
         .unwrap();
+    isrc_key(&pool, &tidal_id).await;
     // A TIDAL page without an ISRC, and Spotify's own track.
     let plain = save(&pool, "https://tidal.com/track/551040646", "MusicRecording").await;
     let own = save(

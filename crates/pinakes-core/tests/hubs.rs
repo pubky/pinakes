@@ -3005,10 +3005,6 @@ async fn a_musicbrainz_page_card_comes_from_the_entity() {
 /// failure cache.
 #[sqlx::test(migrations = "../../migrations")]
 async fn an_entity_over_the_cap_is_no_answer(pool: sqlx::PgPool) {
-    // The three pages' sources are the ones that answer over the cap.
-    if !has(&["musicbrainz_entity", "wikipedia", "wikidata_item"]) {
-        return;
-    }
     let uri = format!("https://musicbrainz.org/artist/{BIG_BAND}");
     let t = Arc::new(Recorded {
         seen: Mutex::default(),
@@ -3045,12 +3041,21 @@ async fn an_entity_over_the_cap_is_no_answer(pool: sqlx::PgPool) {
     also_on::drain(&pool, &cx, &also_on::registry(), 100)
         .await
         .unwrap();
-    for (id, own) in [
-        (&ids[0], format!("mb:artist:{BIG_BAND}")),
-        (&ids[1], "wikidata:Q999999999".to_owned()),
+    // Each page's own source is the one that answers over the cap: a page is checked when the
+    // build has its source.
+    for (id, own, source) in [
+        (
+            &ids[0],
+            format!("mb:artist:{BIG_BAND}"),
+            "musicbrainz_entity",
+        ),
+        (&ids[1], "wikidata:Q999999999".to_owned(), "wikidata_item"),
         // The article's own Wikipedia named the item: that key stays.
-        (&ids[2], "wikidata:Q999999999".to_owned()),
+        (&ids[2], "wikidata:Q999999999".to_owned(), "wikipedia"),
     ] {
+        if !has(&[source]) {
+            continue;
+        }
         let keys: Vec<String> = sqlx::query_scalar(
             "SELECT key FROM resource_key WHERE resource_id=$1 ORDER BY key COLLATE \"C\"",
         )

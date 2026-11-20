@@ -38,7 +38,9 @@ which no source may be named.
 
 Builds share CARGO_TARGET_DIR (set it; else the repository's own target directory is used). The
 build takes about half a minute per source, the tests some minutes more: run it for the sources a
-change touches, or everything before a release. Exit status 1 when any source fails.
+change touches, or everything before a release. The tests run with
+`PINAKES_REQUIRE_BOUNDARY_TOOLS=1`, as under scripts/test: the boundary tests fail without their
+tools instead of skipping. Exit status 1 when any source fails.
 """
 import os
 import re
@@ -430,6 +432,9 @@ def check(kind, name, tests):
             return "the removal left:\n" + "\n".join(left), mentions
         env = dict(os.environ)
         env.setdefault("CARGO_TARGET_DIR", os.path.join(ROOT, "target"))
+        # As scripts/test: the tests that run scripts/verify-osm-boundary fail without its tools
+        # (psql, pg_dump, rg) instead of skipping.
+        env["PINAKES_REQUIRE_BOUNDARY_TOOLS"] = "1"
         steps = [["cargo", "clippy", "-q", "--all-targets", "--", "-D", "warnings"]]
         if tests:
             # Every target runs, so one run names everything the removal broke.
