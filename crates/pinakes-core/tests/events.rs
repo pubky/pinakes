@@ -217,6 +217,16 @@ fn identities_duplicate_versions_cancel_and_export_noise() {
         calendar::canonical_feed("https://cloud.example/index.php/apps/calendar/p/abc/"),
         "https://cloud.example/apps/calendar/p/abc"
     );
+    // A link that is no calendar's is fetched as written: a `webcal://` in its query, a path
+    // that only looks like a Nextcloud share, a Google Calendar page.
+    for uri in [
+        "https://calendar.google.com/calendar/r?cid=webcal://example.org/a.ics",
+        "https://blog.example/apps/calendar/",
+        "https://blog.example/index.php/apps/calendar/",
+        "https://calendar.google.com/calendar/u/0/r/week%2F2026",
+    ] {
+        assert_eq!(calendar::canonical_feed(uri), uri);
+    }
     let base = event(
         "UID:same\nDTSTART:20261020T180000Z\nSUMMARY:Old\nSEQUENCE:1\nDTSTAMP:20261015T000000Z",
     );

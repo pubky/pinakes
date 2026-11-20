@@ -545,22 +545,35 @@ fn recurrence_key(s: &Stamp) -> String {
 fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
+/// The address a calendar link is fetched and keyed at: `webcal:` as `https:`, without a
+/// fragment; a Nextcloud calendar share without `/index.php/` and its trailing slash; a Google
+/// calendar file with its path's percent encodings decoded. Any other link, whatever it holds
+/// (a `webcal://` in its query, `/apps/calendar/` in a blog's path), is left as written.
 pub fn canonical_feed(uri: &str) -> String {
-    let normalized = uri
-        .replacen("webcals://", "https://", 1)
-        .replacen("webcal://", "https://", 1);
+    let normalized = match uri
+        .strip_prefix("webcals://")
+        .or_else(|| uri.strip_prefix("webcal://"))
+    {
+        Some(rest) => format!("https://{rest}"),
+        None => uri.to_owned(),
+    };
     let Ok(mut u) = Url::parse(&normalized) else {
         return normalized;
     };
     u.set_fragment(None);
-    if u.path().contains("/apps/calendar/")
-        || u.path().contains("/remote.php/dav/public-calendars/")
+    if [
+        "/apps/calendar/p/",
+        "/apps/calendar/embed/",
+        "/remote.php/dav/public-calendars/",
+    ]
+    .iter()
+    .any(|share| u.path().contains(share))
     {
         let p = u.path().replace("/index.php/", "/");
         u.set_path(p.trim_end_matches('/'));
     }
     // Percent encodings are canonicalized as bytes; unreserved spelling differences share feed keys.
-    if u.host_str() == Some("calendar.google.com") {
+    if u.host_str() == Some("calendar.google.com") && super::service::is_feed(u.as_str()) {
         let p = percent_encoding::percent_decode_str(u.path())
             .decode_utf8_lossy()
             .into_owned();
