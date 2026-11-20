@@ -1041,6 +1041,38 @@ async fn ensure_resource_created_says_which_call_stored_the_link(pool: PgPool) {
     );
 }
 
+/// Two first inserts of one link at the same moment both find the row: neither fails, one says
+/// it stored the link and the other that it found it there. Thirty links, each inserted by two
+/// tasks that a lock on the table holds at the insert and lets go together.
+#[sqlx::test(migrations = "../../migrations")]
+async fn two_first_inserts_of_one_link_at_the_same_moment_both_find_the_row(pool: PgPool) {
+    for n in 0..30 {
+        let uri = format!("https://example.org/at-once/{n}");
+        let mut held = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE resource IN SHARE ROW EXCLUSIVE MODE")
+            .execute(&mut *held)
+            .await
+            .unwrap();
+        let insert = || {
+            let (pool, uri) = (pool.clone(), uri.clone());
+            tokio::spawn(async move { store::ensure_resource_created(&pool, &uri).await })
+        };
+        let (first, second) = (insert(), insert());
+        common::lock_waiters_reach(&pool, 2, "an insert of the link").await;
+        held.commit().await.unwrap();
+        let mut stored = Vec::new();
+        for insert in [first, second] {
+            let (_, created) = insert
+                .await
+                .unwrap()
+                .unwrap_or_else(|e| panic!("link {n}: {e:#}"));
+            stored.push(created);
+        }
+        stored.sort();
+        assert_eq!(stored, [false, true], "link {n}");
+    }
+}
+
 /// Two first requests for one link, at once, take one place of the hour's new previews between
 /// them: both take one before the link is stored, the request that stores it keeps its place and
 /// the other gives its place back. Here both reach the insert while a lock on the table holds
