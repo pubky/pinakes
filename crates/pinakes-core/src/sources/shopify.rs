@@ -76,12 +76,26 @@ pub fn card(doc: &ResourceMeta, variant: Option<u64>, body: &[u8]) -> Result<Opt
         gtin: text(&chosen["barcode"]).and_then(|b| crate::barcode::gtin13(&b)),
         brand: text(&product["vendor"]),
         sku: text(&chosen["sku"]),
-        price: text(&chosen["price"]).and_then(|p| p.parse().ok()),
-        currency: text(&chosen["price_currency"]),
+        price: price(&chosen["price"]),
+        currency: currency(&chosen["price_currency"]),
         ..Default::default()
     }
     .replace(&mut doc);
     Ok(Some(doc))
+}
+
+/// A price as the page's JSON-LD may state one (`products::from_jsonld`): a finite number that
+/// is not negative.
+fn price(v: &Value) -> Option<f64> {
+    text(v)
+        .and_then(|p| p.parse::<f64>().ok())
+        .filter(|p| p.is_finite() && *p >= 0.0)
+}
+/// A currency as the page's JSON-LD may state one: three ASCII letters, in upper case.
+fn currency(v: &Value) -> Option<String> {
+    text(v)
+        .map(|c| c.to_ascii_uppercase())
+        .filter(|c| c.len() == 3 && c.bytes().all(|b| b.is_ascii_uppercase()))
 }
 
 #[async_trait]
@@ -258,5 +272,33 @@ mod tests {
             assert!(!a.contains_key("gtin"), "{barcode:?}: {a:?}");
             assert_eq!((&*a["sku"], &*a["price"]), ("R-2", "20"), "{barcode:?}");
         }
+    }
+
+    #[test]
+    fn a_price_is_a_number_and_a_currency_three_letters() {
+        let mut doc = ResourceMeta::new("https://shop.example/products/runner", "jsonld", 3600);
+        doc.set_type(products::TYPE);
+        let facts = |price: &str, currency: &str| {
+            let body = serde_json::json!({"product": {"title": "Runner", "variants": [
+                {"id": 1, "sku": "R-1", "price": price, "price_currency": currency}]}});
+            card(&doc, None, &serde_json::to_vec(&body).unwrap())
+                .unwrap()
+                .unwrap()
+                .attributes
+        };
+        for price in ["NaN", "inf", "-inf", "infinity", "-5", "1e999", "ten"] {
+            let a = facts(price, "USD");
+            assert!(!a.contains_key("price"), "{price}: {a:?}");
+            assert!(!a.contains_key("price_currency"), "{price}: {a:?}");
+            assert_eq!(a["sku"], "R-1");
+        }
+        for currency in ["US dollars", "$", "US", "USDT", "U$D", "12E"] {
+            let a = facts("20.00", currency);
+            assert_eq!(a["price"], "20", "{currency}");
+            assert!(!a.contains_key("price_currency"), "{currency}: {a:?}");
+        }
+        let a = facts("20.50", "usd");
+        assert_eq!((&*a["price"], &*a["price_currency"]), ("20.50", "USD"));
+        assert_eq!(facts("0.00", "EUR")["price"], "0");
     }
 }
