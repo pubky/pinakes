@@ -25,15 +25,16 @@ pub const FACTS: &[&str] = &[
     "mpn",
     // The price of the page's cheapest offer, and that one offer's ISO 4217 currency,
     // availability (`in_stock`, `out_of_stock`, `pre_order`, `back_order`, `discontinued`,
-    // `limited_availability`, `sold_out`, `in_store_only`, `online_only`) and seller; when they
-    // were read (RFC 3339).
+    // `limited_availability`, `sold_out`, `in_store_only`, `online_only`, `reserved`,
+    // `made_to_order`) and seller; when they were read (RFC 3339).
     "price",
     "price_currency",
     "availability",
     "price_at",
     "seller",
-    // An Amazon link's ASIN.
+    // An Amazon link's ASIN, and for a book the ISBN-10 that ASIN is.
     "asin",
+    "isbn",
 ];
 
 pub fn is_product(doc: &ResourceMeta) -> bool {
@@ -130,10 +131,13 @@ pub fn drop_identity(doc: &mut ResourceMeta) {
 /// The product a JSON-LD `Product` node describes on the page at `page`: for a `ProductGroup`,
 /// the variant the page's address names (its `url` or `@id`, or Shopify's `?variant=`), else its
 /// only variant. A variant's barcode, article numbers and offers are its own, never the group's
-/// (the group's offers give its lowest price, or another variant's barcode).
+/// (the group's offers give its lowest price, or another variant's barcode). A group whose
+/// address picks none of its several variants names no barcode: the one in its offers is some
+/// variant's.
 pub fn from_jsonld(v: &Value, page: &Url) -> Product {
     let variant = variant(v, page);
     let node = variant.unwrap_or(v);
+    let unpicked = variant.is_none() && all(&v["hasVariant"]).any(|n| n.is_object());
     let offers: Vec<&Value> = all(&node["offers"])
         .flat_map(|o| std::iter::once(o).chain(all(&o["offers"])))
         .collect();
@@ -142,6 +146,7 @@ pub fn from_jsonld(v: &Value, page: &Url) -> Product {
         let codes: Vec<String> = offers.iter().filter_map(|o| gtin(o)).collect();
         (!codes.is_empty() && codes.iter().all(|c| *c == codes[0])).then(|| codes[0].clone())
     });
+    let gtin = gtin.filter(|_| !unpicked);
     // Price, currency, availability and seller come from one offer: the cheapest, a concrete
     // price before an aggregate's low price; without a price, the first naming an availability.
     let priced = |o: &Value| {
@@ -435,9 +440,10 @@ mod tests {
         assert_eq!(p.gtin, None);
         assert_eq!(p.sku.as_deref(), Some("R-2"));
         assert_eq!((p.price, p.currency.as_deref()), (Some(20.0), Some("USD")));
-        // The group's own page: the group's facts.
+        // The group's own page: the group's facts, and no barcode (its offers' is variant 1's).
         let p = from_jsonld(&group, &page("https://shop.example/products/runner"));
         assert_eq!((p.price, p.sku.as_deref()), (Some(10.0), Some("RUNNER")));
+        assert_eq!(p.gtin, None);
     }
 
     #[test]

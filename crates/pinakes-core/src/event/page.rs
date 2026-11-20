@@ -537,6 +537,13 @@ fn names_this_page(v: &Value, base: &Url, pages: &[String]) -> bool {
 /// it names none. An explicit `url` decides: a local `@id` such as `#next-week` resolves to
 /// this page whatever event it is, so it never outweighs a `url` naming another.
 pub fn names_page(v: &Value, base: &Url) -> Option<bool> {
+    // A node that names no page costs no address work.
+    if !["url", "@id"]
+        .into_iter()
+        .any(|f| v.get(f).is_some_and(Value::is_string))
+    {
+        return None;
+    }
     let page = page_identity(base.as_str())?;
     names_page_in(v, base, std::slice::from_ref(&page))
 }

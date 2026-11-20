@@ -652,6 +652,8 @@ impl ResourceMeta {
         for value in self.address.values_mut() {
             truncate(value, 256);
         }
+        // A site's name is short where it is set; here it only loses a NUL.
+        truncate(&mut self.site, 512);
         // Clients load an image from where it is named: a web link's host is a named public one.
         if self
             .image
@@ -817,7 +819,13 @@ impl ResourceMeta {
         }
     }
 }
+/// Cut `s` to at most `max` bytes, at a character boundary, and drop its NUL characters:
+/// PostgreSQL stores none in `text` or `jsonb`, so every text a document bounds (`bounded`,
+/// `EventFields::bound`) is free of them and saves.
 pub fn truncate(s: &mut String, max: usize) {
+    if s.contains('\0') {
+        s.retain(|c| c != '\0');
+    }
     if s.len() > max {
         let mut n = max;
         while !s.is_char_boundary(n) {

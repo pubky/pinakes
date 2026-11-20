@@ -105,7 +105,10 @@ impl Posting {
         let salary = self.salary;
         for (key, value) in [
             ("hiring_organization", self.organization),
-            ("hiring_organization_url", self.organization_url),
+            (
+                "hiring_organization_url",
+                super::link(self.organization_url),
+            ),
             ("employment_type", joined(&self.employment_types)),
             ("remote", self.remote.then(|| "true".to_owned())),
             ("remote_regions", joined(&self.regions)),
@@ -122,7 +125,7 @@ impl Posting {
             ("salary_unit", salary.unit.filter(|_| salary.min.is_some())),
             ("date_posted", self.posted),
             ("valid_through", self.valid_through),
-            ("apply_url", self.apply_url),
+            ("apply_url", super::link(self.apply_url)),
         ] {
             if let Some(value) = value {
                 doc.attributes.entry(key.into()).or_insert(value);
@@ -542,6 +545,35 @@ mod tests {
         let at = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
         assert_eq!(status(&doc, at("2026-10-29T23:00:00Z")), "open");
         assert_eq!(status(&doc, at("2026-10-30T00:00:00Z")), "closed");
+    }
+
+    /// A link longer than an attribute holds is left out of the facts, never cut to a link that
+    /// opens something else.
+    #[test]
+    fn a_link_too_long_for_a_fact_is_left_out() {
+        let base: Url = "https://jobs.example/p/1".parse().unwrap();
+        let long = format!("https://apply.example/form?token={}", "x".repeat(300));
+        let posting = |apply: &str, organization: &str| {
+            let mut doc = ResourceMeta::new(base.as_str(), "jsonld", 60);
+            from_jsonld(
+                &json!({"@type": "JobPosting", "title": "Engineer",
+                    "hiringOrganization": {"name": "Acme", "url": organization},
+                    "potentialAction": {"@type": "ApplyAction", "target": apply}}),
+                &base,
+            )
+            .apply(&mut doc);
+            doc
+        };
+        let doc = posting(&long, &long);
+        assert!(!doc.attributes.contains_key("apply_url"));
+        assert!(!doc.attributes.contains_key("hiring_organization_url"));
+        assert_eq!(doc.attributes["hiring_organization"], "Acme");
+        let doc = posting("https://apply.example/form", "https://acme.example/");
+        assert_eq!(doc.attributes["apply_url"], "https://apply.example/form");
+        assert_eq!(
+            doc.attributes["hiring_organization_url"],
+            "https://acme.example/"
+        );
     }
 
     #[test]

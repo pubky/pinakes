@@ -140,8 +140,8 @@ fn point(uri: &str, lat: f64, lon: f64, precision: usize, name: String) -> Resul
     doc.location_source = Some(LocationSource::Uri);
     doc.attributes
         .insert("precision".into(), PRECISION[precision].into());
-    doc.validate(ATTRIBUTES)?;
-    Ok(doc)
+    // The name is the coordinates as written, however many digits: cut like any card's.
+    doc.bounded(ATTRIBUTES)
 }
 
 /// A point named by a map link. Precision comes from the link's zoom when it has one, else from
@@ -467,6 +467,14 @@ mod tests {
             super::super::classify("https://www.openstreetmap.org/#map=12/52.5/13.4"),
             Some("web")
         );
+    }
+    /// Coordinates written with hundreds of digits name the point within a card's name cap.
+    #[test]
+    fn a_long_coordinate_names_the_point_within_the_cap() {
+        let doc = parse(&format!("geo:46.{},8.5", "1".repeat(1000))).unwrap();
+        assert!(doc.name.as_ref().unwrap().len() <= 512);
+        assert!(doc.name.unwrap().starts_with("46.1111"));
+        assert_eq!(doc.location.unwrap().lon, 8.5);
     }
     #[test]
     fn full_grammar_and_precision() {

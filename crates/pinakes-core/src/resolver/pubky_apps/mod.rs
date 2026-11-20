@@ -74,8 +74,6 @@ pub struct Object<'a> {
     pub owner: &'a str,
     /// When the object is read: what its expiry, end or next occurrence is measured against.
     pub now: chrono::DateTime<chrono::Utc>,
-    /// The most dates one period of a recurrence rule may hold (`event::time::rrule_bounded`).
-    pub max_period_dates: usize,
     vars: Vec<(&'static str, String)>,
 }
 impl Object<'_> {
@@ -200,25 +198,6 @@ pub fn card_at(
     ttl: u64,
     now: chrono::DateTime<chrono::Utc>,
 ) -> ResourceMeta {
-    card_with(
-        uri,
-        content_type,
-        body,
-        ttl,
-        now,
-        crate::event::time::MAX_PERIOD_DATES,
-    )
-}
-/// The card of an object fetched at `now`, its recurrence rules bounded by `max_period_dates`
-/// (`limits.event_max_period_dates`).
-pub fn card_with(
-    uri: &str,
-    content_type: &str,
-    body: &[u8],
-    ttl: u64,
-    now: chrono::DateTime<chrono::Utc>,
-    max_period_dates: usize,
-) -> ResourceMeta {
     let mut doc = ResourceMeta::new(uri, "pubky", ttl);
     doc.set_type("CreativeWork");
     doc.attributes
@@ -238,7 +217,6 @@ pub fn card_with(
                 uri,
                 owner: &owner,
                 now,
-                max_period_dates,
                 vars,
             };
             let read = match json.as_ref().filter(|v| v.is_object()) {
@@ -343,7 +321,6 @@ pub fn open_in(uri: &str) -> Vec<OpenIn> {
                 uri,
                 owner: &owner,
                 now: chrono::Utc::now(),
-                max_period_dates: crate::event::time::MAX_PERIOD_DATES,
                 vars,
             },
             kind.open_in,
@@ -416,13 +393,14 @@ pub fn facts(doc: &ResourceMeta) -> Option<std::collections::BTreeMap<String, St
 pub mod read {
     use serde_json::Value;
 
-    /// The first of `keys` that holds a non-empty string, trimmed.
+    /// The first of `keys` that holds a non-empty string, trimmed, without the NUL characters
+    /// no stored text may hold.
     pub fn text(v: &Value, keys: &[&str]) -> Option<String> {
         keys.iter()
             .find_map(|k| v.get(*k).and_then(Value::as_str))
-            .map(str::trim)
+            .map(|s| s.replace('\0', ""))
+            .map(|s| s.trim().to_owned())
             .filter(|s| !s.is_empty())
-            .map(str::to_owned)
     }
     /// A number as a fact: an integer without a fraction, else as written.
     pub fn number(v: &Value) -> Option<String> {

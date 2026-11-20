@@ -156,9 +156,19 @@ pub(crate) fn unparsed(requested: &Url, f: &Fetched) -> Option<Page> {
 /// a document.
 pub(crate) fn parsed(f: &Fetched, text: &str, html: &scraper::Html) -> Page {
     let walls = &*WALLS;
+    // The page's own title, as the card reads it: the head's, else the first outside an inline
+    // SVG.
     let title = html
-        .select(&select("title"))
+        .select(&select("head > title"))
         .next()
+        .or_else(|| {
+            html.select(&select("title")).find(|title| {
+                !title
+                    .ancestors()
+                    .take(super::html::MAX_ANCESTORS)
+                    .any(|a| a.value().as_element().is_some_and(|e| e.name() == "svg"))
+            })
+        })
         .map(|v| v.text().collect::<String>())
         .unwrap_or_default();
     // Exclude script/style/noscript text: client-rendered shells say "enable JavaScript"
