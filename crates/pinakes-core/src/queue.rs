@@ -745,29 +745,32 @@ async fn finish_job(
         };
         doc.validate(attrs)?;
         crate::changes::save(pool, &job.id, job.generation, &doc, cfg).await?;
-        // The card is saved. What follows it are transactions of their own: when one fails the
-        // card stays as saved, the job is no failure, and the step runs again at the next read.
+        // The save is done. What follows it (the alias its page names, an episode's pages) are
+        // transactions of their own: when one fails, what the save wrote stays and the job is
+        // no failure.
         let after = std::panic::AssertUnwindSafe(after_save(pool, job, &doc))
             .catch_unwind()
             .await
             .unwrap_or_else(|_| Err(anyhow::anyhow!("the steps after the save panicked")));
         if let Err(error) = after {
-            tracing::warn!(resource_id=%job.id,host=%crate::resolver::log_host(&job.uri),kind=crate::resolver::error_class(&error),resolver=resolver.name(),"a saved card's alias step failed; the link is read again in full");
-            // The step's inputs (the page's canonical, an episode's page) come only with a
-            // full read: the link is read again after the first backoff, without its
-            // validators, and no attempt is charged. When this cannot be written either, the
-            // step waits for the card's own next full read.
-            let again = async {
-                sqlx::query("UPDATE event_fetch SET validators='{}' WHERE resource_id=$1 AND validators<>'{}'")
-                    .bind(&job.id)
-                    .execute(pool)
-                    .await?;
-                sqlx::query("UPDATE resource SET final=false,refresh_at=now()+$3*interval '1 second',next_attempt_at=now()+$3*interval '1 second' WHERE id=$1 AND generation=$2")
-                    .bind(&job.id).bind(job.generation).bind(cfg.backoff_secs as f64).execute(pool).await?;
-                anyhow::Ok(())
-            };
-            if let Err(error) = again.await {
-                tracing::warn!(resource_id=%job.id,error=%crate::resolver::log_error(&error),"the re-read after a failed alias step was not scheduled");
+            tracing::warn!(resource_id=%job.id,host=%crate::resolver::log_host(&job.uri),kind=crate::resolver::error_class(&error),resolver=resolver.name(),"a step after the save failed (an alias, an episode's pages)");
+            // An accepted card's step has its inputs (the page's canonical, an episode's page)
+            // only in a full read: the link is read again, without its validators, no later
+            // than `max_backoff_secs` from now and no earlier than it was due anyway. Once an
+            // hour at most, so a step that fails every time costs one fetch an hour; no attempt
+            // is charged. When this cannot be written either, the step waits for the card's
+            // own next full read.
+            if doc.status == Status::Ok {
+                let again = async {
+                    sqlx::query("UPDATE event_fetch SET validators='{}' WHERE resource_id=$1 AND validators<>'{}' AND EXISTS(SELECT 1 FROM resource WHERE id=$1 AND generation=$2)")
+                        .bind(&job.id).bind(job.generation).execute(pool).await?;
+                    sqlx::query("UPDATE resource SET final=false,refresh_at=least(refresh_at,now()+$3*interval '1 second'),next_attempt_at=least(next_attempt_at,now()+$3*interval '1 second') WHERE id=$1 AND generation=$2")
+                        .bind(&job.id).bind(job.generation).bind(cfg.max_backoff_secs as f64).execute(pool).await?;
+                    anyhow::Ok(())
+                };
+                if let Err(error) = again.await {
+                    tracing::warn!(resource_id=%job.id,error=%crate::resolver::log_error(&error),"the full re-read after a failed step was not scheduled");
+                }
             }
         }
         Ok(())
@@ -1252,37 +1255,34 @@ struct Worker {
 }
 impl Worker {
     /// Until shutdown: wait for the pacing slot, run a due canary or claim a batch, and run it.
-    /// Shutdown ends the waiting at once. A batch already claimed is finished first, so no job
-    /// stops between its save and the steps that follow it.
+    /// Shutdown ends the wait for the slot at once. A claim, a canary and a claimed batch are
+    /// finished first, so no row stays leased with no worker and no job stops between its save
+    /// and the steps that follow it.
     async fn run(self, mut shutdown: watch::Receiver<bool>) {
         let mut canary_check = Instant::now();
         while !*shutdown.borrow() {
-            let jobs = tokio::select! {
+            // Only the wait for the pacing slot is cut off: a claim is a row already leased.
+            let slot = tokio::select! {
                 _ = shutdown.changed() => break,
-                jobs = self.next(&mut canary_check) => jobs,
+                slot = self.pace() => slot,
             };
+            let jobs = self.next(&mut canary_check).await;
             if jobs.is_empty() {
                 continue;
             }
-            let work = self.finish(&jobs);
-            tokio::pin!(work);
-            tokio::select! {
-                _ = &mut work => {}
-                _ = shutdown.changed() => {
-                    work.await;
-                    break;
-                }
-            }
+            self.finish(&jobs, slot).await;
         }
     }
-    /// The next batch, after the resolver's pacing slot; none when a canary ran instead, the
-    /// queue held nothing due (after a short wait) or the claim failed.
+    /// Wait for the resolver's pacing slot and take it: the instant the next one is free.
+    async fn pace(&self) -> Instant {
+        let mut next = self.rate.lock().await;
+        tokio::time::sleep_until(*next).await;
+        *next = Instant::now() + Duration::from_secs_f64(1.0 / self.requests_per_second);
+        *next
+    }
+    /// The next batch; none when a canary ran instead, the queue held nothing due (after a
+    /// short wait) or the claim failed.
     async fn next(&self, canary_check: &mut Instant) -> Vec<Job> {
-        {
-            let mut next = self.rate.lock().await;
-            tokio::time::sleep_until(*next).await;
-            *next = Instant::now() + Duration::from_secs_f64(1.0 / self.requests_per_second);
-        }
         let (pool, resolver) = (&self.pool, self.resolver.as_ref());
         if Instant::now() >= *canary_check {
             *canary_check = Instant::now() + Duration::from_secs(60);
@@ -1334,8 +1334,9 @@ impl Worker {
             }
         }
     }
-    /// Run a claimed batch, or put it back when its first job's author is over budget.
-    async fn finish(&self, jobs: &[Job]) {
+    /// Run a claimed batch, or put it back when its first job's author is over budget. `slot`
+    /// is the pacing slot this worker took for it.
+    async fn finish(&self, jobs: &[Job], slot: Instant) {
         let (pool, resolver) = (&self.pool, self.resolver.as_ref());
         let result = async {
             let refused = if resolver.name() == "geo" {
@@ -1354,9 +1355,13 @@ impl Worker {
                 sqlx::query("UPDATE resource SET lease_until=NULL,next_attempt_at=now()+interval '1 second' WHERE id=$1 AND generation=$2").bind(&job.id).bind(job.generation).execute(pool).await?;
             }
             // The refusal fetched nothing. When it put the author's other links off, the next
-            // claim finds another author's link: it need not wait for the pacing slot.
+            // claim finds another author's link: it need not wait for the pacing slot, which
+            // is given back unless another worker has taken the next one since.
             if spread > 0 {
-                *self.rate.lock().await = Instant::now();
+                let mut next = self.rate.lock().await;
+                if *next == slot {
+                    *next = Instant::now();
+                }
             }
             anyhow::Ok(())
         }
@@ -1497,6 +1502,13 @@ mod tests {
         let uri = "https://after-save.example.org/page";
         let job = claimed(&pool, uri).await;
         FAILS_AFTER_SAVE.lock().unwrap().push(uri.into());
+        sqlx::query(
+            "INSERT INTO event_fetch(resource_id,validators) VALUES($1,'{\"etag\":\"x\"}')",
+        )
+        .bind(&job.id)
+        .execute(&pool)
+        .await
+        .unwrap();
         run_batch(
             &pool,
             &After(Duration::ZERO),
@@ -1506,16 +1518,20 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(row(&pool, &job.id).await, ("ok".into(), 0, 0, false, None));
-        // The link is read again in full after the first backoff, so the step runs again.
-        let (again, is_final): (f64, bool) = sqlx::query_as(
-            "SELECT extract(epoch FROM next_attempt_at-now())::float8,final FROM resource WHERE id=$1",
+        // The link is read again in full (its validators are gone) within `max_backoff_secs`,
+        // so the step runs again.
+        let (again, validators): (f64, serde_json::Value) = sqlx::query_as(
+            "SELECT extract(epoch FROM r.next_attempt_at-now())::float8,e.validators FROM resource r JOIN event_fetch e ON e.resource_id=r.id WHERE r.id=$1",
         )
         .bind(&job.id)
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert!(again > 0.0 && again <= cfg.backoff_secs as f64, "{again}");
-        assert!(!is_final);
+        assert!(
+            again > 0.0 && again <= cfg.max_backoff_secs as f64 + 1.0,
+            "{again}"
+        );
+        assert_eq!(validators, serde_json::json!({}));
         let name: Option<String> = sqlx::query_scalar("SELECT name FROM resource WHERE id=$1")
             .bind(&job.id)
             .fetch_one(&pool)
