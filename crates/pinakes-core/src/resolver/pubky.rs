@@ -1002,41 +1002,83 @@ mod tests {
         );
     }
 
-    /// A relay's deadline starts when its request has the relay host's slot: an ask that waits
-    /// for the host's pace longer than the deadline is not a relay that failed, and is answered.
+    /// An ask queued for the relay host's slot is not a relay that failed: it gets its packet
+    /// when the slot comes within the relay's deadline, and when it does not, the link is read
+    /// again shortly without a charge and no request is sent.
     #[tokio::test(start_paused = true)]
     async fn a_relay_s_deadline_does_not_count_the_wait_for_its_host_slot() {
-        let (first, second) = (Keypair::random(), Keypair::random());
-        let net = network(&[direct(&first), direct(&second)], ok());
-        // The relay host takes a request every two seconds; a relay has one second to answer.
-        let mut cfg = crate::config::EgressConfig {
-            host_requests_per_second: 1_000_000.0,
-            ..Default::default()
+        // The relay host takes a request every two seconds.
+        let paced = |relay_timeout_ms: u64| {
+            let (first, second) = (Keypair::random(), Keypair::random());
+            let net = network(&[direct(&first), direct(&second)], ok());
+            let mut cfg = crate::config::EgressConfig {
+                host_requests_per_second: 1_000_000.0,
+                ..Default::default()
+            };
+            cfg.host_rates.insert("relay.example".into(), 0.5);
+            let config = ResolverConfig {
+                pkarr_relay_timeout_ms: relay_timeout_ms,
+                ..Default::default()
+            };
+            let resolver = resolver_with(
+                net.clone(),
+                &["8.8.8.8"],
+                "8.8.4.4",
+                &["https://relay.example"],
+                cfg,
+                config,
+            );
+            (resolver, net, object(&first), object(&second))
         };
-        cfg.host_rates.insert("relay.example".into(), 0.5);
-        let config = ResolverConfig {
-            pkarr_relay_timeout_ms: 1000,
-            ..Default::default()
-        };
-        let resolver = resolver_with(
-            net.clone(),
-            &["8.8.8.8"],
-            "8.8.4.4",
-            &["https://relay.example"],
-            cfg,
-            config,
-        );
-        resolver.resolve(&object(&first)).await.unwrap();
+        // Four seconds for a relay: the second ask waits two for its slot and is answered.
+        let (resolver, net, first, second) = paced(4000);
+        resolver.resolve(&first).await.unwrap();
         let started = tokio::time::Instant::now();
-        let doc = resolver.resolve(&object(&second)).await.unwrap();
+        let doc = resolver.resolve(&second).await.unwrap();
         assert_eq!(doc.name.as_deref(), Some("A deck"));
-        // It waited for its slot, longer than the relay's deadline.
         assert!(
             started.elapsed() > Duration::from_secs(1),
             "{:?}",
             started.elapsed()
         );
         assert_eq!(net.relay_requests.lock().unwrap().len(), 2);
+        // One second for a relay: the second ask is still queued when its time is up.
+        let (resolver, net, first, second) = paced(1000);
+        resolver.resolve(&first).await.unwrap();
+        let started = tokio::time::Instant::now();
+        let error = resolver.resolve(&second).await.unwrap_err();
+        let wait = error
+            .downcast_ref::<crate::resolver::RetryLater>()
+            .unwrap_or_else(|| panic!("{error:#}"));
+        assert_eq!((wait.class, wait.seconds), ("rate_limited", 1));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(net.relay_requests.lock().unwrap().len(), 1);
+    }
+
+    /// Two reads at once behind a relay that never answers: the first read's request holds the
+    /// relay host's slot until its deadline, the second read's ask is queued behind it, and
+    /// both use the other relay's packet within about one deadline, not two.
+    #[tokio::test(start_paused = true)]
+    async fn asks_queued_behind_a_stalled_relay_do_not_hold_back_the_other_s_packet() {
+        let (first, second) = (Keypair::random(), Keypair::random());
+        let relays = ["https://relay.example", "https://relay2.example"];
+        let net = network(&[direct(&first), direct(&second)], ok());
+        net.stalling.lock().unwrap().push("relay.example");
+        let resolver = resolver_on(net, &["8.8.8.8"], "8.8.4.4", &relays);
+        let started = tokio::time::Instant::now();
+        let (first, second) = (object(&first), object(&second));
+        let (a, b) = tokio::join!(resolver.resolve(&first), resolver.resolve(&second));
+        assert_eq!(a.unwrap().name.as_deref(), Some("A deck"));
+        assert_eq!(b.unwrap().name.as_deref(), Some("A deck"));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     /// A relay's 429 keeps its `Retry-After`: when no relay gave an answer about the key, the

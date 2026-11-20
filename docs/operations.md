@@ -29,7 +29,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `resolver_concurrency` | `2` | Concurrent jobs per pubky or card resolver. |
 | `resolver_requests_per_second` | `2.0` | Jobs per second per pubky or card resolver. |
 | `resolver_ttl_secs` | `86400` | Default document lifetime (seconds) for web, pubky and card resolvers. |
-| `pkarr_relay_timeout_ms` | `4000` | How long one PKARR relay may take to answer (milliseconds, 100–9000), from when its request is sent (a wait for the relay host's pace does not count); a relay slower than this is a failed relay, and the others' packets are used. |
+| `pkarr_relay_timeout_ms` | `4000` | How long one PKARR relay may take to answer (milliseconds, 100–9000), from when its request is sent; a relay slower than this is a failed relay, and the others' packets are used. A request still queued for the relay's host a quarter of a second past it is put off without a charge. |
 | `music_enrichment_timeout_ms` | `8000` | How long a MusicBrainz card's enrichment may take, within the card's own read (milliseconds, 100–13000); past it, the card keeps its stored image and description. |
 | `music_enrichment_retry_secs` | `3600` | The earliest a MusicBrainz card whose enrichment, or a Wikidata item's card whose Commons image, failed for a while (a timeout, a 429, a 5xx) is read again (seconds, 60–604800): it waits at least twice as long as since its last reading, up to its own refresh time, so a failure on a routine refresh waits for the next. |
 | `music_image_width` | `640` | The width of the Commons thumbnail an enriched card or a Wikidata item's card asks for (pixels, 20–4096); Commons serves the next of its standard sizes (960 for 640). |
@@ -354,8 +354,9 @@ after a restart, takes the newest packet the relays serve again. A relay that ti
 refused by the policy or serves a packet that does not verify is a `connect` failure, retried
 with the usual backoff and, like any failure, dead-lettered after `limits.max_failures`. When no
 relay answered, because each one that failed refused or reset the connection (or Egress waited
-for its host budget, or the relay answered 429), the failure never reached an answer and never
-dead-letters; after a 429 the link is read again when the relay's `Retry-After` says.
+for its host budget, or the request was still queued for the relay's host when its time was up,
+or the relay answered 429), the failure never reached an answer and never dead-letters; after a
+429 the link is read again when the relay's `Retry-After` says.
 Verified packets are kept for their smallest record TTL, between five minutes
 and a day (10,000 keys at most). It then takes the first endpoint with a public HTTPS (ICANN)
 domain and GETs the object path there with the `pubky-host` header, as Pubky clients address
