@@ -1303,6 +1303,19 @@ mod tests {
                     "{name} does not read {}",
                     example.uri
                 );
+                // A link is one source's: the first in the registry that reads it gets it, so
+                // an example no other source may read is never shadowed.
+                if source.reads(example.uri) {
+                    for other in REGISTRY.iter().filter(|s| s.name() != name) {
+                        assert!(
+                            !other.reads(example.uri),
+                            "{} also reads {name}'s {}",
+                            other.name(),
+                            example.uri
+                        );
+                    }
+                    assert_eq!(reading(example.uri).map(|s| s.name()), Some(name));
+                }
                 assert!(
                     !crate::model::type_path(example.card_type).is_empty(),
                     "{}",
