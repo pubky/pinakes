@@ -4,11 +4,15 @@
 //! API URL, is an alias of one identifier: `inat:observation/{id}` or `inat:taxon/{id}`.
 //!
 //! The API asks for at most 60 requests a minute and under 10,000 a day, so the budget is one
-//! request every 9 seconds. Licences are per observation and per photo; a photo without a licence is never shown.
+//! request every 9 seconds. Licences are per observation and per photo; a photo is shown only
+//! under a Creative Commons licence.
 //! An observation whose location is obscured or private has public coordinates that are
 //! randomised, so its card has no point.
 use super::kit::html_text;
-use super::kit::{float, host_and_segments, int, json, text, time, Card, Point, Request};
+use super::kit::{
+    float, host_and_segments, image_licence, image_url, int, json, text, time, Card, ImageLicence,
+    Point, Request,
+};
 use super::{Example, Source};
 use crate::model::ResourceMeta;
 use anyhow::{ensure, Context, Result};
@@ -130,16 +134,24 @@ pub fn licence(code: &str) -> String {
     }
 }
 
-/// A licensed photo's URL at the given size (`medium`, `large`) and its attribution.
+/// The address of a photo at the given size (`medium`, `large`) and its attribution, for a photo
+/// under a Creative Commons licence (CC0, CC BY and its NC, ND and SA forms). A photo with no
+/// licence code, or with any other one, has none.
 fn photo(p: &Value, size: &str) -> Option<(String, Option<String>)> {
-    text(&p["license_code"])?;
+    let licence = image_licence(&text(&p["license_code"])?)?;
+    if !matches!(
+        licence,
+        ImageLicence::Cc0 | ImageLicence::By | ImageLicence::ByWithTerms
+    ) {
+        return None;
+    }
     let url = text(&p[format!("{size}_url").as_str()]).or_else(|| {
         let square = text(&p["url"])?;
         square
             .contains("/square.")
             .then(|| square.replacen("/square.", &format!("/{size}."), 1))
     })?;
-    Some((url, text(&p["attribution"])))
+    Some((image_url(&url)?, text(&p["attribution"])))
 }
 
 /// Whether an observation's coordinates are its real, public location.
@@ -592,6 +604,63 @@ mod tests {
         });
         assert_eq!(photo(&reserved, "medium"), None);
         assert_eq!(licence("cc0"), "CC0");
+    }
+
+    /// The image of the recorded observation's card after `change` edits its first photo.
+    fn image_with(change: impl Fn(&mut Value)) -> Option<String> {
+        let mut v: Value = serde_json::from_slice(&read("observation-333069440.json.gz")).unwrap();
+        change(&mut v["results"][0]["photos"][0]);
+        let raw = serde_json::to_vec(&v).unwrap();
+        let card = parse_observation(200, &raw, 333069440).unwrap().unwrap();
+        assert_eq!(
+            card.image.is_some(),
+            card.details.contains_key("image_attribution"),
+            "a credit only with its image"
+        );
+        card.image
+    }
+
+    #[test]
+    fn a_photo_is_shown_only_under_a_creative_commons_licence() {
+        let medium = "https://inaturalist-open-data.s3.amazonaws.com/photos/604606400/medium.jpg";
+        for code in [
+            "cc0",
+            "cc-by",
+            "cc-by-nc",
+            "cc-by-sa",
+            "cc-by-nd",
+            "cc-by-nc-sa",
+            "cc-by-nc-nd",
+        ] {
+            assert_eq!(
+                image_with(|p| p["license_code"] = code.into()).as_deref(),
+                Some(medium),
+                "{code}"
+            );
+        }
+        // Codes that are no Creative Commons licence, and one iNaturalist does not have.
+        let others = ["pd", "gfdl", "all-rights-reserved"]
+            .map(|code| image_with(|p| p["license_code"] = code.into()));
+        assert!(others.iter().all(Option::is_none), "{others:?}");
+        // A taxon's default photo follows the same rule.
+        let mut v: Value = serde_json::from_slice(&read("taxon-47219.json.gz")).unwrap();
+        v["results"][0]["default_photo"]["license_code"] = "gfdl".into();
+        let raw = serde_json::to_vec(&v).unwrap();
+        assert_eq!(parse_taxon(200, &raw, 47219).unwrap().unwrap().image, None);
+    }
+
+    #[test]
+    fn a_photo_address_that_is_not_an_https_url_is_no_image() {
+        let data = "data:image/png;base64,iVBORw0KGgo=";
+        // In the size's own field, and in the square one the size's address is made from.
+        let images = [
+            image_with(|p| p["medium_url"] = data.into()),
+            image_with(|p| p["medium_url"] = "http://static.inaturalist.org/1/medium.jpg".into()),
+            image_with(|p| p["url"] = format!("{data}/square.png").into()),
+            image_with(|p| p["url"] = "http://static.inaturalist.org/1/square.jpg".into()),
+            image_with(|p| p["url"] = "photos/1/square.jpg".into()),
+        ];
+        assert!(images.iter().all(Option::is_none), "{images:?}");
     }
 
     #[test]

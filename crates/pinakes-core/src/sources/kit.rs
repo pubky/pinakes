@@ -32,6 +32,60 @@ pub fn web_url(value: &str) -> Option<Url> {
     (url.port().is_none() && url.username().is_empty() && url.password().is_none()).then_some(url)
 }
 
+/// The address of an image a card may hold (`Card::image`), as the URL parser writes it: an
+/// `https` URL that `web_url` takes. Any other value a service gives for an image (an `http` or
+/// `data:` URL, a path, other text) is no image.
+pub fn image_url(value: &str) -> Option<String> {
+    web_url(value)
+        .filter(|url| url.scheme() == "https")
+        .map(String::from)
+}
+
+/// A licence that lets anyone show a work's image, by what it asks in return. Each source
+/// shows an image only under the ones its page in `docs/sources/` names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageLicence {
+    /// CC0: nothing.
+    Cc0,
+    /// The Public Domain Mark: nothing.
+    PublicDomainMark,
+    /// CC BY: a credit.
+    By,
+    /// CC BY with NC, ND or SA: a credit and those terms.
+    ByWithTerms,
+}
+
+/// The licence a Creative Commons code or short name names, in the spellings the services give:
+/// `cc0`, `cc-zero`, `CC0 1.0`; `Public Domain Mark 1.0`; `cc-by`, `cc-by-4.0`, `CC BY 4.0`;
+/// `cc-by-nc`, `cc-by-nc-sa-4.0`, `CC BY-NC-SA 3.0`. Letter case does not matter. A version may
+/// follow the name; what follows the version (a jurisdiction) is not read. `None` for every
+/// other licence and for no licence.
+pub fn image_licence(name: &str) -> Option<ImageLicence> {
+    let name = name.trim().to_ascii_lowercase();
+    let mut parts = name.split([' ', '-']);
+    // The end of the name, or its version.
+    let ends =
+        |part: Option<&str>| part.is_none_or(|p| p.starts_with(|c: char| c.is_ascii_digit()));
+    let licence = match (parts.next()?, parts.next()) {
+        ("cc0", version) => return ends(version).then_some(ImageLicence::Cc0),
+        ("cc", Some("zero")) => ImageLicence::Cc0,
+        ("public", Some("domain")) if parts.next() == Some("mark") => {
+            ImageLicence::PublicDomainMark
+        }
+        ("cc", Some("by")) => {
+            let mut licence = ImageLicence::By;
+            loop {
+                match parts.next() {
+                    Some("nc" | "nd" | "sa") => licence = ImageLicence::ByWithTerms,
+                    version => return ends(version).then_some(licence),
+                }
+            }
+        }
+        _ => return None,
+    };
+    ends(parts.next()).then_some(licence)
+}
+
 /// One HTTP GET to an external API.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Request {
@@ -732,5 +786,81 @@ mod tests {
             assert!(host_and_segments(uri).is_none(), "{uri}");
         }
         assert!(host_and_segments("https://example.org:443/a").is_some());
+    }
+
+    #[test]
+    fn image_urls() {
+        assert_eq!(
+            image_url("https://images.example.org/a/web.jpg?v=1").as_deref(),
+            Some("https://images.example.org/a/web.jpg?v=1")
+        );
+        assert_eq!(
+            image_url("https://images.example.org/a b.jpg").as_deref(),
+            Some("https://images.example.org/a%20b.jpg")
+        );
+        for bad in [
+            "",
+            "http://images.example.org/a.jpg",
+            "data:image/png;base64,iVBORw0KGgo=",
+            "javascript:alert(1)",
+            "ftp://images.example.org/a.jpg",
+            "//images.example.org/a.jpg",
+            "/a.jpg",
+            "a.jpg",
+            "https://images.example.org:8443/a.jpg",
+            "https://user@images.example.org/a.jpg",
+            "https://user:secret@images.example.org/a.jpg",
+        ] {
+            assert_eq!(image_url(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn image_licences() {
+        use ImageLicence::{By, ByWithTerms, Cc0, PublicDomainMark};
+        for (name, licence) in [
+            ("cc0", Cc0),
+            ("CC0", Cc0),
+            ("CC0 1.0", Cc0),
+            ("cc0-1.0", Cc0),
+            ("cc-zero", Cc0),
+            ("Public Domain Mark 1.0", PublicDomainMark),
+            ("cc-by", By),
+            ("cc-by-4.0", By),
+            ("cc-by-3.0-us", By),
+            ("CC BY 4.0", By),
+            ("CC BY 2.5", By),
+            ("cc-by-nc", ByWithTerms),
+            ("cc-by-sa", ByWithTerms),
+            ("cc-by-nd", ByWithTerms),
+            ("cc-by-nc-sa", ByWithTerms),
+            ("cc-by-nc-nd-4.0", ByWithTerms),
+            ("CC BY-NC 4.0", ByWithTerms),
+            ("CC BY-SA 4.0", ByWithTerms),
+            ("CC BY-NC-SA 3.0", ByWithTerms),
+        ] {
+            assert_eq!(image_licence(name), Some(licence), "{name}");
+        }
+        for other in [
+            "",
+            "cc",
+            "cc-",
+            "cc-by-",
+            "cc-by-x",
+            "CC BY + CC0",
+            "CC SA 1.0",
+            "cc0x",
+            "CC0 Universal",
+            "pd",
+            "gfdl",
+            "Public Domain",
+            "mit",
+            "MIT",
+            "In Copyright",
+            "all rights reserved",
+            "by",
+        ] {
+            assert_eq!(image_licence(other), None, "{other:?}");
+        }
     }
 }

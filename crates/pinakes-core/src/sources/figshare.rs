@@ -12,8 +12,8 @@
 //! (`doi.org/10.6084/m9.figshare.{id}`) belong to the DOI source.
 use super::{
     kit::{
-        credit, fetch, host_and_segments, html_text, int, json, plain, text, texts, time, Card,
-        Key, Request,
+        credit, fetch, host_and_segments, html_text, image_licence, image_url, int, json, plain,
+        text, texts, time, Card, ImageLicence, Key, Request,
     },
     Context, Example, Source,
 };
@@ -138,11 +138,10 @@ fn type_name(kind: &str) -> &'static str {
 
 /// Whether a licence lets us show the article's thumbnail: CC0, or CC BY without further terms.
 fn open_licence(name: &str) -> bool {
-    name == "CC0"
-        || name.starts_with("CC0 ")
-        || name
-            .strip_prefix("CC BY ")
-            .is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit()))
+    matches!(
+        image_licence(name),
+        Some(ImageLicence::Cc0 | ImageLicence::By)
+    )
 }
 
 /// An article, or `None` when Figshare has no public article with this id.
@@ -174,7 +173,7 @@ pub fn parse(status: u16, raw: &[u8], id: u64) -> Result<Option<Card>> {
     );
     let licence = text(&v["license"]["name"]);
     if licence.as_deref().is_some_and(open_licence) {
-        card.image = text(&v["thumb"]);
+        card.image = text(&v["thumb"]).and_then(|u| image_url(&u));
     }
     let authors: Vec<String> = v["authors"]
         .as_array()
@@ -511,9 +510,27 @@ mod tests {
     }
 
     #[test]
+    fn a_thumbnail_address_that_is_not_an_https_url_is_no_image() {
+        let images = [
+            "data:image/png;base64,iVBORw0KGgo=",
+            "http://s3-eu-west-1.amazonaws.com/pfigshare-u-previews/9778651/thumb.png",
+            "/pfigshare-u-previews/9778651/thumb.png",
+        ]
+        .map(|address| {
+            let mut v: serde_json::Value =
+                serde_json::from_slice(&read("article-5616445.json")).unwrap();
+            v["thumb"] = address.into();
+            let raw = serde_json::to_vec(&v).unwrap();
+            parse(200, &raw, 5616445).unwrap().unwrap().image
+        });
+        assert!(images.iter().all(Option::is_none), "{images:?}");
+    }
+
+    #[test]
     fn licences_and_types() {
         assert!(open_licence("CC BY 4.0"));
         assert!(open_licence("CC0"));
+        assert!(open_licence("CC0 1.0"));
         assert!(!open_licence("CC BY-NC 4.0"));
         assert!(!open_licence("CC BY-SA 4.0"));
         assert!(!open_licence("MIT"));

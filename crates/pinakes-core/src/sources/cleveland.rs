@@ -10,7 +10,8 @@
 //! The API's data is CC0; images are shown only for works the API marks CC0.
 use super::kit::wikidata_id;
 use super::kit::{
-    fetch, host_and_segments, html_text, int, json, plain, text, texts, web_url, Card, Key, Request,
+    fetch, host_and_segments, html_text, image_licence, image_url, int, json, plain, text, texts,
+    Card, ImageLicence, Key, Request,
 };
 use super::{Context, Example, Source};
 use crate::model::ResourceMeta;
@@ -124,8 +125,8 @@ pub fn parse(status: u16, raw: &[u8], artwork: &Artwork) -> Result<Option<Card>>
         .or_else(|| text(&d["wall_description"]))
         .and_then(|s| html_text(&s));
     let license = text(&d["share_license_status"]);
-    if license.as_deref() == Some("CC0") {
-        card.image = text(&d["images"]["web"]["url"]).filter(|u| web_url(u).is_some());
+    if license.as_deref().and_then(image_licence) == Some(ImageLicence::Cc0) {
+        card.image = text(&d["images"]["web"]["url"]).and_then(|u| image_url(&u));
         card.attribution = Some(format!("{CREDIT}, CC0"));
     } else {
         card.attribution = Some(CREDIT.into());
@@ -416,6 +417,22 @@ mod tests {
             parse(200, &raw, &acc("1997.246")).unwrap().unwrap().image,
             None
         );
+    }
+
+    #[test]
+    fn an_image_address_that_is_not_an_https_url_is_no_image() {
+        let images = [
+            "http://openaccess-cdn.clevelandart.org/1958.39/1958.39_web.jpg",
+            "data:image/png;base64,iVBORw0KGgo=",
+            "1958.39/1958.39_web.jpg",
+        ]
+        .map(|address| {
+            let mut v: Value = serde_json::from_slice(&read("artwork-1958.39.json")).unwrap();
+            v["data"]["images"]["web"]["url"] = address.into();
+            let raw = serde_json::to_vec(&v).unwrap();
+            parse(200, &raw, &acc("1958.39")).unwrap().unwrap().image
+        });
+        assert!(images.iter().all(Option::is_none), "{images:?}");
     }
 
     #[test]
