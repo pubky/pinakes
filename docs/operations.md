@@ -33,7 +33,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `music_enrichment_retry_secs` | `3600` | The earliest a MusicBrainz card whose enrichment, or a Wikidata item's card whose Commons image, failed for a while (a timeout, a 429, a 5xx) is read again (seconds, 60–604800): it waits at least twice as long as since its last reading, up to its own refresh time, so a failure on a routine refresh waits for the next. |
 | `music_image_width` | `640` | The width of the Commons thumbnail an enriched card or a Wikidata item's card asks for (pixels, 20–4096); Commons serves the next of its standard sizes (960 for 640). |
 | `host_requests_per_second` | `1.0` | Requests per second to any one upstream host. |
-| `host_rates` | `{}` | Per-host overrides of `host_requests_per_second`. |
+| `host_rates` | `{}` | Per-host overrides of `host_requests_per_second`. Each key is one host name (`api.example.org`; an IPv6 address in brackets), read without regard to case. A key that is a pattern (`*.example.org`), a URL or a name with a path, or two keys for one host, stop startup. |
 | `html_head_bytes` | `4194304` | How far an HTML page past the 1 MB page cap is read (bytes); nothing in the page stops the read earlier. |
 | `max_failures` | `5` | Failures before a resource dead-letters. |
 | `timeout_grace` | `3` | Timeouts tolerated before they count as failures. |
@@ -47,7 +47,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `osm_ttl_secs` | `2592000` | OSM place cache lifetime (seconds). |
 | `osm_dump_every_hours` | `24` | Hours between two writes of the ODbL dump file. |
 | `osm_dump_downloads_per_hour` | `6` | ODbL dump downloads per hour per client address. |
-| `reach_timeout_secs` | `5` | Nexus reach deadline per search (seconds). |
+| `reach_timeout_secs` | `5` | Nexus reach deadline per search (seconds, 1–60, and more than two seconds below `request_timeout_secs`). |
 | `related_taggers` | `200` | Taggers a related page samples: the authors of a resource's most recent tags, at most this many. |
 | `related_window_days` | `365` | Days a related page looks back, for those taggers and their tags. |
 | `related_refs_per_tagger` | `1000` | References a related page reads per sampled tagger (their most recent). |
@@ -57,8 +57,8 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `collapse_refs_per_member` | `10000` | References counted per group member when `collapse=group` picks a group's row. |
 | `max_radius_m` | `200000.0` | Largest `near` radius (metres). |
 | `api_cache_capacity` | `10000` | Entries the rate limiter remembers when an API request adds a client address (100–100000). It shares one table with the preview limiter; past it the oldest entry is forgotten with its used budget, so keep it above the clients, preview clients and previewed links seen in a minute. Also the client addresses the dump download limiter remembers per hour. |
-| `request_timeout_secs` | `30` | Seconds a request may take on either listener before it is answered 504 (5–600). |
-| `shutdown_grace_secs` | `30` | Seconds a stopping daemon gives open requests, running jobs and background passes to finish. |
+| `request_timeout_secs` | `30` | Seconds a request may take on either listener before it is answered 504 (8–600). An MCP tool call has two seconds less for all its reads together, and answers a tool error past that. |
+| `shutdown_grace_secs` | `30` | Seconds a stopping daemon gives open requests, running jobs and background passes to finish (1–600). |
 | `reach_cost` | `6` | Budget units a search costs for each of `reach` and `boost`. |
 | `related_cost` | `6` | Budget units a related search costs. |
 | `preview_requests_per_minute` | `30` | Preview requests per minute per client. |

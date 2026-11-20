@@ -111,6 +111,40 @@ impl Failure {
 }
 
 impl Tools {
+    /// One tool call, whatever it asks (several REST routes, the Nexus once per 100 links),
+    /// within one deadline (`ApiConfig::tool_timeout`, inside the MCP message's own): a call
+    /// past it is the tool's failure, a 504 with its hint, so the message is still answered.
+    /// `None` when no tool has the name.
+    async fn run(
+        &self,
+        caller: &Caller,
+        name: &str,
+        args: &JsonObject,
+    ) -> Option<Result<Value, Failure>> {
+        let call = async {
+            Some(match name {
+                "search" => self.search(caller, args).await,
+                "card" => self.card(caller, args).await,
+                "lookup" => self.lookup(caller, args).await,
+                "group" => self.group(caller, args).await,
+                "types" => self.types(caller).await,
+                "social" => self.social(caller, args).await,
+                _ => return None,
+            })
+        };
+        let deadline = self.state.config.api.tool_timeout();
+        tokio::time::timeout(deadline, call)
+            .await
+            .unwrap_or_else(|_| {
+                Some(Err(Failure {
+                    status: 504,
+                    error: "the tool call took too long".into(),
+                    url: None,
+                    retry_after: None,
+                }))
+            })
+    }
+
     /// A request to the public routes as the MCP caller, and its JSON answer.
     async fn rest(
         &self,
@@ -468,19 +502,11 @@ impl ServerHandler for Tools {
             base: parts.map_or_else(|| "http://localhost".into(), |p| base_url(&p.headers)),
         };
         let args = request.arguments.unwrap_or_default();
-        let answer = match request.name.as_ref() {
-            "search" => self.search(&caller, &args).await,
-            "card" => self.card(&caller, &args).await,
-            "lookup" => self.lookup(&caller, &args).await,
-            "group" => self.group(&caller, &args).await,
-            "types" => self.types(&caller).await,
-            "social" => self.social(&caller, &args).await,
-            other => {
-                return Err(ErrorData::invalid_params(
-                    format!("no tool named {other}"),
-                    None,
-                ))
-            }
+        let Some(answer) = self.run(&caller, request.name.as_ref(), &args).await else {
+            return Err(ErrorData::invalid_params(
+                format!("no tool named {}", request.name),
+                None,
+            ));
         };
         Ok(match answer {
             Ok(value) => CallToolResult::success(vec![ContentBlock::text(value.to_string())]),
@@ -1275,6 +1301,61 @@ mod tests {
                 Some(true)
             );
         }
+    }
+
+    /// A tool call has one deadline for all its requests: two that each end in time but
+    /// together do not are the tool's 504, at the deadline, where one alone is answered.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_tool_s_requests_share_one_deadline(pool: sqlx::PgPool) {
+        use std::time::{Duration, Instant};
+        let mut config = crate::config::Config::default();
+        // A tool call's deadline is two seconds inside this: two seconds.
+        config.api.request_timeout_secs = 4;
+        assert_eq!(config.api.tool_timeout(), Duration::from_secs(2));
+        let slow = || async {
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            axum::Json(json!({"items": [], "facets": {"type": []}, "resolves": []}))
+        };
+        let tools = Tools {
+            rest: Router::new()
+                .route("/v1/search", axum::routing::get(slow))
+                .route("/v1/info", axum::routing::get(slow)),
+            state: AppState::new(pool, config).unwrap(),
+        };
+        let caller = Caller {
+            peer: None,
+            base: "https://pinakes.example".into(),
+        };
+        // `types` reads the search route and then the info route.
+        let started = Instant::now();
+        let failure = tools
+            .run(&caller, "types", &JsonObject::new())
+            .await
+            .expect("a tool")
+            .expect_err("two reads of 1.2 s within two seconds");
+        assert_eq!(failure.status, 504, "{failure:?}");
+        let took = started.elapsed();
+        assert!(took >= Duration::from_millis(1950), "{took:?}");
+        let ContentBlock::Text(text) = &failure.result().content[0] else {
+            panic!("text content")
+        };
+        let body: Value = serde_json::from_str(&text.text).unwrap();
+        assert_eq!(body["status"], 504);
+        assert!(body["hint"].as_str().unwrap().contains("retry once"));
+        // `lookup` reads the search route once: answered.
+        let one = tools
+            .run(
+                &caller,
+                "lookup",
+                &args(json!({"key": "isbn:9780140328721"})),
+            )
+            .await
+            .expect("a tool");
+        assert!(one.is_ok(), "{one:?}");
+        assert!(tools
+            .run(&caller, "no-such-tool", &JsonObject::new())
+            .await
+            .is_none());
     }
 
     #[test]

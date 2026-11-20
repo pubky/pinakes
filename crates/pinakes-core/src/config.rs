@@ -852,7 +852,9 @@ pub struct ApiConfig {
     /// remembers per hour: past it the oldest is forgotten, with what it had used.
     #[serde(skip)]
     pub cache_capacity: usize,
-    /// Seconds a request may take before it is answered 504, on either listener.
+    /// Seconds a request may take before it is answered 504, on either listener. At least 8:
+    /// an MCP tool call has two seconds less (`tool_timeout`), and `card` with `resolve: true`
+    /// waits three seconds for a new link's card between its other reads.
     #[serde(skip)]
     pub request_timeout_secs: u64,
     #[serde(skip)]
@@ -867,6 +869,20 @@ pub struct ApiConfig {
     pub swagger_ui: bool,
     /// Serve the MCP endpoint, `POST /mcp`, on the public listener (docs/api.md, Agents).
     pub mcp: bool,
+}
+/// The seconds an MCP tool call's deadline lies inside the request's own.
+const TOOL_MARGIN_SECS: u64 = 2;
+impl ApiConfig {
+    /// How long one MCP tool call may take, all its requests together: `request_timeout_secs`
+    /// less two seconds, so the tool's own failure is written before the request's deadline
+    /// answers 504 in its place.
+    pub fn tool_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            self.request_timeout_secs
+                .saturating_sub(TOOL_MARGIN_SECS)
+                .max(1),
+        )
+    }
 }
 impl Default for ApiConfig {
     fn default() -> Self {
@@ -1288,7 +1304,7 @@ impl Config {
             || !(1..=1000).contains(&self.osm.dump_downloads_per_hour)
             || !(1..=10000).contains(&self.api.requests_per_minute)
             || !(100..=100000).contains(&self.api.cache_capacity)
-            || !(5..=600).contains(&self.api.request_timeout_secs)
+            || !(8..=600).contains(&self.api.request_timeout_secs)
             || !(1..=600).contains(&self.shutdown_grace_secs)
             || !(2..=100).contains(&self.api.reach_cost)
             || !(2..=100).contains(&self.api.related_cost)
@@ -1304,6 +1320,13 @@ impl Config {
             || !(1.0..=200_000.0).contains(&self.search.max_radius_m)
         {
             bail!("invalid OSM or spatial budget (public Nominatim maximum 1 request/s)");
+        }
+        // A reach read that outlasts the request is a 504 where it would be the reach's own
+        // answer, and through MCP the tool call's deadline comes first.
+        if self.search.reach_timeout_secs >= self.api.tool_timeout().as_secs() {
+            bail!(
+                "limits.reach_timeout_secs must be more than {TOOL_MARGIN_SECS} seconds below limits.request_timeout_secs"
+            );
         }
         for r in [&self.web, &self.pubky] {
             if r.concurrency == 0
@@ -2387,7 +2410,7 @@ mod tests {
             ("api_cache_capacity", 99),
             ("api_cache_capacity", 100_001),
             ("preview_cache_capacity", 99),
-            ("request_timeout_secs", 4),
+            ("request_timeout_secs", 7),
             ("request_timeout_secs", 601),
             ("shutdown_grace_secs", 0),
             ("shutdown_grace_secs", 601),
@@ -2398,12 +2421,46 @@ mod tests {
             );
         }
         let cfg =
-            with(serde_json::json!({"limits":{"request_timeout_secs":5,"shutdown_grace_secs":7}}))
+            with(serde_json::json!({"limits":{"request_timeout_secs":8,"shutdown_grace_secs":7}}))
                 .unwrap();
         assert_eq!(
             (cfg.api.request_timeout_secs, cfg.shutdown_grace_secs),
-            (5, 7)
+            (8, 7)
         );
+        // At the lowest request deadline an MCP tool call still has the three seconds `card`
+        // with `resolve: true` waits for a new link, and time for its other reads.
+        assert_eq!(cfg.api.tool_timeout(), std::time::Duration::from_secs(6));
+        assert_eq!(
+            Config::default().api.tool_timeout(),
+            std::time::Duration::from_secs(28)
+        );
+    }
+    /// A search's reach read ends before the request's deadline, and before an MCP tool
+    /// call's, two seconds inside it: a slow Nexus is the reach's own answer, never a 504.
+    #[test]
+    fn the_reach_deadline_is_inside_the_request_s() {
+        for (reach, request, accepted) in [
+            (5, 8, true),
+            (6, 8, false),
+            (8, 8, false),
+            (27, 30, true),
+            (28, 30, false),
+            (30, 30, false),
+            (60, 30, false),
+            (60, 63, true),
+        ] {
+            let loaded = with(serde_json::json!({"limits":{
+                "reach_timeout_secs": reach, "request_timeout_secs": request}}));
+            assert_eq!(loaded.is_ok(), accepted, "reach {reach}, request {request}");
+            if let Err(error) = loaded {
+                let text = format!("{error:#}");
+                assert!(
+                    text.contains("limits.reach_timeout_secs")
+                        && text.contains("limits.request_timeout_secs"),
+                    "{text}"
+                );
+            }
+        }
     }
     #[test]
     fn the_example_config_loads_and_lists_only_operator_choices() {

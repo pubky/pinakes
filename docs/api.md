@@ -2072,7 +2072,9 @@ the JSON configuration other clients take, the tools' names and links to `/llms.
 requests cost on top (a `reach` search 6, `types` two requests, `social` its lookup plus one per 100 URIs it asks Nexus). Bodies are capped
 at 2 MB, as for every route; the routes keep their statement timeout, and `social` the Nexus
 client's 10-second timeout. When Nexus does not answer the batch view, `social` is the error
-`502`.
+`502`. A tool call has one deadline for all its requests together, two seconds inside
+`limits.request_timeout_secs`: past it the tool's error is `504`, so the message is answered
+and never the listener's own 504.
 
 **No admin operation.** The tools' requests go to the public routes only, built afresh with no
 header of the MCP request, so the admin listener's routes and its token are out of reach. Any

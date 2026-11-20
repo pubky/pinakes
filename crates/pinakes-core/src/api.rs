@@ -419,9 +419,9 @@ pub fn router(state: AppState) -> Router {
     let mut all = routes.clone().merge(crate::agents::routes());
     if state.config.api.mcp {
         // The tools answer through the REST routes, under the same layers. Their calls are not
-        // counted as requests of their own (the MCP message that made them is), and their
-        // deadline is shorter than the message's, so a call that takes too long is the tool's
-        // failure, with its hint, and not a 504 in place of the MCP answer.
+        // counted as requests of their own (the MCP message that made them is), and they have
+        // no deadline of their own: the tool call that makes them has one for all its calls
+        // (`ApiConfig::tool_timeout`).
         let rest = public_layers(routes, state.clone(), false);
         // A GET (and so a HEAD) is a browser's or a probe's (`agents::mcp_get`); every other
         // method is MCP's.
@@ -467,21 +467,17 @@ fn rest_routes() -> Router<AppState> {
 pub fn with_public_layers(routes: Router<AppState>, state: AppState) -> Router {
     public_layers(routes, state, true)
 }
-/// `with_public_layers` for the listener itself (`outer`: counted, the whole deadline) or for
-/// the calls an MCP tool makes through it (not counted, a deadline two seconds shorter).
+/// `with_public_layers` for the listener itself (`outer`: counted, under the request deadline) or
+/// for the calls an MCP tool makes through it (not counted, and under the tool call's deadline,
+/// which `agents::mcp` keeps).
 fn public_layers(routes: Router<AppState>, state: AppState, outer: bool) -> Router {
-    let routes = panic_backstop(routes, &state, "public");
-    let routes = if outer {
-        routes.layer(axum::middleware::from_fn_with_state(
+    let mut routes = panic_backstop(routes, &state, "public");
+    if outer {
+        routes = routes.layer(axum::middleware::from_fn_with_state(
             state.clone(),
             request_deadline,
-        ))
-    } else {
-        routes.layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            tool_deadline,
-        ))
-    };
+        ));
+    }
     let mut router = routes
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -516,27 +512,6 @@ async fn request_deadline(
     next: axum::middleware::Next,
 ) -> Response {
     let deadline = Duration::from_secs(state.config.api.request_timeout_secs);
-    within(deadline, request, next).await
-}
-/// The deadline of a REST call an MCP tool makes: two seconds inside the MCP message's own.
-async fn tool_deadline(
-    State(state): State<AppState>,
-    request: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> Response {
-    let secs = state
-        .config
-        .api
-        .request_timeout_secs
-        .saturating_sub(2)
-        .max(1);
-    within(Duration::from_secs(secs), request, next).await
-}
-async fn within(
-    deadline: Duration,
-    request: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> Response {
     match tokio::time::timeout(deadline, next.run(request)).await {
         Ok(response) => response,
         Err(_) => ApiError(

@@ -487,6 +487,40 @@ async fn social_without_a_nexus_is_a_plain_error(pool: PgPool) {
     }
 }
 
+/// A tool call that takes too long is the tool's error, a 504 with its hint, in an answered MCP
+/// message, and never the listener's own 504 in place of the message. `social` makes several
+/// calls: it reads the cards, then asks a Nexus that here answers after the request's deadline.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_tool_call_past_its_deadline_is_a_tool_error(pool: PgPool) {
+    let ids = seed(&pool).await;
+    let slow = Router::new().route(
+        "/v1/stream/resources/by_ids",
+        post(|| async {
+            tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+            Json(json!([]))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let nexus_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, slow).await.unwrap() });
+    let mut config = Config {
+        nexus_url,
+        ..Config::default()
+    };
+    // The request's deadline; a tool call's is two seconds inside it.
+    config.api.request_timeout_secs = 4;
+    let app = api::router(AppState::new(pool, config).unwrap());
+    // `call` holds the message to a 200 with a tool result. A Nexus that does not answer in
+    // its client's own ten seconds is a 502: the 504 is the tool call's deadline.
+    let (error, answer) = call(&app, "social", json!({"ids": ids})).await;
+    assert!(error, "{answer}");
+    assert_eq!(answer["status"], 504, "{answer}");
+    assert!(
+        answer["hint"].as_str().unwrap().contains("retry once"),
+        "{answer}"
+    );
+}
+
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_tool_call_spends_the_same_per_ip_budget(pool: PgPool) {
     seed(&pool).await;
