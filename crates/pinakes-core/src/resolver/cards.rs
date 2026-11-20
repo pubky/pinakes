@@ -1,4 +1,5 @@
-//! Generic media/identifier cards. Only metadata is retained; embeds and media are never served.
+//! Generic media/identifier cards. Only metadata is retained: media is never served, and of an
+//! oEmbed answer only the frame Pinakes builds from its player address (`embed`), never its HTML.
 use super::{
     egress::{Egress, FetchOptions, Fetched},
     web, Resolver,
@@ -149,7 +150,8 @@ fn providers() -> &'static Vec<Provider> {
     })
 }
 fn wildcard(pattern: &str, value: &str) -> bool {
-    // Registry wildcards only. Linear greedy glob, no regex or untrusted expression evaluation.
+    // Registry wildcards only. A greedy glob that backtracks to its last `*` (at worst the
+    // pattern's length times the value's), no regex or untrusted expression evaluation.
     let (p, v) = (pattern.as_bytes(), value.as_bytes());
     let (mut i, mut j, mut star, mut back) = (0, 0, None, 0);
     while j < v.len() {
@@ -1150,7 +1152,7 @@ fn podcast_body(
     } else {
         body
     };
-    let xml = roxmltree::Document::parse(body)?;
+    let xml = super::xml::parse(body)?;
     let mut items: Vec<_> = xml
         .descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == "item")

@@ -21,7 +21,8 @@ is gone (404) is `missing` once a second fetch confirms it, as any link. Either 
 a profiled app's namespace keeps nothing of a card it had, neither on its card nor in its change
 history (the lines stay, with their kind, fields and time), and is checked again as missing
 links are; an object of an app without a profile keeps its last card under `missing`, as other
-links do. An object stored before its path was left out becomes `missing` at once when it is
+links do, except its posts (`/pub/{app}/v1/posts/{id}`, read as posts in every namespace), which
+keep nothing either. An object stored before its path was left out becomes `missing` at once when it is
 read again (its next refresh, or `pinakesd reextract pubky`), without a request.
 
 Profiles are Pinakes's own code, one file per app (`resolver/pubky_apps/<app>.rs`). Nothing is
@@ -55,7 +56,7 @@ cards and media, `srs/`, `subscriptions/`, `settings.json`, `tags/`.
 
 | Path | Card |
 | --- | --- |
-| `rooms/{room}` | `Conversation`: `name`, `topic`. Only a listed room (`visibility: public`); an unlisted one has no card |
+| `rooms/{room}` | `Conversation`: `name`, `topic`. Only a listed room of the format's version 1 (`"v": 1`, `visibility: public`); any other has no card |
 
 No client link until rooms.pubky.app is live (the client's address today is a hosting
 provider's subdomain): the profile's `links_off` says so, and pinakesd logs it at startup

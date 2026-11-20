@@ -28,6 +28,17 @@ impl std::fmt::Display for BodyTooLarge {
     }
 }
 impl std::error::Error for BodyTooLarge {}
+
+/// A request that had its host slot and was not answered within its caller's deadline
+/// ([`FetchOptions::request_deadline`]).
+#[derive(Clone, Copy, Debug)]
+pub struct RequestDeadline(pub Duration);
+impl std::fmt::Display for RequestDeadline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "no answer within {} ms", self.0.as_millis())
+    }
+}
+impl std::error::Error for RequestDeadline {}
 /// Whether `error` is, or wraps, a body over its read's cap.
 pub fn over_cap(error: &anyhow::Error) -> bool {
     error.chain().any(|c| c.is::<BodyTooLarge>())
@@ -239,6 +250,15 @@ pub struct FetchOptions {
     /// (`pkarr_relays::PAYLOAD_TYPES`).
     pub extra_types: &'static [&'static str],
     pub validators: Validators,
+    /// How long the request itself may take, once it has its host slot: connecting, sending and
+    /// the whole answer, of each hop. The wait for the slot does not count (a request queued
+    /// behind its host's pace is not a slow host). Past it the fetch fails as
+    /// [`RequestDeadline`]. Without one, only the fetch's own ten seconds bound it.
+    pub request_deadline: Option<Duration>,
+    /// The longest this request waits for its host's slot, when shorter than `MAX_SLOT_WAIT`: a
+    /// slot further away answers `RetryLater` (`rate_limited`, no request sent, no charge), as
+    /// one past `MAX_SLOT_WAIT` always does.
+    pub slot_wait: Option<Duration>,
 }
 impl std::fmt::Debug for Fetched {
     /// The body's length, never the body: a token endpoint's answer holds the token.
@@ -295,6 +315,8 @@ impl std::fmt::Debug for FetchOptions {
             .field("error_json", &self.error_json)
             .field("extra_types", &self.extra_types)
             .field("validators", &self.validators)
+            .field("request_deadline", &self.request_deadline)
+            .field("slot_wait", &self.slot_wait)
             .finish()
     }
 }
@@ -359,6 +381,10 @@ impl Transport for PinnedTransport {
         addresses: &[SocketAddr],
         options: &FetchOptions,
     ) -> Result<Fetched> {
+        // A client per request: `resolve_to_addrs` pins this request's host to the addresses the
+        // policy just checked, so the connection goes where the check looked and a second DNS
+        // answer cannot move it. The price is no connection reuse (a new TCP and TLS handshake
+        // each time), which the per-host pacing makes small.
         let client = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
@@ -474,7 +500,7 @@ pub async fn read_response_with(
         .to_ascii_lowercase();
     let mut body = vec![];
     let mut truncated = false;
-    if !(300..400).contains(&status) && (200..300).contains(&status) {
+    if (200..300).contains(&status) {
         let feed_type = matches!(
             content_type.as_str(),
             "text/calendar"
@@ -540,16 +566,6 @@ pub async fn read_response_with(
                 break;
             }
             body.extend_from_slice(&chunk);
-            let sniff = String::from_utf8_lossy(&body[..body.len().min(256)])
-                .trim_start_matches(['\u{feff}', ' ', '\r', '\n'])
-                .starts_with("BEGIN:VCALENDAR");
-            if options.body_cap.is_none()
-                && body.len() > BODY_CAP
-                && max <= BODY_CAP
-                && !(options.feed_cap.is_some() && (feed_type || options.feed_hint || sniff))
-            {
-                return Err(BodyTooLarge { cap: BODY_CAP }.into());
-            }
             // A cut read stops as soon as it reaches its cap: a sender that stalls there costs no
             // timeout. At the page cap, the head budget applies.
             if !refuse && body.len() >= max {
@@ -1089,7 +1105,10 @@ impl Egress {
                 _ => {
                     // Release the other host's slot before waiting for this one.
                     drop(permit.take());
-                    permit = Some((host.clone(), self.host_permit(&host).await?));
+                    let wait = options
+                        .slot_wait
+                        .map_or(MAX_SLOT_WAIT, |w| w.min(MAX_SLOT_WAIT));
+                    permit = Some((host.clone(), self.host_permit_within(&host, wait).await?));
                 }
             }
             let mut observation = crate::telemetry::FetchGuard::start();
@@ -1099,7 +1118,14 @@ impl Egress {
                 ..options.clone()
             };
             let options = &with_agent;
-            let mut response = self.transport.get_with(&url, &addresses, options).await?;
+            // The slot is taken: a caller's deadline for the request starts here.
+            let sent = self.transport.get_with(&url, &addresses, options);
+            let mut response = match options.request_deadline {
+                Some(deadline) => tokio::time::timeout(deadline, sent)
+                    .await
+                    .map_err(|_| RequestDeadline(deadline))??,
+                None => sent.await?,
+            };
             observation.status(response.status);
             drop(observation);
             if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
@@ -1182,6 +1208,15 @@ impl Egress {
     /// that, answers `RetryLater` instead of a wait the fetch timeout would cut short. Only a
     /// request that gets its slot moves the next one, so a cancelled waiter holds nothing back.
     async fn host_permit(&self, host: &str) -> Result<OwnedMutexGuard<Instant>> {
+        self.host_permit_within(host, MAX_SLOT_WAIT).await
+    }
+    /// [`host_permit`](Self::host_permit), waiting at most `wait` (never more than
+    /// `MAX_SLOT_WAIT`) for the slot.
+    async fn host_permit_within(
+        &self,
+        host: &str,
+        wait: Duration,
+    ) -> Result<OwnedMutexGuard<Instant>> {
         let rate = self.host_rate(host);
         let budget = {
             let mut hosts = self.hosts.lock().await;
@@ -1201,11 +1236,9 @@ impl Egress {
                 seconds: wait.as_secs() + 1,
             })
         };
-        let deadline = Instant::now() + MAX_SLOT_WAIT;
+        let deadline = Instant::now() + wait;
         let Ok(mut guard) = tokio::time::timeout_at(deadline, budget.lock_owned()).await else {
-            return Err(retry(
-                Duration::from_secs_f64(1.0 / rate).max(MAX_SLOT_WAIT),
-            ));
+            return Err(retry(Duration::from_secs_f64(1.0 / rate).max(wait)));
         };
         if *guard > deadline {
             return Err(retry(guard.saturating_duration_since(Instant::now())));
@@ -1224,7 +1257,7 @@ impl Egress {
         let default = self.cfg.host_requests_per_second;
         // A source's limit (`source_rates`) or a service's published one (`PUBLISHED_RATES`)
         // lowers the default, never raises it.
-        let mut rate = match self.cfg.host_rates.get(host) {
+        match self.cfg.host_rates.get(host) {
             Some(rate) => *rate,
             None => self
                 .cfg
@@ -1234,14 +1267,7 @@ impl Egress {
                 .into_iter()
                 .chain(published_rate(host))
                 .fold(default, f64::min),
-        };
-        if matches!(host, "api.nostr.wine" | "portal.einundzwanzig.space") {
-            rate = rate.min(1.0);
         }
-        if host == "api.nostrarchives.com" {
-            rate = rate.min(2.0);
-        }
-        rate
     }
 }
 /// Requests per second the services several sources or the resolver read publish as their limit,
@@ -1267,6 +1293,10 @@ pub const PUBLISHED_RATES: &[(&str, f64)] = &[
     ("api.tvmaze.com", 2.0),
     // The Wayback Machine's CDX API asks for a gentle pace (the whole host: tagged captures too).
     ("web.archive.org", 0.5),
+    // The Nostr indexers and the Einundzwanzig portal publish no limit: a cautious pace.
+    ("api.nostr.wine", 1.0),
+    ("api.nostrarchives.com", 2.0),
+    ("portal.einundzwanzig.space", 1.0),
 ];
 /// The published rate of `host`, if it has one (the most specific rule).
 pub fn published_rate(host: &str) -> Option<f64> {
@@ -2504,6 +2534,22 @@ mod tests {
         slow.host_rates.insert("www.wikidata.org".into(), 0.5);
         let wd = gap(slow, "www.wikidata.org").await;
         assert!(wd >= Duration::from_secs(2), "{wd:?}");
+        // The indexers' and the portal's pace is a published rate like any other: it lowers a
+        // higher default, and an operator's entry sets the host's rate.
+        let fast = || EgressConfig {
+            host_requests_per_second: 10.0,
+            ..Default::default()
+        };
+        for (host, rate) in [
+            ("api.nostr.wine", 1.0),
+            ("api.nostrarchives.com", 2.0),
+            ("portal.einundzwanzig.space", 1.0),
+        ] {
+            assert_eq!(Egress::new(fast()).host_rate(host), rate, "{host}");
+            let mut own = fast();
+            own.host_rates.insert(host.into(), 5.0);
+            assert_eq!(Egress::new(own).host_rate(host), 5.0, "{host}");
+        }
     }
     #[test]
     fn rejects_every_special_range() {

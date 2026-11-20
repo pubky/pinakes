@@ -67,6 +67,7 @@ fn property(line: &str) -> Result<Property> {
         })
         .context("content line missing colon")?;
     let fields = split_quoted(&line[..i], ';');
+    ensure!(!fields[0].trim().is_empty(), "content line without a name");
     let mut params = BTreeMap::new();
     for p in &fields[1..] {
         let (k, v) = p.split_once('=').context("invalid parameter")?;
@@ -118,8 +119,9 @@ fn unescape(s: &str) -> String {
 fn components(bytes: &[u8], cfg: &EventConfig, deadline: std::time::Instant) -> Result<Component> {
     let mut stack: Vec<Component> = vec![];
     let mut root = None;
-    let mut pending = String::new();
+    let mut pending: Vec<u8> = vec![];
     let mut count = 0usize;
+    let mut properties = 0usize;
     let mut consume = |line: &str| -> Result<()> {
         if line.trim().is_empty() {
             return Ok(());
@@ -152,6 +154,8 @@ fn components(bytes: &[u8], cfg: &EventConfig, deadline: std::time::Instant) -> 
                 root = Some(node);
             }
         } else {
+            properties += 1;
+            ensure!(properties <= cfg.max_properties, "calendar property cap");
             stack
                 .last_mut()
                 .context("property outside calendar")?
@@ -170,30 +174,55 @@ fn components(bytes: &[u8], cfg: &EventConfig, deadline: std::time::Instant) -> 
             line.len() <= cfg.max_line_bytes,
             "calendar physical line cap"
         );
-        let line = std::str::from_utf8(line)
-            .unwrap_or("INVALID_CONTENT_LINE")
-            .trim_end_matches('\r');
-        if line.starts_with([' ', '\t']) {
+        // Lines unfold as bytes and decode whole: a fold may fall inside a character (RFC 5545
+        // folds at octets). Bytes that are no UTF-8 (a Latin-1 feed) read as U+FFFD.
+        let mut line = line;
+        while let Some(rest) = line.strip_suffix(b"\r") {
+            line = rest;
+        }
+        if matches!(line.first(), Some(b' ' | b'\t')) {
             ensure!(!pending.is_empty(), "orphan folded line");
             ensure!(
                 pending.len() + line.len() <= cfg.max_line_bytes,
                 "calendar unfolded line cap"
             );
-            pending.push_str(&line[1..]);
+            pending.extend_from_slice(&line[1..]);
         } else {
             if !pending.is_empty() {
-                consume(&pending)?;
+                consume(&String::from_utf8_lossy(&pending))?;
             }
-            pending = line.trim_start_matches('\u{feff}').into();
+            while let Some(rest) = line.strip_prefix("\u{feff}".as_bytes()) {
+                line = rest;
+            }
+            pending.clear();
+            pending.extend_from_slice(line);
         }
     }
     if !pending.is_empty() {
-        consume(&pending)?;
+        consume(&String::from_utf8_lossy(&pending))?;
     }
     ensure!(stack.is_empty(), "truncated calendar");
     let root = root.context("empty calendar")?;
     ensure!(root.name == "VCALENDAR", "expected VCALENDAR");
     Ok(root)
+}
+/// The feed's deadline or a date-value limit met while its dates are worked out. In a series'
+/// expansion it fails the feed; any other error there skips the event with a warning.
+#[derive(Debug)]
+struct Budget(&'static str);
+impl std::fmt::Display for Budget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+impl std::error::Error for Budget {}
+/// `Ok` while `within`; else the [`Budget`] error named `what`.
+fn budget(within: bool, what: &'static str) -> Result<()> {
+    if within {
+        Ok(())
+    } else {
+        Err(Budget(what).into())
+    }
 }
 #[derive(Clone, Debug)]
 struct Stamp {
@@ -238,10 +267,10 @@ impl Zones<'_> {
                     })
                     .flatten()
                 {
-                    ensure!(
+                    budget(
                         std::time::Instant::now() < self.deadline,
-                        "VTIMEZONE work budget"
-                    );
+                        "VTIMEZONE work budget",
+                    )?;
                     let wall = at.with_timezone(&offset).naive_local();
                     if self.at_wall(stamp, wall).is_ok_and(|v| v == at) {
                         return Ok(wall);
@@ -359,16 +388,15 @@ fn transitions(
 ) -> Result<Vec<Transition>> {
     let mut transitions = vec![];
     let mut values = 0usize;
-    let mut budget = || -> Result<()> {
+    let mut spend = || -> Result<()> {
         values += 1;
-        ensure!(
+        budget(
             values <= max_date_values && std::time::Instant::now() < deadline,
-            "VTIMEZONE work budget"
-        );
-        Ok(())
+            "VTIMEZONE work budget",
+        )
     };
     for o in &c.children {
-        budget()?;
+        spend()?;
         let start = time::naive(o.value("DTSTART").context("VTIMEZONE DTSTART")?)
             .context("VTIMEZONE date")?;
         let from = time::fixed(o.value("TZOFFSETFROM").context("VTIMEZONE FROM")?)
@@ -389,7 +417,7 @@ fn transitions(
                 .and_utc()
                 .with_timezone(&rrule::Tz::UTC);
             for date in set.limit().into_iter() {
-                budget()?;
+                spend()?;
                 if date > end {
                     break;
                 }
@@ -398,7 +426,7 @@ fn transitions(
         }
         for p in o.props.iter().filter(|p| p.name == "RDATE") {
             for value in p.value.split(',') {
-                budget()?;
+                spend()?;
                 if let Some(date) = time::naive(value) {
                     dates.push(date);
                 }
@@ -446,10 +474,10 @@ impl Zones<'_> {
     }
     fn custom_time(&self, c: &Component, wall: NaiveDateTime) -> Result<DateTime<Utc>> {
         use chrono::Datelike;
-        ensure!(
+        budget(
             std::time::Instant::now() < self.deadline,
-            "VTIMEZONE work budget"
-        );
+            "VTIMEZONE work budget",
+        )?;
         let key = (c.value("TZID").unwrap_or("").to_owned(), wall.year());
         let mut cache = self.transitions.borrow_mut();
         if !cache.contains_key(&key) {
@@ -470,10 +498,10 @@ impl Zones<'_> {
             .map(|t| t.1)
             .context("empty VTIMEZONE")?;
         for &(at, from, to) in transitions {
-            ensure!(
+            budget(
                 std::time::Instant::now() < self.deadline,
-                "VTIMEZONE work budget"
-            );
+                "VTIMEZONE work budget",
+            )?;
             let delta = to.local_minus_utc() - from.local_minus_utc();
             if delta > 0
                 && wall >= at
@@ -517,22 +545,35 @@ fn recurrence_key(s: &Stamp) -> String {
 fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
+/// The address a calendar link is fetched and keyed at: `webcal:` as `https:`, without a
+/// fragment; a Nextcloud calendar share without `/index.php/` and its trailing slash; a Google
+/// calendar file with its path's percent encodings decoded. Any other link, whatever it holds
+/// (a `webcal://` in its query, `/apps/calendar/` in a blog's path), is left as written.
 pub fn canonical_feed(uri: &str) -> String {
-    let normalized = uri
-        .replacen("webcals://", "https://", 1)
-        .replacen("webcal://", "https://", 1);
+    let normalized = match uri
+        .strip_prefix("webcals://")
+        .or_else(|| uri.strip_prefix("webcal://"))
+    {
+        Some(rest) => format!("https://{rest}"),
+        None => uri.to_owned(),
+    };
     let Ok(mut u) = Url::parse(&normalized) else {
         return normalized;
     };
     u.set_fragment(None);
-    if u.path().contains("/apps/calendar/")
-        || u.path().contains("/remote.php/dav/public-calendars/")
+    if [
+        "/apps/calendar/p/",
+        "/apps/calendar/embed/",
+        "/remote.php/dav/public-calendars/",
+    ]
+    .iter()
+    .any(|share| u.path().contains(share))
     {
         let p = u.path().replace("/index.php/", "/");
         u.set_path(p.trim_end_matches('/'));
     }
     // Percent encodings are canonicalized as bytes; unreserved spelling differences share feed keys.
-    if u.host_str() == Some("calendar.google.com") {
+    if u.host_str() == Some("calendar.google.com") && super::service::is_feed(u.as_str()) {
         let p = percent_encoding::percent_decode_str(u.path())
             .decode_utf8_lossy()
             .into_owned();
@@ -690,8 +731,13 @@ fn document(
     if start.zone.is_none() && !c.value("DTSTART").unwrap().ends_with('Z') {
         doc.event.start_local = Some(start.wall.to_string());
     }
+    // An end without a zone, like such a start, is kept as written: a zone found later (the
+    // venue's) moves both.
+    let mut end_wall = doc.event.start_local.is_some();
     doc.end = if let Some(p) = c.get("DTEND") {
-        Some(zones.stamp(p, &p.value)?.at)
+        let end = zones.stamp(p, &p.value)?;
+        end_wall &= end.zone.is_none() && !p.value.ends_with('Z');
+        Some(end.at)
     } else if let Some(v) = c.value("DURATION") {
         Some(
             start
@@ -713,6 +759,9 @@ fn document(
         Some(start.at)
     };
     ensure!(doc.end >= doc.start, "end before start");
+    if end_wall {
+        doc.event.end_local = doc.end.map(|end| end.naive_utc().to_string());
+    }
     doc.event.event_status = Some(if cal.value("METHOD") == Some("CANCEL") {
         EventStatus::Cancelled
     } else {
@@ -828,6 +877,42 @@ fn document(
     }
     doc = doc.bounded(&[])?;
     Ok((doc, start))
+}
+/// Whether an event can give no date in the horizon, whatever zone it turns out to be in: a
+/// single date (no RRULE, RDATE or RECURRENCE-ID) more than two days outside it, of an event
+/// alone with its UID (`uids`: how many events carry each). An event whose key is not its UID
+/// (it has none, or its link is Eventfrog's, which names it) is never left out.
+fn past_or_far(
+    c: &Component,
+    zones: &Zones<'_>,
+    uids: &BTreeMap<String, usize>,
+    lo: DateTime<Utc>,
+    hi: DateTime<Utc>,
+) -> bool {
+    if ["RRULE", "RDATE", "RECURRENCE-ID"]
+        .iter()
+        .any(|name| c.get(name).is_some())
+    {
+        return false;
+    }
+    let Some(uid) = c.text("UID").filter(|uid| !uid.is_empty()) else {
+        return false;
+    };
+    if uids.get(&uid) != Some(&1)
+        || c.value("URL")
+            .is_some_and(|u| u.to_ascii_lowercase().contains("eventfrog."))
+    {
+        return false;
+    }
+    let Some(start) = c.get("DTSTART").and_then(|p| zones.stamp(p, &p.value).ok()) else {
+        return false;
+    };
+    let margin = Duration::days(2);
+    lo.checked_sub_signed(margin)
+        .is_some_and(|lo| start.at < lo)
+        || hi
+            .checked_add_signed(margin)
+            .is_some_and(|hi| start.at > hi)
 }
 /// A stamp that expands in UTC: its published instant, no zone.
 fn utc_series(start: &Stamp) -> Stamp {
@@ -971,10 +1056,13 @@ fn expand(
         let mut included = 0;
         let dates = bounded.then(|| set.limit().into_iter());
         for (steps, d) in dates.into_iter().flatten().enumerate() {
-            ensure!(
-                steps < cfg.max_recurrence_steps && std::time::Instant::now() < deadline,
-                "recurrence work budget"
-            );
+            budget(
+                std::time::Instant::now() < deadline,
+                "recurrence work budget",
+            )?;
+            // A series that needs more steps than the cap (an hourly one years old) is this
+            // event's error, not the feed's.
+            ensure!(steps < cfg.max_recurrence_steps, "recurrence step cap");
             // The first instance is DTSTART itself: its wall time may be ambiguous (the repeated
             // autumn hour), and mapping it back could name the other instant as a second date.
             let at = if d.naive_utc() == wall_start {
@@ -1001,10 +1089,10 @@ fn expand(
     for p in c.props.iter().filter(|p| p.name == "RDATE") {
         for v in p.value.split(',') {
             values += 1;
-            ensure!(
+            budget(
                 values <= cfg.max_date_values && std::time::Instant::now() < deadline,
-                "RDATE work budget"
-            );
+                "RDATE work budget",
+            )?;
             let (s, end) = v.split_once('/').map_or((v, None), |(s, e)| (s, Some(e)));
             let at = zones.series_stamp(p, s, start)?.at;
             let duration = end
@@ -1031,10 +1119,10 @@ fn expand(
     for p in c.props.iter().filter(|p| p.name == "EXDATE") {
         for v in p.value.split(',') {
             values += 1;
-            ensure!(
+            budget(
                 values <= cfg.max_date_values && std::time::Instant::now() < deadline,
-                "EXDATE work budget"
-            );
+                "EXDATE work budget",
+            )?;
             let s = zones.series_stamp(p, v, start)?;
             if s.date {
                 dates.insert(s.wall.date());
@@ -1106,6 +1194,13 @@ pub fn parse(
     );
     let mut retained_bytes = 0usize;
     let mut events: BTreeMap<(String, String), EventRevision<'_>> = BTreeMap::new();
+    // How many events carry each UID: one that shares its UID may replace or be replaced by
+    // another revision, so only an event alone with its UID is left out below.
+    let eventfrog = base.host_str().is_some_and(|s| s.starts_with("eventfrog."));
+    let mut uids: BTreeMap<String, usize> = BTreeMap::new();
+    for c in cal.children.iter().filter(|c| c.name == "VEVENT") {
+        *uids.entry(c.text("UID").unwrap_or_default()).or_default() += 1;
+    }
     for c in cal.children.iter().filter(|c| c.name == "VEVENT") {
         ensure!(
             std::time::Instant::now() < deadline,
@@ -1113,6 +1208,11 @@ pub fn parse(
         );
         if c.invalid {
             container.warnings.push("invalid_vevent_line".into());
+            continue;
+        }
+        // A calendar's history (an export lists every past event) is not read: no document is
+        // built for an event that can give no date in the horizon, and it counts against no cap.
+        if !eventfrog && past_or_far(c, &zones, &uids, lo, hi) {
             continue;
         }
         let (mut doc, mut start) = match document(c, &cal, &base, &zones) {
@@ -1144,6 +1244,7 @@ pub fn parse(
                 doc.start = dated.start;
                 doc.end = dated.end;
                 doc.event.start_local = None;
+                doc.event.end_local = None;
                 start = stamp;
                 start.zone = Some(tz.clone());
                 start.source = ZoneSource::Coordinates;
@@ -1258,7 +1359,7 @@ pub fn parse(
             &mut container.warnings,
         ) {
             Ok(v) => v,
-            Err(e) if e.to_string().contains("budget") => return Err(e),
+            Err(e) if e.is::<Budget>() => return Err(e),
             Err(_) => {
                 container.warnings.push("invalid_vevent_recurrence".into());
                 continue;
@@ -1318,15 +1419,16 @@ pub fn parse(
                 let mut sequence = *seq;
                 let mut changed = *modified;
                 // RANGE applies the shift and new fields to subsequent original instance keys.
-                let override_ = events.iter().rfind(|((u, r), (c, _, _, _, _))| {
-                    u == uid
-                        && !r.is_empty()
-                        && (r == &key
-                            || (r <= &key
-                                && c.get("RECURRENCE-ID")
+                // Only this event's revisions up to this key are looked at.
+                let override_ = events
+                    .range((uid.clone(), String::new())..=(uid.clone(), key.clone()))
+                    .rfind(|((_, r), (c, _, _, _, _))| {
+                        !r.is_empty()
+                            && (r == &key
+                                || c.get("RECURRENCE-ID")
                                     .and_then(|p| p.params.get("RANGE"))
-                                    .is_some_and(|s| s == "THISANDFUTURE")))
-                });
+                                    .is_some_and(|s| s == "THISANDFUTURE"))
+                    });
                 if let Some(((_, r), (c, override_doc, override_start, s, m))) = override_ {
                     let original = c.get("RECURRENCE-ID").context("override key")?;
                     let original = zones.series_stamp(original, &original.value, start)?;
@@ -1350,6 +1452,14 @@ pub fn parse(
                         d.start = override_doc.start;
                         d.end = override_doc.end;
                     }
+                }
+                // Times without a zone are kept as written, each occurrence its own: a zone
+                // found later (the venue's) reads them again.
+                if d.event.start_local.is_some() {
+                    d.event.start_local = d.start.map(|at| at.naive_utc().to_string());
+                }
+                if d.event.end_local.is_some() {
+                    d.event.end_local = d.end.map(|at| at.naive_utc().to_string());
                 }
                 Ok(Some(Occurrence {
                     uid: uid.clone(),
@@ -1549,7 +1659,12 @@ pub fn structured_feed(
                 hash(format!("{}\n{start}\n{:?}", canonical_feed(uri), d.name).as_bytes())
             )
         });
-        ensure!(uid.len() <= 1024, "UID cap");
+        // An item whose id is too long is left out, as such an event of a calendar is; the
+        // feed's other items stay.
+        if uid.len() > 1024 {
+            container.warnings.push("invalid_feed_item_uid".into());
+            return Ok(());
+        }
         d = d.bounded(&[])?;
         let content_hash = hash(serde_json::to_string(&crate::changes::normalize(&d))?.as_bytes());
         ensure!(
@@ -1606,11 +1721,8 @@ pub fn structured_feed(
         }
     } else {
         let text = std::str::from_utf8(bytes)?;
-        let options = roxmltree::ParsingOptions {
-            nodes_limit: cfg.max_components.saturating_mul(16).min(u32::MAX as usize) as u32,
-            ..Default::default()
-        };
-        let Ok(xml) = roxmltree::Document::parse_with_options(text, options) else {
+        let nodes = cfg.max_components.saturating_mul(16).min(u32::MAX as usize) as u32;
+        let Ok(xml) = crate::resolver::xml::parse_capped(text, nodes) else {
             return Ok(None);
         };
         if !matches!(xml.root_element().tag_name().name(), "rss" | "feed" | "RDF") {

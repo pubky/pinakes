@@ -12,8 +12,11 @@
 //!    (`PARSE_MEMORY`). One `blocking` call is one job (`Job`): its parses share one worker,
 //!    started at the first and ended with the job, so they share its CPU budget and one wall
 //!    deadline, and a watchdog kills the worker at that deadline or as soon as the caller stops
-//!    waiting. Past any limit the parse fails as `TooComplex` (the failure kind `too_complex`):
-//!    no card. Every later parse of that job fails at once, so a loop over many fragments ends
+//!    waiting. Past the CPU budget or the memory limit the parse fails as `TooComplex` (the
+//!    failure kind `too_complex`): no card. A worker killed at the wall deadline, one that ended
+//!    by itself and a caller that stopped waiting say nothing about the page: the failure is a
+//!    `timeout`, the card stays and the page is read again (`TooComplex::transient`). Either
+//!    way every later parse of that job fails at once, so a loop over many fragments ends
 //!    within the job's budget too. The worker answers with the tree, within `MAX_DEPTH` (a deeper
 //!    node is left out) and `MAX_NODES` (more is `TooComplex`), so what the parent reads back is
 //!    bounded and linear to rebuild. Text without a `<` holds no markup and is parsed in this
@@ -371,7 +374,7 @@ async fn permit(parses: &Arc<Semaphore>) -> anyhow::Result<OwnedSemaphorePermit>
         })
     })
     .await?;
-    Ok(permit.context("the caller stopped waiting")??)
+    Ok(permit.context(CALLER_GONE)??)
 }
 
 /// Run a parse on a thread of its own, outside the runtime and its permits, as one parse job,
@@ -415,6 +418,21 @@ pub fn job_over() -> bool {
     })
 }
 
+/// The error for work in a job that stopped because the job is over ([`job_over`]): the job's
+/// own reason when a parse ended it, else its caller gone or its deadline passed.
+pub fn job_ended() -> anyhow::Error {
+    let reason = JOB.with(|j| {
+        j.borrow()
+            .as_ref()
+            .map_or(CALLER_GONE, |job| match job.over {
+                Some(reason) => reason,
+                None if job.cancelled.load(Ordering::SeqCst) => CALLER_GONE,
+                None => WALL_DEADLINE,
+            })
+    });
+    TooComplex { reason }.into()
+}
+
 fn check_slot() {
     debug_assert!(
         JOB.with(|j| j.borrow().is_some()) || tokio::runtime::Handle::try_current().is_err(),
@@ -422,10 +440,26 @@ fn check_slot() {
     );
 }
 
-/// A parse that did not end within its limits: the page gets no card (`too_complex`).
+/// The reasons a parse job ends for that say nothing about the page: its caller gone, a
+/// worker slower than the job's wall deadline (a loaded host), a worker that ended by itself or
+/// was killed from outside (the kernel's memory killer).
+const CALLER_GONE: &str = "the caller stopped waiting";
+const WALL_DEADLINE: &str = "the wall deadline";
+const WORKER_ENDED: &str = "the worker ended early";
+
+/// A parse that did not end within its limits. Past the CPU budget, the memory limit or the
+/// node cap the page gets no card (`too_complex`); a parse that ended for a reason outside the
+/// page (`transient`) is read again later (`timeout`).
 #[derive(Debug)]
 pub struct TooComplex {
     pub reason: &'static str,
+}
+impl TooComplex {
+    /// Whether the parse ended for a reason outside the page (the wall deadline, a worker that
+    /// ended early, a caller that stopped waiting): the next read may parse it.
+    pub fn transient(&self) -> bool {
+        matches!(self.reason, CALLER_GONE | WALL_DEADLINE | WORKER_ENDED)
+    }
 }
 impl std::fmt::Display for TooComplex {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -701,10 +735,10 @@ impl Job {
             return Err(TooComplex { reason }.into());
         }
         if self.cancelled.load(Ordering::SeqCst) {
-            return Err(self.end_with("the caller stopped waiting", text));
+            return Err(self.end_with(CALLER_GONE, text));
         }
         if Instant::now() >= self.deadline {
-            return Err(self.end_with("the wall deadline", text));
+            return Err(self.end_with(WALL_DEADLINE, text));
         }
         // Text without a `<` holds no markup: the tokenizer reads it in linear time and there is
         // no tree to build, so it is parsed here (a calendar's plain descriptions). It counts
@@ -772,18 +806,30 @@ impl Job {
     /// End the job's parsing for good, logged once, and the error for the parse that found it.
     fn end_with(&mut self, reason: &'static str, text: &str) -> anyhow::Error {
         self.over = Some(reason);
-        tracing::warn!(
-            reason,
-            bytes = text.len(),
-            "an HTML parse did not end within its limits; the page gets no card"
-        );
-        TooComplex { reason }.into()
+        let error = TooComplex { reason };
+        if error.transient() {
+            tracing::warn!(
+                reason,
+                bytes = text.len(),
+                "an HTML parse did not end within its limits; the page is read again later"
+            );
+        } else {
+            tracing::warn!(
+                reason,
+                bytes = text.len(),
+                "an HTML parse did not end within its limits; the page gets no card"
+            );
+        }
+        error.into()
     }
 
     fn start(&self, worker: &Worker) -> anyhow::Result<Process> {
+        // The worker reads hostile markup: it gets none of the daemon's environment (the
+        // database URL, keys and tokens), only its arguments and the text on its stdin.
         let mut child = Command::new(&worker.program)
             .args(&worker.args)
             .arg(self.budget.as_secs().max(1).to_string())
+            .env_clear()
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -808,9 +854,9 @@ impl Job {
                 loop {
                     let running = slot.as_mut()?;
                     let reason = if cancelled.load(Ordering::SeqCst) {
-                        Some("the caller stopped waiting")
+                        Some(CALLER_GONE)
                     } else if Instant::now() >= deadline {
-                        Some("the wall deadline")
+                        Some(WALL_DEADLINE)
                     } else {
                         None
                     };
@@ -863,7 +909,7 @@ impl Job {
     /// End the worker and say why it ended: closed, killed, or dead at a limit.
     fn stop(&mut self) -> &'static str {
         let Some(process) = self.process.take() else {
-            return "the worker ended early";
+            return WORKER_ENDED;
         };
         drop(process.stdin);
         drop(process.stdout);
@@ -882,7 +928,7 @@ impl Job {
             Some(Ok(status)) if matches!(status.signal(), Some(libc::SIGABRT | libc::SIGSEGV)) => {
                 "the memory limit"
             }
-            _ => "the worker ended early",
+            _ => WORKER_ENDED,
         }
     }
 
@@ -1964,7 +2010,7 @@ mod tests {
     /// `<title>`, names alike in their first 32 bytes, and end tags that cannot close past a
     /// special element. Each is cut at its cap and parses at once.
     #[test]
-    fn markup_the_scan_once_misread_is_cut() {
+    fn more_hostile_markup_is_cut_at_its_cap() {
         let attributes = |tag: &str| {
             let mut text = format!("<title>Kept</title>{tag}");
             for n in 0..60_000 {
@@ -2188,6 +2234,73 @@ mod tests {
             .is_ok());
     }
 
+    /// A worker is started without the daemon's environment: no variable of this process (cargo
+    /// sets several for a test) reaches it.
+    #[test]
+    fn a_worker_gets_none_of_the_daemon_s_environment() {
+        assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some());
+        let seen = std::env::temp_dir().join(format!("pinakes-worker-env-{}", std::process::id()));
+        let worker = Worker {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                "/usr/bin/env > \"$0\"".into(),
+                seen.clone().into_os_string(),
+            ],
+        };
+        let mut job = Job::new(PARSE_BUDGET, Arc::default());
+        // The script answers nothing: the parse fails, the worker has run.
+        assert!(job
+            .parse_with(Kind::Fragment, "<b>x</b>", Some(&worker))
+            .is_err());
+        let environment = std::fs::read_to_string(&seen).unwrap();
+        let _ = std::fs::remove_file(&seen);
+        assert!(!environment.contains("CARGO"), "{environment}");
+        assert!(!environment.contains("DATABASE_URL"), "{environment}");
+    }
+
+    /// A parse that ended for a reason outside the page is a timeout, read again with the card
+    /// kept: a worker that exits by itself (as one killed from outside does), and one still
+    /// running at the job's wall deadline. A worker dead at its CPU budget stays `too_complex`.
+    #[test]
+    fn a_worker_that_ends_early_or_late_is_a_timeout() {
+        let shell = |script: &str| Worker {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), script.into()],
+        };
+        let mut job = Job::new(PARSE_BUDGET, Arc::default());
+        let error = job
+            .parse_with(Kind::Fragment, "<b>x</b>", Some(&shell("exit 1")))
+            .unwrap_err();
+        let parse = error.downcast_ref::<TooComplex>().expect("too complex");
+        assert_eq!(parse.reason, "the worker ended early");
+        assert!(parse.transient());
+        assert_eq!(crate::resolver::error_class(&error), "timeout");
+
+        let mut job = Job::new(PARSE_BUDGET, Arc::default());
+        job.deadline = Instant::now() + Duration::from_millis(300);
+        let error = job
+            .parse_with(
+                Kind::Fragment,
+                "<b>x</b>",
+                Some(&shell("exec /bin/sleep 30")),
+            )
+            .unwrap_err();
+        let parse = error.downcast_ref::<TooComplex>().expect("too complex");
+        assert_eq!(parse.reason, "the wall deadline");
+        assert_eq!(crate::resolver::error_class(&error), "timeout");
+
+        for (reason, class) in [
+            ("the caller stopped waiting", "timeout"),
+            ("the CPU budget", "too_complex"),
+            ("the memory limit", "too_complex"),
+            ("more nodes than the cap", "too_complex"),
+        ] {
+            let error: anyhow::Error = TooComplex { reason }.into();
+            assert_eq!(crate::resolver::error_class(&error), class, "{reason}");
+        }
+    }
+
     /// A CPU budget no parse of a test reaches: a page cut short at the budget is a smaller tree,
     /// so a test of the node cap parses with this budget and the cap alone can stop it.
     const AMPLE_BUDGET: Duration = Duration::from_secs(60 * 60);
@@ -2314,6 +2427,29 @@ mod tests {
         // A 503 text/plain answer of 13,000 divs, read by the wall check.
         let plain = "<div>".repeat(13_000);
         timed(|| interstitial::inspect(&url, &fetched(503, "text/plain", plain)).unwrap());
+        // A JSON-LD array of 250,000 entries whose first node holds a graph of 250,000 more, as
+        // a JSON answer and as a page's script: each node is ranked once.
+        let zeros = "0,".repeat(250_000);
+        let array = format!(r#"[{{"@type":"Event","name":"Kept","@graph":[{zeros}0]}},{zeros}0]"#);
+        let answer = fetched(200, "application/ld+json", array.clone());
+        let out = timed(|| web::extract(url.as_str(), &answer, 3600).unwrap());
+        assert_eq!(out.doc.name.as_deref(), Some("Kept"));
+        let script = format!(r#"<script type="application/ld+json">{array}</script>"#);
+        let out =
+            timed(|| web::extract(url.as_str(), &fetched(200, "text/html", script), 3600).unwrap());
+        assert_eq!(out.doc.name.as_deref(), Some("Kept"));
+        // 20,000 scripts beside one large one: each script is ranked once.
+        let large = format!(
+            r#"{{"@type":"Event","name":"Kept","@graph":[{}0]}}"#,
+            "0,".repeat(100_000)
+        );
+        let many = format!(
+            r#"<script type="application/ld+json">{large}</script>{}"#,
+            r#"<script type="application/ld+json">{"@type":"WebSite"}</script>"#.repeat(20_000)
+        );
+        let out =
+            timed(|| web::extract(url.as_str(), &fetched(200, "text/html", many), 3600).unwrap());
+        assert_eq!(out.doc.name.as_deref(), Some("Kept"));
     }
 
     /// The semaphore is the test's own: other tests' parses don't move its count.

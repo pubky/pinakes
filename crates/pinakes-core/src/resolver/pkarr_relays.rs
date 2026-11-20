@@ -1,6 +1,7 @@
 //! PKARR records through relays, fetched by `Egress` and verified here: a relay can withhold a
 //! record, never forge one, because every packet carries its owner's signature; and Pinakes
-//! never goes back to a packet older than the newest it remembers for that key.
+//! never goes back to a packet older than the newest it remembers for that key (a memory of
+//! 10,000 keys that a restart empties: after one, a relay can serve an older signed record).
 use super::{
     egress::{Egress, FetchOptions},
     ErrorClass,
@@ -34,6 +35,13 @@ const PAYLOAD_CAP: usize = 8 * 1024;
 const MAX_DEPTH: usize = 7;
 /// Endpoints read across one resolution.
 const MAX_ENDPOINTS: usize = 64;
+/// The longest a relay ask waits for its host's slot (`FetchOptions::slot_wait`). Relay hosts
+/// are paced at one request a second by default, so an ask behind one other request waits about
+/// that long; one behind a stalled request, or several, is put off instead (`Relays::deadline`).
+const RELAY_SLOT_WAIT: Duration = Duration::from_millis(1500);
+/// What a whole relay ask may take beyond its slot wait and its request: the relay host's DNS
+/// lookup and the reading of its answer (`Relays::deadline`).
+const RELAY_ASK_MARGIN: Duration = Duration::from_millis(500);
 
 struct Cached {
     expires: Instant,
@@ -49,6 +57,18 @@ struct State {
 }
 pub struct Relays {
     relays: Vec<Url>,
+    /// How long one relay has to answer (`limits.pkarr_relay_timeout_ms`), so that a relay that
+    /// stalls does not hold back another's packet. Three bounds, none of which adds to another:
+    /// - the wait for the relay host's slot, at most `RELAY_SLOT_WAIT` (`FetchOptions::slot_wait`):
+    ///   a slot further away is the egress's free `rate_limited` wait, no charge;
+    /// - the request, from when it has the slot, at most this deadline
+    ///   (`FetchOptions::request_deadline`); a redirect is not followed (`keep_redirect`);
+    /// - the whole ask (the host's DNS lookup and the reading of its answer too), at most
+    ///   `RELAY_SLOT_WAIT` + this deadline + `RELAY_ASK_MARGIN`.
+    ///
+    /// Past the second or the third the relay failed. With the deadline at most 7 s (its
+    /// validated range) an ask ends within 9 s of a resolution's 10 s.
+    deadline: Duration,
     egress: Egress,
     state: Mutex<State>,
 }
@@ -59,7 +79,8 @@ enum Answer {
     Failed(String),
     /// The relay could not be reached (`super::unreached`): no answer about the key.
     Unreached(String),
-    /// Egress's own wait for the relay host's budget, in seconds: no request was sent.
+    /// A wait, in seconds: Egress's own for the relay host's budget or slot (no request was
+    /// sent), or the relay's 429 with its `Retry-After`.
     Wait(u64),
 }
 
@@ -70,8 +91,9 @@ struct Target {
 }
 
 impl Relays {
-    pub fn new(relays: &[String], egress: Egress) -> Result<Self> {
+    pub fn new(relays: &[String], deadline: Duration, egress: Egress) -> Result<Self> {
         Ok(Self {
+            deadline,
             relays: relays
                 .iter()
                 .map(|r| Url::parse(r).with_context(|| format!("PKARR relay {r}")))
@@ -82,11 +104,13 @@ impl Relays {
     }
 
     /// The owner's verified packet: from the cache while it lives, else the newest one the
-    /// relays (asked together) serve. `None` when the relays have no record. Relay-side failures
-    /// (timeouts, policy refusals, payloads that do not verify) are `connect`: retried with
-    /// backoff, then dead-lettered like any failure. When no relay answered, because each one
-    /// that failed could not be reached (refused, reset) or waited for its host budget, the
-    /// failure is `super::Unreached` (or that wait alone), which never dead-letters.
+    /// relays (asked together, each within `deadline`) serve. `None` when the relays have no
+    /// record. Relay-side failures (timeouts, policy refusals, payloads that do not verify) are
+    /// `connect`: retried with backoff, then dead-lettered like any failure. When no relay
+    /// answered, because each one that failed could not be reached (refused, reset), waited for
+    /// its host budget (or would have waited longer than `RELAY_SLOT_WAIT`) or answered 429, the
+    /// failure is `super::Unreached` (or that wait alone, with the longest `Retry-After`), which
+    /// never dead-letters.
     pub async fn packet(&self, key: &PublicKey) -> Result<Option<SignedPacket>> {
         let z32 = key.to_z32();
         if let Some(cached) = self.state.lock().unwrap().cache.get(&z32) {
@@ -99,13 +123,27 @@ impl Relays {
             extra_types: PAYLOAD_TYPES,
             // Whatever the relay says the body is, HTML too.
             body_cap: Some(PAYLOAD_CAP),
+            request_deadline: Some(self.deadline),
+            slot_wait: Some(RELAY_SLOT_WAIT),
+            // A relay answers a key's packet where it is asked: a redirect is a failed relay,
+            // never followed (each hop would take another slot wait and deadline).
+            keep_redirect: true,
             ..Default::default()
         };
         let answers = futures_util::future::join_all(self.relays.iter().map(|relay| {
             let url = format!("{}/{z32}", relay.as_str().trim_end_matches('/'));
             let options = &options;
             async move {
-                match self.egress.fetch_with(&url, options).await {
+                let ask = RELAY_SLOT_WAIT + self.deadline + RELAY_ASK_MARGIN;
+                let Ok(answer) =
+                    tokio::time::timeout(ask, self.egress.fetch_with(&url, options)).await
+                else {
+                    return Answer::Failed(format!(
+                        "{relay} did not answer within {} ms",
+                        ask.as_millis()
+                    ));
+                };
+                match answer {
                     Ok(fetched) if fetched.status == 404 => Answer::Missing,
                     Ok(fetched) if (200..300).contains(&fetched.status) => {
                         match SignedPacket::from_relay_payload(key, &fetched.body.into()) {
@@ -119,8 +157,16 @@ impl Relays {
                     Err(error) if super::unreached(&error) => {
                         Answer::Unreached(format!("{relay}: {error:#}"))
                     }
+                    Err(error) if error.is::<super::egress::RequestDeadline>() => {
+                        Answer::Failed(format!(
+                            "{relay} did not answer within {} ms",
+                            self.deadline.as_millis()
+                        ))
+                    }
                     Err(error) => match error.downcast_ref::<super::RetryLater>() {
-                        Some(wait) if wait.class == "rate_limited" => Answer::Wait(wait.seconds),
+                        Some(wait) if matches!(wait.class, "rate_limited" | "http_4xx") => {
+                            Answer::Wait(wait.seconds)
+                        }
                         _ => Answer::Failed(format!("{relay}: {error:#}")),
                     },
                 }
@@ -157,7 +203,8 @@ impl Relays {
         }
         if failures.is_empty() && unreached.is_empty() {
             if let Some(seconds) = wait {
-                // Egress waited for a relay host's budget: ask again then.
+                // Egress waited for a relay host's budget, or a relay said when to come back:
+                // ask again then.
                 return Err(super::RetryLater {
                     class: "rate_limited",
                     seconds,

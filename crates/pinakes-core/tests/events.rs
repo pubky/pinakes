@@ -217,6 +217,16 @@ fn identities_duplicate_versions_cancel_and_export_noise() {
         calendar::canonical_feed("https://cloud.example/index.php/apps/calendar/p/abc/"),
         "https://cloud.example/apps/calendar/p/abc"
     );
+    // A link that is no calendar's is fetched as written: a `webcal://` in its query, a path
+    // that only looks like a Nextcloud share, a Google Calendar page.
+    for uri in [
+        "https://calendar.google.com/calendar/r?cid=webcal://example.org/a.ics",
+        "https://blog.example/apps/calendar/",
+        "https://blog.example/index.php/apps/calendar/",
+        "https://calendar.google.com/calendar/u/0/r/week%2F2026",
+    ] {
+        assert_eq!(calendar::canonical_feed(uri), uri);
+    }
     let base = event(
         "UID:same\nDTSTART:20261020T180000Z\nSUMMARY:Old\nSEQUENCE:1\nDTSTAMP:20261015T000000Z",
     );
@@ -1404,16 +1414,23 @@ fn recurrence_local_days_coordinate_zones_exclusion_budget_and_categories() {
         max_recurrence_steps: 10,
         ..Default::default()
     };
-    assert!(calendar::parse(
+    // A series past the step cap is its own failure, not the feed's.
+    let skipped = calendar::parse(
         "https://example.org/f.ics",
         cal(&event(
-            "UID:expensive\nDTSTART:19000101T000000Z\nRRULE:FREQ=HOURLY"
+            "UID:expensive\nDTSTART:19000101T000000Z\nRRULE:FREQ=HOURLY",
         ))
         .as_bytes(),
         &cfg,
-        now()
+        now(),
     )
-    .is_err());
+    .unwrap()
+    .container
+    .unwrap();
+    assert!(skipped.occurrences.is_empty());
+    assert!(skipped
+        .warnings
+        .contains(&"invalid_vevent_recurrence".into()));
     let body = cal(&event(
         "UID:noise\nDTSTART:20261020T120000Z\nX-UNKNOWN-EXPORT:one",
     ));
@@ -1546,20 +1563,21 @@ fn malformed_events_are_isolated_and_hostile_work_is_bounded() {
     .into_bytes();
     let i = body.windows(7).position(|b| b == b"invalid").unwrap();
     body[i] = 0xff;
-    assert_eq!(
-        calendar::parse(
-            "https://example.org/f.ics",
-            &body,
-            &EventConfig::default(),
-            now()
-        )
-        .unwrap()
-        .container
-        .unwrap()
+    // A byte that is no UTF-8 is read as U+FFFD: the event stays.
+    let read = calendar::parse(
+        "https://example.org/f.ics",
+        &body,
+        &EventConfig::default(),
+        now(),
+    )
+    .unwrap()
+    .container
+    .unwrap();
+    assert_eq!(read.occurrences.len(), 2);
+    assert!(read
         .occurrences
-        .len(),
-        1
-    );
+        .iter()
+        .any(|o| o.doc.name.as_deref() == Some("\u{fffd}nvalid")));
     let large = cal(&event(&format!(
         "UID:bounded\nDTSTART:20261020T120000Z\nRRULE:FREQ=DAILY\nSUMMARY:{}\nDESCRIPTION:{}",
         "x".repeat(32000),
@@ -4858,4 +4876,295 @@ fn a_uid_that_carries_a_credential_is_kept_by_a_stand_in() {
     assert!(!key.contains("SECRET"), "{key}");
     assert_eq!(read(secret), key);
     assert_eq!(read("plain-1@cal.example"), "plain-1@cal.example");
+}
+
+/// A zone name is at most 128 bytes, and a prefixed one names its zone by its last parts.
+#[test]
+fn a_zone_name_is_bounded_and_named_by_its_last_parts() {
+    assert_eq!(
+        time::zone("/freeassociation.sourceforge.net/Tzfile/America/Argentina/Buenos_Aires")
+            .unwrap()
+            .to_string(),
+        "America/Argentina/Buenos_Aires"
+    );
+    assert!(time::zone(&format!("{}Europe/Zurich", "/".repeat(150))).is_none());
+    let started = std::time::Instant::now();
+    assert!(time::zone(&"/".repeat(1_000_000)).is_none());
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+}
+/// A calendar's properties are counted over all its components, and a line needs a name: a
+/// nameless one fails the calendar, or inside an event that event alone.
+#[test]
+fn calendar_properties_are_counted_and_need_a_name() {
+    let uri = "https://example.org/feed.ics";
+    let cfg = EventConfig {
+        max_properties: 1000,
+        ..Default::default()
+    };
+    let lines = |n: usize| format!("BEGIN:VCALENDAR\n{}END:VCALENDAR\n", "X-A:1\n".repeat(n));
+    assert!(calendar::parse(uri, lines(1000).as_bytes(), &cfg, now()).is_ok());
+    let error = calendar::parse(uri, lines(1001).as_bytes(), &cfg, now()).unwrap_err();
+    assert!(
+        error.to_string().contains("calendar property cap"),
+        "{error:#}"
+    );
+    let nameless = format!("BEGIN:VCALENDAR\n{}END:VCALENDAR\n", ":\n".repeat(10));
+    let error = calendar::parse(uri, nameless.as_bytes(), &cfg, now()).unwrap_err();
+    assert!(
+        error.to_string().contains("content line without a name"),
+        "{error:#}"
+    );
+    let container = parse(&cal(&format!(
+        "{}\n{}",
+        event("UID:bad\nDTSTART:20261020T120000Z\n:x\nSUMMARY:Nameless line"),
+        event("UID:good\nDTSTART:20261020T120000Z\nSUMMARY:Healthy")
+    )))
+    .container
+    .unwrap();
+    assert_eq!(container.occurrences.len(), 1);
+    assert_eq!(container.occurrences[0].uid, "good");
+    assert!(container.warnings.contains(&"invalid_vevent_line".into()));
+}
+/// A line folded inside a character (RFC 5545 folds at octets) unfolds whole, and a feed that is
+/// not UTF-8 keeps its events, the unreadable bytes replaced.
+#[test]
+fn a_line_folded_inside_a_character_unfolds_whole() {
+    let read = |body: &[u8]| {
+        calendar::parse(
+            "https://example.org/feed.ics",
+            body,
+            &EventConfig::default(),
+            now(),
+        )
+        .unwrap()
+    };
+    let folded = b"BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:fold\r\nDTSTART:20261020T120000Z\r\nSUMMARY:Caf\xc3\r\n \xa9 Lugano\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    let c = read(folded).container.unwrap();
+    assert_eq!(c.occurrences.len(), 1, "{:?}", c.warnings);
+    assert_eq!(
+        c.occurrences[0].doc.name.as_deref(),
+        Some("Caf\u{e9} Lugano")
+    );
+    let latin1 = b"BEGIN:VCALENDAR\nX-WR-CALNAME:Caf\xe9\nBEGIN:VEVENT\nUID:latin\nDTSTART:20261020T120000Z\nSUMMARY:Caf\xe9 Lugano\nEND:VEVENT\nEND:VCALENDAR\n";
+    let doc = read(latin1);
+    assert_eq!(doc.name.as_deref(), Some("Caf\u{fffd}"));
+    let c = doc.container.unwrap();
+    assert_eq!(c.occurrences.len(), 1, "{:?}", c.warnings);
+    assert_eq!(
+        c.occurrences[0].doc.name.as_deref(),
+        Some("Caf\u{fffd} Lugano")
+    );
+}
+/// A series that needs more steps than the cap to reach the horizon is skipped with a warning;
+/// the feed's other events stay.
+#[test]
+fn a_series_past_the_step_cap_is_skipped_beside_healthy_events() {
+    let body = cal(&format!(
+        "{}\n{}",
+        event("UID:old\nDTSTART:20260101T080000Z\nRRULE:FREQ=HOURLY\nSUMMARY:Hourly"),
+        event("UID:good\nDTSTART:20261020T120000Z\nSUMMARY:Healthy")
+    ));
+    let cfg = EventConfig {
+        max_recurrence_steps: 1000,
+        ..Default::default()
+    };
+    let container = calendar::parse("https://example.org/feed.ics", body.as_bytes(), &cfg, now())
+        .unwrap()
+        .container
+        .unwrap();
+    let uids: Vec<&str> = container
+        .occurrences
+        .iter()
+        .map(|o| o.uid.as_str())
+        .collect();
+    assert_eq!(uids, ["good"]);
+    assert!(container
+        .warnings
+        .contains(&"invalid_vevent_recurrence".into()));
+}
+/// A calendar's history counts against no cap: 12,000 past single events beside one upcoming
+/// parse to that one, under a revision cap of 10,000. A past event that shares its UID with
+/// another revision is still read, so the newer revision decides.
+#[test]
+fn a_calendars_history_counts_against_no_cap() {
+    let cfg = EventConfig {
+        parse_timeout_ms: 5000,
+        ..Default::default()
+    };
+    let read = |body: String| {
+        calendar::parse("https://example.org/feed.ics", body.as_bytes(), &cfg, now())
+            .unwrap()
+            .container
+            .unwrap()
+    };
+    let past: Vec<String> = (0..12_000)
+        .map(|i| {
+            event(&format!(
+                "UID:past{i}\nDTSTART:2020{:02}{:02}T120000Z\nSUMMARY:Past {i}",
+                i % 12 + 1,
+                i % 28 + 1
+            ))
+        })
+        .collect();
+    let next = event("UID:next\nDTSTART:20261020T120000Z\nSUMMARY:Next");
+    let container = read(cal(&format!("{}\n{next}", past.join("\n"))));
+    let uids: Vec<&str> = container
+        .occurrences
+        .iter()
+        .map(|o| o.uid.as_str())
+        .collect();
+    assert_eq!(uids, ["next"]);
+    let container = read(cal(&format!(
+        "{}\n{}",
+        event("UID:moved\nSEQUENCE:1\nDTSTART:20261020T120000Z\nSUMMARY:Stale"),
+        event("UID:moved\nSEQUENCE:2\nDTSTART:20200101T120000Z\nSUMMARY:Moved to the past")
+    )));
+    assert!(container.occurrences.is_empty());
+    assert!(container.warnings.contains(&"duplicate_uid".into()));
+}
+/// A floating event's end is kept as written, like its start: a zone found later moves both.
+#[test]
+fn a_floating_event_s_end_moves_with_its_start() {
+    let mut doc = parse(&cal(&event(
+        "UID:floating\nDTSTART:20261020T180000\nDTEND:20261020T200000\nSUMMARY:Floating",
+    )))
+    .container
+    .unwrap()
+    .occurrences[0]
+        .doc
+        .clone();
+    assert_eq!(
+        doc.event.start_local.as_deref(),
+        Some("2026-10-20 18:00:00")
+    );
+    assert_eq!(doc.event.end_local.as_deref(), Some("2026-10-20 20:00:00"));
+    doc.event.tz = Some("Europe/Zurich".into());
+    page::finalize(&mut doc, false);
+    assert_eq!(doc.start.unwrap().to_rfc3339(), "2026-10-20T16:00:00+00:00");
+    assert_eq!(doc.end.unwrap().to_rfc3339(), "2026-10-20T18:00:00+00:00");
+}
+/// A recurring all-day series in a calendar that names no zone keeps each occurrence's own date
+/// through the service (`EventService::container`, which finishes every row), and each is
+/// stored.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_zone_less_all_day_series_keeps_each_date(pool: PgPool) {
+    let service = pinakes_core::event::service::EventService {
+        pool: pool.clone(),
+        config: Default::default(),
+        osm: Arc::new(OsmResolver::new(pool.clone(), OsmConfig::default()).unwrap()),
+    };
+    let first = (Utc::now() - Duration::days(7)).date_naive();
+    let body = cal(&event(&format!(
+        "UID:weekly\nDTSTART;VALUE=DATE:{}\nRRULE:FREQ=WEEKLY;COUNT=6\nSUMMARY:Weekly",
+        first.format("%Y%m%d")
+    )));
+    let uri = "https://example.org/weekly.ics";
+    let fetched = common::fetched(
+        uri.parse().unwrap(),
+        200,
+        "text/calendar".into(),
+        body.into_bytes(),
+    );
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let doc = service
+        .container(uri, &fetched, deadline)
+        .await
+        .unwrap()
+        .unwrap();
+    let rows = &doc.container.as_ref().unwrap().occurrences;
+    let starts: Vec<_> = rows
+        .iter()
+        .map(|o| o.doc.start.unwrap().date_naive())
+        .collect();
+    let expected: Vec<_> = (0..6).map(|i| first + Duration::days(7 * i)).collect();
+    assert_eq!(starts, expected);
+    for row in rows {
+        let (start, end) = (row.doc.start.unwrap(), row.doc.end.unwrap());
+        assert_eq!(end - start, Duration::days(1));
+        assert_eq!(
+            row.doc.event.start_local,
+            Some(start.naive_utc().to_string())
+        );
+    }
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let stored: i64 =
+        sqlx::query_scalar("SELECT count(DISTINCT start_at) FROM occurrence WHERE resource_id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, 6);
+}
+/// An event without a zone does not take the zone of another event at the same venue: only a
+/// zone the place gave is the venue's.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_event_takes_no_zone_from_another_event_at_its_venue(pool: PgPool) {
+    let service = pinakes_core::event::service::EventService {
+        pool: pool.clone(),
+        config: Default::default(),
+        osm: Arc::new(OsmResolver::new(pool.clone(), OsmConfig::default()).unwrap()),
+    };
+    let day = |n: i64| {
+        (Utc::now() + Duration::days(n))
+            .format("%Y%m%d")
+            .to_string()
+    };
+    let body = cal(&format!(
+        "{}\n{}",
+        event(&format!(
+            "UID:a\nDTSTART;TZID=America/New_York:{}T180000\nLOCATION:Room 1\nSUMMARY:A",
+            day(2)
+        )),
+        event(&format!(
+            "UID:b\nDTSTART:{}T180000\nLOCATION:Room 1\nSUMMARY:B",
+            day(3)
+        ))
+    ));
+    let uri = "https://example.org/rooms.ics";
+    let fetched = common::fetched(
+        uri.parse().unwrap(),
+        200,
+        "text/calendar".into(),
+        body.into_bytes(),
+    );
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let doc = service
+        .container(uri, &fetched, deadline)
+        .await
+        .unwrap()
+        .unwrap();
+    let rows = &doc.container.as_ref().unwrap().occurrences;
+    let a = rows.iter().find(|o| o.uid == "a").unwrap();
+    assert_eq!(a.doc.event.tz.as_deref(), Some("America/New_York"));
+    let b = rows.iter().find(|o| o.uid == "b").unwrap();
+    assert_eq!(b.doc.event.tz, None);
+    assert_eq!(
+        b.doc.start.unwrap().format("%Y%m%dT%H%M%S").to_string(),
+        format!("{}T180000", day(3))
+    );
+}
+/// A feed item whose id is longer than a key holds is left out with a warning; the feed's
+/// other items stay.
+#[test]
+fn a_feed_item_with_too_long_an_id_is_left_out() {
+    let item = |id: &str, title: &str| {
+        json!({"id": id, "title": title, "url": format!("https://example.org/event/{title}"),
+            "_gancio": {"start_datetime": 1792522800}})
+    };
+    let feed = json!({"version": "https://jsonfeed.org/version/1",
+        "items": [item(&"x".repeat(1025), "long"), item("id1", "kept")]});
+    let c = calendar::structured_feed(
+        "https://example.org/json",
+        feed.to_string().as_bytes(),
+        &EventConfig::default(),
+        now(),
+    )
+    .unwrap()
+    .unwrap()
+    .container
+    .unwrap();
+    let uids: Vec<&str> = c.occurrences.iter().map(|o| o.uid.as_str()).collect();
+    assert_eq!(uids, ["id1"]);
+    assert!(c.warnings.contains(&"invalid_feed_item_uid".into()));
 }

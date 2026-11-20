@@ -78,7 +78,9 @@ impl PubkyResolver {
 
     /// The latest version of a post (`pubky_apps::Kind::versions`): its folder listed newest
     /// first, one entry, a version file directly in it. `Err` with the listing when the folder
-    /// answers no version (a listing that fails, or holds none, as 404).
+    /// answers no version (a listing that fails, or holds none, as 404). A listing whose first
+    /// line is no entry of this owner is not read as "no version": it fails as `parse`, so a
+    /// homeserver that lists in another form does not turn every post `missing`.
     async fn latest(&self, post: &Url) -> Result<std::result::Result<Url, Fetched>> {
         let mut folder = post.clone();
         folder.set_path(&format!("{}/", post.path().trim_end_matches('/')));
@@ -88,15 +90,28 @@ impl PubkyResolver {
             return Ok(Err(listed));
         }
         let owner = post.host_str().unwrap_or_default();
-        let version = std::str::from_utf8(&listed.body)
-            .ok()
-            .and_then(|body| body.lines().next())
+        let unread = || {
+            anyhow::Error::new(ErrorClass("parse"))
+                .context("the folder listing's first line is no entry of this owner")
+        };
+        let first = std::str::from_utf8(&listed.body)
+            .map_err(|_| unread())?
+            .lines()
+            .next()
             .map(str::trim)
-            .and_then(|line| {
+            .filter(|line| !line.is_empty());
+        let entry = match first {
+            // An empty folder.
+            None => None,
+            Some(line) => Some(
                 line.strip_prefix("pubky://")
                     .or_else(|| line.strip_prefix("pubky"))
-            })
-            .and_then(|rest| rest.strip_prefix(owner))
+                    .and_then(|rest| rest.strip_prefix(owner))
+                    .filter(|path| path.starts_with('/'))
+                    .ok_or_else(unread)?,
+            ),
+        };
+        let version = entry
             .and_then(|path| path.strip_prefix(folder.path()))
             .filter(|file| {
                 file.ends_with(".json")
@@ -118,7 +133,11 @@ impl PubkyResolver {
 
     pub fn new(config: ResolverConfig, egress: Egress) -> Result<Self> {
         Ok(Self {
-            relays: Relays::new(&config.pkarr_relays, egress.clone())?,
+            relays: Relays::new(
+                &config.pkarr_relays,
+                Duration::from_millis(config.pkarr_relay_timeout_ms),
+                egress.clone(),
+            )?,
             egress,
             config,
         })
@@ -177,13 +196,12 @@ impl Resolver for PubkyResolver {
                     .context(crate::resolver::Upstream(status)))
                 }
             }
-            let doc = super::pubky_apps::card_with(
+            let doc = super::pubky_apps::card_at(
                 uri,
                 &fetched.content_type,
                 &fetched.body,
                 self.config.ttl_secs,
                 chrono::Utc::now(),
-                self.config.max_period_dates,
             )
             .bounded(super::pubky_apps::attributes())?;
             crate::telemetry::document(crate::telemetry::last_fetch(), &self.manifest(), &doc);
@@ -243,10 +261,15 @@ mod tests {
     struct FixedDns {
         homeserver: Vec<SocketAddr>,
         relay: Vec<SocketAddr>,
+        /// Relay hosts whose lookup never answers.
+        stalling: Arc<Mutex<Vec<&'static str>>>,
     }
     #[async_trait]
     impl Dns for FixedDns {
         async fn lookup(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>> {
+            if self.stalling.lock().unwrap().contains(&host) {
+                return std::future::pending().await;
+            }
             match (host, port) {
                 ("homeserver.example", 9443 | 443) => Ok(self.homeserver.clone()),
                 ("relay.example" | "relay2.example", 443) => Ok(self.relay.clone()),
@@ -263,6 +286,16 @@ mod tests {
         empty: Mutex<Vec<&'static str>>,
         /// Relay hosts that refuse the connection (a real refusal, from a closed local port).
         refusing: Mutex<Vec<&'static str>>,
+        /// Relay hosts that accept the request and never answer.
+        stalling: Mutex<Vec<&'static str>>,
+        /// Relay hosts that answer only after this long.
+        slow: Mutex<Vec<(&'static str, Duration)>>,
+        /// Relay hosts that answer every request with a redirect to another path of theirs.
+        redirecting: Mutex<Vec<&'static str>>,
+        /// Relay hosts whose DNS lookup never answers (`FixedDns::stalling`).
+        dns_stalling: Arc<Mutex<Vec<&'static str>>>,
+        /// Relay hosts that answer 429 with this `Retry-After` (seconds).
+        limited: Mutex<Vec<(&'static str, u64)>>,
         /// What one relay host serves for one key instead.
         serve: Mutex<HashMap<(&'static str, String), Vec<u8>>>,
         relay_requests: Mutex<Vec<String>>,
@@ -290,6 +323,47 @@ mod tests {
                 drop(listener);
                 return crate::resolver::egress::PinnedTransport
                     .get_with(url, &[closed], options)
+                    .await;
+            }
+            if self.stalling.lock().unwrap().contains(&host) {
+                return std::future::pending().await;
+            }
+            let slow = self
+                .slow
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(h, _)| *h == host)
+                .map(|(_, after)| *after);
+            if let Some(after) = slow {
+                tokio::time::sleep(after).await;
+            }
+            if self.redirecting.lock().unwrap().contains(&host) {
+                let response = axum::http::Response::builder()
+                    .status(302)
+                    .header(
+                        "location",
+                        format!("https://{host}/elsewhere{}", url.path()),
+                    )
+                    .body(vec![]);
+                let response = reqwest::Response::from(response.unwrap());
+                return crate::resolver::egress::read_response_with(url.clone(), response, options)
+                    .await;
+            }
+            let limited = self
+                .limited
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(h, _)| *h == host)
+                .map(|(_, seconds)| *seconds);
+            if let Some(seconds) = limited {
+                let response = axum::http::Response::builder()
+                    .status(429)
+                    .header("retry-after", seconds.to_string())
+                    .body(vec![]);
+                let response = reqwest::Response::from(response.unwrap());
+                return crate::resolver::egress::read_response_with(url.clone(), response, options)
                     .await;
             }
             let key = url.path().trim_start_matches('/');
@@ -384,12 +458,33 @@ mod tests {
             tampering: vec![],
             empty: Mutex::default(),
             refusing: Mutex::default(),
+            stalling: Mutex::default(),
+            slow: Mutex::default(),
+            redirecting: Mutex::default(),
+            dns_stalling: Arc::default(),
+            limited: Mutex::default(),
             serve: Mutex::default(),
             relay_requests: Mutex::default(),
             homeserver,
         })
     }
     fn resolver_on(net: Arc<Net>, dns: &[&str], relay: &str, relays: &[&str]) -> PubkyResolver {
+        // No per-host pacing in tests: the relays and the homeserver answer at once.
+        let cfg = crate::config::EgressConfig {
+            host_requests_per_second: 1_000_000.0,
+            ..Default::default()
+        };
+        resolver_with(net, dns, relay, relays, cfg, ResolverConfig::default())
+    }
+    /// [`resolver_on`] with an egress and a resolver configuration of the test's own.
+    fn resolver_with(
+        net: Arc<Net>,
+        dns: &[&str],
+        relay: &str,
+        relays: &[&str],
+        cfg: crate::config::EgressConfig,
+        config: ResolverConfig,
+    ) -> PubkyResolver {
         let addresses = |list: &[&str], port| {
             list.iter()
                 .map(|a| SocketAddr::new(a.parse().unwrap(), port))
@@ -398,16 +493,12 @@ mod tests {
         let dns = FixedDns {
             homeserver: addresses(dns, 9443),
             relay: addresses(&[relay], 443),
-        };
-        // No per-host pacing in tests: the relays and the homeserver answer at once.
-        let cfg = crate::config::EgressConfig {
-            host_requests_per_second: 1_000_000.0,
-            ..Default::default()
+            stalling: net.dns_stalling.clone(),
         };
         let egress = Egress::with_backends(cfg, Arc::new(dns), net);
         let config = ResolverConfig {
             pkarr_relays: relays.iter().map(|r| r.to_string()).collect(),
-            ..Default::default()
+            ..config
         };
         PubkyResolver::new(config, egress).unwrap()
     }
@@ -795,6 +886,20 @@ mod tests {
             [listing.clone(), format!("{post}/0034B.json")]
         );
 
+        // A first line that is no entry of this owner (a listing in a form Pinakes does not
+        // read) is a failure, never "no version": the card and its history stay.
+        for body in [
+            "<html>listing</html>".to_owned(),
+            format!("{post}/0034B.json"),
+            format!(
+                "pubky://{}{post}/0034B.json",
+                Keypair::random().public_key()
+            ),
+        ] {
+            serve(&listing, 200, "text/plain", body.clone());
+            let error = resolver.resolve(&uri).await.unwrap_err();
+            assert_eq!(crate::resolver::error_class(&error), "parse", "{body}");
+        }
         // An empty folder, one gone, and one listing a file outside it: missing, nothing more
         // fetched.
         for (status, body) in [
@@ -899,6 +1004,229 @@ mod tests {
             );
             assert!(!crate::resolver::unreached(&error), "{answering} {error:#}");
         }
+    }
+
+    /// A relay whose DNS lookup never answers is given up with its whole ask, inside the read:
+    /// the other relay's packet is used.
+    #[tokio::test(start_paused = true)]
+    async fn a_relay_whose_lookup_stalls_does_not_hold_back_another_s_packet() {
+        let owner = Keypair::random();
+        let relays = ["https://relay.example", "https://relay2.example"];
+        let net = network(&[direct(&owner)], ok());
+        net.dns_stalling.lock().unwrap().push("relay.example");
+        let started = tokio::time::Instant::now();
+        let doc = resolver_on(net, &["8.8.8.8"], "8.8.4.4", &relays)
+            .resolve(&object(&owner))
+            .await
+            .unwrap();
+        assert_eq!(doc.name.as_deref(), Some("A deck"));
+        // Its slot wait, its deadline (4 s) and the margin: 6 s of the 10 s read.
+        assert!(
+            started.elapsed() < Duration::from_secs(7),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A relay that answers with a redirect is a failed relay, asked once: the redirect is not
+    /// followed, and the other relay's packet is used.
+    #[tokio::test]
+    async fn a_relay_that_redirects_is_a_failed_relay() {
+        let owner = Keypair::random();
+        let relays = ["https://relay.example", "https://relay2.example"];
+        let net = network(&[direct(&owner)], ok());
+        net.redirecting.lock().unwrap().push("relay.example");
+        let doc = resolver_on(net.clone(), &["8.8.8.8"], "8.8.4.4", &relays)
+            .resolve(&object(&owner))
+            .await
+            .unwrap();
+        assert_eq!(doc.name.as_deref(), Some("A deck"));
+        let asked = |net: &Net| {
+            net.relay_requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|u| u.starts_with("https://relay.example/"))
+                .count()
+        };
+        assert_eq!(asked(&net), 1);
+        // The redirecting relay alone: a failed relay, named by its answer.
+        let net = network(&[direct(&owner)], ok());
+        net.redirecting.lock().unwrap().push("relay.example");
+        let error = resolver_on(net.clone(), &["8.8.8.8"], "8.8.4.4", &relays[..1])
+            .resolve(&object(&owner))
+            .await
+            .unwrap_err();
+        assert_eq!(crate::resolver::error_class(&error), "connect", "{error:#}");
+        assert!(format!("{error:#}").contains("answered 302"), "{error:#}");
+        assert_eq!(asked(&net), 1);
+    }
+
+    /// A relay that accepts the request and never answers is given up at its own deadline,
+    /// shorter than the resolution's: the other relay's packet is used.
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_relay_does_not_hold_back_another_s_packet() {
+        let owner = Keypair::random();
+        let relays = ["https://relay.example", "https://relay2.example"];
+        let net = network(&[direct(&owner)], ok());
+        net.stalling.lock().unwrap().push("relay.example");
+        let started = tokio::time::Instant::now();
+        let doc = resolver_on(net.clone(), &["8.8.8.8"], "8.8.4.4", &relays)
+            .resolve(&object(&owner))
+            .await
+            .unwrap();
+        assert_eq!(doc.name.as_deref(), Some("A deck"));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        // Every relay stalled: a relay-side failure, as a relay's timeout is.
+        net.stalling.lock().unwrap().push("relay2.example");
+        let other = Keypair::random();
+        let error = resolver_on(net, &["8.8.8.8"], "8.8.4.4", &relays)
+            .resolve(&object(&other))
+            .await
+            .unwrap_err();
+        assert_eq!(crate::resolver::error_class(&error), "connect", "{error:#}");
+        assert!(
+            format!("{error:#}").contains("did not answer within"),
+            "{error:#}"
+        );
+    }
+
+    /// The relay host paced at `rate` requests a second, a relay deadline of `relay_timeout_ms`:
+    /// a resolver, its network and the objects of two keys.
+    fn paced(rate: f64, relay_timeout_ms: u64) -> (PubkyResolver, Arc<Net>, String, String) {
+        let (first, second) = (Keypair::random(), Keypair::random());
+        let net = network(&[direct(&first), direct(&second)], ok());
+        let mut cfg = crate::config::EgressConfig {
+            host_requests_per_second: 1_000_000.0,
+            ..Default::default()
+        };
+        cfg.host_rates.insert("relay.example".into(), rate);
+        let config = ResolverConfig {
+            pkarr_relay_timeout_ms: relay_timeout_ms,
+            ..Default::default()
+        };
+        let resolver = resolver_with(
+            net.clone(),
+            &["8.8.8.8"],
+            "8.8.4.4",
+            &["https://relay.example"],
+            cfg,
+            config,
+        );
+        (resolver, net, object(&first), object(&second))
+    }
+
+    /// An ask queued for the relay host's slot is not a relay that failed: it gets its packet
+    /// when the slot comes within `RELAY_SLOT_WAIT`, and when it does not, no request is sent
+    /// and the link is read again later without a charge.
+    #[tokio::test(start_paused = true)]
+    async fn a_relay_s_deadline_does_not_count_the_wait_for_its_host_slot() {
+        // One request a second: the second ask waits about a second for its slot, longer than
+        // the relay's half-second deadline, and is answered.
+        let (resolver, net, first, second) = paced(1.0, 500);
+        resolver.resolve(&first).await.unwrap();
+        let started = tokio::time::Instant::now();
+        let doc = resolver.resolve(&second).await.unwrap();
+        assert_eq!(doc.name.as_deref(), Some("A deck"));
+        assert!(
+            started.elapsed() > Duration::from_millis(500),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(net.relay_requests.lock().unwrap().len(), 2);
+        // One request every two seconds: the slot is further away than an ask waits.
+        let (resolver, net, first, second) = paced(0.5, 4000);
+        resolver.resolve(&first).await.unwrap();
+        let started = tokio::time::Instant::now();
+        let error = resolver.resolve(&second).await.unwrap_err();
+        let wait = error
+            .downcast_ref::<crate::resolver::RetryLater>()
+            .unwrap_or_else(|| panic!("{error:#}"));
+        assert_eq!(wait.class, "rate_limited", "{error:#}");
+        assert!((1..=3).contains(&wait.seconds), "{}", wait.seconds);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(net.relay_requests.lock().unwrap().len(), 1);
+    }
+
+    /// A request sent after a wait for its slot has the whole deadline to be answered: two
+    /// asks at once at one request a second, the second sent about a second later, each relay
+    /// answer taking 0.8 of the deadline. Both get their packet.
+    #[tokio::test(start_paused = true)]
+    async fn a_request_sent_after_a_wait_for_its_slot_has_the_whole_deadline() {
+        let (resolver, net, first, second) = paced(1.0, 1000);
+        net.slow
+            .lock()
+            .unwrap()
+            .push(("relay.example", Duration::from_millis(800)));
+        let started = tokio::time::Instant::now();
+        let (a, b) = tokio::join!(resolver.resolve(&first), resolver.resolve(&second));
+        assert_eq!(a.unwrap().name.as_deref(), Some("A deck"));
+        assert_eq!(b.unwrap().name.as_deref(), Some("A deck"));
+        // The second request was sent after its slot wait.
+        assert!(
+            started.elapsed() > Duration::from_millis(1500),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(net.relay_requests.lock().unwrap().len(), 2);
+    }
+
+    /// Two reads at once behind a relay that never answers: the first read's request holds the
+    /// relay host's slot until its deadline, the second read's ask is queued behind it, and
+    /// both use the other relay's packet within about one deadline, not two.
+    #[tokio::test(start_paused = true)]
+    async fn asks_queued_behind_a_stalled_relay_do_not_hold_back_the_other_s_packet() {
+        let (first, second) = (Keypair::random(), Keypair::random());
+        let relays = ["https://relay.example", "https://relay2.example"];
+        let net = network(&[direct(&first), direct(&second)], ok());
+        net.stalling.lock().unwrap().push("relay.example");
+        let resolver = resolver_on(net, &["8.8.8.8"], "8.8.4.4", &relays);
+        let started = tokio::time::Instant::now();
+        let (first, second) = (object(&first), object(&second));
+        let (a, b) = tokio::join!(resolver.resolve(&first), resolver.resolve(&second));
+        assert_eq!(a.unwrap().name.as_deref(), Some("A deck"));
+        assert_eq!(b.unwrap().name.as_deref(), Some("A deck"));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A relay's 429 keeps its `Retry-After`: when no relay gave an answer about the key, the
+    /// link is read again then, without a charge. Another relay's packet is still used.
+    #[tokio::test]
+    async fn a_relay_s_429_keeps_its_retry_after() {
+        let owner = Keypair::random();
+        let relays = ["https://relay.example", "https://relay2.example"];
+        let net = network(&[direct(&owner)], ok());
+        net.limited
+            .lock()
+            .unwrap()
+            .extend([("relay.example", 120), ("relay2.example", 300)]);
+        let error = resolver_on(net, &["8.8.8.8"], "8.8.4.4", &relays)
+            .resolve(&object(&owner))
+            .await
+            .unwrap_err();
+        let wait = error
+            .downcast_ref::<crate::resolver::RetryLater>()
+            .unwrap_or_else(|| panic!("{error:#}"));
+        assert_eq!((wait.class, wait.seconds), ("rate_limited", 300));
+        let net = network(&[direct(&owner)], ok());
+        net.limited.lock().unwrap().push(("relay.example", 120));
+        let doc = resolver_on(net, &["8.8.8.8"], "8.8.4.4", &relays)
+            .resolve(&object(&owner))
+            .await
+            .unwrap();
+        assert_eq!(doc.name.as_deref(), Some("A deck"));
     }
 
     #[tokio::test]

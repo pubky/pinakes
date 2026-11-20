@@ -93,7 +93,7 @@ pub fn entries(body: &[u8]) -> Vec<Entry> {
     let Ok(text) = std::str::from_utf8(body) else {
         return vec![];
     };
-    let Ok(xml) = roxmltree::Document::parse(text) else {
+    let Ok(xml) = crate::resolver::xml::parse(text) else {
         return vec![];
     };
     let mut out = vec![];

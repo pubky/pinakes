@@ -697,3 +697,19 @@ async fn an_object_at_a_path_never_fetched_keeps_nothing_once_read_again(pool: P
         "{other_id}"
     );
 }
+
+/// A deck whose title, description or topic holds a NUL (which no stored text may hold) keeps
+/// its card without it: the card saves, and the link does not dead-letter.
+#[test]
+fn a_deck_with_a_nul_in_its_text_keeps_its_card_without_it() {
+    let doc = edited(
+        "loopky/medeng2026a-url-cover",
+        json!({"title": "Medical\u{0}English", "description": "Terms\u{0} and phrases",
+            "tags": ["anatomy\u{0}"]}),
+    );
+    assert_eq!(doc.name.as_deref(), Some("MedicalEnglish"));
+    assert_eq!(doc.description.as_deref(), Some("Terms and phrases"));
+    assert_eq!(doc.attributes["topics"], "anatomy");
+    let stored = serde_json::to_string(&doc).unwrap();
+    assert!(!stored.contains("\\u0000"), "{stored}");
+}

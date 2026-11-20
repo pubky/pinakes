@@ -50,10 +50,10 @@ impl Question {
         if doc.description.is_none() {
             doc.description = self.description;
         }
-        let duplicate_of = (!self.duplicate_of.is_empty()).then(|| self.duplicate_of.join("; "));
+        let duplicate_of = super::links(&self.duplicate_of);
         for (key, value) in [
             ("answer_count", self.answer_count.map(|n| n.to_string())),
-            ("accepted_answer", self.accepted_answer),
+            ("accepted_answer", super::link(self.accepted_answer)),
             ("score", self.score.map(|n| n.to_string())),
             ("author", self.author),
             ("published", self.published),
@@ -114,6 +114,26 @@ fn number(v: &Value) -> Option<i64> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// An accepted answer's link longer than an attribute holds is left out, and of several
+    /// duplicate links the whole ones that fit are kept.
+    #[test]
+    fn links_too_long_for_a_fact_are_left_out() {
+        let base: Url = "https://qa.example/q/1".parse().unwrap();
+        let long = format!("/q/1?answer={}", "9".repeat(300));
+        let mut q = from_jsonld(
+            &json!({"@type": "Question", "name": "Why?", "acceptedAnswer": {"url": long}}),
+            &base,
+        );
+        q.duplicate_of = vec![
+            "https://qa.example/q/2".into(),
+            format!("https://qa.example/q/{}", "3".repeat(250)),
+        ];
+        let mut doc = ResourceMeta::new(base.as_str(), "jsonld", 60);
+        q.apply(&mut doc);
+        assert!(!doc.attributes.contains_key("accepted_answer"));
+        assert_eq!(doc.attributes["duplicate_of"], "https://qa.example/q/2");
+    }
 
     #[test]
     fn a_question_from_its_json_ld() {

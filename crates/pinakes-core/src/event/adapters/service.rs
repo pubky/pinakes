@@ -63,6 +63,27 @@ pub(crate) async fn discover_enrichment(
     ttl: u64,
     definition: &Definition,
 ) -> Result<Fetched> {
+    discover(egress, uri, options, ttl, definition, true).await
+}
+/// [`discover_enrichment`] for a platform only guessed from a page's markup
+/// (`detected_html`): a failed guess says nothing of an adapter, so it is not counted as drift.
+pub(crate) async fn discover_hint(
+    egress: &Egress,
+    uri: &str,
+    options: &FetchOptions,
+    ttl: u64,
+    definition: &Definition,
+) -> Result<Fetched> {
+    discover(egress, uri, options, ttl, definition, false).await
+}
+async fn discover(
+    egress: &Egress,
+    uri: &str,
+    options: &FetchOptions,
+    ttl: u64,
+    definition: &Definition,
+    drift: bool,
+) -> Result<Fetched> {
     let fetched = egress.discover(uri, options, ttl).await?;
     enrichment_status(&fetched)?;
     if definition.parser == "mobilizon" && fetched.status == 200 {
@@ -75,7 +96,9 @@ pub(crate) async fn discover_enrichment(
         .await?;
         if failed {
             egress.shorten_discovery(uri, options, 300).await?;
-            crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "drift");
+            if drift {
+                crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "drift");
+            }
             return Err(crate::resolver::RetryLater {
                 class: "graphql",
                 seconds: 300,
@@ -835,9 +858,44 @@ pub fn endpoint(
             .and_then(|o| o.key.as_deref())
             .context("missing API key")
     };
+    // The link's path, without its trailing slashes, query and fragment, with `suffix` after it.
+    // A site's root names no event: it gets no file suffix.
+    let suffixed = |suffix: &str| -> Option<String> {
+        let path = u.path().trim_end_matches('/');
+        if path.is_empty() && !suffix.starts_with('/') {
+            return None;
+        }
+        let mut file = u.clone();
+        file.set_query(None);
+        file.set_fragment(None);
+        file.set_path(&format!("{path}{suffix}"));
+        Some(file.into())
+    };
     let result = match d.parser.as_str() {
-        "calendar" if d.id == "nextcloud" && !u.path().contains("/remote.php/dav/") => Some((
-            u.join(&format!("/remote.php/dav/public-calendars/{id}?export"))?.into(), opts)),
+        // A share link names its calendar right after `/p/` or `/embed/` (a view and a date
+        // may follow: `/p/{token}/dayGridMonth/now`), below wherever the install sits.
+        "calendar" if d.id == "nextcloud" && !u.path().contains("/remote.php/dav/") => {
+            let path = u.path();
+            let share = ["/apps/calendar/p/", "/apps/calendar/embed/"]
+                .iter()
+                .find_map(|form| path.split_once(form));
+            match share {
+                Some((install, rest)) => {
+                    let token = rest.split('/').next().unwrap_or_default();
+                    let install = install.trim_end_matches("/index.php");
+                    let mut export = u.clone();
+                    export.set_fragment(None);
+                    export.set_path(&format!("{install}/remote.php/dav/public-calendars/{token}"));
+                    export.set_query(Some("export"));
+                    (!token.is_empty()).then(|| (export.into(), opts))
+                }
+                None => Some((
+                    u.join(&format!("/remote.php/dav/public-calendars/{id}?export"))?
+                        .into(),
+                    opts,
+                )),
+            }
+        }
         "airmeet" if !u.path().ends_with("/info") => Some((
             format!("https://api.airmeet.com/api/v1/airmeet/{id}/info"),
             opts,
@@ -862,14 +920,13 @@ pub fn endpoint(
                 ..opts
             },
         )),
+        // The key is the wire's alone (`query_secret`): the address this returns, and every
+        // one derived from it, names none.
         "ticketmaster" => Some((
-            query(
-                &format!("https://app.ticketmaster.com/discovery/v2/events/{}.json", id.trim_end_matches(".json")),
-                "apikey",
-                key()?,
-            )?,
+            format!("https://app.ticketmaster.com/discovery/v2/events/{}.json", id.trim_end_matches(".json")),
             FetchOptions {
                 sensitive: true,
+                query_secret: Some(("apikey", key()?.to_owned())),
                 ..opts
             },
         )),
@@ -898,8 +955,8 @@ pub fn endpoint(
         "ics_link" if !crate::event::service::is_feed(uri) => {
             let link = page.and_then(|f| ics_link(&f.url, &String::from_utf8_lossy(&f.body)));
             let fallback = match d.id.as_str() {
-                "tito" | "petzi" => Some(format!("{}.ics", uri.trim_end_matches('/'))),
-                "pretix" | "eventyay" => Some(format!("{}/ical/", uri.trim_end_matches('/'))),
+                "tito" | "petzi" => suffixed(".ics"),
+                "pretix" | "eventyay" => suffixed("/ical/"),
                 "gathio" => Some(u.join(&format!("/export/event/{id}"))?.into()),
                 "allevents" if !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()) => Some(query(
                     "https://allevents.in/api/addtocal.php?type=ical", "event_id", id)?),
