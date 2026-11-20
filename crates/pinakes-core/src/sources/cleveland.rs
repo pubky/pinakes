@@ -62,19 +62,22 @@ pub fn from_uri(uri: &str) -> Option<Artwork> {
     }
 }
 
+/// The identifier of an accession number.
+fn root(accession: &str) -> String {
+    format!("cleveland:{accession}")
+}
+
 /// The identifier, or `None` for a numeric id (its accession number comes from the answer).
 pub fn identifier(artwork: &Artwork) -> Option<String> {
     match artwork {
-        Artwork::Accession(a) => Some(format!("cleveland:{a}")),
+        Artwork::Accession(a) => Some(root(a)),
         Artwork::Id(_) => None,
     }
 }
 
-pub fn page(artwork: &Artwork) -> String {
-    match artwork {
-        Artwork::Accession(a) => format!("https://www.clevelandart.org/art/{a}"),
-        Artwork::Id(id) => format!("https://www.clevelandart.org/art/{id}"),
-    }
+/// The artwork's page on clevelandart.org, by its accession number.
+pub fn page(accession: &str) -> String {
+    format!("https://www.clevelandart.org/art/{accession}")
 }
 
 /// The API record; the API takes either form.
@@ -114,12 +117,7 @@ pub fn parse(status: u16, raw: &[u8], artwork: &Artwork) -> Result<Option<Card>>
         },
         "the API answered for another artwork"
     );
-    let named = Artwork::Accession(acc.clone());
-    let mut card = Card::new(
-        "VisualArtwork",
-        identifier(&named).expect("an accession number"),
-        page(&named),
-    );
+    let mut card = Card::new("VisualArtwork", root(&acc), page(&acc));
     card.name = text(&d["title"]);
     card.description = text(&d["description"])
         .or_else(|| text(&d["wall_description"]))
@@ -301,10 +299,6 @@ mod tests {
             assert_eq!(from_uri(uri), Some(Artwork::Id(135382)), "{uri}");
         }
         assert_eq!(identifier(&Artwork::Id(135382)), None);
-        assert_eq!(
-            page(&acc("1958.39")),
-            "https://www.clevelandart.org/art/1958.39"
-        );
         assert_eq!(
             request(&acc("1958.39")).unwrap().url.as_str(),
             "https://openaccess-api.clevelandart.org/api/artworks/1958.39"
