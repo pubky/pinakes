@@ -231,6 +231,7 @@ pub fn strip_document(doc: &mut crate::model::ResourceMeta, own: &str) -> anyhow
             event_spellings: std::mem::take(&mut doc.event_spellings),
             http_status: doc.http_status,
             withheld: doc.withheld,
+            shape_only: doc.shape_only,
             refresh_by: doc.refresh_by,
             source_root: doc.source_root.take(),
             episode_page: doc.episode_page.take(),

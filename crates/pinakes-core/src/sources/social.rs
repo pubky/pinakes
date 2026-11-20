@@ -52,6 +52,13 @@ impl Shape {
     }
 }
 
+/// `doc`, a card of the link's shape alone made from a page that answered without what the card
+/// reads: a stored card that says more stays (`ResourceMeta::shape_only`).
+pub fn shape_only(mut doc: ResourceMeta) -> ResourceMeta {
+    doc.shape_only = true;
+    doc
+}
+
 /// The card of a link whose platform refused the request: its shape alone, marked `blocked`.
 pub fn blocked(doc: ResourceMeta, shape: Shape, site: &str) -> ResourceMeta {
     let mut doc = shape.card(doc, site);

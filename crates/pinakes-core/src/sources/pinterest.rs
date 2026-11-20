@@ -233,7 +233,7 @@ impl Source for Pinterest {
             },
             Target::Profile(name) => match social::page(cx, &target.root()).await? {
                 Page::Read { doc: page, .. } => profile_card(doc.clone(), name, &page)
-                    .unwrap_or_else(|| plain_profile(doc, name)),
+                    .unwrap_or_else(|| social::shape_only(plain_profile(doc, name))),
                 Page::Missing => cx.missing(uri, self),
                 Page::Blocked => social::blocked(doc, Shape::Profile, SITE),
             },
@@ -336,6 +336,8 @@ mod tests {
         let doc = Pinterest.resolve(&cx, profile).await.unwrap();
         assert_eq!(doc.status, crate::model::Status::Ok);
         assert_eq!(doc.type_name, "Person");
+        // It never replaces a stored card that says more.
+        assert!(doc.shape_only);
         assert_eq!(doc.name.as_deref(), Some("Profile on pinterest.com"));
         assert_eq!(doc.attributes["handle"], "thisuserdoesnotexist12345x");
         assert!(!doc.attributes.contains_key("blocked"));

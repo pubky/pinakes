@@ -274,7 +274,7 @@ impl Source for Twitch {
         let mut doc = match social::page(cx, &target.root()).await? {
             Page::Read { doc: page, .. } => match &target {
                 Target::Channel(login) => channel_card(doc.clone(), login, &page)
-                    .unwrap_or_else(|| plain_channel(doc, login)),
+                    .unwrap_or_else(|| social::shape_only(plain_channel(doc, login))),
                 _ => video_card(doc, &target, &page),
             },
             Page::Missing => cx.missing(uri, self),
@@ -405,6 +405,8 @@ mod tests {
         let doc = Twitch.resolve(&cx, channel).await.unwrap();
         assert_eq!(doc.status, crate::model::Status::Ok);
         assert_eq!(doc.type_name, "Person");
+        // It never replaces a stored card that says more.
+        assert!(doc.shape_only);
         assert_eq!(doc.name.as_deref(), Some("Profile on twitch.tv"));
         assert_eq!(doc.attributes["handle"], "thisuserdoesnotexist12345");
         assert!(!doc.attributes.contains_key("blocked"));

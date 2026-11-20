@@ -19,7 +19,7 @@ capitalised name are aliases of them. Boards and `pin.it` short links are not re
 - A profile: `GET https://www.pinterest.com/{name}/`, its Open Graph tags and JSON-LD. A page
   that is no profile's (Pinterest answers its generic page, with status 200, for a name it
   does not know) gives the plain card, "Profile on pinterest.com", with the name: it does not
-  say the profile is gone. A 404 or 410 is `missing`.
+  say the profile is gone, and it never replaces a stored card that has text or a picture. A 404 or 410 is `missing`.
 
 A request Pinterest refuses (a challenge, 401 or 403) gives the card of the link's shape alone,
 "Post on pinterest.com" or "Profile on pinterest.com", with the `blocked` fact: the link still

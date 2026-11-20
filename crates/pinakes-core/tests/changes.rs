@@ -800,6 +800,70 @@ async fn unreachable_backoff_stops_and_missing_never_invents_existence(pool: PgP
     assert_eq!(classes(&pool, &never).await, vec!["created"]);
 }
 
+/// A card of the link's shape alone (a social page that answered without its tags) never
+/// replaces a stored card that says more, and adds no change line; a link never read gets it,
+/// and so does one whose stored card says no more than the link's shape.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_shape_only_card_never_replaces_a_card_that_says_more(pool: PgPool) {
+    let stored = |id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_as::<_, (Option<String>, Option<String>)>(
+                "SELECT doc->>'name', doc->>'description' FROM resource WHERE id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let plain = |uri: &str, at: i64| {
+        let mut doc = ResourceMeta::new(uri, "web", 3600);
+        doc.set_type("Person");
+        doc.name = Some("Profile on social.example".into());
+        doc.fetched_at = at;
+        doc.shape_only = true;
+        doc
+    };
+    let uri = "https://social.example/in/someone";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut good = ResourceMeta::new(uri, "web", 3600);
+    good.set_type("Person");
+    good.name = Some("Some One".into());
+    good.description = Some("Builds bridges.".into());
+    store::save_document(&pool, &id, 0, &good).await.unwrap();
+    let lines = classes(&pool, &id).await;
+    store::save_document(&pool, &id, 0, &plain(uri, good.fetched_at + 1))
+        .await
+        .unwrap();
+    assert_eq!(
+        stored(id.clone()).await,
+        (Some("Some One".into()), Some("Builds bridges.".into()))
+    );
+    assert_eq!(classes(&pool, &id).await, lines);
+
+    // A link never read gets the plain card.
+    let fresh = "https://social.example/in/someone-else";
+    let fresh_id = store::ensure_resource(&pool, fresh).await.unwrap();
+    store::save_document(&pool, &fresh_id, 0, &plain(fresh, good.fetched_at))
+        .await
+        .unwrap();
+    assert_eq!(
+        stored(fresh_id.clone()).await,
+        (Some("Profile on social.example".into()), None)
+    );
+    // A stored card of the shape alone is replaced as any card is.
+    let mut renamed = plain(fresh, good.fetched_at + 1);
+    renamed.name = Some("Profile on social.example (2)".into());
+    store::save_document(&pool, &fresh_id, 0, &renamed)
+        .await
+        .unwrap();
+    assert_eq!(
+        stored(fresh_id).await.0.as_deref(),
+        Some("Profile on social.example (2)")
+    );
+}
+
 #[sqlx::test(migrations = "../../migrations")]
 async fn new_preview_is_prioritized_and_change_time_follows_lock(pool: PgPool) {
     let _old = store::ensure_resource(&pool, "https://example.org/backlog")

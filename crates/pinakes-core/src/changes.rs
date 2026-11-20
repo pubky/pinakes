@@ -370,6 +370,7 @@ pub async fn save(
     let doc = bounded.as_ref().unwrap_or(doc);
     // Read before the document's copy below, which leaves out what is never stored.
     let withheld = doc.withheld;
+    let shape_only = doc.shape_only;
     let (episodes, episodes_older, episodes_cut) =
         (doc.episodes.clone(), doc.episodes_older, doc.episodes_cut);
     let mut prepared = if let Some(container) = &doc.container {
@@ -451,6 +452,19 @@ pub async fn save(
         doc.event.warnings.sort();
         doc.event.warnings.dedup();
         doc.event.warnings.truncate(16);
+    }
+    // A card of the link's shape alone (a page that answered without what its card reads) says
+    // nothing new: a stored card that says more stays, read again at its time.
+    if shape_only && doc.status == Status::Ok {
+        let says_more = |v: &&Value| {
+            v["status"] == "ok" && (v["description"].is_string() || v["image"].is_string())
+        };
+        if let Some(stored) = before.as_ref().filter(says_more) {
+            let mut retained = stored.clone();
+            retained["fetched_at"] = json!(doc.fetched_at);
+            retained["ttl_secs"] = json!(doc.ttl_secs);
+            doc = serde_json::from_value(retained)?;
+        }
     }
     let social_missing = doc.status == Status::Missing
         && before.as_ref().is_some_and(|v| {

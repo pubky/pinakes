@@ -213,7 +213,8 @@ impl Source for Facebook {
                 Body::Read { body, .. } => {
                     let tags = crate::resolver::html::blocking(move || social::open_graph(&body))
                         .await??;
-                    page_card(doc.clone(), name, &tags).unwrap_or_else(|| plain_page(doc, name))
+                    page_card(doc.clone(), name, &tags)
+                        .unwrap_or_else(|| social::shape_only(plain_page(doc, name)))
                 }
                 Body::Missing => cx.missing(uri, self),
                 Body::Blocked => social::blocked(doc, Shape::Profile, SITE),
@@ -355,6 +356,8 @@ mod tests {
         assert_eq!(doc.name.as_deref(), Some("Profile on facebook.com"));
         assert_eq!(doc.attributes["handle"], "facebook");
         assert!(!doc.attributes.contains_key("blocked"));
+        // It never replaces a stored card that says more.
+        assert!(doc.shape_only);
         assert_eq!(doc.source_root.as_deref(), Some(page));
     }
 }

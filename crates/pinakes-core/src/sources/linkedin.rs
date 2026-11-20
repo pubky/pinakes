@@ -302,11 +302,10 @@ impl Source for LinkedIn {
                 let tags =
                     crate::resolver::html::blocking(move || social::open_graph(&body)).await??;
                 match &target {
-                    Target::Person(slug) => {
-                        person_card(doc.clone(), slug, &tags).unwrap_or_else(|| plain(doc, &target))
-                    }
+                    Target::Person(slug) => person_card(doc.clone(), slug, &tags)
+                        .unwrap_or_else(|| social::shape_only(plain(doc, &target))),
                     Target::Company(slug) => company_card(doc.clone(), slug, &tags)
-                        .unwrap_or_else(|| plain(doc, &target)),
+                        .unwrap_or_else(|| social::shape_only(plain(doc, &target))),
                     Target::Post { .. } => post_card(doc, &target, &tags),
                 }
             }
@@ -481,12 +480,15 @@ mod tests {
         assert_eq!(doc.name.as_deref(), Some("Profile on linkedin.com"));
         assert_eq!(doc.attributes["handle"], "williamhgates");
         assert!(!doc.attributes.contains_key("blocked"));
+        // It never replaces a stored card that says more.
+        assert!(doc.shape_only);
         assert_eq!(doc.source_root.as_deref(), Some(person));
         let doc = LinkedIn.resolve(&cx, company).await.unwrap();
         assert_eq!(doc.status, crate::model::Status::Ok);
         assert_eq!(doc.type_name, "Organization");
         assert_eq!(doc.name.as_deref(), Some("Profile on linkedin.com"));
         assert_eq!(doc.attributes["handle"], "linkedin");
+        assert!(doc.shape_only);
         assert_eq!(doc.source_root.as_deref(), Some(company));
     }
 
