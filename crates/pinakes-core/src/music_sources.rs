@@ -1249,16 +1249,47 @@ pub fn service_links(item: &wikidata::Item) -> Vec<Link> {
     links
 }
 
-/// Whether an item is one recording: exactly one MusicBrainz recording ID and no work ID. A song
-/// item is a work (its studio, live and remastered recordings share it), so a track takes
-/// nothing from it, neither its Q-id nor its tracks.
+/// Whether an item is one recording: a recording's item by the one classifier
+/// (`music_enrichment::ItemKind::of`: a recording ID, P4404, and no work's, release's, release
+/// group's or artist's ID, of no song's class) that names exactly one recording. A song item is
+/// a work (its studio, live and remastered recordings share it), so a track takes nothing from
+/// it, neither its Q-id nor its tracks.
 pub(crate) fn recording_item(item: &wikidata::Item) -> bool {
-    item.id("P4404").len() == 1 && item.id("P435").is_empty()
+    use crate::music_enrichment::ItemKind;
+    ItemKind::of(item) == ItemKind::Recording && item.id("P4404").len() == 1
 }
-/// An item's keys and same-level links; at track level only a recording item's.
+/// Whether an item is one album: a release group's item by the same classifier (one that is its
+/// single's song's too counts) that names no recording (P4404). An album's item that also
+/// carries a recording's ID is a single's track's too ([`keys_entity`]): as the album's key it
+/// would join the track to the album. An item with no MusicBrainz or Discogs album ID is of
+/// unknown level and keys nothing.
+pub(crate) fn album_item(item: &wikidata::Item) -> bool {
+    use crate::music_enrichment::ItemKind;
+    matches!(
+        ItemKind::of(item),
+        ItemKind::ReleaseGroup | ItemKind::WorkAndGroup
+    ) && item.id("P4404").is_empty()
+}
+/// The music-service pages an item's best-rank IDs name at `level`, unkeyed.
+pub(crate) fn item_links(item: &wikidata::Item, level: Level) -> Vec<Link> {
+    let mut links = vec![];
+    for (property, _, _, template) in PROPERTIES {
+        for value in item.id(property).iter().take(4) {
+            links.extend(derived(&property_url(template, value), level, "wikidata"));
+        }
+    }
+    links
+}
+/// An item's keys and same-level links: at track level only a recording item's
+/// ([`recording_item`]), at album level only an album item's ([`album_item`]).
 pub fn found(item: &wikidata::Item, level: Level) -> Found {
     let mut found = Found::default();
-    if level == Level::Track && !recording_item(item) {
+    let of_level = match level {
+        Level::Track => recording_item(item),
+        Level::Album => album_item(item),
+        _ => true,
+    };
+    if !of_level {
         return found;
     }
     if let Some(key) = hubs::key::wikidata(&item.qid) {
@@ -1277,15 +1308,12 @@ pub fn found(item: &wikidata::Item, level: Level) -> Found {
             });
         }
     }
-    // Keyed by the item (one recording at track level), so a tagged link that is one joins.
+    // Keyed by the item (one recording at track level, one album at album level), so a tagged
+    // link that is one joins.
     let named = hubs::key::wikidata(&item.qid);
-    for (property, _, _, template) in PROPERTIES {
-        for value in item.id(property).iter().take(4) {
-            if let Some(mut link) = derived(&property_url(template, value), level, "wikidata") {
-                link.key.clone_from(&named);
-                found.links.push(link);
-            }
-        }
+    found.links = item_links(item, level);
+    for link in &mut found.links {
+        link.key.clone_from(&named);
     }
     found
 }
@@ -1663,6 +1691,53 @@ mod tests {
         assert!(super::found(&item(&[spotify, work]), Level::Track)
             .links
             .is_empty());
+        // The one classifier decides (`ItemKind::of`): a song's item (its class) that carries a
+        // recording's ID is a work, and a track takes nothing from it.
+        let mut song = item(&[spotify, recording]);
+        song.instance_of = vec!["Q7366".into()];
+        assert_eq!(super::found(&song, Level::Track), Found::default());
+        // Two recording IDs: the item spans recordings, and names none.
+        let mut two = item(&[spotify]);
+        two.ids.insert(
+            "P4404".into(),
+            vec![recording.1.into(), "8f3471b5-7e6a-48da-86a9-c1c07a0f47ae".into()],
+        );
+        assert_eq!(super::found(&two, Level::Track), Found::default());
+        // An album takes an album's item only. A single's item that names its track's recording
+        // too keys the track (when it is a recording's item), so it never keys the album: the two
+        // would be one group.
+        let album = ("P2205", "6dVIqQ8qmQ5GBnJ9shOYGE");
+        let group = ("P436", "b1392450-e666-3926-a536-22c65f834433");
+        let at_album = |ids: &[(&str, &str)]| super::found(&item(ids), Level::Album);
+        let keys_of = |found: &Found| -> Vec<String> {
+            found.keys.iter().map(|k| k.key.clone()).collect()
+        };
+        assert_eq!(
+            keys_of(&at_album(&[album, group])),
+            ["wikidata:Q1", "mb:release-group:b1392450-e666-3926-a536-22c65f834433"]
+        );
+        assert!(at_album(&[album, group])
+            .links
+            .iter()
+            .all(|l| l.key.as_deref() == Some("wikidata:Q1")));
+        assert_eq!(at_album(&[album, group, spotify, recording]), Found::default());
+        // An item of unknown level (no MusicBrainz or Discogs album ID) keys nothing either.
+        assert_eq!(at_album(&[album]), Found::default());
+        assert_eq!(at_album(&[album, work]), Found::default());
+        // A single's song's item that is its release group's too is the album's.
+        let mut single = item(&[album, group]);
+        single.instance_of = vec!["Q134556".into()];
+        assert_eq!(keys_of(&super::found(&single, Level::Album)).len(), 2);
+        // Two release group IDs: the item's own key alone, no MusicBrainz key.
+        let mut groups = item(&[album]);
+        groups.ids.insert(
+            "P436".into(),
+            vec![group.1.into(), "00000000-0000-4000-8000-000000000001".into()],
+        );
+        assert_eq!(
+            keys_of(&super::found(&groups, Level::Album)),
+            ["wikidata:Q1"]
+        );
         // Property values become valid URLs.
         assert_eq!(
             property_url("https://music.apple.com/album/{}", "1097861387"),
