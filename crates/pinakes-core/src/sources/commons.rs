@@ -193,8 +193,19 @@ pub fn parse(status: u16, raw: &[u8], target: &Target) -> Result<Option<Card>> {
     let Some(v) = json(status, raw, &[])? else {
         return Ok(None);
     };
-    if v.get("error").is_some() {
-        bail!("the API answered an error: {}", v["error"]["code"]);
+    if let Some(error) = v.get("error") {
+        // The API is busy or read-only for a while: the file is read later.
+        if matches!(
+            error["code"].as_str(),
+            Some("ratelimited" | "maxlag" | "readonly")
+        ) {
+            return Err(crate::resolver::RetryLater {
+                class: "upstream",
+                seconds: 60,
+            }
+            .into());
+        }
+        bail!("the API answered an error");
     }
     let query = &v["query"];
     let pages = query["pages"].as_array().context("no pages")?;
@@ -602,10 +613,32 @@ mod tests {
         assert!(parse(429, b"", &title(GATE)).is_err());
         assert!(parse(503, b"", &title(GATE)).is_err());
         assert!(parse(200, b"<html>", &title(GATE)).is_err());
-        let error = br#"{"error":{"code":"maxlag","info":"Waiting for a database server"}}"#;
-        assert!(parse(200, error, &title(GATE)).is_err());
         let gallery = br#"{"query":{"pages":[{"pageid":5,"ns":0,"title":"Bitcoin"}]}}"#;
         assert_eq!(parse(200, gallery, &Target::PageId(5)).unwrap(), None);
+    }
+
+    #[test]
+    fn api_errors_sent_with_status_200() {
+        let answer = |code: &str| {
+            let body = format!(r#"{{"error":{{"code":"{code}","info":"Details of {code}"}}}}"#);
+            parse(200, body.as_bytes(), &title(GATE)).unwrap_err()
+        };
+        // A busy or read-only API: the file is read later.
+        for code in ["ratelimited", "maxlag", "readonly"] {
+            let error = answer(code);
+            let retry = error
+                .downcast_ref::<crate::resolver::RetryLater>()
+                .unwrap_or_else(|| panic!("{code} is a failure: {error}"));
+            assert_eq!(retry.class, "upstream", "{code}");
+            assert!(retry.seconds >= 60, "{code}");
+            assert!(!format!("{error:#}").contains(code), "{error:#}");
+        }
+        // Any other error is a failure, whose message leaves the answer's text out.
+        let error = answer("badvalue");
+        assert!(error
+            .downcast_ref::<crate::resolver::RetryLater>()
+            .is_none());
+        assert!(!format!("{error:#}").contains("badvalue"), "{error:#}");
     }
 
     #[test]

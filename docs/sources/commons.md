@@ -29,7 +29,8 @@ A file Commons does not have, and a page id that is not a file's page, are `miss
 ## What it reads
 
 `GET https://commons.wikimedia.org/w/api.php?action=query&format=json&formatversion=2&redirects=1&prop=imageinfo|coordinates&iiprop=url|size|mime|extmetadata|timestamp&iiurlwidth=1280&iiextmetadatafilter=…&iiextmetadatalanguage=en&titles=File:{name}`
-(or `pageids={page id}`).
+(or `pageids={page id}`). When the API answers that it is busy or read-only (the error
+`ratelimited`, `maxlag` or `readonly`), the file is read again later.
 
 ## Card
 
