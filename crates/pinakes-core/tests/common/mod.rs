@@ -4,6 +4,7 @@
 //! through the router (`get`, `get_from`), a saved card, a log buffer.
 #![allow(dead_code)]
 pub mod media;
+pub mod spotify_api;
 use serde_json::Value;
 use std::collections::BTreeSet;
 
