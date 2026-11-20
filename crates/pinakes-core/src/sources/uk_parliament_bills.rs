@@ -1,5 +1,5 @@
 //! UK Parliament bills from the Bills API, by bill id. Open Parliament Licence v3.0; no key.
-use super::{list, text, web_url, Context, Example, Source};
+use super::{list, text, Context, Example, Source};
 use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
@@ -17,7 +17,7 @@ fn id(value: &str) -> Option<u32> {
 /// (`/bills/{id}/stages`, `/publications`, `/news`, …), or `…/api/v1/Bills/{id}`. Deeper pages,
 /// such as one amendment, are other objects.
 pub fn of_uri(uri: &str) -> Option<u32> {
-    let url = web_url(uri)?;
+    let url = super::kit::web_url(uri)?;
     let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
     match (url.host_str()?, segments.as_slice()) {
         ("bills.parliament.uk", [bills, n] | [bills, n, _])

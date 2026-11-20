@@ -38,7 +38,7 @@ fn repo_name(value: &str) -> bool {
 /// The owner and repository a repository page names (`github.com/{owner}/{repo}`, `.git` and a
 /// trailing slash allowed).
 pub fn repository(uri: &str) -> Option<(String, String)> {
-    let url = web_url(uri)?;
+    let url = super::kit::web_url(uri)?;
     if !matches!(url.host_str()?, "github.com" | "www.github.com") {
         return None;
     }

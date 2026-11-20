@@ -1,6 +1,6 @@
 //! Swiss companies in the commercial register (Zefix), read as linked data from LINDAS, the
 //! Confederation's linked-data service, by the company's register id (EHRA id). No key.
-use super::{list, sparql_rows, sparql_url, web_url, Context, Example, Row, Source, SPARQL_JSON};
+use super::{list, sparql_rows, sparql_url, Context, Example, Row, Source, SPARQL_JSON};
 use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -16,7 +16,7 @@ fn ehraid(value: &str) -> Option<u64> {
 
 /// The EHRA id of a LINDAS company IRI (or one of its sub-IRIs) or a zefix.ch company page.
 pub fn of_uri(uri: &str) -> Option<u64> {
-    let url = web_url(uri)?;
+    let url = super::kit::web_url(uri)?;
     let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
     match (url.host_str()?, segments.as_slice()) {
         ("register.ld.admin.ch", ["zefix", "company", id, ..]) => ehraid(id),

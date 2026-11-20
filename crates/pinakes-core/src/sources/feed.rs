@@ -496,7 +496,10 @@ mod tests {
         let at = String::from_utf8_lossy(&sitemap).rfind("<url>").unwrap();
         let cut = entries_of(&sitemap[..at + 20], true).unwrap();
         assert!(find(&cut, ARTICLE).is_some());
-        assert_eq!(entries_of(b"<rss><channel><item><link>https://a.exa", true), None);
+        assert_eq!(
+            entries_of(b"<rss><channel><item><link>https://a.exa", true),
+            None
+        );
         assert_eq!(entries_of(b"<html>", false), Some(vec![]));
     }
 

@@ -1,7 +1,7 @@
 //! Swiss federal law from Fedlex, the Confederation's publication platform, read through its
 //! SPARQL endpoint (JOLux) by ELI. Every Fedlex address of an act in the classified compilation,
 //! in any language, is an alias of its ELI; a dated version is its own resource. No key.
-use super::{sparql_rows, sparql_url, web_url, Context, Example, Row, Source, SPARQL_JSON};
+use super::{sparql_rows, sparql_url, Context, Example, Row, Source, SPARQL_JSON};
 use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
@@ -31,7 +31,7 @@ fn eli_part(value: &str) -> bool {
 
 impl Key {
     pub fn of_uri(uri: &str) -> Option<Self> {
-        let url = web_url(uri)?;
+        let url = super::kit::web_url(uri)?;
         let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
         match (url.host_str()?, segments.as_slice()) {
             (

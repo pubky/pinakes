@@ -41,7 +41,7 @@ fn date(y: &str, m: &str, d: &str) -> bool {
 /// `/d/{number}`, `/documents/{number}` and `/api/v1/documents/{number}[.json]`. The slug never
 /// matters.
 pub fn from_uri(uri: &str) -> Option<String> {
-    let url = web_url(uri)?;
+    let url = super::kit::web_url(uri)?;
     if !matches!(
         url.host_str()?,
         "www.federalregister.gov" | "federalregister.gov"
@@ -80,7 +80,7 @@ fn package(value: &str) -> bool {
 /// The document number of a GovInfo copy: `/content/pkg/FR-{date}/pdf/{number}.pdf` or
 /// `/app/details/FR-{date}/{number}`. The same document, at another publisher.
 pub fn from_govinfo_uri(uri: &str) -> Option<String> {
-    let url = web_url(uri)?;
+    let url = super::kit::web_url(uri)?;
     if !matches!(url.host_str()?, "www.govinfo.gov" | "govinfo.gov") {
         return None;
     }

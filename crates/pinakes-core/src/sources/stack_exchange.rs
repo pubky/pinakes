@@ -4,7 +4,7 @@
 //!
 //! Its also-on half ([`also_on::StackExchange`]) keys a question by its id on its site, and a
 //! question closed as a duplicate by its original's instead: the two join one group, a hint.
-use super::{text, web_url, Context, Example, Source};
+use super::{text, Context, Example, Source};
 use crate::{
     kinds::questions::{self, Question},
     model::ResourceMeta,
@@ -74,7 +74,7 @@ fn site(host: &str) -> Option<(String, String)> {
 
 /// The question of `https://{site}/questions/{id}[/{slug}]` or its short link `/q/{id}`.
 pub fn of_uri(uri: &str) -> Option<Target> {
-    let url = web_url(uri)?;
+    let url = super::kit::web_url(uri)?;
     let (host, site) = site(&url.host_str()?.to_ascii_lowercase())?;
     let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
     let id = match segments.as_slice() {

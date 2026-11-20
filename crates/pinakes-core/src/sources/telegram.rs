@@ -56,7 +56,7 @@ impl Target {
     /// `https://t.me/{name}`, `/{name}/{n}`, and the same under `/s/` (the preview), on t.me
     /// and telegram.me.
     pub fn of_uri(uri: &str) -> Option<Self> {
-        let url = web_url(uri)?;
+        let url = super::kit::web_url(uri)?;
         if !matches!(
             url.host_str()?,
             "t.me" | "www.t.me" | "telegram.me" | "www.telegram.me"

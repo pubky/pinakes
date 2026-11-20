@@ -67,7 +67,7 @@ impl Database {
 /// page spells it: `https://{country or world}.{database}/product/{code}[/{slug}]` (`/produit/`
 /// in French).
 pub fn of_uri(uri: &str) -> Option<(&'static Database, String, String)> {
-    let url = super::web_url(uri)?;
+    let url = super::kit::web_url(uri)?;
     let host = url.host_str()?.to_ascii_lowercase();
     let database = DATABASES.iter().find(|d| {
         host == d.host

@@ -1,6 +1,6 @@
 //! GLEIF: Legal Entity Identifier records from the Global LEI Foundation's API. CC0; no key;
 //! 60 requests per minute.
-use super::{list, text, texts, web_url, Budget, Context, Example, Source};
+use super::{list, text, texts, Budget, Context, Example, Source};
 use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
@@ -37,7 +37,7 @@ pub fn of_uri(uri: &str) -> Option<String> {
     if let Some(rest) = uri.strip_prefix("lei:") {
         return lei(rest);
     }
-    let url = web_url(uri)?;
+    let url = super::kit::web_url(uri)?;
     let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
     match (url.host_str()?, segments.as_slice()) {
         ("www.gleif.org" | "gleif.org", [.., "lei", id]) => lei(id),

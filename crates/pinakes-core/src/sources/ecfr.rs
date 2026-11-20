@@ -1,7 +1,7 @@
 //! The Electronic Code of Federal Regulations: CFR sections and parts, read from the eCFR
 //! versioner API (the HTML is bot-walled). Every eCFR address of a section or part is an alias
 //! of its root; the text on a date is its own resource. Public domain; no key.
-use super::{web_url, Context, Example, Source};
+use super::{Context, Example, Source};
 use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
@@ -47,7 +47,7 @@ impl Target {
     /// The chapter, subchapter and subpart segments before the part or section never matter;
     /// a subpart, subject-group or appendix page is another object and is not read.
     pub fn of_uri(uri: &str) -> Option<Self> {
-        let url = web_url(uri)?;
+        let url = super::kit::web_url(uri)?;
         if !matches!(url.host_str()?, "www.ecfr.gov" | "ecfr.gov") {
             return None;
         }

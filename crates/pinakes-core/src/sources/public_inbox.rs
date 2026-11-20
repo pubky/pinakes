@@ -3,7 +3,7 @@
 //! the archive. The old `lists.linuxfoundation.org` pipermail addresses that gnusha.org maps to
 //! a message become aliases of it. No key. An archive that does not answer as public-inbox is
 //! remembered, and its links get ordinary web cards.
-use super::{web_url, Context, Declined, Example, HostMemo, Source};
+use super::{Context, Declined, Example, HostMemo, Source};
 use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
@@ -86,7 +86,7 @@ pub enum Target {
 
 impl Target {
     pub fn of_uri(uri: &str) -> Option<Self> {
-        let url = web_url(uri)?;
+        let url = super::kit::web_url(uri)?;
         if url.scheme() != "https" || url.port().is_some() {
             return None;
         }
@@ -761,7 +761,10 @@ mod tests {
         // A word's charset and payload are bounded; a longer one stays as written.
         let long = format!("=?utf-8?Q?{}?=", "a".repeat(PAYLOAD_MAX + 1));
         assert_eq!(header_text(&long), long);
-        assert_eq!(header_text("=?utf-8?Q?a?= =?x?Q?b?= =?bad =?utf-8?b?Yw==?="), "ab =?bad c");
+        assert_eq!(
+            header_text("=?utf-8?Q?a?= =?x?Q?b?= =?bad =?utf-8?b?Yw==?="),
+            "ab =?bad c"
+        );
         // A header is kept up to its cap, folded lines included.
         let folded = format!(
             "Message-ID: <c@x>\nSubject: {}\n {}\n y\n\nbody",

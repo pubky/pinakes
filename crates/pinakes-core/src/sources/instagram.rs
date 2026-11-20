@@ -62,7 +62,7 @@ impl Target {
     /// `https://www.instagram.com/{name}/`, `/p/{code}/`, `/reel/{code}/` (also `/tv/`), on
     /// instagram.com with or without `www.`, and instagr.am.
     pub fn of_uri(uri: &str) -> Option<Self> {
-        let url = web_url(uri)?;
+        let url = super::kit::web_url(uri)?;
         if !matches!(
             url.host_str()?,
             "instagram.com" | "www.instagram.com" | "instagr.am" | "www.instagr.am"

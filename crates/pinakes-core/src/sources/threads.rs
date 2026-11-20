@@ -36,7 +36,7 @@ impl Target {
     /// `https://www.threads.com/@{handle}`, `/@{handle}/post/{code}` or `/t/{code}`, on
     /// threads.com and threads.net with or without `www.`.
     pub fn of_uri(uri: &str) -> Option<Self> {
-        let url = web_url(uri)?;
+        let url = super::kit::web_url(uri)?;
         if !matches!(
             url.host_str()?,
             "threads.com" | "www.threads.com" | "threads.net" | "www.threads.net"
@@ -418,7 +418,11 @@ mod tests {
             .resolve(&cx, "https://www.threads.com/t/Cspoofed02")
             .await
             .unwrap();
-        assert!(!doc.attributes.contains_key("author"), "{:?}", doc.attributes);
+        assert!(
+            !doc.attributes.contains_key("author"),
+            "{:?}",
+            doc.attributes
+        );
         assert_eq!(doc.source_root, None);
     }
 }

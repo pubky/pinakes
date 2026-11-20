@@ -2,7 +2,7 @@
 //! US Code sections and the Statutes at Large, read from their MODS metadata records. Public
 //! domain; no key. GovInfo's Federal Register and CFR copies are other editions of documents the
 //! `federal_register` and `ecfr` sources read, and are not read here.
-use super::{web_url, Context, Example, Source};
+use super::{Context, Example, Source};
 use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
@@ -113,7 +113,7 @@ fn of_ids(package: &str, granule: Option<&str>) -> Option<Target> {
 
 impl Target {
     pub fn of_uri(uri: &str) -> Option<Self> {
-        let url = web_url(uri)?;
+        let url = super::kit::web_url(uri)?;
         let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
         let query = |name: &str| {
             url.query_pairs()

@@ -2202,10 +2202,9 @@ mod tests {
     /// thousands of inputs passes the egress default.
     #[test]
     fn a_transaction_record_may_pass_the_default_cap() {
-        let tx = from_root(
-            "btc:tx/a1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d",
-        )
-        .unwrap();
+        let tx =
+            from_root("btc:tx/a1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d")
+                .unwrap();
         for api in [Api::Mempool, Api::Esplora] {
             let request = request(api, &tx).unwrap();
             assert_eq!(request.options().body_cap, Some(TXS_CAP), "{api:?}");

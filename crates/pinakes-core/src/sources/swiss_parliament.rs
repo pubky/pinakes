@@ -1,7 +1,7 @@
 //! Swiss Parliament business items (Curia Vista: motions, postulates, bills, interpellations…)
 //! from the Parliament's OData service, by affair id. Bills and initiatives are `Legislation`;
 //! motions, postulates, interpellations and questions are `CreativeWork`. Open data; no key.
-use super::{list, text, web_url, Context, Example, Source};
+use super::{list, text, Context, Example, Source};
 use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
@@ -33,7 +33,7 @@ fn affair(value: &str) -> Option<u32> {
 
 /// The affair id of a parlament.ch business page, its legacy page or the OData entity.
 pub fn of_uri(uri: &str) -> Option<u32> {
-    let url = web_url(uri)?;
+    let url = super::kit::web_url(uri)?;
     let query = |name: &str| {
         url.query_pairs()
             .find(|(k, _)| k.eq_ignore_ascii_case(name))

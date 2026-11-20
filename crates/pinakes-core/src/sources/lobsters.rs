@@ -18,7 +18,7 @@ fn short_id(value: &str) -> Option<&str> {
 
 /// The story of `https://lobste.rs/s/{id}[/{slug}]` or `…/s/{id}.json`.
 pub fn of_uri(uri: &str) -> Option<String> {
-    let url = web_url(uri)?;
+    let url = super::kit::web_url(uri)?;
     if !matches!(url.host_str()?, "lobste.rs" | "www.lobste.rs") {
         return None;
     }

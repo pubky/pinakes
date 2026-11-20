@@ -79,7 +79,7 @@ impl Target {
     /// `https://www.pinterest.com/pin/{id}/` (also `/pin/{slug}--{id}/`) or
     /// `https://www.pinterest.com/{name}/`, on any Pinterest site.
     pub fn of_uri(uri: &str) -> Option<Self> {
-        let url = web_url(uri)?;
+        let url = super::kit::web_url(uri)?;
         let host = url.host_str()?;
         let host = host.strip_prefix("www.").unwrap_or(host);
         if !HOSTS.contains(&host) {

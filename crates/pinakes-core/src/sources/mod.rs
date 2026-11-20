@@ -983,7 +983,9 @@ pub fn texts(v: &serde_json::Value) -> Vec<String> {
         .filter_map(text)
         .collect()
 }
-/// An `https` or `http` URL with a host, as given.
+/// An `https` or `http` URL with a host, as given: for a URL a service's answer names (an image,
+/// a website) and a page of any site. A source parses its own links with `kit::web_url`, which
+/// refuses a port, a user name and a password.
 pub fn web_url(value: &str) -> Option<url::Url> {
     let url = url::Url::parse(value).ok()?;
     (matches!(url.scheme(), "https" | "http") && url.host_str().is_some()).then_some(url)
@@ -1298,6 +1300,34 @@ mod tests {
                 assert!(rate.is_finite() && *rate > 0.0 && !host.is_empty());
             }
         }
+    }
+
+    /// A link with a port, a user name or a password is not a service's own link form: the
+    /// source that reads the plain link neither reads it nor merges it into the object's card.
+    #[test]
+    fn a_link_with_a_port_or_a_user_name_is_no_sources_link() {
+        let mut checked = 0;
+        for source in REGISTRY {
+            for example in source.examples() {
+                let Some(rest) = example.uri.strip_prefix("https://") else {
+                    continue;
+                };
+                if !source.reads(example.uri) {
+                    continue;
+                }
+                let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+                for odd in [
+                    format!("https://{host}:8443/{path}"),
+                    format!("https://user@{host}/{path}"),
+                    format!("https://user:secret@{host}/{path}"),
+                ] {
+                    assert!(!source.reads(&odd), "{} reads {odd}", source.name());
+                    assert_eq!(source.alias_root(&odd), None, "{odd}");
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 0 || REGISTRY.is_empty());
     }
 
     /// `scripts/check-removals --self-test`, run from `root`: it must pass.

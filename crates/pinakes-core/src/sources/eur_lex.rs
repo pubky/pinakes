@@ -2,9 +2,7 @@
 //! are behind a bot challenge). An act's CELEX number is its key: every EUR-Lex address of it is
 //! an alias of its CELEX page, and an ELI, Official Journal or Cellar address becomes one after
 //! its first fetch. Reuse with acknowledgement of the source (Commission Decision 2011/833/EU).
-use super::{
-    sparql_literal, sparql_rows, sparql_url, web_url, Context, Example, Row, Source, SPARQL_JSON,
-};
+use super::{sparql_literal, sparql_rows, sparql_url, Context, Example, Row, Source, SPARQL_JSON};
 use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
@@ -61,7 +59,7 @@ fn uuid(value: &str) -> Option<String> {
 
 impl Key {
     pub fn of_uri(uri: &str) -> Option<Self> {
-        let url = web_url(uri)?;
+        let url = super::kit::web_url(uri)?;
         let host = url.host_str()?;
         let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
         match host {

@@ -46,7 +46,7 @@ impl Target {
     /// the slug, or a `comment` parameter, which selects one comment) is not read: a comment is
     /// its own thing, never its post.
     pub fn of_uri(uri: &str) -> Option<Self> {
-        let url = web_url(uri)?;
+        let url = super::kit::web_url(uri)?;
         if url.query_pairs().any(|(k, _)| k == "comment") {
             return None;
         }

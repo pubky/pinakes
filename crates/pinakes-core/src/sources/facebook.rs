@@ -81,7 +81,7 @@ impl Target {
     /// `https://www.facebook.com/{name}`, `/{name}/posts/{id}`, `/reel/{id}` and
     /// `/watch/?v={id}`, on facebook.com (also m., web., mbasic.) and fb.com.
     pub fn of_uri(uri: &str) -> Option<Self> {
-        let url = web_url(uri)?;
+        let url = super::kit::web_url(uri)?;
         if !matches!(
             url.host_str()?,
             "facebook.com"

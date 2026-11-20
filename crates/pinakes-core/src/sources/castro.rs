@@ -16,7 +16,7 @@ use async_trait::async_trait;
 
 /// The episode a Castro link names: `castro.fm/episode/{id}`.
 pub fn episode_of(uri: &str) -> Option<String> {
-    let url = web_url(uri)?;
+    let url = super::kit::web_url(uri)?;
     if !matches!(url.host_str()?, "castro.fm" | "www.castro.fm") {
         return None;
     }

@@ -64,7 +64,7 @@ impl Target {
             let actor = parts.next()?;
             (actor, parts.collect())
         } else {
-            let url = web_url(uri)?;
+            let url = super::kit::web_url(uri)?;
             if !matches!(url.host_str()?, "bsky.app" | "www.bsky.app") {
                 return None;
             }

@@ -84,7 +84,7 @@ impl Target {
     /// `/{login}/clip/{slug}`, and `https://clips.twitch.tv/{slug}`; also m.twitch.tv and the
     /// host without `www.`.
     pub fn of_uri(uri: &str) -> Option<Self> {
-        let url = web_url(uri)?;
+        let url = super::kit::web_url(uri)?;
         let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
         match url.host_str()? {
             "clips.twitch.tv" => match segments.as_slice() {

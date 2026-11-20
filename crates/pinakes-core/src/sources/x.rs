@@ -55,7 +55,7 @@ impl Target {
     /// `https://x.com/{handle}`, `/{handle}/status/{id}` (with anything after, a photo's
     /// number) or `/i/web/status/{id}`, on x.com, twitter.com and their www. and mobile. hosts.
     pub fn of_uri(uri: &str) -> Option<Self> {
-        let url = web_url(uri)?;
+        let url = super::kit::web_url(uri)?;
         if !matches!(
             url.host_str()?,
             "x.com"

@@ -22,7 +22,7 @@ pub fn of_uri(uri: &str) -> Option<u64> {
 /// The item a link's path names and the comment its `?commentId=` names, if any. The comment
 /// counts only once its own record says it is in that item's thread.
 fn parts(uri: &str) -> Option<(u64, Option<u64>)> {
-    let url = web_url(uri)?;
+    let url = super::kit::web_url(uri)?;
     if !matches!(url.host_str()?, "stacker.news" | "www.stacker.news") {
         return None;
     }

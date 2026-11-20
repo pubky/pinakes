@@ -42,7 +42,7 @@ impl Target {
     /// `/posts/{slug}-activity-{id}-{tag}` and `/feed/update/urn:li:activity:{id}`, on
     /// linkedin.com with any host prefix (`www.`, `de.`, none).
     pub fn of_uri(uri: &str) -> Option<Self> {
-        let url = web_url(uri)?;
+        let url = super::kit::web_url(uri)?;
         let host = url.host_str()?;
         if host != "linkedin.com"
             && !host.strip_suffix(".linkedin.com").is_some_and(|prefix| {

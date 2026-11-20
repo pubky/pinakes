@@ -1,7 +1,7 @@
 //! UK legislation from legislation.gov.uk: Acts, statutory instruments, devolved legislation and
 //! retained EU law, read from each item's `introduction/data.xml` (a provision's from its own
 //! `data.xml`). Open Government Licence v3.0; no key; 1,500 requests per 5 minutes.
-use super::{web_url, Budget, Context, Example, Source};
+use super::{Budget, Context, Example, Source};
 use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
@@ -62,7 +62,7 @@ impl Item {
     /// the same text. Notes, memoranda, impact assessments and other parts are not read, nor
     /// items numbered by regnal year.
     pub fn of_uri(uri: &str) -> Option<Self> {
-        let url = web_url(uri)?;
+        let url = super::kit::web_url(uri)?;
         if !matches!(
             url.host_str()?,
             "www.legislation.gov.uk" | "legislation.gov.uk"
@@ -388,7 +388,10 @@ mod tests {
             ttl: 3600,
         };
         let doc = LegislationGovUk
-            .resolve(&cx, "https://www.legislation.gov.uk/ukpga/2018/12/section/1")
+            .resolve(
+                &cx,
+                "https://www.legislation.gov.uk/ukpga/2018/12/section/1",
+            )
             .await
             .unwrap();
         assert_eq!(doc.status, crate::model::Status::Ok);
