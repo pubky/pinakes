@@ -29,8 +29,9 @@ pub(crate) struct Api {
     pub busy_class: &'static str,
 }
 impl Api {
-    /// A refusal of the credentials: the lookup retries later and keeps what the service gave
-    /// before, as nothing else answers for its source.
+    /// A refusal of the credentials: the lookup keeps what the service gave before, as nothing
+    /// else answers for its source, and the worker passes the source over as one that is not
+    /// ready (`also_on::one`); a lookup that asks the service beside others decides for itself.
     pub(crate) fn refused(&self) -> anyhow::Error {
         RetryLater {
             class: self.auth_class,
@@ -56,12 +57,15 @@ pub(crate) fn pair(id: Option<&str>, secret: Option<&str>) -> Option<(String, St
         _ => None,
     }
 }
-/// Whether an error is a service refusing the operator's credentials, its token or its API (a
-/// class ending `_auth`: `spotify_auth`, `tidal_auth`). It lasts: a retry soon would be refused too.
+/// Whether an error is a service refusing the operator's credentials, its token endpoint or its
+/// API ([`Api::refused`]: a class ending `_auth`, `spotify_auth` or `tidal_auth`, held
+/// [`REFUSAL_HOLD`]). It lasts: a retry soon would be refused too. A token the service rejects
+/// after its first minute is not one (the same class, a minute's wait): the next request takes
+/// a new token.
 pub(crate) fn refused(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<RetryLater>()
-        .is_some_and(|r| r.class.ends_with("_auth"))
+        .is_some_and(|r| r.class.ends_with("_auth") && r.seconds >= REFUSAL_HOLD)
 }
 /// How long refused credentials are held before the service is asked again, and the wait a
 /// refused lookup reports: one value, so the retry comes when the hold ends.

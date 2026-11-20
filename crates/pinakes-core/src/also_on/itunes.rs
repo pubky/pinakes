@@ -116,8 +116,8 @@ mod tests {
         serde_json::from_slice(std::fs::read(path).unwrap().trim_ascii()).unwrap()
     }
 
-    /// iTunes' real answer (`text/javascript`) passes the egress checks; without admitting it,
-    /// the lookup was refused as `policy` and took MusicBrainz's answer down with it.
+    /// iTunes' real answer (`text/javascript`) passes the egress checks: the lookup admits that
+    /// content type, which the egress otherwise refuses as `policy`.
     #[tokio::test]
     async fn itunes_javascript_json_is_admitted() {
         use axum::{routing::get, Router};

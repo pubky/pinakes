@@ -305,8 +305,10 @@ async fn off_or_without_credentials_nothing_asks_tidal(pool: sqlx::PgPool) {
 }
 
 /// A refusal of the credentials (at the token endpoint, or a 403 from the API), a rate limit (429)
-/// and a timeout at the token endpoint (408) keep the links an earlier run found and retry later:
-/// after the five-minute hold (`tidal_auth`), or after the wait TIDAL asked for (`tidal_busy`).
+/// and a timeout at the token endpoint (408) keep the links an earlier run found. A rate limit
+/// or a timeout retries after the wait TIDAL asked for (`tidal_busy`); refused credentials fail
+/// no run (the source is passed over as one that is not ready), so the card is read again at
+/// its sources' lifetime.
 #[sqlx::test(migrations = "../../migrations")]
 async fn refusals_and_rate_limits_keep_the_links(pool: sqlx::PgPool) {
     let album = save(
@@ -331,8 +333,8 @@ async fn refusals_and_rate_limits_keep_the_links(pool: sqlx::PgPool) {
                 refuse: true,
                 ..Default::default()
             },
-            "tidal_auth",
-            290.0..=300.0,
+            None,
+            3_601.0..=f64::INFINITY,
         ),
         (
             ("forbidden-id", "forbidden-secret"),
@@ -340,8 +342,8 @@ async fn refusals_and_rate_limits_keep_the_links(pool: sqlx::PgPool) {
                 api_status: Some(403),
                 ..Default::default()
             },
-            "tidal_auth",
-            290.0..=300.0,
+            None,
+            3_601.0..=f64::INFINITY,
         ),
         (
             ("busy-id", "busy-secret"),
@@ -349,7 +351,7 @@ async fn refusals_and_rate_limits_keep_the_links(pool: sqlx::PgPool) {
                 api_status: Some(429),
                 ..Default::default()
             },
-            "tidal_busy",
+            Some("tidal_busy"),
             3500.0..=3600.0,
         ),
         // A timeout at the token endpoint is a wait, not a refusal of the credentials.
@@ -359,7 +361,7 @@ async fn refusals_and_rate_limits_keep_the_links(pool: sqlx::PgPool) {
                 token_status: Some(408),
                 ..Default::default()
             },
-            "tidal_busy",
+            Some("tidal_busy"),
             60.0..=3600.0,
         ),
     ] {
@@ -371,18 +373,18 @@ async fn refusals_and_rate_limits_keep_the_links(pool: sqlx::PgPool) {
         let before = common::token_refusals("tidal");
         let seen = run(&pool, config(Some(pair), true), answers.clone()).await;
         assert!(seen.iter().any(|s| s.contains("tidal.com")), "{seen:?}");
-        assert_eq!(links(&pool, &album).await, found, "{class}");
+        assert_eq!(links(&pool, &album).await, found, "{class:?}");
         // A refusal of the credentials (401 at the token endpoint, a 403 from the API) is counted
         // where an alert reads it; a rate limit or a timeout is not.
         let counted = common::token_refusals("tidal") - before;
         if answers.api_status == Some(429) || answers.token_status.is_some() {
-            assert_eq!(counted, 0, "{class}");
+            assert_eq!(counted, 0, "{class:?}");
         } else {
-            assert!(counted >= 1, "{class}");
+            assert!(counted >= 1, "{class:?}");
         }
         let (error, seconds) = due(&pool, &album).await;
-        assert_eq!(error.as_deref(), Some(class));
-        assert!(wait.contains(&seconds), "{class}: {seconds}");
+        assert_eq!(error.as_deref(), class);
+        assert!(wait.contains(&seconds), "{class:?}: {seconds}");
         // Within the hold, the retry asks TIDAL nothing.
         let seen = run(&pool, config(Some(pair), true), answers).await;
         assert!(!seen.iter().any(|s| s.contains("tidal.com")), "{seen:?}");

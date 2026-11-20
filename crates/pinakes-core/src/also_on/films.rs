@@ -351,7 +351,8 @@ impl Source for Films {
             return Ok(Found::default());
         };
         let mut found = Found::default();
-        // A failing secondary service leaves what the link's own record said.
+        // A failing secondary service leaves what the link's own record said, and the run comes
+        // back for its part.
         let mut deferred = Deferred::default();
         // The title's IMDb ID, and its item.
         let (tt, item) = match &film {

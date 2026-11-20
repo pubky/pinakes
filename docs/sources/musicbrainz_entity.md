@@ -16,7 +16,7 @@ its own current `wikidata` relation names (`wikidata:{Q-id}`, the exact item lin
 name several items, or no item, key none) once that item, read back, is exactly an artist's item
 for an artist or a release group's for a release group, naming this one MBID (`P434`, `P436`) and,
 for a release group, no recording (`P4404`): an item that is a work's too or names a recording (a
-single's song's or track's item, which a track can be keyed by through its streaming IDs), one of
+single's song's or track's item), one of
 another kind (an album's relation to its artist's item) or one with no identifier yet keys nothing,
 though the card's enrichment may still take its text. So it joins a link Wikidata names for that
 item; a page whose item differs from another member's stays out of that group (one item per group,

@@ -327,6 +327,11 @@ async fn a_refused_podcast_index_key_fails_nothing() {
     );
     assert!(sites(&found).contains(&"Pocket Casts"));
     assert!(found.facts.is_empty());
+    // A refused key lasts: the run does not come back early for it, and what the source
+    // recorded with Podcast Index's answers before stays beside what the others answered now.
+    assert_eq!(found.retry_after, None);
+    // Part of the answer is missing: nothing the source recorded before is deleted.
+    assert_eq!(found.keep_stored, pinakes_core::also_on::Keep::All);
     // The refusal is counted where an alert reads it; a rate limit (429) is not. No other test
     // here has Podcast Index refuse.
     assert!(common::token_refusals("podcast_index") > before);
@@ -355,6 +360,72 @@ async fn a_refused_podcast_index_key_fails_nothing() {
         .await
         .unwrap_err();
     assert!(error.is::<RetryLater>(), "{error:#}");
+}
+
+/// A podcastindex.org card asks iTunes and Wikidata only with Podcast Index's answer: while
+/// Podcast Index refuses the key it asks nobody, and the `podcast:apple:` key and the links an
+/// earlier run recorded stay, with no failed run and no early one.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_refused_podcast_index_key_keeps_an_index_cards_apple_key(pool: sqlx::PgPool) {
+    use pinakes_core::{also_on, model::ResourceMeta, store};
+    let uri = "https://podcastindex.org/podcast/920666";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut doc = ResourceMeta::new(uri, "media", 86400);
+    doc.set_type("PodcastSeries");
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let config = indexed();
+    // What an earlier run, with the key accepted, recorded for the card.
+    also_on::record(
+        &pool,
+        &id,
+        "podcasts",
+        Found {
+            keys: vec![also_on::Key {
+                key: "podcast:apple:1584274529".into(),
+                via: "itunes".into(),
+            }],
+            links: vec![also_on::Link::new(
+                "https://podcasts.apple.com/podcast/id1584274529",
+                "Apple Podcasts",
+                "itunes",
+            )],
+            ..Default::default()
+        },
+        std::time::Duration::from_secs(86_400),
+        &config.also_on,
+    )
+    .await
+    .unwrap();
+    let refused = Recorded::with(&[(
+        "https://api.podcastindex.org/api/1.0/podcasts/byfeedid?id=920666",
+        401,
+        "{}",
+    )]);
+    let sources: Vec<_> = also_on::registry()
+        .into_iter()
+        .filter(|s| s.id() == "podcasts")
+        .collect();
+    sqlx::query("INSERT INTO also_on_dirty(resource_id) VALUES($1) ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=now()")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    also_on::drain(&pool, &cx(refused, config), &sources, 100)
+        .await
+        .unwrap();
+    let rows: Vec<String> = sqlx::query_scalar("SELECT key FROM resource_key WHERE resource_id=$1 UNION ALL SELECT site FROM derived_link WHERE resource_id=$1 ORDER BY 1")
+        .bind(&id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, ["Apple Podcasts", "podcast:apple:1584274529"]);
+    let (error, due_in): (Option<String>, f64) = sqlx::query_as("SELECT last_error,extract(epoch FROM next_attempt_at-now())::float8 FROM also_on_dirty WHERE resource_id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(error, None);
+    assert!(due_in > 3600.0, "{due_in}");
 }
 
 #[tokio::test]
@@ -891,6 +962,174 @@ async fn a_feed_item_page_joins_its_episode() {
         keys(&other),
         ["podcast:apple_episode:1000796718231", enclosure.as_str()],
         "Apple's track, and the file Apple's record names"
+    );
+}
+
+/// A show Podcast Index vouches for (feed 777777), whose feed gives items one and two the same
+/// `<link>` (a listening page), item three a page of its own, and item four the channel's own
+/// `<link>`.
+const SHARED_FEED: &str = "https://shared.example/feed.xml";
+const GUID_SHARED: &str = "22222222-2222-5222-8222-222222222222";
+fn shared_link_site() -> Arc<Recorded> {
+    let item = |n: u8, link: &str| {
+        format!(
+            r#"<item><title>Episode {n}</title><link>{link}</link><guid>ep-{n}</guid><enclosure url="https://shared.example/{n}.mp3" type="audio/mpeg" length="1"/></item>"#
+        )
+    };
+    let feed = format!(
+        r#"<?xml version="1.0"?><rss version="2.0" xmlns:podcast="https://podcastindex.org/namespace/1.0"><channel><title>Shared</title><link>https://shared.example/show</link><podcast:guid>{GUID_SHARED}</podcast:guid>{}{}{}{}</channel></rss>"#,
+        item(1, "https://shared.example/listen"),
+        item(2, "https://shared.example/listen"),
+        item(3, "https://shared.example/episode/3"),
+        item(4, "https://shared.example/show"),
+    );
+    let index = format!(
+        r#"{{"status":"true","feed":{{"id":777777,"podcastGuid":"{GUID_SHARED}","url":"{SHARED_FEED}","originalUrl":"{SHARED_FEED}"}}}}"#
+    );
+    let episode = |id: u64, n: u8| {
+        (
+            format!("https://api.podcastindex.org/api/1.0/episodes/byid?id={id}"),
+            format!(
+                r#"{{"status":"true","episode":{{"id":{id},"guid":"ep-{n}","feedId":777777,"enclosureUrl":"https://shared.example/{n}.mp3","enclosureType":"audio/mpeg"}}}}"#
+            ),
+        )
+    };
+    let by_guid = |n: u8| {
+        (
+            format!(
+                "https://api.podcastindex.org/api/1.0/episodes/byguid?guid=ep-{n}&feedid=777777"
+            ),
+            r#"{"status":"true","episode":[],"description":"Episode not found."}"#.to_owned(),
+        )
+    };
+    let mut bodies: Vec<(String, &str, String)> = vec![
+        (SHARED_FEED.into(), "application/rss+xml", feed),
+        (
+            "https://api.podcastindex.org/api/1.0/podcasts/byfeedid?id=777777".into(),
+            "application/json",
+            index.clone(),
+        ),
+        (
+            "https://api.podcastindex.org/api/1.0/podcasts/byfeedurl?url=https%3A%2F%2Fshared.example%2Ffeed.xml".into(),
+            "application/json",
+            index.clone(),
+        ),
+        (
+            format!("https://api.podcastindex.org/api/1.0/podcasts/byguid?guid={GUID_SHARED}"),
+            "application/json",
+            index,
+        ),
+    ];
+    for (url, body) in [episode(9001, 1), episode(9003, 3), episode(9004, 4)]
+        .into_iter()
+        .chain([by_guid(1), by_guid(3), by_guid(4)])
+    {
+        bodies.push((url, "application/json", body));
+    }
+    let bodies: Vec<(&str, &str, String)> = bodies
+        .iter()
+        .map(|(url, content_type, body)| (url.as_str(), *content_type, body.clone()))
+        .collect();
+    Recorded::with_bodies(&bodies)
+}
+
+#[tokio::test]
+async fn a_page_several_items_link_takes_no_episodes_key() {
+    let cx = cx(shared_link_site(), indexed());
+    let episode = |id: u64| format!("https://podcastindex.org/podcast/777777?episode={id}");
+    let rss = |n: u8| format!("{SHARED_FEED}?guid=ep-{n}");
+    // Episode one's `<link>` is item two's as well: the show's page, not the episode's. The
+    // episode keeps its item key and names its RSS item, never that page.
+    let one = Podcasts
+        .lookup(&cx, &subject(&episode(9001), None, None))
+        .await
+        .unwrap();
+    let key = item_key(GUID_SHARED, "ep-1").unwrap();
+    assert!(keys(&one).contains(&key.as_str()), "{one:?}");
+    assert_eq!(
+        links(&one),
+        [("Podcast feed", rss(1).as_str(), "feed")],
+        "a page two items link is keyed by neither"
+    );
+    // Episode four's `<link>` is the channel's own: the show's site.
+    let four = Podcasts
+        .lookup(&cx, &subject(&episode(9004), None, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        links(&four),
+        [("Podcast feed", rss(4).as_str(), "feed")],
+        "the channel's link is no episode's page"
+    );
+    // Episode three's `<link>` is its own page: keyed by the item, as its RSS item is.
+    let three = Podcasts
+        .lookup(&cx, &subject(&episode(9003), None, None))
+        .await
+        .unwrap();
+    let key = item_key(GUID_SHARED, "ep-3").unwrap();
+    assert_eq!(
+        links(&three),
+        [
+            ("shared.example", "https://shared.example/episode/3", "feed"),
+            ("Podcast feed", rss(3).as_str(), "feed"),
+        ]
+    );
+    assert_eq!(
+        key_of(&three, "https://shared.example/episode/3"),
+        Some(key.as_str())
+    );
+}
+
+#[tokio::test]
+async fn a_card_on_a_page_several_items_link_is_no_episode() {
+    let recorded = shared_link_site();
+    let cx = cx(recorded.clone(), indexed());
+    // A card at the page items one and two both link, read as item one of the feed: the page
+    // is not that item's own, so it takes no item key and names nothing keyed by it.
+    let shared = Podcasts
+        .lookup(
+            &cx,
+            &feed_card("https://shared.example/listen", SHARED_FEED, Some("ep-1")),
+        )
+        .await
+        .unwrap();
+    assert!(
+        keys(&shared).is_empty() && shared.links.is_empty(),
+        "{shared:?}"
+    );
+    // The channel's own link, which item four names and whose head names the feed: no item of
+    // the feed is found by it, and Podcast Index is not asked.
+    let before = recorded.signed_with.lock().unwrap().len();
+    let page = "https://shared.example/show";
+    let mut doc = ResourceMeta::new(page, "web", 3600);
+    doc.attributes.insert("feed".into(), SHARED_FEED.into());
+    let site = Podcasts
+        .lookup(&cx, &subject(page, Some("WebPage"), Some(doc)))
+        .await
+        .unwrap();
+    assert_eq!(site, Found::default());
+    assert_eq!(
+        recorded.signed_with.lock().unwrap().len(),
+        before,
+        "Podcast Index is not asked"
+    );
+    // Item three's own page is its episode: the item key, and the RSS item keyed by it.
+    let own = Podcasts
+        .lookup(
+            &cx,
+            &feed_card(
+                "https://shared.example/episode/3",
+                SHARED_FEED,
+                Some("ep-3"),
+            ),
+        )
+        .await
+        .unwrap();
+    let key = item_key(GUID_SHARED, "ep-3").unwrap();
+    assert!(keys(&own).contains(&key.as_str()), "{own:?}");
+    assert_eq!(
+        key_of(&own, &format!("{SHARED_FEED}?guid=ep-3")),
+        Some(key.as_str())
     );
 }
 

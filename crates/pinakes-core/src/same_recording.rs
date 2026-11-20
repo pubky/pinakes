@@ -78,9 +78,9 @@ pub async fn run(pool: PgPool, config: Config, mut shutdown: watch::Receiver<boo
     }
 }
 
-/// Marks the recordings never read (a database from before the hint, a recording saved while
-/// the hint was off), the stored units whose resource is no longer a recording root (an alias,
-/// a page that is not ok, a retyped page) and those still waiting for a refill (see `refill`).
+/// Marks the recordings never read (one saved while the hint was off), the stored units whose
+/// resource is no longer a recording root (an alias, a page that is not ok, a retyped page) and
+/// those still waiting for a refill (see `refill`).
 /// Returns the resources marked.
 pub async fn sweep(pool: &PgPool) -> Result<u64> {
     let entered = sqlx::query(
@@ -208,9 +208,11 @@ async fn resource(pool: &PgPool, id: &str) -> Result<Read> {
 }
 
 /// One resource read in `tx`: its unit is dropped (with its pairs) when it is no longer a
-/// recording root with a title, else written when its values changed, and its pairs computed
-/// anew (or, for a read that stopped short, from where it stopped). The caller commits a read
-/// that `changed` with `commit_changed`. Its candidates are taken `FOR KEY SHARE … SKIP LOCKED`,
+/// recording root, else written when its values changed, and its pairs computed anew (or, for a
+/// read that stopped short, from where it stopped). A recording without a title (no name, or one
+/// that compares as nothing) keeps a unit with an empty title key that pairs with nothing, so
+/// the sweep does not mark it as never read. The caller commits a read that `changed` with
+/// `commit_changed`. Its candidates are taken `FOR KEY SHARE … SKIP LOCKED`,
 /// so it never waits for a unit another transaction holds (an orphan being deleted, whose
 /// `before_delete` may be waiting for this unit in turn). Exposed for the lock test.
 pub async fn read_in(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, id: &str) -> Result<Read> {
@@ -230,9 +232,9 @@ pub async fn read_in(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, id: &str) -
     };
     let name: Option<String> = row.try_get("name")?;
     let recording: bool = row.try_get("recording")?;
-    let unit = name.as_deref().filter(|_| recording).map(|name| {
+    let unit = recording.then(|| {
         Unit::new(
-            name,
+            name.as_deref().unwrap_or_default(),
             row.try_get::<Option<String>, _>("artist")
                 .ok()
                 .flatten()
@@ -249,24 +251,21 @@ pub async fn read_in(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, id: &str) -
         )
     });
     let stored: Option<String> = row.try_get("fingerprint")?;
-    let unit = match unit {
-        Some(unit) if !unit.title_key.is_empty() => unit,
-        _ => {
-            // No longer a recording: its unit goes, its pairs with it (on both sides), and the
-            // recordings that named it are read again to refill their lists.
-            if stored.is_none() {
-                return Ok(Read::default());
-            }
-            before_delete(tx, id).await?;
-            sqlx::query("DELETE FROM same_recording_unit WHERE resource_id=$1")
-                .bind(id)
-                .execute(&mut **tx)
-                .await?;
-            return Ok(Read {
-                changed: true,
-                examined: 0,
-            });
+    let Some(unit) = unit else {
+        // No longer a recording: its unit goes, its pairs with it (on both sides), and the
+        // recordings that named it are read again to refill their lists.
+        if stored.is_none() {
+            return Ok(Read::default());
         }
+        before_delete(tx, id).await?;
+        sqlx::query("DELETE FROM same_recording_unit WHERE resource_id=$1")
+            .bind(id)
+            .execute(&mut **tx)
+            .await?;
+        return Ok(Read {
+            changed: true,
+            examined: 0,
+        });
     };
     let fingerprint = unit.fingerprint();
     if stored.as_deref() == Some(fingerprint.as_str()) {
@@ -342,7 +341,8 @@ pub async fn read_in(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, id: &str) -
     let mut scan_left = SCAN;
     let mut examined = 0usize;
     let mut last_examined: Option<(String, Option<i32>)> = None;
-    if !unit.artist_key.is_empty() {
+    // A recording without a title or without an artist pairs with nothing.
+    if !unit.title_key.is_empty() && !unit.artist_key.is_empty() {
         for segment in &ring.segments {
             let room = KEPT - (existing.len() + best.len()) as i64;
             if room <= 0 || scan_left <= 0 {

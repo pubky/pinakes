@@ -19,7 +19,7 @@ Only where an OpenStreetMap object and a Wikidata item point at each other:
   attraction, restaurant or hotel page on any of its country sites, by the `d{number}` in its
   name, which is all Wikidata's P3134 holds) gets the one Wikidata item carrying that value
   (read back and compared exactly; several items are ambiguous and give nothing): the item's
-  Q-id as key, its OSM object as key and link when it names exactly one (so the page joins the
+  Q-id as key (when the item carries one value for the page's site), its OSM object as key and link when it names exactly one (so the page joins the
   object's group), and its Wikidata page, other place links and Wikipedia editions.
 - `btcmap`: an OSM object that BTC Map lists gets its merchant page
   (`btcmap.org/merchant/{type}:{id}`), from BTC Map's place list by OSM ID, never by probing a
