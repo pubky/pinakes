@@ -10,7 +10,8 @@ User-Agent, one request at a time and well under five a second; Pinakes keeps to
 `commons:File:{Name}` as the root. The name is in MediaWiki's normal form: underscores for
 spaces, runs of them collapsed, first letter upper case (e.g.
 `commons:File:Golden_Gate_Bridge_as_seen_from_Battery_East.jpg`); in the root, letters outside
-ASCII are percent-encoded (`commons:File:%C3%89t%C3%A9.jpg`), as URIs are stored:
+ASCII are percent-encoded (`commons:File:%C3%89t%C3%A9.jpg`), and so is a `"` after the name's
+first `?`, as URIs are stored:
 
 - `https://commons.wikimedia.org/wiki/File:{name}` and the mobile
   `https://commons.m.wikimedia.org/wiki/File:{name}`, with spaces or underscores, percent-encoded

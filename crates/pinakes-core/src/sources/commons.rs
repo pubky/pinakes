@@ -19,7 +19,7 @@ use crate::model::ResourceMeta;
 use crate::wikimedia::{file_name, file_page};
 use anyhow::{bail, ensure, Context, Result};
 use async_trait::async_trait;
-use percent_encoding::{percent_decode_str, utf8_percent_encode, CONTROLS};
+use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, CONTROLS};
 use serde_json::Value;
 
 pub const SITE: &str = "Wikimedia Commons";
@@ -92,14 +92,22 @@ pub fn from_uri(uri: &str) -> Option<Target> {
     }
 }
 
+/// What URI normalisation escapes from a name's first `?` on, which it reads as a query.
+const QUERY: &AsciiSet = &CONTROLS.add(b'"');
+
 /// The identifier of a file by title; `None` for a page id until the answer names the title.
-/// Letters outside ASCII are percent-encoded, as URI normalisation writes them.
+/// Letters outside ASCII are percent-encoded, and so is a `"` after the name's first `?`, as URI
+/// normalisation writes them.
 pub fn identifier(target: &Target) -> Option<String> {
     match target {
-        Target::Title(name) => Some(format!(
-            "commons:File:{}",
-            utf8_percent_encode(name, CONTROLS)
-        )),
+        Target::Title(name) => {
+            let (path, query) = name.split_at(name.find('?').unwrap_or(name.len()));
+            Some(format!(
+                "commons:File:{}{}",
+                utf8_percent_encode(path, CONTROLS),
+                utf8_percent_encode(query, QUERY)
+            ))
+        }
         Target::PageId(_) => None,
     }
 }
@@ -696,6 +704,31 @@ mod tests {
             assert!(!c.reads(uri), "{uri}");
         }
         assert!(!c.invalid("https://upload.wikimedia.org/wikipedia/commons/4/46/Bitcoin.svg"));
+    }
+
+    #[test]
+    fn a_quote_in_a_name_keeps_its_root() {
+        let c = Commons;
+        for (link, root, name) in [
+            // URI normalisation leaves a `"` as it is before a name's first `?`,
+            (
+                "https://commons.wikimedia.org/wiki/File:%22Me%22.jpg",
+                "commons:File:\"Me\".jpg",
+                "\"Me\".jpg",
+            ),
+            // and percent-encodes it after one.
+            (
+                "https://commons.wikimedia.org/wiki/File:Who%3F_%22Me%22.jpg",
+                "commons:File:Who?_%22Me%22.jpg",
+                "Who?_\"Me\".jpg",
+            ),
+        ] {
+            assert_eq!(id(link).as_deref(), Some(root), "{link}");
+            assert_eq!(crate::model::identity(root).unwrap().1, root);
+            assert_eq!(from_root(root), Some(title(name)), "{root}");
+            assert!(c.reads(root) && !c.invalid(root), "{root}");
+            assert_eq!(c.alias_root(root), None, "{root}");
+        }
     }
 
     #[test]
