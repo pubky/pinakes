@@ -11,8 +11,9 @@ A profile is named by its slug, a company (or school) by its slug:
 link spells: `https://www.linkedin.com/posts/{slug}-activity-{id}-{tag}`, the one LinkedIn shows
 without an account, or `https://www.linkedin.com/feed/update/urn:li:activity:{id}`. The two are
 not aliases of each other: the activity id alone cannot spell the `/posts/` address, and the
-URN's page is shown to accounts only. The host without `www.` or with a country prefix
-(`de.linkedin.com`), a capitalised slug and `/school/{slug}` are aliases.
+URN's page is shown to accounts only. The host without `www.` or with any prefix of up to five
+lower-case letters (a country's site, `de.linkedin.com`), a capitalised slug and
+`/school/{slug}` are aliases.
 
 ## What it reads
 

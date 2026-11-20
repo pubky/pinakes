@@ -1,6 +1,9 @@
 # Twitch
 
 Twitch channels, videos and clips, from their pages' Open Graph tags. No key and no account.
+Videos and clips are social content (a video's title is its creator's own text): the card quotes
+at most 120 characters of the title, refreshes within the hour and is removed once Twitch
+answers that the video is gone (404 or 410).
 
 ## Links
 

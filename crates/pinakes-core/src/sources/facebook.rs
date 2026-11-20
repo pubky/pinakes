@@ -218,8 +218,8 @@ impl Source for Facebook {
                 Body::Missing => cx.missing(uri, self),
                 Body::Blocked => social::blocked(doc, Shape::Profile, SITE),
             },
-            // Posts and videos are shown to accounts only; the page answers the sign-in
-            // redirect, a plain card.
+            // Posts and videos are shown to accounts only: nothing is read from their pages. The
+            // sign-in redirect is a refusal (the blocked card); an answered page, the plain one.
             Target::Post { page, .. } => {
                 let mut doc = match social::page_body(cx, &target.root(), &[]).await? {
                     Body::Missing => cx.missing(uri, self),
