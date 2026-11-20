@@ -165,6 +165,7 @@ impl Metrics {
         registry.register(Box::new(ALSO_ON_SERVICE_ERRORS.clone()))?;
         registry.register(Box::new(ALSO_ON_RECORDING_KEY_CONFLICTS.clone()))?;
         registry.register(Box::new(RESOLUTION_DEFERRED.clone()))?;
+        registry.register(Box::new(AFTER_SAVE_FAILURES.clone()))?;
         let out = Self {
             api_panics,
             api_requests,
@@ -242,7 +243,7 @@ impl Metrics {
             queue: metric!(
                 IntGaugeVec,
                 "pinakes_queue_depth",
-                "Ready, leased and dead resource jobs",
+                "Resource jobs a worker may claim now (pending), leased and dead",
                 &["resolver", "state"]
             ),
             overdue: metric!(
@@ -277,6 +278,11 @@ impl Metrics {
         }
         for manifest in crate::adapter::manifests() {
             out.source_series(&manifest);
+        }
+        // The base resolvers' failed steps after a save from 0; the workers add theirs
+        // (`queue::spawn_with_egress`).
+        for resolver in crate::resolver::ROUTES {
+            after_save_series(resolver);
         }
         // Every keyed source's refusals from 0, so a key refused later is a rise an alert reads.
         for source in crate::sources::KEYED {
@@ -317,7 +323,10 @@ impl Metrics {
         let feed=sqlx::query("SELECT coalesce(sum(greatest(feed_length-cursor,0)),0)::bigint AS lag,coalesce(extract(epoch FROM max(updated_at)),0)::bigint AS success,coalesce(sum(resets),0)::bigint AS resets FROM feed_cursor").fetch_one(pool).await?;
         let sources=sqlx::query("SELECT *,coalesce(extract(epoch FROM last_success_at),0)::bigint AS success FROM source_state").fetch_all(pool).await?;
         let resources=sqlx::query("SELECT resolver,status,count(*) AS n FROM resource WHERE resolver IS NOT NULL GROUP BY resolver,status").fetch_all(pool).await?;
-        let queue=sqlx::query("SELECT resolver,count(*) FILTER(WHERE dead_letter) AS dead,count(*) FILTER(WHERE NOT dead_letter AND lease_until>now()) AS leased,count(*) FILTER(WHERE NOT dead_letter AND NOT final AND next_attempt_at<=now() AND (lease_until IS NULL OR lease_until<=now())) AS pending,count(*) FILTER(WHERE NOT final AND NOT dead_letter AND refresh_at<now()) AS overdue FROM resource WHERE resolver IS NOT NULL GROUP BY resolver").fetch_all(pool).await?;
+        // `pending` is what a worker may claim now, by the claim's own condition: a derived link
+        // nothing keeps is never claimed and is not counted.
+        let queue = format!("SELECT resolver,count(*) FILTER(WHERE dead_letter) AS dead,count(*) FILTER(WHERE NOT dead_letter AND lease_until>now()) AS leased,count(*) FILTER(WHERE {}) AS pending,count(*) FILTER(WHERE NOT final AND NOT dead_letter AND refresh_at<now()) AS overdue FROM resource WHERE resolver IS NOT NULL GROUP BY resolver", crate::queue::CLAIMABLE);
+        let queue = sqlx::query(&queue).fetch_all(pool).await?;
         let groups=sqlx::query("SELECT (SELECT count(*) FROM group_input WHERE parked_keys>0 AND NOT settled_stopped) AS parked,(SELECT count(*) FROM group_dirty WHERE last_error='work_budget') AS stopped,(SELECT count(*) FROM group_input WHERE settled_stopped) AS settled,(SELECT count(*) FROM group_input WHERE key_conflicts>0) AS conflicts").fetch_one(pool).await?;
         // A resource nothing ever referenced keeps the instant it was created as its orphan time;
         // a derived child and a venue are kept for their parent and event, not as previews. The
@@ -492,6 +501,30 @@ static RESOLUTION_DEFERRED: std::sync::LazyLock<IntCounterVec> = std::sync::Lazy
 });
 pub fn resolution_deferred(reason: &'static str) {
     RESOLUTION_DEFERRED.with_label_values(&[reason]).inc();
+}
+/// Saved cards whose steps after the save failed (the alias its page names, an episode's pages),
+/// by resolver: the card stays as saved and the link is read again in full within
+/// `max_backoff_secs`. A step that fails every time shows as a steady rise.
+static AFTER_SAVE_FAILURES: std::sync::LazyLock<IntCounterVec> = std::sync::LazyLock::new(|| {
+    IntCounterVec::new(
+        Opts::new(
+            "pinakes_after_save_failures_total",
+            "Saved cards whose steps after the save failed (the card stays; the link is read again), by resolver",
+        ),
+        &["resolver"],
+    )
+    .expect("static metric")
+});
+pub fn after_save_failure(resolver: &str) {
+    AFTER_SAVE_FAILURES.with_label_values(&[resolver]).inc();
+}
+/// The failed steps after a save counted for `resolver` so far.
+pub fn after_save_failures(resolver: &str) -> u64 {
+    AFTER_SAVE_FAILURES.with_label_values(&[resolver]).get()
+}
+/// A resolver's `pinakes_after_save_failures_total` series from the start, at 0.
+pub fn after_save_series(resolver: &str) {
+    AFTER_SAVE_FAILURES.with_label_values(&[resolver]);
 }
 tokio::task_local! {static FETCHES: Arc<Mutex<Vec<Observation>>>; static DISCOVERY: IntCounterVec;}
 pub fn discovery(kind: &'static str, decision: &'static str) {

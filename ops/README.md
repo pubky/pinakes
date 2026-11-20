@@ -41,7 +41,7 @@ No messages are sent or contact points provisioned by these files.
 | `pinakes_canary_ok{source}` | Latest executed canary result, 0/1 |
 | `pinakes_canary_fields_missing{source}` | Missing declared fields in the last canary |
 | `pinakes_canary_consecutive_failures{source}` | Failed canary runs in a row, kept across restarts, so an alert counts runs, not scrapes |
-| `pinakes_queue_depth{resolver,state}` | Ready pending, currently leased or dead jobs; future refreshes are excluded from pending |
+| `pinakes_queue_depth{resolver,state}` | Jobs a worker may claim now (`pending`), currently leased or dead. Pending is counted by the claim's own condition: future refreshes are not in it, and neither is a derived link whose derivation has ended and that nobody references (it is not read while nothing keeps it, and stays until its cleanup) |
 | `pinakes_refresh_overdue{resolver}` | Non-final resources past refresh time, including failed jobs but excluding dead letters. A link never read has no refresh time and is not counted here: it is `pending` in `pinakes_queue_depth` |
 | `pinakes_group_budget_resources{state}` | Resources whose last grouping run parked a key that alone exceeded the work cap (`parked`), stopped on the run cap and retries hourly (`stopped`), or settled after 24 stopped runs on unchanged input (`settled`) |
 | `pinakes_group_key_conflict_resources` | Resources whose last grouping run refused a join that would put two MusicBrainz IDs, Q-ids or Discogs IDs of one kind in a group (usually a wrong ID on a hub) |
@@ -49,11 +49,12 @@ No messages are sent or contact points provisioned by these files.
 | `pinakes_api_panics_total` | API requests (public or admin listener) whose handler panicked and were answered 500 |
 | `pinakes_api_requests_total{listener,route,status}` | Requests answered, by listener (`public`, `admin`), route and status. The route is the path template (`/v1/resources/{id}`), `unmatched` for a path no route has; never the path asked. A 429 of the per-address budget and a 504 of `limits.request_timeout_secs` are counted. A tool call on `/mcp` counts once, there: the REST routes it calls are not counted again |
 | `pinakes_api_request_duration_seconds{listener,route}` | Time from a request to its response's head (a streamed body, the dump, is not in it) |
-| `pinakes_metrics_refresh_failures_total` | Scrapes whose read of the database failed or took over 8 seconds: `/metrics` still answered, with the database gauges (queue, overdue, resources, canaries, ingestion lag and last success) at their last values. Until those gauges have been read once, `/metrics` answers 503 instead |
+| `pinakes_metrics_refresh_failures_total` | Scrapes whose read of the database failed or took over 8 seconds (one second less than `limits.request_timeout_secs` when that is shorter): `/metrics` still answered, with the database gauges (queue, overdue, resources, canaries, ingestion lag and last success) at their last values. Until those gauges have been read once, `/metrics` answers 503 instead |
 | `pinakes_preview_refused_total{limit}` | New previews `POST /v1/resolve` refused: `instance` (503, the hourly capacity `limits.preview_new_per_hour` taken) or `client` (429, one address's share `limits.preview_new_per_client_per_hour`, when set) |
 | `pinakes_preview_backlog` | Resources nothing ever referenced (only previewed), each kept for `limits.preview_grace_hours`; derived children and venues are not counted |
 | `pinakes_discovery_decisions_total{kind,decision}` | Optional metadata discovery decisions (a request may come from cache) |
 | `pinakes_resolution_deferred_total{reason}` | Resolutions put off without a charged attempt, by reason: `missing_unconfirmed` (a missing answer waiting for the fetch that confirms it) |
+| `pinakes_after_save_failures_total{resolver}` | Saved cards whose steps after the save failed (the alias its page names, an episode's pages), by resolver; the base routes' and each running resolver's series are at 0 from the start. The card stays as saved and no attempt is charged, so the link never dead-letters. A card saved `ok` is read again in full within `limits.max_backoff_secs` (an event platform's slower cadence, where it has one), so the step runs again; any other waits for its own next read. A steady rise is a step that fails every time; the log line `a step after the save failed` names the resource each time |
 | `pinakes_also_on_service_errors_total{service,class}` | Failed also-on requests to a service (`wikidata`, `itunes`, `tidal`, `crossref`, …), by error class; the lookup goes on without that service |
 | `pinakes_also_on_recording_key_conflicts_total{source}` | Also-on runs that keyed a recording another source keys differently on the same resource, by source; both keys stay and the resource joins no recording group |
 | `pinakes_source_token_refusals_total{source}` | Refusals of the operator's configured key, token or app credentials by its service, as each signals one (a 401; a 403 where the service uses it for a refused key, not GitHub's rate limit; a token endpoint answering anything but 200, 408, 429 or 5xx), never a 429 or 5xx. One series per keyed provider, each at 0 from the start: `courtlistener`, `discogs`, `github`, `podcast_index`, `spotify`, `ticketmaster`, `tidal`, `tmdb` |
@@ -64,8 +65,8 @@ and reset counters at their stored totals.
 Full JSON diagnostics are on the admin `/v1/info`; public info is redacted.
 
 Fetch and API request counters/histograms, ingestion rejection, ingestion panic, API panic,
-preview refusal, discovery, resolution deferral, also-on error, recording key conflict, metrics
-refresh failure and token refusal counters reset with the daemon.
+preview refusal, discovery, resolution deferral, failed step after a save, also-on error,
+recording key conflict, metrics refresh failure and token refusal counters reset with the daemon.
 Ingestion reset, source and change counters are restored from durable database state
 at scrape time. Sources and modes
 come from manifests; arbitrary user hostnames do not create metric labels. OSM

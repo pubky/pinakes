@@ -39,6 +39,23 @@ pub async fn claim_batch(
 ) -> Result<Vec<Job>> {
     claim_sources(pool, &[resolver], cfg, size).await
 }
+/// What makes a row of `resource` one a worker may take now: due, not final, not a dead letter,
+/// not leased, and not a derived link nothing keeps (every derivation of it has ended and nobody
+/// references it; it stays until its cleanup). The claim takes rows by it and the `pending`
+/// gauge counts rows by it (`telemetry`), so the gauge holds only work a worker will do.
+pub(crate) const CLAIMABLE: &str = "NOT dead_letter AND NOT final AND next_attempt_at<=now() \
+    AND (lease_until IS NULL OR lease_until<now()) \
+    AND (NOT EXISTS(SELECT 1 FROM resource_derivation d WHERE d.child_id=resource.id) \
+      OR EXISTS(SELECT 1 FROM resource_derivation d WHERE d.child_id=resource.id AND (d.expires_at IS NULL OR d.expires_at>now())) \
+      OR EXISTS(SELECT 1 FROM effective_reference f WHERE f.resource_id=resource.id))";
+static CLAIM: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "UPDATE resource SET lease_until=now()+$2*interval '1 second', generation=generation+1 \
+        WHERE id IN (SELECT id FROM resource WHERE resolver=ANY($1) AND {CLAIMABLE} \
+          ORDER BY priority_at DESC NULLS LAST,next_attempt_at,id FOR UPDATE SKIP LOCKED LIMIT $3) \
+        RETURNING id,uri,attempts,generation"
+    )
+});
 pub async fn claim_sources(
     pool: &PgPool,
     sources: &[&str],
@@ -46,14 +63,12 @@ pub async fn claim_sources(
     size: usize,
 ) -> Result<Vec<Job>> {
     let size = size.clamp(1, 50);
-    Ok(sqlx::query_as(r#"UPDATE resource SET lease_until=now()+$2*interval '1 second', generation=generation+1
-        WHERE id IN (SELECT id FROM resource WHERE resolver=ANY($1) AND NOT dead_letter AND NOT final AND next_attempt_at<=now()
-          AND (lease_until IS NULL OR lease_until<now())
-          AND (NOT EXISTS(SELECT 1 FROM resource_derivation d WHERE d.child_id=resource.id)
-               OR EXISTS(SELECT 1 FROM resource_derivation d WHERE d.child_id=resource.id AND (d.expires_at IS NULL OR d.expires_at>now()))
-               OR EXISTS(SELECT 1 FROM effective_reference f WHERE f.resource_id=resource.id))
-          ORDER BY priority_at DESC NULLS LAST,next_attempt_at,id FOR UPDATE SKIP LOCKED LIMIT $3)
-        RETURNING id,uri,attempts,generation"#).bind(sources).bind(cfg.lease_secs.max(15 * size as u64 + 10) as f64).bind(size as i64).fetch_all(pool).await?)
+    Ok(sqlx::query_as(&CLAIM)
+        .bind(sources)
+        .bind(cfg.lease_secs.max(15 * size as u64 + 10) as f64)
+        .bind(size as i64)
+        .fetch_all(pool)
+        .await?)
 }
 
 /// `reextract`'s arguments: `all`, `also-on`, or route and card-kind names.
@@ -102,8 +117,8 @@ type ReextractRow = (
 /// route swaps its identity envelope and becomes pending, as does an OSM-host URL moving to web
 /// (which may hold no facts there); other rows keep their document until the fetch replaces it.
 /// Leases are fenced by the generation bump. The re-queued rows' also-on lookups are queued too:
-/// a card that comes back unchanged would not run them, and their results may predate a source
-/// or a key the upgrade added. `also-on` queues every resource's also-on lookups, without a
+/// a card that comes back unchanged would not run them, and their results may lack a source or
+/// a key this build has. `also-on` queues every resource's also-on lookups, without a
 /// fetch. A selected alias whose URI a rule now gives another root moves to it, and one no rule
 /// names any more answers for itself again and is re-queued (`alias::release`). The daemon must
 /// not be running (the caller holds the instance lock).
@@ -753,6 +768,7 @@ async fn finish_job(
             .await
             .unwrap_or_else(|_| Err(anyhow::anyhow!("the steps after the save panicked")));
         if let Err(error) = after {
+            crate::telemetry::after_save_failure(resolver.name());
             tracing::warn!(resource_id=%job.id,host=%crate::resolver::log_host(&job.uri),kind=crate::resolver::error_class(&error),resolver=resolver.name(),"a step after the save failed (an alias, an episode's pages)");
             // An accepted card's step has its inputs (the page's canonical, an episode's page)
             // only in a full read: the link is read again, without its validators, no later
@@ -1220,6 +1236,7 @@ pub fn spawn_with_egress(
         for manifest in resolver.manifests() {
             metrics.source_series(&manifest);
         }
+        crate::telemetry::after_save_series(resolver.name());
         let rate = Arc::new(Mutex::new(Instant::now()));
         for _ in 0..budget.concurrency {
             let worker = Worker {
@@ -1448,7 +1465,7 @@ mod tests {
             .execute(pool)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO reference(resource_id,kind,author,label,object_path,created_at,unit_key) VALUES($1,'tag',$2,'t','',now(),'tag:t')")
+        sqlx::query("INSERT INTO reference(resource_id,kind,author,label,object_path,created_at,unit_key) VALUES($1,'tag',$2,'t','/pub/t/'||$1,now(),'tag:t')")
             .bind(&id)
             .bind("y".repeat(52))
             .execute(pool)
@@ -1494,49 +1511,179 @@ mod tests {
         );
     }
 
-    /// A failure in what follows the save (the alias a page names) leaves the saved card as it
-    /// is: `ok`, with no attempt charged.
+    /// A late batch is not counted as a parser error either: the fetch it made keeps its own
+    /// outcome in `pinakes_fetch_total`.
     #[sqlx::test(migrations = "../../migrations")]
-    async fn a_failure_after_the_save_leaves_the_saved_card(pool: PgPool) {
+    async fn a_batch_past_its_deadline_counts_no_parser_error(pool: PgPool) {
+        /// A page fetched and answered 200, whose reading then never ends.
+        struct Stuck;
+        #[async_trait::async_trait]
+        impl Resolver for Stuck {
+            fn name(&self) -> &'static str {
+                "web"
+            }
+            fn matches(&self, _: &str) -> bool {
+                true
+            }
+            async fn resolve(&self, _: &str) -> Result<ResourceMeta> {
+                let mut fetch = crate::telemetry::FetchGuard::start();
+                fetch.status(200);
+                drop(fetch);
+                std::future::pending().await
+            }
+            fn refresh_after(&self, _: &ResourceMeta) -> Duration {
+                Duration::from_secs(100)
+            }
+        }
         let cfg = QueueConfig::default();
-        let uri = "https://after-save.example.org/page";
-        let job = claimed(&pool, uri).await;
-        FAILS_AFTER_SAVE.lock().unwrap().push(uri.into());
+        let job = claimed(&pool, "https://stuck.example.org/page").await;
+        let metrics = crate::telemetry::Metrics::new().unwrap();
+        let refresh = crate::config::RefreshConfig::default();
+        let run = run_batch_within(
+            &pool,
+            &Stuck,
+            &cfg,
+            &refresh,
+            std::slice::from_ref(&job),
+            Duration::from_millis(50),
+        );
+        let (result, fetches) =
+            crate::telemetry::observe(&metrics, &Stuck.manifest_for(&job.uri), run).await;
+        result.unwrap();
+        assert_eq!(
+            fetches.iter().map(|f| f.outcome).collect::<Vec<_>>(),
+            ["ok"]
+        );
+        assert_eq!(
+            row(&pool, &job.id).await,
+            ("pending".into(), 0, 1, false, Some("timeout".into()))
+        );
+    }
+
+    /// A web page, read at once: one with no dates, whose next read is a week away, or an
+    /// event that ended last year, which the save makes final.
+    struct Page {
+        ended: bool,
+    }
+    #[async_trait::async_trait]
+    impl Resolver for Page {
+        fn name(&self) -> &'static str {
+            "web"
+        }
+        fn matches(&self, _: &str) -> bool {
+            true
+        }
+        async fn resolve(&self, uri: &str) -> Result<ResourceMeta> {
+            let mut doc = ResourceMeta::new(uri, "web", 100);
+            doc.name = Some("A page".into());
+            if self.ended {
+                doc.end = Some(chrono::Utc::now() - chrono::Duration::days(365));
+            }
+            Ok(doc)
+        }
+        fn refresh_after(&self, _: &ResourceMeta) -> Duration {
+            Duration::from_secs(7 * 86400)
+        }
+    }
+    /// A link's validators (`None` without a row), whether it is final, and the seconds to its
+    /// next attempt and its refresh (`None` for never).
+    async fn schedule(
+        pool: &PgPool,
+        id: &str,
+    ) -> (Option<serde_json::Value>, bool, Option<f64>, Option<f64>) {
+        sqlx::query_as(
+            "SELECT e.validators,r.final,
+                CASE WHEN isfinite(r.next_attempt_at) THEN extract(epoch FROM r.next_attempt_at-now())::float8 END,
+                extract(epoch FROM r.refresh_at-now())::float8
+             FROM resource r LEFT JOIN event_fetch e ON e.resource_id=r.id WHERE r.id=$1",
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+    async fn with_validators(pool: &PgPool, job: &Job) {
         sqlx::query(
             "INSERT INTO event_fetch(resource_id,validators) VALUES($1,'{\"etag\":\"x\"}')",
         )
         .bind(&job.id)
-        .execute(&pool)
+        .execute(pool)
         .await
         .unwrap();
-        run_batch(
-            &pool,
-            &After(Duration::ZERO),
-            &cfg,
-            std::slice::from_ref(&job),
-        )
-        .await
-        .unwrap();
-        assert_eq!(row(&pool, &job.id).await, ("ok".into(), 0, 0, false, None));
-        // The link is read again in full (its validators are gone) within `max_backoff_secs`,
-        // so the step runs again.
-        let (again, validators): (f64, serde_json::Value) = sqlx::query_as(
-            "SELECT extract(epoch FROM r.next_attempt_at-now())::float8,e.validators FROM resource r JOIN event_fetch e ON e.resource_id=r.id WHERE r.id=$1",
-        )
-        .bind(&job.id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert!(
-            again > 0.0 && again <= cfg.max_backoff_secs as f64 + 1.0,
-            "{again}"
-        );
-        assert_eq!(validators, serde_json::json!({}));
-        let name: Option<String> = sqlx::query_scalar("SELECT name FROM resource WHERE id=$1")
-            .bind(&job.id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(name.as_deref(), Some("A page"));
+    }
+
+    /// A failure in what follows the save (the alias a page names) leaves the saved card as it
+    /// is: `ok`, with no attempt charged. The link is read again in full (its validators are
+    /// gone) within `max_backoff_secs`, so the step runs again: a card whose next read was a
+    /// week away, and one the save made final.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_failure_after_the_save_leaves_the_saved_card(pool: PgPool) {
+        let cfg = QueueConfig::default();
+        let soon = 1.0..=cfg.max_backoff_secs as f64 + 1.0;
+        for (uri, ended) in [
+            ("https://after-save.example.org/page", false),
+            ("https://after-save.example.org/ended", true),
+        ] {
+            let job = claimed(&pool, uri).await;
+            with_validators(&pool, &job).await;
+            FAILS_AFTER_SAVE.lock().unwrap().push(uri.into());
+            let failures = crate::telemetry::after_save_failures("web");
+            run_batch(&pool, &Page { ended }, &cfg, std::slice::from_ref(&job))
+                .await
+                .unwrap();
+            assert_eq!(
+                row(&pool, &job.id).await,
+                ("ok".into(), 0, 0, false, None),
+                "{uri}"
+            );
+            let (validators, is_final, again, refresh) = schedule(&pool, &job.id).await;
+            assert_eq!(validators, Some(serde_json::json!({})), "{uri}");
+            assert!(!is_final, "{uri} is final: it would never be read again");
+            assert!(again.is_some_and(|s| soon.contains(&s)), "{uri}: {again:?}");
+            assert!(
+                refresh.is_some_and(|s| soon.contains(&s)),
+                "{uri}: {refresh:?}"
+            );
+            let name: Option<String> = sqlx::query_scalar("SELECT name FROM resource WHERE id=$1")
+                .bind(&job.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(name.as_deref(), Some("A page"), "{uri}");
+            // The failure is counted, by resolver.
+            assert!(
+                crate::telemetry::after_save_failures("web") > failures,
+                "{uri}"
+            );
+        }
+    }
+
+    /// What the test above measures against: with no failing step, the first page's next read
+    /// is a week away and the ended event is final.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_saved_card_keeps_its_own_schedule(pool: PgPool) {
+        let cfg = QueueConfig::default();
+        let week = 7.0 * 86400.0;
+        for (uri, ended) in [
+            ("https://saved.example.org/page", false),
+            ("https://saved.example.org/ended", true),
+        ] {
+            let job = claimed(&pool, uri).await;
+            with_validators(&pool, &job).await;
+            run_batch(&pool, &Page { ended }, &cfg, std::slice::from_ref(&job))
+                .await
+                .unwrap();
+            let (validators, is_final, again, refresh) = schedule(&pool, &job.id).await;
+            assert_eq!(validators, Some(serde_json::json!({"etag": "x"})), "{uri}");
+            if ended {
+                assert!(is_final && again.is_none() && refresh.is_none(), "{uri}");
+            } else {
+                assert!(!is_final, "{uri}");
+                assert!(
+                    again.is_some_and(|s| (week - 60.0..=week).contains(&s)),
+                    "{uri}: {again:?}"
+                );
+            }
+        }
     }
 }

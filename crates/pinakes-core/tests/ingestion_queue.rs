@@ -3211,3 +3211,67 @@ async fn a_worker_finishes_a_page_over_its_cap(pool: PgPool) {
     let text = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
     assert!(!text.contains("queue persistence failed"), "{text}");
 }
+
+/// The `pending` gauge counts what a worker may claim, by the claim's own condition. A derived
+/// link whose derivation has ended and that nobody references is never claimed: it is not
+/// pending while it waits for its cleanup, and is again once someone references it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_derived_link_nothing_keeps_is_not_pending(pool: PgPool) {
+    async fn pending(pool: &PgPool) -> i64 {
+        // A registry of its own each time: a registry reads the database once in 15 seconds.
+        let metrics = Metrics::new().unwrap();
+        metrics.refresh(pool).await.unwrap();
+        let text = metrics.encode().unwrap();
+        text.lines()
+            .find_map(|l| {
+                l.strip_prefix("pinakes_queue_depth{resolver=\"web\",state=\"pending\"} ")
+            })
+            .unwrap_or_else(|| panic!("no pending series for web:\n{text}"))
+            .parse()
+            .unwrap()
+    }
+    let parent = "https://pending.example.org/calendar";
+    let child = "https://pending.example.org/event";
+    let parent_id = store::ensure_resource(&pool, parent).await.unwrap();
+    let child_id = store::derive_resource(&pool, parent, child, "test", 10)
+        .await
+        .unwrap()
+        .unwrap();
+    sqlx::query("UPDATE resource SET next_attempt_at=now()-interval '1 second'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(pending(&pool).await, 2);
+    sqlx::query(
+        "UPDATE resource_derivation SET expires_at=now()-interval '1 hour' WHERE child_id=$1",
+    )
+    .bind(&child_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(pending(&pool).await, 1, "the ended derived link is counted");
+    // Someone references it: it is work again.
+    assert!(
+        batch(
+            &pool,
+            vec![change(child, "reader", "/pub/app/tags/1")],
+            None
+        )
+        .await
+    );
+    assert_eq!(pending(&pool).await, 2);
+    sqlx::query("DELETE FROM reference")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(pending(&pool).await, 1);
+    // The claim takes the same rows.
+    let jobs = queue::claim_batch(&pool, "web", &QueueConfig::default(), 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        jobs.iter().map(|j| j.id.as_str()).collect::<Vec<_>>(),
+        [parent_id.as_str()]
+    );
+    assert_eq!(pending(&pool).await, 0);
+}
