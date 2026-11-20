@@ -7,15 +7,25 @@ use crate::{
 use serde_json::Value;
 use sqlx::PgPool;
 
-pub(crate) fn music(kind: Option<&str>) -> bool {
+/// Whether a card is a music object's: one of the four music types, or a `Person` whose link is
+/// an artist's page on MusicBrainz or a music service (a solo artist's card, `music::type_card`).
+/// Any other `Person` page is not.
+pub(crate) fn music(kind: Option<&str>, uri: &str) -> bool {
+    match kind {
+        Some("MusicRecording" | "MusicAlbum" | "MusicGroup" | "MusicPlaylist") => true,
+        Some("Person") => artist_page(uri),
+        _ => false,
+    }
+}
+fn artist_page(uri: &str) -> bool {
     matches!(
-        kind,
-        Some("MusicRecording" | "MusicAlbum" | "MusicGroup" | "MusicPlaylist")
-    )
+        crate::hubs::musicbrainz::entity_link(uri),
+        Some((crate::hubs::MbKind::Artist, ..))
+    ) || crate::music::parse(uri).is_some_and(|link| link.level == crate::music::Level::Artist)
 }
 
 pub(crate) async fn keys(pool: &PgPool, detail: &mut ResourceDetail) -> Result<(), ApiError> {
-    if detail.card.group.is_none() || !music(detail.card.type_name.as_deref()) {
+    if detail.card.group.is_none() || !music(detail.card.type_name.as_deref(), &detail.card.uri) {
         return Ok(());
     }
     // The group engine has already checked conflicts and its size cap. Keep a read bound too.
@@ -50,7 +60,7 @@ pub(crate) async fn images(pool: &PgPool, cards: &mut [&mut Card]) -> Result<(),
             c.image.is_none()
                 && c.status != "missing"
                 && c.group.is_some()
-                && music(c.type_name.as_deref())
+                && music(c.type_name.as_deref(), &c.uri)
         })
         .map(|c| c.id.as_str())
         .collect();
