@@ -84,7 +84,8 @@ restart is not reported as stalled ingestion (`reason="no_series"`). Its second 
 `up{job="pinakes"} == 0` (`reason="target_down"`), fires for each target that has not answered
 for five minutes: a Prometheus that scrapes several instances still has the others' series when
 one is down. It reads the scrape job's name, `pinakes` above; change the rule when the job has
-another name. `MetricsStale` fires when the
+another name. When the only instance is down both rules fire, one alert each `reason`: group
+them by `alertname` in Alertmanager to page once. `MetricsStale` fires when the
 scrape answers but the database gauges, or the queue's alone, failed to refresh repeatedly over
 fifteen minutes. `CanaryDown` uses the durable failure
 streak, not repeated Prometheus scrapes of one failed run. For `FeedHeld`, `CursorReset`,
