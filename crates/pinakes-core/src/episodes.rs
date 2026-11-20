@@ -7,7 +7,7 @@
 //! `GET /v1/resources/{id}/episodes` (docs/api.md, Episodes); every show card carries the first
 //! [`ON_CARD`] that have a stream (`Card::episodes`, filled by [`on_cards`] from the stored rows).
 //!
-//! Why a route and a table, not a fact: a fact is one string of at most 512 bytes per name and a
+//! Why a route and a table, not a fact: a fact is one string of at most 256 bytes per name and a
 //! card's document is bounded at 8 KiB; a thousand episodes with their streams are neither. Why
 //! not occurrences: an episode has no instant to window by, no recurrence and no document of its
 //! own here; the list is the feed's head and nothing more. An entry is not a card: the episode's
@@ -34,9 +34,9 @@ pub const PAGE: usize = 20;
 /// How many of a feed's items are looked at for them: feeds list newest first, and a few are
 /// out of order.
 const SCANNED: usize = 2 * KEPT;
-/// How far a feed read for its episodes goes (`FetchOptions::feed_read`): past the page cap
-/// (1 MiB), to 8 MiB, cut there at its last whole item. A show's whole back catalogue fits in
-/// it as a rule (Darknet Diaries' 183 episodes are 1.06 MB).
+/// How far a feed read for its episodes goes (`FetchOptions::feed_read`): past the page cap, to
+/// 8 MiB, cut there at its last whole item. A show's whole back catalogue fits in it as a rule
+/// (Darknet Diaries' 183 episodes are 1.06 MB).
 pub const FEED_READ: usize = 8 * 1024 * 1024;
 /// The options of a read of a feed for its episodes: as any read ([`FEED_READ`]).
 pub fn feed_options() -> crate::resolver::egress::FetchOptions {
@@ -110,10 +110,6 @@ pub fn listed(items: &[roxmltree::Node<'_, '_>], feed: &Url, partial: bool) -> L
         cut: false,
     }
 }
-/// The latest [`KEPT`] episodes among a feed's items ([`listed`]).
-pub fn from_items(items: &[roxmltree::Node<'_, '_>], feed: &Url) -> Vec<Episode> {
-    listed(items, feed, false).episodes
-}
 /// The episodes a fetched feed lists ([`from_feed_listed`]).
 pub fn from_feed(f: &crate::resolver::egress::Fetched) -> Option<Vec<Episode>> {
     from_feed_listed(f).map(|l| l.episodes)
@@ -143,7 +139,7 @@ fn read_feed(f: &crate::resolver::egress::Fetched) -> Option<Listed> {
     } else {
         &text
     };
-    let xml = roxmltree::Document::parse(body).ok()?;
+    let xml = crate::resolver::xml::parse(body).ok()?;
     if !xml.root_element().has_tag_name("rss")
         || !xml.descendants().any(|n| n.has_tag_name("channel"))
     {
@@ -428,11 +424,32 @@ fn episode(item: roxmltree::Node<'_, '_>, feed: &Url) -> Option<Episode> {
         stream: crate::resolver::cards::item_stream(item),
     })
 }
-/// A date as feeds write it (RFC 2822, some RFC 3339), within the stored range.
+/// A date as feeds write it (RFC 2822, some RFC 3339), within the stored range. A zone name
+/// RFC 2822 does not list (`UTC`, `CEST`, `BST`) still dates the episode: `UTC` is `+0000`,
+/// any other says nothing of its offset and is read as `-0000` (RFC 2822 4.3).
 fn date(s: &str) -> Option<DateTime<Utc>> {
+    let s = s.trim();
     DateTime::parse_from_rfc2822(s)
         .or_else(|_| DateTime::parse_from_rfc3339(s))
         .ok()
+        .or_else(|| {
+            let (rest, zone) = s.rsplit_once(' ')?;
+            // A name of letters, and no half of a twelve-hour clock.
+            if zone.is_empty()
+                || zone.len() > 5
+                || !zone.bytes().all(|b| b.is_ascii_alphabetic())
+                || zone.eq_ignore_ascii_case("AM")
+                || zone.eq_ignore_ascii_case("PM")
+            {
+                return None;
+            }
+            let offset = if zone.eq_ignore_ascii_case("UTC") {
+                "+0000"
+            } else {
+                "-0000"
+            };
+            DateTime::parse_from_rfc2822(&format!("{rest} {offset}")).ok()
+        })
         .map(|d| d.to_utc())
         .and_then(crate::event::time::bounded)
 }
@@ -1333,6 +1350,50 @@ mod tests {
         assert_eq!(uris, ["https://show.example/3"]);
     }
 
+    /// An item dated with a zone name RFC 2822 does not list is dated all the same, and so
+    /// ordered among the others, never last as an undated one.
+    #[test]
+    fn a_date_with_an_unlisted_zone_name_still_dates_its_episode() {
+        for (written, at) in [
+            ("Tue, 20 Oct 2026 10:00:00 UTC", "2026-10-20T10:00:00+00:00"),
+            (
+                "Tue, 20 Oct 2026 10:00:00 CEST",
+                "2026-10-20T10:00:00+00:00",
+            ),
+            ("Tue, 20 Oct 2026 10:00:00 BST", "2026-10-20T10:00:00+00:00"),
+            ("Tue, 20 Oct 2026 10:00:00 GMT", "2026-10-20T10:00:00+00:00"),
+            (
+                "Tue, 20 Oct 2026 10:00:00 +0200",
+                "2026-10-20T08:00:00+00:00",
+            ),
+            ("2026-10-20T10:00:00Z", "2026-10-20T10:00:00+00:00"),
+        ] {
+            assert_eq!(
+                date(written).map(|d| d.to_rfc3339()).as_deref(),
+                Some(at),
+                "{written}"
+            );
+        }
+        for written in [
+            "Tue, 20 Oct 2026 10:00:00",
+            "soon",
+            "Tue, 20 Oct 2026 10:00:00 TOOLONG",
+            "Tue, 20 Oct 2026 10:00:00 PM",
+        ] {
+            assert_eq!(date(written), None, "{written}");
+        }
+        let body = feed(concat!(
+            r#"<item><title>Old</title><guid>old</guid><pubDate>Mon, 19 Oct 2026 10:00:00 +0000</pubDate></item>"#,
+            r#"<item><title>New</title><guid>new</guid><pubDate>Tue, 20 Oct 2026 10:00:00 UTC</pubDate></item>"#,
+        ));
+        let names: Vec<_> = from_feed(&fetched(&body, false))
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name.unwrap())
+            .collect();
+        assert_eq!(names, ["New", "Old"]);
+    }
+
     #[test]
     fn a_feeds_items_are_its_latest_episodes_newest_first_with_their_public_streams() {
         let body = feed(concat!(
@@ -1736,8 +1797,7 @@ mod tests {
         assert!(date("yesterday").is_none());
     }
 
-    /// The rules of PLAN-podcasts.md: public, direct audio, nothing signed, expiring or behind a
-    /// login.
+    /// A stream is public, direct audio: nothing signed, expiring or behind a login.
     #[test]
     fn a_stream_is_public_direct_audio() {
         let ok = |u: &str| Stream::public(u, "audio/mpeg", Some(10), false).is_some();

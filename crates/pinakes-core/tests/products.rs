@@ -449,6 +449,10 @@ async fn amazon_is_never_fetched() {
     assert_eq!(doc.type_name, "Product");
     assert_eq!(doc.site, "Amazon");
     assert_eq!(doc.attributes["asin"], "0140328726");
+    // A book's ASIN is its ISBN-10: stored, and published as a fact.
+    assert_eq!(doc.attributes["isbn"], "0140328726");
+    let facts = pinakes_core::kinds::facts(None, &doc, chrono::Utc::now()).unwrap();
+    assert_eq!(facts["isbn"], "0140328726");
     let doc = resolver.resolve("https://amzn.to/3xyzabc").await.unwrap();
     assert_eq!(doc.type_name, "WebPage");
     // Every shop of Amazon's, and its short links.

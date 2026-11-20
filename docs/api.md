@@ -1161,8 +1161,7 @@ page's `offset` while more episodes match, else `null`, and `truncated` saying w
 lists older episodes than the list holds, as the show's last read of it found: that read ended
 before the feed did (past 8 MiB, below), or the feed has more than the 1000 kept (exactly 1000 is
 not). It is the same on every page, whatever `q`, so a client links the show on its own service
-for the rest. A list stored before this field holds what the upgrade gave it (`true` for a list
-that was full at the old 100, else `false`) until its show is read again. `q` lists only the episodes whose `name` holds it, in any
+for the rest. `q` lists only the episodes whose `name` holds it, in any
 letter case (Unicode's, as Rust folds it: `über` finds `ÜBER`); at most 256 bytes, spaces around
 it ignored, a blank `q` matching every episode; it pages the same way. Each item is
 `{uri, name, image, published, guid, stream, id?, aliases?}`. A show's card carries the first of them
@@ -1848,7 +1847,7 @@ described by the start of its text, as plain text.
 | `remote`, `remote_regions` | `true`, and the regions it accepts applicants from, joined with `; ` |
 | `salary_min`, `salary_max`, `salary_currency`, `salary_unit` | The base salary: a range or one amount in both, its ISO 4217 currency, per `HOUR`, `DAY`, `WEEK`, `MONTH` or `YEAR` |
 | `date_posted`, `valid_through` | As the posting gives them |
-| `apply_url` | Where to apply: its ApplyAction, else its own `url`, else the page when one applies there (`directApply`) |
+| `apply_url` | Where to apply: its ApplyAction, else its own `url`, else the page when one applies there (`directApply`); left out when longer than 256 bytes |
 | `job_status` | `open` or `closed`, at the time of the read |
 
 ## Products
@@ -1874,7 +1873,8 @@ record or a product database (their pages say which).
   a page's `mainEntity`, beside page metadata such as a `WebPage` or breadcrumbs or not). A
   `ProductGroup`
   names the barcode, article numbers and offers of the variant its address picks (its `url`, or
-  `?variant=`), else of its only variant, never the group's. A product's barcode is the key `gtin:`, so
+  `?variant=`), else of its only variant, never the group's: a group whose address picks none of
+  several variants names no barcode. A product's barcode is the key `gtin:`, so
   the same product on several shops is [one group](#groups), and `key=gtin:{barcode}` finds them
   all.
 - Its price and availability are facts with the time they were read, never identity: the cheapest
@@ -1894,7 +1894,7 @@ record or a product database (their pages say which).
 | `gtin` | GTIN-13 |
 | `brand`, `sku`, `mpn` | The brand, the shop's article number, the maker's part number |
 | `price`, `price_currency`, `availability`, `seller`, `price_at` | The cheapest offer's price, its ISO 4217 currency, its availability (`in_stock`, `out_of_stock`, `pre_order`, `back_order`, `discontinued`, `limited_availability`, `sold_out`, `in_store_only`, `online_only`, `reserved`, `made_to_order`), who sells it, and when that was read (RFC 3339) |
-| `asin` | An Amazon link's ASIN |
+| `asin`, `isbn` | An Amazon link's ASIN, and for a book the ISBN-10 that ASIN is |
 
 ## Questions
 
@@ -1909,7 +1909,7 @@ characters, as a quoted post is), with its asker as `author` and when it was ask
 | Fact | Meaning |
 | --- | --- |
 | `answer_count`, `score` | Its answers and votes, as its site counts them |
-| `accepted_answer` | The address of the answer its asker accepted |
+| `accepted_answer` | The address of the answer its asker accepted (a page's own; left out when longer than 256 bytes) |
 | `closed_reason`, `duplicate_of` | Why it was closed, and the question it repeats (a link; several joined with `; `) |
 
 A question closed as a duplicate of one other question is in that question's group (a hint, as
@@ -1954,8 +1954,11 @@ through the OSM resolver, including object aliases: `/{type}/{id}/history[/{vers
 URL, so one resource and one cached `osm_place` row serve them all. OSM cards carry `attribution`; details
 add the category, address and bbox. Any other URL on an OSM host (user pages, map views,
 changesets, notes) is refused before any fetch: status `error`, a link-only card, stored once
-as final. Batch 429, 5xx, timeouts and oversized bodies defer jobs without charging an attempt,
-honouring a Retry-After of up to one hour.
+as final. A batch's 429, 5xx or oversized answer defers its jobs without charging an attempt,
+honouring a Retry-After of up to one hour; jobs claimed during that wait are put off to its end
+without a request. A 401 or 403 (the operator's key refused) is read again later and never
+dead-letters; after three days of refusals the link turns `unreachable`, read with the usual
+backoff. A timeout is charged from the fourth in a row (`limits.timeout_grace`).
 
 `geo:` URIs (RFC 5870, altitude and uncertainty ignored; other CRSs are errors) and location
 links resolve offline as Place points (`geo.enabled`): OSM marker links (`/?mlat=&mlon=`), OSM

@@ -239,7 +239,7 @@ pub fn derived_guid(feed_url: &str) -> Option<String> {
     ))
 }
 /// The largest podcast feed this source reads (a show's whole back catalogue; the page cap is
-/// 1 MiB): as far as a show's feed is read for its episodes (`episodes::FEED_READ`).
+/// 1 MiB): as far as a show's episodes are read (`episodes::FEED_READ`).
 pub const PODCAST_FEED_CAP: usize = crate::episodes::FEED_READ;
 
 /// Whether iTunes' feed for a show (`itunes`) is one of `feeds`.
@@ -293,7 +293,7 @@ pub fn read_feed(body: &[u8], feed: &url::Url, item: Option<ItemBy<'_>>) -> Resu
         "https://github.com/Podcastindex-org/podcast-namespace/blob/main/docs/1.0.md",
     ];
     let text = String::from_utf8_lossy(body);
-    let xml = roxmltree::Document::parse(&text)?;
+    let xml = crate::resolver::xml::parse(&text)?;
     let channel = xml
         .root_element()
         .children()

@@ -173,11 +173,6 @@ fn feed_form(d: &Definition, path: &str) -> bool {
     pattern.push_str(rest);
     canary_link_matches(pattern.trim_end_matches('/'), path.trim_end_matches('/'))
 }
-/// Whether `uri` is an organiser calendar a platform derives for its event pages
-/// (`Definition::container_feed`).
-pub fn names_organiser_calendar(uri: &str) -> bool {
-    organiser_calendar_of(uri).is_some()
-}
 /// Whether `url` is where platform `d` answers an organiser calendar itself: over https on the
 /// default port, from a host it declares (`Definition::domains`, the host or a subdomain, as
 /// `detect` reads them), at the calendar's path form, without userinfo or a query.
@@ -197,7 +192,7 @@ fn platform_calendar_location(d: &Definition, url: &Url) -> bool {
         && feed_form(d, url.path())
 }
 /// The answer for `uri` (a `webcal:` link read over https). An organiser calendar
-/// (`names_organiser_calendar`) is the platform's own answer or none: it is fetched without
+/// (`organiser_calendar_of`) is the platform's own answer or none: it is fetched without
 /// following redirects, and only a redirect to where the platform answers it itself
 /// (`platform_calendar_location`) is followed, up to three, HTTP or in-page (a meta refresh, a
 /// script or "Redirecting" stub), so every spelling the platform
@@ -364,20 +359,46 @@ pub fn detect(uri: &str) -> Option<&'static Definition> {
     }
     None
 }
+/// The platform of a page: its link's (`detect`), else the self-hosted software its markup
+/// shows. Only something the software itself puts in its pages counts, never its name in the
+/// page's text (an article about Mobilizon, the Italian word "gancio"): pretix's own assets
+/// beside a calendar link, eventyay's `generator` meta, Gancio's script, Gathio's export link,
+/// Mobilizon's application shell (its `<noscript>` notice in a Phoenix page), hitobito's footer
+/// link to its source.
 pub fn detected_html(uri: &str, html: &str) -> Option<&'static Definition> {
     detect(uri).or_else(|| {
         let s = html.to_ascii_lowercase();
-        if s.contains("pretix") && s.contains("/ical/") {
+        // The first `<meta name="generator">` tags, as written.
+        let generator = |name: &str| {
+            s.match_indices("<meta")
+                .take(64)
+                .filter_map(|(at, _)| {
+                    let tag = &s.as_bytes()[at..s.len().min(at + 512)];
+                    let end = tag.iter().position(|b| *b == b'>')?;
+                    std::str::from_utf8(&tag[..end]).ok()
+                })
+                .any(|tag| tag.contains("generator") && tag.contains(name))
+        };
+        if (s.contains("/static/pretixbase/") || s.contains("/static/pretixpresale/"))
+            && s.contains("/ical/")
+        {
             definition("pretix")
-        } else if s.contains("eventyay") {
+        } else if generator("eventyay") {
             definition("eventyay")
-        } else if s.contains("gancio") {
+        } else if s.contains("/gancio-events.es.js") {
             definition("gancio")
-        } else if s.contains("gathio") || s.contains("/export/event/") {
+        } else if s.contains("/export/event/") {
             definition("gathio")
-        } else if s.contains("mobilizon") {
+        } else if s.contains("phx-track-static")
+            && s.split("<noscript").skip(1).take(8).any(|shell| {
+                shell
+                    .split("</noscript")
+                    .next()
+                    .is_some_and(|notice| notice.contains("mobilizon"))
+            })
+        {
             definition("mobilizon")
-        } else if s.contains("hitobito") {
+        } else if s.contains("github.com/hitobito/hitobito") {
             definition("hitobito")
         } else {
             None

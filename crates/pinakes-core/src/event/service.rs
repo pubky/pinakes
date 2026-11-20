@@ -136,17 +136,25 @@ impl EventService {
         deadline: tokio::time::Instant,
     ) -> Result<()> {
         // One request per distinct structured address, bounded by the total resolver deadline.
-        let mut venues: std::collections::BTreeMap<String, (super::Venue, super::EventFields)> =
+        // Per venue as written: the venue as placed, and the zone the place gave with its
+        // attribution. An event's own zone (its TZID) says nothing of another event there, so
+        // the place is asked with the row's own zone set aside, whichever row comes first.
+        type Placed = (super::Venue, Option<String>, Option<String>);
+        let mut venues: std::collections::BTreeMap<String, Placed> =
             std::collections::BTreeMap::new();
         for row in &mut c.occurrences {
             let key = serde_json::to_string(&row.doc.event.venue)?;
-            if let Some((v, fields)) = venues.get(&key) {
+            if let Some((v, tz, attribution)) = venues.get(&key) {
                 row.doc.event.venue = Some(v.clone());
                 if row.doc.event.tz.is_none() {
-                    row.doc.event.tz = fields.tz.clone();
-                    row.doc.event.timezone_attribution = fields.timezone_attribution.clone();
+                    row.doc.event.tz = tz.clone();
+                    row.doc.event.timezone_attribution = attribution.clone();
                 }
             } else {
+                let own = (
+                    row.doc.event.tz.take(),
+                    row.doc.event.timezone_attribution.take(),
+                );
                 let remaining = deadline
                     .saturating_duration_since(tokio::time::Instant::now())
                     .saturating_sub(Duration::from_millis(100));
@@ -156,8 +164,15 @@ impl EventService {
                 ) {
                     row.doc.event.warnings.push("venue_unavailable".into());
                 }
+                let place = (
+                    row.doc.event.tz.clone(),
+                    row.doc.event.timezone_attribution.clone(),
+                );
+                if own.0.is_some() {
+                    (row.doc.event.tz, row.doc.event.timezone_attribution) = own;
+                }
                 if let Some(v) = &row.doc.event.venue {
-                    venues.insert(key, (v.clone(), row.doc.event.clone()));
+                    venues.insert(key, (v.clone(), place.0, place.1));
                 }
             }
             page::finalize(&mut row.doc, false);
@@ -168,7 +183,7 @@ impl EventService {
         &self,
         uri: &str,
         fetched: &Fetched,
-        mut card: ResourceMeta,
+        card: ResourceMeta,
         egress: &Egress,
         deadline: tokio::time::Instant,
     ) -> Result<ResourceMeta> {
@@ -277,13 +292,18 @@ impl EventService {
                     super::adapters::detected_html(uri, &String::from_utf8_lossy(&fetched.body))
                         .filter(|d| super::adapters::manifest(d, &config).enabled)
                 {
-                    // Self-hosted software cannot be classified from a shared vendor domain.
+                    // Self-hosted software cannot be classified from a shared vendor domain. Its
+                    // API is asked where the page answered (after a redirect, that host).
                     if super::adapters::detect(uri).is_none() {
-                        platform_extra =
-                            super::adapters::service::endpoint(d, uri, Some(fetched), &config)
-                                .ok()
-                                .flatten()
-                                .map(|(target, opts)| (d.id.clone(), target, opts));
+                        platform_extra = super::adapters::service::endpoint(
+                            d,
+                            fetched.url.as_str(),
+                            Some(fetched),
+                            &config,
+                        )
+                        .ok()
+                        .flatten()
+                        .map(|(target, opts)| (d.id.clone(), target, opts));
                     }
                     if let Some(extra) = super::adapters::state::parse(&d.id, uri, &fetched.body) {
                         if !event.type_path.contains(&"Event".into()) {
@@ -403,7 +423,7 @@ impl EventService {
             opts.feed_cap = opts.feed_hint.then_some(self.config.feed_body_bytes);
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             let enrichment = tokio::time::timeout(remaining.min(Duration::from_secs(2)), async {
-                let response = super::adapters::service::discover_enrichment(
+                let response = super::adapters::service::discover_hint(
                     egress,
                     &target,
                     &opts,
@@ -416,20 +436,13 @@ impl EventService {
                 super::adapters::service::enrichment_blocking(uri, d, &response, &config).await
             })
             .await;
-            // HTML detection on an unregistered host is only a hint. An unrelated
-            // API, policy denial or parse error must not veto the page's own facts.
-            match enrichment {
-                Ok(Ok(Some(extra))) => {
-                    if extra.type_path.contains(&"Event".into()) {
-                        event.set_type("Event");
-                        page::merge_missing(&mut event, &extra)?;
-                    }
-                }
-                Ok(Ok(None)) => {}
-                _ => {
-                    crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "drift");
-                    card.event.warnings.push("enrichment_unavailable".into());
-                    event.event.warnings.push("enrichment_unavailable".into());
+            // HTML detection on an unregistered host is only a hint. An unrelated API, a
+            // policy denial or a parse error does not veto the page's own facts, and says
+            // nothing of an adapter: no drift is counted and the card carries no warning.
+            if let Ok(Ok(Some(extra))) = enrichment {
+                if extra.type_path.contains(&"Event".into()) {
+                    event.set_type("Event");
+                    page::merge_missing(&mut event, &extra)?;
                 }
             }
         }

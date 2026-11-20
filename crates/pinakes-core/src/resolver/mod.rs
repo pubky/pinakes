@@ -13,6 +13,7 @@ pub mod pkarr_relays;
 pub mod pubky;
 pub mod pubky_apps;
 pub mod web;
+pub mod xml;
 
 #[async_trait]
 pub trait Resolver: Send + Sync {
@@ -318,7 +319,11 @@ pub fn error_class(error: &anyhow::Error) -> &'static str {
     if let Some(retry) = error.downcast_ref::<RetryLater>() {
         return retry.class;
     }
-    if error.is::<tokio::time::error::Elapsed>() {
+    if error.is::<tokio::time::error::Elapsed>()
+        || error
+            .chain()
+            .any(|cause| cause.is::<egress::RequestDeadline>())
+    {
         return "timeout";
     }
     if error.chain().any(|cause| cause.is::<Unreached>()) {
@@ -331,9 +336,18 @@ pub fn error_class(error: &anyhow::Error) -> &'static str {
     {
         return "too_large";
     }
-    // A parse that did not end within its limits: no card, and no retry.
-    if error.chain().any(|cause| cause.is::<html::TooComplex>()) {
-        return "too_complex";
+    // A parse that did not end within its limits: no card, and no retry. One that ended for a
+    // reason outside the page (a slow or killed worker) is a timeout: the card stays, the read
+    // comes again.
+    if let Some(parse) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<html::TooComplex>())
+    {
+        return if parse.transient() {
+            "timeout"
+        } else {
+            "too_complex"
+        };
     }
     for cause in error.chain() {
         if let Some(request) = cause.downcast_ref::<reqwest::Error>() {
