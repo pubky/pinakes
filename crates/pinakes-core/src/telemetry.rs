@@ -48,6 +48,14 @@ pub struct Metrics {
     pub group_key_conflicts: IntGauge,
     /// API handler panics (either listener) answered 500 by the backstop layer.
     pub api_panics: IntCounter,
+    /// Requests answered, by listener (`public`, `admin`), route (its path template, `unmatched`
+    /// when no route has the path; never the path asked) and status. A tool call on `/mcp` counts
+    /// once, there: the REST routes it calls are not counted again.
+    pub api_requests: IntCounterVec,
+    /// How long a request took to its response's head, by listener and route.
+    pub api_duration: HistogramVec,
+    /// `/metrics` scrapes whose read of the database failed: the gauges kept their last values.
+    pub refresh_failures: IntCounter,
     /// New previews `POST /v1/resolve` refused, by the limit that refused them: the instance's
     /// hour (`instance`) or one client's share of it (`client`).
     pub preview_refused: IntCounterVec,
@@ -110,6 +118,32 @@ impl Metrics {
             "API requests (public or admin listener) whose handler panicked (answered 500)",
         )?;
         registry.register(Box::new(api_panics.clone()))?;
+        let api_requests = IntCounterVec::new(
+            Opts::new(
+                "pinakes_api_requests_total",
+                "API requests answered, by listener, route (path template; unmatched when no route has the path) and status",
+            ),
+            &["listener", "route", "status"],
+        )?;
+        registry.register(Box::new(api_requests.clone()))?;
+        let api_duration = HistogramVec::new(
+            HistogramOpts::new(
+                "pinakes_api_request_duration_seconds",
+                "Time from an API request to its response's head, by listener and route",
+            ),
+            &["listener", "route"],
+        )?;
+        registry.register(Box::new(api_duration.clone()))?;
+        // The paths no route has, from 0: both series exist before the first request.
+        for listener in ["public", "admin"] {
+            api_requests.with_label_values(&[listener, "unmatched", "404"]);
+            api_duration.with_label_values(&[listener, "unmatched"]);
+        }
+        let refresh_failures = IntCounter::new(
+            "pinakes_metrics_refresh_failures_total",
+            "Metrics scrapes whose read of the database failed (the gauges kept their last values)",
+        )?;
+        registry.register(Box::new(refresh_failures.clone()))?;
         let preview_refused = IntCounterVec::new(
             Opts::new(
                 "pinakes_preview_refused_total",
@@ -131,6 +165,9 @@ impl Metrics {
         registry.register(Box::new(RESOLUTION_DEFERRED.clone()))?;
         let out = Self {
             api_panics,
+            api_requests,
+            api_duration,
+            refresh_failures,
             preview_refused,
             preview_backlog,
             ingest_rejected: metric!(
@@ -236,18 +273,7 @@ impl Metrics {
             out.ingest_rejected.with_label_values(&[reason]);
         }
         for manifest in crate::adapter::manifests() {
-            for outcome in OUTCOMES {
-                out.fetch
-                    .with_label_values(&[&manifest.source, manifest.mode.as_str(), outcome]);
-            }
-            out.duration.with_label_values(&[&manifest.source]);
-            for class in crate::changes::CLASSES {
-                out.changes
-                    .with_label_values(&[manifest.source.as_str(), *class]);
-            }
-            out.held.with_label_values(&[&manifest.source]);
-            out.resets.with_label_values(&[&manifest.source]);
-            out.success.with_label_values(&[&manifest.source]);
+            out.source_series(&manifest);
         }
         // Every keyed source's refusals from 0, so a key refused later is a rise an alert reads.
         for source in crate::sources::KEYED {
@@ -255,29 +281,89 @@ impl Metrics {
         }
         Ok(out)
     }
+    /// A source's series from the start, each at 0: its fetches by outcome, changes by class,
+    /// held snapshots and cursor resets. A rule on `increase()` reads a rise from 0; a series
+    /// that first appears at 1 shows none. Called for the base manifests here and for every
+    /// manifest of the resolvers the daemon runs (`queue::spawn_with_egress`).
+    pub fn source_series(&self, manifest: &Manifest) {
+        for outcome in OUTCOMES {
+            self.fetch
+                .with_label_values(&[&manifest.source, manifest.mode.as_str(), outcome]);
+        }
+        self.duration.with_label_values(&[&manifest.source]);
+        for class in crate::changes::CLASSES {
+            self.changes
+                .with_label_values(&[manifest.source.as_str(), *class]);
+        }
+        self.held.with_label_values(&[&manifest.source]);
+        self.resets.with_label_values(&[&manifest.source]);
+        self.success.with_label_values(&[&manifest.source]);
+    }
+    /// Whether the database gauges were ever read: before that they hold no value, only zeros.
+    pub async fn ever_refreshed(&self) -> bool {
+        self.refresh_lock.lock().await.is_some()
+    }
     pub async fn refresh(&self, pool: &PgPool) -> Result<()> {
         let mut refreshed = self.refresh_lock.lock().await;
         if refreshed.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(15)) {
             return Ok(());
         }
-        let row=sqlx::query("SELECT coalesce(sum(greatest(feed_length-cursor,0)),0)::bigint AS lag,coalesce(extract(epoch FROM max(updated_at)),0)::bigint AS success,coalesce(sum(resets),0)::bigint AS resets FROM feed_cursor").fetch_one(pool).await?;
+        // Every read first, then the gauges: a read that fails (the API pool's statement
+        // timeout, a database restart) leaves every gauge at its last value, none half reset.
+        let feed=sqlx::query("SELECT coalesce(sum(greatest(feed_length-cursor,0)),0)::bigint AS lag,coalesce(extract(epoch FROM max(updated_at)),0)::bigint AS success,coalesce(sum(resets),0)::bigint AS resets FROM feed_cursor").fetch_one(pool).await?;
+        let sources=sqlx::query("SELECT *,coalesce(extract(epoch FROM last_success_at),0)::bigint AS success FROM source_state").fetch_all(pool).await?;
+        let resources=sqlx::query("SELECT resolver,status,count(*) AS n FROM resource WHERE resolver IS NOT NULL GROUP BY resolver,status").fetch_all(pool).await?;
+        let queue=sqlx::query("SELECT resolver,count(*) FILTER(WHERE dead_letter) AS dead,count(*) FILTER(WHERE NOT dead_letter AND lease_until>now()) AS leased,count(*) FILTER(WHERE NOT dead_letter AND NOT final AND next_attempt_at<=now() AND (lease_until IS NULL OR lease_until<=now())) AS pending,count(*) FILTER(WHERE NOT final AND NOT dead_letter AND refresh_at<now()) AS overdue FROM resource WHERE resolver IS NOT NULL GROUP BY resolver").fetch_all(pool).await?;
+        let groups=sqlx::query("SELECT (SELECT count(*) FROM group_input WHERE parked_keys>0 AND NOT settled_stopped) AS parked,(SELECT count(*) FROM group_dirty WHERE last_error='work_budget') AS stopped,(SELECT count(*) FROM group_input WHERE settled_stopped) AS settled,(SELECT count(*) FROM group_input WHERE key_conflicts>0) AS conflicts").fetch_one(pool).await?;
+        // A resource nothing ever referenced keeps the instant it was created as its orphan time;
+        // a derived child and a venue are kept for their parent and event, not as previews. The
+        // partial orphan index bounds the scan to orphans.
+        let previews: i64 = sqlx::query_scalar("SELECT count(*) FROM resource r WHERE r.orphaned_at IS NOT NULL AND r.orphaned_at=r.created_at AND NOT EXISTS(SELECT 1 FROM resource_derivation d WHERE d.child_id=r.id) AND NOT EXISTS(SELECT 1 FROM resource v WHERE v.venue_id=r.id) AND NOT EXISTS(SELECT 1 FROM occurrence o WHERE o.venue_id=r.id)")
+            .fetch_one(pool)
+            .await?;
         for (source, refusals) in crate::sources::token_refusals() {
             sync_counter(
                 &self.token_refusals.with_label_values(&[source]),
                 refusals as i64,
             );
         }
-        self.ingest_lag.set(row.try_get("lag")?);
-        self.ingest_success.set(row.try_get("success")?);
-        sync_counter(&self.ingest_resets, row.try_get("resets")?);
+        self.ingest_lag.set(feed.try_get("lag")?);
+        self.ingest_success.set(feed.try_get("success")?);
+        sync_counter(&self.ingest_resets, feed.try_get("resets")?);
         self.canary_ok.reset();
         self.canary_missing.reset();
         self.canary_failures.reset();
-        for source in sqlx::query("SELECT *,coalesce(extract(epoch FROM last_success_at),0)::bigint AS success FROM source_state").fetch_all(pool).await? {
-            let name:String=source.try_get("source")?;self.success.with_label_values(&[&name]).set(source.try_get("success")?);
-            sync_counter(&self.held.with_label_values(&[&name]),source.try_get("feed_held_total")?);sync_counter(&self.resets.with_label_values(&[&name]),source.try_get("cursor_resets_total")?);
-            let changes:serde_json::Value=source.try_get("change_totals")?;for (class,count) in changes.as_object().into_iter().flatten() {sync_counter(&self.changes.with_label_values(&[&name,class]),count.as_i64().unwrap_or(0));}
-            if let Some(ok)=source.try_get::<Option<bool>,_>("canary_ok")? {self.canary_ok.with_label_values(&[&name]).set(i64::from(ok));self.canary_missing.with_label_values(&[&name]).set(source.try_get::<Vec<String>,_>("canary_missing")?.len() as i64);self.canary_failures.with_label_values(&[&name]).set(source.try_get::<i32,_>("canary_failures")? as i64);}
+        for source in sources {
+            let name: String = source.try_get("source")?;
+            self.success
+                .with_label_values(&[&name])
+                .set(source.try_get("success")?);
+            sync_counter(
+                &self.held.with_label_values(&[&name]),
+                source.try_get("feed_held_total")?,
+            );
+            sync_counter(
+                &self.resets.with_label_values(&[&name]),
+                source.try_get("cursor_resets_total")?,
+            );
+            let changes: serde_json::Value = source.try_get("change_totals")?;
+            for (class, count) in changes.as_object().into_iter().flatten() {
+                sync_counter(
+                    &self.changes.with_label_values(&[&name, class]),
+                    count.as_i64().unwrap_or(0),
+                );
+            }
+            if let Some(ok) = source.try_get::<Option<bool>, _>("canary_ok")? {
+                self.canary_ok
+                    .with_label_values(&[&name])
+                    .set(i64::from(ok));
+                self.canary_missing
+                    .with_label_values(&[&name])
+                    .set(source.try_get::<Vec<String>, _>("canary_missing")?.len() as i64);
+                self.canary_failures
+                    .with_label_values(&[&name])
+                    .set(source.try_get::<i32, _>("canary_failures")? as i64);
+            }
         }
         self.queue.reset();
         self.overdue.reset();
@@ -295,22 +381,31 @@ impl Metrics {
                     .set(0);
             }
         }
-        for row in sqlx::query("SELECT resolver,status,count(*) AS n FROM resource WHERE resolver IS NOT NULL GROUP BY resolver,status").fetch_all(pool).await? {self.resources.with_label_values(&[&row.try_get::<String,_>("resolver")?,&row.try_get::<String,_>("status")?]).set(row.try_get("n")?);}
-        for row in sqlx::query("SELECT resolver,count(*) FILTER(WHERE dead_letter) AS dead,count(*) FILTER(WHERE NOT dead_letter AND lease_until>now()) AS leased,count(*) FILTER(WHERE NOT dead_letter AND NOT final AND next_attempt_at<=now() AND (lease_until IS NULL OR lease_until<=now())) AS pending,count(*) FILTER(WHERE NOT final AND NOT dead_letter AND refresh_at<now()) AS overdue FROM resource WHERE resolver IS NOT NULL GROUP BY resolver").fetch_all(pool).await? {let resolver:String=row.try_get("resolver")?;for state in ["pending","leased","dead"] {self.queue.with_label_values(&[&resolver,state]).set(row.try_get(state)?);}self.overdue.with_label_values(&[&resolver]).set(row.try_get("overdue")?);}
-        let row=sqlx::query("SELECT (SELECT count(*) FROM group_input WHERE parked_keys>0 AND NOT settled_stopped) AS parked,(SELECT count(*) FROM group_dirty WHERE last_error='work_budget') AS stopped,(SELECT count(*) FROM group_input WHERE settled_stopped) AS settled,(SELECT count(*) FROM group_input WHERE key_conflicts>0) AS conflicts").fetch_one(pool).await?;
-        self.group_key_conflicts.set(row.try_get("conflicts")?);
-        // A resource nothing ever referenced keeps the instant it was created as its orphan time;
-        // a derived child and a venue are kept for their parent and event, not as previews. The
-        // partial orphan index bounds the scan to orphans.
-        self.preview_backlog.set(
-            sqlx::query_scalar("SELECT count(*) FROM resource r WHERE r.orphaned_at IS NOT NULL AND r.orphaned_at=r.created_at AND NOT EXISTS(SELECT 1 FROM resource_derivation d WHERE d.child_id=r.id) AND NOT EXISTS(SELECT 1 FROM resource v WHERE v.venue_id=r.id) AND NOT EXISTS(SELECT 1 FROM occurrence o WHERE o.venue_id=r.id)")
-                .fetch_one(pool)
-                .await?,
-        );
+        for row in resources {
+            self.resources
+                .with_label_values(&[
+                    &row.try_get::<String, _>("resolver")?,
+                    &row.try_get::<String, _>("status")?,
+                ])
+                .set(row.try_get("n")?);
+        }
+        for row in queue {
+            let resolver: String = row.try_get("resolver")?;
+            for state in ["pending", "leased", "dead"] {
+                self.queue
+                    .with_label_values(&[&resolver, state])
+                    .set(row.try_get(state)?);
+            }
+            self.overdue
+                .with_label_values(&[&resolver])
+                .set(row.try_get("overdue")?);
+        }
+        self.group_key_conflicts.set(groups.try_get("conflicts")?);
+        self.preview_backlog.set(previews);
         for state in ["parked", "stopped", "settled"] {
             self.group_budget
                 .with_label_values(&[state])
-                .set(row.try_get(state)?);
+                .set(groups.try_get(state)?);
         }
         *refreshed = Some(Instant::now());
         Ok(())

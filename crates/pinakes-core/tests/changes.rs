@@ -669,6 +669,42 @@ async fn ops_artifacts_reference_registered_metrics(pool: PgPool) {
         {
             assert!(names.contains(name), "unregistered alert metric {name}");
         }
+        // Every fetch outcome a rule matches is one the daemon records.
+        let expr = rule["expr"].as_str().unwrap();
+        for matcher in expr.split("outcome=").skip(1) {
+            let value = matcher
+                .trim_start_matches('~')
+                .strip_prefix('"')
+                .and_then(|rest| rest.split('"').next())
+                .unwrap_or_else(|| panic!("an outcome matcher without a value in {expr}"));
+            for outcome in value.split('|') {
+                assert!(
+                    telemetry::OUTCOMES.contains(&outcome),
+                    "{}: no fetch has the outcome {outcome}",
+                    rule["alert"].as_str().unwrap()
+                );
+            }
+        }
+    }
+    // A recognised bot wall is its own outcome (`blocked`): the alert named for walls reads it.
+    assert!(rules.iter().any(|r| r["alert"].as_str() == Some("WallUp")
+        && r["expr"].as_str().unwrap().contains("blocked")));
+    // A link never read has no refresh time and is in no overdue count: the queue's own depth
+    // is alerted on too.
+    assert!(rules
+        .iter()
+        .any(|r| r["alert"].as_str() == Some("QueueBacklog")
+            && r["expr"]
+                .as_str()
+                .unwrap()
+                .contains("pinakes_queue_depth{state=\"pending\"}")));
+    // A missing series is its own alert with a wait, never the stalled-ingestion alert.
+    for rule in rules {
+        let expr = rule["expr"].as_str().unwrap();
+        if expr.contains("absent(") {
+            assert_eq!(rule["alert"].as_str(), Some("MetricsMissing"), "{expr}");
+            assert!(rule["for"].is_string(), "{expr}");
+        }
     }
     // Every keyed source's refusals are a series from the start (at 0), and an alert reads them.
     for source in pinakes_core::sources::KEYED {
