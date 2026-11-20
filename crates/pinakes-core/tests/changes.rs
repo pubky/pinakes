@@ -301,6 +301,129 @@ async fn paging_lookup_retention_and_deleted_history(pool: PgPool) {
     assert_eq!(changes_of(&app, &[&id], 1, 100).await.0, 410);
     assert_eq!(changes_of(&app, &[&id], 0, 100).await.0, 200);
 }
+/// One missing answer for a social post is not yet `missing`: its change lines and its also-on
+/// results stay, as its card does. The second, which confirms it, removes them.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_unconfirmed_missing_answer_keeps_a_social_post_s_lines_and_facts(pool: PgPool) {
+    let uri = "https://social.example/@author/1";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut post = ResourceMeta::new(uri, "activitypub", 86400);
+    post.set_type("SocialMediaPosting");
+    post.name = Some("A post".into());
+    store::save_document(&pool, &id, 0, &post).await.unwrap();
+    sqlx::query("INSERT INTO resource_fact(resource_id,name,value,source,expires_at) VALUES($1,'isrc','GBAYE0601498','musicbrainz',now()+interval '1 day')")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let kept = || async {
+        let facts: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM resource_fact WHERE resource_id=$1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        (classes(&pool, &id).await, facts)
+    };
+    assert_eq!(kept().await, (vec!["created".to_owned()], 1));
+    let mut missing = post.clone();
+    missing.status = Status::Missing;
+    missing.fetched_at += 1;
+    store::save_document(&pool, &id, 0, &missing).await.unwrap();
+    assert_eq!(kept().await, (vec!["created".to_owned()], 1));
+    missing.fetched_at += 1;
+    store::save_document(&pool, &id, 0, &missing).await.unwrap();
+    assert_eq!(kept().await, (vec![], 0));
+}
+
+/// Orphan cleanup keeps no text of an opted-out post either: its `deleted` line holds no
+/// document, as its other lines hold none.
+#[sqlx::test(migrations = "../../migrations")]
+async fn cleanup_keeps_no_document_of_an_opted_out_post(pool: PgPool) {
+    let mut ids = vec![];
+    for (uri, opted_out) in [
+        ("https://example.org/opted-out", true),
+        ("https://example.org/plain", false),
+    ] {
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let mut doc = ResourceMeta::new(uri, "web", 86400);
+        doc.name = Some("The text of the post".into());
+        if opted_out {
+            doc.attributes.insert("opted_out".into(), "true".into());
+        }
+        store::save_document(&pool, &id, 0, &doc).await.unwrap();
+        ids.push(id);
+    }
+    sqlx::query("UPDATE resource SET orphaned_at=now()-interval '10 days'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(store::cleanup(&pool, 7, 7 * 24).await.unwrap(), 2);
+    let deleted: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT resource_id,before IS NULL FROM resource_change WHERE class='deleted' ORDER BY seq",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let mut expected = vec![(ids[0].clone(), true), (ids[1].clone(), false)];
+    expected.sort();
+    let mut deleted = deleted;
+    deleted.sort();
+    assert_eq!(deleted, expected);
+    let texts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM resource_change WHERE resource_id=$1 AND (before IS NOT NULL OR after IS NOT NULL)",
+    )
+    .bind(&ids[0])
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(texts, 0);
+}
+
+/// A stored card this build cannot read (a value it does not know) does not fail the save over
+/// it: the new reading replaces it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_stored_card_that_does_not_read_is_replaced(pool: PgPool) {
+    let (id, mut doc) = seed(&pool, "https://example.org/unreadable").await;
+    sqlx::query(
+        "UPDATE resource SET doc=jsonb_set(doc,'{embed}','{\"kind\":\"no-such-kind\"}') WHERE id=$1",
+    )
+    .bind(&id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    doc.name = Some("Read again".into());
+    doc.fetched_at += 1;
+    store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    let (name, embed): (Option<String>, Option<Value>) =
+        sqlx::query_as("SELECT name,doc->'embed' FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(name.as_deref(), Some("Read again"));
+    assert_eq!(embed, None);
+    // A missing answer over such a card is saved too.
+    sqlx::query(
+        "UPDATE resource SET doc=jsonb_set(doc,'{embed}','{\"kind\":\"no-such-kind\"}') WHERE id=$1",
+    )
+    .bind(&id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    doc.status = Status::Missing;
+    for _ in 0..2 {
+        doc.fetched_at += 1;
+        store::save_document(&pool, &id, 0, &doc).await.unwrap();
+    }
+    let status: String = sqlx::query_scalar("SELECT status FROM resource WHERE id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "missing");
+}
+
 /// A change lookup takes links as `POST /v1/resources/lookup` does, IDs, or both: a link reads
 /// as its ID, an alias spelling as its alias (its line names the root, then the root's lines
 /// follow), and an unknown link adds nothing.
