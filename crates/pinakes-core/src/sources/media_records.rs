@@ -128,17 +128,21 @@ fn walled(uri: &str) -> Option<Walled> {
     let url = super::kit::web_url(uri)?;
     let host = url.host_str()?.to_ascii_lowercase();
     let s: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
+    // An Apple ID as Apple writes one: digits alone, with no sign and no leading zero.
+    let apple = |id: &str| {
+        super::kit::number::<u64>(id, 20)
+            .filter(|_| !id.starts_with('0'))
+            .map(Walled::ApplePodcast)
+    };
     match (host.as_str(), s.as_slice()) {
         ("www.imdb.com" | "imdb.com" | "m.imdb.com", ["title", tt]) if imdb(tt) => {
             Some(Walled::Imdb((*tt).to_owned()))
         }
-        ("pca.st" | "castro.fm", ["itunes", id]) => id.parse().ok().map(Walled::ApplePodcast),
+        ("pca.st" | "castro.fm", ["itunes", id]) => apple(id),
         // Overcast's `itunes{id}`, with or without the show's slug, signs a reader in first.
-        ("overcast.fm" | "www.overcast.fm", [id] | [id, _]) => id
-            .strip_prefix("itunes")
-            .filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
-            .and_then(|id| id.parse().ok())
-            .map(Walled::ApplePodcast),
+        ("overcast.fm" | "www.overcast.fm", [id] | [id, _]) => {
+            id.strip_prefix("itunes").and_then(apple)
+        }
         _ => None,
     }
 }
@@ -779,6 +783,26 @@ mod tests {
             assert_eq!(walled(not), None, "{not}");
         }
         assert_eq!(walled("https://www.imdb.com/title/tt0903747/reviews"), None);
+    }
+
+    /// A player's link names an Apple podcast by digits alone: a sign, a leading zero or zero
+    /// is no ID.
+    #[test]
+    fn an_apple_id_is_digits_alone() {
+        for not in [
+            "https://pca.st/itunes/+1296350485",
+            "https://castro.fm/itunes/+1296350485",
+            "https://pca.st/itunes/01296350485",
+            "https://pca.st/itunes/0",
+            "https://overcast.fm/itunes01296350485",
+            "https://overcast.fm/itunes0/darknet-diaries",
+        ] {
+            assert_eq!(walled(not), None, "{not}");
+        }
+        assert_eq!(
+            walled("https://castro.fm/itunes/1296350485"),
+            Some(Walled::ApplePodcast(1296350485))
+        );
     }
 
     #[tokio::test(start_paused = true)]
