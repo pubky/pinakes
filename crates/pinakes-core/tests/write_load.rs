@@ -352,6 +352,27 @@ async fn concurrent_writers_never_wait_on_the_search_revision(pool: PgPool) {
             .unwrap();
         assert_eq!(name, Some(format!("round {last}")), "{uri}");
     }
+    // Every link a writer derived is there, live, under the page that derived it, and no other.
+    let derived: Vec<(String, String)> = sqlx::query_as(
+        "SELECT parent_id,child_id FROM resource_derivation WHERE expires_at IS NULL OR expires_at>now() ORDER BY 1,2",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let mut expected: Vec<(String, String)> = ids
+        .iter()
+        .enumerate()
+        .skip(1)
+        .flat_map(|(w, (id, _))| {
+            (0..rounds).map(move |r| {
+                let link = format!("https://load.example/{w}/link/{r}");
+                (id.clone(), pinakes_core::model::identity(&link).unwrap().0)
+            })
+        })
+        .collect();
+    expected.sort();
+    assert_eq!(expected.len(), (WRITERS - 1) * rounds);
+    assert_eq!(derived, expected, "derived links");
     // Every spelling the first writer added is an alias.
     let spellings: i64 = sqlx::query_scalar("SELECT count(*) FROM resource_alias a JOIN resource r ON r.id=a.alias_id WHERE a.basis='tracking' AND r.uri LIKE 'https://load.example/0/page/%'")
         .fetch_one(&pool)
