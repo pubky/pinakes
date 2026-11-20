@@ -356,6 +356,26 @@ mod tests {
         ResourceMeta::new("https://delvingbitcoin.org/t/304", "discourse", 3600)
     }
 
+    /// A forum's JSON 404 for a topic says the topic is gone: the read asks for the error's body,
+    /// which the transport drops otherwise, and the card is `missing`; the forum stays known.
+    #[tokio::test(start_paused = true)]
+    async fn a_missing_topic_read_through_the_egress_is_missing() {
+        let (egress, _) = crate::sources::fixture::egress(vec![(
+            "https://gone.forum.example/t/999999.json",
+            404,
+            "application/json",
+            read("topic-missing.json"),
+        )]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let link = "https://gone.forum.example/t/gone-topic/999999";
+        let doc = Discourse.resolve(&cx, link).await.unwrap();
+        assert_eq!(doc.status, crate::model::Status::Missing);
+        assert!(Discourse.reads(link));
+    }
+
     #[test]
     fn addresses() {
         let topic = |post| Target::Topic {
