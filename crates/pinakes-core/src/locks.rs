@@ -55,9 +55,9 @@ pub async fn own_database(pool: &PgPool) -> Result<InstanceLock> {
 /// later: 32 seconds. The process ends once its database connections are closed, a few
 /// seconds more (`pinakesd`), in which a request still open may be answered.
 pub const LOCK_CHECK: std::time::Duration = std::time::Duration::from_secs(10);
-/// How long a daemon that has lost the instance lock gives its tasks to stop, in place of
-/// `limits.shutdown_grace_secs` (which still applies when it is the shorter): time for a
-/// statement in flight and an open response, no more.
+/// How long a daemon that has lost the instance lock gives its tasks to stop at most, in place
+/// of `limits.shutdown_grace_secs` (less when that grace ends sooner): time for a statement in
+/// flight and an open response, no more.
 /// Fixed, as `LOCK_CHECK` is. Another daemon may already run on the database, so the workers'
 /// batches are cut off instead of finished without the lock: a job cut off before its save is
 /// read again when its lease runs out; one cut off after it keeps the card it saved, and the
@@ -72,7 +72,8 @@ pub enum Check {
     /// No answer within [`LOCK_CHECK`], or an error that does not end the session. The session
     /// may only be slow (a loaded host, a stalled network), so the lock may still be held.
     Slow,
-    /// The session's connection failed: the lock is gone with it.
+    /// The session has ended (its connection failed, or the server said so): the lock is gone
+    /// with it.
     Gone,
 }
 /// What a failed check says about the lock's session. The session has ended, and the lock with
@@ -107,13 +108,12 @@ impl InstanceLock {
     }
     /// Check the lock every [`LOCK_CHECK`] and end once it is lost; never otherwise (the daemon
     /// drops the watch when it has stopped, so the lock is watched while it stops too). It is
-    /// lost at once when its session's connection fails, and when two checks in a row get no
-    /// answer in time (or an error that leaves the session open): one slow answer does not
-    /// stop a daemon that still holds its lock, and the check after it is made at once.
-    /// Without the lock another `pinakesd`, or a
-    /// `reextract`, could start on the database, so a daemon that has lost it gives what it
-    /// runs [`LOST_GRACE`] and stops (its supervisor starts it again, and it takes the lock
-    /// anew).
+    /// lost at once when its session has ended ([`Check::Gone`]), and when two checks in a row
+    /// get no answer in time, or an error that may leave the session open: one of them does
+    /// not stop a daemon that still holds its lock, and the check after it is made at once.
+    /// Without the lock another `pinakesd`, or a `reextract`, could start on the database, so
+    /// a daemon that has lost it gives what it runs [`LOST_GRACE`] and stops (its supervisor
+    /// starts it again, and it takes the lock anew).
     pub async fn watch(lock: std::sync::Arc<tokio::sync::Mutex<Self>>) {
         let check = || async { lock.lock().await.check().await };
         watch_checks(check, LOCK_CHECK).await
@@ -193,10 +193,11 @@ mod tests {
         ] {
             assert_eq!(failed_check(&gone), Check::Gone, "{gone:?}");
         }
-        for open in [
+        for unsaid in [
             // A cancelled statement, a statement timeout: the session goes on.
             database(Some("57014")),
             database(Some("57000")),
+            // Not one of the three: when it did end the session, the next check finds that.
             database(Some("57P04")),
             database(Some("53200")),
             database(Some("40001")),
@@ -205,7 +206,7 @@ mod tests {
             Error::PoolTimedOut,
             Error::RowNotFound,
         ] {
-            assert_eq!(failed_check(&open), Check::Slow, "{open:?}");
+            assert_eq!(failed_check(&unsaid), Check::Slow, "{unsaid:?}");
         }
     }
 

@@ -1327,9 +1327,10 @@ impl Worker {
     }
     /// The next batch; none when a canary ran instead, the queue held nothing due (after a
     /// short wait), the claim failed or the daemon is stopping. `slot` is the pacing slot this
-    /// worker took. A daemon told to stop (a signal, a lost instance lock) while the worker
-    /// had its slot starts no canary and claims nothing: the slot is given back. When the stop
-    /// comes while the claim is on its way, the rows it leased are released, unread.
+    /// worker took. A daemon told to stop (a signal, a lost instance lock, a task that ended)
+    /// while the worker had its slot runs no canary and claims nothing: the slot is given
+    /// back. When the stop comes while a claim is on its way, what it leased (a canary, the
+    /// batch's rows) is released, not run.
     async fn next(
         &self,
         canary_check: &mut Instant,
@@ -1349,6 +1350,11 @@ impl Worker {
                 tracing::warn!(error=%crate::resolver::log_error(&e),"canary suspension failed");
             }
             match crate::canary::claim_due(pool, &allowed, &self.canary).await {
+                Ok(Some((manifest, generation))) if *shutdown.borrow() => {
+                    if let Err(e) = crate::canary::release(pool, manifest, generation).await {
+                        tracing::warn!(error=%crate::resolver::log_error(&e),"a canary claimed while stopping keeps its lease until it runs out");
+                    }
+                }
                 Ok(Some((manifest, generation))) => {
                     if let Err(e) = crate::canary::run_manifest(
                         pool,
@@ -1774,6 +1780,33 @@ mod tests {
             .unwrap()
     }
 
+    /// Until a statement of this database waits for a lock on `table`.
+    async fn waits_for(pool: &PgPool, table: &str) {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_locks WHERE NOT granted AND relation=$1::regclass \
+                 AND database=(SELECT oid FROM pg_database WHERE datname=current_database())",
+            )
+            .bind(table)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            if waiting > 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+    /// Both, to their ends, within half a minute: a claim that never waits fails its test.
+    async fn both<A, B>(
+        a: impl std::future::Future<Output = A>,
+        b: impl std::future::Future<Output = B>,
+    ) -> (A, B) {
+        tokio::time::timeout(Duration::from_secs(30), async { tokio::join!(a, b) })
+            .await
+            .expect("the claim waits for the table, then ends")
+    }
+
     /// A daemon told to stop after a worker took its pacing slot (a signal, a lost instance
     /// lock): the worker leases nothing, starts no canary and gives its slot back. The same
     /// worker, not stopping, claims the link.
@@ -1825,23 +1858,11 @@ mod tests {
         let mut later = Instant::now() + Duration::from_secs(3600);
         let next = worker.next(&mut later, slot, &shutdown);
         let release = async {
-            // Until the claim waits for the table.
-            loop {
-                let waiting: i64 = sqlx::query_scalar(
-                    "SELECT count(*) FROM pg_locks WHERE NOT granted AND relation='resource'::regclass",
-                )
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-                if waiting > 0 {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+            waits_for(&pool, "resource").await;
             stop.send(true).unwrap();
             held.commit().await.unwrap();
         };
-        let (jobs, ()) = tokio::join!(next, release);
+        let (jobs, ()) = both(next, release).await;
         assert!(jobs.is_empty(), "the batch is not run");
         // Claimed (its generation moved) and released.
         assert_eq!(lease(&pool, &id).await, (false, generation + 1));
@@ -1851,6 +1872,47 @@ mod tests {
         );
         let again = claim(&pool, "web", &QueueConfig::default()).await.unwrap();
         assert_eq!(again.map(|job| job.id), Some(id));
+    }
+
+    /// The same for a canary: one claimed as the stop comes (its claim waits for a table lock
+    /// here) is released, not run, and stays due.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_canary_claimed_as_the_stop_comes_is_released(pool: PgPool) {
+        sqlx::query(
+            "INSERT INTO source_state(source,canary_due_at) VALUES('web',now()-interval '1 hour')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let slot = Instant::now() + Duration::from_secs(3600);
+        let worker = worker(&pool, slot);
+        let (stop, shutdown) = watch::channel(false);
+        let mut held = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE source_state IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *held)
+            .await
+            .unwrap();
+        let mut canary_check = Instant::now();
+        let next = worker.next(&mut canary_check, slot, &shutdown);
+        let release = async {
+            waits_for(&pool, "source_state").await;
+            stop.send(true).unwrap();
+            held.commit().await.unwrap();
+        };
+        let (jobs, ()) = both(next, release).await;
+        assert!(jobs.is_empty());
+        // Claimed (its generation moved), released, not run (no result, no new due time).
+        let canary: (bool, i64, bool, bool) = sqlx::query_as(
+            "SELECT canary_lease_until IS NULL,canary_generation,canary_at IS NULL,canary_due_at<now() FROM source_state WHERE source='web'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(canary, (true, 1, true, true));
+        assert!(
+            *worker.rate.lock().await <= Instant::now(),
+            "the slot is back"
+        );
     }
 
     /// The claim's reference test, alone.

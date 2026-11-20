@@ -220,7 +220,7 @@ async fn supervise(
         }
     };
     if !finished {
-        // The grace this stop had: shorter than the configured one after a lost lock.
+        // The grace this stop had: after a lost lock, no longer than `LOST_GRACE` from then.
         tracing::warn!(
             grace_secs = ends.duration_since(stopping).as_secs_f64(),
             lock_lost = lost,

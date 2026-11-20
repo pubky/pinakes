@@ -55,6 +55,18 @@ pub async fn claim_due<'a>(
             .map(|m| (m, generation))
     }))
 }
+/// Give a claimed canary back, not run: it stays due, and its lease ends now. Fenced by the
+/// claim's `generation`, so a canary claimed again since is left alone.
+pub async fn release(pool: &PgPool, manifest: &Manifest, generation: i64) -> Result<()> {
+    sqlx::query(
+        "UPDATE source_state SET canary_lease_until=NULL WHERE source=$1 AND canary_generation=$2",
+    )
+    .bind(&manifest.source)
+    .bind(generation)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
 /// The fields a canary's card must hold: the manifest's expected ones. The web route expects
 /// none of a page (any page may lack any field), so its canary, a page known to have a title,
 /// must have its `name`: it proves a reader returned a field, not only that the fetch answered.

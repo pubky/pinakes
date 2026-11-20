@@ -193,7 +193,7 @@ row get no answer in time or an error that leaves the session open (a database t
 answer, a cancelled statement; one of them stops nothing), since another daemon or a
 `reextract` could then start beside it. A daemon that has lost the lock, running or already
 stopping, claims no more work and gives open requests, running jobs and background passes two
-seconds from then, or `limits.shutdown_grace_secs` when that is shorter, not the full grace:
+seconds from then at most (less when its shutdown grace ends sooner), not the full grace:
 what still runs is dropped. A job cut off before its save is read again when its lease runs out;
 one cut off after it keeps the card it saved, and the steps after the save (the alias its page
 names, an episode's pages) wait for its next full read: a read the site answers 304 does not run

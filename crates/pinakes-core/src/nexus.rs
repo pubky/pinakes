@@ -119,7 +119,7 @@ type ReachCache = Arc<Mutex<HashMap<(String, String), (Instant, ReachSet, Option
 /// operator's choice.
 pub const FEED_PAGE: usize = 1000;
 /// How long one request to the Nexus may take: a feed page, a reach list, a batch view. Fixed;
-/// a search's reach read has a shorter deadline of its own (`limits.reach_timeout_secs`).
+/// a search's reach reads have a shorter deadline of their own (`limits.reach_timeout_secs`).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// The largest answer read from the Nexus (a feed page of `FEED_PAGE` lines fits well below).
 const BODY_CAP: usize = 8 * 1024 * 1024;

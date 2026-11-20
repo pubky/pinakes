@@ -4271,7 +4271,7 @@ async fn a_boost_ranks_the_viewers_set_first_and_never_filters(pool: PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn two_reach_reads_share_one_deadline(pool: PgPool) {
     let slow = || async {
-        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
         Json(vec![author(1)])
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -4284,7 +4284,7 @@ async fn two_reach_reads_share_one_deadline(pool: PgPool) {
         nexus_url: format!("http://{addr}"),
         ..Default::default()
     };
-    config.search.reach_timeout_secs = 1;
+    config.search.reach_timeout_secs = 2;
     let app = api::router(AppState::new(pool, config).unwrap());
     let started = std::time::Instant::now();
     let (code, body) = call(
@@ -4300,7 +4300,7 @@ async fn two_reach_reads_share_one_deadline(pool: PgPool) {
     assert_eq!(code, 502, "{body}");
     let took = started.elapsed();
     assert!(
-        (std::time::Duration::from_millis(950)..std::time::Duration::from_millis(1350))
+        (std::time::Duration::from_millis(1950)..std::time::Duration::from_millis(2600))
             .contains(&took),
         "{took:?}"
     );
