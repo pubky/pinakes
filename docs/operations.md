@@ -141,6 +141,23 @@ A database advisory lock, the instance lock, allows one daemon per database. The
 a connection of its own for its whole life. Resolver, host, author, reach-cache and IP budgets are
 process-local, and the lock keeps their guarantees. Every daemon version takes the same key, so a
 second daemon on a database refuses to start. No other lock uses that key (`pinakes_core::locks`).
+The lock is its session's: the daemon checks every ten seconds that the session is alive and
+answers within ten seconds, and stops when it does not (a PostgreSQL restart, a dropped
+connection, a database that does not answer), since another daemon or a `reextract` could then
+start beside it.
+
+**Stopping and restarting.** `pinakesd` stops with a non-zero status when one of its background
+tasks ends by itself or panics (ingestion, grouping, maintenance, the ODbL dump, a queue worker,
+a listener, the instance lock's check), or when a hint pass or also-on panics (those end by
+themselves when switched off): a daemon that kept answering with a dead loop would look healthy
+and fall behind. Run it under a supervisor that starts it again (`Restart=on-failure`, a
+container restart policy). On SIGTERM or SIGINT it stops taking work, lets open requests,
+running jobs and background passes finish for up to `limits.shutdown_grace_secs`, closes its
+database connections (up to 5 seconds more) and exits 0, or non-zero when a task panicked while
+stopping; what still runs after the grace is dropped (a job cut off there is read again when its
+lease runs out). Give the supervisor's stop timeout more than the two together
+(`TimeoutStopSec`, `stop_grace_period`). A signal during startup, `--migrate` or `reextract`
+stops them too (`--migrate` and `reextract` then exit non-zero).
 
 **Re-extraction.** A parser or routing change reaches stored documents through one command, run
 while the daemon is stopped (it takes the instance lock):

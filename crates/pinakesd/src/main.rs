@@ -15,8 +15,21 @@ fn main() -> Result<()> {
     if let Command::ParseWorker(secs) = command {
         std::process::exit(pinakes_core::resolver::html::worker_main(secs));
     }
-    tokio::runtime::Runtime::new()?.block_on(serve(config, command))
+    let runtime = tokio::runtime::Runtime::new()?;
+    let result = runtime.block_on(serve(config, command));
+    // Whatever still runs on a blocking thread (a dump write, a parse) is left: the process
+    // ends here, within the shutdown grace.
+    runtime.shutdown_background();
+    result
 }
+/// The connections of the daemon's own pool: the workers, ingestion and the background passes.
+/// The API has a pool of its own (`api::pool_options`).
+const POOL_CONNECTIONS: u32 = 20;
+/// How long a stopping daemon waits for its pool's connections to close.
+const POOL_CLOSE: Duration = Duration::from_secs(5);
+/// How often retention and orphan cleanup run.
+const MAINTENANCE_PERIOD: Duration = Duration::from_secs(3600);
+
 async fn serve(config: Option<PathBuf>, command: Command) -> Result<()> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "pinakes=info,pinakes_core=info,sqlx=warn".into());
@@ -31,6 +44,165 @@ async fn serve(config: Option<PathBuf>, command: Command) -> Result<()> {
         }
         Command::ParseWorker(_) => unreachable!("handled before the runtime"),
     };
+    // The signal handlers come first, so a stop is heeded during startup, a migration and a
+    // re-extraction too (as a container's first process the daemon has no default handlers).
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut terminate = signal(SignalKind::terminate()).context("SIGTERM handler")?;
+    let mut interrupt = signal(SignalKind::interrupt()).context("SIGINT handler")?;
+    let stop = async move {
+        tokio::select! { _=terminate.recv()=>{}, _=interrupt.recv()=>{} }
+    };
+    tokio::pin!(stop);
+    let one_shot = migrate_only || reextract.is_some();
+    let daemon = tokio::select! {
+        // Each step so far is a transaction of its own: one cut off is rolled back.
+        _ = &mut stop => {
+            anyhow::ensure!(!one_shot, "stopped by a signal before it finished");
+            tracing::info!("stopped by a signal during startup");
+            return Ok(());
+        }
+        daemon = start(config, migrate_only, reextract) => daemon?,
+    };
+    match daemon {
+        Some(daemon) => daemon.run(stop).await,
+        None => Ok(()),
+    }
+}
+
+/// The running daemon: its background tasks and workers, and what stops them.
+struct Daemon {
+    tasks: Tasks,
+    workers: tokio::task::JoinSet<()>,
+    shutdown: watch::Sender<bool>,
+    grace: Duration,
+    pool: sqlx::PgPool,
+    instance_lock: std::sync::Arc<tokio::sync::Mutex<pinakes_core::locks::InstanceLock>>,
+}
+impl Daemon {
+    async fn run(self, stop: impl std::future::Future<Output = ()>) -> Result<()> {
+        let result = supervise(stop, self.tasks, self.workers, self.shutdown, self.grace).await;
+        // The lock goes last, after every task that writes.
+        drop(self.instance_lock);
+        // Closing waits for every connection to come back: no longer than a few seconds, since
+        // a database that does not answer may be why the daemon stops.
+        let _ = tokio::time::timeout(POOL_CLOSE, self.pool.close()).await;
+        result
+    }
+}
+
+/// The daemon's background tasks, by name.
+#[derive(Default)]
+struct Tasks(tokio::task::JoinSet<Ended>);
+/// How a background task ended.
+struct Ended {
+    name: &'static str,
+    panicked: bool,
+    /// Whether the task runs until shutdown: ending earlier is a failure.
+    lasting: bool,
+}
+impl Tasks {
+    /// A task that runs until shutdown. When it ends before, or panics, the daemon stops.
+    fn spawn(
+        &mut self,
+        name: &'static str,
+        task: impl std::future::Future<Output = ()> + Send + 'static,
+    ) {
+        self.add(name, true, task);
+    }
+    /// A task that ends by itself when its feature is off. When it panics, the daemon stops.
+    fn spawn_optional(
+        &mut self,
+        name: &'static str,
+        task: impl std::future::Future<Output = ()> + Send + 'static,
+    ) {
+        self.add(name, false, task);
+    }
+    fn add(
+        &mut self,
+        name: &'static str,
+        lasting: bool,
+        task: impl std::future::Future<Output = ()> + Send + 'static,
+    ) {
+        self.0.spawn(async move {
+            let panicked = std::panic::AssertUnwindSafe(task)
+                .catch_unwind()
+                .await
+                .is_err();
+            Ended {
+                name,
+                panicked,
+                lasting,
+            }
+        });
+    }
+}
+
+/// Run until `stop` (a signal), or until a background task or a worker ends by itself or panics:
+/// a daemon that kept answering with a dead ingestion, grouping or cleanup loop would look
+/// healthy and fall behind. Then signal shutdown and give everything `grace` to finish; what
+/// still runs after it is dropped. An error names what ended early, so the process exits
+/// non-zero and its supervisor starts it again.
+async fn supervise(
+    stop: impl std::future::Future<Output = ()>,
+    mut tasks: Tasks,
+    mut workers: tokio::task::JoinSet<()>,
+    shutdown: watch::Sender<bool>,
+    grace: Duration,
+) -> Result<()> {
+    tokio::pin!(stop);
+    let failed: Option<&'static str> = loop {
+        tokio::select! {
+            _ = &mut stop => break None,
+            Some(ended) = tasks.0.join_next() => match ended {
+                Ok(Ended { panicked: false, lasting: false, .. }) => {}
+                Ok(ended) => break Some(ended.name),
+                Err(_) => break Some("background task"),
+            },
+            Some(_) = workers.join_next() => break Some("queue worker"),
+        }
+    };
+    if let Some(name) = failed {
+        tracing::error!(task = name, "a background task ended; stopping the daemon");
+    }
+    let _ = shutdown.send(true);
+    // A task or worker that panics while it stops is a failure too.
+    let mut panicked: Option<&'static str> = None;
+    let drain = async {
+        while let Some(ended) = tasks.0.join_next().await {
+            match ended {
+                Ok(Ended {
+                    panicked: false, ..
+                }) => {}
+                Ok(ended) => panicked = panicked.or(Some(ended.name)),
+                Err(_) => panicked = panicked.or(Some("background task")),
+            }
+        }
+        while let Some(ended) = workers.join_next().await {
+            if ended.is_err() {
+                panicked = panicked.or(Some("queue worker"));
+            }
+        }
+    };
+    if tokio::time::timeout(grace, drain).await.is_err() {
+        tracing::warn!(
+            grace_secs = grace.as_secs(),
+            "shutdown grace passed; stopping with work still running"
+        );
+    }
+    match (failed, panicked) {
+        (Some(name), _) => bail!("{name} ended before shutdown"),
+        (None, Some(name)) => bail!("{name} panicked while stopping"),
+        (None, None) => Ok(()),
+    }
+}
+
+/// Everything up to the listeners: `None` for a command that has finished (`--migrate`,
+/// `reextract`).
+async fn start(
+    config: Option<PathBuf>,
+    migrate_only: bool,
+    reextract: Option<Vec<String>>,
+) -> Result<Option<Daemon>> {
     // Every HTML parse runs in a child `pinakesd parse-worker`, killed at its limits; a daemon
     // that cannot run one does not serve.
     pinakes_core::resolver::html::set_worker(std::env::current_exe()?, ["parse-worker"]);
@@ -39,12 +211,12 @@ async fn serve(config: Option<PathBuf>, command: Command) -> Result<()> {
     let config = Config::load(config.as_deref())?;
     pinakes_core::configure_sources(&config);
     let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(20)
+        .max_connections(POOL_CONNECTIONS)
         .connect(&config.database_url)
         .await?;
     migrate(&pool).await?;
     if migrate_only {
-        return Ok(());
+        return Ok(None);
     }
     // Build the public document now, so a malformed recipe file stops startup before workers,
     // ingestion and the listeners start.
@@ -55,16 +227,33 @@ async fn serve(config: Option<PathBuf>, command: Command) -> Result<()> {
         println!("scrubbed {scrubbed} posts gone or opted out");
         let requeued = queue::reextract(&pool, &routes).await?;
         println!("re-queued {requeued} resources");
-        return Ok(());
+        return Ok(None);
     }
+    warn_plain_nexus(&config);
+    warn_other_feeds(&ingest::other_feeds(&pool, &config.nexus_url).await?);
     pinakes_core::groups::configure(&pool, &config.groups).await?;
     pinakes_core::also_on::configure(&pool, &config).await?;
     let api_pool = api::pool_options().connect(&config.database_url).await?;
     let state = AppState::new(api_pool, config.clone())?;
+    // Both listeners are bound before any task or worker starts: from here on nothing waits,
+    // so a signal during startup never cuts off a worker that has claimed a job.
+    let admin = tokio::net::TcpListener::bind(&config.admin_listen).await?;
+    let listener = tokio::net::TcpListener::bind(&config.listen).await?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let mut tasks = Tasks::default();
+    let instance_lock = std::sync::Arc::new(tokio::sync::Mutex::new(instance_lock));
+    let watched =
+        pinakes_core::locks::InstanceLock::watch(instance_lock.clone(), shutdown_rx.clone());
+    tasks.spawn("instance lock", async move {
+        if watched.await {
+            tracing::error!(
+                "the instance lock's database session is gone or does not answer; stopping"
+            );
+        }
+    });
     // One Egress for the resolvers and the also-on sources: the per-host budgets are shared.
     let egress = pinakes_core::resolver::egress::Egress::new(config.egress.clone());
-    let mut workers = queue::spawn_with_egress(
+    let workers = queue::spawn_with_egress(
         pool.clone(),
         config.clone(),
         state.wake.clone(),
@@ -72,19 +261,22 @@ async fn serve(config: Option<PathBuf>, command: Command) -> Result<()> {
         state.metrics.clone(),
         egress.clone(),
     )?;
-    let also_on_task = tokio::spawn(pinakes_core::also_on::run(
-        pool.clone(),
-        pinakes_core::also_on::Context {
-            egress,
-            config: std::sync::Arc::new(config.clone()),
-        },
-        pinakes_core::also_on::registry(),
-        shutdown_rx.clone(),
-    ));
+    tasks.spawn_optional(
+        "also-on",
+        pinakes_core::also_on::run(
+            pool.clone(),
+            pinakes_core::also_on::Context {
+                egress,
+                config: std::sync::Arc::new(config.clone()),
+            },
+            pinakes_core::also_on::registry(),
+            shutdown_rx.clone(),
+        ),
+    );
     let ingest_state = state.clone();
     let ingest_pool = pool.clone();
     let mut ingest_shutdown = shutdown_rx.clone();
-    let ingest_task = tokio::spawn(async move {
+    tasks.spawn("ingestion", async move {
         loop {
             // A panicking line is skipped inside `apply`; anything else that panics is counted
             // (`pinakes_ingest_panics_total`) and retried like an error with the cursor held.
@@ -96,8 +288,8 @@ async fn serve(config: Option<PathBuf>, command: Command) -> Result<()> {
                 &ingest_state.metrics,
             ))
             .catch_unwind();
-            let applied = tokio::select! { _=ingest_shutdown.changed()=>break,result=poll=>result.unwrap_or_else(|_| { ingest_state.metrics.ingest_panics.inc(); Err(anyhow::anyhow!("ingestion panicked")) }) };
-            match applied {
+            let polled = tokio::select! { _=ingest_shutdown.changed()=>break,result=poll=>result.unwrap_or_else(|_| { ingest_state.metrics.ingest_panics.inc(); Err(anyhow::anyhow!("ingestion panicked")) }) };
+            match polled {
                 Ok(poll) => {
                     if poll.lines > 0 {
                         tracing::info!(lines = poll.lines, "ingested Nexus batch");
@@ -119,7 +311,7 @@ async fn serve(config: Option<PathBuf>, command: Command) -> Result<()> {
     let group_pool = pool.clone();
     let group_config = config.groups.clone();
     let mut group_shutdown = shutdown_rx.clone();
-    let group_task = tokio::spawn(async move {
+    tasks.spawn("grouping", async move {
         loop {
             let batch = tokio::select! { _=group_shutdown.changed()=>break,result=pinakes_core::groups::drain(&group_pool,&group_config,25)=>result };
             match batch {
@@ -135,72 +327,89 @@ async fn serve(config: Option<PathBuf>, command: Command) -> Result<()> {
             tokio::select! {_=group_shutdown.changed()=>break,_=tokio::time::sleep(Duration::from_secs(2))=>{}}
         }
     });
-    let same_event_task = tokio::spawn(pinakes_core::same_event::run(
-        pool.clone(),
-        config.clone(),
-        shutdown_rx.clone(),
-    ));
-    let same_recording_task = tokio::spawn(pinakes_core::same_recording::run(
-        pool.clone(),
-        config.clone(),
-        shutdown_rx.clone(),
-    ));
-    let maintenance_task = tokio::spawn(pinakes_core::maintenance::run(
-        pool.clone(),
-        config.grace_days,
-        config.preview_grace_hours,
-        config.refresh.retention_days,
-        Duration::from_secs(3600),
-        shutdown_rx.clone(),
-    ));
-    let dump_task = tokio::spawn(pinakes_core::osm_dump::run(
-        pool.clone(),
-        PathBuf::from(&config.osm.dump_dir),
-        Duration::from_secs(config.osm.dump_every_hours * 3600),
-        shutdown_rx.clone(),
-    ));
-    let admin = tokio::net::TcpListener::bind(&config.admin_listen).await?;
+    tasks.spawn_optional(
+        "same-event hints",
+        pinakes_core::same_event::run(pool.clone(), config.clone(), shutdown_rx.clone()),
+    );
+    tasks.spawn_optional(
+        "same-recording hints",
+        pinakes_core::same_recording::run(pool.clone(), config.clone(), shutdown_rx.clone()),
+    );
+    tasks.spawn(
+        "maintenance",
+        pinakes_core::maintenance::run(
+            pool.clone(),
+            config.grace_days,
+            config.preview_grace_hours,
+            config.refresh.retention_days,
+            MAINTENANCE_PERIOD,
+            shutdown_rx.clone(),
+        ),
+    );
+    tasks.spawn(
+        "ODbL dump",
+        pinakes_core::osm_dump::run(
+            pool.clone(),
+            PathBuf::from(&config.osm.dump_dir),
+            Duration::from_secs(config.osm.dump_every_hours * 3600),
+            shutdown_rx.clone(),
+        ),
+    );
     warn_admin_listener(admin.local_addr()?);
     warn_admin_without_token(admin.local_addr()?, config.admin_token.is_some());
     let admin_app = api::admin_router(state.clone());
     let mut admin_shutdown = shutdown_rx.clone();
-    let admin_task = tokio::spawn(async move {
-        axum::serve(admin, admin_app)
+    tasks.spawn("admin listener", async move {
+        let served = axum::serve(admin, admin_app)
             .with_graceful_shutdown(async move {
                 let _ = admin_shutdown.changed().await;
             })
-            .await
+            .await;
+        if let Err(error) = served {
+            tracing::error!(error = %pinakes_core::resolver::log_error(&error), "the admin listener failed");
+        }
     });
-    let listener = tokio::net::TcpListener::bind(&config.listen).await?;
     tracing::info!(listen=%config.listen,"Pinakes started");
     if config.pubky.enabled {
         pinakes_core::resolver::pubky_apps::log_links_off();
     }
-    axum::serve(
-        listener,
-        api::router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .with_graceful_shutdown(async move {
-        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("SIGTERM handler");
-        tokio::select! { _=tokio::signal::ctrl_c()=>{},_=term.recv()=>{} }
-        let _ = shutdown_tx.send(true);
-    })
-    .await?;
-    admin_task.await??;
-    ingest_task.await?;
-    maintenance_task.await?;
-    also_on_task.await?;
-    dump_task.await?;
-    group_task.await?;
-    same_event_task.await?;
-    same_recording_task.await?;
-    while let Some(result) = workers.join_next().await {
-        result?;
+    let public_app =
+        api::router(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
+    let mut public_shutdown = shutdown_rx.clone();
+    tasks.spawn("public listener", async move {
+        let served = axum::serve(listener, public_app)
+            .with_graceful_shutdown(async move {
+                let _ = public_shutdown.changed().await;
+            })
+            .await;
+        if let Err(error) = served {
+            tracing::error!(error = %pinakes_core::resolver::log_error(&error), "the public listener failed");
+        }
+    });
+    Ok(Some(Daemon {
+        tasks,
+        workers,
+        shutdown: shutdown_tx,
+        grace: Duration::from_secs(config.shutdown_grace_secs),
+        pool,
+        instance_lock,
+    }))
+}
+
+/// A `nexus_authorization` sent to an `http://` Nexus on another machine crosses the network in
+/// clear.
+fn warn_plain_nexus(config: &Config) {
+    if config.nexus_authorization_in_clear() {
+        tracing::warn!(nexus = %pinakes_core::resolver::log_host(&config.nexus_url), "nexus_authorization is sent over http to a host that is not local; use an https nexus_url");
     }
-    drop(instance_lock);
-    pool.close().await;
-    Ok(())
+}
+
+/// The references are one Nexus feed's: a database that holds a cursor for another `nexus_url`
+/// (or another spelling of this one) keeps that feed's references beside this one's.
+fn warn_other_feeds(hosts: &[String]) {
+    if !hosts.is_empty() {
+        tracing::warn!(other_feeds = %hosts.join(", "), "this database holds a feed cursor for another nexus_url; the references read from it stay beside the configured feed's (docs/operations.md, Ingestion)");
+    }
 }
 
 fn warn_admin_listener(address: std::net::SocketAddr) {
@@ -221,6 +430,11 @@ fn warn_admin_without_token(address: std::net::SocketAddr, token: bool) {
 /// logs nothing below warn whatever the filter says. rmcp logs whole requests and results at debug
 /// and trace, and notifications at info: a tool's arguments, such as a private calendar URL, before
 /// any validation.
+///
+/// Both filters are layers of their own, so they decide for the whole subscriber. A filter
+/// attached to the output layer alone (`with_filter`) keeps its verdict per thread until the
+/// event arrives: a question that no event follows (a library asking whether a record would be
+/// logged) leaves a refusal behind, and the next line on that thread is dropped.
 fn subscriber<W>(
     filter: tracing_subscriber::EnvFilter,
     writer: W,
@@ -228,17 +442,15 @@ fn subscriber<W>(
 where
     W: for<'w> tracing_subscriber::fmt::MakeWriter<'w> + Send + Sync + 'static,
 {
-    use tracing_subscriber::{filter::FilterExt as _, layer::SubscriberExt as _, Layer as _};
+    use tracing_subscriber::layer::SubscriberExt as _;
     let quiet_mcp = tracing_subscriber::filter::filter_fn(|meta| {
         let target = meta.target();
         !(target == "rmcp" || target.starts_with("rmcp::")) || *meta.level() <= tracing::Level::WARN
     });
-    tracing_subscriber::registry().with(
-        tracing_subscriber::fmt::layer()
-            .json()
-            .with_writer(writer)
-            .with_filter(filter.and(quiet_mcp)),
-    )
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(quiet_mcp)
+        .with(tracing_subscriber::fmt::layer().json().with_writer(writer))
 }
 
 enum Command {
@@ -386,6 +598,112 @@ mod tests {
                 "{env}: {logs}"
             );
         }
+    }
+    /// The tasks of a supervision test: `quiet` run until shutdown, as the daemon's loops do.
+    fn quiet(tasks: &mut Tasks, name: &'static str, shutdown: &watch::Receiver<bool>) {
+        let mut shutdown = shutdown.clone();
+        tasks.spawn(name, async move {
+            let _ = shutdown.changed().await;
+        });
+    }
+    /// A background task that ends by itself, or panics, stops the daemon with an error that
+    /// names it, after the other tasks were told to stop; a worker that ends does too. A task
+    /// whose feature is off may end, and a stop signal is a clean stop.
+    #[tokio::test]
+    async fn a_background_task_that_ends_stops_the_daemon() {
+        let grace = Duration::from_secs(5);
+        let never = std::future::pending::<()>;
+        for early in ["returns", "panics", "worker"] {
+            let (stop, shutdown) = watch::channel(false);
+            let mut tasks = Tasks::default();
+            let mut workers = tokio::task::JoinSet::new();
+            quiet(&mut tasks, "grouping", &shutdown);
+            let mut seen = shutdown.clone();
+            workers.spawn(async move {
+                if early != "worker" {
+                    let _ = seen.changed().await;
+                }
+            });
+            match early {
+                "returns" => tasks.spawn("ingestion", async {}),
+                "panics" => tasks.spawn("ingestion", async { panic!("ingestion panicked") }),
+                _ => {}
+            }
+            let stopped = shutdown.clone();
+            let error = supervise(never(), tasks, workers, stop, grace)
+                .await
+                .unwrap_err()
+                .to_string();
+            let name = if early == "worker" {
+                "queue worker"
+            } else {
+                "ingestion"
+            };
+            assert_eq!(error, format!("{name} ended before shutdown"), "{early}");
+            assert!(
+                *stopped.borrow(),
+                "{early}: the other tasks were told to stop"
+            );
+        }
+        // A task whose feature is off ends at once; the daemon runs on until its signal.
+        let (stop, shutdown) = watch::channel(false);
+        let mut tasks = Tasks::default();
+        quiet(&mut tasks, "grouping", &shutdown);
+        tasks.spawn_optional("also-on", async {});
+        let signal = tokio::time::sleep(Duration::from_millis(200));
+        let started = std::time::Instant::now();
+        supervise(signal, tasks, tokio::task::JoinSet::new(), stop, grace)
+            .await
+            .unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(200));
+        // But its panic stops the daemon.
+        let (stop, _shutdown) = watch::channel(false);
+        let mut tasks = Tasks::default();
+        tasks.spawn_optional("also-on", async { panic!("also-on panicked") });
+        let error = supervise(never(), tasks, tokio::task::JoinSet::new(), stop, grace)
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "also-on ended before shutdown");
+    }
+    /// A task that panics while it stops makes the stop a failure.
+    #[tokio::test]
+    async fn a_panic_while_stopping_is_a_failure() {
+        let (stop, shutdown) = watch::channel(false);
+        let mut tasks = Tasks::default();
+        let mut seen = shutdown.clone();
+        tasks.spawn("maintenance", async move {
+            let _ = seen.changed().await;
+            panic!("maintenance panicked while stopping");
+        });
+        let error = supervise(
+            async {},
+            tasks,
+            tokio::task::JoinSet::new(),
+            stop,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "maintenance panicked while stopping");
+    }
+    /// Shutdown waits for the tasks no longer than its grace: one that does not stop is left.
+    #[tokio::test]
+    async fn shutdown_waits_no_longer_than_its_grace() {
+        let (stop, _shutdown) = watch::channel(false);
+        let mut tasks = Tasks::default();
+        tasks.spawn("stuck", std::future::pending::<()>());
+        let started = std::time::Instant::now();
+        supervise(
+            async {},
+            tasks,
+            tokio::task::JoinSet::new(),
+            stop,
+            Duration::from_millis(300),
+        )
+        .await
+        .unwrap();
+        let waited = started.elapsed();
+        assert!(waited >= Duration::from_millis(300) && waited < Duration::from_secs(5));
     }
     #[test]
     fn warns_when_the_admin_listener_has_no_token() {

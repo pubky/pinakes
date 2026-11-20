@@ -47,6 +47,38 @@ pub async fn own_database(pool: &PgPool) -> Result<InstanceLock> {
     }
     Ok(InstanceLock(connection))
 }
+/// How often the daemon checks that it still holds the instance lock ([`InstanceLock::watch`]),
+/// and how long one check may take. Fixed: it bounds how long two daemons could run on one
+/// database, which no deployment needs to tune.
+pub const LOCK_CHECK: std::time::Duration = std::time::Duration::from_secs(10);
+impl InstanceLock {
+    /// Whether the lock's session is alive and answers within [`LOCK_CHECK`]. The lock is the
+    /// session's: a PostgreSQL restart or a dropped connection ends both, while the daemon's
+    /// other connections reconnect.
+    pub async fn held(&mut self) -> bool {
+        let alive = sqlx::query("SELECT 1").execute(&mut *self.0);
+        matches!(tokio::time::timeout(LOCK_CHECK, alive).await, Ok(Ok(_)))
+    }
+    /// Check the lock every [`LOCK_CHECK`] until `shutdown`: `true` once it is lost, `false` at
+    /// shutdown. Without the lock another `pinakesd`, or a `reextract`, could start on the
+    /// database, so a daemon that has lost it stops (its supervisor starts it again, and it
+    /// takes the lock anew).
+    pub async fn watch(
+        lock: std::sync::Arc<tokio::sync::Mutex<Self>>,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
+    ) -> bool {
+        while !*shutdown.borrow() {
+            tokio::select! {
+                _ = shutdown.changed() => return false,
+                _ = tokio::time::sleep(LOCK_CHECK) => {}
+            }
+            if !lock.lock().await.held().await {
+                return true;
+            }
+        }
+        false
+    }
+}
 
 #[cfg(test)]
 mod tests {
