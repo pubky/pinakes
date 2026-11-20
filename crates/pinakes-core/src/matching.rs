@@ -192,8 +192,8 @@ pub fn recording_title(title: &str) -> String {
 /// are compared.
 pub fn artist_name(credit: &str) -> String {
     let lower = credit.to_lowercase();
-    let first = before_credit(&lower);
-    let mut first = first;
+    // Without the space a cut credit leaves: a name's last word is no separator ("Lil Nas X").
+    let mut first = before_credit(&lower).trim_end();
     for separator in [" & ", ", ", " with ", " x ", " vs ", " vs. ", " / "] {
         if let Some(at) = first.find(separator) {
             first = &first[..at];
@@ -271,6 +271,9 @@ mod tests {
             ("A, B and C", "a"),
             ("Simon & Garfunkel", "simon"),
             ("Jay-Z x Kanye West", "jay z"),
+            ("Lil Nas X", "lil nas x"),
+            ("Lil Nas X feat. Billy Ray Cyrus", "lil nas x"),
+            ("Lil Nas X ft. Billy Ray Cyrus & Someone", "lil nas x"),
             ("Beyoncé", "beyoncé"),
             ("", ""),
         ] {
