@@ -85,21 +85,17 @@ fn options(token: &str) -> FetchOptions {
     }
 }
 
-/// Whether a 403 is GitHub's rate limit: its `message` names one ("API rate limit exceeded for
-/// …", "You have exceeded a secondary rate limit. …", "… an abuse detection mechanism …"), or
-/// the answer carries no message to read.
+/// Whether a 403 is GitHub's rate limit: its JSON `message` names one ("API rate limit
+/// exceeded for …", "You have exceeded a secondary rate limit. …", "… an abuse detection
+/// mechanism …"). Any other 403, and one with no message to read, is no wait.
 fn rate_limit(body: &[u8]) -> bool {
-    match serde_json::from_slice::<Value>(body)
+    serde_json::from_slice::<Value>(body)
         .ok()
         .and_then(|v| text(&v["message"]))
-    {
-        Some(message) => {
+        .is_some_and(|message| {
             let message = message.to_ascii_lowercase();
             message.contains("rate limit") || message.contains("abuse detection")
-        }
-        // An answer that says nothing readable is taken as the limit: a wait keeps the card.
-        None => true,
-    }
+        })
 }
 
 /// A repository's card from `GET /repos/{owner}/{repo}` with `token`. A path GitHub has no
@@ -422,6 +418,8 @@ mod tests {
                     None,
                 ),
                 ("/repos/down/repo", _) => (503, b"{}".to_vec(), None),
+                // A 403 with no message to read.
+                ("/repos/mute/repo", _) => (403, b"{}".to_vec(), None),
                 _ => (404, fixture::read("github", "repo-missing.json"), None),
             };
             Ok(crate::resolver::egress::Fetched {
@@ -557,7 +555,7 @@ mod tests {
             ttl: 3600,
         };
         let mut answers = Vec::new();
-        for owner in ["busy", "slow", "blocked", "down"] {
+        for owner in ["busy", "slow", "blocked", "down", "mute"] {
             let doc = cx.card(&format!("https://github.com/{owner}/repo"), &Github);
             let answer = read(&cx, doc, owner, "repo", "good-token").await;
             let error = answer.expect_err("no card");
@@ -573,6 +571,7 @@ mod tests {
                 ("slow", Some("http_4xx"), false),
                 ("blocked", None, true),
                 ("down", Some("upstream"), false),
+                ("mute", None, true),
             ]
         );
     }
