@@ -180,9 +180,10 @@ a connection of its own for its whole life. Resolver, host, author, reach-cache 
 process-local, and the lock keeps their guarantees. Every daemon version takes the same key, so a
 second daemon on a database refuses to start. No other lock uses that key (`pinakes_core::locks`).
 The lock is its session's: the daemon checks every ten seconds that the session is alive and
-answers within ten seconds, and stops when it does not (a PostgreSQL restart, a dropped
-connection, a database that does not answer), since another daemon or a `reextract` could then
-start beside it.
+answers within ten seconds. It stops at once when the session's connection has failed (a
+PostgreSQL restart, a dropped connection), and when two checks in a row get no answer in time (a
+database that does not answer; one slow answer stops nothing), since another daemon or a
+`reextract` could then start beside it.
 
 **Stopping and restarting.** `pinakesd` stops with a non-zero status when one of its background
 tasks ends by itself or panics (ingestion, grouping, maintenance, the ODbL dump, a queue worker,
