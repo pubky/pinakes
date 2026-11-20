@@ -994,6 +994,82 @@ async fn durable_queue_backoff_dead_letter_refresh_and_fencing(pool: PgPool) {
         id
     );
 }
+/// A lease that ran out (its worker died, or hangs) is taken by the next claim, once; a held
+/// lease is not. The worker that held the old lease is fenced by the claim's generation: what it
+/// finishes afterwards, as a card or as a failure, changes nothing.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_expired_lease_is_retaken_once_and_the_old_worker_is_fenced(pool: PgPool) {
+    let cfg = QueueConfig::default();
+    let id = store::ensure_resource(&pool, "https://example.org/leased")
+        .await
+        .unwrap();
+    let old = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    assert_eq!(old.id, id);
+    // A lease that still holds keeps every other worker out.
+    assert!(queue::claim(&pool, "web", &cfg).await.unwrap().is_none());
+    sqlx::query("UPDATE resource SET lease_until=now()-interval '1 second' WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let new = queue::claim(&pool, "web", &cfg)
+        .await
+        .unwrap()
+        .expect("an expired lease is claimed again");
+    assert_eq!(
+        (new.id.as_str(), new.generation),
+        (id.as_str(), old.generation + 1)
+    );
+    assert!(
+        queue::claim(&pool, "web", &cfg).await.unwrap().is_none(),
+        "the expired lease was taken twice"
+    );
+    // The link's status, attempts, whether a lease holds it, generation and last error.
+    let row = || {
+        let (pool, id) = (pool.clone(), id.clone());
+        async move {
+            sqlx::query_as::<_, (String, i32, bool, i64, Option<String>)>(
+                "SELECT status,attempts,coalesce(lease_until>now(),false),generation,last_error FROM resource WHERE id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let held = ("pending".to_owned(), 0, true, new.generation, None);
+    assert_eq!(row().await, held);
+    // The old worker finishes late, with a card and then with a failure: neither is written,
+    // and the new worker's lease stays.
+    queue::run_job(&pool, &FakeResolver { fail: false }, &cfg, &old)
+        .await
+        .unwrap();
+    assert_eq!(row().await, held);
+    queue::run_job(&pool, &FakeResolver { fail: true }, &cfg, &old)
+        .await
+        .unwrap();
+    queue::failed(&pool, &old, &cfg, "parse").await.unwrap();
+    assert_eq!(row().await, held);
+    let name = || {
+        let (pool, id) = (pool.clone(), id.clone());
+        async move {
+            sqlx::query_scalar::<_, Option<String>>("SELECT doc->>'name' FROM resource WHERE id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(name().await, None, "the fenced worker stored a card");
+    // The worker that holds the lease finishes the job.
+    queue::run_job(&pool, &FakeResolver { fail: false }, &cfg, &new)
+        .await
+        .unwrap();
+    let done = row().await;
+    assert_eq!((done.0.as_str(), done.1), ("ok", 0));
+    assert_eq!(name().await.as_deref(), Some("Resolved once"));
+    assert!(queue::claim(&pool, "web", &cfg).await.unwrap().is_none());
+}
 #[sqlx::test(migrations = "../../migrations")]
 async fn documents_promote_spatial_time_type_and_category_columns(pool: PgPool) {
     let id = store::ensure_resource(&pool, "https://example.org/")
@@ -1935,15 +2011,25 @@ async fn resolver_panic_is_a_failed_job_and_next_batch_can_run(pool: PgPool) {
         .await
         .unwrap();
     let resolver = PanicOnce(std::sync::atomic::AtomicBool::new(true));
-    let job = queue::Job {
-        id: id.clone(),
-        uri: "https://example.org/poison".into(),
-        generation: 0,
-        attempts: 0,
-    };
+    // Claimed as a worker claims it, so the job holds a lease when its resolver panics.
+    let job = queue::claim(&pool, "web", &QueueConfig::default())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.id, id);
     queue::run_batch(&pool, &resolver, &QueueConfig::default(), &[job])
         .await
         .unwrap();
+    // The poisoned link is a failed job like any other: one attempt, its lease given back, due
+    // again after the backoff, and no dead letter yet.
+    let poisoned: (String, i32, bool, bool, bool) = sqlx::query_as(
+        "SELECT status,attempts,lease_until IS NULL,dead_letter,next_attempt_at>now() FROM resource WHERE id=$1",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(poisoned, ("error".into(), 1, true, false, true));
     let id = store::ensure_resource(&pool, "https://example.org/healthy")
         .await
         .unwrap();

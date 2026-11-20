@@ -326,22 +326,47 @@ async fn a_cancelled_job_stops_its_loop() {
 
 /// A record of 250,000 plain descriptions (about 1 MB, as an Internet Archive record may hold): its
 /// caller gone, the job refuses the rest of them and frees its slot within a fraction of a
-/// second, instead of parsing on.
+/// second, instead of parsing on. The job reads its first thousand, then waits until its caller
+/// has left: each of those was read, each of the 249,000 after them is refused.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn a_cancelled_job_refuses_the_rest_of_a_plain_answer() {
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
     let _serial = worker();
     let descriptions: Vec<String> = (0..250_000).map(|n| format!("plain {n}")).collect();
     assert!(descriptions.iter().map(String::len).sum::<usize>() > 1_000_000);
     let before = html::running();
+    let (read, refused) = (
+        std::sync::Arc::new(AtomicUsize::new(0)),
+        std::sync::Arc::new(AtomicUsize::new(0)),
+    );
+    let (read_in_job, refused_in_job) = (read.clone(), refused.clone());
+    let (under_way, is_under_way) = std::sync::mpsc::channel::<()>();
+    let (caller_left, has_caller_left) = std::sync::mpsc::channel::<()>();
     let job = tokio::spawn(html::blocking(move || {
-        descriptions
-            .iter()
-            .filter_map(|d| pinakes_core::sources::kit::html_text(d))
-            .count()
+        for (n, description) in descriptions.iter().enumerate() {
+            if n == 1_000 {
+                let _ = under_way.send(());
+                // Until the caller has left; bounded, so a failed test ends instead of holding
+                // the runtime's shutdown.
+                let _ = has_caller_left.recv_timeout(Duration::from_secs(30));
+            }
+            match pinakes_core::sources::kit::html_text(description) {
+                Some(_) => read_in_job.fetch_add(1, SeqCst),
+                None => refused_in_job.fetch_add(1, SeqCst),
+            };
+        }
     }));
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let started = Instant::now();
+    while is_under_way.try_recv().is_err() && started.elapsed() < Duration::from_secs(10) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // The job is running, in its slot, and has refused nothing while its caller waits.
+    assert_eq!((read.load(SeqCst), refused.load(SeqCst)), (1_000, 0));
+    assert!(html::running() > before);
     job.abort();
+    assert!(job.await.unwrap_err().is_cancelled());
+    caller_left.send(()).unwrap();
     let started = Instant::now();
     while html::running() != before && started.elapsed() < Duration::from_secs(10) {
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -352,6 +377,40 @@ async fn a_cancelled_job_refuses_the_rest_of_a_plain_answer() {
         "{:?}",
         started.elapsed()
     );
+    assert_eq!(
+        (read.load(SeqCst), refused.load(SeqCst)),
+        (1_000, 249_000),
+        "the job read on after its caller left"
+    );
+}
+
+/// The worker runs under its memory limit (`html::PARSE_MEMORY` of address space): a request
+/// whose text would need more is not read. The worker makes room for a text before it reads it,
+/// cannot, and aborts, which a job reads as the memory limit (`parse_worker_stub`). Without the
+/// limit it would make the room and end with status 2 at the end of its input.
+#[test]
+fn a_worker_asked_for_more_than_its_memory_limit_aborts() {
+    use std::io::Write;
+    use std::os::unix::process::ExitStatusExt;
+    let _serial = worker();
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_pinakes-parse"))
+        .arg("1")
+        .env_clear()
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    // A request's head and no more: a document (kind 0) of one and a half times the limit.
+    let length = u32::try_from(html::PARSE_MEMORY + html::PARSE_MEMORY / 2).unwrap();
+    let mut head = vec![0u8];
+    head.extend_from_slice(&length.to_le_bytes());
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(&head).unwrap();
+    drop(stdin);
+    let status = child.wait().unwrap();
+    assert_eq!(status.signal(), Some(libc::SIGABRT), "{status:?}");
+    assert!(no_worker_left());
 }
 
 /// The instant the 1,000-event calendar is read at: two weeks before its events, so the parse
