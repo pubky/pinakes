@@ -35,9 +35,9 @@ pub const PAGE: usize = 20;
 /// out of order.
 const SCANNED: usize = 2 * KEPT;
 /// How far a feed read for its episodes goes (`FetchOptions::feed_read`): past the page cap, to
-/// the largest podcast feed the podcasts source reads, cut there at its last whole item. A
-/// show's whole back catalogue fits in it as a rule (Darknet Diaries' 183 episodes are 1.06 MB).
-pub const FEED_READ: usize = crate::also_on::podcasts::PODCAST_FEED_CAP;
+/// 8 MiB, cut there at its last whole item. A show's whole back catalogue fits in it as a rule
+/// (Darknet Diaries' 183 episodes are 1.06 MB).
+pub const FEED_READ: usize = 8 * 1024 * 1024;
 /// The options of a read of a feed for its episodes: as any read ([`FEED_READ`]).
 pub fn feed_options() -> crate::resolver::egress::FetchOptions {
     crate::resolver::egress::FetchOptions {
@@ -428,11 +428,32 @@ fn episode(item: roxmltree::Node<'_, '_>, feed: &Url) -> Option<Episode> {
         stream: crate::resolver::cards::item_stream(item),
     })
 }
-/// A date as feeds write it (RFC 2822, some RFC 3339), within the stored range.
+/// A date as feeds write it (RFC 2822, some RFC 3339), within the stored range. A zone name
+/// RFC 2822 does not list (`UTC`, `CEST`, `BST`) still dates the episode: `UTC` is `+0000`,
+/// any other says nothing of its offset and is read as `-0000` (RFC 2822 4.3).
 fn date(s: &str) -> Option<DateTime<Utc>> {
+    let s = s.trim();
     DateTime::parse_from_rfc2822(s)
         .or_else(|_| DateTime::parse_from_rfc3339(s))
         .ok()
+        .or_else(|| {
+            let (rest, zone) = s.rsplit_once(' ')?;
+            // A name of letters, and no half of a twelve-hour clock.
+            if zone.is_empty()
+                || zone.len() > 5
+                || !zone.bytes().all(|b| b.is_ascii_alphabetic())
+                || zone.eq_ignore_ascii_case("AM")
+                || zone.eq_ignore_ascii_case("PM")
+            {
+                return None;
+            }
+            let offset = if zone.eq_ignore_ascii_case("UTC") {
+                "+0000"
+            } else {
+                "-0000"
+            };
+            DateTime::parse_from_rfc2822(&format!("{rest} {offset}")).ok()
+        })
         .map(|d| d.to_utc())
         .and_then(crate::event::time::bounded)
 }
@@ -1331,6 +1352,50 @@ mod tests {
         assert!(!serde_json::to_string(&episodes).unwrap().contains("SECRET"));
         let uris: Vec<&str> = episodes.iter().map(|e| e.uri.as_str()).collect();
         assert_eq!(uris, ["https://show.example/3"]);
+    }
+
+    /// An item dated with a zone name RFC 2822 does not list is dated all the same, and so
+    /// ordered among the others, never last as an undated one.
+    #[test]
+    fn a_date_with_an_unlisted_zone_name_still_dates_its_episode() {
+        for (written, at) in [
+            ("Tue, 20 Oct 2026 10:00:00 UTC", "2026-10-20T10:00:00+00:00"),
+            (
+                "Tue, 20 Oct 2026 10:00:00 CEST",
+                "2026-10-20T10:00:00+00:00",
+            ),
+            ("Tue, 20 Oct 2026 10:00:00 BST", "2026-10-20T10:00:00+00:00"),
+            ("Tue, 20 Oct 2026 10:00:00 GMT", "2026-10-20T10:00:00+00:00"),
+            (
+                "Tue, 20 Oct 2026 10:00:00 +0200",
+                "2026-10-20T08:00:00+00:00",
+            ),
+            ("2026-10-20T10:00:00Z", "2026-10-20T10:00:00+00:00"),
+        ] {
+            assert_eq!(
+                date(written).map(|d| d.to_rfc3339()).as_deref(),
+                Some(at),
+                "{written}"
+            );
+        }
+        for written in [
+            "Tue, 20 Oct 2026 10:00:00",
+            "soon",
+            "Tue, 20 Oct 2026 10:00:00 TOOLONG",
+            "Tue, 20 Oct 2026 10:00:00 PM",
+        ] {
+            assert_eq!(date(written), None, "{written}");
+        }
+        let body = feed(concat!(
+            r#"<item><title>Old</title><guid>old</guid><pubDate>Mon, 19 Oct 2026 10:00:00 +0000</pubDate></item>"#,
+            r#"<item><title>New</title><guid>new</guid><pubDate>Tue, 20 Oct 2026 10:00:00 UTC</pubDate></item>"#,
+        ));
+        let names: Vec<_> = from_feed(&fetched(&body, false))
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name.unwrap())
+            .collect();
+        assert_eq!(names, ["New", "Old"]);
     }
 
     #[test]
