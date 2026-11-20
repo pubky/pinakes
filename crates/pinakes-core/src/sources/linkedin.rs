@@ -430,8 +430,7 @@ mod tests {
         let shown = OpenGraph {
             title: Some("LinkedIn on LinkedIn: hello".into()),
             description: Some("hello world".into()),
-            image: None,
-            kind: Some("article".into()),
+            ..OpenGraph::default()
         };
         let doc = post_card(base, &target, &shown);
         assert_eq!(doc.name.as_deref(), Some("LinkedIn on LinkedIn: hello"));

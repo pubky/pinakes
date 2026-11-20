@@ -194,7 +194,6 @@ pub struct OpenGraph {
     pub title: Option<String>,
     pub description: Option<String>,
     pub image: Option<String>,
-    pub kind: Option<String>,
 }
 
 /// The Open Graph tags of a page. Run under a parse slot (`html::blocking`).
@@ -216,7 +215,6 @@ pub fn open_graph(body: &str) -> Result<OpenGraph> {
             "og:title" => &mut tags.title,
             "og:description" => &mut tags.description,
             "og:image" => &mut tags.image,
-            "og:type" => &mut tags.kind,
             _ => continue,
         };
         if slot.is_none() {
@@ -344,9 +342,7 @@ mod tests {
             tags,
             OpenGraph {
                 title: Some("A & B".into()),
-                description: None,
-                image: None,
-                kind: Some("profile".into()),
+                ..OpenGraph::default()
             }
         );
     }
