@@ -358,6 +358,18 @@ pub async fn regroup_all(pool: &sqlx::PgPool, cfg: &pinakes_core::groups::GroupC
         .unwrap();
     assert_eq!(left, 0, "a group run is left waiting");
 }
+/// Whether the resources `ids`, of one unit each, share one group: the control of a test about
+/// what grouped members do not do, or about what does not group.
+pub async fn one_group(pool: &sqlx::PgPool, ids: &[&str]) -> bool {
+    let ids: Vec<String> = ids.iter().map(|id| (*id).to_owned()).collect();
+    let groups: Vec<Option<String>> =
+        sqlx::query_scalar("SELECT group_id FROM group_unit WHERE resource_id=ANY($1)")
+            .bind(&ids)
+            .fetch_all(pool)
+            .await
+            .unwrap();
+    groups.len() == ids.len() && groups[0].is_some() && groups.iter().all(|g| *g == groups[0])
+}
 /// This thread's CPU time, for a bound on the cost of a hostile input: it holds under any load on
 /// the machine, where a wall-clock bound does not.
 pub fn thread_cpu_time() -> std::time::Duration {

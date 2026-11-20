@@ -792,8 +792,9 @@ async fn facts_are_shown_checked_and_never_join(pool: PgPool) {
         read["facts"],
         json!({"artist": "Radiohead", "isrc": "GBAYE9701376; GBBKS1700108"})
     );
-    // The same ISRC on both links joins nothing: a fact is not a key.
-    common::drain_groups(&pool, &Default::default()).await;
+    // The same ISRC on both links joins nothing: a fact is not a key. Every unit is grouped
+    // anew, so the run has read both links as they are now.
+    common::regroup_all(&pool, &Default::default()).await;
     let grouped: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM group_unit WHERE resource_id IN ($1,$2) AND group_id IS NOT NULL",
     )
@@ -803,6 +804,24 @@ async fn facts_are_shown_checked_and_never_join(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(grouped, 0);
+    // The same two links with one exact key each are one group: the fact alone kept them apart.
+    for id in [&ia, &ib] {
+        also_on::record(
+            &pool,
+            id,
+            "hub",
+            Found {
+                keys: vec![key("mb:recording:e00ebb77-541e-41f3-86ba-a90530414922")],
+                ..Default::default()
+            },
+            Duration::from_secs(86_400),
+            &Config::default().also_on,
+        )
+        .await
+        .unwrap();
+    }
+    common::drain_groups(&pool, &Default::default()).await;
+    assert!(common::one_group(&pool, &[&ia, &ib]).await);
     // A link without facts has none.
     let other = page(&pool, "https://tidal.com/track/9", "Song").await;
     assert!(get(&app, &format!("/v1/resources/{other}")).await["facts"].is_null());

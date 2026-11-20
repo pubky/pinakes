@@ -1123,6 +1123,10 @@ async fn a_member_on_another_release_comes_after_an_unplaced_link(pool: PgPool) 
         .unwrap();
     }
     common::drain_groups(&pool, &Default::default()).await;
+    assert!(
+        common::one_group(&pool, &[&card, &member]).await,
+        "the card and the member are one group"
+    );
     also_on::record(
         &pool,
         &card,
@@ -1214,6 +1218,11 @@ async fn pages_of_the_cards_own_service_take_no_slot(pool: PgPool) {
         .unwrap();
     }
     common::drain_groups(&pool, &Default::default()).await;
+    let members: Vec<&str> = ids.iter().map(String::as_str).collect();
+    assert!(
+        common::one_group(&pool, &members).await,
+        "the card and the eight pages are one group"
+    );
     also_on::record(
         &pool,
         &card,

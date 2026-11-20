@@ -230,7 +230,7 @@ async fn an_app_wikidata_lacks_is_only_possibly_the_same(pool: sqlx::PgPool) {
     }
     let cx = also_on::Context {
         egress: Egress::with_backends(
-            Default::default(),
+            common::unpaced_egress_config(),
             Arc::new(PublicDns),
             Arc::new(Recorded::new()),
         ),
@@ -327,6 +327,8 @@ async fn an_app_wikidata_lacks_is_only_possibly_the_same(pool: sqlx::PgPool) {
                 .unwrap()
         }
     };
+    // The hint is no group: after a group run of every unit, the two it names are still not one.
+    common::regroup_all(&pool, &Default::default()).await;
     let (a, b) = (group(&ids[0]).await, group(&ids[1]).await);
     assert!(a.is_none() || a != b, "never one group: {a:?} {b:?}");
 }

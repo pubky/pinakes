@@ -2096,6 +2096,14 @@ async fn a_newcomer_never_joins_past_an_unfinished_key(pool: PgPool) {
     assert!(reconciled(&pool, &id, &tight(2)).await);
     assert_eq!(gid(&pool, &id).await, id);
     assert_eq!(gid(&pool, &card).await, group);
+    // The run did leave keys unfinished: the far pages' were over its budget.
+    let parked: i32 =
+        sqlx::query_scalar("SELECT parked_keys FROM group_input WHERE resource_id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(parked > 0);
 }
 
 /// Past the budget a chain whose bridging key is unfinished keeps every member in its group.
@@ -2121,6 +2129,14 @@ async fn a_chain_with_an_unfinished_bridge_stays_whole(pool: PgPool) {
     for id in [&a, &b, &left, &right] {
         assert_eq!(gid(&pool, id).await, group, "{id}");
     }
+    // The run did leave the bridge's key unfinished.
+    let parked: i32 =
+        sqlx::query_scalar("SELECT parked_keys FROM group_input WHERE resource_id=$1")
+            .bind(&b)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(parked > 0);
 }
 
 /// Past `max_members` a key's members are the first it admitted, and they stay so: the units
