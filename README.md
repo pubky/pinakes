@@ -95,8 +95,9 @@ schema upgrades require a reviewed in-place procedure; disposable local database
 
 **Egress.** Every fetch a reference can steer goes through one client (`resolver/egress.rs`):
 public HTTP(S) only, every DNS answer checked and pinned, private and metadata addresses refused,
-at most three redirects (each checked again), a 10-second timeout and a 1 MB body cap (8 MB for
-MusicBrainz and Wikidata answers). Requests to one host go one at a time, paced to
+at most three redirects (each checked again), a 10-second timeout and a 1 MB body cap (an HTML
+page is read on to `limits.html_head_bytes`, 4 MB by default; 8 MB for MusicBrainz and Wikidata
+answers). Requests to one host go one at a time, paced to
 `limits.host_requests_per_second` or the host's published rate. Discovery reads (also-on
 lookups, oEmbed, feed discovery) are cached and shared between concurrent readers. Card images
 stay origin URLs and are never fetched; a link that is itself an image resolves to an ImageObject
@@ -119,8 +120,9 @@ scripts/dev
 
 `scripts/dev` migrates the database, starts `pinakesd` on port 8090 (admin on 9090) and tails
 `.runtime/pinakesd.log`. Point `nexus_url` at a Nexus that serves the resource changes feed. The
-local superuser is for development only; a deployment uses a migration role and a restricted
-application role.
+local superuser is for development only: in a deployment a superuser creates the database and
+its extensions, and the daemon connects as the database's owner, no superuser
+([operations](docs/operations.md#database)).
 
 ```sh
 curl http://127.0.0.1:8090/v1/info

@@ -115,6 +115,14 @@ Supported: PostgreSQL 16–18 with PostGIS 3.4+ and `pg_trgm`.
 on an empty database and exits; the daemon does the same at startup, and so does `reextract`. A
 database that already has it is left as it is.
 
+**Roles.** A superuser creates the database and its two extensions once (`CREATE EXTENSION
+postgis; CREATE EXTENSION pg_trgm;`: PostGIS takes a superuser). The role in `database_url` is
+no superuser. It owns the database (`createdb -O <role>`), or at least has `CREATE` on its
+`public` schema: `--migrate`, the daemon and `reextract` all connect as that one role, it
+creates the tables, and every start checks the migration history with a statement
+(`CREATE TABLE IF NOT EXISTS _sqlx_migrations`) that PostgreSQL refuses to a role without
+`CREATE` on the schema, also when the table exists.
+
 Schema changes edit `0001_schema.sql`; this is not an incremental migration runner. A daemon
 refuses a database built from a different schema version. For a production upgrade, back up and
 restore-test first, apply a reviewed upgrade procedure while stopped, and prove the resulting
@@ -215,8 +223,8 @@ line names its own ID. Every release comes before any move, so a spelling whose 
 released link moves to that link, never to the root the link had. An alias a page's canonical made
 (basis `canonical`) or an official API's answer made (basis `source`) is no rule of its URI and
 stays, as does the alias of a link whose source is switched off (`[sources.x] enabled = false`
-silences its rule; what it merged before stays merged). To fix the aliases an earlier build made,
-run `reextract all`: the links concerned
+silences its rule; what it merged before stays merged). `reextract all` checks every stored link
+against the alias rules: the links concerned
 classify to several routes (a Reddit comment's link to `media`, a LinkedIn post's to
 `official`). The selected rows' [also-on](#also-on) lookups are
 queued too: a card that comes back unchanged would not run them again, so results read by an
@@ -238,6 +246,10 @@ It prints `scrubbed N posts gone or opted out`, then the re-queued count.
 UPDATE resource SET dead_letter=false, attempts=0, next_attempt_at=now(),
   lease_until=NULL, generation=generation+1 WHERE id='<resource_id>';
 ```
+
+`pinakesd reextract <route>` revives a route's dead letters too: every row it re-queues gets
+`dead_letter=false` and `attempts=0`. It runs with the daemon stopped and reads the whole route
+again.
 
 **Grouping rebuild.** The daemon stores its grouping policy (its limits and mode) and
 re-queues every membership when it changes, so a changed `groups.cross_container_occurrences`
@@ -466,14 +478,16 @@ The agents' guide (`/llms.txt`, `/skill.md`, the index at `/`) and the MCP endpo
 `api.mcp`, default on) are on the public listener under the same per-IP budget
 ([api](api.md#agents)). The MCP endpoint is stateless and read-only, takes no credentials and
 accepts any `Host`; terminate TLS at the reverse proxy and pass `X-Forwarded-Proto`, so the guide
-names the public `https` URL. Turning `api.mcp` off removes `/mcp` and its link from the index;
-the guide stays.
+names the public `https` URL. The proxy must pass the public `Host` too: the guide's base URL is
+the `Host` the daemon receives (in nginx, `proxy_set_header Host $host;`). Turning `api.mcp` off
+removes `/mcp` and its link from the index; the guide stays.
 
 ## Ingestion
 
 `pinakesd` polls the Nexus reference feed (`GET /v1/resources/changes`) every `limits.poll_secs`. Pinakes keys each line on its
 `uri`, normalized and hashed into its own ID (Nexus's `resource_id` is not read); a URI that does
-not normalize is rejected (`uri`). A line's author must be 52
+not normalize, or that still holds a control character once normalized (one the URL parser
+refuses keeps its text), is rejected (`uri`). A line's author must be 52
 lowercase z-base-32 characters; labels and object paths must be non-empty, NUL-free and within
 `limits.max_label_bytes` and `limits.max_object_path_bytes`. A page is parsed line by line: a line
 of a kind this build does not read (`unknown_kind`, a newer Nexus's) or one it cannot parse
@@ -531,7 +545,7 @@ versionless (`pubky://<author>/pub/<namespace>/v1/posts/{id}`), and its `object_
 file written (`…/{id}/{editId}.json`). The URI must be a post in its author's own storage (else
 `uri`) and the object path a version file directly in it (else `object_path`). Social events and
 rsvps are indexed by Nexus. A `post` line in a namespace
-Pinakes never fetches (`social`, `pubky.app`, and the old `mapky.app` and `eventky.app`, read
+Pinakes never fetches (`social`, `pubky.app`, `mapky.app` and `eventky.app`, read
 decoded, so `%73ocial` is `social`) is rejected (`never_fetched`), creating no resource or
 reference and fetching nothing. Letter case is kept, as the resolver keeps it: `Social` is another
 app's namespace. A namespace that is not one path segment once decoded (not UTF-8, an encoded `/`,
@@ -648,10 +662,8 @@ save, cleared when the card is cleared or scrubbed; the newest 1000 of a feed's 
 with whether the feed lists older ones in `podcast_episode_list` (written and cleared with the
 rows), and served by
 `GET /v1/resources/{id}/episodes`
-([API](api.md#episodes)). A list stored before entries named their feed item names the item's
-page until the show is read again.
-After the upgrade that added them, the lists fill as shows are read again: `reextract all`
-(feed cards are `media`, Podcast Index pages `official`, player pages `web`).
+([API](api.md#episodes)). A show's list fills when the show is read; `reextract all` reads every
+show again at once (feed cards are `media`, Podcast Index pages `official`, player pages `web`).
 
 A challenge page (a bot wall, captcha or sign-in redirect) is a failed fetch: the resource turns
 `unreachable` and is retried with the normal backoff, dead-lettering after
@@ -774,8 +786,9 @@ a script, a "Redirecting" stub), is not followed, on the platform route and on t
 alike, whatever that answer's status or body: nothing there is fetched, the stored dates stay,
 and `last_error` is `off_origin`. It is read again with the
 queue's backoff (`limits.backoff_secs` doubling up to `limits.max_backoff_secs`); that streak
-never counts toward the dead letter, and any other answer starts it over. After an upgrade, Meetup pages take their group calendar, their UID and
-their token alias at their next read; `pinakesd reextract event_platform` reads every event
+never counts toward the dead letter, and any other answer starts it over. A stored Meetup page
+takes its group calendar, its UID and its token alias at its next read;
+`pinakesd reextract event_platform` reads every event
 platform's links at once. A numeric Meetup page that becomes its token's alias leaves its
 group, as every alias does, and an operator's curation of it (`PUT /v1/groups/{id}`) goes with
 it: curate the token page again after its first read. Self-hosted Pretix, Eventyay, Gathio, Gancio and Mobilizon are detected from page
@@ -841,7 +854,7 @@ it), or after an upgrade that adds or changes also-on sources, run `pinakesd --c
 (or `reextract all`, which includes it): until then links already stored keep the results of
 their last run for up to the source's lifetime (30 days). After an upgrade that changes how links
 are spelled, typed or named (aliases of a canonical link, a card's service in `site`), run
-`reextract all`: stored cards keep what the older build gave them until each is fetched again.
+`reextract all`: a stored card stays as its last read left it until it is fetched again.
 `spotify_isrc` (with the Spotify credentials) costs one Spotify search per ISRC key of a track on
 another service, and per barcode key of an album a search and up to three album reads, cached an
 hour, on Spotify's pace. `tidal_isrc` (with the TIDAL credentials) costs one TIDAL request per ISRC
@@ -850,8 +863,8 @@ or barcode key of a track or album on another service, on `tidal`'s pace and tok
 per track a Deezer, Spotify or TIDAL read and an iTunes lookup, and per label upload on YouTube a
 watch page (up to 3 MB) and a Deezer and a TIDAL search; each runs its part only while the source
 of that service runs (`deezer`, `spotify`, `tidal`, `tidal_isrc`, `itunes`). Every one of them is
-on by default (`[also_on.sources.<id>] enabled = false` turns one off); after the upgrade that adds
-them, `reextract also-on` asks for every stored track and album at once. The duplicate
+on by default (`[also_on.sources.<id>] enabled = false` turns one off);
+`reextract also-on` asks for every stored track and album at once. The duplicate
 check of the music sources (an ISRC MusicBrainz gives to several recordings) costs MusicBrainz
 reads on a common path: for a recording MusicBrainz relates a link to, one ISRC lookup per ISRC
 of the recording and, where several recordings share one, each of their records (at most 8
@@ -1047,8 +1060,8 @@ changes or goes (no longer a recording, or deleted as an orphan)
 takes its pairs from the recordings that named it, and those are queued to refill their lists, as
 is one whose pair the caps pushed out. Each change to the pairs moves the search revision in its
 own transaction, so a search page's `ETag` covers the hints it shows. An hourly sweep, which also
-runs at startup, queues recordings never read (a database from before the
-hint) and drops the units of resources that are no longer recordings. Requests only read the
+runs at startup, queues recordings never read (one saved while the hint was off) and drops the
+units of resources that are no longer recordings. Requests only read the
 stored pairs, leaving out the card's own group members. `"off"` stops the pass and removes the
 field from recording cards (and from `/v1/openapi.json` when the event hint is off
 too); the stored pairs stay.
