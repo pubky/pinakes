@@ -252,3 +252,53 @@ async fn a_free_licence_without_its_author_shows_nothing(pool: PgPool) {
         assert!(doc.credits.is_empty());
     }
 }
+
+/// A NoDerivatives licence is on no list, with or without NonCommercial: its names, its URL, or
+/// its URL beside the names of a licence that is. The Attribution licence of the same version is
+/// on the list.
+#[test]
+fn a_no_derivatives_licence_is_refused() {
+    use pinakes_core::wikimedia::license;
+    let by = license(
+        Some("cc-by-4.0"),
+        Some("CC BY 4.0"),
+        Some("https://creativecommons.org/licenses/by/4.0/"),
+    );
+    assert_eq!(by.map(|l| l.id).as_deref(), Some("CC-BY-4.0"));
+    for (template, short, url) in [
+        (
+            "cc-by-nd-4.0",
+            "CC BY-ND 4.0",
+            "https://creativecommons.org/licenses/by-nd/4.0/",
+        ),
+        (
+            "cc-by-nd-2.0",
+            "CC BY-ND 2.0",
+            "https://creativecommons.org/licenses/by-nd/2.0/",
+        ),
+        (
+            "cc-by-nc-nd-4.0",
+            "CC BY-NC-ND 4.0",
+            "https://creativecommons.org/licenses/by-nc-nd/4.0/",
+        ),
+        (
+            "cc-by-nc-nd-3.0",
+            "CC BY-NC-ND 3.0",
+            "https://creativecommons.org/licenses/by-nc-nd/3.0/",
+        ),
+    ] {
+        for (template, short, url) in [
+            (Some(template), Some(short), Some(url)),
+            (Some(template), Some(short), None),
+            (Some(template), None, Some(url)),
+            (None, Some(short), Some(url)),
+            (None, None, Some(url)),
+            (Some("cc-by-4.0"), Some("CC BY 4.0"), Some(url)),
+        ] {
+            assert!(
+                license(template, short, url).is_none(),
+                "{template:?} {short:?} {url:?}"
+            );
+        }
+    }
+}

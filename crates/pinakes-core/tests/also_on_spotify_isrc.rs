@@ -128,6 +128,7 @@ async fn spotify_isrc_is_on_by_default_and_keeps_its_rows_through_refusals(pool:
     store::save_document(&pool, &tidal_id, 0, &doc)
         .await
         .unwrap();
+    isrc_key(&pool, &tidal_id).await;
     // On by default: the pair alone turns it on.
     let mut by_default = config(Some(("isrc-default-id", "isrc-default-secret")));
     by_default.also_on.sources.remove("spotify_isrc");
@@ -148,11 +149,21 @@ async fn spotify_isrc_is_on_by_default_and_keeps_its_rows_through_refusals(pool:
     run(&pool, on.clone(), Answers::default()).await;
     let expected = [format!("https://open.spotify.com/track/{TRACK}")];
     assert_eq!(links(pool.clone(), tidal_id.clone()).await, expected);
-    // A refusal and a rate limit keep it (each with a pair of its own: a refusal holds the
-    // pair's slot for five minutes, a rate limit for the time asked).
-    for (status, pair) in [
-        (403, ("isrc-refused-id", "isrc-refused-secret")),
-        (429, ("isrc-busy-id", "isrc-busy-secret")),
+    // A refusal, a rate limit and an outage keep it (each with a pair of its own: a refusal
+    // holds the pair's slot for five minutes, a rate limit or an outage for the time asked). The
+    // refusal fails no run; the other two are retried as a wait Spotify asked for.
+    for (status, pair, class) in [
+        (403, ("isrc-refused-id", "isrc-refused-secret"), None),
+        (
+            429,
+            ("isrc-busy-id", "isrc-busy-secret"),
+            Some("spotify_busy"),
+        ),
+        (
+            503,
+            ("isrc-down-id", "isrc-down-secret"),
+            Some("spotify_busy"),
+        ),
     ] {
         let seen = run(
             &pool,
@@ -170,6 +181,11 @@ async fn spotify_isrc_is_on_by_default_and_keeps_its_rows_through_refusals(pool:
         assert_eq!(
             links(pool.clone(), tidal_id.clone()).await,
             expected,
+            "{status}"
+        );
+        assert_eq!(
+            common::also_on_due(&pool, &tidal_id).await.0.as_deref(),
+            class,
             "{status}"
         );
     }

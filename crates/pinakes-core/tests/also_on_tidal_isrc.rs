@@ -304,11 +304,11 @@ async fn off_or_without_credentials_nothing_asks_tidal(pool: sqlx::PgPool) {
     assert!(!links(&pool, &track).await.is_empty());
 }
 
-/// A refusal of the credentials (at the token endpoint, or a 403 from the API), a rate limit (429)
-/// and a timeout at the token endpoint (408) keep the links an earlier run found. A rate limit
-/// or a timeout retries after the wait TIDAL asked for (`tidal_busy`); refused credentials fail
-/// no run (the source is passed over as one that is not ready), so the card is read again at
-/// its sources' lifetime.
+/// A refusal of the credentials (at the token endpoint, or a 403 from the API), a rate limit (429),
+/// a timeout at the token endpoint (408) and an outage of either (503) keep the links an earlier
+/// run found. A rate limit, a timeout or an outage retries after the wait TIDAL asked for
+/// (`tidal_busy`); refused credentials fail no run (the source is passed over as one that is
+/// not ready), so the card is read again at its sources' lifetime.
 #[sqlx::test(migrations = "../../migrations")]
 async fn refusals_and_rate_limits_keep_the_links(pool: sqlx::PgPool) {
     let album = save(
@@ -364,20 +364,40 @@ async fn refusals_and_rate_limits_keep_the_links(pool: sqlx::PgPool) {
             Some("tidal_busy"),
             60.0..=3600.0,
         ),
+        // So is an outage (5xx), of the API or of the token endpoint.
+        (
+            ("down-id", "down-secret"),
+            Answers {
+                api_status: Some(503),
+                ..Default::default()
+            },
+            Some("tidal_busy"),
+            60.0..=3600.0,
+        ),
+        (
+            ("token-down-id", "token-down-secret"),
+            Answers {
+                token_status: Some(503),
+                ..Default::default()
+            },
+            Some("tidal_busy"),
+            60.0..=3600.0,
+        ),
     ] {
         // Each case's retry counts from its own first failure.
         sqlx::query("UPDATE also_on_dirty SET attempts=0")
             .execute(&pool)
             .await
             .unwrap();
+        let _turn = common::REFUSALS.lock().await;
         let before = common::token_refusals("tidal");
         let seen = run(&pool, config(Some(pair), true), answers.clone()).await;
         assert!(seen.iter().any(|s| s.contains("tidal.com")), "{seen:?}");
         assert_eq!(links(&pool, &album).await, found, "{class:?}");
         // A refusal of the credentials (401 at the token endpoint, a 403 from the API) is counted
-        // where an alert reads it; a rate limit or a timeout is not.
+        // where an alert reads it; a rate limit, a timeout or an outage is not.
         let counted = common::token_refusals("tidal") - before;
-        if answers.api_status == Some(429) || answers.token_status.is_some() {
+        if matches!(answers.api_status, Some(429 | 503)) || answers.token_status.is_some() {
             assert_eq!(counted, 0, "{class:?}");
         } else {
             assert!(counted >= 1, "{class:?}");

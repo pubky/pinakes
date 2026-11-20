@@ -1384,6 +1384,80 @@ async fn a_compressed_body_is_capped_by_its_decoded_size() {
     assert_eq!(page.body.len(), BODY_CAP);
     server.abort();
 }
+/// A server that accepts the connection and never answers: the egress' own transport gives up
+/// at its ten seconds, and the failure is a timeout. The test takes those ten seconds.
+#[tokio::test]
+async fn a_server_that_never_answers_is_a_timeout() {
+    use pinakes_core::resolver::egress::PinnedTransport;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    // Every connection is accepted and held, with no answer.
+    let server = tokio::spawn(async move {
+        let mut held = Vec::new();
+        loop {
+            held.push(listener.accept().await.unwrap().0);
+        }
+    });
+    let url: url::Url = format!("http://silent.example:{}/page", addr.port())
+        .parse()
+        .unwrap();
+    let options = FetchOptions::default();
+    let started = std::time::Instant::now();
+    let answer = tokio::time::timeout(
+        std::time::Duration::from_secs(25),
+        PinnedTransport.get_with(&url, &[addr], &options),
+    )
+    .await
+    .expect("the transport gives up on its own");
+    let waited = started.elapsed();
+    server.abort();
+    let error = answer.unwrap_err();
+    assert_eq!(
+        pinakes_core::resolver::error_class(&error),
+        "timeout",
+        "{error:#}"
+    );
+    // The connection was made (no connect failure after 5 s): the wait was for the answer.
+    assert!(waited >= std::time::Duration::from_secs(9), "{waited:?}");
+}
+/// A private or local address is refused however its literal is spelt (octal, hexadecimal, one
+/// number, IPv4 inside IPv6): the link's host is read as the address it names, and no request
+/// is made. A public address in octal passes the check and reaches the transport.
+#[tokio::test]
+async fn an_address_literal_is_refused_by_what_it_names_not_how_it_is_spelt() {
+    let egress = common::offline_egress(Default::default());
+    for uri in [
+        "http://127.0.0.1/",
+        "http://0177.0.0.1/",
+        "http://0x7f.0.0.1/",
+        "http://0x7f000001/",
+        "http://017700000001/",
+        "http://2130706433/",
+        // 192.168.0.1 and 169.254.169.254.
+        "http://0300.0250.0.1/",
+        "http://0251.0376.0251.0376/",
+        "http://[::ffff:127.0.0.1]/",
+        "http://[::ffff:7f00:1]/",
+    ] {
+        let error = egress.fetch(uri).await.unwrap_err();
+        assert_eq!(
+            pinakes_core::resolver::error_class(&error),
+            "policy",
+            "{uri}: {error:#}"
+        );
+        assert!(
+            format!("{error:#}").contains("egress refused non-public address"),
+            "{uri}: {error:#}"
+        );
+    }
+    // 8.8.8.8 in octal: allowed, so the request is made, to the address it names (and fails:
+    // this egress has no network).
+    let error = egress.fetch("http://010.010.010.010/").await.unwrap_err();
+    assert!(
+        format!("{error:#}").contains("no network in tests: 8.8.8.8"),
+        "{error:#}"
+    );
+}
 #[test]
 fn remaining_calendar_pitfalls_dates_lists_split_uids_alt_images_and_horizons() {
     let body=cal(&format!("X-WR-TIMEZONE:Europe/Zurich\n{}\n{}\n{}",event("UID:base@google.com\nDTSTART;TZID=Europe/Zurich:20261020T180000\nRRULE:FREQ=WEEKLY;UNTIL=20261101T170000Z\nEXDATE;TZID=Europe/Zurich:20261027T180000,20261103T180000\nRDATE;VALUE=DATE:20261022\nSUMMARY:Before split\nX-ALT-DESC;FMTTYPE=text/HTML:<p>Poster<img src=\"https://example.org/img.png\"></p>"),event("UID:base_R20261101T180000@google.com\nDTSTART;TZID=Europe/Zurich:20261101T180000\nRRULE:FREQ=WEEKLY;COUNT=2\nSUMMARY:After split"),event("UID:date\nDTSTART;VALUE=DATE:20261025\nDTEND;VALUE=DATE:20261027\nSUMMARY:Two days\nSTATUS:CANCELLED")));

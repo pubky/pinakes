@@ -29,6 +29,7 @@ fn mb_url(resource: &str) -> (u16, Vec<u8>) {
             (200, fixture("mb-url-spotify-track.json"))
         }
         "https://busy.example/x" => (503, fixture("mb-503.json")),
+        "https://limited.example/x" => (429, fixture("mb-503.json")),
         "https://open.spotify.com/album/6dVIqQ8qmQ5GBnJ9shOYGE" => {
             (200, fixture("mb-url-spotify-album.json"))
         }
@@ -692,6 +693,13 @@ async fn musicbrainz_answers_known_unknown_and_busy() {
         .unwrap_err();
     let retry = busy.downcast_ref::<RetryLater>().expect("retry later");
     assert_eq!((retry.class, retry.seconds), ("musicbrainz_busy", 120));
+    // A rate limit (429) is a retry after the hub's own wait too (the egress answers every 429
+    // so, under its own class).
+    let limited = musicbrainz::url(&e, musicbrainz::BASE, "https://limited.example/x")
+        .await
+        .unwrap_err();
+    let retry = limited.downcast_ref::<RetryLater>().expect("retry later");
+    assert_eq!(retry.seconds, 120);
     // A malformed MBID asks nothing.
     let before = t.seen.lock().unwrap().len();
     assert!(
