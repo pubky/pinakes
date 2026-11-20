@@ -845,8 +845,8 @@ pub async fn record(
         + chrono::Duration::from_std(ttl.saturating_mul(2)).unwrap_or(chrono::Duration::days(60));
     let mut tx = pool.begin().await?;
     // The write order first, then the resource rows this run's triggers update (its own, and
-    // those its keyed links name, now and before) in ID order, so neither a save nor two runs
-    // naming each other deadlock.
+    // those its keyed links name, now and before, a link taken over from another source
+    // included) in ID order, so neither a save nor two runs naming each other deadlock.
     lock_writers(&mut tx).await?;
     let named: Vec<&str> = std::iter::once(resource_id)
         .chain(
@@ -856,10 +856,12 @@ pub async fn record(
                 .map(|(id, ..)| id.as_str()),
         )
         .collect();
-    sqlx::query("SELECT 1 FROM resource WHERE id=ANY($1::text[] || ARRAY(SELECT link_id FROM derived_link WHERE resource_id=$2 AND source=$3 AND key IS NOT NULL)) ORDER BY id FOR NO KEY UPDATE")
+    let link_ids: Vec<&str> = links.iter().map(|(id, ..)| id.as_str()).collect();
+    sqlx::query("SELECT 1 FROM resource WHERE id=ANY($1::text[] || ARRAY(SELECT link_id FROM derived_link WHERE resource_id=$2 AND (source=$3 OR link_id=ANY($4)) AND key IS NOT NULL)) ORDER BY id FOR NO KEY UPDATE")
         .bind(&named)
         .bind(resource_id)
         .bind(source)
+        .bind(&link_ids)
         .execute(&mut *tx)
         .await?;
     // Read again under the locks, for a lookup that ran while its resource changed. One that
@@ -909,7 +911,12 @@ pub async fn record(
         .collect();
     sqlx::query("DELETE FROM resource_key WHERE resource_id=$1 AND source=$2 AND NOT key=ANY(SELECT v->>'key' FROM jsonb_array_elements($3) v)")
         .bind(resource_id).bind(source).bind(Value::from(key_rows.clone())).execute(&mut *tx).await?;
-    // A key another source already vouches for keeps that source; this one adds nothing to it.
+    // A key whose source is switched off, or let it expire, is this source's from now on: no
+    // read shows such a row, though this source vouches for the key. `key` is set so that the
+    // resource is regrouped as for a new key (the triggers on `key`).
+    sqlx::query("UPDATE resource_key t SET key=t.key,source=$2,via=v->>'via',seen_at=now(),expires_at=$4 FROM jsonb_array_elements($3) v WHERE t.resource_id=$1 AND t.key=v->>'key' AND t.source<>$2 AND (t.expires_at<=now() OR t.source IN (SELECT source FROM also_on_source_off))")
+        .bind(resource_id).bind(source).bind(Value::from(key_rows.clone())).bind(expires).execute(&mut *tx).await?;
+    // A key another live source vouches for keeps that source; this one adds nothing to it.
     sqlx::query("INSERT INTO resource_key(resource_id,key,source,via,expires_at) SELECT $1,v->>'key',$2,v->>'via',$4 FROM jsonb_array_elements($3) v ON CONFLICT(resource_id,key) DO UPDATE SET seen_at=now(),expires_at=greatest(resource_key.expires_at,excluded.expires_at) WHERE resource_key.source=excluded.source")
         .bind(resource_id).bind(source).bind(Value::from(key_rows)).bind(expires).execute(&mut *tx).await?;
     let link_rows: Vec<Value> = links
@@ -918,10 +925,16 @@ pub async fn record(
         .collect();
     sqlx::query("DELETE FROM derived_link WHERE resource_id=$1 AND source=$2 AND NOT link_id=ANY(SELECT v->>'id' FROM jsonb_array_elements($3) v)")
         .bind(resource_id).bind(source).bind(Value::from(link_rows.clone())).execute(&mut *tx).await?;
+    // A keyed link this run takes over from a source that is switched off or let it expire
+    // (below) names its resource again with the same key: that resource is regrouped, as the
+    // link's trigger does only for a key that changes.
+    sqlx::query("WITH taken AS (SELECT t.link_id FROM derived_link t JOIN jsonb_array_elements($3) v ON t.link_id=v->>'id' WHERE t.resource_id=$1 AND t.source<>$2 AND (t.expires_at<=now() OR t.source IN (SELECT source FROM also_on_source_off)) AND t.key IS NOT NULL AND t.key=v->>'key' AND v->>'kind' IS DISTINCT FROM 'maybe'), bumped AS (UPDATE resource r SET group_revision=r.group_revision+1 FROM taken n WHERE r.id=n.link_id RETURNING r.id) INSERT INTO group_dirty(resource_id) SELECT id FROM bumped ON CONFLICT DO NOTHING")
+        .bind(resource_id).bind(source).bind(Value::from(link_rows.clone())).execute(&mut *tx).await?;
     // A link another source derived first stays that source's, unless it is a maybe (a match by
     // metadata) and this one is not: the exact row takes it over, its source, kind and key too, so
-    // the maybe source neither writes it back nor deletes it when it stops finding the link.
-    sqlx::query("INSERT INTO derived_link(resource_id,link_id,uri,site,source,via,kind,at,key,expires_at) SELECT $1,v->>'id',v->>'uri',v->>'site',$2,v->>'via',v->>'kind',(v->>'at')::timestamptz,v->>'key',$4 FROM jsonb_array_elements($3) v ON CONFLICT(resource_id,link_id) DO UPDATE SET source=excluded.source,uri=excluded.uri,site=excluded.site,via=excluded.via,kind=excluded.kind,at=excluded.at,key=excluded.key,seen_at=now(),expires_at=excluded.expires_at WHERE derived_link.source=excluded.source OR (derived_link.kind='maybe' AND excluded.kind IS DISTINCT FROM 'maybe')")
+    // the maybe source neither writes it back nor deletes it when it stops finding the link. A
+    // link whose source is switched off, or let it expire, is taken over the same way.
+    sqlx::query("INSERT INTO derived_link(resource_id,link_id,uri,site,source,via,kind,at,key,expires_at) SELECT $1,v->>'id',v->>'uri',v->>'site',$2,v->>'via',v->>'kind',(v->>'at')::timestamptz,v->>'key',$4 FROM jsonb_array_elements($3) v ON CONFLICT(resource_id,link_id) DO UPDATE SET source=excluded.source,uri=excluded.uri,site=excluded.site,via=excluded.via,kind=excluded.kind,at=excluded.at,key=excluded.key,seen_at=now(),expires_at=excluded.expires_at WHERE derived_link.source=excluded.source OR (derived_link.kind='maybe' AND excluded.kind IS DISTINCT FROM 'maybe') OR derived_link.expires_at<=now() OR derived_link.source IN (SELECT source FROM also_on_source_off)")
         .bind(resource_id).bind(source).bind(Value::from(link_rows)).bind(expires).execute(&mut *tx).await?;
     let fact_rows: Vec<Value> = facts
         .iter()
@@ -929,8 +942,9 @@ pub async fn record(
         .collect();
     sqlx::query("DELETE FROM resource_fact WHERE resource_id=$1 AND source=$2 AND NOT (name,value) IN (SELECT v->>'name',v->>'value' FROM jsonb_array_elements($3) v)")
         .bind(resource_id).bind(source).bind(Value::from(fact_rows.clone())).execute(&mut *tx).await?;
-    // A fact another source already reports keeps that source.
-    sqlx::query("INSERT INTO resource_fact(resource_id,name,value,source,expires_at) SELECT $1,v->>'name',v->>'value',$2,$4 FROM jsonb_array_elements($3) v ON CONFLICT(resource_id,name,value) DO UPDATE SET seen_at=now(),expires_at=greatest(resource_fact.expires_at,excluded.expires_at) WHERE resource_fact.source=excluded.source")
+    // A fact another live source already reports keeps that source; one whose source is
+    // switched off, or let it expire, is this source's from now on.
+    sqlx::query("INSERT INTO resource_fact(resource_id,name,value,source,expires_at) SELECT $1,v->>'name',v->>'value',$2,$4 FROM jsonb_array_elements($3) v ON CONFLICT(resource_id,name,value) DO UPDATE SET source=excluded.source,seen_at=now(),expires_at=greatest(resource_fact.expires_at,excluded.expires_at) WHERE resource_fact.source=excluded.source OR resource_fact.expires_at<=now() OR resource_fact.source IN (SELECT source FROM also_on_source_off)")
         .bind(resource_id).bind(source).bind(Value::from(fact_rows)).bind(expires).execute(&mut *tx).await?;
     let edition_rows: Vec<Value> = placed
         .editions

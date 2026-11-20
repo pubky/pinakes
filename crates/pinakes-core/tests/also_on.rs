@@ -3616,6 +3616,98 @@ async fn a_lookup_whose_resource_became_an_alias_writes_nothing(pool: PgPool) {
     assert_eq!(derived(&pool, &id).await, 0);
 }
 
+/// A key, a link or a fact two sources vouch for is the row of the one that recorded it first.
+/// Once that source is switched off, or let the row expire, the other takes the row over at its
+/// next run, so the card keeps what a live source vouches for; the resource, and the one a keyed
+/// link names, are regrouped.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_live_source_takes_over_the_rows_of_one_switched_off_or_expired(pool: PgPool) {
+    use pinakes_core::also_on::{Fact, SourceOptions};
+    // Whichever source this build has: the switch is the configuration's.
+    let first = also_on::registered()[0].id();
+    let config = |on: bool| {
+        let mut config = Config::default();
+        config.also_on.sources.insert(
+            first.into(),
+            SourceOptions {
+                enabled: Some(on),
+                ..Default::default()
+            },
+        );
+        config
+    };
+    let recording = "mb:recording:9f9cf187-d6f9-437f-9d98-d59cdbd52757";
+    let uri = "https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq";
+    let link = "https://www.deezer.com/track/138539973";
+    let id = page(&pool, uri, "Paranoid Android").await;
+    let named = page(&pool, link, "Paranoid Android").await;
+    let (one, two) = (Fake::new(first), Fake::new("second"));
+    for source in [&one, &two] {
+        source.answer(
+            uri,
+            Ok(Found {
+                keys: vec![key(recording)],
+                links: vec![Link::new(link, "Deezer", "musicbrainz").keyed(recording)],
+                facts: vec![Fact::new("isrc", "GBAYE9701376")],
+                ..Default::default()
+            }),
+        );
+    }
+    let sources: Vec<Arc<dyn Source>> = vec![one, two];
+    let owners = || {
+        let pool = pool.clone();
+        let id = id.clone();
+        async move {
+            sqlx::query_scalar::<_, String>("SELECT 'key '||source FROM resource_key WHERE resource_id=$1 AND expires_at>now() UNION ALL SELECT 'link '||source FROM derived_link WHERE resource_id=$1 AND expires_at>now() AND key IS NOT NULL UNION ALL SELECT 'fact '||source FROM resource_fact WHERE resource_id=$1 AND expires_at>now() ORDER BY 1")
+                .bind(&id)
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    drain(&pool, &cx(config(true)), &sources).await;
+    assert_eq!(
+        owners().await,
+        [
+            format!("fact {first}"),
+            format!("key {first}"),
+            format!("link {first}")
+        ]
+    );
+    // Switched off: its rows no longer show. The other source's next run takes them over, and
+    // both resources are regrouped.
+    also_on::configure(&pool, &config(false)).await.unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
+    sqlx::query("DELETE FROM group_dirty")
+        .execute(&pool)
+        .await
+        .unwrap();
+    drain(&pool, &cx(config(false)), &sources).await;
+    let taken = ["fact second", "key second", "link second"];
+    assert_eq!(owners().await, taken);
+    let regrouped: Vec<String> =
+        sqlx::query_scalar("SELECT resource_id FROM group_dirty ORDER BY resource_id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let mut both = vec![id.clone(), named.clone()];
+    both.sort();
+    assert_eq!(regrouped, both);
+    // Rows a third source let expire: taken over too, and live again.
+    for table in ["resource_key", "derived_link", "resource_fact"] {
+        sqlx::query(&format!(
+            "UPDATE {table} SET source='third',expires_at=now()-interval '1 second' WHERE resource_id=$1"
+        ))
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    assert!(owners().await.is_empty());
+    drain(&pool, &cx(config(false)), &sources).await;
+    assert_eq!(owners().await, taken);
+}
+
 /// A source the operator switches off stops showing at once: its keys, facts and derived links
 /// stay in the database until they expire, but no card, `also_on` list, search or group reads
 /// them. Switched on again, they show again.
