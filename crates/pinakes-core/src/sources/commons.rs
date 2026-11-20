@@ -12,7 +12,7 @@
 //! time and well under five a second. Every file has its own licence and author, which the card
 //! carries as its attribution.
 use super::kit::{
-    fetch, float, host_and_segments, html_text, json, number, text, web_url, Card, Point, Request,
+    fetch, float, host_and_segments, html_text, number, text, web_url, Card, Point, Request,
 };
 use super::{Example, Source};
 use crate::model::ResourceMeta;
@@ -195,9 +195,8 @@ fn answered_title(query: &Value, asked: String) -> String {
 
 /// A file, or `None` when Commons has no such file (or the page id is not a file's page).
 pub fn parse(status: u16, raw: &[u8], target: &Target) -> Result<Option<Card>> {
-    let Some(v) = json(status, raw, &[])? else {
-        return Ok(None);
-    };
+    ensure!(status == 200, "unexpected status {status}");
+    let v: Value = serde_json::from_slice(raw)?;
     if let Some(error) = v.get("error") {
         // The API is busy or read-only for a while: the file is read later.
         if matches!(
