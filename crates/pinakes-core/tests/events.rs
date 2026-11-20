@@ -5086,3 +5086,51 @@ async fn a_zone_less_all_day_series_keeps_each_date(pool: PgPool) {
             .unwrap();
     assert_eq!(stored, 6);
 }
+/// An event without a zone does not take the zone of another event at the same venue: only a
+/// zone the place gave is the venue's.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_event_takes_no_zone_from_another_event_at_its_venue(pool: PgPool) {
+    let service = pinakes_core::event::service::EventService {
+        pool: pool.clone(),
+        config: Default::default(),
+        osm: Arc::new(OsmResolver::new(pool.clone(), OsmConfig::default()).unwrap()),
+    };
+    let day = |n: i64| {
+        (Utc::now() + Duration::days(n))
+            .format("%Y%m%d")
+            .to_string()
+    };
+    let body = cal(&format!(
+        "{}\n{}",
+        event(&format!(
+            "UID:a\nDTSTART;TZID=America/New_York:{}T180000\nLOCATION:Room 1\nSUMMARY:A",
+            day(2)
+        )),
+        event(&format!(
+            "UID:b\nDTSTART:{}T180000\nLOCATION:Room 1\nSUMMARY:B",
+            day(3)
+        ))
+    ));
+    let uri = "https://example.org/rooms.ics";
+    let fetched = common::fetched(
+        uri.parse().unwrap(),
+        200,
+        "text/calendar".into(),
+        body.into_bytes(),
+    );
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let doc = service
+        .container(uri, &fetched, deadline)
+        .await
+        .unwrap()
+        .unwrap();
+    let rows = &doc.container.as_ref().unwrap().occurrences;
+    let a = rows.iter().find(|o| o.uid == "a").unwrap();
+    assert_eq!(a.doc.event.tz.as_deref(), Some("America/New_York"));
+    let b = rows.iter().find(|o| o.uid == "b").unwrap();
+    assert_eq!(b.doc.event.tz, None);
+    assert_eq!(
+        b.doc.start.unwrap().format("%Y%m%dT%H%M%S").to_string(),
+        format!("{}T180000", day(3))
+    );
+}
