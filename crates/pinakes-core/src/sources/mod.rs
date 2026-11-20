@@ -738,9 +738,22 @@ fn alias_root_with(uri: &str, switches: Option<&SourcesConfig>) -> Option<String
 pub fn invalid(uri: &str) -> bool {
     REGISTRY.iter().any(|s| s.invalid(uri))
 }
-/// Every source's default host rates, for hosts the operator did not set.
-pub fn budgets() -> impl Iterator<Item = (&'static str, f64)> {
-    REGISTRY.iter().flat_map(|s| s.budgets().iter().copied())
+/// The switched-on sources' host rates, for hosts the operator did not set: one rate per host,
+/// the lowest when two sources name it. A switched-off source (one without its token too) asks
+/// nothing, so it paces nothing.
+pub fn budgets(switches: &SourcesConfig) -> impl Iterator<Item = (&'static str, f64)> {
+    let mut rates: BTreeMap<&'static str, f64> = BTreeMap::new();
+    for (host, rate) in REGISTRY
+        .iter()
+        .filter(|s| switches.enabled(s.name()))
+        .flat_map(|s| s.budgets().iter().copied())
+    {
+        rates
+            .entry(host)
+            .and_modify(|r| *r = r.min(rate))
+            .or_insert(rate);
+    }
+    rates.into_iter()
 }
 
 /// Every attribute a card on the `official` or web route may store: the web keys and every
@@ -1784,6 +1797,42 @@ mod tests {
         assert_eq!(memo.get("blog.example"), Some(false));
         let error = anyhow::Error::from(Declined);
         assert!(error.is::<Declined>());
+    }
+
+    /// A switched-off source paces no host, and a source that needs a token paces none without
+    /// one; a host two sources name gets the lower rate.
+    #[test]
+    fn only_a_switched_on_source_paces_its_host() {
+        let paced = |config: &Config, host: &str| config.egress.source_rates.contains_key(host);
+        let elsewhere = |name: &str, host: &str| {
+            REGISTRY
+                .iter()
+                .filter(|s| s.name() != name)
+                .any(|s| s.budgets().iter().any(|(h, _)| *h == host))
+                || crate::also_on::budgets().any(|(h, _)| h == host)
+        };
+        let on = Config::default();
+        for source in REGISTRY {
+            for (host, rate) in source.budgets() {
+                if elsewhere(source.name(), host) {
+                    continue;
+                }
+                let name = source.name();
+                assert_eq!(
+                    paced(&on, host),
+                    !source.takes_token(),
+                    "{name}: {host} with the default switches"
+                );
+                if source.takes_token() {
+                    continue;
+                }
+                assert_eq!(on.egress.source_rates[*host], *rate, "{name}");
+                let mut value = Config::defaults().unwrap();
+                value["sources"][name] = serde_json::json!({ "enabled": false });
+                let off = Config::from_value(value).unwrap();
+                assert!(!paced(&off, host), "{name} is off and still paces {host}");
+            }
+        }
     }
 
     #[test]

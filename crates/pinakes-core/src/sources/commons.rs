@@ -352,9 +352,6 @@ impl Source for Commons {
             "page_id",
         ]
     }
-    fn budgets(&self) -> &'static [super::Budget] {
-        &[("commons.wikimedia.org", 1.0)]
-    }
     fn examples(&self) -> &'static [Example] {
         &[
             Example {
