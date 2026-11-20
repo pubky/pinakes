@@ -72,7 +72,6 @@ fn document_name(file: &str) -> bool {
         && !file.starts_with('.')
 }
 
-/// The target of an `/Archives/edgar/data/…` path.
 /// An SEC release number, e.g. `34-106268`.
 fn release_number(value: &str) -> Option<&str> {
     let (act, n) = value.split_once('-')?;
@@ -106,6 +105,7 @@ fn release_path(path: &str) -> Option<Target> {
     })
 }
 
+/// The target of an `/Archives/edgar/data/…` path.
 fn archive_path(path: &str) -> Option<Target> {
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     match segments.as_slice() {
