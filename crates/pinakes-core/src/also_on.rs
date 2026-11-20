@@ -1257,6 +1257,7 @@ pub async fn drain_leased(
             Ok(Some(Next {
                 lifetime,
                 partial: None,
+                failed: None,
             })) => {
                 sqlx::query(&format!(
                     "UPDATE also_on_dirty SET attempts=0,last_error=NULL,{} WHERE resource_id=$1",
@@ -1277,6 +1278,7 @@ pub async fn drain_leased(
             Ok(Some(Next {
                 lifetime,
                 partial: Some(asked),
+                failed: None,
             })) => {
                 sqlx::query(&format!(
                     "UPDATE also_on_dirty SET attempts=attempts+1,last_error=NULL,{} WHERE resource_id=$1",
@@ -1300,27 +1302,50 @@ pub async fn drain_leased(
                 .execute(pool)
                 .await?;
             }
-            Err(error) => {
-                tracing::warn!(resource=%id, kind=crate::resolver::error_class(&error), "also-on lookup will retry");
-                // A service that said how long to wait is waited for at least that long.
-                let asked = error
-                    .downcast_ref::<crate::resolver::RetryLater>()
-                    .map_or(0, |r| r.seconds.min(86_400)) as f64;
-                sqlx::query(&format!(
-                    "UPDATE also_on_dirty SET attempts=attempts+1,last_error=$3,{} WHERE resource_id=$1",
-                    next("now()+make_interval(secs => greatest($5::float8,least($4::float8*power(2,least(attempts,6)),3600)))")
-                ))
-                .bind(&id)
-                .bind(lease)
-                .bind(crate::resolver::error_class(&error))
-                .bind(cfg.retry_secs as f64)
-                .bind(asked)
-                .execute(pool)
-                .await?;
-            }
+            // A source failed: what the others found is recorded, the failed one's rows stay, and
+            // the run comes back after a failed run's backoff, or after the wait a service named
+            // when longer. After `PARTIAL_RETRIES` such runs in a row (a source that fails for
+            // good: a refused request, a wall) it comes back at the lifetime, as one that keeps
+            // missing a secondary service does.
+            Ok(Some(Next {
+                lifetime,
+                failed: Some(error),
+                ..
+            })) => failed_run(pool, cfg, &id, lease, &error, Some(lifetime)).await?,
+            // The run could not be done at all (a database error): it is retried with backoff.
+            Err(error) => failed_run(pool, cfg, &id, lease, &error, None).await?,
         }
     }
     Ok(handled)
+}
+/// Writes a failed run's outcome for `id` against its `lease` (`drain_leased`): the error's
+/// class, one more failed run, and the next attempt after the backoff (`also_on_retry_secs`
+/// doubling to an hour, or the wait the error names when longer), or at `lifetime` once
+/// [`PARTIAL_RETRIES`] failed runs came before this one.
+async fn failed_run(
+    pool: &PgPool,
+    cfg: &AlsoOnConfig,
+    id: &str,
+    lease: DateTime<Utc>,
+    error: &anyhow::Error,
+    lifetime: Option<chrono::Duration>,
+) -> Result<()> {
+    tracing::warn!(resource=%id, kind=crate::resolver::error_class(error), "also-on lookup will retry");
+    // A service that said how long to wait is waited for at least that long.
+    let asked = error
+        .downcast_ref::<crate::resolver::RetryLater>()
+        .map_or(0, |r| r.seconds.min(86_400)) as f64;
+    sqlx::query("UPDATE also_on_dirty SET attempts=attempts+1,last_error=$3,next_attempt_at=CASE WHEN next_attempt_at=$2 THEN now()+CASE WHEN attempts>=$6 AND $7::interval IS NOT NULL THEN $7::interval ELSE make_interval(secs => greatest($5::float8,least($4::float8*power(2,least(attempts,6)),3600))) END ELSE next_attempt_at END WHERE resource_id=$1")
+        .bind(id)
+        .bind(lease)
+        .bind(crate::resolver::error_class(error))
+        .bind(cfg.retry_secs as f64)
+        .bind(asked)
+        .bind(PARTIAL_RETRIES)
+        .bind(lifetime)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 /// How many runs in a row a failing secondary service brings back early (after the backoff of a
 /// failed run, which reaches an hour at the fifth): after them the service is taken to fail for
@@ -1332,6 +1357,8 @@ struct Next {
     lifetime: chrono::Duration,
     /// A secondary service failed in this run: the longest wait one named (zero when none).
     partial: Option<Duration>,
+    /// A source failed: the run is retried (its rows stay, as it recorded nothing).
+    failed: Option<anyhow::Error>,
 }
 
 /// The sources that hold rows of `resource_id`, in every table `record` writes (keys, derived
@@ -1349,8 +1376,9 @@ async fn stored_sources(
 }
 
 /// One resource: every enabled source that applies runs; each success replaces its rows. Ok
-/// with when the next run is due, Ok(None) when no source applies, Err when any source failed
-/// (the others' results are kept). A source whose service refuses the operator's credentials
+/// with when the next run is due (`Next::failed` when any source failed: the others' results are
+/// kept), Ok(None) when no source applies, Err when the run itself could not be done (a database
+/// error). A source whose service refuses the operator's credentials
 /// (`client_credentials::refused`) is passed over as one that is not ready: its rows stay.
 async fn one(
     pool: &PgPool,
@@ -1456,6 +1484,8 @@ async fn one(
                 next = Some(next.map_or(lifetime, |n| n.min(lifetime)));
             }
             Err(error) => {
+                let lifetime = source.ttl();
+                next = Some(next.map_or(lifetime, |n| n.min(lifetime)));
                 // The longest wait any failing source asked for sets the retry.
                 let wait = |e: &anyhow::Error| {
                     e.downcast_ref::<crate::resolver::RetryLater>()
@@ -1475,12 +1505,10 @@ async fn one(
             .execute(pool)
             .await?;
     }
-    if let Some(error) = failed {
-        return Err(error);
-    }
     Ok(next.map(|n| Next {
         lifetime: chrono::Duration::from_std(n).unwrap_or(chrono::Duration::days(30)),
         partial,
+        failed,
     }))
 }
 

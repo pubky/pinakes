@@ -837,7 +837,7 @@ social post found gone gets no lookups, and its rows are dropped: nothing is der
 archived copy included. Its deletion takes it off the queue; `reextract` and a failed refresh put
 it back on, and the worker then runs no source for it and drops its queue row. A lookup that ran
 while it was found gone writes nothing, nor does one whose link became an alias meanwhile. A
-source that fails or panics keeps its earlier rows and retries with backoff; the others' results
+source that fails or panics keeps its earlier rows and retries with backoff (after six failed runs in a row, at the sources' lifetime); the others' results
 stand and the worker goes on (a panic is logged as an error). A source that asks a secondary
 service besides its own (its page names which) keeps what the link and the other services gave
 when that service fails: the link's own key is recorded, nothing the source recorded before is deleted, the failure is counted in

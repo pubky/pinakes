@@ -3820,6 +3820,69 @@ async fn a_secondary_service_that_fails_for_good_stops_bringing_the_card_back(po
     assert_eq!(state().await.1, 0);
 }
 
+/// A source that fails for good (a refused request, a wall) brings the card back with backoff
+/// only so often: after `PARTIAL_RETRIES` failed runs in a row the next is at the lifetime, and
+/// the rows it recorded before stay, as a failed source records nothing. A run in which every
+/// source answers starts the count again.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_source_that_fails_for_good_stops_bringing_the_card_back(pool: PgPool) {
+    let uri = "https://example.org/walled";
+    let id = page(&pool, uri, "Walled").await;
+    let hub = Fake::new("datacite");
+    let found = || {
+        Ok(Found {
+            keys: vec![key("doi:10.1000/z")],
+            ..Default::default()
+        })
+    };
+    hub.answer(uri, found());
+    let sources: Vec<Arc<dyn Source>> = vec![hub.clone()];
+    let cx = cx(Config::default());
+    drain(&pool, &cx, &sources).await;
+    let state = || {
+        let pool = pool.clone();
+        let id = id.clone();
+        async move {
+            sqlx::query_as::<_, (f64, i32, Option<String>, i64)>(
+                "SELECT extract(epoch FROM d.next_attempt_at-now())::float8,d.attempts,d.last_error,(SELECT count(*) FROM resource_key k WHERE k.resource_id=d.resource_id) FROM also_on_dirty d WHERE d.resource_id=$1",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    hub.answer(uri, Err(anyhow::anyhow!("answered 403")));
+    drain(&pool, &cx, &sources).await;
+    let (due_in, attempts, error, keys) = state().await;
+    assert_eq!((attempts, keys), (1, 1));
+    assert!(error.is_some());
+    assert!((290.0..=300.0).contains(&due_in), "{due_in}");
+    // The sixth failed run in a row: an hour, the backoff's ceiling.
+    sqlx::query("UPDATE also_on_dirty SET attempts=$2 WHERE resource_id=$1")
+        .bind(&id)
+        .bind(also_on::PARTIAL_RETRIES - 1)
+        .execute(&pool)
+        .await
+        .unwrap();
+    drain(&pool, &cx, &sources).await;
+    let (due_in, attempts, _, keys) = state().await;
+    assert_eq!((attempts, keys), (also_on::PARTIAL_RETRIES, 1));
+    assert!((3590.0..=3600.0).contains(&due_in), "{due_in}");
+    // The seventh and the eighth: the source's lifetime (a day), the key still there.
+    for more in 1..=2 {
+        drain(&pool, &cx, &sources).await;
+        let (due_in, attempts, error, keys) = state().await;
+        assert_eq!((attempts, keys), (also_on::PARTIAL_RETRIES + more, 1));
+        assert!(error.is_some());
+        assert!((86_300.0..=86_400.0).contains(&due_in), "{more}: {due_in}");
+    }
+    hub.answer(uri, found());
+    drain(&pool, &cx, &sources).await;
+    let (_, attempts, error, _) = state().await;
+    assert_eq!((attempts, error), (0, None));
+}
+
 /// A run with part of its answer missing (a service failed or refused the operator's
 /// credentials) deletes none of the rows its source recorded before (`Found::keep_stored`): a
 /// changed iTunes answer beside a refused Podcast Index key adds iTunes' new key, and the old
