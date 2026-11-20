@@ -873,9 +873,9 @@ pub struct ApiConfig {
 /// The seconds an MCP tool call's deadline lies inside the request's own.
 const TOOL_MARGIN_SECS: u64 = 2;
 impl ApiConfig {
-    /// How long one MCP tool call may take, all its requests together: `request_timeout_secs`
-    /// less two seconds, so the tool's own failure is written before the request's deadline
-    /// answers 504 in its place.
+    /// How long one MCP tool call may take, all its requests together, from the start of the
+    /// request that carries it: `request_timeout_secs` less two seconds, so the tool's own
+    /// failure is written before the request's deadline answers 504 in its place.
     pub fn tool_timeout(&self) -> std::time::Duration {
         std::time::Duration::from_secs(
             self.request_timeout_secs
@@ -2652,7 +2652,7 @@ limits! {
     max_radius_m: f64 = |c| c.search.max_radius_m => [|c, v| c.search.max_radius_m = v],
     /// Entries the rate limiter remembers when an API request adds a client address (100–100000). It shares one table with the preview limiter; past it the oldest entry is forgotten with its used budget. Also the client addresses the dump download limiter remembers per hour.
     api_cache_capacity: usize = |c| c.api.cache_capacity => [|c, v| c.api.cache_capacity = v],
-    /// Seconds a request may take on either listener before it is answered 504 (5–600).
+    /// Seconds a request may take on either listener before it is answered 504 (8–600).
     request_timeout_secs: u64 = |c| c.api.request_timeout_secs => [|c, v| c.api.request_timeout_secs = v],
     /// Seconds a stopping daemon gives open requests, running jobs and background passes to finish.
     shutdown_grace_secs: u64 = |c| c.shutdown_grace_secs => [|c, v| c.shutdown_grace_secs = v],

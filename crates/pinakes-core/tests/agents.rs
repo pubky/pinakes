@@ -177,11 +177,16 @@ async fn mcp(app: &Router, message: Value, extra: &[(&str, &str)]) -> (StatusCod
     ];
     headers.extend_from_slice(extra);
     let (status, response_headers, body) = raw(app, "POST", "/mcp", &headers, Some(message)).await;
+    (status, rpc_answer(&response_headers, body))
+}
+
+/// The JSON-RPC answer in an MCP response's body, plain or as an event stream.
+fn rpc_answer(headers: &axum::http::HeaderMap, body: Vec<u8>) -> Value {
     let text = String::from_utf8(body).unwrap();
-    let event_stream = response_headers
+    let event_stream = headers
         .get("content-type")
         .is_some_and(|t| t.to_str().unwrap().starts_with("text/event-stream"));
-    let json = if event_stream {
+    if event_stream {
         text.lines()
             .filter_map(|l| l.strip_prefix("data:"))
             .filter_map(|d| serde_json::from_str(d.trim()).ok())
@@ -189,8 +194,7 @@ async fn mcp(app: &Router, message: Value, extra: &[(&str, &str)]) -> (StatusCod
             .unwrap_or(Value::Null)
     } else {
         serde_json::from_str(&text).unwrap_or(Value::Null)
-    };
-    (status, json)
+    }
 }
 
 async fn initialize(app: &Router) {
@@ -488,7 +492,7 @@ async fn social_without_a_nexus_is_a_plain_error(pool: PgPool) {
 }
 
 /// A tool call that takes too long is the tool's error, a 504 with its hint, in an answered MCP
-/// message, and never the listener's own 504 in place of the message. `social` makes several
+/// message, not the listener's own 504 in place of the message. `social` makes several
 /// calls: it reads the cards, then asks a Nexus that here answers after the request's deadline.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_tool_call_past_its_deadline_is_a_tool_error(pool: PgPool) {
@@ -519,6 +523,64 @@ async fn a_tool_call_past_its_deadline_is_a_tool_error(pool: PgPool) {
         answer["hint"].as_str().unwrap().contains("retry once"),
         "{answer}"
     );
+}
+
+/// A tool call's deadline counts from the start of the request that carries it. A message whose
+/// body takes longer to arrive than the two seconds between the tool's deadline and the
+/// request's is still answered, with the tool's 504, before the listener's own 504 would
+/// take its place.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_message_that_arrives_slowly_is_still_answered(pool: PgPool) {
+    use std::time::{Duration, Instant};
+    let ids = seed(&pool).await;
+    let slow = Router::new().route(
+        "/v1/stream/resources/by_ids",
+        post(|| async {
+            tokio::time::sleep(Duration::from_secs(8)).await;
+            Json(json!([]))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let nexus_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, slow).await.unwrap() });
+    let mut config = Config {
+        nexus_url,
+        ..Config::default()
+    };
+    // The request's deadline; a tool call ends two seconds inside it.
+    config.api.request_timeout_secs = 4;
+    let app = api::router(AppState::new(pool, config).unwrap());
+    let message = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "social", "arguments": {"ids": ids}}});
+    // The body arrives after 2.5 seconds: past the tool's deadline, inside the request's.
+    let body = Body::from_stream(futures_util::stream::once(async move {
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        Ok::<_, std::convert::Infallible>(message.to_string())
+    }));
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .header("host", "pinakes.example")
+        .header("mcp-protocol-version", "2025-06-18")
+        .body(body)
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.2:1234".parse::<SocketAddr>().unwrap(),
+    ));
+    let started = Instant::now();
+    let response = app.oneshot(request).await.unwrap();
+    let (status, headers) = (response.status(), response.headers().clone());
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let took = started.elapsed();
+    let answer = rpc_answer(&headers, bytes.to_vec());
+    assert_eq!(status, 200, "{answer}");
+    let result = &answer["result"];
+    assert_eq!(result["isError"], true, "{answer}");
+    let tool: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(tool["status"], 504, "{answer}");
+    assert!(took < Duration::from_millis(3900), "{took:?}");
 }
 
 #[sqlx::test(migrations = "../../migrations")]

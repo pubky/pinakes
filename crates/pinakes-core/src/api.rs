@@ -421,7 +421,7 @@ pub fn router(state: AppState) -> Router {
         // The tools answer through the REST routes, under the same layers. Their calls are not
         // counted as requests of their own (the MCP message that made them is), and they have
         // no deadline of their own: the tool call that makes them has one for all its calls
-        // (`ApiConfig::tool_timeout`).
+        // (`ApiConfig::tool_timeout`, counted from the MCP message's start).
         let rest = public_layers(routes, state.clone(), false);
         // A GET (and so a HEAD) is a browser's or a probe's (`agents::mcp_get`); every other
         // method is MCP's.
@@ -503,15 +503,24 @@ fn public_layers(routes: Router<AppState>, state: AppState, outer: bool) -> Rout
     }
     router.with_state(state)
 }
+/// When a request's deadline started to run (`request_deadline`), as an extension of the
+/// request.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RequestStarted(pub(crate) Instant);
 /// A request that takes longer than `limits.request_timeout_secs` to answer is answered 504: a
 /// slow statement or a pool that is exhausted holds a request no longer than that. The deadline
 /// covers the handler up to its response's head; a body it streams (the dump) is not under it.
+/// The request carries the instant it started ([`RequestStarted`]), for what must end inside
+/// the deadline (an MCP tool call).
 async fn request_deadline(
     State(state): State<AppState>,
-    request: axum::extract::Request,
+    mut request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
     let deadline = Duration::from_secs(state.config.api.request_timeout_secs);
+    request
+        .extensions_mut()
+        .insert(RequestStarted(Instant::now()));
     match tokio::time::timeout(deadline, next.run(request)).await {
         Ok(response) => response,
         Err(_) => ApiError(
