@@ -133,9 +133,9 @@ pub fn parse(status: u16, raw: &[u8], r: &Repo) -> Result<Option<Card>> {
         "last_updated",
         time(&v["last_updated"]).map(|t| t.to_rfc3339()),
     );
-    card.detail("official", official);
+    card.detail("official", official.then_some(true));
     card.detail("status", text(&v["status_description"]));
-    card.detail("archived", v["archived"].as_bool());
+    card.detail("archived", (v["archived"] == true).then_some(true));
     card.detail(
         "categories",
         v["categories"]
@@ -342,7 +342,7 @@ mod tests {
             card.description.as_deref(),
             Some("Flexible multi-arch (amd & amd64) Bitcoin Core Docker image")
         );
-        assert_eq!(card.details["official"], false);
+        assert!(!card.details.contains_key("official"));
         let btcpay = repo("btcpayserver", "btcpayserver").unwrap();
         let card = parse(200, &read("repo-btcpayserver-btcpayserver.json"), &btcpay)
             .unwrap()
@@ -353,6 +353,23 @@ mod tests {
         );
         assert_eq!(card.details["pull_count"], 4117458);
         assert_eq!(card.details["categories"].as_array().unwrap().len(), 3);
+    }
+
+    /// `official` and `archived` are facts only when true.
+    #[test]
+    fn a_false_flag_is_no_fact() {
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&read("repo-lncm-bitcoind.json")).unwrap();
+        let mut card = |archived: bool| {
+            record["archived"] = archived.into();
+            parse(200, &serde_json::to_vec(&record).unwrap(), &lncm())
+                .unwrap()
+                .unwrap()
+        };
+        let open = card(false);
+        assert!(!open.details.contains_key("official"));
+        assert!(!open.details.contains_key("archived"));
+        assert_eq!(card(true).details["archived"], true);
     }
 
     #[test]
