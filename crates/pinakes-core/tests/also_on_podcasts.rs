@@ -327,6 +327,8 @@ async fn a_refused_podcast_index_key_fails_nothing() {
     );
     assert!(sites(&found).contains(&"Pocket Casts"));
     assert!(found.facts.is_empty());
+    // A refused key is no failed request: the run does not come back early for it.
+    assert_eq!(found.retry_after, None);
     // The refusal is counted where an alert reads it; a rate limit (429) is not. No other test
     // here has Podcast Index refuse.
     assert!(common::token_refusals("podcast_index") > before);

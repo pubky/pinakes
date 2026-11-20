@@ -381,7 +381,8 @@ pub fn episodes_request(show: u64, storefront: &str) -> String {
 }
 /// iTunes' record of `show` when it knows it as a podcast (its one result, of kind `podcast`).
 pub fn parse_show(status: u16, raw: &[u8], show: u64) -> Result<Option<ItunesShow>> {
-    let Some(v) = media::json(status, raw, &[404])? else {
+    // A 400 is an ID iTunes cannot read: no show, whenever it is asked.
+    let Some(v) = media::json(status, raw, &[400, 404])? else {
         return Ok(None);
     };
     let results = v["results"].as_array().context("no results")?;
@@ -434,7 +435,7 @@ pub fn itunes_stream(e: &serde_json::Value) -> Option<Stream> {
 }
 /// The episodes of `show` iTunes lists.
 pub fn parse_episodes(status: u16, raw: &[u8], show: u64) -> Result<Vec<Episode>> {
-    let Some(v) = media::json(status, raw, &[404])? else {
+    let Some(v) = media::json(status, raw, &[400, 404])? else {
         return Ok(Vec::new());
     };
     Ok(v["results"]
@@ -768,7 +769,8 @@ impl Podcasts {
         let f = Self::itunes(cx, &episodes_request(show, sf)).await?;
         parse_episodes(f.status, &f.body, show)
     }
-    /// A signed Podcast Index request, when the operator configured its key.
+    /// A signed Podcast Index request, when the operator configured its key and Podcast Index
+    /// accepts it.
     async fn index_get(
         cx: &Context,
         url: &str,
@@ -779,6 +781,11 @@ impl Podcasts {
         let options = pi_options(key, secret);
         let fetched = cx.egress.fetch_with(url, &options).await?;
         crate::podcast_index_api::note_refusal(fetched.status);
+        // A refused key lasts: Podcast Index answers nothing then, as without a key, and no run
+        // comes back early for it.
+        if matches!(fetched.status, 401 | 403) {
+            return Ok(None);
+        }
         Ok(Some(fetched))
     }
     /// Podcast Index's feed for `ask`.
