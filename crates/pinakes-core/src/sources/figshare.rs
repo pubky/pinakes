@@ -8,7 +8,8 @@
 //! the one the answer names.
 //!
 //! Figshare gives each version a DOI ending in `.v{n}`; the same DOI without the suffix names the
-//! article and resolves to its latest version. Both are keys. DOI links
+//! article and resolves to its latest version. The article's DOI is the key; a version's is a
+//! fact (`version_doi`). DOI links
 //! (`doi.org/10.6084/m9.figshare.{id}`) belong to the DOI source.
 use super::{
     kit::{
@@ -67,7 +68,10 @@ fn article_path(s: &[&str]) -> Option<u64> {
         [id] => number(id),
         // Two numbers are an article and one of its versions, not a slug and an article.
         [slug, id] if !slug.bytes().all(|b| b.is_ascii_digit()) => number(id),
-        [kind, _, id] if TYPES.contains(kind) => number(id),
+        // The same after a type: `dataset/1018700/1` is an article and its version.
+        [kind, slug, id] if TYPES.contains(kind) && !slug.bytes().all(|b| b.is_ascii_digit()) => {
+            number(id)
+        }
         _ => None,
     }
 }
@@ -324,6 +328,8 @@ mod tests {
             "https://figshare.com/articles/presentation/Using_APIs_to_customise_repositories_and_engage_audiences/5616445/2?file=9778651",
             "https://figshare.com/articles/Using_APIs_to_customise_repositories_and_engage_audiences/5616445/1",
             "https://api.figshare.com/v2/articles/5616445/versions/1",
+            // A type, an article and its version: not article 1.
+            "https://figshare.com/articles/dataset/1018700/1",
         ] {
             assert_eq!(from_uri(uri), None, "{uri}");
         }

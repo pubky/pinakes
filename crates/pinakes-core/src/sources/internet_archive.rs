@@ -7,8 +7,7 @@
 //! (`web.archive.org`) are not the item.
 //!
 //! The request reads only the item's `metadata` record, which stays a few kilobytes even for an
-//! item with thousands of files (the full record lists every file). The item's total size is a
-//! separate small request (`size_request`). An unknown identifier and a taken-down ("darked")
+//! item with thousands of files (the full record lists every file). An unknown identifier and a taken-down ("darked")
 //! item both answer 200 with an error that names the identifier.
 use super::kit::{
     fetch, host_and_segments, html_text, image_licence, image_url, json, plain, text, web_url,
