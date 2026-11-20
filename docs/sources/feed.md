@@ -22,7 +22,10 @@ sitemap and `robots.txt` goes through the shared discovery cache (an hour; `robo
 a failed fetch five minutes) and the host's normal rate, within the web fetch's deadline and at
 most 6 seconds. At one request a second, a site's first walled link may spend that time on
 the page and its feeds; the news sitemaps are then read on a later attempt, once the feeds are
-cached. A host whose feeds all answered and none listed any item is remembered for a day.
+cached. A feed or sitemap over 1 MB is read up to its last whole item within that megabyte, and
+at most 5,000 items of one are searched. A host whose feeds all answered and none listed any item
+is remembered for a day; a rate limit, a timeout, a server error or a feed cut before its first
+item says nothing about the host, which is asked again.
 
 ## Card
 
