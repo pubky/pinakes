@@ -22,8 +22,9 @@ An id the API does not know (404 "ObjectID not found") is `missing`.
 ## Card
 
 `VisualArtwork`, with `site` "The Met" and `name` the title. The API has no description text, so
-the card has none. `image` is the web-sized image (`primaryImageSmall`), only for public-domain
-works. The API gives only years, so the card has no `start`; they are facts.
+the card has none. `image` is the web-sized image (`primaryImageSmall`), or the full-size
+original (`primaryImage`) when the answer has no web-sized one, only for public-domain works.
+The API gives only years, so the card has no `start`; they are facts.
 
 | Fact | Meaning |
 | --- | --- |

@@ -1,7 +1,7 @@
 //! UK legislation from legislation.gov.uk: Acts, statutory instruments, devolved legislation and
 //! retained EU law, read from each item's `introduction/data.xml` (a provision's from its own
 //! `data.xml`). Open Government Licence v3.0; no key; 1,500 requests per 5 minutes.
-use super::{web_url, Budget, Context, Example, Source};
+use super::{Budget, Context, Example, Source};
 use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
@@ -55,6 +55,12 @@ const VERSIONS: &[&str] = &["enacted", "made", "adopted", "created", "prospectiv
 fn provision_number(value: &str) -> bool {
     !value.is_empty() && value.len() <= 12 && value.bytes().all(|b| b.is_ascii_alphanumeric())
 }
+/// A point in time as `YYYY-MM-DD`. The parser also reads `2020-1-31` and `+2020-01-31`: the
+/// version kept is the parsed date written out, so each day has one root.
+fn point_in_time(value: &str) -> Option<String> {
+    let date = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").ok()?;
+    Some(date.format("%Y-%m-%d").to_string())
+}
 
 impl Item {
     /// `https://www.legislation.gov.uk[/id]/{type}/{year}/{number}[/{provision}][/{version}]`, with
@@ -62,7 +68,7 @@ impl Item {
     /// the same text. Notes, memoranda, impact assessments and other parts are not read, nor
     /// items numbered by regnal year.
     pub fn of_uri(uri: &str) -> Option<Self> {
-        let url = web_url(uri)?;
+        let url = super::kit::web_url(uri)?;
         if !matches!(
             url.host_str()?,
             "www.legislation.gov.uk" | "legislation.gov.uk"
@@ -96,16 +102,13 @@ impl Item {
             tail.pop();
         }
         let version = match tail.last() {
-            Some(v)
-                if VERSIONS.contains(v)
-                    || chrono::NaiveDate::parse_from_str(v, "%Y-%m-%d").is_ok() =>
-            {
-                let v = (*v).to_owned();
-                tail.pop();
-                Some(v)
-            }
-            _ => None,
+            Some(v) if VERSIONS.contains(v) => Some((*v).to_owned()),
+            Some(v) => point_in_time(v),
+            None => None,
         };
+        if version.is_some() {
+            tail.pop();
+        }
         let provision = match tail.as_slice() {
             [] | ["contents"] | ["introduction"] => None,
             [first, ..]
@@ -322,6 +325,9 @@ impl Source for LegislationGovUk {
         let xml = FetchOptions {
             accept: Some("application/xml".into()),
             extra_types: &["application/xml"],
+            // A cap of its own: a larger record is refused (the introduction below), where an
+            // XML body without one is cut and no longer parses.
+            body_cap: Some(crate::resolver::egress::BODY_CAP),
             ..Default::default()
         };
         let f = match cx.fetch(&item.data_url(), &xml).await {
@@ -358,6 +364,42 @@ mod tests {
     }
     fn base(item: &Item) -> ResourceMeta {
         ResourceMeta::new(&item.root(), "legislation_gov_uk", 3600)
+    }
+
+    /// A provision over the page cap takes its card from the introduction: the read sets a cap
+    /// of its own, so the body is refused rather than cut into XML that no longer parses.
+    #[tokio::test(start_paused = true)]
+    async fn a_provision_over_the_cap_reads_the_introduction() {
+        let mut cut = read("ukpga_2018_12_section_1_2020-01-31.xml");
+        cut.truncate(cut.len() / 2);
+        let (egress, recorded) = crate::sources::fixture::egress(vec![
+            (
+                "https://www.legislation.gov.uk/ukpga/2018/12/section/1/data.xml",
+                200,
+                "!large-xml",
+                cut,
+            ),
+            (
+                "https://www.legislation.gov.uk/ukpga/2018/12/introduction/data.xml",
+                200,
+                "application/xml",
+                read("ukpga_2018_12_introduction.xml"),
+            ),
+        ]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let doc = LegislationGovUk
+            .resolve(
+                &cx,
+                "https://www.legislation.gov.uk/ukpga/2018/12/section/1",
+            )
+            .await
+            .unwrap();
+        assert_eq!(doc.status, crate::model::Status::Ok);
+        assert!(doc.name.is_some());
+        assert_eq!(recorded.asked().len(), 2, "{:?}", recorded.asked());
     }
 
     #[test]
@@ -429,6 +471,44 @@ mod tests {
         ] {
             assert!(!LegislationGovUk.reads(uri), "{uri}");
         }
+    }
+
+    /// A point in time written another way (`2020-1-31`, `+2020-01-31`) names the same day's
+    /// text: its link is an alias of the `YYYY-MM-DD` root and reads that version's data.
+    #[test]
+    fn a_date_written_another_way_is_the_same_days_root() {
+        let act = "https://www.legislation.gov.uk/ukpga/2018/12/2020-01-31";
+        let section = "https://www.legislation.gov.uk/ukpga/2018/12/section/1/2020-01-31";
+        for (uri, root) in [
+            (
+                "https://www.legislation.gov.uk/ukpga/2018/12/2020-1-31",
+                act,
+            ),
+            (
+                "https://www.legislation.gov.uk/ukpga/2018/12/contents/+2020-01-31",
+                act,
+            ),
+            (
+                "https://www.legislation.gov.uk/ukpga/2018/12/section/1/2020-1-31",
+                section,
+            ),
+        ] {
+            let named = Item::of_uri(uri).unwrap();
+            assert_eq!(named.version.as_deref(), Some("2020-01-31"), "{uri}");
+            assert_eq!(
+                LegislationGovUk.alias_root(uri).as_deref(),
+                Some(root),
+                "{uri}"
+            );
+        }
+        assert_eq!(LegislationGovUk.alias_root(act), None);
+        assert_eq!(
+            Item::of_uri("https://www.legislation.gov.uk/ukpga/2018/12/2020-1-31")
+                .unwrap()
+                .data_url(),
+            "https://www.legislation.gov.uk/ukpga/2018/12/introduction/2020-01-31/data.xml"
+        );
+        assert!(!LegislationGovUk.reads("https://www.legislation.gov.uk/ukpga/2018/12/2020-13-31"));
     }
 
     #[test]

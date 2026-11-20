@@ -359,6 +359,16 @@ pub async fn clear(pool: &PgPool, id: &str, generation: i64, last_error: &str) -
     tx.commit().await?;
     Ok(())
 }
+/// Whether a stored card says more than `plain`, a card of its link's shape alone: another name,
+/// a description, an image, or a fact the plain card lacks.
+fn says_more_than(stored: &Value, plain: &ResourceMeta) -> bool {
+    stored["name"].as_str() != plain.name.as_deref()
+        || stored["description"].is_string()
+        || stored["image"].is_string()
+        || stored["attributes"]
+            .as_object()
+            .is_some_and(|facts| facts.keys().any(|k| !plain.attributes.contains_key(k)))
+}
 pub async fn save(
     pool: &PgPool,
     id: &str,
@@ -370,6 +380,7 @@ pub async fn save(
     let doc = bounded.as_ref().unwrap_or(doc);
     // Read before the document's copy below, which leaves out what is never stored.
     let withheld = doc.withheld;
+    let shape_only = doc.shape_only;
     let (episodes, episodes_older, episodes_cut) =
         (doc.episodes.clone(), doc.episodes_older, doc.episodes_cut);
     let mut prepared = if let Some(container) = &doc.container {
@@ -462,6 +473,15 @@ pub async fn save(
         doc.event.warnings.dedup();
         doc.event.warnings.truncate(16);
     }
+    // A card of the link's shape alone (a page that answered without what its card reads) on a
+    // stored card that says more is taken as a missing answer is: the stored card stays until a
+    // second fresh fetch answers the same, `missing_ttl_secs` later, which stores the plain card.
+    // A good read in between clears the observation. A link never read gets the plain card.
+    let shapeless = shape_only
+        && doc.status == Status::Ok
+        && before
+            .as_ref()
+            .is_some_and(|stored| stored["status"] == "ok" && says_more_than(stored, &doc));
     let social_missing = doc.status == Status::Missing
         && before.as_ref().is_some_and(|v| {
             serde_json::from_value::<ResourceMeta>(v.clone())
@@ -480,7 +500,7 @@ pub async fn save(
         // Spellings saved before they became aliases of this post kept its text too.
         scrub_aliases_of(&mut tx, id).await?;
     }
-    if doc.status == Status::Missing {
+    if doc.status == Status::Missing || shapeless {
         let fetched = chrono::DateTime::from_timestamp_millis(doc.fetched_at)
             .context("invalid fetch time")?;
         let last: Option<chrono::DateTime<chrono::Utc>> = row.try_get("last_missing_at")?;
@@ -525,6 +545,7 @@ pub async fn save(
             tracing::info!(
                 resource = %id,
                 retry_secs = retry,
+                shapeless,
                 "a missing answer waits for its confirming fetch"
             );
             let retry = retry as f64;
@@ -533,6 +554,13 @@ pub async fn save(
             }
             tx.commit().await?;
             return Ok(());
+        }
+        if shapeless {
+            // Confirmed: the plain card, stored as any card is, and the observation is over.
+            sqlx::query("UPDATE resource SET missing_streak=0,last_missing_at=NULL,timeout_streak=0 WHERE id=$1")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
         }
         // The missing answer is confirmed. A gone social post keeps nothing of the post: its
         // change lines, what its spellings kept of it and its also-on results go now, never on
@@ -554,7 +582,7 @@ pub async fn save(
                 .execute(&mut *tx)
                 .await?;
         }
-        if let Some(before) = before.as_ref().filter(|_| !app_missing) {
+        if let Some(before) = before.as_ref().filter(|_| !app_missing && !shapeless) {
             let mut retained = before.clone();
             retained["fetched_at"] = json!(doc.fetched_at);
             retained["ttl_secs"] = json!(doc.ttl_secs);

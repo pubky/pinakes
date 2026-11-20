@@ -75,11 +75,14 @@ first form of each listed site, so every listed link reads back as the card.
   testnet4).
 - A block by height on any explorer is read like mempool.space's: an alias only once settled.
 
-An unknown block, transaction or channel is `missing`. mempool.space answers an unknown
-Lightning node with a server error, as it does on a fault, so a server error on a node's record
-is followed by the Lightning search for its exact key: a node the search doesn't list is
-`missing`, and a listed node whose record keeps failing counts toward the failure limit. A
-429 or 408 on a node's record is only retried later, with no search.
+An unknown block, transaction or channel is `missing` when mempool.space itself says it is not
+found. When mempool.space fails and the fallback does not know the object (a transaction its
+node has not seen), the read ends with mempool.space's error: a rate limit or a server error is
+retried later. mempool.space answers an unknown Lightning node with a server error, as it does
+on a fault, so a server error on a node's record is followed by the Lightning search for its
+exact key: a node the search doesn't list is `missing`, and a listed node whose record keeps
+failing counts toward the failure limit. A 429 or 408 on a node's record is only retried later,
+with no search.
 
 ## Also on
 
@@ -103,7 +106,8 @@ no request. Each is a link of the card's own object (above).
   `/api/v1/lightning/channels?public_key={key}&status=open`. A transaction's and a channel's
   come with their own record;
 - the fallback: the same paths (`/api/block/{hash}` for blocks) at
-  `https://blockstream.info/api` (`/testnet/api`, `/signet/api`; no testnet4 and no Lightning).
+  `https://blockstream.info/api` (`/testnet/api`, `/signet/api`). Testnet4 and Lightning objects
+  have no fallback: they are read from mempool.space only.
 
 ## Card
 
@@ -122,7 +126,8 @@ The card types are local, not schema.org: `BitcoinBlock`, `BitcoinTransaction`,
 | --- | --- |
 | `page_url` | The object's page on mempool.space |
 | `height`, `hash`, `previous_block` | Block height, hash and previous block's hash |
-| `tx_count`, `size`, `weight` | Transactions in the block, size in bytes, weight units |
+| `tx_count` | A block's transactions; an address's confirmed transactions |
+| `size`, `weight` | A block's or a transaction's size in bytes and its weight units |
 | `pool` | The mining pool, as mempool.space names it |
 | `total_fees`, `reward` | In satoshis |
 | `median_fee_rate` | sat/vB |
@@ -158,7 +163,8 @@ Each card lists the objects it points at in the resource read's `related`
   channels there are when fewer are listed. A node's channel total is its `channels` fact, the
   channels mempool.space counts as active; the listed ones are its biggest open channels, which
   can include an inactive one. A transaction with 400 inputs is still one request: its record
-  lists them all.
+  lists them all. A record over 4 MB (a few thousand inputs) is not read: the link fails and
+  is retried like any failed read.
 - Roots stay on the card's network: `btc-testnet4:address/…`, `ln-signet:node/…`,
   `btc-signet:tx/…` (a signet channel's funding transaction). An address that is not valid on
   the card's network is listed as its script type, without a `uri`.
@@ -169,8 +175,9 @@ Each card lists the objects it points at in the resource read's `related`
   the mempool (its block comes later) and a block in the best chain whose next block is not
   settled yet (or that has none yet). A part refused for good (a 404, an answer that cannot be
   read) is left out until the card's own refresh. A read again that cannot fetch a part leaves
-  it out until the read after. The
-  Esplora fallback reads the same parts, but has no pool, no reward and no Lightning.
+  it out until the read after. The Esplora fallback reads the same parts, but has no Lightning,
+  and its block record has no `pool`, `total_fees`, `reward` or `median_fee_rate`: a block card
+  read from it is read again within the hour, for mempool.space's record.
 - An address's list is read up to 4 MB (a few dozen whole transactions); a larger one (an
   exchange's batch payouts) is left out. A part put off again and again (a server error, the
   budget) reads the card again every hour while it lasts.

@@ -10,8 +10,9 @@ file it plays and its show. No key, no account.
 `https://castro.fm/episode/{id}`. The page names:
 - the file its player plays: the one `<source>` of `<audio id="co-supertop-castro-episode">`,
   the show's own enclosure;
-- the show's Apple Podcasts ID: the one ID its "Listen on" links name (Apple Podcasts'
-  `…/id{n}`, `pca.st/itunes/{n}`, `castro.fm/itunes/{n}`).
+- the show's Apple Podcasts ID: the one ID its links name. Every link of the page is looked at
+  (any `href`, the "Listen on" links among them): Apple Podcasts' `…/id{n}`,
+  `pca.st/itunes/{n}`, `castro.fm/itunes/{n}`.
 
 A page with no player, more than one file, or a file that is no public link (signed, expiring)
 keeps its page card. A page naming two Apple IDs names none. Nothing behind a login is read.

@@ -38,7 +38,7 @@ fn repo_name(value: &str) -> bool {
 /// The owner and repository a repository page names (`github.com/{owner}/{repo}`, `.git` and a
 /// trailing slash allowed).
 pub fn repository(uri: &str) -> Option<(String, String)> {
-    let url = web_url(uri)?;
+    let url = super::kit::web_url(uri)?;
     if !matches!(url.host_str()?, "github.com" | "www.github.com") {
         return None;
     }
@@ -57,6 +57,7 @@ pub fn repository(uri: &str) -> Option<(String, String)> {
 #[derive(Debug)]
 pub enum Answer {
     Card(Box<ResourceMeta>),
+    /// A repository the token reads but the public cannot: no public object.
     Missing,
     /// The token was refused (401): read without it.
     Refused,
@@ -77,11 +78,31 @@ fn options(token: &str) -> FetchOptions {
         keep_redirect: true,
         // Its rate limit answers 403 (`read`): a wait, which a confirmation replays.
         waits: &[403],
+        // An error answer keeps its JSON body: a 403's `message` says whether it is the rate
+        // limit. A 429 comes as it is, for `read` to class.
+        error_json: true,
         ..Default::default()
     }
 }
 
-/// A repository's card from `GET /repos/{owner}/{repo}` with `token`.
+/// Whether a 403 is GitHub's rate limit: its JSON `message` names one ("API rate limit
+/// exceeded for …", "You have exceeded a secondary rate limit. …", "… an abuse detection
+/// mechanism …"). Any other 403, and one with no message to read, is no wait.
+fn rate_limit(body: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|v| text(&v["message"]))
+        .is_some_and(|message| {
+            let message = message.to_ascii_lowercase();
+            message.contains("rate limit") || message.contains("abuse detection")
+        })
+}
+
+/// A repository's card from `GET /repos/{owner}/{repo}` with `token`. A path GitHub has no
+/// repository for (404) is declined: it may be another page of the site (an advisory, a
+/// two-part site page), so the web route reads it and says whether it is gone. A 403 that is
+/// not the rate limit (access to the repository is blocked) is declined too. The rate limit is
+/// a wait of class `http_4xx`, a timeout or a server error one of class `upstream`.
 pub async fn read(
     cx: &Context<'_>,
     doc: ResourceMeta,
@@ -92,6 +113,13 @@ pub async fn read(
     let options = options(token);
     let url = format!("{API}/repos/{owner}/{repo}");
     let f = cx.egress.discover(&url, &options, 3600).await?;
+    let wait = |class: &'static str| -> Result<Answer> {
+        Err(crate::resolver::RetryLater {
+            class,
+            seconds: f.retry_after_secs.clamp(60, 3600),
+        }
+        .into())
+    };
     match f.status {
         200 => match card(doc, &f.body)? {
             Some(card) => Ok(Answer::Card(Box::new(card))),
@@ -105,13 +133,12 @@ pub async fn read(
         },
         301 | 302 | 307 | 308 => Ok(Answer::Moved),
         401 => Ok(Answer::Refused),
-        404 => Ok(Answer::Missing),
-        // GitHub's rate limit answers 403 or 429.
-        403 | 408 | 429 | 500..=599 => Err(crate::resolver::RetryLater {
-            class: "rate_limited",
-            seconds: f.retry_after_secs.clamp(60, 3600),
-        }
-        .into()),
+        404 => Err(Declined.into()),
+        // GitHub's rate limit answers 429, or 403 with a message that names it.
+        429 => wait("http_4xx"),
+        403 if rate_limit(&f.body) => wait("http_4xx"),
+        403 => Err(Declined.into()),
+        408 | 500..=599 => wait("upstream"),
         status => anyhow::bail!("GitHub answered {status}"),
     }
 }
@@ -255,6 +282,8 @@ mod tests {
             ("https://github.com/BurntSushi", None),
             ("https://github.com/orgs/rust-lang", None),
             ("https://github.com/topics/rust", None),
+            ("https://github.com/advisories/GHSA-jfh8-c2jp-5v3q", None),
+            ("https://github.com/Solutions/ci-cd", None),
             ("https://github.com/-x/y", None),
             ("https://gist.github.com/a/b", None),
             ("https://example.org/a/b", None),
@@ -376,6 +405,21 @@ mod tests {
                     br#"{"message":"API rate limit exceeded"}"#.to_vec(),
                     None,
                 ),
+                // Its secondary rate limit.
+                ("/repos/slow/repo", _) => (
+                    403,
+                    br#"{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}"#.to_vec(),
+                    None,
+                ),
+                // A 403 that is not a rate limit.
+                ("/repos/blocked/repo", _) => (
+                    403,
+                    br#"{"message":"Repository access blocked"}"#.to_vec(),
+                    None,
+                ),
+                ("/repos/down/repo", _) => (503, b"{}".to_vec(), None),
+                // A 403 with no message to read.
+                ("/repos/mute/repo", _) => (403, b"{}".to_vec(), None),
                 _ => (404, fixture::read("github", "repo-missing.json"), None),
             };
             Ok(crate::resolver::egress::Fetched {
@@ -449,7 +493,7 @@ mod tests {
             .unwrap());
     }
 
-    /// The fetch that confirms a missing answer asks GitHub again for a cached 404, but replays a
+    /// A confirming fetch asks GitHub again for a cached 404, but replays a
     /// cached 403: GitHub's rate limit, a wait (`FetchOptions::waits`) it must not cut short.
     #[tokio::test(start_paused = true)]
     async fn a_confirmation_keeps_github_s_rate_limit() {
@@ -486,12 +530,57 @@ mod tests {
                         .is_some());
                 }
             } else {
-                assert!(matches!(first.unwrap(), Answer::Missing));
-                assert!(matches!(again.unwrap(), Answer::Missing));
+                assert!(first.unwrap_err().is::<Declined>());
+                assert!(again.unwrap_err().is::<Declined>());
             }
         }
         assert_eq!(asked("/repos/busy/repo"), 1, "the rate limit was cut short");
         assert_eq!(asked("/repos/a/missing"), 2);
+    }
+
+    /// A 403 is a wait only when its message names a rate limit: any other 403 (access to the
+    /// repository is blocked) is the web route's page. A server error is a wait of its own class.
+    #[tokio::test(start_paused = true)]
+    async fn only_a_rate_limit_403_is_a_wait() {
+        let api = std::sync::Arc::new(Api {
+            seen: Default::default(),
+        });
+        let egress = crate::resolver::egress::Egress::with_backends(
+            Default::default(),
+            std::sync::Arc::new(fixture::PublicDns),
+            api.clone(),
+        );
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let mut answers = Vec::new();
+        for owner in ["busy", "slow", "blocked", "down", "mute"] {
+            let doc = cx.card(&format!("https://github.com/{owner}/repo"), &Github);
+            let answer = read(&cx, doc, owner, "repo", "good-token").await;
+            let error = answer.expect_err("no card");
+            let class = error
+                .downcast_ref::<crate::resolver::RetryLater>()
+                .map(|retry| retry.class);
+            answers.push((owner, class, error.is::<Declined>()));
+        }
+        assert_eq!(
+            answers,
+            [
+                ("busy", Some("http_4xx"), false),
+                ("slow", Some("http_4xx"), false),
+                ("blocked", None, true),
+                ("down", Some("upstream"), false),
+                ("mute", None, true),
+            ]
+        );
+    }
+
+    /// The request asks for an error answer's JSON body: a 403's message says whether it is the
+    /// rate limit, and the egress drops an error's JSON body unless asked.
+    #[test]
+    fn an_error_answer_keeps_its_json_body() {
+        assert!(options("good-token").error_json);
     }
 
     #[tokio::test(start_paused = true)]
@@ -521,18 +610,22 @@ mod tests {
         assert!(
             matches!(answer, Answer::Card(ref d) if d.name.as_deref() == Some("BurntSushi/ripgrep"))
         );
-        assert!(matches!(
-            read(
+        // A path GitHub has no repository for (a site page shaped like one, a deleted
+        // repository) is the web route's to read, never `missing` on the API's word.
+        for (owner, repo) in [("a", "missing"), ("advisories", "GHSA-jfh8-c2jp-5v3q")] {
+            let answer = read(
                 &cx,
-                doc("https://github.com/a/missing"),
-                "a",
-                "missing",
-                "good-token"
+                doc(&format!("https://github.com/{owner}/{repo}")),
+                owner,
+                repo,
+                "good-token",
             )
-            .await
-            .unwrap(),
-            Answer::Missing
-        ));
+            .await;
+            assert!(
+                answer.is_err_and(|e| e.is::<Declined>()),
+                "{owner}/{repo} is not declined"
+            );
+        }
         // A renamed repository's redirect is answered, never followed with the token.
         assert!(matches!(
             read(
@@ -562,7 +655,7 @@ mod tests {
         assert!(seen
             .iter()
             .all(|(url, auth)| url.starts_with("https://api.github.com/") && auth.is_some()));
-        assert_eq!(seen.len(), 4, "{seen:?}");
+        assert_eq!(seen.len(), 5, "{seen:?}");
     }
 
     /// Without a token the source is off: its links get ordinary web cards.

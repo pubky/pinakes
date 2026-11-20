@@ -17,7 +17,8 @@ These are their own resources, each with the same kinds of aliases:
 - a **provision**: a section, article, regulation, rule, schedule, part or chapter, and the
   paragraphs in it, e.g. `/ukpga/2018/12/section/1` or `/ukpga/2018/12/schedule/2/paragraph/3`;
 - a **version** of the item or of a provision: as enacted, made, adopted, created or
-  prospective (`/enacted`, `/made`, …), or the text at a date (`/2020-01-31`).
+  prospective (`/enacted`, `/made`, …), or the text at a date (`/2020-01-31`; a date written
+  another way, `/2020-1-31`, is an alias of it).
 
 The explanatory notes, memoranda, impact assessments and other documents published beside an
 item (`/notes`, `/memorandum`, `/impacts`, …) are not read, nor items numbered by regnal year

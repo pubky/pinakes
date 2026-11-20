@@ -1,9 +1,10 @@
 # Discourse
 
 Topics and posts on any Discourse forum, read from the forum's own JSON. No key; Discourse's
-default limits are 200 requests per minute and 50 per 10 seconds per address (one per second
-here). Posts are social content: the card quotes at most 200 characters, refreshes within the
-hour and is removed once the post is gone.
+default limits are 200 requests per minute and 50 per 10 seconds per address. Each forum is asked
+at the default pace, `limits.host_requests_per_second` (one request a second unless the operator
+changes it). Posts are social content: the card quotes at most 200 characters, refreshes within
+the hour and is removed once the post is gone.
 
 ## Links
 
@@ -22,7 +23,8 @@ about that topic alone.
 ## What it reads
 
 `GET https://{host}/t/{id}.json`, `…/t/{id}/{n}.json` or `…/posts/{id}.json`. A topic or post the
-forum says does not exist is `missing`.
+forum says does not exist (a 404, or a 410 for a deleted one, with the `error_type` `not_found`)
+is `missing`.
 
 ## Card
 

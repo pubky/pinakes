@@ -4,7 +4,7 @@
 //! Every Snap Store link of one snap is an alias of `https://snapcraft.io/{name}`.
 use super::{
     kit::{fetch, json, text, web_url, Card, Request},
-    Example, Source,
+    Declined, Example, Source,
 };
 use crate::model::ResourceMeta;
 use anyhow::{ensure, Context, Result};
@@ -129,10 +129,12 @@ impl Source for SnapStore {
             return Ok(cx.missing(uri, self));
         };
         let f = fetch(cx, &request(&name).context("no request")?).await?;
-        Ok(match parse(f.status, &f.body, &name)? {
-            Some(card) => card.into_doc(cx.card(uri, self), SITE),
-            None => cx.missing(uri, self),
-        })
+        match parse(f.status, &f.body, &name)? {
+            Some(card) => Ok(card.into_doc(cx.card(uri, self), SITE)),
+            // No snap by this name: the link may be another page of the site, so the web route
+            // reads it and says whether it is gone.
+            None => Err(Declined.into()),
+        }
     }
 }
 
@@ -221,5 +223,24 @@ mod tests {
         );
         assert!(parse(200, &read("info-signal-desktop.json"), "signal").is_err());
         assert!(parse(500, b"", "signal-desktop").is_err());
+    }
+
+    /// A name the store does not know is no `missing` card: the page gets a web card.
+    #[tokio::test(start_paused = true)]
+    async fn an_unknown_name_is_declined() {
+        let (egress, _) = fixture::egress(vec![(
+            "https://api.snapcraft.io/v2/snaps/info/no-such-snap-pinakes?fields=title,summary,publisher,media,website,license,categories",
+            404,
+            "application/json",
+            read("info-missing.json"),
+        )]);
+        let cx = crate::sources::Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let answer = SnapStore
+            .resolve(&cx, "https://snapcraft.io/no-such-snap-pinakes")
+            .await;
+        assert!(answer.is_err_and(|e| e.is::<crate::sources::Declined>()));
     }
 }

@@ -7,11 +7,11 @@
 //! (`web.archive.org`) are not the item.
 //!
 //! The request reads only the item's `metadata` record, which stays a few kilobytes even for an
-//! item with thousands of files (the full record lists every file). The item's total size is a
-//! separate small request (`size_request`). An unknown identifier and a taken-down ("darked")
+//! item with thousands of files (the full record lists every file). An unknown identifier and a taken-down ("darked")
 //! item both answer 200 with an error that names the identifier.
 use super::kit::{
-    fetch, host_and_segments, html_text, json, plain, text, web_url, Card, Key, Request,
+    fetch, host_and_segments, html_text, image_licence, image_url, json, plain, text, web_url,
+    Card, ImageLicence, Key, Request,
 };
 use super::{Example, Source};
 use crate::{model::ResourceMeta, resolver::cards};
@@ -127,11 +127,10 @@ fn cc_name(url: &str) -> Option<String> {
 /// Whether a licence (as `cc_name` names it) lets anyone show the item's image with a credit:
 /// CC0, the Public Domain Mark, or CC BY without further terms.
 fn open_image(name: &str) -> bool {
-    name.starts_with("CC0 ")
-        || name.starts_with("Public Domain Mark ")
-        || name
-            .strip_prefix("CC BY ")
-            .is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit()))
+    matches!(
+        image_licence(name),
+        Some(ImageLicence::Cc0 | ImageLicence::PublicDomainMark | ImageLicence::By)
+    )
 }
 
 /// An Open Library id of the given kind (`M` edition, `W` work).
@@ -200,7 +199,7 @@ pub fn parse(status: u16, raw: &[u8], id: &str) -> Result<Option<Card>> {
         .and_then(cc_name)
         .is_some_and(|n| open_image(&n))
     {
-        card.image = Some(format!("https://archive.org/services/img/{id}"));
+        card.image = image_url(&format!("https://archive.org/services/img/{id}"));
     }
     let rights = values(&m["rights"]).iter().find_map(|r| html_text(r));
     card.attribution = license
@@ -553,6 +552,18 @@ mod tests {
             Some("CC0 1.0")
         );
         assert_eq!(cc_name("https://example.org/licenses/by/4.0/"), None);
+        for (licence, open) in [
+            ("https://creativecommons.org/publicdomain/zero/1.0/", true),
+            ("http://creativecommons.org/publicdomain/mark/1.0/", true),
+            ("https://creativecommons.org/licenses/by/4.0/", true),
+            ("https://creativecommons.org/licenses/by/3.0/us/", true),
+            ("https://creativecommons.org/licenses/by-nc/4.0/", false),
+            ("https://creativecommons.org/licenses/by-sa/4.0/", false),
+            ("https://creativecommons.org/licenses/by-nc-nd/3.0/", false),
+            ("https://creativecommons.org/licenses/sa/1.0/", false),
+        ] {
+            assert_eq!(open_image(&cc_name(licence).unwrap()), open, "{licence}");
+        }
     }
 
     #[test]

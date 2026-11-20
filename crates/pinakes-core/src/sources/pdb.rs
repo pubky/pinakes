@@ -5,8 +5,8 @@
 //! id in upper case. An extended id (`pdb_00004hhb`) names the same entry while it starts with
 //! `pdb_0000`. Coordinate files (`files.rcsb.org`) are files of an entry, not the entry.
 //!
-//! An obsolete entry is gone from the Data API (404) and is missing; `status_request` says which
-//! entry replaced it. The data is CC0.
+//! An obsolete entry is gone from the Data API (404) and is missing; the entry that replaced it
+//! is not looked up. The data is CC0.
 use super::{
     kit::{fetch, float, host_and_segments, int, json, text, time, web_url, Card, Key, Request},
     Example, Source,
@@ -15,6 +15,7 @@ use crate::model::ResourceMeta;
 use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use serde_json::Value;
+use std::collections::HashSet;
 
 pub const SITE: &str = "RCSB PDB";
 pub const ATTRIBUTION: &str = "RCSB PDB (CC0 1.0)";
@@ -104,13 +105,15 @@ pub fn parse(status: u16, raw: &[u8], id: &str) -> Result<Option<Card>> {
     card.detail("molecular_weight_kda", float(&info["molecular_weight"]));
     let keywords = &v["struct_keywords"];
     card.detail("classification", text(&keywords["pdbx_keywords"]));
-    let mut words: Vec<String> = vec![];
-    for w in keywords["text"].as_str().unwrap_or("").split(',') {
-        let w = w.trim();
-        if !w.is_empty() && !words.iter().any(|x| x == w) {
-            words.push(w.into());
-        }
-    }
+    // Each keyword once, in the order given.
+    let mut seen = HashSet::new();
+    let words: Vec<&str> = keywords["text"]
+        .as_str()
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|w| !w.is_empty() && seen.insert(*w))
+        .collect();
     card.detail("keywords", words);
     let c = &v["rcsb_primary_citation"];
     card.detail("citation_title", text(&c["title"]));
@@ -350,6 +353,19 @@ mod tests {
         assert_eq!(d["keywords"].as_array().unwrap().len(), 9);
         assert_eq!(d["citation_doi"], "10.1016/j.cell.2020.02.058");
         assert_eq!(card.keys, [Key::new("doi", "10.2210/pdb6vxx/pdb")]);
+    }
+
+    #[test]
+    fn a_repeated_keyword_is_listed_once() {
+        let mut v: Value = serde_json::from_slice(&read("entry-4hhb.json")).unwrap();
+        v["struct_keywords"]["text"] =
+            "HEME, OXYGEN TRANSPORT ,heme,, HEME,OXYGEN TRANSPORT".into();
+        let raw = serde_json::to_vec(&v).unwrap();
+        let card = parse(200, &raw, "4HHB").unwrap().unwrap();
+        assert_eq!(
+            card.details["keywords"],
+            json!(["HEME", "OXYGEN TRANSPORT", "heme"])
+        );
     }
 
     #[test]

@@ -26,8 +26,9 @@ CELEX numbers and are their own resources.
 ## What it reads
 
 `GET https://publications.europa.eu/webapi/rdf/sparql?query=…` for the work with that key: its
-CELEX number, ELI, resource types, date, in-force flag and English title (about 1 KB). A key with
-no work is `missing`.
+CELEX number, ELI, resource types, date, in-force flag and English title (about 1 KB). A CELEX
+number, ELI or Official Journal id with no work is `missing`. A Publications Office publication
+that is no legal act (a report, a study) gets a web card.
 
 ## Card
 

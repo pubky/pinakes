@@ -32,7 +32,8 @@ read.
 ## What it reads
 
 `GET https://api.discogs.com/{artists,masters,releases}/{id}` (2 to 50 KB). An ID Discogs does not
-have is `missing`. The answer is shared for an hour with the also-on lookup of the same link.
+have is `missing`; a record whose `id` is not the one asked for is an error, and no card. The
+answer is shared for an hour with the also-on lookup of the same link.
 
 ## Card
 

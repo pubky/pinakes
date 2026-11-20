@@ -6,7 +6,7 @@
 //! at `https://www.instagram.com/{name}/`, `/p/{code}/` or `/reel/{code}/`.
 use super::{
     social::{self, Body, OpenGraph, Shape},
-    web_url, Context, Example, Source,
+    Context, Example, Source,
 };
 use crate::model::ResourceMeta;
 use anyhow::{Context as _, Result};
@@ -26,6 +26,7 @@ const RESERVED: &[&str] = &[
     "emails",
     "explore",
     "legal",
+    "login",
     "nametag",
     "oauth",
     "p",
@@ -62,7 +63,7 @@ impl Target {
     /// `https://www.instagram.com/{name}/`, `/p/{code}/`, `/reel/{code}/` (also `/tv/`), on
     /// instagram.com with or without `www.`, and instagr.am.
     pub fn of_uri(uri: &str) -> Option<Self> {
-        let url = web_url(uri)?;
+        let url = super::kit::web_url(uri)?;
         if !matches!(
             url.host_str()?,
             "instagram.com" | "www.instagram.com" | "instagr.am" | "www.instagr.am"
@@ -204,7 +205,7 @@ impl Source for Instagram {
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
         let target = Target::of_uri(uri).context("not an Instagram link")?;
         let doc = cx.card(uri, self);
-        let mut doc = match social::page_body(cx, &target.root()).await? {
+        let mut doc = match social::page_body(cx, &target.root(), &[]).await? {
             Body::Read { body, .. } => {
                 let tags =
                     crate::resolver::html::blocking(move || social::open_graph(&body)).await??;
@@ -269,6 +270,18 @@ mod tests {
         );
     }
 
+    /// Instagram's sign-in page is no profile's name.
+    #[test]
+    fn the_sign_in_page_is_no_profile() {
+        for uri in [
+            "https://www.instagram.com/login",
+            "https://instagram.com/Login/",
+        ] {
+            assert_eq!(Target::of_uri(uri), None, "{uri}");
+            assert!(!Instagram.reads(uri), "{uri}");
+        }
+    }
+
     #[test]
     fn a_post_page_without_tags_is_the_plain_card() {
         let body = crate::sources::fixture::read("instagram", "post-C2vXx0yPvYq.html.gz");
@@ -283,7 +296,6 @@ mod tests {
             title: Some(r#"Instagram on Instagram: "Hello, world""#.into()),
             description: Some("1,000 likes, 10 comments".into()),
             image: Some("https://example.com/a.jpg".into()),
-            kind: Some("video.other".into()),
         };
         let doc = post_card(base, &Target::Reel("C2vXx0yPvYq".into()), &shown);
         assert_eq!(doc.type_name, "VideoObject");
@@ -292,6 +304,52 @@ mod tests {
         assert_eq!(doc.image.as_deref(), Some("https://example.com/a.jpg"));
         // A reel quotes its caption: social content, as a post is.
         assert!(Instagram.social(&doc));
+    }
+
+    /// Instagram has no status of its own for a refusal: a 999 is a server error as any status
+    /// above 500 is, a retry and not the blocked card.
+    #[tokio::test(start_paused = true)]
+    async fn a_999_is_a_server_error() {
+        let profile = "https://www.instagram.com/instagram/";
+        let (egress, _) = crate::sources::fixture::egress(vec![(
+            profile,
+            999,
+            "text/html",
+            b"<html></html>".to_vec(),
+        )]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let error = Instagram.resolve(&cx, profile).await.unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<crate::resolver::RetryLater>()
+                .map(|retry| retry.class),
+            Some("upstream")
+        );
+    }
+
+    /// A post withheld where the request came from (451) is not a post that is gone: the blocked
+    /// card, not `missing`.
+    #[tokio::test(start_paused = true)]
+    async fn a_withheld_post_is_blocked_not_missing() {
+        let post = "https://www.instagram.com/p/C2vXx0yPvYq/";
+        let (egress, _) = crate::sources::fixture::egress(vec![(
+            post,
+            451,
+            "text/html",
+            b"<html><title>Unavailable</title></html>".to_vec(),
+        )]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let doc = Instagram.resolve(&cx, post).await.unwrap();
+        assert_eq!(doc.status, crate::model::Status::Ok);
+        assert_eq!(doc.type_name, "SocialMediaPosting");
+        assert_eq!(doc.attributes["blocked"], "true");
+        assert_eq!(doc.source_root.as_deref(), Some(post));
     }
 
     #[test]
@@ -303,7 +361,6 @@ mod tests {
                 "700M Followers, 100 Following, 8,000 Posts - See Instagram photos and videos from Instagram (@instagram)".into(),
             ),
             image: Some("https://example.com/avatar.jpg".into()),
-            kind: Some("profile".into()),
         };
         let doc = profile_card(base.clone(), "instagram", &shown);
         assert_eq!(doc.type_name, "Person");

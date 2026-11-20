@@ -2,7 +2,7 @@
 
 Substack publications, posts and profiles, from their pages' Open Graph tags and JSON-LD. No
 key and no account. A publication's card names its RSS feed; a link to the feed itself
-(`https://{name}.substack.com/feed`) is the [feed](feed.md) source's.
+(`https://{name}.substack.com/feed`) is not this source's and is read as any feed link is.
 
 ## Links
 

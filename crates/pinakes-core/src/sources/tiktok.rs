@@ -36,7 +36,7 @@ impl Target {
     /// tiktok.com with or without `www.` or `m.`. Short links (`vm.tiktok.com`, `/t/`) name
     /// nothing without a fetch and are not read.
     pub fn of_uri(uri: &str) -> Option<Self> {
-        let url = web_url(uri)?;
+        let url = super::kit::web_url(uri)?;
         if !matches!(
             url.host_str()?,
             "tiktok.com" | "www.tiktok.com" | "m.tiktok.com"

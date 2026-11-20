@@ -1,7 +1,7 @@
 //! Swiss federal law from Fedlex, the Confederation's publication platform, read through its
 //! SPARQL endpoint (JOLux) by ELI. Every Fedlex address of an act in the classified compilation,
 //! in any language, is an alias of its ELI; a dated version is its own resource. No key.
-use super::{sparql_rows, sparql_url, web_url, Context, Example, Row, Source, SPARQL_JSON};
+use super::{sparql_rows, sparql_url, Context, Example, Row, Source, SPARQL_JSON};
 use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
@@ -28,20 +28,23 @@ fn eli_part(value: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase() || b == b'_')
 }
+/// A version's date as `YYYYMMDD`. The parser also reads a day of one digit (`2024033`): the
+/// date kept is the parsed one written out, so each day has one root.
+fn version_date(value: &str) -> Option<String> {
+    let date = chrono::NaiveDate::parse_from_str(value, "%Y%m%d").ok()?;
+    Some(date.format("%Y%m%d").to_string())
+}
 
 impl Key {
     pub fn of_uri(uri: &str) -> Option<Self> {
-        let url = web_url(uri)?;
+        let url = super::kit::web_url(uri)?;
         let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
         match (url.host_str()?, segments.as_slice()) {
             (
                 "www.fedlex.admin.ch" | "fedlex.admin.ch" | "fedlex.data.admin.ch",
                 ["eli", "cc", a, b, ..],
             ) if eli_part(a) && eli_part(b) => {
-                let version = segments
-                    .get(4)
-                    .filter(|v| chrono::NaiveDate::parse_from_str(v, "%Y%m%d").is_ok())
-                    .map(|v| (*v).to_owned());
+                let version = segments.get(4).and_then(|v| version_date(v));
                 Some(Self::Act(format!("eli/cc/{a}/{b}"), version))
             }
             ("www.admin.ch" | "admin.ch", ["opc", _, "classified-compilation", dossier, ..])
@@ -357,6 +360,25 @@ mod tests {
         ] {
             assert!(!Fedlex.reads(uri), "{uri}");
         }
+    }
+
+    /// A version date written with a one-digit day (`2024033`) names the same day: its link is
+    /// an alias of the `YYYYMMDD` root.
+    #[test]
+    fn a_date_written_another_way_is_the_same_days_root() {
+        let root = "https://fedlex.data.admin.ch/eli/cc/1999/404/20240303";
+        let uri = "https://www.fedlex.admin.ch/eli/cc/1999/404/2024033/de";
+        assert_eq!(
+            Key::of_uri(uri),
+            Some(Key::Act("eli/cc/1999/404".into(), Some("20240303".into())))
+        );
+        assert_eq!(Fedlex.alias_root(uri).as_deref(), Some(root));
+        assert_eq!(Fedlex.alias_root(root), None);
+        // A segment that is no date names the act itself.
+        assert_eq!(
+            Key::of_uri("https://www.fedlex.admin.ch/eli/cc/1999/404/20241303/de"),
+            Some(Key::Act("eli/cc/1999/404".into(), None))
+        );
     }
 
     #[test]

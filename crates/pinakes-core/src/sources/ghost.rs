@@ -46,6 +46,10 @@ impl Site {
         if !Self::marked(page) {
             return None;
         }
+        Self::parsed(page)
+    }
+    /// What the page's markup names; for a page that is `marked`.
+    fn parsed(page: &Fetched) -> Option<Self> {
         let body = String::from_utf8_lossy(&page.body);
         let html = crate::resolver::html::document(&body).ok()?;
         let generator = scraper::Selector::parse("head meta[name='generator']").ok()?;
@@ -210,7 +214,7 @@ impl Source for Ghost {
             return Ok(None);
         }
         let found = page.clone();
-        let Some(site) = crate::resolver::html::blocking(move || Site::of_page(&found)).await?
+        let Some(site) = crate::resolver::html::blocking(move || Site::parsed(&found)).await?
         else {
             return Ok(None);
         };
@@ -228,7 +232,9 @@ impl Source for Ghost {
         if f.status != 200 {
             return Ok(None);
         }
-        card(doc, &page.url, &f.body)
+        // A parse slot, not the runtime's thread: the body is the site's own text.
+        let (doc, url) = (doc.clone(), page.url.clone());
+        crate::resolver::html::blocking(move || card(&doc, &url, &f.body)).await?
     }
 }
 

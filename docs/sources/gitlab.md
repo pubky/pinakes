@@ -2,7 +2,7 @@
 
 Projects, branches, tags, releases and files on gitlab.com and any other GitLab instance, read
 from the instance's API (`/api/v4/projects/…`). No key; gitlab.com allows 500 unauthenticated API
-requests per minute (one per second here).
+requests per minute (Pinakes asks at `limits.host_requests_per_second`, one a second by default).
 
 ## Links
 
@@ -15,14 +15,18 @@ requests per minute (one per second here).
 
 A ref can contain `/`, so the split between ref and path is asked of the API: the first one, two
 or three segments are tried as a branch, then as a tag, shortest first. A 40-character commit id
-is the ref by itself.
+is the ref by itself. When none of them is a ref and the link has more segments, the ref may be
+a longer name: the link gets an ordinary web card.
 
 Project pages are read on gitlab.com, framagit.org, gitlab.freedesktop.org, gitlab.gnome.org,
 invent.kde.org and salsa.debian.org, and on any host that answered as GitLab within the last
-day. The `/-/` shapes are read on any host; one that answers otherwise, fails or does not answer
-is remembered for a day, in memory, and gets ordinary web cards. A known instance is never
-marked as not GitLab. A page shaped like a project that the API does
-not know (a group, a user, an old page address) gets an ordinary web card too. Issues and merge
+day. The `/-/` shapes are read on any host. A host answers as GitLab with the object asked for
+(a project with its path, a branch or tag with its commit, a release with its tag, a list of
+commits) or with GitLab's own error (`{"message": "404 …"}`); one that answers otherwise, fails
+or does not answer is remembered for a day, in memory, and gets ordinary web cards. A known
+instance is never marked as not GitLab. A page shaped like a project that the API does
+not know (a group, a user, an old page address) gets an ordinary web card too, and so does one
+on a host learned this way whose answer is not a project of that host. Issues and merge
 requests are not read.
 
 The address the API gives a project (`web_url`) is its root; every other spelling becomes an
@@ -46,7 +50,7 @@ A ref, path, tag or release the project does not have is `missing`.
 description, with its avatar as the image; a ref `{project} · {ref}`, described by its latest
 commit's title; a file `{path} · {project}`, described by the title of the latest commit that
 changed it; a release `{project} {release name}`, described by the start of its notes. No commit
-author's name or address is published.
+author's name or address is published, and an e-mail address in a description is left out.
 
 | Fact | Meaning |
 | --- | --- |

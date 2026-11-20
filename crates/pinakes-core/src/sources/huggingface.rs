@@ -202,7 +202,7 @@ pub fn from_uri(uri: &str) -> Option<Repo> {
         }
         ["datasets", rest @ ..] => page_path(Kind::Dataset, rest),
         ["spaces", rest @ ..] => page_path(Kind::Space, rest),
-        [first, ..] if RESERVED.contains(first) => None,
+        [first, ..] if RESERVED.contains(&first.to_ascii_lowercase().as_str()) => None,
         rest => page_path(Kind::Model, rest),
     }
 }
@@ -511,6 +511,14 @@ mod tests {
             "https://huggingface.co/spaces/huggingface-projects/llama-2-7b-chat/blob/main/app.py",
         ] {
             assert_eq!(from_uri(uri), None, "{uri}");
+            assert!(!HuggingFace.reads(uri), "{uri}");
+        }
+        // A site section is no owner, in any letter case.
+        for uri in [
+            "https://huggingface.co/docs/hub",
+            "https://huggingface.co/Docs/hub",
+            "https://huggingface.co/BLOG/gemma",
+        ] {
             assert!(!HuggingFace.reads(uri), "{uri}");
         }
         let r = from_uri("https://hf.co/meta-llama/Llama-2-7b-hf/tree/main").unwrap();

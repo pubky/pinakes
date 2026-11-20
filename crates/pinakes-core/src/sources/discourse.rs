@@ -3,7 +3,7 @@
 //! limit is 200 requests per minute per address. A site that does not answer as Discourse is
 //! remembered, and its links get ordinary web cards.
 use super::{list, text, web_url, Context, Declined, Example, HostMemo, Source};
-use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
+use crate::model::ResourceMeta;
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use serde_json::Value;
@@ -40,7 +40,7 @@ pub enum Target {
 
 impl Target {
     pub fn of_uri(uri: &str) -> Option<Self> {
-        let url = web_url(uri)?;
+        let url = super::kit::web_url(uri)?;
         if url.scheme() != "https" || url.port().is_some() {
             return None;
         }
@@ -102,15 +102,17 @@ fn excerpt(html: &str) -> String {
     super::excerpt(&crate::resolver::cards::plain(html), 200)
 }
 
-/// Discourse answers JSON; anything else (a 404 page, a challenge) is another site.
+/// Discourse answers JSON; anything else (a 404 page, a challenge) is another site. `None` when
+/// the forum says the topic or post does not exist: a 404, or a 410 (deleted), with its
+/// `error_type` `not_found`.
 fn json(status: u16, body: &[u8]) -> Result<Option<Value>> {
     let Ok(v) = serde_json::from_slice::<Value>(body) else {
         return Err(Declined.into());
     };
     match status {
         200 => Ok(Some(v)),
-        404 if v["error_type"] == "not_found" => Ok(None),
-        401 | 403 | 404 | 405 => Err(Declined.into()),
+        404 | 410 if v["error_type"] == "not_found" => Ok(None),
+        401 | 403 | 404 | 405 | 410 => Err(Declined.into()),
         s => anyhow::bail!("the forum answered {s}"),
     }
 }
@@ -315,7 +317,10 @@ impl Source for Discourse {
         if FORUMS.get(&host) == Some(false) {
             return Err(Declined.into());
         }
-        let f = cx.fetch(&target.api_url(), &FetchOptions::json()).await?;
+        // A missing topic's 404 names its `error_type` in JSON.
+        let f = cx
+            .fetch(&target.api_url(), &super::json_with_errors())
+            .await?;
         // The cards read posts' HTML: in a parse slot.
         let (doc, at, read, json) = (cx.card(uri, self), host.clone(), target.clone(), f.clone());
         let result = crate::resolver::html::blocking(move || match &read {
@@ -349,6 +354,26 @@ mod tests {
     const HOST: &str = "delvingbitcoin.org";
     fn base() -> ResourceMeta {
         ResourceMeta::new("https://delvingbitcoin.org/t/304", "discourse", 3600)
+    }
+
+    /// A forum's JSON 404 for a topic says the topic is gone: the read asks for the error's body,
+    /// which the transport drops otherwise, and the card is `missing`; the forum stays known.
+    #[tokio::test(start_paused = true)]
+    async fn a_missing_topic_read_through_the_egress_is_missing() {
+        let (egress, _) = crate::sources::fixture::egress(vec![(
+            "https://gone.forum.example/t/999999.json",
+            404,
+            "application/json",
+            read("topic-missing.json"),
+        )]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let link = "https://gone.forum.example/t/gone-topic/999999";
+        let doc = Discourse.resolve(&cx, link).await.unwrap();
+        assert_eq!(doc.status, crate::model::Status::Missing);
+        assert!(Discourse.reads(link));
     }
 
     #[test]
@@ -495,5 +520,21 @@ mod tests {
             topic_card(base(), HOST, 304, None, 404, &read("not-discourse.html")).unwrap_err();
         assert!(other.is::<Declined>());
         assert!(topic_card(base(), HOST, 305, None, 200, &read("topic-304.json")).is_err());
+    }
+
+    #[test]
+    fn a_410_is_gone_as_a_404_is() {
+        // A deleted topic or post: 410 with Discourse's `error_type`.
+        let gone = br#"{"errors":["This topic has been deleted."],"error_type":"not_found"}"#;
+        assert!(topic_card(base(), HOST, 304, None, 410, gone)
+            .unwrap()
+            .is_none());
+        assert!(post_card(base(), HOST, 790, 410, gone).unwrap().is_none());
+        // Without it the 410 is another program's, as such a 404 is.
+        for status in [404, 410] {
+            let other =
+                topic_card(base(), HOST, 304, None, status, br#"{"error":"Gone"}"#).unwrap_err();
+            assert!(other.is::<Declined>(), "{status}: {other}");
+        }
     }
 }

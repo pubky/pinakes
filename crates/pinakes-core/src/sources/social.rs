@@ -1,9 +1,10 @@
 //! What the social-platform sources share. Each reads its platform's public page (its Open
 //! Graph tags, with any JSON-LD) or its oEmbed endpoint, never an account's view, and gives one
 //! of three cards: a post, a profile or a video. A platform that refuses the request (a sign-in
-//! redirect, a challenge page, a 401, 403 or 999) still gets a card, of the link's shape alone,
-//! marked `blocked`: the link resolves, groups and counts while the platform shows the object to
-//! accounts only.
+//! redirect, a challenge page, a 401 or 403, a 451, or a status of its own that its source names)
+//! still gets a card, of the link's shape alone, marked `blocked`: the link resolves, groups and
+//! counts while the platform shows the object to accounts only or withholds it where the request
+//! came from.
 pub use super::excerpt;
 use super::Context;
 use crate::{
@@ -51,6 +52,13 @@ impl Shape {
     }
 }
 
+/// `doc`, a card of the link's shape alone made from a page that answered without what the card
+/// reads: a stored card that says more stays until a confirming read (`ResourceMeta::shape_only`).
+pub fn shape_only(mut doc: ResourceMeta) -> ResourceMeta {
+    doc.shape_only = true;
+    doc
+}
+
 /// The card of a link whose platform refused the request: its shape alone, marked `blocked`.
 pub fn blocked(doc: ResourceMeta, shape: Shape, site: &str) -> ResourceMeta {
     let mut doc = shape.card(doc, site);
@@ -68,25 +76,29 @@ pub enum Page {
         doc: Box<ResourceMeta>,
         url: url::Url,
     },
-    /// The platform says there is no such object.
+    /// The platform says there is no such object (404, 410).
     Missing,
-    /// The platform refused the request.
+    /// The platform refused the request, or withholds the page where the request came from
+    /// (451): that says nothing about whether the object exists.
     Blocked,
 }
 
-/// LinkedIn's status for a request it refuses without an account.
-const REFUSED: u16 = 999;
-
-/// A request to a platform, or `None` when the platform refused it: an access wall, or its 999.
-/// Rate limits and server errors are `RetryLater`, as `Context::fetch` makes them; 999 is above
-/// 500 but a refusal, and is answered before that rule would read it as a server error.
-async fn fetch(cx: &Context<'_>, url: &str, options: &FetchOptions) -> Result<Option<Fetched>> {
+/// A request to a platform, or `None` when the platform refused it: an access wall, or one of
+/// `refused`, the statuses the platform itself answers a request it refuses without an account.
+/// Rate limits and server errors are `RetryLater`, as `Context::fetch` makes them; a refused
+/// status may be above 500, and is answered before that rule would read it as a server error.
+async fn fetch(
+    cx: &Context<'_>,
+    url: &str,
+    options: &FetchOptions,
+    refused: &[u16],
+) -> Result<Option<Fetched>> {
     let fetched = match cx.egress.fetch_with(url, options).await {
         Ok(fetched) => fetched,
         Err(e) if e.is::<Blocked>() => return Ok(None),
         Err(e) => return Err(e),
     };
-    if fetched.status == REFUSED {
+    if refused.contains(&fetched.status) {
         return Ok(None);
     }
     super::retry(&fetched)?;
@@ -95,13 +107,13 @@ async fn fetch(cx: &Context<'_>, url: &str, options: &FetchOptions) -> Result<Op
 
 /// Fetch a platform's public page.
 pub async fn page(cx: &Context<'_>, url: &str) -> Result<Page> {
-    let Some(fetched) = fetch(cx, url, &FetchOptions::default()).await? else {
+    let Some(fetched) = fetch(cx, url, &FetchOptions::default(), &[]).await? else {
         return Ok(Page::Blocked);
     };
     match fetched.status {
         200 => {}
-        404 | 410 | 451 => return Ok(Page::Missing),
-        401 | 403 => return Ok(Page::Blocked),
+        404 | 410 => return Ok(Page::Missing),
+        401 | 403 | 451 => return Ok(Page::Blocked),
         s => bail!("the site answered {s}"),
     }
     let (uri, ttl, ended_at) = (url.to_owned(), cx.ttl, fetched.url.clone());
@@ -128,7 +140,8 @@ pub fn take(doc: &mut ResourceMeta, page: &ResourceMeta) {
 /// What an oEmbed endpoint answered for a link.
 pub enum Oembed {
     Found(Value),
-    /// The provider says there is no such object (404, or 400 naming the link).
+    /// The provider says there is no such object: a 404, or any 400 (how a provider answers a
+    /// link it does not know; the answer's body is not read).
     Missing,
     Blocked,
 }
@@ -142,7 +155,7 @@ pub async fn oembed(cx: &Context<'_>, endpoint: &str, url: &str) -> Result<Oembe
     let mut request = url::Url::parse(endpoint)?;
     request.query_pairs_mut().append_pair("url", url);
     let options = FetchOptions::json();
-    let Some(fetched) = fetch(cx, request.as_str(), &options).await? else {
+    let Some(fetched) = fetch(cx, request.as_str(), &options, &[]).await? else {
         return Ok(Oembed::Blocked);
     };
     match fetched.status {
@@ -164,9 +177,10 @@ pub enum Body {
     Blocked,
 }
 
-/// Fetch a platform's public page as text.
-pub async fn page_body(cx: &Context<'_>, url: &str) -> Result<Body> {
-    let Some(fetched) = fetch(cx, url, &FetchOptions::default()).await? else {
+/// Fetch a platform's public page as text. `refused` holds the statuses the platform itself
+/// answers a request it refuses without an account (LinkedIn's 999); most platforms have none.
+pub async fn page_body(cx: &Context<'_>, url: &str, refused: &[u16]) -> Result<Body> {
+    let Some(fetched) = fetch(cx, url, &FetchOptions::default(), refused).await? else {
         return Ok(Body::Blocked);
     };
     Ok(match fetched.status {
@@ -174,8 +188,8 @@ pub async fn page_body(cx: &Context<'_>, url: &str) -> Result<Body> {
             body: String::from_utf8_lossy(&fetched.body).into_owned(),
             url: fetched.url,
         },
-        404 | 410 | 451 => Body::Missing,
-        401 | 403 => Body::Blocked,
+        404 | 410 => Body::Missing,
+        401 | 403 | 451 => Body::Blocked,
         s => bail!("the site answered {s}"),
     })
 }
@@ -187,7 +201,6 @@ pub struct OpenGraph {
     pub title: Option<String>,
     pub description: Option<String>,
     pub image: Option<String>,
-    pub kind: Option<String>,
 }
 
 /// The Open Graph tags of a page. Run under a parse slot (`html::blocking`).
@@ -209,7 +222,6 @@ pub fn open_graph(body: &str) -> Result<OpenGraph> {
             "og:title" => &mut tags.title,
             "og:description" => &mut tags.description,
             "og:image" => &mut tags.image,
-            "og:type" => &mut tags.kind,
             _ => continue,
         };
         if slot.is_none() {
@@ -236,9 +248,10 @@ pub fn post_text(doc: &mut ResourceMeta, text: &str, by: Option<&str>) {
 }
 
 /// The name and the handle an Open Graph title carries: `Name (@handle) on X`,
-/// `Name (@handle) • Threads`.
+/// `Name (@handle) • Threads`. The handle is the last `(@…)` of the title: the name before it is
+/// the account's own text and may hold one too.
 pub fn name_and_handle(title: &str) -> (Option<String>, Option<String>) {
-    let Some((name, rest)) = title.split_once(" (@") else {
+    let Some((name, rest)) = title.rsplit_once(" (@") else {
         return (trimmed(title), None);
     };
     let handle = rest.split_once(')').map(|(handle, _)| handle);
@@ -289,6 +302,11 @@ mod tests {
             (Some("Twitch - Twitch".into()), None)
         );
         assert_eq!(name_and_handle("  "), (None, None));
+        // A display name is the account's own text: a handle written into it is not the handle.
+        assert_eq!(
+            name_and_handle("Zuck (@zuck) fan (@mallory) on Threads"),
+            (Some("Zuck (@zuck) fan".into()), Some("mallory".into()))
+        );
     }
 
     #[test]
@@ -331,11 +349,59 @@ mod tests {
             tags,
             OpenGraph {
                 title: Some("A & B".into()),
-                description: None,
-                image: None,
-                kind: Some("profile".into()),
+                ..OpenGraph::default()
             }
         );
+    }
+
+    /// A status above 500 that no source names as its platform's refusal is a server error: a
+    /// retry, never the blocked card.
+    #[tokio::test(start_paused = true)]
+    async fn a_999_is_a_server_error() {
+        let profile = "https://example.com/someone";
+        let mut asked = url::Url::parse("https://example.com/oembed").unwrap();
+        asked.query_pairs_mut().append_pair("url", profile);
+        let (egress, _) = crate::sources::fixture::egress(vec![
+            (profile, 999, "text/html", b"<html></html>".to_vec()),
+            (asked.as_str(), 999, "application/json", b"{}".to_vec()),
+        ]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let class = |error: Option<anyhow::Error>| {
+            error
+                .as_ref()
+                .and_then(|e| e.downcast_ref::<crate::resolver::RetryLater>())
+                .map(|retry| retry.class)
+        };
+        assert_eq!(class(page(&cx, profile).await.err()), Some("upstream"));
+        assert_eq!(
+            class(
+                oembed(&cx, "https://example.com/oembed", profile)
+                    .await
+                    .err()
+            ),
+            Some("upstream")
+        );
+    }
+
+    /// A 451 is a page withheld where the request came from, not an object that does not exist:
+    /// the blocked card, so nothing stored is purged as gone.
+    #[tokio::test(start_paused = true)]
+    async fn a_451_is_blocked_not_missing() {
+        let profile = "https://example.com/someone";
+        let (egress, _) = crate::sources::fixture::egress(vec![(
+            profile,
+            451,
+            "text/html",
+            b"<html><title>Unavailable</title></html>".to_vec(),
+        )]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        assert!(matches!(page(&cx, profile).await, Ok(Page::Blocked)));
     }
 
     #[test]

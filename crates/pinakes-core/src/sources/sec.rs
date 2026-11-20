@@ -9,7 +9,6 @@ use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use serde_json::Value;
-use url::Url;
 
 /// What an EDGAR link names.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,7 +71,6 @@ fn document_name(file: &str) -> bool {
         && !file.starts_with('.')
 }
 
-/// The target of an `/Archives/edgar/data/…` path.
 /// An SEC release number, e.g. `34-106268`.
 fn release_number(value: &str) -> Option<&str> {
     let (act, n) = value.split_once('-')?;
@@ -106,6 +104,7 @@ fn release_path(path: &str) -> Option<Target> {
     })
 }
 
+/// The target of an `/Archives/edgar/data/…` path.
 fn archive_path(path: &str) -> Option<Target> {
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     match segments.as_slice() {
@@ -151,10 +150,7 @@ fn archive_path(path: &str) -> Option<Target> {
 
 impl Target {
     pub fn of_uri(uri: &str) -> Option<Self> {
-        let url = Url::parse(uri).ok()?;
-        if !matches!(url.scheme(), "https" | "http") {
-            return None;
-        }
+        let url = super::kit::web_url(uri)?;
         let query = |name: &str| {
             url.query_pairs()
                 .find(|(k, _)| k.eq_ignore_ascii_case(name))
@@ -179,9 +175,10 @@ impl Target {
         }
     }
 
-    /// The one address every spelling of this target is an alias of.
-    pub fn root(&self) -> String {
-        match self {
+    /// The one address every spelling of this target is an alias of. A release has none: it is
+    /// its own address.
+    pub fn root(&self) -> Option<String> {
+        Some(match self {
             Self::Filing { cik, accession } => format!(
                 "https://www.sec.gov/Archives/edgar/data/{cik}/{}/",
                 folder(accession)
@@ -197,18 +194,13 @@ impl Target {
             Self::Company { cik } => {
                 format!("https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik:010}")
             }
-            // A release is its own address.
-            Self::Release { .. } => String::new(),
-        }
+            Self::Release { .. } => return None,
+        })
     }
 }
 
 pub fn alias_root(uri: &str) -> Option<String> {
-    let target = Target::of_uri(uri)?;
-    if matches!(target, Target::Release { .. }) {
-        return None;
-    }
-    let root = target.root();
+    let root = Target::of_uri(uri)?.root()?;
     let (_, normalized, _) = crate::model::identity(uri).ok()?;
     (root != normalized).then_some(root)
 }
@@ -432,20 +424,18 @@ pub fn filing_card(
     }
     // A spelling under a co-registrant's (or owner's) CIK is an alias of the primary filer's.
     let accession = header.accession.clone();
-    doc.source_root = Some(
-        match document {
-            Some((file, _)) => Target::Document {
-                cik: *primary_cik,
-                accession,
-                file: file.to_owned(),
-            },
-            None => Target::Filing {
-                cik: *primary_cik,
-                accession,
-            },
-        }
-        .root(),
-    );
+    doc.source_root = match document {
+        Some((file, _)) => Target::Document {
+            cik: *primary_cik,
+            accession,
+            file: file.to_owned(),
+        },
+        None => Target::Filing {
+            cik: *primary_cik,
+            accession,
+        },
+    }
+    .root();
     if let Some((file, row)) = document {
         doc.attributes.insert("document".into(), file.into());
         if let Some((kind, description)) = row {
@@ -666,12 +656,9 @@ impl Source for Sec {
         ]
     }
     fn budgets(&self) -> &'static [Budget] {
-        // EDGAR allows ten requests per second in total.
-        &[
-            ("www.sec.gov", 5.0),
-            ("sec.gov", 2.0),
-            ("data.sec.gov", 2.0),
-        ]
+        // EDGAR allows ten requests per second in total. A `sec.gov` link is read from
+        // `www.sec.gov`.
+        &[("www.sec.gov", 5.0), ("data.sec.gov", 2.0)]
     }
     fn examples(&self) -> &'static [Example] {
         &[
@@ -694,15 +681,8 @@ impl Source for Sec {
         ]
     }
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
-        // EDGAR refuses requests whose User-Agent has no email address: wait for one.
-        if cx.contact().is_none() {
-            return Err(crate::resolver::RetryLater {
-                class: "disabled",
-                seconds: 3600,
-            }
-            .into());
-        }
         let target = Target::of_uri(uri).context("not an EDGAR link")?;
+        // A release is read from the Federal Register: nothing is asked of EDGAR.
         if let Target::Release { release, file } = &target {
             let json = FetchOptions::json();
             let f = cx.fetch(&docket_url(release), &json).await?;
@@ -715,6 +695,14 @@ impl Source for Sec {
                 None => None,
             };
             return Ok(release_card(cx.card(uri, self), release, file, document));
+        }
+        // EDGAR refuses requests whose User-Agent has no email address: wait for one.
+        if cx.contact().is_none() {
+            return Err(crate::resolver::RetryLater {
+                class: "disabled",
+                seconds: 3600,
+            }
+            .into());
         }
         if let Target::Company { cik } = target {
             let url = format!("https://data.sec.gov/submissions/CIK{cik:010}.json");
@@ -1063,6 +1051,62 @@ mod tests {
         let doc = release_card(base(uri), "34-106268", "34-106268.pdf", None);
         assert_eq!(doc.type_name, "Report");
         assert_eq!(doc.name.as_deref(), Some("Release No. 34-106268"));
+    }
+
+    /// A release is its own address: it has no root, and no empty one.
+    #[test]
+    fn a_release_has_no_root() {
+        let release =
+            Target::of_uri("https://www.sec.gov/files/rules/sro/nasdaqtx/2026/34-106268.pdf")
+                .unwrap();
+        assert_eq!(format!("{:?}", release.root()), "None");
+        let company = Target::Company { cik: 2070457 };
+        assert!(format!("{:?}", company.root()).contains("CIK=0002070457"));
+    }
+
+    /// A budget names a host the source asks: filings at `www.sec.gov` (also for a `sec.gov`
+    /// link), companies at `data.sec.gov`.
+    #[test]
+    fn every_budget_host_is_one_the_source_asks() {
+        let hosts: Vec<&str> = Sec.budgets().iter().map(|(host, _)| *host).collect();
+        assert_eq!(hosts, ["www.sec.gov", "data.sec.gov"]);
+        let Some(Target::Filing { cik, accession }) =
+            Target::of_uri("https://sec.gov/Archives/edgar/data/2103612/000110465926000959/")
+        else {
+            panic!("a filing");
+        };
+        let header = filing_url(cik, &accession, &format!("{accession}.hdr.sgml"));
+        assert!(header.starts_with("https://www.sec.gov/"), "{header}");
+    }
+
+    /// A release is read from the Federal Register: its link does not wait for a contact, and
+    /// nothing is asked of EDGAR.
+    #[tokio::test(start_paused = true)]
+    async fn a_release_does_not_wait_for_a_contact() {
+        let docket = url::Url::parse(&docket_url("34-999999"))
+            .unwrap()
+            .to_string();
+        let (egress, recorded) = crate::sources::fixture::egress(vec![(
+            docket.as_str(),
+            200,
+            "application/json",
+            read("fr-docket-34-999999.json"),
+        )]);
+        assert_eq!(egress.contact(), None);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let doc = Sec
+            .resolve(
+                &cx,
+                "https://www.sec.gov/files/rules/sro/nasdaqtx/2026/34-999999.pdf",
+            )
+            .await
+            .unwrap();
+        assert_eq!(doc.status, crate::model::Status::Ok);
+        assert_eq!(doc.name.as_deref(), Some("Release No. 34-999999"));
+        assert_eq!(recorded.asked(), [docket]);
     }
 
     #[tokio::test]

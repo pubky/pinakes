@@ -46,7 +46,7 @@ impl Target {
     /// the slug, or a `comment` parameter, which selects one comment) is not read: a comment is
     /// its own thing, never its post.
     pub fn of_uri(uri: &str) -> Option<Self> {
-        let url = web_url(uri)?;
+        let url = super::kit::web_url(uri)?;
         if url.query_pairs().any(|(k, _)| k == "comment") {
             return None;
         }
@@ -127,9 +127,17 @@ fn gone(post: &Value) -> bool {
 /// The card of a post from its listing, or `None` when the listing holds no such post or only
 /// the stub of a deleted or removed one (the post is gone).
 pub fn post_card(doc: ResourceMeta, id: &str, v: &Value) -> Result<Option<ResourceMeta>> {
-    let Some(post) = v[0]["data"]["children"][0]["data"].as_object() else {
+    // A listing with no post is Reddit's "no such post"; an answer that is no listing says
+    // nothing about the post.
+    let children = v[0]["data"]["children"]
+        .as_array()
+        .context("Reddit answered no listing")?;
+    let Some(first) = children.first() else {
         return Ok(None);
     };
+    let post = first["data"]
+        .as_object()
+        .context("Reddit answered a listing entry that is no post")?;
     let post = Value::Object(post.clone());
     anyhow::ensure!(post["id"] == id, "Reddit answered for another post");
     if gone(&post) {
@@ -162,6 +170,7 @@ pub fn post_card(doc: ResourceMeta, id: &str, v: &Value) -> Result<Option<Resour
 /// The card of a subreddit from its `about`, or `None` when the answer describes no subreddit.
 pub fn subreddit_card(doc: ResourceMeta, name: &str, v: &Value) -> Result<Option<ResourceMeta>> {
     let about = &v["data"];
+    anyhow::ensure!(about.is_object(), "Reddit answered no subreddit record");
     let Some(display) = text(&about["display_name"]) else {
         return Ok(None);
     };
@@ -187,6 +196,7 @@ pub fn subreddit_card(doc: ResourceMeta, name: &str, v: &Value) -> Result<Option
 /// The card of a user from their `about`, or `None` when the answer describes no user.
 pub fn user_card(doc: ResourceMeta, name: &str, v: &Value) -> Result<Option<ResourceMeta>> {
     let about = &v["data"];
+    anyhow::ensure!(about.is_object(), "Reddit answered no user record");
     let Some(user) = text(&about["name"]) else {
         return Ok(None);
     };
@@ -449,6 +459,26 @@ mod tests {
         assert_eq!(doc.attributes["comments"], "567");
         assert_eq!(doc.attributes["published"], "2026-04-20T16:00:00Z");
         assert!(post_card(base.clone(), "other", &read("post-1k3d0pk.json")).is_err());
+        // An empty listing is "no such post"; an answer of another shape is an error, so the
+        // stored card stays.
+        let empty = serde_json::json!([{"kind": "Listing", "data": {"children": []}}]);
+        assert!(post_card(base.clone(), "1k3d0pk", &empty)
+            .unwrap()
+            .is_none());
+        for unreadable in [
+            serde_json::json!({}),
+            serde_json::json!([{"data": {}}]),
+            // A listing whose first entry is no post.
+            serde_json::json!([{"data": {"children": [{"kind": "t3"}]}}]),
+            serde_json::json!([{"data": {"children": [null]}}]),
+        ] {
+            assert!(
+                post_card(base.clone(), "1k3d0pk", &unreadable).is_err(),
+                "{unreadable}"
+            );
+        }
+        assert!(subreddit_card(base.clone(), "announcements", &serde_json::json!({})).is_err());
+        assert!(user_card(base.clone(), "reddit_admin", &serde_json::json!([])).is_err());
         // Reddit's stub of a deleted or removed post is no post: a self post its author deleted,
         // one a moderator removed, a link post with no text whose removal Reddit records.
         assert!(

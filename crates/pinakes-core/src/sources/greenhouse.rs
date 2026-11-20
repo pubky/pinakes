@@ -27,7 +27,7 @@ fn job(value: &str) -> Option<u64> {
 /// The board and job of `job-boards.greenhouse.io/{board}/jobs/{id}`, its `boards.` spelling, its
 /// application form (`/embed/job_app?for={board}&token={id}`) or the API's address.
 pub fn of_uri(uri: &str) -> Option<(String, u64)> {
-    let url = web_url(uri)?;
+    let url = super::kit::web_url(uri)?;
     let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
     let query = |k: &str| {
         url.query_pairs()

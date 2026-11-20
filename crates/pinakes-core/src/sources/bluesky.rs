@@ -2,7 +2,7 @@
 //! post's identity is its at-URI: every address of it, by handle or by DID, becomes one resource
 //! named by the DID.
 use super::{excerpt, text, web_url, Context, Example, Source};
-use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
+use crate::model::ResourceMeta;
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use serde_json::Value;
@@ -40,9 +40,10 @@ fn handle(value: &str) -> bool {
                 && !label.ends_with('-')
         })
 }
-/// A record key: letters, digits and `.-_:~`.
+/// A record key: letters, digits and `.-_:~`, but not `.` or `..`, which a web address reads as
+/// steps of its path.
 fn rkey(value: &str) -> bool {
-    !value.is_empty()
+    !matches!(value, "" | "." | "..")
         && value.len() <= 512
         && value
             .bytes()
@@ -64,7 +65,7 @@ impl Target {
             let actor = parts.next()?;
             (actor, parts.collect())
         } else {
-            let url = web_url(uri)?;
+            let url = super::kit::web_url(uri)?;
             if !matches!(url.host_str()?, "bsky.app" | "www.bsky.app") {
                 return None;
             }
@@ -114,6 +115,15 @@ pub fn resolved_did(body: &[u8]) -> Option<String> {
     v["did"].as_str().filter(|d| did(d)).map(str::to_owned)
 }
 
+/// Whether a `resolveHandle` error (400) says the handle names no account, as Bluesky words it
+/// (`InvalidRequest`, "Unable to resolve handle") or as a plain `NotFound`.
+pub fn unknown_handle(body: &[u8]) -> bool {
+    matches!(
+        error_name(body).as_deref(),
+        Some("InvalidRequest" | "NotFound" | "HandleNotFound")
+    )
+}
+
 /// Whether an account carries the `!no-unauthenticated` self-label.
 fn no_unauthenticated(labels: &Value) -> bool {
     labels
@@ -121,23 +131,34 @@ fn no_unauthenticated(labels: &Value) -> bool {
         .is_some_and(|l| l.iter().any(|l| l["val"] == "!no-unauthenticated"))
 }
 
-/// The card of a post from `getPostThread`, or `None` when the post does not exist.
+/// What an error answer (400) names in `error`, when it is JSON.
+fn error_name(body: &[u8]) -> Option<String> {
+    let v: Value = serde_json::from_slice(body).ok()?;
+    v["error"].as_str().map(str::to_owned)
+}
+
+/// The card of a post from `getPostThread`, or `None` when Bluesky says the post does not exist
+/// (`NotFound`, or a `#notFoundPost` or `#blockedPost` thread). Any other answer it cannot read
+/// is an error: the stored card stays.
 pub fn post_card(
     mut doc: ResourceMeta,
     at_uri: &str,
     status: u16,
     body: &[u8],
 ) -> Result<Option<ResourceMeta>> {
-    let v: Value = serde_json::from_slice(body).unwrap_or_default();
-    match status {
-        200 => {}
-        400 if v["error"] == "NotFound" => return Ok(None),
+    let v: Value = match status {
+        200 => serde_json::from_slice(body).context("Bluesky answered no JSON")?,
+        400 if error_name(body).as_deref() == Some("NotFound") => return Ok(None),
         s => anyhow::bail!("Bluesky answered {s}"),
-    }
+    };
     let thread = &v["thread"];
-    if thread["$type"] != "app.bsky.feed.defs#threadViewPost" {
-        // A blocked or deleted post (`#notFoundPost`, `#blockedPost`).
-        return Ok(None);
+    match thread["$type"].as_str() {
+        Some("app.bsky.feed.defs#threadViewPost") => {}
+        // A deleted or blocked post.
+        Some("app.bsky.feed.defs#notFoundPost" | "app.bsky.feed.defs#blockedPost") => {
+            return Ok(None)
+        }
+        _ => anyhow::bail!("Bluesky answered no post thread"),
     }
     let post = &thread["post"];
     anyhow::ensure!(post["uri"] == at_uri, "Bluesky answered for another post");
@@ -194,18 +215,17 @@ pub fn profile_card(
     status: u16,
     body: &[u8],
 ) -> Result<Option<ResourceMeta>> {
-    let v: Value = serde_json::from_slice(body).unwrap_or_default();
-    match status {
-        200 => {}
+    let v: Value = match status {
+        200 => serde_json::from_slice(body).context("Bluesky answered no JSON")?,
         400 if matches!(
-            v["error"].as_str(),
+            error_name(body).as_deref(),
             Some("InvalidRequest" | "NotFound" | "AccountTakedown")
         ) =>
         {
             return Ok(None)
         }
         s => anyhow::bail!("Bluesky answered {s}"),
-    }
+    };
     anyhow::ensure!(v["did"] == did_, "Bluesky answered for another actor");
     doc.set_type("Person");
     doc.site = "bsky.app".into();
@@ -304,7 +324,8 @@ impl Source for Bluesky {
     }
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
         let target = Target::of_uri(uri).context("not a Bluesky link")?;
-        let json = FetchOptions::json();
+        // Bluesky names what is wrong in an error's JSON (`NotFound`, an unknown handle).
+        let json = super::json_with_errors();
         let did = if target.by_did() {
             target.actor.clone()
         } else {
@@ -319,7 +340,7 @@ impl Source for Bluesky {
                 .await?;
             match f.status {
                 200 => resolved_did(&f.body).context("no DID")?,
-                400 => return Ok(cx.missing(uri, self)),
+                400 if unknown_handle(&f.body) => return Ok(cx.missing(uri, self)),
                 s => anyhow::bail!("Bluesky answered {s}"),
             }
         };
@@ -354,6 +375,56 @@ impl Source for Bluesky {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What Bluesky says in an error's JSON decides: a handle it cannot resolve and a post it
+    /// calls `NotFound` are gone, any other 400 is an error. The read asks for the error's
+    /// body, which the transport drops otherwise.
+    #[tokio::test(start_paused = true)]
+    async fn an_error_answer_is_read_for_what_it_says() {
+        const JSON: &str = "application/json";
+        let handle =
+            |name: &str| format!("{APPVIEW}/com.atproto.identity.resolveHandle?handle={name}");
+        let thread = format!(
+            "{APPVIEW}/app.bsky.feed.getPostThread?uri=at%3A%2F%2F{}%2Fapp.bsky.feed.post%2F3aaaaaaaaaaaa&depth=0&parentHeight=0",
+            DID.replace(':', "%3A")
+        );
+        let (egress, _) = crate::sources::fixture::egress(vec![
+            (
+                &handle("nobody.example.org"),
+                400,
+                JSON,
+                br#"{"error":"InvalidRequest","message":"Unable to resolve handle"}"#.to_vec(),
+            ),
+            (
+                &handle("limited.example.org"),
+                400,
+                JSON,
+                br#"{"error":"SomethingElse","message":"x"}"#.to_vec(),
+            ),
+            (&thread, 400, JSON, read("bsky-thread-missing.json")),
+        ]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let doc = Bluesky
+            .resolve(&cx, "https://bsky.app/profile/nobody.example.org")
+            .await
+            .unwrap();
+        assert_eq!(doc.status, crate::model::Status::Missing);
+        assert!(Bluesky
+            .resolve(&cx, "https://bsky.app/profile/limited.example.org")
+            .await
+            .is_err());
+        let doc = Bluesky
+            .resolve(
+                &cx,
+                &format!("https://bsky.app/profile/{DID}/post/3aaaaaaaaaaaa"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(doc.status, crate::model::Status::Missing);
+    }
 
     fn read(file: &str) -> Vec<u8> {
         crate::sources::fixture::read("bluesky", file)
@@ -392,6 +463,19 @@ mod tests {
         ] {
             assert!(!Bluesky.reads(uri), "{uri}");
         }
+    }
+
+    #[test]
+    fn a_dot_is_not_a_record_key() {
+        for key in [".", ".."] {
+            let uri = format!("at://{DID}/app.bsky.feed.post/{key}");
+            assert_eq!(Target::of_uri(&uri), None, "{uri}");
+            assert!(!Bluesky.reads(&uri), "{uri}");
+            assert_eq!(Bluesky.alias_root(&uri), None, "{uri}");
+        }
+        // A key that only holds dots among other characters is one.
+        let uri = format!("at://{DID}/app.bsky.feed.post/a..b");
+        assert!(Target::of_uri(&uri).is_some_and(|t| t.post.as_deref() == Some("a..b")));
     }
 
     #[test]
@@ -474,6 +558,38 @@ mod tests {
             &read("bsky-thread-3mxzez2m7wk2r.json")
         )
         .is_err());
+
+        // Bluesky's own word for a deleted or blocked post is "gone"; an answer that says
+        // nothing readable (an empty or HTML body, another shape) is an error, so the stored
+        // card stays.
+        for gone in ["notFoundPost", "blockedPost"] {
+            let body = format!(
+                r#"{{"thread":{{"$type":"app.bsky.feed.defs#{gone}","uri":"{missing}"}}}}"#
+            );
+            assert!(post_card(base.clone(), &missing, 200, body.as_bytes())
+                .unwrap()
+                .is_none());
+        }
+        let unreadable: [&[u8]; 4] = [
+            b"<html>",
+            b"",
+            b"{}",
+            br#"{"thread":{"$type":"app.bsky.feed.defs#somethingNew"}}"#,
+        ];
+        for unreadable in unreadable {
+            assert!(
+                post_card(base.clone(), &missing, 200, unreadable).is_err(),
+                "{}",
+                String::from_utf8_lossy(unreadable)
+            );
+            assert!(profile_card(base.clone(), DID, 200, unreadable).is_err());
+        }
+        assert!(post_card(base.clone(), &missing, 400, b"<html>").is_err());
+        assert!(unknown_handle(
+            br#"{"error":"InvalidRequest","message":"Unable to resolve handle"}"#
+        ));
+        assert!(!unknown_handle(b"<html>bad request</html>"));
+        assert!(!unknown_handle(br#"{"error":"RateLimitExceeded"}"#));
 
         let doc = profile_card(base, DID, 200, &read("bsky-profile-bsky-app.json"))
             .unwrap()

@@ -1,6 +1,5 @@
 //! Substack publications, posts and profiles, from their pages' Open Graph tags and JSON-LD. A
-//! publication's card names its RSS feed (`/feed`), which the feed source reads when a link
-//! names it. No key, no account. Every spelling (`open.substack.com/pub/{name}/p/{slug}`, the
+//! publication's card names its RSS feed (`/feed`). No key, no account. Every spelling (`open.substack.com/pub/{name}/p/{slug}`, the
 //! hosts with `www.`) is one resource at `https://{name}.substack.com/[p/{slug}]` or
 //! `https://substack.com/@{user}`.
 use super::{
@@ -39,7 +38,7 @@ impl Target {
     /// `https://{name}.substack.com/`, `https://{name}.substack.com/p/{slug}`,
     /// `https://open.substack.com/pub/{name}/p/{slug}` and `https://substack.com/@{user}`.
     pub fn of_uri(uri: &str) -> Option<Self> {
-        let url = web_url(uri)?;
+        let url = super::kit::web_url(uri)?;
         let host = url.host_str()?.to_ascii_lowercase();
         let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
         match host.as_str() {

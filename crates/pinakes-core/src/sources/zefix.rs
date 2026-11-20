@@ -1,9 +1,10 @@
 //! Swiss companies in the commercial register (Zefix), read as linked data from LINDAS, the
 //! Confederation's linked-data service, by the company's register id (EHRA id). No key.
-use super::{list, sparql_rows, sparql_url, web_url, Context, Example, Row, Source, SPARQL_JSON};
+use super::{list, sparql_rows, sparql_url, Context, Example, Source, SPARQL_JSON};
 use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::Result;
 use async_trait::async_trait;
+use std::collections::BTreeMap;
 
 pub struct Zefix;
 
@@ -16,7 +17,7 @@ fn ehraid(value: &str) -> Option<u64> {
 
 /// The EHRA id of a LINDAS company IRI (or one of its sub-IRIs) or a zefix.ch company page.
 pub fn of_uri(uri: &str) -> Option<u64> {
-    let url = web_url(uri)?;
+    let url = super::kit::web_url(uri)?;
     let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
     match (url.host_str()?, segments.as_slice()) {
         ("register.ld.admin.ch", ["zefix", "company", id, ..]) => ehraid(id),
@@ -49,6 +50,9 @@ pub fn query(id: u64) -> String {
 
 const SCHEMA: &str = "http://schema.org/";
 
+/// A row's value and its language tag.
+type Cell = (String, Option<String>);
+
 /// `CHE105909036` as `CHE-105.909.036`.
 fn uid(value: &str) -> Option<String> {
     let digits = value.strip_prefix("CHE")?;
@@ -66,16 +70,27 @@ pub fn card(
     anyhow::ensure!(status == 200, "LINDAS answered {status}");
     let rows = sparql_rows(body)?;
     let company = root(id);
-    let get = |subject: &str, property: &str| -> Vec<(String, Option<String>)> {
-        rows.iter()
-            .filter(|r: &&Row| {
-                r.get("s").is_some_and(|s| s.0 == subject)
-                    && r.get("p")
-                        .is_some_and(|p| p.0 == format!("{SCHEMA}{property}"))
-            })
-            .filter_map(|r| r.get("o").cloned())
-            .collect()
+    // Each subject's objects by property, in the rows' order: read once, so a lookup never
+    // scans the rows.
+    let mut objects: BTreeMap<&str, BTreeMap<&str, Vec<&Cell>>> = BTreeMap::new();
+    for row in &rows {
+        if let (Some(s), Some(p), Some(o)) = (row.get("s"), row.get("p"), row.get("o")) {
+            objects
+                .entry(s.0.as_str())
+                .or_default()
+                .entry(p.0.as_str())
+                .or_default()
+                .push(o);
+        }
+    }
+    let of = |subject: &str, property: &str| -> Vec<Cell> {
+        objects
+            .get(subject)
+            .and_then(|properties| properties.get(property))
+            .map(|found| found.iter().map(|o| (*o).clone()).collect())
+            .unwrap_or_default()
     };
+    let get = |subject: &str, property: &str| of(subject, &format!("{SCHEMA}{property}"));
     let one = |subject: &str, property: &str| {
         get(subject, property)
             .into_iter()
@@ -101,22 +116,19 @@ pub fn card(
         }
     }
     // The identifiers are nodes with a name and a value.
+    let identifiers: Vec<(Option<String>, Option<String>)> = get(&company, "identifier")
+        .into_iter()
+        .map(|(node, _)| (one(&node, "name"), one(&node, "value")))
+        .collect();
     let identifier = |kind: &str| {
-        get(&company, "identifier")
-            .into_iter()
-            .find_map(|(node, _)| {
-                (one(&node, "name").as_deref() == Some(kind))
-                    .then(|| one(&node, "value"))
-                    .flatten()
-            })
+        identifiers.iter().find_map(|(name, value)| {
+            (name.as_deref() == Some(kind))
+                .then(|| value.clone())
+                .flatten()
+        })
     };
     let named = |property: &str, lang: Option<&str>| {
-        let node = rows.iter().find_map(|r| {
-            (r.get("s").is_some_and(|s| s.0 == company)
-                && r.get("p").is_some_and(|p| p.0 == property))
-            .then(|| r.get("o").map(|o| o.0.clone()))
-            .flatten()
-        })?;
+        let (node, _) = of(&company, property).into_iter().next()?;
         let names = get(&node, "name");
         names
             .iter()
@@ -264,6 +276,41 @@ mod tests {
     fn the_query_matches_the_recorded_one() {
         let recorded = "PREFIX schema: <http://schema.org/> SELECT ?s ?p ?o WHERE { VALUES ?c { <https://register.ld.admin.ch/zefix/company/126286> } { ?c ?p ?o BIND(?c AS ?s) } UNION { ?c schema:address ?s . ?s ?p ?o } UNION { ?c schema:identifier ?s . ?s ?p ?o } UNION { ?c schema:additionalType ?s . ?s schema:name ?o BIND(schema:name AS ?p) } UNION { ?c <https://schema.ld.admin.ch/municipality> ?s . ?s schema:name ?o BIND(schema:name AS ?p) } }";
         assert_eq!(query(126286), recorded);
+    }
+
+    /// An identifier is the first node of its kind that has a value; a node's first value
+    /// counts.
+    #[test]
+    fn identifiers_are_read_in_the_rows_order() {
+        let company = root(7);
+        let cell = |value: &str| serde_json::json!({"type": "literal", "value": value});
+        let row = |s: &str, p: &str, o: &str| {
+            let p = format!("{SCHEMA}{p}");
+            serde_json::json!({"s": cell(s), "p": cell(&p), "o": cell(o)})
+        };
+        let node = |n: u8| format!("{company}/identifier/{n}");
+        let body = serde_json::json!({"results": {"bindings": [
+            row(&company, "legalName", "Example AG"),
+            row(&company, "identifier", &node(1)),
+            row(&company, "identifier", &node(2)),
+            row(&company, "identifier", &node(3)),
+            row(&node(1), "name", "CompanyUID"),
+            row(&node(2), "name", "CompanyUID"),
+            row(&node(2), "value", "CHE105909036"),
+            row(&node(3), "value", "CH17030010013"),
+            row(&node(3), "value", "CH00000000000"),
+            row(&node(3), "name", "CompanyCHID"),
+        ]}});
+        let doc = card(
+            ResourceMeta::new(&company, "zefix", 3600),
+            7,
+            200,
+            body.to_string().as_bytes(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(doc.attributes["uid"], "CHE-105.909.036");
+        assert_eq!(doc.attributes["ch_id"], "CH17030010013");
     }
 
     #[test]

@@ -4,10 +4,10 @@
 //! private channel, a user or a group without a public page gets the plain card. Every spelling
 //! (telegram.me, `/s/`, a capitalised name) is one resource at `https://t.me/{channel}[/{n}]`.
 use super::{
-    social::{self, Page, Shape},
+    social::{self, Body, Page, Shape},
     web_url, Context, Example, Source,
 };
-use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
+use crate::model::ResourceMeta;
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use scraper::{ElementRef, Html, Selector};
@@ -56,7 +56,7 @@ impl Target {
     /// `https://t.me/{name}`, `/{name}/{n}`, and the same under `/s/` (the preview), on t.me
     /// and telegram.me.
     pub fn of_uri(uri: &str) -> Option<Self> {
-        let url = web_url(uri)?;
+        let url = super::kit::web_url(uri)?;
         if !matches!(
             url.host_str()?,
             "t.me" | "www.t.me" | "telegram.me" | "www.telegram.me"
@@ -242,30 +242,15 @@ impl Source for Telegram {
         let target = Target::of_uri(uri).context("not a Telegram link")?;
         let doc = cx.card(uri, self);
         let mut doc = if target.post.is_some() {
-            let fetched = match cx
-                .fetch(
-                    &format!("{}?embed=1", target.root()),
-                    &FetchOptions::default(),
-                )
-                .await
-            {
-                Ok(fetched) => fetched,
-                Err(e) if e.is::<crate::resolver::interstitial::Blocked>() => {
-                    return Ok(social::blocked(doc, Shape::Post, SITE))
-                }
-                Err(e) => return Err(e),
-            };
-            match fetched.status {
-                200 => {
-                    let body = String::from_utf8_lossy(&fetched.body).into_owned();
+            match social::page_body(cx, &format!("{}?embed=1", target.root()), &[]).await? {
+                Body::Read { body, .. } => {
                     let read = target.clone();
                     crate::resolver::html::blocking(move || post_card(doc, &read, &body))
                         .await??
                         .unwrap_or_else(|| cx.missing(uri, self))
                 }
-                404 | 410 => cx.missing(uri, self),
-                401 | 403 => social::blocked(doc, Shape::Post, SITE),
-                s => anyhow::bail!("t.me answered {s}"),
+                Body::Missing => cx.missing(uri, self),
+                Body::Blocked => social::blocked(doc, Shape::Post, SITE),
             }
         } else {
             match social::page(cx, &target.root()).await? {
@@ -365,6 +350,54 @@ mod tests {
             post_card(base, &target(Some("999999999")), &read("post-missing.html"))
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    /// A post t.me withholds where the request came from (451) is the blocked card, as a
+    /// channel's page is: not an error, not `missing`.
+    #[tokio::test(start_paused = true)]
+    async fn a_withheld_post_is_the_blocked_card() {
+        let (egress, _) = crate::sources::fixture::egress(vec![(
+            "https://t.me/telegram/300?embed=1",
+            451,
+            "text/html",
+            b"<html><title>Unavailable</title></html>".to_vec(),
+        )]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let doc = Telegram
+            .resolve(&cx, "https://t.me/telegram/300")
+            .await
+            .unwrap();
+        assert_eq!(doc.status, crate::model::Status::Ok);
+        assert_eq!(doc.type_name, "SocialMediaPosting");
+        assert_eq!(doc.attributes["blocked"], "true");
+    }
+
+    /// A post whose fetch ends at a sign-in page is the blocked card at the post's root: every
+    /// spelling of the link stays one resource while t.me refuses.
+    #[tokio::test(start_paused = true)]
+    async fn a_walled_post_keeps_its_root() {
+        let (egress, _) = crate::sources::fixture::egress(vec![(
+            "https://t.me/telegram/300?embed=1",
+            302,
+            "text/html",
+            b"https://t.me/login".to_vec(),
+        )]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let doc = Telegram
+            .resolve(&cx, "https://t.me/s/Telegram/300")
+            .await
+            .unwrap();
+        assert_eq!(doc.attributes["blocked"], "true");
+        assert_eq!(
+            doc.source_root.as_deref(),
+            Some("https://t.me/telegram/300")
         );
     }
 

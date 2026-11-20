@@ -1,8 +1,9 @@
 //! Forgejo and Gitea instances (Codeberg, gitea.com and any other): repositories, branches,
 //! tags, releases and files, read from the instance's API (`/api/v1/repos/…`), never from its
 //! pages (Codeberg answers deep pages with a bot challenge, which is never solved). No key;
-//! Codeberg allows 2,000 requests per 10 minutes. Another host is asked once a day whether it
-//! runs Forgejo or Gitea (`/api/v1/version`); one that does not gets ordinary web cards.
+//! Codeberg allows 2,000 requests per 10 minutes. Another host is asked once a day, for a
+//! `/src/…` link, whether it runs Forgejo or Gitea (`/api/v1/version`); one that does not gets
+//! ordinary web cards.
 use super::{list, text, web_url, Budget, Context, Declined, Example, HostMemo, Source};
 use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::{Context as _, Result};
@@ -15,7 +16,7 @@ pub struct Forgejo;
 /// Which hosts answered as Forgejo or Gitea, and which did not.
 static INSTANCES: LazyLock<HostMemo> = LazyLock::new(HostMemo::default);
 
-/// Instances known without asking; their repository pages are read too.
+/// Instances known without asking; their repository pages and release links are read too.
 const KNOWN: &[&str] = &["codeberg.org", "gitea.com"];
 
 /// First path segments that are the instance's own pages, never an owner.
@@ -42,7 +43,8 @@ const RESERVED: &[&str] = &[
 ];
 
 /// How many leading segments of `src/{branch|tag}/…` are tried as the ref name: a branch name
-/// can contain `/`, so the split is asked of the API, shortest first.
+/// can contain `/`, so the split is asked of the API, shortest first. A link with more, none of
+/// them a ref, is declined: the ref may be a longer name.
 const MAX_REF_SEGMENTS: usize = 3;
 
 fn name(value: &str) -> bool {
@@ -111,7 +113,7 @@ pub struct Target {
 
 impl Target {
     pub fn of_uri(uri: &str) -> Option<Self> {
-        let url = web_url(uri)?;
+        let url = super::kit::web_url(uri)?;
         if url.scheme() != "https" || url.port().is_some() {
             return None;
         }
@@ -173,10 +175,20 @@ impl Target {
             .map(|n| (rest[..n].join("/"), rest[n..].join("/")))
             .collect()
     }
-    /// Whether only a Forgejo or Gitea instance has links of this shape. A bare `/{owner}/{repo}`
-    /// is read on known instances only.
+    /// Whether the ref may be longer than any split `splits` tries: the link has more leading
+    /// segments that could be the branch or tag than `MAX_REF_SEGMENTS`.
+    fn longer_ref(&self) -> bool {
+        match &self.object {
+            Object::At { kind, rest } => *kind != RefKind::Commit && rest.len() > MAX_REF_SEGMENTS,
+            _ => false,
+        }
+    }
+    /// Whether only a Forgejo or Gitea instance has links of this shape:
+    /// `src/{branch|tag|commit}/…`. A bare `/{owner}/{repo}` and `releases/tag/{tag}`, which is
+    /// GitHub's release link shape too, are read on known instances and on hosts that answered
+    /// as one.
     fn distinctive(&self) -> bool {
-        self.object != Object::Repo
+        matches!(self.object, Object::At { .. })
     }
 }
 
@@ -229,7 +241,9 @@ pub fn repo_card(mut doc: ResourceMeta, host: &str, body: &[u8]) -> Result<Resou
         .context("no repository page")?;
     doc.set_type("SoftwareSourceCode");
     doc.name = Some(full);
-    doc.description = text(&v["description"]);
+    doc.description = text(&v["description"])
+        .map(|d| super::without_addresses(&d))
+        .filter(|d| !d.is_empty());
     doc.image = text(&v["avatar_url"]).filter(|u| web_url(u).is_some());
     let topics: Vec<String> = v["topics"]
         .as_array()
@@ -398,8 +412,7 @@ pub fn release_card(
     Ok(doc)
 }
 
-/// Whether `/api/v1/version` answered as Forgejo or Gitea.
-/// Whether `/api/v1/version` answered as Forgejo or Gitea do: exactly `{"version": "…"}`, the
+/// Whether `/api/v1/version` answered as Forgejo and Gitea do: exactly `{"version": "…"}`, the
 /// value a version (`1.22.0`, `11.0.1+gitea-1.22.0`, `16.0.0-dev-785-465b60ef+gitea-1.22.0`).
 pub fn is_instance(status: u16, body: &[u8]) -> bool {
     status == 200
@@ -574,6 +587,8 @@ impl Source for Forgejo {
                     }
                 }
                 match found {
+                    // The ref may be one of the longer names not tried: the page's web card.
+                    None if target.longer_ref() => return Err(Declined.into()),
                     None => None,
                     Some((reference, path, Some(body))) if path.is_empty() => Some(ref_card(
                         cx.card(uri, self),
@@ -665,7 +680,7 @@ mod tests {
             }
         );
 
-        // Repository pages are read on known instances; deeper shapes on any host.
+        // Repository pages are read on known instances; the `src/…` shapes on any host.
         assert!(Forgejo.reads("https://codeberg.org/forgejo/forgejo"));
         assert!(Forgejo.reads("https://gitea.com/gitea/tea"));
         assert!(!Forgejo.reads("https://example.org/about/team"));
@@ -717,6 +732,20 @@ mod tests {
         // The page must be on the host asked.
         assert!(repo_card(base(uri), "gitea.com", &read("repo-forgejo.json")).is_err());
         assert!(repo_card(base(uri), "codeberg.org", &read("repo-missing.json")).is_err());
+    }
+
+    /// A card never publishes an address: a repository's description loses one.
+    #[test]
+    fn a_description_holds_no_address() {
+        let uri = "https://codeberg.org/forgejo/forgejo";
+        let mut record: Value = serde_json::from_slice(&read("repo-forgejo.json")).unwrap();
+        record["description"] = "A forge. Write to ann@example.org for help".into();
+        let record = serde_json::to_vec(&record).unwrap();
+        let doc = repo_card(base(uri), "codeberg.org", &record).unwrap();
+        assert_eq!(
+            doc.description.as_deref(),
+            Some("A forge. Write to for help")
+        );
     }
 
     #[test]
@@ -859,6 +888,40 @@ mod resolve_tests {
         assert_eq!(doc.status, Status::Missing);
     }
 
+    /// A branch no tried split finds is `missing` only when every split was tried. A link with
+    /// more segments may name a longer branch, so its page gets a web card.
+    #[tokio::test(start_paused = true)]
+    async fn a_branch_longer_than_the_splits_tried_is_declined() {
+        let routes: Vec<String> = [
+            "dependabot",
+            "dependabot/npm_and_yarn",
+            "dependabot/npm_and_yarn/babel",
+        ]
+        .iter()
+        .map(|name| format!("{API}/branches/{name}"))
+        .collect();
+        let (egress, recorded) = fixture::egress(
+            routes
+                .iter()
+                .map(|url| (url.as_str(), 404, JSON, read("branch-v11.0.json")))
+                .collect(),
+        );
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let page = "https://codeberg.org/forgejo/forgejo/src/branch/dependabot/npm_and_yarn/babel";
+        let answer = Forgejo.resolve(&cx, &format!("{page}/core-7.26.0")).await;
+        assert_eq!(recorded.asked(), routes);
+        assert!(
+            answer.is_err_and(|e| e.is::<Declined>()),
+            "a branch of four segments was not tried, yet the link is not declined"
+        );
+        // Every split of three segments was tried: the instance has no such branch.
+        let doc = Forgejo.resolve(&cx, page).await.unwrap();
+        assert_eq!(doc.status, Status::Missing);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn an_unknown_host_is_asked_once_and_remembered() {
         let (egress, recorded) = fixture::egress(vec![
@@ -911,6 +974,41 @@ mod resolve_tests {
             .await
             .unwrap_err()
             .is::<Declined>());
+    }
+
+    /// `releases/tag/{tag}` is GitHub's release link shape too: it is read on known instances
+    /// and on a host that answered as one, never on a host not asked yet.
+    #[tokio::test(start_paused = true)]
+    async fn a_release_link_is_read_on_instances_only() {
+        let release = "https://releases.example/a/b/releases/tag/v1";
+        for uri in ["https://github.com/o/r/releases/tag/v1", release] {
+            assert!(!Forgejo.reads(uri), "{uri}");
+        }
+        assert!(Forgejo.reads("https://codeberg.org/forgejo/forgejo/releases/tag/v11.0.1"));
+        // A `src/…` link is read on any host, which is asked whether it is an instance.
+        let (egress, _) = fixture::egress(vec![
+            (
+                "https://releases.example/api/v1/version",
+                200,
+                JSON,
+                read("gitea-version.json"),
+            ),
+            (
+                "https://releases.example/api/v1/repos/a/b/branches/main",
+                200,
+                JSON,
+                read("branch-forgejo.json"),
+            ),
+        ]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let branch = "https://releases.example/a/b/src/branch/main";
+        assert!(Forgejo.reads(branch));
+        let doc = Forgejo.resolve(&cx, branch).await.unwrap();
+        assert_eq!(doc.attributes["branch"], "main");
+        assert!(Forgejo.reads(release));
     }
 
     #[tokio::test(start_paused = true)]

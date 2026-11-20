@@ -39,6 +39,16 @@
     "status": 404,
     "url": "https://www.ecfr.gov/api/versioner/v1/ancestry/current/title-17.json?section=240.99zz"
   },
+  "ancestry_current_title-26_section-1.401(k)-1": {
+    "bytes": 1574,
+    "content_type": "application/json; charset=utf-8",
+    "file": "ancestry_current_title-26_section-1.401(k)-1.json",
+    "note": "ancestry of 26 CFR 1.401(k)-1 at current: a section number with parentheses",
+    "recorded_at": "2026-11-20T00:12:14+00:00",
+    "sha256": "917e051a8ecee6be4cdf63f759dc6b5bf0deb134e9687a5cae7036e1a634573d",
+    "status": 200,
+    "url": "https://www.ecfr.gov/api/versioner/v1/ancestry/current/title-26.json?section=1.401(k)-1"
+  },
   "html_cgi-bin_text-idx_legacy": {
     "accept": "text/html,application/xhtml+xml,*/*;q=0.8",
     "bytes": 0,

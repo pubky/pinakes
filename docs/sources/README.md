@@ -238,6 +238,11 @@ its registry lines, nothing else; `scripts/test` and `scripts/e2e --mock` then p
   (`crates/pinakes-core/tests/<name>.rs` or `tests/also_on_<name>.rs`) if it has one;
 - its live end-to-end samples, `e2e/samples/<name>.json`.
 
+An instance that runs the build without the source must also lose the source's
+`[sources.<name>]` block (and its `PINAKES__SOURCES__<NAME>__…` variables) from its own
+configuration first: a block for a source the build does not have stops the daemon at startup
+(`unknown source [sources.<name>]`), as a misspelled name does.
+
 `scripts/check-removals [--tests] [NAME…]` proves it: it removes each source on a scratch
 worktree by this list, checks that nothing of the source's own is left (it looks for the
 source's id and display name where every source has lines of its own, parses the example
@@ -248,13 +253,18 @@ runs the workspace's tests too, which catch what the build cannot (a test of ano
 relied on it, a recording it took along). A removal that would need any other edit is named
 before it is needed.
 
-Shared code stays (`sources/kit.rs`, `sources/biodiversity.rs`, `music.rs`, `music_sources.rs`,
-`wikipedia.rs`, `lookups/mod.rs`, `lookups/wikidata.rs`, `also_on/media.rs`,
+Shared code stays (`sources/kit.rs`, `sources/social.rs`, `sources/biodiversity.rs`, `music.rs`,
+`music_sources.rs`, `wikipedia.rs`, `lookups/mod.rs`, `lookups/wikidata.rs`, `also_on/media.rs`,
 `also_on/client_credentials.rs`, and what several sources ask one service with, in
 `also_on/*_api.rs`); code only one source uses is in that source's files, so a removal leaves no
-unused code behind (test helpers for any source excepted). A source that needs to know whether
-another one runs asks by its ID (`also_on::runs_by_id`, `also_on::enabled_by_id`), never by its
-module. Tests that need a source skip without it, so none has to change. The
-keys a removed source recorded stay until they expire (up to their lifetime), and keep their
-single-object rule: the daemon writes every registered namespace's rule to the database at start
-(`single_object_namespace`), so grouping reads it after the code is gone.
+unused code behind. The exceptions stay as shared code: test helpers for any source, a hook of the
+`Source` trait that one source implements today (`apply_title`), and helpers in `sources/mod.rs` and
+`sources/kit.rs` with one caller today (`card_of`, `kit::unix_ms`). Shared tables and the stored
+document's fields stay as they are, also when the source that goes was the only one to fill them: a
+card type in `data/local-types.json` or `kit::DATED` (the Bitcoin types), a related entry's
+`amount_sat`. A source that needs to know whether another one runs asks by its ID
+(`also_on::runs_by_id`, `also_on::enabled_by_id`), never by its module. Tests that need a source
+skip without it, so none has to change. The keys a removed source recorded stay until they expire
+(up to their lifetime), and keep their single-object rule: the daemon writes every registered
+namespace's rule to the database at start (`single_object_namespace`), so grouping reads it after
+the code is gone.

@@ -6,7 +6,7 @@
 //! `/feed/update/urn:li:activity:{id}`.
 use super::{
     social::{self, Body, OpenGraph, Shape},
-    web_url, Context, Example, Source,
+    Context, Example, Source,
 };
 use crate::model::ResourceMeta;
 use anyhow::{Context as _, Result};
@@ -15,6 +15,8 @@ use async_trait::async_trait;
 pub struct LinkedIn;
 
 const SITE: &str = "linkedin.com";
+/// LinkedIn's status for a request it refuses without an account.
+const REFUSED: &[u16] = &[999];
 
 /// A profile or company slug: letters, digits, `-`, `_` and percent-encoded characters.
 fn slug(value: &str) -> bool {
@@ -42,7 +44,7 @@ impl Target {
     /// `/posts/{slug}-activity-{id}-{tag}` and `/feed/update/urn:li:activity:{id}`, on
     /// linkedin.com with any host prefix (`www.`, `de.`, none).
     pub fn of_uri(uri: &str) -> Option<Self> {
-        let url = web_url(uri)?;
+        let url = super::kit::web_url(uri)?;
         let host = url.host_str()?;
         if host != "linkedin.com"
             && !host.strip_suffix(".linkedin.com").is_some_and(|prefix| {
@@ -98,6 +100,31 @@ impl Target {
             _ => Shape::Profile,
         }
     }
+    /// A post's author, as its `/posts/` address spells it (`{author}_…`).
+    fn author(&self) -> Option<String> {
+        match self {
+            Self::Post {
+                posts: Some(posts), ..
+            } => posts.split_once('_').map(|(author, _)| author.to_owned()),
+            _ => None,
+        }
+    }
+}
+
+/// The card of a link by its shape alone, with what the link itself spells (a slug, a post's
+/// author): what a page without the object's tags gives. Such a page (a consent page,
+/// LinkedIn's generic page) does not say whether the object exists.
+fn plain(doc: ResourceMeta, target: &Target) -> ResourceMeta {
+    let mut doc = target.shape().card(doc, SITE);
+    match target {
+        Target::Person(slug) => social::fact(&mut doc, "handle", Some(slug.clone())),
+        Target::Company(slug) => {
+            doc.set_type("Organization");
+            social::fact(&mut doc, "handle", Some(slug.clone()));
+        }
+        Target::Post { .. } => social::fact(&mut doc, "author", target.author()),
+    }
+    doc
 }
 
 /// Whether a page is LinkedIn's sign-in invitation in place of the object.
@@ -181,12 +208,7 @@ pub fn company_card(doc: ResourceMeta, slug: &str, tags: &OpenGraph) -> Option<R
 /// The card of a post from its page's tags, when LinkedIn shows the post rather than its
 /// sign-in invitation.
 pub fn post_card(doc: ResourceMeta, target: &Target, tags: &OpenGraph) -> ResourceMeta {
-    let author = match target {
-        Target::Post {
-            posts: Some(posts), ..
-        } => posts.split_once('_').map(|(author, _)| author.to_owned()),
-        _ => None,
-    };
+    let author = target.author();
     if sign_in(tags) || tags.title.is_none() {
         let mut doc = social::blocked(doc, Shape::Post, SITE);
         social::fact(&mut doc, "author", author);
@@ -275,17 +297,15 @@ impl Source for LinkedIn {
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
         let target = Target::of_uri(uri).context("not a LinkedIn link")?;
         let doc = cx.card(uri, self);
-        let mut doc = match social::page_body(cx, &target.root()).await? {
+        let mut doc = match social::page_body(cx, &target.root(), REFUSED).await? {
             Body::Read { body, .. } => {
                 let tags =
                     crate::resolver::html::blocking(move || social::open_graph(&body)).await??;
                 match &target {
-                    Target::Person(slug) => {
-                        person_card(doc, slug, &tags).unwrap_or_else(|| cx.missing(uri, self))
-                    }
-                    Target::Company(slug) => {
-                        company_card(doc, slug, &tags).unwrap_or_else(|| cx.missing(uri, self))
-                    }
+                    Target::Person(slug) => person_card(doc.clone(), slug, &tags)
+                        .unwrap_or_else(|| social::shape_only(plain(doc, &target))),
+                    Target::Company(slug) => company_card(doc.clone(), slug, &tags)
+                        .unwrap_or_else(|| social::shape_only(plain(doc, &target))),
                     Target::Post { .. } => post_card(doc, &target, &tags),
                 }
             }
@@ -428,13 +448,48 @@ mod tests {
         let shown = OpenGraph {
             title: Some("LinkedIn on LinkedIn: hello".into()),
             description: Some("hello world".into()),
-            image: None,
-            kind: Some("article".into()),
+            ..OpenGraph::default()
         };
         let doc = post_card(base, &target, &shown);
         assert_eq!(doc.name.as_deref(), Some("LinkedIn on LinkedIn: hello"));
         assert_eq!(doc.description.as_deref(), Some("hello world"));
         assert!(!doc.attributes.contains_key("blocked"));
+    }
+
+    /// A 200 page without a profile's or a company's tags (a consent page, LinkedIn's generic
+    /// page) does not say whether the object exists: the plain card, not `missing`.
+    #[tokio::test(start_paused = true)]
+    async fn a_page_without_tags_is_the_plain_card() {
+        let person = "https://www.linkedin.com/in/williamhgates";
+        let company = "https://www.linkedin.com/company/linkedin";
+        let shell = || {
+            b"<html><head><title>LinkedIn</title></head><body><p>Choose your cookie settings.</p></body></html>"
+                .to_vec()
+        };
+        let (egress, _) = crate::sources::fixture::egress(vec![
+            (person, 200, "text/html", shell()),
+            (company, 200, "text/html", shell()),
+        ]);
+        let cx = crate::sources::Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let doc = LinkedIn.resolve(&cx, person).await.unwrap();
+        assert_eq!(doc.status, crate::model::Status::Ok);
+        assert_eq!(doc.type_name, "Person");
+        assert_eq!(doc.name.as_deref(), Some("Profile on linkedin.com"));
+        assert_eq!(doc.attributes["handle"], "williamhgates");
+        assert!(!doc.attributes.contains_key("blocked"));
+        // It never replaces a stored card that says more.
+        assert!(doc.shape_only);
+        assert_eq!(doc.source_root.as_deref(), Some(person));
+        let doc = LinkedIn.resolve(&cx, company).await.unwrap();
+        assert_eq!(doc.status, crate::model::Status::Ok);
+        assert_eq!(doc.type_name, "Organization");
+        assert_eq!(doc.name.as_deref(), Some("Profile on linkedin.com"));
+        assert_eq!(doc.attributes["handle"], "linkedin");
+        assert!(doc.shape_only);
+        assert_eq!(doc.source_root.as_deref(), Some(company));
     }
 
     /// The resolver reads a `/posts/` link at its own address, and a link LinkedIn answers with

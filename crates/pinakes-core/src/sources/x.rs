@@ -53,9 +53,10 @@ pub enum Target {
 
 impl Target {
     /// `https://x.com/{handle}`, `/{handle}/status/{id}` (with anything after, a photo's
-    /// number) or `/i/web/status/{id}`, on x.com, twitter.com and their www. and mobile. hosts.
+    /// number), `/i/web/status/{id}` or `/i/status/{id}`, on x.com, twitter.com and their www.
+    /// and mobile. hosts. `i` is X's own path, never a handle: a post under it has no author.
     pub fn of_uri(uri: &str) -> Option<Self> {
-        let url = web_url(uri)?;
+        let url = super::kit::web_url(uri)?;
         if !matches!(
             url.host_str()?,
             "x.com"
@@ -69,14 +70,20 @@ impl Target {
         }
         let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
         match segments.as_slice() {
-            ["i", "web", "status", id, ..] if social::numeric(id) => Some(Self::Post {
-                author: None,
-                id: (*id).to_owned(),
-            }),
-            [user, "status", id, ..] if handle(user) && social::numeric(id) => Some(Self::Post {
-                author: Some(user.to_ascii_lowercase()),
-                id: (*id).to_owned(),
-            }),
+            ["i", "web", "status", id, ..] | ["i", "status", id, ..] if social::numeric(id) => {
+                Some(Self::Post {
+                    author: None,
+                    id: (*id).to_owned(),
+                })
+            }
+            [user, "status", id, ..]
+                if handle(user) && !user.eq_ignore_ascii_case("i") && social::numeric(id) =>
+            {
+                Some(Self::Post {
+                    author: Some(user.to_ascii_lowercase()),
+                    id: (*id).to_owned(),
+                })
+            }
             [user] if handle(user) && !RESERVED.contains(&user.to_ascii_lowercase().as_str()) => {
                 Some(Self::Profile(user.to_ascii_lowercase()))
             }
@@ -310,6 +317,24 @@ mod tests {
         );
         assert_eq!(X.alias_root("https://x.com/jack/status/20"), None);
         assert_eq!(X.alias_root("https://x.com/i/web/status/20"), None);
+    }
+
+    /// `i` is X's own path, never a handle: `/i/status/{id}` names a post without its author,
+    /// and no root is spelled from it.
+    #[test]
+    fn a_post_under_i_has_no_author() {
+        assert_eq!(
+            Target::of_uri("https://x.com/i/status/20"),
+            Some(Target::Post {
+                author: None,
+                id: "20".into(),
+            })
+        );
+        assert_eq!(
+            X.alias_root("https://twitter.com/i/status/20/photo/1"),
+            None
+        );
+        assert_eq!(Target::of_uri("https://x.com/I/status/20"), None);
     }
 
     #[test]

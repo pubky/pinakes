@@ -12,14 +12,14 @@
 //! time and well under five a second. Every file has its own licence and author, which the card
 //! carries as its attribution.
 use super::kit::{
-    fetch, float, host_and_segments, html_text, json, text, web_url, Card, Point, Request,
+    fetch, float, host_and_segments, html_text, number, text, web_url, Card, Point, Request,
 };
 use super::{Example, Source};
 use crate::model::ResourceMeta;
 use crate::wikimedia::{file_name, file_page};
 use anyhow::{bail, ensure, Context, Result};
 use async_trait::async_trait;
-use percent_encoding::{percent_decode_str, utf8_percent_encode, CONTROLS};
+use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, CONTROLS};
 use serde_json::Value;
 
 pub const SITE: &str = "Wikimedia Commons";
@@ -49,10 +49,7 @@ fn title(raw: &str) -> Option<Target> {
 }
 
 fn page_id(raw: &str) -> Option<Target> {
-    raw.parse()
-        .ok()
-        .filter(|id| *id > 0 && raw.len() <= 12)
-        .map(Target::PageId)
+    number(raw, 12).map(Target::PageId)
 }
 
 /// What a Commons link names: a file description page or the API's query for one file.
@@ -92,14 +89,22 @@ pub fn from_uri(uri: &str) -> Option<Target> {
     }
 }
 
+/// What URI normalisation escapes from a name's first `?` on, which it reads as a query.
+const QUERY: &AsciiSet = &CONTROLS.add(b'"');
+
 /// The identifier of a file by title; `None` for a page id until the answer names the title.
-/// Letters outside ASCII are percent-encoded, as URI normalisation writes them.
+/// Letters outside ASCII are percent-encoded, and so is a `"` after the name's first `?`, as URI
+/// normalisation writes them.
 pub fn identifier(target: &Target) -> Option<String> {
     match target {
-        Target::Title(name) => Some(format!(
-            "commons:File:{}",
-            utf8_percent_encode(name, CONTROLS)
-        )),
+        Target::Title(name) => {
+            let (path, query) = name.split_at(name.find('?').unwrap_or(name.len()));
+            Some(format!(
+                "commons:File:{}{}",
+                utf8_percent_encode(path, CONTROLS),
+                utf8_percent_encode(query, QUERY)
+            ))
+        }
         Target::PageId(_) => None,
     }
 }
@@ -190,11 +195,21 @@ fn answered_title(query: &Value, asked: String) -> String {
 
 /// A file, or `None` when Commons has no such file (or the page id is not a file's page).
 pub fn parse(status: u16, raw: &[u8], target: &Target) -> Result<Option<Card>> {
-    let Some(v) = json(status, raw, &[])? else {
-        return Ok(None);
-    };
-    if v.get("error").is_some() {
-        bail!("the API answered an error: {}", v["error"]["code"]);
+    ensure!(status == 200, "unexpected status {status}");
+    let v: Value = serde_json::from_slice(raw)?;
+    if let Some(error) = v.get("error") {
+        // The API is busy or read-only for a while: the file is read later.
+        if matches!(
+            error["code"].as_str(),
+            Some("ratelimited" | "maxlag" | "readonly")
+        ) {
+            return Err(crate::resolver::RetryLater {
+                class: "upstream",
+                seconds: 60,
+            }
+            .into());
+        }
+        bail!("the API answered an error");
     }
     let query = &v["query"];
     let pages = query["pages"].as_array().context("no pages")?;
@@ -352,9 +367,6 @@ impl Source for Commons {
             "page_id",
         ]
     }
-    fn budgets(&self) -> &'static [super::Budget] {
-        &[("commons.wikimedia.org", 1.0)]
-    }
     fn examples(&self) -> &'static [Example] {
         &[
             Example {
@@ -466,6 +478,9 @@ mod tests {
             "https://commons.wikimedia.org/w/index.php?title=File:Bitcoin.svg&diff=prev&oldid=1",
             "https://commons.wikimedia.org/w/index.php?curid=0",
             "https://commons.wikimedia.org/w/index.php?curid=abc",
+            // A page id is digits only.
+            "https://commons.wikimedia.org/w/index.php?curid=%2B30202095",
+            "https://commons.wikimedia.org/w/api.php?action=query&pageids=%2B30202095",
             "https://commons.wikimedia.org/w/api.php?titles=File:A.jpg%7CFile:B.jpg",
             "https://commons.wikimedia.org/wiki/File:a%2541.jpg",
         ] {
@@ -605,10 +620,32 @@ mod tests {
         assert!(parse(429, b"", &title(GATE)).is_err());
         assert!(parse(503, b"", &title(GATE)).is_err());
         assert!(parse(200, b"<html>", &title(GATE)).is_err());
-        let error = br#"{"error":{"code":"maxlag","info":"Waiting for a database server"}}"#;
-        assert!(parse(200, error, &title(GATE)).is_err());
         let gallery = br#"{"query":{"pages":[{"pageid":5,"ns":0,"title":"Bitcoin"}]}}"#;
         assert_eq!(parse(200, gallery, &Target::PageId(5)).unwrap(), None);
+    }
+
+    #[test]
+    fn api_errors_sent_with_status_200() {
+        let answer = |code: &str| {
+            let body = format!(r#"{{"error":{{"code":"{code}","info":"Details of {code}"}}}}"#);
+            parse(200, body.as_bytes(), &title(GATE)).unwrap_err()
+        };
+        // A busy or read-only API: the file is read later.
+        for code in ["ratelimited", "maxlag", "readonly"] {
+            let error = answer(code);
+            let retry = error
+                .downcast_ref::<crate::resolver::RetryLater>()
+                .unwrap_or_else(|| panic!("{code} is a failure: {error}"));
+            assert_eq!(retry.class, "upstream", "{code}");
+            assert!(retry.seconds >= 60, "{code}");
+            assert!(!format!("{error:#}").contains(code), "{error:#}");
+        }
+        // Any other error is a failure, whose message leaves the answer's text out.
+        let error = answer("badvalue");
+        assert!(error
+            .downcast_ref::<crate::resolver::RetryLater>()
+            .is_none());
+        assert!(!format!("{error:#}").contains("badvalue"), "{error:#}");
     }
 
     #[test]
@@ -666,6 +703,31 @@ mod tests {
             assert!(!c.reads(uri), "{uri}");
         }
         assert!(!c.invalid("https://upload.wikimedia.org/wikipedia/commons/4/46/Bitcoin.svg"));
+    }
+
+    #[test]
+    fn a_quote_in_a_name_keeps_its_root() {
+        let c = Commons;
+        for (link, root, name) in [
+            // URI normalisation leaves a `"` as it is before a name's first `?`,
+            (
+                "https://commons.wikimedia.org/wiki/File:%22Me%22.jpg",
+                "commons:File:\"Me\".jpg",
+                "\"Me\".jpg",
+            ),
+            // and percent-encodes it after one.
+            (
+                "https://commons.wikimedia.org/wiki/File:Who%3F_%22Me%22.jpg",
+                "commons:File:Who?_%22Me%22.jpg",
+                "Who?_\"Me\".jpg",
+            ),
+        ] {
+            assert_eq!(id(link).as_deref(), Some(root), "{link}");
+            assert_eq!(crate::model::identity(root).unwrap().1, root);
+            assert_eq!(from_root(root), Some(title(name)), "{root}");
+            assert!(c.reads(root) && !c.invalid(root), "{root}");
+            assert_eq!(c.alias_root(root), None, "{root}");
+        }
     }
 
     #[test]
