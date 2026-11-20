@@ -3436,6 +3436,10 @@ async fn a_shared_isrc_names_the_recording_the_tracks_length_picks(pool: sqlx::P
         "https://musicbrainz.org/recording/e00ebb77-541e-41f3-86ba-a90530414922",
         "https://tidal.com/track/491206015",
     ] {
+        // The page is read by its own source.
+        if uri.starts_with("https://musicbrainz.org/") && !has(&["musicbrainz_entity"]) {
+            continue;
+        }
         let id = store::ensure_resource(&pool, uri).await.unwrap();
         let mut d = ResourceMeta::new(uri, "jsonld", 86400);
         d.set_type("MusicRecording");
