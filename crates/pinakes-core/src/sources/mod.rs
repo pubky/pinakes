@@ -558,7 +558,8 @@ impl HostMemo {
     }
     pub fn set(&self, host: &str, is: bool) {
         let mut memo = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        if memo.len() >= Self::CAP {
+        // A new host at the cap takes the oldest answer's place; a known host only renews its own.
+        if memo.len() >= Self::CAP && !memo.contains_key(host) {
             if let Some(oldest) = memo
                 .iter()
                 .min_by_key(|(_, (_, at))| *at)
@@ -1820,6 +1821,18 @@ mod tests {
         assert_eq!(memo.get("blog.example"), Some(false));
         let error = anyhow::Error::from(Declined);
         assert!(error.is::<Declined>());
+        // At the cap, renewing a known host's answer evicts nothing.
+        let full = HostMemo::default();
+        for n in 0..HostMemo::CAP {
+            full.set(&format!("host{n}.example"), true);
+        }
+        full.set("host7.example", false);
+        assert_eq!(full.get("host0.example"), Some(true));
+        assert_eq!(full.get("host7.example"), Some(false));
+        // A new host takes the oldest answer's place.
+        full.set("new.example", true);
+        assert_eq!(full.get("host0.example"), None);
+        assert_eq!(full.get("new.example"), Some(true));
     }
 
     /// A switched-off source paces no host, and a source that needs a token paces none without
