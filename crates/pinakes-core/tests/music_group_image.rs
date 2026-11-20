@@ -15,17 +15,52 @@ use std::time::Duration;
 use tower::ServiceExt;
 const IMAGE: &str =
     "https://coverartarchive.org/release/2b4cd0d4-fe21-46ac-a4fc-ece7e990a9d4/front-500";
+/// An image no open database credits: a service's own.
+const OWN_IMAGE: &str = "https://images.example.com/cover.jpg";
 async fn save(pool: &PgPool, uri: &str, kind: &str, image: bool) -> String {
+    save_with(pool, uri, kind, image.then_some(IMAGE), image).await
+}
+/// Saves a `kind` card for `uri` with `image`; `credited` gives the image its Cover Art Archive
+/// credit.
+async fn save_with(
+    pool: &PgPool,
+    uri: &str,
+    kind: &str,
+    image: Option<&str>,
+    credited: bool,
+) -> String {
     let id = store::ensure_resource(pool, uri).await.unwrap();
     let mut doc = ResourceMeta::new(uri, "web", 86400);
     doc.set_type(kind);
     doc.name = Some("Song".into());
-    if image {
-        doc.image = Some(IMAGE.into());
+    doc.image = image.map(str::to_owned);
+    if credited {
         doc.credits=serde_json::from_value(json!([{"field":"image","provider":"cover_art_archive","source_url":"https://musicbrainz.org/release/2b4cd0d4-fe21-46ac-a4fc-ece7e990a9d4/cover-art","license":"","excerpted":false,"modified":false}])).unwrap();
     }
     store::save_document(pool, &id, 0, &doc).await.unwrap();
     id
+}
+/// Gives each of `ids` the hub key `key` and groups them: one group.
+async fn grouped(pool: &PgPool, cfg: &Config, key: &str, ids: &[&String]) {
+    for id in ids {
+        also_on::record(
+            pool,
+            id,
+            "musicbrainz",
+            Found {
+                keys: vec![Key {
+                    key: key.into(),
+                    via: "musicbrainz".into(),
+                }],
+                ..Default::default()
+            },
+            Duration::from_secs(86400),
+            &cfg.also_on,
+        )
+        .await
+        .unwrap();
+    }
+    common::drain_groups(pool, &cfg.groups).await;
 }
 async fn read(app: &axum::Router, id: &str) -> Value {
     let mut req = Request::builder()
@@ -183,11 +218,24 @@ async fn committed_music_groups_are_logged_and_capped(pool: PgPool) {
     assert!(text.contains("group reconciliation committed"), "{text}");
     assert!(text.contains("group size cap reached"), "{text}");
 }
+/// Two tracks of one album each name the album with a link keyed by the album's own key. A
+/// link's key belongs to what it names: the album takes it, the tracks do not, so neither track
+/// joins the album or the other track. A page that holds the album's key itself joins the album,
+/// and a page a track's link names by the track's key joins that track.
 #[sqlx::test(migrations = "../../migrations")]
 async fn album_link_does_not_union_track_groups(pool: PgPool) {
     let cfg = Config::default();
+    let release = "mb:release:2b4cd0d4-fe21-46ac-a4fc-ece7e990a9d4";
     let album_uri = "https://musicbrainz.org/release/2b4cd0d4-fe21-46ac-a4fc-ece7e990a9d4";
+    let same_track_uri = "https://open.spotify.com/track/0AAAAAAAAAAAAAAAAAAAAA";
     let album = save(&pool, album_uri, "MusicAlbum", true).await;
+    let same_album = save(
+        &pool,
+        "https://example.com/albums/2b4cd0d4",
+        "MusicAlbum",
+        false,
+    )
+    .await;
     let a = save(
         &pool,
         "https://www.deezer.com/track/3507590481",
@@ -202,7 +250,23 @@ async fn album_link_does_not_union_track_groups(pool: PgPool) {
         false,
     )
     .await;
-    for (id, key) in [(&a, "isrc:NLH2L2500268"), (&b, "isrc:NLH2L2500269")] {
+    let same_track = save(&pool, same_track_uri, "MusicRecording", false).await;
+    for (id, key, links) in [
+        (&same_album, release, vec![]),
+        (
+            &a,
+            "isrc:NLH2L2500268",
+            vec![
+                Link::new(album_uri, "MusicBrainz", "musicbrainz").keyed(release),
+                Link::new(same_track_uri, "Spotify", "musicbrainz").keyed("isrc:NLH2L2500268"),
+            ],
+        ),
+        (
+            &b,
+            "isrc:NLH2L2500269",
+            vec![Link::new(album_uri, "MusicBrainz", "musicbrainz").keyed(release)],
+        ),
+    ] {
         also_on::record(
             &pool,
             id,
@@ -212,7 +276,7 @@ async fn album_link_does_not_union_track_groups(pool: PgPool) {
                     key: key.into(),
                     via: "musicbrainz".into(),
                 }],
-                links: vec![Link::new(album_uri, "MusicBrainz", "musicbrainz")],
+                links,
                 ..Default::default()
             },
             Duration::from_secs(86400),
@@ -223,13 +287,105 @@ async fn album_link_does_not_union_track_groups(pool: PgPool) {
     }
     common::drain_groups(&pool, &cfg.groups).await;
     let app = api::router(AppState::new(pool.clone(), cfg).unwrap());
-    for id in [&a, &b, &album] {
-        let v = read(&app, id).await;
-        assert!(
-            v["group"].is_null() || v["group"]["size"] == 1,
-            "containment isn't identity: {v}"
-        );
-    }
+    let group = |v: Value| v["group"].clone();
+    // The keys do join here: the album with the page that holds its key, the first track with
+    // the page its link names by the track's key.
+    let albums = group(read(&app, &album).await);
+    assert_eq!(albums["size"], 2, "{albums}");
+    assert_eq!(group(read(&app, &same_album).await), albums);
+    let tracks = group(read(&app, &a).await);
+    assert_eq!(tracks["size"], 2, "{tracks}");
+    assert_eq!(group(read(&app, &same_track).await), tracks);
+    // Containment is not identity: the tracks' group is not the album's, and the second track,
+    // which shares only the album with the first, is in neither.
+    assert_ne!(tracks["id"], albums["id"]);
+    let v = read(&app, &b).await;
+    assert!(v["group"].is_null(), "{v}");
+}
+/// A card takes a group member's image only from a healthy member of its own type whose image
+/// an open database credits, and only when it has none of its own. Each case is refused first
+/// and lends once the one thing in the way is changed (or, for the last, lends until it is).
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_image_is_borrowed_only_from_a_healthy_same_type_member_with_a_credited_image(
+    pool: PgPool,
+) {
+    let cfg = Config::default();
+    let app = api::router(AppState::new(pool.clone(), cfg.clone()).unwrap());
+    let lent = |v: &Value| {
+        v["credits"]
+            .as_array()
+            .is_some_and(|credits| credits.iter().any(|c| c["provider"] == "cover_art_archive"))
+    };
+
+    // A member of another type: an album's cover is not a recording's.
+    let borrower_uri = "https://example.com/borrow/type/track";
+    let donor_uri = "https://example.com/borrow/type/album";
+    let borrower = save(&pool, borrower_uri, "MusicRecording", false).await;
+    let donor = save(&pool, donor_uri, "MusicAlbum", true).await;
+    grouped(&pool, &cfg, "isrc:NLH2L2500301", &[&borrower, &donor]).await;
+    let v = read(&app, &borrower).await;
+    assert_eq!(v["group"]["size"], 2, "{v}");
+    assert!(v["image"].is_null() && !lent(&v), "another type: {v}");
+    save(&pool, donor_uri, "MusicRecording", true).await;
+    common::drain_groups(&pool, &cfg.groups).await;
+    let v = read(&app, &borrower).await;
+    assert_eq!(v["group"]["size"], 2, "{v}");
+    assert!(v["image"] == IMAGE && lent(&v), "the same type: {v}");
+
+    // A member's image that no open database credits.
+    let borrower_uri = "https://example.com/borrow/store/track";
+    let donor_uri = "https://example.com/borrow/store/other";
+    let borrower = save(&pool, borrower_uri, "MusicRecording", false).await;
+    let donor = save_with(&pool, donor_uri, "MusicRecording", Some(OWN_IMAGE), false).await;
+    grouped(&pool, &cfg, "isrc:NLH2L2500302", &[&borrower, &donor]).await;
+    let v = read(&app, &borrower).await;
+    assert_eq!(v["group"]["size"], 2, "{v}");
+    assert!(
+        v["image"].is_null() && !lent(&v),
+        "an uncredited image: {v}"
+    );
+    save(&pool, donor_uri, "MusicRecording", true).await;
+    common::drain_groups(&pool, &cfg.groups).await;
+    let v = read(&app, &borrower).await;
+    assert!(v["image"] == IMAGE && lent(&v), "a credited image: {v}");
+
+    // A card with an image of its own keeps it.
+    let borrower_uri = "https://example.com/borrow/own/track";
+    let donor_uri = "https://example.com/borrow/own/other";
+    let borrower = save_with(
+        &pool,
+        borrower_uri,
+        "MusicRecording",
+        Some(OWN_IMAGE),
+        false,
+    )
+    .await;
+    let donor = save(&pool, donor_uri, "MusicRecording", true).await;
+    grouped(&pool, &cfg, "isrc:NLH2L2500303", &[&borrower, &donor]).await;
+    let v = read(&app, &borrower).await;
+    assert_eq!(v["group"]["size"], 2, "{v}");
+    assert!(v["image"] == OWN_IMAGE && !lent(&v), "its own image: {v}");
+    save(&pool, borrower_uri, "MusicRecording", false).await;
+    common::drain_groups(&pool, &cfg.groups).await;
+    let v = read(&app, &borrower).await;
+    assert!(v["image"] == IMAGE && lent(&v), "no image of its own: {v}");
+
+    // A member that is not readable lends nothing.
+    let borrower_uri = "https://example.com/borrow/missing/track";
+    let donor_uri = "https://example.com/borrow/missing/other";
+    let borrower = save(&pool, borrower_uri, "MusicRecording", false).await;
+    let donor = save(&pool, donor_uri, "MusicRecording", true).await;
+    grouped(&pool, &cfg, "isrc:NLH2L2500304", &[&borrower, &donor]).await;
+    let v = read(&app, &borrower).await;
+    assert!(v["image"] == IMAGE && lent(&v), "a healthy member: {v}");
+    sqlx::query("UPDATE resource SET status='missing' WHERE id=$1")
+        .bind(&donor)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let v = read(&app, &borrower).await;
+    assert_eq!(v["group"]["size"], 2, "{v}");
+    assert!(v["image"].is_null() && !lent(&v), "a missing member: {v}");
 }
 /// A solo artist's card is a `Person`: on MusicBrainz or a music service it takes its group's
 /// keys and image like any other music card. A `Person` page anywhere else takes neither.
