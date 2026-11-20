@@ -928,8 +928,8 @@ async fn answers_about_the_link_still_dead_letter(pool: PgPool) {
 async fn durable_queue_backoff_dead_letter_refresh_and_fencing(pool: PgPool) {
     let cfg = QueueConfig {
         max_failures: 2,
-        backoff_secs: 2,
-        max_backoff_secs: 10,
+        backoff_secs: 60,
+        max_backoff_secs: 300,
         ..Default::default()
     };
     let id = store::ensure_resource(&pool, "https://example.org/")
@@ -947,7 +947,9 @@ async fn durable_queue_backoff_dead_letter_refresh_and_fencing(pool: PgPool) {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert!(seconds > 1.0 && seconds <= 2.0);
+    // The first backoff, less the time since the failure was written (half of it at most, so a
+    // slow machine does not fail this).
+    assert!(seconds > 30.0 && seconds <= 60.0, "{seconds}");
     sqlx::query("UPDATE resource SET next_attempt_at=now()-interval '1 second'")
         .execute(&pool)
         .await
@@ -967,15 +969,15 @@ async fn durable_queue_backoff_dead_letter_refresh_and_fencing(pool: PgPool) {
         .await
         .unwrap();
     assert!(queue::claim(&pool, "web", &cfg).await.unwrap().is_none());
-    assert_eq!(queue::backoff(&cfg, 1), 2);
-    assert_eq!(queue::backoff(&cfg, 2), 4);
-    assert_eq!(queue::backoff(&cfg, 99), 10);
+    assert_eq!(queue::backoff(&cfg, 1), 60);
+    assert_eq!(queue::backoff(&cfg, 2), 120);
+    assert_eq!(queue::backoff(&cfg, 99), 300);
     sqlx::query("UPDATE resource SET dead_letter=false,next_attempt_at=now(),attempts=0")
         .execute(&pool)
         .await
         .unwrap();
     let third = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
-    // A worker completing an expired lease cannot overwrite a newer worker's result.
+    // A worker whose link was claimed again since (`first`, two claims ago) writes nothing.
     queue::run_job(&pool, &FakeResolver { fail: false }, &cfg, &first)
         .await
         .unwrap();

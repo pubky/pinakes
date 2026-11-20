@@ -264,22 +264,23 @@ async fn group_fence_ignores_unrelated_saves_and_retries_changed_inputs(pool: Pg
         let id = b.clone();
         let pending =
             tokio::spawn(async move { groups::reconcile(&pool2, &id, &Default::default()).await });
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query='SELECT pg_advisory_xact_lock_shared($1)')")
-                    .fetch_one(&pool).await.unwrap();
-                if waiting { break; }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        }).await.unwrap();
+        common::lock_waiters_reach(&pool, 1, "the group run").await;
         sqlx::query("UPDATE resource SET doc=jsonb_set(doc,'{name}', '\"Concurrent save\"'),name='Concurrent save' WHERE id=$1")
             .bind(changed).execute(&mut *writer).await.unwrap();
+        let committed = std::time::Instant::now();
         writer.commit().await.unwrap();
         assert_eq!(pending.await.unwrap(), changed == &other);
         if changed == &b {
             let retry:(i32,f64)=sqlx::query_as("SELECT fence_attempts,extract(epoch FROM(next_attempt_at-now()))::float8 FROM group_dirty WHERE resource_id=$1").bind(&b).fetch_one(&pool).await.unwrap();
             assert_eq!(retry.0, 1);
-            assert!(retry.1 > 4.0 && retry.1 <= 10.0);
+            // The retry was set after the commit, 5 to 10 seconds ahead: what is left of it and
+            // the time since the commit are together at least 5 seconds, however late this read.
+            let since = committed.elapsed().as_secs_f64();
+            assert!(
+                retry.1 <= 10.0 && retry.1 + since >= 5.0,
+                "{} s left, {since} s after the commit",
+                retry.1
+            );
             for _ in 0..3 {
                 sqlx::query("UPDATE resource SET group_revision=group_revision+1 WHERE id=$1")
                     .bind(&b)
@@ -1621,10 +1622,17 @@ async fn lock_contention_retries_shortly_without_charging(pool: PgPool) {
     for _ in 0..6 {
         sqlx::query("INSERT INTO group_dirty(resource_id) VALUES($1) ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=now()")
             .bind(&a).execute(&pool).await.unwrap();
+        let began = std::time::Instant::now();
         assert!(!groups::reconcile(&pool, &a, &Default::default()).await);
         let (fence, attempts, error, delay): (i32, i32, String, f64) = sqlx::query_as("SELECT fence_attempts,attempts,last_error,extract(epoch FROM next_attempt_at-now())::float8 FROM group_dirty WHERE resource_id=$1").bind(&a).fetch_one(&pool).await.unwrap();
         assert_eq!((fence, attempts, error.as_str()), (0, 0, "lock_busy"));
-        assert!((0.5..=3.1).contains(&delay), "{delay}");
+        // Parked 1 to 3 seconds ahead at some time since the run began: what is left of the
+        // wait and the time since then are together at least a second, however late this read.
+        let since = began.elapsed().as_secs_f64();
+        assert!(
+            delay <= 3.1 && delay + since >= 1.0,
+            "{delay} s left, {since} s after the run began"
+        );
     }
     sqlx::query("SELECT pg_advisory_unlock($1)")
         .bind(pinakes_core::locks::GROUP)
@@ -2494,18 +2502,7 @@ async fn removing_a_hub_key_and_saving_its_resource_take_locks_in_one_order(pool
                 .await
         }
     });
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'DELETE FROM resource_key%')")
-                .fetch_one(&pool).await.unwrap();
-            if waiting {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap();
+    common::lock_waiters_reach(&pool, 1, "the key's removal").await;
     // The save's new document marks the resource dirty.
     sqlx::query("UPDATE resource SET doc=jsonb_set(doc,'{name}','\"Saved\"') WHERE id=$1")
         .bind(&id)
@@ -2552,18 +2549,7 @@ async fn removing_a_group_unit_and_saving_a_member_take_locks_in_one_order(pool:
                 .await
         }
     });
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'DELETE FROM group_unit%')")
-                .fetch_one(&pool).await.unwrap();
-            if waiting {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap();
+    common::lock_waiters_reach(&pool, 1, "the unit's removal").await;
     sqlx::query("UPDATE resource SET doc=jsonb_set(doc,'{name}','\"Saved\"') WHERE id=$1")
         .bind(&page)
         .execute(&mut *saving)

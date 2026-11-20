@@ -2071,7 +2071,7 @@ async fn a_free_commons_file_wins_over_the_cover() {
 /// Each part of an album's enrichment ends on its own. A cover that comes after the budget
 /// leaves the image unread and the article found stays; a Wikidata that refuses the album's
 /// item for now (503) leaves the album its cover, the image and description unread.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn each_part_of_an_album_reading_ends_on_its_own() {
     let t = Recorded::new(Mode {
         cover_art_delay_ms: 30_000,
@@ -2112,7 +2112,7 @@ async fn each_part_of_an_album_reading_ends_on_its_own() {
 /// answers come after the card's enrichment budget, the cover's in time. The card shows the
 /// cover and its credit; image and description stay unread (a stored card's come back), and the
 /// card is read again early.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_busy_wikidata_leaves_the_album_its_cover() {
     let t = Recorded::new(Mode {
         wikidata_delay_ms: 3000,
@@ -2153,12 +2153,12 @@ async fn a_stored_commons_image_stays_over_the_cover_while_wikidata_is_busy(pool
     tag(&pool, &[KIND_OF_BLUE]).await;
     let busy = |album_has_image| Mode {
         album_has_image,
-        wikidata_delay_ms: 3000,
+        wikidata_delay_ms: 30_000,
         ..Default::default()
     };
     let first = resolve_once(
         &pool,
-        &web_within(Recorded::new(busy(true)), 1000),
+        &web_within(Recorded::new(busy(true)), 2000),
         KIND_OF_BLUE,
     )
     .await;
@@ -2172,7 +2172,7 @@ async fn a_stored_commons_image_stays_over_the_cover_while_wikidata_is_busy(pool
     assert_eq!(stored.image.as_deref(), Some(MILES_IMAGE));
     let kept = resolve_once(
         &pool,
-        &web_within(Recorded::new(busy(true)), 1000),
+        &web_within(Recorded::new(busy(true)), 2000),
         KIND_OF_BLUE,
     )
     .await;

@@ -1245,11 +1245,11 @@ async fn a_pending_preview_is_waited_for_by_its_status_and_read_once(pool: PgPoo
 
 /// What happens to a preview while it is waited for decides the answer: a link deleted
 /// meanwhile is a 404, and one that became an alias answers with its root's card as soon as the
-/// root has one.
+/// root has one. Either answer follows the change, not the end of the window.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_preview_that_goes_or_becomes_an_alias_while_waited_for(pool: PgPool) {
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
-    // Runs `change` on the link's row once the request has stored it.
+    // Runs `change` on the link's row once the request has stored it: when the change was made.
     let meanwhile = |uri: &'static str, change: &'static str, root: Option<String>| {
         let pool = pool.clone();
         tokio::spawn(async move {
@@ -1270,14 +1270,20 @@ async fn a_preview_that_goes_or_becomes_an_alias_while_waited_for(pool: PgPool) 
                 .execute(&pool)
                 .await
                 .unwrap();
+            std::time::Instant::now()
         })
     };
+    // The wait reads the row's status every 50 ms, so the answer follows the change at once. The
+    // change is made as soon as the row is stored, so an answer held to the end of the
+    // three-second window comes almost three seconds after it. Two seconds between the two
+    // tells them apart, counted from the change: the time the request and the change take to
+    // start on a loaded machine is not in it.
+    let prompt = std::time::Duration::from_secs(2);
     let gone = meanwhile(
         "https://example.org/gone-meanwhile",
         "DELETE FROM resource WHERE id=$1 AND $2::text IS NULL",
         None,
     );
-    let start = std::time::Instant::now();
     // The document declares no 404 for this route: the answer is not checked against it.
     let (code, answer) = send(
         &app,
@@ -1287,11 +1293,13 @@ async fn a_preview_that_goes_or_becomes_an_alias_while_waited_for(pool: PgPool) 
         |_, _, _, _| {},
     )
     .await;
-    gone.await.unwrap();
+    let answered = std::time::Instant::now();
+    let went = gone.await.unwrap();
     assert_eq!(code, 404);
     assert_eq!(answer["error"], "resource expired");
     // Answered when the row went, not at the end of the window.
-    assert!(start.elapsed() < std::time::Duration::from_secs(3));
+    let after = answered.saturating_duration_since(went);
+    assert!(after < prompt, "answered {after:?} after the row went");
 
     let root = store::ensure_resource(&pool, "https://example.org/root")
         .await
@@ -1304,7 +1312,6 @@ async fn a_preview_that_goes_or_becomes_an_alias_while_waited_for(pool: PgPool) 
         "INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'canonical')",
         Some(root.clone()),
     );
-    let start = std::time::Instant::now();
     let (code, answer) = call(
         &app,
         "POST",
@@ -1312,11 +1319,16 @@ async fn a_preview_that_goes_or_becomes_an_alias_while_waited_for(pool: PgPool) 
         Some(json!({"uri":"https://example.org/alias-meanwhile"})),
     )
     .await;
-    aliased.await.unwrap();
+    let answered = std::time::Instant::now();
+    let became = aliased.await.unwrap();
     assert_eq!(code, 200);
     assert_eq!(answer["id"], root.as_str());
     assert_eq!(answer["name"], "Root");
-    assert!(start.elapsed() < std::time::Duration::from_secs(3));
+    let after = answered.saturating_duration_since(became);
+    assert!(
+        after < prompt,
+        "answered {after:?} after it became an alias"
+    );
 }
 
 #[sqlx::test(migrations = "../../migrations")]

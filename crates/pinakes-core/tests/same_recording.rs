@@ -76,8 +76,15 @@ async fn found(pool: &PgPool, id: &str, source: &str, keys: &[&str], facts: &[(&
     .unwrap();
 }
 
+/// The pass, until nothing is due. A recording that stays due fails the test instead of hanging
+/// it.
 async fn pass(pool: &PgPool, config: &Config) {
-    while same_recording::drain(pool, config, 200).await.unwrap() > 0 {}
+    for _ in 0..10_000 {
+        if same_recording::drain(pool, config, 200).await.unwrap() == 0 {
+            return;
+        }
+    }
+    panic!("the same-recording pass still has work after 10000 rounds");
 }
 
 /// The ids on a page of search results.

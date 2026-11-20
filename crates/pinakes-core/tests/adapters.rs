@@ -2452,7 +2452,7 @@ async fn platform_ua_config_class_c_and_secret_projection(pool: PgPool) {
     }
     assert!(!serde_json::to_string(&doc).unwrap().contains("test-secret"));
     // A refused key (401, 403) is counted where an alert reads it; a rate limit (429) is not.
-    // No other test here has Ticketmaster refuse.
+    let turn = common::REFUSALS.lock().await;
     for status in [401, 403, 429] {
         let (egress, t) = mock_egress(vec![
             (status, json!({"fault": {"faultstring": "Invalid ApiKey"}})),
@@ -2472,6 +2472,7 @@ async fn platform_ua_config_class_c_and_secret_projection(pool: PgPool) {
             assert!(counted >= 1, "{status}");
         }
     }
+    drop(turn);
     let (egress, _) = mock_egress(vec![(503, Value::Null)]);
     platform.web.egress = egress;
     let uri = "https://www.facebook.com/events/fixture";
@@ -3513,11 +3514,13 @@ fn nested_flight_and_nuxt_share_one_deadline() {
         serde_json::to_string(&strings).unwrap()
     );
     for id in ["xceed", "ents24"] {
-        let before = std::time::Instant::now();
+        // The deadline is 500 ms of the clock, so of this thread's CPU time at most.
+        let before = common::thread_cpu_time();
         assert!(state::parse(id, "https://example.org/event", html.as_bytes()).is_none());
+        let spent = common::thread_cpu_time() - before;
         assert!(
-            before.elapsed() < std::time::Duration::from_millis(1200),
-            "deadline exceeded for {id}"
+            spent < std::time::Duration::from_millis(1200),
+            "deadline exceeded for {id}: {spent:?}"
         );
     }
 }

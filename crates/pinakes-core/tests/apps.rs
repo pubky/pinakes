@@ -134,7 +134,7 @@ async fn an_apps_store_links_join_one_group(pool: sqlx::PgPool) {
     let config = Config::default();
     let cx = also_on::Context {
         egress: Egress::with_backends(
-            Default::default(),
+            common::unpaced_egress_config(),
             Arc::new(PublicDns),
             Arc::new(Recorded::new()),
         ),

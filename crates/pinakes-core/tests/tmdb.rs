@@ -752,12 +752,13 @@ async fn the_credential_never_leaves_the_request(pool: PgPool) {
             let api = Api::new();
             *api.answer.lock().unwrap() = answer;
             let cx = cx(config(Some(credential)), &api);
+            let _turn = common::REFUSALS.lock().await;
             let before = common::token_refusals("tmdb");
             look_up(&pool, &cx).await;
             read_again(&pool, &reader).await;
             assert!(!api.seen().is_empty());
             // Only the refusal (401) is counted where an alert reads it, never a rate limit or
-            // an outage. No other test here has TMDB refuse.
+            // an outage.
             let counted = common::token_refusals("tmdb") - before;
             if answer == Answer::Refused {
                 assert!(counted >= 1);

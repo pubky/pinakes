@@ -16,6 +16,10 @@ pub fn token_refusals(source: &str) -> u64 {
         .find(|(s, _)| *s == source)
         .map_or(0, |(_, n)| n)
 }
+/// Held by a test while it asserts an exact difference of `token_refusals`, and by every other
+/// test of the same file that has that source's credential refused: the counter is the
+/// process's, so only tests that take turns can tell their own refusals from another's.
+pub static REFUSALS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// A schema with its `$ref` followed; a dangling reference is an error and checks nothing.
 fn resolve<'a>(doc: &'a Value, schema: &'a Value, at: &str, errors: &mut Vec<String>) -> &'a Value {

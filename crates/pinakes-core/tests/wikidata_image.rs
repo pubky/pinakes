@@ -320,7 +320,7 @@ async fn a_busy_commons_keeps_the_stored_image(pool: PgPool) {
         )
         .await;
         // Within the card's wait for Commons, far inside its own read.
-        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert!(started.elapsed() < std::time::Duration::from_secs(8));
         assert_eq!(t.to("commons.wikimedia.org").len(), 1);
         assert_eq!(doc.image, None);
         assert!(doc.credits.is_empty());

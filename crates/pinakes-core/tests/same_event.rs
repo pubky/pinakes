@@ -67,8 +67,14 @@ async fn save(pool: &PgPool, doc: &ResourceMeta) -> String {
     id
 }
 
+/// The pass, until nothing is due. A unit that stays due fails the test instead of hanging it.
 async fn pass(pool: &PgPool, config: &Config) {
-    while same_event::drain(pool, config, 200).await.unwrap() > 0 {}
+    for _ in 0..10_000 {
+        if same_event::drain(pool, config, 200).await.unwrap() == 0 {
+            return;
+        }
+    }
+    panic!("the same-event pass still has work after 10000 rounds");
 }
 
 /// How many of `ids` have a unit in a group, of how many units they have.

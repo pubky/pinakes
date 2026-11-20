@@ -757,9 +757,10 @@ async fn deezer_s_api_stays_off_and_its_links_stay(pool: sqlx::PgPool) {
     if !has(&["musicbrainz", "wikidata"]) {
         return;
     }
-    // The configuration as the daemon builds it, Deezer switched off, and its egress
+    // The default configuration (stated here: nothing of the process environment is read) with
+    // Deezer switched off, and the egress rule the daemon derives from it
     // (`also_on::off_hosts`).
-    let mut config = Config::load(None).unwrap();
+    let mut config = Config::default();
     if has(&["deezer"]) {
         config.also_on.sources.insert(
             "deezer".into(),

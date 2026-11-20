@@ -30,6 +30,9 @@ export DATABASE_URL='postgresql:///postgres?host=/var/run/postgresql'
 | `scripts/lock-waits COMMAND…` | Samples the database every 50 ms while COMMAND runs (COMMAND starts once the sampler has its first sample, or has stopped) and prints which locks backends waited on; fails, without repeating any part of `DATABASE_URL`, when it could not sample. Needs `psql` and `python3`. |
 
 Tests use local servers, injected transports and recorded fixtures instead of public services.
+The suite runs on Linux: the parse-worker tests (`--test parse_worker`,
+`--test parse_worker_stub`) read `/proc` and run `/bin/sh` stubs, and the CPU-time bounds use the
+thread clock (`CLOCK_THREAD_CPUTIME_ID`).
 
 ## Layout
 

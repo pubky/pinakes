@@ -2765,7 +2765,7 @@ async fn a_run_takes_the_write_order_as_saves_do(pool: PgPool) {
         .await
         .unwrap();
     let recording = run(pool.clone(), id.clone());
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    common::lock_waiters_reach(&pool, 1, "the run behind the exclusive writer").await;
     assert!(
         !recording.is_finished(),
         "the run waits for the exclusive writer"

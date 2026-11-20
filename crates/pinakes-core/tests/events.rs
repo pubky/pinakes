@@ -1808,7 +1808,10 @@ async fn performers_record_where_the_fetch_ended_on_every_path(pool: PgPool) {
     );
     let service = pinakes_core::event::service::EventService {
         pool: pool.clone(),
-        config: EventConfig::default(),
+        config: EventConfig {
+            geocoding: false,
+            ..Default::default()
+        },
         osm: Arc::new(OsmResolver::new(pool, OsmConfig::default()).unwrap()),
     };
     let asked = "https://www.songkick.com/concerts/43402127-radiohead-at-rac-arena";
@@ -4252,18 +4255,7 @@ async fn retention_waits_for_a_writer_holding_nothing_else(pool: PgPool) {
             let pool = pool.clone();
             async move { pinakes_core::changes::retain(&pool, 90).await }
         });
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock')")
-                    .fetch_one(&pool).await.unwrap();
-                if waiting {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .unwrap();
+        common::lock_waiters_reach(&pool, 1, "retention").await;
         sqlx::query("UPDATE resource SET group_revision=group_revision+1 WHERE id=$1")
             .bind(next)
             .execute(&mut *writer)
@@ -4405,7 +4397,7 @@ fn a_rule_whose_periods_would_hold_too_many_dates_is_never_expanded() {
                 event(&bad),
                 event("UID:good\nDTSTART:20261020T120000Z\nSUMMARY:Healthy")
             ));
-            let began = std::time::Instant::now();
+            let began = common::thread_cpu_time();
             let container = calendar::parse(
                 "https://example.org/feed.ics",
                 body.as_bytes(),
@@ -4416,7 +4408,7 @@ fn a_rule_whose_periods_would_hold_too_many_dates_is_never_expanded() {
             .container
             .unwrap();
             assert!(
-                began.elapsed() < std::time::Duration::from_secs(5),
+                common::thread_cpu_time() - began < std::time::Duration::from_secs(5),
                 "{rule}"
             );
             let mut uids: Vec<&str> = container
@@ -4611,13 +4603,13 @@ fn an_event_with_two_rules_or_an_exception_rule_is_left_out() {
 fn a_rule_with_a_huge_interval_expands_within_the_deadline() {
     // The library builds one period at a time: a yearly rule every 10,000 years builds its first
     // year, then steps past the calendar's end and stops, well within the parse deadline.
-    let began = std::time::Instant::now();
+    let began = common::thread_cpu_time();
     let container = parse(&cal(&event(
         "UID:i\nDTSTART:20261020T120000Z\nRRULE:FREQ=YEARLY;INTERVAL=10000\nSUMMARY:i",
     )))
     .container
     .unwrap();
-    assert!(began.elapsed() < std::time::Duration::from_secs(2));
+    assert!(common::thread_cpu_time() - began < std::time::Duration::from_secs(2));
     assert_eq!(container.occurrences.len(), 1);
     assert!(container.warnings.is_empty(), "{:?}", container.warnings);
 }
@@ -4767,7 +4759,10 @@ async fn an_artists_concert_list_on_a_platform_is_the_artist_through_the_whole_r
     );
     let service = pinakes_core::event::service::EventService {
         pool: pool.clone(),
-        config: EventConfig::default(),
+        config: EventConfig {
+            geocoding: false,
+            ..Default::default()
+        },
         osm: Arc::new(OsmResolver::new(pool, OsmConfig::default()).unwrap()),
     };
     let asked = "https://www.songkick.com/artists/253846-radiohead";
@@ -4831,7 +4826,10 @@ async fn an_event_naming_the_pages_canonical_is_the_pages_event_through_the_whol
     );
     let service = pinakes_core::event::service::EventService {
         pool: pool.clone(),
-        config: EventConfig::default(),
+        config: EventConfig {
+            geocoding: false,
+            ..Default::default()
+        },
         osm: Arc::new(OsmResolver::new(pool, OsmConfig::default()).unwrap()),
     };
     let asked = "https://gigs.example/concert/amp";
@@ -5026,9 +5024,9 @@ fn a_zone_name_is_bounded_and_named_by_its_last_parts() {
         "America/Argentina/Buenos_Aires"
     );
     assert!(time::zone(&format!("{}Europe/Zurich", "/".repeat(150))).is_none());
-    let started = std::time::Instant::now();
+    let started = common::thread_cpu_time();
     assert!(time::zone(&"/".repeat(1_000_000)).is_none());
-    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    assert!(common::thread_cpu_time() - started < std::time::Duration::from_secs(1));
 }
 /// A calendar's properties are counted over all its components, and a line needs a name: a
 /// nameless one fails the calendar, or inside an event that event alone.
