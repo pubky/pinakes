@@ -1,8 +1,10 @@
 # Mastodon
 
 Posts on any Mastodon server, read from that server's own API. No key; Mastodon allows 300
-requests per 5 minutes per address (one per second here). Posts are social content: the card
-quotes at most 200 characters, refreshes within the hour and is removed once the post is gone.
+requests per 5 minutes per address. Each server is asked at the default pace,
+`limits.host_requests_per_second` (one request a second unless the operator changes it). Posts
+are social content: the card quotes at most 200 characters, refreshes within the hour and is
+removed once the post is gone.
 
 ## Links
 
