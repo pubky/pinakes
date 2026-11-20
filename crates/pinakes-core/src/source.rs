@@ -17,7 +17,11 @@ pub const ERROR_CLASSES: &[&str] = &[
 
 pub async fn outcome(pool: &PgPool, source: &str, error: Option<&str>) -> Result<()> {
     let error = error.map(|value| {
-        if ERROR_CLASSES.contains(&value) {
+        // A redirect the upstream answered (stored on a link as `http_3xx`) is the source's
+        // client-side error: its configured URL names the wrong place.
+        if value == "http_3xx" {
+            "http_4xx"
+        } else if ERROR_CLASSES.contains(&value) {
             value
         } else {
             "parse"
