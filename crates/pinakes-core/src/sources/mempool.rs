@@ -688,7 +688,9 @@ pub fn request(to: Api, target: &Target) -> Option<Request> {
         (Object::Block(BlockRef::Hash(h)), Api::Mempool) => api(to, n, &format!("v1/block/{h}")),
         (Object::Block(BlockRef::Hash(h)), Api::Esplora) => api(to, n, &format!("block/{h}")),
         (Object::Block(BlockRef::Height(h)), _) => height_request(to, n, *h),
-        (Object::Tx(id), _) => api(to, n, &format!("tx/{id}")),
+        // A transaction lists every input and output: a consolidation's record passes the
+        // egress default.
+        (Object::Tx(id), _) => api(to, n, &format!("tx/{id}")).map(|r| r.cap(TXS_CAP)),
         (Object::Address(a), _) => api(to, n, &format!("address/{a}")),
         (Object::Node(k), Api::Mempool) => api(to, n, &format!("v1/lightning/nodes/{k}")),
         (Object::Channel(id), Api::Mempool) => api(to, n, &format!("v1/lightning/channels/{id}")),
@@ -808,8 +810,9 @@ pub fn parse_txid(status: u16, raw: &[u8]) -> Result<String> {
     hash(std::str::from_utf8(raw)?.trim()).context("not a transaction id")
 }
 
-/// The largest list of an address's transactions read (`txs_request`): a few dozen whole
-/// transactions, which an exchange's batch payouts can take past the egress default.
+/// The largest transaction record (`request`) and list of an address's transactions
+/// (`txs_request`) read: a few dozen whole transactions, or one with a few thousand inputs, which
+/// an exchange's batch payouts and consolidations can take past the egress default.
 pub const TXS_CAP: usize = 4 * crate::resolver::egress::BODY_CAP;
 
 /// An address's latest transactions, those in the mempool first, then the confirmed ones,
@@ -2193,6 +2196,20 @@ mod tests {
             .collect();
         assert_eq!(sites, ["1ML", "Amboss"]);
         assert!(links(&from_root(&format!("ln-signet:node/{ACINQ}")).unwrap()).is_empty());
+    }
+
+    /// A transaction's record is read up to `TXS_CAP`, like an address's list: one with
+    /// thousands of inputs passes the egress default.
+    #[test]
+    fn a_transaction_record_may_pass_the_default_cap() {
+        let tx = from_root(
+            "btc:tx/a1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d",
+        )
+        .unwrap();
+        for api in [Api::Mempool, Api::Esplora] {
+            let request = request(api, &tx).unwrap();
+            assert_eq!(request.options().body_cap, Some(TXS_CAP), "{api:?}");
+        }
     }
 
     #[test]

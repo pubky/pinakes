@@ -158,7 +158,8 @@ Each card lists the objects it points at in the resource read's `related`
   channels there are when fewer are listed. A node's channel total is its `channels` fact, the
   channels mempool.space counts as active; the listed ones are its biggest open channels, which
   can include an inactive one. A transaction with 400 inputs is still one request: its record
-  lists them all.
+  lists them all. A record over 4 MB (a few thousand inputs) is not read: the link fails and
+  is retried like any failed read.
 - Roots stay on the card's network: `btc-testnet4:address/…`, `ln-signet:node/…`,
   `btc-signet:tx/…` (a signet channel's funding transaction). An address that is not valid on
   the card's network is listed as its script type, without a `uri`.
