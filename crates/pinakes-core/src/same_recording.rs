@@ -78,9 +78,9 @@ pub async fn run(pool: PgPool, config: Config, mut shutdown: watch::Receiver<boo
     }
 }
 
-/// Marks the recordings never read (a database from before the hint, a recording saved while
-/// the hint was off), the stored units whose resource is no longer a recording root (an alias,
-/// a page that is not ok, a retyped page) and those still waiting for a refill (see `refill`).
+/// Marks the recordings never read (one saved while the hint was off), the stored units whose
+/// resource is no longer a recording root (an alias, a page that is not ok, a retyped page) and
+/// those still waiting for a refill (see `refill`).
 /// Returns the resources marked.
 pub async fn sweep(pool: &PgPool) -> Result<u64> {
     let entered = sqlx::query(
