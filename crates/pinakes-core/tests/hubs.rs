@@ -2889,7 +2889,12 @@ async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
             .execute(&pool)
             .await
             .unwrap();
-        let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+        // `from=now` reads the API's clock: pin it before the concert (2027-05-03), so the
+        // concert stays upcoming whatever the date.
+        let mut state = AppState::new(pool.clone(), Config::default()).unwrap();
+        let before: chrono::DateTime<chrono::Utc> = "2027-01-01T00:00:00Z".parse().unwrap();
+        state.clock = Some(std::sync::Arc::new(move || before));
+        let app = api::router(state);
         let mut request = axum::http::Request::builder()
             .uri(
                 "/v1/search?key=mbid:a74b1b7f-71a5-4011-9441-d0b5e4122711&type=MusicEvent&from=now",
