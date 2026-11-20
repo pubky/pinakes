@@ -1,9 +1,12 @@
-//! Concurrent writers against one database: resource saves (each followed by its group refresh),
-//! derived links, ingested batches that add and remove tags, new alias spellings, and change
-//! retention deleting calendar feeds' expired occurrences while those feeds are tagged and saved.
-//! None waits on another for the search revision, none deadlocks, and every write succeeds
-//! (waits are sampled from `pg_locks` on a connection of the sampler's own).
+//! Concurrent writers against one database: resource saves (each followed by its group refresh;
+//! two writers' pages share each hub key, so their refreshes meet on one group), derived links,
+//! ingested batches that add and remove tags, new alias spellings, and change retention deleting
+//! calendar feeds' expired occurrences while those feeds are tagged and saved.
+//! None waits on another for the search revision, none deadlocks, and no write is lost: the state
+//! the load leaves is read back (waits are sampled from `pg_locks` on a connection of the
+//! sampler's own).
 //! `WRITE_LOAD_ROUNDS` scales the run; the numbers go to standard error.
+mod common;
 use pinakes_core::{
     changes,
     config::EventConfig,
@@ -88,12 +91,18 @@ async fn sample(mut conn: PgConnection, done: Arc<AtomicBool>) -> Waits {
     waits
 }
 
-fn doc(uri: &str, name: &str, key: usize) -> ResourceMeta {
+/// Page `w` as a save writes it; the citation is a grouping key of this page alone.
+fn doc(uri: &str, name: &str, w: usize) -> ResourceMeta {
     let mut d = ResourceMeta::new(uri, "web", 86400);
     d.name = Some(name.into());
     d.set_type("Article");
-    group_keys::add(&mut d, "cites_doi", &format!("10.5555/load-{key}"));
+    group_keys::add(&mut d, "cites_doi", &format!("10.5555/load-{w}"));
     d
+}
+
+/// The hub key pages `2k` and `2k+1` share: the two are one group.
+fn shared_key(w: usize) -> String {
+    format!("isrc:QZLD1260{:04}", w / 2)
 }
 
 /// A valid Pubky ID for writer `n`.
@@ -141,6 +150,7 @@ async fn concurrent_writers_never_wait_on_the_search_revision(pool: PgPool) {
     let rounds: usize = std::env::var("WRITE_LOAD_ROUNDS")
         .ok()
         .and_then(|v| v.parse().ok())
+        .filter(|rounds| *rounds > 0)
         .unwrap_or(15);
     let pool = PgPoolOptions::new()
         .max_connections(2 * WRITERS as u32 + 4)
@@ -151,7 +161,13 @@ async fn concurrent_writers_never_wait_on_the_search_revision(pool: PgPool) {
     for w in 0..WRITERS {
         let uri = format!("https://load.example/{w}");
         let id = store::ensure_resource(&pool, &uri).await.unwrap();
-        store::save_document(&pool, &id, 0, &doc(&uri, "start", w / 2))
+        store::save_document(&pool, &id, 0, &doc(&uri, "start", w))
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO resource_key(resource_id,key,source,via,expires_at) VALUES($1,$2,'test','test',now()+interval '1 day')")
+            .bind(&id)
+            .bind(shared_key(w))
+            .execute(&pool)
             .await
             .unwrap();
         ids.push((id, uri));
@@ -183,9 +199,10 @@ async fn concurrent_writers_never_wait_on_the_search_revision(pool: PgPool) {
         let writes = writes.clone();
         tasks.push(tokio::spawn(async move {
             for r in 0..rounds {
-                // A save of its own resource (two writers share each group key), then a link it
-                // derives; one writer adds new spellings that become aliases instead.
-                store::save_document(&pool, &id, 0, &doc(&uri, &format!("round {r}"), w / 2))
+                // A save of its own resource (its group refresh reads the hub key it shares
+                // with one other writer's page), then a link it derives; one writer adds new
+                // spellings that become aliases instead.
+                store::save_document(&pool, &id, 0, &doc(&uri, &format!("round {r}"), w))
                     .await
                     .unwrap();
                 if w != 0 {
@@ -299,9 +316,14 @@ async fn concurrent_writers_never_wait_on_the_search_revision(pool: PgPool) {
             }
         }
     }));
-    for task in tasks {
-        task.await.unwrap();
-    }
+    // Bounded: writers that wait on each other for ever fail the test instead of hanging it.
+    tokio::time::timeout(Duration::from_secs(120 + 10 * rounds as u64), async {
+        for task in tasks {
+            task.await.unwrap();
+        }
+    })
+    .await
+    .expect("the writers never finished");
     let elapsed = started.elapsed();
     done.store(true, Ordering::SeqCst);
     let waits = sampler.await.unwrap();
@@ -317,8 +339,68 @@ async fn concurrent_writers_never_wait_on_the_search_revision(pool: PgPool) {
         deadlocks(&pool).await - before,
         waits.by_lock
     );
+    assert!(waits.samples > 0, "the sampler never ran: {waits:?}");
     assert_eq!(waits.revision, 0, "{waits:?}");
     assert_eq!(deadlocks(&pool).await, before, "no deadlock");
+    // No write is lost. Each page holds its last save.
+    let last = rounds - 1;
+    for (id, uri) in &ids {
+        let name: Option<String> = sqlx::query_scalar("SELECT name FROM resource WHERE id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(name, Some(format!("round {last}")), "{uri}");
+    }
+    // Every spelling the first writer added is an alias.
+    let spellings: i64 = sqlx::query_scalar("SELECT count(*) FROM resource_alias a JOIN resource r ON r.id=a.alias_id WHERE a.basis='tracking' AND r.uri LIKE 'https://load.example/0/page/%'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(spellings, rounds as i64, "alias spellings");
+    // Each page and feed carries the last round's tag and no earlier one.
+    for (id, uri) in ids.iter().chain(&feeds) {
+        let labels: Vec<Option<String>> = sqlx::query_scalar(
+            "SELECT label FROM reference WHERE resource_id=$1 AND kind='tag' ORDER BY label",
+        )
+        .bind(id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(labels, [Some(format!("load{last}"))], "{uri}");
+    }
+    // Each feed's two events are live again after the last deletion and save.
+    for (id, uri) in &feeds {
+        let (all, live): (i64, i64) = sqlx::query_as("SELECT count(*), count(*) FILTER (WHERE status<>'cancelled' AND start_at>now()) FROM occurrence WHERE resource_id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!((all, live), (2, 2), "{uri}");
+    }
+    // Every group refresh the load put off runs now (`drain_groups` fails the test on one that
+    // cannot be done), and the two pages of each hub key are one group, each key's a group of
+    // its own.
+    common::drain_groups(&pool, &Default::default()).await;
+    let mut groups = vec![];
+    for (id, uri) in &ids {
+        let group: Option<String> =
+            sqlx::query_scalar("SELECT group_id FROM group_unit WHERE resource_id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        groups.push(group.unwrap_or_else(|| panic!("{uri} is in no group")));
+    }
+    for pair in groups.chunks(2) {
+        assert_eq!(pair[0], pair[1], "the pages of one hub key: {groups:?}");
+    }
+    let distinct: std::collections::BTreeSet<&String> = groups.iter().collect();
+    assert_eq!(
+        distinct.len(),
+        WRITERS / 2,
+        "one group per hub key: {groups:?}"
+    );
 }
 
 /// The sampler counts a wait on a `search_write` row (the transaction holding it, and the row
