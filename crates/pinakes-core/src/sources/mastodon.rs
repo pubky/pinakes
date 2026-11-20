@@ -230,7 +230,8 @@ impl Source for Mastodon {
     }
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
         let target = Target::of_uri(uri).context("not a Mastodon post")?;
-        if INSTANCES.get(&target.host) == Some(false) {
+        let known = INSTANCES.get(&target.host);
+        if known == Some(false) {
             return Err(Declined.into());
         }
         let f = cx
@@ -251,7 +252,13 @@ impl Source for Mastodon {
             Ok(Some(_)) => INSTANCES.set(&target.host, true),
             _ => {}
         }
-        Ok(result?.unwrap_or_else(|| cx.missing(uri, self)))
+        match result? {
+            Some(doc) => Ok(doc),
+            // "Not found" in JSON is Mastodon's word for a post that is gone only from a server
+            // that has answered as Mastodon; any other program may answer a path so.
+            None if known == Some(true) => Ok(cx.missing(uri, self)),
+            None => Err(Declined.into()),
+        }
     }
 }
 
@@ -408,6 +415,37 @@ mod tests {
             Target::of_uri("https://mastodon.social/users/Gargron@mastodon.social/statuses/1"),
             None
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn only_a_server_that_answered_as_mastodon_says_a_post_is_gone() {
+        const JSON: &str = "application/json";
+        let host = "gone.mastodon.example";
+        let api = |id: u64| format!("https://{host}/api/v1/statuses/{id}");
+        let uri = |id: u64| format!("https://{host}/@Gargron/{id}");
+        let (egress, _) = crate::sources::fixture::egress(vec![
+            (&api(1), 200, JSON, read("status-1.json")),
+            (&api(2), 404, JSON, read("status-missing.json")),
+            (&api(3), 410, JSON, br#"{"error":"Gone"}"#.to_vec()),
+        ]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        // A JSON 404 or 410 with an `error` from a host never seen as Mastodon may be any
+        // program's: the link goes to the web fetch, and the host stays unmarked.
+        for id in [2, 3] {
+            let error = Mastodon.resolve(&cx, &uri(id)).await.unwrap_err();
+            assert!(error.is::<Declined>(), "{id}: {error}");
+            assert!(Mastodon.reads(&uri(id)), "{id}");
+        }
+        // Once the host has answered with a post, its "not found" is Mastodon's.
+        let doc = Mastodon.resolve(&cx, &uri(1)).await.unwrap();
+        assert_eq!(doc.type_name, "SocialMediaPosting");
+        for id in [2, 3] {
+            let doc = Mastodon.resolve(&cx, &uri(id)).await.unwrap();
+            assert_eq!(doc.status, crate::model::Status::Missing, "{id}");
+        }
     }
 
     #[test]

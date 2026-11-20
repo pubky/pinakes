@@ -25,8 +25,10 @@ the server.
 ## What it reads
 
 `GET https://{server}/api/v1/statuses/{id}`: the post's text, content warning, author, time,
-counts, attachments, address and ActivityPub id. A post the server says does not exist is
-`missing`.
+counts, attachments, address and ActivityPub id. A post the server says does not exist (a 404 or
+410 in JSON with an `error`) is `missing` when the server answered with a Mastodon post within the
+last day. From any other host that answer may be another program's, and the link gets an ordinary
+web card.
 
 ## Card
 
