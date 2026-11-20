@@ -60,6 +60,7 @@ pub fn credential(config: &crate::config::Config) -> Option<Credential> {
 }
 
 /// Discogs' record of one object, `None` when it has none, and whether the credential was used.
+/// A record whose `id` is not the one asked for is an error.
 /// The answer is shared for an hour, so the card and the also-on lookup ask once. A credential
 /// Discogs refuses (401, 403: expired, revoked or mistyped) is dropped, with one warning: that
 /// request is asked again without it, and later ones go without it from the start, so cards
@@ -85,7 +86,14 @@ pub async fn record(
         authenticated = false;
     }
     match f.status {
-        200 => Ok((Some(serde_json::from_slice(&f.body)?), authenticated)),
+        200 => {
+            let v: Value = serde_json::from_slice(&f.body)?;
+            anyhow::ensure!(
+                v["id"].as_u64() == Some(id),
+                "Discogs answered for another record"
+            );
+            Ok((Some(v), authenticated))
+        }
         404 => Ok((None, authenticated)),
         408 | 429 | 500..=599 => Err(RetryLater {
             class: "upstream",
@@ -660,6 +668,37 @@ mod tests {
         );
     }
 
+    /// A record that names another ID than the one asked for is no card.
+    #[tokio::test(start_paused = true)]
+    async fn a_record_of_another_id_is_an_error() {
+        let (egress, _) = crate::sources::fixture::egress(vec![
+            (
+                "https://api.discogs.com/masters/7",
+                200,
+                "application/json",
+                crate::sources::fixture::read("discogs", "master-21491.json"),
+            ),
+            (
+                "https://api.discogs.com/artists/8",
+                200,
+                "application/json",
+                br#"{"name": "No ID"}"#.to_vec(),
+            ),
+        ]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        for uri in [
+            "https://www.discogs.com/master/7",
+            "https://www.discogs.com/artist/8",
+        ] {
+            let read = Discogs.resolve(&cx, uri).await;
+            assert!(read.is_err(), "{uri}: {:?}", read.map(|d| d.name));
+        }
+        assert!(record(&egress, Kind::Master, 7, None).await.is_err());
+    }
+
     /// An app's consumer key and secret are a credential, from the file or their own variables;
     /// the token wins when both are set; neither shows in the config's forms; a key with a comma
     /// (which would split the header) is refused.
@@ -811,7 +850,15 @@ mod tests {
                     if authorized {
                         br#"{"message": "You must authenticate to access this resource."}"#.to_vec()
                     } else {
-                        crate::sources::fixture::read("discogs", "master-21491.json")
+                        // The recorded master, as the record of the ID asked for.
+                        let mut master = read("master-21491.json");
+                        master["id"] = url
+                            .path()
+                            .rsplit('/')
+                            .next()
+                            .and_then(|id| id.parse::<u64>().ok())
+                            .into();
+                        serde_json::to_vec(&master).unwrap()
                     },
                 ))
             }
