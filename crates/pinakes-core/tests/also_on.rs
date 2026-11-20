@@ -3691,7 +3691,10 @@ async fn a_live_source_takes_over_the_rows_of_one_switched_off_or_expired(pool: 
             Ok(Found {
                 keys: vec![key(recording)],
                 links: vec![Link::new(link, "Deezer", "musicbrainz").keyed(recording)],
-                facts: vec![Fact::new("isrc", "GBAYE9701376")],
+                facts: vec![
+                    Fact::new("isrc", "GBAYE9701376"),
+                    Fact::new("artist", "Radiohead"),
+                ],
                 ..Default::default()
             }),
         );
@@ -3701,7 +3704,7 @@ async fn a_live_source_takes_over_the_rows_of_one_switched_off_or_expired(pool: 
         let pool = pool.clone();
         let id = id.clone();
         async move {
-            sqlx::query_scalar::<_, String>("SELECT 'key '||source FROM resource_key WHERE resource_id=$1 AND expires_at>now() UNION ALL SELECT 'link '||source FROM derived_link WHERE resource_id=$1 AND expires_at>now() AND key IS NOT NULL UNION ALL SELECT 'fact '||source FROM resource_fact WHERE resource_id=$1 AND expires_at>now() ORDER BY 1")
+            sqlx::query_scalar::<_, String>("SELECT 'key '||source FROM resource_key WHERE resource_id=$1 AND expires_at>now() UNION SELECT 'link '||source FROM derived_link WHERE resource_id=$1 AND expires_at>now() AND key IS NOT NULL UNION SELECT 'fact '||source FROM resource_fact WHERE resource_id=$1 AND expires_at>now() ORDER BY 1")
                 .bind(&id)
                 .fetch_all(&pool)
                 .await
@@ -3721,21 +3724,40 @@ async fn a_live_source_takes_over_the_rows_of_one_switched_off_or_expired(pool: 
     // both resources are regrouped.
     also_on::configure(&pool, &config(false)).await.unwrap();
     common::drain_groups(&pool, &Default::default()).await;
-    sqlx::query("DELETE FROM group_dirty")
-        .execute(&pool)
-        .await
-        .unwrap();
+    let marks = |table: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, String>(&format!(
+                "SELECT resource_id FROM {table} ORDER BY resource_id"
+            ))
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let unmark = || {
+        let pool = pool.clone();
+        async move {
+            for table in ["group_dirty", "same_recording_dirty"] {
+                sqlx::query(&format!("DELETE FROM {table}"))
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+        }
+    };
+    unmark().await;
     drain(&pool, &cx(config(false)), &sources).await;
     let taken = ["fact second", "key second", "link second"];
     assert_eq!(owners().await, taken);
-    let regrouped: Vec<String> =
-        sqlx::query_scalar("SELECT resource_id FROM group_dirty ORDER BY resource_id")
-            .fetch_all(&pool)
-            .await
-            .unwrap();
     let mut both = vec![id.clone(), named.clone()];
     both.sort();
-    assert_eq!(regrouped, both);
+    assert_eq!(marks("group_dirty").await, both);
+    // Its artist counts for the same-recording hint again: the recording is read again.
+    assert_eq!(
+        marks("same_recording_dirty").await,
+        std::slice::from_ref(&id)
+    );
     // Rows a third source let expire: taken over too, and live again.
     for table in ["resource_key", "derived_link", "resource_fact"] {
         sqlx::query(&format!(
@@ -3747,8 +3769,14 @@ async fn a_live_source_takes_over_the_rows_of_one_switched_off_or_expired(pool: 
         .unwrap();
     }
     assert!(owners().await.is_empty());
+    unmark().await;
     drain(&pool, &cx(config(false)), &sources).await;
     assert_eq!(owners().await, taken);
+    assert_eq!(marks("group_dirty").await, both);
+    assert_eq!(
+        marks("same_recording_dirty").await,
+        std::slice::from_ref(&id)
+    );
 }
 
 /// A source the operator switches off stops showing at once: its keys, facts and derived links

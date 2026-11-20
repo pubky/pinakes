@@ -951,6 +951,11 @@ pub async fn record(
         .collect();
     sqlx::query("DELETE FROM resource_fact WHERE resource_id=$1 AND source=$2 AND NOT (name,value) IN (SELECT v->>'name',v->>'value' FROM jsonb_array_elements($3) v)")
         .bind(resource_id).bind(source).bind(Value::from(fact_rows.clone())).execute(&mut *tx).await?;
+    // A recording's artist or length taken over from a switched-off source (below) counts for
+    // the same-recording hint again: the recording is read again, as the fact's trigger marks it
+    // only for a value that changes or a row that had expired.
+    sqlx::query("INSERT INTO same_recording_dirty(resource_id) SELECT r.id FROM resource r WHERE r.id=$1 AND r.type_path @> ARRAY['MusicRecording'] AND EXISTS(SELECT 1 FROM resource_fact t JOIN jsonb_array_elements($3) v ON t.name=v->>'name' AND t.value=v->>'value' WHERE t.resource_id=$1 AND t.source<>$2 AND t.name IN ('artist','duration') AND t.expires_at>now() AND t.source IN (SELECT source FROM also_on_source_off)) ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=excluded.next_attempt_at WHERE same_recording_dirty.next_attempt_at>excluded.next_attempt_at")
+        .bind(resource_id).bind(source).bind(Value::from(fact_rows.clone())).execute(&mut *tx).await?;
     // A fact another live source already reports keeps that source; one whose source is
     // switched off, or let it expire, is this source's from now on.
     sqlx::query("INSERT INTO resource_fact(resource_id,name,value,source,expires_at) SELECT $1,v->>'name',v->>'value',$2,$4 FROM jsonb_array_elements($3) v ON CONFLICT(resource_id,name,value) DO UPDATE SET source=excluded.source,seen_at=now(),expires_at=greatest(resource_fact.expires_at,excluded.expires_at) WHERE resource_fact.source=excluded.source OR resource_fact.expires_at<=now() OR resource_fact.source IN (SELECT source FROM also_on_source_off)")
@@ -971,9 +976,11 @@ pub async fn record(
 
 /// Run the sources of `ids` again in ten minutes, those `editions` reads (a MusicBrainz key): a change of
 /// their groups (a member joining or leaving, a link becoming an alias) changes the links their
-/// cards may show, which it places. A card that is due stays due; any other is due ten minutes
-/// from now, one the worker holds too: its lease moves, so the batch's end leaves the mark
-/// standing as it does a save's (`drain_leased`), and the card runs again after this run.
+/// cards may show, which it places. A card that is due stays due, and one due later than ten
+/// minutes from now is due then. One due sooner keeps its time, a microsecond later: were that
+/// time the worker's lease on it, the batch's end must not find the lease unchanged
+/// (`drain_leased` writes the next run only over its own lease), so the mark stands as a save's
+/// does and the card runs again when the lease has run out.
 pub(crate) async fn requeue_placed(
     tx: &mut Transaction<'_, Postgres>,
     ids: &[String],
@@ -982,7 +989,7 @@ pub(crate) async fn requeue_placed(
         return Ok(());
     }
     // In ten minutes: the changes a regrouping makes at once come to one run per card.
-    sqlx::query("INSERT INTO also_on_dirty(resource_id,next_attempt_at) SELECT DISTINCT k.resource_id,now()+interval '10 minutes' FROM resource_key k WHERE k.resource_id=ANY($1) AND (k.key LIKE 'mb:recording:%' OR k.key LIKE 'mb:release:%' OR k.key LIKE 'mb:release-group:%') ORDER BY 1 ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=excluded.next_attempt_at WHERE also_on_dirty.next_attempt_at>now()")
+    sqlx::query("INSERT INTO also_on_dirty(resource_id,next_attempt_at) SELECT DISTINCT k.resource_id,now()+interval '10 minutes' FROM resource_key k WHERE k.resource_id=ANY($1) AND (k.key LIKE 'mb:recording:%' OR k.key LIKE 'mb:release:%' OR k.key LIKE 'mb:release-group:%') ORDER BY 1 ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=CASE WHEN also_on_dirty.next_attempt_at>excluded.next_attempt_at THEN excluded.next_attempt_at ELSE also_on_dirty.next_attempt_at+interval '1 microsecond' END WHERE also_on_dirty.next_attempt_at>now()")
         .bind(ids)
         .execute(&mut **tx)
         .await?;
@@ -1209,8 +1216,8 @@ pub async fn drain_leased(
         .collect::<Vec<_>>()
         .await;
     // A change saved while a resource was read marked it due again (its lease became now): that
-    // mark stands, so the change is read too. So does a regrouping's (`requeue_placed`: ten
-    // minutes from then), and another worker's claim after this lease
+    // mark stands, so the change is read too. So does a regrouping's (`requeue_placed`: the
+    // lease moved), and another worker's claim after this lease
     // ran out. The next attempt is written only while the row still holds this run's lease,
     // however long the batch took; the count of failed runs and the error are always written.
     let next = |at: &str| {
