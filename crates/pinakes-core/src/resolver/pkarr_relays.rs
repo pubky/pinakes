@@ -35,9 +35,10 @@ const PAYLOAD_CAP: usize = 8 * 1024;
 const MAX_DEPTH: usize = 7;
 /// Endpoints read across one resolution.
 const MAX_ENDPOINTS: usize = 64;
-/// How much longer than the relay deadline a whole ask may take (`Relays::deadline`): more than
-/// an ask that is not queued spends before its request is sent (a DNS answer, a free slot).
-const ASK_GRACE: Duration = Duration::from_millis(250);
+/// The longest a relay ask waits for its host's slot (`FetchOptions::slot_wait`). Relay hosts
+/// are paced at one request a second by default, so an ask behind one other request waits about
+/// that long; one behind a stalled request, or several, is put off instead (`Relays::deadline`).
+const RELAY_SLOT_WAIT: Duration = Duration::from_millis(1500);
 
 struct Cached {
     expires: Instant,
@@ -53,14 +54,14 @@ struct State {
 }
 pub struct Relays {
     relays: Vec<Url>,
-    /// How long one relay has to answer (`limits.pkarr_relay_timeout_ms`, at most nine of a
-    /// resolution's ten seconds), so that a relay that stalls does not hold back another's
-    /// packet. It bounds an ask twice, and the two never add up. The request, from when it has
-    /// the relay host's slot (`FetchOptions::request_deadline`): a relay that has not answered
-    /// by then failed. And the whole ask, its wait for that slot included, `ASK_GRACE` longer:
-    /// an ask that ends there spent its time queued behind the host's other requests (one of
-    /// them stalled, or the host's pace), which says nothing of the relay, so it is a wait
-    /// without a charge and no failure.
+    /// How long one relay has to answer (`limits.pkarr_relay_timeout_ms`), so that a relay that
+    /// stalls does not hold back another's packet. An ask is two steps, each bounded once inside
+    /// the egress: its wait for the relay host's slot, at most `RELAY_SLOT_WAIT`
+    /// (`FetchOptions::slot_wait`; a slot further away is the egress's free `rate_limited`
+    /// wait: it says nothing of the relay, so no charge), then its request, from when it has the
+    /// slot, at most this deadline (`FetchOptions::request_deadline`; a relay that has not
+    /// answered by then failed). An ask takes at most `RELAY_SLOT_WAIT` plus this deadline: with
+    /// the deadline at most 8 s (its validated range), 9.5 s of a resolution's 10 s.
     deadline: Duration,
     egress: Egress,
     state: Mutex<State>,
@@ -72,9 +73,8 @@ enum Answer {
     Failed(String),
     /// The relay could not be reached (`super::unreached`): no answer about the key.
     Unreached(String),
-    /// A wait, in seconds: Egress's own for the relay host's budget (no request was sent), the
-    /// relay's 429 with its `Retry-After`, or an ask still queued for the relay host's slot
-    /// when its time was up.
+    /// A wait, in seconds: Egress's own for the relay host's budget or slot (no request was
+    /// sent), or the relay's 429 with its `Retry-After`.
     Wait(u64),
 }
 
@@ -102,7 +102,7 @@ impl Relays {
     /// record. Relay-side failures (timeouts, policy refusals, payloads that do not verify) are
     /// `connect`: retried with backoff, then dead-lettered like any failure. When no relay
     /// answered, because each one that failed could not be reached (refused, reset), waited for
-    /// its host budget (or was still queued for it when its time was up) or answered 429, the
+    /// its host budget (or would have waited longer than `RELAY_SLOT_WAIT`) or answered 429, the
     /// failure is `super::Unreached` (or that wait alone, with the longest `Retry-After`), which
     /// never dead-letters.
     pub async fn packet(&self, key: &PublicKey) -> Result<Option<SignedPacket>> {
@@ -118,21 +118,14 @@ impl Relays {
             // Whatever the relay says the body is, HTML too.
             body_cap: Some(PAYLOAD_CAP),
             request_deadline: Some(self.deadline),
+            slot_wait: Some(RELAY_SLOT_WAIT),
             ..Default::default()
         };
         let answers = futures_util::future::join_all(self.relays.iter().map(|relay| {
             let url = format!("{}/{z32}", relay.as_str().trim_end_matches('/'));
             let options = &options;
             async move {
-                let asked = tokio::time::timeout(
-                    self.deadline + ASK_GRACE,
-                    self.egress.fetch_with(&url, options),
-                );
-                let Ok(answer) = asked.await else {
-                    // Queued for the host's slot for most of its time: ask again shortly.
-                    return Answer::Wait(1);
-                };
-                match answer {
+                match self.egress.fetch_with(&url, options).await {
                     Ok(fetched) if fetched.status == 404 => Answer::Missing,
                     Ok(fetched) if (200..300).contains(&fetched.status) => {
                         match SignedPacket::from_relay_payload(key, &fetched.body.into()) {

@@ -1116,8 +1116,8 @@ impl Config {
         {
             bail!("limits.html_head_bytes must be 1–16 MB");
         }
-        if !(100..=9000).contains(&self.pubky.pkarr_relay_timeout_ms) {
-            bail!("limits.pkarr_relay_timeout_ms must be 100–9000");
+        if !(100..=8000).contains(&self.pubky.pkarr_relay_timeout_ms) {
+            bail!("limits.pkarr_relay_timeout_ms must be 100–8000");
         }
         let w = &self.web;
         if !(100..=13000).contains(&w.music_enrichment_timeout_ms)
@@ -2263,7 +2263,7 @@ limits! {
         |c, v| c.cards.media.ttl_secs = v, |c, v| c.cards.isbn.ttl_secs = v,
         |c, v| c.cards.doi.ttl_secs = v, |c, v| c.cards.nostr.ttl_secs = v,
         |c, v| c.cards.activitypub.ttl_secs = v, |c, v| c.cards.official.ttl_secs = v],
-    /// How long one PKARR relay may take to answer (milliseconds, 100–9000); a relay slower than
+    /// How long one PKARR relay may take to answer (milliseconds, 100–8000); a relay slower than
     /// this is a failed relay, and the others' packets are used.
     pkarr_relay_timeout_ms: u64 = |c| c.pubky.pkarr_relay_timeout_ms => [|c, v| c.pubky.pkarr_relay_timeout_ms = v],
     /// How long a MusicBrainz card's enrichment may take, within the card's own read

@@ -255,6 +255,10 @@ pub struct FetchOptions {
     /// behind its host's pace is not a slow host). Past it the fetch fails as
     /// [`RequestDeadline`]. Without one, only the fetch's own ten seconds bound it.
     pub request_deadline: Option<Duration>,
+    /// The longest this request waits for its host's slot, when shorter than `MAX_SLOT_WAIT`: a
+    /// slot further away answers `RetryLater` (`rate_limited`, no request sent, no charge), as
+    /// one past `MAX_SLOT_WAIT` always does.
+    pub slot_wait: Option<Duration>,
 }
 impl std::fmt::Debug for Fetched {
     /// The body's length, never the body: a token endpoint's answer holds the token.
@@ -312,6 +316,7 @@ impl std::fmt::Debug for FetchOptions {
             .field("extra_types", &self.extra_types)
             .field("validators", &self.validators)
             .field("request_deadline", &self.request_deadline)
+            .field("slot_wait", &self.slot_wait)
             .finish()
     }
 }
@@ -1100,7 +1105,10 @@ impl Egress {
                 _ => {
                     // Release the other host's slot before waiting for this one.
                     drop(permit.take());
-                    permit = Some((host.clone(), self.host_permit(&host).await?));
+                    let wait = options
+                        .slot_wait
+                        .map_or(MAX_SLOT_WAIT, |w| w.min(MAX_SLOT_WAIT));
+                    permit = Some((host.clone(), self.host_permit_within(&host, wait).await?));
                 }
             }
             let mut observation = crate::telemetry::FetchGuard::start();
@@ -1200,6 +1208,15 @@ impl Egress {
     /// that, answers `RetryLater` instead of a wait the fetch timeout would cut short. Only a
     /// request that gets its slot moves the next one, so a cancelled waiter holds nothing back.
     async fn host_permit(&self, host: &str) -> Result<OwnedMutexGuard<Instant>> {
+        self.host_permit_within(host, MAX_SLOT_WAIT).await
+    }
+    /// [`host_permit`](Self::host_permit), waiting at most `wait` (never more than
+    /// `MAX_SLOT_WAIT`) for the slot.
+    async fn host_permit_within(
+        &self,
+        host: &str,
+        wait: Duration,
+    ) -> Result<OwnedMutexGuard<Instant>> {
         let rate = self.host_rate(host);
         let budget = {
             let mut hosts = self.hosts.lock().await;
@@ -1219,11 +1236,9 @@ impl Egress {
                 seconds: wait.as_secs() + 1,
             })
         };
-        let deadline = Instant::now() + MAX_SLOT_WAIT;
+        let deadline = Instant::now() + wait;
         let Ok(mut guard) = tokio::time::timeout_at(deadline, budget.lock_owned()).await else {
-            return Err(retry(
-                Duration::from_secs_f64(1.0 / rate).max(MAX_SLOT_WAIT),
-            ));
+            return Err(retry(Duration::from_secs_f64(1.0 / rate).max(wait)));
         };
         if *guard > deadline {
             return Err(retry(guard.saturating_duration_since(Instant::now())));
