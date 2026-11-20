@@ -1619,8 +1619,14 @@ impl Source for Mempool {
         let by = cx.deadline().map_or(by, |d| d.min(by));
         let read = match read(cx, Api::Mempool, &target, by).await {
             Ok(read) => read,
+            // The fallback's "not found" does not say the object is gone while mempool.space
+            // fails (a transaction Esplora's node has not seen): mempool.space's error stands,
+            // as it does when the fallback fails too.
             Err(e) if request(Api::Esplora, &target).is_some() => {
-                read(cx, Api::Esplora, &target, by).await.map_err(|_| e)?
+                match read(cx, Api::Esplora, &target, by).await {
+                    Ok(Some(read)) => Some(read),
+                    Ok(None) | Err(_) => return Err(e),
+                }
             }
             Err(e) => match (
                 &target.object,

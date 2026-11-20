@@ -19,7 +19,8 @@ use common::media::PublicDns;
 /// USGS never answers; mempool.space answers the record of `BUSY` with 429 and that of `SLOW`
 /// with 408, fails every other node record with a server error, and its search lists only
 /// `LISTED`, `BUSY` and `SLOW`; it answers the record of the address `STALLED` but never its
-/// transaction list.
+/// transaction list. It answers the record of the transaction `LIMITED` with 429 and that of
+/// `FAILING` with 503, and knows no other transaction; blockstream.info knows none.
 struct Scripted;
 const LISTED: &str = "03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f";
 const UNKNOWN: &str = "020000000000000000000000000000000000000000000000000000000000000001";
@@ -31,6 +32,9 @@ const STALLED: &str = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa";
 const DEEP: &str = "00000000000000000000000000000000000000000000000000000000000000d1";
 const TIP: &str = "00000000000000000000000000000000000000000000000000000000000000d2";
 const NEXT: &str = "00000000000000000000000000000000000000000000000000000000000000d3";
+const LIMITED: &str = "00000000000000000000000000000000000000000000000000000000000000e1";
+const FAILING: &str = "00000000000000000000000000000000000000000000000000000000000000e2";
+const GONE: &str = "00000000000000000000000000000000000000000000000000000000000000e3";
 
 fn answer(url: &Url, status: u16, body: String) -> Fetched {
     Fetched {
@@ -93,6 +97,15 @@ impl Transport for Scripted {
                 if path == "/api/blocks/tip/height" || path.ends_with("/txid/0") =>
             {
                 Ok(answer(u, 404, "Not found".into()))
+            }
+            (Some("mempool.space"), path) if path.strip_prefix("/api/tx/") == Some(LIMITED) => {
+                Ok(answer(u, 429, "Too Many Requests".into()))
+            }
+            (Some("mempool.space"), path) if path.strip_prefix("/api/tx/") == Some(FAILING) => {
+                Ok(answer(u, 503, "Service Unavailable".into()))
+            }
+            (Some("mempool.space" | "blockstream.info"), path) if path.starts_with("/api/tx/") => {
+                Ok(answer(u, 404, "Transaction not found".into()))
             }
             (Some("mempool.space"), path) if path.starts_with("/api/v1/lightning/nodes/") => {
                 Ok(if path.ends_with(BUSY) {
@@ -203,6 +216,26 @@ async fn a_rate_limited_lightning_node_is_only_a_retry() {
         let retry = error.downcast_ref::<RetryLater>().expect("a retry");
         assert_eq!(retry.class, class, "{key}");
     }
+}
+
+/// While mempool.space fails a transaction's record (a rate limit, a server error), the
+/// fallback's "not found" does not make the transaction missing: the read ends as
+/// mempool.space's error, a retry. mempool.space's own "not found" is `missing`.
+#[tokio::test(start_paused = true)]
+async fn a_transaction_only_the_fallback_calls_unknown_is_a_retry() {
+    if !has("mempool") {
+        return;
+    }
+    for (txid, class) in [(LIMITED, "http_4xx"), (FAILING, "upstream")] {
+        let error = official()
+            .resolve(&format!("btc:tx/{txid}"))
+            .await
+            .unwrap_err();
+        let retry = error.downcast_ref::<RetryLater>().expect("a retry");
+        assert_eq!(retry.class, class, "{txid}");
+    }
+    let doc = official().resolve(&format!("btc:tx/{GONE}")).await.unwrap();
+    assert_eq!(doc.status, Status::Missing);
 }
 
 /// A compound name is no identifier: one compound gives its card without merging the page into

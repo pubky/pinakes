@@ -75,11 +75,14 @@ first form of each listed site, so every listed link reads back as the card.
   testnet4).
 - A block by height on any explorer is read like mempool.space's: an alias only once settled.
 
-An unknown block, transaction or channel is `missing`. mempool.space answers an unknown
-Lightning node with a server error, as it does on a fault, so a server error on a node's record
-is followed by the Lightning search for its exact key: a node the search doesn't list is
-`missing`, and a listed node whose record keeps failing counts toward the failure limit. A
-429 or 408 on a node's record is only retried later, with no search.
+An unknown block, transaction or channel is `missing` when mempool.space itself says it is not
+found. When mempool.space fails and the fallback does not know the object (a transaction its
+node has not seen), the read ends with mempool.space's error: a rate limit or a server error is
+retried later. mempool.space answers an unknown Lightning node with a server error, as it does
+on a fault, so a server error on a node's record is followed by the Lightning search for its
+exact key: a node the search doesn't list is `missing`, and a listed node whose record keeps
+failing counts toward the failure limit. A 429 or 408 on a node's record is only retried later,
+with no search.
 
 ## Also on
 
