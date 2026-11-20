@@ -148,6 +148,55 @@ async fn letterboxd_and_tvmaze_by_imdb_id() {
     assert!(found.links.is_empty());
 }
 
+/// A Wikidata that fails for now (busy, or an answer it gives no meaning to) is never "the title
+/// has no item": what the link's own record and the other services say stands, and the run
+/// comes back for Wikidata's part.
+#[tokio::test]
+async fn a_failing_wikidata_brings_the_run_back() {
+    let search = "https://www.wikidata.org/w/api.php?action=query&format=json&list=search&srnamespace=0&srprop=&srlimit=2&srsearch=haswbstatement%3AP345%3Dtt0111161";
+    let s = subject("https://www.imdb.com/title/tt0111161/", None, None);
+    for status in [503, 403] {
+        let recorded = Recorded::with_answers(&[
+            (search, status, "application/json", b"{}".to_vec()),
+            (
+                SHAWSHANK_PAGE.0,
+                SHAWSHANK_PAGE.1,
+                "text/html",
+                SHAWSHANK_PAGE.2.as_bytes().to_vec(),
+            ),
+        ]);
+        let found = Films
+            .lookup(&cx(recorded.clone(), Config::default()), &s)
+            .await
+            .unwrap();
+        assert_eq!(keys(&found), ["imdb:tt0111161"], "{status}");
+        assert!(found.facts.is_empty(), "{status}: {:?}", found.facts);
+        assert_eq!(
+            links(&found),
+            [(
+                "Letterboxd",
+                "https://letterboxd.com/film/the-shawshank-redemption/",
+                "letterboxd"
+            )],
+            "{status}"
+        );
+        assert!(
+            found
+                .retry_after
+                .is_some_and(|wait| wait >= std::time::Duration::from_secs(60)),
+            "{status}: {:?}",
+            found.retry_after
+        );
+        assert!(
+            !recorded
+                .seen()
+                .iter()
+                .any(|u| u.contains("action=wbgetentities")),
+            "{status}"
+        );
+    }
+}
+
 /// A Rotten Tomatoes page (the owner's Halloween preview) reaches its title through the one
 /// Wikidata item with its Rotten Tomatoes ID: the item's IMDb ID is the key, and its other pages
 /// (never Rotten Tomatoes) are links named through it.

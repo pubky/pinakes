@@ -506,7 +506,8 @@ impl Books {
             },
         };
         let mut found = found(&edition, isbn.as_deref());
-        // A failing secondary service leaves what Open Library said.
+        // A failing secondary service leaves what Open Library said, and the run comes back for
+        // its part.
         let mut deferred = Deferred::default();
         if let (true, Some(isbn)) = (edition.ebook, &isbn) {
             let itunes = super::itunes_api::options();
