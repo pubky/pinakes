@@ -168,7 +168,7 @@ impl EventService {
         &self,
         uri: &str,
         fetched: &Fetched,
-        mut card: ResourceMeta,
+        card: ResourceMeta,
         egress: &Egress,
         deadline: tokio::time::Instant,
     ) -> Result<ResourceMeta> {
@@ -277,13 +277,18 @@ impl EventService {
                     super::adapters::detected_html(uri, &String::from_utf8_lossy(&fetched.body))
                         .filter(|d| super::adapters::manifest(d, &config).enabled)
                 {
-                    // Self-hosted software cannot be classified from a shared vendor domain.
+                    // Self-hosted software cannot be classified from a shared vendor domain. Its
+                    // API is asked where the page answered (after a redirect, that host).
                     if super::adapters::detect(uri).is_none() {
-                        platform_extra =
-                            super::adapters::service::endpoint(d, uri, Some(fetched), &config)
-                                .ok()
-                                .flatten()
-                                .map(|(target, opts)| (d.id.clone(), target, opts));
+                        platform_extra = super::adapters::service::endpoint(
+                            d,
+                            fetched.url.as_str(),
+                            Some(fetched),
+                            &config,
+                        )
+                        .ok()
+                        .flatten()
+                        .map(|(target, opts)| (d.id.clone(), target, opts));
                     }
                     if let Some(extra) = super::adapters::state::parse(&d.id, uri, &fetched.body) {
                         if !event.type_path.contains(&"Event".into()) {
@@ -403,7 +408,7 @@ impl EventService {
             opts.feed_cap = opts.feed_hint.then_some(self.config.feed_body_bytes);
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             let enrichment = tokio::time::timeout(remaining.min(Duration::from_secs(2)), async {
-                let response = super::adapters::service::discover_enrichment(
+                let response = super::adapters::service::discover_hint(
                     egress,
                     &target,
                     &opts,
@@ -416,20 +421,13 @@ impl EventService {
                 super::adapters::service::enrichment_blocking(uri, d, &response, &config).await
             })
             .await;
-            // HTML detection on an unregistered host is only a hint. An unrelated
-            // API, policy denial or parse error must not veto the page's own facts.
-            match enrichment {
-                Ok(Ok(Some(extra))) => {
-                    if extra.type_path.contains(&"Event".into()) {
-                        event.set_type("Event");
-                        page::merge_missing(&mut event, &extra)?;
-                    }
-                }
-                Ok(Ok(None)) => {}
-                _ => {
-                    crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "drift");
-                    card.event.warnings.push("enrichment_unavailable".into());
-                    event.event.warnings.push("enrichment_unavailable".into());
+            // HTML detection on an unregistered host is only a hint. An unrelated API, a
+            // policy denial or a parse error does not veto the page's own facts, and says
+            // nothing of an adapter: no drift is counted and the card carries no warning.
+            if let Ok(Ok(Some(extra))) = enrichment {
+                if extra.type_path.contains(&"Event".into()) {
+                    event.set_type("Event");
+                    page::merge_missing(&mut event, &extra)?;
                 }
             }
         }

@@ -63,6 +63,27 @@ pub(crate) async fn discover_enrichment(
     ttl: u64,
     definition: &Definition,
 ) -> Result<Fetched> {
+    discover(egress, uri, options, ttl, definition, true).await
+}
+/// [`discover_enrichment`] for a platform only guessed from a page's markup
+/// (`detected_html`): a failed guess says nothing of an adapter, so it is not counted as drift.
+pub(crate) async fn discover_hint(
+    egress: &Egress,
+    uri: &str,
+    options: &FetchOptions,
+    ttl: u64,
+    definition: &Definition,
+) -> Result<Fetched> {
+    discover(egress, uri, options, ttl, definition, false).await
+}
+async fn discover(
+    egress: &Egress,
+    uri: &str,
+    options: &FetchOptions,
+    ttl: u64,
+    definition: &Definition,
+    drift: bool,
+) -> Result<Fetched> {
     let fetched = egress.discover(uri, options, ttl).await?;
     enrichment_status(&fetched)?;
     if definition.parser == "mobilizon" && fetched.status == 200 {
@@ -75,7 +96,9 @@ pub(crate) async fn discover_enrichment(
         .await?;
         if failed {
             egress.shorten_discovery(uri, options, 300).await?;
-            crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "drift");
+            if drift {
+                crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "drift");
+            }
             return Err(crate::resolver::RetryLater {
                 class: "graphql",
                 seconds: 300,

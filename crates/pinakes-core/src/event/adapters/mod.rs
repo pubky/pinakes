@@ -364,20 +364,46 @@ pub fn detect(uri: &str) -> Option<&'static Definition> {
     }
     None
 }
+/// The platform of a page: its link's (`detect`), else the self-hosted software its markup
+/// shows. Only something the software itself puts in its pages counts, never its name in the
+/// page's text (an article about Mobilizon, the Italian word "gancio"): pretix's own assets
+/// beside a calendar link, eventyay's `generator` meta, Gancio's script, Gathio's export link,
+/// Mobilizon's application shell (its `<noscript>` notice in a Phoenix page), hitobito's footer
+/// link to its source.
 pub fn detected_html(uri: &str, html: &str) -> Option<&'static Definition> {
     detect(uri).or_else(|| {
         let s = html.to_ascii_lowercase();
-        if s.contains("pretix") && s.contains("/ical/") {
+        // The first `<meta name="generator">` tags, as written.
+        let generator = |name: &str| {
+            s.match_indices("<meta")
+                .take(64)
+                .filter_map(|(at, _)| {
+                    let tag = &s.as_bytes()[at..s.len().min(at + 512)];
+                    let end = tag.iter().position(|b| *b == b'>')?;
+                    std::str::from_utf8(&tag[..end]).ok()
+                })
+                .any(|tag| tag.contains("generator") && tag.contains(name))
+        };
+        if (s.contains("/static/pretixbase/") || s.contains("/static/pretixpresale/"))
+            && s.contains("/ical/")
+        {
             definition("pretix")
-        } else if s.contains("eventyay") {
+        } else if generator("eventyay") {
             definition("eventyay")
-        } else if s.contains("gancio") {
+        } else if s.contains("/gancio-events.es.js") {
             definition("gancio")
-        } else if s.contains("gathio") || s.contains("/export/event/") {
+        } else if s.contains("/export/event/") {
             definition("gathio")
-        } else if s.contains("mobilizon") {
+        } else if s.contains("phx-track-static")
+            && s.split("<noscript").skip(1).take(8).any(|shell| {
+                shell
+                    .split("</noscript")
+                    .next()
+                    .is_some_and(|notice| notice.contains("mobilizon"))
+            })
+        {
             definition("mobilizon")
-        } else if s.contains("hitobito") {
+        } else if s.contains("github.com/hitobito/hitobito") {
             definition("hitobito")
         } else {
             None

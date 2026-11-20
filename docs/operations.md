@@ -725,8 +725,11 @@ never counts toward the dead letter, and any other answer starts it over. After 
 their token alias at their next read; `pinakesd reextract event_platform` reads every event
 platform's links at once. A numeric Meetup page that becomes its token's alias leaves its
 group, as every alias does, and an operator's curation of it (`PUT /v1/groups/{id}`) goes with
-it: curate the token page again after its first read. Self-hosted Pretix, Eventyay, Gathio, Gancio and Mobilizon are detected from page
-signatures, a heuristic that can cost one bounded discovery request. Authenticated APIs never
+it: curate the token page again after its first read. Self-hosted Pretix, Eventyay, Gathio, Gancio, Mobilizon and hitobito are detected from what
+the software itself puts in its pages (its assets, its `generator` meta, its export link, its
+application shell), never from its name in a page's text. A detected page costs one bounded
+request more, to the host the page answered from (for Mobilizon a GraphQL POST to its `/api`);
+when that request fails the page's own card stands, with no warning and no drift counted. Authenticated APIs never
 redirect, and credentials are removed from retained URLs and errors.
 
 Cursor feeds (an event portal, BTC Map) keep their checkpoints in

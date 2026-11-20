@@ -3504,47 +3504,83 @@ async fn luma_calendar_discovery_and_non_calendar_client_url(pool: PgPool) {
     assert_eq!(doc.container.unwrap().occurrences.len(), 1);
 }
 
-struct HintedGraphql;
+/// A page on no declared platform's host, as `body`, landing (after a redirect) on
+/// `final.example`; the GraphQL API there answers an error. Records every request.
+struct HintedGraphql {
+    body: &'static str,
+    seen: Mutex<Vec<String>>,
+}
 #[async_trait::async_trait]
 impl Transport for HintedGraphql {
     async fn get(&self, u: &url::Url, _: &[SocketAddr]) -> anyhow::Result<Fetched> {
+        self.seen.lock().unwrap().push(u.to_string());
         let api = u.path() == "/api";
+        let mut answered = u.clone();
+        if !api {
+            answered.set_host(Some("final.example")).unwrap();
+        }
         Ok(common::fetched(
-            u.clone(),
+            answered,
             200,
             if api { "application/json" } else { "text/html" }.into(),
             if api {
                 br#"{"errors":[{"message":"not that GraphQL API"}]}"#.to_vec()
             } else {
-                b"<title>A page about mobilizon</title>".to_vec()
+                self.body.as_bytes().to_vec()
             },
         ))
     }
 }
+/// A platform's name in a page's text is no sign of the platform: nothing more is asked. A
+/// page that is the platform's application shell is asked for at the host it answered from,
+/// and a failed answer there neither vetoes the page nor marks it: no warning, no drift.
 #[sqlx::test(migrations = "../../migrations")]
 async fn unregistered_platform_hint_cannot_veto_page(pool: PgPool) {
     use pinakes_core::{queue, resolver::Resolver};
     let uri = "https://generic.example/events/86a665ae-e495-4e4f-88d4-4cffd44a82f1";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
-    let r = platform(
-        &pool,
-        EventConfig {
-            geocoding: false,
-            ..Default::default()
-        },
-        Egress::with_backends(
-            Default::default(),
-            Arc::new(AdapterDns),
-            Arc::new(HintedGraphql),
-        ),
+    let read = |body: &'static str| {
+        let transport = Arc::new(HintedGraphql {
+            body,
+            seen: Mutex::default(),
+        });
+        let r = platform(
+            &pool,
+            EventConfig {
+                geocoding: false,
+                ..Default::default()
+            },
+            Egress::with_backends(Default::default(), Arc::new(AdapterDns), transport.clone()),
+        );
+        (r, transport)
+    };
+    // The word alone, in the title and the text (also "gancio", an Italian word).
+    let (r, transport) = read(
+        "<title>A page about mobilizon</title><p>Mobilizon, pretix, eventyay, gathio, hitobito: un gancio.</p>",
     );
     let doc = r.resolve(uri).await.unwrap();
     assert_eq!(doc.name.as_deref(), Some("A page about mobilizon"));
-    assert!(doc
-        .event
-        .warnings
-        .iter()
-        .any(|w| w == "enrichment_unavailable"));
+    assert!(doc.event.warnings.is_empty(), "{:?}", doc.event.warnings);
+    assert_eq!(*transport.seen.lock().unwrap(), [uri]);
+    // Mobilizon's application shell: its API is asked, where the page answered.
+    let (r, transport) = read(
+        r#"<title>A meetup</title><link phx-track-static rel="stylesheet" href="/assets/main.css"><noscript>We're sorry but Mobilizon doesn't work properly without JavaScript enabled.</noscript><div id="app"></div>"#,
+    );
+    let metrics = pinakes_core::telemetry::Metrics::new().unwrap();
+    let (doc, observations) =
+        pinakes_core::telemetry::observe(&metrics, &r.manifest(), r.resolve(uri)).await;
+    let doc = doc.unwrap();
+    assert_eq!(doc.name.as_deref(), Some("A meetup"));
+    assert!(doc.event.warnings.is_empty(), "{:?}", doc.event.warnings);
+    assert_eq!(
+        *transport.seen.lock().unwrap(),
+        [uri, "https://final.example/api"]
+    );
+    assert!(
+        observations.iter().all(|o| o.outcome != "drift"),
+        "{:?}",
+        observations.iter().map(|o| o.outcome).collect::<Vec<_>>()
+    );
     queue::run_job(
         &pool,
         &r,
