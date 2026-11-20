@@ -4859,3 +4859,18 @@ fn a_uid_that_carries_a_credential_is_kept_by_a_stand_in() {
     assert_eq!(read(secret), key);
     assert_eq!(read("plain-1@cal.example"), "plain-1@cal.example");
 }
+
+/// A zone name is at most 128 bytes, and a prefixed one names its zone by its last parts.
+#[test]
+fn a_zone_name_is_bounded_and_named_by_its_last_parts() {
+    assert_eq!(
+        time::zone("/freeassociation.sourceforge.net/Tzfile/America/Argentina/Buenos_Aires")
+            .unwrap()
+            .to_string(),
+        "America/Argentina/Buenos_Aires"
+    );
+    assert!(time::zone(&format!("{}Europe/Zurich", "/".repeat(150))).is_none());
+    let started = std::time::Instant::now();
+    assert!(time::zone(&"/".repeat(1_000_000)).is_none());
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+}
