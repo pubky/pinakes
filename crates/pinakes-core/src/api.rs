@@ -418,8 +418,9 @@ pub fn router(state: AppState) -> Router {
     let routes = rest_routes();
     let mut all = routes.clone().merge(crate::agents::routes());
     if state.config.api.mcp {
-        // The tools answer through the REST routes, under the same layers.
-        let rest = with_public_layers(routes, state.clone());
+        // The tools answer through the REST routes, under the same layers. Their calls are not
+        // counted as requests of their own: the MCP message that made them is.
+        let rest = public_layers(routes, state.clone(), false);
         // A GET (and so a HEAD) is a browser's or a probe's (`agents::mcp_get`); every other
         // method is MCP's.
         let mcp = crate::agents::mcp::service(rest, state.clone());
@@ -457,11 +458,20 @@ fn rest_routes() -> Router<AppState> {
         .route("/v1/openapi.json", get(openapi))
         .route("/v1/dumps/osm_place.ndjson.gz", get(osm_dump))
 }
-/// The public listener's layer stack around `routes`: the panic backstop innermost, then CORS
-/// preflights, the per-IP budget, CORS headers, the body limit and, outermost, the path-scoped
-/// Swagger headers. Public so a test can mount a route under exactly this stack.
+/// The public listener's layer stack around `routes`: the panic backstop innermost, then the
+/// request deadline, CORS preflights, the per-IP budget, CORS headers, the body limit, the
+/// request count and, outermost, the path-scoped Swagger headers. Public so a test can mount a
+/// route under exactly this stack.
 pub fn with_public_layers(routes: Router<AppState>, state: AppState) -> Router {
+    public_layers(routes, state, true)
+}
+/// `with_public_layers`, with or without the request count.
+fn public_layers(routes: Router<AppState>, state: AppState, counted: bool) -> Router {
     let mut router = panic_backstop(routes, &state, "public")
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            request_deadline,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             cors_preflight,
@@ -475,10 +485,76 @@ pub fn with_public_layers(routes: Router<AppState>, state: AppState) -> Router {
             cors_headers,
         ))
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024));
+    if counted {
+        router = router.layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            public_requests,
+        ));
+    }
     if state.config.api.swagger_ui {
         router = router.layer(axum::middleware::from_fn(swagger_headers));
     }
     router.with_state(state)
+}
+/// A request that takes longer than `limits.request_timeout_secs` to answer is answered 504: a
+/// slow statement or a pool that is exhausted holds a request no longer than that. The deadline
+/// covers the handler up to its response's head; a body it streams (the dump) is not under it.
+async fn request_deadline(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let deadline = Duration::from_secs(state.config.api.request_timeout_secs);
+    match tokio::time::timeout(deadline, next.run(request)).await {
+        Ok(response) => response,
+        Err(_) => ApiError(
+            StatusCode::GATEWAY_TIMEOUT,
+            "the request took too long".into(),
+        )
+        .into_response(),
+    }
+}
+/// Counts and times every request on a listener (`pinakes_api_requests_total`,
+/// `pinakes_api_request_duration_seconds`) by the route's path template, never the path asked
+/// (`unmatched` when no route has it), and by the status answered. Outermost but for the Swagger
+/// headers, so a 429 of the budget and a 504 of the deadline are counted too.
+async fn count_request(
+    state: AppState,
+    listener: &'static str,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let route = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map_or("unmatched", |path| path.as_str())
+        .to_owned();
+    let started = Instant::now();
+    let response = next.run(request).await;
+    let metrics = &state.metrics;
+    metrics
+        .api_requests
+        .with_label_values(&[listener, &route, response.status().as_str()])
+        .inc();
+    metrics
+        .api_duration
+        .with_label_values(&[listener, &route])
+        .observe(started.elapsed().as_secs_f64());
+    response
+}
+async fn public_requests(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    count_request(state, "public", request, next).await
+}
+async fn admin_requests(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    count_request(state, "admin", request, next).await
 }
 /// Marks a plain-text answer a handler wrote itself, which quotes no input: the rejection layer
 /// leaves it as it is.
@@ -800,7 +876,7 @@ pub struct Card {
     /// `aliases` that carry references (the 31 most recently referenced), most referenced first
     /// (counted up to 1,000 each, then by URI), at most 5, normalized as every URI is. A typed
     /// card's `uri` is often not a link anyone wrote (`btc:block/…`, `isbn:…`): ask Nexus by
-    /// these to find the tags (docs/api.md, Joining with Nexus). An occurrence's are its feed's.
+    /// these to find the tags (docs/api.md, Card). An occurrence's are its feed's.
     /// A gone social post's are its own link's alone.
     /// Empty when nothing references the card.
     pub refs: Vec<String>,
@@ -857,7 +933,7 @@ pub struct Because {
 /// Another event, app or recording that is possibly the same one. An event: it starts together
 /// with this one, near it (or, when either has no place, at the same venue or under the same
 /// organizer), under a similar name, on another page. On an app's store card: another store card
-/// with the same website host and name (`start` is absent, `score` 1). A recording: the same title
+/// with the same website host and name (`start` is null, `score` 1). A recording: the same title
 /// and first artist, and a length within 3 s when both are known, on another page, with no key
 /// that joins them.
 #[derive(Clone, Serialize, ToSchema)]
@@ -868,7 +944,7 @@ pub struct SameEvent {
     /// service's API, that service's page); a recording's link.
     pub uri: String,
     pub site: Option<String>,
-    /// An event's start; absent for a recording.
+    /// An event's start; null for an app and a recording.
     pub start: Option<DateTime<Utc>>,
     /// An event: how alike the two names are, from 0.5 to 1 (pg_trgm similarity of the normalised
     /// names). An app: 1. A recording: 1 when both lengths are known and within 3 s, 0.7 when one
@@ -2379,17 +2455,9 @@ fn related_because(sql: &mut QueryBuilder<'_, Postgres>, item: &str, n: &str, au
         "(({item})-'because_n'-'because_authors')||jsonb_build_object('because',jsonb_build_object('shared',{n},'taggers',to_jsonb(ARRAY(SELECT t.author FROM related_taggers t WHERE t.author IN (SELECT unnest(string_to_array({authors},' '))) ORDER BY t.at DESC,t.author LIMIT {BECAUSE_TAGGERS}))))"
     ));
 }
-/// The version of a search page's shape, in its ETag: a page cached before a field was added
-/// (`because`, then every card's `credits`, then `embed`, then a show's `episodes`, then an
-/// exact `also_on` member's `refs`), before a
-/// field's content changed for rows already stored (`open_in` naming the web page of a card whose
-/// link is not one), or before its rows' order changed (`q` ranked by relevance by default) or
-/// their set (a short `q` matches a name at word starts only; `host` lists any of several hosts,
-/// where a comma-separated value found nothing before) is never answered 304. Move it when
-/// a search row gains or loses a field, a field reads otherwise for stored rows, or the same query
-/// finds other rows or the same rows in another order.
-// 9: exact member refs; 10: held music group artwork and its credit; 11: a show's `episodes`
-// name the publisher's episode card and carry `aliases`.
+/// The version of a search page's shape, in its ETag: a page cached under another version is
+/// never answered 304. Move it when a search row gains or loses a field, a field reads otherwise
+/// for stored rows, or the same query finds other rows or the same rows in another order.
 pub const SEARCH_SHAPE: u32 = 11;
 /// The most taggers a related row's `because` names.
 pub const BECAUSE_TAGGERS: usize = 3;
@@ -2982,13 +3050,17 @@ pub async fn search(
     let revision: Value = row.try_get("revision")?;
     let etag = format!(
         "\"{}\"",
-        // Relative times (`from=now`) resolve per request: hash the resolved window too.
+        // Relative times (`from=now`) resolve per request: hash the resolved window too. A
+        // trending or related page counts references in a window that ends at the request's
+        // instant: its minute is hashed, so the page is not answered 304 once rows have left
+        // the window with no write in between.
         blake3::hash(&serde_json::to_vec(&(
             q.clone(),
             revision,
             reach_revision,
             spatial.from,
             spatial.to,
+            (trending || related.is_some()).then(|| at.timestamp().div_euclid(60)),
             SEARCH_SHAPE
         ))?)
         .to_hex()
@@ -3119,14 +3191,24 @@ pub async fn lookup(
     State(state): State<AppState>,
     Json(body): Json<LookupRequest>,
 ) -> Result<Json<Vec<Card>>, ApiError> {
+    // The count first: no entry is checked or normalised for a request over the cap.
+    let entries = match (&body.ids, &body.uris) {
+        (Some(ids), None) => ids.len(),
+        (None, Some(uris)) => uris.len(),
+        _ => return Err(ApiError::bad("supply exactly one of ids or uris")),
+    };
+    if !(1..=500).contains(&entries) {
+        return Err(ApiError::bad("lookup requires 1–500 entries"));
+    }
     let ids = match (body.ids, body.uris) {
-        (Some(ids), None) => {
+        (Some(ids), _) => {
             if ids.iter().any(|s| !model::valid_id(s)) {
                 return Err(ApiError::bad("invalid resource ID"));
             }
             ids
         }
-        (None, Some(uris)) => uris
+        (None, uris) => uris
+            .unwrap_or_default()
             .iter()
             .map(|s| {
                 model::identity(s)
@@ -3134,11 +3216,7 @@ pub async fn lookup(
                     .map_err(|e| ApiError::bad(e.to_string()))
             })
             .collect::<Result<Vec<_>, _>>()?,
-        _ => return Err(ApiError::bad("supply exactly one of ids or uris")),
     };
-    if !(1..=500).contains(&ids.len()) {
-        return Err(ApiError::bad("lookup requires 1–500 entries"));
-    }
     let roots: Vec<String> = sqlx::query_scalar("SELECT coalesce(a.root_id,w.id) FROM unnest($1::text[]) w(id) LEFT JOIN resource_alias a ON a.alias_id=w.id").bind(&ids).fetch_all(&state.pool).await?;
     store::expedite(&state.pool, &roots).await?;
     state.wake.notify_waiters();
@@ -3474,6 +3552,7 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
         (name = "Previews", description = "Link previews and cards: resolve a pasted link, look up the cards of a page of posts, open one card."),
         (name = "Search", description = "Map viewports, nearby places, events, tag pages, the search box and social reach."),
         (name = "Events", description = "The dates of calendar feeds."),
+        (name = "Media", description = "A podcast show's episodes."),
         (name = "Groups", description = "Links to the same thing on several services: a hint on each card, never a merge."),
         (name = "Changes", description = "Freshness: what changed for the links a client keeps."),
         (name = "Service", description = "Version, resolvers, licence and this document."),
@@ -3563,6 +3642,8 @@ pub async fn admin_document(
 /// every `/v1/openapi.json` request.
 static PUBLIC_DOCUMENT: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
     let mut doc = serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI serialization");
+    // The crate's version, as `/v1/info` names it.
+    doc["info"]["version"] = env!("CARGO_PKG_VERSION").into();
     crate::recipes::apply(&mut doc);
     declare_rejections(&mut doc);
     doc
@@ -3911,11 +3992,15 @@ pub fn admin_router(state: AppState) -> Router {
     with_admin_layers(routes, state)
 }
 /// The admin listener's layer stack around `routes`: the panic backstop innermost, then the
-/// bearer check, then the `Host` check outermost, so a request for another host or without the
-/// credential never reaches a handler. No CORS. Public so a test can mount a route under exactly
-/// this stack.
+/// request deadline, the bearer check, the `Host` check, so a request for another host or
+/// without the credential never reaches a handler, and the request count outermost. No CORS.
+/// Public so a test can mount a route under exactly this stack.
 pub fn with_admin_layers(routes: Router<AppState>, state: AppState) -> Router {
     panic_backstop(routes, &state, "admin")
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            request_deadline,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             admin_auth,
@@ -3923,6 +4008,10 @@ pub fn with_admin_layers(routes: Router<AppState>, state: AppState) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             admin_host,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            admin_requests,
         ))
         .with_state(state)
 }
@@ -3996,8 +4085,28 @@ async fn admin_auth(
     }
     next.run(request).await
 }
+/// How long a scrape waits for the database gauges: below a scraper's usual ten seconds.
+const METRICS_REFRESH: Duration = Duration::from_secs(8);
+/// The registry, whatever the database does: when the gauges read from it cannot be refreshed
+/// within `METRICS_REFRESH` they keep their last values and the failure is counted
+/// (`pinakes_metrics_refresh_failures_total`), so a slow or failed read never hides the
+/// process's own counters from a scrape. Until the gauges have been read once they hold no
+/// value: the answer is 503 then, never zeros that would read as facts (an ingestion that
+/// never succeeded).
 async fn metrics(State(state): State<AppState>) -> Result<Response, ApiError> {
-    state.metrics.refresh(&state.pool).await?;
+    let refresh = tokio::time::timeout(METRICS_REFRESH, state.metrics.refresh(&state.pool))
+        .await
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("the database read took too long")));
+    if let Err(error) = refresh {
+        state.metrics.refresh_failures.inc();
+        tracing::warn!(error=%crate::resolver::log_error(&error),"metrics refresh failed");
+        if !state.metrics.ever_refreshed().await {
+            return Err(ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "metrics are not ready: the database has not been read yet".into(),
+            ));
+        }
+    }
     Ok((
         [(
             header::CONTENT_TYPE,

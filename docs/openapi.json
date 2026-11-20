@@ -234,7 +234,7 @@
             ]
           },
           "refs": {
-            "description": "The links people referenced on Pubky that resolve to this card: its own `uri` and its\n`aliases` that carry references (the 31 most recently referenced), most referenced first\n(counted up to 1,000 each, then by URI), at most 5, normalized as every URI is. A typed\ncard's `uri` is often not a link anyone wrote (`btc:block/…`, `isbn:…`): ask Nexus by\nthese to find the tags (docs/api.md, Joining with Nexus). An occurrence's are its feed's.\nA gone social post's are its own link's alone.\nEmpty when nothing references the card.",
+            "description": "The links people referenced on Pubky that resolve to this card: its own `uri` and its\n`aliases` that carry references (the 31 most recently referenced), most referenced first\n(counted up to 1,000 each, then by URI), at most 5, normalized as every URI is. A typed\ncard's `uri` is often not a link anyone wrote (`btc:block/…`, `isbn:…`): ask Nexus by\nthese to find the tags (docs/api.md, Card). An occurrence's are its feed's.\nA gone social post's are its own link's alone.\nEmpty when nothing references the card.",
             "items": {
               "type": "string"
             },
@@ -1644,7 +1644,7 @@
         "description": "`GET /v1/resources/{id}`, `GET /v1/resources/by-uri` and `POST /v1/resolve`: the card with\nthe resource's further fields, one flat object (`api_shape` 2 in `/v1/info`)."
       },
       "SameEvent": {
-        "description": "Another event, app or recording that is possibly the same one. An event: it starts together\nwith this one, near it (or, when either has no place, at the same venue or under the same\norganizer), under a similar name, on another page. On an app's store card: another store card\nwith the same website host and name (`start` is absent, `score` 1). A recording: the same title\nand first artist, and a length within 3 s when both are known, on another page, with no key\nthat joins them.",
+        "description": "Another event, app or recording that is possibly the same one. An event: it starts together\nwith this one, near it (or, when either has no place, at the same venue or under the same\norganizer), under a similar name, on another page. On an app's store card: another store card\nwith the same website host and name (`start` is null, `score` 1). A recording: the same title\nand first artist, and a length within 3 s when both are known, on another page, with no key\nthat joins them.",
         "properties": {
           "id": {
             "description": "Its card's ID (a feed's, for an occurrence).",
@@ -1662,7 +1662,7 @@
             ]
           },
           "start": {
-            "description": "An event's start; absent for a recording.",
+            "description": "An event's start; null for an app and a recording.",
             "format": "date-time",
             "type": [
               "string",
@@ -4136,6 +4136,10 @@
     {
       "description": "The dates of calendar feeds.",
       "name": "Events"
+    },
+    {
+      "description": "A podcast show's episodes.",
+      "name": "Media"
     },
     {
       "description": "Links to the same thing on several services: a hint on each card, never a merge.",
