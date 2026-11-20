@@ -24,8 +24,8 @@ most 6 seconds. At one request a second, a site's first walled link may spend th
 the page and its feeds; the news sitemaps are then read on a later attempt, once the feeds are
 cached. A feed or sitemap over 1 MB is read up to its last whole item within that megabyte, and
 at most 5,000 items of one are searched. A host whose feeds all answered and none listed any item
-is remembered for a day; a rate limit, a timeout, a server error or a feed cut before its first
-item says nothing about the host, which is asked again.
+is remembered for a day; a rate limit, a timeout or a server error (of a feed or of `robots.txt`) or a
+feed cut before its first item says nothing about the host, which is asked again.
 
 ## Card
 

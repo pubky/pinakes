@@ -354,13 +354,20 @@ impl Source for Feed {
             extra_types: &["text/plain"],
             ..Default::default()
         };
+        // A `robots.txt` that failed (a fetch error, a rate limit, a timeout or a server error)
+        // says nothing about the host's sitemaps: nothing is concluded then either.
+        let mut robots_failed = false;
         let sitemaps = match cx
             .egress
             .discover(&format!("{origin}/robots.txt"), &robots, 86_400)
             .await
         {
             Ok(f) if f.status == 200 => news_sitemaps(&String::from_utf8_lossy(&f.body), &url),
-            _ => vec![],
+            Ok(f) if !matches!(f.status, 408 | 429 | 500..=599) => vec![],
+            _ => {
+                robots_failed = true;
+                vec![]
+            }
         };
         for address in sitemaps {
             let answer = cx.egress.discover(&address, &feed, FEED_TTL).await;
@@ -368,7 +375,7 @@ impl Source for Feed {
                 return Ok(Some(doc));
             }
         }
-        if !any && !failed {
+        if !any && !failed && !robots_failed {
             FEEDLESS.set(&host, false);
         }
         Ok(None)
@@ -572,6 +579,29 @@ mod tests {
         let page = "https://busy.example/article/1";
         assert!(Feed.walled(&cx, page).await.unwrap().is_none());
         let asked = recorded.asked().len();
+        tokio::time::advance(std::time::Duration::from_secs(301)).await;
+        assert!(Feed.walled(&cx, page).await.unwrap().is_none());
+        assert!(recorded.asked().len() > asked, "the host was memoised");
+    }
+
+    /// A `robots.txt` that answers a server error says nothing about the host's news sitemaps: a
+    /// host whose feeds list nothing is not remembered as feedless then, and is asked again.
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_robots_txt_does_not_mark_a_host_feedless() {
+        let (egress, recorded) = fixture::egress(vec![(
+            "https://robots-down.example/robots.txt",
+            503,
+            "text/plain",
+            vec![],
+        )]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let page = "https://robots-down.example/article/1";
+        assert!(Feed.walled(&cx, page).await.unwrap().is_none());
+        let asked = recorded.asked().len();
+        // Past the discovery cache's five minutes for failures, the host is asked again.
         tokio::time::advance(std::time::Duration::from_secs(301)).await;
         assert!(Feed.walled(&cx, page).await.unwrap().is_none());
         assert!(recorded.asked().len() > asked, "the host was memoised");
