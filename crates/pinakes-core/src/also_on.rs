@@ -178,13 +178,32 @@ pub struct Found {
     /// A secondary service the source asks failed, so its part is missing from this run: what
     /// the run found stands, and the worker brings the run back after its backoff, as for a
     /// failed run (five minutes, doubling to an hour), or after this wait (the one the service
-    /// named) when longer; never after the source's lifetime.
+    /// named) when longer; after [`PARTIAL_RETRIES`] such runs in a row, after [`CAPPED_RETRY`].
+    /// The source sets `keep_stored` too ([`Keep::All`]), so nothing it gave before is deleted
+    /// meanwhile.
     pub retry_after: Option<Duration>,
     /// Where links of the resource's group sit among its releases (`link_release`).
     pub editions: Vec<Edition>,
     /// Links whose place this run could not tell (a lookup failed, credentials were refused, a
     /// list was cut short, a cap was reached): their earlier places stay as recorded.
     pub keep: Vec<String>,
+    /// Whether the rows the source recorded before and did not find again are deleted
+    /// ([`Keep`]): only when every service the source asked answered.
+    pub keep_stored: Keep,
+}
+/// What a run does with the rows its source recorded before and did not find again. A row that
+/// stays keeps its own expiry, so one that no service gives any more leaves when it expires (at
+/// most twice the source's lifetime after it was last found). Places among releases
+/// (`link_release`) follow `Found::keep` whatever this says.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Keep {
+    /// They are deleted: every service the source asked answered, and the run's answer is whole.
+    #[default]
+    Nothing,
+    /// A service the source asks failed or refused the operator's credentials, so part of the
+    /// answer is missing, and so may be what other services are asked with: none is deleted,
+    /// and what the run found is added.
+    All,
 }
 /// A link placed for one card: on a MusicBrainz release, `rank` 0 when it is the card's own, then
 /// 1, 2, … for the original edition's releases by date; or (rank 1000, no `release`) on another
@@ -718,7 +737,16 @@ fn checked(
         .collect();
     keys.sort();
     keys.dedup_by(|a, b| a.key == b.key);
+    // As for facts: the cap cuts the many keys of one namespace (a recording's ISRCs) before a
+    // namespace's one key (its MBID, its Q-id), so those always fit.
+    let namespace = |key: &str| key.rsplit_once(':').map_or(key, |(n, _)| n).to_owned();
+    let mut per_namespace: std::collections::HashMap<String, usize> = Default::default();
+    for k in &keys {
+        *per_namespace.entry(namespace(&k.key)).or_default() += 1;
+    }
+    keys.sort_by_key(|k| per_namespace[&namespace(&k.key)] > 1);
     keys.truncate(cfg.keys_per_source);
+    keys.sort();
     // In the source's order (its best first), each link once.
     let mut links = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -830,7 +858,8 @@ fn normal_key(key: &str) -> Option<String> {
     }
 }
 /// Replace `source`'s keys and links for `resource_id` with `found` (checked and bounded); they
-/// live for twice `ttl`.
+/// live for twice `ttl`. A run with part of its answer missing deletes none of the source's rows
+/// (`Found::keep_stored`, [`Keep`]).
 pub async fn record(
     pool: &PgPool,
     resource_id: &str,
@@ -840,13 +869,14 @@ pub async fn record(
     cfg: &AlsoOnConfig,
 ) -> Result<()> {
     anyhow::ensure!(token(source), "invalid source id {source}");
+    let mut keep_stored = found.keep_stored;
     let (mut keys, mut links, mut facts, mut placed) = checked(resource_id, found, cfg);
     let expires = Utc::now()
         + chrono::Duration::from_std(ttl.saturating_mul(2)).unwrap_or(chrono::Duration::days(60));
     let mut tx = pool.begin().await?;
     // The write order first, then the resource rows this run's triggers update (its own, and
-    // those its keyed links name, now and before) in ID order, so neither a save nor two runs
-    // naming each other deadlock.
+    // those its keyed links name, now and before, a link taken over from another source
+    // included) in ID order, so neither a save nor two runs naming each other deadlock.
     lock_writers(&mut tx).await?;
     let named: Vec<&str> = std::iter::once(resource_id)
         .chain(
@@ -856,10 +886,12 @@ pub async fn record(
                 .map(|(id, ..)| id.as_str()),
         )
         .collect();
-    sqlx::query("SELECT 1 FROM resource WHERE id=ANY($1::text[] || ARRAY(SELECT link_id FROM derived_link WHERE resource_id=$2 AND source=$3 AND key IS NOT NULL)) ORDER BY id FOR NO KEY UPDATE")
+    let link_ids: Vec<&str> = links.iter().map(|(id, ..)| id.as_str()).collect();
+    sqlx::query("SELECT 1 FROM resource WHERE id=ANY($1::text[] || ARRAY(SELECT link_id FROM derived_link WHERE resource_id=$2 AND (source=$3 OR link_id=ANY($4)) AND key IS NOT NULL)) ORDER BY id FOR NO KEY UPDATE")
         .bind(&named)
         .bind(resource_id)
         .bind(source)
+        .bind(&link_ids)
         .execute(&mut *tx)
         .await?;
     // Read again under the locks, for a lookup that ran while its resource changed. One that
@@ -877,6 +909,7 @@ pub async fn record(
         .is_some_and(|doc| crate::changes::gone_social(&doc))
     {
         (keys, links, facts, placed) = Default::default();
+        keep_stored = Keep::Nothing;
     }
     // Observed, never decided: every producer keys the recording that stands for a set of
     // duplicates (`music_sources::recording_key`), so two MusicBrainz recordings on one resource
@@ -907,30 +940,53 @@ pub async fn record(
         .iter()
         .map(|k| serde_json::json!({"key": k.key, "via": k.via}))
         .collect();
-    sqlx::query("DELETE FROM resource_key WHERE resource_id=$1 AND source=$2 AND NOT key=ANY(SELECT v->>'key' FROM jsonb_array_elements($3) v)")
-        .bind(resource_id).bind(source).bind(Value::from(key_rows.clone())).execute(&mut *tx).await?;
-    // A key another source already vouches for keeps that source; this one adds nothing to it.
+    if keep_stored == Keep::Nothing {
+        sqlx::query("DELETE FROM resource_key WHERE resource_id=$1 AND source=$2 AND NOT key=ANY(SELECT v->>'key' FROM jsonb_array_elements($3) v)")
+            .bind(resource_id).bind(source).bind(Value::from(key_rows.clone())).execute(&mut *tx).await?;
+    }
+    // A key whose source is switched off, or let it expire, is this source's from now on: no
+    // read shows such a row, though this source vouches for the key. `key` is set so that the
+    // resource is regrouped as for a new key (the triggers on `key`).
+    sqlx::query("UPDATE resource_key t SET key=t.key,source=$2,via=v->>'via',seen_at=now(),expires_at=$4 FROM jsonb_array_elements($3) v WHERE t.resource_id=$1 AND t.key=v->>'key' AND t.source<>$2 AND (t.expires_at<=now() OR t.source IN (SELECT source FROM also_on_source_off))")
+        .bind(resource_id).bind(source).bind(Value::from(key_rows.clone())).bind(expires).execute(&mut *tx).await?;
+    // A key another live source vouches for keeps that source; this one adds nothing to it.
     sqlx::query("INSERT INTO resource_key(resource_id,key,source,via,expires_at) SELECT $1,v->>'key',$2,v->>'via',$4 FROM jsonb_array_elements($3) v ON CONFLICT(resource_id,key) DO UPDATE SET seen_at=now(),expires_at=greatest(resource_key.expires_at,excluded.expires_at) WHERE resource_key.source=excluded.source")
         .bind(resource_id).bind(source).bind(Value::from(key_rows)).bind(expires).execute(&mut *tx).await?;
     let link_rows: Vec<Value> = links
         .iter()
         .map(|(id, uri, l)| serde_json::json!({"id": id, "uri": uri, "site": l.site, "via": l.via, "kind": l.kind, "at": l.at, "key": l.key}))
         .collect();
-    sqlx::query("DELETE FROM derived_link WHERE resource_id=$1 AND source=$2 AND NOT link_id=ANY(SELECT v->>'id' FROM jsonb_array_elements($3) v)")
+    if keep_stored == Keep::Nothing {
+        sqlx::query("DELETE FROM derived_link WHERE resource_id=$1 AND source=$2 AND NOT link_id=ANY(SELECT v->>'id' FROM jsonb_array_elements($3) v)")
+            .bind(resource_id).bind(source).bind(Value::from(link_rows.clone())).execute(&mut *tx).await?;
+    }
+    // A keyed link this run takes over from a source that is switched off or let it expire
+    // (below) names its resource again with the same key: that resource is regrouped, as the
+    // link's trigger does only for a key that changes.
+    sqlx::query("WITH taken AS (SELECT t.link_id FROM derived_link t JOIN jsonb_array_elements($3) v ON t.link_id=v->>'id' WHERE t.resource_id=$1 AND t.source<>$2 AND (t.expires_at<=now() OR t.source IN (SELECT source FROM also_on_source_off)) AND t.key IS NOT NULL AND t.key=v->>'key' AND v->>'kind' IS DISTINCT FROM 'maybe'), bumped AS (UPDATE resource r SET group_revision=r.group_revision+1 FROM taken n WHERE r.id=n.link_id RETURNING r.id) INSERT INTO group_dirty(resource_id) SELECT id FROM bumped ON CONFLICT DO NOTHING")
         .bind(resource_id).bind(source).bind(Value::from(link_rows.clone())).execute(&mut *tx).await?;
     // A link another source derived first stays that source's, unless it is a maybe (a match by
     // metadata) and this one is not: the exact row takes it over, its source, kind and key too, so
-    // the maybe source neither writes it back nor deletes it when it stops finding the link.
-    sqlx::query("INSERT INTO derived_link(resource_id,link_id,uri,site,source,via,kind,at,key,expires_at) SELECT $1,v->>'id',v->>'uri',v->>'site',$2,v->>'via',v->>'kind',(v->>'at')::timestamptz,v->>'key',$4 FROM jsonb_array_elements($3) v ON CONFLICT(resource_id,link_id) DO UPDATE SET source=excluded.source,uri=excluded.uri,site=excluded.site,via=excluded.via,kind=excluded.kind,at=excluded.at,key=excluded.key,seen_at=now(),expires_at=excluded.expires_at WHERE derived_link.source=excluded.source OR (derived_link.kind='maybe' AND excluded.kind IS DISTINCT FROM 'maybe')")
+    // the maybe source neither writes it back nor deletes it when it stops finding the link. A
+    // link whose source is switched off, or let it expire, is taken over the same way.
+    sqlx::query("INSERT INTO derived_link(resource_id,link_id,uri,site,source,via,kind,at,key,expires_at) SELECT $1,v->>'id',v->>'uri',v->>'site',$2,v->>'via',v->>'kind',(v->>'at')::timestamptz,v->>'key',$4 FROM jsonb_array_elements($3) v ON CONFLICT(resource_id,link_id) DO UPDATE SET source=excluded.source,uri=excluded.uri,site=excluded.site,via=excluded.via,kind=excluded.kind,at=excluded.at,key=excluded.key,seen_at=now(),expires_at=excluded.expires_at WHERE derived_link.source=excluded.source OR (derived_link.kind='maybe' AND excluded.kind IS DISTINCT FROM 'maybe') OR derived_link.expires_at<=now() OR derived_link.source IN (SELECT source FROM also_on_source_off)")
         .bind(resource_id).bind(source).bind(Value::from(link_rows)).bind(expires).execute(&mut *tx).await?;
     let fact_rows: Vec<Value> = facts
         .iter()
         .map(|f| serde_json::json!({"name": f.name, "value": f.value}))
         .collect();
-    sqlx::query("DELETE FROM resource_fact WHERE resource_id=$1 AND source=$2 AND NOT (name,value) IN (SELECT v->>'name',v->>'value' FROM jsonb_array_elements($3) v)")
+    if keep_stored == Keep::Nothing {
+        sqlx::query("DELETE FROM resource_fact WHERE resource_id=$1 AND source=$2 AND NOT (name,value) IN (SELECT v->>'name',v->>'value' FROM jsonb_array_elements($3) v)")
+            .bind(resource_id).bind(source).bind(Value::from(fact_rows.clone())).execute(&mut *tx).await?;
+    }
+    // A recording's artist or length taken over from a switched-off source (below) counts for
+    // the same-recording hint again: the recording is read again, as the fact's trigger marks it
+    // only for a value that changes or a row that had expired.
+    sqlx::query("INSERT INTO same_recording_dirty(resource_id) SELECT r.id FROM resource r WHERE r.id=$1 AND r.type_path @> ARRAY['MusicRecording'] AND EXISTS(SELECT 1 FROM resource_fact t JOIN jsonb_array_elements($3) v ON t.name=v->>'name' AND t.value=v->>'value' WHERE t.resource_id=$1 AND t.source<>$2 AND t.name IN ('artist','duration') AND t.expires_at>now() AND t.source IN (SELECT source FROM also_on_source_off)) ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=excluded.next_attempt_at WHERE same_recording_dirty.next_attempt_at>excluded.next_attempt_at")
         .bind(resource_id).bind(source).bind(Value::from(fact_rows.clone())).execute(&mut *tx).await?;
-    // A fact another source already reports keeps that source.
-    sqlx::query("INSERT INTO resource_fact(resource_id,name,value,source,expires_at) SELECT $1,v->>'name',v->>'value',$2,$4 FROM jsonb_array_elements($3) v ON CONFLICT(resource_id,name,value) DO UPDATE SET seen_at=now(),expires_at=greatest(resource_fact.expires_at,excluded.expires_at) WHERE resource_fact.source=excluded.source")
+    // A fact another live source already reports keeps that source; one whose source is
+    // switched off, or let it expire, is this source's from now on.
+    sqlx::query("INSERT INTO resource_fact(resource_id,name,value,source,expires_at) SELECT $1,v->>'name',v->>'value',$2,$4 FROM jsonb_array_elements($3) v ON CONFLICT(resource_id,name,value) DO UPDATE SET source=excluded.source,seen_at=now(),expires_at=greatest(resource_fact.expires_at,excluded.expires_at) WHERE resource_fact.source=excluded.source OR resource_fact.expires_at<=now() OR resource_fact.source IN (SELECT source FROM also_on_source_off)")
         .bind(resource_id).bind(source).bind(Value::from(fact_rows)).bind(expires).execute(&mut *tx).await?;
     let edition_rows: Vec<Value> = placed
         .editions
@@ -948,7 +1004,12 @@ pub async fn record(
 
 /// Run the sources of `ids` again in ten minutes, those `editions` reads (a MusicBrainz key): a change of
 /// their groups (a member joining or leaving, a link becoming an alias) changes the links their
-/// cards may show, which it places.
+/// cards may show, which it places. A card due later than ten minutes from now is due then. One
+/// due sooner, or due already, keeps its time, a microsecond later: were that time the worker's
+/// lease on it (one that has run out while its batch still runs, too), the batch's end must not
+/// find the lease unchanged (`drain_leased` writes the next run only over its own lease), so the
+/// mark stands as a save's does and the card runs again when the lease has run out. A due card
+/// no worker holds stays due.
 pub(crate) async fn requeue_placed(
     tx: &mut Transaction<'_, Postgres>,
     ids: &[String],
@@ -957,7 +1018,7 @@ pub(crate) async fn requeue_placed(
         return Ok(());
     }
     // In ten minutes: the changes a regrouping makes at once come to one run per card.
-    sqlx::query("INSERT INTO also_on_dirty(resource_id,next_attempt_at) SELECT DISTINCT k.resource_id,now()+interval '10 minutes' FROM resource_key k WHERE k.resource_id=ANY($1) AND (k.key LIKE 'mb:recording:%' OR k.key LIKE 'mb:release:%' OR k.key LIKE 'mb:release-group:%') ORDER BY 1 ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=least(also_on_dirty.next_attempt_at,excluded.next_attempt_at)")
+    sqlx::query("INSERT INTO also_on_dirty(resource_id,next_attempt_at) SELECT DISTINCT k.resource_id,now()+interval '10 minutes' FROM resource_key k WHERE k.resource_id=ANY($1) AND (k.key LIKE 'mb:recording:%' OR k.key LIKE 'mb:release:%' OR k.key LIKE 'mb:release-group:%') ORDER BY 1 ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=CASE WHEN also_on_dirty.next_attempt_at>excluded.next_attempt_at THEN excluded.next_attempt_at ELSE also_on_dirty.next_attempt_at+interval '1 microsecond' END")
         .bind(ids)
         .execute(&mut **tx)
         .await?;
@@ -1184,7 +1245,8 @@ pub async fn drain_leased(
         .collect::<Vec<_>>()
         .await;
     // A change saved while a resource was read marked it due again (its lease became now): that
-    // mark stands, so the change is read too. So does another worker's claim after this lease
+    // mark stands, so the change is read too. So does a regrouping's (`requeue_placed`: the
+    // lease moved), and another worker's claim after this lease
     // ran out. The next attempt is written only while the row still holds this run's lease,
     // however long the batch took; the count of failed runs and the error are always written.
     let next = |at: &str| {
@@ -1195,6 +1257,7 @@ pub async fn drain_leased(
             Ok(Some(Next {
                 lifetime,
                 partial: None,
+                failed: None,
             })) => {
                 sqlx::query(&format!(
                     "UPDATE also_on_dirty SET attempts=0,last_error=NULL,{} WHERE resource_id=$1",
@@ -1209,20 +1272,25 @@ pub async fn drain_leased(
             // A secondary service failed: what the run found is recorded, and the run comes back
             // after a failed run's backoff, so a service that keeps failing is asked less and
             // less often (up to hourly), or after the wait it named when longer; never after the
-            // lifetime. A run with every service answering resets the count.
+            // lifetime. After `PARTIAL_RETRIES` such runs in a row the failure is taken to last,
+            // and the run comes back after `CAPPED_RETRY` (a day, or the lifetime when shorter).
+            // A run with every service answering resets the count.
             Ok(Some(Next {
                 lifetime,
                 partial: Some(asked),
+                failed: None,
             })) => {
                 sqlx::query(&format!(
                     "UPDATE also_on_dirty SET attempts=attempts+1,last_error=NULL,{} WHERE resource_id=$1",
-                    next("now()+least($3,make_interval(secs => greatest($5::float8,least($4::float8*power(2,least(attempts,6)),3600))))")
+                    next("now()+CASE WHEN attempts>=$6 THEN $7 ELSE least($3,make_interval(secs => greatest($5::float8,least($4::float8*power(2,least(attempts,6)),3600)))) END")
                 ))
                 .bind(&id)
                 .bind(lease)
                 .bind(lifetime)
                 .bind(cfg.retry_secs as f64)
                 .bind(asked.as_secs().min(86_400) as f64)
+                .bind(PARTIAL_RETRIES)
+                .bind(capped(lifetime))
                 .execute(pool)
                 .await?;
             }
@@ -1235,27 +1303,63 @@ pub async fn drain_leased(
                 .execute(pool)
                 .await?;
             }
-            Err(error) => {
-                tracing::warn!(resource=%id, kind=crate::resolver::error_class(&error), "also-on lookup will retry");
-                // A service that said how long to wait is waited for at least that long.
-                let asked = error
-                    .downcast_ref::<crate::resolver::RetryLater>()
-                    .map_or(0, |r| r.seconds.min(86_400)) as f64;
-                sqlx::query(&format!(
-                    "UPDATE also_on_dirty SET attempts=attempts+1,last_error=$3,{} WHERE resource_id=$1",
-                    next("now()+make_interval(secs => greatest($5::float8,least($4::float8*power(2,least(attempts,6)),3600)))")
-                ))
-                .bind(&id)
-                .bind(lease)
-                .bind(crate::resolver::error_class(&error))
-                .bind(cfg.retry_secs as f64)
-                .bind(asked)
-                .execute(pool)
-                .await?;
-            }
+            // A source failed: what the others found is recorded, the failed one's rows stay, and
+            // the run comes back after a failed run's backoff, or after the wait a service named
+            // when longer. After `PARTIAL_RETRIES` such runs in a row (a source that fails for
+            // good: a refused request, a wall) it comes back after `CAPPED_RETRY`, as one that
+            // keeps missing a secondary service does.
+            Ok(Some(Next {
+                lifetime,
+                failed: Some(error),
+                ..
+            })) => failed_run(pool, cfg, &id, lease, &error, Some(capped(lifetime))).await?,
+            // The run could not be done at all (a database error): it is retried with backoff.
+            Err(error) => failed_run(pool, cfg, &id, lease, &error, None).await?,
         }
     }
     Ok(handled)
+}
+/// Writes a failed run's outcome for `id` against its `lease` (`drain_leased`): the error's
+/// class, one more failed run, and the next attempt after the backoff (`also_on_retry_secs`
+/// doubling to an hour, or the wait the error names when longer), or after `capped` (the
+/// lifetime held to [`CAPPED_RETRY`]) once [`PARTIAL_RETRIES`] failed runs came before this one.
+async fn failed_run(
+    pool: &PgPool,
+    cfg: &AlsoOnConfig,
+    id: &str,
+    lease: DateTime<Utc>,
+    error: &anyhow::Error,
+    capped: Option<chrono::Duration>,
+) -> Result<()> {
+    tracing::warn!(resource=%id, kind=crate::resolver::error_class(error), "also-on lookup will retry");
+    // A service that said how long to wait is waited for at least that long.
+    let asked = error
+        .downcast_ref::<crate::resolver::RetryLater>()
+        .map_or(0, |r| r.seconds.min(86_400)) as f64;
+    sqlx::query("UPDATE also_on_dirty SET attempts=attempts+1,last_error=$3,next_attempt_at=CASE WHEN next_attempt_at=$2 THEN now()+CASE WHEN attempts>=$6 AND $7::interval IS NOT NULL THEN $7::interval ELSE make_interval(secs => greatest($5::float8,least($4::float8*power(2,least(attempts,6)),3600))) END ELSE next_attempt_at END WHERE resource_id=$1")
+        .bind(id)
+        .bind(lease)
+        .bind(crate::resolver::error_class(error))
+        .bind(cfg.retry_secs as f64)
+        .bind(asked)
+        .bind(PARTIAL_RETRIES)
+        .bind(capped)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+/// How many runs in a row a failing source or secondary service brings back early (after the
+/// backoff of a failed run, which reaches an hour at the fifth): after them the failure is taken
+/// to last, and the card runs again after [`CAPPED_RETRY`].
+pub const PARTIAL_RETRIES: i32 = 6;
+/// When a card whose failures reached [`PARTIAL_RETRIES`] runs again: after a day, or its
+/// sources' lifetime when shorter. A failure that lasts costs a run a day; an outage that ends
+/// is over for the card within a day, long before any of its rows (kept twice the lifetime)
+/// can expire.
+pub const CAPPED_RETRY: Duration = Duration::from_secs(86_400);
+/// [`CAPPED_RETRY`], or `lifetime` when shorter.
+fn capped(lifetime: chrono::Duration) -> chrono::Duration {
+    chrono::Duration::from_std(CAPPED_RETRY).map_or(lifetime, |cap| lifetime.min(cap))
 }
 /// When a resource's next also-on run is due.
 struct Next {
@@ -1263,6 +1367,8 @@ struct Next {
     lifetime: chrono::Duration,
     /// A secondary service failed in this run: the longest wait one named (zero when none).
     partial: Option<Duration>,
+    /// A source failed: the run is retried (its rows stay, as it recorded nothing).
+    failed: Option<anyhow::Error>,
 }
 
 /// The sources that hold rows of `resource_id`, in every table `record` writes (keys, derived
@@ -1280,8 +1386,10 @@ async fn stored_sources(
 }
 
 /// One resource: every enabled source that applies runs; each success replaces its rows. Ok
-/// with when the next run is due, Ok(None) when no source applies, Err when any source failed
-/// (the others' results are kept).
+/// with when the next run is due (`Next::failed` when any source failed: the others' results are
+/// kept), Ok(None) when no source applies, Err when the run itself could not be done (a database
+/// error). A source whose service refuses the operator's credentials
+/// (`client_credentials::refused`) is passed over as one that is not ready: its rows stay.
 async fn one(
     pool: &PgPool,
     cx: &Context,
@@ -1376,7 +1484,18 @@ async fn one(
                     .fetch_all(pool)
                     .await?;
             }
+            // A service that refuses the operator's credentials: its source is not ready, as one
+            // without credentials. Its rows stay, and the run neither fails nor comes back early
+            // for it (the refusal is logged and counted where it is met, `client_credentials`):
+            // the card's sources are asked again at their lifetime, this one too.
+            Err(error) if client_credentials::refused(&error) => {
+                tracing::debug!(resource = %id, source = source.id(), "also-on source passed over: its credentials are refused");
+                let lifetime = source.ttl();
+                next = Some(next.map_or(lifetime, |n| n.min(lifetime)));
+            }
             Err(error) => {
+                let lifetime = source.ttl();
+                next = Some(next.map_or(lifetime, |n| n.min(lifetime)));
                 // The longest wait any failing source asked for sets the retry.
                 let wait = |e: &anyhow::Error| {
                     e.downcast_ref::<crate::resolver::RetryLater>()
@@ -1396,12 +1515,10 @@ async fn one(
             .execute(pool)
             .await?;
     }
-    if let Some(error) = failed {
-        return Err(error);
-    }
     Ok(next.map(|n| Next {
         lifetime: chrono::Duration::from_std(n).unwrap_or(chrono::Duration::days(30)),
         partial,
+        failed,
     }))
 }
 

@@ -30,11 +30,21 @@ struct Fake {
     /// A service asked to wait this long (`RetryLater`), per URI.
     waits: Mutex<BTreeMap<String, u64>>,
     calls: Mutex<Vec<String>>,
+    /// Its lifetime when not a day.
+    lifetime: Option<Duration>,
 }
 impl Fake {
     fn new(id: &'static str) -> Arc<Self> {
         Arc::new(Self {
             id,
+            ..Default::default()
+        })
+    }
+    /// A fake whose rows live `lifetime` (a day by default).
+    fn lasting(id: &'static str, lifetime: Duration) -> Arc<Self> {
+        Arc::new(Self {
+            id,
+            lifetime: Some(lifetime),
             ..Default::default()
         })
     }
@@ -55,7 +65,7 @@ impl Source for Fake {
         subject.status == "ok" && self.answers.lock().unwrap().contains_key(&subject.uri)
     }
     fn ttl(&self) -> Duration {
-        Duration::from_secs(86_400)
+        self.lifetime.unwrap_or(Duration::from_secs(86_400))
     }
     async fn lookup(&self, _: &Context, subject: &Subject) -> anyhow::Result<Found> {
         self.calls.lock().unwrap().push(subject.uri.clone());
@@ -2977,6 +2987,108 @@ async fn a_change_saved_during_a_run_is_read_again(pool: PgPool) {
     assert!(later);
 }
 
+/// A source during whose lookup another card joins the subject's group: it records the
+/// recording's key for `other` and runs the grouping, as a second card's run and the group task
+/// would while this card's batch is claimed.
+struct JoinedMeanwhile {
+    pool: PgPool,
+    other: String,
+    recording: &'static str,
+}
+#[async_trait]
+impl Source for JoinedMeanwhile {
+    fn id(&self) -> &'static str {
+        "joined_meanwhile"
+    }
+    fn applies(&self, subject: &Subject) -> bool {
+        subject.status == "ok" && subject.id != self.other
+    }
+    fn ttl(&self) -> Duration {
+        Duration::from_secs(86_400)
+    }
+    async fn lookup(&self, cx: &Context, _: &Subject) -> anyhow::Result<Found> {
+        also_on::record(
+            &self.pool,
+            &self.other,
+            "hub",
+            Found {
+                keys: vec![key(self.recording)],
+                ..Default::default()
+            },
+            Duration::from_secs(86_400),
+            &cx.config.also_on,
+        )
+        .await?;
+        common::drain_groups(&self.pool, &Default::default()).await;
+        Ok(Found {
+            keys: vec![key("isrc:USIR10211559")],
+            ..Default::default()
+        })
+    }
+}
+
+/// A regrouping marks the cards it moves to run again in ten minutes (`editions` places their
+/// group's links). The mark stands for a card the worker holds too: the end of its batch does
+/// not write the lifetime over it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_regrouping_during_a_run_brings_the_card_back(pool: PgPool) {
+    let recording = "mb:recording:8f3471b5-7e6a-48da-86a9-c1c07a0f47ae";
+    let card = page(
+        &pool,
+        "https://open.spotify.com/track/regrouped",
+        "Regrouped",
+    )
+    .await;
+    let other = page(&pool, "https://tidal.com/track/491206012", "Regrouped").await;
+    let cx = cx(Config::default());
+    also_on::record(
+        &pool,
+        &card,
+        "hub",
+        Found {
+            keys: vec![key(recording)],
+            ..Default::default()
+        },
+        Duration::from_secs(86_400),
+        &cx.config.also_on,
+    )
+    .await
+    .unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
+    let group = || {
+        let pool = pool.clone();
+        let card = card.clone();
+        async move {
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT group_id FROM group_unit WHERE resource_id=$1",
+            )
+            .bind(&card)
+            .fetch_optional(&pool)
+            .await
+            .unwrap()
+            .flatten()
+        }
+    };
+    assert_eq!(group().await, None);
+    let sources: Vec<Arc<dyn Source>> = vec![Arc::new(JoinedMeanwhile {
+        pool: pool.clone(),
+        other: other.clone(),
+        recording,
+    })];
+    drain(&pool, &cx, &sources).await;
+    // The card's group changed while its run was claimed.
+    assert!(group().await.is_some());
+    let (due_in, attempts, error): (f64, i32, Option<String>) = sqlx::query_as(
+        "SELECT extract(epoch FROM next_attempt_at-now())::float8,attempts,last_error FROM also_on_dirty WHERE resource_id=$1",
+    )
+    .bind(&card)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((attempts, error), (0, None));
+    assert!((300.0..=600.0).contains(&due_in), "{due_in}");
+}
+
 /// A link that carries a credential is never sent to another service: no also-on source looks it
 /// up, while a plain link in the same batch is.
 #[sqlx::test(migrations = "../../migrations")]
@@ -3142,6 +3254,44 @@ async fn the_facts_caps_floor_keeps_a_recordings_single_valued_facts(pool: PgPoo
     assert_eq!(stored.iter().filter(|n| *n == "isrc").count(), 5);
 }
 
+/// A source's keys are capped as its facts are: the cap cuts the many keys of one namespace (a
+/// recording's ISRCs) before a namespace's one key (its MBID), which always fits.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_sources_single_keys_survive_its_cap(pool: PgPool) {
+    let id = page(&pool, "https://open.spotify.com/track/keycap", "Track").await;
+    let mut config = Config::default();
+    config.also_on.keys_per_source = 3;
+    let recording = "mb:recording:00000000-0000-4000-8000-00000000000f";
+    let mut keys: Vec<Key> = (10..18)
+        .map(|n| key(&format!("isrc:AAAAA26000{n}")))
+        .collect();
+    keys.push(key(recording));
+    also_on::record(
+        &pool,
+        &id,
+        "music",
+        Found {
+            keys,
+            ..Default::default()
+        },
+        Duration::from_secs(60),
+        &config.also_on,
+    )
+    .await
+    .unwrap();
+    let stored: Vec<String> = sqlx::query_scalar(
+        "SELECT key FROM resource_key WHERE resource_id=$1 ORDER BY key COLLATE \"C\"",
+    )
+    .bind(&id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        stored,
+        ["isrc:AAAAA2600010", "isrc:AAAAA2600011", recording]
+    );
+}
+
 /// Two sources fail, the first asking for an hour, the second for five minutes: the resource is
 /// due again after the hour, whichever failed last.
 #[sqlx::test(migrations = "../../migrations")]
@@ -3166,6 +3316,100 @@ async fn the_longest_wait_among_failing_sources_sets_the_retry(pool: PgPool) {
         assert_eq!(error.as_deref(), Some("fake_busy"), "{order:?}");
         assert!((3500.0..=3600.0).contains(&seconds), "{order:?}: {seconds}");
     }
+}
+
+/// A source that records a key until its service refuses the operator's credentials: a
+/// `RetryLater` of an `_auth` class, as `also_on::client_credentials` reports a refusal.
+#[derive(Default)]
+struct Refusable {
+    refused: Mutex<bool>,
+}
+#[async_trait]
+impl Source for Refusable {
+    fn id(&self) -> &'static str {
+        "refusable"
+    }
+    fn applies(&self, subject: &Subject) -> bool {
+        subject.status == "ok"
+    }
+    fn ttl(&self) -> Duration {
+        Duration::from_secs(2 * 86_400)
+    }
+    async fn lookup(&self, _: &Context, _: &Subject) -> anyhow::Result<Found> {
+        if *self.refused.lock().unwrap() {
+            return Err(pinakes_core::resolver::RetryLater {
+                class: "refusable_auth",
+                seconds: 300,
+            }
+            .into());
+        }
+        Ok(Found {
+            keys: vec![key("upc:0602498688373")],
+            ..Default::default()
+        })
+    }
+}
+
+/// A source whose service refuses the operator's credentials is passed over as one that is not
+/// ready: the rows it recorded stay, the card's other sources are recorded, and the run neither
+/// fails nor comes back early, so the card is read again at the shortest lifetime of its sources.
+#[sqlx::test(migrations = "../../migrations")]
+async fn refused_credentials_fail_no_run_and_keep_the_sources_rows(pool: PgPool) {
+    let uri = "https://open.spotify.com/track/refused";
+    let id = page(&pool, uri, "Refused").await;
+    let steady = Fake::new("steady");
+    steady.answer(
+        uri,
+        Ok(Found {
+            keys: vec![key("isrc:USIR10211559")],
+            ..Default::default()
+        }),
+    );
+    let refusable = Arc::new(Refusable::default());
+    let sources: Vec<Arc<dyn Source>> = vec![refusable.clone(), steady.clone()];
+    let cx = cx(Config::default());
+    let state = || {
+        let pool = pool.clone();
+        let id = id.clone();
+        async move {
+            let keys: Vec<String> = sqlx::query_scalar(
+                "SELECT key||' '||source FROM resource_key WHERE resource_id=$1 ORDER BY key",
+            )
+            .bind(&id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            let (due_in, attempts, error): (f64, i32, Option<String>) = sqlx::query_as(
+                "SELECT extract(epoch FROM next_attempt_at-now())::float8,attempts,last_error FROM also_on_dirty WHERE resource_id=$1",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            (keys, due_in, attempts, error)
+        }
+    };
+    let both: Vec<String> = vec![
+        "isrc:USIR10211559 steady".into(),
+        "upc:0602498688373 refusable".into(),
+    ];
+    drain(&pool, &cx, &sources).await;
+    let (keys, due_in, attempts, error) = state().await;
+    assert_eq!((keys, attempts, error), (both.clone(), 0, None));
+    assert!((86_300.0..=86_400.0).contains(&due_in), "{due_in}");
+    // Refused: the same rows, no failed run, due at the other source's lifetime (a day).
+    *refusable.refused.lock().unwrap() = true;
+    drain(&pool, &cx, &sources).await;
+    let (keys, due_in, attempts, error) = state().await;
+    assert_eq!((keys, attempts, error), (both.clone(), 0, None));
+    assert!((86_300.0..=86_400.0).contains(&due_in), "{due_in}");
+    assert_eq!(steady.calls.lock().unwrap().len(), 2);
+    // Alone, it keeps its rows and its card comes back at its own lifetime (two days).
+    let alone: Vec<Arc<dyn Source>> = vec![refusable.clone()];
+    drain(&pool, &cx, &alone).await;
+    let (keys, due_in, attempts, error) = state().await;
+    assert_eq!((keys, attempts, error), (both.clone(), 0, None));
+    assert!((172_700.0..=172_800.0).contains(&due_in), "{due_in}");
 }
 
 /// A source that reads gone links, as the archive lookup does: an archived copy and a fact. It
@@ -3423,6 +3667,499 @@ async fn a_lookup_whose_resource_became_an_alias_writes_nothing(pool: PgPool) {
             .unwrap();
     assert!(alias);
     assert_eq!(derived(&pool, &id).await, 0);
+}
+
+/// The mark stands as well for a card whose lease ran out before the regrouping, while its batch
+/// still runs: the lease moves, so the batch's end does not find it unchanged. A due card no
+/// worker holds stays due through a regrouping.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_regrouping_after_the_lease_ran_out_brings_the_card_back(pool: PgPool) {
+    let recording = "mb:recording:e00ebb77-541e-41f3-86ba-a90530414922";
+    let card = page(&pool, "https://open.spotify.com/track/outlived", "Outlived").await;
+    let other = page(&pool, "https://tidal.com/track/491206013", "Outlived").await;
+    let cx = cx(Config::default());
+    let hub = |id: String| {
+        let (pool, cx) = (pool.clone(), cx.clone());
+        async move {
+            also_on::record(
+                &pool,
+                &id,
+                "hub",
+                Found {
+                    keys: vec![key(recording)],
+                    ..Default::default()
+                },
+                Duration::from_secs(86_400),
+                &cx.config.also_on,
+            )
+            .await
+            .unwrap();
+            common::drain_groups(&pool, &Default::default()).await;
+        }
+    };
+    hub(card.clone()).await;
+    let sources: Vec<Arc<dyn Source>> = vec![Arc::new(JoinedMeanwhile {
+        pool: pool.clone(),
+        other: other.clone(),
+        recording,
+    })];
+    sqlx::query("UPDATE also_on_dirty SET next_attempt_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // A lease of no time at all: it has run out when the lookup regroups.
+    also_on::drain_leased(&pool, &cx, &sources, 100, Duration::ZERO)
+        .await
+        .unwrap();
+    let due = || {
+        let pool = pool.clone();
+        let card = card.clone();
+        async move {
+            sqlx::query_as::<_, (f64, i32, Option<String>)>(
+                "SELECT extract(epoch FROM next_attempt_at-now())::float8,attempts,last_error FROM also_on_dirty WHERE resource_id=$1",
+            )
+            .bind(&card)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let (due_in, attempts, error) = due().await;
+    assert_eq!((attempts, error), (0, None));
+    assert!(due_in <= 600.0, "{due_in}");
+    // The card is due and no worker holds it: another regrouping leaves it due.
+    let third = page(&pool, "https://www.deezer.com/track/3750996073", "Outlived").await;
+    sqlx::query(
+        "UPDATE also_on_dirty SET next_attempt_at=now()-interval '1 minute' WHERE resource_id=$1",
+    )
+    .bind(&card)
+    .execute(&pool)
+    .await
+    .unwrap();
+    hub(third).await;
+    let (due_in, ..) = due().await;
+    assert!((-61.0..=-59.0).contains(&due_in), "{due_in}");
+}
+
+/// A secondary service that keeps failing brings its card back early only so often: after
+/// `PARTIAL_RETRIES` such runs in a row the next run is at the source's lifetime, and stays
+/// there while the service fails. A run with every service answering starts the count again.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_secondary_service_that_fails_for_good_stops_bringing_the_card_back(pool: PgPool) {
+    let uri = "https://example.org/forever";
+    let id = page(&pool, uri, "Forever").await;
+    let hub = Fake::new("datacite");
+    // The whole answer: the registry's key and a link another service names (Wikidata's). A
+    // partial one has the key only, as a source answers while that service fails, keeping what
+    // it gave before (`Keep::All`).
+    let wikidata = || Link::new("https://www.wikidata.org/wiki/Q42", "Wikidata", "wikidata");
+    let answer = |failed: bool| {
+        Ok(Found {
+            keys: vec![key("doi:10.1000/y")],
+            links: if failed { vec![] } else { vec![wikidata()] },
+            retry_after: failed.then_some(Duration::from_secs(60)),
+            keep_stored: if failed {
+                also_on::Keep::All
+            } else {
+                also_on::Keep::Nothing
+            },
+            ..Default::default()
+        })
+    };
+    let wikidata_links = || {
+        let pool = pool.clone();
+        let id = id.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM derived_link WHERE resource_id=$1 AND via='wikidata'",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    hub.answer(uri, answer(false));
+    drain(
+        &pool,
+        &cx(Config::default()),
+        &[hub.clone() as Arc<dyn Source>],
+    )
+    .await;
+    assert_eq!(wikidata_links().await, 1);
+    hub.answer(uri, answer(true));
+    let sources: Vec<Arc<dyn Source>> = vec![hub.clone()];
+    let cx = cx(Config::default());
+    let state = || {
+        let pool = pool.clone();
+        let id = id.clone();
+        async move {
+            sqlx::query_as::<_, (f64, i32)>(
+                "SELECT extract(epoch FROM next_attempt_at-now())::float8,attempts FROM also_on_dirty WHERE resource_id=$1",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    drain(&pool, &cx, &sources).await;
+    assert_eq!(state().await.1, 1);
+    // The last early run: an hour, the backoff's ceiling.
+    sqlx::query("UPDATE also_on_dirty SET attempts=$2 WHERE resource_id=$1")
+        .bind(&id)
+        .bind(also_on::PARTIAL_RETRIES - 1)
+        .execute(&pool)
+        .await
+        .unwrap();
+    drain(&pool, &cx, &sources).await;
+    let (due_in, attempts) = state().await;
+    assert_eq!(attempts, also_on::PARTIAL_RETRIES);
+    assert!((3590.0..=3600.0).contains(&due_in), "{due_in}");
+    // Still failing: the source's lifetime (a day), this run and the next. What the failed
+    // service gave before stays meanwhile, though no run comes back early for it.
+    for more in 1..=2 {
+        drain(&pool, &cx, &sources).await;
+        let (due_in, attempts) = state().await;
+        assert_eq!(attempts, also_on::PARTIAL_RETRIES + more);
+        assert!((86_300.0..=86_400.0).contains(&due_in), "{more}: {due_in}");
+        assert_eq!(wikidata_links().await, 1, "{more}");
+    }
+    hub.answer(uri, answer(false));
+    drain(&pool, &cx, &sources).await;
+    assert_eq!(state().await.1, 0);
+    // A source whose rows live thirty days: once capped, its card still runs again after a day
+    // (`CAPPED_RETRY`), so an outage that ends is over for it within a day.
+    let month = Fake::lasting("datacite", Duration::from_secs(30 * 86_400));
+    month.answer(uri, answer(true));
+    let month: Vec<Arc<dyn Source>> = vec![month];
+    sqlx::query("UPDATE also_on_dirty SET attempts=$2 WHERE resource_id=$1")
+        .bind(&id)
+        .bind(also_on::PARTIAL_RETRIES)
+        .execute(&pool)
+        .await
+        .unwrap();
+    drain(&pool, &cx, &month).await;
+    let (due_in, attempts) = state().await;
+    assert_eq!(attempts, also_on::PARTIAL_RETRIES + 1);
+    assert!((86_300.0..=86_400.0).contains(&due_in), "{due_in}");
+    assert_eq!(wikidata_links().await, 1);
+}
+
+/// A source that fails for good (a refused request, a wall) brings the card back with backoff
+/// only so often: after `PARTIAL_RETRIES` failed runs in a row the next is at the lifetime, and
+/// the rows it recorded before stay, as a failed source records nothing. A run in which every
+/// source answers starts the count again.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_source_that_fails_for_good_stops_bringing_the_card_back(pool: PgPool) {
+    let uri = "https://example.org/walled";
+    let id = page(&pool, uri, "Walled").await;
+    let hub = Fake::new("datacite");
+    let found = || {
+        Ok(Found {
+            keys: vec![key("doi:10.1000/z")],
+            ..Default::default()
+        })
+    };
+    hub.answer(uri, found());
+    let sources: Vec<Arc<dyn Source>> = vec![hub.clone()];
+    let cx = cx(Config::default());
+    drain(&pool, &cx, &sources).await;
+    let state = || {
+        let pool = pool.clone();
+        let id = id.clone();
+        async move {
+            sqlx::query_as::<_, (f64, i32, Option<String>, i64)>(
+                "SELECT extract(epoch FROM d.next_attempt_at-now())::float8,d.attempts,d.last_error,(SELECT count(*) FROM resource_key k WHERE k.resource_id=d.resource_id) FROM also_on_dirty d WHERE d.resource_id=$1",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    hub.answer(uri, Err(anyhow::anyhow!("answered 403")));
+    drain(&pool, &cx, &sources).await;
+    let (due_in, attempts, error, keys) = state().await;
+    assert_eq!((attempts, keys), (1, 1));
+    assert!(error.is_some());
+    assert!((290.0..=300.0).contains(&due_in), "{due_in}");
+    // The sixth failed run in a row: an hour, the backoff's ceiling.
+    sqlx::query("UPDATE also_on_dirty SET attempts=$2 WHERE resource_id=$1")
+        .bind(&id)
+        .bind(also_on::PARTIAL_RETRIES - 1)
+        .execute(&pool)
+        .await
+        .unwrap();
+    drain(&pool, &cx, &sources).await;
+    let (due_in, attempts, _, keys) = state().await;
+    assert_eq!((attempts, keys), (also_on::PARTIAL_RETRIES, 1));
+    assert!((3590.0..=3600.0).contains(&due_in), "{due_in}");
+    // The seventh and the eighth: the source's lifetime (a day), the key still there.
+    for more in 1..=2 {
+        drain(&pool, &cx, &sources).await;
+        let (due_in, attempts, error, keys) = state().await;
+        assert_eq!((attempts, keys), (also_on::PARTIAL_RETRIES + more, 1));
+        assert!(error.is_some());
+        assert!((86_300.0..=86_400.0).contains(&due_in), "{more}: {due_in}");
+    }
+    hub.answer(uri, found());
+    drain(&pool, &cx, &sources).await;
+    let (_, attempts, error, _) = state().await;
+    assert_eq!((attempts, error), (0, None));
+    // A source whose rows live thirty days: once capped, its card still runs again after a day
+    // (`CAPPED_RETRY`), so an outage that ends is over for it within a day.
+    let month = Fake::lasting("datacite", Duration::from_secs(30 * 86_400));
+    month.answer(uri, Err(anyhow::anyhow!("timed out")));
+    let month: Vec<Arc<dyn Source>> = vec![month];
+    sqlx::query("UPDATE also_on_dirty SET attempts=$2 WHERE resource_id=$1")
+        .bind(&id)
+        .bind(also_on::PARTIAL_RETRIES)
+        .execute(&pool)
+        .await
+        .unwrap();
+    drain(&pool, &cx, &month).await;
+    let (due_in, attempts, _, keys) = state().await;
+    assert_eq!((attempts, keys), (also_on::PARTIAL_RETRIES + 1, 1));
+    assert!((86_300.0..=86_400.0).contains(&due_in), "{due_in}");
+}
+
+/// A run with part of its answer missing (a service failed or refused the operator's
+/// credentials) deletes none of the rows its source recorded before (`Found::keep_stored`): a
+/// changed iTunes answer beside a refused Podcast Index key adds iTunes' new key, and the old
+/// one stays until it expires. A run in which every service answered replaces them.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_run_with_part_of_its_answer_missing_deletes_nothing(pool: PgPool) {
+    use pinakes_core::also_on::{Fact, Keep};
+    let uri = "https://podcasts.apple.com/us/podcast/the-daily/id1200361736";
+    let id = page(&pool, uri, "Kept").await;
+    let source = Fake::new("podcasts");
+    let via = |k: &str, via: &str| Key {
+        key: k.into(),
+        via: via.into(),
+    };
+    let guid = "podcast:guid:304b84f0-07b0-5265-b6b7-da5cf5aeb56e";
+    source.answer(
+        uri,
+        Ok(Found {
+            keys: vec![
+                via("podcast:apple:1200361736", "itunes"),
+                via(guid, "podcastindex"),
+            ],
+            links: vec![
+                Link::new(
+                    "https://podcastindex.org/podcast/1",
+                    "Podcast Index",
+                    "podcastindex",
+                ),
+                Link::new("https://pca.st/itunes/1200361736", "Pocket Casts", "itunes"),
+                Link::new("https://daily.example/ep/1", "daily.example", "feed"),
+            ],
+            facts: vec![Fact::new(
+                "podcast_guid",
+                "304b84f0-07b0-5265-b6b7-da5cf5aeb56e",
+            )],
+            ..Default::default()
+        }),
+    );
+    let sources: Vec<Arc<dyn Source>> = vec![source.clone()];
+    let cx = cx(Config::default());
+    drain(&pool, &cx, &sources).await;
+    let rows = || {
+        let pool = pool.clone();
+        let id = id.clone();
+        async move {
+            let mut rows = sqlx::query_scalar::<_, String>("SELECT 'key '||key FROM resource_key WHERE resource_id=$1 UNION SELECT 'link '||site FROM derived_link WHERE resource_id=$1 UNION SELECT 'fact '||name FROM resource_fact WHERE resource_id=$1")
+                .bind(&id)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+            rows.sort();
+            rows
+        }
+    };
+    let kept_ones = |keep_stored: Keep| {
+        Ok(Found {
+            keys: vec![via("podcast:apple:1200361737", "itunes")],
+            links: vec![Link::new(
+                "https://overcast.fm/itunes1200361737",
+                "Overcast",
+                "itunes",
+            )],
+            keep_stored,
+            ..Default::default()
+        })
+    };
+    let expiry = || {
+        let pool = pool.clone();
+        let id = id.clone();
+        async move {
+            sqlx::query_scalar::<_, f64>("SELECT extract(epoch FROM expires_at)::float8 FROM resource_key WHERE resource_id=$1 AND key='podcast:apple:1200361736'")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let old_expiry = expiry().await;
+    // Podcast Index refuses the key; iTunes now answers another show. Its new key and link are
+    // added; every row recorded before stays, iTunes' old ones too, until they expire.
+    source.answer(uri, kept_ones(Keep::All));
+    drain(&pool, &cx, &sources).await;
+    assert_eq!(
+        rows().await,
+        [
+            "fact podcast_guid",
+            "key podcast:apple:1200361736",
+            "key podcast:apple:1200361737",
+            &format!("key {guid}"),
+            "link Overcast",
+            "link Pocket Casts",
+            "link Podcast Index",
+            "link daily.example",
+        ]
+    );
+    // The old key keeps the expiry its own run gave it: no run refreshes what it no longer finds.
+    assert_eq!(expiry().await, old_expiry);
+    // A failed request: nothing is deleted, what was found is added.
+    source.answer(
+        uri,
+        Ok(Found {
+            keys: vec![via("podcast:apple:1200361738", "itunes")],
+            retry_after: Some(Duration::from_secs(60)),
+            keep_stored: Keep::All,
+            ..Default::default()
+        }),
+    );
+    drain(&pool, &cx, &sources).await;
+    assert_eq!(rows().await.len(), 9);
+    // A whole answer replaces them all.
+    source.answer(uri, kept_ones(Keep::Nothing));
+    drain(&pool, &cx, &sources).await;
+    assert_eq!(
+        rows().await,
+        ["key podcast:apple:1200361737", "link Overcast"]
+    );
+}
+
+/// A key, a link or a fact two sources vouch for is the row of the one that recorded it first.
+/// Once that source is switched off, or let the row expire, the other takes the row over at its
+/// next run, so the card keeps what a live source vouches for; the resource, and the one a keyed
+/// link names, are regrouped.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_live_source_takes_over_the_rows_of_one_switched_off_or_expired(pool: PgPool) {
+    use pinakes_core::also_on::{Fact, SourceOptions};
+    // Whichever source this build has: the switch is the configuration's.
+    let first = also_on::registered()[0].id();
+    let config = |on: bool| {
+        let mut config = Config::default();
+        config.also_on.sources.insert(
+            first.into(),
+            SourceOptions {
+                enabled: Some(on),
+                ..Default::default()
+            },
+        );
+        config
+    };
+    let recording = "mb:recording:9f9cf187-d6f9-437f-9d98-d59cdbd52757";
+    let uri = "https://open.spotify.com/track/6LgJvl0Xdtc73RJ1mmpotq";
+    let link = "https://www.deezer.com/track/138539973";
+    let id = page(&pool, uri, "Paranoid Android").await;
+    let named = page(&pool, link, "Paranoid Android").await;
+    let (one, two) = (Fake::new(first), Fake::new("second"));
+    for source in [&one, &two] {
+        source.answer(
+            uri,
+            Ok(Found {
+                keys: vec![key(recording)],
+                links: vec![Link::new(link, "Deezer", "musicbrainz").keyed(recording)],
+                facts: vec![
+                    Fact::new("isrc", "GBAYE9701376"),
+                    Fact::new("artist", "Radiohead"),
+                ],
+                ..Default::default()
+            }),
+        );
+    }
+    let sources: Vec<Arc<dyn Source>> = vec![one, two];
+    let owners = || {
+        let pool = pool.clone();
+        let id = id.clone();
+        async move {
+            sqlx::query_scalar::<_, String>("SELECT 'key '||source FROM resource_key WHERE resource_id=$1 AND expires_at>now() UNION SELECT 'link '||source FROM derived_link WHERE resource_id=$1 AND expires_at>now() AND key IS NOT NULL UNION SELECT 'fact '||source FROM resource_fact WHERE resource_id=$1 AND expires_at>now() ORDER BY 1")
+                .bind(&id)
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    drain(&pool, &cx(config(true)), &sources).await;
+    assert_eq!(
+        owners().await,
+        [
+            format!("fact {first}"),
+            format!("key {first}"),
+            format!("link {first}")
+        ]
+    );
+    // Switched off: its rows no longer show. The other source's next run takes them over, and
+    // both resources are regrouped.
+    also_on::configure(&pool, &config(false)).await.unwrap();
+    common::drain_groups(&pool, &Default::default()).await;
+    let marks = |table: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, String>(&format!(
+                "SELECT resource_id FROM {table} ORDER BY resource_id"
+            ))
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let unmark = || {
+        let pool = pool.clone();
+        async move {
+            for table in ["group_dirty", "same_recording_dirty"] {
+                sqlx::query(&format!("DELETE FROM {table}"))
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+        }
+    };
+    unmark().await;
+    drain(&pool, &cx(config(false)), &sources).await;
+    let taken = ["fact second", "key second", "link second"];
+    assert_eq!(owners().await, taken);
+    let mut both = vec![id.clone(), named.clone()];
+    both.sort();
+    assert_eq!(marks("group_dirty").await, both);
+    // Its artist counts for the same-recording hint again: the recording is read again.
+    assert_eq!(
+        marks("same_recording_dirty").await,
+        std::slice::from_ref(&id)
+    );
+    // Rows a third source let expire: taken over too, and live again.
+    for table in ["resource_key", "derived_link", "resource_fact"] {
+        sqlx::query(&format!(
+            "UPDATE {table} SET source='third',expires_at=now()-interval '1 second' WHERE resource_id=$1"
+        ))
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    assert!(owners().await.is_empty());
+    unmark().await;
+    drain(&pool, &cx(config(false)), &sources).await;
+    assert_eq!(owners().await, taken);
+    assert_eq!(marks("group_dirty").await, both);
+    assert_eq!(
+        marks("same_recording_dirty").await,
+        std::slice::from_ref(&id)
+    );
 }
 
 /// A source the operator switches off stops showing at once: its keys, facts and derived links

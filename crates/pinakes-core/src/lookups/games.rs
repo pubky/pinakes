@@ -627,9 +627,12 @@ pub mod also_on {
             assert_eq!(keys(&found), ["steam:620"]);
             assert!(sites(&found).iter().any(|s| s.starts_with("ProtonDB ")));
             assert!(found.retry_after.is_some());
-            // Nothing failed: the source runs again after its lifetime.
+            // What GOG gave before stays until the run comes back for it.
+            assert_eq!(found.keep_stored, crate::also_on::Keep::All);
+            // Nothing failed: the source runs again after its lifetime, and replaces its rows.
             let found = Steam.lookup(&recorded(vec![]), &portal).await.unwrap();
             assert!(found.retry_after.is_none());
+            assert_eq!(found.keep_stored, crate::also_on::Keep::Nothing);
         }
 
         /// No link or ID check of this family slices a string inside a multibyte character, and no

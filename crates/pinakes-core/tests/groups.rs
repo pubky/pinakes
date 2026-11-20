@@ -688,6 +688,13 @@ async fn curation_sets_members_only_and_invalid_curation_is_refused(pool: PgPool
             400
         );
     }
+    // A member named twice is set once.
+    let twice = json!({"members":[{"resource_id":a},{"resource_id":a}]});
+    let response = admin.clone().oneshot(put(twice)).await.unwrap();
+    assert_eq!(response.status(), 200);
+    let again: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(again["members"].as_array().unwrap().len(), 1);
     // A group has no name or image of its own.
     let named = json!({"members":[{"resource_id":a}],"name":"Curator title"});
     assert_eq!(

@@ -272,6 +272,9 @@ pub enum ItemBy<'a> {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FeedRead {
     pub guid: Option<String>,
+    /// The wanted item's `<link>`, when it is that item's own page (`episodes::own_page`): a
+    /// page several items link, the channel's own link or a site's root is the show's, never
+    /// one episode's.
     pub item_link: Option<String>,
     pub item_guid: Option<String>,
     /// Whether the wanted item has an audio or video enclosure (an episode, not a post).
@@ -279,9 +282,11 @@ pub struct FeedRead {
     /// The wanted item's enclosure, when it is a public stream (`cards::item_stream`).
     pub item_stream: Option<Stream>,
 }
-/// Read an RSS feed (any encoding is read as UTF-8, invalid bytes replaced: the GUIDs and links
-/// are ASCII). `Err` when the body is no RSS channel at all.
-pub fn read_feed(body: &[u8], item: Option<ItemBy<'_>>) -> Result<FeedRead> {
+/// Read the RSS feed fetched at `feed` (any encoding is read as UTF-8, invalid bytes replaced:
+/// the GUIDs and links are ASCII). An item wanted by its page ([`ItemBy::Link`]) is found only
+/// when that page is its own (`episodes::own_page`). `Err` when the body is no RSS channel at
+/// all.
+pub fn read_feed(body: &[u8], feed: &url::Url, item: Option<ItemBy<'_>>) -> Result<FeedRead> {
     const NAMESPACES: &[&str] = &[
         "https://podcastindex.org/namespace/1.0",
         "http://podcastindex.org/namespace/1.0",
@@ -334,9 +339,22 @@ pub fn read_feed(body: &[u8], item: Option<ItemBy<'_>>) -> Result<FeedRead> {
             _ => None,
         }
     });
+    // Whether the wanted item's `<link>` is that item's own page: the page takes the item's key
+    // (as the card found by it, or as a link keyed by it), so a page other items link too, the
+    // channel's link or a site's root would join every episode that names it.
+    let own_page = wanted.is_some_and(|n| {
+        let items: Vec<roxmltree::Node<'_, '_>> = channel
+            .children()
+            .filter(|c| c.has_tag_name("item"))
+            .collect();
+        crate::episodes::item_identity(n, feed)
+            .and_then(|i| i.page)
+            .is_some_and(|page| crate::episodes::own_page(&page, &items, channel, feed))
+    });
+    let wanted = wanted.filter(|_| own_page || !matches!(item, Some(ItemBy::Link(_))));
     Ok(FeedRead {
         guid: own,
-        item_link: wanted.and_then(|n| field(n, "link")),
+        item_link: wanted.filter(|_| own_page).and_then(|n| field(n, "link")),
         item_guid: wanted
             .and_then(|n| field(n, "guid"))
             .filter(|g| !g.is_empty()),
@@ -363,7 +381,8 @@ pub fn episodes_request(show: u64, storefront: &str) -> String {
 }
 /// iTunes' record of `show` when it knows it as a podcast (its one result, of kind `podcast`).
 pub fn parse_show(status: u16, raw: &[u8], show: u64) -> Result<Option<ItunesShow>> {
-    let Some(v) = media::json(status, raw, &[404])? else {
+    // A 400 is an ID iTunes cannot read: no show, whenever it is asked.
+    let Some(v) = media::json(status, raw, &[400, 404])? else {
         return Ok(None);
     };
     let results = v["results"].as_array().context("no results")?;
@@ -416,7 +435,7 @@ pub fn itunes_stream(e: &serde_json::Value) -> Option<Stream> {
 }
 /// The episodes of `show` iTunes lists.
 pub fn parse_episodes(status: u16, raw: &[u8], show: u64) -> Result<Vec<Episode>> {
-    let Some(v) = media::json(status, raw, &[404])? else {
+    let Some(v) = media::json(status, raw, &[400, 404])? else {
         return Ok(Vec::new());
     };
     Ok(v["results"]
@@ -750,7 +769,8 @@ impl Podcasts {
         let f = Self::itunes(cx, &episodes_request(show, sf)).await?;
         parse_episodes(f.status, &f.body, show)
     }
-    /// A signed Podcast Index request, when the operator configured its key.
+    /// A signed Podcast Index request, when the operator configured its key; a key Podcast
+    /// Index refuses is an error, a refusal of the credentials.
     async fn index_get(
         cx: &Context,
         url: &str,
@@ -761,6 +781,15 @@ impl Podcasts {
         let options = pi_options(key, secret);
         let fetched = cx.egress.fetch_with(url, &options).await?;
         crate::podcast_index_api::note_refusal(fetched.status);
+        // A refused key lasts: a refusal of the credentials, which brings no run back early and
+        // leaves what this source recorded with Podcast Index's answers where it is (`Deferred`).
+        if matches!(fetched.status, 401 | 403) {
+            return Err(RetryLater {
+                class: "podcast_index_auth",
+                seconds: super::client_credentials::REFUSAL_HOLD,
+            }
+            .into());
+        }
         Ok(Some(fetched))
     }
     /// Podcast Index's feed for `ask`.
@@ -813,7 +842,7 @@ impl Podcasts {
         if f.status != 200 || (exact && !same_feed(f.url.as_str(), url)) {
             return Ok(None);
         }
-        let body = f.body.clone();
+        let (body, at) = (f.body.clone(), f.url.clone());
         let owned = item.map(|by| match by {
             ItemBy::Guid(g) => (true, g.to_owned()),
             ItemBy::Link(l) => (false, l.to_owned()),
@@ -826,7 +855,7 @@ impl Podcasts {
                     ItemBy::Link(v)
                 }
             });
-            read_feed(&body, by)
+            read_feed(&body, &at, by)
         })
         .await?
         .ok();
@@ -1575,12 +1604,14 @@ mod tests {
         // Podcasting 2.0 moved to feeds.podcastindex.org but keeps the GUID of its first URL:
         // the GUID derived from where it lives now would be another show's.
         let pc20 = read("feed-pc20.xml.gz");
-        let own = read_feed(&pc20, None).unwrap().guid;
+        let at = |u: &str| url::Url::parse(u).unwrap();
+        let pc20_at = at("https://feeds.podcastindex.org/pc20.xml");
+        let own = read_feed(&pc20, &pc20_at, None).unwrap().guid;
         assert_eq!(own.as_deref(), Some("917393e3-1b1e-5cef-ace4-edaa54e1f810"));
         assert_ne!(derived_guid("https://feeds.podcastindex.org/pc20.xml"), own);
         // An item's own page, by its GUID.
         assert_eq!(
-            read_feed(&pc20, Some(ItemBy::Guid("PC20-275")))
+            read_feed(&pc20, &pc20_at, Some(ItemBy::Guid("PC20-275")))
                 .unwrap()
                 .item_link
                 .as_deref(),
@@ -1588,7 +1619,7 @@ mod tests {
         );
         // And its enclosure, with its `itunes:duration`: the episode's stream.
         assert_eq!(
-            read_feed(&pc20, Some(ItemBy::Guid("PC20-275")))
+            read_feed(&pc20, &pc20_at, Some(ItemBy::Guid("PC20-275")))
                 .unwrap()
                 .item_stream,
             Stream::public(
@@ -1599,16 +1630,18 @@ mod tests {
             )
         );
         assert_eq!(
-            read_feed(&pc20, Some(ItemBy::Guid("PC20-0")))
+            read_feed(&pc20, &pc20_at, Some(ItemBy::Guid("PC20-0")))
                 .unwrap()
                 .item_link,
             None
         );
         // An item by its page.
         let dd = read("feed-darknetdiaries.xml.gz");
+        let dd_at = at("https://podcast.darknetdiaries.com/");
         assert_eq!(
             read_feed(
                 &dd,
+                &dd_at,
                 Some(ItemBy::Link("https://darknetdiaries.com/episode/180/"))
             )
             .unwrap()
@@ -1618,26 +1651,71 @@ mod tests {
             "the page"
         );
         assert_eq!(
-            read_feed(&dd, Some(ItemBy::Link("https://darknetdiaries.com/")))
-                .unwrap()
-                .item_guid,
+            read_feed(
+                &dd,
+                &dd_at,
+                Some(ItemBy::Link("https://darknetdiaries.com/"))
+            )
+            .unwrap()
+            .item_guid,
             None
         );
+        let any = at("https://example.org/feed.xml");
         let plain = br#"<rss version="2.0"><channel><title>T</title><item><guid>a</guid></item></channel></rss>"#;
-        assert_eq!(read_feed(plain, None).unwrap().guid, None);
+        assert_eq!(read_feed(plain, &any, None).unwrap().guid, None);
         let other = br#"<rss xmlns:x="https://example.org/ns"><channel><x:guid>917393e3-1b1e-5cef-ace4-edaa54e1f810</x:guid></channel></rss>"#;
         assert_eq!(
-            read_feed(other, None).unwrap().guid,
+            read_feed(other, &any, None).unwrap().guid,
             None,
             "another namespace's guid"
         );
         // A Latin-1 feed is read: its GUID and links are ASCII.
         let latin1 = b"<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><rss xmlns:podcast=\"https://podcastindex.org/namespace/1.0\"><channel><title>Caf\xe9</title><podcast:guid>917393e3-1b1e-5cef-ace4-edaa54e1f810</podcast:guid></channel></rss>";
         assert_eq!(
-            read_feed(latin1, None).unwrap().guid.as_deref(),
+            read_feed(latin1, &any, None).unwrap().guid.as_deref(),
             Some("917393e3-1b1e-5cef-ace4-edaa54e1f810")
         );
-        assert!(read_feed(b"<html><body>no feed</body></html>", None).is_err());
+        assert!(read_feed(b"<html><body>no feed</body></html>", &any, None).is_err());
+    }
+
+    /// An item's `<link>` is its page only when it is that item's own (`episodes::own_page`):
+    /// a page two items link, the channel's own link and a site's root are the show's.
+    #[test]
+    fn an_items_link_is_its_page_only_when_it_is_its_own() {
+        let feed = url::Url::parse("https://shared.example/feed.xml").unwrap();
+        let body = br#"<rss version="2.0"><channel><title>T</title><link>https://shared.example/show</link>
+            <item><link>https://shared.example/listen</link><guid>a</guid></item>
+            <item><link>https://shared.example/listen</link><guid>b</guid></item>
+            <item><link>https://shared.example/episode/c</link><guid>c</guid></item>
+            <item><link>https://shared.example/show</link><guid>d</guid></item>
+            <item><link>https://shared.example/</link><guid>e</guid></item>
+            </channel></rss>"#;
+        let by_guid = |guid: &str| read_feed(body, &feed, Some(ItemBy::Guid(guid))).unwrap();
+        for shared in ["a", "b", "d", "e"] {
+            let read = by_guid(shared);
+            assert_eq!(read.item_link, None, "{shared}");
+            // The item is still the one its GUID names.
+            assert_eq!(read.item_guid.as_deref(), Some(shared));
+        }
+        assert_eq!(
+            by_guid("c").item_link.as_deref(),
+            Some("https://shared.example/episode/c")
+        );
+        // By its page, only the item whose own page it is is found.
+        let by_link = |page: &str| read_feed(body, &feed, Some(ItemBy::Link(page))).unwrap();
+        assert_eq!(
+            by_link("https://shared.example/episode/c")
+                .item_guid
+                .as_deref(),
+            Some("c")
+        );
+        for page in [
+            "https://shared.example/listen",
+            "https://shared.example/show",
+            "https://shared.example/",
+        ] {
+            assert_eq!(by_link(page).item_guid, None, "{page}");
+        }
     }
 
     #[test]

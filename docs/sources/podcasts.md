@@ -30,12 +30,12 @@ Podcast Index page
   episode takes the item GUID from iTunes, a Podcast Index episode from Podcast Index, and a
   page only when the feed (its feed card's, or the RSS feed its own head names, followed through
   redirects, read up to 8 MiB) is vouched and has one item with audio or video whose `<link>` is
-  that page. Such a page is typed `PodcastEpisode` from its next refresh. A feed item finds its Apple track among the show's
+  that page, and the page is that item's own (no other item links it, and it is not the show's own link or a site's front page). Such a page is typed `PodcastEpisode` from its next refresh. A feed item finds its Apple track among the show's
   latest 200 episodes by its GUID.
 - **What an episode's item key adds.** Once an episode has its item key, each of the following
   is keyed by it, so a tagged copy of any of them joins the episode:
   - The item's own page (its `<link>`: the show's site, or a YouTube video when the show
-    publishes there). It is read in the vouched feed at Podcast Index's URL.
+    publishes there), when no other item of the feed links it and it is not the show's own link or a site's front page. It is read in the vouched feed at Podcast Index's URL.
   - The RSS item, `{feed}?guid={item GUID}`, which a feed card reads as that episode.
   - Podcast Index's page of it (`episodes/byguid` in that feed). An episode's own Podcast
     Index page is the card.
@@ -98,8 +98,8 @@ Podcast Index is asked only with a key and secret: `[podcast_index] key` and `se
 api.podcastindex.org). Without them a show joins through its Apple ID only: no GUID is a key, a
 feed gets no Apple ID, a Podcast Index page has nothing to read, and episodes join only by their
 Apple track. The key and secret never appear in logs, the operator info or errors. A refused key
-or a Podcast Index outage fails no lookup: the source keeps what the other services answered,
-and asks again later only when nothing at all was found. Such failures of a secondary service
+fails no lookup and brings no run back early: what the other services answer is added, and nothing the source recorded before is deleted (a row no service gives any more leaves when it expires). An outage of a secondary service keeps what the other services answered,
+and the run comes back after a failed run's wait; when nothing at all was found the lookup fails and the stored rows stay. Such failures of a secondary service
 (Podcast Index, iTunes, Wikidata, the feed) are counted in
 `pinakes_also_on_service_errors_total{service,class}`; a refused key (401 or 403) is also counted
 in `pinakes_source_token_refusals_total{source="podcast_index"}`, which the `ProviderKeyRefused`

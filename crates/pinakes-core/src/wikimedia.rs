@@ -362,9 +362,14 @@ fn upload_url(raw: &str) -> Option<String> {
 /// (`CC BY-SA 4.0`, `GPLv3`) and `LicenseUrl` name, when it is on the list: CC0 1.0, the public
 /// domain, CC BY and CC BY-SA 1.0 to 4.0 (ported versions too), the GNU GPL (1.0 to 3.0), LGPL
 /// (2.0 to 3.0) and AGPL (3.0), and Commons' `Attribution` licence (`gnu` and `attribution`
-/// give their IDs). A Creative Commons licence needs its URL, and its template or name must
-/// name the same licence. A GNU licence or `Attribution` needs its name; a URL, when there is
-/// one, must name the same licence, and so must every name.
+/// give their IDs).
+/// - CC0 and the public domain: the template or the short name says so (one is enough), or
+///   their Creative Commons URL stands with no name beside it. A URL read as another Creative
+///   Commons licence on the list refuses them; any other URL says nothing.
+/// - CC BY and CC BY-SA: their URL, and the template or the short name naming the same licence
+///   (one is enough).
+/// - A GNU licence or `Attribution`: its name; every name given must name the same licence, and
+///   so must a URL, when there is one.
 pub fn license(template: Option<&str>, short: Option<&str>, url: Option<&str>) -> Option<License> {
     let template = template.map(str::to_ascii_lowercase);
     let short = short.map(|s| s.trim().to_ascii_lowercase());
@@ -374,7 +379,8 @@ pub fn license(template: Option<&str>, short: Option<&str>, url: Option<&str>) -
             .as_deref()
             .is_some_and(|s| s == "cc0" || s == "cc0 1.0");
     if cc0 || matches!(&from_url, Some(Cc::Zero)) {
-        // Every name must agree: a CC0 URL beside another licence's name is no CC0.
+        // One name saying CC0 is enough. A CC0 URL beside names that do not say it is no CC0,
+        // and neither is a CC0 name beside another Creative Commons licence's URL.
         let agrees = from_url.as_ref().is_none_or(|c| matches!(c, Cc::Zero))
             && (cc0 || (template.is_none() && short.is_none()));
         return agrees.then(|| License {

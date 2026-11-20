@@ -207,7 +207,7 @@ async fn recordings_nothing_exact_joins_name_the_ones_they_may_be(pool: PgPool) 
         "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69"
     );
     assert_eq!(tidal_card["maybe_same"][2]["score"], 0.7);
-    // A read lists up to ten in the card itself (#52); here there are three.
+    // A read lists up to ten in the card itself; here there are three.
     assert_eq!(tidal_card["maybe_same"].as_array().unwrap().len(), 3);
     // A member of the card's own group is never listed.
     let mb_card = card(&config, &pool, &mb).await;
@@ -1366,4 +1366,76 @@ async fn a_changed_recording_starts_its_read_over_not_from_where_it_stopped(pool
         same_recording::SCAN,
         "the one at 101 s, then the crowd without lengths, full"
     );
+}
+
+/// A recording whose title compares as nothing (only a tag that goes) keeps a unit that pairs
+/// with nothing: it is read once, and the sweep does not mark it again. One that loses its
+/// title loses its pairs.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_recording_without_a_title_is_read_once(pool: PgPool) {
+    let config = Config::default();
+    let mut untitled = vec![];
+    for n in [1_000_091, 1_000_092] {
+        untitled.push(
+            recording(
+                &pool,
+                &format!("https://tidal.com/track/{n}"),
+                "[Explicit]",
+                Some("Queen"),
+                Some("PT5M54S"),
+            )
+            .await,
+        );
+    }
+    same_recording::sweep(&pool).await.unwrap();
+    pass(&pool, &config).await;
+    // Nothing is left to mark, and nothing is due.
+    assert_eq!(same_recording::sweep(&pool).await.unwrap(), 0);
+    let due: i64 = sqlx::query_scalar("SELECT count(*) FROM same_recording_dirty")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(due, 0);
+    let keys: Vec<String> =
+        sqlx::query_scalar("SELECT title_key FROM same_recording_unit ORDER BY resource_id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(keys, ["", ""]);
+    // Two recordings without a title are no pair.
+    for id in &untitled {
+        assert_eq!(named(&card(&config, &pool, id).await), Vec::<&str>::new());
+    }
+    // A pair, one of which loses its title: the pair goes, on both sides.
+    let mut pair = vec![];
+    for n in [1_000_093, 1_000_094] {
+        pair.push(
+            recording(
+                &pool,
+                &format!("https://tidal.com/track/{n}"),
+                "Bohemian Rhapsody",
+                Some("Queen"),
+                Some("PT5M54S"),
+            )
+            .await,
+        );
+    }
+    pass(&pool, &config).await;
+    assert_eq!(
+        named(&card(&config, &pool, &pair[0]).await),
+        [pair[1].as_str()]
+    );
+    recording(
+        &pool,
+        "https://tidal.com/track/1000093",
+        "[Explicit]",
+        Some("Queen"),
+        Some("PT5M54S"),
+    )
+    .await;
+    pass(&pool, &config).await;
+    for id in &pair {
+        assert_eq!(named(&card(&config, &pool, id).await), Vec::<&str>::new());
+    }
+    assert_eq!(same_recording::sweep(&pool).await.unwrap(), 0);
 }
