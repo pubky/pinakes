@@ -526,7 +526,9 @@ list without the item), so an answer the request cache keeps is not replayed to 
 request in that confirmation. Only a wait the upstream named is replayed, and never cut short: a
 408, 429 or 5xx with its `Retry-After`, a 403 GitHub's rate limit answers. The wait is not charged as an attempt:
 the row's `last_error` is `missing_unconfirmed`, it is logged (`a missing answer waits for its
-confirming fetch`) and counted in `pinakes_resolution_deferred_total{reason="missing_unconfirmed"}`. A lookup or preview
+confirming fetch`) and counted in `pinakes_resolution_deferred_total{reason="missing_unconfirmed"}`. A social page
+answered without its tags, on a stored card that says more than the link's plain card, waits and is counted the same
+way (the log line carries `shapeless`); its confirming read stores the plain card. A lookup or preview
 moves an overdue resource to the front within its TTL, author budget and retry schedule; it
 cannot revive a dead letter. Resolution is also limited per referencing author
 (`limits.author_requests_per_second`); several tags never multiply fetches.
