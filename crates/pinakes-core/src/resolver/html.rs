@@ -906,7 +906,9 @@ impl Job {
         ))
     }
 
-    /// End the worker and say why it ended: closed, killed, or dead at a limit.
+    /// End the worker and say why it ended: closed, killed, or dead at a limit. A worker still
+    /// running is killed here, not waited for: one that ignores the end of its input would hold
+    /// the job's thread for as long as it lives. One already dead of a limit keeps that status.
     fn stop(&mut self) -> &'static str {
         let Some(process) = self.process.take() else {
             return WORKER_ENDED;
@@ -917,7 +919,10 @@ impl Job {
             let (child, done) = &*process.shared;
             let child = child.lock().unwrap_or_else(|e| e.into_inner()).take();
             done.notify_all();
-            child.map(|mut child| child.wait())
+            child.map(|mut child| {
+                let _ = child.kill();
+                child.wait()
+            })
         };
         let killed = process.watchdog.join().ok().flatten();
         if let Some(reason) = killed {

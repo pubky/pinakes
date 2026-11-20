@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 /// - `half-answer`: the head of an answer of 100 bytes and four of them, then it ends.
 /// - `no-answer`: it ends at once.
 /// - `asleep`: it sleeps for thirty seconds.
+/// - `deaf`: the head of an answer of `u32::MAX` bytes, then it sleeps for a minute whatever
+///   happens to its input.
 /// - `aborted`: it dies of `SIGABRT`, as a worker does when an allocation fails.
 const STUB: &str = r#"read -r mode < "$1"
 case "$mode" in
@@ -25,6 +27,10 @@ long-answer)
 half-answer) printf '\000\144\000\000\000half' ;;
 no-answer) ;;
 asleep) exec /bin/sleep 30 ;;
+deaf)
+    printf '\000\377\377\377\377'
+    exec /bin/sleep 60
+    ;;
 aborted)
     ulimit -c 0
     kill -s ABRT "$$"
@@ -131,6 +137,20 @@ fn a_worker_asleep_at_the_wall_deadline_is_killed() {
         elapsed >= Duration::from_secs(1) && elapsed < Duration::from_secs(20),
         "{elapsed:?}"
     );
+}
+
+/// A worker that goes on after its answer was refused, whatever happens to its input, is killed
+/// when the job ends: the job does not wait for it. The stub would sleep for a minute.
+#[test]
+fn a_worker_deaf_to_the_end_of_its_input_is_killed() {
+    let _stub = stub("deaf");
+    let started = Instant::now();
+    assert_eq!(
+        failure(Duration::from_secs(1)),
+        ("the worker ended early", "timeout")
+    );
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_secs(30), "{elapsed:?}");
 }
 
 /// A worker dead of `SIGABRT` died at its memory limit (`parse_worker` shows the real worker
