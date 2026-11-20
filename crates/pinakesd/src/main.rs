@@ -77,10 +77,20 @@ struct Daemon {
     grace: Duration,
     pool: sqlx::PgPool,
     instance_lock: std::sync::Arc<tokio::sync::Mutex<pinakes_core::locks::InstanceLock>>,
+    /// Ends once the instance lock is lost, never otherwise.
+    lock_lost: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
 }
 impl Daemon {
     async fn run(self, stop: impl std::future::Future<Output = ()>) -> Result<()> {
-        let result = supervise(stop, self.tasks, self.workers, self.shutdown, self.grace).await;
+        let result = supervise(
+            stop,
+            self.lock_lost,
+            self.tasks,
+            self.workers,
+            self.shutdown,
+            self.grace,
+        )
+        .await;
         // The lock goes last, after every task that writes.
         drop(self.instance_lock);
         // Closing waits for every connection to come back: no longer than a few seconds, since
@@ -90,7 +100,7 @@ impl Daemon {
     }
 }
 
-/// The task that checks the instance lock: it ends before shutdown only when the lock is lost.
+/// What a daemon that has lost its instance lock names as the task that ended.
 const INSTANCE_LOCK: &str = "instance lock";
 /// The daemon's background tasks, by name.
 #[derive(Default)]
@@ -139,24 +149,30 @@ impl Tasks {
     }
 }
 
-/// Run until `stop` (a signal), or until a background task or a worker ends by itself or panics:
-/// a daemon that kept answering with a dead ingestion, grouping or cleanup loop would look
-/// healthy and fall behind. Then signal shutdown and give everything `grace` to finish; what
-/// still runs after it is dropped. When the task that ended is the instance lock's check, the
-/// lock is lost and the grace is `locks::LOST_GRACE` at most: nothing is finished without the
-/// lock. An error names what ended early, so the process exits non-zero and its supervisor
-/// starts it again.
+/// Run until `stop` (a signal), until `lock_lost` (the instance lock is gone), or until a
+/// background task or a worker ends by itself or panics: a daemon that kept answering with a
+/// dead ingestion, grouping or cleanup loop would look healthy and fall behind. Then signal
+/// shutdown and give everything `grace` to finish; what still runs after it is dropped. From
+/// the instant the lock is lost, before the shutdown or during it, what runs has
+/// `locks::LOST_GRACE` at most: nothing is finished without the lock. An error names what ended
+/// early, so the process exits non-zero and its supervisor starts it again.
 async fn supervise(
     stop: impl std::future::Future<Output = ()>,
+    lock_lost: impl std::future::Future<Output = ()>,
     mut tasks: Tasks,
     mut workers: tokio::task::JoinSet<()>,
     shutdown: watch::Sender<bool>,
     grace: Duration,
 ) -> Result<()> {
-    tokio::pin!(stop);
+    tokio::pin!(stop, lock_lost);
+    let mut lost = false;
     let failed: Option<&'static str> = loop {
         tokio::select! {
             _ = &mut stop => break None,
+            _ = &mut lock_lost => {
+                lost = true;
+                break Some(INSTANCE_LOCK);
+            }
             Some(ended) = tasks.0.join_next() => match ended {
                 Ok(Ended { panicked: false, lasting: false, .. }) => {}
                 Ok(ended) => break Some(ended.name),
@@ -168,11 +184,8 @@ async fn supervise(
     if let Some(name) = failed {
         tracing::error!(task = name, "a background task ended; stopping the daemon");
     }
-    let grace = if failed == Some(INSTANCE_LOCK) {
-        grace.min(pinakes_core::locks::LOST_GRACE)
-    } else {
-        grace
-    };
+    let lost_grace = pinakes_core::locks::LOST_GRACE;
+    let mut ends = tokio::time::Instant::now() + if lost { grace.min(lost_grace) } else { grace };
     let _ = shutdown.send(true);
     // A task or worker that panics while it stops is a failure too.
     let mut panicked: Option<&'static str> = None;
@@ -192,9 +205,23 @@ async fn supervise(
             }
         }
     };
-    if tokio::time::timeout(grace, drain).await.is_err() {
+    let finished = {
+        tokio::pin!(drain);
+        loop {
+            tokio::select! {
+                finished = tokio::time::timeout_at(ends, &mut drain) => break finished.is_ok(),
+                // The lock is watched while the daemon stops too.
+                _ = &mut lock_lost, if !lost => {
+                    lost = true;
+                    ends = ends.min(tokio::time::Instant::now() + lost_grace);
+                }
+            }
+        }
+    };
+    if !finished {
         tracing::warn!(
             grace_secs = grace.as_secs(),
+            lock_lost = lost,
             "shutdown grace passed; stopping with work still running"
         );
     }
@@ -252,14 +279,13 @@ async fn start(
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let mut tasks = Tasks::default();
     let instance_lock = std::sync::Arc::new(tokio::sync::Mutex::new(instance_lock));
-    let watched =
-        pinakes_core::locks::InstanceLock::watch(instance_lock.clone(), shutdown_rx.clone());
-    tasks.spawn(INSTANCE_LOCK, async move {
-        if watched.await {
-            tracing::error!(
-                "the instance lock's database session is gone or does not answer; stopping"
-            );
-        }
+    // The lock is watched until the daemon has stopped, through its shutdown too.
+    let watched = pinakes_core::locks::InstanceLock::watch(instance_lock.clone());
+    let lock_lost = Box::pin(async move {
+        watched.await;
+        tracing::error!(
+            "the instance lock's database session is gone or does not answer; stopping"
+        );
     });
     // One Egress for the resolvers and the also-on sources: the per-host budgets are shared.
     let egress = pinakes_core::resolver::egress::Egress::new(config.egress.clone());
@@ -403,6 +429,7 @@ async fn start(
         grace: Duration::from_secs(config.shutdown_grace_secs),
         pool,
         instance_lock,
+        lock_lost,
     }))
 }
 
@@ -640,7 +667,7 @@ mod tests {
                 _ => {}
             }
             let stopped = shutdown.clone();
-            let error = supervise(never(), tasks, workers, stop, grace)
+            let error = supervise(never(), never(), tasks, workers, stop, grace)
                 .await
                 .unwrap_err()
                 .to_string();
@@ -662,17 +689,31 @@ mod tests {
         tasks.spawn_optional("also-on", async {});
         let signal = tokio::time::sleep(Duration::from_millis(200));
         let started = std::time::Instant::now();
-        supervise(signal, tasks, tokio::task::JoinSet::new(), stop, grace)
-            .await
-            .unwrap();
+        supervise(
+            signal,
+            never(),
+            tasks,
+            tokio::task::JoinSet::new(),
+            stop,
+            grace,
+        )
+        .await
+        .unwrap();
         assert!(started.elapsed() >= Duration::from_millis(200));
         // But its panic stops the daemon.
         let (stop, _shutdown) = watch::channel(false);
         let mut tasks = Tasks::default();
         tasks.spawn_optional("also-on", async { panic!("also-on panicked") });
-        let error = supervise(never(), tasks, tokio::task::JoinSet::new(), stop, grace)
-            .await
-            .unwrap_err();
+        let error = supervise(
+            never(),
+            never(),
+            tasks,
+            tokio::task::JoinSet::new(),
+            stop,
+            grace,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(error.to_string(), "also-on ended before shutdown");
     }
     /// A task that panics while it stops makes the stop a failure.
@@ -687,6 +728,7 @@ mod tests {
         });
         let error = supervise(
             async {},
+            std::future::pending(),
             tasks,
             tokio::task::JoinSet::new(),
             stop,
@@ -705,6 +747,7 @@ mod tests {
         let started = std::time::Instant::now();
         supervise(
             async {},
+            std::future::pending(),
             tasks,
             tokio::task::JoinSet::new(),
             stop,
@@ -716,8 +759,8 @@ mod tests {
         assert!(waited >= Duration::from_millis(300) && waited < Duration::from_secs(5));
     }
     /// A daemon that has lost its instance lock gives its tasks `LOST_GRACE`, not the
-    /// shutdown grace: a worker in the middle of a batch is cut off there. Any other task that
-    /// ends leaves the full grace.
+    /// shutdown grace: a worker in the middle of a batch is cut off there. A task that ends
+    /// with the lock held leaves the full grace.
     #[tokio::test]
     async fn a_lost_instance_lock_cuts_the_grace_short() {
         let grace = Duration::from_secs(4);
@@ -729,18 +772,53 @@ mod tests {
         ] {
             let (stop, _shutdown) = watch::channel(false);
             let mut tasks = Tasks::default();
-            tasks.spawn(ended, async {});
+            let lock_lost: std::pin::Pin<Box<dyn std::future::Future<Output = ()>>> =
+                if ended == INSTANCE_LOCK {
+                    Box::pin(async {})
+                } else {
+                    tasks.spawn(ended, async {});
+                    Box::pin(std::future::pending())
+                };
             // A worker whose batch does not end.
             let mut workers = tokio::task::JoinSet::new();
             workers.spawn(std::future::pending::<()>());
             let started = std::time::Instant::now();
-            let error = supervise(std::future::pending::<()>(), tasks, workers, stop, grace)
+            let stop_signal = std::future::pending::<()>();
+            let error = supervise(stop_signal, lock_lost, tasks, workers, stop, grace)
                 .await
                 .unwrap_err();
             let waited = started.elapsed();
             assert_eq!(error.to_string(), format!("{ended} ended before shutdown"));
             assert!(waited >= least && waited < most, "{ended}: {waited:?}");
         }
+    }
+    /// The lock is watched while the daemon stops: one lost half a second into a shutdown
+    /// leaves `LOST_GRACE` from then, not the rest of the grace. The stop was asked for, so
+    /// it is no failure.
+    #[tokio::test]
+    async fn a_lock_lost_while_stopping_cuts_the_grace_short() {
+        let grace = Duration::from_secs(6);
+        let after = Duration::from_millis(500);
+        let lost = pinakes_core::locks::LOST_GRACE;
+        let (stop, _shutdown) = watch::channel(false);
+        let mut workers = tokio::task::JoinSet::new();
+        workers.spawn(std::future::pending::<()>());
+        let started = std::time::Instant::now();
+        supervise(
+            async {},
+            tokio::time::sleep(after),
+            Tasks::default(),
+            workers,
+            stop,
+            grace,
+        )
+        .await
+        .unwrap();
+        let waited = started.elapsed();
+        assert!(
+            waited >= after + lost && waited < after + lost + Duration::from_millis(1500),
+            "{waited:?}"
+        );
     }
     #[test]
     fn warns_when_the_admin_listener_has_no_token() {

@@ -3212,7 +3212,7 @@ async fn a_worker_finishes_a_page_over_its_cap(pool: PgPool) {
     assert!(!text.contains("queue persistence failed"), "{text}");
 }
 
-/// The `pending` gauge counts what a worker may claim, by the claim's own condition. A derived
+/// The `pending` gauge counts rows by the claim's own condition. A derived
 /// link whose derivation has ended and that nobody references is never claimed: it is not
 /// pending while it waits for its cleanup, and is again once someone references it.
 #[sqlx::test(migrations = "../../migrations")]

@@ -153,13 +153,15 @@ carried over by hand:
    must have the same columns (`\d resource_change` in each):
 
    ```sh
-   DATABASE_URL="$OLD_DATABASE_URL" scripts/pg-env pg_dump --data-only --table=resource_change \
-     | DATABASE_URL="$NEW_DATABASE_URL" scripts/pg-env psql -v ON_ERROR_STOP=1
+   DATABASE_URL="$OLD_DATABASE_URL" scripts/pg-env pg_dump --data-only --table=resource_change --file=resource_change.sql
+   DATABASE_URL="$NEW_DATABASE_URL" scripts/pg-env psql -v ON_ERROR_STOP=1 --single-transaction --file=resource_change.sql
    ```
 
-   `scripts/pg-env` runs a command with libpq's `PG*` variables set from `DATABASE_URL`, so
-   neither URL, nor a password in it, stands on a command line, where the process table shows
-   it. Setting `PGHOST`, `PGUSER`, `PGDATABASE` and a `PGPASSFILE` for each side does the same.
+   Run the second command only when the first has succeeded: it loads the whole file or
+   nothing. `scripts/pg-env` runs a command with libpq's `PG*` variables set from
+   `DATABASE_URL`, so neither URL, nor a password in it, stands on a command line, where the
+   process table shows it. Setting `PGHOST`, `PGUSER`, `PGDATABASE` and a `PGPASSFILE` for each
+   command does the same.
 
 5. Start the daemon on the new database. It reads the feed from zero and reads every link
    again; each card gets a `created` line of its own.
@@ -188,16 +190,20 @@ The lock is its session's: the daemon checks every ten seconds that the session 
 answers within ten seconds. It stops at once when the session's connection has failed (a
 PostgreSQL restart, a dropped connection), and when two checks in a row get no answer in time (a
 database that does not answer; one slow answer stops nothing), since another daemon or a
-`reextract` could then start beside it. A daemon that has lost the lock takes no new work and
-gives open requests, running jobs and background passes two seconds, not
-`limits.shutdown_grace_secs`: what still runs then is dropped (a job cut off is read again when
-its lease runs out). So a daemon whose lock is gone works beside another for 32 seconds at most:
-30 to notice a session that is gone without its connection failing, and those two.
+`reextract` could then start beside it. A daemon that has lost the lock, running or already
+stopping, claims no more work and gives open requests, running jobs and background passes two
+seconds from then, not `limits.shutdown_grace_secs`: what still runs is dropped. A job cut off
+before its save is read again when its lease runs out; one cut off after it keeps the card it
+saved, and the steps after the save (the alias its page names, an episode's pages) wait for its
+next read. So a daemon's workers and background passes run without the lock for 32 seconds at
+most: 30 to notice a session that is gone without its connection failing, and those two. The
+process ends once its database connections are closed (up to 5 seconds more), in which a
+request still open may be answered.
 
-**Stopping and restarting.** `pinakesd` stops with a non-zero status when one of its background
-tasks ends by itself or panics (ingestion, grouping, maintenance, the ODbL dump, a queue worker,
-a listener, the instance lock's check), or when a hint pass or also-on panics (those end by
-themselves when switched off): a daemon that kept answering with a dead loop would look healthy
+**Stopping and restarting.** `pinakesd` stops with a non-zero status when it loses the instance
+lock, when one of its background tasks ends by itself or panics (ingestion, grouping,
+maintenance, the ODbL dump, a queue worker, a listener), or when a hint pass or also-on panics
+(those end by themselves when switched off): a daemon that kept answering with a dead loop would look healthy
 and fall behind. Run it under a supervisor that starts it again (`Restart=on-failure`, a
 container restart policy). On SIGTERM or SIGINT it stops taking work, lets open requests,
 running jobs and background passes finish for up to `limits.shutdown_grace_secs`, closes its

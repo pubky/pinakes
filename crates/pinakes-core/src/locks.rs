@@ -48,16 +48,19 @@ pub async fn own_database(pool: &PgPool) -> Result<InstanceLock> {
     Ok(InstanceLock(connection))
 }
 /// How often the daemon checks that it still holds the instance lock ([`InstanceLock::watch`]),
-/// and how long one check may take. Fixed: with [`LOST_GRACE`] it bounds how long two daemons
-/// could run on one database, which no deployment needs to tune. A session that is gone
+/// and how long one check may take. Fixed: with [`LOST_GRACE`] it bounds how long a daemon
+/// works on without its lock, which no deployment needs to tune. A session that is gone
 /// without its connection failing is noticed within three times this (the wait and two checks
-/// with no answer), and the daemon's tasks are dropped `LOST_GRACE` later: 32 seconds.
+/// with no answer), and the daemon's workers and background tasks are dropped `LOST_GRACE`
+/// later: 32 seconds. The process ends once its database connections are closed, a few
+/// seconds more (`pinakesd`), in which a request still open may be answered.
 pub const LOCK_CHECK: std::time::Duration = std::time::Duration::from_secs(10);
 /// How long a daemon that has lost the instance lock gives its tasks to stop, in place of
 /// `limits.shutdown_grace_secs`: time for a statement in flight and an open response, no more.
-/// Fixed, as `LOCK_CHECK` is.
-/// Another daemon may already run on the database, so the workers' batches are cut off (a job
-/// cut off is read again when its lease runs out) instead of finished without the lock.
+/// Fixed, as `LOCK_CHECK` is. Another daemon may already run on the database, so the workers'
+/// batches are cut off instead of finished without the lock: a job cut off before its save is
+/// read again when its lease runs out; one cut off after it keeps the card it saved, and the
+/// steps after the save wait for its next read.
 pub const LOST_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 /// What one check of the lock's session found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,46 +84,37 @@ impl InstanceLock {
             Err(_) => Check::Slow,
         }
     }
-    /// Check the lock every [`LOCK_CHECK`] until `shutdown`: `true` once it is lost, `false` at
-    /// shutdown. It is lost at once when its session's connection fails, and when two checks in
-    /// a row get no answer in time: one slow answer does not stop a daemon that still holds
-    /// its lock, and the check after it is made at once. Without the lock another `pinakesd`,
-    /// or a `reextract`, could start on the database, so a daemon that has lost it stops within
-    /// [`LOST_GRACE`] (its supervisor starts it again, and it takes the lock anew).
-    pub async fn watch(
-        lock: std::sync::Arc<tokio::sync::Mutex<Self>>,
-        shutdown: tokio::sync::watch::Receiver<bool>,
-    ) -> bool {
+    /// Check the lock every [`LOCK_CHECK`] and end once it is lost; never otherwise (the daemon
+    /// drops the watch when it has stopped, so the lock is watched while it stops too). It is
+    /// lost at once when its session's connection fails, and when two checks in a row get no
+    /// answer in time: one slow answer does not stop a daemon that still holds its lock, and
+    /// the check after it is made at once. Without the lock another `pinakesd`, or a
+    /// `reextract`, could start on the database, so a daemon that has lost it gives what it
+    /// runs [`LOST_GRACE`] and stops (its supervisor starts it again, and it takes the lock
+    /// anew).
+    pub async fn watch(lock: std::sync::Arc<tokio::sync::Mutex<Self>>) {
         let check = || async { lock.lock().await.check().await };
-        watch_checks(check, LOCK_CHECK, shutdown).await
+        watch_checks(check, LOCK_CHECK).await
     }
 }
 /// [`InstanceLock::watch`] over any check, one every `every`.
-async fn watch_checks<F, Fut>(
-    mut check: F,
-    every: std::time::Duration,
-    mut shutdown: tokio::sync::watch::Receiver<bool>,
-) -> bool
+async fn watch_checks<F, Fut>(mut check: F, every: std::time::Duration)
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Check>,
 {
     let mut slow = false;
-    while !*shutdown.borrow() {
+    loop {
         // The check after a slow one is made at once: the session has had its time.
         if !slow {
-            tokio::select! {
-                _ = shutdown.changed() => return false,
-                _ = tokio::time::sleep(every) => {}
-            }
+            tokio::time::sleep(every).await;
         }
         match check().await {
             Check::Held => slow = false,
             Check::Slow if !slow => slow = true,
-            Check::Slow | Check::Gone => return true,
+            Check::Slow | Check::Gone => return,
         }
     }
-    false
 }
 
 #[cfg(test)]
@@ -141,33 +135,18 @@ mod tests {
             (vec![Slow, Slow], 2),
             (vec![Slow, Held, Slow, Held, Held, Slow, Slow], 7),
         ] {
-            let (_stop, shutdown) = tokio::sync::watch::channel(false);
             let mut made = 0;
             let check = || {
                 let found = script[made];
                 made += 1;
                 async move { found }
             };
-            assert!(watch_checks(check, every, shutdown).await, "{script:?}");
+            watch_checks(check, every).await;
             assert_eq!(made, lost_after, "{script:?}");
         }
-        // Shutdown ends the watch with the lock held, slow check or not.
-        let (stop, shutdown) = tokio::sync::watch::channel(false);
-        let mut made = 0;
-        let check = || {
-            made += 1;
-            if made == 3 {
-                stop.send(true).unwrap();
-            }
-            async move {
-                if made == 3 {
-                    Slow
-                } else {
-                    Held
-                }
-            }
-        };
-        assert!(!watch_checks(check, every, shutdown).await);
+        // A lock that is held is watched for as long as the watch is: it never ends by itself.
+        let held = watch_checks(|| async { Held }, every);
+        assert!(tokio::time::timeout(every * 50, held).await.is_err());
     }
     #[test]
     fn every_key_differs_and_lock_waits_names_it() {

@@ -1291,7 +1291,10 @@ impl Worker {
     /// Until shutdown: wait for the pacing slot, run a due canary or claim a batch, and run it.
     /// Shutdown ends the wait for the slot at once. A claim, a canary and a claimed batch are
     /// finished first, so no row stays leased with no worker and no job stops between its save
-    /// and the steps that follow it.
+    /// and the steps that follow it. A daemon whose shutdown grace ends first drops the worker
+    /// where it is: a job cut off before its save is read again when its lease runs out; one
+    /// cut off after it keeps the card it saved, and the steps after the save wait for its
+    /// next read.
     async fn run(self, mut shutdown: watch::Receiver<bool>) {
         let mut canary_check = Instant::now();
         while !*shutdown.borrow() {
