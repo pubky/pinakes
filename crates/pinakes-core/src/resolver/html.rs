@@ -2387,6 +2387,29 @@ mod tests {
         // A 503 text/plain answer of 13,000 divs, read by the wall check.
         let plain = "<div>".repeat(13_000);
         timed(|| interstitial::inspect(&url, &fetched(503, "text/plain", plain)).unwrap());
+        // A JSON-LD array of 250,000 entries whose first node holds a graph of 250,000 more, as
+        // a JSON answer and as a page's script: each node is ranked once.
+        let zeros = "0,".repeat(250_000);
+        let array = format!(r#"[{{"@type":"Event","name":"Kept","@graph":[{zeros}0]}},{zeros}0]"#);
+        let answer = fetched(200, "application/ld+json", array.clone());
+        let out = timed(|| web::extract(url.as_str(), &answer, 3600).unwrap());
+        assert_eq!(out.doc.name.as_deref(), Some("Kept"));
+        let script = format!(r#"<script type="application/ld+json">{array}</script>"#);
+        let out =
+            timed(|| web::extract(url.as_str(), &fetched(200, "text/html", script), 3600).unwrap());
+        assert_eq!(out.doc.name.as_deref(), Some("Kept"));
+        // 20,000 scripts beside one large one: each script is ranked once.
+        let large = format!(
+            r#"{{"@type":"Event","name":"Kept","@graph":[{}0]}}"#,
+            "0,".repeat(100_000)
+        );
+        let many = format!(
+            r#"<script type="application/ld+json">{large}</script>{}"#,
+            r#"<script type="application/ld+json">{"@type":"WebSite"}</script>"#.repeat(20_000)
+        );
+        let out =
+            timed(|| web::extract(url.as_str(), &fetched(200, "text/html", many), 3600).unwrap());
+        assert_eq!(out.doc.name.as_deref(), Some("Kept"));
     }
 
     /// The semaphore is the test's own: other tests' parses don't move its count.

@@ -683,11 +683,15 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
             .filter_map(|u| origin_url(&fetched.url, u).and_then(|u| entity_identity(&u)))
             .any(|id| page.contains(&id))
     };
-    if let Some(best) = (1..scripts.len()).fold((!scripts.is_empty()).then_some(0), |best, i| {
-        best.filter(|b| rank(&scripts[i]) <= rank(&scripts[*b]))
-            .or(Some(i))
-    }) {
-        let (entity, head) = &scripts[best];
+    // Each script is ranked once; a page of many scripts stops when its parse job is over.
+    let mut ranks = Vec::with_capacity(scripts.len());
+    for script in &scripts {
+        if super::html::job_over() {
+            return Err(super::html::job_ended());
+        }
+        ranks.push(rank(script));
+    }
+    if let Some((entity, head)) = first_of_highest(ranks.into_iter().zip(&scripts)) {
         apply_jsonld(
             &mut out.doc,
             entity,
@@ -698,17 +702,12 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
         // A plugin's body Article can outrank the head's WebPage for the card; the head's
         // identity claims still apply.
         if !head {
-            let head_best = scripts
-                .iter()
-                .filter(|(_, head)| *head)
-                .fold(None, |best, (v, _)| match best {
-                    Some(b)
-                        if entity_priority(v, &fetched.url) <= entity_priority(b, &fetched.url) =>
-                    {
-                        Some(b)
-                    }
-                    _ => Some(v),
-                });
+            let head_best = first_of_highest(
+                scripts
+                    .iter()
+                    .filter(|(_, head)| *head)
+                    .map(|(v, _)| (entity_priority(v, &fetched.url), v)),
+            );
             if let Some(v) = head_best {
                 jsonld_claims(&mut out.doc, v, &fetched.url);
             }
@@ -1362,19 +1361,43 @@ fn schema_type(v: &Value) -> Option<&str> {
         .filter_map(Value::as_str)
         .find(|s| !crate::model::type_path(s).is_empty())
 }
-fn entity_priority(v: &Value, base: &Url) -> u8 {
-    if let Some(values) = v.as_array() {
-        return values
-            .iter()
-            .map(|v| entity_priority(v, base))
-            .max()
-            .unwrap_or(0);
+/// The first item of the highest rank, each rank computed once.
+fn first_of_highest<R: PartialOrd, T>(ranked: impl Iterator<Item = (R, T)>) -> Option<T> {
+    let mut best: Option<(R, T)> = None;
+    for (rank, item) in ranked {
+        if best.as_ref().is_none_or(|(highest, _)| rank > *highest) {
+            best = Some((rank, item));
+        }
     }
-    let nested = main_entity(v)
-        .or_else(|| v.get("@graph"))
-        .map(|v| entity_priority(v, base))
-        .unwrap_or(0);
-    type_priority(v, base).max(nested)
+    best.map(|(_, item)| item)
+}
+/// How far a walk over a script's nodes goes (`all_nodes`, `entity_priority`): the first
+/// `NODE_ENTRIES` entries of each array, `NODE_DEPTH` levels down. No page's own entity sits
+/// further in, and a hostile script costs no more than these.
+const NODE_ENTRIES: usize = 256;
+const NODE_DEPTH: usize = 6;
+/// The highest priority (`type_priority`) of a node, its main entity and its graph, as far as
+/// `NODE_ENTRIES` and `NODE_DEPTH` reach.
+fn entity_priority(v: &Value, base: &Url) -> u8 {
+    fn within(v: &Value, base: &Url, depth: usize) -> u8 {
+        if depth > NODE_DEPTH {
+            return 0;
+        }
+        if let Some(values) = v.as_array() {
+            return values
+                .iter()
+                .take(NODE_ENTRIES)
+                .map(|v| within(v, base, depth + 1))
+                .max()
+                .unwrap_or(0);
+        }
+        let nested = main_entity(v)
+            .or_else(|| v.get("@graph"))
+            .map(|v| within(v, base, depth + 1))
+            .unwrap_or(0);
+        type_priority(v, base).max(nested)
+    }
+    within(v, base, 0)
 }
 /// A node's own priority, ignoring nested entities: 110 for the page's own recipe, 100 for other
 /// content, 90 for a recipe of another page, 80 for WebPage, 20 for publisher and navigation
@@ -1516,13 +1539,13 @@ fn main_entity(v: &Value) -> Option<&Value> {
 /// Every object node of a script's value, through its arrays, `@graph` and `mainEntity`, each
 /// with whether it sits in a list of several main entities.
 fn all_nodes<'a>(v: &'a Value, out: &mut Vec<(&'a Value, bool)>, depth: usize, in_list: bool) {
-    if depth > 6 {
+    if depth > NODE_DEPTH {
         return;
     }
     match v {
         Value::Array(a) => a
             .iter()
-            .take(256)
+            .take(NODE_ENTRIES)
             .for_each(|v| all_nodes(v, out, depth + 1, in_list)),
         Value::Object(_) => {
             out.push((v, in_list));
@@ -1658,11 +1681,8 @@ fn entity_identity(url: &str) -> Option<String> {
 /// Wikidata item for every page. Returns whether claims were donated.
 fn jsonld_claims(doc: &mut ResourceMeta, v: &Value, base: &Url) -> bool {
     if let Some(values) = v.as_array() {
-        let best = values.iter().fold(None, |best, v| match best {
-            Some(b) if entity_priority(v, base) <= entity_priority(b, base) => Some(b),
-            _ => Some(v),
-        });
-        return best.is_some_and(|b| jsonld_claims(doc, b, base));
+        return first_of_highest(values.iter().map(|v| (entity_priority(v, base), v)))
+            .is_some_and(|b| jsonld_claims(doc, b, base));
     }
     for nested in [main_entity(v), v.get("@graph")].into_iter().flatten() {
         if jsonld_claims(doc, nested, base) {
@@ -1796,21 +1816,21 @@ fn selected<'a>(v: &'a Value, base: &Url, vouched: bool) -> Option<(&'a Value, b
 /// outranks another event it lists, and one naming no page, when vouched for, outranks one
 /// naming another page; the first of equals.
 fn best_node<'a>(values: &'a [Value], base: &Url, vouched: bool) -> Option<&'a Value> {
+    // The page's identity once for the array, and each node's rank once: an array of any
+    // length costs one look at each of its nodes.
+    let page = crate::event::page::page_identity(base.as_str());
     let rank = |v: &Value| {
+        let names = page.as_ref().and_then(|page| {
+            crate::event::page::names_page_in(v, base, std::slice::from_ref(page))
+        });
         (
             !site_node(v, base),
             entity_priority(v, base),
-            crate::event::page::owns_page(v, base),
-            crate::event::page::names_page(v, base).unwrap_or(vouched),
+            names == Some(true),
+            names.unwrap_or(vouched),
         )
     };
-    let mut best = values.first()?;
-    for value in values.iter().skip(1) {
-        if rank(value) > rank(best) {
-            best = value;
-        }
-    }
-    Some(best)
+    first_of_highest(values.iter().map(|v| (rank(v), v)))
 }
 /// What the head says the page is about, from its page nodes (a `WebPage` naming the page or
 /// none): the nodes their main entity names (`node_key`: `{"@id": "#product"}`), or none for a
