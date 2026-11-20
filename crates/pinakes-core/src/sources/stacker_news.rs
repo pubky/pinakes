@@ -22,7 +22,7 @@ pub fn of_uri(uri: &str) -> Option<u64> {
 /// The item a link's path names and the comment its `?commentId=` names, if any. The comment
 /// counts only once its own record says it is in that item's thread.
 fn parts(uri: &str) -> Option<(u64, Option<u64>)> {
-    let url = web_url(uri)?;
+    let url = super::kit::web_url(uri)?;
     if !matches!(url.host_str()?, "stacker.news" | "www.stacker.news") {
         return None;
     }
@@ -63,7 +63,11 @@ pub fn card(
         // Their text may repeat the request, link and all: only that there was an error.
         anyhow::bail!("Stacker News answered an error");
     }
-    let node = &v["data"]["item"];
+    anyhow::ensure!(v["data"].is_object(), "Stacker News answered no data");
+    // `item: null` is its "no such item"; an answer without `item` says nothing about it.
+    let node = v["data"]
+        .get("item")
+        .context("Stacker News answered no item")?;
     if node.is_null() || !node["deletedAt"].is_null() {
         return Ok(None);
     }
@@ -323,5 +327,13 @@ mod tests {
         .unwrap()
         .is_none());
         assert!(card(base(2), 2, 200, &read("sn-item-1.json")).is_err());
+        // An answer without `data` says nothing about the item: an error, not "gone".
+        assert!(card(base(1), 1, 200, b"{}").is_err());
+        assert!(card(base(1), 1, 200, br#"{"data":null}"#).is_err());
+        // Only an explicit `item: null` is "no such item"; `data` without `item` is an error.
+        assert!(card(base(1), 1, 200, br#"{"data":{}}"#).is_err());
+        assert!(card(base(1), 1, 200, br#"{"data":{"item":null}}"#)
+            .unwrap()
+            .is_none());
     }
 }

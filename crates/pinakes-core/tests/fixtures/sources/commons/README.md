@@ -1,7 +1,7 @@
-Wikimedia Commons MediaWiki API responses (`action=query` with `prop=imageinfo|coordinates`, and
-one `wbgetentities` structured-data answer), recorded once on 2026-10-19 with the Pinakes user
-agent (`pinakes/0.1.0 (+https://pubky.app; info@synonym.to)`), one request at a time, at least
-2 s apart. Parser regression fixtures for `pinakes_core::sources::commons`; test runs make no
+Wikimedia Commons MediaWiki API responses (`action=query` with `prop=imageinfo|coordinates`),
+recorded once on 2026-10-19 with the Pinakes user agent
+(`pinakes/0.1.0 (+https://pubky.app; info@synonym.to)`), one request at a time, at least 2 s
+apart. Parser regression fixtures for `pinakes_core::sources::commons`; test runs make no
 requests.
 
 `provenance.json` lists each fixture's request URL, status, content type, recording time, and the

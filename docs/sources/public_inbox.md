@@ -20,8 +20,11 @@ so the Message-ID is recorded (`message_id`) but merges nothing across archives.
 
 On gnusha.org, lore.kernel.org, inbox.sourceware.org and public-inbox.org the aliases apply from
 the link alone. A path segment shaped like a Message-ID on any other host is read as a message
-too: a host whose `/raw` answers something other than an mbox (a 404 for one message aside) is
-remembered for a day, and its links get ordinary web cards.
+too, when the part after its `@` ends in letters (`abc@example.org`; not a package's version, as
+in `gin@v1.9.1` or `react@18`). A host whose `/raw` answers something other than an mbox, a 404
+too, is remembered for a day, and its links get ordinary web cards. A host that answered an mbox
+is an archive for a day: any Message-ID is read there, and a 404 is a missing message. A `/raw`
+that cannot be read on a host not known as an archive gives the link an ordinary web card.
 
 ## What it reads
 
@@ -35,7 +38,7 @@ the 1 MB body limit (attachments) gets an ordinary web card.
 
 `EmailMessage`, named by its subject and described by the opening words of its own text (quoted
 lines, "… wrote:" lines, the signature and list footers left out). No address is published: the
-sender appears by display name only.
+sender appears by display name only, and an address in the subject or the text is left out.
 
 | Fact | Meaning |
 | --- | --- |

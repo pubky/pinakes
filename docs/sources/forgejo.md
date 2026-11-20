@@ -3,7 +3,8 @@
 Repositories, branches, tags, releases and files on Forgejo and Gitea instances: Codeberg,
 gitea.com and any other. Everything is read from the instance's API (`/api/v1/repos/…`), never
 from its pages: Codeberg answers deep pages with a bot challenge, which is never solved. No key;
-Codeberg allows 2,000 requests per 10 minutes (one per second here).
+Codeberg allows 2,000 requests per 10 minutes (Pinakes asks at `limits.host_requests_per_second`,
+one a second by default).
 
 ## Links
 
@@ -16,10 +17,12 @@ Codeberg allows 2,000 requests per 10 minutes (one per second here).
 
 A branch name can contain `/` (`v11.0/forgejo`), so the split between branch and path is asked
 of the API: the first one, two or three segments are tried as the branch (or tag), shortest
-first.
+first. When none of them is a branch (or tag) and the link has more segments, the name may be a
+longer one: the link gets an ordinary web card.
 
-Repository pages are read on codeberg.org and gitea.com, and on any host that answered as an
-instance within the last day. The deeper shapes (`/src/branch/…`, `/releases/tag/…`) are read on
+Repository pages and release links (`/releases/tag/…`, a shape GitHub's release links have too)
+are read on codeberg.org and gitea.com, and on any host that answered as an instance within the
+last day. The `/src/…` shapes (`/src/branch/…`, `/src/tag/…`, `/src/commit/…`) are read on
 any host: an unknown host is first asked for `/api/v1/version`, which must answer exactly as
 Forgejo and Gitea do (`{"version": "…"}`, the value a version such as `1.22.0` or
 `11.0.1+gitea-1.22.0`). The answer is remembered for a day, in memory: a host that answers
@@ -50,7 +53,8 @@ codeberg.org or gitea.com.
 with its avatar as the image; a branch or tag `{owner}/{repo} · {name}`, described by its
 commit's first line; a file `{path} · {owner}/{repo}`, described by the first line of the latest
 commit that changed it; a release `{owner}/{repo} {release name}`, described by the start of its
-notes. No commit author's name or address is published.
+notes. No commit author's name or address is published, and an e-mail address in a description
+is left out.
 
 | Fact | Meaning |
 | --- | --- |

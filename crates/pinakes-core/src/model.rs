@@ -490,6 +490,13 @@ pub struct ResourceMeta {
     #[serde(skip)]
     #[schema(ignore)]
     pub withheld: bool,
+    /// A card of the link's shape alone, made from a page that answered without what its card
+    /// reads (a social site's shell or consent page): on a stored card that says more it is a
+    /// first missing answer is, confirmed by a second fresh fetch before the plain card replaces
+    /// it (`changes::save`); a link never read gets it. Never stored.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub shape_only: bool,
     /// When the card changes by itself (an incident expires, an auction ends): its next fetch
     /// comes no later (`queue::refresh_by`). Never stored.
     #[serde(skip)]

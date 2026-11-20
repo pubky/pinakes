@@ -1024,6 +1024,204 @@ async fn unreachable_backoff_stops_and_missing_never_invents_existence(pool: PgP
     assert_eq!(classes(&pool, &never).await, vec!["created"]);
 }
 
+/// A card of the link's shape alone (a social page that answered without its tags) never
+/// replaces a stored card that says more, and adds no change line; a link never read gets it,
+/// and so does one whose stored card says no more than the link's shape.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_shape_only_card_never_replaces_a_card_that_says_more(pool: PgPool) {
+    let stored = |id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_as::<_, (Option<String>, Option<String>)>(
+                "SELECT doc->>'name', doc->>'description' FROM resource WHERE id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let plain = |uri: &str, at: i64| {
+        let mut doc = ResourceMeta::new(uri, "web", 3600);
+        doc.set_type("Person");
+        doc.name = Some("Profile on social.example".into());
+        doc.fetched_at = at;
+        doc.shape_only = true;
+        doc
+    };
+    let uri = "https://social.example/in/someone";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut good = ResourceMeta::new(uri, "web", 3600);
+    good.set_type("Person");
+    good.name = Some("Some One".into());
+    good.description = Some("Builds bridges.".into());
+    store::save_document(&pool, &id, 0, &good).await.unwrap();
+    let lines = classes(&pool, &id).await;
+    store::save_document(&pool, &id, 0, &plain(uri, good.fetched_at + 1))
+        .await
+        .unwrap();
+    assert_eq!(
+        stored(id.clone()).await,
+        (Some("Some One".into()), Some("Builds bridges.".into()))
+    );
+    assert_eq!(classes(&pool, &id).await, lines);
+
+    // A link never read gets the plain card.
+    let fresh = "https://social.example/in/someone-else";
+    let fresh_id = store::ensure_resource(&pool, fresh).await.unwrap();
+    store::save_document(&pool, &fresh_id, 0, &plain(fresh, good.fetched_at))
+        .await
+        .unwrap();
+    assert_eq!(
+        stored(fresh_id.clone()).await,
+        (Some("Profile on social.example".into()), None)
+    );
+    // A stored card of the shape alone says no more than a new one: it is replaced as any card
+    // is (here by one with a fact the link names).
+    let mut more = plain(fresh, good.fetched_at + 1);
+    more.attributes
+        .insert("handle".into(), "someone-else".into());
+    store::save_document(&pool, &fresh_id, 0, &more)
+        .await
+        .unwrap();
+    let handle: Option<String> =
+        sqlx::query_scalar("SELECT doc->'attributes'->>'handle' FROM resource WHERE id=$1")
+            .bind(&fresh_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(handle.as_deref(), Some("someone-else"));
+}
+
+/// The stored row of a card: its name, `fetched_at`, whether it is final and when it is read next
+/// (seconds from now).
+async fn kept_row(pool: &PgPool, id: &str) -> (Option<String>, Option<i64>, bool, f64) {
+    sqlx::query_as(
+        "SELECT doc->>'name', (doc->>'fetched_at')::bigint, final, \
+         extract(epoch FROM next_attempt_at-now())::float8 FROM resource WHERE id=$1",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+/// A person's card of `uri` named `name`, read at `at` (ms); `shape_only` for the plain card of
+/// a page answered without its tags.
+fn person(uri: &str, name: &str, at: i64, shape_only: bool) -> ResourceMeta {
+    let mut doc = ResourceMeta::new(uri, "web", 3600);
+    doc.set_type("Person");
+    doc.name = Some(name.into());
+    doc.fetched_at = at;
+    doc.shape_only = shape_only;
+    doc
+}
+const PLAIN: &str = "Profile on social.example";
+
+/// A stored card that says more by its name alone, or by a fact alone, is kept for a page
+/// answered without its tags.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_card_that_says_more_by_its_name_or_a_fact_is_kept(pool: PgPool) {
+    let now = chrono::Utc::now().timestamp_millis();
+    for (path, name, fact) in [
+        ("name-only", "Some One", None),
+        ("fact-only", PLAIN, Some("12")),
+    ] {
+        let uri = format!("https://social.example/in/{path}");
+        let id = store::ensure_resource(&pool, &uri).await.unwrap();
+        let mut good = person(&uri, name, now - 3600 * 1000, false);
+        if let Some(fact) = fact {
+            good.attributes.insert("followers".into(), fact.into());
+        }
+        store::save_document(&pool, &id, 0, &good).await.unwrap();
+        store::save_document(&pool, &id, 0, &person(&uri, PLAIN, now, true))
+            .await
+            .unwrap();
+        assert_eq!(
+            kept_row(&pool, &id).await.0.as_deref(),
+            Some(name),
+            "{path}"
+        );
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT doc->'attributes'->>'followers' FROM resource WHERE id=$1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored.as_deref(), fact, "{path}");
+    }
+}
+
+/// A page answered without its tags, on a stored card that says more, is a first missing answer:
+/// the card stays as last read (no change line, its `fetched_at` that read's) and the confirming
+/// read comes `limits.missing_ttl_secs` later, whatever the card's own lifetime (a profile's is a
+/// day); the confirming read stores the plain card. A good read in between clears the observation.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_tagless_read_waits_for_its_confirming_read_as_a_missing_one(pool: PgPool) {
+    let cfg = QueueConfig::default();
+    let streak = |id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i32>("SELECT missing_streak FROM resource WHERE id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let day = 86_400;
+    let at = |doc: ResourceMeta| ResourceMeta {
+        ttl_secs: day,
+        ..doc
+    };
+    let uri = "https://social.example/in/day-old";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let now = chrono::Utc::now().timestamp_millis();
+    let mut good = at(person(uri, "Some One", now - day as i64 * 1000, false));
+    good.description = Some("Builds bridges.".into());
+    store::save_document(&pool, &id, 0, &good).await.unwrap();
+    let lines = classes(&pool, &id).await;
+
+    // The first tagless read, a day after the last good one: kept, read again an hour later.
+    store::save_document(&pool, &id, 0, &at(person(uri, PLAIN, now, true)))
+        .await
+        .unwrap();
+    let (name, fetched, last, next) = kept_row(&pool, &id).await;
+    assert_eq!(name.as_deref(), Some("Some One"));
+    assert_eq!(
+        fetched,
+        Some(good.fetched_at),
+        "fetched_at renewed by a keep"
+    );
+    let wait = cfg.missing_ttl_secs.max(3600) as f64;
+    assert!(
+        !last && next > wait - 60.0 && next <= wait,
+        "next read in {next} s"
+    );
+    assert_eq!(streak(id.clone()).await, 1);
+    assert_eq!(classes(&pool, &id).await, lines);
+
+    // A good read in between clears the observation; the next tagless read is a first one again.
+    let mut again = good.clone();
+    again.fetched_at = now + 1;
+    store::save_document(&pool, &id, 0, &again).await.unwrap();
+    assert_eq!(streak(id.clone()).await, 0);
+    store::save_document(&pool, &id, 0, &at(person(uri, PLAIN, now + 2, true)))
+        .await
+        .unwrap();
+    assert_eq!(kept_row(&pool, &id).await.0.as_deref(), Some("Some One"));
+    assert_eq!(streak(id.clone()).await, 1);
+
+    // The confirming read stores the plain card, and the observation is over.
+    let confirming = now + 2 + cfg.missing_ttl_secs as i64 * 1000;
+    store::save_document(&pool, &id, 0, &at(person(uri, PLAIN, confirming, true)))
+        .await
+        .unwrap();
+    let (name, fetched, ..) = kept_row(&pool, &id).await;
+    assert_eq!(name.as_deref(), Some(PLAIN));
+    assert_eq!(fetched, Some(confirming));
+    assert_eq!(streak(id.clone()).await, 0);
+}
+
 #[sqlx::test(migrations = "../../migrations")]
 async fn new_preview_is_prioritized_and_change_time_follows_lock(pool: PgPool) {
     let _old = store::ensure_resource(&pool, "https://example.org/backlog")

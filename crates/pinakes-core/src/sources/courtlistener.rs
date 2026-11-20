@@ -7,7 +7,7 @@
 //! source off until the daemon restarts, and
 //! `pinakes_source_token_refusals_total{source="courtlistener"}` counts it. Case law is in the
 //! public domain.
-use super::{list, text, texts, web_url, Budget, Context, Declined, Example, Source};
+use super::{list, text, texts, Budget, Context, Declined, Example, Source};
 use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
@@ -39,7 +39,7 @@ fn cluster(value: &str) -> Option<u64> {
 
 /// The cluster id of `/opinion/{id}[/{slug}/…]` or `/api/rest/v{3,4}/clusters/{id}/`.
 pub fn of_uri(uri: &str) -> Option<u64> {
-    let url = web_url(uri)?;
+    let url = super::kit::web_url(uri)?;
     if !matches!(
         url.host_str()?,
         "www.courtlistener.com" | "courtlistener.com"
@@ -194,7 +194,7 @@ impl Source for Courtlistener {
     }
     fn budgets(&self) -> &'static [Budget] {
         // Five requests a minute, its anonymous limit when it had one: a token's own limit may
-        // be higher, which the operator can set (`egress.host_rates`).
+        // be higher, which the operator can set (`limits.host_rates`).
         &[("www.courtlistener.com", 5.0 / 60.0)]
     }
     fn examples(&self) -> &'static [Example] {

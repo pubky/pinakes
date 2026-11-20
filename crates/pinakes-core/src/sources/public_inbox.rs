@@ -3,7 +3,7 @@
 //! the archive. The old `lists.linuxfoundation.org` pipermail addresses that gnusha.org maps to
 //! a message become aliases of it. No key. An archive that does not answer as public-inbox is
 //! remembered, and its links get ordinary web cards.
-use super::{web_url, Context, Declined, Example, HostMemo, Source};
+use super::{Context, Declined, Example, HostMemo, Source};
 use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
@@ -63,6 +63,17 @@ fn message_id(value: &str) -> Option<String> {
             .any(|c| c.is_whitespace() || c.is_control() || "<>/".contains(c)))
     .then_some(id)
 }
+/// Whether a Message-ID's domain ends in a label of letters only (`example.org`, `localhost`).
+/// A version after an `@` does not (`gin@v1.9.1`, `bootstrap@5.3.0`, `react@18`).
+fn lettered_domain(id: &str) -> bool {
+    id.rsplit_once('@')
+        .and_then(|(_, domain)| domain.rsplit('.').next())
+        .is_some_and(|label| !label.is_empty() && label.bytes().all(|b| b.is_ascii_alphabetic()))
+}
+/// Whether `host` is an archive: one known without asking, or one that answered an mbox.
+fn archive(host: &str) -> bool {
+    KNOWN.contains(&host) || ARCHIVES.get(host) == Some(true)
+}
 fn path_part(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
@@ -86,7 +97,7 @@ pub enum Target {
 
 impl Target {
     pub fn of_uri(uri: &str) -> Option<Self> {
-        let url = web_url(uri)?;
+        let url = super::kit::web_url(uri)?;
         if url.scheme() != "https" || url.port().is_some() {
             return None;
         }
@@ -108,7 +119,11 @@ impl Target {
                 _ => None,
             };
         }
-        let at = segments.iter().rposition(|s| message_id(s).is_some())?;
+        // On a host that is not an archive as far as is known, a package's version after an
+        // `@` is no Message-ID.
+        let strict = !archive(&host);
+        let mid = |s: &str| message_id(s).filter(|id| !strict || lettered_domain(id));
+        let at = segments.iter().rposition(|&s| mid(s).is_some())?;
         let (before, after) = (&segments[..at], &segments[at + 1..]);
         if before.is_empty()
             || before.len() > 4
@@ -120,7 +135,7 @@ impl Target {
         Some(Self::Message {
             host,
             base: format!("/{}", before.join("/")),
-            mid: message_id(segments[at])?,
+            mid: mid(segments[at])?,
         })
     }
     /// The message's page in its archive.
@@ -138,6 +153,7 @@ impl Target {
 /// A message as its mbox headers and first text part say.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Message {
+    /// The subject, without any address in it.
     pub subject: Option<String>,
     /// The sender's display name; the address is never kept.
     pub author: Option<String>,
@@ -148,7 +164,8 @@ pub struct Message {
     pub excerpt: Option<String>,
 }
 
-/// Headers as (lowercase name → first value), unfolded; and the body after them.
+/// Headers as (lowercase name → first value), unfolded and each cut at `HEADER_CAP`; and the
+/// body after them.
 fn headers(text: &str) -> (BTreeMap<String, String>, &str) {
     let mut map = BTreeMap::new();
     let mut current: Option<(String, String)> = None;
@@ -163,8 +180,11 @@ fn headers(text: &str) -> (BTreeMap<String, String>, &str) {
         }
         if line.starts_with([' ', '\t']) {
             if let Some((_, value)) = current.as_mut() {
-                value.push(' ');
-                value.push_str(line.trim());
+                if value.len() < HEADER_CAP {
+                    value.push(' ');
+                    let room = HEADER_CAP - value.len();
+                    value.push_str(capped(line.trim(), room));
+                }
             }
             continue;
         }
@@ -172,7 +192,10 @@ fn headers(text: &str) -> (BTreeMap<String, String>, &str) {
             map.entry(name).or_insert(value);
         }
         if let Some((name, value)) = line.split_once(':') {
-            current = Some((name.trim().to_ascii_lowercase(), value.trim().to_owned()));
+            current = Some((
+                name.trim().to_ascii_lowercase(),
+                capped(value.trim(), HEADER_CAP).to_owned(),
+            ));
         }
     }
     if let Some((name, value)) = current {
@@ -238,51 +261,103 @@ fn quoted_printable(text: &str, header: bool) -> Vec<u8> {
     out
 }
 
+/// The longest header value kept, in bytes: a longer one is cut there.
+const HEADER_CAP: usize = 8 * 1024;
+/// The longest charset name and payload of one encoded word, in bytes (RFC 2047 allows 75
+/// characters for the whole word; mailers write longer ones).
+const CHARSET_MAX: usize = 64;
+const PAYLOAD_MAX: usize = 1024;
+
+/// `value` up to `max` bytes, cut at a character.
+fn capped(value: &str, max: usize) -> &str {
+    let mut end = value.len().min(max);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
+
+/// Where the next `?=` of a header is, asked at rising positions: each stretch of the header is
+/// searched once, however many `=?` it holds.
+#[derive(Default)]
+struct Ends {
+    from: usize,
+    at: Option<usize>,
+    searched: bool,
+}
+impl Ends {
+    fn next(&mut self, value: &str, from: usize) -> Option<usize> {
+        if !self.searched || from < self.from || self.at.is_some_and(|at| at < from) {
+            self.at = value.get(from..)?.find("?=").map(|i| from + i);
+            self.searched = true;
+        }
+        self.from = from;
+        self.at
+    }
+}
+
+/// The encoded word that starts at `start` (an `=?`) in `value`: its text and where it ends.
+/// The charset is looked for within `CHARSET_MAX` bytes and a payload over `PAYLOAD_MAX` is no
+/// word, so one `=?` costs a bounded amount of work.
+fn encoded_word(value: &str, start: usize, ends: &mut Ends) -> Option<(String, usize)> {
+    let bytes = value.as_bytes();
+    let cs_at = start + 2;
+    let cs_len = bytes
+        .get(cs_at..)?
+        .iter()
+        .take(CHARSET_MAX + 1)
+        .position(|b| *b == b'?')?;
+    let enc = *bytes.get(cs_at + cs_len + 1)?;
+    if !matches!(enc, b'B' | b'b' | b'Q' | b'q') || bytes.get(cs_at + cs_len + 2) != Some(&b'?') {
+        return None;
+    }
+    let payload_at = cs_at + cs_len + 3;
+    let end = ends.next(value, payload_at)?;
+    if end - payload_at > PAYLOAD_MAX {
+        return None;
+    }
+    let payload = value.get(payload_at..end)?;
+    let decoded = match enc {
+        b'B' | b'b' => base64::engine::general_purpose::STANDARD
+            .decode(payload.trim())
+            .ok()?,
+        _ => quoted_printable(payload, true),
+    };
+    let cs = value.get(cs_at..cs_at + cs_len)?;
+    Some((
+        charset(&decoded, cs.split('*').next().unwrap_or(cs)),
+        end + 2,
+    ))
+}
+
 /// RFC 2047 encoded words (`=?UTF-8?Q?…?=`, `=?utf-8?B?…?=`) as text; whitespace between two
-/// encoded words is dropped.
+/// encoded words is dropped. Linear in the header's length.
 pub fn header_text(value: &str) -> String {
     let mut out = String::new();
-    let mut rest = value;
+    let mut at = 0;
     let mut after_word = false;
-    while let Some(start) = rest.find("=?") {
-        let (before, word) = rest.split_at(start);
-        let decoded = (|| {
-            let inner = &word[2..];
-            let (cs, inner) = inner.split_once('?')?;
-            let (enc, inner) = inner.split_once('?')?;
-            let end = inner.find("?=")?;
-            let payload = &inner[..end];
-            let bytes = match enc {
-                "B" | "b" => base64::engine::general_purpose::STANDARD
-                    .decode(payload.trim())
-                    .ok()?,
-                "Q" | "q" => quoted_printable(payload, true),
-                _ => return None,
-            };
-            let consumed = 2 + cs.len() + 1 + enc.len() + 1 + end + 2;
-            Some((
-                charset(&bytes, cs.split('*').next().unwrap_or(cs)),
-                consumed,
-            ))
-        })();
-        match decoded {
-            Some((text, consumed)) => {
+    let mut ends = Ends::default();
+    while let Some(found) = value[at..].find("=?") {
+        let start = at + found;
+        let before = &value[at..start];
+        match encoded_word(value, start, &mut ends) {
+            Some((text, end)) => {
                 if !(after_word && before.trim().is_empty()) {
                     out.push_str(before);
                 }
                 out.push_str(&text);
-                rest = &word[consumed..];
+                at = end;
                 after_word = true;
             }
             None => {
                 out.push_str(before);
                 out.push_str("=?");
-                rest = &word[2..];
+                at = start + 2;
                 after_word = false;
             }
         }
     }
-    out.push_str(rest);
+    out.push_str(&value[at..]);
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -409,7 +484,7 @@ pub fn parse(raw: &[u8]) -> Result<Message> {
     Ok(Message {
         subject: headers
             .get("subject")
-            .map(|s| header_text(s))
+            .map(|s| super::without_addresses(&header_text(s)))
             .filter(|s| !s.is_empty()),
         author,
         date,
@@ -543,7 +618,7 @@ impl Source for PublicInbox {
         if ARCHIVES.get(&host) == Some(false) {
             return Err(Declined.into());
         }
-        let known = KNOWN.contains(&host.as_str()) || ARCHIVES.get(&host) == Some(true);
+        let known = archive(&host);
         let raw = format!("{}raw", target.root().context("a message has a root")?);
         let f = match cx
             .fetch(
@@ -556,6 +631,7 @@ impl Source for PublicInbox {
             )
             .await
         {
+            Ok(f) => f,
             // A message too large to read (attachments): its page gets an ordinary web card.
             Err(e)
                 if e.chain()
@@ -563,7 +639,12 @@ impl Source for PublicInbox {
             {
                 return Err(Declined.into())
             }
-            f => f?,
+            // So does the page of a host not known as an archive whose `/raw` cannot be read.
+            // A wait (this daemon's own host budget, a 429, a server error) is no answer.
+            Err(e) if !known && e.downcast_ref::<crate::resolver::RetryLater>().is_none() => {
+                return Err(Declined.into())
+            }
+            Err(e) => return Err(e),
         };
         // lore.kernel.org serves the mbox as `text/plain`; it still starts with a `From ` line.
         let mbox = f.content_type.contains("mbox")
@@ -575,8 +656,8 @@ impl Source for PublicInbox {
                 doc.site = host;
                 return Ok(doc);
             }
-            // A missing message says nothing about the host; any other answer does.
-            404 => return Err(Declined.into()),
+            // Any other answer, a 404 too, says the host is no archive, unless it is known as
+            // one: a link shaped like a message is not asked about again for a day.
             _ => {
                 if !known {
                     ARCHIVES.set(&host, false);
@@ -585,7 +666,12 @@ impl Source for PublicInbox {
             }
         }
         ARCHIVES.set(&host, true);
-        let mut doc = card(cx.card(uri, self), &target, parse(&f.body)?)?;
+        // A parse slot, not the runtime's thread: the body is a megabyte of a host's own text.
+        let (doc, body) = (cx.card(uri, self), f.body);
+        let mut doc = crate::resolver::html::blocking(move || {
+            parse(&body).and_then(|message| card(doc, &target, message))
+        })
+        .await??;
         doc.site = host;
         Ok(doc)
     }
@@ -694,6 +780,65 @@ mod tests {
             Some("Hello there")
         );
         assert!(parse(b"<html>not a message</html>").is_err());
+        // A word's charset and payload are bounded; a longer one stays as written.
+        let long = format!("=?utf-8?Q?{}?=", "a".repeat(PAYLOAD_MAX + 1));
+        assert_eq!(header_text(&long), long);
+        assert_eq!(
+            header_text("=?utf-8?Q?a?= =?x?Q?b?= =?bad =?utf-8?b?Yw==?="),
+            "ab =?bad c"
+        );
+        // A header is kept up to its cap, folded lines included.
+        let folded = format!(
+            "Message-ID: <c@x>\nSubject: {}\n {}\n y\n\nbody",
+            "é".repeat(100),
+            "x".repeat(2 * HEADER_CAP)
+        );
+        let subject = parse(folded.as_bytes()).unwrap().subject.unwrap();
+        assert_eq!(subject.len(), HEADER_CAP);
+        assert!(subject.starts_with('é') && subject.ends_with('x'));
+    }
+
+    /// A megabyte of `=?` that never forms an encoded word is decoded in one pass, whatever the
+    /// shape: a decoder that searched the rest of the header once per `=?` would take minutes.
+    #[test]
+    fn a_hostile_header_is_decoded_in_linear_time() {
+        let megabyte = |unit: &str, tail: &str| {
+            let mut text = unit.repeat(1_000_000 / unit.len());
+            text.push_str(tail);
+            text
+        };
+        let hostile = vec![
+            megabyte("=???x", ""),
+            megabyte("=?a?B?x", ""),
+            megabyte("=?a?B?x", "?="),
+            megabyte("=?a?Q?x", "?="),
+            megabyte("=?", "?="),
+            megabyte("=?a?x!", "?="),
+            megabyte("=?é", "?="),
+        ];
+        // On a thread of its own, so a quadratic decoder fails this test after a minute instead
+        // of holding the run for as long as it takes.
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let started = crate::capability::thread_cpu_time();
+            let mut lengths = vec![];
+            for header in &hostile {
+                lengths.push((header.len(), header_text(header).len()));
+                // The whole message path: a subject of that size is cut at the cap.
+                let mbox = format!("Message-ID: <h@x>\nSubject: {header}\n\nbody\n");
+                let subject = parse(mbox.as_bytes()).unwrap().subject.unwrap_or_default();
+                assert!(subject.len() <= HEADER_CAP, "{}", subject.len());
+            }
+            let _ = done.send((crate::capability::thread_cpu_time() - started, lengths));
+        });
+        let (used, lengths) = result
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("header decoding did not finish within a minute");
+        assert!(used < std::time::Duration::from_secs(10), "{used:?}");
+        // Nothing decoded: the text comes back as written (whitespace aside).
+        for (given, decoded) in lengths {
+            assert!(decoded <= given, "{decoded} > {given}");
+        }
     }
 
     #[test]
@@ -840,15 +985,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(doc.status, Status::Missing);
-        // Another host: a missing message (404) says nothing about it, any other answer that
-        // is no mbox makes its links ordinary web cards from now on.
-        let other = "https://lists.example.org/devel/abc@example.org/";
-        assert!(PublicInbox
-            .resolve(&cx, other)
-            .await
-            .unwrap_err()
-            .is::<Declined>());
-        assert!(PublicInbox.reads(other));
+        // Another host: an answer that is no mbox makes its links ordinary web cards from now
+        // on.
         let page = "https://pages.example.org/devel/abc@example.org/";
         assert!(PublicInbox
             .resolve(&cx, page)
@@ -856,5 +994,87 @@ mod tests {
             .unwrap_err()
             .is::<Declined>());
         assert!(!PublicInbox.reads(page));
+    }
+
+    #[test]
+    fn a_version_after_an_at_is_no_message() {
+        for uri in [
+            "https://pkg.go.dev/github.com/gin-gonic/gin@v1.9.1",
+            "https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/",
+            "https://unpkg.com/react@18/",
+        ] {
+            assert!(!PublicInbox.reads(uri), "{uri}");
+            assert_eq!(Target::of_uri(uri), None, "{uri}");
+        }
+        // A known archive's Message-IDs are taken as they come.
+        assert!(PublicInbox.reads("https://gnusha.org/pi/bitcoindev/20260101.1234@host-01/"));
+        assert!(PublicInbox.reads("https://lists.example.com/devel/abc@localhost/"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_host_without_the_message_is_not_asked_again() {
+        let learned = "https://inbox.example.net/list/atCSAVprBE-tAnN3@erisian.com.au/";
+        let (egress, recorded) = fixture::egress(vec![(
+            &format!("{learned}raw"),
+            200,
+            "application/mbox; charset=UTF-8",
+            read("raw-towns.mbox"),
+        )]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        // A host that is no archive answers 404 for `/raw`: its next link is a web page.
+        let first = "https://plain.example.net/devel/abc@example.org/";
+        let next = "https://plain.example.net/devel/def@example.org/";
+        assert!(PublicInbox
+            .resolve(&cx, first)
+            .await
+            .unwrap_err()
+            .is::<Declined>());
+        assert!(!PublicInbox.reads(next));
+        assert!(PublicInbox
+            .resolve(&cx, next)
+            .await
+            .unwrap_err()
+            .is::<Declined>());
+        assert_eq!(recorded.asked(), [format!("{first}raw")]);
+
+        // A host that answered an mbox is an archive: a message it does not have is missing,
+        // and its Message-IDs are taken as they come.
+        let numbered = "https://inbox.example.net/list/20260101.1234@host-01/";
+        assert!(!PublicInbox.reads(numbered));
+        let doc = PublicInbox.resolve(&cx, learned).await.unwrap();
+        assert_eq!(doc.type_name, "EmailMessage");
+        assert!(PublicInbox.reads(numbered));
+        let doc = PublicInbox.resolve(&cx, numbered).await.unwrap();
+        assert_eq!(doc.status, Status::Missing);
+        assert!(PublicInbox.reads(numbered));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_probe_that_fails_gives_the_page_its_web_card() {
+        // `/raw` redirects to itself: the fetch is refused after three redirects.
+        let raw = "https://loop.example.net/devel/abc@example.org/raw";
+        let (egress, _) = fixture::egress(vec![(raw, 302, "text/html", raw.as_bytes().to_vec())]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let error = PublicInbox
+            .resolve(&cx, "https://loop.example.net/devel/abc@example.org/")
+            .await
+            .unwrap_err();
+        assert!(error.is::<Declined>(), "{error:#}");
+    }
+
+    #[test]
+    fn a_subject_holds_no_address() {
+        let mbox = "Message-ID: <s@example.org>\n\
+                    Subject: Re: ask bob@example.org or <ann@example.org> about the patch\n\nbody\n";
+        let uri = "https://gnusha.org/pi/bitcoindev/s@example.org/";
+        let message = parse(mbox.as_bytes()).unwrap();
+        let doc = card(base(uri), &Target::of_uri(uri).unwrap(), message).unwrap();
+        assert_eq!(doc.name.as_deref(), Some("Re: ask or about the patch"));
     }
 }

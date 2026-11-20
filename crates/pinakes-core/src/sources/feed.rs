@@ -65,6 +65,29 @@ fn text_of(node: roxmltree::Node<'_, '_>, name: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The most items read from one feed or sitemap.
+const ENTRIES: usize = 5000;
+
+/// The items of a feed answer: of the whole body, or of one the read cut at its cap up to the
+/// last whole item (`cards::feed_prefix`; a sitemap up to its last whole `url`). `None` when a
+/// cut body holds no whole item: nothing is known about the feed then.
+pub fn entries_of(body: &[u8], truncated: bool) -> Option<Vec<Entry>> {
+    if !truncated {
+        return Some(entries(body));
+    }
+    // A cut inside a character leaves the whole characters before it.
+    let text = String::from_utf8_lossy(body);
+    let completed = match crate::resolver::cards::feed_prefix(&text, ENTRIES) {
+        Some(feed) => feed,
+        None => {
+            let end = text.rfind("</url>")? + "</url>".len();
+            format!("{}</urlset>", &text[..end])
+        }
+    };
+    let found = entries(completed.as_bytes());
+    (!found.is_empty()).then_some(found)
+}
+
 /// The items of an RSS feed, an Atom feed or a Google News sitemap.
 pub fn entries(body: &[u8]) -> Vec<Entry> {
     let Ok(text) = std::str::from_utf8(body) else {
@@ -74,21 +97,30 @@ pub fn entries(body: &[u8]) -> Vec<Entry> {
         return vec![];
     };
     let mut out = vec![];
-    for node in xml.descendants().filter(|n| n.is_element()).take(5000) {
+    let listed = |n: &roxmltree::Node<'_, '_>| {
+        n.is_element() && matches!(n.tag_name().name(), "item" | "entry" | "url")
+    };
+    for node in xml.descendants().filter(listed).take(ENTRIES) {
         match node.tag_name().name() {
             // RSS 2.0.
             "item" => {
                 let Some(link) = text_of(node, "link") else {
                     continue;
                 };
+                let image_type = |c: &roxmltree::Node<'_, '_>| {
+                    c.attribute("type").map(|t| t.starts_with("image/"))
+                };
                 let image = node
                     .children()
                     .filter(|c| c.is_element())
-                    .find(|c| {
-                        matches!(c.tag_name().name(), "content" | "thumbnail")
-                            && c.attribute("medium").is_none_or(|m| m == "image")
-                            || c.tag_name().name() == "enclosure"
-                                && c.attribute("type").is_some_and(|t| t.starts_with("image/"))
+                    .find(|c| match (c.tag_name().name(), c.attribute("medium")) {
+                        ("content" | "thumbnail", Some(medium)) => medium == "image",
+                        ("thumbnail", None) => true,
+                        // `media:content` that names no medium: a video or a sound by its
+                        // type is not the picture.
+                        ("content", None) => image_type(c).unwrap_or(true),
+                        ("enclosure", _) => image_type(c).unwrap_or(false),
+                        _ => false,
                     })
                     .and_then(|c| c.attribute("url"))
                     .map(str::to_owned);
@@ -322,13 +354,20 @@ impl Source for Feed {
             extra_types: &["text/plain"],
             ..Default::default()
         };
+        // A `robots.txt` that failed (a fetch error, a rate limit, a timeout or a server error)
+        // says nothing about the host's sitemaps: nothing is concluded then either.
+        let mut robots_failed = false;
         let sitemaps = match cx
             .egress
             .discover(&format!("{origin}/robots.txt"), &robots, 86_400)
             .await
         {
             Ok(f) if f.status == 200 => news_sitemaps(&String::from_utf8_lossy(&f.body), &url),
-            _ => vec![],
+            Ok(f) if !matches!(f.status, 408 | 429 | 500..=599) => vec![],
+            _ => {
+                robots_failed = true;
+                vec![]
+            }
         };
         for address in sitemaps {
             let answer = cx.egress.discover(&address, &feed, FEED_TTL).await;
@@ -336,27 +375,30 @@ impl Source for Feed {
                 return Ok(Some(doc));
             }
         }
-        if !any && !failed {
+        if !any && !failed && !robots_failed {
             FEEDLESS.set(&host, false);
         }
         Ok(None)
     }
 }
 
-/// A feed answer's entries, parsed in a parse slot: `Err` when the request failed, `None` when
-/// it was no 200.
+/// A feed answer's entries, parsed in a parse slot: `Err` when nothing can be said about the
+/// feed (the request failed, the host answered a rate limit, a timeout or a server error, or the
+/// body was cut before its first whole item), `None` when the host has no feed there.
 async fn feed_entries(
     answer: Result<crate::resolver::egress::Fetched>,
 ) -> std::result::Result<Option<Vec<Entry>>, ()> {
     let f = answer.map_err(|_| ())?;
-    if f.status != 200 {
-        return Ok(None);
+    match f.status {
+        200 => {}
+        408 | 429 | 500..=599 => return Err(()),
+        _ => return Ok(None),
     }
-    Ok(Some(
-        crate::resolver::html::blocking(move || entries(&f.body))
-            .await
-            .unwrap_or_default(),
-    ))
+    crate::resolver::html::blocking(move || entries_of(&f.body, f.truncated))
+        .await
+        .map_err(|_| ())?
+        .map(Some)
+        .ok_or(())
 }
 
 #[cfg(test)]
@@ -430,6 +472,139 @@ mod tests {
                 "{other}"
             );
         }
+    }
+
+    /// An item's `media:content` is its image by its `medium`, else by its `type`: a video is
+    /// not the picture, and the thumbnail after it is.
+    #[test]
+    fn a_video_is_not_an_items_image() {
+        let image = |media: &str| {
+            let rss = format!(
+                r#"<rss xmlns:media="http://search.yahoo.com/mrss/"><channel><item>
+                <link>https://a.example/post/1</link><title>A post</title>{media}</item></channel></rss>"#
+            );
+            entries(rss.as_bytes()).remove(0).image
+        };
+        let video = r#"<media:content url="https://a.example/v.mp4" type="video/mp4"/>"#;
+        let thumbnail = r#"<media:thumbnail url="https://a.example/t.jpg"/>"#;
+        assert_eq!(image(video), None);
+        assert_eq!(
+            image(&format!("{video}{thumbnail}")).as_deref(),
+            Some("https://a.example/t.jpg")
+        );
+        assert_eq!(
+            image(r#"<media:content url="https://a.example/s.mp3" type="audio/mpeg"/>"#),
+            None
+        );
+        for picture in [
+            r#"<media:content url="https://a.example/p.jpg"/>"#,
+            r#"<media:content url="https://a.example/p.jpg" type="image/jpeg"/>"#,
+            r#"<media:content url="https://a.example/p.jpg" medium="image"/>"#,
+            r#"<enclosure url="https://a.example/p.jpg" type="image/jpeg"/>"#,
+        ] {
+            assert_eq!(
+                image(picture).as_deref(),
+                Some("https://a.example/p.jpg"),
+                "{picture}"
+            );
+        }
+        assert_eq!(
+            image(r#"<media:content url="https://a.example/v.mp4" medium="video"/>"#),
+            None
+        );
+    }
+
+    /// A sitemap's entries are counted, not its elements: a link far down a long news sitemap
+    /// is found.
+    #[test]
+    fn a_long_sitemap_is_read_by_its_entries() {
+        let mut sitemap = String::from(
+            r#"<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">"#,
+        );
+        for n in 0..1500 {
+            sitemap.push_str(&format!(
+                "<url><loc>https://n.example/a/{n}</loc><news:news><news:publication>\
+                 <news:name>N</news:name><news:language>en</news:language></news:publication>\
+                 <news:publication_date>2026-10-19T16:09:02+00:00</news:publication_date>\
+                 <news:title>Article {n}</news:title></news:news></url>"
+            ));
+        }
+        sitemap.push_str("</urlset>");
+        let found = entries(sitemap.as_bytes());
+        assert_eq!(found.len(), 1500);
+        assert!(find(&found, "https://n.example/a/1499").is_some());
+    }
+
+    /// A feed the read cut at its cap is read up to its last whole item, and a sitemap up to
+    /// its last whole `url`.
+    #[test]
+    fn a_cut_feed_keeps_its_whole_items() {
+        let rss = read("theblock-rss.xml");
+        let all = entries(&rss);
+        let at = String::from_utf8_lossy(&rss).rfind("<item>").unwrap();
+        let cut = entries_of(&rss[..at + 40], true).unwrap();
+        assert_eq!(cut.len(), all.len() - 1);
+        assert!(find(&cut, ARTICLE).is_some());
+        let sitemap = read("theblock-news-sitemap.xml");
+        let at = String::from_utf8_lossy(&sitemap).rfind("<url>").unwrap();
+        let cut = entries_of(&sitemap[..at + 20], true).unwrap();
+        assert!(find(&cut, ARTICLE).is_some());
+        assert_eq!(
+            entries_of(b"<rss><channel><item><link>https://a.exa", true),
+            None
+        );
+        assert_eq!(entries_of(b"<html>", false), Some(vec![]));
+    }
+
+    /// A feed over the read's cap still names its article, and neither it nor a server error
+    /// marks the host as having no feed.
+    #[tokio::test(start_paused = true)]
+    async fn a_cut_feed_or_a_server_error_does_not_mark_a_host_feedless() {
+        let rss = String::from_utf8(read("theblock-rss.xml"))
+            .unwrap()
+            .replace("www.theblock.co", "big.example");
+        let cut = rss.as_bytes()[..rss.rfind("<item>").unwrap() + 40].to_vec();
+        let (egress, recorded) = fixture::egress(vec![
+            ("https://big.example/feed", 200, "!large-xml", cut),
+            ("https://busy.example/feed", 503, "text/html", vec![]),
+        ]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let article = ARTICLE.replace("www.theblock.co", "big.example");
+        let doc = Feed.walled(&cx, &article).await.unwrap().unwrap();
+        assert_eq!(doc.source, "feed");
+        // The busy host is asked again once the discovery cache lets it.
+        let page = "https://busy.example/article/1";
+        assert!(Feed.walled(&cx, page).await.unwrap().is_none());
+        let asked = recorded.asked().len();
+        tokio::time::advance(std::time::Duration::from_secs(301)).await;
+        assert!(Feed.walled(&cx, page).await.unwrap().is_none());
+        assert!(recorded.asked().len() > asked, "the host was memoised");
+    }
+
+    /// A `robots.txt` that answers a server error says nothing about the host's news sitemaps: a
+    /// host whose feeds list nothing is not remembered as feedless then, and is asked again.
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_robots_txt_does_not_mark_a_host_feedless() {
+        let (egress, recorded) = fixture::egress(vec![(
+            "https://robots-down.example/robots.txt",
+            503,
+            "text/plain",
+            vec![],
+        )]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let page = "https://robots-down.example/article/1";
+        assert!(Feed.walled(&cx, page).await.unwrap().is_none());
+        let asked = recorded.asked().len();
+        // Past the discovery cache's five minutes for failures, the host is asked again.
+        tokio::time::advance(std::time::Duration::from_secs(301)).await;
+        assert!(Feed.walled(&cx, page).await.unwrap().is_none());
+        assert!(recorded.asked().len() > asked, "the host was memoised");
     }
 
     #[test]

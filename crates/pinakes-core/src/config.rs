@@ -1037,7 +1037,7 @@ impl Config {
         self.osm.contact = self.egress.contact.clone();
         self.web.musicbrainz_base = self.also_on.musicbrainz_base().to_owned();
         // A source's published limits, for hosts the operator does not rate.
-        self.egress.source_rates = crate::sources::budgets()
+        self.egress.source_rates = crate::sources::budgets(self)
             .chain(crate::also_on::budgets())
             .map(|(host, rate)| (host.to_owned(), rate))
             .collect();
@@ -2228,7 +2228,7 @@ mod tests {
     }
     #[test]
     fn source_budgets_never_override_the_operator() {
-        let budgets: Vec<_> = crate::sources::budgets().collect();
+        let budgets: Vec<_> = crate::sources::budgets(&Config::default()).collect();
         let Some((host, rate)) = budgets.first().copied() else {
             return;
         };

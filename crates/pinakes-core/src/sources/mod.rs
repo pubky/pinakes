@@ -1,5 +1,8 @@
-//! Cards read from a service's own keyless API instead of its HTML page: exact where the page is
-//! bot-walled, thin or moved.
+//! Cards read from a service's own API instead of its HTML page: exact where the page is
+//! bot-walled, thin or moved. Most APIs need no key; a few sources read with the operator's
+//! token (`Source::takes_token`) and are off without it. Where a service has no API for an
+//! object, its source reads the service's own page (its tags or embedded record); page hooks and
+//! wall hooks improve a web card instead of claiming links.
 //!
 //! A source is one module, `sources/<name>.rs`, whose unit struct implements [`Source`] and is
 //! listed once in [`REGISTRY`] (with its `pub mod` line). Its documentation is
@@ -192,9 +195,11 @@ pub trait Source: Send + Sync {
         &[]
     }
     /// The service's published limits per host, as `(host, requests_per_second)`; a windowed
-    /// limit is given as its average rate (60 per minute → 1.0). The rate becomes the host's
-    /// default (`limits.host_rates` overrides it). Egress never has more than one request in
-    /// flight per host, which meets any limit on concurrent requests.
+    /// limit is given as its average rate (60 per minute → 1.0). The rate lowers the host's
+    /// default (`limits.host_requests_per_second`), never raises it: one above the default
+    /// changes nothing until the operator raises the default. `limits.host_rates` overrides
+    /// both. Egress never has more than one request in flight per host, which meets any limit on
+    /// concurrent requests.
     fn budgets(&self) -> &'static [Budget] {
         &[]
     }
@@ -484,8 +489,9 @@ impl Context<'_> {
     pub fn deadline(&self) -> Option<tokio::time::Instant> {
         DEADLINE.try_with(|d| *d).ok()
     }
-    /// A GET (or, with `options.json_body`, a POST) through the egress policy. Rate limits and
-    /// server errors become `RetryLater`; other statuses are the caller's to read. At most
+    /// A GET (or, with `options.json_body`, a POST) through the egress policy. A rate limit
+    /// (429), a request timeout (408) and a server error become `RetryLater` (`retry`, classes
+    /// `http_4xx` and `upstream`); other statuses are the caller's to read. At most
     /// `MAX_HEADERS` extra headers (`options.headers`, e.g. a service's own identification
     /// header); connection, credential and User-Agent headers are refused.
     pub async fn fetch(&self, url: &str, options: &FetchOptions) -> Result<Fetched> {
@@ -517,8 +523,20 @@ fn check_headers(headers: &[(&'static str, String)]) -> Result<()> {
     Ok(())
 }
 
+/// The options of a JSON API read whose error answers are read too. The transport drops the
+/// body of an error answer unless the read asks for it (`FetchOptions::error_json`): a source
+/// that tells "no such object" from another refusal by what the answer says reads with these.
+/// A rate limit (429) then comes back as an answer, which `Context::fetch` turns into the retry.
+pub fn json_with_errors() -> FetchOptions {
+    FetchOptions {
+        error_json: true,
+        ..FetchOptions::json()
+    }
+}
+
 /// Whether an error is this daemon's own host budget (the slot is further away than a fetch
-/// may wait), which says nothing about the host's answer.
+/// may wait, which egress answers with the class `rate_limited`), which says nothing about the
+/// host's answer.
 pub fn own_rate_limit(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<crate::resolver::RetryLater>()
@@ -551,7 +569,8 @@ impl HostMemo {
     }
     pub fn set(&self, host: &str, is: bool) {
         let mut memo = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        if memo.len() >= Self::CAP {
+        // A new host at the cap takes the oldest answer's place; a known host only renews its own.
+        if memo.len() >= Self::CAP && !memo.contains_key(host) {
             if let Some(oldest) = memo
                 .iter()
                 .min_by_key(|(_, (_, at))| *at)
@@ -738,9 +757,31 @@ fn alias_root_with(uri: &str, switches: Option<&SourcesConfig>) -> Option<String
 pub fn invalid(uri: &str) -> bool {
     REGISTRY.iter().any(|s| s.invalid(uri))
 }
-/// Every source's default host rates, for hosts the operator did not set.
-pub fn budgets() -> impl Iterator<Item = (&'static str, f64)> {
-    REGISTRY.iter().flat_map(|s| s.budgets().iter().copied())
+/// The host rates of the sources that ask their hosts, for hosts the operator did not set: one
+/// rate per host, the lowest when two sources name it. A source asks its hosts while it is on, or
+/// while its also-on half (the also-on source of the same name, which reads the same service) is;
+/// one that is off with its half (or without its token) asks nothing, so it paces nothing.
+pub fn budgets(config: &Config) -> impl Iterator<Item = (&'static str, f64)> {
+    lowest(
+        REGISTRY
+            .iter()
+            .filter(|s| {
+                config.sources.enabled(s.name()) || crate::also_on::enabled_by_id(config, s.name())
+            })
+            .flat_map(|s| s.budgets().iter().copied()),
+    )
+    .into_iter()
+}
+/// One rate per host: the lowest named for it.
+fn lowest(rates: impl Iterator<Item = (&'static str, f64)>) -> BTreeMap<&'static str, f64> {
+    let mut lowest: BTreeMap<&'static str, f64> = BTreeMap::new();
+    for (host, rate) in rates {
+        lowest
+            .entry(host)
+            .and_modify(|r| *r = r.min(rate))
+            .or_insert(rate);
+    }
+    lowest
 }
 
 /// Every attribute a card on the `official` or web route may store: the web keys and every
@@ -794,11 +835,14 @@ pub async fn resolve(
     Ok(Some(doc.bounded(attributes())?))
 }
 
-/// Rate limits and timeouts (408, 429: class `rate_limited`) and server errors (class `upstream`):
-/// retry later, after at least a minute.
+/// A request timeout or a rate limit (408, 429: class `http_4xx`, as egress classes the 429 it
+/// answers itself) and a server error (class `upstream`): retry later, after at least a minute.
+/// A 429 reaches here only from a read that asked for the error's body
+/// (`FetchOptions::error_json`). The class `rate_limited` is the daemon's own budget wait alone
+/// (`own_rate_limit`), never a service's answer.
 pub(crate) fn retry(f: &Fetched) -> Result<()> {
     let class = match f.status {
-        408 | 429 => "rate_limited",
+        408 | 429 => "http_4xx",
         s if s >= 500 => "upstream",
         _ => return Ok(()),
     };
@@ -983,7 +1027,9 @@ pub fn texts(v: &serde_json::Value) -> Vec<String> {
         .filter_map(text)
         .collect()
 }
-/// An `https` or `http` URL with a host, as given.
+/// An `https` or `http` URL with a host, as given: for a URL a service's answer names (an image,
+/// a website) and a page of any site. A source parses its own links with `kit::web_url`, which
+/// refuses a port, a user name and a password.
 pub fn web_url(value: &str) -> Option<url::Url> {
     let url = url::Url::parse(value).ok()?;
     (matches!(url.scheme(), "https" | "http") && url.host_str().is_some()).then_some(url)
@@ -1064,9 +1110,13 @@ pub(crate) mod fixture {
     }
 
     /// An egress that answers recorded responses by exact URL (anything else is a 404) and
-    /// remembers the URLs asked, in order. A redirect's body is its `Location`; the content type
-    /// `!too-large` answers a body over its read's cap. Pair it with `#[tokio::test(start_paused = true)]`:
-    /// the per-host spacing then costs no time.
+    /// remembers the URLs asked, in order. An error answer's body is dropped as the real read
+    /// drops it (kept for a wall's page and for a read with `error_json`). A redirect's body is
+    /// its `Location`; the content type
+    /// `!too-large` answers a body over its read's cap, and `!large-xml` an XML body over the page
+    /// cap as the real read treats one of a read without a feed cap: refused when the read sets
+    /// `body_cap`, otherwise cut (the route's body is the cut text). Pair it with `#[tokio::test(start_paused = true)]`: the
+    /// per-host spacing then costs no time.
     pub fn egress(
         routes: Vec<(&str, u16, &'static str, Vec<u8>)>,
     ) -> (crate::resolver::egress::Egress, std::sync::Arc<Recorded>) {
@@ -1077,6 +1127,7 @@ pub(crate) mod fixture {
                 .collect(),
             asked: Default::default(),
             delays: Default::default(),
+            raw: std::sync::atomic::AtomicBool::new(false),
         });
         let egress = crate::resolver::egress::Egress::with_backends(
             Default::default(),
@@ -1086,10 +1137,24 @@ pub(crate) mod fixture {
         (egress, recorded)
     }
 
+    /// `egress` whose transport hands every answer back as recorded, an error's body included:
+    /// for tests of the egress itself, which say what it does with whatever a transport gives.
+    pub fn egress_raw(
+        routes: Vec<(&str, u16, &'static str, Vec<u8>)>,
+    ) -> (crate::resolver::egress::Egress, std::sync::Arc<Recorded>) {
+        let (egress, recorded) = egress(routes);
+        recorded
+            .raw
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        (egress, recorded)
+    }
+
     pub struct Recorded {
         routes: std::collections::BTreeMap<String, (u16, &'static str, Vec<u8>)>,
         pub asked: std::sync::Mutex<Vec<String>>,
         delays: std::sync::Mutex<std::collections::BTreeMap<String, std::time::Duration>>,
+        /// Whether an error answer keeps its body whatever the read asked for (`egress_raw`).
+        raw: std::sync::atomic::AtomicBool,
     }
     impl Recorded {
         pub fn asked(&self) -> Vec<String> {
@@ -1102,6 +1167,55 @@ pub(crate) mod fixture {
     }
     #[async_trait::async_trait]
     impl crate::resolver::egress::Transport for Recorded {
+        async fn get_with(
+            &self,
+            url: &url::Url,
+            addresses: &[std::net::SocketAddr],
+            options: &crate::resolver::egress::FetchOptions,
+        ) -> anyhow::Result<crate::resolver::egress::Fetched> {
+            match self.routes.get(url.as_str()) {
+                Some((status, "!large-xml", body)) => {
+                    self.asked.lock().unwrap().push(url.to_string());
+                    if let Some(cap) = options.body_cap {
+                        return Err(crate::resolver::egress::BodyTooLarge { cap }.into());
+                    }
+                    Ok(crate::resolver::egress::Fetched {
+                        truncated: true,
+                        ..crate::resolver::egress::Fetched::answer(
+                            url.clone(),
+                            *status,
+                            "application/xml".into(),
+                            body.clone(),
+                        )
+                    })
+                }
+                _ => {
+                    // As the real read does: an error answer keeps its body only when it is a
+                    // wall's page (403, 429 or 503 as HTML or text) or the read asked for an
+                    // error's JSON.
+                    let mut fetched = self.get(url, addresses).await?;
+                    let kind = fetched
+                        .content_type
+                        .split(';')
+                        .next()
+                        .unwrap_or_default()
+                        .trim()
+                        .to_ascii_lowercase();
+                    let wall = matches!(fetched.status, 403 | 429 | 503)
+                        && matches!(
+                            kind.as_str(),
+                            "text/html" | "application/xhtml+xml" | "text/plain" | ""
+                        );
+                    let json = options.error_json
+                        && (kind == "application/json" || kind.ends_with("+json"));
+                    let raw = self.raw.load(std::sync::atomic::Ordering::Relaxed);
+                    if fetched.status >= 400 && !wall && !json && !raw {
+                        fetched.body.clear();
+                    }
+                    Ok(fetched)
+                }
+            }
+        }
         async fn get(
             &self,
             url: &url::Url,
@@ -1256,6 +1370,19 @@ mod tests {
                     "{name} does not read {}",
                     example.uri
                 );
+                // A link is one source's: the first in the registry that reads it gets it, so
+                // an example no other source may read is never shadowed.
+                if source.reads(example.uri) {
+                    for other in REGISTRY.iter().filter(|s| s.name() != name) {
+                        assert!(
+                            !other.reads(example.uri),
+                            "{} also reads {name}'s {}",
+                            other.name(),
+                            example.uri
+                        );
+                    }
+                    assert_eq!(reading(example.uri).map(|s| s.name()), Some(name));
+                }
                 assert!(
                     !crate::model::type_path(example.card_type).is_empty(),
                     "{}",
@@ -1271,6 +1398,34 @@ mod tests {
                 assert!(rate.is_finite() && *rate > 0.0 && !host.is_empty());
             }
         }
+    }
+
+    /// A link with a port, a user name or a password is not a service's own link form: the
+    /// source that reads the plain link neither reads it nor merges it into the object's card.
+    #[test]
+    fn a_link_with_a_port_or_a_user_name_is_no_sources_link() {
+        let mut checked = 0;
+        for source in REGISTRY {
+            for example in source.examples() {
+                let Some(rest) = example.uri.strip_prefix("https://") else {
+                    continue;
+                };
+                if !source.reads(example.uri) {
+                    continue;
+                }
+                let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+                for odd in [
+                    format!("https://{host}:8443/{path}"),
+                    format!("https://user@{host}/{path}"),
+                    format!("https://user:secret@{host}/{path}"),
+                ] {
+                    assert!(!source.reads(&odd), "{} reads {odd}", source.name());
+                    assert_eq!(source.alias_root(&odd), None, "{odd}");
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 0 || REGISTRY.is_empty());
     }
 
     /// `scripts/check-removals --self-test`, run from `root`: it must pass.
@@ -1727,6 +1882,104 @@ mod tests {
         assert_eq!(memo.get("blog.example"), Some(false));
         let error = anyhow::Error::from(Declined);
         assert!(error.is::<Declined>());
+        // At the cap, renewing a known host's answer evicts nothing.
+        let full = HostMemo::default();
+        for n in 0..HostMemo::CAP {
+            full.set(&format!("host{n}.example"), true);
+        }
+        full.set("host7.example", false);
+        assert_eq!(full.get("host0.example"), Some(true));
+        assert_eq!(full.get("host7.example"), Some(false));
+        // A new host takes the oldest answer's place.
+        full.set("new.example", true);
+        assert_eq!(full.get("host0.example"), None);
+        assert_eq!(full.get("new.example"), Some(true));
+    }
+
+    /// What a service answers is never the daemon's own budget wait: a request timeout and a
+    /// rate limit are `http_4xx`, a server error `upstream`.
+    #[test]
+    fn a_services_answer_is_not_the_daemons_own_wait() {
+        let answer = |status: u16| {
+            Fetched::answer(
+                url::Url::parse("https://api.example/x").unwrap(),
+                status,
+                "application/json".into(),
+                vec![],
+            )
+        };
+        for (status, class) in [(408, "http_4xx"), (429, "http_4xx"), (503, "upstream")] {
+            let error = retry(&answer(status)).unwrap_err();
+            let wait = error
+                .downcast_ref::<crate::resolver::RetryLater>()
+                .expect("a retry");
+            assert_eq!(wait.class, class, "{status}");
+            assert!(wait.seconds >= 60);
+            assert!(!own_rate_limit(&error), "{status}");
+        }
+        assert!(retry(&answer(404)).is_ok());
+        let own = anyhow::Error::new(crate::resolver::RetryLater {
+            class: "rate_limited",
+            seconds: 7,
+        });
+        assert!(own_rate_limit(&own));
+    }
+
+    /// A host two sources name gets the lower rate, in either order.
+    #[test]
+    fn the_lowest_rate_of_a_host_wins() {
+        let rates = [("a.example", 2.0), ("b.example", 0.5), ("a.example", 0.2)];
+        for rates in [rates.to_vec(), rates.iter().rev().copied().collect()] {
+            let lowest: Vec<_> = lowest(rates.into_iter()).into_iter().collect();
+            assert_eq!(lowest, [("a.example", 0.2), ("b.example", 0.5)]);
+        }
+    }
+
+    /// A switched-off source paces no host while its also-on half (if it has one) is off too, and
+    /// a source that needs a token paces none without one. While the half is on, it reads the
+    /// same service, so the host keeps its pace.
+    #[test]
+    fn only_a_switched_on_source_paces_its_host() {
+        let paced = |config: &Config, host: &str| config.egress.source_rates.contains_key(host);
+        let elsewhere = |name: &str, host: &str| {
+            REGISTRY
+                .iter()
+                .filter(|s| s.name() != name)
+                .any(|s| s.budgets().iter().any(|(h, _)| *h == host))
+                || crate::also_on::budgets().any(|(h, _)| h == host)
+        };
+        let on = Config::default();
+        for source in REGISTRY {
+            for (host, rate) in source.budgets() {
+                if elsewhere(source.name(), host) {
+                    continue;
+                }
+                let name = source.name();
+                assert_eq!(
+                    paced(&on, host),
+                    !source.takes_token(),
+                    "{name}: {host} with the default switches"
+                );
+                if source.takes_token() {
+                    continue;
+                }
+                assert_eq!(on.egress.source_rates[*host], *rate, "{name}");
+                let mut value = Config::defaults().unwrap();
+                value["sources"][name] = serde_json::json!({ "enabled": false });
+                let off = Config::from_value(value.clone()).unwrap();
+                let half = crate::also_on::registered().iter().any(|s| s.id() == name);
+                assert_eq!(
+                    paced(&off, host),
+                    half,
+                    "{name} is off; its also-on half reads {host}: {half}"
+                );
+                if half {
+                    value["also_on"]["sources"][name] = serde_json::json!({ "enabled": false });
+                    let both = Config::from_value(value).unwrap();
+                    assert!(!paced(&both, host), "{name} and its half are off: {host}");
+                }
+            }
+        }
     }
 
     #[test]

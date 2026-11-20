@@ -2,9 +2,7 @@
 //! are behind a bot challenge). An act's CELEX number is its key: every EUR-Lex address of it is
 //! an alias of its CELEX page, and an ELI, Official Journal or Cellar address becomes one after
 //! its first fetch. Reuse with acknowledgement of the source (Commission Decision 2011/833/EU).
-use super::{
-    sparql_literal, sparql_rows, sparql_url, web_url, Context, Example, Row, Source, SPARQL_JSON,
-};
+use super::{sparql_literal, sparql_rows, sparql_url, Context, Example, Row, Source, SPARQL_JSON};
 use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
@@ -61,7 +59,7 @@ fn uuid(value: &str) -> Option<String> {
 
 impl Key {
     pub fn of_uri(uri: &str) -> Option<Self> {
-        let url = web_url(uri)?;
+        let url = super::kit::web_url(uri)?;
         let host = url.host_str()?;
         let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
         match host {
@@ -307,14 +305,51 @@ impl Source for EurLex {
                 },
             )
             .await?;
-        Ok(card(cx.card(uri, self), &key, f.status, &f.body)?
-            .unwrap_or_else(|| cx.missing(uri, self)))
+        match card(cx.card(uri, self), &key, f.status, &f.body)? {
+            Some(doc) => Ok(doc),
+            // A publication that is no legal act (a report, a study, a book): the Publications
+            // Office's page is the web route's to read.
+            None if matches!(key, Key::Cellar(_)) => Err(super::Declined.into()),
+            None => Ok(cx.missing(uri, self)),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Publications Office publication with no legal act gets a web card; an act's own key
+    /// with no work is `missing`.
+    #[tokio::test(start_paused = true)]
+    async fn a_publication_that_is_no_act_is_declined() {
+        let report =
+            "https://op.europa.eu/en/publication-detail/-/publication/0b2b8a4c-0a5c-11ee-b12e-01aa75ed71a1";
+        let act = "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32099R9999";
+        let asked = |uri: &str| sparql_url(ENDPOINT, &Key::of_uri(uri).unwrap().query());
+        let (egress, _) = crate::sources::fixture::egress(vec![
+            (
+                &asked(report),
+                200,
+                SPARQL_JSON,
+                read("celex_missing_32099R9999.json"),
+            ),
+            (
+                &asked(act),
+                200,
+                SPARQL_JSON,
+                read("celex_missing_32099R9999.json"),
+            ),
+        ]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let answer = EurLex.resolve(&cx, report).await;
+        assert!(answer.is_err_and(|e| e.is::<crate::sources::Declined>()));
+        let doc = EurLex.resolve(&cx, act).await.unwrap();
+        assert_eq!(doc.status, crate::model::Status::Missing);
+    }
 
     fn read(file: &str) -> Vec<u8> {
         crate::sources::fixture::read("eur_lex", file)

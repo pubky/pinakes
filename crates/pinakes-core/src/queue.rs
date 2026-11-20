@@ -812,7 +812,16 @@ async fn finish_job(
     if let Err(error) = result {
         // The host, the stored error kind and the upstream status, so a failure can be found by
         // site or by kind; never the error's text, which may hold what an upstream answered.
-        tracing::warn!(resource_id=%job.id,host=%crate::resolver::log_host(&job.uri),kind=crate::resolver::error_class(&error),status=crate::resolver::status_of(&error).map(|s| s.to_string()).unwrap_or_default(),resolver=resolver.name(),"resolution failed");
+        // Egress's own wait (the host's budget, a cached failure replayed) is no failure of the
+        // link: with a slow host budget every waiting link meets it, so it is logged at debug.
+        if error
+            .downcast_ref::<crate::resolver::RetryLater>()
+            .is_some_and(|r| matches!(r.class, "rate_limited" | "discovery_cached"))
+        {
+            tracing::debug!(resource_id=%job.id,host=%crate::resolver::log_host(&job.uri),kind=crate::resolver::error_class(&error),resolver=resolver.name(),"resolution waits for its host");
+        } else {
+            tracing::warn!(resource_id=%job.id,host=%crate::resolver::log_host(&job.uri),kind=crate::resolver::error_class(&error),status=crate::resolver::status_of(&error).map(|s| s.to_string()).unwrap_or_default(),resolver=resolver.name(),"resolution failed");
+        }
         if error.is::<crate::resolver::interstitial::Blocked>() {
             // A challenge page: unreachable, with the normal failure backoff and dead letter.
             // The last accepted document stays; a wall never confirms disappearance.

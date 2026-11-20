@@ -21,7 +21,7 @@ fn package(value: &str) -> Option<String> {
 
 /// The app a Google Play link names: `/store/apps/details?id={package}`.
 pub fn from_uri(uri: &str) -> Option<String> {
-    let url = web_url(uri)?;
+    let url = super::kit::web_url(uri)?;
     if url.host_str()? != "play.google.com" {
         return None;
     }

@@ -629,7 +629,9 @@ list without the item), so an answer the request cache keeps is not replayed to 
 request in that confirmation. Only a wait the upstream named is replayed, and never cut short: a
 408, 429 or 5xx with its `Retry-After`, a 403 GitHub's rate limit answers. The wait is not charged as an attempt:
 the row's `last_error` is `missing_unconfirmed`, it is logged (`a missing answer waits for its
-confirming fetch`) and counted in `pinakes_resolution_deferred_total{reason="missing_unconfirmed"}`. A lookup or preview
+confirming fetch`) and counted in `pinakes_resolution_deferred_total{reason="missing_unconfirmed"}`. A social page
+answered without its tags, on a stored card that says more than the link's plain card, waits and is counted the same
+way (the log line carries `shapeless`); its confirming read stores the plain card. A lookup or preview
 moves an overdue resource to the front within its TTL, author budget and retry schedule; it
 cannot revive a dead letter. Resolution is also limited per referencing author
 (`limits.author_requests_per_second`); several tags never multiply fetches.
@@ -1118,7 +1120,9 @@ only the version, what the instance resolves, the limits a client must respect a
 licence. Stored errors are sanitized classes (dns, connect, timeout, http_3xx for a redirect the
 OSM upstream answered, http_4xx, http_5xx, parse,
 policy, too_large for an answer past its size cap, too_complex for a page whose parse ran past
-its CPU, memory or node limit; rate_limited for a link waiting for its host's budget). A failed resolve
+its CPU, memory or node limit; rate_limited for a link waiting for its host's budget). A link that only
+waits for the daemon's own pace (its host's budget, or a cached failure replayed) is logged at
+debug (`resolution waits for its host`). A failed resolve
 is logged at warn as `resolution failed`, with the resource id (`resource_id`), the link's host
 (`host`; its scheme for a link without one, never its path), this class (`kind`) and the
 upstream HTTP status when one was answered (`status`), never the error's text. A source's health

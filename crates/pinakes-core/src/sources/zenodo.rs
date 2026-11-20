@@ -12,8 +12,8 @@
 //! service, and DOI links (`doi.org/10.5281/zenodo.{id}`) belong to the DOI source.
 use super::{
     kit::{
-        credit, fetch, host_and_segments, html_text, int, json, number, text, texts, Card, Key,
-        Request,
+        credit, fetch, host_and_segments, html_text, image_licence, image_url, int, json, number,
+        text, texts, Card, ImageLicence, Key, Request,
     },
     Context, Example, Source,
 };
@@ -101,10 +101,10 @@ pub fn licence_name(id: &str) -> String {
 
 /// Whether a licence lets us show the work's image: CC0, or CC BY without further terms.
 fn open_licence(id: &str) -> bool {
-    matches!(id, "cc-zero" | "cc0-1.0")
-        || id
-            .strip_prefix("cc-by-")
-            .is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit()))
+    matches!(
+        image_licence(id),
+        Some(ImageLicence::Cc0 | ImageLicence::By)
+    )
 }
 
 /// A record, or `None` when Zenodo has no such record (404) or it was deleted (410).
@@ -131,7 +131,7 @@ pub fn parse(status: u16, raw: &[u8], id: u64) -> Result<Option<Card>> {
     let licence = text(&m["license"]["id"]);
     let open = text(&m["access_right"]).as_deref() == Some("open");
     if open && licence.as_deref().is_some_and(open_licence) {
-        card.image = text(&v["links"]["thumbnails"]["750"]);
+        card.image = text(&v["links"]["thumbnails"]["750"]).and_then(|u| image_url(&u));
     }
     let creators: Vec<String> = m["creators"]
         .as_array()
@@ -417,12 +417,31 @@ mod tests {
     }
 
     #[test]
+    fn a_preview_address_that_is_not_an_https_url_is_no_image() {
+        let images = [
+            "data:image/png;base64,iVBORw0KGgo=",
+            "http://zenodo.org/api/iiif/record:1234567:article.pdf/full/%5E750,/0/default.jpg",
+            "/api/iiif/record:1234567:article.pdf/full/%5E750,/0/default.jpg",
+        ]
+        .map(|address| {
+            let mut v: serde_json::Value =
+                serde_json::from_slice(&read("record-1234567.json")).unwrap();
+            v["links"]["thumbnails"]["750"] = address.into();
+            let raw = serde_json::to_vec(&v).unwrap();
+            parse(200, &raw, 1234567).unwrap().unwrap().image
+        });
+        assert!(images.iter().all(Option::is_none), "{images:?}");
+    }
+
+    #[test]
     fn licences_and_text() {
         assert_eq!(licence_name("cc-by-sa-4.0"), "CC BY-SA 4.0");
         assert_eq!(licence_name("cc-by-nc-nd-3.0"), "CC BY-NC-ND 3.0");
         assert_eq!(licence_name("mit"), "mit");
         assert!(open_licence("cc-by-4.0"));
         assert!(open_licence("cc-zero"));
+        assert!(open_licence("cc0-1.0"));
+        assert!(open_licence("cc-by-3.0-us"));
         assert!(!open_licence("cc-by-sa-4.0"));
         assert!(!open_licence("cc-by-nc-4.0"));
         assert!(!open_licence("mit"));

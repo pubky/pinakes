@@ -11,8 +11,9 @@ A profile is named by its slug, a company (or school) by its slug:
 link spells: `https://www.linkedin.com/posts/{slug}-activity-{id}-{tag}`, the one LinkedIn shows
 without an account, or `https://www.linkedin.com/feed/update/urn:li:activity:{id}`. The two are
 not aliases of each other: the activity id alone cannot spell the `/posts/` address, and the
-URN's page is shown to accounts only. The host without `www.` or with a country prefix
-(`de.linkedin.com`), a capitalised slug and `/school/{slug}` are aliases.
+URN's page is shown to accounts only. The host without `www.` or with any prefix of up to five
+lower-case letters (a country's site, `de.linkedin.com`), a capitalised slug and
+`/school/{slug}` are aliases.
 
 ## What it reads
 
@@ -25,10 +26,15 @@ URN's page is shown to accounts only. The host without `www.` or with a country 
 - A post: `GET` of its root. A page offering to sign in instead of the post gives the plain
   card.
 
-The tags are read as written: LinkedIn's JSON-LD describes recent posts, not the page.
-LinkedIn answers many requests without an account with HTTP 999 or its sign-in page; such a
-request gives the card of the link's shape alone, "Profile on linkedin.com" or "Post on
-linkedin.com", with the `blocked` fact: the link still resolves, groups and counts.
+The tags are read as written: LinkedIn's JSON-LD describes recent posts, not the page. A profile's
+or company's page answered without them gives the plain card, "Profile on linkedin.com", with the
+slug: it does not say the object is gone, and a stored card that says more (another name, text, a
+picture or facts) stays, as last read, until a second read an hour later (`limits.missing_ttl_secs`)
+answers the same, as a missing answer is confirmed: then the plain card replaces it. LinkedIn
+answers many requests without an account with HTTP 999 or its sign-in page; such a request gives the
+card of the link's shape alone, "Profile on linkedin.com" or "Post on linkedin.com", with the
+`blocked` fact: the link still resolves, groups and counts. So does a page LinkedIn withholds where
+the request came from (451): it is not `missing`.
 
 ## Card
 

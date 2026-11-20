@@ -5,7 +5,7 @@
 //! "collection online" form, and the API's own URL) is an alias of one identifier,
 //! `met:{objectID}`. The API's data is CC0; images are shown only for public-domain works.
 use super::kit::{
-    fetch, host_and_segments, int, json, number, text, web_url, wikidata_id, Card, Key, Request,
+    fetch, host_and_segments, image_url, int, json, number, text, wikidata_id, Card, Key, Request,
 };
 use super::{Context, Example, Source};
 use crate::model::ResourceMeta;
@@ -86,10 +86,10 @@ pub fn parse(status: u16, raw: &[u8], id: u64) -> Result<Option<Card>> {
     card.name = text(&v["title"]);
     let public_domain = v["isPublicDomain"].as_bool();
     if public_domain == Some(true) {
-        // The web-sized image; `primaryImage` is the full-resolution original.
+        // The web-sized image, else the full-resolution original (`primaryImage`).
         card.image = text(&v["primaryImageSmall"])
             .or_else(|| text(&v["primaryImage"]))
-            .filter(|u| web_url(u).is_some());
+            .and_then(|u| image_url(&u));
         card.attribution = Some(format!("{CREDIT}, CC0"));
     } else {
         card.attribution = Some(CREDIT.into());
@@ -309,6 +309,23 @@ mod tests {
         v["primaryImage"] = json!("https://images.metmuseum.org/x.jpg");
         let raw = serde_json::to_vec(&v).unwrap();
         assert_eq!(parse(200, &raw, 488221).unwrap().unwrap().image, None);
+    }
+
+    #[test]
+    fn an_image_address_that_is_not_an_https_url_is_no_image() {
+        let images = [
+            "http://images.metmuseum.org/CRDImages/ep/web-large/DP-42549-001.jpg",
+            "data:image/png;base64,iVBORw0KGgo=",
+            "CRDImages/ep/web-large/DP-42549-001.jpg",
+        ]
+        .map(|address| {
+            let mut v: serde_json::Value =
+                serde_json::from_slice(&read("object-436535.json")).unwrap();
+            v["primaryImageSmall"] = json!(address);
+            let raw = serde_json::to_vec(&v).unwrap();
+            parse(200, &raw, 436535).unwrap().unwrap().image
+        });
+        assert!(images.iter().all(Option::is_none), "{images:?}");
     }
 
     #[test]

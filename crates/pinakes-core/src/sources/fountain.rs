@@ -22,7 +22,7 @@ fn id(value: &str) -> Option<String> {
 
 /// The show or episode a Fountain link names: `fountain.fm/show/{id}`, `/episode/{id}`.
 pub fn page_of(uri: &str) -> Option<Page> {
-    let url = web_url(uri)?;
+    let url = super::kit::web_url(uri)?;
     if !matches!(url.host_str()?, "fountain.fm" | "www.fountain.fm") {
         return None;
     }

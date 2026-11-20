@@ -12,6 +12,12 @@ so each database's host is paced at 1.66 requests a second.
 The databases are openfoodfacts.org, openbeautyfacts.org, openproductsfacts.org and
 openpetfoodfacts.org.
 
+Once the product is read, its root is its page on the database that holds it, with the barcode as
+that database's record spells it. A link that spells the barcode with more or fewer leading zeros
+(`…/product/0000080466468` for `…/product/80466468`) is an alias of that root, and so is a product
+page on a database that holds the barcode as another type of product
+(`https://world.openfoodfacts.org/product/80466468` for the product on openbeautyfacts.org).
+
 ## What it reads
 
 `GET https://world.{database}/api/v2/product/{GTIN-13}.json?fields=…`. A database that holds the

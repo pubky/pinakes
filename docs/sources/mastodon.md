@@ -1,14 +1,19 @@
 # Mastodon
 
 Posts on any Mastodon server, read from that server's own API. No key; Mastodon allows 300
-requests per 5 minutes per address (one per second here). Posts are social content: the card
-quotes at most 200 characters, refreshes within the hour and is removed once the post is gone.
+requests per 5 minutes per address. Each server is asked at the default pace,
+`limits.host_requests_per_second` (one request a second unless the operator changes it). Posts
+are social content: the card quotes at most 200 characters, refreshes within the hour and is
+removed once the post is gone.
 
 ## Links
 
 A link of the shape `https://{server}/@{account}/{id}` or
 `https://{server}/users/{account}/statuses/{id}` (with a numeric post id) is read from
-`https://{server}/api/v1/statuses/{id}`. A post is keyed on its ActivityPub id, which the API
+`https://{server}/api/v1/statuses/{id}`. The post must belong to the account the
+link names: the answer's `account.acct`, compared without case. `@{account}@{server}` may name an
+account of `{server}` itself; the `/users/…` form names only the server's own accounts. A link
+that names another account gets an ordinary web card. A post is keyed on its ActivityPub id, which the API
 names: every address of it on its own server becomes an alias of that id after its first fetch.
 A server's copy of another server's post (`https://{other}/@{account}@{server}/{id}`), or any
 answer naming an id on another host, keeps its own card, with the id as the `activitypub_id`
@@ -22,8 +27,10 @@ the server.
 ## What it reads
 
 `GET https://{server}/api/v1/statuses/{id}`: the post's text, content warning, author, time,
-counts, attachments, address and ActivityPub id. A post the server says does not exist is
-`missing`.
+counts, attachments, address and ActivityPub id. A post the server says does not exist (a 404 or
+410 in JSON with an `error`) is `missing` when the server answered with a Mastodon post within the
+last day. From any other host that answer may be another program's, and the link gets an ordinary
+web card.
 
 ## Card
 
@@ -31,8 +38,9 @@ A `SocialMediaPosting` named by the start of its text (or its content warning, w
 the text it hides), with its first attachment's preview unless it is marked sensitive (else the
 author's avatar).
 
-An author who opted out of search indexing (the account's `indexable: false` or `noindex: true`,
-the flag behind the profile's `robots` `noindex` tag) keeps a normal card, the link preview
+An author whose posts are not for search (the account has not opted in to full-text search of
+its public posts, `indexable: false`, or asked search engines not to index its profile,
+`noindex: true`, the flag behind the profile's `robots` `noindex` tag) keeps a normal card, the link preview
 Mastodon itself shows, with the `opted_out` fact. Its text is never found by search (`q=`), and
 its change history keeps no text: what was kept before the opt-out goes, and its change lines
 carry only their kind, fields and time. The spellings of the post saved before they became its

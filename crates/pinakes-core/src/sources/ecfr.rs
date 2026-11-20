@@ -1,7 +1,7 @@
 //! The Electronic Code of Federal Regulations: CFR sections and parts, read from the eCFR
 //! versioner API (the HTML is bot-walled). Every eCFR address of a section or part is an alias
 //! of its root; the text on a date is its own resource. Public domain; no key.
-use super::{web_url, Context, Example, Source};
+use super::{Context, Example, Source};
 use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
@@ -30,16 +30,24 @@ fn part(value: &str) -> Option<&str> {
     (!value.is_empty() && value.len() <= 12 && value.bytes().all(|b| b.is_ascii_alphanumeric()))
         .then_some(value)
 }
-/// `240.10b-5`: the part, a dot, and letters, digits and hyphens.
-fn section(value: &str) -> Option<&str> {
+/// `240.10b-5`, `1.401(k)-1`: the part, a dot, and letters, digits, hyphens, dots and
+/// parentheses. A link may carry the parentheses escaped (`%28`, `%29`).
+fn section(value: &str) -> Option<String> {
+    let value = value.replace("%28", "(").replace("%29", ")");
     let (p, rest) = value.split_once('.')?;
-    (part(p).is_some()
+    let ok = part(p).is_some()
         && !rest.is_empty()
         && value.len() <= 40
         && rest
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.'))
-    .then_some(value)
+            .all(|b| b.is_ascii_alphanumeric() || b"-.()".contains(&b));
+    ok.then_some(value)
+}
+/// A link's date as `YYYY-MM-DD`. The parser also reads `2020-1-1` and `+2020-01-01`: the date
+/// kept is the parsed one written out, so each day has one root.
+fn date(value: &str) -> Option<String> {
+    let date = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").ok()?;
+    Some(date.format("%Y-%m-%d").to_string())
 }
 
 impl Target {
@@ -47,18 +55,14 @@ impl Target {
     /// The chapter, subchapter and subpart segments before the part or section never matter;
     /// a subpart, subject-group or appendix page is another object and is not read.
     pub fn of_uri(uri: &str) -> Option<Self> {
-        let url = web_url(uri)?;
+        let url = super::kit::web_url(uri)?;
         if !matches!(url.host_str()?, "www.ecfr.gov" | "ecfr.gov") {
             return None;
         }
         let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
         let (date, rest) = match segments.as_slice() {
             ["current", rest @ ..] => (None, rest),
-            ["on", date, rest @ ..]
-                if chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok() =>
-            {
-                (Some((*date).to_owned()), rest)
-            }
+            ["on", on, rest @ ..] => (Some(date(on)?), rest),
             _ => return None,
         };
         let title = title(rest.first()?.strip_prefix("title-")?)?;
@@ -84,7 +88,10 @@ impl Target {
             (part, Some(section)) => {
                 // A part named next to the section must be the section's own.
                 let own = section.split_once('.').map(|(p, _)| p);
-                (part.is_none() || part == own).then(|| Object::Section(section.to_owned()))?
+                if part.is_some() && part != own {
+                    return None;
+                }
+                Object::Section(section)
             }
             (Some(part), None) => Object::Part(part.to_owned()),
             (None, None) => return None,
@@ -328,6 +335,88 @@ mod tests {
             section(17, "240.10b-5", Some("2020-01-01")).api_url(),
             "https://www.ecfr.gov/api/versioner/v1/ancestry/2020-01-01/title-17.json?section=240.10b-5"
         );
+    }
+
+    /// A date written another way (`2020-1-1`, `+2020-01-01`) names the same day's text: its
+    /// link is an alias of the `YYYY-MM-DD` root.
+    #[test]
+    fn a_date_written_another_way_is_the_same_days_root() {
+        let root = "https://www.ecfr.gov/on/2020-01-01/title-17/section-240.10b-5";
+        for uri in [
+            "https://www.ecfr.gov/on/2020-1-1/title-17/section-240.10b-5",
+            "https://www.ecfr.gov/on/2020-01-1/title-17/section-240.10b-5",
+            "https://www.ecfr.gov/on/+2020-01-01/title-17/part-240/section-240.10b-5",
+        ] {
+            assert_eq!(
+                Target::of_uri(uri),
+                Some(section(17, "240.10b-5", Some("2020-01-01"))),
+                "{uri}"
+            );
+            assert_eq!(Ecfr.alias_root(uri).as_deref(), Some(root), "{uri}");
+        }
+        assert_eq!(Ecfr.alias_root(root), None);
+        assert_eq!(
+            Target::of_uri("https://www.ecfr.gov/on/2020-13-01/title-17/section-240.10b-5"),
+            None
+        );
+    }
+
+    /// A section with parentheses (`26 CFR 1.401(k)-1`) is read, with them escaped or not.
+    #[test]
+    fn a_section_with_parentheses() {
+        let root = "https://www.ecfr.gov/current/title-26/section-1.401(k)-1";
+        let target = section(26, "1.401(k)-1", None);
+        for uri in [
+            "https://www.ecfr.gov/current/title-26/chapter-I/subchapter-A/part-1/subject-group-ECFR6f8c3724b50e44d/section-1.401(k)-1",
+            "https://www.ecfr.gov/current/title-26/section-1.401%28k%29-1",
+        ] {
+            assert_eq!(Target::of_uri(uri), Some(target.clone()), "{uri}");
+            assert_eq!(Ecfr.alias_root(uri).as_deref(), Some(root), "{uri}");
+        }
+        assert_eq!(Target::of_uri(root), Some(target.clone()));
+        assert_eq!(Ecfr.alias_root(root), None);
+        // Any other escape is not part of a section's number.
+        for uri in [
+            "https://www.ecfr.gov/current/title-26/section-1.401%2Fk",
+            "https://www.ecfr.gov/current/title-26/section-1.401%28k%29-1%3F",
+        ] {
+            assert_eq!(Target::of_uri(uri), None, "{uri}");
+        }
+        let raw = read("ancestry_current_title-26_section-1.401(k)-1.json");
+        let doc = card(ResourceMeta::new(root, "ecfr", 3600), &target, 200, &raw)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            doc.name.as_deref(),
+            Some("§ 1.401(k)-1 Certain cash or deferred arrangements.")
+        );
+        assert_eq!(doc.attributes["citation"], "26 CFR 1.401(k)-1");
+        assert_eq!(doc.attributes["page_url"], root);
+    }
+
+    /// The request for a section with parentheses is the recorded one.
+    #[tokio::test(start_paused = true)]
+    async fn a_section_with_parentheses_is_asked_for_as_written() {
+        let (egress, recorded) = crate::sources::fixture::egress(vec![(
+            "https://www.ecfr.gov/api/versioner/v1/ancestry/current/title-26.json?section=1.401(k)-1",
+            200,
+            "application/json",
+            read("ancestry_current_title-26_section-1.401(k)-1.json"),
+        )]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let doc = Ecfr
+            .resolve(
+                &cx,
+                "https://www.ecfr.gov/current/title-26/section-1.401%28k%29-1",
+            )
+            .await
+            .unwrap();
+        assert_eq!(doc.status, crate::model::Status::Ok);
+        assert_eq!(doc.attributes["citation"], "26 CFR 1.401(k)-1");
+        assert_eq!(recorded.asked().len(), 1, "{:?}", recorded.asked());
     }
 
     #[test]

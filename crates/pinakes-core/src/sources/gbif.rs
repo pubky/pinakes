@@ -26,7 +26,8 @@ pub enum Object {
     Occurrence(u64),
 }
 
-/// A positive decimal key, without leading zeros.
+/// A positive decimal key of at most 19 digits, read as a number (`kit::number`), so leading
+/// zeros name the same key. A root holds the key without them (`from_root`).
 pub fn key(value: &str) -> Option<u64> {
     number(value, 19)
 }

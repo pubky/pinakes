@@ -2,7 +2,7 @@
 //! US Code sections and the Statutes at Large, read from their MODS metadata records. Public
 //! domain; no key. GovInfo's Federal Register and CFR copies are other editions of documents the
 //! `federal_register` and `ecfr` sources read, and are not read here.
-use super::{web_url, Context, Example, Source};
+use super::{Context, Example, Source};
 use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
@@ -81,6 +81,24 @@ fn code_section(value: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
 }
+/// A US Code granule id, e.g. `USCODE-2022-title26-subtitleA-chap1-subchapF-partI-sec501`: it
+/// goes into the request path and the root as written.
+fn code_granule(value: &str) -> bool {
+    super::kit::plain(value, 120, |c| {
+        c.is_ascii_alphanumeric() || c == '-' || c == '.'
+    })
+}
+/// Whether a granule id names this section of this title: `USCODE-{year}-title{t}-…-sec{s}`.
+fn names_section(granule: &str, title: &str, section: &str) -> bool {
+    granule
+        .strip_prefix("USCODE-")
+        .and_then(|rest| rest.split_once('-'))
+        .is_some_and(|(_, rest)| {
+            rest.to_ascii_lowercase()
+                .starts_with(&format!("title{title}-"))
+                && rest.ends_with(&format!("-sec{section}"))
+        })
+}
 /// A package and (when it has one) a granule as a target.
 fn of_ids(package: &str, granule: Option<&str>) -> Option<Target> {
     if package.starts_with("PLAW-") {
@@ -104,7 +122,7 @@ fn of_ids(package: &str, granule: Option<&str>) -> Option<Target> {
     let ok_title =
         !title.is_empty() && title.len() <= 4 && title.bytes().all(|b| b.is_ascii_alphanumeric());
     let section = granule.strip_prefix(package)?.rsplit_once("-sec")?.1;
-    (ok_title && code_section(section)).then(|| Target::Code {
+    (ok_title && code_granule(granule) && code_section(section)).then(|| Target::Code {
         title,
         section: section.to_owned(),
         edition: Some((package.to_owned(), granule.to_owned())),
@@ -113,7 +131,7 @@ fn of_ids(package: &str, granule: Option<&str>) -> Option<Target> {
 
 impl Target {
     pub fn of_uri(uri: &str) -> Option<Self> {
-        let url = web_url(uri)?;
+        let url = super::kit::web_url(uri)?;
         let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
         let query = |name: &str| {
             url.query_pairs()
@@ -318,8 +336,7 @@ pub fn card(
             edition,
         } => {
             anyhow::ensure!(
-                access.starts_with("USCODE-")
-                    && access.ends_with(&format!("-sec{section}"))
+                names_section(&access, t, section)
                     && edition
                         .as_ref()
                         .is_none_or(|(_, granule)| access == *granule),
@@ -482,6 +499,9 @@ impl Source for Govinfo {
                 &FetchOptions {
                     accept: Some("application/xml".into()),
                     extra_types: &["application/xml", "text/xml"],
+                    // A cap of its own: a larger record is refused (the minimal card below),
+                    // where an XML body without one is cut and no longer parses.
+                    body_cap: Some(crate::resolver::egress::BODY_CAP),
                     ..Default::default()
                 },
             )
@@ -517,6 +537,30 @@ mod tests {
         Target::Law {
             package: "PLAW-117publ58".into(),
         }
+    }
+
+    /// A record over the page cap gives the card its link names: the read sets a cap of its
+    /// own, so the body is refused rather than cut into XML that no longer parses.
+    #[tokio::test(start_paused = true)]
+    async fn a_record_over_the_cap_gets_the_minimal_card() {
+        let mut cut = read("mods_pkg_PLAW-117publ58.xml.gz");
+        cut.truncate(cut.len() / 2);
+        let (egress, _) = crate::sources::fixture::egress(vec![(
+            "https://www.govinfo.gov/metadata/pkg/PLAW-117publ58/mods.xml",
+            200,
+            "!large-xml",
+            cut,
+        )]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let doc = Govinfo
+            .resolve(&cx, "https://www.govinfo.gov/app/details/PLAW-117publ58")
+            .await
+            .unwrap();
+        assert_eq!(doc.name.as_deref(), Some("Public Law 117-58"));
+        assert_eq!(doc.type_name, "Legislation");
     }
 
     #[test]
@@ -572,6 +616,58 @@ mod tests {
         ] {
             assert!(!Govinfo.reads(uri), "{uri}");
         }
+    }
+
+    /// A granule id is letters, digits, `-` and `.`, at most 120 of them: any other never reaches
+    /// the request path or the root.
+    #[test]
+    fn a_us_code_granule_is_a_plain_id() {
+        let package = "https://www.govinfo.gov/app/details/USCODE-2022-title26";
+        let long = format!("USCODE-2022-title26-{}-sec501", "x".repeat(120));
+        for granule in [
+            "USCODE-2022-title26-x%2Fy-sec501",
+            "USCODE-2022-title26-x%3Fy%3Dz-sec501",
+            "USCODE-2022-title26-x%20y-sec501",
+            long.as_str(),
+        ] {
+            let uri = format!("{package}/{granule}");
+            assert!(!Govinfo.reads(&uri), "{uri}");
+            assert_eq!(Govinfo.alias_root(&uri), None, "{uri}");
+            let mods = format!(
+                "https://www.govinfo.gov/metadata/granule/USCODE-2022-title26/{granule}/mods.xml"
+            );
+            assert!(!Govinfo.reads(&mods), "{mods}");
+        }
+        let section = "USCODE-2022-title42-chap7-subchapXVIII-partB-sec1395w-4";
+        assert!(Govinfo.reads(&format!(
+            "https://www.govinfo.gov/app/details/USCODE-2022-title42/{section}"
+        )));
+    }
+
+    /// The link service's answer must be the section of the title asked for: the same section
+    /// number in another title is another record.
+    #[test]
+    fn another_titles_section_is_not_the_record_asked_for() {
+        let record = read("mods_granule_USCODE-2024-title26-sec501.xml.gz");
+        for title in ["42", "2", "6", "126"] {
+            let other = Target::Code {
+                title: title.into(),
+                section: "501".into(),
+                edition: None,
+            };
+            assert!(
+                card(base(&other), &other, 200, "/x", &record).is_err(),
+                "title {title}"
+            );
+        }
+        let asked = Target::Code {
+            title: "26".into(),
+            section: "501".into(),
+            edition: None,
+        };
+        assert!(card(base(&asked), &asked, 200, "/x", &record)
+            .unwrap()
+            .is_some());
     }
 
     #[test]

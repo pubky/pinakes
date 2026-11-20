@@ -34,7 +34,8 @@ pub const SETTLED_DEPTH: u64 = 6;
 /// outputs, an address's transactions, a node's channels and peers.
 pub const RELATED_EACH: usize = 10;
 /// When a card with a part not there yet (a block's next block, a transaction's block) or not
-/// read (its request was put off) is read again, at the latest.
+/// read (its request was put off; a block's pool, fees and reward, which Esplora's record lacks)
+/// is read again, at the latest.
 const READ_AGAIN_SECS: i64 = 3600;
 /// How long the requests for a card's `related` parts may take, from the start of its read: the
 /// rest of the official route's limit (`resolver::cards`, 14 s) stays for the card's own record
@@ -654,15 +655,17 @@ pub fn page(target: &Target) -> String {
 }
 
 /// Where a request goes: mempool.space, or the Esplora API at blockstream.info, the fallback
-/// reader for on-chain objects (mainnet, testnet and signet). Esplora's records have the shapes
-/// of mempool.space's, so the same parsers read them, with the same roots and pages.
+/// reader for on-chain objects on mainnet, testnet and signet (`esplora_base`); testnet4 and
+/// Lightning objects have no fallback. Esplora's records have the shapes of mempool.space's, so
+/// the same parsers read them, with the same roots and pages.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Api {
     Mempool,
     Esplora,
 }
 
-/// The Esplora API base at blockstream.info, or `None` for a network it does not serve.
+/// The Esplora API base at blockstream.info for a network the fallback reads: mainnet, testnet
+/// and signet. `None` for testnet4, which is read from mempool.space only.
 fn esplora_base(network: Network) -> Option<&'static str> {
     match network {
         Network::Mainnet => Some("https://blockstream.info/api"),
@@ -688,7 +691,9 @@ pub fn request(to: Api, target: &Target) -> Option<Request> {
         (Object::Block(BlockRef::Hash(h)), Api::Mempool) => api(to, n, &format!("v1/block/{h}")),
         (Object::Block(BlockRef::Hash(h)), Api::Esplora) => api(to, n, &format!("block/{h}")),
         (Object::Block(BlockRef::Height(h)), _) => height_request(to, n, *h),
-        (Object::Tx(id), _) => api(to, n, &format!("tx/{id}")),
+        // A transaction lists every input and output: a consolidation's record passes the
+        // egress default.
+        (Object::Tx(id), _) => api(to, n, &format!("tx/{id}")).map(|r| r.cap(TXS_CAP)),
         (Object::Address(a), _) => api(to, n, &format!("address/{a}")),
         (Object::Node(k), Api::Mempool) => api(to, n, &format!("v1/lightning/nodes/{k}")),
         (Object::Channel(id), Api::Mempool) => api(to, n, &format!("v1/lightning/channels/{id}")),
@@ -808,8 +813,9 @@ pub fn parse_txid(status: u16, raw: &[u8]) -> Result<String> {
     hash(std::str::from_utf8(raw)?.trim()).context("not a transaction id")
 }
 
-/// The largest list of an address's transactions read (`txs_request`): a few dozen whole
-/// transactions, which an exchange's batch payouts can take past the egress default.
+/// The largest transaction record (`request`) and list of an address's transactions
+/// (`txs_request`) read: a few dozen whole transactions, or one with a few thousand inputs, which
+/// an exchange's batch payouts and consolidations can take past the egress default.
 pub const TXS_CAP: usize = 4 * crate::resolver::egress::BODY_CAP;
 
 /// An address's latest transactions, those in the mempool first, then the confirmed ones,
@@ -1079,7 +1085,11 @@ pub(crate) fn tx_card(v: &Value, network: Network, txid: &str) -> Result<Card> {
     card.detail("outputs", vout.map(Vec::len));
     card.detail(
         "output_value",
-        vout.map(|o| o.iter().filter_map(|x| x["value"].as_u64()).sum::<u64>()),
+        vout.map(|o| {
+            o.iter()
+                .filter_map(|x| x["value"].as_u64())
+                .fold(0u64, u64::saturating_add)
+        }),
     );
     card.detail(
         "coinbase",
@@ -1322,7 +1332,8 @@ pub struct Mempool;
 /// What `read` found: the card; whether its root names the link for good (always, except for a
 /// block by height that is not yet `settled`); and whether to read it again within the hour
 /// (`READ_AGAIN_SECS`): a part of it is not there yet (a best-chain block's settled next block,
-/// a transaction's block) or a request for one was put off (`RetryLater`).
+/// a transaction's block), a request for one was put off (`RetryLater`), or it is a block read
+/// from Esplora, whose record has no pool, fees or reward.
 struct Read {
     card: Card,
     named: bool,
@@ -1356,6 +1367,17 @@ async fn part(
     }
 }
 
+/// What `parse` reads from a fetched answer, in a parse slot: a transaction's record or an
+/// address's list can be megabytes (`TXS_CAP`), more than the async runtime should parse and
+/// sort.
+async fn parsed<T, F>(f: Fetched, parse: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce(u16, &[u8]) -> Result<T> + Send + 'static,
+{
+    crate::resolver::html::blocking(move || parse(f.status, &f.body)).await?
+}
+
 /// The tip height.
 async fn read_tip(cx: &super::Context<'_>, to: Api, network: Network) -> Result<u64> {
     let tip = fetch(cx, &tip_request(to, network).context("tip")?).await?;
@@ -1384,12 +1406,16 @@ async fn read(
         target.object = Object::Block(BlockRef::Hash(hash));
     }
     let f = fetch(cx, &request(to, &target).context("no reader")?).await?;
-    let Some(mut card) = parse(f.status, &f.body, &target)? else {
+    let read = target.clone();
+    let Some(mut card) = parsed(f, move |status, body| parse(status, body, &read)).await? else {
         return Ok(None);
     };
     let (n, mut named, mut soon) = (target.network, true, false);
     match &target.object {
         Object::Block(BlockRef::Hash(hash)) => {
+            // Esplora's block record has no pool, fees or reward: mempool.space's come with a
+            // later read.
+            soon |= to == Api::Esplora;
             // Its place in the best chain: whether its height names it (read by height, which
             // needs both), and its next block, linked once that is settled too.
             let status = if by_height {
@@ -1453,9 +1479,16 @@ async fn read(
             }
         }
         Object::Address(addr) => {
-            let txs = part(cx, txs_request(to, n, addr), by)
-                .await
-                .and_then(|f| parse_address_txs(f.status, &f.body, n, addr));
+            let txs = match part(cx, txs_request(to, n, addr), by).await {
+                Ok(f) => {
+                    let addr = addr.clone();
+                    parsed(f, move |status, body| {
+                        parse_address_txs(status, body, n, &addr)
+                    })
+                    .await
+                }
+                Err(e) => Err(e),
+            };
             match txs {
                 Ok(txs) => {
                     let count = |name: &str| card.details.get(name).and_then(Value::as_u64);
@@ -1545,7 +1578,7 @@ impl Source for Mempool {
             "first_seen",
             "created",
             "closed",
-            // Blocks
+            // Blocks (`tx_count` also on addresses, `size` and `weight` also on transactions)
             "height",
             "hash",
             "tx_count",
@@ -1616,8 +1649,14 @@ impl Source for Mempool {
         let by = cx.deadline().map_or(by, |d| d.min(by));
         let read = match read(cx, Api::Mempool, &target, by).await {
             Ok(read) => read,
+            // The fallback's "not found" does not say the object is gone while mempool.space
+            // fails (a transaction Esplora's node has not seen): mempool.space's error stands,
+            // as it does when the fallback fails too.
             Err(e) if request(Api::Esplora, &target).is_some() => {
-                read(cx, Api::Esplora, &target, by).await.map_err(|_| e)?
+                match read(cx, Api::Esplora, &target, by).await {
+                    Ok(Some(read)) => Some(read),
+                    Ok(None) | Err(_) => return Err(e),
+                }
             }
             Err(e) => match (
                 &target.object,
@@ -2195,6 +2234,19 @@ mod tests {
         assert!(links(&from_root(&format!("ln-signet:node/{ACINQ}")).unwrap()).is_empty());
     }
 
+    /// A transaction's record is read up to `TXS_CAP`, like an address's list: one with
+    /// thousands of inputs passes the egress default.
+    #[test]
+    fn a_transaction_record_may_pass_the_default_cap() {
+        let tx =
+            from_root("btc:tx/a1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d")
+                .unwrap();
+        for api in [Api::Mempool, Api::Esplora] {
+            let request = request(api, &tx).unwrap();
+            assert_eq!(request.options().body_cap, Some(TXS_CAP), "{api:?}");
+        }
+    }
+
     #[test]
     fn block_by_height() {
         let t = from_uri("https://mempool.space/block/481824").unwrap();
@@ -2270,6 +2322,124 @@ mod tests {
         assert!(parse_block(429, b"", Network::Mainnet, HASH).is_err());
     }
 
+    /// The answers to a read of the example block by hash on one API (`record` its block
+    /// record's path), from the files of `dir`.
+    fn block_answers(
+        api: &str,
+        record: &str,
+        dir: &str,
+    ) -> Vec<(String, u16, &'static str, Vec<u8>)> {
+        let file = |name: &str| read(&format!("{dir}{name}"));
+        vec![
+            (
+                format!("{api}/{record}/{HASH}"),
+                200,
+                "application/json",
+                file("block-481824.json"),
+            ),
+            (
+                format!("{api}/block/{HASH}/status"),
+                200,
+                "application/json",
+                file("block-481824-status.json"),
+            ),
+            (
+                format!("{api}/blocks/tip/height"),
+                200,
+                "text/plain",
+                read("tip-height-1111.txt"),
+            ),
+            (
+                format!("{api}/block/{HASH}/txid/0"),
+                200,
+                "text/plain",
+                file("block-481824-txid-0.txt"),
+            ),
+        ]
+    }
+
+    async fn resolve(
+        uri: &str,
+        answers: &[(String, u16, &'static str, Vec<u8>)],
+    ) -> Result<ResourceMeta> {
+        let routes = answers
+            .iter()
+            .map(|(url, status, kind, body)| (url.as_str(), *status, *kind, body.clone()))
+            .collect();
+        let (egress, _) = fixture::egress(routes);
+        let cx = crate::sources::Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        Mempool.resolve(&cx, uri).await
+    }
+
+    /// A transaction's record and an address's list of transactions are parsed in a parse slot,
+    /// never on the async runtime: each can be megabytes.
+    #[tokio::test(start_paused = true)]
+    async fn big_records_are_parsed_in_a_parse_slot() {
+        use crate::resolver::html::counted;
+        let api = "https://mempool.space/api";
+        let bech = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq";
+        let answers = vec![
+            (
+                format!("{api}/tx/{PIZZA}"),
+                200,
+                "application/json",
+                read("tx-pizza.json.gz"),
+            ),
+            (
+                format!("{api}/address/{bech}"),
+                200,
+                "application/json",
+                read("address-bech32.json"),
+            ),
+            (
+                format!("{api}/address/{bech}/txs"),
+                200,
+                "application/json",
+                read("address-bech32-txs.json.gz"),
+            ),
+        ];
+        for (uri, jobs) in [
+            (format!("btc:tx/{PIZZA}"), 1),
+            (format!("btc:address/{bech}"), 2),
+        ] {
+            let before = counted::jobs();
+            let doc = resolve(&uri, &answers).await.unwrap();
+            assert_eq!(doc.status, crate::model::Status::Ok, "{uri}");
+            assert_eq!(counted::jobs() - before, jobs, "{uri}");
+        }
+    }
+
+    /// A settled block read from mempool.space is complete: no early read again. Read from
+    /// Esplora while mempool.space fails, it has no pool, fees or reward and is read again
+    /// within the hour.
+    #[tokio::test(start_paused = true)]
+    async fn a_block_read_from_esplora_is_read_again_soon() {
+        let root = format!("btc:block/{HASH}");
+        let answers = block_answers("https://mempool.space/api", "v1/block", "");
+        let doc = resolve(&root, &answers).await.unwrap();
+        assert_eq!(doc.attributes["pool"], "BTCC");
+        assert_eq!(doc.refresh_by, None);
+
+        let mut answers = block_answers("https://blockstream.info/api", "block", "esplora/");
+        answers.push((
+            format!("https://mempool.space/api/v1/block/{HASH}"),
+            503,
+            "application/json",
+            b"{}".to_vec(),
+        ));
+        let doc = resolve(&root, &answers).await.unwrap();
+        assert_eq!(doc.status, crate::model::Status::Ok);
+        assert_eq!(doc.attributes["height"], "481824");
+        for fact in ["pool", "total_fees", "reward", "median_fee_rate"] {
+            assert!(!doc.attributes.contains_key(fact), "{fact}");
+        }
+        let soon = doc.refresh_by.expect("read again soon") - chrono::Utc::now();
+        assert!(soon <= chrono::Duration::hours(1) && soon > chrono::Duration::minutes(50));
+    }
+
     #[test]
     fn testnet4_block() {
         let hash = parse_height(200, &read("testnet4-block-height-1000.txt"))
@@ -2334,6 +2504,21 @@ mod tests {
             parse_tx(404, &read("tx-missing.txt"), Network::Mainnet, PIZZA).unwrap(),
             None
         );
+    }
+
+    /// Output values that pass `u64` together (a malformed record) give the largest value, as
+    /// the other satoshi sums do.
+    #[test]
+    fn output_values_past_u64_saturate() {
+        let body = format!(
+            r#"{{"txid":"{PIZZA}","status":{{"confirmed":false}},"vin":[],"vout":[{{"value":{}}},{{"value":2}}]}}"#,
+            u64::MAX - 1
+        );
+        let card = parse_tx(200, body.as_bytes(), Network::Mainnet, PIZZA)
+            .unwrap()
+            .unwrap();
+        assert_eq!(card.details["outputs"], 2);
+        assert_eq!(card.details["output_value"], u64::MAX);
     }
 
     #[test]

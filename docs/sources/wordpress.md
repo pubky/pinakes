@@ -20,8 +20,8 @@ The record must name the page's own address (`link`); otherwise the page keeps i
 ## What it reads
 
 `GET …/wp-json/wp/v2/posts/{id}?_embed=wp:featuredmedia&_fields=id,link,title,excerpt,date_gmt,modified_gmt,_links,_embedded`
-(a few KB), within the web fetch's deadline and at most 3 seconds. A failed or refused request
-leaves the page's own card.
+(a few KB), within the web fetch's deadline and at most 3 seconds. A redirect is not followed. A
+failed, redirected or refused request leaves the page's own card.
 
 ## Card
 

@@ -22,13 +22,18 @@ sitemap and `robots.txt` goes through the shared discovery cache (an hour; `robo
 a failed fetch five minutes) and the host's normal rate, within the web fetch's deadline and at
 most 6 seconds. At one request a second, a site's first walled link may spend that time on
 the page and its feeds; the news sitemaps are then read on a later attempt, once the feeds are
-cached. A host whose feeds all answered and none listed any item is remembered for a day.
+cached. A feed or sitemap over 1 MB is read up to its last whole item within that megabyte, and
+at most 5,000 items of one are searched. A host whose feeds all answered and none listed any item
+is remembered for a day; a rate limit, a timeout or a server error (of a feed or of `robots.txt`) or a
+feed cut before its first item says nothing about the host, which is asked again.
 
 ## Card
 
 `Article` (from an RSS or Atom feed) or `NewsArticle` (from a news sitemap), named by the item's
-title and described by its description (at most 300 characters), with its image. `from`
-is `feed`.
+title and described by its description (at most 300 characters), with its image. An RSS item's
+image is its `media:thumbnail`, an `enclosure` typed as an image, or a `media:content` that is an
+image by its `medium` or, without one, by its `type` (no `type` counts as an image; a video or a
+sound does not). `from` is `feed`.
 
 | Fact | Meaning |
 | --- | --- |

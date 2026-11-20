@@ -6,7 +6,8 @@ use async_trait::async_trait;
 
 pub struct Lobsters;
 
-/// A story's short id: six lower-case letters and digits.
+/// A story's short id, with or without `.json`: 3 to 12 lower-case letters and digits (Lobsters
+/// gives six).
 fn short_id(value: &str) -> Option<&str> {
     let value = value.strip_suffix(".json").unwrap_or(value);
     ((3..=12).contains(&value.len())
@@ -18,7 +19,7 @@ fn short_id(value: &str) -> Option<&str> {
 
 /// The story of `https://lobste.rs/s/{id}[/{slug}]` or `…/s/{id}.json`.
 pub fn of_uri(uri: &str) -> Option<String> {
-    let url = web_url(uri)?;
+    let url = super::kit::web_url(uri)?;
     if !matches!(url.host_str()?, "lobste.rs" | "www.lobste.rs") {
         return None;
     }

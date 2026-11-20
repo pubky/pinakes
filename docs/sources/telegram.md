@@ -20,7 +20,8 @@ links (`/+…`, `/joinchat/…`) and private channels (`/c/…`) are not read.
   "Profile on t.me", with the name alone.
 
 A request t.me refuses (a challenge, 401 or 403) gives the card of the link's shape alone with
-the `blocked` fact: the link still resolves, groups and counts.
+the `blocked` fact: the link still resolves, groups and counts. So does a page t.me withholds
+where the request came from (451): it is not `missing`.
 
 ## Card
 

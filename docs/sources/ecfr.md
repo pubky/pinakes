@@ -17,11 +17,12 @@ subject-group segments, is an alias of its root:
 
 The text on a date, `https://www.ecfr.gov/on/{YYYY-MM-DD}/title-{title}/section-{section}` (or
 `/part-{part}`), is its own resource, not an alias of the current text; its card shares the
-citation.
+citation. A date written another way (`/on/2020-1-1/`) is an alias of the `YYYY-MM-DD` root.
 
 The address must end in the section or the part: subpart, subject-group and appendix pages are
-not read. A section and the part named beside it must agree (`part-240/section-240.10b-5`). The
-legacy `/cgi-bin/text-idx` addresses are not read.
+not read. A section and the part named beside it must agree (`part-240/section-240.10b-5`). A
+section number may hold parentheses (`section-1.401(k)-1`); a link that escapes them (`%28`,
+`%29`) is an alias. The legacy `/cgi-bin/text-idx` addresses are not read.
 
 ## What it reads
 

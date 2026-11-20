@@ -6,7 +6,7 @@
 //! `https://clips.twitch.tv/{slug}`.
 use super::{
     social::{self, Page, Shape},
-    web_url, Context, Example, Source,
+    Context, Example, Source,
 };
 use crate::model::ResourceMeta;
 use anyhow::{Context as _, Result};
@@ -84,7 +84,7 @@ impl Target {
     /// `/{login}/clip/{slug}`, and `https://clips.twitch.tv/{slug}`; also m.twitch.tv and the
     /// host without `www.`.
     pub fn of_uri(uri: &str) -> Option<Self> {
-        let url = web_url(uri)?;
+        let url = super::kit::web_url(uri)?;
         let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
         match url.host_str()? {
             "clips.twitch.tv" => match segments.as_slice() {
@@ -124,20 +124,29 @@ impl Target {
     }
 }
 
+/// The card of a channel by its link alone, "Profile on twitch.tv" with the login the link
+/// spells: what a page that is not a profile's gives. Twitch answers one generic page for a
+/// channel that does not exist and for a page it names only to a browser, so that page does not
+/// say whether the channel exists.
+fn plain_channel(doc: ResourceMeta, login: &str) -> ResourceMeta {
+    let mut doc = Shape::Profile.card(doc, SITE);
+    social::fact(&mut doc, "handle", Some(login.to_owned()));
+    doc
+}
+
 /// The card of a channel from its page, or `None` when the page is not a profile (its Open
-/// Graph type is Twitch's own `website`: no such channel). The extractor has read the name
+/// Graph type is Twitch's own `website`: its generic page). The extractor has read the name
 /// from the title (`Name - Twitch`) and the bio from the description.
 pub fn channel_card(doc: ResourceMeta, login: &str, page: &ResourceMeta) -> Option<ResourceMeta> {
     if page.type_name != "Person" {
         return None;
     }
-    let mut doc = Shape::Profile.card(doc, SITE);
+    let mut doc = plain_channel(doc, login);
     social::take(&mut doc, page);
     doc.description = doc
         .description
         .as_deref()
         .map(|bio| social::excerpt(bio, 200));
-    social::fact(&mut doc, "handle", Some(login.to_owned()));
     Some(doc)
 }
 
@@ -264,9 +273,8 @@ impl Source for Twitch {
         let doc = cx.card(uri, self);
         let mut doc = match social::page(cx, &target.root()).await? {
             Page::Read { doc: page, .. } => match &target {
-                Target::Channel(login) => {
-                    channel_card(doc, login, &page).unwrap_or_else(|| cx.missing(uri, self))
-                }
+                Target::Channel(login) => channel_card(doc.clone(), login, &page)
+                    .unwrap_or_else(|| social::shape_only(plain_channel(doc, login))),
                 _ => video_card(doc, &target, &page),
             },
             Page::Missing => cx.missing(uri, self),
@@ -377,6 +385,33 @@ mod tests {
             ),
         )
         .is_none());
+    }
+
+    /// The page Twitch answers for a channel that does not exist is its generic page, with
+    /// status 200, the one it answers for a clip: the plain card, not `missing`.
+    #[tokio::test(start_paused = true)]
+    async fn a_page_that_is_no_profile_is_the_plain_card() {
+        let channel = "https://www.twitch.tv/thisuserdoesnotexist12345";
+        let (egress, _) = crate::sources::fixture::egress(vec![(
+            channel,
+            200,
+            "text/html",
+            crate::sources::fixture::read("twitch", "channel-missing.html.gz"),
+        )]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let doc = Twitch.resolve(&cx, channel).await.unwrap();
+        assert_eq!(doc.status, crate::model::Status::Ok);
+        assert_eq!(doc.type_name, "Person");
+        // It never replaces a stored card that says more.
+        assert!(doc.shape_only);
+        assert_eq!(doc.name.as_deref(), Some("Profile on twitch.tv"));
+        assert_eq!(doc.attributes["handle"], "thisuserdoesnotexist12345");
+        assert!(!doc.attributes.contains_key("blocked"));
+        assert_eq!((doc.description, doc.image), (None, None));
+        assert_eq!(doc.source_root.as_deref(), Some(channel));
     }
 
     /// A video's card quotes its creator (social, purged when the video goes); a channel's is

@@ -2,7 +2,8 @@
 
 Pinterest pins and profiles. No key and no account: a pin comes from Pinterest's oEmbed
 endpoint, a profile from its page's Open Graph tags. Pins are social content: the card quotes at
-most 200 characters, refreshes within the hour and is removed once the pin is gone.
+most 120 characters of the pin's title (its name; a pin's card has no description), refreshes
+within the hour and is removed once the pin is gone.
 
 ## Links
 
@@ -15,12 +16,17 @@ capitalised name are aliases of them. Boards and `pin.it` short links are not re
 
 - A pin: `GET https://www.pinterest.com/oembed.json?url={root}`, the documented oEmbed
   endpoint. A 400 or 404 (Pinterest answers "Url was not found") is `missing`.
-- A profile: `GET https://www.pinterest.com/{name}/`, its Open Graph tags and JSON-LD. A page
-  that is no profile's (no such name) is `missing`.
+- A profile: `GET https://www.pinterest.com/{name}/`, its Open Graph tags and JSON-LD. A page that
+  is no profile's (Pinterest answers its generic page, with status 200, for a name it does not know)
+  gives the plain card, "Profile on pinterest.com", with the name: it does not say the profile is
+  gone, and a stored card that says more (another name, text, a picture or facts) stays, as last
+  read, until a second read an hour later (`limits.missing_ttl_secs`) answers the same, as a missing
+  answer is confirmed: then the plain card replaces it. A 404 or 410 is `missing`.
 
 A request Pinterest refuses (a challenge, 401 or 403) gives the card of the link's shape alone,
 "Post on pinterest.com" or "Profile on pinterest.com", with the `blocked` fact: the link still
-resolves, groups and counts.
+resolves, groups and counts. So does a profile page Pinterest withholds where the request came
+from (451): it is not `missing`.
 
 ## Card
 

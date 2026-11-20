@@ -29,7 +29,7 @@ facts.
 | `gtin` | The variant's barcode as GTIN-13, when its check digit is right |
 | `brand` | The product's vendor |
 | `sku` | The variant's article number |
-| `price`, `price_currency`, `price_at` | The variant's price, its currency and when it was read |
+| `price`, `price_currency`, `price_at` | The variant's price (a number, not negative), its currency (three letters) and when it was read |
 
 ## Examples
 

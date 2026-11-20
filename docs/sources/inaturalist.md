@@ -69,8 +69,12 @@ Creative Commons licence, and `description` the Wikipedia summary iNaturalist sh
 
 An observation's attribution is the observer and its licence, in iNaturalist's form: "(c)
 ramchop, some rights reserved (CC BY-NC), via iNaturalist" ("all rights reserved" without a
-licence; "no rights reserved (CC0)" without the "(c)" when the observer waived them). A photo without a licence is never shown. A taxon card with a description is credited
-"iNaturalist; description from Wikipedia (CC BY-SA 4.0)".
+licence; "no rights reserved (CC0)" without the "(c)" when the observer waived them). A taxon
+card with a description is credited "iNaturalist; description from Wikipedia (CC BY-SA 4.0)".
+
+A photo is shown only under a Creative Commons licence: CC0, CC BY, or CC BY with NC, ND or SA
+terms. A photo with no licence code or with any other one (`pd`, `gfdl`) is not shown, and
+neither is one whose address is not an `https` URL.
 
 ## Examples
 

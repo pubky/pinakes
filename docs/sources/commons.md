@@ -2,7 +2,9 @@
 
 Media files on Wikimedia Commons (photos, drawings, video, audio), read from the Commons
 MediaWiki API by file name. No key. Wikimedia asks anonymous clients for a descriptive
-User-Agent, one request at a time and well under five a second; Pinakes keeps to one a second.
+User-Agent, one request at a time and well under five a second; Pinakes asks at the host's pace
+(`limits.host_requests_per_second`, one a second by default, never above Wikimedia's 200 a
+minute).
 
 ## Links
 
@@ -10,7 +12,8 @@ User-Agent, one request at a time and well under five a second; Pinakes keeps to
 `commons:File:{Name}` as the root. The name is in MediaWiki's normal form: underscores for
 spaces, runs of them collapsed, first letter upper case (e.g.
 `commons:File:Golden_Gate_Bridge_as_seen_from_Battery_East.jpg`); in the root, letters outside
-ASCII are percent-encoded (`commons:File:%C3%89t%C3%A9.jpg`), as URIs are stored:
+ASCII are percent-encoded (`commons:File:%C3%89t%C3%A9.jpg`), and so is a `"` after the name's
+first `?`, as URIs are stored:
 
 - `https://commons.wikimedia.org/wiki/File:{name}` and the mobile
   `https://commons.m.wikimedia.org/wiki/File:{name}`, with spaces or underscores, percent-encoded
@@ -29,7 +32,8 @@ A file Commons does not have, and a page id that is not a file's page, are `miss
 ## What it reads
 
 `GET https://commons.wikimedia.org/w/api.php?action=query&format=json&formatversion=2&redirects=1&prop=imageinfo|coordinates&iiprop=url|size|mime|extmetadata|timestamp&iiurlwidth=1280&iiextmetadatafilter=…&iiextmetadatalanguage=en&titles=File:{name}`
-(or `pageids={page id}`).
+(or `pageids={page id}`). When the API answers that it is busy or read-only (the error
+`ratelimited`, `maxlag` or `readonly`), the file is read again later.
 
 ## Card
 

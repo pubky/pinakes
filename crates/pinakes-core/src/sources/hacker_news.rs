@@ -19,7 +19,7 @@ fn item(value: &str) -> Option<u64> {
 
 /// The item of `news.ycombinator.com/item?id={n}`, `hnsignals.com/signal/{n}` or the API.
 pub fn of_uri(uri: &str) -> Option<u64> {
-    let url = web_url(uri)?;
+    let url = super::kit::web_url(uri)?;
     let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
     match (url.host_str()?, segments.as_slice()) {
         ("news.ycombinator.com", ["item"]) => url
