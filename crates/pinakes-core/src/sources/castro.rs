@@ -1,6 +1,6 @@
 //! Episodes on Castro, from their own pages: a page hook on the web route. Castro has no public
 //! API; an episode's page plays the show's own enclosure in its player and names the show's
-//! Apple Podcasts ID in its "Listen on" links. With them the card plays that file (its
+//! Apple Podcasts ID in its links (any `href` of the page). With them the card plays that file (its
 //! `stream`), and the podcasts also-on source finds the episode on Apple Podcasts by the file
 //! iTunes lists for it. The page's own metadata names the card, as for any page.
 use super::{
