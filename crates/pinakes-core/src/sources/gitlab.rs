@@ -5,7 +5,7 @@
 //! as GitLab.
 use super::kit::GITLAB_RESERVED as RESERVED;
 use super::{list, text, web_url, Budget, Context, Declined, Example, HostMemo, Source};
-use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
+use crate::model::ResourceMeta;
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use serde_json::Value;
@@ -494,7 +494,8 @@ impl Source for Gitlab {
         if INSTANCES.get(&host) == Some(false) {
             return Err(Declined.into());
         }
-        let json = FetchOptions::json();
+        // GitLab's 404 is JSON with its own message, which tells an instance from another site.
+        let json = super::json_with_errors();
         // The first answer from an unknown host says whether it is GitLab: GitLab's own error
         // shape, or a 200 that holds `field`, the string the object asked for always has.
         let get = |url: String, field: &'static str| {

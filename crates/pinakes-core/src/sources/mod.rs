@@ -523,6 +523,17 @@ fn check_headers(headers: &[(&'static str, String)]) -> Result<()> {
     Ok(())
 }
 
+/// The options of a JSON API read whose error answers are read too. The transport drops the
+/// body of an error answer unless the read asks for it (`FetchOptions::error_json`): a source
+/// that tells "no such object" from another refusal by what the answer says reads with these.
+/// A rate limit (429) then comes back as an answer, which `Context::fetch` turns into the retry.
+pub fn json_with_errors() -> FetchOptions {
+    FetchOptions {
+        error_json: true,
+        ..FetchOptions::json()
+    }
+}
+
 /// Whether an error is this daemon's own host budget (the slot is further away than a fetch
 /// may wait, which egress answers with the class `rate_limited`), which says nothing about the
 /// host's answer.
@@ -1090,7 +1101,9 @@ pub(crate) mod fixture {
     }
 
     /// An egress that answers recorded responses by exact URL (anything else is a 404) and
-    /// remembers the URLs asked, in order. A redirect's body is its `Location`; the content type
+    /// remembers the URLs asked, in order. An error answer's body is dropped as the real read
+    /// drops it (kept for a wall's page and for a read with `error_json`). A redirect's body is
+    /// its `Location`; the content type
     /// `!too-large` answers a body over its read's cap, and `!large-xml` an XML body over the page
     /// cap as the real read treats one: refused when the read sets `body_cap`, otherwise cut (the
     /// route's body is the cut text). Pair it with `#[tokio::test(start_paused = true)]`: the
@@ -1105,6 +1118,7 @@ pub(crate) mod fixture {
                 .collect(),
             asked: Default::default(),
             delays: Default::default(),
+            raw: std::sync::atomic::AtomicBool::new(false),
         });
         let egress = crate::resolver::egress::Egress::with_backends(
             Default::default(),
@@ -1114,10 +1128,24 @@ pub(crate) mod fixture {
         (egress, recorded)
     }
 
+    /// `egress` whose transport hands every answer back as recorded, an error's body included:
+    /// for tests of the egress itself, which say what it does with whatever a transport gives.
+    pub fn egress_raw(
+        routes: Vec<(&str, u16, &'static str, Vec<u8>)>,
+    ) -> (crate::resolver::egress::Egress, std::sync::Arc<Recorded>) {
+        let (egress, recorded) = egress(routes);
+        recorded
+            .raw
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        (egress, recorded)
+    }
+
     pub struct Recorded {
         routes: std::collections::BTreeMap<String, (u16, &'static str, Vec<u8>)>,
         pub asked: std::sync::Mutex<Vec<String>>,
         delays: std::sync::Mutex<std::collections::BTreeMap<String, std::time::Duration>>,
+        /// Whether an error answer keeps its body whatever the read asked for (`egress_raw`).
+        raw: std::sync::atomic::AtomicBool,
     }
     impl Recorded {
         pub fn asked(&self) -> Vec<String> {
@@ -1152,7 +1180,31 @@ pub(crate) mod fixture {
                         )
                     })
                 }
-                _ => self.get(url, addresses).await,
+                _ => {
+                    // As the real read does: an error answer keeps its body only when it is a
+                    // wall's page (403, 429 or 503 as HTML or text) or the read asked for an
+                    // error's JSON.
+                    let mut fetched = self.get(url, addresses).await?;
+                    let kind = fetched
+                        .content_type
+                        .split(';')
+                        .next()
+                        .unwrap_or_default()
+                        .trim()
+                        .to_ascii_lowercase();
+                    let wall = matches!(fetched.status, 403 | 429 | 503)
+                        && matches!(
+                            kind.as_str(),
+                            "text/html" | "application/xhtml+xml" | "text/plain" | ""
+                        );
+                    let json = options.error_json
+                        && (kind == "application/json" || kind.ends_with("+json"));
+                    let raw = self.raw.load(std::sync::atomic::Ordering::Relaxed);
+                    if fetched.status >= 400 && !wall && !json && !raw {
+                        fetched.body.clear();
+                    }
+                    Ok(fetched)
+                }
             }
         }
         async fn get(

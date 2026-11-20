@@ -9,7 +9,6 @@ use super::{Budget, Context, Example, Source};
 use crate::{
     kinds::products::{self, Product},
     model::ResourceMeta,
-    resolver::egress::FetchOptions,
 };
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
@@ -243,7 +242,8 @@ impl Source for OpenFoodFacts {
     }
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
         let (mut database, code, _) = of_uri(uri).context("not a product page")?;
-        let options = FetchOptions::json();
+        // A 404's JSON names the database that holds the product.
+        let options = super::json_with_errors();
         let f = cx.fetch(&database.api(&code), &options).await?;
         let mut found = answer(&code, f.status, &f.body)?;
         // Its page redirects to the database that holds it.
@@ -262,10 +262,7 @@ impl Source for OpenFoodFacts {
 pub mod also_on {
     //! The `open_food_facts` also-on source: a product card's barcode on the databases.
     use super::{answer, facts, of_uri, Answer, DATABASES};
-    use crate::{
-        also_on::{Context, Fact, Found, Link, Source, Subject},
-        resolver::egress::FetchOptions,
-    };
+    use crate::also_on::{Context, Fact, Found, Link, Source, Subject};
     use anyhow::Result;
     use async_trait::async_trait;
 
@@ -304,7 +301,7 @@ pub mod also_on {
             let Some(code) = barcode(subject) else {
                 return Ok(found);
             };
-            let options = FetchOptions::json();
+            let options = crate::sources::json_with_errors();
             // Open Food Facts first: it names the database of a barcode it holds as another type
             // of product, which is then asked once.
             let mut database = &DATABASES[0];

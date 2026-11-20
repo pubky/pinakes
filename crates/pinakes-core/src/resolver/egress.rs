@@ -3251,7 +3251,7 @@ mod tests {
                 true,
             ),
         ];
-        let (egress, _) = crate::sources::fixture::egress(
+        let (egress, _) = crate::sources::fixture::egress_raw(
             routes
                 .iter()
                 .map(|(url, status, kind, body, ..)| (*url, *status, *kind, body.to_vec()))

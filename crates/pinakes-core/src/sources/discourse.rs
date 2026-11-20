@@ -3,7 +3,7 @@
 //! limit is 200 requests per minute per address. A site that does not answer as Discourse is
 //! remembered, and its links get ordinary web cards.
 use super::{list, text, web_url, Context, Declined, Example, HostMemo, Source};
-use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
+use crate::model::ResourceMeta;
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use serde_json::Value;
@@ -317,7 +317,10 @@ impl Source for Discourse {
         if FORUMS.get(&host) == Some(false) {
             return Err(Declined.into());
         }
-        let f = cx.fetch(&target.api_url(), &FetchOptions::json()).await?;
+        // A missing topic's 404 names its `error_type` in JSON.
+        let f = cx
+            .fetch(&target.api_url(), &super::json_with_errors())
+            .await?;
         // The cards read posts' HTML: in a parse slot.
         let (doc, at, read, json) = (cx.card(uri, self), host.clone(), target.clone(), f.clone());
         let result = crate::resolver::html::blocking(move || match &read {

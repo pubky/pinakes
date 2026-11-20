@@ -2,7 +2,7 @@
 //! post's identity is its at-URI: every address of it, by handle or by DID, becomes one resource
 //! named by the DID.
 use super::{excerpt, text, web_url, Context, Example, Source};
-use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
+use crate::model::ResourceMeta;
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use serde_json::Value;
@@ -324,7 +324,8 @@ impl Source for Bluesky {
     }
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
         let target = Target::of_uri(uri).context("not a Bluesky link")?;
-        let json = FetchOptions::json();
+        // Bluesky names what is wrong in an error's JSON (`NotFound`, an unknown handle).
+        let json = super::json_with_errors();
         let did = if target.by_did() {
             target.actor.clone()
         } else {
@@ -374,6 +375,56 @@ impl Source for Bluesky {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What Bluesky says in an error's JSON decides: a handle it cannot resolve and a post it
+    /// calls `NotFound` are gone, any other 400 is an error. The read asks for the error's
+    /// body, which the transport drops otherwise.
+    #[tokio::test(start_paused = true)]
+    async fn an_error_answer_is_read_for_what_it_says() {
+        const JSON: &str = "application/json";
+        let handle =
+            |name: &str| format!("{APPVIEW}/com.atproto.identity.resolveHandle?handle={name}");
+        let thread = format!(
+            "{APPVIEW}/app.bsky.feed.getPostThread?uri=at%3A%2F%2F{}%2Fapp.bsky.feed.post%2F3aaaaaaaaaaaa&depth=0&parentHeight=0",
+            DID.replace(':', "%3A")
+        );
+        let (egress, _) = crate::sources::fixture::egress(vec![
+            (
+                &handle("nobody.example.org"),
+                400,
+                JSON,
+                br#"{"error":"InvalidRequest","message":"Unable to resolve handle"}"#.to_vec(),
+            ),
+            (
+                &handle("limited.example.org"),
+                400,
+                JSON,
+                br#"{"error":"SomethingElse","message":"x"}"#.to_vec(),
+            ),
+            (&thread, 400, JSON, read("bsky-thread-missing.json")),
+        ]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let doc = Bluesky
+            .resolve(&cx, "https://bsky.app/profile/nobody.example.org")
+            .await
+            .unwrap();
+        assert_eq!(doc.status, crate::model::Status::Missing);
+        assert!(Bluesky
+            .resolve(&cx, "https://bsky.app/profile/limited.example.org")
+            .await
+            .is_err());
+        let doc = Bluesky
+            .resolve(
+                &cx,
+                &format!("https://bsky.app/profile/{DID}/post/3aaaaaaaaaaaa"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(doc.status, crate::model::Status::Missing);
+    }
 
     fn read(file: &str) -> Vec<u8> {
         crate::sources::fixture::read("bluesky", file)

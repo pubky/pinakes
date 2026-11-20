@@ -5,7 +5,7 @@
 //! Mastodon, and its links get ordinary web cards. A JSON refusal (a private post, a server that
 //! refuses unauthenticated reads) gives that link a web card and marks nothing.
 use super::{text, web_url, Context, Declined, Example, HostMemo, Source};
-use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
+use crate::model::ResourceMeta;
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use serde_json::Value;
@@ -238,7 +238,8 @@ impl Source for Mastodon {
         let f = cx
             .fetch(
                 &format!("https://{}/api/v1/statuses/{}", target.host, target.id),
-                &FetchOptions::json(),
+                // A missing post's 404 says so in JSON, which tells Mastodon from another site.
+                &super::json_with_errors(),
             )
             .await?;
         let (doc, read, status, body) =
