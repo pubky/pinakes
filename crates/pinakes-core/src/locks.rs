@@ -62,7 +62,7 @@ pub const LOCK_CHECK: std::time::Duration = std::time::Duration::from_secs(10);
 /// batches are cut off instead of finished without the lock: a job cut off before its save is
 /// read again when its lease runs out; one cut off after it keeps the card it saved, and the
 /// steps after the save wait for its next full read (a read the site answers 304 does not run
-/// them; a card the save made final waits for `pinakesd reextract`).
+/// them; a card the save made final waits for a new reference or `pinakesd reextract`).
 pub const LOST_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 /// What one check of the lock's session found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
