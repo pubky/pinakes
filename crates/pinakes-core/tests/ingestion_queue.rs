@@ -416,6 +416,17 @@ async fn rejects_oversized_feed_fields_without_stalling_or_truncating_keys(pool:
         bad.object_path = path;
         lines.push(bad);
     }
+    // A URI the URL parser refuses (the port) keeps its text, and PostgreSQL stores no NUL: the
+    // line is rejected, never an error that holds the cursor.
+    for uri in [
+        "http://example.org:99999/\0",
+        "http://exa\0mple.org/",
+        "http://[::1\0]/",
+    ] {
+        let mut bad = good.clone();
+        bad.uri = uri.into();
+        lines.push(bad);
+    }
     let end = lines.len() as i64;
     let page = FeedPage {
         page: Changes {
@@ -438,7 +449,7 @@ async fn rejects_oversized_feed_fields_without_stalling_or_truncating_keys(pool:
         .await
         .unwrap();
     assert_eq!(stored, (good.label.unwrap(), ingest::TAG_PATH.into()));
-    for (reason, count) in [("author", 4), ("label", 3), ("object_path", 3)] {
+    for (reason, count) in [("author", 4), ("label", 3), ("object_path", 3), ("uri", 3)] {
         assert_eq!(
             metrics.ingest_rejected.with_label_values(&[reason]).get(),
             count
@@ -1828,6 +1839,50 @@ async fn new_reference_reopens_final_pages_but_never_geo(pool: PgPool) {
             .unwrap();
     assert!(final_geo);
     assert!(!final_page);
+    // A new reference through an alias spelling (the link with a tracking parameter) reopens
+    // the root, which holds the card; the alias row itself is never final.
+    sqlx::query("UPDATE resource SET final=true,resolved_at=now()-interval '1 day',next_attempt_at='infinity' WHERE uri='https://example.org/final'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let spelling = change(
+        "https://example.org/final?utm_source=feed",
+        "e",
+        "/pub/app/tags/e",
+    );
+    batch(&pool, vec![spelling], Some("one")).await;
+    let (aliases, final_root): (i64, bool) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM resource_alias a WHERE a.root_id=r.id),r.final FROM resource r WHERE r.uri='https://example.org/final'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(aliases, 1);
+    assert!(!final_root);
+}
+
+/// The feeds a database has a cursor for besides the configured one, by host only.
+#[sqlx::test(migrations = "../../migrations")]
+async fn other_feeds_are_named_by_host(pool: PgPool) {
+    let configured = "http://nexus.example.org:8080";
+    ingest::cursor(&pool, configured).await.unwrap();
+    assert!(ingest::other_feeds(&pool, configured)
+        .await
+        .unwrap()
+        .is_empty());
+    ingest::cursor(&pool, "http://nexus.example.org:8080/")
+        .await
+        .unwrap();
+    ingest::cursor(
+        &pool,
+        "https://user:SECRET@old.nexus.example.org/base?token=x",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        ingest::other_feeds(&pool, configured).await.unwrap(),
+        ["nexus.example.org", "old.nexus.example.org"]
+    );
 }
 
 #[sqlx::test(migrations = "../../migrations")]

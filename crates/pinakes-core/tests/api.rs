@@ -732,7 +732,10 @@ async fn polls_the_http_feed_and_replays_without_duplicates(pool: PgPool) {
         )
         .await
         .unwrap(),
-        2
+        ingest::Poll {
+            lines: 2,
+            again: true
+        }
     );
     assert_eq!(
         ingest::poll_once(
@@ -744,7 +747,10 @@ async fn polls_the_http_feed_and_replays_without_duplicates(pool: PgPool) {
         )
         .await
         .unwrap(),
-        0
+        ingest::Poll {
+            lines: 0,
+            again: false
+        }
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM reference")
@@ -753,6 +759,51 @@ async fn polls_the_http_feed_and_replays_without_duplicates(pool: PgPool) {
             .unwrap(),
         1
     );
+    task.abort();
+}
+
+/// A feed that starts over (its epoch is another) is no batch: the poll reports no lines read
+/// and no poll to follow at once, so the daemon waits before it reads the feed again from zero.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_poll_that_resets_the_feed_reads_no_lines_and_waits(pool: PgPool) {
+    let (_, uri, _) = identity("https://example.org/feed").unwrap();
+    let line = Change {
+        op: Op::Put,
+        uri,
+        kind: Kind::Tag,
+        author: author(0),
+        object_path: "/pub/app/tags/one".into(),
+        label: None,
+        at: Utc::now().timestamp_millis(),
+    };
+    let (url, _, task) = mock_nexus(vec![line]).await;
+    let nexus = Nexus::new(&url, None).unwrap();
+    let metrics = Metrics::new().unwrap();
+    let limits = IngestConfig::default();
+    let poll = || ingest::poll_once(&pool, &url, &nexus, &limits, &metrics);
+    let read = ingest::Poll {
+        lines: 1,
+        again: true,
+    };
+    assert_eq!(poll().await.unwrap(), read);
+    sqlx::query("UPDATE feed_cursor SET epoch='an-earlier-epoch'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        poll().await.unwrap(),
+        ingest::Poll {
+            lines: 0,
+            again: false
+        }
+    );
+    let (cursor, resets, references): (i64, i64, i64) =
+        sqlx::query_as("SELECT cursor,resets,(SELECT count(*) FROM reference) FROM feed_cursor")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((cursor, resets, references), (0, 1, 0));
+    assert_eq!(poll().await.unwrap(), read);
     task.abort();
 }
 

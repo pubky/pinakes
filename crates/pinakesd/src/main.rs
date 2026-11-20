@@ -98,12 +98,17 @@ async fn serve(config: Option<PathBuf>, command: Command) -> Result<()> {
             .catch_unwind();
             let applied = tokio::select! { _=ingest_shutdown.changed()=>break,result=poll=>result.unwrap_or_else(|_| { ingest_state.metrics.ingest_panics.inc(); Err(anyhow::anyhow!("ingestion panicked")) }) };
             match applied {
-                Ok(n) if n > 0 => {
-                    tracing::info!(lines = n, "ingested Nexus batch");
-                    ingest_state.wake.notify_waiters();
-                    continue;
+                Ok(poll) => {
+                    if poll.lines > 0 {
+                        tracing::info!(lines = poll.lines, "ingested Nexus batch");
+                        ingest_state.wake.notify_waiters();
+                    }
+                    // More may wait: the next page at once. After a reset, and when the feed
+                    // held nothing new, the next poll waits.
+                    if poll.again {
+                        continue;
+                    }
                 }
-                Ok(_) => {}
                 Err(e) => {
                     tracing::warn!(error=%pinakes_core::resolver::log_error(&e),"ingestion will retry")
                 }

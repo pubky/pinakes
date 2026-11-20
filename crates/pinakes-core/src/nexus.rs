@@ -115,6 +115,14 @@ pub struct ReachSet {
 /// A viewer's set, cached by viewer and kind: when it was read, the set, and the reach-set
 /// route's `ETag` it came with (`wot_2` only).
 type ReachCache = Arc<Mutex<HashMap<(String, String), (Instant, ReachSet, Option<String>)>>>;
+/// The feed lines one poll asks for; Nexus's page cap. Fixed: it is the feed's contract, not an
+/// operator's choice.
+pub const FEED_PAGE: usize = 1000;
+/// How long one request to the Nexus may take: a feed page, a reach list, a batch view. Fixed;
+/// a search's reach read has a shorter deadline of its own (`limits.reach_timeout_secs`).
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// The largest answer read from the Nexus (a feed page of `FEED_PAGE` lines fits well below).
+const BODY_CAP: usize = 8 * 1024 * 1024;
 /// How long a set answers searches before it is read again.
 const REACH_FRESH: Duration = Duration::from_secs(300);
 /// How long a `wot_2` set and its `ETag` are kept to ask Nexus whether it changed.
@@ -169,7 +177,7 @@ impl Nexus {
                 .no_proxy()
                 .default_headers(headers)
                 .redirect(reqwest::redirect::Policy::none())
-                .timeout(Duration::from_secs(10))
+                .timeout(REQUEST_TIMEOUT)
                 .build()?,
             cache: Arc::default(),
             reach_timeout,
@@ -179,7 +187,7 @@ impl Nexus {
         let response = self
             .client
             .get(format!("{}/v1/resources/changes", self.base))
-            .query(&[("cursor", cursor), ("limit", 1000)])
+            .query(&[("cursor", cursor), ("limit", FEED_PAGE as i64)])
             .send()
             .await
             .and_then(reqwest::Response::error_for_status)
@@ -400,7 +408,7 @@ async fn bounded_bytes(mut response: reqwest::Response) -> Result<Vec<u8>> {
         .await
         .map_err(reqwest::Error::without_url)?
     {
-        if bytes.len() + chunk.len() > 8 * 1024 * 1024 {
+        if bytes.len() + chunk.len() > BODY_CAP {
             bail!("Nexus response exceeded 8 MB");
         }
         bytes.extend_from_slice(&chunk);

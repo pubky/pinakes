@@ -444,7 +444,15 @@ line names its feed position only, never its content). A panic anywhere else in 
 batch's score update or cursor write, say) is an error: the batch rolls back, the cursor holds,
 `pinakes_ingest_panics_total` counts it and the poll is retried. A feed epoch change, or a
 cursor beyond the feed's length, clears the reference projection and scores and restarts at
-zero; resource documents stay through the grace period. A resource without references is
+zero, after one `limits.poll_secs` wait; resource documents stay through the grace period.
+The cursor is kept under `nexus_url` as written. After `nexus_url` changes (another Nexus, or
+another spelling of the same one, such as a trailing slash) the new feed is read from zero and
+the references read from the old one stay beside it: the daemon logs a warning at each start
+that names the other feed's host. The other feed's cursor row also stays in
+`pinakes_ingest_lag_lines`. To start over with the new feed alone, stop the daemon and
+clear the projection as a feed reset does
+(`UPDATE resource SET orphaned_at=coalesce(orphaned_at,now()); TRUNCATE reference, resource_score, feed_cursor;`):
+the next start reads the configured feed from zero. A resource without references is
 deleted `limits.grace_days` after it became orphaned. One nothing ever referenced (a link only
 previewed with `POST /v1/resolve`) goes after `limits.preview_grace_hours` (a day) instead: its
 orphan time is still the instant it was created, as a reference clears it and losing the last
