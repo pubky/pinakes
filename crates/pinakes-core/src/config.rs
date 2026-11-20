@@ -626,10 +626,10 @@ pub struct ResolverConfig {
     /// sources' (`[also_on.sources.musicbrainz] base_url`); empty is the public one.
     #[serde(skip)]
     pub musicbrainz_base: String,
-    /// `pubky` only: the most dates one period of a recurrence rule may hold
-    /// (`limits.event_max_period_dates`), for the Pubky apps' event readers.
+    /// `pubky` only: how long one PKARR relay may take to answer
+    /// (`limits.pkarr_relay_timeout_ms`).
     #[serde(skip)]
-    pub max_period_dates: usize,
+    pub pkarr_relay_timeout_ms: u64,
     /// `web.music_enrichment` only: a MusicBrainz page's card takes an image and a description,
     /// with their credits, from its Wikidata item (`music_enrichment`). Off, the card is
     /// MusicBrainz's alone.
@@ -656,7 +656,7 @@ impl Default for ResolverConfig {
             requests_per_second: 2.0,
             ttl_secs: 86400,
             musicbrainz_base: String::new(),
-            max_period_dates: crate::event::time::MAX_PERIOD_DATES,
+            pkarr_relay_timeout_ms: 4000,
             music_enrichment: true,
             music_enrichment_timeout_ms: 8000,
             music_enrichment_retry_secs: 3600,
@@ -1117,6 +1117,9 @@ impl Config {
             .contains(&self.egress.html_head_bytes)
         {
             bail!("limits.html_head_bytes must be 1–16 MB");
+        }
+        if !(100..=9000).contains(&self.pubky.pkarr_relay_timeout_ms) {
+            bail!("limits.pkarr_relay_timeout_ms must be 100–9000");
         }
         let w = &self.web;
         if !(100..=13000).contains(&w.music_enrichment_timeout_ms)
@@ -2268,6 +2271,9 @@ limits! {
         |c, v| c.cards.media.ttl_secs = v, |c, v| c.cards.isbn.ttl_secs = v,
         |c, v| c.cards.doi.ttl_secs = v, |c, v| c.cards.nostr.ttl_secs = v,
         |c, v| c.cards.activitypub.ttl_secs = v, |c, v| c.cards.official.ttl_secs = v],
+    /// How long one PKARR relay may take to answer (milliseconds, 100–9000); a relay slower than
+    /// this is a failed relay, and the others' packets are used.
+    pkarr_relay_timeout_ms: u64 = |c| c.pubky.pkarr_relay_timeout_ms => [|c, v| c.pubky.pkarr_relay_timeout_ms = v],
     /// How long a MusicBrainz card's enrichment may take, within the card's own read
     /// (milliseconds, 100–13000); past it, the card keeps its stored image and description.
     music_enrichment_timeout_ms: u64 = |c| c.web.music_enrichment_timeout_ms => [|c, v| c.web.music_enrichment_timeout_ms = v],

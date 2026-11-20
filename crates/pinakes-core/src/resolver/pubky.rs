@@ -118,7 +118,11 @@ impl PubkyResolver {
 
     pub fn new(config: ResolverConfig, egress: Egress) -> Result<Self> {
         Ok(Self {
-            relays: Relays::new(&config.pkarr_relays, egress.clone())?,
+            relays: Relays::new(
+                &config.pkarr_relays,
+                Duration::from_millis(config.pkarr_relay_timeout_ms),
+                egress.clone(),
+            )?,
             egress,
             config,
         })
@@ -263,6 +267,10 @@ mod tests {
         empty: Mutex<Vec<&'static str>>,
         /// Relay hosts that refuse the connection (a real refusal, from a closed local port).
         refusing: Mutex<Vec<&'static str>>,
+        /// Relay hosts that accept the request and never answer.
+        stalling: Mutex<Vec<&'static str>>,
+        /// Relay hosts that answer 429 with this `Retry-After` (seconds).
+        limited: Mutex<Vec<(&'static str, u64)>>,
         /// What one relay host serves for one key instead.
         serve: Mutex<HashMap<(&'static str, String), Vec<u8>>>,
         relay_requests: Mutex<Vec<String>>,
@@ -290,6 +298,25 @@ mod tests {
                 drop(listener);
                 return crate::resolver::egress::PinnedTransport
                     .get_with(url, &[closed], options)
+                    .await;
+            }
+            if self.stalling.lock().unwrap().contains(&host) {
+                return std::future::pending().await;
+            }
+            let limited = self
+                .limited
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(h, _)| *h == host)
+                .map(|(_, seconds)| *seconds);
+            if let Some(seconds) = limited {
+                let response = axum::http::Response::builder()
+                    .status(429)
+                    .header("retry-after", seconds.to_string())
+                    .body(vec![]);
+                let response = reqwest::Response::from(response.unwrap());
+                return crate::resolver::egress::read_response_with(url.clone(), response, options)
                     .await;
             }
             let key = url.path().trim_start_matches('/');
@@ -384,6 +411,8 @@ mod tests {
             tampering: vec![],
             empty: Mutex::default(),
             refusing: Mutex::default(),
+            stalling: Mutex::default(),
+            limited: Mutex::default(),
             serve: Mutex::default(),
             relay_requests: Mutex::default(),
             homeserver,
@@ -899,6 +928,67 @@ mod tests {
             );
             assert!(!crate::resolver::unreached(&error), "{answering} {error:#}");
         }
+    }
+
+    /// A relay that accepts the request and never answers is given up at its own deadline,
+    /// shorter than the resolution's: the other relay's packet is used.
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_relay_does_not_hold_back_another_s_packet() {
+        let owner = Keypair::random();
+        let relays = ["https://relay.example", "https://relay2.example"];
+        let net = network(&[direct(&owner)], ok());
+        net.stalling.lock().unwrap().push("relay.example");
+        let started = tokio::time::Instant::now();
+        let doc = resolver_on(net.clone(), &["8.8.8.8"], "8.8.4.4", &relays)
+            .resolve(&object(&owner))
+            .await
+            .unwrap();
+        assert_eq!(doc.name.as_deref(), Some("A deck"));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        // Every relay stalled: a relay-side failure, as a relay's timeout is.
+        net.stalling.lock().unwrap().push("relay2.example");
+        let other = Keypair::random();
+        let error = resolver_on(net, &["8.8.8.8"], "8.8.4.4", &relays)
+            .resolve(&object(&other))
+            .await
+            .unwrap_err();
+        assert_eq!(crate::resolver::error_class(&error), "connect", "{error:#}");
+        assert!(
+            format!("{error:#}").contains("did not answer within"),
+            "{error:#}"
+        );
+    }
+
+    /// A relay's 429 keeps its `Retry-After`: when no relay gave an answer about the key, the
+    /// link is read again then, without a charge. Another relay's packet is still used.
+    #[tokio::test]
+    async fn a_relay_s_429_keeps_its_retry_after() {
+        let owner = Keypair::random();
+        let relays = ["https://relay.example", "https://relay2.example"];
+        let net = network(&[direct(&owner)], ok());
+        net.limited
+            .lock()
+            .unwrap()
+            .extend([("relay.example", 120), ("relay2.example", 300)]);
+        let error = resolver_on(net, &["8.8.8.8"], "8.8.4.4", &relays)
+            .resolve(&object(&owner))
+            .await
+            .unwrap_err();
+        let wait = error
+            .downcast_ref::<crate::resolver::RetryLater>()
+            .unwrap_or_else(|| panic!("{error:#}"));
+        assert_eq!((wait.class, wait.seconds), ("rate_limited", 300));
+        let net = network(&[direct(&owner)], ok());
+        net.limited.lock().unwrap().push(("relay.example", 120));
+        let doc = resolver_on(net, &["8.8.8.8"], "8.8.4.4", &relays)
+            .resolve(&object(&owner))
+            .await
+            .unwrap();
+        assert_eq!(doc.name.as_deref(), Some("A deck"));
     }
 
     #[tokio::test]
