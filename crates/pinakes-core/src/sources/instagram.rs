@@ -316,6 +316,7 @@ mod tests {
             title: Some(r#"Instagram on Instagram: "Hello, world""#.into()),
             description: Some("1,000 likes, 10 comments".into()),
             image: Some("https://example.com/a.jpg".into()),
+            ..OpenGraph::default()
         };
         let doc = post_card(base, &Target::Reel("C2vXx0yPvYq".into()), &shown);
         assert_eq!(doc.type_name, "VideoObject");
@@ -381,6 +382,7 @@ mod tests {
                 "700M Followers, 100 Following, 8,000 Posts - See Instagram photos and videos from Instagram (@instagram)".into(),
             ),
             image: Some("https://example.com/avatar.jpg".into()),
+            ..OpenGraph::default()
         };
         let doc = profile_card(base.clone(), "instagram", &shown);
         assert_eq!(doc.type_name, "Person");

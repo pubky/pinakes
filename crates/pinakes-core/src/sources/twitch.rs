@@ -282,11 +282,19 @@ impl Source for Twitch {
             return Ok(doc);
         }
         let mut doc = match social::page(cx, &target.root()).await? {
-            Page::Read { doc: page, .. } => match &target {
-                Target::Channel(login) => channel_card(doc.clone(), login, &page)
-                    .unwrap_or_else(|| social::shape_only(plain_channel(doc, login))),
-                _ => video_card(doc, &target, &page),
-            },
+            Page::Read { doc: page, url } => {
+                // Only the object's own page names it: a fetch that ended at another address
+                // read another page.
+                let own = Target::of_uri(url.as_str()).as_ref() == Some(&target);
+                match &target {
+                    Target::Channel(login) => own
+                        .then_some(&page)
+                        .and_then(|page| channel_card(doc.clone(), login, page))
+                        .unwrap_or_else(|| social::shape_only(plain_channel(doc, login))),
+                    _ if own => video_card(doc, &target, &page),
+                    _ => social::shape_only(Shape::Video.card(doc, SITE)),
+                }
+            }
             Page::Missing => cx.missing(uri, self),
             Page::Blocked => social::blocked(doc, target.shape(), SITE),
         };

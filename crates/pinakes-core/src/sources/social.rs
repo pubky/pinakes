@@ -203,6 +203,17 @@ pub struct OpenGraph {
     pub title: Option<String>,
     pub description: Option<String>,
     pub image: Option<String>,
+    /// The address the page gives itself (`og:url`).
+    pub url: Option<String>,
+}
+impl OpenGraph {
+    /// The address of the page that was read: the one it gives itself (`og:url`), or without one
+    /// the address the fetch ended at. A fetch may end on another page than the one asked for (a
+    /// redirect, another page answered in its place), so a source takes a page's name and text
+    /// only when its own link parser reads this address as the object the link names.
+    pub fn address<'a>(&'a self, ended_at: &'a url::Url) -> &'a str {
+        self.url.as_deref().unwrap_or(ended_at.as_str())
+    }
 }
 
 /// The Open Graph tags of a page. Run under a parse slot (`html::blocking`).
@@ -224,6 +235,7 @@ pub fn open_graph(body: &str) -> Result<OpenGraph> {
             "og:title" => &mut tags.title,
             "og:description" => &mut tags.description,
             "og:image" => &mut tags.image,
+            "og:url" => &mut tags.url,
             _ => continue,
         };
         if slot.is_none() {

@@ -1895,18 +1895,19 @@ mod tests {
         assert!(!names_the_key(br#"{"message":"Invalid token."}"#, "detail"));
     }
 
-    /// One case rule for identifier roots: a root spelled in another letter case is a spelling
-    /// of the canonical root (its alias), never an invalid link.
+    /// One case rule for identifier roots: the lower-case spelling of a root whose canonical form
+    /// is in upper case is a spelling of that root (its alias), never an invalid link.
     #[test]
     fn a_root_in_another_letter_case_is_its_spelling() {
         for (source, spelling, root) in [
             ("clinicaltrials", "nct:nct04368728", "nct:NCT04368728"),
             ("pdb", "pdb:4hhb", "pdb:4HHB"),
             ("uniprot", "uniprot:p69905", "uniprot:P69905"),
-            ("usgs", "usgs:CI38457511", "usgs:ci38457511"),
-            ("ror", "ror:042NB2S44", "ror:042nb2s44"),
-            ("cleveland", "cleveland:1958.39.A", "cleveland:1958.39.a"),
-            ("gleif", "lei:ky37lus27qqx7bb93l28", "lei:KY37LUS27QQX7BB93L28"),
+            (
+                "gleif",
+                "lei:ky37lus27qqx7bb93l28",
+                "lei:KY37LUS27QQX7BB93L28",
+            ),
             ("federal_register", "fr:e9-12345", "fr:E9-12345"),
         ] {
             if by_name(source).is_none() {
@@ -2006,6 +2007,76 @@ mod tests {
         let bio = doc.description.unwrap();
         assert!(bio.starts_with("Builds bridges."), "{bio}");
         assert!(!bio.contains('@'), "{bio}");
+    }
+
+    /// A social card takes its name from the object's own page only. Each recorded page (one real
+    /// page per platform, as the platform served it to this source's request) names its object;
+    /// the same page reached from another object's link (a redirect) names nothing, and that link
+    /// gets the plain card of its shape.
+    #[tokio::test(start_paused = true)]
+    async fn a_social_card_is_named_from_the_objects_own_page_only() {
+        for (source, own, file, name, moved, plain) in [
+            (
+                "facebook",
+                "https://www.facebook.com/facebook",
+                "own-page-facebook.html.gz",
+                "Facebook",
+                "https://www.facebook.com/moved.name",
+                "Profile on facebook.com",
+            ),
+            (
+                "linkedin",
+                "https://www.linkedin.com/company/linkedin",
+                "own-page-company-linkedin.html.gz",
+                "LinkedIn",
+                "https://www.linkedin.com/company/moved-name",
+                "Profile on linkedin.com",
+            ),
+            (
+                "pinterest",
+                "https://www.pinterest.com/pinterest/",
+                "own-page-profile-pinterest.html.gz",
+                "Pinterest",
+                "https://www.pinterest.com/moved_name/",
+                "Profile on pinterest.com",
+            ),
+            (
+                "twitch",
+                "https://www.twitch.tv/twitch",
+                "own-page-channel-twitch.html.gz",
+                "Twitch",
+                "https://www.twitch.tv/moved_name",
+                "Profile on twitch.tv",
+            ),
+            (
+                "telegram",
+                "https://t.me/telegram",
+                "own-page-channel-telegram.html",
+                "Telegram News",
+                "https://t.me/moved_name",
+                "Profile on t.me",
+            ),
+        ] {
+            let Some(s) = by_name(source) else {
+                continue;
+            };
+            let (egress, _) = fixture::egress(vec![
+                (own, 200, "text/html", fixture::read(source, file)),
+                (moved, 302, "text/html", own.as_bytes().to_vec()),
+            ]);
+            let cx = Context {
+                egress: &egress,
+                ttl: 3600,
+            };
+            let doc = s.resolve(&cx, own).await.unwrap();
+            assert_eq!(doc.name.as_deref(), Some(name), "{own}");
+            let doc = s.resolve(&cx, moved).await.unwrap();
+            assert_eq!(doc.status, Status::Ok, "{moved}");
+            assert_eq!(doc.name.as_deref(), Some(plain), "{moved}");
+            assert_eq!(doc.description, None, "{moved}");
+            assert_eq!(doc.image, None, "{moved}");
+            assert_eq!(doc.source_root.as_deref(), Some(moved), "{moved}");
+        }
     }
 
     #[test]

@@ -95,6 +95,11 @@ impl Target {
             }
         }
     }
+    /// Whether the page read at `address` (`OpenGraph::address`) is this object's: the same
+    /// profile or company, under any of its spellings (a country's site, `/school/`).
+    fn is_at(&self, address: &str) -> bool {
+        Self::of_uri(address).as_ref() == Some(self)
+    }
     fn shape(&self) -> Shape {
         match self {
             Self::Post { .. } => Shape::Post,
@@ -282,9 +287,16 @@ impl Source for LinkedIn {
             return Ok(doc);
         }
         let mut doc = match social::page_body(cx, &target.root(), REFUSED).await? {
-            Body::Read { body, .. } => {
+            Body::Read { body, url } => {
                 let tags =
                     crate::resolver::html::blocking(move || social::open_graph(&body)).await??;
+                // Only the object's own page names it: a fetch may end on another page, whose
+                // tags are not read.
+                let tags = if target.is_at(tags.address(&url)) {
+                    tags
+                } else {
+                    OpenGraph::default()
+                };
                 match &target {
                     Target::Person(slug) => person_card(doc.clone(), slug, &tags)
                         .unwrap_or_else(|| social::shape_only(plain(doc, &target))),
@@ -433,7 +445,10 @@ mod tests {
         let doc = LinkedIn.resolve(&cx, company).await.unwrap();
         assert_eq!(doc.type_name, "Organization");
         assert_eq!(doc.attributes["blocked"], "true");
-        assert!(LinkedIn.social(&doc), "a company page is its owner's own text");
+        assert!(
+            LinkedIn.social(&doc),
+            "a company page is its owner's own text"
+        );
     }
 
     /// A 200 page without a profile's or a company's tags (a consent page, LinkedIn's generic

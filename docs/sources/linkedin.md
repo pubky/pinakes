@@ -38,6 +38,8 @@ card of the link's shape alone, "Profile on linkedin.com", with the
 the request came from (451): it is not `missing`. A refusal on a refresh keeps the card read before,
 as a wall on a web page does.
 
+A card takes its name, text and picture only from the object's own page: when the page read (its `og:url`, else the address the fetch ended at) names another object, as after a redirect, the card is the plain one of the link's shape, as for a page without tags.
+
 ## Card
 
 A profile is a `Person` named by its display name, with its about text (else its headline)

@@ -17,6 +17,15 @@
     "status": 200,
     "url": "https://t.me/telegram"
   },
+  "own-page-channel-telegram": {
+    "bytes": 11139,
+    "content_type": "text/html; charset=utf-8",
+    "file": "own-page-channel-telegram.html",
+    "recorded_at": "2026-11-21T18:47:58+00:00",
+    "sha256": "7acd0a0d7aa2acd978756c5a5ad969f389a6a105f136d03fd8155bb9cb8c7119",
+    "status": 200,
+    "url": "https://t.me/telegram"
+  },
   "post-missing": {
     "bytes": 12818,
     "content_type": "text/html; charset=utf-8",

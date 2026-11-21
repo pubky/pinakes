@@ -124,6 +124,13 @@ impl Target {
     }
 }
 
+/// Whether the page read at `address` (`OpenGraph::address`) is the page `name`. Facebook reads
+/// a name without its dots and in any case, so they do not count.
+fn own_page(name: &str, address: &str) -> bool {
+    let plain = |name: &str| name.replace('.', "").to_ascii_lowercase();
+    matches!(Target::of_uri(address), Some(Target::Page(read)) if plain(&read) == plain(name))
+}
+
 /// The card of a page by its link alone, "Profile on facebook.com" with the name the link
 /// spells: what a page without tags gives. Such a page (a consent page, Facebook's generic
 /// page) does not say whether the page exists.
@@ -198,7 +205,10 @@ impl Source for Facebook {
     }
     fn social(&self, doc: &ResourceMeta) -> bool {
         // A post, and a page (its about text is its owner's own).
-        matches!(doc.type_name.as_str(), "SocialMediaPosting" | "Organization")
+        matches!(
+            doc.type_name.as_str(),
+            "SocialMediaPosting" | "Organization"
+        )
     }
     fn examples(&self) -> &'static [Example] {
         &[Example {
@@ -211,10 +221,13 @@ impl Source for Facebook {
         let doc = cx.card(uri, self);
         let mut doc = match &target {
             Target::Page(name) => match social::page_body(cx, &target.root(), &[]).await? {
-                Body::Read { body, .. } => {
+                Body::Read { body, url } => {
                     let tags = crate::resolver::html::blocking(move || social::open_graph(&body))
                         .await??;
-                    page_card(doc.clone(), name, &tags)
+                    // Only the page's own tags name it: a fetch may end on another page.
+                    Some(&tags)
+                        .filter(|tags| own_page(name, tags.address(&url)))
+                        .and_then(|tags| page_card(doc.clone(), name, tags))
                         .unwrap_or_else(|| social::shape_only(plain_page(doc, name)))
                 }
                 Body::Missing => cx.missing(uri, self),

@@ -19,9 +19,12 @@ links (`/+…`, `/joinchat/…`) and private channels (`/c/…`) are not read.
   user, a private channel, no such name) answers "Telegram: Contact @name": the plain card,
   "Profile on t.me", with the name alone.
 
-A request t.me refuses (a challenge, 401 or 403) gives the card of the link's shape alone with
-the `blocked` fact: the link still resolves, groups and counts. A refusal on a refresh keeps the card read before, as a wall on a web page does. So does a page t.me withholds
-where the request came from (451): it is not `missing`.
+A request t.me refuses (a challenge, 401 or 403) gives the card of the link's shape alone with the
+`blocked` fact: the link still resolves, groups and counts. So does a page t.me withholds where the
+request came from (451): it is not `missing`. A refusal on a refresh keeps the card read before, as
+a wall on a web page does.
+
+A card takes its name, text and picture only from the object's own page: when the page read (the address the fetch ended at) names another object, as after a redirect, the card is the plain one of the link's shape, as for a page without tags.
 
 ## Card
 
