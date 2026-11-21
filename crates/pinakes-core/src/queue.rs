@@ -509,7 +509,8 @@ async fn run_job_inner(
     job: &Job,
 ) -> Result<()> {
     let confirming = confirming(pool, std::slice::from_ref(job)).await?;
-    let result = resolve(resolver, &job.uri, confirming).await;
+    let stored = crate::sources::stored(pool, std::slice::from_ref(job)).await?;
+    let result = crate::sources::with_stored(stored, resolve(resolver, &job.uri, confirming)).await;
     guarded_finish_job(
         pool,
         resolver,
@@ -555,7 +556,9 @@ async fn guarded_finish_job(
                         .execute(pool)
                         .await?;
                     let confirming = confirming(pool, std::slice::from_ref(job)).await?;
-                    match resolve(resolver, &job.uri, confirming).await {
+                    let stored = crate::sources::stored(pool, std::slice::from_ref(job)).await?;
+                    let read = resolve(resolver, &job.uri, confirming);
+                    match crate::sources::with_stored(stored, read).await {
                         Err(error) if error.is::<crate::resolver::NotModified>() => Ok(doc),
                         other => other,
                     }
@@ -992,6 +995,7 @@ async fn run_batch_within(
             resolve.await
         }
     };
+    let resolve = crate::sources::with_stored(crate::sources::stored(pool, jobs).await?, resolve);
     let results = tokio::time::timeout(deadline, resolve).await;
     let late = results.is_err();
     let results = match results {

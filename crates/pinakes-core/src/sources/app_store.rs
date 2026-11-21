@@ -2,11 +2,14 @@
 //! key, no account.
 //!
 //! Every App Store link of one app (any storefront, with or without its name) is an alias of
-//! `https://apps.apple.com/app/id{id}`. The lookup asks the United States storefront first; when
-//! that storefront does not sell the app, it asks the storefront a link of the app named (the
-//! country in the link, remembered since the daemon started), so one root per app shows the US
-//! record whenever there is one. An app no asked storefront sells is missing. The app's
-//! `bundleId` is Apple's alone: it is a fact, never the Android package.
+//! `https://apps.apple.com/app/id{id}`. The lookup asks the United States storefront first, so
+//! one root per app shows the US record whenever there is one. When the US storefront does not
+//! sell the app, it asks the storefront that sold it at the last read (the card's `storefront`
+//! fact, kept with the stored card), then the storefront a link of the app named (the latest
+//! seen since the daemon started). A link's storefront counts only once its lookup returned the
+//! app: one that does not sell it is forgotten and never decides the card. An app no asked
+//! storefront sells is missing. The app's `bundleId` is Apple's alone: it is a fact, never the
+//! Android package.
 use super::{
     kit::{fetch, float, int, json, text, time, web_url, Card, Request},
     Example, Source,
@@ -36,12 +39,11 @@ fn link(uri: &str) -> Option<(String, Option<String>)> {
         return None;
     }
     let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
-    let country = |cc: &str| cc.len() == 2 && cc.bytes().all(|b| b.is_ascii_lowercase());
     // The app's name in the link is any one segment (Japanese names included).
     let name = |n: &str| !n.is_empty() && n.len() <= 600;
     let (cc, id) = match segments.as_slice() {
-        [cc, "app", n, id] if country(cc) && name(n) => (Some(*cc), id),
-        [cc, "app", id] if country(cc) => (Some(*cc), id),
+        [cc, "app", n, id] if storefront(cc) && name(n) => (Some(*cc), id),
+        [cc, "app", id] if storefront(cc) => (Some(*cc), id),
         ["app", n, id] if name(n) => (None, id),
         ["app", id] => (None, id),
         _ => return None,
@@ -49,12 +51,12 @@ fn link(uri: &str) -> Option<(String, Option<String>)> {
     Some((app_id(id.strip_prefix("id")?)?, cc.map(str::to_owned)))
 }
 
-/// The storefront other than the US one that a link of each app named (the latest one seen): what
-/// the lookup asks when the US storefront does not sell the app. Kept while the daemon runs, up
-/// to `STOREFRONTS_CAP` apps (at the cap, the smallest app id makes room).
-static STOREFRONTS: std::sync::Mutex<BTreeMap<String, String>> =
-    std::sync::Mutex::new(BTreeMap::new());
-const STOREFRONTS_CAP: usize = 10_000;
+/// The storefront other than the US one that a link of each app named (the latest one seen),
+/// until its lookup did not return the app: what the lookup asks when neither the US storefront
+/// nor the one the card was read from sells the app. Kept while the daemon runs, up to `LINKED_CAP` apps (at the cap, the
+/// smallest app id makes room).
+static LINKED: std::sync::Mutex<BTreeMap<String, String>> = std::sync::Mutex::new(BTreeMap::new());
+const LINKED_CAP: usize = 10_000;
 
 /// Remember the storefront `uri` names for its app, when it names one other than the US.
 fn remember(uri: &str) {
@@ -64,17 +66,33 @@ fn remember(uri: &str) {
     if cc == "us" {
         return;
     }
-    let mut seen = STOREFRONTS.lock().unwrap_or_else(|e| e.into_inner());
-    if seen.len() >= STOREFRONTS_CAP && !seen.contains_key(&id) {
+    let mut seen = LINKED.lock().unwrap_or_else(|e| e.into_inner());
+    if seen.len() >= LINKED_CAP && !seen.contains_key(&id) {
         seen.pop_first();
     }
     seen.insert(id, cc);
 }
 
 /// The storefront a link of app `id` named, other than the US one.
-fn storefront(id: &str) -> Option<String> {
-    let seen = STOREFRONTS.lock().unwrap_or_else(|e| e.into_inner());
-    seen.get(id).cloned()
+fn linked(id: &str) -> Option<String> {
+    LINKED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(id)
+        .cloned()
+}
+
+/// Forget storefront `cc` of app `id` once its lookup did not return the app.
+fn forget(id: &str, cc: &str) {
+    let mut seen = LINKED.lock().unwrap_or_else(|e| e.into_inner());
+    if seen.get(id).is_some_and(|c| c == cc) {
+        seen.remove(id);
+    }
+}
+
+/// A storefront code: two lower-case letters.
+fn storefront(cc: &str) -> bool {
+    cc.len() == 2 && cc.bytes().all(|b| b.is_ascii_lowercase())
 }
 
 pub fn page(id: &str) -> String {
@@ -86,7 +104,7 @@ pub fn request(id: &str, cc: Option<&str>) -> Option<Request> {
     let id = app_id(id)?;
     let url = match cc {
         Some(cc) => {
-            if cc.len() != 2 || !cc.bytes().all(|b| b.is_ascii_lowercase()) {
+            if !storefront(cc) {
                 return None;
             }
             format!("https://itunes.apple.com/lookup?id={id}&country={cc}")
@@ -195,7 +213,11 @@ impl Source for AppStore {
             "content_rating",
             "released",
             "updated",
+            "storefront",
         ]
+    }
+    fn reads_back(&self) -> &'static [&'static str] {
+        &["storefront"]
     }
     fn budgets(&self) -> &'static [super::Budget] {
         // Apple asks for about 20 calls a minute.
@@ -219,15 +241,38 @@ impl Source for AppStore {
         };
         let f = fetch(cx, &request(&id, None).context("no request")?).await?;
         let mut card = parse(f.status, &f.body, &id)?;
-        // The US storefront does not sell it: ask the one a link of the app named.
-        if card.is_none() {
-            if let Some(cc) = cc.or_else(|| storefront(&id)).filter(|cc| cc != "us") {
-                let f = fetch(cx, &request(&id, Some(&cc)).context("no request")?).await?;
-                card = parse(f.status, &f.body, &id)?;
+        let mut from = None;
+        // The US storefront does not sell it: ask the one the card was read from, which decides
+        // as the US one does.
+        let known = cx
+            .stored(uri, "storefront")
+            .filter(|cc| storefront(cc) && cc != "us");
+        if let (None, Some(cc)) = (&card, &known) {
+            let f = fetch(cx, &request(&id, Some(cc)).context("no request")?).await?;
+            card = parse(f.status, &f.body, &id)?;
+            from = known.clone();
+        }
+        // Then the one a link named, which counts only once it returned the app: a lookup that
+        // fails for it (a code Apple does not know) is one more storefront that does not sell it,
+        // and only a busy or failing service is a retry.
+        let linked = cc
+            .or_else(|| linked(&id))
+            .filter(|cc| cc != "us" && Some(cc) != known.as_ref());
+        if let (None, Some(cc)) = (&card, linked) {
+            let f = fetch(cx, &request(&id, Some(&cc)).context("no request")?).await?;
+            match parse(f.status, &f.body, &id) {
+                Ok(Some(found)) => {
+                    card = Some(found);
+                    from = Some(cc);
+                }
+                _ => forget(&id, &cc),
             }
         }
         Ok(match card {
-            Some(card) => card.into_doc(cx.card(uri, self), SITE),
+            Some(mut card) => {
+                card.detail("storefront", from);
+                card.into_doc(cx.card(uri, self), SITE)
+            }
             None => cx.missing(uri, self),
         })
     }
@@ -324,42 +369,89 @@ mod tests {
             .collect()
     }
 
-    /// An app the US storefront does not sell is read from the storefront its link names, under
-    /// the one root of the app.
+    /// The stored card's facts of `uri` that a queue job hands its read (`sources::stored`).
+    fn stored(uri: &str, cc: &str) -> BTreeMap<String, BTreeMap<String, String>> {
+        BTreeMap::from([(
+            uri.to_owned(),
+            BTreeMap::from([("storefront".to_owned(), cc.to_owned())]),
+        )])
+    }
+
+    /// An app the US storefront does not sell is read from the storefront a link of it names,
+    /// under the one root of the app, and the card keeps that storefront: a later read (after a
+    /// restart, with nothing in memory) asks it again. A link's storefront that does not sell the
+    /// app, or a code that is no storefront, never decides the card.
     #[tokio::test(start_paused = true)]
-    async fn an_app_the_us_storefront_does_not_sell_is_read_from_the_links_storefront() {
-        let (egress, recorded) = fixture::egress(answers(&[
-            (
-                "https://itunes.apple.com/lookup?id=1225135057",
-                "lookup-1225135057.json",
-            ),
-            (
-                "https://itunes.apple.com/lookup?id=1225135057&country=ch",
-                "lookup-1225135057-ch.json",
-            ),
-        ]));
+    async fn a_storefront_counts_once_it_returned_the_app_and_stays_with_the_card() {
+        use crate::model::Status;
+        let us = "https://itunes.apple.com/lookup?id=1225135057";
+        let ch = "https://itunes.apple.com/lookup?id=1225135057&country=ch";
+        let de = "https://itunes.apple.com/lookup?id=1225135057&country=de";
+        let zz = "https://itunes.apple.com/lookup?id=1225135057&country=zz";
+        let mut routes = answers(&[
+            (us, "lookup-1225135057.json"),
+            (ch, "lookup-1225135057-ch.json"),
+            (de, "lookup-1225135057-de.json"),
+        ]);
+        routes.push((
+            zz,
+            400,
+            "text/javascript",
+            read("lookup-1225135057-zz.json"),
+        ));
+        let (egress, recorded) = fixture::egress(routes);
         let cx = crate::sources::Context {
             egress: &egress,
             ttl: 3600,
         };
-        let link = "https://apps.apple.com/ch/app/postfinance-twint/id1225135057";
-        let root = AppStore.alias_root(link).unwrap();
-        assert_eq!(root, "https://apps.apple.com/app/id1225135057");
-        // The root is read (an alias never is): the storefront comes from the link seen.
-        let doc = AppStore.resolve(&cx, &root).await.unwrap();
-        assert_eq!(doc.status, crate::model::Status::Ok);
-        assert_eq!(doc.name.as_deref(), Some("PostFinance TWINT"));
+        let root = "https://apps.apple.com/app/id1225135057";
+        let asked = |from: usize| recorded.asked()[from..].to_vec();
+
+        // A made-up code in a link: asked once, it does not sell the app (no card yet).
         assert_eq!(
-            recorded.asked(),
-            [
-                "https://itunes.apple.com/lookup?id=1225135057",
-                "https://itunes.apple.com/lookup?id=1225135057&country=ch"
-            ]
+            AppStore
+                .alias_root("https://apps.apple.com/zz/app/postfinance-twint/id1225135057")
+                .as_deref(),
+            Some(root)
         );
+        let doc = AppStore.resolve(&cx, root).await.unwrap();
+        assert_eq!(doc.status, Status::Missing);
+        assert_eq!(asked(0), [us, zz]);
+        assert_eq!(linked("1225135057"), None, "forgotten once asked");
+
+        // The link's storefront sells it: the card is its record and keeps the storefront.
+        AppStore.alias_root("https://apps.apple.com/ch/app/postfinance-twint/id1225135057");
+        let doc = AppStore.resolve(&cx, root).await.unwrap();
+        assert_eq!(doc.status, Status::Ok);
+        assert_eq!(doc.name.as_deref(), Some("PostFinance TWINT"));
+        assert_eq!(doc.attributes["storefront"], "ch");
+        assert_eq!(asked(2), [us, ch]);
+        // Kept until the card that names it is stored.
+        assert_eq!(linked("1225135057").as_deref(), Some("ch"));
+
+        // A fresh process: no link seen, only the stored card's storefront.
+        forget("1225135057", "ch");
+        let doc = crate::sources::with_stored(stored(root, "ch"), AppStore.resolve(&cx, root))
+            .await
+            .unwrap();
+        assert_eq!(doc.status, Status::Ok);
+        assert_eq!(doc.attributes["storefront"], "ch");
+        assert_eq!(asked(4), [us, ch]);
+
+        // Links tagged with storefronts that do not sell it leave the card as it is.
+        AppStore.alias_root("https://apps.apple.com/zz/app/id1225135057");
+        AppStore.alias_root("https://apps.apple.com/de/app/id1225135057");
+        let doc = crate::sources::with_stored(stored(root, "ch"), AppStore.resolve(&cx, root))
+            .await
+            .unwrap();
+        assert_eq!(doc.status, Status::Ok);
+        assert_eq!(doc.name.as_deref(), Some("PostFinance TWINT"));
+        assert_eq!(asked(6), [us, ch]);
     }
 
     /// When the US storefront sells the app, its record is the card, whichever storefront the
-    /// link names; an app no storefront sells is missing.
+    /// link names; an app no storefront sells is missing, once the US storefront and the one the
+    /// card was read from were both asked.
     #[tokio::test(start_paused = true)]
     async fn the_us_record_wins_and_an_app_nobody_sells_is_missing() {
         let (egress, recorded) = fixture::egress(answers(&[
@@ -369,6 +461,10 @@ mod tests {
             ),
             (
                 "https://itunes.apple.com/lookup?id=1",
+                "lookup-missing.json",
+            ),
+            (
+                "https://itunes.apple.com/lookup?id=1&country=ch",
                 "lookup-missing.json",
             ),
         ]));
@@ -384,15 +480,33 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(doc.name.as_deref(), Some("Signal - Private Messenger"));
+        assert!(!doc.attributes.contains_key("storefront"));
+        // The US record wins over the storefront the card was read from, too.
+        let signal = "https://apps.apple.com/app/id874139669";
+        let doc = crate::sources::with_stored(stored(signal, "ch"), AppStore.resolve(&cx, signal))
+            .await
+            .unwrap();
+        assert_eq!(doc.name.as_deref(), Some("Signal - Private Messenger"));
+        assert!(!doc.attributes.contains_key("storefront"));
         assert_eq!(
             recorded.asked(),
-            ["https://itunes.apple.com/lookup?id=874139669"]
+            [
+                "https://itunes.apple.com/lookup?id=874139669",
+                "https://itunes.apple.com/lookup?id=874139669"
+            ]
         );
-        let doc = AppStore
-            .resolve(&cx, "https://apps.apple.com/app/id1")
+        let gone = "https://apps.apple.com/app/id1";
+        let doc = crate::sources::with_stored(stored(gone, "ch"), AppStore.resolve(&cx, gone))
             .await
             .unwrap();
         assert_eq!(doc.status, crate::model::Status::Missing);
+        assert_eq!(
+            recorded.asked()[2..],
+            [
+                "https://itunes.apple.com/lookup?id=1",
+                "https://itunes.apple.com/lookup?id=1&country=ch"
+            ]
+        );
     }
 
     #[test]

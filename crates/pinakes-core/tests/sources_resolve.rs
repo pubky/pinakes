@@ -142,6 +142,23 @@ impl Transport for Scripted {
             (Some("pubchem.ncbi.nlm.nih.gov"), path) if path.starts_with("/rest/pug/compound/cid/2244/property/") => Ok(
                 answer(u, 200, r#"{"PropertyTable":{"Properties":[{"CID":2244,"MolecularFormula":"C9H8O4","Title":"Aspirin","InChIKey":"BSYNRYMUTXBXSQ-UHFFFAOYSA-N"}]}}"#.into()),
             ),
+            // The US storefront does not sell the app; Switzerland does; `zz` is no storefront.
+            (Some("itunes.apple.com"), "/lookup") => {
+                let file = match u.query() {
+                    Some("id=1225135057") => "lookup-1225135057.json",
+                    Some("id=1225135057&country=ch") => "lookup-1225135057-ch.json",
+                    Some("id=1225135057&country=zz") => "lookup-1225135057-zz.json",
+                    _ => anyhow::bail!("no script for {u}"),
+                };
+                let body = std::fs::read(format!(
+                    "{}/tests/fixtures/sources/app_store/{file}",
+                    env!("CARGO_MANIFEST_DIR")
+                ))?;
+                let status = if file.ends_with("-zz.json") { 400 } else { 200 };
+                let mut lookup = answer(u, status, String::from_utf8(body)?);
+                lookup.content_type = "text/javascript; charset=utf-8".into();
+                Ok(lookup)
+            }
             // X walls every profile page.
             (Some("x.com"), _) => {
                 let mut page = answer(u, 403, "<html>Sign in to X</html>".into());
@@ -459,4 +476,57 @@ async fn a_gone_profile_is_purged_like_a_post(pool: sqlx::PgPool) {
     .unwrap();
     assert_eq!(status, "missing");
     assert_eq!((name, description, image), (None, None, None));
+}
+
+/// An App Store card read from the storefront a link named keeps that storefront with the stored
+/// card: the daemon's next jobs, with nothing in memory naming it (as after a restart), read the
+/// same record, and a link tagged with a code that is no storefront leaves the card ok.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_app_store_card_keeps_its_storefront_across_restarts(pool: sqlx::PgPool) {
+    use pinakes_core::{queue, sources, store};
+    let Some(app_store) = sources::by_name("app_store") else {
+        return;
+    };
+    let resolver = official();
+    let root = "https://apps.apple.com/app/id1225135057";
+    let id = store::ensure_resource(&pool, root).await.unwrap();
+    let job = queue::Job {
+        id: id.clone(),
+        uri: root.into(),
+        attempts: 0,
+        generation: 0,
+    };
+    let row = || {
+        let pool = pool.clone();
+        let id = id.clone();
+        async move {
+            sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+                "SELECT status, doc->>'name', doc->'attributes'->>'storefront' FROM resource WHERE id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let ok = (
+        "ok".to_owned(),
+        Some("PostFinance TWINT".to_owned()),
+        Some("ch".to_owned()),
+    );
+    // A link names the storefront; the root's job reads it there.
+    app_store.alias_root("https://apps.apple.com/ch/app/postfinance-twint/id1225135057");
+    queue::run_job(&pool, &resolver, &Default::default(), &job)
+        .await
+        .unwrap();
+    assert_eq!(row().await, ok);
+    // The latest link names a made-up code: nothing in memory names Switzerland any more, only
+    // the stored card does, and the card stays ok.
+    app_store.alias_root("https://apps.apple.com/zz/app/id1225135057");
+    for _ in 0..3 {
+        queue::run_job(&pool, &resolver, &Default::default(), &job)
+            .await
+            .unwrap();
+        assert_eq!(row().await, ok);
+    }
 }

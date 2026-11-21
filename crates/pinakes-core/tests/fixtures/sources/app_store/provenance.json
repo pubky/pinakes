@@ -17,6 +17,24 @@
     "status": 200,
     "url": "https://itunes.apple.com/lookup?id=1225135057&country=ch"
   },
+  "lookup-1225135057-de": {
+    "bytes": 42,
+    "content_type": "text/javascript; charset=utf-8",
+    "file": "lookup-1225135057-de.json",
+    "recorded_at": "2026-11-21T20:31:20+00:00",
+    "sha256": "7f5ce663b726607eae2fde2a6dc438052ac0d1681e636de7cc3377c0bb77e047",
+    "status": 200,
+    "url": "https://itunes.apple.com/lookup?id=1225135057&country=de"
+  },
+  "lookup-1225135057-zz": {
+    "bytes": 306,
+    "content_type": "text/javascript; charset=utf-8",
+    "file": "lookup-1225135057-zz.json",
+    "recorded_at": "2026-11-21T20:31:20+00:00",
+    "sha256": "e225afdaea9f1f096edfb43e87da7f2699ebbedd63858abe591a5f583c93c38d",
+    "status": 400,
+    "url": "https://itunes.apple.com/lookup?id=1225135057&country=zz"
+  },
   "lookup-874139669": {
     "bytes": 9903,
     "content_type": "text/javascript; charset=utf-8",

@@ -194,6 +194,11 @@ pub trait Source: Send + Sync {
     fn facts(&self) -> &'static [&'static str] {
         &[]
     }
+    /// The facts of its stored card a read of the link sees again (`Context::stored`): what an
+    /// earlier read learnt that the link alone does not say. Each is one of `facts`.
+    fn reads_back(&self) -> &'static [&'static str] {
+        &[]
+    }
     /// The service's published limits per host, as `(host, requests_per_second)`; a windowed
     /// limit is given as its average rate (60 per minute → 1.0). The rate lowers the host's
     /// default (`limits.host_requests_per_second`), never raises it: one above the default
@@ -483,6 +488,53 @@ tokio::task_local! {
     /// fetches beyond its card.
     static DEADLINE: tokio::time::Instant;
 }
+tokio::task_local! {
+    /// The facts the jobs' sources read back of their stored cards (`Source::reads_back`), by link.
+    static STORED: BTreeMap<String, BTreeMap<String, String>>;
+}
+/// What the sources of `jobs` read back of their stored cards in `pool` (`Source::reads_back`),
+/// by link, for `with_stored`. It asks the database only when such a source reads one of them.
+pub async fn stored(
+    pool: &sqlx::PgPool,
+    jobs: &[crate::queue::Job],
+) -> Result<BTreeMap<String, BTreeMap<String, String>>> {
+    let wanted: BTreeMap<&str, (&str, &'static [&'static str])> = jobs
+        .iter()
+        .filter_map(|j| {
+            let facts = reading(&j.uri)?.reads_back();
+            (!facts.is_empty()).then_some((j.id.as_str(), (j.uri.as_str(), facts)))
+        })
+        .collect();
+    let mut stored = BTreeMap::new();
+    if wanted.is_empty() {
+        return Ok(stored);
+    }
+    let ids: Vec<&str> = wanted.keys().copied().collect();
+    let rows: Vec<(String, Option<serde_json::Value>)> =
+        sqlx::query_as("SELECT id, doc->'attributes' FROM resource WHERE id=ANY($1)")
+            .bind(&ids)
+            .fetch_all(pool)
+            .await?;
+    for (id, attributes) in rows {
+        let (Some((uri, facts)), Some(attributes)) = (wanted.get(id.as_str()), attributes) else {
+            continue;
+        };
+        let kept: BTreeMap<String, String> = facts
+            .iter()
+            .filter_map(|f| Some(((*f).to_owned(), attributes.get(*f)?.as_str()?.to_owned())))
+            .collect();
+        stored.insert((*uri).to_owned(), kept);
+    }
+    Ok(stored)
+}
+/// Run `read` with `stored` (from `stored()`) as what its sources' contexts see
+/// (`Context::stored`).
+pub async fn with_stored<F: std::future::Future>(
+    stored: BTreeMap<String, BTreeMap<String, String>>,
+    read: F,
+) -> F::Output {
+    STORED.scope(stored, read).await
+}
 /// Run `hook` with `deadline` as the deadline its context reports (`Context::deadline`).
 pub async fn within<F: std::future::Future>(deadline: tokio::time::Instant, hook: F) -> F::Output {
     DEADLINE.scope(deadline, hook).await
@@ -499,6 +551,14 @@ impl Context<'_> {
     /// route, which has the fetch to itself.
     pub fn deadline(&self) -> Option<tokio::time::Instant> {
         DEADLINE.try_with(|d| *d).ok()
+    }
+    /// Fact `name` of the stored card of `uri`, when its source reads it back
+    /// (`Source::reads_back`) and the queue's job of `uri` runs this read.
+    pub fn stored(&self, uri: &str, name: &str) -> Option<String> {
+        STORED
+            .try_with(|s| s.get(uri).and_then(|facts| facts.get(name)).cloned())
+            .ok()
+            .flatten()
     }
     /// A GET (or, with `options.json_body`, a POST) through the egress policy. A rate limit
     /// (429), a request timeout (408) and a server error become `RetryLater` (`retry`, classes

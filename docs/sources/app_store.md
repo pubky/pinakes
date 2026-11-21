@@ -17,12 +17,19 @@ A developer's page and a page under the app (reviews) are not read.
 ## What it reads
 
 `GET https://itunes.apple.com/lookup?id={id}`, the United States storefront. It answers
-`text/javascript` holding JSON. An app that storefront does not sell answers no result; then it
-asks the storefront a link of the app named, `GET
-https://itunes.apple.com/lookup?id={id}&country={country}` (the country in the link; for the
-app's root, the one a link of the app named since the daemon started). When both storefronts sell
-the app, the card is the US record (one resource per app). An app no asked storefront sells is
-`missing`.
+`text/javascript` holding JSON. When both the US storefront and another one sell the app, the
+card is the US record (one resource per app). An app the US storefront does not sell answers no
+result; then the read asks, with `GET https://itunes.apple.com/lookup?id={id}&country={country}`:
+
+1. the storefront the card was read from at its last read (its `storefront` fact, kept with the
+   stored card, so it holds across restarts);
+2. when that one does not sell it either, or the card has none, the storefront the latest link of
+   the app named since the daemon started (the country in the link).
+
+A storefront from a link counts only once its lookup returned the app (the card then keeps it):
+one that does not sell the app, or a code that is no storefront (the lookup answers 400), is
+forgotten once asked and never decides the card, so tagging such a link leaves a card read from another storefront as it is. An app no
+asked storefront sells is `missing`.
 
 ## Card
 
@@ -40,6 +47,7 @@ the app, the card is the US record (one resource per app). An app no asked store
 | `rating`, `rating_count` | The average rating (two decimals) and the number of ratings |
 | `content_rating` | The age rating, e.g. "12+" |
 | `released`, `updated` | When the app and its current version were released (RFC 3339) |
+| `storefront` | The storefront the card was read from, e.g. "ch", when the US storefront does not sell the app |
 | `page_url` | `https://apps.apple.com/app/id{id}` |
 
 The app's other stores come from the `apps` also-on family.
