@@ -3,21 +3,20 @@
 //! `PINAKES_COURTLISTENER_TOKEN`): the API answers no request without one (401), and the opinion
 //! pages answer bots with a challenge. Without a token the source is off and opinion links get
 //! ordinary web cards. The token goes only to `www.courtlistener.com`, never through a redirect,
-//! and never appears in logs, errors or cards. A token CourtListener refuses (401 or 403) turns the
-//! source off until the daemon restarts, and
-//! `pinakes_source_token_refusals_total{source="courtlistener"}` counts it. Case law is in the
-//! public domain.
+//! and never appears in logs, errors or cards. A token CourtListener refuses (401, or a 403 whose
+//! JSON `detail` names the token) turns the source off for an hour (`Refusals`), and
+//! `pinakes_source_token_refusals_total{source="courtlistener"}` counts it. Any other 403 is a
+//! failure of that link alone. Case law is in the public domain.
 use super::{list, text, texts, Budget, Context, Declined, Example, Source};
 use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use serde_json::Value;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 pub struct Courtlistener;
 
-/// Whether CourtListener has refused the configured token since the daemon started.
-static REFUSED: AtomicBool = AtomicBool::new(false);
+/// CourtListener's refusals of the configured token.
+static REFUSALS: super::Refusals = super::Refusals::new("courtlistener");
 
 /// The search request with `token`.
 fn options(token: &str) -> FetchOptions {
@@ -27,6 +26,8 @@ fn options(token: &str) -> FetchOptions {
         // Errors and cache keys never carry the header; a redirect is answered, not followed.
         sensitive: true,
         keep_redirect: true,
+        // A 403's JSON says whether the token is what was refused.
+        error_json: true,
         ..Default::default()
     }
 }
@@ -63,7 +64,7 @@ pub fn root(id: u64) -> String {
 pub enum Answer {
     Card(Box<ResourceMeta>),
     Missing,
-    /// The token was refused (401 or 403).
+    /// The token was refused (401, or 403 naming it).
     Refused,
 }
 
@@ -79,7 +80,10 @@ pub async fn read(cx: &Context<'_>, doc: ResourceMeta, id: u64, token: &str) -> 
             &options(token),
         )
         .await?;
-    if matches!(f.status, 401 | 403) {
+    // A 403 is a refusal of the token only when CourtListener's own answer says so ("Invalid
+    // token.", "Authentication credentials were not provided."); another 403 (a forbidden
+    // object, a firewall's page) is that link's failure.
+    if f.status == 401 || (f.status == 403 && super::names_the_key(&f.body, "detail")) {
         return Ok(Answer::Refused);
     }
     super::retry(&f)?;
@@ -205,22 +209,32 @@ impl Source for Courtlistener {
     }
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
         let id = of_uri(uri).context("not an opinion")?;
-        let Some(token) = super::token(self.name()).filter(|_| !REFUSED.load(Ordering::Relaxed))
-        else {
+        let Some(token) = super::token(self.name()) else {
             return Err(Declined.into());
         };
-        match read(cx, cx.card(uri, self), id, &token).await? {
-            Answer::Card(doc) => Ok(*doc),
-            Answer::Missing => Ok(cx.missing(uri, self)),
-            Answer::Refused => {
-                super::token_refused(self.name());
-                if !REFUSED.swap(true, Ordering::Relaxed) {
-                    tracing::warn!(
-                        "CourtListener refused the configured token; its links get web cards until restart"
-                    );
-                }
-                Err(Declined.into())
+        resolve_with(cx, uri, id, &token, &REFUSALS).await
+    }
+}
+
+/// The card of opinion cluster `id` at `uri` with `token`, `Declined` while `refusals` holds it.
+async fn resolve_with(
+    cx: &Context<'_>,
+    uri: &str,
+    id: u64,
+    token: &str,
+    refusals: &super::Refusals,
+) -> Result<ResourceMeta> {
+    refusals.check()?;
+    match read(cx, cx.card(uri, &Courtlistener), id, token).await? {
+        Answer::Card(doc) => Ok(*doc),
+        Answer::Missing => Ok(cx.missing(uri, &Courtlistener)),
+        Answer::Refused => {
+            if refusals.refused() {
+                tracing::warn!(
+                    "CourtListener refused the configured token; its links get web cards for an hour"
+                );
             }
+            Err(Declined.into())
         }
     }
 }
@@ -317,6 +331,23 @@ mod tests {
                 (Some("Token good-token"), _) => {
                     (200, "search_o_cluster_id_999999999_missing.json")
                 }
+                (Some("Token forbidden-token"), _) => {
+                    return Ok(crate::resolver::egress::Fetched::answer(
+                        url.clone(),
+                        403,
+                        "application/json".into(),
+                        br#"{"detail":"You do not have permission to perform this action."}"#
+                            .to_vec(),
+                    ))
+                }
+                (Some("Token invalid-token"), _) => {
+                    return Ok(crate::resolver::egress::Fetched::answer(
+                        url.clone(),
+                        403,
+                        "application/json".into(),
+                        br#"{"detail":"Invalid token."}"#.to_vec(),
+                    ))
+                }
                 _ => (401, "search_unauthenticated_401.json"),
             };
             Ok(crate::resolver::egress::Fetched::answer(
@@ -372,5 +403,49 @@ mod tests {
                 Some("Token stale-token".to_owned())
             ]
         );
+    }
+
+    /// A 403 is a refusal only when its `detail` names the token; a refusal switches the token
+    /// off for an hour (links are `Declined` meanwhile), and it is used again after.
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_token_is_off_for_an_hour_and_only_a_403_naming_it_counts() {
+        let api = std::sync::Arc::new(Api {
+            seen: Default::default(),
+        });
+        let egress = crate::resolver::egress::Egress::with_backends(
+            Default::default(),
+            std::sync::Arc::new(crate::sources::fixture::PublicDns),
+            api.clone(),
+        );
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let uri = root(2812209);
+        let declined = |r: Result<ResourceMeta>| r.is_err_and(|e| e.is::<Declined>());
+        // Another 403 is this link's failure, and no refusal.
+        let refusals = crate::sources::Refusals::new("courtlistener");
+        let error = resolve_with(&cx, &uri, 2812209, "forbidden-token", &refusals)
+            .await
+            .unwrap_err();
+        assert!(!error.is::<Declined>());
+        assert!(!refusals.latched());
+        // A 403 naming the token is a refusal: off for an hour, nothing asked meanwhile.
+        assert!(declined(
+            resolve_with(&cx, &uri, 2812209, "invalid-token", &refusals).await
+        ));
+        assert!(refusals.latched());
+        let asked = api.seen.lock().unwrap().len();
+        tokio::time::advance(std::time::Duration::from_secs(3599)).await;
+        assert!(declined(
+            resolve_with(&cx, &uri, 2812209, "good-token", &refusals).await
+        ));
+        assert_eq!(api.seen.lock().unwrap().len(), asked);
+        // After the hour the token is used again.
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        let doc = resolve_with(&cx, &uri, 2812209, "good-token", &refusals)
+            .await
+            .unwrap();
+        assert_eq!(doc.name.as_deref(), Some("Obergefell v. Hodges"));
     }
 }

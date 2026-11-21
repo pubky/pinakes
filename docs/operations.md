@@ -378,7 +378,8 @@ and its address rules no longer merge new links (links it merged before stay mer
 that reads with the operator's token (`github`: `[sources.github] token` or `PINAKES_GITHUB_TOKEN`;
 `courtlistener`: `[sources.courtlistener] token` or `PINAKES_COURTLISTENER_TOKEN`) is on only with
 one. Its token is a secret, sent only to its service's API and never through a redirect. A token
-the service refuses (401; CourtListener's 403 too) switches the source off until restart, and
+the service refuses (401, or a 403 whose answer names the token) switches the source off for an
+hour (Discogs reads without its credential, Podcast Index pages get web cards), and
 `pinakes_source_token_refusals_total{source}` counts each refusal. That series counts every keyed
 provider's refusals (Discogs, Spotify, TIDAL, TMDB, Podcast Index and Ticketmaster too, as each
 signals one: a 401, a 403 where it means a refused key, or a refused token request; never a 429

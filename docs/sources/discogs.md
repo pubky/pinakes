@@ -13,11 +13,12 @@ either credential Discogs takes:
 The token wins when both are set. With either, the cards show images and Discogs allows 60
 requests a minute; an operator's `limits.host_rates` entry sets the pace outright
 (`"api.discogs.com" = 1.0` under `[limits.host_rates]`). The credential is sent only to
-`api.discogs.com` and never appears in logs, errors or the operator info. A credential Discogs
-refuses (401 or 403: expired, revoked or mistyped) is dropped, remembered by the hash of its
-header: that request is asked again without it, later ones go without it from the start, one
-warning is logged, and the cards are read without it (no images);
-`pinakes_source_token_refusals_total{source="discogs"}` counts each refusal. Release data is CC0.
+`api.discogs.com` and never appears in logs, errors or the operator info. A request Discogs
+answers 401 or 403 with the credential is asked again without it. When that answer is the record
+(or its 404), the credential is what Discogs refused (expired, revoked or mistyped): it is dropped
+for an hour, one warning is logged, the cards are read without it meanwhile (no images), and
+`pinakes_source_token_refusals_total{source="discogs"}` counts each refusal. A 401 or 403 the
+request gets without the credential too is no refusal of it. Release data is CC0.
 
 ## Links
 

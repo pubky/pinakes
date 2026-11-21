@@ -701,6 +701,60 @@ pub fn token_refused(source: &'static str) {
         .entry(source)
         .or_default() += 1;
 }
+/// A keyed service's refusals of the operator's key or token: each one is counted
+/// (`token_refused`) and switches the key off for an hour, during which the source answers
+/// `Declined` (its links get web cards) or reads without it. A refusal is what the service's
+/// own answer says is one: a 401, or a 403 whose body names the key (each source says how).
+pub struct Refusals {
+    source: &'static str,
+    until: std::sync::Mutex<Option<tokio::time::Instant>>,
+}
+impl Refusals {
+    /// How long a refused key stays off.
+    pub const LATCH: std::time::Duration = std::time::Duration::from_secs(3600);
+    pub const fn new(source: &'static str) -> Self {
+        Self {
+            source,
+            until: std::sync::Mutex::new(None),
+        }
+    }
+    /// Whether the key is off: the service refused it less than an hour ago.
+    pub fn latched(&self) -> bool {
+        let until = *self.until.lock().unwrap_or_else(|e| e.into_inner());
+        until.is_some_and(|u| tokio::time::Instant::now() < u)
+    }
+    /// Count one refusal and switch the key off for an hour from now; true when it was on, so
+    /// the caller warns once per latch.
+    pub fn refused(&self) -> bool {
+        token_refused(self.source);
+        let now = tokio::time::Instant::now();
+        let mut until = self.until.lock().unwrap_or_else(|e| e.into_inner());
+        let was_on = until.is_none_or(|u| now >= u);
+        *until = Some(now + Self::LATCH);
+        was_on
+    }
+    /// `Declined` while the key is off: the link gets a web card.
+    pub fn check(&self) -> Result<()> {
+        if self.latched() {
+            return Err(Declined.into());
+        }
+        Ok(())
+    }
+}
+
+/// Whether an error answer's JSON names the key or token as its reason (`field` holds the
+/// service's message: "Invalid token.", "Bad credentials", …).
+pub fn names_the_key(body: &[u8], field: &str) -> bool {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v[field].as_str().map(str::to_ascii_lowercase))
+        .is_some_and(|m| {
+            ["token", "credential", "key", "authoriz", "authentic"]
+                .iter()
+                .any(|w| m.contains(w))
+        })
+}
+
 /// Every source's token refusals so far.
 pub fn token_refusals() -> Vec<(&'static str, u64)> {
     TOKEN_REFUSALS
@@ -1814,6 +1868,46 @@ mod tests {
             },
         );
         assert_eq!(alias_root_with(uri, Some(&off)), None);
+    }
+
+    /// A refusal is counted and switches the key off for an hour from the latest refusal; the
+    /// latch then expires on its own (a paused clock stands in for the hour).
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_key_is_off_for_an_hour() {
+        let count = || {
+            token_refusals()
+                .into_iter()
+                .find(|(s, _)| *s == "tmdb")
+                .map_or(0, |(_, n)| n)
+        };
+        let refusals = Refusals::new("tmdb");
+        let before = count();
+        assert!(!refusals.latched() && refusals.check().is_ok());
+        assert!(refusals.refused(), "the first refusal of a latch warns");
+        assert!(count() > before);
+        assert!(refusals.check().is_err_and(|e| e.is::<Declined>()));
+        tokio::time::advance(std::time::Duration::from_secs(1800)).await;
+        assert!(!refusals.refused(), "a refusal while latched warns no more");
+        tokio::time::advance(std::time::Duration::from_secs(3599)).await;
+        assert!(refusals.latched(), "an hour from the latest refusal");
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        assert!(!refusals.latched() && refusals.check().is_ok());
+        assert!(refusals.refused());
+    }
+
+    #[test]
+    fn a_403_names_the_key_in_its_own_words() {
+        assert!(names_the_key(br#"{"detail":"Invalid token."}"#, "detail"));
+        assert!(names_the_key(
+            br#"{"detail":"Authentication credentials were not provided."}"#,
+            "detail"
+        ));
+        assert!(!names_the_key(
+            br#"{"detail":"You do not have permission to perform this action."}"#,
+            "detail"
+        ));
+        assert!(!names_the_key(b"<html>Forbidden</html>", "detail"));
+        assert!(!names_the_key(br#"{"message":"Invalid token."}"#, "detail"));
     }
 
     #[test]

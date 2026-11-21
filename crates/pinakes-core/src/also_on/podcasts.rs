@@ -780,10 +780,11 @@ impl Podcasts {
         };
         let options = pi_options(key, secret);
         let fetched = cx.egress.fetch_with(url, &options).await?;
-        crate::podcast_index_api::note_refusal(fetched.status);
-        // A refused key lasts: a refusal of the credentials, which brings no run back early and
-        // leaves what this source recorded with Podcast Index's answers where it is (`Deferred`).
-        if matches!(fetched.status, 401 | 403) {
+        // A refused key lasts: a refusal of the credentials, counted, which brings no run back
+        // early and leaves what this source recorded with Podcast Index's answers where it is
+        // (`Deferred`).
+        if crate::podcast_index_api::refuses_the_pair(&fetched) {
+            crate::sources::token_refused("podcast_index");
             return Err(RetryLater {
                 class: "podcast_index_auth",
                 seconds: super::client_credentials::REFUSAL_HOLD,

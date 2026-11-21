@@ -5,9 +5,11 @@ episode id. The website is never fetched. The API needs the operator's Podcast I
 secret (`[podcast_index]`, or `PINAKES__PODCAST_INDEX__KEY` and `__SECRET`), the pair the also-on
 `podcasts` source uses. Without both, the source declines and the page gets an ordinary web card.
 The pair goes only to `api.podcastindex.org`, signed per request, and never appears in logs,
-errors or cards. A refusal of the pair (401 or 403) is counted in
-`pinakes_source_token_refusals_total{source="podcast_index"}`, which the `ProviderKeyRefused`
-alert reads.
+errors or cards. A refusal of the pair (401, or a 403 whose `description` names the key) is
+counted in `pinakes_source_token_refusals_total{source="podcast_index"}`, which the
+`ProviderKeyRefused` alert reads, and switches the pair off for this source for an hour: the page
+gets a web card, as without a pair, and the pair is used again after the hour. The also-on
+`podcasts` lookups count a refusal by the same rule and hold that lookup back on their own.
 
 ## Links
 
