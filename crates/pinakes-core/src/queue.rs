@@ -710,7 +710,10 @@ async fn finish_job(
                 | "nostr"
                 | "activitypub"
                 | "official"
-        ) {
+        ) && (resolver.name() != "official" || doc.status == Status::Ok)
+        {
+            // On the official route only a card read whole is scheduled by its dates (and final
+            // once they passed): a missing answer keeps the `missing_ttl_secs` re-read.
             let now = chrono::Utc::now();
             let mut manifest = resolver.manifest_for(&job.uri);
             if resolver.name() == "osm" {

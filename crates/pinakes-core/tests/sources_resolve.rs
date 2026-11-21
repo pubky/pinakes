@@ -530,3 +530,42 @@ async fn an_app_store_card_keeps_its_storefront_across_restarts(pool: sqlx::PgPo
         assert_eq!(row().await, ok);
     }
 }
+
+/// An official card whose date passed is final only when it was read whole: a "not found" for
+/// it (a transaction the service lost track of) keeps the `missing_ttl_secs` re-read.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_past_dated_official_card_found_missing_is_read_again(pool: sqlx::PgPool) {
+    use pinakes_core::{model::ResourceMeta, queue, store};
+    if !has("mempool") {
+        return;
+    }
+    let resolver = official();
+    let uri = format!("btc:tx/{GONE}");
+    let id = store::ensure_resource(&pool, &uri).await.unwrap();
+    let mut good = ResourceMeta::new(&uri, "mempool", 86_400);
+    good.set_type("Event");
+    good.name = Some("Transaction".into());
+    good.start = Some("2020-01-03T18:15:05Z".parse().unwrap());
+    store::save_document(&pool, &id, 0, &good).await.unwrap();
+    let job = queue::Job {
+        id: id.clone(),
+        uri,
+        attempts: 0,
+        generation: 0,
+    };
+    // Not found twice: missing, confirmed.
+    for _ in 0..2 {
+        queue::run_job(&pool, &resolver, &Default::default(), &job)
+            .await
+            .unwrap();
+    }
+    let (status, last, refresh): (String, bool, f64) = sqlx::query_as(
+        "SELECT status,final,coalesce(extract(epoch FROM refresh_at-now()),0)::float8 FROM resource WHERE id=$1",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((status.as_str(), last), ("missing", false));
+    assert!((3_000.0..=3_600.0).contains(&refresh), "{refresh}");
+}
