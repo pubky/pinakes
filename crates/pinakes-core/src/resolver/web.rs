@@ -535,7 +535,7 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
         let page = match super::interstitial::unparsed(&url, fetched) {
             Some(page) => page,
             None => {
-                let text = String::from_utf8_lossy(&fetched.body);
+                let text = fetched.text();
                 let html = super::html::document(&text)?;
                 let page = super::interstitial::parsed(fetched, &text, &html);
                 walled = Some((text, html));
@@ -597,7 +597,7 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
     // `as_read` changes the address alone: the body is the one the wall check parsed.
     let (text, walled) = match walled {
         Some((text, html)) => (text, Some(html)),
-        None => (String::from_utf8_lossy(&fetched.body), None),
+        None => (fetched.text(), None),
     };
     // A feed, on whichever route fetched it: its own title and description.
     if let Some((name, description)) = feed(&fetched.content_type, &text) {
@@ -3115,6 +3115,44 @@ mod tests {
             .image
             .as_deref()
             .is_some_and(|i| i.contains("/items/r1808W019H3baERCQAWo/")));
+    }
+
+    /// A page is read in the encoding it names: its answer's `charset`, else a `<meta>` in its
+    /// head; a byte order mark beats both.
+    #[test]
+    fn a_page_is_read_in_the_encoding_it_names() {
+        let fixture = |name: &str| {
+            std::fs::read(format!(
+                "{}/tests/fixtures/web/charset/{name}",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap()
+        };
+        let page = |body: Vec<u8>, charset: Option<&str>| {
+            let mut fetched = Fetched::answer(
+                Url::parse("https://example.org/page").unwrap(),
+                200,
+                "text/html".into(),
+                body,
+            );
+            fetched.charset = charset.map(str::to_owned);
+            extract("https://example.org/page", &fetched, 100).unwrap()
+        };
+        let latin = page(fixture("windows-1252.html"), Some("windows-1252"));
+        assert_eq!(latin.title.as_deref(), Some("Café crème – Zürich"));
+        assert_eq!(
+            latin.doc.description.as_deref(),
+            Some("Prêt à servir für 5 €")
+        );
+        let japanese = page(fixture("shift_jis.html"), None);
+        assert_eq!(japanese.title.as_deref(), Some("日本語のページ"));
+        assert_eq!(japanese.description.as_deref(), Some("東京の喫茶店"));
+        let mut marked = b"\xEF\xBB\xBF".to_vec();
+        marked.extend_from_slice("<title>Grüße</title>".as_bytes());
+        assert_eq!(
+            page(marked, Some("windows-1252")).title.as_deref(),
+            Some("Grüße")
+        );
     }
 
     #[test]

@@ -175,7 +175,10 @@ fn a_worker_parse_is_the_parser_s_tree() {
             if path.is_dir() {
                 stack.push(path);
             } else if path.extension().is_some_and(|x| x == "html") {
-                pages.push(std::fs::read_to_string(&path).unwrap());
+                // A page in another encoding (the charset fixtures) is not UTF-8 text.
+                if let Ok(page) = String::from_utf8(std::fs::read(&path).unwrap()) {
+                    pages.push(page);
+                }
             }
         }
     }

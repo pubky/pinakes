@@ -317,6 +317,7 @@ pub fn fetched(
         retry_after_secs: 60,
         location: None,
         body,
+        charset: None,
     }
 }
 /// `groups::drain`, then each grouping run it left deferred done again at once through

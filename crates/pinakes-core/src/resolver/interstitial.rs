@@ -106,7 +106,7 @@ pub fn inspect(requested: &Url, f: &Fetched) -> anyhow::Result<Page> {
     if let Some(page) = unparsed(requested, f) {
         return Ok(page);
     }
-    let text = String::from_utf8_lossy(&f.body);
+    let text = f.text();
     let html = crate::resolver::html::document(&text)?;
     Ok(parsed(f, &text, &html))
 }
@@ -332,6 +332,19 @@ pub(crate) fn parsed(f: &Fetched, text: &str, html: &scraper::Html) -> Page {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The wall check reads the page in the encoding it names: a windows-1252 challenge's
+    /// curly apostrophe matches its marker.
+    #[test]
+    fn the_wall_check_reads_the_page_s_encoding() {
+        let url = Url::parse("https://shop.example/item").unwrap();
+        let mut body = b"<html><head><title>Making sure you".to_vec();
+        body.push(0x92);
+        body.extend_from_slice(b"re not a bot</title></head><body></body></html>");
+        let mut f = Fetched::answer(url.clone(), 503, "text/html".into(), body);
+        f.charset = Some("windows-1252".into());
+        assert_eq!(inspect(&url, &f).unwrap(), Page::Blocked);
+    }
 
     #[test]
     fn the_marker_file_is_bounded_lower_case_and_parses() {

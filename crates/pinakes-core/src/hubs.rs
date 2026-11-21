@@ -167,6 +167,7 @@ async fn seed(egress: &Egress, url: &str, hub: &str, answer: Option<&Value>) -> 
         location: None,
         content_type: "application/json".into(),
         body: serde_json::to_vec(answer.unwrap_or(&serde_json::json!({"error": "Not Found"})))?,
+        charset: None,
     };
     egress.seed(url, &options(hub), 3600, fetched).await
 }

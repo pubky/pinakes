@@ -244,6 +244,7 @@ async fn prefetch(cx: &Context, kind: Kind, ids: &[&str]) -> Result<()> {
             location: None,
             content_type: JSON_API.into(),
             body: serde_json::to_vec(&body)?,
+            charset: None,
         };
         cx.egress.seed(&one, &options, 3600, seeded).await?;
     }

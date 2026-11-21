@@ -153,6 +153,9 @@ pub struct Fetched {
     pub validators: Validators,
     pub url: Url,
     pub content_type: String,
+    /// The `charset` parameter of the answer's `Content-Type`, lower-cased, when it named one
+    /// ([`Fetched::text`] reads the body by it).
+    pub charset: Option<String>,
     pub status: u16,
     pub retry_after_secs: u64,
     pub location: Option<String>,
@@ -170,12 +173,97 @@ impl Fetched {
             validators: Validators::default(),
             url,
             content_type,
+            charset: None,
             status,
             retry_after_secs: 60,
             location: None,
             body,
         }
     }
+}
+impl Fetched {
+    /// The body as text, decoded once ([`decode`]) by the charset the answer or the page names.
+    pub fn text(&self) -> std::borrow::Cow<'_, str> {
+        decode(&self.body, self.charset.as_deref())
+    }
+}
+/// `body` as text in its character encoding: a byte order mark's, else `charset` (the
+/// `Content-Type` parameter), else one a `<meta charset>` or `<meta http-equiv>` declares in the
+/// first 1024 bytes, else UTF-8. Bytes the encoding cannot read become U+FFFD.
+pub fn decode<'a>(body: &'a [u8], charset: Option<&str>) -> std::borrow::Cow<'a, str> {
+    if let Some((encoding, bom)) = encoding_rs::Encoding::for_bom(body) {
+        return encoding.decode_without_bom_handling(&body[bom..]).0;
+    }
+    let encoding = charset
+        .and_then(|label| encoding_rs::Encoding::for_label(label.as_bytes()))
+        .or_else(|| meta_charset(&body[..body.len().min(1024)]))
+        .unwrap_or(encoding_rs::UTF_8);
+    encoding.decode_without_bom_handling(body).0
+}
+/// The encoding a `<meta>` among `head` declares: its `charset` attribute, or the `charset=` in
+/// an http-equiv `content`. As browsers read it, a declared UTF-16 is UTF-8 (the declaration was
+/// readable as ASCII) and `x-user-defined` is windows-1252.
+fn meta_charset(head: &[u8]) -> Option<&'static encoding_rs::Encoding> {
+    let find = |haystack: &[u8], needle: &[u8]| {
+        haystack
+            .windows(needle.len())
+            .position(|window| window.eq_ignore_ascii_case(needle))
+    };
+    let mut from = 0;
+    while let Some(at) = find(&head[from..], b"<meta") {
+        let start = from + at + b"<meta".len();
+        let end = head[start..]
+            .iter()
+            .position(|b| *b == b'>')
+            .map_or(head.len(), |n| start + n);
+        let tag = &head[start..end];
+        from = end;
+        if !tag
+            .first()
+            .is_some_and(|b| b.is_ascii_whitespace() || *b == b'/')
+        {
+            continue;
+        }
+        let Some(at) = find(tag, b"charset") else {
+            continue;
+        };
+        let Some(value) = tag[at + b"charset".len()..]
+            .trim_ascii_start()
+            .strip_prefix(b"=")
+        else {
+            continue;
+        };
+        let value = value.trim_ascii_start();
+        let value = value
+            .strip_prefix(b"\"")
+            .or_else(|| value.strip_prefix(b"'"))
+            .unwrap_or(value);
+        let end = value
+            .iter()
+            .position(|b| matches!(b, b'"' | b'\'' | b';' | b'/') || b.is_ascii_whitespace())
+            .unwrap_or(value.len());
+        if let Some(encoding) = encoding_rs::Encoding::for_label(&value[..end]) {
+            return Some(if encoding == encoding_rs::X_USER_DEFINED {
+                encoding_rs::WINDOWS_1252
+            } else {
+                encoding.output_encoding()
+            });
+        }
+    }
+    None
+}
+/// The `charset` parameter of a `Content-Type` value, lower-cased.
+fn charset_parameter(value: &str) -> Option<String> {
+    value
+        .split(';')
+        .skip(1)
+        .find_map(|parameter| {
+            let (name, value) = parameter.split_once('=')?;
+            name.trim()
+                .eq_ignore_ascii_case("charset")
+                .then(|| value.trim().trim_matches(['"', '\'']).to_ascii_lowercase())
+        })
+        .filter(|charset| !charset.is_empty())
 }
 #[async_trait]
 pub trait Dns: Send + Sync {
@@ -267,6 +355,7 @@ impl std::fmt::Debug for Fetched {
             .field("url", &self.url.as_str())
             .field("status", &self.status)
             .field("content_type", &self.content_type)
+            .field("charset", &self.charset)
             .field("retry_after_secs", &self.retry_after_secs)
             .field("location", &self.location)
             .field("permanent_redirect", &self.permanent_redirect)
@@ -488,6 +577,11 @@ pub async fn read_response_with(
         .get("location")
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
+    let charset = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .and_then(charset_parameter);
     let content_type = response
         .headers()
         .get("content-type")
@@ -625,6 +719,7 @@ pub async fn read_response_with(
         retry_after_secs,
         location,
         content_type,
+        charset,
         body,
     })
 }
@@ -688,6 +783,7 @@ impl Egress {
                     url: Url::parse(uri)?,
                     validators: Default::default(),
                     content_type: "application/json".into(),
+                    charset: None,
                     status: 200,
                     retry_after_secs: 60,
                     location: None,
@@ -2509,6 +2605,48 @@ mod tests {
             20 * 1024 * 1024
         );
     }
+    /// An answer keeps its `Content-Type` charset; its text is decoded by a byte order mark,
+    /// that charset, or a `<meta>` within the first 1024 bytes, else as UTF-8.
+    #[tokio::test]
+    async fn an_answer_s_text_is_decoded_by_its_charset() {
+        let url = Url::parse("https://example.org/page").unwrap();
+        let japanese = "<title>日本語</title>";
+        let (shift_jis, _, _) = encoding_rs::SHIFT_JIS.encode(japanese);
+        let response = axum::http::Response::builder()
+            .status(200)
+            .header("content-type", "text/html; Charset=\"Shift_JIS\"")
+            .body(shift_jis.to_vec())
+            .unwrap();
+        let fetched = read_response_with(
+            url.clone(),
+            reqwest::Response::from(response),
+            &FetchOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fetched.content_type, "text/html");
+        assert_eq!(fetched.charset.as_deref(), Some("shift_jis"));
+        assert_eq!(fetched.text(), japanese);
+        let meta = |padding: usize| {
+            let mut body =
+                format!("{}<meta charset='shift_jis'>", " ".repeat(padding)).into_bytes();
+            body.extend_from_slice(&shift_jis);
+            decode(&body, None).into_owned()
+        };
+        assert!(meta(0).ends_with(japanese));
+        // Past the first 1024 bytes a declaration is not looked for: UTF-8.
+        assert!(!meta(1100).contains(japanese));
+        assert_eq!(decode("Grüße".as_bytes(), None), "Grüße");
+        assert_eq!(decode(b"Gr\xfc\xdfe", Some("latin1")), "Grüße");
+        assert_eq!(
+            decode(
+                b"<meta http-equiv=content-type content='text/html;charset=utf-16'>\xc3\xa9",
+                None
+            ),
+            "<meta http-equiv=content-type content='text/html;charset=utf-16'>é"
+        );
+    }
+
     /// A hub's published limit lowers its host's default pace; an operator's entry sets it.
     #[tokio::test(start_paused = true)]
     async fn a_published_limit_paces_its_host() {
