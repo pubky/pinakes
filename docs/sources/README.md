@@ -185,7 +185,7 @@ so one goes without the others needing a change.
 - [`deezer`](deezer.md): Deezer's own ISRCs and barcodes, and another service's track or album on Deezer by its ISRC or barcode.
 - [`spotify_isrc`](spotify_isrc.md): another service's track or album on Spotify by its ISRC or barcode (with the operator's Spotify app credentials).
 - [`tidal_isrc`](tidal_isrc.md): another service's track or album on TIDAL by its ISRC or barcode (with the operator's TIDAL credentials).
-- [`itunes`](itunes.md): Apple Music albums by barcode, and an Apple Music track's preview.
+- [`itunes`](itunes.md): Apple Music albums by barcode (a maybe: iTunes' answer cannot be read back), and an Apple Music track's preview.
 - [`itunes_song`](itunes_song.md): Apple Music's song for another service's track, by its album's barcode, place and title (a maybe: a match, unkeyed).
 - [`youtube_match`](youtube_match.md): a label's YouTube upload on Deezer and TIDAL, by artist, title and length (a maybe: a match, unkeyed).
 - [`wikipedia`](wikipedia.md): the other editions of a Wikipedia article.

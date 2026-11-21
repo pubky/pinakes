@@ -3,7 +3,9 @@
 One of the music sources of [also on](../api.md#also-on): links on music services are looked up exactly, never by title or name.
 
 `itunes`: for an album with a barcode key, the Apple Music album iTunes' `lookup?upc=` names
-when exactly one album answers, keyed by that barcode (so a tagged link to that album joins).
+when exactly one album answers, as a [maybe](../api.md#also-on) (`kind: "maybe"`): iTunes'
+answer carries no barcode to read back, so the album is possibly the same, never a key, and a
+tagged link to it does not join.
 
 An Apple Music track's [stream](../api.md#stream) is iTunes' 30-second preview:
 - iTunes' `lookup?id={track}&entity=song` must answer with that one song (never another

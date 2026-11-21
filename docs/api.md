@@ -1597,11 +1597,13 @@ service's own track or album that carries the value becomes a link keyed by it.
 
 **Exact links and matches.** A derived link is exact when an identifier the service owns, or a
 hub, names it: a MusicBrainz relation, a Wikidata claim, or a service's own answer to a lookup by
-ISRC or barcode (`deezer`, `itunes` albums, `spotify_isrc`, `tidal_isrc`). It carries that key, so a
-tagged resource that is the link joins the group; its entry is a plain derived link. Two sources
-match by metadata instead: their links are maybes, marked `kind: "maybe"` on the entry
-(possibly the same thing), still listed so a client can show or play them, but never keyed, never
-joining a group, never making a key of the card they are on.
+ISRC or barcode (`deezer`, `spotify_isrc`, `tidal_isrc`). It carries that key, so a
+tagged resource that is the link joins the group; its entry is a plain derived link. Three sources
+match by metadata or an answer they cannot read back instead: their links are maybes, marked
+`kind: "maybe"` on the entry (possibly the same thing), still listed so a client can show or play
+them, but never keyed, never joining a group, never making a key of the card they are on.
+- `itunes` albums: the one Apple Music album iTunes answers for the album's barcode (its answer
+  carries no barcode to compare).
 - `itunes_song`: Apple Music's song at the same disc and track number on the
   album with the track's barcode, with the same title and within 3 s of its length (iTunes
   answers carry no ISRC).

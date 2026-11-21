@@ -9,8 +9,8 @@ use serde_json::Value;
 
 use crate::music_sources::*;
 
-/// Apple Music's album for an album's barcode keys, and an Apple Music track's preview, from
-/// iTunes.
+/// Apple Music's album for an album's barcode keys (possibly the same album: a maybe link), and
+/// an Apple Music track's preview, from iTunes.
 pub struct ItunesSource;
 #[async_trait]
 impl Source for ItunesSource {
@@ -36,7 +36,7 @@ impl Source for ItunesSource {
         }
         for upc in subject.keys_in("upc").take(2) {
             if let Some(apple) = itunes_album(cx, upc).await? {
-                found.links.push(apple.keyed(format!("upc:{upc}")));
+                found.links.push(apple.maybe());
             }
         }
         Ok(found)
@@ -46,7 +46,7 @@ impl Source for ItunesSource {
 /// Apple Music's album for a barcode: iTunes `lookup?upc=` in the configured storefront, when
 /// exactly one album answers (an unknown code can return unrelated albums). Its results carry no
 /// UPC, so unlike Deezer's the answer can't be read back against the code asked: exactly one
-/// album is the only check, and `upc` is no single-object namespace that would catch a wrong one.
+/// album is the only check, so the album is possibly the same ([`Link::maybe`]), never a key.
 async fn itunes_album(cx: &Context, barcode: &str) -> Result<Option<Link>> {
     let storefront = &cx.config.also_on.apple_storefront;
     let url =

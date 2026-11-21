@@ -277,8 +277,9 @@ const KEYS: &str =
     "SELECT key||' '||source FROM resource_key WHERE resource_id=$1 ORDER BY key COLLATE \"C\"";
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn a_tidal_barcode_joins_apple_music_and_deezer(pool: sqlx::PgPool) {
-    // Deezer's album and iTunes' are the joins; without either source there is nothing to check.
+async fn a_tidal_barcode_joins_deezer_and_lists_apple_music_as_a_maybe(pool: sqlx::PgPool) {
+    // Deezer's album is the join and iTunes' a maybe; without either source there is nothing to
+    // check.
     let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
     if !["deezer", "itunes"]
         .iter()
@@ -326,20 +327,19 @@ async fn a_tidal_barcode_joins_apple_music_and_deezer(pool: sqlx::PgPool) {
     assert_eq!(
         rows(
             &pool,
-            "SELECT uri||' '||via||' '||key FROM derived_link WHERE resource_id=$1 ORDER BY uri COLLATE \"C\"",
+            "SELECT uri||' '||via||' '||coalesce(key,kind) FROM derived_link WHERE resource_id=$1 ORDER BY uri COLLATE \"C\"",
             &hydra
         )
         .await,
         [
-            "https://music.apple.com/album/1680053261 itunes upc:4018939306052",
+            // iTunes' one answer carries no barcode to read back: possibly the same, no key.
+            "https://music.apple.com/album/1680053261 itunes maybe",
             "https://www.deezer.com/album/320429237 deezer upc:4018939306052",
         ]
     );
     common::drain_groups(&pool, &Default::default()).await;
-    let group = "SELECT coalesce(group_id,'-') FROM group_unit WHERE resource_id=$1";
-    let joined = rows(&pool, group, &hydra).await;
-    assert_ne!(joined, ["-"]);
-    assert_eq!(rows(&pool, group, &apple).await, joined);
+    // The tagged Apple Music album does not join through the maybe.
+    assert!(!common::one_group(&pool, &[&hydra, &apple]).await);
 }
 
 #[sqlx::test(migrations = "../../migrations")]
