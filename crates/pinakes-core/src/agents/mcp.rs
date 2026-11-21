@@ -5,8 +5,10 @@
 //! and a tool call what its REST request costs on top. The admin routes are not in that router,
 //! and no header of the MCP request reaches it, so the admin token is never read here. The
 //! answer is compact JSON text: the card fields an agent needs and the REST URL of the full
-//! answer. `social` asks the Nexus this instance reads for tags per card, by the card's `uri`
-//! and `refs`, charged one unit per 100 URIs.
+//! answer. Every tool only reads, but `card` with `resolve: true`, which stores an unknown link
+//! as a preview and has a worker fetch it (`POST /v1/resolve`), and is annotated so. `social`
+//! asks the Nexus this instance reads for tags per card, by the card's `uri` and `refs`, and
+//! about plain links this instance holds, charged one unit per 100 URIs.
 use super::base_url;
 use crate::api::AppState;
 use axum::{
@@ -31,6 +33,7 @@ use serde_json::{json, Map, Value};
 use std::{
     net::SocketAddr,
     sync::{Arc, LazyLock},
+    time::Duration,
 };
 use tower::ServiceExt;
 
@@ -433,7 +436,15 @@ impl Tools {
                 });
             }
         }
-        for uri in uris {
+        // A plain link is asked about only when this instance holds it: a card's link or an
+        // alias of one. Any other is answered as not known, and never sent to the Nexus.
+        let mut unknown_uris = vec![];
+        let held = held_uris(&self.state.pool, &uris).await?;
+        for (uri, held) in uris.into_iter().zip(held) {
+            if !held {
+                unknown_uris.push(uri);
+                continue;
+            }
             asks.push(Ask {
                 id: None,
                 root: None,
@@ -442,38 +453,78 @@ impl Tools {
             });
         }
         let all: Vec<String> = asks.iter().flat_map(|a| a.asked.iter().cloned()).collect();
-        let mut views = vec![];
-        for batch in all.chunks(100) {
-            if let Some(peer) = caller.peer {
-                self.state
-                    .charge(peer.0.ip(), 1)
-                    .await
-                    .map_err(|e| Failure {
+        // All the call's Nexus reads under one deadline, the search's reach deadline.
+        let deadline = Duration::from_secs(self.state.config.search.reach_timeout_secs);
+        let reads = async {
+            let mut views = vec![];
+            for batch in all.chunks(100) {
+                if let Some(client) = caller.client {
+                    self.state.charge(client.0, 1).await.map_err(|e| Failure {
                         status: e.0.as_u16(),
                         error: e.1,
                         url: None,
                         retry_after: None,
                     })?;
+                }
+                views.extend(
+                    self.state
+                        .nexus
+                        .resources_by_uris(batch, viewer.as_deref())
+                        .await
+                        .map_err(|_| Failure {
+                            status: 502,
+                            error: "the Nexus this instance reads did not answer the batch resource view (POST /v1/stream/resources/by_ids)".into(),
+                            url: None,
+                            retry_after: None,
+                        })?,
+                );
             }
-            views.extend(
-                self.state
-                    .nexus
-                    .resources_by_uris(batch, viewer.as_deref())
-                    .await
-                    .map_err(|_| Failure {
-                        status: 502,
-                        error: "the Nexus this instance reads did not answer the batch resource view (POST /v1/stream/resources/by_ids)".into(),
-                        url: None,
-                        retry_after: None,
-                    })?,
-            );
-        }
+            Ok(views)
+        };
+        let views = tokio::time::timeout(deadline, reads)
+            .await
+            .unwrap_or_else(|_| {
+                Err(Failure {
+                    status: 504,
+                    error: "the Nexus this instance reads did not answer the batch resource view in time".into(),
+                    url: None,
+                    retry_after: None,
+                })
+            })?;
         let mut answer = social_answer(&asks, &views, viewer.as_deref());
         if !unknown_ids.is_empty() {
             answer["unknown_ids"] = unknown_ids.into();
         }
+        if !unknown_uris.is_empty() {
+            answer["unknown_uris"] = unknown_uris.into();
+        }
         Ok(answer)
     }
+}
+
+/// For each of `uris`, whether this instance holds it: its ID (`model::identity`) is a stored
+/// card's or an alias's. A link that does not normalize is not held.
+async fn held_uris(pool: &sqlx::PgPool, uris: &[String]) -> Result<Vec<bool>, Failure> {
+    let ids: Vec<Option<String>> = uris
+        .iter()
+        .map(|uri| crate::model::identity(uri).ok().map(|(id, _, _)| id))
+        .collect();
+    let known: Vec<String> = sqlx::query_scalar(
+        "SELECT wanted.id FROM unnest($1::text[]) AS wanted(id) WHERE EXISTS(SELECT 1 FROM resource r WHERE r.id=wanted.id) OR EXISTS(SELECT 1 FROM resource_alias a WHERE a.alias_id=wanted.id)",
+    )
+    .bind(ids.iter().flatten().cloned().collect::<Vec<String>>())
+    .fetch_all(pool)
+    .await
+    .map_err(|_| Failure {
+        status: 500,
+        error: "the links could not be read".into(),
+        url: None,
+        retry_after: None,
+    })?;
+    Ok(ids
+        .iter()
+        .map(|id| id.as_ref().is_some_and(|id| known.contains(id)))
+        .collect())
 }
 
 /// What `social` asks Nexus about one card (or one link): the URIs, the card's own first. `id`
@@ -623,10 +674,10 @@ pub fn tools() -> Vec<Tool> {
         ),
         tool(
             "social",
-            "Tags and taggers per card, from the Nexus this instance reads. Give the ids of cards from search: each card is asked about by its own uri and by every link people referenced for it (its refs, such as the mempool.space page of a btc: block, or an occurrence's feed, occurrence.feed_uri), and the answers are merged per card. Links that are not Pinakes cards, or a card's other spellings (aliases on its full read), can be given as uris. Taggers are counted once each; a count marked at_least is a lower bound (Nexus counts taggers it does not list, who may be the same on several links). With viewer, each tag says whether that user used it.",
+            "Tags and taggers per card, from the Nexus this instance reads. Give the ids of cards from search: each card is asked about by its own uri and by every link people referenced for it (its refs, such as the mempool.space page of a btc: block, or an occurrence's feed, occurrence.feed_uri), and the answers are merged per card. A card's link or one of its other spellings (aliases on its full read) can be given as uris; a link this instance does not hold is answered in unknown_uris and not asked about. Taggers are counted once each; a count marked at_least is a lower bound (Nexus counts taggers it does not list, who may be the same on several links). With viewer, each tag says whether that user used it.",
             json!({"type":"object","additionalProperties":false,"properties":{
                 "ids":{"type":"array","items":{"type":"string"},"maxItems":100,"description":"Card ids from search, card or lookup."},
-                "uris":{"type":"array","items":{"type":"string"},"maxItems":100,"description":"Links to ask about as they are."},
+                "uris":{"type":"array","items":{"type":"string"},"maxItems":100,"description":"Links this instance holds (a card's link or alias), asked about as they are."},
                 "viewer":{"type":"string","description":"A 52-character pubky public key."}
             }}),
         ),

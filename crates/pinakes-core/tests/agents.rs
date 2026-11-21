@@ -419,11 +419,12 @@ async fn the_mcp_handshake_and_every_tool(pool: PgPool) {
         .contains(&json!("web")));
 
     // social by links: tags per link from Nexus, with the viewer's own; a link Nexus does not
-    // know has none.
+    // know has none, and one this instance does not hold is not asked about.
     let (error, social) = call(
         &app,
         "social",
-        json!({"uris": ["https://example.org/concert", "https://example.org/article"],
+        json!({"uris": ["https://example.org/concert", "https://example.org/article",
+                        "https://example.org/never-referenced"],
                "viewer": AUTHOR}),
     )
     .await;
@@ -436,7 +437,7 @@ async fn the_mcp_handshake_and_every_tool(pool: PgPool) {
              "tags": [{"label": "music", "taggers_count": 1, "viewer_tagged": true}]},
             {"uri": "https://example.org/article", "asked": ["https://example.org/article"],
              "found": [], "taggers_count": 0, "tags": []}
-        ]})
+        ], "unknown_uris": ["https://example.org/never-referenced"]})
     );
     let (error, refused) = call(&app, "social", json!({"uris": []})).await;
     assert!(error);
@@ -478,6 +479,9 @@ async fn social_without_a_nexus_is_a_plain_error(pool: PgPool) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let older_url = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, older).await.unwrap() });
+    store::ensure_resource(&pool, "https://example.org/")
+        .await
+        .unwrap();
     for nexus_url in [format!("http://{free}"), older_url] {
         let config = Config {
             nexus_url: nexus_url.clone(),
@@ -687,13 +691,21 @@ async fn social_refuses_more_than_100_entries_and_an_over_long_link(pool: PgPool
         nexus_url,
         ..Config::default()
     };
-    let app = api::router(AppState::new(pool, config).unwrap());
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
     let links = |n: usize| -> Vec<String> {
         (0..n)
             .map(|i| format!("https://example.org/link/{i}"))
             .collect()
     };
     let too_many = "`ids` (card ids) and `uris` (links) take 1–100 entries together";
+    let link = |bytes: usize| {
+        let start = "https://example.org/";
+        format!("{start}{}", "a".repeat(bytes - start.len()))
+    };
+    // `social` asks the Nexus only about links this instance holds.
+    for uri in links(97).into_iter().chain([link(2048)]) {
+        store::ensure_resource(&pool, &uri).await.unwrap();
+    }
 
     // The three seeded cards and 97 links: 100 entries, each answered.
     let (error, answer) = call(&app, "social", json!({"ids": ids, "uris": links(97)})).await;
@@ -714,10 +726,6 @@ async fn social_refuses_more_than_100_entries_and_an_over_long_link(pool: PgPool
     assert_eq!(asked.load(Ordering::SeqCst), served);
 
     // A link of exactly 2048 bytes is asked about; one byte more is refused.
-    let link = |bytes: usize| {
-        let start = "https://example.org/";
-        format!("{start}{}", "a".repeat(bytes - start.len()))
-    };
     let (error, answer) = call(&app, "social", json!({"uris": [link(2048)]})).await;
     assert!(!error, "{answer}");
     assert_eq!(answer["items"][0]["uri"], link(2048), "{answer}");
@@ -735,6 +743,84 @@ async fn social_refuses_more_than_100_entries_and_an_over_long_link(pool: PgPool
         "{answer}"
     );
     assert_eq!(asked.load(Ordering::SeqCst), served);
+}
+
+/// `social` sends the Nexus only links this instance holds, a card's link or an alias of one:
+/// any other is answered in `unknown_uris`, and a call naming only such links asks the Nexus
+/// nothing. Nothing is stored for them.
+#[sqlx::test(migrations = "../../migrations")]
+async fn social_asks_the_nexus_only_about_links_this_instance_holds(pool: PgPool) {
+    let asked: std::sync::Arc<std::sync::Mutex<Vec<Value>>> = std::sync::Arc::default();
+    let seen = asked.clone();
+    let fake = Router::new().route(
+        "/v1/stream/resources/by_ids",
+        post(move |Json(body): Json<Value>| {
+            let seen = seen.clone();
+            async move {
+                seen.lock().unwrap().push(body["uris"].clone());
+                Json(json!([]))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let nexus_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, fake).await.unwrap() });
+    store::ensure_resource(&pool, "https://example.org/held")
+        .await
+        .unwrap();
+    // A spelling someone referenced is an alias of its root: held too.
+    store::ensure_resource(&pool, "https://example.org/held?utm_source=feed")
+        .await
+        .unwrap();
+    let stored = || async {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    let before = stored().await;
+    let config = Config {
+        nexus_url,
+        ..Config::default()
+    };
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
+    let (error, answer) = call(
+        &app,
+        "social",
+        json!({"uris": ["https://example.org/unknown", "https://example.org/held",
+                        "https://example.org/held?utm_source=feed", "not a link"]}),
+    )
+    .await;
+    assert!(!error, "{answer}");
+    assert_eq!(
+        answer["unknown_uris"],
+        json!(["https://example.org/unknown", "not a link"]),
+        "{answer}"
+    );
+    assert_eq!(
+        *asked.lock().unwrap(),
+        [json!([
+            "https://example.org/held",
+            "https://example.org/held?utm_source=feed"
+        ])]
+    );
+    let (error, answer) = call(
+        &app,
+        "social",
+        json!({"uris": ["https://example.org/unknown"]}),
+    )
+    .await;
+    assert!(!error, "{answer}");
+    assert_eq!(
+        answer,
+        json!({"items": [], "unknown_uris": ["https://example.org/unknown"]})
+    );
+    assert_eq!(
+        asked.lock().unwrap().len(),
+        1,
+        "no Nexus call for unknown links"
+    );
+    assert_eq!(stored().await, before);
 }
 
 /// `card` with `resolve: true` is the one tool call that stores a link: it is a preview, and
