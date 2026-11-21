@@ -288,7 +288,7 @@ class Container(unittest.TestCase):
         self.assertIn('PINAKES__ADMIN_LISTEN=127.0.0.1:9090', s)
         self.assertIn('PINAKES__OSM__DUMP_DIR=/var/lib/pinakes/dumps', s)
         self.assertIn('ENTRYPOINT ["/usr/local/bin/pinakesd"]', s)
-        self.assertIn('CMD ["/usr/local/bin/pinakesd", "healthcheck"]', s)
+        self.assertRegex(s, r'(?m)^HEALTHCHECK [^\n]*\\\n\s*CMD \["/usr/local/bin/pinakesd", "healthcheck"\]$')
         self.assertNotIn('COPY . ', s)
         context = (ROOT / '.dockerignore').read_text().splitlines()
         self.assertIn('**', context)
