@@ -4,8 +4,8 @@
 //! API URL, is an alias of one identifier: `inat:observation/{id}` or `inat:taxon/{id}`.
 //!
 //! The API asks for at most 60 requests a minute and under 10,000 a day, so the budget is one
-//! request every 9 seconds. Licences are per observation and per photo; a photo is shown only
-//! under a Creative Commons licence.
+//! request every 9 seconds. Licences are per observation and per photo; a photo is shown only in
+//! the public domain or under a Creative Commons licence.
 //! An observation whose location is obscured or private has public coordinates that are
 //! randomised, so its card has no point.
 use super::kit::html_text;
@@ -136,14 +136,16 @@ pub fn licence(code: &str) -> String {
 }
 
 /// The address of a photo at the given size (`medium`, `large`) and its attribution, for a photo
-/// under a Creative Commons licence (CC0, CC BY and its NC, ND and SA forms). A photo with no
-/// licence code, or with any other one, has none.
+/// in the public domain (`pd`) or under a Creative Commons licence (CC0, CC BY and its NC, ND and
+/// SA forms). A photo with no licence code, or with any other one, has none.
 fn photo(p: &Value, size: &str) -> Option<(String, Option<String>)> {
-    let licence = image_licence(&text(&p["license_code"])?)?;
-    if !matches!(
-        licence,
-        ImageLicence::Cc0 | ImageLicence::By | ImageLicence::ByWithTerms
-    ) {
+    let code = text(&p["license_code"])?;
+    let shown = code.eq_ignore_ascii_case("pd")
+        || matches!(
+            image_licence(&code),
+            Some(ImageLicence::Cc0 | ImageLicence::By | ImageLicence::ByWithTerms)
+        );
+    if !shown {
         return None;
     }
     let url = text(&p[format!("{size}_url").as_str()]).or_else(|| {
@@ -179,7 +181,10 @@ pub fn parse_observation(status: u16, raw: &[u8], id: u64) -> Result<Option<Card
         card.detail("place_guess", text(&v["place_guess"]));
         card.detail("positional_accuracy_m", int(&v["positional_accuracy"]));
     }
-    card.start = time(&v["time_observed_at"]).or_else(|| time(&v["observed_on"]));
+    card.detail(
+        "observed_at",
+        time(&v["time_observed_at"]).map(|t| t.to_rfc3339()),
+    );
     card.detail("observed_on", text(&v["observed_on"]));
     card.detail("quality_grade", text(&v["quality_grade"]));
     card.detail("taxon_id", taxon["id"].as_u64());
@@ -305,6 +310,7 @@ impl Source for Inaturalist {
             // Observations
             "place_guess",
             "positional_accuracy_m",
+            "observed_at",
             "observed_on",
             "quality_grade",
             "taxon_id",
@@ -466,10 +472,9 @@ mod tests {
         );
         let p = card.point.unwrap();
         assert_eq!((p.lat, p.lon), (33.195340253, -117.3847581279));
-        assert_eq!(
-            card.start.unwrap().to_rfc3339(),
-            "2026-01-01T23:09:23+00:00"
-        );
+        // An observation can still change: its time is a fact, not a start that makes it final.
+        assert_eq!(card.start, None);
+        assert_eq!(card.details["observed_at"], "2026-01-01T23:09:23+00:00");
         assert_eq!(card.details["taxon_name"], "Euphagus cyanocephalus");
         assert_eq!(card.details["quality_grade"], "research");
         assert_eq!(card.details["user_login"], "ramchop");
@@ -517,10 +522,7 @@ mod tests {
         assert!(!card.details.contains_key("place_guess"));
         assert_eq!(card.details["obscured"], true);
         assert_eq!(card.details["geoprivacy"], "obscured");
-        assert_eq!(
-            card.start.unwrap().to_rfc3339(),
-            "2023-12-31T21:16:30+00:00"
-        );
+        assert_eq!(card.details["observed_at"], "2023-12-31T21:16:30+00:00");
         assert_eq!(card.details["gbif_occurrence"], 4993788366u64);
         // Any one of the three signals hides the point.
         for (field, value) in [
@@ -622,9 +624,10 @@ mod tests {
     }
 
     #[test]
-    fn a_photo_is_shown_only_under_a_creative_commons_licence() {
+    fn a_photo_is_shown_only_in_the_public_domain_or_under_a_creative_commons_licence() {
         let medium = "https://inaturalist-open-data.s3.amazonaws.com/photos/604606400/medium.jpg";
         for code in [
+            "pd",
             "cc0",
             "cc-by",
             "cc-by-nc",
@@ -640,7 +643,7 @@ mod tests {
             );
         }
         // Codes that are no Creative Commons licence, and one iNaturalist does not have.
-        let others = ["pd", "gfdl", "all-rights-reserved"]
+        let others = ["gfdl", "all-rights-reserved"]
             .map(|code| image_with(|p| p["license_code"] = code.into()));
         assert!(others.iter().all(Option::is_none), "{others:?}");
         // A taxon's default photo follows the same rule.

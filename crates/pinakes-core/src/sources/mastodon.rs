@@ -139,10 +139,10 @@ pub fn card(
             v["favourites_count"].as_u64().map(|n| n.to_string()),
         ),
         ("content_warning", warning),
-        // An author whose posts are not for search (`opted_out`): the card stays a link
-        // preview, as Mastodon shows one, but its text is never searchable nor kept in the
+        // An author who has not opted in to search (the `opted_out` fact): the card stays a
+        // link preview, as Mastodon shows one, but its text is never searchable nor kept in the
         // change history.
-        ("opted_out", opted_out(account).then(|| "true".into())),
+        ("opted_out", not_opted_in(account).then(|| "true".into())),
         ("activitypub_id", Some(ap.to_string())),
         (
             "page_url",
@@ -162,10 +162,11 @@ pub fn card(
     Ok(Some(doc))
 }
 
-/// Whether an account's posts are not for search: it has not opted in to full-text search of
-/// its public posts (`indexable: false`), or asked search engines not to index its profile
-/// (`noindex`, which the profile's `robots` meta tag also carries).
-fn opted_out(account: &Value) -> bool {
+/// Whether an account has not opted in to search: it has not opted in to full-text search of its
+/// public posts (`indexable: false`, Mastodon's default), or it asked search engines not to index
+/// its profile (`noindex`, which the profile's `robots` meta tag also carries). Either keeps its
+/// posts out of search.
+fn not_opted_in(account: &Value) -> bool {
     account["indexable"] == false || account["noindex"] == true
 }
 
@@ -350,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn an_author_who_opted_out_keeps_a_card_marked_opted_out() {
+    fn an_author_not_opted_in_to_search_keeps_a_card_marked_opted_out() {
         let target = link("https://mastodon.social/@Gargron/1");
         let base = ResourceMeta::new("https://mastodon.social/@Gargron/1", "mastodon", 3600);
         let doc = card(base.clone(), &target, 200, &read("status-1-opted-out.json"))

@@ -39,7 +39,7 @@ snapshot; a test fails when it is stale.
 | `GET /mcp` | None | A browser (`Accept: text/html`): a short page on how to connect; any other GET: 405 with `Allow: POST` ([Agents](#agents)) |
 
 URIs are normalized and IDs computed by Pinakes itself: lowercase scheme and host, no default
-port, userinfo or fragment, then BLAKE3. Each URI is at most 2048 bytes; IDs are 32 lowercase hex
+port, userinfo or fragment (and no query on a `bitcoin:` payment request), then BLAKE3. Each URI is at most 2048 bytes; IDs are 32 lowercase hex
 characters and Pinakes's own, so combine with other indexes by URI. A missing upstream object is a known resource with
 `status: "missing"`, not a 404. `lookup` never fetches an unknown URI; a known overdue resource
 moves to the front of the refresh queue without bypassing its TTL, backoff or final state.
@@ -124,8 +124,8 @@ description from a content-like member (`content`, `text`): such a card is a
 `SocialMediaPosting`, social content like a note, with a 200-character excerpt that refreshes
 within the hour and is removed once the object is gone.
 
-A social post found gone (a note, or a post or comment an official-API source reads) keeps
-nothing of itself. Its card is `status: "missing"` with its `uri`, `site` and `from`, and the
+A social post found gone (a note, or a post, comment or profile an official-API source reads)
+keeps nothing of itself. Its card is `status: "missing"` with its `uri`, `site` and `from`, and the
 type every gone post has, `SocialMediaPosting`, whatever the post was (a Reddit thread, a TikTok
 video): no name, description, image or facts, no also-on links and no change history. Its read
 lists no `aliases`, and its `refs` name its own link alone: a spelling's link can carry the post's
@@ -707,7 +707,7 @@ POST /v1/changes/lookup {"resource_ids":["81cefcae5a6a468cfc27ff1c1b420fce","5bc
 
 | Parameter | Meaning |
 | --- | --- |
-| `q` | Full-text name/description search with a trigram/partial-name fallback; at most 256 bytes. A short `q` (letters and digits, at most three characters counting one space between words, e.g. `ai`, `lol`, `btc`) matches a name only at the start of a word (`Airbnb`, not `Rain`; a sign such as `/` or `™` starts a word too) and the description by whole words; several short words match in that order, apart only by white space, each at a word start (`a s` finds `A slow song`, not `As lop`); text with other signs (`c++`), in a script written without spaces (Chinese, Japanese, Thai) or in Hebrew or Arabic (which write prefixes onto words) still matches inside the name. Ranked by `relevance` unless `sort` says otherwise ([Ranking](#search)). A post whose author opted out of search indexing (a read's `facts.opted_out`: Mastodon's `indexable: false` or `noindex`, Bluesky's `!no-unauthenticated`) never matches |
+| `q` | Full-text name/description search with a trigram/partial-name fallback; at most 256 bytes. A short `q` (letters and digits, at most three characters counting one space between words, e.g. `ai`, `lol`, `btc`) matches a name only at the start of a word (`Airbnb`, not `Rain`; a sign such as `/` or `™` starts a word too) and the description by whole words; several short words match in that order, apart only by white space, each at a word start (`a s` finds `A slow song`, not `As lop`); text with other signs (`c++`), in a script written without spaces (Chinese, Japanese, Thai) or in Hebrew or Arabic (which write prefixes onto words) still matches inside the name. Ranked by `relevance` unless `sort` says otherwise ([Ranking](#search)). A post whose author has not opted in to search (a read's `facts.opted_out`: Mastodon's `indexable: false` or `noindex`, Bluesky's `!no-unauthenticated`) never matches |
 | `type` | A schema.org type, ancestors included (`Event` matches `MusicEvent`; `Place` matches cafés and other `LocalBusiness` types), or up to 10 comma-separated: any of them (`type=MusicRecording,MusicAlbum,MusicGroup`). An unknown type is a 400 that names it (only a name of letters and digits is repeated; anything else, such as a URL, gets a general message) |
 | `exclude_type` | Every card of another type: a schema.org type, or up to 50 comma-separated, each with its subtypes (`exclude_type=Event` leaves `MusicEvent` out too), in the same spelling as `type` (an unknown type is a 400 the same way). A link with no type yet (not read, or unreachable) is left out, as the `type` facet does not count it, so a client that groups types can list "every other type" as the links its type facet counts outside its groups (`exclude_type=` its groups' types). Combines with `type`: `type=CreativeWork&exclude_type=Article` |
 | `category` | Exact filter |
@@ -886,7 +886,7 @@ No other search carries `because`.
   reference of theirs (a tag, a reply, an embed, a collection). With `reach`, only the
   taggers within the viewer's reach.
 - Each resource is listed once, as its own card: never once per occurrence of a feed.
-- A post whose author opted out of indexing is never listed, as it is never found by its text,
+- A post whose author has not opted in to search is never listed, as it is never found by its text,
   and references to it count for nothing: not toward its group, and its taggers are not the
   taggers of a group it is in.
 - An alias reads as its root; an unknown resource relates to nothing.

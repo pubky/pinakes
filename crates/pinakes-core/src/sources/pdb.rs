@@ -138,10 +138,10 @@ pub fn parse(status: u16, raw: &[u8], id: &str) -> Result<Option<Card>> {
     Ok(Some(card))
 }
 
-/// The entry of a root, `pdb:{ID}` (the four-character id in upper case).
+/// The entry of a root, `pdb:{ID}` (the four-character id in upper case). A root in another
+/// letter case (`pdb:4hhb`) is a spelling of it: its alias.
 pub fn from_root(uri: &str) -> Option<String> {
-    let id = uri.strip_prefix("pdb:")?;
-    pdb_id(id).filter(|i| i == id)
+    pdb_id(uri.strip_prefix("pdb:")?)
 }
 
 /// The entry of a root or an RCSB link.
@@ -396,13 +396,12 @@ mod tests {
         ] {
             assert_eq!(p.alias_root(uri).as_deref(), Some("pdb:4HHB"), "{uri}");
         }
-        for uri in [
-            "pdb:4hhb",
-            "pdb:0HHB",
-            "pdb:pdb_00004hhb",
-            "pdb:",
-            "pdb:4HHB/x",
-        ] {
+        // A root in another letter case, or with the extended id, is a spelling of the root.
+        for uri in ["pdb:4hhb", "pdb:pdb_00004hhb"] {
+            assert_eq!(p.alias_root(uri).as_deref(), Some("pdb:4HHB"), "{uri}");
+            assert!(!p.invalid(uri), "{uri}");
+        }
+        for uri in ["pdb:0HHB", "pdb:", "pdb:4HHB/x"] {
             assert!(p.invalid(uri), "{uri}");
             assert!(!p.reads(uri), "{uri}");
         }

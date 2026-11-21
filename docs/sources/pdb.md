@@ -14,7 +14,8 @@ four-character id in upper case, e.g. `pdb:4HHB`):
   `/pdb/explore/explore.do?…`);
 - `https://data.rcsb.org/rest/v1/core/entry/{id}`.
 
-Ids are case-insensitive. The extended form `pdb_0000{id}` (e.g. `pdb_00004hhb`) is the same
+Ids are case-insensitive: `pdb:{id}` in another letter case (`pdb:4hhb`) is an alias of the root.
+The extended form `pdb_0000{id}` (e.g. `pdb_00004hhb`) is the same
 entry. Coordinate files (`files.rcsb.org`) are files of an entry, not the entry, and are not read.
 
 An id the API does not know is `missing`; so is an obsolete entry (the API answers it with 404 as

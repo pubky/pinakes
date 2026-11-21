@@ -1,5 +1,5 @@
 //! Hacker News stories, comments, jobs and polls, read from the official Firebase API by item id.
-//! hnsignals.com names items by the same id. No key; no published limit. A job item, and a
+//! No key; no published limit. A job item, and a
 //! top-level comment of a monthly "Ask HN: Who is hiring?" thread, is a job posting.
 use super::{text, web_url, Context, Example, Source};
 use crate::{
@@ -17,7 +17,8 @@ fn item(value: &str) -> Option<u64> {
     super::kit::number(value, 12)
 }
 
-/// The item of `news.ycombinator.com/item?id={n}`, `hnsignals.com/signal/{n}` or the API.
+/// The item of `news.ycombinator.com/item?id={n}` or the API. Another site's page that names an
+/// item by its id (hnsignals.com) is that site's page, with a web card of its own.
 pub fn of_uri(uri: &str) -> Option<u64> {
     let url = super::kit::web_url(uri)?;
     let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
@@ -26,7 +27,6 @@ pub fn of_uri(uri: &str) -> Option<u64> {
             .query_pairs()
             .find(|(k, _)| k == "id")
             .and_then(|(_, v)| item(&v)),
-        ("hnsignals.com" | "www.hnsignals.com", ["signal", id, ..]) => item(id),
         ("hacker-news.firebaseio.com", ["v0", "item", file]) => item(file.strip_suffix(".json")?),
         _ => None,
     }
@@ -279,7 +279,7 @@ impl Source for HackerNews {
                 card_type: "DiscussionForumPosting",
             },
             Example {
-                uri: "https://hnsignals.com/signal/2921983",
+                uri: "https://news.ycombinator.com/item?id=2921983",
                 card_type: "Comment",
             },
             Example {
@@ -341,7 +341,6 @@ mod tests {
     fn addresses() {
         for uri in [
             "https://news.ycombinator.com/item?id=8863&p=2",
-            "https://hnsignals.com/signal/8863",
             "https://hacker-news.firebaseio.com/v0/item/8863.json",
         ] {
             assert_eq!(
@@ -356,6 +355,8 @@ mod tests {
         );
         for uri in [
             "https://news.ycombinator.com/user?id=pg",
+            // Another site's page naming the item is no spelling of it.
+            "https://hnsignals.com/signal/8863",
             "https://news.ycombinator.com/item?id=x",
             "https://news.ycombinator.com/",
         ] {

@@ -17,6 +17,15 @@
     "status": 404,
     "url": "https://publish.x.com/oembed?url=https://x.com/jack/status/1&omit_script=true&dnt=true"
   },
+  "own-page-profile-x": {
+    "bytes": 183419,
+    "content_type": "text/html; charset=UTF-8",
+    "file": "own-page-profile-x.html.gz",
+    "recorded_at": "2026-11-21T20:34:44+00:00",
+    "sha256": "313711a2b6acc3748f132569aecb7ecd91336dc5d6471e54b43b9d68ae89ff14",
+    "status": 200,
+    "url": "https://x.com/jack"
+  },
   "profile-missing": {
     "bytes": 40525,
     "content_type": "text/html; charset=UTF-8",

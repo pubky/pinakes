@@ -146,6 +146,18 @@ pub fn post_card(doc: ResourceMeta, target: &Target, body: &str) -> Result<Optio
     Ok(Some(doc))
 }
 
+/// The card of a link by its shape alone, with the channel it names: what another page than the
+/// object's gives.
+fn plain(doc: ResourceMeta, target: &Target) -> ResourceMeta {
+    let (shape, fact) = match target.post {
+        Some(_) => (Shape::Post, "author"),
+        None => (Shape::Profile, "handle"),
+    };
+    let mut doc = shape.card(doc, SITE);
+    social::fact(&mut doc, fact, Some(target.channel.clone()));
+    doc
+}
+
 /// The card of a channel from its preview page: its name, description and photo. A name
 /// without a public page (a user, a private channel, no such name) gets the page "Telegram:
 /// Contact @name": the plain card.
@@ -224,7 +236,8 @@ impl Source for Telegram {
         ]
     }
     fn social(&self, doc: &ResourceMeta) -> bool {
-        doc.type_name == "SocialMediaPosting"
+        // A post, and a profile (its bio is its author's own text).
+        matches!(doc.type_name.as_str(), "SocialMediaPosting" | "Person")
     }
     fn examples(&self) -> &'static [Example] {
         &[
@@ -241,8 +254,12 @@ impl Source for Telegram {
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
         let target = Target::of_uri(uri).context("not a Telegram link")?;
         let doc = cx.card(uri, self);
+        // Only the object's own page names it: a fetch that ended at another address read
+        // another page, which gives the plain card of the link's shape.
+        let own = |ended_at: &url::Url| Target::of_uri(ended_at.as_str()).as_ref() == Some(&target);
         let mut doc = if target.post.is_some() {
             match social::page_body(cx, &format!("{}?embed=1", target.root()), &[]).await? {
+                Body::Read { url, .. } if !own(&url) => social::shape_only(plain(doc, &target)),
                 Body::Read { body, .. } => {
                     let read = target.clone();
                     crate::resolver::html::blocking(move || post_card(doc, &read, &body))
@@ -254,6 +271,7 @@ impl Source for Telegram {
             }
         } else {
             match social::page(cx, &target.root()).await? {
+                Page::Read { url, .. } if !own(&url) => social::shape_only(plain(doc, &target)),
                 Page::Read { doc: page, .. } => profile_card(doc, &target, &page),
                 Page::Missing => cx.missing(uri, self),
                 Page::Blocked => social::blocked(doc, Shape::Profile, SITE),

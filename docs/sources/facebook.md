@@ -4,7 +4,7 @@ Facebook pages, posts and videos, from what their public pages carry. No key and
 Facebook shows posts and videos to accounts only: such a link gets the card of its shape alone
 rather than a failure (below). Event links (`https://www.facebook.com/events/{id}`) are not this source's:
 the event module's Facebook adapter reads them (an event page that carries JSON-LD is an event
-there, with its dates).
+there, with its dates). A page is social content too: it refreshes within the hour, is removed once it is gone, and its about text is published without e-mail addresses.
 
 ## Links
 
@@ -23,19 +23,21 @@ photos, share links and `profile.php` links are not read.
   says more (another name, text, a picture or facts) stays, as last read, until a second read an
   hour later (`limits.missing_ttl_secs`) answers the same, as a missing answer is confirmed: then the
   plain card replaces it.
-- A post or video: `GET` of its root. Nothing is read from the answer: the card is the link's
-  shape alone, "Post on facebook.com" (with its page) or "Video on facebook.com". What comes
-  back without an account is the sign-in redirect, a refused request: that card has the
-  `blocked` fact (below). A 404 or 410 is `missing`.
+- A post or video: nothing. Facebook shows them to accounts only, so the card is a link rule:
+  the link's root and shape alone, "Post on facebook.com" (with its page as `author`) or
+  "Video on facebook.com".
 
-A request Facebook refuses (the sign-in redirect, a challenge, 401 or 403) gives the card of
-the link's shape alone with the `blocked` fact: the link still resolves, groups and counts. So
-does a page Facebook withholds where the request came from (451): it is not `missing`.
+A request Facebook refuses (the sign-in redirect, a challenge, 401 or 403) gives the card of the
+link's shape alone with the `blocked` fact: the link still resolves, groups and counts. So does a
+page Facebook withholds where the request came from (451): it is not `missing`. A refusal on a
+refresh keeps the card read before, as a wall on a web page does.
+
+A card takes its name, text and picture only from the object's own page: when the page read (its `og:url`, else the address the fetch ended at) names another object, as after a redirect, the card is the plain one of the link's shape, as for a page without tags.
 
 ## Card
 
 A page is an `Organization` named by its name, with its about text and its picture. A post is
-a `SocialMediaPosting`, a video a `VideoObject`.
+a `SocialMediaPosting`, a video a `VideoObject`, each named by its shape.
 
 | Fact | Meaning |
 | --- | --- |

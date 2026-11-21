@@ -382,7 +382,8 @@ and its address rules no longer merge new links (links it merged before stay mer
 that reads with the operator's token (`github`: `[sources.github] token` or `PINAKES_GITHUB_TOKEN`;
 `courtlistener`: `[sources.courtlistener] token` or `PINAKES_COURTLISTENER_TOKEN`) is on only with
 one. Its token is a secret, sent only to its service's API and never through a redirect. A token
-the service refuses (401; CourtListener's 403 too) switches the source off until restart, and
+the service refuses (401, or a 403 whose answer names the token) switches the source off for an
+hour (Discogs reads without its credential, Podcast Index pages get web cards), and
 `pinakes_source_token_refusals_total{source}` counts each refusal. That series counts every keyed
 provider's refusals (Discogs, Spotify, TIDAL, TMDB, Podcast Index and Ticketmaster too, as each
 signals one: a 401, a 403 where it means a refused key, or a refused token request; never a 429
@@ -393,7 +394,10 @@ lowers its service's host to the service's published rate (never above
 would wait more than five seconds for its host (its slot, or the request ahead of it) is retried
 later instead of timing out; a redirect within the host keeps the slot it has. After an upgrade
 that adds a source, run `pinakesd reextract web official`: links already known get their source's
-card.
+card. An official card is read again at `[cards.official] ttl_secs` (sooner where its source asks)
+until it is a thing that happened at a time (an event such as an earthquake, a finished trial, a
+Bitcoin block or confirmed transaction): a day after its start or end has passed it is final and
+not read again. An observation's time is a fact, so observations keep being read again.
 
 Two clients are outside that policy. Nominatim and Nexus are trusted, operator-configured
 upstreams at fixed URLs that no reference can change: their clients do not apply the web DNS

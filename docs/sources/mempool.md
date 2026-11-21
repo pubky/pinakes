@@ -14,7 +14,7 @@ resource, with a root in the object's own scheme:
 | --- | --- | --- |
 | Block | `https://mempool.space/block/{hash}` | `btc:block/{hash}` |
 | Transaction | `https://mempool.space/tx/{txid}` (`#vin=…`/`#vout=…` included) | `btc:tx/{txid}` |
-| Address | `https://mempool.space/address/{address}`, `bitcoin:{address}[?…]` | `btc:address/{address}` |
+| Address | `https://mempool.space/address/{address}`, `bitcoin:{address}` (a payment request's query, `?amount=…&label=…&lightning=…&pj=…`, is dropped before the link is stored) | `btc:address/{address}` |
 | Lightning node | `https://mempool.space/lightning/node/{public key}` | `ln:node/{public key}` |
 | Lightning channel | `https://mempool.space/lightning/channel/{id}`, also by short id `{block}x{tx}x{output}` | `ln:channel/{decimal id}` |
 
@@ -56,16 +56,15 @@ first form of each listed site, so every listed link reads back as the card.
 | Amboss (`amboss.space`) | `/node/{key}` | `/edge/{id}` | listed |
 | Lightning Network+ (`lightningnetwork.plus`) | `/nodes/{key}` | | listed |
 
-- How each form was checked (2026-11-10): on the live site for one block, transaction and
-  address (a wrong id answers 404 or names nothing) for Blockstream (mainnet, testnet, signet;
-  testnet4 by its explorer page and API), BTCScan and Blockchain.com (explorer pages, the older
-  paths and `blockchain.info`, which redirect to them); through its API for mempool.emzy.de's
-  networks (its testnet answers 502, so it is left out); as routes only for OKLink, whose pages
-  render client-side (a wrong id also answers 200), and Amboss's `/edge/`; 1ML and LN+ answer
-  404 for a wrong key. Blockchair, BlockCypher, bitcoinexplorer.org and 3xpl refuse a plain
-  client or were down, so their forms were checked on archived captures (3xpl's transaction
-  form on other transactions' captures); they are read, not listed. Blockchain.com's
-  `btc-testnet` pages show no data that names their network, so they are left out.
+- Blockstream (every network listed), BTCScan, Blockchain.com (its older paths and
+  `blockchain.info` redirect to its pages) and mempool.emzy.de answer a wrong block, transaction
+  or address with a 404 or a page that names nothing; 1ML and Lightning Network+ answer a wrong
+  key with a 404. OKLink's pages render client-side (a wrong id also answers 200) and Amboss's
+  `/edge/` is a route of its app, so their forms are routes only.
+- Blockchair, BlockCypher, bitcoinexplorer.org and 3xpl refuse a plain client: their links are
+  read, never listed.
+- mempool.emzy.de's testnet (it answers 502) and Blockchain.com's `btc-testnet` pages (they show
+  nothing that names their network) are left out.
 - A trailing slash, a query string, a fragment and `www.` change nothing. Language prefixes are
   read only on mempool sites.
 - Other chains on the same sites are not Bitcoin and name nothing: Blockstream's `/liquid/…`,
@@ -82,7 +81,8 @@ retried later. mempool.space answers an unknown Lightning node with a server err
 on a fault, so a server error on a node's record is followed by the Lightning search for its
 exact key: a node the search doesn't list is `missing`, and a listed node whose record keeps
 failing counts toward the failure limit. A 429 or 408 on a node's record is only retried later,
-with no search.
+with no search. This is the one place a source falls back to a search endpoint, after its
+object's own record failed, to decide `missing`; the match is exact on the key, never on a name.
 
 ## Also on
 
@@ -106,8 +106,8 @@ no request. Each is a link of the card's own object (above).
   `/api/v1/lightning/channels?public_key={key}&status=open`. A transaction's and a channel's
   come with their own record;
 - the fallback: the same paths (`/api/block/{hash}` for blocks) at
-  `https://blockstream.info/api` (`/testnet/api`, `/signet/api`). Testnet4 and Lightning objects
-  have no fallback: they are read from mempool.space only.
+  `https://blockstream.info/api` (`/testnet/api`, `/testnet4/api`, `/signet/api`). Lightning
+  objects have no fallback: they are read from mempool.space only.
 
 ## Card
 
@@ -131,6 +131,7 @@ The card types are local, not schema.org: `BitcoinBlock`, `BitcoinTransaction`,
 | `pool` | The mining pool, as mempool.space names it |
 | `total_fees`, `reward` | In satoshis |
 | `median_fee_rate` | sat/vB |
+| `stale` | `true` for a block its status puts outside the best chain (an orphaned block) |
 | `confirmed`, `block_height`, `block_hash` | A transaction's confirmation |
 | `fee`, `vsize`, `inputs`, `outputs`, `output_value`, `coinbase` | A transaction (satoshis, vbytes) |
 | `received`, `balance`, `unconfirmed_tx_count` | An address (confirmed satoshis) |

@@ -1,9 +1,10 @@
 # Twitch
 
 Twitch channels, videos and clips, from their pages' Open Graph tags. No key and no account.
-Videos and clips are social content (a video's title is its creator's own text): the card quotes
-at most 120 characters of the title, refreshes within the hour and is removed once Twitch
-answers that the video is gone (404 or 410).
+Videos are social content (a video's title is its creator's own text): the card quotes at most
+120 characters of the title, refreshes within the hour and is removed once Twitch answers that
+the video is gone (404 or 410). A clip is a link rule: its card is the link's root and shape,
+with the channel the link spells, and nothing is asked. A channel is social content too: it refreshes within the hour, is removed once it is gone, and its bio is published without e-mail addresses.
 
 ## Links
 
@@ -23,17 +24,20 @@ of them.
   answer is confirmed: then the plain card replaces it. A 404 or 410 is `missing`.
 - A video: `GET https://www.twitch.tv/videos/{id}`, its Open Graph tags
   (`Title - login on Twitch`).
-- A clip: `GET https://clips.twitch.tv/{slug}`. Twitch names a clip only to a browser, so the
-  card is the plain one, "Video on twitch.tv", with the channel when the link spells it.
+- A clip: nothing. Twitch names a clip only to a browser, so the card is "Video on twitch.tv",
+  with the channel when the link spells it.
 
-A request Twitch refuses (a challenge, 401 or 403) gives the card of the link's shape alone
-with the `blocked` fact: the link still resolves, groups and counts. So does a page Twitch
-withholds where the request came from (451): it is not `missing`.
+A request Twitch refuses (a challenge, 401 or 403) gives the card of the link's shape alone with the
+`blocked` fact: the link still resolves, groups and counts. So does a page Twitch withholds where
+the request came from (451): it is not `missing`. A refusal on a refresh keeps the card read before,
+as a wall on a web page does.
+
+A card takes its name, text and picture only from the object's own page: when the page read (the address the fetch ended at) names another object, as after a redirect, the card is the plain one of the link's shape, as for a page without tags.
 
 ## Card
 
-A channel is a `Person` named by its display name, with its bio and its avatar. A video or a
-clip is a `VideoObject` named by its title, with its still.
+A channel is a `Person` named by its display name, with its bio and its avatar. A video is a
+`VideoObject` named by its title, with its still; a clip one named by its shape.
 
 | Fact | Meaning |
 | --- | --- |

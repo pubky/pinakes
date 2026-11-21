@@ -49,6 +49,10 @@ Podcast Index page
   whether or not the show's GUID is vouched, just as its track is: Apple is the authority for
   its own episodes. iTunes may know an item by another GUID than the show's feed does (Darknet
   Diaries' "Conti"). Then the file is what joins Apple's episode to the show's own page.
+- **A player's show page.** A page that names a show's feed without being the feed's own card
+  (a Fountain show page, the `fountain` source) gets the show's keys only when the feed names it
+  as the show's page, its channel `<link>`; otherwise it lists the show's links, none of them a
+  key of the page.
 - **A player's episode page.** A Castro episode page (the `castro` source) plays a file and
   names its show's Apple ID. The episode is the one among the show's latest 200 that iTunes
   lists with that very file. It gets that episode's keys, and the item key when the show is
@@ -102,6 +106,6 @@ Apple track. The key and secret never appear in logs, the operator info or error
 fails no lookup and brings no run back early: what the other services answer is added, and nothing the source recorded before is deleted (a row no service gives any more leaves when it expires). An outage of a secondary service keeps what the other services answered,
 and the run comes back after a failed run's wait; when nothing at all was found the lookup fails and the stored rows stay. Such failures of a secondary service
 (Podcast Index, iTunes, Wikidata, the feed) are counted in
-`pinakes_also_on_service_errors_total{service,class}`; a refused key (401 or 403) is also counted
-in `pinakes_source_token_refusals_total{source="podcast_index"}`, which the `ProviderKeyRefused`
+`pinakes_also_on_service_errors_total{service,class}`; a refused key (a 401, or a 403 whose
+`description` names the key) is also counted in `pinakes_source_token_refusals_total{source="podcast_index"}`, which the `ProviderKeyRefused`
 alert reads.

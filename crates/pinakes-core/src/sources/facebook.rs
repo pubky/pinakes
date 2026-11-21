@@ -1,6 +1,6 @@
 //! Facebook pages, posts and videos, from what their public pages carry. A page's Open Graph
-//! tags name it (name, about, picture). Posts and videos are shown to accounts only: the
-//! sign-in redirect gets the plain card, marked `blocked`. Event links (`/events/{id}`) are not
+//! tags name it (name, about, picture). Posts and videos are shown to accounts only, so they are
+//! link rules: their card is the link's root and shape, and nothing is asked. Event links (`/events/{id}`) are not
 //! this source's: the event module's Facebook adapter reads them. No key, no account. Every
 //! spelling (m., web., fb.com, a capitalised name) is one resource at
 //! `https://www.facebook.com/…`.
@@ -124,6 +124,13 @@ impl Target {
     }
 }
 
+/// Whether the page read at `address` (`OpenGraph::address`) is the page `name`. Facebook reads
+/// a name without its dots and in any case, so they do not count.
+fn own_page(name: &str, address: &str) -> bool {
+    let plain = |name: &str| name.replace('.', "").to_ascii_lowercase();
+    matches!(Target::of_uri(address), Some(Target::Page(read)) if plain(&read) == plain(name))
+}
+
 /// The card of a page by its link alone, "Profile on facebook.com" with the name the link
 /// spells: what a page without tags gives. Such a page (a consent page, Facebook's generic
 /// page) does not say whether the page exists.
@@ -197,7 +204,11 @@ impl Source for Facebook {
         &["author", "handle", "blocked"]
     }
     fn social(&self, doc: &ResourceMeta) -> bool {
-        doc.type_name == "SocialMediaPosting"
+        // A post, and a page (its about text is its owner's own).
+        matches!(
+            doc.type_name.as_str(),
+            "SocialMediaPosting" | "Organization"
+        )
     }
     fn examples(&self) -> &'static [Example] {
         &[Example {
@@ -210,31 +221,31 @@ impl Source for Facebook {
         let doc = cx.card(uri, self);
         let mut doc = match &target {
             Target::Page(name) => match social::page_body(cx, &target.root(), &[]).await? {
-                Body::Read { body, .. } => {
+                Body::Read { body, url } => {
                     let tags = crate::resolver::html::blocking(move || social::open_graph(&body))
                         .await??;
-                    page_card(doc.clone(), name, &tags)
+                    // Only the page's own tags name it: a fetch may end on another page.
+                    Some(&tags)
+                        .filter(|tags| own_page(name, tags.address(&url)))
+                        .and_then(|tags| page_card(doc.clone(), name, tags))
                         .unwrap_or_else(|| social::shape_only(plain_page(doc, name)))
                 }
                 Body::Missing => cx.missing(uri, self),
-                Body::Blocked => social::blocked(doc, Shape::Profile, SITE),
+                // A walled page keeps the link's type.
+                Body::Blocked => {
+                    let mut doc = social::blocked(doc, Shape::Profile, SITE);
+                    doc.set_type("Organization");
+                    doc
+                }
             },
-            // Posts and videos are shown to accounts only: nothing is read from their pages. The
-            // sign-in redirect is a refusal (the blocked card); an answered page, the plain one.
+            // Posts and videos are shown to accounts only, so their pages are never asked: the
+            // card is the link's (its root, its shape and the page that posted it).
             Target::Post { page, .. } => {
-                let mut doc = match social::page_body(cx, &target.root(), &[]).await? {
-                    Body::Missing => cx.missing(uri, self),
-                    Body::Read { .. } => Shape::Post.card(doc, SITE),
-                    Body::Blocked => social::blocked(doc, Shape::Post, SITE),
-                };
+                let mut doc = Shape::Post.card(doc, SITE);
                 social::fact(&mut doc, "author", Some(page.clone()));
                 doc
             }
-            Target::Video(_) => match social::page_body(cx, &target.root(), &[]).await? {
-                Body::Missing => cx.missing(uri, self),
-                Body::Read { .. } => Shape::Video.card(doc, SITE),
-                Body::Blocked => social::blocked(doc, Shape::Video, SITE),
-            },
+            Target::Video(_) => Shape::Video.card(doc, SITE),
         };
         doc.source_root = Some(target.root());
         Ok(doc)

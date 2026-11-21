@@ -215,7 +215,8 @@ impl Source for X {
         &["author", "author_name", "published", "handle", "blocked"]
     }
     fn social(&self, doc: &ResourceMeta) -> bool {
-        doc.type_name == "SocialMediaPosting"
+        // A post, and a profile (its bio is its author's own text).
+        matches!(doc.type_name.as_str(), "SocialMediaPosting" | "Person")
     }
     fn examples(&self) -> &'static [Example] {
         &[
@@ -249,7 +250,18 @@ impl Source for X {
             }
             Target::Profile(handle) => {
                 match social::page(cx, &format!("https://x.com/{handle}")).await? {
-                    Page::Read { doc: page, .. } => profile_card(doc, handle, &page),
+                    // Only the profile's own page names it: a fetch that ended at another
+                    // address read another page.
+                    Page::Read { doc: page, url }
+                        if Target::of_uri(url.as_str()).as_ref() == Some(&target) =>
+                    {
+                        profile_card(doc, handle, &page)
+                    }
+                    Page::Read { .. } => {
+                        let mut doc = Shape::Profile.card(doc, SITE);
+                        social::fact(&mut doc, "handle", Some(handle.clone()));
+                        social::shape_only(doc)
+                    }
                     Page::Missing => cx.missing(uri, self),
                     Page::Blocked => social::blocked(doc, Shape::Profile, SITE),
                 }
@@ -268,6 +280,38 @@ mod tests {
 
     fn read(file: &str) -> Vec<u8> {
         crate::sources::fixture::read("x", file)
+    }
+
+    /// A profile takes its name only from its own page: the same recorded page, whose title names
+    /// the handle the link does, gives the plain card when the fetch ended at another address.
+    #[tokio::test(start_paused = true)]
+    async fn a_profile_is_named_from_its_own_page_only() {
+        let own = "https://x.com/jack";
+        let elsewhere = "https://x.com/explore";
+        let page = read("own-page-profile-x.html.gz");
+        let read_at = |ended_at: &'static str| {
+            let page = page.clone();
+            async move {
+                let mut routes = vec![(ended_at, 200, "text/html", page)];
+                if ended_at != own {
+                    routes.push((own, 302, "text/html", ended_at.as_bytes().to_vec()));
+                }
+                let (egress, _) = crate::sources::fixture::egress(routes);
+                let cx = Context {
+                    egress: &egress,
+                    ttl: 3600,
+                };
+                X.resolve(&cx, own).await.unwrap()
+            }
+        };
+        let doc = read_at(own).await;
+        assert_eq!(doc.name.as_deref(), Some("jack"));
+        assert!(doc.description.is_some());
+        let doc = read_at(elsewhere).await;
+        assert_eq!(doc.status, crate::model::Status::Ok);
+        assert_eq!(doc.name.as_deref(), Some("Profile on x.com"));
+        assert_eq!((doc.description, doc.image), (None, None));
+        assert_eq!(doc.attributes["handle"], "jack");
     }
 
     #[test]

@@ -1,9 +1,11 @@
-//! Instagram posts, reels and profiles, from their pages' Open Graph tags when Instagram
-//! writes them for a request without an account; its oEmbed endpoint needs an app token and is
-//! not used. A profile answers the sign-in redirect: the plain card, marked `blocked`. A post
-//! page names the post only to a browser: the plain card, "Post on instagram.com". No key, no
-//! account. Every spelling (instagr.am, a capitalised name, no trailing slash) is one resource
-//! at `https://www.instagram.com/{name}/`, `/p/{code}/` or `/reel/{code}/`.
+//! Instagram posts, reels and profiles. A profile is read from its page's Open Graph tags when
+//! Instagram writes them for a request without an account; its oEmbed endpoint needs an app
+//! token and is not used. A profile answers the sign-in redirect: the plain card, marked
+//! `blocked`. A post's or reel's page names it only to a browser, so posts and reels are link
+//! rules: the plain card ("Post on instagram.com", "Video on instagram.com") from the link, no
+//! request. No key, no account. Every spelling (instagr.am, a capitalised name, no trailing
+//! slash) is one resource at `https://www.instagram.com/{name}/`, `/p/{code}/` or
+//! `/reel/{code}/`.
 use super::{
     social::{self, Body, OpenGraph, Shape},
     Context, Example, Source,
@@ -127,52 +129,30 @@ pub fn profile_card(doc: ResourceMeta, name: &str, tags: &OpenGraph) -> Resource
     doc
 }
 
-/// The card of a post or reel from its page's tags, when Instagram wrote them (a title naming
-/// the author, `Name on Instagram: "caption"`); else the plain card.
-pub fn post_card(doc: ResourceMeta, target: &Target, tags: &OpenGraph) -> ResourceMeta {
-    let mut doc = target.shape().card(doc, SITE);
-    let Some(title) = tags
-        .title
-        .as_deref()
-        .filter(|t| !t.eq_ignore_ascii_case("instagram"))
-    else {
-        return doc;
-    };
-    let (by, caption) = match title.split_once(" on Instagram: ") {
-        Some((by, caption)) => (Some(by.trim()), caption.trim().trim_matches('"')),
-        None => (None, title),
-    };
-    social::post_text(&mut doc, caption, by);
-    if doc.description.is_none() {
-        doc.description = tags.description.as_deref().map(|d| social::excerpt(d, 200));
-    }
-    doc.image = tags.image.clone();
-    social::fact(&mut doc, "author_name", by.map(str::to_owned));
-    doc
-}
-
 #[async_trait]
 impl Source for Instagram {
     fn name(&self) -> &'static str {
         "instagram"
     }
     fn e2e(&self) -> Option<super::E2e> {
-        use super::{E2e, E2eAnswer, E2eSample};
+        use super::{E2e, E2eSample};
         Some(E2e {
-            samples: &[E2eSample {
-                kind: "instagram",
-                uri: "https://www.instagram.com/p/C2vXx0yPvYq/",
-                card_type: "SocialMediaPosting",
-                group_with: None,
-            }],
-            answers: &[E2eAnswer {
-                host: "www.instagram.com",
-                path: "/p/C2vXx0yPvYq/",
-                query: &[],
-                header: None,
-                content_type: "text/html",
-                file: "post-C2vXx0yPvYq.html.gz",
-            }],
+            // Posts and reels are link rules: nothing is asked.
+            samples: &[
+                E2eSample {
+                    kind: "instagram",
+                    uri: "https://www.instagram.com/p/C2vXx0yPvYq/",
+                    card_type: "SocialMediaPosting",
+                    group_with: None,
+                },
+                E2eSample {
+                    kind: "instagram_reel",
+                    uri: "https://www.instagram.com/reel/AAAAAAAAAAA/",
+                    card_type: "VideoObject",
+                    group_with: None,
+                },
+            ],
+            answers: &[],
         })
     }
     fn reads(&self, uri: &str) -> bool {
@@ -184,11 +164,15 @@ impl Source for Instagram {
         (root != normalized).then_some(root)
     }
     fn facts(&self) -> &'static [&'static str] {
-        &["author_name", "handle", "blocked"]
+        &["handle", "blocked"]
     }
-    /// A post's card and a reel's: both quote the author's caption.
+    /// A post's card and a reel's (link rules: their hourly refresh asks nothing), and a
+    /// profile's (its bio is its author's own text).
     fn social(&self, doc: &ResourceMeta) -> bool {
-        matches!(doc.type_name.as_str(), "SocialMediaPosting" | "VideoObject")
+        matches!(
+            doc.type_name.as_str(),
+            "SocialMediaPosting" | "VideoObject" | "Person"
+        )
     }
     fn examples(&self) -> &'static [Example] {
         &[
@@ -205,14 +189,18 @@ impl Source for Instagram {
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
         let target = Target::of_uri(uri).context("not an Instagram link")?;
         let doc = cx.card(uri, self);
+        // A post's or reel's page names it only to a browser, so it is never asked: the card is
+        // the link's (its root and its shape).
+        let Target::Profile(name) = &target else {
+            let mut doc = target.shape().card(doc, SITE);
+            doc.source_root = Some(target.root());
+            return Ok(doc);
+        };
         let mut doc = match social::page_body(cx, &target.root(), &[]).await? {
             Body::Read { body, .. } => {
                 let tags =
                     crate::resolver::html::blocking(move || social::open_graph(&body)).await??;
-                match &target {
-                    Target::Profile(name) => profile_card(doc, name, &tags),
-                    _ => post_card(doc, &target, &tags),
-                }
+                profile_card(doc, name, &tags)
             }
             Body::Missing => cx.missing(uri, self),
             Body::Blocked => social::blocked(doc, target.shape(), SITE),
@@ -282,30 +270,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_post_page_without_tags_is_the_plain_card() {
-        let body = crate::sources::fixture::read("instagram", "post-C2vXx0yPvYq.html.gz");
-        let tags = social::open_graph(&String::from_utf8_lossy(&body)).unwrap();
-        let target = Target::Post("C2vXx0yPvYq".into());
-        let base = ResourceMeta::new(&target.root(), "instagram", 3600);
-        let doc = post_card(base.clone(), &target, &tags);
-        assert_eq!(doc.type_name, "SocialMediaPosting");
-        assert_eq!(doc.name.as_deref(), Some("Post on instagram.com"));
-        assert_eq!((doc.description, doc.image), (None, None));
-        let shown = OpenGraph {
-            title: Some(r#"Instagram on Instagram: "Hello, world""#.into()),
-            description: Some("1,000 likes, 10 comments".into()),
-            image: Some("https://example.com/a.jpg".into()),
-        };
-        let doc = post_card(base, &Target::Reel("C2vXx0yPvYq".into()), &shown);
-        assert_eq!(doc.type_name, "VideoObject");
-        assert_eq!(doc.name.as_deref(), Some("Hello, world"));
-        assert_eq!(doc.attributes["author_name"], "Instagram");
-        assert_eq!(doc.image.as_deref(), Some("https://example.com/a.jpg"));
-        // A reel quotes its caption: social content, as a post is.
-        assert!(Instagram.social(&doc));
-    }
-
     /// Instagram has no status of its own for a refusal: a 999 is a server error as any status
     /// above 500 is, a retry and not the blocked card.
     #[tokio::test(start_paused = true)]
@@ -330,28 +294,6 @@ mod tests {
         );
     }
 
-    /// A post withheld where the request came from (451) is not a post that is gone: the blocked
-    /// card, not `missing`.
-    #[tokio::test(start_paused = true)]
-    async fn a_withheld_post_is_blocked_not_missing() {
-        let post = "https://www.instagram.com/p/C2vXx0yPvYq/";
-        let (egress, _) = crate::sources::fixture::egress(vec![(
-            post,
-            451,
-            "text/html",
-            b"<html><title>Unavailable</title></html>".to_vec(),
-        )]);
-        let cx = Context {
-            egress: &egress,
-            ttl: 3600,
-        };
-        let doc = Instagram.resolve(&cx, post).await.unwrap();
-        assert_eq!(doc.status, crate::model::Status::Ok);
-        assert_eq!(doc.type_name, "SocialMediaPosting");
-        assert_eq!(doc.attributes["blocked"], "true");
-        assert_eq!(doc.source_root.as_deref(), Some(post));
-    }
-
     #[test]
     fn a_profile_from_tags_or_without_them() {
         let base = ResourceMeta::new("https://www.instagram.com/instagram/", "instagram", 3600);
@@ -361,6 +303,7 @@ mod tests {
                 "700M Followers, 100 Following, 8,000 Posts - See Instagram photos and videos from Instagram (@instagram)".into(),
             ),
             image: Some("https://example.com/avatar.jpg".into()),
+            ..OpenGraph::default()
         };
         let doc = profile_card(base.clone(), "instagram", &shown);
         assert_eq!(doc.type_name, "Person");
