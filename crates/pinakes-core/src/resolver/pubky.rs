@@ -298,6 +298,8 @@ mod tests {
         limited: Mutex<Vec<(&'static str, u64)>>,
         /// Relay hosts that answer this server error, with this `Retry-After` when there is one.
         down: Mutex<Vec<(&'static str, u16, Option<u64>)>>,
+        /// Relay hosts whose connection times out in the client (its connect timeout).
+        timing_out: Mutex<Vec<&'static str>>,
         /// What one relay host serves for one key instead.
         serve: Mutex<HashMap<(&'static str, String), Vec<u8>>>,
         relay_requests: Mutex<Vec<String>>,
@@ -367,6 +369,10 @@ mod tests {
                 let response = reqwest::Response::from(response.unwrap());
                 return crate::resolver::egress::read_response_with(url.clone(), response, options)
                     .await;
+            }
+            if self.timing_out.lock().unwrap().contains(&host) {
+                return Err(anyhow::Error::new(crate::resolver::ErrorClass("timeout"))
+                    .context("the connection timed out"));
             }
             let down = self
                 .down
@@ -482,6 +488,7 @@ mod tests {
             dns_stalling: Arc::default(),
             limited: Mutex::default(),
             down: Mutex::default(),
+            timing_out: Mutex::default(),
             serve: Mutex::default(),
             relay_requests: Mutex::default(),
             homeserver,
@@ -1077,6 +1084,13 @@ mod tests {
         })
         .await;
         assert_eq!(wait(&error), Some(("relay_outage", 300)), "{error:#}");
+        // A connection that timed out in the client is no answer either.
+        let error = outage(&|net| {
+            net.timing_out.lock().unwrap().push("relay.example");
+            net.down.lock().unwrap().push(("relay2.example", 503, None));
+        })
+        .await;
+        assert_eq!(wait(&error), Some(("relay_outage", 60)), "{error:#}");
         let error = outage(&|net| {
             net.down.lock().unwrap().push(("relay.example", 503, None));
             net.empty.lock().unwrap().push("relay2.example");

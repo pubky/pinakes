@@ -182,6 +182,11 @@ impl Relays {
                             self.deadline.as_millis()
                         ),
                     ),
+                    // A connection or read that timed out inside the client (its own connect
+                    // timeout) did not answer in time either.
+                    Err(error) if super::error_class(&error) == "timeout" => {
+                        Answer::Outage(OUTAGE_WAIT, format!("{relay} timed out: {error:#}"))
+                    }
                     Err(error) => match error.downcast_ref::<super::RetryLater>() {
                         Some(wait) if matches!(wait.class, "rate_limited" | "http_4xx") => {
                             Answer::Wait(wait.seconds)
