@@ -37,13 +37,15 @@ scientific name).
 - **Point:** only when the observation is not obscured and neither the observer's geoprivacy nor
   the taxon's is `obscured` or `private`. iNaturalist's public coordinates for an obscured
   observation are randomised, so they are never used; the place guess is left out too.
-- **Image:** the first photo at medium size, only when the photo has a Creative Commons licence;
+- **Image:** the first photo at medium size, only when the photo is in the public domain or has
+  a Creative Commons licence;
   its own credit is `image_attribution`.
 - iNaturalist names the GBIF occurrence it published the observation as, in the
   `gbif_occurrence` fact.
 
-A taxon is a `Taxon`, with `name` the scientific name, the default photo as `image` when it has a
-Creative Commons licence, and `description` the Wikipedia summary iNaturalist shows (as text).
+A taxon is a `Taxon`, with `name` the scientific name, the default photo as `image` when it is in
+the public domain or has a Creative Commons licence, and `description` the Wikipedia summary
+iNaturalist shows (as text).
 
 | Fact | Meaning |
 | --- | --- |
@@ -72,9 +74,9 @@ ramchop, some rights reserved (CC BY-NC), via iNaturalist" ("all rights reserved
 licence; "no rights reserved (CC0)" without the "(c)" when the observer waived them). A taxon
 card with a description is credited "iNaturalist; description from Wikipedia (CC BY-SA 4.0)".
 
-A photo is shown only under a Creative Commons licence: CC0, CC BY, or CC BY with NC, ND or SA
-terms. A photo with no licence code or with any other one (`pd`, `gfdl`) is not shown, and
-neither is one whose address is not an `https` URL.
+A photo is shown only in the public domain (`pd`) or under a Creative Commons licence: CC0, CC
+BY, or CC BY with NC, ND or SA terms. A photo with no licence code or with any other one
+(`gfdl`) is not shown, and neither is one whose address is not an `https` URL.
 
 ## Examples
 

@@ -4,8 +4,8 @@
 //! API URL, is an alias of one identifier: `inat:observation/{id}` or `inat:taxon/{id}`.
 //!
 //! The API asks for at most 60 requests a minute and under 10,000 a day, so the budget is one
-//! request every 9 seconds. Licences are per observation and per photo; a photo is shown only
-//! under a Creative Commons licence.
+//! request every 9 seconds. Licences are per observation and per photo; a photo is shown only in
+//! the public domain or under a Creative Commons licence.
 //! An observation whose location is obscured or private has public coordinates that are
 //! randomised, so its card has no point.
 use super::kit::html_text;
@@ -136,14 +136,16 @@ pub fn licence(code: &str) -> String {
 }
 
 /// The address of a photo at the given size (`medium`, `large`) and its attribution, for a photo
-/// under a Creative Commons licence (CC0, CC BY and its NC, ND and SA forms). A photo with no
-/// licence code, or with any other one, has none.
+/// in the public domain (`pd`) or under a Creative Commons licence (CC0, CC BY and its NC, ND and
+/// SA forms). A photo with no licence code, or with any other one, has none.
 fn photo(p: &Value, size: &str) -> Option<(String, Option<String>)> {
-    let licence = image_licence(&text(&p["license_code"])?)?;
-    if !matches!(
-        licence,
-        ImageLicence::Cc0 | ImageLicence::By | ImageLicence::ByWithTerms
-    ) {
+    let code = text(&p["license_code"])?;
+    let shown = code.eq_ignore_ascii_case("pd")
+        || matches!(
+            image_licence(&code),
+            Some(ImageLicence::Cc0 | ImageLicence::By | ImageLicence::ByWithTerms)
+        );
+    if !shown {
         return None;
     }
     let url = text(&p[format!("{size}_url").as_str()]).or_else(|| {
@@ -622,9 +624,10 @@ mod tests {
     }
 
     #[test]
-    fn a_photo_is_shown_only_under_a_creative_commons_licence() {
+    fn a_photo_is_shown_only_in_the_public_domain_or_under_a_creative_commons_licence() {
         let medium = "https://inaturalist-open-data.s3.amazonaws.com/photos/604606400/medium.jpg";
         for code in [
+            "pd",
             "cc0",
             "cc-by",
             "cc-by-nc",
@@ -640,7 +643,7 @@ mod tests {
             );
         }
         // Codes that are no Creative Commons licence, and one iNaturalist does not have.
-        let others = ["pd", "gfdl", "all-rights-reserved"]
+        let others = ["gfdl", "all-rights-reserved"]
             .map(|code| image_with(|p| p["license_code"] = code.into()));
         assert!(others.iter().all(Option::is_none), "{others:?}");
         // A taxon's default photo follows the same rule.
