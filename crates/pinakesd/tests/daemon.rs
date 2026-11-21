@@ -69,13 +69,18 @@ async fn run(config: &Path, args: &[&str]) -> Output {
         .unwrap_or_else(|_| panic!("pinakesd {args:?} did not return within a minute"))
         .unwrap()
 }
-async fn stop(mut child: Child) {
+/// Send the daemon SIGTERM.
+fn terminate(child: &Child) {
     let pid = child.id().unwrap().to_string();
     assert!(std::process::Command::new("kill")
         .args(["-TERM", &pid])
         .status()
         .unwrap()
         .success());
+}
+/// SIGTERM, then a clean exit within 30 s.
+async fn stop(mut child: Child) {
+    terminate(&child);
     let status = tokio::time::timeout(Duration::from_secs(30), child.wait())
         .await
         .expect("pinakesd stops on SIGTERM")
@@ -283,10 +288,10 @@ async fn the_daemon_refuses_a_database_read_from_another_nexus(pool: PgPool) {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// From the instant a stopping daemon starts its shutdown, its admin `/healthz` answers 503: the
-/// admin listener stops taking connections then, so the request that sees it is one already in
-/// flight. Here the request's last line arrives after the signal, once the public listener is
-/// closed, and the daemon still exits cleanly after answering it.
+/// Once a daemon starts its shutdown, its admin `/healthz` answers 503. The admin listener stops
+/// taking connections then, so the request that sees it is one already in flight: here its last
+/// line arrives after the signal, once the public listener is closed, and the daemon still exits
+/// cleanly after answering it.
 #[sqlx::test(migrations = false)]
 async fn a_stopping_daemon_answers_healthz_with_503(pool: PgPool) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -326,14 +331,10 @@ async fn a_stopping_daemon_answers_healthz_with_503(pool: PgPool) {
         .write_all(format!("GET /healthz HTTP/1.1\r\nHost: {admin}\r\n").as_bytes())
         .await
         .unwrap();
-    // Let the daemon read the started request before the signal.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let pid = serving.id().unwrap().to_string();
-    assert!(std::process::Command::new("kill")
-        .args(["-TERM", &pid])
-        .status()
-        .unwrap()
-        .success());
+    // The daemon must have accepted the connection and started reading the request before the
+    // signal; a connection it has not yet taken is dropped at shutdown and the test fails.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    terminate(&serving);
     // The shutdown has started once the public listener no longer takes connections.
     let started = Instant::now();
     while tokio::net::TcpStream::connect(public).await.is_ok() {
@@ -343,6 +344,7 @@ async fn a_stopping_daemon_answers_healthz_with_503(pool: PgPool) {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    // `stopping` is set by a task of its own that the same shutdown wakes.
     tokio::time::sleep(Duration::from_millis(200)).await;
     request.write_all(b"\r\n").await.unwrap();
     let mut answer = String::new();
@@ -352,7 +354,7 @@ async fn a_stopping_daemon_answers_healthz_with_503(pool: PgPool) {
         .unwrap();
     assert!(answer.starts_with("HTTP/1.1 503"), "{answer}");
     assert!(answer.ends_with("stopping"), "{answer}");
-
+    // Already signalled: it exits by itself once the request is answered.
     let status = tokio::time::timeout(Duration::from_secs(30), serving.wait())
         .await
         .expect("pinakesd stops on SIGTERM")
