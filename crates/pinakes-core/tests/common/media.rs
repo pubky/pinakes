@@ -15,17 +15,14 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-/// Resolves each host to a public address of its own (in 8.8.0.0/16, the same for a host every
-/// time), as the services are, so the egress' own address check passes, no test asks a real
-/// resolver, and the egress paces each service by its own address.
+/// Resolves each host to a public address of its own (in 8.8.0.0/16, from the BLAKE3 hash of
+/// its name, so the same on every run), as the services are, so the egress' own address check
+/// passes, no test asks a real resolver, and the egress paces each service by its own address.
 pub struct PublicDns;
 #[async_trait::async_trait]
 impl Dns for PublicDns {
     async fn lookup(&self, host: &str, port: u16) -> anyhow::Result<Vec<SocketAddr>> {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::hash::DefaultHasher::new();
-        host.hash(&mut hasher);
-        let [a, b, ..] = hasher.finish().to_le_bytes();
+        let [a, b, ..] = *blake3::hash(host.as_bytes()).as_bytes();
         Ok(vec![SocketAddr::new([8, 8, a, b].into(), port)])
     }
 }
