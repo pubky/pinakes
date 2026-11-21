@@ -272,7 +272,9 @@ mod tests {
             }
             match (host, port) {
                 ("homeserver.example", 9443 | 443) => Ok(self.homeserver.clone()),
-                ("relay.example" | "relay2.example", 443) => Ok(self.relay.clone()),
+                ("relay.example" | "relay2.example" | "relay3.example", 443) => {
+                    Ok(self.relay.clone())
+                }
                 other => panic!("unexpected lookup {other:?}"),
             }
         }
@@ -1325,6 +1327,40 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(doc.name.as_deref(), Some("A deck"));
+    }
+
+    /// A relay's 429 beside a relay that refuses the connection (or one with no record) still
+    /// keeps its `Retry-After`: the link is read again then, not as soon as the next attempt.
+    #[tokio::test]
+    async fn a_relay_s_429_beside_an_unreached_relay_keeps_its_retry_after() {
+        let owner = Keypair::random();
+        let relays = [
+            "https://relay.example",
+            "https://relay2.example",
+            "https://relay3.example",
+        ];
+        for with_missing in [false, true] {
+            let net = network(&[direct(&owner)], ok());
+            net.limited.lock().unwrap().push(("relay.example", 300));
+            net.refusing.lock().unwrap().push("relay2.example");
+            let mut asked = &relays[..2];
+            if with_missing {
+                net.empty.lock().unwrap().push("relay3.example");
+                asked = &relays[..];
+            }
+            let error = resolver_on(net, &["8.8.8.8"], "8.8.4.4", asked)
+                .resolve(&object(&owner))
+                .await
+                .unwrap_err();
+            let wait = error
+                .downcast_ref::<crate::resolver::RetryLater>()
+                .unwrap_or_else(|| panic!("{with_missing} {error:#}"));
+            assert_eq!(
+                (wait.class, wait.seconds),
+                ("rate_limited", 300),
+                "{with_missing}"
+            );
+        }
     }
 
     #[tokio::test]

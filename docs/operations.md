@@ -443,7 +443,9 @@ longest `Retry-After` a relay named (a minute when none did), with no attempt ch
 dead letter. When no relay answered, because each one that failed refused or reset the
 connection (or Egress waited for its host budget, or the request would have waited more than
 1.5 s for the relay's host, or the relay answered 429), the failure never reached an answer and
-never dead-letters; after a 429 the link is read again when the relay's `Retry-After` says.
+never dead-letters. When a relay answered 429 (or Egress waited for its host) and no other relay
+failed otherwise, the link is read again when the relay's `Retry-After` says (or its host is
+free), also when another relay refused the connection or has no record.
 Verified packets are kept for their smallest record TTL, between five minutes
 and a day (10,000 keys at most). It then takes the first endpoint with a public HTTPS (ICANN)
 domain and GETs the object path there with the `pubky-host` header, as Pubky clients address

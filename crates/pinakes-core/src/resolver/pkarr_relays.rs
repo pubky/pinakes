@@ -115,9 +115,11 @@ impl Relays {
     ///   not be reached or made Egress wait): a relay outage, `RetryLater` of class
     ///   `relay_outage` with the longest wait named, else a minute. The link did nothing wrong:
     ///   no attempt is charged, as after a 429;
-    /// - each one could not be reached (refused, reset): `super::Unreached`;
-    /// - each one waited for its host budget (or would have waited longer than
-    ///   `RELAY_SLOT_WAIT`) or answered 429: that wait alone, with the longest `Retry-After`.
+    /// - each one could not be reached (refused, reset): `super::Unreached`.
+    ///
+    /// When a relay waited for its host budget (or would have waited longer than
+    /// `RELAY_SLOT_WAIT`) or answered 429, and no relay failed otherwise, the result is that wait
+    /// (the longest `Retry-After`), also beside relays that could not be reached or had no record.
     ///
     /// Neither dead-letters. Other relay-side failures (policy refusals, a redirect, a payload
     /// that does not verify), and a 5xx or a timeout beside a relay's 404, are `connect`:
@@ -244,24 +246,26 @@ impl Relays {
             })
             .context(format!("PKARR relays are down: {}", outages.join("; "))));
         }
-        if failures.is_empty() && unreached.is_empty() && outages.is_empty() {
+        if failures.is_empty() && outages.is_empty() {
             if let Some(seconds) = wait {
                 // Egress waited for a relay host's budget, or a relay said when to come back:
-                // ask again then.
+                // ask again then, also when another relay could not be reached or had no record.
                 return Err(super::RetryLater {
                     class: "rate_limited",
                     seconds,
                 }
                 .into());
             }
-            return Err(connect("no PKARR relay configured".into()));
-        }
-        if failures.is_empty() && outages.is_empty() && !missing {
-            // No relay answered about the key: each one could not be reached, or Egress waited.
-            return Err(anyhow::Error::new(super::Unreached).context(format!(
-                "PKARR relays could not be reached: {}",
-                unreached.join("; ")
-            )));
+            if unreached.is_empty() {
+                return Err(connect("no PKARR relay configured".into()));
+            }
+            if !missing {
+                // No relay answered about the key: each one could not be reached.
+                return Err(anyhow::Error::new(super::Unreached).context(format!(
+                    "PKARR relays could not be reached: {}",
+                    unreached.join("; ")
+                )));
+            }
         }
         failures.extend(outages);
         failures.extend(unreached);
