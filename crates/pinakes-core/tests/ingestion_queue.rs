@@ -2008,6 +2008,41 @@ async fn new_reference_revives_a_dead_letter_but_a_repeat_never_does(pool: PgPoo
     assert_eq!(state().await.unwrap(), (false, 0, true), "through an alias");
 }
 
+/// A link never read is claimed before an overdue refresh, however long the refresh has waited;
+/// an expedited row still comes first.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_new_link_is_claimed_before_an_overdue_refresh(pool: PgPool) {
+    let (refresh, _) = store::ensure_resource_created(&pool, "https://example.org/refresh")
+        .await
+        .unwrap();
+    let (new, _) = store::ensure_resource_created(&pool, "https://example.org/new")
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource SET status='ok',resolved_at=now()-interval '8 days',next_attempt_at=now()-interval '1 day' WHERE id=$1")
+        .bind(&refresh)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let cfg = QueueConfig::default();
+    let claimed = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    assert_eq!(claimed.id, new);
+    let claimed = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    assert_eq!(claimed.id, refresh);
+    // An expedited refresh goes ahead of a new link.
+    let (later, _) = store::ensure_resource_created(&pool, "https://example.org/later")
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource SET lease_until=NULL,priority_at=now() WHERE id=$1")
+        .bind(&refresh)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let claimed = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    assert_eq!(claimed.id, refresh);
+    let claimed = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    assert_eq!(claimed.id, later);
+}
+
 /// A database that holds the cursor of another Nexus feed and none of the configured one is
 /// refused, with the reset step and the other feed by host only. One the operator prepared, with
 /// a cursor row for the configured feed (beside the old one, or the old one moved), starts,

@@ -629,7 +629,9 @@ being named.
 ## Queue and refresh
 
 The durable queue leases rows with `SKIP LOCKED` and fences stale completions by a generation
-counter. A job lease lasts at least `limits.lease_secs`; a 50-object OSM batch gets 760 seconds.
+counter. A worker takes the rows a lookup or a preview moved to the front first, then
+links never read before overdue refreshes (after downtime the refreshes that came due together
+wait behind new links), then the longest due. A job lease lasts at least `limits.lease_secs`; a 50-object OSM batch gets 760 seconds.
 Failures back off exponentially from `limits.backoff_secs` to `limits.max_backoff_secs` and
 dead-letter after `limits.max_failures`. The first `limits.timeout_grace` consecutive timeouts
 back off without charging an attempt. A request that never got an answer from the upstream (the
