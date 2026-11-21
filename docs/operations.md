@@ -913,12 +913,6 @@ image, cached an hour. A stored card changes at its next read; `pinakesd reextra
 event_platform` reads every event platform link again at once, Wikidata items among them (a
 Wikipedia page read from its item is on the `web` route).
 
-`cargo run -p pinakes-core --example adapter_probe -- MANIFEST.json REPLAYS.json OUTPUT_DIR`
-(with `DATABASE_URL`) runs a read-only, keyless canary pass and records requests, the User-Agent
-each sent, statuses, hashes and parser output; secrets are refused. `PINAKES_PROBE_OFFLINE=1`
-replays captures without network access. Recorded responses for the keyless probes run in
-`scripts/test`.
-
 ## Also on
 
 After setting a source's key (its page in [docs/sources](sources/README.md#also-on) names
