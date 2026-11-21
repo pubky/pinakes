@@ -1182,15 +1182,18 @@ fn microformat_fill(
             .and_then(|(lat, lon)| point(lat, lon));
     }
 }
-/// A property of the microformats `root`: its first element matching `s` that is not inside a
-/// root nested in it (an author's `h-card` in a post holds the author's name, not the post's).
+/// A property of the microformats `root`: its first element matching `s` that is neither a root
+/// nested in it nor inside one (an author's `h-card` in a post holds the author's name, not the
+/// post's, also when it carries the property's class itself).
 fn mf(root: &ElementRef<'_>, s: &str) -> Option<String> {
     root.select(&selector(s))
         .find(|el| {
-            !el.ancestors()
-                .take(super::html::MAX_ANCESTORS)
-                .take_while(|a| a.id() != root.id())
-                .any(|a| a.value().as_element().and_then(mf_root).is_some())
+            (el.id() == root.id() || mf_root(el.value()).is_none())
+                && !el
+                    .ancestors()
+                    .take(super::html::MAX_ANCESTORS)
+                    .take_while(|a| a.id() != root.id())
+                    .any(|a| a.value().as_element().and_then(mf_root).is_some())
         })
         .map(|el| {
             let attrs: &[&str] = if s.starts_with(".u-") {
@@ -3258,6 +3261,24 @@ mod tests {
         );
         assert_eq!(doc.name.as_deref(), Some("Notes on caching"));
         assert_eq!(doc.image.as_deref(), Some("https://blog.example/cover.png"));
+    }
+
+    #[test]
+    fn a_nested_root_with_the_property_s_own_class_gives_the_post_nothing() {
+        let fetched = Fetched::answer(
+            Url::parse("https://blog.example/2026/post").unwrap(),
+            200,
+            "text/html".into(),
+            r#"<html><head><title>Blog</title></head><body><article class="h-entry"><div class="p-author h-card p-name">Jane</div><img class="p-author h-card u-photo" src="/me.jpg"><h1 class="p-name">Notes on caching</h1></article></body></html>"#
+                .as_bytes()
+                .into(),
+        );
+        let doc = extract("https://blog.example/2026/post", &fetched, 100)
+            .unwrap()
+            .doc;
+        assert_eq!(doc.type_name, "Article");
+        assert_eq!(doc.name.as_deref(), Some("Notes on caching"));
+        assert_eq!(doc.image, None);
     }
 
     #[test]
