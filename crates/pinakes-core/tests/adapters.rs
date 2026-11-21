@@ -739,7 +739,9 @@ async fn cursor_outages_preserve_documents_and_checkpoints(pool: PgPool) {
 /// named wait or the backoff, whichever is longer), and the row ends `error` and dead-lettered
 /// once the failures have lasted three days.
 #[sqlx::test(migrations = "../../migrations")]
-async fn a_platform_answering_500_for_ever_backs_off_and_dead_letters_after_three_days(pool: PgPool) {
+async fn a_platform_answering_500_for_ever_backs_off_and_dead_letters_after_three_days(
+    pool: PgPool,
+) {
     use pinakes_core::queue;
     let uri = "https://portal.einundzwanzig.space/api/changes";
     let id = store::ensure_resource(&pool, uri).await.unwrap();

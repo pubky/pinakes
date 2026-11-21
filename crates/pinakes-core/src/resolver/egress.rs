@@ -367,7 +367,10 @@ fn content_charset(content: &[u8]) -> Option<&[u8]> {
         return match value.first() {
             Some(&quote @ (b'"' | b'\'')) => {
                 let value = &value[1..];
-                value.iter().position(|b| *b == quote).map(|end| &value[..end])
+                value
+                    .iter()
+                    .position(|b| *b == quote)
+                    .map(|end| &value[..end])
             }
             _ => {
                 let end = value
@@ -388,7 +391,11 @@ fn quota_reset(headers: &reqwest::header::HeaderMap, now: std::time::SystemTime)
         return None;
     }
     let now = now.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
-    Some(value("x-ratelimit-reset")?.saturating_sub(now).clamp(1, 3600))
+    Some(
+        value("x-ratelimit-reset")?
+            .saturating_sub(now)
+            .clamp(1, 3600),
+    )
 }
 /// The `charset` parameter of a `Content-Type` value, lower-cased.
 fn charset_parameter(value: &str) -> Option<String> {
@@ -2941,7 +2948,11 @@ mod tests {
         };
         for status in [403, 429] {
             let f = answer(status, &spent(epoch + 900)).await.unwrap();
-            assert!((895..=900).contains(&f.retry_after_secs), "{status}: {}", f.retry_after_secs);
+            assert!(
+                (895..=900).contains(&f.retry_after_secs),
+                "{status}: {}",
+                f.retry_after_secs
+            );
         }
         let f = answer(403, &spent(epoch + 86400)).await.unwrap();
         assert_eq!(f.retry_after_secs, 3600);
@@ -3100,14 +3111,16 @@ mod tests {
                 self.most.fetch_max(now, Ordering::SeqCst);
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 *self.at.lock().unwrap().get_mut(&ip).unwrap() -= 1;
-                Ok(if url.path() == "/" && url.host_str() == Some("a.example.org") {
-                    Fetched {
-                        location: Some("/next".into()),
-                        ..Fetched::answer(url.clone(), 302, "text/plain".into(), vec![])
-                    }
-                } else {
-                    Fetched::answer(url.clone(), 200, "text/plain".into(), b"ok".to_vec())
-                })
+                Ok(
+                    if url.path() == "/" && url.host_str() == Some("a.example.org") {
+                        Fetched {
+                            location: Some("/next".into()),
+                            ..Fetched::answer(url.clone(), 302, "text/plain".into(), vec![])
+                        }
+                    } else {
+                        Fetched::answer(url.clone(), 200, "text/plain".into(), b"ok".to_vec())
+                    },
+                )
             }
         }
         let transport = Arc::new(Slow::default());

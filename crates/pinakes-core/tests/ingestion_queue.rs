@@ -3163,14 +3163,21 @@ async fn an_upstream_outage_dead_letters_only_after_three_days(pool: PgPool) {
     let mut waits = 0;
     while waited < 3600.0 {
         let (streak, attempts, dead, delay, _) = run(&BUSY).await;
-        assert_eq!((streak, attempts, dead), (waits + 1, 0, false), "after {waited} s");
+        assert_eq!(
+            (streak, attempts, dead),
+            (waits + 1, 0, false),
+            "after {waited} s"
+        );
         waited += delay.round();
         waits += 1;
     }
     assert!(waits >= 5, "{waits} waits in an hour");
     static UP: FakeResolver = FakeResolver { fail: false };
     let (streak, attempts, dead, _, status) = run(&UP).await;
-    assert_eq!((streak, attempts, dead, status.as_str()), (0, 0, false, "ok"));
+    assert_eq!(
+        (streak, attempts, dead, status.as_str()),
+        (0, 0, false, "ok")
+    );
     // The waits of the defaults: 30 s doubling to an hour, so the 79th failure in a row comes
     // three days after the first (3810 s, then 71 waits of 3600 s); the 78th does not.
     assert!(queue::upstream_span(&cfg, 78) < 3 * 86400);
@@ -3181,9 +3188,15 @@ async fn an_upstream_outage_dead_letters_only_after_three_days(pool: PgPool) {
         .await
         .unwrap();
     let (streak, _, dead, delay, status) = run(&BUSY).await;
-    assert_eq!((streak, dead, status.as_str(), delay.round()), (78, false, "ok", 3600.0));
+    assert_eq!(
+        (streak, dead, status.as_str(), delay.round()),
+        (78, false, "ok", 3600.0)
+    );
     let (streak, attempts, dead, _, status) = run(&BUSY).await;
-    assert_eq!((streak, attempts, dead, status.as_str()), (79, 0, true, "error"));
+    assert_eq!(
+        (streak, attempts, dead, status.as_str()),
+        (79, 0, true, "error")
+    );
 }
 
 fn too_large() -> anyhow::Error {
