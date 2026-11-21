@@ -483,9 +483,10 @@ Every public `/v1` route shares the per-IP budget (`api.requests_per_minute`), a
 their own per-IP and per-URI budgets and a per-client share of the hour's new previews; ODbL dump
 downloads are counted per address too. The address a request is counted under is the connecting
 peer's, unless the peer is in `api.trusted_proxies` (addresses or networks, such as
-`["127.0.0.1", "172.17.0.0/16"]`; empty by default). From a trusted proxy it is the right-most
-`X-Forwarded-For` entry that is not itself a trusted proxy: each proxy appends the address it was
-connected from, so whatever a client wrote to the left of that is never read. With no such entry
+`["172.17.0.1"]` for a proxy at the Docker bridge gateway; empty by default). From a trusted
+proxy it is the right-most `X-Forwarded-For` entry that is not itself a trusted proxy: each proxy
+appends the address it was connected from, so whatever a client wrote to the left of that is
+never read. With no such entry
 (no header, every entry a trusted proxy, or one that is no address) the proxy's own address is
 used. From a peer not in the list the header is never read, so leave the list empty where clients
 connect directly, and list exactly the proxies that set the header (a proxy that passes on a
