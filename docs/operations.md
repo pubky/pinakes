@@ -267,13 +267,13 @@ It prints `scrubbed N posts gone or opted out`, then the re-queued count.
 **Dead letters.** To retry one by hand:
 
 ```sql
-UPDATE resource SET dead_letter=false, attempts=0, next_attempt_at=now(),
-  lease_until=NULL, generation=generation+1 WHERE id='<resource_id>';
+UPDATE resource SET dead_letter=false, attempts=0, timeout_streak=0, last_error=NULL,
+  next_attempt_at=now(), lease_until=NULL, generation=generation+1 WHERE id='<resource_id>';
 ```
 
 `pinakesd reextract <route>` revives a route's dead letters too: every row it re-queues gets
-`dead_letter=false` and `attempts=0`. It runs with the daemon stopped and reads the whole route
-again.
+`dead_letter=false`, `attempts=0`, `timeout_streak=0` and `last_error=NULL`. It runs with the
+daemon stopped and reads the whole route again.
 
 **Grouping rebuild.** The daemon stores its grouping policy (its limits and mode) and
 re-queues every membership when it changes, so a changed `groups.cross_container_occurrences`
