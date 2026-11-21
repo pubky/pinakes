@@ -2074,7 +2074,12 @@ fn apply_jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url, claims: bool, vou
             v.get("name").or_else(|| v.get("headline")).and_then(string),
         );
     }
-    fill(&mut doc.description, v.get("description").and_then(string));
+    fill(
+        &mut doc.description,
+        v.get("description")
+            .and_then(string)
+            .and_then(super::html::plain_text),
+    );
     fill(
         &mut doc.image,
         v.get("image")
@@ -3187,6 +3192,41 @@ mod tests {
         assert_eq!(
             page(marked, Some("windows-1252")).title.as_deref(),
             Some("Grüße")
+        );
+    }
+
+    /// A JSON-LD description that holds markup (a WordPress event plugin's `<p>`) is read as
+    /// text, on the general reader and the event reader alike; one with a bare `<` is kept.
+    #[test]
+    fn a_json_ld_description_with_markup_is_plain_text() {
+        let read = |script: &str| {
+            let body = format!(
+                r#"<title>Page</title><script type="application/ld+json">{script}</script>"#
+            );
+            let fetched = Fetched::answer(
+                Url::parse("https://example.org/e/1").unwrap(),
+                200,
+                "text/html".into(),
+                body.into_bytes(),
+            );
+            extract("https://example.org/e/1", &fetched, 100)
+                .unwrap()
+                .doc
+                .description
+        };
+        for script in [
+            r#"{"@type":"WebPage","name":"Page","description":"<p>Join us at <b>the hall</b>.</p>"}"#,
+            r#"{"@type":"Event","name":"Gig","startDate":"2027-05-01T19:30:00Z","description":"<p>Join us at <b>the hall</b>.</p>"}"#,
+        ] {
+            assert_eq!(
+                read(script).as_deref(),
+                Some("Join us at the hall."),
+                "{script}"
+            );
+        }
+        assert_eq!(
+            read(r#"{"@type":"WebPage","name":"Page","description":"1 < 2, a <-> b"}"#).as_deref(),
+            Some("1 < 2, a <-> b")
         );
     }
 

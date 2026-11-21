@@ -522,6 +522,20 @@ pub fn bounded(text: &str) -> &str {
     scan.cut.map_or(text, |at| &text[..at])
 }
 
+/// `text` as plain text, as a card's text fields are: read with [`scan_text`] when it holds
+/// markup (a `<` opening a tag, a comment or a declaration), else as it is. `None` when markup
+/// leaves no text.
+pub fn plain_text(text: String) -> Option<String> {
+    let markup = text
+        .as_bytes()
+        .windows(2)
+        .any(|w| w[0] == b'<' && (w[1].is_ascii_alphabetic() || matches!(w[1], b'/' | b'!')));
+    if markup {
+        scan_text(&text)
+    } else {
+        Some(text)
+    }
+}
 /// The text of an HTML fragment, read in one pass without a parser, so in time linear in
 /// its length whatever its nesting: tags and comments are dropped, a block tag (`p`, `br`,
 /// `li`, …) starts a new line, `script` and `style` contents are skipped, character

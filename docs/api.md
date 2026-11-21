@@ -49,7 +49,8 @@ moves to the front of the refresh queue without bypassing its TTL, backoff or fi
 Every route returns the same card for a resource or an occurrence.
 Absent values are `null`, never `""`. Text fields (`name`, `description`, `site`, and every
 text a read adds) are plain text, decoded from the source's HTML entities once: escape them
-before rendering them as HTML.
+before rendering them as HTML. A source text that holds markup (a page's JSON-LD `description`,
+a DOI's title with `<i>`) is read as text, its tags dropped.
 
 A music link is typed by what it is, whatever the service's page or player calls it: a track is a
 `MusicRecording`, an album a `MusicAlbum`, an artist a `MusicGroup` (a `Person` from the next
