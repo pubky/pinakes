@@ -1966,6 +1966,48 @@ async fn new_reference_reopens_final_pages_but_never_geo(pool: PgPool) {
     assert!(!final_root);
 }
 
+/// A dead letter comes back on a new reference to its link, as a final page reopens: due now,
+/// with its failures forgotten. A repeat of a reference it already has, or a line from before the
+/// link was stored (a replayed feed), revives nothing; neither does time alone.
+#[sqlx::test(migrations = "../../migrations")]
+async fn new_reference_revives_a_dead_letter_but_a_repeat_never_does(pool: PgPool) {
+    let first = change("https://example.org/dead", "a", "/pub/app/tags/a");
+    batch(&pool, vec![first.clone()], Some("one")).await;
+    let dead = || {
+        sqlx::query("UPDATE resource SET dead_letter=true,attempts=5,status='error',last_error='http',created_at=now()-interval '1 day',next_attempt_at=now()+interval '1 day'")
+            .execute(&pool)
+    };
+    dead().await.unwrap();
+    let state = || {
+        sqlx::query_as::<_, (bool, i32, bool)>(
+            "SELECT dead_letter,attempts,next_attempt_at<=now() FROM resource WHERE uri='https://example.org/dead'",
+        )
+        .fetch_one(&pool)
+    };
+    batch(&pool, vec![first.clone()], Some("one")).await;
+    assert_eq!(state().await.unwrap(), (true, 5, false), "a repeat");
+    let mut replayed = change("https://example.org/dead", "b", "/pub/app/tags/b");
+    replayed.at = (Utc::now() - chrono::Duration::days(2)).timestamp_millis();
+    batch(&pool, vec![replayed], Some("one")).await;
+    assert_eq!(state().await.unwrap(), (true, 5, false), "an older line");
+    let second = change("https://example.org/dead", "c", "/pub/app/tags/c");
+    batch(&pool, vec![second], Some("one")).await;
+    assert_eq!(state().await.unwrap(), (false, 0, true), "a new reference");
+    // A dead letter that had a card is revived by a reference made after its last read.
+    dead().await.unwrap();
+    sqlx::query("UPDATE resource SET resolved_at=now()-interval '1 hour'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let third = change(
+        "https://example.org/dead?utm_source=feed",
+        "d",
+        "/pub/app/tags/d",
+    );
+    batch(&pool, vec![third], Some("one")).await;
+    assert_eq!(state().await.unwrap(), (false, 0, true), "through an alias");
+}
+
 /// A database that holds the cursor of another Nexus feed and none of the configured one is
 /// refused, with the reset step and the other feed by host only. One the operator prepared, with
 /// a cursor row for the configured feed (beside the old one, or the old one moved), starts,

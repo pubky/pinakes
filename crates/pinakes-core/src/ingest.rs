@@ -327,9 +327,11 @@ async fn apply_line(
             #[cfg(test)]
             tests::maybe_panic(line);
             if old.as_deref() != Some(&id) {
-                // A new reference reopens a finished card: the line's own, or, when the line
-                // names an alias, its root, which holds the card.
-                sqlx::query("UPDATE resource SET final=false,refresh_at=now(),next_attempt_at=now(),dead_letter=false,attempts=0 WHERE id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1) AND final AND resolver<>'geo' AND $2>resolved_at").bind(&id).bind(timestamp(Some(line.at))?).execute(&mut **tx).await?;
+                // A new reference reopens a finished card, and revives a dead letter: the line's
+                // own, or, when the line names an alias, its root, which holds the card. Only a
+                // reference made after the card's last read (a dead letter never read, after
+                // the link was first stored): a replayed feed revives only links referenced since.
+                sqlx::query("UPDATE resource SET final=false,refresh_at=now(),next_attempt_at=now(),dead_letter=false,attempts=0,timeout_streak=0 WHERE id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=$1),$1) AND resolver<>'geo' AND ((final AND $2>resolved_at) OR (dead_letter AND $2>coalesce(resolved_at,created_at)))").bind(&id).bind(timestamp(Some(line.at))?).execute(&mut **tx).await?;
             }
             if post {
                 expedite(tx, &id, line.at).await?;

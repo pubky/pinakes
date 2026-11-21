@@ -264,7 +264,11 @@ deleted, and it is regrouped. An opted-out post's lines lose their documents. Th
 either keep only their `aliased` line: their cards, other lines and also-on results are deleted.
 It prints `scrubbed N posts gone or opted out`, then the re-queued count.
 
-**Dead letters.** To retry one by hand:
+**Dead letters.** A dead letter is read again when someone references its link anew (a new tag,
+reply, embed or collection item, through any of its spellings), as a final page is reopened: the
+reference must be newer than the card's last read (for a link never read, than its first storing),
+so the feed read again after a reset revives only links referenced since. Time alone never brings one back, and a lookup or preview does
+not either. To retry one by hand:
 
 ```sql
 UPDATE resource SET dead_letter=false, attempts=0, next_attempt_at=now(),
@@ -649,12 +653,13 @@ confirming fetch`) and counted in `pinakes_resolution_deferred_total{reason="mis
 answered without its tags, on a stored card that says more than the link's plain card, waits and is counted the same
 way (the log line carries `shapeless`); its confirming read stores the plain card. A lookup or preview
 moves an overdue resource to the front within its TTL, author budget and retry schedule; it
-cannot revive a dead letter. Resolution is also limited per referencing author
+cannot revive a dead letter (a new reference does). Resolution is also limited per referencing author
 (`limits.author_requests_per_second`); several tags never multiply fetches.
 
 Refresh follows the time to an event's start (`limits.refresh_resource_secs`,
 `limits.refresh_container_secs`): 7 days, 2 days, 6 hours and 1 hour. One fetch at end + 24
-hours makes a resource final, and a new reference reopens a final resource; `geo:` stays final.
+hours makes a resource final, and a new reference reopens a final resource and revives a dead
+letter; `geo:` stays final.
 OSM places refresh after `limits.osm_ttl_secs`; a confirmed missing object stays cached as
 missing for the same period. Conditional responses keep accepted facts, but validators are kept
 only for calendars, where they commit with the parsed snapshot.
