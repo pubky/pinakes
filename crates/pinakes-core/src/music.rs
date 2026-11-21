@@ -358,13 +358,43 @@ pub fn parse(uri: &str) -> Option<Link> {
     }
 }
 
+/// Whether a YouTube channel's or playlist's card is a link on YouTube Music: its own link, or
+/// another spelling of it (an alias, `music.youtube.com/…`), is on `music.youtube.com`. Asked
+/// only for those cards ([`type_card`]).
+pub async fn on_youtube_music(pool: &sqlx::PgPool, id: &str, uri: &str) -> anyhow::Result<bool> {
+    let host = |u: &str| url::Url::parse(u).ok().and_then(|u| u.host_str().map(str::to_owned));
+    if !parse(uri).is_some_and(|l| {
+        l.service == Service::YouTube && matches!(l.level, Level::Artist | Level::Playlist)
+    }) {
+        return Ok(false);
+    }
+    if host(uri).as_deref() == Some("music.youtube.com") {
+        return Ok(true);
+    }
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM resource_alias a JOIN resource r ON r.id=a.alias_id WHERE a.root_id=$1 AND r.host='music.youtube.com')",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await?)
+}
+
 /// Type and name a resolved card by what its link is, whatever the service's page or oEmbed
 /// says: a track is a `MusicRecording`, an album a `MusicAlbum`, an artist a `MusicGroup` (a
 /// `Person` when MusicBrainz says the artist is one: `artist_type`), a playlist a
-/// `MusicPlaylist`; a video stays as resolved. The card's site is the service's name ("Apple
-/// Music", "TIDAL", "YouTube"), as derived links show it. A Bandcamp root (an artist page that
-/// features an album) is named after the artist. A card that did not resolve is left alone.
-pub fn type_card(uri: &str, artist_type: Option<&str>, doc: &mut crate::model::ResourceMeta) {
+/// `MusicPlaylist`; a video stays as resolved. YouTube is not only music: its channel or
+/// playlist is music only when it is a Topic channel (named `{Artist} - Topic`, YouTube's own
+/// channel of an artist's releases) or a link on YouTube Music (`on_youtube_music`: the card's
+/// link, or another spelling of it, is on `music.youtube.com`); any other stays as resolved. The
+/// card's site is the service's name ("Apple Music", "TIDAL", "YouTube"), as derived links show
+/// it. A Bandcamp root (an artist page that features an album) is named after the artist. A card
+/// that did not resolve is left alone.
+pub fn type_card(
+    uri: &str,
+    artist_type: Option<&str>,
+    on_youtube_music: bool,
+    doc: &mut crate::model::ResourceMeta,
+) {
     if doc.status != crate::model::Status::Ok {
         return;
     }
@@ -380,8 +410,15 @@ pub fn type_card(uri: &str, artist_type: Option<&str>, doc: &mut crate::model::R
         }
         doc.description = None;
     }
+    let topic = || {
+        doc.name
+            .as_deref()
+            .is_some_and(|n| n.trim_end().ends_with(" - Topic"))
+    };
     match link.level {
         Level::Video => {}
+        Level::Artist | Level::Playlist
+            if link.service == Service::YouTube && !on_youtube_music && !topic() => {}
         Level::Artist if artist_type == Some("Person") => doc.set_type("Person"),
         level => doc.set_type(level.type_name()),
     }
@@ -976,6 +1013,34 @@ mod tests {
         assert!(parse("https://www.youtube.com/channel/short").is_none());
     }
 
+    /// A YouTube channel or playlist is music only as a Topic channel or a link on YouTube
+    /// Music; any other keeps the type its page gave it.
+    #[test]
+    fn youtube_channels_and_playlists_are_music_only_on_a_music_signal() {
+        use crate::model::{ResourceMeta, Status};
+        let card = |uri: &str, name: &str, on_youtube_music: bool| {
+            let mut d = ResourceMeta::new(uri, "web", 3600);
+            d.set_type("WebPage");
+            d.name = Some(name.into());
+            d.status = Status::Ok;
+            type_card(uri, None, on_youtube_music, &mut d);
+            d.type_name
+        };
+        let channel = "https://www.youtube.com/channel/UCq19-LqvG35A-30oyAiPiqA";
+        let playlist =
+            "https://www.youtube.com/playlist?list=PLFgquLnL59alCl_2TQvOiD5Vgm1hCaGSI";
+        assert_eq!(card(channel, "Cooking at home", false), "WebPage");
+        assert_eq!(card(channel, "Queen - Topic", false), "MusicGroup");
+        assert_eq!(card(channel, "Queen", true), "MusicGroup");
+        assert_eq!(card(playlist, "Holiday videos", false), "WebPage");
+        assert_eq!(card(playlist, "A Night at the Opera", true), "MusicPlaylist");
+        // Other services' artists and playlists are music whatever their names.
+        assert_eq!(
+            card("https://www.deezer.com/artist/399", "Cooking at home", false),
+            "MusicGroup"
+        );
+    }
+
     #[test]
     fn cards_are_typed_by_their_level() {
         use crate::model::{ResourceMeta, Status};
@@ -983,7 +1048,7 @@ mod tests {
             let mut d = ResourceMeta::new(uri, "web", 3600);
             d.set_type(kind);
             d.status = status;
-            type_card(uri, None, &mut d);
+            type_card(uri, None, false, &mut d);
             d.type_name
         };
         // Apple Music's JSON-LD calls a song a MusicComposition; Spotify's oEmbed a video.
@@ -1039,7 +1104,7 @@ mod tests {
         let mut d = ResourceMeta::new("https://www.youtube.com/watch?v=dQw4w9WgXcQ", "media", 3600);
         d.site = "www.youtube.com".into();
         d.set_type("VideoObject");
-        type_card("https://www.youtube.com/watch?v=dQw4w9WgXcQ", None, &mut d);
+        type_card("https://www.youtube.com/watch?v=dQw4w9WgXcQ", None, false, &mut d);
         assert_eq!(
             (d.type_name.as_str(), d.site.as_str()),
             ("VideoObject", "YouTube")
@@ -1050,7 +1115,7 @@ mod tests {
         d.name = Some("OK Computer".into());
         d.description = Some("The album's notes".into());
         d.site = "Radiohead".into();
-        type_card("https://radiohead.bandcamp.com/", None, &mut d);
+        type_card("https://radiohead.bandcamp.com/", None, false, &mut d);
         assert_eq!(
             (d.type_name.as_str(), d.name.as_deref(), d.site.as_str()),
             ("MusicGroup", Some("Radiohead"), "Bandcamp")
@@ -1058,7 +1123,7 @@ mod tests {
         assert!(d.description.is_none());
         // A solo artist, as MusicBrainz says.
         let mut d = ResourceMeta::new("https://www.deezer.com/artist/1", "web", 3600);
-        type_card("https://www.deezer.com/artist/1", Some("Person"), &mut d);
+        type_card("https://www.deezer.com/artist/1", Some("Person"), false, &mut d);
         assert_eq!(d.type_name, "Person");
     }
 
