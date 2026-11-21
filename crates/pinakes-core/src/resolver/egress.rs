@@ -299,12 +299,9 @@ fn attribute(head: &[u8], at: &mut usize) -> Option<(Vec<u8>, Vec<u8>)> {
     while byte(*at).is_some_and(|b| b.is_ascii_whitespace() || b == b'/') {
         *at += 1;
     }
-    match byte(*at)? {
-        b'>' => {
-            *at += 1;
-            return None;
-        }
-        _ => {}
+    if byte(*at)? == b'>' {
+        *at += 1;
+        return None;
     }
     let mut name = Vec::new();
     loop {
