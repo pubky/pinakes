@@ -2014,6 +2014,57 @@ async fn edition_keys_join_only_through_the_page(pool: PgPool) {
     assert_eq!(gid(&pool, &ids[1]).await, group);
 }
 
+/// Two editions of one work never join: each carries its own Open Library edition key beside the
+/// shared work key, and a group holds one edition. The work page joins one of them, and the
+/// refused join is counted.
+#[sqlx::test(migrations = "../../migrations")]
+async fn editions_of_one_work_stay_apart(pool: PgPool) {
+    let book = |name: &str, keys: &'static [&'static str]| {
+        let pool = pool.clone();
+        let uri = format!("https://example.org/{name}");
+        let name = name.to_owned();
+        async move {
+            let id = store::ensure_resource(&pool, &uri).await.unwrap();
+            let mut d = ResourceMeta::new(&uri, "web", 86400);
+            d.name = Some(name);
+            d.set_type("Book");
+            store_document(&pool, &id, &d).await;
+            for key in keys {
+                sqlx::query("INSERT INTO resource_key(resource_id,key,source,via,expires_at) VALUES($1,$2,'test','test',now()+interval '1 day')")
+                    .bind(&id)
+                    .bind(key)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+            id
+        }
+    };
+    let first = book(
+        "edition-1",
+        &["openlibrary:edition:OL1M", "openlibrary:work:OL1W"],
+    )
+    .await;
+    let second = book(
+        "edition-2",
+        &["openlibrary:edition:OL2M", "openlibrary:work:OL1W"],
+    )
+    .await;
+    let work = book("work", &["openlibrary:work:OL1W"]).await;
+    common::regroup_all(&pool, &groups::GroupConfig::default()).await;
+    assert!(!common::one_group(&pool, &[&first, &second]).await);
+    assert!(
+        common::one_group(&pool, &[&work, &first]).await
+            != common::one_group(&pool, &[&work, &second]).await,
+        "the work page joins exactly one edition"
+    );
+    let refused: i64 = sqlx::query_scalar("SELECT count(*) FROM group_input WHERE key_conflicts>0")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(refused > 0);
+}
+
 /// An automatic group keeps its ID as it grows: a member whose unit ID is smaller than every
 /// other's joins without renaming the group.
 #[sqlx::test(migrations = "../../migrations")]

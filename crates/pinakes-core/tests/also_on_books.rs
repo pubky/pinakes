@@ -21,8 +21,8 @@ async fn a_printed_book_and_its_work() {
             "openlibrary:work:OL468431W"
         ]
     );
-    // The work's Q-id is a fact: an edition reaches the item one way only, and the Open
-    // Library work key already joins the editions.
+    // The work's Q-id is a fact: an edition reaches the item one way only, and an edition is
+    // not its work (editions of one work never join).
     assert!(found.facts.contains(&Fact::new("wikidata", "Q214371")));
     assert_eq!(
         links(&found),

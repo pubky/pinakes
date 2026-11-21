@@ -1,8 +1,9 @@
 //! Books: an edition by ISBN (or its Open Library page), or a work by its Open Library page, and
 //! where else it is.
 //!
-//! Open Library's edition record is the authority: the edition must list the ISBN asked. Its
-//! work joins the editions of one work as a group (a hint, like every group). Links come only
+//! Open Library's edition record is the authority: the edition must list the ISBN asked. Each
+//! edition keeps its own group: editions and translations of one work never join, since a group
+//! holds one Open Library edition, and the work page joins at most one of them. Links come only
 //! from exact IDs: the edition's own Open Library, Internet Archive (`ocaid`), Goodreads,
 //! LibraryThing and Google Books IDs (each only when the record holds exactly one), Amazon's
 //! `dp/{ISBN-10}` for a printed 978 ISBN, Apple Books for an ebook edition whose ISBN iTunes
