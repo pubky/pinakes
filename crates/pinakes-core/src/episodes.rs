@@ -93,13 +93,17 @@ pub struct Listed {
 }
 /// The latest [`KEPT`] episodes among a feed's items: newest first by `pubDate`, undated ones
 /// after them in the feed's order; an item without a GUID, an enclosure or a link is no
-/// episode. `partial`: the items are a part of the feed's (the read ended before the feed did).
+/// episode. Items of one identity (a repeated GUID, or no GUID and a shared link) are listed
+/// once, as the first of them in the feed, which is the one their URI reads.
+/// `partial`: the items are a part of the feed's (the read ended before the feed did).
 pub fn listed(items: &[roxmltree::Node<'_, '_>], feed: &Url, partial: bool) -> Listed {
+    let mut seen = std::collections::HashSet::new();
     let mut episodes: Vec<(usize, Episode)> = items
         .iter()
         .take(SCANNED)
         .enumerate()
         .filter_map(|(n, item)| Some((n, episode(*item, feed)?)))
+        .filter(|(_, episode)| seen.insert(episode.guid.clone()))
         .collect();
     let older = partial || items.len() > SCANNED || episodes.len() > KEPT;
     episodes.sort_by(|a, b| b.1.published.cmp(&a.1.published).then(a.0.cmp(&b.0)));
@@ -1314,6 +1318,30 @@ mod tests {
                 body.as_bytes().to_vec(),
             )
         }
+    }
+
+    /// Items of one identity are one episode, the first in the feed: two without a GUID that
+    /// share a link, two with one GUID. Their identities stay: the link, the GUID.
+    #[test]
+    fn items_of_one_identity_are_listed_once_as_the_first() {
+        let body = feed(concat!(
+            r#"<item><title>Part 1</title><link>https://show.example/ep</link><pubDate>Tue, 20 Oct 2026 10:00:00 +0000</pubDate><enclosure url="https://cdn.example/1.mp3" type="audio/mpeg"/></item>"#,
+            r#"<item><title>Part 2</title><link>https://show.example/ep</link><pubDate>Wed, 21 Oct 2026 10:00:00 +0000</pubDate><enclosure url="https://cdn.example/2.mp3" type="audio/mpeg"/></item>"#,
+            r#"<item><title>Once</title><guid>ep-9</guid><pubDate>Mon, 19 Oct 2026 10:00:00 +0000</pubDate><enclosure url="https://cdn.example/9.mp3" type="audio/mpeg"/></item>"#,
+            r#"<item><title>Again</title><guid>ep-9</guid><pubDate>Thu, 22 Oct 2026 10:00:00 +0000</pubDate><enclosure url="https://cdn.example/9b.mp3" type="audio/mpeg"/></item>"#,
+        ));
+        let episodes = from_feed(&fetched(&body, false)).unwrap();
+        let listed: Vec<(&str, Option<&str>)> = episodes
+            .iter()
+            .map(|e| (e.guid.as_str(), e.name.as_deref()))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("https://show.example/ep", Some("Part 1")),
+                ("ep-9", Some("Once")),
+            ]
+        );
     }
 
     /// A feed read at an address that carries a credential lists only the episodes with a page of
