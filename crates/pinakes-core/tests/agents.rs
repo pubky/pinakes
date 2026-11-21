@@ -825,18 +825,25 @@ async fn social_asks_the_nexus_only_about_links_this_instance_holds(pool: PgPool
 
 /// The Nexus reads of one `social` call share one deadline, `limits.reach_timeout_secs`: a call
 /// asking about more than 100 links reads two batches, each inside the deadline by itself but
-/// not together, and is answered 504 when the deadline ends, long before the tool's own.
+/// not together, and is answered the reach deadline's 504, not the tool's own later one.
+///
+/// The timing leaves slack on both sides: the first batch takes 1 s, so the second starts about
+/// 3 s before the 4 s deadline; the second takes 3.5 s, well inside the Nexus client's own 10 s
+/// request timeout. A slow machine only makes the call later, which the reach deadline still
+/// cuts; without that deadline the call answers both batches' items.
 #[sqlx::test(migrations = "../../migrations")]
 async fn the_batches_of_one_social_call_share_the_reach_deadline(pool: PgPool) {
-    use std::time::{Duration, Instant};
-    let batches: std::sync::Arc<std::sync::atomic::AtomicUsize> = std::sync::Arc::default();
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    let batches: std::sync::Arc<AtomicUsize> = std::sync::Arc::default();
     let counted = batches.clone();
     let slow = Router::new().route(
         "/v1/stream/resources/by_ids",
         post(move || {
-            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            async {
-                tokio::time::sleep(Duration::from_millis(1300)).await;
+            let first = counted.fetch_add(1, Ordering::SeqCst) == 0;
+            async move {
+                let wait = if first { 1000 } else { 3500 };
+                tokio::time::sleep(Duration::from_millis(wait)).await;
                 Json(json!([]))
             }
         }),
@@ -857,16 +864,18 @@ async fn the_batches_of_one_social_call_share_the_reach_deadline(pool: PgPool) {
         nexus_url,
         ..Config::default()
     };
-    config.search.reach_timeout_secs = 2;
+    config.search.reach_timeout_secs = 4;
     config.api.request_timeout_secs = 30;
     let app = api::router(AppState::new(pool, config).unwrap());
-    let started = Instant::now();
     let (error, answer) = call(&app, "social", json!({"ids": ids, "uris": uris})).await;
-    let took = started.elapsed();
     assert!(error, "{answer}");
     assert_eq!(answer["status"], 504, "{answer}");
-    assert_eq!(batches.load(std::sync::atomic::Ordering::SeqCst), 2);
-    assert!(took < Duration::from_millis(3400), "{took:?}");
+    assert_eq!(
+        answer["error"],
+        "the Nexus this instance reads did not answer the batch resource view in time",
+        "{answer}"
+    );
+    assert_eq!(batches.load(Ordering::SeqCst), 2);
 }
 
 /// `card` with `resolve: true` is the one tool call that stores a link: it is a preview, and
