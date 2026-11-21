@@ -25,6 +25,9 @@ links do, except its posts (`/pub/{app}/v1/posts/{id}`, read as posts in every n
 keep nothing either. A stored object whose path its app's profile leaves out becomes `missing` at
 once when it is read again (its next refresh, or `pinakesd reextract pubky`), without a request.
 
+An object is named by its path alone: a folder (`…/` or a doubled slash), a query or a port in a
+`pubky://` link names no object, and such a link gets no route and no card.
+
 Profiles are Pinakes's own code, one file per app (`resolver/pubky_apps/<app>.rs`). Nothing is
 read from the apps themselves or from a registry outside this repository.
 

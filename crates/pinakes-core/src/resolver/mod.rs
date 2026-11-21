@@ -88,7 +88,8 @@ pub(crate) fn pubky_app(url: &url::Url) -> Option<String> {
     }
 }
 /// A `pubky://` object's path segments, decoded as a homeserver decodes them; `None` when one
-/// decodes to a separator or a dot segment.
+/// decodes to a separator or a dot segment, or is empty (a folder's trailing slash, a doubled
+/// slash): such a path names no object an app publishes.
 pub(crate) fn path_segments(url: &url::Url) -> Option<Vec<String>> {
     let segments: Vec<String> = url
         .path()
@@ -103,7 +104,7 @@ pub(crate) fn path_segments(url: &url::Url) -> Option<Vec<String>> {
         .collect::<Option<_>>()?;
     if segments
         .iter()
-        .any(|s| s.contains(['/', '\\']) || s == "." || s == "..")
+        .any(|s| s.is_empty() || s.contains(['/', '\\']) || s == "." || s == "..")
     {
         return None;
     }
@@ -122,9 +123,12 @@ fn classify_route(uri: &str) -> Option<&'static str> {
     }
     match url.scheme() {
         // Another app's object: a kind its profile reads, or any object of an app no profile
-        // knows (`pubky_apps::route`).
+        // knows (`pubky_apps::route`). A folder (a trailing slash), a query or a port names
+        // nothing an app publishes: no route.
         "pubky"
-            if pubky_app(&url).is_some()
+            if url.query().is_none()
+                && url.port().is_none()
+                && pubky_app(&url).is_some()
                 && path_segments(&url)
                     .and_then(|s| pubky_apps::route(&s[1..]))
                     .is_some_and(|r| !matches!(r, pubky_apps::Route::Excluded)) =>

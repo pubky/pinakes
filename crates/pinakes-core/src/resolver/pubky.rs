@@ -604,6 +604,14 @@ mod tests {
             format!("pubky://{key}/pub/a.app/x%5C..%5Cf"),
             format!("pubky://{key}/pub//x"),
             format!("pubky://{key}/priv/a.app/x"),
+            // A folder, a query or a port is no object's spelling.
+            format!("pubky://{key}/pub/a.app/"),
+            format!("pubky://{key}/pub/a.app/x/"),
+            format!("pubky://{key}/pub/a.app//x"),
+            format!("pubky://{key}/pub/a.app/x?y=1"),
+            format!("pubky://{key}/pub/a.app/x?"),
+            format!("pubky://{key}:1/pub/a.app/x"),
+            format!("pubky://{key}:6286/pub/a.app/x"),
         ] {
             assert_eq!(crate::resolver::classify(&uri), None, "{uri}");
         }
