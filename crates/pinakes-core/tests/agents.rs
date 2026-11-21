@@ -823,6 +823,52 @@ async fn social_asks_the_nexus_only_about_links_this_instance_holds(pool: PgPool
     assert_eq!(stored().await, before);
 }
 
+/// The Nexus reads of one `social` call share one deadline, `limits.reach_timeout_secs`: a call
+/// asking about more than 100 links reads two batches, each inside the deadline by itself but
+/// not together, and is answered 504 when the deadline ends, long before the tool's own.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_batches_of_one_social_call_share_the_reach_deadline(pool: PgPool) {
+    use std::time::{Duration, Instant};
+    let batches: std::sync::Arc<std::sync::atomic::AtomicUsize> = std::sync::Arc::default();
+    let counted = batches.clone();
+    let slow = Router::new().route(
+        "/v1/stream/resources/by_ids",
+        post(move || {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async {
+                tokio::time::sleep(Duration::from_millis(1300)).await;
+                Json(json!([]))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let nexus_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, slow).await.unwrap() });
+    // Three typed cards, each asked about by its own link and the links people wrote for it,
+    // and 97 held links: 100 entries, 103 links asked in two batches.
+    let ids = seed_typed(&pool).await;
+    let mut uris = vec![];
+    for n in 0..97 {
+        let uri = format!("https://example.org/held/{n}");
+        store::ensure_resource(&pool, &uri).await.unwrap();
+        uris.push(Value::from(uri));
+    }
+    let mut config = Config {
+        nexus_url,
+        ..Config::default()
+    };
+    config.search.reach_timeout_secs = 2;
+    config.api.request_timeout_secs = 30;
+    let app = api::router(AppState::new(pool, config).unwrap());
+    let started = Instant::now();
+    let (error, answer) = call(&app, "social", json!({"ids": ids, "uris": uris})).await;
+    let took = started.elapsed();
+    assert!(error, "{answer}");
+    assert_eq!(answer["status"], 504, "{answer}");
+    assert_eq!(batches.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert!(took < Duration::from_millis(3400), "{took:?}");
+}
+
 /// `card` with `resolve: true` is the one tool call that stores a link: it is a preview, and
 /// spends the caller's preview budget, the one `POST /v1/resolve` spends. With the budget spent,
 /// the next such call is the tool's 429 with the route's `Retry-After` and stores nothing. A
