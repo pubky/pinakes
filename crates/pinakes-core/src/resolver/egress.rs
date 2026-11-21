@@ -210,57 +210,171 @@ pub fn decode<'a>(body: &'a [u8], charset: Option<&str>) -> std::borrow::Cow<'a,
         .unwrap_or(encoding_rs::UTF_8);
     encoding.decode_without_bom_handling(body).0
 }
-/// The encoding a `<meta>` among `head` declares: its `charset` attribute, or the `charset=` in
-/// an http-equiv `content`. As browsers read it, a declared UTF-16 is UTF-8 (the declaration was
-/// readable as ASCII) and `x-user-defined` is windows-1252.
+/// The encoding a `<meta>` among `head` declares, read as the HTML standard's prescan does: a
+/// tag's own `charset` attribute, or the `charset=` in the `content` of one whose `http-equiv` is
+/// `Content-Type`. Comments and other tags (their attributes too) are passed over, so a
+/// `data-charset`, a `content` without the `http-equiv`, or a `<meta>` in a comment or in an
+/// attribute's value declares nothing. As browsers read it, a declared UTF-16 is UTF-8 (the
+/// declaration was readable as ASCII) and `x-user-defined` is windows-1252.
 fn meta_charset(head: &[u8]) -> Option<&'static encoding_rs::Encoding> {
-    let find = |haystack: &[u8], needle: &[u8]| {
-        haystack
-            .windows(needle.len())
-            .position(|window| window.eq_ignore_ascii_case(needle))
+    let starts = |at: usize, prefix: &[u8]| {
+        head.get(at..at + prefix.len())
+            .is_some_and(|w| w.eq_ignore_ascii_case(prefix))
     };
-    let mut from = 0;
-    while let Some(at) = find(&head[from..], b"<meta") {
-        let start = from + at + b"<meta".len();
-        let end = head[start..]
-            .iter()
-            .position(|b| *b == b'>')
-            .map_or(head.len(), |n| start + n);
-        let tag = &head[start..end];
-        from = end;
-        if !tag
-            .first()
-            .is_some_and(|b| b.is_ascii_whitespace() || *b == b'/')
+    let mut at = 0;
+    while at < head.len() {
+        if starts(at, b"<!--") {
+            // A comment ends at the first `-->` after its opening (`<!-->` too).
+            let from = at + 2;
+            at = head[from..]
+                .windows(3)
+                .position(|w| w == b"-->")
+                .map_or(head.len(), |n| from + n + 3);
+        } else if starts(at, b"<meta")
+            && head
+                .get(at + 5)
+                .is_some_and(|b| b.is_ascii_whitespace() || *b == b'/')
         {
-            continue;
-        }
-        let Some(at) = find(tag, b"charset") else {
-            continue;
-        };
-        let Some(value) = tag[at + b"charset".len()..]
-            .trim_ascii_start()
-            .strip_prefix(b"=")
-        else {
-            continue;
-        };
-        let value = value.trim_ascii_start();
-        let value = value
-            .strip_prefix(b"\"")
-            .or_else(|| value.strip_prefix(b"'"))
-            .unwrap_or(value);
-        let end = value
-            .iter()
-            .position(|b| matches!(b, b'"' | b'\'' | b';' | b'/') || b.is_ascii_whitespace())
-            .unwrap_or(value.len());
-        if let Some(encoding) = encoding_rs::Encoding::for_label(&value[..end]) {
-            return Some(if encoding == encoding_rs::X_USER_DEFINED {
-                encoding_rs::WINDOWS_1252
-            } else {
-                encoding.output_encoding()
-            });
+            at += 5;
+            let mut seen: Vec<Vec<u8>> = Vec::new();
+            let (mut charset, mut pragma, mut need_pragma) = (None, false, None);
+            while let Some((name, value)) = attribute(head, &mut at) {
+                if seen.contains(&name) {
+                    continue;
+                }
+                match name.as_slice() {
+                    b"http-equiv" => pragma = value.eq_ignore_ascii_case(b"content-type"),
+                    b"content" if charset.is_none() => {
+                        if let Some(label) = content_charset(&value) {
+                            charset = encoding_rs::Encoding::for_label(label);
+                            need_pragma = Some(true);
+                        }
+                    }
+                    b"charset" => {
+                        charset = encoding_rs::Encoding::for_label(value.trim_ascii());
+                        need_pragma = Some(false);
+                    }
+                    _ => {}
+                }
+                seen.push(name);
+            }
+            match (need_pragma, charset) {
+                (Some(need), Some(encoding)) if pragma || !need => {
+                    return Some(if encoding == encoding_rs::X_USER_DEFINED {
+                        encoding_rs::WINDOWS_1252
+                    } else {
+                        encoding.output_encoding()
+                    });
+                }
+                _ => {}
+            }
+        } else if head[at] == b'<' && head.get(at + 1).is_some_and(u8::is_ascii_alphabetic)
+            || starts(at, b"</") && head.get(at + 2).is_some_and(u8::is_ascii_alphabetic)
+        {
+            // Another tag: its name, then its attributes, whose values may hold any `<`.
+            at = head[at..]
+                .iter()
+                .position(|b| b.is_ascii_whitespace() || *b == b'>')
+                .map_or(head.len(), |n| at + n);
+            while attribute(head, &mut at).is_some() {}
+        } else if starts(at, b"<!") || starts(at, b"</") || starts(at, b"<?") {
+            at = head[at..]
+                .iter()
+                .position(|b| *b == b'>')
+                .map_or(head.len(), |n| at + n + 1);
+        } else {
+            at += 1;
         }
     }
     None
+}
+/// The next attribute of a tag in `head` from `at` (the standard's "get an attribute"): its name
+/// in lower case and its value, `at` moved past it; `None` at the tag's end (`at` past its `>`)
+/// or the end of `head`.
+fn attribute(head: &[u8], at: &mut usize) -> Option<(Vec<u8>, Vec<u8>)> {
+    let byte = |at: usize| head.get(at).copied();
+    while byte(*at).is_some_and(|b| b.is_ascii_whitespace() || b == b'/') {
+        *at += 1;
+    }
+    match byte(*at)? {
+        b'>' => {
+            *at += 1;
+            return None;
+        }
+        _ => {}
+    }
+    let mut name = Vec::new();
+    loop {
+        match byte(*at)? {
+            b'=' if !name.is_empty() => break,
+            b if b.is_ascii_whitespace() => break,
+            b'/' | b'>' => return Some((name, Vec::new())),
+            b => name.push(b.to_ascii_lowercase()),
+        }
+        *at += 1;
+    }
+    while byte(*at).is_some_and(|b| b.is_ascii_whitespace()) {
+        *at += 1;
+    }
+    if byte(*at)? != b'=' {
+        return Some((name, Vec::new()));
+    }
+    *at += 1;
+    while byte(*at).is_some_and(|b| b.is_ascii_whitespace()) {
+        *at += 1;
+    }
+    let mut value = Vec::new();
+    match byte(*at)? {
+        quote @ (b'"' | b'\'') => {
+            *at += 1;
+            loop {
+                let b = byte(*at)?;
+                *at += 1;
+                if b == quote {
+                    return Some((name, value));
+                }
+                value.push(b.to_ascii_lowercase());
+            }
+        }
+        b'>' => Some((name, value)),
+        _ => {
+            while let Some(b) = byte(*at).filter(|b| !b.is_ascii_whitespace() && *b != b'>') {
+                value.push(b.to_ascii_lowercase());
+                *at += 1;
+            }
+            Some((name, value))
+        }
+    }
+}
+/// The encoding label in a `<meta>` `content` value (`text/html; charset=shift_jis`), as the
+/// standard extracts it: after a `charset` followed by `=`, quoted (closed) or up to a space or
+/// `;`.
+fn content_charset(content: &[u8]) -> Option<&[u8]> {
+    let mut from = 0;
+    loop {
+        let at = content[from..]
+            .windows(7)
+            .position(|w| w.eq_ignore_ascii_case(b"charset"))?;
+        let rest = content[from + at + 7..].trim_ascii_start();
+        let Some(value) = rest.strip_prefix(b"=") else {
+            from += at + 7;
+            continue;
+        };
+        let value = value.trim_ascii_start();
+        return match value.first() {
+            Some(&quote @ (b'"' | b'\'')) => {
+                let value = &value[1..];
+                value.iter().position(|b| *b == quote).map(|end| &value[..end])
+            }
+            _ => {
+                let end = value
+                    .iter()
+                    .position(|b| b.is_ascii_whitespace() || *b == b';')
+                    .unwrap_or(value.len());
+                (end > 0).then(|| &value[..end])
+            }
+        };
+    }
 }
 /// The `charset` parameter of a `Content-Type` value, lower-cased.
 fn charset_parameter(value: &str) -> Option<String> {
@@ -2739,6 +2853,32 @@ mod tests {
         assert!(meta(0).ends_with(japanese));
         // Past the first 1024 bytes a declaration is not looked for: UTF-8.
         assert!(!meta(1100).contains(japanese));
+        // Only a declaration is one: a tag's own `charset`, or an http-equiv `content`; never
+        // a comment, another attribute or a `<meta>` inside another tag's attribute.
+        let declared = |head: &str| {
+            let mut body = head.as_bytes().to_vec();
+            body.extend_from_slice(&shift_jis);
+            decode(&body, None).ends_with(japanese)
+        };
+        for head in [
+            "<meta name=viewport charset=\"Shift_JIS\">",
+            "<META HTTP-EQUIV=\"Content-Type\" CONTENT=\"text/html; charset=Shift_JIS\">",
+            "<meta content='text/html; charset=\"shift_jis\"' http-equiv=content-type>",
+            "<!-- a note --><meta charset=shift_jis />",
+        ] {
+            assert!(declared(head), "{head}");
+        }
+        for head in [
+            "<!-- <meta charset=shift_jis> -->",
+            "<meta data-charset=shift_jis>",
+            "<meta content=\"text/html; charset=shift_jis\">",
+            "<meta name=\"description\" content=\"charset=shift_jis\">",
+            "<div title=\"<meta charset=shift_jis>\"></div>",
+            "<metadata charset=shift_jis>",
+            "<meta http-equiv=content-type content=\"text/html; charset='shift_jis\">",
+        ] {
+            assert!(!declared(head), "{head}");
+        }
         assert_eq!(decode("Grüße".as_bytes(), None), "Grüße");
         assert_eq!(decode(b"Gr\xfc\xdfe", Some("latin1")), "Grüße");
         assert_eq!(
