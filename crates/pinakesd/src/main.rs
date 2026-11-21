@@ -42,6 +42,7 @@ async fn serve(config: Option<PathBuf>, command: Command) -> Result<()> {
             println!("{text}");
             return Ok(());
         }
+        Command::Healthcheck => return healthcheck(config.as_deref()).await,
         Command::ParseWorker(_) => unreachable!("handled before the runtime"),
     };
     // The signal handlers come first, so a stop is heeded during startup, a migration and a
@@ -279,6 +280,14 @@ async fn start(
     let admin_address = admin.local_addr()?;
     let listener = tokio::net::TcpListener::bind(&config.listen).await?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    // The shutdown starts when a task or worker ends, the lock is lost or a signal comes: from
+    // then on the admin `/healthz` answers 503.
+    let stopping = state.stopping.clone();
+    let mut stop_seen = shutdown_rx.clone();
+    tokio::spawn(async move {
+        let _ = stop_seen.changed().await;
+        stopping.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
     let mut tasks = Tasks::default();
     let instance_lock = std::sync::Arc::new(tokio::sync::Mutex::new(instance_lock));
     // The lock is watched until the daemon has stopped, through its shutdown too.
@@ -499,6 +508,54 @@ enum Command {
     Print(String),
     /// `parse-worker <cpu seconds>`: the HTML parse worker the daemon runs itself in.
     ParseWorker(u64),
+    /// `healthcheck`: `GET /healthz` on the configured admin listener (the image's
+    /// `HEALTHCHECK`, which has no HTTP client of its own).
+    Healthcheck,
+}
+/// How long `pinakesd healthcheck` waits for the admin listener's answer, all of it.
+const HEALTHCHECK_TIMEOUT: Duration = Duration::from_secs(5);
+/// `GET /healthz` on the admin listener of the configuration at `config` (and the environment):
+/// an error, so a non-zero exit, unless it answers 200. A listener on every address is asked on
+/// loopback. Without `--config` (the image's `HEALTHCHECK`), a configuration that is only valid
+/// with its file still names its admin listener: `PINAKES__ADMIN_LISTEN`, else the default.
+async fn healthcheck(config: Option<&std::path::Path>) -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let admin_listen = match (Config::load(config), config) {
+        (Ok(config), _) => config.admin_listen,
+        (Err(_), None) => std::env::var("PINAKES__ADMIN_LISTEN")
+            .unwrap_or_else(|_| Config::default().admin_listen),
+        (Err(error), Some(_)) => return Err(error),
+    };
+    let mut address: std::net::SocketAddr = admin_listen.parse().context("invalid admin_listen")?;
+    if address.ip().is_unspecified() {
+        address.set_ip(match address {
+            std::net::SocketAddr::V4(_) => std::net::Ipv4Addr::LOCALHOST.into(),
+            std::net::SocketAddr::V6(_) => std::net::Ipv6Addr::LOCALHOST.into(),
+        });
+    }
+    let ask = async {
+        let mut stream = tokio::net::TcpStream::connect(address).await?;
+        let request = format!(
+            "GET {} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n",
+            api::HEALTHZ
+        );
+        stream.write_all(request.as_bytes()).await?;
+        let mut answer = Vec::new();
+        stream.take(4096).read_to_end(&mut answer).await?;
+        anyhow::Ok(answer)
+    };
+    let answer = tokio::time::timeout(HEALTHCHECK_TIMEOUT, ask)
+        .await
+        .context("the admin listener did not answer in time")?
+        .with_context(|| format!("the admin listener at {address} did not answer"))?;
+    let status = String::from_utf8_lossy(&answer)
+        .lines()
+        .next()
+        .and_then(|line| line.split(' ').nth(1).map(str::to_owned))
+        .unwrap_or_default();
+    anyhow::ensure!(status == "200", "{} answered {status:?}", api::HEALTHZ);
+    println!("healthy");
+    Ok(())
 }
 /// Options in any position; every other word after `reextract` is a route, checked here, before
 /// any config is read or database touched.
@@ -519,6 +576,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                 return Ok((config, Command::ParseWorker(secs)));
             }
             "reextract" => routes = Some(vec![]),
+            "healthcheck" if routes.is_none() => command = Command::Healthcheck,
             "--openapi" => {
                 return Ok((
                     config,
@@ -529,7 +587,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                 return Ok((
                     config,
                     Command::Print(
-                        "pinakesd [--config PATH] [--migrate | --openapi | reextract ROUTE…|all|also-on | parse-worker SECS]"
+                        "pinakesd [--config PATH] [--migrate | --openapi | healthcheck | reextract ROUTE…|all|also-on | parse-worker SECS]"
                             .into(),
                     ),
                 ))
@@ -574,6 +632,10 @@ mod tests {
             assert_eq!(config.as_deref(), Some(std::path::Path::new("x.toml")));
             assert!(matches!(command, super::Command::Reextract(r) if r == ["all"]));
         }
+        let (config, command) = parse(&["healthcheck", "--config", "x.toml"]).unwrap();
+        assert_eq!(config.as_deref(), Some(std::path::Path::new("x.toml")));
+        assert!(matches!(command, Command::Healthcheck));
+        assert!(parse(&["reextract", "healthcheck"]).is_err());
         let (_, command) = parse(&["reextract", "also-on"]).unwrap();
         assert!(matches!(command, Command::Reextract(routes) if routes == ["also-on"]));
         let (_, command) = parse(&["reextract", "web", "--config", "x.toml", "osm"]).unwrap();

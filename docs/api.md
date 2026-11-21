@@ -2092,8 +2092,10 @@ to know.
 
 `admin_listen` (default `127.0.0.1:9090`) serves `GET /metrics` (Prometheus text),
 `GET /v1/info` with full ingestion, source and canary state, `GET /v1/resources/{id}/document`
-(the stored document with its internal fields) and group curation (`PUT /v1/groups/{id}`). With
-`admin_token` (or `PINAKES__ADMIN_TOKEN`) every admin route needs `Authorization: Bearer`,
+(the stored document with its internal fields), group curation (`PUT /v1/groups/{id}`) and
+`GET /healthz`: 200 `ok` when the database answers `SELECT 1` within a second, 503 when it does
+not or the daemon is stopping (a background task ended). With
+`admin_token` (or `PINAKES__ADMIN_TOKEN`) every admin route but `/healthz` needs `Authorization: Bearer`,
 compared in constant time; a non-loopback bind without a token is refused. It answers 421 to a
 request whose `Host` is not `localhost`, an IP address or a name in `admin_hosts`, before the token
 is checked. It sends no CORS

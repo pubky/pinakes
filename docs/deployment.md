@@ -56,6 +56,11 @@ directory's ownership. For an existing volume or bind mount, provision write acc
 writes the ODbL dump through SQL and does not require a PostgreSQL client in the image. Run
 database backups with a separate PostgreSQL client matching the server major version.
 
+The image's `HEALTHCHECK` runs `pinakesd healthcheck`, which asks `GET /healthz` on the admin
+listener (`admin_listen` as the environment sets it, on loopback inside the container; no token
+needed): healthy when the database answers within a second and no background task has ended.
+`docker inspect --format '{{.State.Health.Status}}' pinakes` shows it.
+
 Put a TLS proxy in front of the loopback-published public API. Port 9090 remains on loopback
 inside the container; do not publish it or use host networking to reach it. Private monitoring
 needs an explicitly reviewed admin network configuration, bearer token and allowed admin hosts

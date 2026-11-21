@@ -5224,3 +5224,40 @@ async fn a_short_query_matches_word_starts_not_inside_words(pool: PgPool) {
         [chinese]
     );
 }
+
+/// `GET /healthz` is on the admin listener only, takes no admin token and costs no budget: 200
+/// while the database answers, 503 once the daemon is stopping (a background task ended) or the
+/// database is gone. The other admin routes still need the token.
+#[sqlx::test(migrations = "../../migrations")]
+async fn healthz_answers_on_the_admin_listener_from_the_database(pool: PgPool) {
+    let config = Config {
+        admin_token: Some("admin-secret-token".into()),
+        ..Config::default()
+    };
+    let state = AppState::new(pool.clone(), config).unwrap();
+    let (public, admin) = (api::router(state.clone()), api::admin_router(state.clone()));
+    let ok = (StatusCode::OK, json!({"body": "ok"}));
+    for _ in 0..3 {
+        assert_eq!(admin_call(&admin, "GET", "/healthz", None).await, ok);
+    }
+    assert_eq!(admin_call(&admin, "GET", "/metrics", None).await.0, 401);
+    assert_eq!(call(&public, "GET", "/healthz", None).await.0, 404);
+    state
+        .stopping
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        admin_call(&admin, "GET", "/healthz", None).await.0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    // The database gone: no answer to `SELECT 1`.
+    let state = AppState::new(pool.clone(), Config::default()).unwrap();
+    let admin = api::admin_router(state);
+    assert_eq!(admin_call(&admin, "GET", "/healthz", None).await, ok);
+    pool.close().await;
+    let started = std::time::Instant::now();
+    assert_eq!(
+        admin_call(&admin, "GET", "/healthz", None).await.0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+}

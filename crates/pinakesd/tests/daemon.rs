@@ -10,7 +10,7 @@ use tokio::process::{Child, Command};
 
 /// A config for the test database on free loopback ports, with nothing that reaches out: no
 /// Nexus listens on the discard port, and Pubky and the canaries are off.
-fn config(pool: &PgPool, dir: &Path) -> (PathBuf, String) {
+fn config(pool: &PgPool, dir: &Path) -> (PathBuf, String, String) {
     let mut database = url::Url::parse(&std::env::var("DATABASE_URL").unwrap()).unwrap();
     database.set_path(&format!(
         "/{}",
@@ -37,7 +37,11 @@ fn config(pool: &PgPool, dir: &Path) -> (PathBuf, String) {
         ),
     )
     .unwrap();
-    (path, format!("http://127.0.0.1:{listen}"))
+    (
+        path,
+        format!("http://127.0.0.1:{listen}"),
+        format!("http://127.0.0.1:{admin}"),
+    )
 }
 fn daemon(config: &Path, args: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_pinakesd"));
@@ -83,7 +87,10 @@ async fn stop(mut child: Child) {
 async fn the_daemon_saves_a_link_and_reextracts_while_it_owns_its_database(pool: PgPool) {
     let dir =
         Path::new(env!("CARGO_TARGET_TMPDIR")).join(pool.connect_options().get_database().unwrap());
-    let (config, base) = config(&pool, &dir);
+    let (config, base, admin) = config(&pool, &dir);
+    // Nothing listens yet: the health check fails.
+    let unhealthy = run(&config, &["healthcheck"]).await;
+    assert!(!unhealthy.status.success());
     let log = std::fs::File::create(dir.join("pinakesd.log")).unwrap();
     let mut serving = daemon(&config, &[])
         .stdout(log.try_clone().unwrap())
@@ -106,6 +113,17 @@ async fn the_daemon_saves_a_link_and_reextracts_while_it_owns_its_database(pool:
         assert!(started.elapsed() < Duration::from_secs(60), "not serving");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+
+    // The admin listener's health route, without the admin token, and the image's check of it.
+    let health = http.get(format!("{admin}/healthz")).send().await.unwrap();
+    assert_eq!(health.status(), 200);
+    let healthy = run(&config, &["healthcheck"]).await;
+    assert!(
+        healthy.status.success(),
+        "{}",
+        String::from_utf8_lossy(&healthy.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&healthy.stdout), "healthy\n");
 
     // A second daemon on the same database is refused, a re-extraction included.
     let refused = run(&config, &["reextract", "all"]).await;
@@ -159,7 +177,7 @@ async fn the_daemon_saves_a_link_and_reextracts_while_it_owns_its_database(pool:
 async fn the_daemon_stops_when_it_loses_the_instance_lock(pool: PgPool) {
     let dir =
         Path::new(env!("CARGO_TARGET_TMPDIR")).join(pool.connect_options().get_database().unwrap());
-    let (config, base) = config(&pool, &dir);
+    let (config, base, _) = config(&pool, &dir);
     let log = std::fs::File::create(dir.join("pinakesd.log")).unwrap();
     let mut serving = daemon(&config, &[])
         .stdout(log.try_clone().unwrap())

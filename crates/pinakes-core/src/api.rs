@@ -85,6 +85,9 @@ pub struct AppState {
     /// The request clock for relative times and search cursors; tests set it, the daemon never
     /// does (wall clock).
     pub clock: Option<Clock>,
+    /// Set by the daemon once a background task or worker has ended or the daemon is stopping:
+    /// `GET /healthz` then answers 503.
+    pub stopping: Arc<std::sync::atomic::AtomicBool>,
 }
 impl AppState {
     pub fn new(pool: PgPool, config: Config) -> anyhow::Result<Self> {
@@ -105,6 +108,7 @@ impl AppState {
             cursor_mac: SimpleHmac::<blake3::Hasher>::new_from_slice(&cursor_key)
                 .context("initialize cursor MAC")?,
             clock: None,
+            stopping: Arc::default(),
         })
     }
     /// Now, for relative times and search cursors.
@@ -4007,8 +4011,26 @@ pub fn admin_router(state: AppState) -> Router {
         .route("/v1/groups/{id}", axum::routing::put(curate_group))
         .route("/v1/resources/{id}/document", get(admin_document))
         .route("/metrics", get(metrics))
-        .route("/v1/info", get(admin_info));
+        .route("/v1/info", get(admin_info))
+        .route(HEALTHZ, get(healthz));
     with_admin_layers(routes, state)
+}
+/// The admin listener's health route.
+pub const HEALTHZ: &str = "/healthz";
+/// How long the health route waits for the database.
+const HEALTHZ_TIMEOUT: Duration = Duration::from_secs(1);
+/// `GET /healthz`: 200 when the database answers `SELECT 1` within a second and no background
+/// task has ended; 503 otherwise. Only on the admin listener, and the one route there that takes
+/// no admin token: it says nothing but whether the daemon is well.
+async fn healthz(State(state): State<AppState>) -> Response {
+    if state.stopping.load(std::sync::atomic::Ordering::SeqCst) {
+        return (StatusCode::SERVICE_UNAVAILABLE, "stopping").into_response();
+    }
+    let select = sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&state.pool);
+    match tokio::time::timeout(HEALTHZ_TIMEOUT, select).await {
+        Ok(Ok(_)) => (StatusCode::OK, "ok").into_response(),
+        _ => (StatusCode::SERVICE_UNAVAILABLE, "database unavailable").into_response(),
+    }
 }
 /// The admin listener's layer stack around `routes`: the panic backstop innermost, then the
 /// request deadline, the bearer check, the `Host` check, so a request for another host or
@@ -4077,6 +4099,9 @@ async fn admin_auth(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
+    if request.method() == axum::http::Method::GET && request.uri().path() == HEALTHZ {
+        return next.run(request).await;
+    }
     if let Some(expected) = &state.config.admin_token {
         let supplied = request
             .headers()
