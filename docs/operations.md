@@ -612,13 +612,18 @@ The durable queue leases rows with `SKIP LOCKED` and fences stale completions by
 counter. A job lease lasts at least `limits.lease_secs`; a 50-object OSM batch gets 760 seconds.
 Failures back off exponentially from `limits.backoff_secs` to `limits.max_backoff_secs` and
 dead-letter after `limits.max_failures`. The first `limits.timeout_grace` consecutive timeouts
-back off without charging an attempt. A request that never got an answer from the upstream (the
+back off without charging an attempt. A service that answers 5xx, 408 or 429 (stored as
+`upstream`, `http_5xx` or `http_4xx`) is read again after the wait it named or the backoff,
+whichever is longer; the backoff doubles up to `limits.max_backoff_secs` while one of these
+answers follows another, a longer named wait is never cut, and each one is an attempt: the link
+dead-letters after `limits.max_failures` like any other failure and turns `error` then (until then
+its status stays). A request that never got an answer from the upstream (the
 connection refused, reset or aborted, or the host unreachable; stored as `connect`) is never
 charged and never dead-letters: it
 backs off up to `limits.max_backoff_secs` for as long as it lasts, its streak is kept in
 `timeout_streak` while `last_error` is `connect`, and a link with no card yet turns `error` after
 `limits.max_failures` of them in a row while it is still retried. Egress's own waits (its host
-budget, a cached failure) keep that streak. A TLS failure (a certificate the host serves) and a
+budget, a cached failure) keep that streak and an upstream one, and charge nothing. A TLS failure (a certificate the host serves) and a
 `connect` failure a resolver names itself (a PKARR relay, a key-pinned homeserver) are answers
 about the link and count. A missing result needs a second fresh fetch to confirm,
 scheduled after `limits.missing_ttl_secs` (at least an hour) for a link with an accepted card, and

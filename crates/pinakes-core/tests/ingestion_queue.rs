@@ -628,7 +628,8 @@ async fn timeout_escalation_is_durable_fenced_and_resets(pool: PgPool) {
     let id = store::ensure_resource(&pool, uri).await.unwrap();
     for (kind, expected) in [
         ("timeout", 1),
-        ("http_5xx", 0),
+        // A 5xx starts a streak of its own in the column, which a timeout then starts over.
+        ("http_5xx", 1),
         ("timeout", 1),
         ("success", 0),
         ("timeout", 1),
@@ -3000,13 +3001,36 @@ async fn our_own_rate_limit_is_its_own_class_and_no_failure(pool: PgPool) {
     assert!(delay > 58.0 && delay <= 60.0, "{delay}");
 }
 
-/// A source that answers `RetryLater` with a class other than `timeout` (a server error, a rate
-/// limit) is rescheduled and never counts toward dead letter, however often it happens.
+/// A service that keeps answering 5xx, 408 or 429 (`RetryLater` of class `upstream`, `http_4xx`
+/// or `http_5xx`): the link waits the named wait or the backoff, whichever is longer, the backoff
+/// doubling while the class stays an upstream wait (one class to another keeps the streak), each
+/// wait is an attempt, and the row dead-letters after `max_failures`, turning `error` then.
+/// Another outcome starts the streak over; a longer named wait is never cut.
 #[sqlx::test(migrations = "../../migrations")]
-async fn upstream_retries_never_count_toward_dead_letter(pool: PgPool) {
+async fn upstream_waits_back_off_and_dead_letter(pool: PgPool) {
+    struct Busy(&'static str, u64);
+    #[async_trait::async_trait]
+    impl Resolver for Busy {
+        fn refresh_after(&self, _: &ResourceMeta) -> Duration {
+            Duration::from_secs(60)
+        }
+        fn name(&self) -> &'static str {
+            "web"
+        }
+        fn matches(&self, _: &str) -> bool {
+            true
+        }
+        async fn resolve(&self, _: &str) -> anyhow::Result<ResourceMeta> {
+            Err(pinakes_core::resolver::RetryLater {
+                class: self.0,
+                seconds: self.1,
+            }
+            .into())
+        }
+    }
     let cfg = QueueConfig {
         timeout_grace: 1,
-        max_failures: 2,
+        max_failures: 6,
         backoff_secs: 30,
         max_backoff_secs: 240,
         ..Default::default()
@@ -3014,24 +3038,79 @@ async fn upstream_retries_never_count_toward_dead_letter(pool: PgPool) {
     let id = store::ensure_resource(&pool, "https://example.org/slow-upstream")
         .await
         .unwrap();
-    for _ in 0..6 {
+    let mut rows = vec![];
+    for answer in [
+        Busy("upstream", 60),
+        Busy("http_5xx", 60),
+        Busy("http_4xx", 60),
+        Busy("upstream", 60),
+        // A named wait longer than the capped backoff stays whole.
+        Busy("upstream", 7200),
+        Busy("upstream", 60),
+    ] {
         sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE id=$1")
             .bind(&id)
             .execute(&pool)
             .await
             .unwrap();
         let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
-        queue::run_job(&pool, &DeferredResolver("upstream"), &cfg, &job)
-            .await
-            .unwrap();
-        let row: (i32, i32, bool, f64) = sqlx::query_as("SELECT timeout_streak,attempts,dead_letter,extract(epoch FROM next_attempt_at-now())::float8 FROM resource WHERE id=$1")
+        queue::run_job(&pool, &answer, &cfg, &job).await.unwrap();
+        let row: (i32, i32, bool, f64, String) = sqlx::query_as("SELECT timeout_streak,attempts,dead_letter,extract(epoch FROM next_attempt_at-now())::float8,status FROM resource WHERE id=$1")
             .bind(&id)
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!((row.0, row.1, row.2), (0, 0, false), "{row:?}");
-        assert!(row.3 <= 60.0 && row.3 > 58.0, "{row:?}");
+        rows.push((row.0, row.1, row.2, row.3.round() as i64, row.4));
     }
+    assert_eq!(
+        rows,
+        [
+            (1, 1, false, 60, "pending".to_owned()),
+            (2, 2, false, 60, "pending".to_owned()),
+            (3, 3, false, 120, "pending".to_owned()),
+            (4, 4, false, 240, "pending".to_owned()),
+            (5, 5, false, 7200, "pending".to_owned()),
+            (6, 6, true, 240, "error".to_owned()),
+        ]
+    );
+    // The daemon's own wait for a host's budget charges nothing and keeps the streak; another
+    // outcome (here a timeout) starts it over.
+    sqlx::query("UPDATE resource SET dead_letter=false,attempts=0 WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut rows = vec![];
+    for answer in [
+        DeferredResolver("rate_limited"),
+        DeferredResolver("timeout"),
+        DeferredResolver("upstream"),
+    ] {
+        sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE id=$1")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+        queue::run_job(&pool, &answer, &cfg, &job).await.unwrap();
+        rows.push(
+            sqlx::query_as::<_, (i32, i32, String)>(
+                "SELECT timeout_streak,attempts,last_error FROM resource WHERE id=$1",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        );
+    }
+    assert_eq!(
+        rows,
+        [
+            (6, 0, "upstream".to_owned()),
+            (1, 0, "timeout".to_owned()),
+            (1, 1, "upstream".to_owned()),
+        ]
+    );
 }
 
 fn too_large() -> anyhow::Error {

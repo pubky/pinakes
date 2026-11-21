@@ -749,7 +749,7 @@ async fn osm_history_and_unconfirmed_fetches_stay_in_derivative_table(pool: PgPo
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn batch_failures_are_per_object_and_upstream_retries_do_not_charge(pool: PgPool) {
+async fn batch_failures_are_per_object_and_upstream_waits_are_charged(pool: PgPool) {
     use std::sync::atomic::AtomicU16;
     let code = Arc::new(AtomicU16::new(200));
     let mode = code.clone();
@@ -833,7 +833,9 @@ async fn batch_failures_are_per_object_and_upstream_retries_do_not_charge(pool: 
             }
         );
         let (attempts,dead,delay):(i32,bool,f64)=sqlx::query_as("SELECT attempts,dead_letter,extract(epoch FROM next_attempt_at-now())::float8 FROM resource WHERE osm_id=3").fetch_one(&pool).await.unwrap();
-        assert_eq!(attempts, 0);
+        // A 429 or 5xx is an attempt, as any service's lasting busy answer is; an oversized
+        // answer is not.
+        assert_eq!(attempts, if status == 429 { 1 } else { 2 });
         assert!(!dead);
         if status == 413 {
             assert!(delay > 50.0 && delay <= 60.0);
@@ -898,7 +900,12 @@ async fn a_cooldown_defers_the_next_batch_at_once(pool: PgPool) {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!((attempts, dead), (0, false), "node {id}");
+        // The 429 is the asked job's attempt; the job put off by the cooldown is charged nothing.
+        assert_eq!(
+            (attempts, dead),
+            (if id == 11 { 1 } else { 0 }, false),
+            "node {id}"
+        );
         assert!(delay > 590.0 && delay <= 601.0, "node {id}: {delay}");
         assert_eq!(
             error.as_deref(),

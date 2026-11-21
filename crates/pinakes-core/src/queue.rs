@@ -415,6 +415,36 @@ async fn off_origin(pool: &PgPool, job: &Job, cfg: &QueueConfig) -> Result<()> {
     tx.commit().await?;
     Ok(())
 }
+/// The classes of a service's own answer that it cannot serve now: a 5xx, a 408 or a 429
+/// (`sources::retry`, `event::adapters::service::upstream_status`, the egress's 429, a card
+/// reader's or Nominatim's). The daemon's own waits (`rate_limited`, `discovery_cached`) are not
+/// among them.
+const UPSTREAM_WAITS: [&str; 3] = ["upstream", "http_4xx", "http_5xx"];
+/// A service that answered 5xx, 408 or 429 (`UPSTREAM_WAITS`): the link is read again after the
+/// wait the answer named or the queue's backoff, whichever is longer, the backoff doubling up to
+/// `max_backoff_secs` while `last_error` stays one of these classes (the streak is kept in
+/// `timeout_streak`; a longer named wait is never cut). Each wait is an attempt: the link
+/// dead-letters after `max_failures`, as other failures do, and turns `error` then; until then
+/// its status stays (an accepted card is not flipped by one busy answer).
+async fn upstream_wait(
+    pool: &PgPool,
+    job: &Job,
+    cfg: &QueueConfig,
+    retry: &crate::resolver::RetryLater,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    let row: Option<(i32, i32)> = sqlx::query_as("SELECT CASE WHEN last_error=ANY($3) THEN timeout_streak ELSE 0 END,attempts FROM resource WHERE id=$1 AND generation=$2 FOR UPDATE")
+        .bind(&job.id).bind(job.generation).bind(&UPSTREAM_WAITS[..]).fetch_optional(&mut *tx).await?;
+    if let Some((streak, attempts)) = row {
+        let streak = streak.saturating_add(1);
+        let attempts = attempts.saturating_add(1);
+        let delay = retry.seconds.max(backoff(cfg, streak as u32));
+        sqlx::query("UPDATE resource SET timeout_streak=$2,attempts=$3,dead_letter=$4,status=CASE WHEN $4 THEN 'error' ELSE status END,lease_until=NULL,priority_at=NULL,last_error=$5,next_attempt_at=now()+$6*interval '1 second' WHERE id=$1")
+            .bind(&job.id).bind(streak).bind(attempts).bind(attempts as u32 >= cfg.max_failures).bind(retry.class).bind(delay as f64).execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
 async fn timed_out(pool: &PgPool, job: &Job, cfg: &QueueConfig, seconds: u64) -> Result<()> {
     let mut tx = pool.begin().await?;
     let row: Option<(i32, i32)> = sqlx::query_as("SELECT CASE WHEN last_error='timeout' THEN timeout_streak ELSE 0 END,attempts FROM resource WHERE id=$1 AND generation=$2 FOR UPDATE")
@@ -833,12 +863,15 @@ async fn finish_job(
                 denied(pool, job, cfg, retry).await?;
             } else if retry.class == "off_origin" {
                 off_origin(pool, job, cfg).await?;
+            } else if UPSTREAM_WAITS.contains(&retry.class) {
+                upstream_wait(pool, job, cfg, retry).await?;
             } else {
                 // Egress's own waits (its host budget, a cached failure replayed) say nothing new
-                // about the link: a refused-connection streak stays, so its backoff keeps growing.
+                // about the link and charge nothing: a refused-connection or upstream-wait streak
+                // stays, so its backoff keeps growing.
                 let own = matches!(retry.class, "rate_limited" | "discovery_cached");
-                sqlx::query("UPDATE resource SET timeout_streak=CASE WHEN $5 AND last_error='connect' THEN timeout_streak ELSE 0 END,lease_until=NULL,priority_at=NULL,next_attempt_at=now()+$3*interval '1 second',last_error=CASE WHEN $5 AND last_error='connect' THEN last_error ELSE $4 END WHERE id=$1 AND generation=$2")
-                    .bind(&job.id).bind(job.generation).bind(retry.seconds.clamp(1,3600) as f64).bind(retry.class).bind(own).execute(pool).await?;
+                sqlx::query("UPDATE resource SET timeout_streak=CASE WHEN $5 AND (last_error='connect' OR last_error=ANY($6)) THEN timeout_streak ELSE 0 END,lease_until=NULL,priority_at=NULL,next_attempt_at=now()+$3*interval '1 second',last_error=CASE WHEN $5 AND (last_error='connect' OR last_error=ANY($6)) THEN last_error ELSE $4 END WHERE id=$1 AND generation=$2")
+                    .bind(&job.id).bind(job.generation).bind(retry.seconds.clamp(1,3600) as f64).bind(retry.class).bind(own).bind(&UPSTREAM_WAITS[..]).execute(pool).await?;
             }
         } else if crate::resolver::unreached(&error) {
             // A refused, reset or unreachable connection: retried with backoff, never dead-lettered.
