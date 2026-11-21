@@ -204,7 +204,9 @@ Where it comes from, the first that has one:
    another site's oEmbed answer counts when the card reads it anyway. Its `provider` is the
    answer's `provider_name` as a slug (`speaker-deck`), else the frame's host; an answer takes
    the name of a service of the first kind only for a frame on that service's own embed host
-   (never Mastodon's).
+   (never Mastodon's). An answer from an endpoint only the page named (on the page's own origin,
+   not the registry's for the link) is the site's own word: its `provider` is the frame's host,
+and the card's `provider` fact the endpoint's host.
 3. **The page's own player**: its head's `twitter:player` (with `:width` and `:height`), or an
    `og:video:secure_url` / `og:video:url` whose `og:video:type` is `text/html`.
 
