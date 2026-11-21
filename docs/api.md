@@ -1883,9 +1883,11 @@ record or a product database (their pages say which).
   `ProductGroup`
   names the barcode, article numbers and offers of the variant its address picks (its `url`, or
   `?variant=`), else of its only variant, never the group's: a group whose address picks none of
-  several variants names no barcode. A product's barcode is the key `gtin:`, so
-  the same product on several shops is [one group](#groups), and `key=gtin:{barcode}` finds them
-  all.
+  several variants names no barcode. The barcode is `facts.gtin`. When a service's own record
+  states it (a shop's product record an [official source](sources/README.md) reads), it is also
+  the key `gtin:`, so the same product on several shops is [one group](#groups), and
+  `key=gtin:{barcode}` finds them all; a barcode only the page's own JSON-LD states is a fact
+  and never a key.
 - Its price and availability are facts with the time they were read, never identity: the cheapest
   offer's `price`, `price_currency`, `availability` and `seller` (all four of that one offer),
   and `price_at`.
