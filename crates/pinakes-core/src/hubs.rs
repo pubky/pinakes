@@ -94,9 +94,10 @@ impl std::fmt::Display for Gone {
 }
 impl std::error::Error for Gone {}
 
-/// A hub's answer as JSON: `None` for 404, a retry for 429/503 (and other 5xx) and for an API
-/// error Wikidata sends with 200 (`ratelimited`, `maxlag`; an unknown ID is an answer), [`Gone`]
-/// for 410, an error for anything else that is not 200 JSON.
+/// A hub's answer as JSON: `None` for 404, a retry for 503 (and other 5xx) and for an API error
+/// Wikidata sends with 200 (`ratelimited`, `maxlag`; an unknown ID is an answer), [`Gone`] for
+/// 410, an error for anything else that is not 200 JSON. A 429 never reaches it: the egress
+/// answers it as a retry under its own class (`http_4xx`) with the hub's wait.
 fn json(fetched: &Fetched, hub: &'static str) -> Result<Option<Value>> {
     let busy = || -> anyhow::Error {
         RetryLater {
@@ -119,7 +120,7 @@ fn json(fetched: &Fetched, hub: &'static str) -> Result<Option<Value>> {
         }
         404 => Ok(None),
         410 => Err(Gone { hub }.into()),
-        429 | 500..=599 => Err(busy()),
+        500..=599 => Err(busy()),
         status => bail!("{hub} answered {status}"),
     }
 }

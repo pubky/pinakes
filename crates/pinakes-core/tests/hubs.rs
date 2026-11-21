@@ -693,13 +693,13 @@ async fn musicbrainz_answers_known_unknown_and_busy() {
         .unwrap_err();
     let retry = busy.downcast_ref::<RetryLater>().expect("retry later");
     assert_eq!((retry.class, retry.seconds), ("musicbrainz_busy", 120));
-    // A rate limit (429) is a retry after the hub's own wait too (the egress answers every 429
-    // so, under its own class).
+    // A rate limit (429) is a retry after the hub's own wait too: the egress answers every 429
+    // so, under its own class, before the hub reads it.
     let limited = musicbrainz::url(&e, musicbrainz::BASE, "https://limited.example/x")
         .await
         .unwrap_err();
     let retry = limited.downcast_ref::<RetryLater>().expect("retry later");
-    assert_eq!(retry.seconds, 120);
+    assert_eq!((retry.class, retry.seconds), ("http_4xx", 120));
     // A malformed MBID asks nothing.
     let before = t.seen.lock().unwrap().len();
     assert!(
