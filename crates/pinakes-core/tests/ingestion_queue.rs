@@ -1966,28 +1966,63 @@ async fn new_reference_reopens_final_pages_but_never_geo(pool: PgPool) {
     assert!(!final_root);
 }
 
-/// The feeds a database has a cursor for besides the configured one, by host only.
+/// A database that holds the cursor of another Nexus feed and none of the configured one is
+/// refused, with the reset step and the other feed by host only. One the operator prepared, with
+/// a cursor row for the configured feed (beside the old one, or the old one moved), starts,
+/// under any spelling of its URL (a trailing `/`), and keeps that cursor.
 #[sqlx::test(migrations = "../../migrations")]
-async fn other_feeds_are_named_by_host(pool: PgPool) {
+async fn a_database_read_from_another_nexus_is_refused(pool: PgPool) {
     let configured = "http://nexus.example.org:8080";
-    ingest::cursor(&pool, configured).await.unwrap();
-    assert!(ingest::other_feeds(&pool, configured)
-        .await
-        .unwrap()
-        .is_empty());
-    ingest::cursor(&pool, "http://nexus.example.org:8080/")
+    ingest::check_feed(&pool, configured).await.unwrap();
+    let old = "https://user:SECRET@old.nexus.example.org/PRIVATEPATH?token=CANARY";
+    sqlx::query("INSERT INTO feed_cursor(nexus,cursor) VALUES($1,7)")
+        .bind(old)
+        .execute(&pool)
         .await
         .unwrap();
-    ingest::cursor(
-        &pool,
-        "https://user:SECRET@old.nexus.example.org/base?token=x",
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        ingest::other_feeds(&pool, configured).await.unwrap(),
-        ["nexus.example.org", "old.nexus.example.org"]
-    );
+    let error = ingest::check_feed(&pool, configured).await.unwrap_err();
+    let text = format!("{error:#} {error:?}");
+    assert!(text.contains("old.nexus.example.org"), "{text}");
+    assert!(text.contains(ingest::CHANGING_NEXUS), "{text}");
+    for secret in ["user", "SECRET", "PRIVATEPATH", "CANARY"] {
+        assert!(!text.contains(secret), "{secret}: {text}");
+    }
+    // The operator gave the configured feed its row beside the old one: it starts.
+    sqlx::query("INSERT INTO feed_cursor(nexus,cursor) VALUES($1,3)")
+        .bind(configured)
+        .execute(&pool)
+        .await
+        .unwrap();
+    ingest::check_feed(&pool, configured).await.unwrap();
+    assert_eq!(ingest::cursor(&pool, configured).await.unwrap().cursor, 3);
+    // Or moved the old row to the new address (the same feed): it starts and reads on.
+    sqlx::query("DELETE FROM feed_cursor WHERE nexus=$1")
+        .bind(configured)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE feed_cursor SET nexus=$1")
+        .bind(format!("{configured}/"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    ingest::check_feed(&pool, configured).await.unwrap();
+    assert_eq!(ingest::cursor(&pool, configured).await.unwrap().cursor, 7);
+    ingest::check_feed(&pool, &format!("{configured}/"))
+        .await
+        .unwrap();
+    // Another spelling's row beside the configured one's is the same feed: it is dropped.
+    sqlx::query("INSERT INTO feed_cursor(nexus) VALUES($1)")
+        .bind(format!("{configured}//"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    ingest::check_feed(&pool, configured).await.unwrap();
+    let rows: Vec<(String, i64)> = sqlx::query_as("SELECT nexus,cursor FROM feed_cursor")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, [(configured.to_owned(), 7)]);
 }
 
 #[sqlx::test(migrations = "../../migrations")]

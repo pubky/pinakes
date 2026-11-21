@@ -148,6 +148,7 @@ async fn the_nexus_authorization_is_sent_on_every_call_and_shown_nowhere(pool: P
         &state.nexus,
         &Default::default(),
         &Metrics::new().unwrap(),
+        &mut ingest::Resets::new(std::time::Duration::ZERO),
     )
     .await
     .unwrap_err();

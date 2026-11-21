@@ -53,7 +53,13 @@ pub struct Cursor {
     pub cursor: i64,
     pub epoch: Option<String>,
 }
+/// The key of a feed's cursor row: `nexus_url` without a trailing `/`, the same URL to the
+/// Nexus client.
+pub fn feed_key(nexus: &str) -> &str {
+    nexus.trim_end_matches('/')
+}
 pub async fn cursor(pool: &PgPool, nexus: &str) -> Result<Cursor> {
+    let nexus = feed_key(nexus);
     sqlx::query("INSERT INTO feed_cursor(nexus) VALUES($1) ON CONFLICT DO NOTHING")
         .bind(nexus)
         .execute(pool)
@@ -65,21 +71,60 @@ pub async fn cursor(pool: &PgPool, nexus: &str) -> Result<Cursor> {
             .await?,
     )
 }
-/// The feeds other than `nexus` that have a cursor in this database, by host. The references
-/// are the projection of one Nexus feed, and a cursor is kept under `nexus_url` as written: a
-/// database that has read another feed (or the same one under another spelling of its URL)
-/// keeps that feed's cursor and the references read from it.
-pub async fn other_feeds(pool: &PgPool, nexus: &str) -> Result<Vec<String>> {
-    let others: Vec<String> =
-        sqlx::query_scalar("SELECT nexus FROM feed_cursor WHERE nexus<>$1 ORDER BY nexus")
-            .bind(nexus)
-            .fetch_all(pool)
-            .await?;
+/// The section of docs/operations.md that says how to move a database to another `nexus_url`.
+pub const CHANGING_NEXUS: &str = "docs/operations.md, \"Changing nexus_url\"";
+/// Refuses to read `nexus` into a database that holds the cursor of another Nexus feed and none
+/// of this one: the references are the projection of one feed, and reading a second on top of
+/// them would mix both. The error names the other feeds by host and the documented step
+/// ([`CHANGING_NEXUS`]). A database the operator prepared, with a cursor row for `nexus`, starts;
+/// another feed's row left beside it is logged, by host, at each start. A row under another
+/// spelling of `nexus` (a trailing `/`) is the same feed: it is moved to the key [`feed_key`]
+/// gives, or dropped beside a row already there.
+pub async fn check_feed(pool: &PgPool, nexus: &str) -> Result<()> {
+    let key = feed_key(nexus);
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(crate::locks::INGEST)
+        .execute(&mut *tx)
+        .await?;
+    let rows: Vec<String> = sqlx::query_scalar("SELECT nexus FROM feed_cursor ORDER BY nexus")
+        .fetch_all(&mut *tx)
+        .await?;
+    let (same, others): (Vec<&String>, Vec<&String>) =
+        rows.iter().partition(|row| feed_key(row) == key);
     // The host only, as every log line names a URL (docs/operations.md).
-    Ok(others
+    let hosts = others
         .iter()
         .map(|url| crate::resolver::log_host(url))
-        .collect())
+        .collect::<BTreeSet<String>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if !others.is_empty() && same.is_empty() {
+        bail!(
+            "this database holds the feed cursor of another Nexus ({hosts}) and none of nexus_url ({}): its references were read from that feed. Before reading this one, reset the projection, or give this nexus_url a cursor row ({CHANGING_NEXUS})",
+            crate::resolver::log_host(nexus),
+        );
+    }
+    if !others.is_empty() {
+        tracing::warn!(other_feeds = %hosts, "this database still holds a feed cursor for another nexus_url beside the configured one; delete its row ({CHANGING_NEXUS})");
+    }
+    let spelt: Vec<&String> = same.into_iter().filter(|row| *row != key).collect();
+    if !spelt.is_empty() {
+        let kept = rows.iter().any(|row| row == key);
+        for (i, row) in spelt.into_iter().enumerate() {
+            let query = if kept || i > 0 {
+                sqlx::query("DELETE FROM feed_cursor WHERE nexus=$1").bind(row)
+            } else {
+                sqlx::query("UPDATE feed_cursor SET nexus=$2 WHERE nexus=$1")
+                    .bind(row)
+                    .bind(key)
+            };
+            query.execute(&mut *tx).await?;
+        }
+    }
+    tx.commit().await?;
+    Ok(())
 }
 /// What `apply` did with a page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,6 +137,9 @@ enum Applied {
     Reset,
 }
 /// Returns false when another poller won the cursor or a reset needs a fresh page zero.
+///
+/// A page that starts the feed over ([`starts_over`]) resets at once here: the caller has
+/// confirmed it. The daemon's poll ([`poll_once`]) confirms one with a later read first.
 ///
 /// Each line runs in a savepoint: a line whose work panics rolls back alone and is skipped,
 /// counted as rejected (`panic`) and logged by feed position only, and the cursor moves past it.
@@ -115,6 +163,7 @@ async fn apply_page(
     limits: &IngestConfig,
     metrics: &Metrics,
 ) -> Result<Applied> {
+    let key = feed_key(nexus);
     let mut tx = pool.begin().await?;
     // Reference state is a projection of one configured Nexus; serialize rebuilds with batches.
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
@@ -123,15 +172,14 @@ async fn apply_page(
         .await?;
     let saved: Cursor =
         sqlx::query_as("SELECT cursor, epoch FROM feed_cursor WHERE nexus=$1 FOR UPDATE")
-            .bind(nexus)
+            .bind(key)
             .fetch_one(&mut *tx)
             .await?;
     if saved.cursor != requested.cursor || saved.epoch != requested.epoch {
         return Ok(Applied::Lost);
     }
-    let changed = matches!((&saved.epoch, &feed.epoch), (Some(a),Some(b)) if a != b);
     let epoch = feed.epoch.as_ref().or(saved.epoch.as_ref());
-    let reset = changed || requested.cursor > feed.length;
+    let reset = starts_over(&saved, feed);
     // A batch locks its lines' resources in feed order, and may assign aliases: it runs
     // alongside other writers but not other alias assignments. A reset touches every resource.
     let order = if reset {
@@ -151,7 +199,7 @@ async fn apply_page(
             .execute(&mut *tx)
             .await?;
         sqlx::query("UPDATE feed_cursor SET cursor=0, epoch=$2, feed_length=$3, updated_at=now(),resets=resets+1 WHERE nexus=$1")
-            .bind(nexus).bind(epoch).bind(feed.length).execute(&mut *tx).await?;
+            .bind(key).bind(epoch).bind(feed.length).execute(&mut *tx).await?;
         tx.commit().await?;
         // The host only, as every log line names a URL (docs/operations.md).
         tracing::warn!(
@@ -209,7 +257,7 @@ async fn apply_page(
         tests::maybe_panic_after_lines(feed);
         store::recompute_scores(&mut tx, &affected.into_iter().collect::<Vec<_>>()).await?;
         sqlx::query("UPDATE feed_cursor SET cursor=$2, epoch=$3, feed_length=$4, updated_at=now() WHERE nexus=$1")
-            .bind(nexus).bind(feed.page.next_cursor).bind(epoch).bind(feed.length).execute(&mut *tx).await?;
+            .bind(key).bind(feed.page.next_cursor).bind(epoch).bind(feed.length).execute(&mut *tx).await?;
         anyhow::Ok(())
     });
     let finished = finish.catch_unwind().await.map_err(|_| {
@@ -414,6 +462,54 @@ fn timestamp(ms: Option<i64>) -> Result<Option<DateTime<Utc>>> {
     ms.map(|ms| DateTime::from_timestamp_millis(ms).context("invalid feed timestamp"))
         .transpose()
 }
+/// Whether `feed`, read from `requested`, says the feed started over: its epoch is another than
+/// the saved one, or it is shorter than the cursor.
+pub fn starts_over(requested: &Cursor, feed: &FeedPage) -> bool {
+    matches!((&requested.epoch, &feed.epoch), (Some(a), Some(b)) if a != b)
+        || requested.cursor > feed.length
+}
+/// The feed answer that would start the references over, held until a later read confirms it.
+///
+/// One answer with another epoch (or shorter than the cursor) clears nothing: the next read, at
+/// least `wait` later and from the same cursor, must report the same epoch and still start over.
+/// An answer in between that does not start over forgets it. Kept in memory: after a restart
+/// the confirmation starts again.
+#[derive(Debug)]
+pub struct Resets {
+    wait: std::time::Duration,
+    seen: Option<(Cursor, Option<String>, std::time::Instant)>,
+}
+impl Resets {
+    /// Confirmation at least `wait` after the first answer (the daemon's `limits.poll_secs`).
+    pub fn new(wait: std::time::Duration) -> Self {
+        Self { wait, seen: None }
+    }
+    /// Whether `feed`, which starts over, confirms the answer seen before it.
+    fn confirms(&mut self, requested: &Cursor, feed: &FeedPage) -> bool {
+        let same = |(cursor, epoch, _): &(Cursor, Option<String>, std::time::Instant)| {
+            cursor.cursor == requested.cursor
+                && cursor.epoch == requested.epoch
+                && *epoch == feed.epoch
+        };
+        match &self.seen {
+            Some(seen) if same(seen) => {
+                if seen.2.elapsed() < self.wait {
+                    return false;
+                }
+                self.seen = None;
+                true
+            }
+            _ => {
+                self.seen = Some((
+                    requested.clone(),
+                    feed.epoch.clone(),
+                    std::time::Instant::now(),
+                ));
+                false
+            }
+        }
+    }
+}
 /// What one poll did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Poll {
@@ -421,19 +517,36 @@ pub struct Poll {
     /// the cursor moved. 0 when no batch was committed.
     pub lines: usize,
     /// Whether the next poll follows at once: the cursor moved, so more may wait, or another
-    /// poller moved it. False when the feed held nothing new and after a reset, which waits
+    /// poller moved it. False when the feed held nothing new, when an answer that starts the
+    /// feed over waits for its confirming read, and after a reset, which waits
     /// `limits.poll_secs` before the feed is read again from zero.
     pub again: bool,
 }
+/// One read of the feed, applied. An answer that starts the feed over resets the references
+/// only when `resets` confirms it ([`Resets`]); until then nothing is written.
 pub async fn poll_once(
     pool: &PgPool,
     nexus_url: &str,
     nexus: &Nexus,
     limits: &IngestConfig,
     metrics: &Metrics,
+    resets: &mut Resets,
 ) -> Result<Poll> {
     let cursor = cursor(pool, nexus_url).await?;
     let page = nexus.changes(cursor.cursor).await?;
+    if !starts_over(&cursor, &page) {
+        resets.seen = None;
+    } else if !resets.confirms(&cursor, &page) {
+        // The host only, as every log line names a URL (docs/operations.md).
+        tracing::warn!(
+            nexus = %crate::resolver::log_host(nexus_url),
+            "the Nexus feed answered as if it started over; waiting for a confirming read"
+        );
+        return Ok(Poll {
+            lines: 0,
+            again: false,
+        });
+    }
     Ok(
         match apply_page(pool, nexus_url, &cursor, &page, limits, metrics).await? {
             Applied::Batch => {
@@ -660,7 +773,8 @@ mod tests {
         let nexus = Nexus::new(&url, None).unwrap();
         let metrics = Metrics::new().unwrap();
         let limits = IngestConfig::default();
-        let applied = poll_once(&pool, &url, &nexus, &limits, &metrics)
+        let mut resets = Resets::new(std::time::Duration::ZERO);
+        let applied = poll_once(&pool, &url, &nexus, &limits, &metrics, &mut resets)
             .await
             .unwrap();
         // The six lines of the page were read, four of them skipped: more may wait.
@@ -678,6 +792,120 @@ mod tests {
         assert_eq!(cursor(&pool, &url).await.unwrap().cursor, 6);
         let skipped = |reason| metrics.ingest_rejected.with_label_values(&[reason]).get();
         assert_eq!((skipped("unknown_kind"), skipped("malformed")), (1, 3));
+        server.abort();
+    }
+
+    /// A Nexus feed of one tag line whose epoch header the test sets, and its URL.
+    async fn feed_with_epoch(
+        epoch: std::sync::Arc<std::sync::Mutex<&'static str>>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use axum::{extract::Query, routing::get, Router};
+        let line = serde_json::to_value(line("https://example.org/epoch", "/a")).unwrap();
+        let app = Router::new().route(
+            "/v1/resources/changes",
+            get(
+                move |Query(q): Query<std::collections::HashMap<String, i64>>| async move {
+                    let at = q["cursor"];
+                    let lines = if at == 0 { vec![line] } else { vec![] };
+                    let epoch = *epoch.lock().unwrap();
+                    (
+                        [("x-events-epoch", epoch), ("x-events-length", "1")],
+                        axum::Json(serde_json::json!({ "lines": lines, "next_cursor": 1 })),
+                    )
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (url, server)
+    }
+    /// The references, and the resets the cursor row counts.
+    async fn projection(pool: &PgPool) -> (Vec<String>, i64) {
+        let resets = sqlx::query_scalar("SELECT resets FROM feed_cursor")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        (tagged(pool).await, resets)
+    }
+
+    /// An answer with a new epoch clears nothing by itself: the references go only when a read
+    /// at least the wait later reports the same new epoch, and the feed is then read from zero.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_new_epoch_resets_only_once_a_later_read_confirms_it(pool: PgPool) {
+        let epoch = std::sync::Arc::new(std::sync::Mutex::new("first"));
+        let (url, server) = feed_with_epoch(epoch.clone()).await;
+        let nexus = Nexus::new(&url, None).unwrap();
+        let (metrics, limits) = (Metrics::new().unwrap(), IngestConfig::default());
+        let wait = std::time::Duration::from_secs(2);
+        let mut resets = Resets::new(wait);
+        macro_rules! poll {
+            () => {
+                poll_once(&pool, &url, &nexus, &limits, &metrics, &mut resets)
+                    .await
+                    .unwrap()
+            };
+        }
+        let read = Poll {
+            lines: 1,
+            again: true,
+        };
+        let idle = Poll {
+            lines: 0,
+            again: false,
+        };
+        assert_eq!(poll!(), read);
+        let kept = (vec!["https://example.org/epoch".to_owned()], 0);
+        *epoch.lock().unwrap() = "second";
+        assert_eq!(poll!(), idle);
+        assert_eq!(projection(&pool).await, kept);
+        // The same answer again before the wait is over confirms nothing yet.
+        assert_eq!(poll!(), idle);
+        assert_eq!(projection(&pool).await, kept);
+        tokio::time::sleep(wait).await;
+        assert_eq!(poll!(), idle);
+        assert_eq!(projection(&pool).await, (vec![], 1));
+        let saved = cursor(&pool, &url).await.unwrap();
+        assert_eq!((saved.cursor, saved.epoch.as_deref()), (0, Some("second")));
+        assert_eq!(poll!(), read);
+        server.abort();
+    }
+
+    /// One odd answer followed by the old epoch truncates nothing, and is forgotten: a later
+    /// answer with another epoch waits for its own confirmation.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn one_odd_epoch_followed_by_the_old_one_resets_nothing(pool: PgPool) {
+        let epoch = std::sync::Arc::new(std::sync::Mutex::new("first"));
+        let (url, server) = feed_with_epoch(epoch.clone()).await;
+        let nexus = Nexus::new(&url, None).unwrap();
+        let (metrics, limits) = (Metrics::new().unwrap(), IngestConfig::default());
+        let wait = std::time::Duration::from_secs(2);
+        let mut resets = Resets::new(wait);
+        macro_rules! poll {
+            () => {
+                poll_once(&pool, &url, &nexus, &limits, &metrics, &mut resets)
+                    .await
+                    .unwrap()
+            };
+        }
+        poll!();
+        let kept = (vec!["https://example.org/epoch".to_owned()], 0);
+        *epoch.lock().unwrap() = "odd";
+        poll!();
+        tokio::time::sleep(wait).await;
+        *epoch.lock().unwrap() = "first";
+        let idle = Poll {
+            lines: 0,
+            again: false,
+        };
+        assert_eq!(poll!(), idle);
+        assert_eq!(projection(&pool).await, kept);
+        // The odd answer again, past the wait of its first sighting: a sighting of its own.
+        *epoch.lock().unwrap() = "odd";
+        assert_eq!(poll!(), idle);
+        assert_eq!(projection(&pool).await, kept);
+        let saved = cursor(&pool, &url).await.unwrap();
+        assert_eq!((saved.cursor, saved.epoch.as_deref()), (1, Some("first")));
         server.abort();
     }
 

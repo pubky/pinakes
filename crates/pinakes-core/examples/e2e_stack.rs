@@ -527,8 +527,11 @@ async fn run(pool: sqlx::PgPool, f: Fixture) -> Result<()> {
     let nexus = Nexus::new(&base, None)?;
     let url = base.clone();
     let polling = tokio::spawn(async move {
+        let mut resets = ingest::Resets::new(Duration::from_secs(cfg.poll_secs));
         loop {
-            if let Err(e) = ingest::poll_once(&pool, &url, &nexus, &cfg.ingest, &metrics).await {
+            if let Err(e) =
+                ingest::poll_once(&pool, &url, &nexus, &cfg.ingest, &metrics, &mut resets).await
+            {
                 eprintln!("mock ingestion: {e}");
             }
             if let Err(e) = pinakes_core::groups::drain(&pool, &cfg.queue.groups, 25).await {
@@ -835,9 +838,17 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
         config: cfg.clone(),
     };
     let polling = tokio::spawn(async move {
+        let mut resets = ingest::Resets::new(Duration::from_secs(cfg.poll_secs));
         loop {
-            if let Err(e) =
-                ingest::poll_once(&pool, &cfg.nexus_url, &nexus, &cfg.ingest, &metrics).await
+            if let Err(e) = ingest::poll_once(
+                &pool,
+                &cfg.nexus_url,
+                &nexus,
+                &cfg.ingest,
+                &metrics,
+                &mut resets,
+            )
+            .await
             {
                 eprintln!("live ingestion: {e}");
             }

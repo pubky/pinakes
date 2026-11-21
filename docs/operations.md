@@ -537,15 +537,11 @@ line names its feed position only, never its content). A panic anywhere else in 
 batch's score update or cursor write, say) is an error: the batch rolls back, the cursor holds,
 `pinakes_ingest_panics_total` counts it and the poll is retried. A feed epoch change, or a
 cursor beyond the feed's length, clears the reference projection and scores and restarts at
-zero, after one `limits.poll_secs` wait; resource documents stay through the grace period.
-The cursor is kept under `nexus_url` as written. After `nexus_url` changes (another Nexus, or
-another spelling of the same one, such as a trailing slash) the new feed is read from zero and
-the references read from the old one stay beside it: the daemon logs a warning at each start
-that names the other feed's host. The other feed's cursor row also stays in
-`pinakes_ingest_lag_lines`. To start over with the new feed alone, stop the daemon and
-clear the projection as a feed reset does
-(`UPDATE resource SET orphaned_at=coalesce(orphaned_at,now()); TRUNCATE reference, resource_score, feed_cursor;`):
-the next start reads the configured feed from zero. A resource without references is
+zero, once it is confirmed: the answer that reports it writes nothing (the daemon logs a
+warning), and only the next read, at least `limits.poll_secs` later and from the same cursor,
+that reports the same epoch and still starts over clears them. An answer in between that does not
+start over (the old epoch again) cancels it. After a reset the next poll waits `limits.poll_secs`;
+resource documents stay through the grace period. A resource without references is
 deleted `limits.grace_days` after it became orphaned. One nothing ever referenced (a link only
 previewed with `POST /v1/resolve`) goes after `limits.preview_grace_hours` (a day) instead: its
 orphan time is still the instant it was created, as a reference clears it and losing the last
@@ -569,6 +565,26 @@ startup. `pinakes_preview_refused_total{limit}` counts the refusals, `instance` 
 `client` for a share (alert `PreviewCapacityReached` on either),
 and `pinakes_preview_backlog` the resources nothing ever referenced (not derived children or
 venues).
+
+### Changing nexus_url
+
+The references are the projection of one Nexus feed, and its cursor is kept under `nexus_url`
+without a trailing `/` (with or without one it is the same URL). The daemon refuses to start on a
+database that holds the cursor of another Nexus and none of the configured one: the error names
+the other feed's host and this section. Before you change `nexus_url`, stop the daemon and do one
+of these:
+
+- Another feed: clear the projection as a feed reset does, and the next start reads the
+  configured feed from zero:
+  `UPDATE resource SET orphaned_at=coalesce(orphaned_at,now()); TRUNCATE reference, resource_score, feed_cursor;`
+- The same feed at a new address: move its cursor row, so the feed is read on from where it was:
+  `UPDATE feed_cursor SET nexus='<new nexus_url>';`
+
+A database with a cursor row for the configured URL starts. Another feed's row left beside it is
+logged by host at each start and still counts in `pinakes_ingest_lag_lines`: delete it
+(`DELETE FROM feed_cursor WHERE nexus='<old nexus_url>';`). A row under another spelling of the
+configured URL is the same feed: the daemon moves it to the configured key at start, or drops it
+beside a row already there.
 
 ### Posts
 

@@ -221,3 +221,64 @@ async fn the_daemon_stops_when_it_loses_the_instance_lock(pool: PgPool) {
     assert!(log.contains("instance lock ended before shutdown"), "{log}");
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// A daemon on a database that holds another Nexus feed's cursor does not start: its error names
+/// the reset step. Once the operator has moved the cursor row to the configured address (here
+/// spelt with a trailing `/`, the same URL), it starts and keeps that cursor.
+#[sqlx::test(migrations = false)]
+async fn the_daemon_refuses_a_database_read_from_another_nexus(pool: PgPool) {
+    let dir =
+        Path::new(env!("CARGO_TARGET_TMPDIR")).join(pool.connect_options().get_database().unwrap());
+    let (config, base, _) = config(&pool, &dir);
+    let migrated = run(&config, &["--migrate"]).await;
+    assert!(
+        migrated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&migrated.stderr)
+    );
+    sqlx::query("INSERT INTO feed_cursor(nexus,cursor) VALUES('http://old.nexus.example.org',5)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let refused = run(&config, &[]).await;
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("old.nexus.example.org"), "{stderr}");
+    assert!(
+        stderr.contains(pinakes_core::ingest::CHANGING_NEXUS),
+        "{stderr}"
+    );
+    sqlx::query("UPDATE feed_cursor SET nexus='http://127.0.0.1:9/'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let log = std::fs::File::create(dir.join("pinakesd.log")).unwrap();
+    let mut serving = daemon(&config, &[])
+        .stdout(log.try_clone().unwrap())
+        .stderr(log)
+        .spawn()
+        .unwrap();
+    let http = reqwest::Client::new();
+    let started = Instant::now();
+    while !http
+        .get(format!("{base}/v1/info"))
+        .send()
+        .await
+        .is_ok_and(|r| r.status().is_success())
+    {
+        assert!(
+            serving.try_wait().unwrap().is_none(),
+            "pinakesd exited; see {}",
+            dir.join("pinakesd.log").display()
+        );
+        assert!(started.elapsed() < Duration::from_secs(60), "not serving");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    stop(serving).await;
+    let rows: Vec<(String, i64)> = sqlx::query_as("SELECT nexus,cursor FROM feed_cursor")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, [("http://127.0.0.1:9".to_owned(), 5)]);
+    std::fs::remove_dir_all(dir).unwrap();
+}

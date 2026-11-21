@@ -755,7 +755,8 @@ async fn polls_the_http_feed_and_replays_without_duplicates(pool: PgPool) {
             &url,
             &nexus,
             &IngestConfig::default(),
-            &Metrics::new().unwrap()
+            &Metrics::new().unwrap(),
+            &mut ingest::Resets::new(std::time::Duration::ZERO),
         )
         .await
         .unwrap(),
@@ -770,7 +771,8 @@ async fn polls_the_http_feed_and_replays_without_duplicates(pool: PgPool) {
             &url,
             &nexus,
             &IngestConfig::default(),
-            &Metrics::new().unwrap()
+            &Metrics::new().unwrap(),
+            &mut ingest::Resets::new(std::time::Duration::ZERO),
         )
         .await
         .unwrap(),
@@ -790,7 +792,8 @@ async fn polls_the_http_feed_and_replays_without_duplicates(pool: PgPool) {
 }
 
 /// A feed that starts over (its epoch is another) is no batch: the poll reports no lines read
-/// and no poll to follow at once, so the daemon waits before it reads the feed again from zero.
+/// and no poll to follow at once, so the daemon waits before it reads the feed again; the read
+/// that confirms the new epoch resets, and the feed is read again from zero.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_poll_that_resets_the_feed_reads_no_lines_and_waits(pool: PgPool) {
     let (_, uri, _) = identity("https://example.org/feed").unwrap();
@@ -807,30 +810,39 @@ async fn a_poll_that_resets_the_feed_reads_no_lines_and_waits(pool: PgPool) {
     let nexus = Nexus::new(&url, None).unwrap();
     let metrics = Metrics::new().unwrap();
     let limits = IngestConfig::default();
-    let poll = || ingest::poll_once(&pool, &url, &nexus, &limits, &metrics);
+    let mut resets = ingest::Resets::new(std::time::Duration::ZERO);
+    macro_rules! poll {
+        () => {
+            ingest::poll_once(&pool, &url, &nexus, &limits, &metrics, &mut resets)
+                .await
+                .unwrap()
+        };
+    }
     let read = ingest::Poll {
         lines: 1,
         again: true,
     };
-    assert_eq!(poll().await.unwrap(), read);
+    let idle = ingest::Poll {
+        lines: 0,
+        again: false,
+    };
+    assert_eq!(poll!(), read);
     sqlx::query("UPDATE feed_cursor SET epoch='an-earlier-epoch'")
         .execute(&pool)
         .await
         .unwrap();
-    assert_eq!(
-        poll().await.unwrap(),
-        ingest::Poll {
-            lines: 0,
-            again: false
-        }
-    );
-    let (cursor, resets, references): (i64, i64, i64) =
-        sqlx::query_as("SELECT cursor,resets,(SELECT count(*) FROM reference) FROM feed_cursor")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!((cursor, resets, references), (0, 1, 0));
-    assert_eq!(poll().await.unwrap(), read);
+    let projection = || {
+        sqlx::query_as::<_, (i64, i64, i64)>(
+            "SELECT cursor,resets,(SELECT count(*) FROM reference) FROM feed_cursor",
+        )
+        .fetch_one(&pool)
+    };
+    // The first answer with the new epoch waits for its confirming read.
+    assert_eq!(poll!(), idle);
+    assert_eq!(projection().await.unwrap(), (1, 0, 1));
+    assert_eq!(poll!(), idle);
+    assert_eq!(projection().await.unwrap(), (0, 1, 0));
+    assert_eq!(poll!(), read);
     task.abort();
 }
 

@@ -269,7 +269,7 @@ async fn start(
         return Ok(None);
     }
     warn_plain_nexus(&config);
-    warn_other_feeds(&ingest::other_feeds(&pool, &config.nexus_url).await?);
+    ingest::check_feed(&pool, &config.nexus_url).await?;
     pinakes_core::groups::configure(&pool, &config.groups).await?;
     pinakes_core::also_on::configure(&pool, &config).await?;
     let api_pool = api::pool_options().connect(&config.database_url).await?;
@@ -324,6 +324,9 @@ async fn start(
     let ingest_pool = pool.clone();
     let mut ingest_shutdown = shutdown_rx.clone();
     tasks.spawn("ingestion", async move {
+        // An answer that starts the feed over is confirmed by the next read, `poll_secs` later.
+        let mut resets =
+            ingest::Resets::new(Duration::from_secs(ingest_state.config.poll_secs));
         loop {
             // A panicking line is skipped inside `apply`; anything else that panics is counted
             // (`pinakes_ingest_panics_total`) and retried like an error with the cursor held.
@@ -333,6 +336,7 @@ async fn start(
                 &ingest_state.nexus,
                 &ingest_state.config.ingest,
                 &ingest_state.metrics,
+                &mut resets,
             ))
             .catch_unwind();
             let polled = tokio::select! { _=ingest_shutdown.changed()=>break,result=poll=>result.unwrap_or_else(|_| { ingest_state.metrics.ingest_panics.inc(); Err(anyhow::anyhow!("ingestion panicked")) }) };
@@ -342,8 +346,9 @@ async fn start(
                         tracing::info!(lines = poll.lines, "ingested Nexus batch");
                         ingest_state.wake.notify_waiters();
                     }
-                    // More may wait: the next page at once. After a reset, and when the feed
-                    // held nothing new, the next poll waits.
+                    // More may wait: the next page at once. After a reset, while a reset
+                    // waits for its confirming read, and when the feed held nothing new, the
+                    // next poll waits.
                     if poll.again {
                         continue;
                     }
@@ -449,14 +454,6 @@ async fn start(
 fn warn_plain_nexus(config: &Config) {
     if config.nexus_authorization_in_clear() {
         tracing::warn!(nexus = %pinakes_core::resolver::log_host(&config.nexus_url), "nexus_authorization is sent over http to a host that is not local; use an https nexus_url");
-    }
-}
-
-/// The references are one Nexus feed's: a database that holds a cursor for another `nexus_url`
-/// (or another spelling of this one) keeps that feed's references beside this one's.
-fn warn_other_feeds(hosts: &[String]) {
-    if !hosts.is_empty() {
-        tracing::warn!(other_feeds = %hosts.join(", "), "this database holds a feed cursor for another nexus_url; the references read from it stay beside the configured feed's (docs/operations.md, Ingestion)");
     }
 }
 
