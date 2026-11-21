@@ -139,6 +139,9 @@ impl Relays {
             // A relay answers a key's packet where it is asked: a redirect is a failed relay,
             // never followed (each hop would take another slot wait and deadline).
             keep_redirect: true,
+            // The operator's relays (the default two share one address) are paced by their
+            // hosts alone, so one stalled relay never holds back the other.
+            host_slot_only: true,
             ..Default::default()
         };
         let answers = futures_util::future::join_all(self.relays.iter().map(|relay| {

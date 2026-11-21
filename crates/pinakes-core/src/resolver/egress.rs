@@ -357,6 +357,9 @@ pub struct FetchOptions {
     /// slot further away answers `RetryLater` (`rate_limited`, no request sent, no charge), as
     /// one past `MAX_SLOT_WAIT` always does.
     pub slot_wait: Option<Duration>,
+    /// Pace this request by its host's slot alone, not also by its address's: for the
+    /// operator's own endpoints (the PKARR relays), never for an address a link steers.
+    pub host_slot_only: bool,
 }
 impl std::fmt::Debug for Fetched {
     /// The body's length, never the body: a token endpoint's answer holds the token.
@@ -1165,9 +1168,16 @@ impl Egress {
         let requested = Url::parse(uri)?;
         let mut url = requested.clone();
         let mut permanent = true;
-        // A redirect within the same host keeps the slot it has; a slow host's next slot is
-        // further away than a fetch may wait, so a new one would always answer RetryLater.
-        let mut permit: Option<(String, OwnedMutexGuard<Instant>)> = None;
+        // A redirect within the same host keeps the slots it has; a slow host's next slot is
+        // further away than a fetch may wait, so a new one would always answer RetryLater. Each
+        // request holds its host's slot and its first pinned address's, so many names on one
+        // server are paced together.
+        type Slots = (
+            String,
+            OwnedMutexGuard<Instant>,
+            Option<OwnedMutexGuard<Instant>>,
+        );
+        let mut permit: Option<Slots> = None;
         for redirects in 0..=3 {
             if !matches!(url.scheme(), "http" | "https")
                 || !url.username().is_empty()
@@ -1208,17 +1218,37 @@ impl Egress {
                     .context("egress refused non-public address"));
             }
             // Pin checked addresses to the connection; a second DNS lookup could rebind to a private IP.
+            let address = (!options.host_slot_only).then(|| address_slot(addresses[0].ip()));
             match &mut permit {
-                Some((held, guard)) if *held == host => {
+                Some((held, guard, at_address)) if *held == host => {
                     **guard = Instant::now() + self.host_interval(&host);
+                    if let (Some(at_address), Some(address)) = (at_address, &address) {
+                        **at_address = Instant::now() + self.address_interval(address, &host);
+                    }
                 }
                 _ => {
-                    // Release the other host's slot before waiting for this one.
+                    // Release the other host's slots before waiting for this one's.
                     drop(permit.take());
                     let wait = options
                         .slot_wait
                         .map_or(MAX_SLOT_WAIT, |w| w.min(MAX_SLOT_WAIT));
-                    permit = Some((host.clone(), self.host_permit_within(&host, wait).await?));
+                    let deadline = Instant::now() + wait;
+                    let mut guard = self.host_permit_within(&host, wait).await?;
+                    let at_address = match &address {
+                        Some(address) => {
+                            let left = deadline.saturating_duration_since(Instant::now());
+                            match self.address_permit_within(address, &host, left).await {
+                                Ok(at_address) => Some(at_address),
+                                Err(error) => {
+                                    // No request is sent: the host's turn is not used up.
+                                    *guard = Instant::now();
+                                    return Err(error);
+                                }
+                            }
+                        }
+                        None => None,
+                    };
+                    permit = Some((host.clone(), guard, at_address));
                 }
             }
             let mut observation = crate::telemetry::FetchGuard::start();
@@ -1327,7 +1357,34 @@ impl Egress {
         host: &str,
         wait: Duration,
     ) -> Result<OwnedMutexGuard<Instant>> {
-        let rate = self.host_rate(host);
+        self.slot_permit_within(host, self.host_interval(host), wait)
+            .await
+    }
+    /// The turn of `address` (its [`address_slot`]) for a request to `host`, waiting at most
+    /// `wait` as [`host_permit_within`](Self::host_permit_within) does.
+    async fn address_permit_within(
+        &self,
+        address: &str,
+        host: &str,
+        wait: Duration,
+    ) -> Result<OwnedMutexGuard<Instant>> {
+        self.slot_permit_within(address, self.address_interval(address, host), wait)
+            .await
+    }
+    /// The least time between two requests to one address: the default pace, or the host's when
+    /// the operator set it faster. A slow host's own pace never slows the other names on its
+    /// address.
+    fn address_interval(&self, address: &str, host: &str) -> Duration {
+        self.host_interval(address).min(self.host_interval(host))
+    }
+    /// The next turn of the slot named `slot` (a host, or an address: [`address_slot`]), the next
+    /// one `interval` after it, waiting at most `wait`.
+    async fn slot_permit_within(
+        &self,
+        slot: &str,
+        interval: Duration,
+        wait: Duration,
+    ) -> Result<OwnedMutexGuard<Instant>> {
         let budget = {
             let mut hosts = self.hosts.lock().await;
             if hosts.len() >= 10000 {
@@ -1336,7 +1393,7 @@ impl Egress {
                 });
             }
             hosts
-                .entry(host.into())
+                .entry(slot.into())
                 .or_insert_with(|| Arc::new(Mutex::new(Instant::now())))
                 .clone()
         };
@@ -1348,15 +1405,21 @@ impl Egress {
         };
         let deadline = Instant::now() + wait;
         let Ok(mut guard) = tokio::time::timeout_at(deadline, budget.lock_owned()).await else {
-            return Err(retry(Duration::from_secs_f64(1.0 / rate).max(wait)));
+            return Err(retry(interval.max(wait)));
         };
         if *guard > deadline {
             return Err(retry(guard.saturating_duration_since(Instant::now())));
         }
         tokio::time::sleep_until(*guard).await;
-        *guard = Instant::now() + self.host_interval(host);
+        *guard = Instant::now() + interval;
         Ok(guard)
     }
+}
+/// The pacing slot of an address, apart from every host name's.
+fn address_slot(ip: IpAddr) -> String {
+    format!("address {ip}")
+}
+impl Egress {
     /// The least time between two requests to a host: its rate plus a stable per-host jitter,
     /// which avoids synchronized requests without weakening the minimum interval.
     fn host_interval(&self, host: &str) -> Duration {
@@ -2698,6 +2761,66 @@ mod tests {
             .unwrap_err();
         assert!(format!("{error:#}").contains("port blocked"), "{error:#}");
         assert!(BAD_PORTS.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    /// Two names on one address are paced together: their requests never overlap. Names on two
+    /// addresses do.
+    #[tokio::test(start_paused = true)]
+    async fn two_names_on_one_address_do_not_overlap() {
+        struct Shared(bool);
+        #[async_trait]
+        impl Dns for Shared {
+            async fn lookup(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>> {
+                let ip = if self.0 || host == "a.example.org" {
+                    "8.8.8.8"
+                } else {
+                    "8.8.4.4"
+                };
+                Ok(vec![SocketAddr::new(ip.parse()?, port)])
+            }
+        }
+        #[derive(Default)]
+        struct Slow {
+            now: AtomicUsize,
+            most: AtomicUsize,
+        }
+        #[async_trait]
+        impl Transport for Slow {
+            async fn get(&self, url: &Url, _: &[SocketAddr]) -> Result<Fetched> {
+                let now = self.now.fetch_add(1, Ordering::SeqCst) + 1;
+                self.most.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                self.now.fetch_sub(1, Ordering::SeqCst);
+                Ok(Fetched::answer(
+                    url.clone(),
+                    200,
+                    "text/plain".into(),
+                    b"ok".to_vec(),
+                ))
+            }
+        }
+        for (shared, most) in [(true, 1), (false, 2)] {
+            let transport = Arc::new(Slow::default());
+            let egress = Egress::with_backends(
+                EgressConfig {
+                    host_requests_per_second: 1000.0,
+                    ..Default::default()
+                },
+                Arc::new(Shared(shared)),
+                transport.clone(),
+            );
+            let (a, b) = tokio::join!(
+                egress.fetch("https://a.example.org/"),
+                egress.fetch("https://b.example.org/")
+            );
+            a.unwrap();
+            b.unwrap();
+            assert_eq!(
+                transport.most.load(Ordering::SeqCst),
+                most,
+                "shared {shared}"
+            );
+        }
     }
 
     /// A hub's published limit lowers its host's default pace; an operator's entry sets it.

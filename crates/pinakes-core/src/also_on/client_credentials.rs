@@ -548,11 +548,18 @@ mod tests {
     async fn a_slow_request_holds_only_its_own_slot() {
         use crate::resolver::egress::{Dns, Egress, Fetched, Transport};
         use std::net::SocketAddr;
+        /// Each service on an address of its own, as two services are (one address paces the
+        /// names on it together).
         struct Public;
         #[async_trait::async_trait]
         impl Dns for Public {
-            async fn lookup(&self, _: &str, port: u16) -> Result<Vec<SocketAddr>> {
-                Ok(vec![SocketAddr::new("8.8.8.8".parse()?, port)])
+            async fn lookup(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>> {
+                let ip = if host == "slow.example" {
+                    "8.8.8.8"
+                } else {
+                    "8.8.4.4"
+                };
+                Ok(vec![SocketAddr::new(ip.parse()?, port)])
             }
         }
         /// Answers every token and API request at once, but `slow.example`'s API request only
