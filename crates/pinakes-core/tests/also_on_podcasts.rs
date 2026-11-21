@@ -1184,3 +1184,37 @@ async fn an_unreadable_feed_has_no_guid_and_fails_nothing() {
         "the derived GUID, a fact only"
     );
 }
+
+/// A page that names a show's feed (a player's show page) is keyed with the show's keys only when
+/// the feed names it as its page (the channel's `<link>`); otherwise the show's links stay, none
+/// of them a key of the page.
+#[tokio::test]
+async fn a_show_page_takes_the_shows_keys_only_when_its_feed_names_it() {
+    let feed = "https://feeds.podcastindex.org/pc20.xml";
+    let page_card = |uri: &str| {
+        let mut doc = ResourceMeta::new(uri, "fountain", 3600);
+        doc.attributes.insert("podcast_feed".into(), feed.into());
+        subject(uri, Some("PodcastSeries"), Some(doc))
+    };
+    let cx = cx(Recorded::new(), indexed());
+    // The feed's channel names http://podcastindex.org as its page, not this one.
+    let found = Podcasts
+        .lookup(&cx, &page_card("https://fountain.fm/show/pc20"))
+        .await
+        .unwrap();
+    assert!(found.keys.is_empty(), "{:?}", keys(&found));
+    assert!(!found.links.is_empty());
+    assert!(found.links.iter().all(|l| l.key.is_none()));
+    // The page the feed names is the show's.
+    let found = Podcasts
+        .lookup(&cx, &page_card("http://podcastindex.org"))
+        .await
+        .unwrap();
+    assert_eq!(
+        keys(&found),
+        [
+            "podcast:apple:1584274529",
+            "podcast:guid:917393e3-1b1e-5cef-ace4-edaa54e1f810"
+        ]
+    );
+}

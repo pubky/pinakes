@@ -48,6 +48,10 @@ Podcast Index page
   whether or not the show's GUID is vouched, just as its track is: Apple is the authority for
   its own episodes. iTunes may know an item by another GUID than the show's feed does (Darknet
   Diaries' "Conti"). Then the file is what joins Apple's episode to the show's own page.
+- **A player's show page.** A page that names a show's feed without being the feed's own card
+  (a Fountain show page, the `fountain` source) gets the show's keys only when the feed names it
+  as the show's page, its channel `<link>`; otherwise it lists the show's links, none of them a
+  key of the page.
 - **A player's episode page.** A Castro episode page (the `castro` source) plays a file and
   names its show's Apple ID. The episode is the one among the show's latest 200 that iTunes
   lists with that very file. It gets that episode's keys, and the item key when the show is
