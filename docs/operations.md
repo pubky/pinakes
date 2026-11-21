@@ -519,8 +519,8 @@ is off. Swagger UI shares the `/v1` per-IP budget.
 
 The agents' guide (`/llms.txt`, `/skill.md`, the index at `/`) and the MCP endpoint (`POST /mcp`,
 `api.mcp`, default on) are on the public listener under the same per-IP budget
-([api](api.md#agents)). The MCP endpoint is stateless and read-only, takes no credentials and
-accepts any `Host`; terminate TLS at the reverse proxy and pass `X-Forwarded-Proto`, so the guide
+([api](api.md#agents)). The MCP endpoint is stateless, takes no credentials, writes nothing but
+the previews `card` with `resolve: true` asks for, and accepts any `Host`; terminate TLS at the reverse proxy and pass `X-Forwarded-Proto`, so the guide
 names the public `https` URL. The proxy must pass the public `Host` too: the guide's base URL is
 the `Host` the daemon receives (in nginx, `proxy_set_header Host $host;`). Turning `api.mcp` off
 removes `/mcp` and its link from the index; the guide stays.

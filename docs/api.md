@@ -2049,7 +2049,10 @@ for any other. `GET /` links the guide, the skill, the MCP endpoint (when on), t
 `/v1/info` and nexus-scout's guide.
 
 **MCP.** `POST /mcp` (`api.mcp`, default on) is a Model Context Protocol server over Streamable
-HTTP, stateless and read-only, built on the official Rust SDK (`rmcp`). Messages are answered as
+HTTP, stateless, built on the official Rust SDK (`rmcp`). Every tool only reads, except `card`
+with `resolve: true`, which stores an unknown link as a preview and has a worker fetch it
+(`POST /v1/resolve`): `card` is announced with `readOnlyHint: false` and `openWorldHint: true`,
+the others with `readOnlyHint: true` and `openWorldHint: false`. Messages are answered as
 JSON (`application/json`); there are no sessions and no server-to-client requests. Each tool is a
 request to the public routes above, answered by their handlers under the public listener's
 layers, with the caller's address:
@@ -2090,7 +2093,7 @@ message that has not arrived in full by the request's deadline.
 
 **No admin operation.** The tools' requests go to the public routes only, built afresh with no
 header of the MCP request, so the admin listener's routes and its token are out of reach. Any
-`Host` is accepted: the endpoint takes no credentials and changes nothing, so rmcp's DNS-rebinding
+`Host` is accepted: the endpoint takes no credentials and writes nothing but budgeted previews, so rmcp's DNS-rebinding
 guard for local servers protects nothing here, and the public host names are the reverse proxy's
 to know.
 

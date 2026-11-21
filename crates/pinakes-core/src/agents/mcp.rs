@@ -1,4 +1,4 @@
-//! `POST /mcp`: a Model Context Protocol endpoint (Streamable HTTP, stateless, read-only), with
+//! `POST /mcp`: a Model Context Protocol endpoint (Streamable HTTP, stateless), with
 //! the official Rust SDK, `rmcp`. Each tool is a request to the public routes, answered by their
 //! own handlers under the public listener's layers (the per-IP budget, the size caps, the
 //! statement timeout), with the caller's address: an MCP message costs one unit of the budget
@@ -40,7 +40,7 @@ const ANSWER_CAP: usize = 16 * 1024 * 1024;
 const DESCRIPTION_CHARS: usize = 300;
 
 /// The MCP service: stateless, JSON answers, a body cap of the REST routes' 2 MB. Any `Host` is
-/// accepted: the endpoint is public, read-only and takes no credentials, so the DNS-rebinding
+/// accepted: the endpoint is public and takes no credentials, so the DNS-rebinding
 /// guard rmcp applies to local servers protects nothing here, and the operator's host names are
 /// the reverse proxy's to know.
 pub fn service(rest: Router, state: AppState) -> StreamableHttpService<Tools, NeverSessionManager> {
@@ -548,7 +548,18 @@ pub fn tools() -> Vec<Tool> {
         let Value::Object(schema) = schema else {
             unreachable!("a tool's schema is an object")
         };
-        Tool::new(name, description, Arc::new(schema)).with_annotations(read_only())
+        // `card` with `resolve: true` stores a link it does not know as a preview and has this
+        // instance fetch it from its site: neither read-only nor closed-world.
+        let annotations = if name == "card" {
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(false)
+                .idempotent(true)
+                .open_world(true)
+        } else {
+            read_only()
+        };
+        Tool::new(name, description, Arc::new(schema)).with_annotations(annotations)
     };
     vec![
         tool(
@@ -584,7 +595,7 @@ pub fn tools() -> Vec<Tool> {
         ),
         tool(
             "card",
-            "Read one link by its URI: its card with details (address, facts from official APIs, the objects it points at (`related`: a Bitcoin transaction's block, inputs and outputs, an address's latest transactions, a Lightning node's channels), other spellings, the same thing on other services, the public Pubky collections that hold it). Exact non-derived also_on members include optional refs (at most 5) for a Nexus tag join alongside their uri; derived or maybe links do not. Only links this instance already knows; set resolve to true to have an unknown link read now (it has its own small per-minute budget and may answer pending).",
+            "Read one link by its URI: its card with details (address, facts from official APIs, the objects it points at (`related`: a Bitcoin transaction's block, inputs and outputs, an address's latest transactions, a Lightning node's channels), other spellings, the same thing on other services, the public Pubky collections that hold it). Exact non-derived also_on members include optional refs (at most 5) for a Nexus tag join alongside their uri; derived or maybe links do not. Only links this instance already knows; set resolve to true to have an unknown link read now: this instance stores it as a temporary preview and fetches it from its site (it has its own small per-minute budget and may answer pending).",
             json!({"type":"object","required":["uri"],"additionalProperties":false,"properties":{
                 "uri":{"type":"string","description":"The link: a spelling people referenced, or one with tracking parameters, a doi.org or ISBN link, or another URL form of a service's known card."},
                 "resolve":{"type":"boolean","description":"Read the link now if it is unknown here: stores it as a preview and fetches it from its site. Default false."}
@@ -1305,7 +1316,7 @@ mod tests {
     }
 
     #[test]
-    fn every_tool_is_read_only_and_its_schema_an_object() {
+    fn every_tool_is_announced_as_it_acts_and_its_schema_an_object() {
         let tools = tools();
         assert_eq!(
             tools.iter().map(|t| t.name.as_ref()).collect::<Vec<_>>(),
@@ -1313,10 +1324,12 @@ mod tests {
         );
         for tool in tools {
             assert_eq!(tool.input_schema["type"], "object", "{}", tool.name);
-            assert_eq!(
-                tool.annotations.as_ref().and_then(|a| a.read_only_hint),
-                Some(true)
-            );
+            let annotations = tool.annotations.as_ref().unwrap();
+            // `card` with `resolve: true` stores and fetches: it is not announced read-only.
+            let reads = tool.name != "card";
+            assert_eq!(annotations.read_only_hint, Some(reads), "{}", tool.name);
+            assert_eq!(annotations.open_world_hint, Some(!reads), "{}", tool.name);
+            assert_eq!(annotations.destructive_hint, Some(false), "{}", tool.name);
         }
     }
 

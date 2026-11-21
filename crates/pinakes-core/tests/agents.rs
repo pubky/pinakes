@@ -834,7 +834,17 @@ async fn no_admin_route_is_reachable_through_mcp(pool: PgPool) {
             ["search", "card", "lookup", "group", "types", "social"].contains(&name),
             "{name}"
         );
-        assert_eq!(tool["annotations"]["readOnlyHint"], true, "{name}");
+        // `card` may store and fetch a link (`resolve: true`); every other tool only reads.
+        assert_eq!(
+            tool["annotations"]["readOnlyHint"],
+            name != "card",
+            "{name}"
+        );
+        assert_eq!(
+            tool["annotations"]["openWorldHint"],
+            name == "card",
+            "{name}"
+        );
     }
     let card = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
                       "params": {"name": "card", "arguments": {"uri": "https://example.org/concert"}}});

@@ -225,8 +225,9 @@ only links your network referenced, search here with `reach=following&viewer=<pu
 
 ## MCP
 
-`POST {{BASE}}/mcp` is a Model Context Protocol endpoint (Streamable HTTP, stateless, read-only,
-no auth). Its tools are thin calls into the routes above, and each answer names the REST URL with
+`POST {{BASE}}/mcp` is a Model Context Protocol endpoint (Streamable HTTP, stateless, no auth).
+Every tool only reads, except `card` with `resolve: true`, which stores an unknown link as a
+preview and has this instance fetch it from its site. Its tools are thin calls into the routes above, and each answer names the REST URL with
 the full result:
 
 | tool | does |
