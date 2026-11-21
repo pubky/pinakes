@@ -459,6 +459,57 @@ impl Transport for WikiFailure {
         ))
     }
 }
+/// Records the body cap each request asked for; answers 404.
+#[derive(Default)]
+struct Caps(std::sync::Mutex<Vec<(String, Option<usize>)>>);
+#[async_trait::async_trait]
+impl Transport for Caps {
+    async fn get(&self, u: &url::Url, a: &[SocketAddr]) -> anyhow::Result<Fetched> {
+        self.get_with(u, a, &FetchOptions::default()).await
+    }
+    async fn get_with(
+        &self,
+        u: &url::Url,
+        _: &[SocketAddr],
+        options: &FetchOptions,
+    ) -> anyhow::Result<Fetched> {
+        self.0
+            .lock()
+            .unwrap()
+            .push((u.to_string(), options.body_cap));
+        Ok(common::fetched(u.clone(), 404, "text/html".into(), vec![]))
+    }
+}
+/// A Wikidata event item is read up to the configured `limits.hub_body_bytes`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_wikidata_item_is_read_up_to_the_hub_body_cap(pool: PgPool) {
+    use pinakes_core::resolver::Resolver;
+    let caps = Arc::new(Caps::default());
+    let r = platform(
+        &pool,
+        EventConfig {
+            geocoding: false,
+            ..Default::default()
+        },
+        Egress::with_backends(
+            pinakes_core::config::EgressConfig {
+                hub_body_bytes: 16 * 1024 * 1024,
+                ..Default::default()
+            },
+            Arc::new(AdapterDns),
+            caps.clone(),
+        ),
+    );
+    let _ = r.resolve("https://www.wikidata.org/wiki/Q12345").await;
+    let entity = "https://www.wikidata.org/wiki/Special:EntityData/Q12345.json";
+    let asked = caps.0.lock().unwrap().clone();
+    assert!(
+        asked
+            .iter()
+            .any(|(url, cap)| url == entity && *cap == Some(16 * 1024 * 1024)),
+        "{asked:?}"
+    );
+}
 #[sqlx::test(migrations = "../../migrations")]
 async fn only_parse_errors_fall_back_and_plain_wikipedia_skips_fetch(pool: PgPool) {
     use pinakes_core::resolver::Resolver;
