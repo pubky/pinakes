@@ -106,8 +106,9 @@ credentials (above):
 - the Spotify links read meanwhile keep what Spotify gave them before; the source is passed
   over as one without credentials, so their other sources' results are recorded and the run
   does not fail;
-- the refusal is held five minutes, and Spotify is asked nothing while it holds, so it gets one
-  token request and one API request at most every five minutes, each answered 403 again;
+- the refusal is held `limits.also_on_refusal_hold_secs` (five minutes), and Spotify is asked
+  nothing while it holds, so it gets one token request and one API request at most once per
+  hold, each answered 403 again;
 - each link is read again at its usual time (the sources' lifetime), not sooner.
 
 The remedy is the owner's: take out or renew Premium on the account that owns the app. Spotify

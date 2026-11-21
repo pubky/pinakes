@@ -13,9 +13,11 @@ A lookup family of [also on](../api.md#also-on) (`lookups/games.rs`).
   Wikidata item carrying that page's ID (read back and compared exactly; an item its successor
   replaces gives way to it; several others are ambiguous and give nothing). It gets the item's
   other stores and game databases (Epic Games Store, itch.io, IGDB, MobyGames, PCGamingWiki,
-  HowLongToBeat) with one value each, its Q-id as key when the item carries no other ID on that
-  store (an item with two Steam appids is neither page's), and, off Steam, its one Steam appid
-  as the `steam:` key, so the page joins the game's Steam page. An app's store pages are the
+  HowLongToBeat) with one value each as links. Only when the item carries no other ID on the
+  page's store is the page the item's: then its Q-id is a key and, off Steam, its one Steam
+  appid is the `steam:` key, so the page joins the game's Steam page. An item with two values
+  on one store (two Steam appids; a game and its expansion pass on GOG) gives either page links
+  only, no key. An app's store pages are the
   `apps` family's, when the build has it.
 
 

@@ -1232,21 +1232,13 @@ impl std::fmt::Display for CurationError {
     }
 }
 impl std::error::Error for CurationError {}
-/// Set a curated group's members (a member in another group leaves it).
-pub async fn curate(pool: &PgPool, id: &str, body: Curation, cfg: &GroupConfig) -> Result<()> {
-    ensure!(
-        cfg.enabled && crate::model::valid_id(id),
-        CurationError("invalid or disabled group")
-    );
-    ensure!(
-        !body.members.is_empty() && body.members.len() <= cfg.max_members,
-        CurationError("invalid group member count")
-    );
+/// A curation's transaction: it waits for the active group writer within its two-second limit
+/// ([`GroupBusy`] after that), then takes the write order a save takes.
+async fn curation_tx(pool: &PgPool) -> Result<Transaction<'static, Postgres>> {
     let mut tx = pool.begin().await?;
     sqlx::query("SET LOCAL statement_timeout='2s'")
         .execute(&mut *tx)
         .await?;
-    // Curation waits for the active writer within the transaction's two-second limit.
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(crate::locks::GROUP)
         .execute(&mut *tx)
@@ -1261,6 +1253,68 @@ pub async fn curate(pool: &PgPool, id: &str, body: Curation, cfg: &GroupConfig) 
             }
         })?;
     crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
+    Ok(tx)
+}
+/// Undo a curation: the group's members are no longer pinned and the group is no longer curated,
+/// so each former member groups again by what its keys say (the group itself goes when no member
+/// joins it again). `Ok(false)` when `id` is no curated group.
+pub async fn uncurate(pool: &PgPool, id: &str, cfg: &GroupConfig) -> Result<bool> {
+    ensure!(
+        cfg.enabled && crate::model::valid_id(id),
+        CurationError("invalid or disabled group")
+    );
+    let mut tx = curation_tx(pool).await?;
+    let curated: Option<bool> =
+        sqlx::query_scalar("SELECT curated FROM \"group\" WHERE id=$1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if curated != Some(true) {
+        return Ok(false);
+    }
+    let units: Vec<String> =
+        sqlx::query_scalar("DELETE FROM group_override WHERE group_id=$1 RETURNING unit_id")
+            .bind(id)
+            .fetch_all(&mut *tx)
+            .await?;
+    sqlx::query("UPDATE \"group\" SET curated=false WHERE id=$1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    let keys: Vec<String> =
+        sqlx::query_scalar("SELECT DISTINCT key FROM resource_group WHERE unit_id=ANY($1)")
+            .bind(&units)
+            .fetch_all(&mut *tx)
+            .await?;
+    rebuild(&mut tx, &units, &keys, &[id.to_owned()], cfg).await?;
+    // Each former member's own run reads its keys anew (nothing it read before is taken as
+    // unchanged), and a group no member joins again goes, as an automatic group does.
+    sqlx::query("DELETE FROM group_input WHERE resource_id IN (SELECT resource_id FROM group_unit WHERE unit_id=ANY($1))")
+        .bind(&units)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("INSERT INTO group_dirty(resource_id) SELECT DISTINCT resource_id FROM group_unit WHERE unit_id=ANY($1) ON CONFLICT DO NOTHING")
+        .bind(&units)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM \"group\" g WHERE id=$1 AND NOT curated AND NOT EXISTS(SELECT 1 FROM group_unit u WHERE u.group_id=g.id) AND NOT EXISTS(SELECT 1 FROM resource_group k WHERE k.group_id=g.id)")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(true)
+}
+/// Set a curated group's members (a member in another group leaves it).
+pub async fn curate(pool: &PgPool, id: &str, body: Curation, cfg: &GroupConfig) -> Result<()> {
+    ensure!(
+        cfg.enabled && crate::model::valid_id(id),
+        CurationError("invalid or disabled group")
+    );
+    ensure!(
+        !body.members.is_empty() && body.members.len() <= cfg.max_members,
+        CurationError("invalid group member count")
+    );
+    let mut tx = curation_tx(pool).await?;
     let mut units = vec![];
     let mut previous: Vec<String> =
         sqlx::query_scalar("SELECT group_id FROM group_override WHERE group_id=$1")

@@ -125,7 +125,7 @@ async fn page_links(
         .discover(
             &url,
             &crate::resolver::egress::FetchOptions::default(),
-            3600,
+            cx.egress.config().discovery_secs,
         )
         .await?;
     match fetched.status {

@@ -32,7 +32,10 @@ impl WikipediaSource {
         };
         let url = item_lookup(&article)?;
         let options = crate::resolver::egress::FetchOptions::json();
-        let fetched = cx.egress.discover(url.as_str(), &options, 3600).await?;
+        let fetched = cx
+            .egress
+            .discover(url.as_str(), &options, cx.egress.config().discovery_secs)
+            .await?;
         if matches!(fetched.status, 429 | 500..=599) {
             return Err(super::media::busy("wikipedia_busy", &fetched));
         }

@@ -292,8 +292,8 @@ async fn a_copy_that_claims_a_shows_apple_id_joins_nothing_of_it() {
         .await
         .unwrap();
     let theirs = item_key(own, "prx_7057_141e0c43-f935-41de-be94-708448052c4d").unwrap();
-    let file = enclosure_key("https://copy.example/a.mp3").unwrap();
-    assert_eq!(keys(&found), [theirs.as_str(), file.as_str()]);
+    // Its file is what its own feed says: no service names it, so it is no key.
+    assert_eq!(keys(&found), [theirs.as_str()]);
     assert_eq!(sites(&found), ["Podcast feed"], "its own RSS item only");
     // Darknet Diaries' own GUID, which Podcast Index says the real feed owns: nothing of the
     // show at all. Its own audio is still its stream: a stream joins nothing.

@@ -26,24 +26,14 @@ impl Source for DeezerSource {
         "deezer"
     }
     fn applies(&self, subject: &Subject) -> bool {
-        let link = music::parse(&subject.uri);
-        if link.as_ref().is_some_and(|l| {
-            l.service == Service::Deezer && matches!(l.level, Level::Track | Level::Album)
-        }) {
-            return true;
-        }
-        match link.map(|l| l.level).or_else(|| mb_level(&subject.uri)) {
-            Some(Level::Track) => subject.keys_in("isrc").next().is_some(),
-            Some(Level::Album) => subject.keys_in("upc").next().is_some(),
-            _ => false,
-        }
+        own_object(&subject.uri).is_some() || reverse_subject(subject, Service::Deezer).is_some()
     }
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
-        let link = music::parse(&subject.uri);
+        let link = own_object(&subject.uri);
         let Some(level) = link
             .as_ref()
             .map(|l| l.level)
-            .or_else(|| mb_level(&subject.uri))
+            .or_else(|| reverse_subject(subject, Service::Deezer).map(|(level, _)| level))
         else {
             return Ok(Found::default());
         };
@@ -58,7 +48,7 @@ impl Source for DeezerSource {
             crate::barcode::gtin13
         };
         let mut found = Found::default();
-        if let Some(link) = link.filter(|l| l.service == Service::Deezer) {
+        if let Some(link) = link {
             // Its own record of its own object.
             let Some(v) = deezer_api::object(cx, &format!("{kind}/{}", link.id)).await? else {
                 return Ok(found);
@@ -109,5 +99,62 @@ impl Source for DeezerSource {
             }
         }
         Ok(found)
+    }
+}
+
+/// A Deezer track or album link: its own record names its ISRC or barcode.
+fn own_object(uri: &str) -> Option<music::Link> {
+    music::parse(uri)
+        .filter(|l| l.service == Service::Deezer && matches!(l.level, Level::Track | Level::Album))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A YouTube video with an `isrc:` key is asked as its recording, as every lookup by ISRC
+    /// asks it (`reverse_subject`): Deezer's track with that ISRC (its recorded answer), read
+    /// back and keyed by it.
+    #[tokio::test]
+    async fn a_video_with_an_isrc_key_gets_deezers_track() {
+        let body = std::fs::read(format!(
+            "{}/tests/fixtures/hubs/deezer-track-isrc-GBUM71029604.json",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        let (egress, _) = crate::sources::fixture::egress(vec![(
+            "https://api.deezer.com/track/isrc:GBUM71029604",
+            200,
+            "application/json",
+            body,
+        )]);
+        let cx = Context {
+            egress,
+            config: Default::default(),
+        };
+        let subject = Subject {
+            id: "x".into(),
+            uri: "https://www.youtube.com/watch?v=fJ9rUzIMcZQ".into(),
+            status: "ok".into(),
+            type_name: Some("VideoObject".into()),
+            doc: None,
+            keys: vec![("isrc:GBUM71029604".into(), "musicbrainz".into())],
+            first_seen_at: None,
+            candidates: vec![],
+        };
+        assert!(DeezerSource.applies(&subject));
+        let found = DeezerSource.lookup(&cx, &subject).await.unwrap();
+        let links: Vec<(&str, Option<&str>)> = found
+            .links
+            .iter()
+            .map(|l| (l.uri.as_str(), l.key.as_deref()))
+            .collect();
+        assert_eq!(
+            links,
+            [(
+                "https://www.deezer.com/track/3541552051",
+                Some("isrc:GBUM71029604")
+            )]
+        );
     }
 }

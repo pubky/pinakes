@@ -40,9 +40,10 @@ Podcast Index page
   - Podcast Index's page of it (`episodes/byguid` in that feed). An episode's own Podcast
     Index page is the card.
   - Each file it plays: `podcast:enclosure:{SHA-256 of the enclosure URL}`, without its
-    fragment. The source takes these from the feed's item, Podcast Index's record and iTunes'.
-    One episode may play several files: iTunes may read another copy of a show's feed, which
-    names the file differently. `GET /v1/search?key=podcast:enclosure:{URL}` takes the file's
+    fragment. The source takes these from Podcast Index's record and iTunes': the feed's own
+    item names its file too, but any feed may name any file, so that is a key only when one of
+    the two services names the same file. One episode may play several files: iTunes may read
+    another copy of a show's feed, which names the file differently. `GET /v1/search?key=podcast:enclosure:{URL}` takes the file's
     URL too.
 - **An Apple episode's file.** The file iTunes' record of an Apple episode names is a key
   whether or not the show's GUID is vouched, just as its track is: Apple is the authority for

@@ -215,7 +215,7 @@ impl PlatformResolver {
             doc.source = d.id.clone();
             return Ok(doc);
         }
-        let target = match endpoint(d, uri, None, cfg) {
+        let target = match endpoint(d, uri, None, cfg, crate::hubs::body_cap(&self.web.egress)) {
             Ok(target) => target,
             Err(_) if !probe => return self.web.resolve(uri).await,
             Err(error) => return Err(error),
@@ -309,14 +309,15 @@ impl PlatformResolver {
                 if !d.requires_key && (missing || uid_only) {
                     // Calendar-link discovery reads the page: in a parse slot.
                     let found = {
-                        let (d, uri, page, cfg) = (
+                        let (d, uri, page, cfg, cap) = (
                             d.clone(),
                             uri.to_owned(),
                             crate::resolver::web::as_read(&fetched).into_owned(),
                             cfg.clone(),
+                            crate::hubs::body_cap(&self.web.egress),
                         );
                         crate::resolver::html::blocking(move || {
-                            endpoint(&d, &uri, Some(&page), &cfg)
+                            endpoint(&d, &uri, Some(&page), &cfg, cap)
                         })
                         .await?
                     };
@@ -844,11 +845,13 @@ fn query(u: &str, key: &str, val: &str) -> Result<String> {
     Ok(u.into())
 }
 /// Returns only known endpoints or links extracted from the current page. All URLs go through Egress.
+/// `hub_body_bytes` is the body cap of a Wikidata item's answer (`limits.hub_body_bytes`).
 pub fn endpoint(
     d: &Definition,
     uri: &str,
     page: Option<&Fetched>,
     cfg: &EventConfig,
+    hub_body_bytes: usize,
 ) -> Result<Option<(String, FetchOptions)>> {
     let u = Url::parse(uri)?;
     let id = last(&u);
@@ -947,7 +950,7 @@ pub fn endpoint(
                 format!("https://www.wikidata.org/wiki/Special:EntityData/{id}.json"),
                 FetchOptions {
                     // A much-edited item carries megabytes of claims.
-                    body_cap: Some(crate::hubs::WIKIDATA_CAP),
+                    body_cap: Some(hub_body_bytes),
                     ..opts
                 },
             ))
@@ -1050,7 +1053,7 @@ async fn wiki(uri: &str, f: &Fetched, egress: &Egress) -> Result<Item> {
             .discover(
                 &format!("https://www.wikidata.org/wiki/Special:EntityData/{qid}.json"),
                 &FetchOptions {
-                    body_cap: Some(crate::hubs::WIKIDATA_CAP),
+                    body_cap: Some(crate::hubs::body_cap(egress)),
                     ..Default::default()
                 },
                 86400,

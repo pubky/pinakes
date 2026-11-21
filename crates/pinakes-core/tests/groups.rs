@@ -382,6 +382,82 @@ async fn evidence_loss_splits_and_curation_preserves_identity(pool: PgPool) {
     assert_eq!(gid(&pool, &far).await, far);
 }
 
+/// `DELETE /v1/groups/{id}` on the admin listener undoes a curation: no member is pinned any
+/// more and each groups again by what its keys say. The public listener has no such route.
+#[sqlx::test(migrations = "../../migrations")]
+async fn deleting_a_curation_returns_its_members_to_their_keys(pool: PgPool) {
+    let a = card(&pool, "undo", &["undo-page"], None).await;
+    let (b, _) = save(&pool, "undo-page", &["undo"], None).await;
+    let (c, _) = save(&pool, "undo-other", &[], None).await;
+    assert!(common::one_group(&pool, &[&a, &b]).await);
+    let id = "d".repeat(32);
+    groups::curate(
+        &pool,
+        &id,
+        groups::Curation {
+            members: [&a, &c]
+                .into_iter()
+                .map(|r| groups::Member {
+                    resource_id: r.clone(),
+                    occurrence: None,
+                })
+                .collect(),
+        },
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(gid(&pool, &a).await, id);
+    assert_eq!(gid(&pool, &c).await, id);
+    assert!(!common::one_group(&pool, &[&a, &b]).await);
+    let state = AppState::new(pool.clone(), Config::default()).unwrap();
+    let delete = |id: &str| {
+        let mut request = Request::builder()
+            .method("DELETE")
+            .uri(format!("/v1/groups/{id}"))
+            .body(Body::empty())
+            .unwrap();
+        request.extensions_mut().insert(axum::extract::ConnectInfo(
+            "127.0.0.2:1234".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        request
+    };
+    // Not on the public listener.
+    let public = api::router(state.clone())
+        .oneshot(delete(&id))
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(public, 405);
+    assert_eq!(gid(&pool, &c).await, id);
+    let admin = api::admin_router(state);
+    assert_eq!(
+        admin.clone().oneshot(delete(&id)).await.unwrap().status(),
+        204
+    );
+    common::drain_groups(&pool, &Default::default()).await;
+    let pinned: i64 = sqlx::query_scalar("SELECT count(*) FROM group_override")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(pinned, 0);
+    // The card and its landing page join again; the other member stands alone.
+    assert!(common::one_group(&pool, &[&a, &b]).await);
+    assert_eq!(gid(&pool, &c).await, c);
+    let curated: Option<bool> = sqlx::query_scalar("SELECT curated FROM \"group\" WHERE id=$1")
+        .bind(&id)
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+    assert_ne!(curated, Some(true));
+    // Undone once: no curated group any more. An invalid ID is refused.
+    assert_eq!(
+        admin.clone().oneshot(delete(&id)).await.unwrap().status(),
+        404
+    );
+    assert_eq!(admin.oneshot(delete("x")).await.unwrap().status(), 400);
+}
+
 /// A group is a hint: every member keeps its own card, references, ranking and counts; each card
 /// names the others; `collapse=group` shows the member with the most references, as itself.
 #[sqlx::test(migrations = "../../migrations")]
@@ -2012,6 +2088,57 @@ async fn edition_keys_join_only_through_the_page(pool: PgPool) {
     assert_ne!(group, edition);
     assert_eq!(gid(&pool, &ids[0]).await, group);
     assert_eq!(gid(&pool, &ids[1]).await, group);
+}
+
+/// Two editions of one work never join: each carries its own Open Library edition key beside the
+/// shared work key, and a group holds one edition. The work page joins one of them, and the
+/// refused join is counted.
+#[sqlx::test(migrations = "../../migrations")]
+async fn editions_of_one_work_stay_apart(pool: PgPool) {
+    let book = |name: &str, keys: &'static [&'static str]| {
+        let pool = pool.clone();
+        let uri = format!("https://example.org/{name}");
+        let name = name.to_owned();
+        async move {
+            let id = store::ensure_resource(&pool, &uri).await.unwrap();
+            let mut d = ResourceMeta::new(&uri, "web", 86400);
+            d.name = Some(name);
+            d.set_type("Book");
+            store_document(&pool, &id, &d).await;
+            for key in keys {
+                sqlx::query("INSERT INTO resource_key(resource_id,key,source,via,expires_at) VALUES($1,$2,'test','test',now()+interval '1 day')")
+                    .bind(&id)
+                    .bind(key)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+            id
+        }
+    };
+    let first = book(
+        "edition-1",
+        &["openlibrary:edition:OL1M", "openlibrary:work:OL1W"],
+    )
+    .await;
+    let second = book(
+        "edition-2",
+        &["openlibrary:edition:OL2M", "openlibrary:work:OL1W"],
+    )
+    .await;
+    let work = book("work", &["openlibrary:work:OL1W"]).await;
+    common::regroup_all(&pool, &groups::GroupConfig::default()).await;
+    assert!(!common::one_group(&pool, &[&first, &second]).await);
+    assert!(
+        common::one_group(&pool, &[&work, &first]).await
+            != common::one_group(&pool, &[&work, &second]).await,
+        "the work page joins exactly one edition"
+    );
+    let refused: i64 = sqlx::query_scalar("SELECT count(*) FROM group_input WHERE key_conflicts>0")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(refused > 0);
 }
 
 /// An automatic group keeps its ID as it grows: a member whose unit ID is smaller than every
