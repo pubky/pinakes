@@ -382,6 +382,76 @@ async fn evidence_loss_splits_and_curation_preserves_identity(pool: PgPool) {
     assert_eq!(gid(&pool, &far).await, far);
 }
 
+/// `DELETE /v1/groups/{id}` on the admin listener undoes a curation: no member is pinned any
+/// more and each groups again by what its keys say. The public listener has no such route.
+#[sqlx::test(migrations = "../../migrations")]
+async fn deleting_a_curation_returns_its_members_to_their_keys(pool: PgPool) {
+    let a = card(&pool, "undo", &["undo-page"], None).await;
+    let (b, _) = save(&pool, "undo-page", &["undo"], None).await;
+    let (c, _) = save(&pool, "undo-other", &[], None).await;
+    assert!(common::one_group(&pool, &[&a, &b]).await);
+    let id = "d".repeat(32);
+    groups::curate(
+        &pool,
+        &id,
+        groups::Curation {
+            members: [&a, &c]
+                .into_iter()
+                .map(|r| groups::Member {
+                    resource_id: r.clone(),
+                    occurrence: None,
+                })
+                .collect(),
+        },
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(gid(&pool, &a).await, id);
+    assert_eq!(gid(&pool, &c).await, id);
+    assert!(!common::one_group(&pool, &[&a, &b]).await);
+    let state = AppState::new(pool.clone(), Config::default()).unwrap();
+    let delete = |id: &str| {
+        let mut request = Request::builder()
+            .method("DELETE")
+            .uri(format!("/v1/groups/{id}"))
+            .body(Body::empty())
+            .unwrap();
+        request.extensions_mut().insert(axum::extract::ConnectInfo(
+            "127.0.0.2:1234".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        request
+    };
+    // Not on the public listener.
+    let public = api::router(state.clone())
+        .oneshot(delete(&id))
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(public, 405);
+    assert_eq!(gid(&pool, &c).await, id);
+    let admin = api::admin_router(state);
+    assert_eq!(admin.clone().oneshot(delete(&id)).await.unwrap().status(), 204);
+    common::drain_groups(&pool, &Default::default()).await;
+    let pinned: i64 = sqlx::query_scalar("SELECT count(*) FROM group_override")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(pinned, 0);
+    // The card and its landing page join again; the other member stands alone.
+    assert!(common::one_group(&pool, &[&a, &b]).await);
+    assert_eq!(gid(&pool, &c).await, c);
+    let curated: Option<bool> = sqlx::query_scalar("SELECT curated FROM \"group\" WHERE id=$1")
+        .bind(&id)
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+    assert_ne!(curated, Some(true));
+    // Undone once: no curated group any more. An invalid ID is refused.
+    assert_eq!(admin.clone().oneshot(delete(&id)).await.unwrap().status(), 404);
+    assert_eq!(admin.oneshot(delete("x")).await.unwrap().status(), 400);
+}
+
 /// A group is a hint: every member keeps its own card, references, ranking and counts; each card
 /// names the others; `collapse=group` shows the member with the most references, as itself.
 #[sqlx::test(migrations = "../../migrations")]

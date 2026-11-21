@@ -1409,7 +1409,11 @@ Content-Type: application/json
 An occurrence member is `{"uid":"calendar-uid","recurrence_id":"2026-10-20T17:00:00Z"}`.
 Members must exist and have been grouped once. Curation pins its members away from automatic
 groups and overrides the distance and evidence rules; removing a member lets its automatic
-evidence count again. Invalid curation returns 400; a busy group writer returns 503 (retry). `groups.enabled = false` turns off group
+evidence count again. Invalid curation returns 400; a busy group writer returns 503 (retry).
+`DELETE /v1/groups/{id}`, also on the admin listener only, undoes a curation: its members are
+no longer pinned and the group is no longer curated, so each member groups again by what its
+keys say (the group goes when none joins it again). It answers 204, 404 when the ID is no
+curated group, 400 for an invalid ID, 503 while the group writer is busy. `groups.enabled = false` turns off group
 reads, writes and collapse; stored membership stays for when it is turned back on.
 
 ## Possibly the same event
@@ -2101,7 +2105,8 @@ to know.
 
 `admin_listen` (default `127.0.0.1:9090`) serves `GET /metrics` (Prometheus text),
 `GET /v1/info` with full ingestion, source and canary state, `GET /v1/resources/{id}/document`
-(the stored document with its internal fields) and group curation (`PUT /v1/groups/{id}`). With
+(the stored document with its internal fields) and group curation (`PUT /v1/groups/{id}`, and
+`DELETE /v1/groups/{id}` to undo one). With
 `admin_token` (or `PINAKES__ADMIN_TOKEN`) every admin route needs `Authorization: Bearer`,
 compared in constant time; a non-loopback bind without a token is refused. It answers 421 to a
 request whose `Host` is not `localhost`, an IP address or a name in `admin_hosts`, before the token

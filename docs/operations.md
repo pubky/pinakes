@@ -1056,7 +1056,9 @@ records its evidence as group keys: an identifier card's `doi`/`isbn` and the la
 registry names (`registry`), a page's head citations (`cites_doi`, `cites_isbn`) and ICS UIDs
 (`ics_uid`); the exact keys also-on sources vouch for join too (`hub:{key}`, below). Groups form
 only from those (see [the API](api.md#groups)): an identifier card with
-a named landing page that cites it, one UID within one feed, and curation. A group stores
+a named landing page that cites it, one UID within one feed, and curation. An operator curates
+a group on the admin listener with `PUT /v1/groups/{id}` and undoes a curation with
+`DELETE /v1/groups/{id}`: its members then group again by their keys. A group stores
 membership only; cards read it when they are served. Each key of a run may
 make a capped number of compatibility checks (`limits.group_max_members`² × 2, between 100,000
 and 2,000,000). A key that alone exceeds the cap is parked (its unions undone) and the later

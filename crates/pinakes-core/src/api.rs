@@ -4027,7 +4027,10 @@ fn byte_range(value: &str, len: u64) -> Range {
 
 pub fn admin_router(state: AppState) -> Router {
     let routes = Router::new()
-        .route("/v1/groups/{id}", axum::routing::put(curate_group))
+        .route(
+            "/v1/groups/{id}",
+            axum::routing::put(curate_group).delete(uncurate_group),
+        )
         .route("/v1/resources/{id}/document", get(admin_document))
         .route("/metrics", get(metrics))
         .route("/v1/info", get(admin_info));
@@ -4276,6 +4279,40 @@ pub async fn curate_group(
     .await?
     .map(Json)
     .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "group not found".into()))
+}
+/// `DELETE /v1/groups/{id}` (admin listener only): undo a curation ([`crate::groups::uncurate`]).
+/// 204 when it was a curated group, 404 when it is no curated group, 400 for an invalid ID or
+/// with groups off, 503 while the group writer is busy.
+pub async fn uncurate_group(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let undone = crate::groups::uncurate(&state.pool, &id, &state.config.groups)
+        .await
+        .map_err(|e| {
+            tracing::warn!(error=%crate::resolver::log_error(&e),"undoing a group curation failed");
+            if e.is::<crate::groups::GroupBusy>() {
+                ApiError(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "group writer busy; retry later".into(),
+                )
+            } else if e.is::<crate::groups::CurationError>() {
+                ApiError::bad("invalid group curation")
+            } else {
+                ApiError(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "group curation unavailable".into(),
+                )
+            }
+        })?;
+    if undone {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "no curated group with this ID".into(),
+        ))
+    }
 }
 #[cfg(test)]
 mod tests {
