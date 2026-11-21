@@ -21,7 +21,7 @@ use super::{
 };
 use crate::{
     music::{self, Level, Service},
-    music_sources::{derived, join_level, key_values, mb_level},
+    music_sources::{derived, key_values, reverse_subject},
 };
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
@@ -54,15 +54,7 @@ impl Source for SpotifyIsrc {
         spotify_api::configured(config)
     }
     fn applies(&self, subject: &Subject) -> bool {
-        music::parse(&subject.uri)
-            .filter(|l| l.service != Service::Spotify)
-            .and_then(|l| join_level(&l))
-            .or_else(|| mb_level(&subject.uri))
-            .is_some_and(|level| match level {
-                Level::Track => subject.keys_in("isrc").next().is_some(),
-                Level::Album => subject.keys_in("upc").next().is_some(),
-                _ => false,
-            })
+        reverse_subject(subject, Service::Spotify).is_some()
     }
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
         let (client_id, secret) = cx
@@ -71,11 +63,10 @@ impl Source for SpotifyIsrc {
             .pair()
             .context("no Spotify credentials")?;
         let pair = (client_id.as_str(), secret.as_str());
-        if music::parse(&subject.uri)
-            .and_then(|l| join_level(&l))
-            .or_else(|| mb_level(&subject.uri))
-            == Some(Level::Album)
-        {
+        let Some((level, _)) = reverse_subject(subject, Service::Spotify) else {
+            return Ok(Found::default());
+        };
+        if level == Level::Album {
             return albums(cx, pair, subject).await;
         }
         // The track's own ISRC first, then the hubs'; only ISRCs that are keys (a shared one is

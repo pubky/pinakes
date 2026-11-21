@@ -45,6 +45,30 @@ pub(crate) fn mb_level(uri: &str) -> Option<Level> {
     })
 }
 
+/// What a lookup on `own`'s catalogue by ISRC or barcode (`deezer`, `itunes`, `spotify_isrc`,
+/// `tidal_isrc`) asks for `subject`: the level and the key namespace it is asked by. Another
+/// service's track or video is asked by its `isrc:` keys, its album or YouTube album playlist by
+/// its `upc:` keys, and so is a MusicBrainz recording's or release's page, by the keys its hub
+/// gave. `None` for `own`'s links (each service reads its own object's record instead), for any
+/// other link or page, and for a subject without such a key. One rule, so the four cover the same
+/// cards.
+pub(crate) fn reverse_subject(subject: &Subject, own: Service) -> Option<(Level, &'static str)> {
+    let level = music::parse(&subject.uri)
+        .filter(|l| l.service != own)
+        .and_then(|l| join_level(&l))
+        .or_else(|| mb_level(&subject.uri))?;
+    let namespace = match level {
+        Level::Track => "isrc",
+        Level::Album => "upc",
+        _ => return None,
+    };
+    subject
+        .keys_in(namespace)
+        .next()
+        .is_some()
+        .then_some((level, namespace))
+}
+
 /// A link found on a hub, when it is a music link at `level`: its canonical URL and service.
 pub(crate) fn derived(url: &str, level: Level, via: &str) -> Option<Link> {
     let found = music::parse(url)?;
@@ -1264,6 +1288,56 @@ pub(crate) fn item_found(item: &wikidata::Item, level: Level) -> Found {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The four lookups by ISRC or barcode cover the same cards: another service's track or
+    /// video by its ISRC, its album or YouTube album playlist by its barcode, a MusicBrainz
+    /// recording or release page by its hub's keys; never the service's own links, an artist,
+    /// another playlist, or a card without the key.
+    #[test]
+    fn the_lookups_by_isrc_and_barcode_cover_the_same_cards() {
+        let subject = |uri: &str, keys: &[&str]| Subject {
+            id: String::new(),
+            uri: uri.into(),
+            status: "ok".into(),
+            type_name: None,
+            doc: None,
+            keys: keys.iter().map(|k| ((*k).into(), "test".into())).collect(),
+            first_seen_at: None,
+            candidates: vec![],
+        };
+        let isrc = ["isrc:GBUM71029604"];
+        let upc = ["upc:0602517416987"];
+        let both = ["isrc:GBUM71029604", "upc:0602517416987"];
+        for (uri, keys, asked) in [
+            ("https://www.youtube.com/watch?v=bSnlKl_PoQU", &isrc[..], Some((Level::Track, "isrc"))),
+            ("https://www.deezer.com/track/1171872", &isrc[..], Some((Level::Track, "isrc"))),
+            ("https://open.spotify.com/album/4m2880jivSbbyEGAKfITCa", &upc[..], Some((Level::Album, "upc"))),
+            ("https://www.youtube.com/playlist?list=OLAK5uy_kHcT8rC7yXBgYsSvrqrCN8i4KmDrhHl8s", &upc[..], Some((Level::Album, "upc"))),
+            ("https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69", &isrc[..], Some((Level::Track, "isrc"))),
+            ("https://musicbrainz.org/release/30702389-5c67-4438-9ea0-2351c8de0f1d", &upc[..], Some((Level::Album, "upc"))),
+            // Without the key of its level: nothing to ask.
+            ("https://www.youtube.com/watch?v=bSnlKl_PoQU", &upc[..], None),
+            ("https://musicbrainz.org/release/30702389-5c67-4438-9ea0-2351c8de0f1d", &isrc[..], None),
+            // No track or album.
+            ("https://www.deezer.com/artist/27", &both[..], None),
+            ("https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711", &both[..], None),
+            ("https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M", &both[..], None),
+            ("https://example.org/track", &both[..], None),
+        ] {
+            for own in [Service::Deezer, Service::AppleMusic, Service::Spotify, Service::Tidal] {
+                assert_eq!(reverse_subject(&subject(uri, keys), own), asked, "{uri} on {own:?}");
+            }
+        }
+        // A service's own links are never asked by value.
+        for (uri, own) in [
+            ("https://www.deezer.com/track/1171872", Service::Deezer),
+            ("https://music.apple.com/album/1097861387", Service::AppleMusic),
+            ("https://open.spotify.com/album/4m2880jivSbbyEGAKfITCa", Service::Spotify),
+            ("https://tidal.com/album/3524504", Service::Tidal),
+        ] {
+            assert_eq!(reverse_subject(&subject(uri, &both), own), None, "{uri}");
+        }
+    }
     use serde_json::Value;
 
     fn fixture(name: &str) -> Value {

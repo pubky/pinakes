@@ -2,7 +2,9 @@
 
 One of the music sources of [also on](../api.md#also-on): links on music services are looked up exactly, never by title or name.
 
-`itunes`: for an album with a barcode key, the Apple Music album iTunes' `lookup?upc=` names
+`itunes`: for an album with a barcode key (another service's album, a YouTube album playlist
+or a MusicBrainz release page: [which cards](README.md#lookups-by-isrc-or-barcode)), the Apple
+Music album iTunes' `lookup?upc=` names
 when exactly one album answers, as a [maybe](../api.md#also-on) (`kind: "maybe"`): iTunes'
 answer carries no barcode to read back, so the album is possibly the same, never a key, and a
 tagged link to it does not join.

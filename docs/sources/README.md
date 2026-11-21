@@ -139,6 +139,15 @@ on the same page. A source that records keys lists their forms (`Source::key_for
 example each): every form searches back as recorded (`GET /v1/search?key=`, tested for every
 registered source), and in a debug build a source records no other form.
 
+### Lookups by ISRC or barcode
+
+`deezer`, `itunes`, `spotify_isrc` and `tidal_isrc` ask their service's catalogue by an ISRC or
+a barcode the card already has as a key, and cover the same cards: another service's track or
+video (a video counts as its recording) by its `isrc:` keys, another service's album or YouTube
+album playlist by its `upc:` keys, and a MusicBrainz recording's or release's page by the keys
+its hub gave. Never the service's own links (each reads its own object's record instead), an
+artist, another playlist or any other page. `itunes` asks albums only.
+
 ### An ISRC on several recordings
 
 MusicBrainz gives one ISRC to several recordings at times. When those recordings agree, they
