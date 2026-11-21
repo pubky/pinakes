@@ -718,6 +718,14 @@ pub struct EgressConfig {
     /// `deny_hosts` are: switching a source off stops every call to its API.
     #[serde(skip)]
     pub off_hosts: Vec<String>,
+    /// The body cap of a MusicBrainz or Wikidata answer (`hubs`): a much-edited item or an
+    /// artist with very many relations is megabytes, above the default cap.
+    #[serde(skip)]
+    pub hub_body_bytes: usize,
+    /// How long an answer the also-on sources, lookups and hubs ask for is shared
+    /// (`Egress::discover`), in seconds: two sources asking the same thing ask once.
+    #[serde(skip)]
+    pub discovery_secs: u64,
 }
 impl Default for EgressConfig {
     fn default() -> Self {
@@ -730,6 +738,8 @@ impl Default for EgressConfig {
             source_rates: BTreeMap::new(),
             html_head_bytes: 4 * 1024 * 1024,
             off_hosts: vec![],
+            hub_body_bytes: crate::hubs::DEFAULT_BODY_CAP,
+            discovery_secs: 3600,
         }
     }
 }
@@ -1187,6 +1197,8 @@ impl Config {
             || !(8..=256).contains(&a.facts_per_source)
             || !(1..=16).contains(&a.concurrency)
             || !(1..=86400).contains(&a.retry_secs)
+            || !(120..=86400).contains(&a.refusal_hold_secs)
+            || !(1024 * 1024..=16 * 1024 * 1024).contains(&a.watch_page_bytes)
         {
             bail!("invalid also_on limits");
         }
@@ -1200,6 +1212,17 @@ impl Config {
             .contains(&self.egress.html_head_bytes)
         {
             bail!("limits.html_head_bytes must be 1–16 MB");
+        }
+        if !(1024 * 1024..=64 * 1024 * 1024).contains(&self.egress.hub_body_bytes) {
+            bail!("limits.hub_body_bytes must be 1–64 MiB");
+        }
+        // The cache keeps an answer at least an hour: a shorter lifetime would not be kept.
+        if !(crate::resolver::egress::MIN_ANSWER_SECS..=86400).contains(&self.egress.discovery_secs)
+        {
+            bail!(
+                "limits.discovery_cache_secs must be {}–86400",
+                crate::resolver::egress::MIN_ANSWER_SECS
+            );
         }
         if !(100..=7000).contains(&self.pubky.pkarr_relay_timeout_ms) {
             bail!("limits.pkarr_relay_timeout_ms must be 100–7000");
@@ -1539,6 +1562,71 @@ mod tests {
                 .max_period_dates,
             2
         );
+    }
+    /// The hub body cap, the discovery cache lifetime, the refusal hold and the watch-page cap
+    /// are limits: their defaults, applied where they are read, and held to their ranges.
+    #[test]
+    fn the_also_on_caps_and_waits_are_limits() {
+        let limits = Limits::default();
+        assert_eq!(limits.hub_body_bytes, 8 * 1024 * 1024);
+        assert_eq!(limits.discovery_cache_secs, 3600);
+        assert_eq!(limits.also_on_refusal_hold_secs, 300);
+        assert_eq!(limits.also_on_watch_page_bytes, 3 * 1024 * 1024);
+        let set = with(serde_json::json!({"limits": {
+            "hub_body_bytes": 16 * 1024 * 1024,
+            "discovery_cache_secs": 7200,
+            "also_on_refusal_hold_secs": 900,
+            "also_on_watch_page_bytes": 4 * 1024 * 1024,
+        }}))
+        .unwrap();
+        assert_eq!(set.egress.hub_body_bytes, 16 * 1024 * 1024);
+        assert_eq!(set.egress.discovery_secs, 7200);
+        assert_eq!(set.also_on.refusal_hold_secs, 900);
+        assert_eq!(set.also_on.watch_page_bytes, 4 * 1024 * 1024);
+        let egress = policy(&set);
+        assert_eq!(crate::hubs::body_cap(&egress), 16 * 1024 * 1024);
+        for (key, value) in [
+            ("hub_body_bytes", 1024),
+            ("hub_body_bytes", 65 * 1024 * 1024),
+            ("discovery_cache_secs", 3599),
+            ("discovery_cache_secs", 86401),
+            // A refusal's wait must stay above a rejected token's minute (`client_credentials`).
+            ("also_on_refusal_hold_secs", 60),
+            ("also_on_refusal_hold_secs", 86401),
+            ("also_on_watch_page_bytes", 1024),
+            ("also_on_watch_page_bytes", 17 * 1024 * 1024),
+        ] {
+            assert!(
+                with(serde_json::json!({"limits":{key:value}})).is_err(),
+                "{key}={value}"
+            );
+        }
+    }
+    /// Every `limits.discovery_cache_secs` the config accepts is how long the cache keeps a
+    /// successful answer: replayed until then, gone after.
+    #[tokio::test(start_paused = true)]
+    async fn an_answer_is_cached_for_the_discovery_cache_secs() {
+        use crate::resolver::egress::{FetchOptions, Fetched};
+        let url = "https://example.org/answer";
+        for secs in [3600, 7200, 86400] {
+            let set = with(serde_json::json!({"limits": {"discovery_cache_secs": secs}})).unwrap();
+            let egress = policy(&set);
+            let options = FetchOptions::default();
+            let answer = Fetched::answer(
+                url::Url::parse(url).unwrap(),
+                200,
+                "application/json".into(),
+                b"{}".to_vec(),
+            );
+            egress
+                .seed(url, &options, egress.config().discovery_secs, answer)
+                .await
+                .unwrap();
+            tokio::time::advance(std::time::Duration::from_secs(secs - 1)).await;
+            assert!(egress.discovered(url, &options).await.unwrap(), "{secs}");
+            tokio::time::advance(std::time::Duration::from_secs(2)).await;
+            assert!(!egress.discovered(url, &options).await.unwrap(), "{secs}");
+        }
     }
     #[test]
     fn operations_md_documents_every_limit() {
@@ -2693,6 +2781,17 @@ limits! {
     also_on_concurrency: usize = |c| c.also_on.concurrency => [|c, v| c.also_on.concurrency = v],
     /// First retry of a failed source run (seconds); doubles up to an hour.
     also_on_retry_secs: u64 = |c| c.also_on.retry_secs => [|c, v| c.also_on.retry_secs = v],
+    /// How long a service's refusal of the operator's credentials (TIDAL, Spotify, Podcast Index)
+    /// is held before it is asked again (seconds, 120–86400).
+    also_on_refusal_hold_secs: u64 = |c| c.also_on.refusal_hold_secs => [|c, v| c.also_on.refusal_hold_secs = v],
+    /// The largest YouTube watch page `youtube_match` reads (bytes, 1–16 MiB); a larger one is
+    /// refused.
+    also_on_watch_page_bytes: usize = |c| c.also_on.watch_page_bytes => [|c, v| c.also_on.watch_page_bytes = v],
+    /// The body cap of a MusicBrainz or Wikidata answer (bytes, 1–64 MiB).
+    hub_body_bytes: usize = |c| c.egress.hub_body_bytes => [|c, v| c.egress.hub_body_bytes = v],
+    /// How long an answer the also-on sources, lookups and hubs ask for is shared (seconds,
+    /// 3600–86400: the cache keeps a successful answer at least an hour).
+    discovery_cache_secs: u64 = |c| c.egress.discovery_secs => [|c, v| c.egress.discovery_secs = v],
     /// Longest calendar content line (bytes).
     event_max_line_bytes: usize = |c| c.event.max_line_bytes => [|c, v| c.event.max_line_bytes = v],
     /// Most date values in one calendar property.

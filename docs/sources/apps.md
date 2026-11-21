@@ -11,8 +11,9 @@ A lookup family of [also on](../api.md#also-on) (`lookups/apps.rs`).
     other's "replaces", P1365) gives way to its successor: TextSecure and Signal share Signal's
     Android package, and Signal is the package's item. Several others are ambiguous and give
     nothing;
-  - from that item, its Q-id (when the item carries one ID on the page's store), its store IDs (one value each) as keys, and its other stores (and
-    Homebrew) as links;
+  - from that item, its other stores (and Homebrew) as links, and, only when the item carries
+    one ID on the page's store, its Q-id and its store IDs (one value each) as keys: an item
+    naming two packages on one store gives either page links only;
   - its `app_match` fact, from its card's name and official website (the `website` fact the
     store sources `app_store`, `google_play`, `fdroid`, `flathub` and `snap_store` give): store
     cards with the same one are [possibly the same app](../api.md#possibly-the-same-app), a hint

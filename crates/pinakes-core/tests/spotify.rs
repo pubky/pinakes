@@ -10,10 +10,10 @@ use common::{
     strings as rows,
 };
 
-/// A Spotify album's barcode joins Apple Music and Deezer; a track's ISRC, which MusicBrainz
-/// gives to one recording, is its key.
+/// A Spotify album's barcode joins Deezer (Apple Music's album for it is a maybe, which joins
+/// nothing); a track's ISRC, which MusicBrainz gives to one recording, is its key.
 #[sqlx::test(migrations = "../../migrations")]
-async fn a_spotify_barcode_joins_apple_music_and_deezer(pool: sqlx::PgPool) {
+async fn a_spotify_barcode_joins_deezer_and_lists_apple_music_as_a_maybe(pool: sqlx::PgPool) {
     let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
     if !["deezer", "itunes"]
         .iter()
@@ -77,10 +77,8 @@ async fn a_spotify_barcode_joins_apple_music_and_deezer(pool: sqlx::PgPool) {
         ["isrc GBUM71029604"]
     );
     common::drain_groups(&pool, &Default::default()).await;
-    let group = "SELECT coalesce(group_id,'-') FROM group_unit WHERE resource_id=$1";
-    let joined = rows(&pool, group, &album).await;
-    assert_ne!(joined, ["-"]);
-    assert_eq!(rows(&pool, group, &apple).await, joined);
+    // The tagged Apple Music album does not join through iTunes' maybe.
+    assert!(!common::one_group(&pool, &[&album, &apple]).await);
 }
 
 #[sqlx::test(migrations = "../../migrations")]

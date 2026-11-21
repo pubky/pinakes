@@ -77,6 +77,10 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `also_on_facts_per_source` | `32` | Facts one source keeps per resource, at least 8: the cap cuts the many values of one name (a recording's ISRCs) before a name's one value, and 8 holds a recording's single-valued facts (its MBID, the MBID it was merged from, artist, length, original album, barcode). |
 | `also_on_concurrency` | `2` | Resources whose sources run at once. |
 | `also_on_retry_secs` | `300` | First retry of a failed source run (seconds); doubles up to an hour. |
+| `also_on_refusal_hold_secs` | `300` | How long a service's refusal of the operator's credentials (TIDAL, Spotify, Podcast Index) is held before it is asked again (seconds, 120–86400); the refused lookup reports the same wait. |
+| `also_on_watch_page_bytes` | `3145728` | The largest YouTube watch page `youtube_match` reads (bytes, 1–16 MiB; they are about 1.4 MB); a larger one is refused. |
+| `hub_body_bytes` | `8388608` | The body cap of a MusicBrainz or Wikidata answer (bytes, 1–64 MiB): a much-edited item or an artist with very many relations is megabytes. |
+| `discovery_cache_secs` | `3600` | How long an answer the also-on sources, lookups and hubs ask for is shared, so two sources asking the same thing ask once (seconds, 3600–86400: the cache keeps a successful answer at least an hour). |
 | `event_max_line_bytes` | `65536` | Longest calendar content line (bytes). |
 | `event_max_date_values` | `4096` | Most date values in one calendar property. |
 | `event_feed_body_bytes` | `33554432` | Largest calendar or feed body (bytes). |
@@ -344,8 +348,8 @@ worker's limits are the guarantee. At most as many pages are parsed at once as t
 cores: a parse holds its slot until it ends, even after its request timed out. An RSS or
 Atom feed read without a calendar's feed cap is cut there too (a long show's feed is 2–5 MB):
 its channel and newest items come first, and its card reads up to the last whole item. Wikidata
-entity reads may take 8 MB, since a much-edited item carries megabytes of claims, and so may
-MusicBrainz answers (an artist or release with very many links). An answer over even that is
+entity reads may take `limits.hub_body_bytes` (8 MiB), since a much-edited item carries
+megabytes of claims, and so may MusicBrainz answers (an artist or release with very many links). An answer over even that is
 refused, never cut, and remembered as such for five minutes. The also-on sources then record only
 what the link's URL proves (a MusicBrainz page its MBID or ISRC, a Wikidata item its Q-id) and
 don't retry it; Wikidata items verified together that are over it together are read one by one;
@@ -898,7 +902,7 @@ hour, on Spotify's pace. `tidal_isrc` (with the TIDAL credentials) costs one TID
 or barcode key of a track or album on another service, on `tidal`'s pace and token slot.
 `itunes_song` and `youtube_match` (their links are maybes, `kind` `maybe`, never keys) cost
 per track a Deezer, Spotify or TIDAL read and an iTunes lookup, and per label upload on YouTube a
-watch page (up to 3 MB) and a Deezer and a TIDAL search; each runs its part only while the source
+watch page (up to `limits.also_on_watch_page_bytes`) and a Deezer and a TIDAL search; each runs its part only while the source
 of that service runs (`deezer`, `spotify`, `tidal`, `tidal_isrc`, `itunes`). Every one of them is
 on by default (`[also_on.sources.<id>] enabled = false` turns one off);
 `reextract also-on` asks for every stored track and album at once. The duplicate
@@ -979,7 +983,7 @@ recording (its works, only when it has no item of its own with an English articl
 page of its official releases for a cover); Wikidata one
 read-back of the item its own `wikidata` relation names, or, without one, one search and one
 read-back for each lookup (its MBID, then for an artist up to two Discogs pages: three lookups;
-hits over the 8 MB cap together are read back one by one), one read of the item's pages and
+hits over `limits.hub_body_bytes` together are read back one by one), one read of the item's pages and
 English description, and one of its image claim, and for a recording one read-back and one read
 of its work's item's pages; Wikipedia two summaries
 (English, then one other language), for a recording three (its item's English article, its
@@ -1056,7 +1060,9 @@ records its evidence as group keys: an identifier card's `doi`/`isbn` and the la
 registry names (`registry`), a page's head citations (`cites_doi`, `cites_isbn`) and ICS UIDs
 (`ics_uid`); the exact keys also-on sources vouch for join too (`hub:{key}`, below). Groups form
 only from those (see [the API](api.md#groups)): an identifier card with
-a named landing page that cites it, one UID within one feed, and curation. A group stores
+a named landing page that cites it, one UID within one feed, and curation. An operator curates
+a group on the admin listener with `PUT /v1/groups/{id}` and undoes a curation with
+`DELETE /v1/groups/{id}`: its members then group again by their keys. A group stores
 membership only; cards read it when they are served. Each key of a run may
 make a capped number of compatibility checks (`limits.group_max_members`² × 2, between 100,000
 and 2,000,000). A key that alone exceeds the cap is parked (its unions undone) and the later

@@ -16,7 +16,8 @@
 //! Keys: `podcast:apple:{id}` and `podcast:guid:{uuid}` for a show; for an episode
 //! `podcast:apple_episode:{id}`, `podcast:item:{show GUID}:{SHA-256 of the item GUID}`, which
 //! every link to the episode shares, and `podcast:enclosure:{SHA-256 of a file's URL}` for each
-//! file it plays; and the show's `wikidata:Q…`.
+//! file Podcast Index or iTunes says it plays (a feed's own enclosure alone is no key); and the
+//! show's `wikidata:Q…`.
 //!
 //! Spotify names no item GUID or file for an episode, so its episode links join only through
 //! derived links.
@@ -742,7 +743,11 @@ impl Heard {
 impl Podcasts {
     async fn itunes(cx: &Context, url: &str) -> Result<crate::resolver::egress::Fetched> {
         cx.egress
-            .discover(url, &super::itunes_api::options(), 3600)
+            .discover(
+                url,
+                &super::itunes_api::options(),
+                cx.egress.config().discovery_secs,
+            )
             .await
     }
     /// iTunes' record of the show, if it knows it.
@@ -786,7 +791,7 @@ impl Podcasts {
         if matches!(fetched.status, 401 | 403) {
             return Err(RetryLater {
                 class: "podcast_index_auth",
-                seconds: super::client_credentials::REFUSAL_HOLD,
+                seconds: cx.config.also_on.refusal_hold_secs,
             }
             .into());
         }
@@ -828,7 +833,11 @@ impl Podcasts {
             feed_cap: Some(PODCAST_FEED_CAP),
             ..Default::default()
         };
-        let f = match cx.egress.discover(url, &options, 3600).await {
+        let f = match cx
+            .egress
+            .discover(url, &options, cx.egress.config().discovery_secs)
+            .await
+        {
             Ok(f) => f,
             Err(e) if e.is::<RetryLater>() => return Err(e),
             Err(e) => {
@@ -931,7 +940,7 @@ impl Podcasts {
     /// An episode's Apple track (found by track ID or by item GUID among the show's latest
     /// episodes), and once its show's GUID is vouched, its item key and everything keyed by it:
     /// the item's own page (its `<link>`) and the RSS item in the vouched feed, Podcast Index's
-    /// page of it and the enclosures it plays.
+    /// page of it and the enclosures Podcast Index and iTunes name.
     async fn episode(
         cx: &Context,
         found: &mut Found,
@@ -1023,12 +1032,10 @@ impl Podcasts {
                 );
             }
         }
-        // The files it plays, each as a key.
-        for (stream, via) in [
-            (&heard.feed, "feed"),
-            (&heard.index, "podcastindex"),
-            (&heard.itunes, "itunes"),
-        ] {
+        // The files it plays, each as a key when Podcast Index or iTunes names it: a feed's own
+        // enclosure is what the feed says of itself (any feed may name any file), so it joins
+        // only when a service's record names the same file.
+        for (stream, via) in [(&heard.index, "podcastindex"), (&heard.itunes, "itunes")] {
             if let Some(k) = stream.as_ref().and_then(|s| enclosure_key(&s.url)) {
                 if !found.keys.iter().any(|have| have.key == k) {
                     found.keys.push(key(k, via));

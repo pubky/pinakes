@@ -6,8 +6,10 @@ An [also on](../api.md#also-on) source.
 page (`openlibrary.org/books/OL…M`) or work page (`openlibrary.org/works/OL…W`) is looked up
 exactly, never by title:
 - Open Library's edition record must list the ISBN asked. Its edition and work IDs are keys
-  (`openlibrary:edition:…`, `openlibrary:work:…`, so the editions of one work join, a hint like
-  every group; `key=` takes either as it is recorded), its ISBN-13s are `isbn` facts, and it links the edition, its work
+  (`openlibrary:edition:…`, `openlibrary:work:…`; `key=` takes either as it is recorded). Both
+  namespaces are single-object, so the editions and translations of one work never join: each
+  edition keeps its own group, and the work page joins at most one of them. Its ISBN-13s are
+  `isbn` facts, and it links the edition, its work
   (`kind: "work"`), its Internet Archive copy (`ocaid`), and its Goodreads edition, LibraryThing
   work (`kind: "work"`) and Google Books pages when it holds exactly one ID for each.
 - A work page's key is `openlibrary:work:…`. Open Library's record must be that work; an ID it

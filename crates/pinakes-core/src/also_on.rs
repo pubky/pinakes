@@ -78,6 +78,12 @@ pub struct AlsoOnConfig {
     pub concurrency: usize,
     #[serde(skip)]
     pub retry_secs: u64,
+    /// How long a refusal of the operator's credentials is held (`client_credentials`).
+    #[serde(skip)]
+    pub refusal_hold_secs: u64,
+    /// The largest YouTube watch page `youtube_match` reads.
+    #[serde(skip)]
+    pub watch_page_bytes: usize,
 }
 impl Default for AlsoOnConfig {
     fn default() -> Self {
@@ -92,6 +98,8 @@ impl Default for AlsoOnConfig {
             facts_per_source: 32,
             concurrency: 2,
             retry_secs: 300,
+            refusal_hold_secs: 300,
+            watch_page_bytes: 3 * 1024 * 1024,
         }
     }
 }

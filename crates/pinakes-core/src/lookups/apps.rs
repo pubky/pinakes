@@ -218,9 +218,9 @@ pub mod also_on {
 
     /// An app's own store page: its store key, and through the one Wikidata item carrying that
     /// store's ID (read back and compared exactly; an item its successor replaces gives way to
-    /// it; several others are ambiguous and give nothing), the item's Q-id as key when the item
-    /// carries no other ID on that store, its other store IDs as keys and its other stores as
-    /// links.
+    /// it; several others are ambiguous and give nothing) its other stores as links, and, only
+    /// when the item carries no other ID on that store, the item's Q-id and its other store IDs
+    /// as keys.
     pub struct AppStores;
 
     #[async_trait]
@@ -268,12 +268,13 @@ pub mod also_on {
             };
             if let Some(hub) = hub {
                 if let Some((raw, _)) = item(cx, &hub.qid).await? {
-                    // An item naming several IDs on this store is not this one page's.
+                    // An item naming several IDs on this store is not this one page's: links
+                    // only.
                     if hubs::wikidata::only_value(&hub, pid, &app.id) {
                         found.push_key(items::key(&hub.qid));
-                    }
-                    for key in item_keys(&raw) {
-                        found.push_key(key);
+                        for key in item_keys(&raw) {
+                            found.push_key(key);
+                        }
                     }
                     for link in items::links(&raw, items::APP) {
                         found.push_link(link);
@@ -411,8 +412,9 @@ pub mod also_on {
             assert!(sites(&found).is_empty());
         }
 
-        /// An item that names two Google Play packages is not either page's: its Q-id is no key
-        /// of the page. The same item with the one package keys it.
+        /// An item that names two Google Play packages is not either page's: neither its Q-id nor
+        /// its other store IDs are keys of the page, only its own store key. The same item with
+        /// the one package keys it.
         #[tokio::test(start_paused = true)]
         async fn an_item_with_two_packages_on_the_store_gives_no_item_key() {
             use crate::lookups::fixture::{context, read, JSON};
@@ -421,6 +423,11 @@ pub mod also_on {
             let item = |second: bool| {
                 let mut v: serde_json::Value =
                     serde_json::from_slice(&read("wikidata-q16927599.json.gz")).unwrap();
+                // A Flathub ID: a key of the item's other store.
+                v["entities"]["Q16927599"]["claims"]["P4655"] = serde_json::json!([{"mainsnak": {"snaktype": "value",
+                    "property": "P4655",
+                    "datavalue": {"value": "de.danoeh.antennapod", "type": "string"},
+                    "datatype": "external-id"}, "type": "statement", "rank": "normal"}]);
                 if second {
                     v["entities"]["Q16927599"]["claims"]["P3418"]
                         .as_array_mut()
@@ -445,8 +452,16 @@ pub mod also_on {
                 ]);
                 let found = AppStores.lookup(&cx, &page).await.unwrap();
                 let k = keys(&found);
-                assert!(k.contains(&"android:de.danoeh.antennapod"), "{k:?}");
+                assert_eq!(k[0], "android:de.danoeh.antennapod", "{k:?}");
                 assert_eq!(k.contains(&"wikidata:Q16927599"), keyed, "{second}: {k:?}");
+                assert_eq!(
+                    k.contains(&"flathub:de.danoeh.antennapod"),
+                    keyed,
+                    "{second}: {k:?}"
+                );
+                if !keyed {
+                    assert_eq!(k, ["android:de.danoeh.antennapod"]);
+                }
                 // Its other stores stay links either way.
                 assert!(
                     sites(&found).contains(
