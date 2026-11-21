@@ -1188,7 +1188,7 @@ fn microformat_fill(
 fn mf(root: &ElementRef<'_>, s: &str) -> Option<String> {
     root.select(&selector(s))
         .find(|el| {
-            (el.id() == root.id() || mf_root(el.value()).is_none())
+            mf_root(el.value()).is_none()
                 && !el
                     .ancestors()
                     .take(super::html::MAX_ANCESTORS)

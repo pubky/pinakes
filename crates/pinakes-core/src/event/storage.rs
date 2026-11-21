@@ -290,8 +290,7 @@ pub async fn prepare(
         .max(3600);
     // A first hold is confirmed soon (`held_retry_secs`, never sooner than the feed's cadence
     // floor): an identical snapshot then releases it before the feed changes again. Later holds
-    // back off from the normal cadence, and so does a snapshot not held (one older than the
-    // stored one).
+    // back off from the normal cadence, and so does a snapshot no newer than the stored one.
     let retry = if holds == 1 {
         container
             .held_retry_secs
