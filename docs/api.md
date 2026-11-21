@@ -57,8 +57,8 @@ refresh after MusicBrainz says the artist is one) and a playlist a `MusicPlaylis
 service ([music service links](#aliases)). YouTube is not only music: its channel is a
 `MusicGroup` and its playlist a `MusicPlaylist` only when the channel is a Topic channel (named
 `{Artist} - Topic`) or the link is on YouTube Music (`music.youtube.com`, the tagged spelling or
-another of the same channel or playlist); any other channel or playlist keeps the type its page
-gives. A video stays a `VideoObject`; a track's, album's or
+another of the same channel or playlist, from the card's next read); any other channel or
+playlist keeps the type its page gives. A video stays a `VideoObject`; a track's, album's or
 artist's page keeps its own video (a `VideoObject` in its JSON-LD) as a part of the page, not its
 card ([lists](#lists)). The card's `site` is the
 service's name (`Spotify`, `Apple Music`, `TIDAL`, `YouTube`, …), as derived links show it, in

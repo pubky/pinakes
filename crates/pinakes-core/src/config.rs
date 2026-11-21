@@ -1559,8 +1559,7 @@ mod tests {
         );
     }
     /// The hub body cap, the discovery cache lifetime, the refusal hold and the watch-page cap
-    /// are limits with the values they had as constants, applied where they are read and held
-    /// to their ranges.
+    /// are limits: their defaults, applied where they are read, and held to their ranges.
     #[test]
     fn the_also_on_caps_and_waits_are_limits() {
         let limits = Limits::default();

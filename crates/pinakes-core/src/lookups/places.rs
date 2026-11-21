@@ -635,7 +635,7 @@ pub mod also_on {
         /// A malformed OSM statement names no object: it costs only that, the Q-id is still a key,
         /// and a valid OSM statement beside it still names the item's one object, as a link.
         #[tokio::test(start_paused = true)]
-        async fn a_malformed_osm_statement_costs_only_the_osm_key() {
+        async fn a_malformed_osm_statement_costs_only_the_osm_link() {
             let search = "https://www.wikidata.org/w/api.php?action=query&list=search&srsearch=haswbstatement%3AP3134%3D188151&srlimit=5&format=json";
             let item = |keep_way: bool| {
                 let mut v: serde_json::Value =

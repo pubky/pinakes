@@ -175,7 +175,7 @@ async fn prefetch(cx: &Context, kind: Kind, ids: &[&str]) -> Result<()> {
     let mut s = client_credentials::slot(&slot, cx.config.also_on.refusal_hold_secs).await;
     s.unless_busy(&TIDAL)?;
     let token = s.token(&TIDAL, cx, &client_id, &secret).await?;
-    // A batch asks only for what its items don't have cached (a retry's, within the hour).
+    // A batch asks only for what its items don't have cached (a retry's, within the discovery cache's lifetime).
     let mut ids: Vec<&str> = ids.to_vec();
     for id in ids.clone() {
         if cx

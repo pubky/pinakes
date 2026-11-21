@@ -2217,7 +2217,7 @@ async fn an_apple_music_track_plays_its_itunes_preview(pool: sqlx::PgPool) {
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn a_deezer_barcode_names_the_apple_album_that_joins(pool: sqlx::PgPool) {
+async fn a_deezer_barcode_names_the_apple_album_as_a_maybe(pool: sqlx::PgPool) {
     // Deezer's barcode and iTunes' album for it are the two sources' work.
     if !has(&["deezer", "itunes"]) {
         return;
@@ -2310,18 +2310,18 @@ async fn a_deezer_barcode_names_the_apple_album_that_joins(pool: sqlx::PgPool) {
         .await,
         ["upc:0602557656527 deezer"]
     );
+    // iTunes' one answer for the barcode carries no barcode to read back: a maybe, no key, and
+    // the tagged Apple album does not join through it.
     assert_eq!(
         rows(
-            "SELECT uri||' '||via||' '||key FROM derived_link WHERE resource_id=$1 AND key IS NOT NULL",
+            "SELECT uri||' '||via||' '||coalesce(key,kind) FROM derived_link WHERE resource_id=$1 AND source='itunes'",
             ids[0].clone()
         )
         .await,
-        ["https://music.apple.com/album/1445304934 itunes upc:0602557656527"]
+        ["https://music.apple.com/album/1445304934 itunes maybe"]
     );
-    let group = "SELECT coalesce(group_id,'-') FROM group_unit WHERE resource_id=$1";
-    let album = rows(group, ids[0].clone()).await;
-    assert_ne!(album, ["-"]);
-    assert_eq!(rows(group, ids[1].clone()).await, album);
+    common::drain_groups(&pool, &Default::default()).await;
+    assert!(!common::one_group(&pool, &[&ids[0], &ids[1]]).await);
     assert_eq!(
         rows(
             "SELECT uri||' '||via||' '||key FROM derived_link WHERE resource_id=$1 AND source='deezer'",

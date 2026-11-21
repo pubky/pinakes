@@ -1364,12 +1364,17 @@ mod tests {
             ),
             ("https://example.org/track", &both[..], None),
         ] {
+            // Each service but the link's own (below).
+            let on = music::parse(uri).map(|l| l.service);
             for own in [
                 Service::Deezer,
                 Service::AppleMusic,
                 Service::Spotify,
                 Service::Tidal,
-            ] {
+            ]
+            .into_iter()
+            .filter(|s| Some(*s) != on)
+            {
                 assert_eq!(
                     reverse_subject(&subject(uri, keys), own),
                     asked,
