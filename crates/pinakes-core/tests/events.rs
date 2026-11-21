@@ -116,6 +116,75 @@ fn recurrence_dst_rdate_exdate_overrides_range_and_orphans() {
     );
     assert_eq!(rows[3].doc.name.as_deref(), Some("Future"));
 }
+/// A series past its cap keeps its upcoming dates first, then fills the cap with its most recent
+/// past ones, never the earliest dates of the horizon.
+#[test]
+fn a_series_keeps_its_upcoming_dates_then_its_latest_past_ones() {
+    let cfg = EventConfig {
+        max_occurrences_per_series: 10,
+        ..Default::default()
+    };
+    let dates = |props: &str| -> Vec<String> {
+        calendar::parse(
+            "https://example.org/a.ics",
+            cal(&event(props)).as_bytes(),
+            &cfg,
+            now(),
+        )
+        .unwrap()
+        .container
+        .unwrap()
+        .occurrences
+        .iter()
+        .map(|o| o.doc.start.unwrap().format("%m-%dT%H").to_string())
+        .collect()
+    };
+    // Twice a day since August: the ten kept dates are the next ten.
+    assert_eq!(
+        dates("UID:twice\nDTSTART:20260801T080000Z\nRRULE:FREQ=DAILY;BYHOUR=8,20\nSUMMARY:Twice"),
+        [
+            "10-16T08", "10-16T20", "10-17T08", "10-17T20", "10-18T08", "10-18T20", "10-19T08",
+            "10-19T20", "10-20T08", "10-20T20"
+        ]
+    );
+    // Daily until the 18th: its three upcoming dates, then the seven latest past ones.
+    assert_eq!(
+        dates("UID:ending\nDTSTART:20261001T120000Z\nRRULE:FREQ=DAILY;COUNT=18\nSUMMARY:Ending"),
+        [
+            "10-09T12", "10-10T12", "10-11T12", "10-12T12", "10-13T12", "10-14T12", "10-15T12",
+            "10-16T12", "10-17T12", "10-18T12"
+        ]
+    );
+    // The same with each date an event of its own under one UID (the feed's cap).
+    let each: String = (1..=18)
+        .map(|day| {
+            event(&format!(
+                "UID:each\nRECURRENCE-ID:202610{day:02}T120000Z\nDTSTART:202610{day:02}T120000Z\nSUMMARY:Each"
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let kept: Vec<String> = calendar::parse(
+        "https://example.org/a.ics",
+        cal(&each).as_bytes(),
+        &cfg,
+        now(),
+    )
+    .unwrap()
+    .container
+    .unwrap()
+    .occurrences
+    .iter()
+    .map(|o| o.doc.start.unwrap().format("%m-%dT%H").to_string())
+    .collect();
+    assert_eq!(
+        kept,
+        [
+            "10-09T12", "10-10T12", "10-11T12", "10-12T12", "10-13T12", "10-14T12", "10-15T12",
+            "10-16T12", "10-17T12", "10-18T12"
+        ]
+    );
+}
 #[test]
 fn recurrence_limits_monthly_setpos_until_skip_invalid_and_dtstart() {
     let cfg = EventConfig {

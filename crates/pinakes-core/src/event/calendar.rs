@@ -955,13 +955,15 @@ fn series_start(
 }
 /// Expand a series from its series stamp (`series_start`, applied by `parse`). A rule whose
 /// periods hold too many dates is not expanded: the event keeps DTSTART and its RDATEs, less its
-/// EXDATEs, within the horizon, with the warning `series_rule_unexpanded`.
+/// EXDATEs, within the horizon, with the warning `series_rule_unexpanded`. The rule's dates from
+/// `now` on are counted toward its bound; of those before `now`, only the latest are kept.
 #[allow(clippy::too_many_arguments)]
 fn expand(
     c: &Component,
     start: &Stamp,
     zones: &Zones<'_>,
     lo: DateTime<Utc>,
+    now: DateTime<Utc>,
     hi: DateTime<Utc>,
     cfg: &EventConfig,
     deadline: std::time::Instant,
@@ -1078,9 +1080,14 @@ fn expand(
             }
             if at >= lo {
                 out.insert(at, None);
-                included += 1;
-                if included >= take {
-                    break;
+                if at >= now {
+                    included += 1;
+                    if included >= take {
+                        break;
+                    }
+                } else if out.len() > take {
+                    // Every date so far is past: the earliest goes.
+                    out.pop_first();
                 }
             }
         }
@@ -1353,6 +1360,7 @@ pub fn parse(
             start,
             &zones,
             lo,
+            now,
             hi,
             cfg,
             deadline,
@@ -1365,7 +1373,14 @@ pub fn parse(
                 continue;
             }
         };
-        for (series_count, (at, duration)) in expanded.into_iter().enumerate() {
+        // Upcoming dates first, then the most recent past ones fill the series' cap.
+        let (past, upcoming): (Vec<_>, Vec<_>) =
+            expanded.into_iter().partition(|(at, _)| *at < now);
+        for (series_count, (at, duration)) in upcoming
+            .into_iter()
+            .chain(past.into_iter().rev())
+            .enumerate()
+        {
             ensure!(
                 std::time::Instant::now() < deadline,
                 "occurrence work budget"
@@ -1519,7 +1534,17 @@ pub fn parse(
     }
     let mut counts = BTreeMap::new();
     let mut rows: Vec<_> = result.into_values().collect();
-    rows.sort_by_key(|o| o.doc.start);
+    // Each series keeps its upcoming dates first, then its most recent past ones; the kept rows
+    // are listed by start.
+    rows.sort_by_key(|o| {
+        o.doc.start.map(|at| {
+            if at >= now {
+                (false, at - now)
+            } else {
+                (true, now - at)
+            }
+        })
+    });
     for mut row in rows {
         let count = counts.entry(row.uid.clone()).or_insert(0);
         if *count >= cfg.max_occurrences_per_series {
@@ -1540,6 +1565,7 @@ pub fn parse(
         };
         container.occurrences.push(row);
     }
+    container.occurrences.sort_by_key(|o| o.doc.start);
     container.warnings.sort();
     container.warnings.dedup();
     let mut doc = ResourceMeta::new(uri, "event", 86400);

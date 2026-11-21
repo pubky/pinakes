@@ -80,7 +80,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `event_max_line_bytes` | `65536` | Longest calendar content line (bytes). |
 | `event_max_date_values` | `4096` | Most date values in one calendar property. |
 | `event_feed_body_bytes` | `33554432` | Largest calendar or feed body (bytes). |
-| `event_max_occurrences_per_series` | `50` | Most occurrences one series expands to. |
+| `event_max_occurrences_per_series` | `50` | Most occurrences one series expands to: its upcoming dates first, then its most recent past ones. |
 | `event_max_occurrences_per_feed` | `10000` | Most occurrences one feed yields. |
 | `event_max_components` | `100000` | Most components one calendar may hold. |
 | `event_max_properties` | `1000000` | Most properties one calendar may hold, over all its components. |
