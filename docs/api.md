@@ -55,8 +55,8 @@ A music link is typed by what it is, whatever the service's page or player calls
 `MusicRecording`, an album a `MusicAlbum`, an artist a `MusicGroup` (a `Person` from the next
 refresh after MusicBrainz says the artist is one) and a playlist a `MusicPlaylist`, on every
 service ([music service links](#aliases)). YouTube is not only music: its channel is a
-`MusicGroup` and its playlist a `MusicPlaylist` only when the channel is a Topic channel (named
-`{Artist} - Topic`) or the link is on YouTube Music (`music.youtube.com`, the tagged spelling or
+`MusicGroup` only when it is a Topic channel (named `{Artist} - Topic`) or on YouTube Music, and
+its playlist a `MusicPlaylist` only on YouTube Music (`music.youtube.com`, the tagged spelling or
 another of the same channel or playlist, from the card's next read); any other channel or
 playlist keeps the type its page gives. A video stays a `VideoObject`; a track's, album's or
 artist's page keeps its own video (a `VideoObject` in its JSON-LD) as a part of the page, not its

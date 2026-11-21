@@ -419,10 +419,13 @@ pub fn type_card(
             .as_deref()
             .is_some_and(|n| n.trim_end().ends_with(" - Topic"))
     };
+    // A YouTube channel is music when it is a Topic channel or on YouTube Music; a playlist only
+    // on YouTube Music (a playlist's name is its maker's).
+    let youtube = link.service == Service::YouTube && !on_youtube_music;
     match link.level {
         Level::Video => {}
-        Level::Artist | Level::Playlist
-            if link.service == Service::YouTube && !on_youtube_music && !topic() => {}
+        Level::Artist if youtube && !topic() => {}
+        Level::Playlist if youtube => {}
         Level::Artist if artist_type == Some("Person") => doc.set_type("Person"),
         level => doc.set_type(level.type_name()),
     }
@@ -1036,6 +1039,8 @@ mod tests {
         assert_eq!(card(channel, "Queen - Topic", false), "MusicGroup");
         assert_eq!(card(channel, "Queen", true), "MusicGroup");
         assert_eq!(card(playlist, "Holiday videos", false), "WebPage");
+        // A playlist's name is its maker's: " - Topic" there is no music signal.
+        assert_eq!(card(playlist, "Holiday videos - Topic", false), "WebPage");
         assert_eq!(
             card(playlist, "A Night at the Opera", true),
             "MusicPlaylist"
