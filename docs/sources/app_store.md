@@ -17,7 +17,11 @@ A developer's page and a page under the app (reviews) are not read.
 ## What it reads
 
 `GET https://itunes.apple.com/lookup?id={id}`, the United States storefront. It answers
-`text/javascript` holding JSON. An app that storefront does not sell answers no result and is
+`text/javascript` holding JSON. An app that storefront does not sell answers no result; then it
+asks the storefront a link of the app named, `GET
+https://itunes.apple.com/lookup?id={id}&country={country}` (the country in the link; for the
+app's root, the one a link of the app named since the daemon started). When both storefronts sell
+the app, the card is the US record (one resource per app). An app no asked storefront sells is
 `missing`.
 
 ## Card
@@ -32,7 +36,7 @@ A developer's page and a page under the app (reviews) are not read.
 | `website` | The seller's website |
 | `bundle_id` | Apple's bundle ID. It is never an Android package and joins nothing |
 | `version` | The current version |
-| `price` | The price as shown, e.g. "Free" |
+| `price` | The price as the storefront read shows it, e.g. "Free" |
 | `rating`, `rating_count` | The average rating (two decimals) and the number of ratings |
 | `content_rating` | The age rating, e.g. "12+" |
 | `released`, `updated` | When the app and its current version were released (RFC 3339) |

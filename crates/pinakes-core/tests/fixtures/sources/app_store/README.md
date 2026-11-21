@@ -3,7 +3,10 @@ the Pinakes user agent (`pinakes/0.1.0 (+https://pubky.app; info@synonym.to)`). 
 `pinakes_core::sources::app_store`; test runs make no requests.
 
 The API answers `text/javascript` holding JSON; the files keep the `.json` extension. An unknown
-ID answers 200 with `{"resultCount":0,"results":[]}` (`lookup-missing.json`, ID 1).
+ID answers 200 with `{"resultCount":0,"results":[]}` (`lookup-missing.json`, ID 1). An app the
+US storefront does not sell answers the same there (`lookup-1225135057.json`) and its record in
+the storefront that sells it (`lookup-1225135057-ch.json`, `&country=ch`), both recorded on
+2026-11-21 with `pinakes/0.1.0 (+https://pubky.app)`.
 
 `provenance.json` lists each fixture's request URL, status, content type, recording time, and the
 size and SHA-256 of the body as served. The descriptions and icons are the developers' and
