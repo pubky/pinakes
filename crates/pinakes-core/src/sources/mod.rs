@@ -1891,6 +1891,34 @@ mod tests {
         assert!(!names_the_key(br#"{"message":"Invalid token."}"#, "detail"));
     }
 
+    /// One case rule for identifier roots: a root spelled in another letter case is a spelling
+    /// of the canonical root (its alias), never an invalid link.
+    #[test]
+    fn a_root_in_another_letter_case_is_its_spelling() {
+        for (source, spelling, root) in [
+            ("clinicaltrials", "nct:nct04368728", "nct:NCT04368728"),
+            ("pdb", "pdb:4hhb", "pdb:4HHB"),
+            ("uniprot", "uniprot:p69905", "uniprot:P69905"),
+            ("usgs", "usgs:CI38457511", "usgs:ci38457511"),
+            ("ror", "ror:042NB2S44", "ror:042nb2s44"),
+            ("cleveland", "cleveland:1958.39.A", "cleveland:1958.39.a"),
+            ("gleif", "lei:ky37lus27qqx7bb93l28", "lei:KY37LUS27QQX7BB93L28"),
+            ("federal_register", "fr:e9-12345", "fr:E9-12345"),
+        ] {
+            if by_name(source).is_none() {
+                continue;
+            }
+            assert!(!invalid(spelling), "{spelling}");
+            assert_eq!(
+                alias_root_with(spelling, None).as_deref(),
+                Some(root),
+                "{spelling}"
+            );
+            assert_eq!(alias_root_with(root, None), None, "{root}");
+            assert!(!invalid(root), "{root}");
+        }
+    }
+
     #[test]
     fn switches_and_names() {
         let mut config = Config::default();

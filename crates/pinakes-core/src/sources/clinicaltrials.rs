@@ -63,10 +63,10 @@ pub fn request(nct: &str) -> Option<Request> {
     ))
 }
 
-/// The NCT number of a root (`nct:NCT04368728`, in upper case).
+/// The NCT number of a root (`nct:NCT04368728`, in upper case). A root in another letter case
+/// (`nct:nct04368728`) is a spelling of it: its alias.
 pub fn from_root(uri: &str) -> Option<String> {
-    let id = uri.strip_prefix("nct:")?;
-    nct(id).filter(|n| n == id)
+    nct(uri.strip_prefix("nct:")?)
 }
 
 /// The NCT number of a root or a ClinicalTrials.gov link.
@@ -453,7 +453,13 @@ mod tests {
                 .as_deref(),
             Some("nct:NCT04368728")
         );
-        for uri in ["nct:nct04368728", "nct:NCT0436872", "nct:04368728", "nct:"] {
+        // A root in another letter case is a spelling of the root.
+        assert_eq!(
+            c.alias_root("nct:nct04368728").as_deref(),
+            Some("nct:NCT04368728")
+        );
+        assert!(!c.invalid("nct:nct04368728"));
+        for uri in ["nct:NCT0436872", "nct:04368728", "nct:"] {
             assert!(c.invalid(uri), "{uri}");
             assert!(!c.reads(uri), "{uri}");
         }

@@ -285,10 +285,10 @@ fn entry(v: &Value, acc: &str) -> Result<Option<Entry>> {
     Ok(Some(Entry::Card(Box::new(card))))
 }
 
-/// The entry of a root, `uniprot:{ACC}` (the accession in upper case).
+/// The entry of a root, `uniprot:{ACC}` (the accession in upper case). A root in another letter
+/// case (`uniprot:p69905`) is a spelling of it: its alias.
 pub fn from_root(uri: &str) -> Option<Target> {
-    let acc = uri.strip_prefix("uniprot:")?;
-    accession(acc).filter(|a| a == acc).map(Target::Accession)
+    accession(uri.strip_prefix("uniprot:")?).map(Target::Accession)
 }
 
 /// The entry of a root or a UniProt link.
@@ -656,12 +656,13 @@ mod tests {
         let name = "https://www.uniprot.org/uniprotkb/HBA_HUMAN/entry";
         assert!(u.reads(name));
         assert_eq!(u.alias_root(name), None);
-        for uri in [
-            "uniprot:p69905",
-            "uniprot:HBA_HUMAN",
-            "uniprot:P6990",
-            "uniprot:",
-        ] {
+        // A root in another letter case is a spelling of the root.
+        assert_eq!(
+            u.alias_root("uniprot:p69905").as_deref(),
+            Some("uniprot:P69905")
+        );
+        assert!(!u.invalid("uniprot:p69905"));
+        for uri in ["uniprot:HBA_HUMAN", "uniprot:P6990", "uniprot:"] {
             assert!(u.invalid(uri), "{uri}");
             assert!(!u.reads(uri), "{uri}");
         }

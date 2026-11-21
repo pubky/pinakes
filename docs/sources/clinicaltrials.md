@@ -6,8 +6,8 @@ about 50 requests a minute, 0.8 a second).
 
 ## Links
 
-`nct:{NCT number}` is the root (`NCT` and 8 digits, in upper case, e.g. `nct:NCT04368728`).
-Every ClinicalTrials.gov address of the study is an alias of it, whatever its query (`?tab=…`,
+`nct:{NCT number}` is the root (`NCT` and 8 digits, in upper case, e.g. `nct:NCT04368728`); the
+root in another letter case (`nct:nct04368728`) is an alias of it. Every ClinicalTrials.gov address of the study is an alias of it, whatever its query (`?tab=…`,
 `?term=…`), except a past version of the record (`?tab=history&a={n}`), which is a dated
 version and not read here:
 
