@@ -133,6 +133,7 @@ async fn main() -> Result<()> {
                 retry_after_secs: 60,
                 location: v["location"].as_str().map(str::to_owned),
                 validators: serde_json::from_value(v["validators"].clone()).unwrap_or_default(),
+                charset: None,
             })
         };
         let key = format!(

@@ -287,7 +287,7 @@ impl pinakes_core::resolver::egress::Transport for Recorded {
     }
 }
 /// Resolves every host to one public address (93.184.216.34), so the egress' own address check
-/// passes and no test asks a real resolver. `media::PublicDns` answers 8.8.8.8 instead.
+/// passes and no test asks a real resolver. `media::PublicDns` answers an address per host instead.
 pub struct PublicDns;
 #[async_trait::async_trait]
 impl pinakes_core::resolver::egress::Dns for PublicDns {
@@ -317,6 +317,7 @@ pub fn fetched(
         retry_after_secs: 60,
         location: None,
         body,
+        charset: None,
     }
 }
 /// `groups::drain`, then each grouping run it left deferred done again at once through

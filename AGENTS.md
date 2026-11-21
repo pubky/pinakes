@@ -99,8 +99,8 @@ service whose artist page it names). Joins never come from a title or name match
 **Egress.** Every request a reference can steer goes through `resolver::egress::Egress`: never
 build another HTTP client for them (the two others, `resolver/osm.rs` and `nexus.rs`, ask only the
 Nominatim and Nexus URLs the operator sets). The egress pins DNS, refuses private addresses, caps bodies,
-paces each host (one request at a time, at `limits.host_requests_per_second` or the service's
-published rate) and caches answers. A source with a published limit lowers its host's rate; it
+paces each host and each address (one request at a time, at `limits.host_requests_per_second` or the service's
+published rate; a service's own host named with its pace, `budgets` or `PUBLISHED_RATES`, by host alone) and caches answers. A source with a published limit lowers its host's rate; it
 never raises it.
 
 **Secrets.** Keys, tokens and passwords come only from the config file or the environment

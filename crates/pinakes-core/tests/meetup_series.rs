@@ -195,6 +195,7 @@ impl Transport for Site {
             retry_after_secs: 60,
             location,
             body: page.cloned().unwrap_or_default().into_bytes(),
+            charset: None,
         })
     }
 }

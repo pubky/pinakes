@@ -386,12 +386,14 @@ impl OsmResolver {
         if status.as_u16() == 304 {
             return Err(super::NotModified.into());
         }
+        // A 429 is the operator's own quota at the upstream (it answers every job of the batch
+        // alike): the daemon's own wait (`quota`), which charges no link. A 5xx is charged.
         if status.as_u16() == 429 || status.is_server_error() {
             let seconds = retry_after(response.headers());
             *next = Instant::now() + Duration::from_secs(seconds);
             return Err(super::RetryLater {
                 class: if status.as_u16() == 429 {
-                    "http_4xx"
+                    "quota"
                 } else {
                     "http_5xx"
                 },
@@ -403,8 +405,10 @@ impl OsmResolver {
             return Ok(None);
         }
         // The upstream refuses Pinakes (a key expired or out of quota), which says nothing of
-        // the link: it is read again later and never dead-letters for it.
+        // the link: it is read again later and never dead-letters for it. The refusal is
+        // counted in `pinakes_source_token_refusals_total{source="osm"}`.
         if matches!(status.as_u16(), 401 | 403) {
+            crate::sources::token_refused("osm");
             return Err(super::RetryLater {
                 class: "upstream_denied",
                 seconds: retry_after_named(response.headers()).unwrap_or(DENIED_RETRY_SECS),

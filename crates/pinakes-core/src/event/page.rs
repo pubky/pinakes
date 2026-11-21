@@ -229,6 +229,7 @@ fn fields(doc: &mut ResourceMeta, v: &Value, base: &Url, ap: bool) {
     fill(
         &mut doc.description,
         text(&v["description"])
+            .and_then(crate::resolver::html::plain_text)
             .or_else(|| text(&v["summary"]))
             .or_else(|| {
                 string(&v["content"]).and_then(|s| {

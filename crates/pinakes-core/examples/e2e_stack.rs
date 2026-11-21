@@ -207,6 +207,7 @@ impl Transport for Fixture {
             location: None,
             retry_after_secs: 60,
             validators: Default::default(),
+            charset: None,
         })
     }
 }

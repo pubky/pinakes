@@ -48,6 +48,16 @@ pub const BODY_CAP: usize = 1024 * 1024;
 /// The longest a request waits for its host's next slot, queue included. It leaves the request
 /// at least half of the ten-second fetch timeout.
 pub const MAX_SLOT_WAIT: Duration = Duration::from_secs(5);
+/// The Fetch standard's bad ports (<https://fetch.spec.whatwg.org/#port-blocking>): ports of
+/// services other than the web (mail, SSH, DNS, IRC, …). No request or relay connection is made
+/// to one, whoever names it (a link, a redirect, a homeserver's PKARR record).
+pub const BAD_PORTS: &[u16] = &[
+    0, 1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95, 101,
+    102, 103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137, 139, 143, 161, 179, 389, 427,
+    465, 512, 513, 514, 515, 526, 530, 531, 532, 540, 548, 554, 556, 563, 587, 601, 636, 989, 990,
+    993, 995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667,
+    6668, 6669, 6679, 6697, 10080,
+];
 pub const USER_AGENT: &str = concat!(
     "pinakes/",
     env!("CARGO_PKG_VERSION"),
@@ -153,6 +163,9 @@ pub struct Fetched {
     pub validators: Validators,
     pub url: Url,
     pub content_type: String,
+    /// The `charset` parameter of the answer's `Content-Type`, lower-cased, when it named one
+    /// ([`Fetched::text`] reads the body by it).
+    pub charset: Option<String>,
     pub status: u16,
     pub retry_after_secs: u64,
     pub location: Option<String>,
@@ -170,12 +183,229 @@ impl Fetched {
             validators: Validators::default(),
             url,
             content_type,
+            charset: None,
             status,
             retry_after_secs: 60,
             location: None,
             body,
         }
     }
+}
+impl Fetched {
+    /// The body as text, decoded once ([`decode`]) by the charset the answer or the page names.
+    pub fn text(&self) -> std::borrow::Cow<'_, str> {
+        decode(&self.body, self.charset.as_deref())
+    }
+}
+/// `body` as text in its character encoding: a byte order mark's, else `charset` (the
+/// `Content-Type` parameter), else one a `<meta charset>` or `<meta http-equiv>` declares in the
+/// first 1024 bytes, else UTF-8. Bytes the encoding cannot read become U+FFFD.
+pub fn decode<'a>(body: &'a [u8], charset: Option<&str>) -> std::borrow::Cow<'a, str> {
+    if let Some((encoding, bom)) = encoding_rs::Encoding::for_bom(body) {
+        return encoding.decode_without_bom_handling(&body[bom..]).0;
+    }
+    let encoding = charset
+        .and_then(|label| encoding_rs::Encoding::for_label(label.as_bytes()))
+        .or_else(|| meta_charset(&body[..body.len().min(1024)]))
+        .unwrap_or(encoding_rs::UTF_8);
+    encoding.decode_without_bom_handling(body).0
+}
+/// The encoding a `<meta>` among `head` declares, read as the HTML standard's prescan does: a
+/// tag's own `charset` attribute, or the `charset=` in the `content` of one whose `http-equiv` is
+/// `Content-Type`. Comments and other tags (their attributes too) are passed over, so a
+/// `data-charset`, a `content` without the `http-equiv`, or a `<meta>` in a comment or in an
+/// attribute's value declares nothing. As browsers read it, a declared UTF-16 is UTF-8 (the
+/// declaration was readable as ASCII) and `x-user-defined` is windows-1252.
+fn meta_charset(head: &[u8]) -> Option<&'static encoding_rs::Encoding> {
+    let starts = |at: usize, prefix: &[u8]| {
+        head.get(at..at + prefix.len())
+            .is_some_and(|w| w.eq_ignore_ascii_case(prefix))
+    };
+    let mut at = 0;
+    while at < head.len() {
+        if starts(at, b"<!--") {
+            // A comment ends at the first `-->` after its opening (`<!-->` too).
+            let from = at + 2;
+            at = head[from..]
+                .windows(3)
+                .position(|w| w == b"-->")
+                .map_or(head.len(), |n| from + n + 3);
+        } else if starts(at, b"<meta")
+            && head
+                .get(at + 5)
+                .is_some_and(|b| b.is_ascii_whitespace() || *b == b'/')
+        {
+            at += 5;
+            let mut seen: Vec<Vec<u8>> = Vec::new();
+            let (mut charset, mut pragma, mut need_pragma) = (None, false, None);
+            // A `charset` attribute decides, even with a label no encoding has.
+            let mut charset_attribute = false;
+            while let Some((name, value)) = attribute(head, &mut at) {
+                if seen.contains(&name) {
+                    continue;
+                }
+                match name.as_slice() {
+                    b"http-equiv" => pragma = value.eq_ignore_ascii_case(b"content-type"),
+                    b"content" if charset.is_none() && !charset_attribute => {
+                        if let Some(label) = content_charset(&value) {
+                            charset = encoding_rs::Encoding::for_label(label);
+                            need_pragma = Some(true);
+                        }
+                    }
+                    b"charset" => {
+                        charset_attribute = true;
+                        charset = encoding_rs::Encoding::for_label(value.trim_ascii());
+                        need_pragma = Some(false);
+                    }
+                    _ => {}
+                }
+                seen.push(name);
+            }
+            match (need_pragma, charset) {
+                (Some(need), Some(encoding)) if pragma || !need => {
+                    return Some(if encoding == encoding_rs::X_USER_DEFINED {
+                        encoding_rs::WINDOWS_1252
+                    } else {
+                        encoding.output_encoding()
+                    });
+                }
+                _ => {}
+            }
+        } else if head[at] == b'<' && head.get(at + 1).is_some_and(u8::is_ascii_alphabetic)
+            || starts(at, b"</") && head.get(at + 2).is_some_and(u8::is_ascii_alphabetic)
+        {
+            // Another tag: its name, then its attributes, whose values may hold any `<`.
+            at = head[at..]
+                .iter()
+                .position(|b| b.is_ascii_whitespace() || *b == b'>')
+                .map_or(head.len(), |n| at + n);
+            while attribute(head, &mut at).is_some() {}
+        } else if starts(at, b"<!") || starts(at, b"</") || starts(at, b"<?") {
+            at = head[at..]
+                .iter()
+                .position(|b| *b == b'>')
+                .map_or(head.len(), |n| at + n + 1);
+        } else {
+            at += 1;
+        }
+    }
+    None
+}
+/// The next attribute of a tag in `head` from `at` (the standard's "get an attribute"): its name
+/// in lower case and its value, `at` moved past it; `None` at the tag's end (`at` past its `>`)
+/// or the end of `head`.
+fn attribute(head: &[u8], at: &mut usize) -> Option<(Vec<u8>, Vec<u8>)> {
+    let byte = |at: usize| head.get(at).copied();
+    while byte(*at).is_some_and(|b| b.is_ascii_whitespace() || b == b'/') {
+        *at += 1;
+    }
+    if byte(*at)? == b'>' {
+        *at += 1;
+        return None;
+    }
+    let mut name = Vec::new();
+    loop {
+        match byte(*at)? {
+            b'=' if !name.is_empty() => break,
+            b if b.is_ascii_whitespace() => break,
+            b'/' | b'>' => return Some((name, Vec::new())),
+            b => name.push(b.to_ascii_lowercase()),
+        }
+        *at += 1;
+    }
+    while byte(*at).is_some_and(|b| b.is_ascii_whitespace()) {
+        *at += 1;
+    }
+    if byte(*at)? != b'=' {
+        return Some((name, Vec::new()));
+    }
+    *at += 1;
+    while byte(*at).is_some_and(|b| b.is_ascii_whitespace()) {
+        *at += 1;
+    }
+    let mut value = Vec::new();
+    match byte(*at)? {
+        quote @ (b'"' | b'\'') => {
+            *at += 1;
+            loop {
+                let b = byte(*at)?;
+                *at += 1;
+                if b == quote {
+                    return Some((name, value));
+                }
+                value.push(b.to_ascii_lowercase());
+            }
+        }
+        b'>' => Some((name, value)),
+        _ => {
+            while let Some(b) = byte(*at).filter(|b| !b.is_ascii_whitespace() && *b != b'>') {
+                value.push(b.to_ascii_lowercase());
+                *at += 1;
+            }
+            Some((name, value))
+        }
+    }
+}
+/// The encoding label in a `<meta>` `content` value (`text/html; charset=shift_jis`), as the
+/// standard extracts it: after a `charset` followed by `=`, quoted (closed) or up to a space or
+/// `;`.
+fn content_charset(content: &[u8]) -> Option<&[u8]> {
+    let mut from = 0;
+    loop {
+        let at = content[from..]
+            .windows(7)
+            .position(|w| w.eq_ignore_ascii_case(b"charset"))?;
+        let rest = content[from + at + 7..].trim_ascii_start();
+        let Some(value) = rest.strip_prefix(b"=") else {
+            from += at + 7;
+            continue;
+        };
+        let value = value.trim_ascii_start();
+        return match value.first() {
+            Some(&quote @ (b'"' | b'\'')) => {
+                let value = &value[1..];
+                value
+                    .iter()
+                    .position(|b| *b == quote)
+                    .map(|end| &value[..end])
+            }
+            _ => {
+                let end = value
+                    .iter()
+                    .position(|b| b.is_ascii_whitespace() || *b == b';')
+                    .unwrap_or(value.len());
+                (end > 0).then(|| &value[..end])
+            }
+        };
+    }
+}
+/// The seconds until a spent quota is reset, 1 s to an hour: the `X-RateLimit-Reset` time (Unix
+/// seconds) of an answer whose `X-RateLimit-Remaining` is 0 (GitHub's rate limit); `None`
+/// otherwise.
+fn quota_reset(headers: &reqwest::header::HeaderMap, now: std::time::SystemTime) -> Option<u64> {
+    let value = |name: &str| headers.get(name)?.to_str().ok()?.trim().parse::<u64>().ok();
+    if value("x-ratelimit-remaining")? != 0 {
+        return None;
+    }
+    let now = now.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    Some(
+        value("x-ratelimit-reset")?
+            .saturating_sub(now)
+            .clamp(1, 3600),
+    )
+}
+/// The `charset` parameter of a `Content-Type` value, lower-cased.
+fn charset_parameter(value: &str) -> Option<String> {
+    value
+        .split(';')
+        .skip(1)
+        .find_map(|parameter| {
+            let (name, value) = parameter.split_once('=')?;
+            name.trim()
+                .eq_ignore_ascii_case("charset")
+                .then(|| value.trim().trim_matches(['"', '\'']).to_ascii_lowercase())
+        })
+        .filter(|charset| !charset.is_empty())
 }
 #[async_trait]
 pub trait Dns: Send + Sync {
@@ -259,6 +489,9 @@ pub struct FetchOptions {
     /// slot further away answers `RetryLater` (`rate_limited`, no request sent, no charge), as
     /// one past `MAX_SLOT_WAIT` always does.
     pub slot_wait: Option<Duration>,
+    /// Pace this request by its host's slot alone, not also by its address's: for the
+    /// operator's own endpoints (the PKARR relays), never for an address a link steers.
+    pub host_slot_only: bool,
 }
 impl std::fmt::Debug for Fetched {
     /// The body's length, never the body: a token endpoint's answer holds the token.
@@ -267,6 +500,7 @@ impl std::fmt::Debug for Fetched {
             .field("url", &self.url.as_str())
             .field("status", &self.status)
             .field("content_type", &self.content_type)
+            .field("charset", &self.charset)
             .field("retry_after_secs", &self.retry_after_secs)
             .field("location", &self.location)
             .field("permanent_redirect", &self.permanent_redirect)
@@ -483,14 +717,25 @@ pub async fn read_response_with(
         last_modified: header("last-modified"),
     };
     let status = response.status().as_u16();
-    // A 429 that names no wait is held five minutes; other answers default to a minute.
+    // A 429 that names no wait is held five minutes; other answers default to a minute. A spent
+    // quota's reset (`X-RateLimit-Reset` beside `X-RateLimit-Remaining: 0`) names its wait.
     let retry_after_secs = super::osm::retry_after_named(response.headers())
+        .or_else(|| {
+            matches!(status, 403 | 429)
+                .then(|| quota_reset(response.headers(), std::time::SystemTime::now()))
+                .flatten()
+        })
         .unwrap_or(if status == 429 { UNNAMED_429_WAIT } else { 60 });
     let location = response
         .headers()
         .get("location")
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
+    let charset = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .and_then(charset_parameter);
     let content_type = response
         .headers()
         .get("content-type")
@@ -628,6 +873,7 @@ pub async fn read_response_with(
         retry_after_secs,
         location,
         content_type,
+        charset,
         body,
     })
 }
@@ -691,6 +937,7 @@ impl Egress {
                     url: Url::parse(uri)?,
                     validators: Default::default(),
                     content_type: "application/json".into(),
+                    charset: None,
                     status: 200,
                     retry_after_secs: 60,
                     location: None,
@@ -720,10 +967,11 @@ impl Egress {
             if !self.allows_host(&host) {
                 bail!("relay denied by egress policy");
             }
-            let addresses = self
-                .dns
-                .lookup(&host, url.port_or_known_default().context("relay port")?)
-                .await?;
+            let port = url.port_or_known_default().context("relay port")?;
+            if BAD_PORTS.contains(&port) {
+                bail!("relay port blocked by egress policy");
+            }
+            let addresses = self.dns.lookup(&host, port).await?;
             if addresses.is_empty() || addresses.iter().any(|a| !public_ip(a.ip())) {
                 bail!("relay DNS resolved to non-public address");
             }
@@ -1067,9 +1315,17 @@ impl Egress {
         let requested = Url::parse(uri)?;
         let mut url = requested.clone();
         let mut permanent = true;
-        // A redirect within the same host keeps the slot it has; a slow host's next slot is
-        // further away than a fetch may wait, so a new one would always answer RetryLater.
-        let mut permit: Option<(String, OwnedMutexGuard<Instant>)> = None;
+        // A redirect within the same host keeps the host's slot; a slow host's next slot is
+        // further away than a fetch may wait, so a new one would always answer RetryLater. Each
+        // request holds its host's slot and its first pinned address's (the address with its
+        // slot), so many names on one server are paced together; a same-host hop to another
+        // address takes that address's turn.
+        type Slots = (
+            String,
+            OwnedMutexGuard<Instant>,
+            Option<(String, OwnedMutexGuard<Instant>)>,
+        );
+        let mut permit: Option<Slots> = None;
         for redirects in 0..=3 {
             if !matches!(url.scheme(), "http" | "https")
                 || !url.username().is_empty()
@@ -1093,6 +1349,9 @@ impl Egress {
                 return Err(refused("Amazon is never fetched"));
             }
             let port = url.port_or_known_default().context("missing port")?;
+            if BAD_PORTS.contains(&port) {
+                return Err(refused("port blocked by egress policy"));
+            }
             let addresses = match url.host().context("missing host")? {
                 Host::Ipv4(v) => vec![SocketAddr::new(IpAddr::V4(v), port)],
                 Host::Ipv6(v) => vec![SocketAddr::new(IpAddr::V6(v), port)],
@@ -1107,17 +1366,52 @@ impl Egress {
                     .context("egress refused non-public address"));
             }
             // Pin checked addresses to the connection; a second DNS lookup could rebind to a private IP.
+            // A service's own host, which no link can multiply, is paced by its name alone.
+            let address = (!options.host_slot_only && !self.service_host(&host))
+                .then(|| address_slot(addresses[0].ip()));
             match &mut permit {
-                Some((held, guard)) if *held == host => {
+                Some((held, guard, at_address)) if *held == host => {
                     **guard = Instant::now() + self.host_interval(&host);
+                    match (at_address.as_mut(), &address) {
+                        (Some((held_address, at)), Some(address)) if held_address == address => {
+                            **at = Instant::now() + self.address_interval(address, &host);
+                        }
+                        (_, Some(address)) => {
+                            // A new DNS answer: the other address's slot goes before this
+                            // one's turn is waited for.
+                            *at_address = None;
+                            let wait = options
+                                .slot_wait
+                                .map_or(MAX_SLOT_WAIT, |w| w.min(MAX_SLOT_WAIT));
+                            let at = self.address_permit_within(address, &host, wait).await?;
+                            *at_address = Some((address.clone(), at));
+                        }
+                        (_, None) => *at_address = None,
+                    }
                 }
                 _ => {
-                    // Release the other host's slot before waiting for this one.
+                    // Release the other host's slots before waiting for this one's.
                     drop(permit.take());
                     let wait = options
                         .slot_wait
                         .map_or(MAX_SLOT_WAIT, |w| w.min(MAX_SLOT_WAIT));
-                    permit = Some((host.clone(), self.host_permit_within(&host, wait).await?));
+                    let deadline = Instant::now() + wait;
+                    let mut guard = self.host_permit_within(&host, wait).await?;
+                    let at_address = match &address {
+                        Some(address) => {
+                            let left = deadline.saturating_duration_since(Instant::now());
+                            match self.address_permit_within(address, &host, left).await {
+                                Ok(at_address) => Some((address.clone(), at_address)),
+                                Err(error) => {
+                                    // No request is sent: the host's turn is not used up.
+                                    *guard = Instant::now();
+                                    return Err(error);
+                                }
+                            }
+                        }
+                        None => None,
+                    };
+                    permit = Some((host.clone(), guard, at_address));
                 }
             }
             let mut observation = crate::telemetry::FetchGuard::start();
@@ -1226,7 +1520,44 @@ impl Egress {
         host: &str,
         wait: Duration,
     ) -> Result<OwnedMutexGuard<Instant>> {
-        let rate = self.host_rate(host);
+        self.slot_permit_within(host, self.host_interval(host), wait)
+            .await
+    }
+    /// The turn of `address` (its [`address_slot`]) for a request to `host`, waiting at most
+    /// `wait` as [`host_permit_within`](Self::host_permit_within) does.
+    async fn address_permit_within(
+        &self,
+        address: &str,
+        host: &str,
+        wait: Duration,
+    ) -> Result<OwnedMutexGuard<Instant>> {
+        self.slot_permit_within(address, self.address_interval(address, host), wait)
+            .await
+    }
+    /// Whether `host` is a service's own, named in the code with its pace: a source's or an
+    /// also-on source's (`budgets`, in `source_rates`) or a published one (`PUBLISHED_RATES`, an
+    /// exact rule: a `*.` rule's names are as many as links make). The fixed API hosts sources
+    /// call are one name each, so they take their host's slot only, as the PKARR relays do
+    /// (`FetchOptions::host_slot_only`). Every other host (a link's, a redirect's, a discovered
+    /// endpoint's) is paced by its address too.
+    fn service_host(&self, host: &str) -> bool {
+        self.cfg.source_rates.contains_key(host)
+            || PUBLISHED_RATES.iter().any(|(rule, _)| *rule == host)
+    }
+    /// The least time between two requests to one address: the default pace, or the host's when
+    /// the operator set it faster. A slow host's own pace never slows the other names on its
+    /// address.
+    fn address_interval(&self, address: &str, host: &str) -> Duration {
+        self.host_interval(address).min(self.host_interval(host))
+    }
+    /// The next turn of the slot named `slot` (a host, or an address: [`address_slot`]), the next
+    /// one `interval` after it, waiting at most `wait`.
+    async fn slot_permit_within(
+        &self,
+        slot: &str,
+        interval: Duration,
+        wait: Duration,
+    ) -> Result<OwnedMutexGuard<Instant>> {
         let budget = {
             let mut hosts = self.hosts.lock().await;
             if hosts.len() >= 10000 {
@@ -1235,7 +1566,7 @@ impl Egress {
                 });
             }
             hosts
-                .entry(host.into())
+                .entry(slot.into())
                 .or_insert_with(|| Arc::new(Mutex::new(Instant::now())))
                 .clone()
         };
@@ -1247,15 +1578,21 @@ impl Egress {
         };
         let deadline = Instant::now() + wait;
         let Ok(mut guard) = tokio::time::timeout_at(deadline, budget.lock_owned()).await else {
-            return Err(retry(Duration::from_secs_f64(1.0 / rate).max(wait)));
+            return Err(retry(interval.max(wait)));
         };
         if *guard > deadline {
             return Err(retry(guard.saturating_duration_since(Instant::now())));
         }
         tokio::time::sleep_until(*guard).await;
-        *guard = Instant::now() + self.host_interval(host);
+        *guard = Instant::now() + interval;
         Ok(guard)
     }
+}
+/// The pacing slot of an address, apart from every host name's.
+fn address_slot(ip: IpAddr) -> String {
+    format!("address {ip}")
+}
+impl Egress {
     /// The least time between two requests to a host: its rate plus a stable per-host jitter,
     /// which avoids synchronized requests without weakening the minimum interval.
     fn host_interval(&self, host: &str) -> Duration {
@@ -2518,6 +2855,300 @@ mod tests {
             20 * 1024 * 1024
         );
     }
+    /// An answer keeps its `Content-Type` charset; its text is decoded by a byte order mark,
+    /// that charset, or a `<meta>` within the first 1024 bytes, else as UTF-8.
+    #[tokio::test]
+    async fn an_answer_s_text_is_decoded_by_its_charset() {
+        let url = Url::parse("https://example.org/page").unwrap();
+        let japanese = "<title>日本語</title>";
+        let (shift_jis, _, _) = encoding_rs::SHIFT_JIS.encode(japanese);
+        let response = axum::http::Response::builder()
+            .status(200)
+            .header("content-type", "text/html; Charset=\"Shift_JIS\"")
+            .body(shift_jis.to_vec())
+            .unwrap();
+        let fetched = read_response_with(
+            url.clone(),
+            reqwest::Response::from(response),
+            &FetchOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fetched.content_type, "text/html");
+        assert_eq!(fetched.charset.as_deref(), Some("shift_jis"));
+        assert_eq!(fetched.text(), japanese);
+        let meta = |padding: usize| {
+            let mut body =
+                format!("{}<meta charset='shift_jis'>", " ".repeat(padding)).into_bytes();
+            body.extend_from_slice(&shift_jis);
+            decode(&body, None).into_owned()
+        };
+        assert!(meta(0).ends_with(japanese));
+        // Past the first 1024 bytes a declaration is not looked for: UTF-8.
+        assert!(!meta(1100).contains(japanese));
+        // Only a declaration is one: a tag's own `charset`, or an http-equiv `content`; never
+        // a comment, another attribute or a `<meta>` inside another tag's attribute.
+        let declared = |head: &str| {
+            let mut body = head.as_bytes().to_vec();
+            body.extend_from_slice(&shift_jis);
+            decode(&body, None).ends_with(japanese)
+        };
+        for head in [
+            "<meta name=viewport charset=\"Shift_JIS\">",
+            "<META HTTP-EQUIV=\"Content-Type\" CONTENT=\"text/html; charset=Shift_JIS\">",
+            "<meta content='text/html; charset=\"shift_jis\"' http-equiv=content-type>",
+            "<!-- a note --><meta charset=shift_jis />",
+        ] {
+            assert!(declared(head), "{head}");
+        }
+        for head in [
+            "<!-- <meta charset=shift_jis> -->",
+            "<meta data-charset=shift_jis>",
+            "<meta content=\"text/html; charset=shift_jis\">",
+            "<meta name=\"description\" content=\"charset=shift_jis\">",
+            "<div title=\"<meta charset=shift_jis>\"></div>",
+            "<metadata charset=shift_jis>",
+            "<meta http-equiv=content-type content=\"text/html; charset='shift_jis\">",
+            "<meta charset=bogus http-equiv=content-type content=\"text/html; charset=shift_jis\">",
+        ] {
+            assert!(!declared(head), "{head}");
+        }
+        assert_eq!(decode("Grüße".as_bytes(), None), "Grüße");
+        assert_eq!(decode(b"Gr\xfc\xdfe", Some("latin1")), "Grüße");
+        assert_eq!(
+            decode(
+                b"<meta http-equiv=content-type content='text/html;charset=utf-16'>\xc3\xa9",
+                None
+            ),
+            "<meta http-equiv=content-type content='text/html;charset=utf-16'>é"
+        );
+    }
+
+    /// A spent quota (GitHub's rate limit: `X-RateLimit-Remaining: 0`) is waited for until its
+    /// `X-RateLimit-Reset`, at most an hour; a `Retry-After` still wins, and a quota not spent
+    /// names no wait.
+    #[tokio::test]
+    async fn a_spent_quota_is_waited_for_until_its_reset() {
+        let now = std::time::SystemTime::now();
+        let epoch = now.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let options = FetchOptions::default();
+        let answer = |status: u16, headers: &[(&str, String)]| {
+            let mut response = axum::http::Response::builder()
+                .status(status)
+                .header("content-type", "text/plain");
+            for (name, value) in headers {
+                response = response.header(*name, value);
+            }
+            let response = response.body(b"{}".to_vec()).unwrap();
+            read_response_with(
+                Url::parse("https://api.example.org/").unwrap(),
+                reqwest::Response::from(response),
+                &options,
+            )
+        };
+        let spent = |reset: u64| {
+            vec![
+                ("x-ratelimit-remaining", "0".to_owned()),
+                ("x-ratelimit-reset", reset.to_string()),
+            ]
+        };
+        for status in [403, 429] {
+            let f = answer(status, &spent(epoch + 900)).await.unwrap();
+            assert!(
+                (895..=900).contains(&f.retry_after_secs),
+                "{status}: {}",
+                f.retry_after_secs
+            );
+        }
+        let f = answer(403, &spent(epoch + 86400)).await.unwrap();
+        assert_eq!(f.retry_after_secs, 3600);
+        let mut named = spent(epoch + 900);
+        named.push(("retry-after", "120".to_owned()));
+        assert_eq!(answer(403, &named).await.unwrap().retry_after_secs, 120);
+        let left = vec![
+            ("x-ratelimit-remaining", "12".to_owned()),
+            ("x-ratelimit-reset", (epoch + 900).to_string()),
+        ];
+        assert_eq!(answer(403, &left).await.unwrap().retry_after_secs, 60);
+    }
+
+    /// The Fetch standard's bad ports are refused before any lookup or request, on a link, a
+    /// redirect's target and a relay connection; other ports (a homeserver's 6286) are asked.
+    #[tokio::test]
+    async fn bad_ports_are_never_asked() {
+        let transport = Arc::new(Redirect {
+            calls: AtomicUsize::new(0),
+            target: "https://example.org:25/",
+        });
+        let egress = Egress::with_backends(
+            EgressConfig::default(),
+            Arc::new(FakeDns),
+            transport.clone(),
+        );
+        for uri in [
+            "http://example.org:22/",
+            "https://example.org:25/",
+            "http://example.org:6667/",
+            "http://example.org:0/",
+        ] {
+            let error = egress.fetch(uri).await.unwrap_err();
+            assert_eq!(crate::resolver::error_class(&error), "policy", "{uri}");
+            assert!(
+                format!("{error:#}").contains("port blocked"),
+                "{uri}: {error:#}"
+            );
+        }
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
+        // A redirect to a bad port is refused at that hop.
+        let error = egress.fetch("https://example.org:6286/").await.unwrap_err();
+        assert!(format!("{error:#}").contains("port blocked"), "{error:#}");
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+        let error = egress
+            .nostr_request_inner("wss://relay.example:25", serde_json::json!({}), 1000)
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("port blocked"), "{error:#}");
+        assert!(BAD_PORTS.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    /// Two names on one address are paced together: their requests never overlap. Names on two
+    /// addresses do, and so do two services' own hosts on one address (a source's API host, a
+    /// published one), which no link multiplies; a `*.` rule's names are paced by address.
+    #[tokio::test(start_paused = true)]
+    async fn two_names_on_one_address_do_not_overlap() {
+        struct Shared(bool);
+        #[async_trait]
+        impl Dns for Shared {
+            async fn lookup(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>> {
+                let ip = if self.0 || host == "a.example.org" {
+                    "8.8.8.8"
+                } else {
+                    "8.8.4.4"
+                };
+                Ok(vec![SocketAddr::new(ip.parse()?, port)])
+            }
+        }
+        #[derive(Default)]
+        struct Slow {
+            now: AtomicUsize,
+            most: AtomicUsize,
+        }
+        #[async_trait]
+        impl Transport for Slow {
+            async fn get(&self, url: &Url, _: &[SocketAddr]) -> Result<Fetched> {
+                let now = self.now.fetch_add(1, Ordering::SeqCst) + 1;
+                self.most.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                self.now.fetch_sub(1, Ordering::SeqCst);
+                Ok(Fetched::answer(
+                    url.clone(),
+                    200,
+                    "text/plain".into(),
+                    b"ok".to_vec(),
+                ))
+            }
+        }
+        for (shared, a, b, most) in [
+            (true, "a.example.org", "b.example.org", 1),
+            (false, "a.example.org", "b.example.org", 2),
+            (true, "api.one.example", "api.two.example", 2),
+            (true, "www.wikidata.org", "commons.wikimedia.org", 2),
+            (true, "de.wikipedia.org", "fr.wikipedia.org", 1),
+        ] {
+            let transport = Arc::new(Slow::default());
+            let egress = Egress::with_backends(
+                EgressConfig {
+                    host_requests_per_second: 1000.0,
+                    source_rates: [
+                        ("api.one.example".to_owned(), 1000.0),
+                        ("api.two.example".to_owned(), 1000.0),
+                    ]
+                    .into(),
+                    ..Default::default()
+                },
+                Arc::new(Shared(shared)),
+                transport.clone(),
+            );
+            let (a_url, b_url) = (format!("https://{a}/"), format!("https://{b}/"));
+            let (one, two) = tokio::join!(egress.fetch(&a_url), egress.fetch(&b_url));
+            one.unwrap();
+            two.unwrap();
+            assert_eq!(
+                transport.most.load(Ordering::SeqCst),
+                most,
+                "{a} {b} shared {shared}"
+            );
+        }
+    }
+
+    /// A same-host redirect whose new DNS answer is another address takes that address's slot:
+    /// it never overlaps another name's request to that address.
+    #[tokio::test(start_paused = true)]
+    async fn a_redirect_to_another_address_takes_its_slot() {
+        #[derive(Default)]
+        struct Moving(AtomicUsize);
+        #[async_trait]
+        impl Dns for Moving {
+            async fn lookup(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>> {
+                // a.example.org answers 8.8.8.8 first, then 8.8.4.4 (b.example.org's).
+                let ip = if host == "a.example.org" && self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                    "8.8.8.8"
+                } else {
+                    "8.8.4.4"
+                };
+                Ok(vec![SocketAddr::new(ip.parse()?, port)])
+            }
+        }
+        #[derive(Default)]
+        struct Slow {
+            at: std::sync::Mutex<HashMap<IpAddr, usize>>,
+            most: AtomicUsize,
+        }
+        #[async_trait]
+        impl Transport for Slow {
+            async fn get(&self, url: &Url, addresses: &[SocketAddr]) -> Result<Fetched> {
+                let ip = addresses[0].ip();
+                let now = {
+                    let mut at = self.at.lock().unwrap();
+                    let now = at.entry(ip).or_default();
+                    *now += 1;
+                    *now
+                };
+                self.most.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                *self.at.lock().unwrap().get_mut(&ip).unwrap() -= 1;
+                Ok(
+                    if url.path() == "/" && url.host_str() == Some("a.example.org") {
+                        Fetched {
+                            location: Some("/next".into()),
+                            ..Fetched::answer(url.clone(), 302, "text/plain".into(), vec![])
+                        }
+                    } else {
+                        Fetched::answer(url.clone(), 200, "text/plain".into(), b"ok".to_vec())
+                    },
+                )
+            }
+        }
+        let transport = Arc::new(Slow::default());
+        let egress = Egress::with_backends(
+            EgressConfig {
+                host_requests_per_second: 1000.0,
+                ..Default::default()
+            },
+            Arc::new(Moving::default()),
+            transport.clone(),
+        );
+        // a's first hop runs 0–500 ms on 8.8.8.8, its second 500–1000 ms on 8.8.4.4; b asks
+        // 8.8.4.4 at 600 ms.
+        let (a, b) = tokio::join!(egress.fetch("https://a.example.org/"), async {
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            egress.fetch("https://b.example.org/").await
+        });
+        assert_eq!(a.unwrap().url.path(), "/next");
+        b.unwrap();
+        assert_eq!(transport.most.load(Ordering::SeqCst), 1);
+    }
+
     /// A hub's published limit lowers its host's default pace; an operator's entry sets it.
     #[tokio::test(start_paused = true)]
     async fn a_published_limit_paces_its_host() {

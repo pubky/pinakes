@@ -749,7 +749,7 @@ async fn osm_history_and_unconfirmed_fetches_stay_in_derivative_table(pool: PgPo
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn batch_failures_are_per_object_and_upstream_retries_do_not_charge(pool: PgPool) {
+async fn batch_failures_are_per_object_and_only_a_5xx_is_charged(pool: PgPool) {
     use std::sync::atomic::AtomicU16;
     let code = Arc::new(AtomicU16::new(200));
     let mode = code.clone();
@@ -832,9 +832,16 @@ async fn batch_failures_are_per_object_and_upstream_retries_do_not_charge(pool: 
                 "error"
             }
         );
-        let (attempts,dead,delay):(i32,bool,f64)=sqlx::query_as("SELECT attempts,dead_letter,extract(epoch FROM next_attempt_at-now())::float8 FROM resource WHERE osm_id=3").fetch_one(&pool).await.unwrap();
-        assert_eq!(attempts, 0);
+        let (attempts,dead,delay,streak,error):(i32,bool,f64,i32,String)=sqlx::query_as("SELECT attempts,dead_letter,extract(epoch FROM next_attempt_at-now())::float8,timeout_streak,last_error FROM resource WHERE osm_id=3").fetch_one(&pool).await.unwrap();
+        // A 429 is the operator's own quota: no charge. A 5xx starts a streak of waits, which
+        // dead-letters only after days; neither is an attempt, nor is an oversized answer.
+        assert_eq!(attempts, 0, "{status}");
         assert!(!dead);
+        match status {
+            429 => assert_eq!((streak, error.as_str()), (0, "quota")),
+            503 => assert_eq!((streak, error.as_str()), (1, "http_5xx")),
+            _ => {}
+        }
         if status == 413 {
             assert!(delay > 50.0 && delay <= 60.0);
         } else {
@@ -898,11 +905,13 @@ async fn a_cooldown_defers_the_next_batch_at_once(pool: PgPool) {
         .fetch_one(&pool)
         .await
         .unwrap();
+        // The 429 is the operator's own quota, and the job put off by the cooldown waits for
+        // the daemon's budget: neither is charged.
         assert_eq!((attempts, dead), (0, false), "node {id}");
         assert!(delay > 590.0 && delay <= 601.0, "node {id}: {delay}");
         assert_eq!(
             error.as_deref(),
-            Some(if id == 11 { "http_4xx" } else { "rate_limited" })
+            Some(if id == 11 { "quota" } else { "rate_limited" })
         );
     }
     // The second batch sent nothing.
@@ -937,6 +946,12 @@ async fn a_refused_upstream_key_is_not_the_link_s_failure(pool: PgPool) {
         .await
         .unwrap();
     let cfg = QueueConfig::default();
+    let refusals = || {
+        pinakes_core::sources::token_refusals()
+            .into_iter()
+            .find(|(source, _)| *source == "osm")
+            .map_or(0, |(_, n)| n)
+    };
     for (status, class, attempts) in [
         (401, "upstream_denied", 0),
         (403, "upstream_denied", 0),
@@ -945,6 +960,7 @@ async fn a_refused_upstream_key_is_not_the_link_s_failure(pool: PgPool) {
         (302, "http_3xx", 2),
     ] {
         code.store(status, Ordering::SeqCst);
+        let refused_before = refusals();
         sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE osm_id=21")
             .execute(&pool)
             .await
@@ -963,6 +979,13 @@ async fn a_refused_upstream_key_is_not_the_link_s_failure(pool: PgPool) {
         assert_eq!(
             row,
             (attempts, false, Some(class.to_owned())),
+            "status {status}"
+        );
+        // A refused key is counted where the `ProviderKeyRefused` alert reads it; no other
+        // answer is (no other test of this file is refused).
+        assert_eq!(
+            refusals() - refused_before,
+            u64::from(matches!(status, 401 | 403)),
             "status {status}"
         );
     }

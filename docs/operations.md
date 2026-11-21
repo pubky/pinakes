@@ -36,7 +36,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `host_requests_per_second` | `1.0` | Requests per second to any one upstream host. |
 | `host_rates` | `{}` | Per-host overrides of `host_requests_per_second`. Each key is one host name (`api.example.org`; an IPv6 address in brackets), read without regard to case. A key that is a pattern (`*.example.org`), a URL or a name with a path, or two keys for one host, stop startup. |
 | `html_head_bytes` | `4194304` | How far an HTML page past the 1 MB page cap is read (bytes); nothing in the page stops the read earlier. |
-| `max_failures` | `5` | Failures before a resource dead-letters. |
+| `max_failures` | `5` | Failures before a resource dead-letters. A service that keeps answering 5xx, 408 or 429 dead-letters a link only once its failures have lasted three days ([queue](#queue-and-refresh)). |
 | `timeout_grace` | `3` | Timeouts tolerated before they count as failures. |
 | `backoff_secs` | `30` | First retry backoff (seconds). |
 | `max_backoff_secs` | `3600` | Retry backoff ceiling (seconds). |
@@ -84,7 +84,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `event_max_line_bytes` | `65536` | Longest calendar content line (bytes). |
 | `event_max_date_values` | `4096` | Most date values in one calendar property. |
 | `event_feed_body_bytes` | `33554432` | Largest calendar or feed body (bytes). |
-| `event_max_occurrences_per_series` | `50` | Most occurrences one series expands to. |
+| `event_max_occurrences_per_series` | `50` | Most occurrences one series expands to: its upcoming dates first, then its most recent past ones. |
 | `event_max_occurrences_per_feed` | `10000` | Most occurrences one feed yields. |
 | `event_max_components` | `100000` | Most components one calendar may hold. |
 | `event_max_properties` | `1000000` | Most properties one calendar may hold, over all its components. |
@@ -96,7 +96,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `event_months_back` | `1` | Months of past occurrences kept in the horizon. |
 | `event_months_forward` | `12` | Months of future occurrences kept in the horizon. |
 | `geocode_score` | `0.8` | Lowest accepted geocoding score. |
-| `held_retry_secs` | `60` | Retry interval of a held feed snapshot (seconds). |
+| `held_retry_secs` | `60` | Wait before a held feed snapshot's first check (seconds; at least `feed_cadence_floor`); later holds back off from the normal cadence. |
 | `same_event_incoming_kept` | `40` | The most events that may name one event in the same-event hint (each keeps its best twenty). |
 | `same_event_drop_batch` | `500` | Events the same-event sweep drops per transaction. |
 | `feed_max_changes` | `100` | Occurrence changes per snapshot before they become one summary line. |
@@ -275,13 +275,13 @@ so the feed read again after a reset revives only links referenced since. Time a
 not either. To retry one by hand:
 
 ```sql
-UPDATE resource SET dead_letter=false, attempts=0, next_attempt_at=now(),
-  lease_until=NULL, generation=generation+1 WHERE id='<resource_id>';
+UPDATE resource SET dead_letter=false, attempts=0, timeout_streak=0, last_error=NULL,
+  next_attempt_at=now(), lease_until=NULL, generation=generation+1 WHERE id='<resource_id>';
 ```
 
 `pinakesd reextract <route>` revives a route's dead letters too: every row it re-queues gets
-`dead_letter=false` and `attempts=0`. It runs with the daemon stopped and reads the whole route
-again.
+`dead_letter=false`, `attempts=0`, `timeout_streak=0` and `last_error=NULL`. It runs with the
+daemon stopped and reads the whole route again.
 
 **Grouping rebuild.** The daemon stores its grouping policy (its limits and mode) and
 re-queues every membership when it changes, so a changed `groups.cross_container_occurrences`
@@ -389,9 +389,9 @@ one. Its token is a secret, sent only to its service's API and never through a r
 the service refuses (401, or a 403 whose answer names the token) switches the source off for an
 hour (Discogs reads without its credential, Podcast Index pages get web cards), and
 `pinakes_source_token_refusals_total{source}` counts each refusal. That series counts every keyed
-provider's refusals (Discogs, Spotify, TIDAL, TMDB, Podcast Index and Ticketmaster too, as each
-signals one: a 401, a 403 where it means a refused key, or a refused token request; never a 429
-or 5xx), and the `ProviderKeyRefused` alert
+provider's refusals (Discogs, Spotify, TIDAL, TMDB, Podcast Index, Ticketmaster and Nominatim
+(`osm`) too, as each signals one: a 401, a 403 where it means a refused key, or a refused token
+request; never a 429 or 5xx), and the `ProviderKeyRefused` alert
 (`ops/alerts.yml`) reads it. A source
 lowers its service's host to the service's published rate (never above
 `limits.host_requests_per_second`) unless `limits.host_rates` names the host, and a request that
@@ -451,14 +451,19 @@ a record (when every relay answers 404, the owner has no record for five minutes
 forge one, and Pinakes never uses a packet older than the newest it remembers for that key. That
 memory is an accepted limit: it holds the newest timestamp of at most 10,000 keys, apart from the
 cache, and forgets the oldest timestamps of uncached keys first; a forgotten key, or any key
-after a restart, takes the newest packet the relays serve again. A relay that times out, is
-refused by the policy, answers with a redirect (never followed) or serves a packet that does not
-verify is a `connect` failure, retried
-with the usual backoff and, like any failure, dead-lettered after `limits.max_failures`. When no
-relay answered, because each one that failed refused or reset the connection (or Egress waited
-for its host budget, or the request would have waited more than 1.5 s for the relay's host, or
-the relay answered 429), the failure never reached an answer and never dead-letters; after a
-429 the link is read again when the relay's `Retry-After` says.
+after a restart, takes the newest packet the relays serve again. A relay that is refused by the
+policy, answers with a redirect (never followed) or serves a packet that does not verify is a
+`connect` failure, and so is one that times out or answers 5xx beside another relay's 404 or such
+a failure; it is retried with the usual backoff and, like any failure, dead-lettered after `limits.max_failures`. When no
+relay gave a packet or a 404 and each one that failed answered 5xx or did not answer in time, the
+relays are down (`relay_outage`): the link did nothing wrong, so it is read again after the
+longest `Retry-After` a relay named (a minute when none did), with no attempt charged and no
+dead letter. When no relay answered, because each one that failed refused or reset the
+connection (or Egress waited for its host budget, or the request would have waited more than
+1.5 s for the relay's host, or the relay answered 429), the failure never reached an answer and
+never dead-letters. When a relay answered 429 (or Egress waited for its host) and no other relay
+failed otherwise, the link is read again when the relay's `Retry-After` says (or its host is
+free), also when another relay refused the connection or has no record.
 Verified packets are kept for their smallest record TTL, between five minutes
 and a day (10,000 keys at most). It then takes the first endpoint with a public HTTPS (ICANN)
 domain and GETs the object path there with the `pubky-host` header, as Pubky clients address
@@ -655,13 +660,25 @@ links never read before overdue refreshes (after downtime the refreshes that cam
 wait behind new links), then the longest due. A job lease lasts at least `limits.lease_secs`; a 50-object OSM batch gets 760 seconds.
 Failures back off exponentially from `limits.backoff_secs` to `limits.max_backoff_secs` and
 dead-letter after `limits.max_failures`. The first `limits.timeout_grace` consecutive timeouts
-back off without charging an attempt. A request that never got an answer from the upstream (the
+back off without charging an attempt. A service that answers 5xx, 408 or 429 (stored as
+`upstream`, `http_5xx` or `http_4xx`) is read again after the wait it named or the backoff,
+whichever is longer; the backoff doubles up to `limits.max_backoff_secs` while one of these
+answers follows another (the streak is kept in `timeout_streak`), and a longer named wait is never
+cut. These waits are no attempts, so a short outage never dead-letters a link: it dead-letters,
+and turns `error`, only once the failures have lasted three days (the span after which a denial
+turns a link `unreachable`), measured as the backoff of the streak's waits from its first (a
+read brought forward, such as a re-read asked for, counts as one of them); at the defaults that
+is the 79th in a row. Until then an accepted card keeps its status, and a link with
+no card yet shows `error` after `limits.max_failures` of them in a row. A rate limit on the
+operator's own quota (GitHub's token rate limit, a 429 from the operator's Nominatim; stored as
+`quota`) is the daemon's own wait: it charges nothing and keeps the streak. A request that never got an answer from the upstream (the
 connection refused, reset or aborted, or the host unreachable; stored as `connect`) is never
 charged and never dead-letters: it
 backs off up to `limits.max_backoff_secs` for as long as it lasts, its streak is kept in
 `timeout_streak` while `last_error` is `connect`, and a link with no card yet turns `error` after
 `limits.max_failures` of them in a row while it is still retried. Egress's own waits (its host
-budget, a cached failure) keep that streak. A TLS failure (a certificate the host serves) and a
+budget, a cached failure) and the operator's quota keep that streak and an upstream one, and
+charge nothing. A TLS failure (a certificate the host serves) and a
 `connect` failure a resolver names itself (a PKARR relay, a key-pinned homeserver) are answers
 about the link and count. A missing result needs a second fresh fetch to confirm,
 scheduled after `limits.missing_ttl_secs` (at least an hour) for a link with an accepted card, and
@@ -794,8 +811,10 @@ EXDATEs, with the warning `series_rule_unexpanded`. After an upgrade that change
 `pinakesd reextract event`: feeds re-parse at once instead of at their next fetch. A JSON feed (Gancio, a JSON Feed) is parsed as one document,
 so its parsed form can take several times `limits.event_feed_body_bytes` of memory; size that
 limit with the worker count in mind. `webcal://` is fetched over HTTPS and never downgrades. A
-feed-provided refresh interval is clamped to one hour through 30 days. Held snapshots retry after
-`limits.held_retry_secs`, backing off from the normal cadence.
+feed-provided refresh interval is clamped to one hour through 30 days. A held snapshot is read
+again after `limits.held_retry_secs` (at least `limits.feed_cadence_floor`, an hour by default),
+so an identical snapshot confirms it soon; a second hold in a row and later ones back off from
+the normal cadence, doubling each time up to seven days.
 
 `event.utc_series_wall_clock` (default `"x_wr_timezone"`; also `"coordinates"`, `"never"`)
 chooses which zone sources make a series with a UTC DTSTART expand on local wall-clock time
@@ -900,8 +919,9 @@ Nostr identifiers and client URLs use signed NIP-52 events through two HTTP inde
 request per second, Archives at two), paginating `until` windows within
 `limits.max_indexer_pages`; the newest matching revision wins, and `nevent`/`note` pin one. Both
 must miss before absence is accepted. With `event.adapters.websocket`, one relay hint is asked
-after both miss (`limits.websocket_deadline_ms`, one MB, 256 frames, DNS checked and pinned); an
-unfinished subscription never confirms absence. A full tied page, an exhausted budget or an
+whenever no indexer has a match, also while an indexer is down or out of time
+(`limits.websocket_deadline_ms`, one MB, 256 frames, DNS checked and pinned); its signed match is
+used, and neither its silence nor an unfinished subscription ever confirms absence. A full tied page, an exhausted budget or an
 indexer 404 is inconclusive and retries after five minutes without charging an attempt.
 
 Only parser failures fall back to a web card. Upstream failures keep the accepted document and
@@ -1160,8 +1180,10 @@ only the version, what the instance resolves, the limits a client must respect a
 licence. Stored errors are sanitized classes (dns, connect, timeout, http_3xx for a redirect the
 OSM upstream answered, http_4xx, http_5xx, parse,
 policy, too_large for an answer past its size cap, too_complex for a page whose parse ran past
-its CPU, memory or node limit; rate_limited for a link waiting for its host's budget). A link that only
-waits for the daemon's own pace (its host's budget, or a cached failure replayed) is logged at
+its CPU, memory or node limit; rate_limited for a link waiting for its host's budget; quota for
+a rate limit on the operator's own quota). A link that only
+waits for the daemon's own pace (its host's budget, a cached failure replayed, the operator's
+quota) is logged at
 debug (`resolution waits for its host`). A failed resolve
 is logged at warn as `resolution failed`, with the resource id (`resource_id`), the link's host
 (`host`; its scheme for a link without one, never its path), this class (`kind`) and the
