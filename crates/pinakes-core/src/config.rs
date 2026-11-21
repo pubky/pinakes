@@ -1219,7 +1219,10 @@ impl Config {
         // The cache keeps an answer at least an hour: a shorter lifetime would not be kept.
         if !(crate::resolver::egress::MIN_ANSWER_SECS..=86400).contains(&self.egress.discovery_secs)
         {
-            bail!("limits.discovery_cache_secs must be 3600–86400");
+            bail!(
+                "limits.discovery_cache_secs must be {}–86400",
+                crate::resolver::egress::MIN_ANSWER_SECS
+            );
         }
         if !(100..=7000).contains(&self.pubky.pkarr_relay_timeout_ms) {
             bail!("limits.pkarr_relay_timeout_ms must be 100–7000");
@@ -2787,7 +2790,7 @@ limits! {
     /// The body cap of a MusicBrainz or Wikidata answer (bytes, 1–64 MiB).
     hub_body_bytes: usize = |c| c.egress.hub_body_bytes => [|c, v| c.egress.hub_body_bytes = v],
     /// How long an answer the also-on sources, lookups and hubs ask for is shared (seconds,
-    /// 60–86400).
+    /// 3600–86400: the cache keeps a successful answer at least an hour).
     discovery_cache_secs: u64 = |c| c.egress.discovery_secs => [|c, v| c.egress.discovery_secs = v],
     /// Longest calendar content line (bytes).
     event_max_line_bytes: usize = |c| c.event.max_line_bytes => [|c, v| c.event.max_line_bytes = v],

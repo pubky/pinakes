@@ -386,10 +386,11 @@ pub async fn on_youtube_music(pool: &sqlx::PgPool, id: &str, uri: &str) -> anyho
 /// Type and name a resolved card by what its link is, whatever the service's page or oEmbed
 /// says: a track is a `MusicRecording`, an album a `MusicAlbum`, an artist a `MusicGroup` (a
 /// `Person` when MusicBrainz says the artist is one: `artist_type`), a playlist a
-/// `MusicPlaylist`; a video stays as resolved. YouTube is not only music: its channel or
-/// playlist is music only when it is a Topic channel (named `{Artist} - Topic`, YouTube's own
-/// channel of an artist's releases) or a link on YouTube Music (`on_youtube_music`: the card's
-/// link, or another spelling of it, is on `music.youtube.com`); any other stays as resolved. The
+/// `MusicPlaylist`; a video stays as resolved. YouTube is not only music: its channel is music
+/// only when it is a Topic channel (named `{Artist} - Topic`, YouTube's own channel of an
+/// artist's releases) or a link on YouTube Music, and its playlist only on YouTube Music
+/// (`on_youtube_music`: the card's link, or another spelling of it, is on `music.youtube.com`);
+/// any other stays as resolved. The
 /// card's site is the service's name ("Apple Music", "TIDAL", "YouTube"), as derived links show
 /// it. A Bandcamp root (an artist page that features an album) is named after the artist. A card
 /// that did not resolve is left alone.
