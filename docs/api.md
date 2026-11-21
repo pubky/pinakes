@@ -1480,7 +1480,10 @@ Two recordings are possibly the same when all of these hold:
   names nothing);
 - their lengths, when both are known (the `duration` fact, else the page's), are within 3 s.
 
-`score` is 1 when both lengths are known and agree, 0.7 when one is unknown. A member of the
+`score` is 1 when both lengths are known and agree, 0.7 when one is unknown. Recordings whose
+artist and length (when they have one) a source states as facts come first, then those whose
+own page alone states them, each by score: any page can copy a track's title, artist and length
+into its markup, and that never puts it ahead of a recording a service vouches for. A member of the
 card's own group and an alias are never listed, so a pair that a key later joins drops out of
 the hint by itself. It is a hint, like a group, and less: nothing is merged, counted or ranked
 by it, and each recording keeps its own card.
