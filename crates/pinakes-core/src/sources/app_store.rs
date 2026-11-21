@@ -7,7 +7,8 @@
 //! sell the app, it asks the storefront that sold it at the last read (the card's `storefront`
 //! fact, kept with the stored card), then the storefront a link of the app named (the latest
 //! seen since the daemon started). A link's storefront counts only once its lookup returned the
-//! app: one that does not sell it is forgotten and never decides the card. An app no asked
+//! app: one that does not sell it (an empty answer, or a 400 for a code that is no storefront)
+//! is forgotten and never decides the card. Any other failed lookup is a retry. An app no asked
 //! storefront sells is missing. The app's `bundleId` is Apple's alone: it is a fact, never the
 //! Android package.
 use super::{
@@ -15,7 +16,7 @@ use super::{
     Example, Source,
 };
 use crate::model::ResourceMeta;
-use anyhow::{ensure, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use async_trait::async_trait;
 use std::collections::BTreeMap;
 
@@ -114,12 +115,27 @@ pub fn request(id: &str, cc: Option<&str>) -> Option<Request> {
     Request::get(&url).map(|r| r.admit(&["text/javascript"]))
 }
 
+/// The app in storefront `cc`'s lookup, or `None` when that storefront does not sell it: an
+/// answer with no result, or the 400 Apple answers for a country code that is no storefront (the
+/// ID was checked before asking, so the code is what it refuses). Any other failure (a body that
+/// is not a lookup, a record of another app, another status) is an error, so the read is retried.
+fn sold(status: u16, raw: &[u8], id: &str) -> Result<Option<Card>> {
+    match status {
+        200 => parse(status, raw, id),
+        400 => Ok(None),
+        s => bail!("unexpected status {s}"),
+    }
+}
+
 /// The app, or `None` when the lookup finds no app by this ID.
 pub fn parse(status: u16, raw: &[u8], id: &str) -> Result<Option<Card>> {
     let Some(v) = json(status, raw, &[404])? else {
         return Ok(None);
     };
-    let Some(app) = v["results"].as_array().and_then(|r| r.first()) else {
+    let results = v["results"]
+        .as_array()
+        .context("the answer is not a lookup")?;
+    let Some(app) = results.first() else {
         return Ok(None);
     };
     ensure!(
@@ -243,29 +259,29 @@ impl Source for AppStore {
         let mut card = parse(f.status, &f.body, &id)?;
         let mut from = None;
         // The US storefront does not sell it: ask the one the card was read from, which decides
-        // as the US one does.
+        // the card when it answers (`sold`).
         let known = cx
             .stored(uri, "storefront")
             .filter(|cc| storefront(cc) && cc != "us");
         if let (None, Some(cc)) = (&card, &known) {
             let f = fetch(cx, &request(&id, Some(cc)).context("no request")?).await?;
-            card = parse(f.status, &f.body, &id)?;
+            card = sold(f.status, &f.body, &id)?;
             from = known.clone();
         }
-        // Then the one a link named, which counts only once it returned the app: a lookup that
-        // fails for it (a code Apple does not know) is one more storefront that does not sell it,
-        // and only a busy or failing service is a retry.
+        // Then the one a link named, which counts only once it returned the app: one that does
+        // not sell it (`sold`) is forgotten, and a lookup that fails otherwise is a retry that
+        // keeps it.
         let linked = cc
             .or_else(|| linked(&id))
             .filter(|cc| cc != "us" && Some(cc) != known.as_ref());
         if let (None, Some(cc)) = (&card, linked) {
             let f = fetch(cx, &request(&id, Some(&cc)).context("no request")?).await?;
-            match parse(f.status, &f.body, &id) {
-                Ok(Some(found)) => {
+            match sold(f.status, &f.body, &id)? {
+                Some(found) => {
                     card = Some(found);
                     from = Some(cc);
                 }
-                _ => forget(&id, &cc),
+                None => forget(&id, &cc),
             }
         }
         Ok(match card {
@@ -509,11 +525,71 @@ mod tests {
         );
     }
 
+    /// A storefront lookup says "does not sell it" only with an empty answer or the 400 of a code
+    /// that is no storefront; a body that is not a lookup, a record of another app or any other
+    /// status is a retry, and the link's storefront is kept for it. The stored storefront counts
+    /// the same way. Each case is its own app (made-up IDs), so the links seen do not mix.
+    #[tokio::test(start_paused = true)]
+    async fn only_an_empty_answer_or_an_unknown_storefront_does_not_sell_it() {
+        use crate::model::Status;
+        const JS: &str = "text/javascript";
+        let us = |id: &str| format!("https://itunes.apple.com/lookup?id={id}");
+        let de = |id: &str| format!("https://itunes.apple.com/lookup?id={id}&country=de");
+        let empty = read("lookup-missing.json");
+        let cases: [(&str, u16, Vec<u8>, bool); 8] = [
+            ("900000001", 200, empty.clone(), true),
+            ("900000002", 400, read("lookup-1225135057-zz.json"), true),
+            ("900000003", 200, b"<html>busy</html>".to_vec(), false),
+            ("900000004", 200, read("lookup-874139669.json"), false),
+            ("900000005", 503, Vec::new(), false),
+            ("900000006", 403, Vec::new(), false),
+            // JSON that is no lookup, and a 404, which the lookup never answers.
+            ("900000007", 200, b"{}".to_vec(), false),
+            ("900000008", 404, empty.clone(), false),
+        ];
+        let urls: Vec<(String, String)> = cases.iter().map(|(id, ..)| (us(id), de(id))).collect();
+        let mut routes = Vec::new();
+        for ((_, status, body, _), (us, de)) in cases.iter().zip(&urls) {
+            routes.push((us.as_str(), 200, JS, empty.clone()));
+            routes.push((de.as_str(), *status, JS, body.clone()));
+        }
+        let (egress, _) = fixture::egress(routes);
+        let cx = crate::sources::Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        for (id, status, _, sells_not) in &cases {
+            AppStore.alias_root(&format!("https://apps.apple.com/de/app/id{id}"));
+            let root = page(id);
+            let read = AppStore.resolve(&cx, &root).await;
+            if *sells_not {
+                assert_eq!(read.unwrap().status, Status::Missing, "{id} {status}");
+                assert_eq!(linked(id), None, "{id}: forgotten");
+            } else {
+                assert!(read.is_err(), "{id} {status}: a retry");
+                assert_eq!(linked(id).as_deref(), Some("de"), "{id}: kept");
+                // The storefront the card was read from: the same failure is a retry too.
+                forget(id, "de");
+                let read =
+                    crate::sources::with_stored(stored(&root, "de"), AppStore.resolve(&cx, &root))
+                        .await;
+                assert!(read.is_err(), "{id} {status}: stored storefront, a retry");
+            }
+        }
+        // A stored storefront Apple no longer knows (400) is one that does not sell the app.
+        let root = page("900000002");
+        let doc = crate::sources::with_stored(stored(&root, "de"), AppStore.resolve(&cx, &root))
+            .await
+            .unwrap();
+        assert_eq!(doc.status, Status::Missing);
+    }
+
     #[test]
     fn missing_mismatched_and_failed() {
         assert_eq!(parse(200, &read("lookup-missing.json"), "1").unwrap(), None);
         assert!(parse(200, &read("lookup-874139669.json"), "874139670").is_err());
         assert!(parse(200, b"<html>", "874139669").is_err());
+        assert!(parse(200, b"{}", "874139669").is_err());
         assert!(parse(500, b"", "874139669").is_err());
     }
 }

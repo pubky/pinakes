@@ -26,10 +26,14 @@ result; then the read asks, with `GET https://itunes.apple.com/lookup?id={id}&co
 2. when that one does not sell it either, or the card has none, the storefront the latest link of
    the app named since the daemon started (the country in the link).
 
+A storefront does not sell the app when its lookup answers no result, or answers 400 (a code
+that is no storefront). Any other failure of a storefront lookup (an answer that is not a lookup,
+a record of another app, another status) is retried later and decides nothing.
+
 A storefront from a link counts only once its lookup returned the app (the card then keeps it):
-one that does not sell the app, or a code that is no storefront (the lookup answers 400), is
-forgotten once asked and never decides the card, so tagging such a link leaves a card read from another storefront as it is. An app no
-asked storefront sells is `missing`.
+one that does not sell the app is forgotten once asked and never decides the card, so tagging
+such a link leaves a card read from another storefront as it is. An app no asked storefront
+sells is `missing`.
 
 ## Card
 
