@@ -1357,7 +1357,8 @@ async fn the_production_queue_types_and_names_music_links(pool: PgPool) {
         }
     }
     // A playlist tagged on YouTube Music: an alias of its www.youtube.com spelling.
-    let on_music = "https://music.youtube.com/playlist?list=OLAK5uy_nEGbRK3IZ018QZqnVmZtq-0k-vtJdysnA";
+    let on_music =
+        "https://music.youtube.com/playlist?list=OLAK5uy_nEGbRK3IZ018QZqnVmZtq-0k-vtJdysnA";
     store::ensure_resource(&pool, on_music).await.unwrap();
     let expected = [
         (

@@ -26,8 +26,7 @@ impl Source for DeezerSource {
         "deezer"
     }
     fn applies(&self, subject: &Subject) -> bool {
-        own_object(&subject.uri).is_some()
-            || reverse_subject(subject, Service::Deezer).is_some()
+        own_object(&subject.uri).is_some() || reverse_subject(subject, Service::Deezer).is_some()
     }
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
         let link = own_object(&subject.uri);
@@ -159,4 +158,3 @@ mod tests {
         );
     }
 }
-

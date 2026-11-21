@@ -431,7 +431,10 @@ async fn deleting_a_curation_returns_its_members_to_their_keys(pool: PgPool) {
     assert_eq!(public, 405);
     assert_eq!(gid(&pool, &c).await, id);
     let admin = api::admin_router(state);
-    assert_eq!(admin.clone().oneshot(delete(&id)).await.unwrap().status(), 204);
+    assert_eq!(
+        admin.clone().oneshot(delete(&id)).await.unwrap().status(),
+        204
+    );
     common::drain_groups(&pool, &Default::default()).await;
     let pinned: i64 = sqlx::query_scalar("SELECT count(*) FROM group_override")
         .fetch_one(&pool)
@@ -448,7 +451,10 @@ async fn deleting_a_curation_returns_its_members_to_their_keys(pool: PgPool) {
         .unwrap();
     assert_ne!(curated, Some(true));
     // Undone once: no curated group any more. An invalid ID is refused.
-    assert_eq!(admin.clone().oneshot(delete(&id)).await.unwrap().status(), 404);
+    assert_eq!(
+        admin.clone().oneshot(delete(&id)).await.unwrap().status(),
+        404
+    );
     assert_eq!(admin.oneshot(delete("x")).await.unwrap().status(), 400);
 }
 

@@ -1309,30 +1309,85 @@ mod tests {
         let upc = ["upc:0602517416987"];
         let both = ["isrc:GBUM71029604", "upc:0602517416987"];
         for (uri, keys, asked) in [
-            ("https://www.youtube.com/watch?v=bSnlKl_PoQU", &isrc[..], Some((Level::Track, "isrc"))),
-            ("https://www.deezer.com/track/1171872", &isrc[..], Some((Level::Track, "isrc"))),
-            ("https://open.spotify.com/album/4m2880jivSbbyEGAKfITCa", &upc[..], Some((Level::Album, "upc"))),
-            ("https://www.youtube.com/playlist?list=OLAK5uy_kHcT8rC7yXBgYsSvrqrCN8i4KmDrhHl8s", &upc[..], Some((Level::Album, "upc"))),
-            ("https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69", &isrc[..], Some((Level::Track, "isrc"))),
-            ("https://musicbrainz.org/release/30702389-5c67-4438-9ea0-2351c8de0f1d", &upc[..], Some((Level::Album, "upc"))),
+            (
+                "https://www.youtube.com/watch?v=bSnlKl_PoQU",
+                &isrc[..],
+                Some((Level::Track, "isrc")),
+            ),
+            (
+                "https://www.deezer.com/track/1171872",
+                &isrc[..],
+                Some((Level::Track, "isrc")),
+            ),
+            (
+                "https://open.spotify.com/album/4m2880jivSbbyEGAKfITCa",
+                &upc[..],
+                Some((Level::Album, "upc")),
+            ),
+            (
+                "https://www.youtube.com/playlist?list=OLAK5uy_kHcT8rC7yXBgYsSvrqrCN8i4KmDrhHl8s",
+                &upc[..],
+                Some((Level::Album, "upc")),
+            ),
+            (
+                "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69",
+                &isrc[..],
+                Some((Level::Track, "isrc")),
+            ),
+            (
+                "https://musicbrainz.org/release/30702389-5c67-4438-9ea0-2351c8de0f1d",
+                &upc[..],
+                Some((Level::Album, "upc")),
+            ),
             // Without the key of its level: nothing to ask.
-            ("https://www.youtube.com/watch?v=bSnlKl_PoQU", &upc[..], None),
-            ("https://musicbrainz.org/release/30702389-5c67-4438-9ea0-2351c8de0f1d", &isrc[..], None),
+            (
+                "https://www.youtube.com/watch?v=bSnlKl_PoQU",
+                &upc[..],
+                None,
+            ),
+            (
+                "https://musicbrainz.org/release/30702389-5c67-4438-9ea0-2351c8de0f1d",
+                &isrc[..],
+                None,
+            ),
             // No track or album.
             ("https://www.deezer.com/artist/27", &both[..], None),
-            ("https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711", &both[..], None),
-            ("https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M", &both[..], None),
+            (
+                "https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711",
+                &both[..],
+                None,
+            ),
+            (
+                "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M",
+                &both[..],
+                None,
+            ),
             ("https://example.org/track", &both[..], None),
         ] {
-            for own in [Service::Deezer, Service::AppleMusic, Service::Spotify, Service::Tidal] {
-                assert_eq!(reverse_subject(&subject(uri, keys), own), asked, "{uri} on {own:?}");
+            for own in [
+                Service::Deezer,
+                Service::AppleMusic,
+                Service::Spotify,
+                Service::Tidal,
+            ] {
+                assert_eq!(
+                    reverse_subject(&subject(uri, keys), own),
+                    asked,
+                    "{uri} on {own:?}"
+                );
             }
         }
         // A service's own links are never asked by value.
         for (uri, own) in [
             ("https://www.deezer.com/track/1171872", Service::Deezer),
-            ("https://music.apple.com/album/1097861387", Service::AppleMusic),
-            ("https://open.spotify.com/album/4m2880jivSbbyEGAKfITCa", Service::Spotify),
+            (
+                "https://music.apple.com/album/1097861387",
+                Service::AppleMusic,
+            ),
+            (
+                "https://open.spotify.com/album/4m2880jivSbbyEGAKfITCa",
+                Service::Spotify,
+            ),
             ("https://tidal.com/album/3524504", Service::Tidal),
         ] {
             assert_eq!(reverse_subject(&subject(uri, &both), own), None, "{uri}");

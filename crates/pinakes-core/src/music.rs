@@ -362,7 +362,11 @@ pub fn parse(uri: &str) -> Option<Link> {
 /// another spelling of it (an alias, `music.youtube.com/…`), is on `music.youtube.com`. Asked
 /// only for those cards ([`type_card`]).
 pub async fn on_youtube_music(pool: &sqlx::PgPool, id: &str, uri: &str) -> anyhow::Result<bool> {
-    let host = |u: &str| url::Url::parse(u).ok().and_then(|u| u.host_str().map(str::to_owned));
+    let host = |u: &str| {
+        url::Url::parse(u)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_owned))
+    };
     if !parse(uri).is_some_and(|l| {
         l.service == Service::YouTube && matches!(l.level, Level::Artist | Level::Playlist)
     }) {
@@ -1027,16 +1031,22 @@ mod tests {
             d.type_name
         };
         let channel = "https://www.youtube.com/channel/UCq19-LqvG35A-30oyAiPiqA";
-        let playlist =
-            "https://www.youtube.com/playlist?list=PLFgquLnL59alCl_2TQvOiD5Vgm1hCaGSI";
+        let playlist = "https://www.youtube.com/playlist?list=PLFgquLnL59alCl_2TQvOiD5Vgm1hCaGSI";
         assert_eq!(card(channel, "Cooking at home", false), "WebPage");
         assert_eq!(card(channel, "Queen - Topic", false), "MusicGroup");
         assert_eq!(card(channel, "Queen", true), "MusicGroup");
         assert_eq!(card(playlist, "Holiday videos", false), "WebPage");
-        assert_eq!(card(playlist, "A Night at the Opera", true), "MusicPlaylist");
+        assert_eq!(
+            card(playlist, "A Night at the Opera", true),
+            "MusicPlaylist"
+        );
         // Other services' artists and playlists are music whatever their names.
         assert_eq!(
-            card("https://www.deezer.com/artist/399", "Cooking at home", false),
+            card(
+                "https://www.deezer.com/artist/399",
+                "Cooking at home",
+                false
+            ),
             "MusicGroup"
         );
     }
@@ -1104,7 +1114,12 @@ mod tests {
         let mut d = ResourceMeta::new("https://www.youtube.com/watch?v=dQw4w9WgXcQ", "media", 3600);
         d.site = "www.youtube.com".into();
         d.set_type("VideoObject");
-        type_card("https://www.youtube.com/watch?v=dQw4w9WgXcQ", None, false, &mut d);
+        type_card(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            None,
+            false,
+            &mut d,
+        );
         assert_eq!(
             (d.type_name.as_str(), d.site.as_str()),
             ("VideoObject", "YouTube")
@@ -1123,7 +1138,12 @@ mod tests {
         assert!(d.description.is_none());
         // A solo artist, as MusicBrainz says.
         let mut d = ResourceMeta::new("https://www.deezer.com/artist/1", "web", 3600);
-        type_card("https://www.deezer.com/artist/1", Some("Person"), false, &mut d);
+        type_card(
+            "https://www.deezer.com/artist/1",
+            Some("Person"),
+            false,
+            &mut d,
+        );
         assert_eq!(d.type_name, "Person");
     }
 
