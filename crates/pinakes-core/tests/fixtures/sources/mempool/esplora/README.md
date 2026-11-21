@@ -9,3 +9,7 @@ The data is public blockchain data.
 
 More answers were recorded on 2026-11-11 the same way for the cards' `related` lists (a block's
 status and coinbase id, an address's transaction list); `provenance.json` lists them.
+
+A testnet4 coinbase transaction (`testnet4-tx-coinbase-1000.json`, block 1,000's first) was
+recorded on 2026-11-21 the same way, with `pinakes/0.1.0 (+https://pubky.app)`, for the testnet4
+fallback.
