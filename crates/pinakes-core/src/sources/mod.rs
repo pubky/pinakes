@@ -806,25 +806,6 @@ pub fn apply_title(
         .iter()
         .any(|s| s.apply_title(uri, title, description, doc))
 }
-/// The card the switched-on source reading `uri` makes of it, `None` when no source reads it,
-/// its source declined it or the object does not exist: for a source whose card builds on another
-/// object's (an SEC release on the Federal Register document that publishes it), by the other
-/// object's identifier alone.
-pub async fn card_of(cx: &Context<'_>, uri: &str) -> Result<Option<ResourceMeta>> {
-    let source = {
-        let switches = SWITCHES.read().unwrap_or_else(|e| e.into_inner());
-        reading(uri).filter(|s| switches.as_ref().is_none_or(|c| c.enabled(s.name())))
-    };
-    let Some(source) = source else {
-        return Ok(None);
-    };
-    match source.resolve(cx, uri).await {
-        Ok(doc) if doc.status == Status::Ok => Ok(Some(doc)),
-        Ok(_) => Ok(None),
-        Err(error) if error.is::<Declined>() => Ok(None),
-        Err(error) => Err(error),
-    }
-}
 /// The token the daemon started with for `source` (`configure`).
 pub fn token(source: &str) -> Option<crate::event::adapters::SecretKey> {
     let switches = SWITCHES.read().unwrap_or_else(|e| e.into_inner());

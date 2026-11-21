@@ -5,7 +5,7 @@ card comes from its header (`{accession}.hdr.sgml`, about 1 KB); the filed docum
 often several megabytes, are never fetched. Public data; no key. EDGAR's [access
 rules](https://www.sec.gov/os/accessing-edgar-data) ask for at most ten requests per second and a
 User-Agent with an email address: while `http.contact` is empty, EDGAR links wait (they are retried
-hourly) instead of being sent; an SRO release, read from the Federal Register, does not wait.
+hourly) instead of being sent; an SRO release, whose card needs no request, does not wait.
 The source keeps well under that limit: five requests per second for `www.sec.gov` (where a
 `sec.gov` link is read too) and two for `data.sec.gov`, never above
 `limits.host_requests_per_second` (one by default).
@@ -37,24 +37,25 @@ A **company** is named by its CIK: `https://www.sec.gov/cgi-bin/browse-edgar?act
 
 An **SRO release** (a self-regulatory organization's rule change as the SEC publishes it,
 `https://www.sec.gov/files/rules/sro/{org}/{year}/{release}.pdf`, and its exhibits
-`{release}-{exhibit}.pdf`) is its own resource. The PDF is never fetched: the card comes from the
-Federal Register document that publishes the release, found by its docket id `Release No.
-{release}` (an exact match; a release number names one document).
+`{release}-{exhibit}.pdf`) is its own resource. The PDF is never fetched and nothing is asked: the
+card is the release's own, from its link. The Federal Register document that publishes the
+release joins it through the `federal_register` also-on source, which finds the document by its
+docket id `Release No. {release}`.
 
 ## What it reads
 
 - A filing or document: `…/{accession}.hdr.sgml`; for a document also the filing's
   `{accession}-index.htm`, for the document's type and description.
 - A company: `https://data.sec.gov/submissions/CIK{cik}.json`.
-- An SRO release: the Federal Register API's documents under docket `{release}`, then that
-  document's record (see federal_register).
+- An SRO release: nothing.
 
 ## Card
 
 A filing is a `Report` named "Form {form} · {primary filer}", e.g. "Form 8-K · Twenty One Capital,
 Inc.", described as "Filed {date} · period {date} · items {items}" and, for an ownership filing,
 "reporting owner {owners}". A company is a `Corporation` with its
-name, described by its industry (SIC description).
+name, described by its industry (SIC description). An SRO release is a `Report` named "Release
+No. {release}".
 
 | Fact | Meaning |
 | --- | --- |
@@ -71,7 +72,7 @@ name, described by its industry (SIC description).
 | `page_url` | The filing's index page |
 | `document`, `exhibit`, `exhibit_description` | For a document: its file name, its type (`EX-99.1`) and description |
 | `tickers`, `state_of_incorporation`, `lei` | For a company |
-| `release`, `document`, `federal_register` | For an SRO release: its number, the file, and the number of the Federal Register document it joined, whose facts the card also carries (a `Legislation` card; a `Report` named "Release No. {release}" until the Federal Register publishes it) |
+| `release`, `document` | For an SRO release: its number and the file |
 
 ## Examples
 

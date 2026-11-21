@@ -260,7 +260,7 @@ Shared code stays (`sources/kit.rs`, `sources/social.rs`, `sources/biodiversity.
 `also_on/*_api.rs`); code only one source uses is in that source's files, so a removal leaves no
 unused code behind. The exceptions stay as shared code: test helpers for any source, a hook of the
 `Source` trait that one source implements today (`apply_title`), and helpers in `sources/mod.rs` and
-`sources/kit.rs` with one caller today (`card_of`, `kit::unix_ms`). Shared tables and the stored
+`sources/kit.rs` with one caller today (`kit::unix_ms`). Shared tables and the stored
 document's fields stay as they are, also when the source that goes was the only one to fill them: a
 card type in `data/local-types.json` or `kit::DATED` (the Bitcoin types), a related entry's
 `amount_sat`. A source that needs to know whether another one runs asks by its ID
