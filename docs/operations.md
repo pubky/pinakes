@@ -66,7 +66,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `preview_uri_requests_per_minute` | `30` | Preview requests per minute per URI. |
 | `preview_cache_capacity` | `10000` | The same table's size when a preview adds its client address and link (100–100000); past it the oldest entry (an API client's too) is forgotten with its used budget. Keep it equal to `api_cache_capacity`. |
 | `preview_new_per_hour` | `1000` | New previews per hour for the whole instance; over it `POST /v1/resolve` answers 503. |
-| `preview_new_per_client_per_hour` | `0` | New previews per hour one client address may take (0: no share); over it `POST /v1/resolve` answers 429. |
+| `preview_new_per_client_per_hour` | `100` | New previews per hour one client address may take (0: no share); over it `POST /v1/resolve` answers 429. |
 | `podcast_items` | `2000` | Podcast feed items read for a show's or an episode's card. A show's episode list looks at a feed's first 2000 items at most (fewer on a feed's own card when this is lower) and keeps the newest 1000. |
 | `group_max_members` | `256` | Most members of one automatic group. |
 | `group_max_distance_m` | `500.0` | Farthest two located members of one group (metres). |
@@ -473,10 +473,17 @@ their load to one request per owner and TTL.
 
 ### Clients and budgets
 
-Every public `/v1` route shares the direct-peer IP budget (`api.requests_per_minute`), and
-previews have their own per-IP and per-URI budgets. Forwarded headers are deliberately ignored:
-behind a reverse proxy the proxy's address gets the aggregate budget, so set client-IP limits at
-the edge.
+Every public `/v1` route shares the per-IP budget (`api.requests_per_minute`), and previews have
+their own per-IP and per-URI budgets and a per-client share of the hour's new previews; ODbL dump
+downloads are counted per address too. The address a request is counted under is the connecting
+peer's, unless the peer is in `api.trusted_proxies` (addresses or networks, such as
+`["127.0.0.1", "172.17.0.0/16"]`; empty by default). From a trusted proxy it is the right-most
+`X-Forwarded-For` entry that is not itself a trusted proxy: each proxy appends the address it was
+connected from, so whatever a client wrote to the left of that is never read. With no such entry
+(no header, every entry a trusted proxy, or one that is no address) the proxy's own address is
+used. From a peer not in the list the header is never read, so leave the list empty where clients
+connect directly, and list exactly the proxies that set the header (a proxy that passes on a
+client's header without appending its peer lets clients choose their address).
 
 CORS: `api.cors_allow_origins` (default `["*"]`, safe because the public API takes no cookies or
 tokens and writes nothing but budgeted previews) lets browser apps on other origins call the
@@ -558,12 +565,11 @@ most. A Nexus outage leaves cached data served and polling retries.
 `POST /v1/resolve` stores at most `limits.preview_new_per_hour` (1000) links the instance did not
 know in any hour, whoever asks. Over it, a new link gets 503 with `Retry-After` (the seconds until
 the oldest of the hour's previews is an hour old) and nothing is stored; a known link still
-reads, and the per-client budget's 429 comes first. With
-`limits.preview_new_per_client_per_hour` set (0, no share, by default), one client address takes
-at most that many of them: over it, that client gets 429 with `Retry-After` and the others go on.
-Set it only where clients reach the listener directly: the share is keyed on the connecting
-address, as the per-IP budgets are, and behind a reverse proxy every client has the proxy's, so a
-share would cap the whole instance. A place is kept only by the request that stored the link; one
+reads, and the per-client budget's 429 comes first. One client address takes at most
+`limits.preview_new_per_client_per_hour` (100; 0 is no share) of them: over it, that client gets
+429 with `Retry-After` and the others go on. The share is keyed on the client address the per-IP
+budgets use ([Clients and budgets](#clients-and-budgets)): behind a reverse proxy, list it in
+`api.trusted_proxies`, or every client has the proxy's address and one share caps them all. A place is kept only by the request that stored the link; one
 whose request fails or goes away first is given back. The window is in memory and starts empty at
 startup. `pinakes_preview_refused_total{limit}` counts the refusals, `instance` for the hour and
 `client` for a share (alert `PreviewCapacityReached` on either),

@@ -914,11 +914,11 @@ feed item's id that is such a link is kept by its hash, and a change line names 
 a link written scheme-relative (`//host/p`) or as `webcal:` without `//` counts too. Such a link is never sent to another service: also-on lookups (the hubs, the
 Wayback Machine) and oEmbed providers skip it, the `social` tool leaves it out of what it asks the Nexus, and it is never kept as another link's alias. A
 resource only previewed, never referenced, is not a search result and expires after `limits.preview_grace_hours` (a day). Previews are limited per
-client IP and per URI (`limits.preview_requests_per_minute`, `limits.preview_uri_requests_per_minute`,
+client address (the connecting one, or behind a proxy in `api.trusted_proxies` the one it
+forwards) and per URI (`limits.preview_requests_per_minute`, `limits.preview_uri_requests_per_minute`,
 30 each); a 429 carries `Retry-After: 60`. The instance stores at most
-`limits.preview_new_per_hour` (1000) links it did not know in any hour, and, when the operator sets
-`limits.preview_new_per_client_per_hour` (no share by default), one client address at most that
-many of them: over the first, a new link gets 503, over the second 429, each with `Retry-After`
+`limits.preview_new_per_hour` (1000) links it did not know in any hour, and one client address at
+most `limits.preview_new_per_client_per_hour` (100; 0 is no share) of them: over the first, a new link gets 503, over the second 429, each with `Retry-After`
 (seconds), and nothing is stored, while a known link still reads.
 
 Statuses:
@@ -2005,8 +2005,10 @@ Coordinate-derived time zones use ODbL boundary data too; see `data/README.md`.
 
 ## Limits and errors
 
-Every public route (`/v1`, Swagger UI, the agents' guide and index, and `/mcp`) shares a per-IP budget on the direct peer address
-(`api.requests_per_minute`, 120; forwarded headers are not trusted). A search costs
+Every public route (`/v1`, Swagger UI, the agents' guide and index, and `/mcp`) shares a per-IP budget on the client address
+(`api.requests_per_minute`, 120): the connecting address, or behind a reverse proxy listed in
+`api.trusted_proxies` the right-most `X-Forwarded-For` entry that is not one of them
+([operations](operations.md#clients-and-budgets)). A search costs
 `limits.reach_cost` (6) units for each of `reach` and `boost` (each reads a set from Nexus),
 charged before any Nexus call, `limits.related_cost` (6) for `related`, all of them together
 when it has several; every other request costs one.

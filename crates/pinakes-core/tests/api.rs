@@ -1031,13 +1031,12 @@ async fn one_client_takes_at_most_its_share_of_new_previews(pool: PgPool) {
     assert_eq!(refused.with_label_values(&["client"]).get(), 1);
 }
 
-/// The per-client share of new previews is off unless the operator sets it: behind the reverse
-/// proxy the deployment asks for, every client has the proxy's address, and a share would cap the
-/// whole instance.
+/// The per-client share of new previews is 100 an hour by default; 0 is no share.
 #[test]
-fn the_per_client_share_is_off_unless_set() {
-    assert_eq!(Config::default().preview_new_per_client_per_hour, 0);
-    assert!(Config::from_value(json!({"limits": {"preview_new_per_client_per_hour": 0}})).is_ok());
+fn the_per_client_share_is_100_unless_set() {
+    assert_eq!(Config::default().preview_new_per_client_per_hour, 100);
+    let off = Config::from_value(json!({"limits": {"preview_new_per_client_per_hour": 0}}));
+    assert_eq!(off.unwrap().preview_new_per_client_per_hour, 0);
 }
 
 /// `store::ensure_resource_created` says whether its call created the row: the first call for a
@@ -5272,4 +5271,180 @@ async fn healthz_answers_on_the_admin_listener_from_the_database(pool: PgPool) {
         StatusCode::SERVICE_UNAVAILABLE
     );
     assert!(started.elapsed() < std::time::Duration::from_secs(3));
+}
+
+/// The client address behind `api.trusted_proxies`: the peer itself when it is not a trusted
+/// proxy (its `X-Forwarded-For` is never read), else the right-most entry that is not a trusted
+/// proxy, so entries a client wrote to the left of its own are ignored.
+#[test]
+fn the_client_address_is_the_right_most_untrusted_forwarded_hop() {
+    let trusted: Vec<ipnet::IpNet> = [
+        "10.0.0.0/8".parse().unwrap(),
+        "192.0.2.9/32".parse().unwrap(),
+    ]
+    .into();
+    let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+    let forwarded = |values: &[&str]| {
+        let mut headers = HeaderMap::new();
+        for value in values {
+            headers.append("x-forwarded-for", value.parse().unwrap());
+        }
+        headers
+    };
+    let client =
+        |peer: &str, values: &[&str]| api::client_address(ip(peer), &forwarded(values), &trusted);
+    // An untrusted peer is the client, whatever it sends.
+    assert_eq!(client("203.0.113.5", &["198.51.100.1"]), ip("203.0.113.5"));
+    // A trusted peer: the address it forwards.
+    assert_eq!(client("10.1.2.3", &["198.51.100.1"]), ip("198.51.100.1"));
+    // Spoofed entries to the left of the one the proxy appended are ignored, and so are the
+    // trusted proxies on the way.
+    assert_eq!(
+        client("10.1.2.3", &["1.1.1.1, 2.2.2.2, 198.51.100.1, 192.0.2.9"]),
+        ip("198.51.100.1")
+    );
+    assert_eq!(
+        client("10.1.2.3", &["1.1.1.1", "198.51.100.1:4711, 10.9.9.9"]),
+        ip("198.51.100.1")
+    );
+    assert_eq!(
+        client("10.1.2.3", &["[2001:db8::7]:443"]),
+        ip("2001:db8::7")
+    );
+    // A byte that is no text in a spoofed entry does not hide the one the proxy appended.
+    let mut spoofed = HeaderMap::new();
+    spoofed.append(
+        "x-forwarded-for",
+        axum::http::HeaderValue::from_bytes(b"\xff, 198.51.100.1").unwrap(),
+    );
+    assert_eq!(
+        api::client_address(ip("10.1.2.3"), &spoofed, &trusted),
+        ip("198.51.100.1")
+    );
+    // No header, every hop trusted, or a hop that is no address: the proxy itself.
+    assert_eq!(client("10.1.2.3", &[]), ip("10.1.2.3"));
+    assert_eq!(client("10.1.2.3", &["10.4.4.4"]), ip("10.1.2.3"));
+    assert_eq!(client("10.1.2.3", &["1.1.1.1, unknown"]), ip("10.1.2.3"));
+    // Nothing is trusted by default: the header is never read.
+    assert_eq!(
+        api::client_address(ip("10.1.2.3"), &forwarded(&["198.51.100.1"]), &[]),
+        ip("10.1.2.3")
+    );
+    for bad in ["10.0.0.0/33", "proxy.example.org", "10.0.0.1:80"] {
+        let config = json!({"api": {"trusted_proxies": [bad]}});
+        assert!(Config::from_value(config).is_err(), "{bad}");
+    }
+    assert!(Config::from_value(json!({"api": {"trusted_proxies": ["10.0.0.0/8", "::1"]}})).is_ok());
+    assert!(Config::default().api.trusted_proxies.is_empty());
+}
+
+/// A request through the public layers from `peer` with `forwarded` as its `X-Forwarded-For`.
+async fn get_via(app: &Router, peer: &str, forwarded: Option<&str>, path: &str) -> StatusCode {
+    let mut request = Request::builder().uri(path);
+    if let Some(forwarded) = forwarded {
+        request = request.header("x-forwarded-for", forwarded);
+    }
+    let mut request = request.body(Body::empty()).unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        format!("{peer}:1234").parse::<SocketAddr>().unwrap(),
+    ));
+    app.clone().oneshot(request).await.unwrap().status()
+}
+
+/// The per-IP budget behind a trusted proxy is each client's own: one client spends its budget
+/// and is refused while another, through the same proxy, still reads; a client that writes
+/// another's address to the left of its own is still counted as itself. From an untrusted peer
+/// the header changes nothing.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_per_ip_budget_behind_a_trusted_proxy_is_each_clients_own(pool: PgPool) {
+    let config = Config::from_value(json!({
+        "api": {"requests_per_minute": 2, "trusted_proxies": ["127.0.0.1"]}
+    }))
+    .unwrap();
+    let app = api::router(AppState::new(pool, config).unwrap());
+    let path = "/v1/info";
+    for _ in 0..2 {
+        assert_eq!(
+            get_via(&app, "127.0.0.1", Some("203.0.113.7"), path).await,
+            200
+        );
+    }
+    assert_eq!(
+        get_via(&app, "127.0.0.1", Some("203.0.113.7"), path).await,
+        429
+    );
+    assert_eq!(
+        get_via(&app, "127.0.0.1", Some("203.0.113.8, 203.0.113.7"), path).await,
+        429
+    );
+    assert_eq!(
+        get_via(&app, "127.0.0.1", Some("203.0.113.8"), path).await,
+        200
+    );
+    // An untrusted peer naming a client with budget left is counted as itself.
+    for _ in 0..2 {
+        assert_eq!(
+            get_via(&app, "127.0.0.9", Some("203.0.113.9"), path).await,
+            200
+        );
+    }
+    assert_eq!(
+        get_via(&app, "127.0.0.9", Some("203.0.113.9"), path).await,
+        429
+    );
+    assert_eq!(
+        get_via(&app, "127.0.0.1", Some("203.0.113.9"), path).await,
+        200
+    );
+}
+
+/// By default one client address takes at most 100 of the hour's new previews: behind a trusted
+/// proxy the 101st new link from one client is refused with 429 and not stored, while another
+/// client through the same proxy still previews.
+#[sqlx::test(migrations = "../../migrations")]
+async fn by_default_one_client_takes_at_most_100_new_previews_an_hour(pool: PgPool) {
+    let config = Config::from_value(json!({
+        "api": {"trusted_proxies": ["127.0.0.1"], "requests_per_minute": 1000},
+        "limits": {"preview_requests_per_minute": 1000},
+    }))
+    .unwrap();
+    assert_eq!(config.preview_new_per_client_per_hour, 100);
+    let state = AppState::new(pool.clone(), config).unwrap();
+    let refused = state.metrics.preview_refused.clone();
+    let app = api::router(state);
+    let preview = |client: &'static str, n: usize| {
+        let app = app.clone();
+        async move {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri("/v1/resolve")
+                .header("content-type", "application/json")
+                .header("x-forwarded-for", client)
+                .body(Body::from(
+                    json!({ "uri": format!("https://example.org/{client}/{n}") }).to_string(),
+                ))
+                .unwrap();
+            request.extensions_mut().insert(axum::extract::ConnectInfo(
+                "127.0.0.1:1234".parse::<SocketAddr>().unwrap(),
+            ));
+            app.oneshot(request).await.unwrap().status()
+        }
+    };
+    let taken = futures_util::future::join_all((0..100).map(|n| preview("203.0.113.7", n))).await;
+    assert!(
+        taken.iter().all(|code| *code == 200 || *code == 202),
+        "{taken:?}"
+    );
+    assert_eq!(
+        preview("203.0.113.7", 100).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    let code = preview("203.0.113.8", 0).await;
+    assert!(code == 200 || code == 202, "{code}");
+    assert_eq!(refused.with_label_values(&["client"]).get(), 1);
+    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM resource")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, 101);
 }

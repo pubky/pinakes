@@ -69,6 +69,8 @@ pub struct Tools {
 /// request's deadline started to run (`api::RequestStarted`; `None` outside a request).
 struct Caller {
     peer: Option<ConnectInfo<SocketAddr>>,
+    /// The client address the MCP request is counted under (`api::ClientAddr`).
+    client: Option<crate::api::ClientAddr>,
     base: String,
     started: Option<std::time::Instant>,
 }
@@ -171,6 +173,9 @@ impl Tools {
             .map_err(|_| Failure::bad("the arguments do not make a request"))?;
         if let Some(peer) = caller.peer {
             request.extensions_mut().insert(peer);
+        }
+        if let Some(client) = caller.client {
+            request.extensions_mut().insert(client);
         }
         let response = self
             .rest
@@ -507,6 +512,7 @@ impl ServerHandler for Tools {
         let parts = context.extensions.get::<axum::http::request::Parts>();
         let caller = Caller {
             peer: parts.and_then(|p| p.extensions.get::<ConnectInfo<SocketAddr>>().copied()),
+            client: parts.and_then(|p| p.extensions.get::<crate::api::ClientAddr>().copied()),
             base: parts.map_or_else(|| "http://localhost".into(), |p| base_url(&p.headers)),
             started: parts
                 .and_then(|p| p.extensions.get::<crate::api::RequestStarted>())
@@ -1335,6 +1341,7 @@ mod tests {
         };
         let caller = Caller {
             peer: None,
+            client: None,
             base: "https://pinakes.example".into(),
             started: None,
         };
@@ -1394,6 +1401,7 @@ mod tests {
         };
         let caller = |ago: Duration| Caller {
             peer: None,
+            client: None,
             base: "https://pinakes.example".into(),
             started: Some(Instant::now() - ago),
         };

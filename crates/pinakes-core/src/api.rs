@@ -85,6 +85,8 @@ pub struct AppState {
     /// The request clock for relative times and search cursors; tests set it, the daemon never
     /// does (wall clock).
     pub clock: Option<Clock>,
+    /// `api.trusted_proxies`, parsed.
+    trusted_proxies: Arc<Vec<ipnet::IpNet>>,
     /// Set by the daemon once a background task or worker has ended or the daemon is stopping:
     /// `GET /healthz` then answers 503.
     pub stopping: Arc<std::sync::atomic::AtomicBool>,
@@ -94,8 +96,10 @@ impl AppState {
         let mut cursor_key = [0; 32];
         getrandom::fill(&mut cursor_key).context("cursor key entropy unavailable")?;
         let metrics = Arc::new(crate::telemetry::Metrics::new()?);
+        let trusted_proxies = Arc::new(config.api.trusted_proxy_nets()?);
         Ok(Self {
             pool,
+            trusted_proxies,
             nexus: Nexus::configured(&config)?,
             config,
             wake: Arc::default(),
@@ -254,17 +258,88 @@ pub fn pool_options() -> sqlx::postgres::PgPoolOptions {
             })
         })
 }
+/// The address a public request is counted under: its per-IP budgets, its ODbL dump downloads and
+/// its share of the hour's new previews. Set by the per-IP budget layer for every public request
+/// ([`client_address`]); an MCP tool's requests carry their MCP request's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClientAddr(pub std::net::IpAddr);
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for ClientAddr {
+    type Rejection = ApiError;
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _: &S,
+    ) -> Result<Self, ApiError> {
+        parts
+            .extensions
+            .get::<ClientAddr>()
+            .copied()
+            .ok_or_else(|| {
+                ApiError(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "missing client address".into(),
+                )
+            })
+    }
+}
+/// The client of a request from `peer`: `peer` itself, unless it is one of `trusted` (the
+/// operator's reverse proxies, `api.trusted_proxies`). From a trusted proxy it is the right-most
+/// `X-Forwarded-For` entry that is not itself a trusted proxy: each proxy appends the address it
+/// was connected from, so the entries left of it are whatever the client sent and are never
+/// read. With no such entry (no header, every entry a trusted proxy, or one that is no address)
+/// the client is `peer`.
+pub fn client_address(
+    peer: std::net::IpAddr,
+    headers: &HeaderMap,
+    trusted: &[ipnet::IpNet],
+) -> std::net::IpAddr {
+    let peer = peer.to_canonical();
+    let is_trusted = |ip: &std::net::IpAddr| trusted.iter().any(|net| net.contains(ip));
+    if !is_trusted(&peer) {
+        return peer;
+    }
+    // Split as bytes: an entry that is no text (a byte a client wrote) is that entry alone, and
+    // never hides the entries after it.
+    let hops: Vec<&[u8]> = headers
+        .get_all("x-forwarded-for")
+        .iter()
+        .flat_map(|value| value.as_bytes().split(|b| *b == b','))
+        .collect();
+    for hop in hops.into_iter().rev() {
+        let hop = std::str::from_utf8(hop).unwrap_or_default().trim();
+        // An address, or one with a port (`192.0.2.1:4711`, `[2001:db8::1]:4711`).
+        let Some(ip) = hop
+            .parse::<std::net::IpAddr>()
+            .ok()
+            .or_else(|| hop.parse::<SocketAddr>().ok().map(|a| a.ip()))
+            .map(|ip| ip.to_canonical())
+        else {
+            return peer;
+        };
+        if !is_trusted(&ip) {
+            return ip;
+        }
+    }
+    peer
+}
 async fn public_budget(
     State(state): State<AppState>,
-    request: axum::extract::Request,
+    mut request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    let Some(peer) = request.extensions().get::<ConnectInfo<SocketAddr>>() else {
-        return ApiError(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "missing peer address".into(),
-        )
-        .into_response();
+    let client = match request.extensions().get::<ClientAddr>() {
+        Some(client) => client.0,
+        None => {
+            let Some(peer) = request.extensions().get::<ConnectInfo<SocketAddr>>() else {
+                return ApiError(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "missing peer address".into(),
+                )
+                .into_response();
+            };
+            let client = client_address(peer.0.ip(), request.headers(), &state.trusted_proxies);
+            request.extensions_mut().insert(ClientAddr(client));
+            client
+        }
     };
     // A reach search (`reach` or `boost`, each a set read from Nexus) and a related search cost
     // their own units, a search with several all of them together; anything else costs one.
@@ -288,7 +363,7 @@ async fn public_budget(
     if let Err(error) = state
         .budget(
             &[(
-                format!("api-ip:{}", peer.0.ip()),
+                format!("api-ip:{client}"),
                 state.config.api.requests_per_minute,
             )],
             state.config.api.cache_capacity,
@@ -3256,7 +3331,7 @@ pub async fn lookup(
 #[utoipa::path(post,tag="Previews",path="/v1/resolve",request_body=ResolveRequest,responses((status=200,body=ResourceDetail),(status=202,body=ResourceDetail,description="Queued; poll resource by ID",headers(("Retry-After"=u64,description="Seconds until the next attempt, when it is put off (a missing answer waiting for the fetch that confirms it); absent while the job is queued or running"))),(status=400,description="Unsupported URI, disabled resolver, or a link that carries a credential"),(status=429,description="Preview rate limit"),(status=503,description="The instance's new previews for this hour are taken; nothing was stored",headers(("Retry-After"=u64,description="Seconds until a new preview can be taken")))))]
 pub async fn resolve(
     State(state): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ClientAddr(client): ClientAddr,
     Json(body): Json<ResolveRequest>,
 ) -> Result<Response, ApiError> {
     let (id, uri, _) = model::identity(&body.uri).map_err(|e| ApiError::bad(e.to_string()))?;
@@ -3274,7 +3349,7 @@ pub async fn resolve(
     // An alias is never fetched: the root's route decides.
     let target = crate::alias::root(&uri).map_or_else(|| uri.clone(), |a| a.root);
     crate::resolver::admit(&target, &state.config).map_err(ApiError::bad)?;
-    state.preview_budget(peer.ip(), &id).await?;
+    state.preview_budget(client, &id).await?;
     // A link the instance does not know yet takes a place in its hour of new previews; when the
     // hour is full, nothing is stored. Two first requests for one link at once may both take one.
     let known: bool = sqlx::query_scalar(
@@ -3286,7 +3361,7 @@ pub async fn resolve(
     let slot = if known {
         None
     } else {
-        match state.reserve_preview(peer.ip()) {
+        match state.reserve_preview(client) {
             Ok(slot) => Some(slot),
             Err((status, seconds)) => {
                 let (limit, message) = if status == StatusCode::TOO_MANY_REQUESTS {
@@ -3846,7 +3921,7 @@ pub const OSM_DUMP_LINE: &str = "SELECT jsonb_build_object('osm_type',osm_type,'
 #[utoipa::path(get,tag="Licensing",path="/v1/dumps/osm_place.ndjson.gz",responses((status=200,description="The ODbL derivative database, written daily, as a gzip file download. Decompressed it is one JSON object per line: the licence notice first (`OsmDumpNotice`), then one cached OSM object per line (`OsmDumpPlace`). Single byte ranges are served (206)",content_type="application/gzip",headers(("Content-Disposition"=String,description="`attachment; filename=\"osm_place.ndjson.gz\"`"),("ETag"=String),("Last-Modified"=String),("Accept-Ranges"=String,description="`bytes`"))),(status=206,description="The requested byte range of the file",content_type="application/gzip"),(status=304,description="ETag or Last-Modified unchanged"),(status=416,description="Range not satisfiable"),(status=429,description="Over `limits.osm_dump_downloads_per_hour` transfers (200 or 206) to this address in the last hour; HEAD, 304 and 416 are free"),(status=503,description="No dump file written yet; retry later")))]
 async fn osm_dump(
     State(state): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ClientAddr(client): ClientAddr,
     method: axum::http::Method,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
@@ -3925,7 +4000,7 @@ async fn osm_dump(
     };
     // Only a transfer counts: not a HEAD, a revalidation or an unsatisfiable range.
     if method != axum::http::Method::HEAD {
-        state.download_budget(peer.ip()).await?;
+        state.download_budget(client).await?;
     }
     file.seek(std::io::SeekFrom::Start(start))
         .await
