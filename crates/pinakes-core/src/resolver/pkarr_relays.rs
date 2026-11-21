@@ -82,7 +82,12 @@ enum Answer {
     /// A wait, in seconds: Egress's own for the relay host's budget or slot (no request was
     /// sent), or the relay's 429 with its `Retry-After`.
     Wait(u64),
+    /// The relay is down: it answered 5xx (with the wait it named, else a minute) or did not
+    /// answer in time. Nothing about the key.
+    Outage(u64, String),
 }
+/// How long a relay outage waits when the relays named no wait (a timeout).
+const OUTAGE_WAIT: u64 = 60;
 
 /// One HTTPS endpoint of a record: a domain, `.` (the key's own addresses) or another key.
 struct Target {
@@ -105,12 +110,18 @@ impl Relays {
 
     /// The owner's verified packet: from the cache while it lives, else the newest one the
     /// relays (asked together, each within `deadline`) serve. `None` when the relays have no
-    /// record. Relay-side failures (timeouts, policy refusals, payloads that do not verify) are
-    /// `connect`: retried with backoff, then dead-lettered like any failure. When no relay
-    /// answered, because each one that failed could not be reached (refused, reset), waited for
-    /// its host budget (or would have waited longer than `RELAY_SLOT_WAIT`) or answered 429, the
-    /// failure is `super::Unreached` (or that wait alone, with the longest `Retry-After`), which
-    /// never dead-letters.
+    /// record. When no relay gave a packet or a 404:
+    /// - each one that failed answered 5xx or did not answer in time (beside relays that could
+    ///   not be reached or made Egress wait): a relay outage, `RetryLater` of class
+    ///   `relay_outage` with the longest wait named, else a minute. The link did nothing wrong:
+    ///   no attempt is charged, as after a 429;
+    /// - each one could not be reached (refused, reset): `super::Unreached`;
+    /// - each one waited for its host budget (or would have waited longer than
+    ///   `RELAY_SLOT_WAIT`) or answered 429: that wait alone, with the longest `Retry-After`.
+    ///
+    /// Neither dead-letters. Other relay-side failures (policy refusals, a redirect, a payload
+    /// that does not verify), and a 5xx or a timeout beside a relay's 404, are `connect`:
+    /// retried with backoff, then dead-lettered like any failure.
     pub async fn packet(&self, key: &PublicKey) -> Result<Option<SignedPacket>> {
         let z32 = key.to_z32();
         if let Some(cached) = self.state.lock().unwrap().cache.get(&z32) {
@@ -138,10 +149,10 @@ impl Relays {
                 let Ok(answer) =
                     tokio::time::timeout(ask, self.egress.fetch_with(&url, options)).await
                 else {
-                    return Answer::Failed(format!(
-                        "{relay} did not answer within {} ms",
-                        ask.as_millis()
-                    ));
+                    return Answer::Outage(
+                        OUTAGE_WAIT,
+                        format!("{relay} did not answer within {} ms", ask.as_millis()),
+                    );
                 };
                 match answer {
                     Ok(fetched) if fetched.status == 404 => Answer::Missing,
@@ -153,16 +164,21 @@ impl Relays {
                             )),
                         }
                     }
+                    Ok(fetched) if fetched.status >= 500 => Answer::Outage(
+                        fetched.retry_after_secs,
+                        format!("{relay} answered {}", fetched.status),
+                    ),
                     Ok(fetched) => Answer::Failed(format!("{relay} answered {}", fetched.status)),
                     Err(error) if super::unreached(&error) => {
                         Answer::Unreached(format!("{relay}: {error:#}"))
                     }
-                    Err(error) if error.is::<super::egress::RequestDeadline>() => {
-                        Answer::Failed(format!(
+                    Err(error) if error.is::<super::egress::RequestDeadline>() => Answer::Outage(
+                        OUTAGE_WAIT,
+                        format!(
                             "{relay} did not answer within {} ms",
                             self.deadline.as_millis()
-                        ))
-                    }
+                        ),
+                    ),
                     Err(error) => match error.downcast_ref::<super::RetryLater>() {
                         Some(wait) if matches!(wait.class, "rate_limited" | "http_4xx") => {
                             Answer::Wait(wait.seconds)
@@ -174,6 +190,7 @@ impl Relays {
         }))
         .await;
         let (mut failures, mut unreached, mut wait) = (vec![], vec![], None::<u64>);
+        let (mut outages, mut outage_wait) = (vec![], 0u64);
         let (mut missing, mut best): (bool, Option<SignedPacket>) = (false, None);
         for answer in answers {
             match answer {
@@ -181,6 +198,10 @@ impl Relays {
                 Answer::Failed(error) => failures.push(error),
                 Answer::Unreached(error) => unreached.push(error),
                 Answer::Wait(seconds) => wait = Some(wait.unwrap_or(0).max(seconds)),
+                Answer::Outage(seconds, error) => {
+                    outage_wait = outage_wait.max(seconds);
+                    outages.push(error);
+                }
                 Answer::Packet(packet) => {
                     if best
                         .as_ref()
@@ -197,11 +218,25 @@ impl Relays {
                 connect("the PKARR relays serve only a packet older than one seen before".into())
             });
         }
-        if missing && failures.is_empty() && unreached.is_empty() && wait.is_none() {
+        if missing
+            && failures.is_empty()
+            && outages.is_empty()
+            && unreached.is_empty()
+            && wait.is_none()
+        {
             self.store(z32, None, MIN_TTL);
             return Ok(None);
         }
-        if failures.is_empty() && unreached.is_empty() {
+        if failures.is_empty() && !missing && !outages.is_empty() {
+            // Every relay that answered at all was down: read again after the longest wait, as
+            // after a 429.
+            return Err(anyhow::Error::new(super::RetryLater {
+                class: "relay_outage",
+                seconds: outage_wait.max(wait.unwrap_or(0)).max(1),
+            })
+            .context(format!("PKARR relays are down: {}", outages.join("; "))));
+        }
+        if failures.is_empty() && unreached.is_empty() && outages.is_empty() {
             if let Some(seconds) = wait {
                 // Egress waited for a relay host's budget, or a relay said when to come back:
                 // ask again then.
@@ -213,13 +248,14 @@ impl Relays {
             }
             return Err(connect("no PKARR relay configured".into()));
         }
-        if failures.is_empty() && !missing {
+        if failures.is_empty() && outages.is_empty() && !missing {
             // No relay answered about the key: each one could not be reached, or Egress waited.
             return Err(anyhow::Error::new(super::Unreached).context(format!(
                 "PKARR relays could not be reached: {}",
                 unreached.join("; ")
             )));
         }
+        failures.extend(outages);
         failures.extend(unreached);
         Err(connect(format!(
             "PKARR relays failed: {}",

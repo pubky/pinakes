@@ -3111,6 +3111,24 @@ async fn upstream_waits_back_off_and_dead_letter(pool: PgPool) {
             (1, 1, "upstream".to_owned()),
         ]
     );
+    // A PKARR relay outage is no answer about the link: no attempt, and the streak starts over.
+    sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    queue::run_job(&pool, &DeferredResolver("relay_outage"), &cfg, &job)
+        .await
+        .unwrap();
+    let row: (i32, i32, bool, String) = sqlx::query_as(
+        "SELECT timeout_streak,attempts,dead_letter,last_error FROM resource WHERE id=$1",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row, (0, 1, false, "relay_outage".to_owned()));
 }
 
 fn too_large() -> anyhow::Error {

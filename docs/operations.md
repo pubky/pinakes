@@ -433,14 +433,17 @@ a record (when every relay answers 404, the owner has no record for five minutes
 forge one, and Pinakes never uses a packet older than the newest it remembers for that key. That
 memory is an accepted limit: it holds the newest timestamp of at most 10,000 keys, apart from the
 cache, and forgets the oldest timestamps of uncached keys first; a forgotten key, or any key
-after a restart, takes the newest packet the relays serve again. A relay that times out, is
-refused by the policy, answers with a redirect (never followed) or serves a packet that does not
-verify is a `connect` failure, retried
-with the usual backoff and, like any failure, dead-lettered after `limits.max_failures`. When no
-relay answered, because each one that failed refused or reset the connection (or Egress waited
-for its host budget, or the request would have waited more than 1.5 s for the relay's host, or
-the relay answered 429), the failure never reached an answer and never dead-letters; after a
-429 the link is read again when the relay's `Retry-After` says.
+after a restart, takes the newest packet the relays serve again. A relay that is refused by the
+policy, answers with a redirect (never followed) or serves a packet that does not verify is a
+`connect` failure, and so is one that times out or answers 5xx beside another relay's 404 or such
+a failure; it is retried with the usual backoff and, like any failure, dead-lettered after `limits.max_failures`. When no
+relay gave a packet or a 404 and each one that failed answered 5xx or did not answer in time, the
+relays are down (`relay_outage`): the link did nothing wrong, so it is read again after the
+longest `Retry-After` a relay named (a minute when none did), with no attempt charged and no
+dead letter. When no relay answered, because each one that failed refused or reset the
+connection (or Egress waited for its host budget, or the request would have waited more than
+1.5 s for the relay's host, or the relay answered 429), the failure never reached an answer and
+never dead-letters; after a 429 the link is read again when the relay's `Retry-After` says.
 Verified packets are kept for their smallest record TTL, between five minutes
 and a day (10,000 keys at most). It then takes the first endpoint with a public HTTPS (ICANN)
 domain and GETs the object path there with the `pubky-host` header, as Pubky clients address

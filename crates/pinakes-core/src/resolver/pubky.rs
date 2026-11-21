@@ -296,6 +296,8 @@ mod tests {
         dns_stalling: Arc<Mutex<Vec<&'static str>>>,
         /// Relay hosts that answer 429 with this `Retry-After` (seconds).
         limited: Mutex<Vec<(&'static str, u64)>>,
+        /// Relay hosts that answer this server error, with this `Retry-After` when there is one.
+        down: Mutex<Vec<(&'static str, u16, Option<u64>)>>,
         /// What one relay host serves for one key instead.
         serve: Mutex<HashMap<(&'static str, String), Vec<u8>>>,
         relay_requests: Mutex<Vec<String>>,
@@ -363,6 +365,22 @@ mod tests {
                     .header("retry-after", seconds.to_string())
                     .body(vec![]);
                 let response = reqwest::Response::from(response.unwrap());
+                return crate::resolver::egress::read_response_with(url.clone(), response, options)
+                    .await;
+            }
+            let down = self
+                .down
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(h, _, _)| *h == host)
+                .map(|(_, status, seconds)| (*status, *seconds));
+            if let Some((status, seconds)) = down {
+                let mut response = axum::http::Response::builder().status(status);
+                if let Some(seconds) = seconds {
+                    response = response.header("retry-after", seconds.to_string());
+                }
+                let response = reqwest::Response::from(response.body(vec![]).unwrap());
                 return crate::resolver::egress::read_response_with(url.clone(), response, options)
                     .await;
             }
@@ -463,6 +481,7 @@ mod tests {
             redirecting: Mutex::default(),
             dns_stalling: Arc::default(),
             limited: Mutex::default(),
+            down: Mutex::default(),
             serve: Mutex::default(),
             relay_requests: Mutex::default(),
             homeserver,
@@ -1006,6 +1025,60 @@ mod tests {
         }
     }
 
+    /// Relays that answer 5xx (or time out) are down: the link did nothing wrong, so the read
+    /// waits and comes again like after a 429 (the longest wait a relay named, else a minute),
+    /// never toward the dead letter. A relay that could not be reached or made Egress wait does
+    /// not change that; one relay's 404 does: it answered about the key.
+    #[tokio::test]
+    async fn relays_that_answer_5xx_are_an_outage() {
+        let owner = Keypair::random();
+        let relays = ["https://relay.example", "https://relay2.example"];
+        let outage = |configure: &dyn Fn(&Net)| {
+            let net = network(&[direct(&owner)], ok());
+            configure(&net);
+            let resolver = resolver_on(net, &["8.8.8.8"], "8.8.4.4", &relays);
+            let object = object(&owner);
+            async move { resolver.resolve(&object).await.unwrap_err() }
+        };
+        let wait = |error: &anyhow::Error| {
+            error
+                .downcast_ref::<crate::resolver::RetryLater>()
+                .map(|r| (r.class, r.seconds))
+        };
+        let error = outage(&|net| {
+            net.down.lock().unwrap().extend([
+                ("relay.example", 503, Some(120)),
+                ("relay2.example", 500, None),
+            ])
+        })
+        .await;
+        assert_eq!(wait(&error), Some(("relay_outage", 120)), "{error:#}");
+        assert_eq!(crate::resolver::error_class(&error), "relay_outage");
+        let error = outage(&|net| {
+            net.down.lock().unwrap().push(("relay.example", 502, None));
+            net.refusing.lock().unwrap().push("relay2.example");
+        })
+        .await;
+        assert_eq!(wait(&error), Some(("relay_outage", 60)), "{error:#}");
+        let error = outage(&|net| {
+            net.down
+                .lock()
+                .unwrap()
+                .push(("relay.example", 503, Some(30)));
+            net.limited.lock().unwrap().push(("relay2.example", 300));
+        })
+        .await;
+        assert_eq!(wait(&error), Some(("relay_outage", 300)), "{error:#}");
+        let error = outage(&|net| {
+            net.down.lock().unwrap().push(("relay.example", 503, None));
+            net.empty.lock().unwrap().push("relay2.example");
+        })
+        .await;
+        assert_eq!(wait(&error), None, "{error:#}");
+        assert_eq!(crate::resolver::error_class(&error), "connect", "{error:#}");
+        assert!(!crate::resolver::unreached(&error), "{error:#}");
+    }
+
     /// A relay whose DNS lookup never answers is given up with its whole ask, inside the read:
     /// the other relay's packet is used.
     #[tokio::test(start_paused = true)]
@@ -1081,14 +1154,17 @@ mod tests {
             "{:?}",
             started.elapsed()
         );
-        // Every relay stalled: a relay-side failure, as a relay's timeout is.
+        // Every relay stalled: a relay outage, read again in a minute without a charge.
         net.stalling.lock().unwrap().push("relay2.example");
         let other = Keypair::random();
         let error = resolver_on(net, &["8.8.8.8"], "8.8.4.4", &relays)
             .resolve(&object(&other))
             .await
             .unwrap_err();
-        assert_eq!(crate::resolver::error_class(&error), "connect", "{error:#}");
+        let wait = error
+            .downcast_ref::<crate::resolver::RetryLater>()
+            .unwrap_or_else(|| panic!("{error:#}"));
+        assert_eq!((wait.class, wait.seconds), ("relay_outage", 60));
         assert!(
             format!("{error:#}").contains("did not answer within"),
             "{error:#}"
