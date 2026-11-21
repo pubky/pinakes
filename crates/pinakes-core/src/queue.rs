@@ -625,7 +625,13 @@ async fn guarded_finish_job(
         Ok(mut doc) if crate::music::parse(&job.uri).is_some() => {
             // What the also-on sources said about the artist (a person or a group), if anything.
             let artist = crate::also_on::media::artist_type(pool, &job.id).await?;
-            crate::music::type_card(&job.uri, artist.as_ref().map(|(t, _)| t.as_str()), &mut doc);
+            let on_youtube_music = crate::music::on_youtube_music(pool, &job.id, &job.uri).await?;
+            crate::music::type_card(
+                &job.uri,
+                artist.as_ref().map(|(t, _)| t.as_str()),
+                on_youtube_music,
+                &mut doc,
+            );
             if let Some((t, source)) =
                 artist.filter(|(t, _)| t == "Person" && doc.type_name == "Person")
             {

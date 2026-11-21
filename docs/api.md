@@ -55,7 +55,11 @@ a DOI's title with `<i>`) is read as text, its tags dropped.
 A music link is typed by what it is, whatever the service's page or player calls it: a track is a
 `MusicRecording`, an album a `MusicAlbum`, an artist a `MusicGroup` (a `Person` from the next
 refresh after MusicBrainz says the artist is one) and a playlist a `MusicPlaylist`, on every
-service ([music service links](#aliases)). A video stays a `VideoObject`; a track's, album's or
+service ([music service links](#aliases)). YouTube is not only music: its channel is a
+`MusicGroup` only when it is a Topic channel (named `{Artist} - Topic`) or on YouTube Music, and
+its playlist a `MusicPlaylist` only on YouTube Music (`music.youtube.com`, the tagged spelling or
+another of the same channel or playlist, from the card's next read); any other channel or
+playlist keeps the type its page gives. A video stays a `VideoObject`; a track's, album's or
 artist's page keeps its own video (a `VideoObject` in its JSON-LD) as a part of the page, not its
 card ([lists](#lists)). The card's `site` is the
 service's name (`Spotify`, `Apple Music`, `TIDAL`, `YouTube`, …), as derived links show it, in
@@ -1413,7 +1417,11 @@ Content-Type: application/json
 An occurrence member is `{"uid":"calendar-uid","recurrence_id":"2026-10-20T17:00:00Z"}`.
 Members must exist and have been grouped once. Curation pins its members away from automatic
 groups and overrides the distance and evidence rules; removing a member lets its automatic
-evidence count again. Invalid curation returns 400; a busy group writer returns 503 (retry). `groups.enabled = false` turns off group
+evidence count again. Invalid curation returns 400; a busy group writer returns 503 (retry).
+`DELETE /v1/groups/{id}`, also on the admin listener only, undoes a curation: its members are
+no longer pinned and the group is no longer curated, so each member groups again by what its
+keys say (the group goes when none joins it again). It answers 204, 404 when the ID is no
+curated group, 400 for an invalid ID, 503 while the group writer is busy. `groups.enabled = false` turns off group
 reads, writes and collapse; stored membership stays for when it is turned back on.
 
 ## Possibly the same event
@@ -1488,7 +1496,10 @@ Two recordings are possibly the same when all of these hold:
   names nothing);
 - their lengths, when both are known (the `duration` fact, else the page's), are within 3 s.
 
-`score` is 1 when both lengths are known and agree, 0.7 when one is unknown. A member of the
+`score` is 1 when both lengths are known and agree, 0.7 when one is unknown. Recordings whose
+artist and length (when they have one) a source states as facts come first, then those whose
+own page alone states them, each by score: any page can copy a track's title, artist and length
+into its markup, and that never puts it ahead of a recording a service vouches for. A member of the
 card's own group and an alias are never listed, so a pair that a key later joins drops out of
 the hint by itself. It is a hint, like a group, and less: nothing is merged, counted or ranked
 by it, and each recording keeps its own card.
@@ -1575,7 +1586,8 @@ seeing the keys the ones before it found: `service`, `tidal`, `spotify`,
 `films`, `podcasts`, `product_keys`, `open_food_facts`, `stack_exchange`, `titles`, `federal_register`, `mempool`, `osm_wikidata`, `wikidata_osm`,
 `wikidata_places`, `btcmap`, `unpaywall`, `ncbi`, `datacite`, `huggingface`, `crates`, `npm`,
 `pypi`, `software_heritage`, `steam`, `wikidata_stores`, `app_stores`, `wayback`, `editions`;
-`[also_on.sources.<id>] enabled = false` turns one off. A MusicBrainz or Wikidata answer over 8 MB is no answer: the source
+`[also_on.sources.<id>] enabled = false` turns one off. A MusicBrainz or Wikidata answer over
+`limits.hub_body_bytes` (8 MiB by default) is no answer: the source
 records only what the link's URL proves (a MusicBrainz page's MBID or ISRC, a Wikidata item
 link's Q-id, the Q-id an article's own Wikipedia names), else nothing, until its next run. A
 source's exact keys
@@ -1605,11 +1617,13 @@ service's own track or album that carries the value becomes a link keyed by it.
 
 **Exact links and matches.** A derived link is exact when an identifier the service owns, or a
 hub, names it: a MusicBrainz relation, a Wikidata claim, or a service's own answer to a lookup by
-ISRC or barcode (`deezer`, `itunes` albums, `spotify_isrc`, `tidal_isrc`). It carries that key, so a
-tagged resource that is the link joins the group; its entry is a plain derived link. Two sources
-match by metadata instead: their links are maybes, marked `kind: "maybe"` on the entry
-(possibly the same thing), still listed so a client can show or play them, but never keyed, never
-joining a group, never making a key of the card they are on.
+ISRC or barcode (`deezer`, `spotify_isrc`, `tidal_isrc`). It carries that key, so a
+tagged resource that is the link joins the group; its entry is a plain derived link. Three sources
+match by metadata or an answer they cannot read back instead: their links are maybes, marked
+`kind: "maybe"` on the entry (possibly the same thing), still listed so a client can show or play
+them, but never keyed, never joining a group, never making a key of the card they are on.
+- `itunes` albums: the one Apple Music album iTunes answers for the album's barcode (its answer
+  carries no barcode to compare).
 - `itunes_song`: Apple Music's song at the same disc and track number on the
   album with the track's barcode, with the same title and within 3 s of its length (iTunes
   answers carry no ISRC).
@@ -1630,9 +1644,9 @@ An article's card comes from its Wikipedia's REST summary (`Article`, the title,
 paragraph up to 600 characters, the thumbnail, `site` `Wikipedia ({lang})`), so a long article
 whose page exceeds the page cap still gets one; a page the summary does not cover (a special page)
 is read as a web page. A MusicBrainz page's card ([its spellings](#aliases)) comes from
-MusicBrainz's web service (the entity it names), not from the page (unless that answer is over its
-8 MB cap: then the page is read as any page, and the sources record only what its URL proves, the
-MBID or the ISRC): the title, `MusicRecording`, `MusicAlbum`, `MusicGroup` or `Person` (an artist
+MusicBrainz's web service (the entity it names), not from the page (unless that answer is over
+`limits.hub_body_bytes`, 8 MiB by default: then the page is read as any page, and the sources
+record only what its URL proves, the MBID or the ISRC): the title, `MusicRecording`, `MusicAlbum`, `MusicGroup` or `Person` (an artist
 MusicBrainz calls a person), the artist credit and a recording's length as its description (an
 enriched description below takes the place of this line; the resource read's `facts` still give
 them as `artist` and `duration`, in seconds, from the card itself as soon as it is read, and from
@@ -2103,7 +2117,8 @@ to know.
 
 `admin_listen` (default `127.0.0.1:9090`) serves `GET /metrics` (Prometheus text),
 `GET /v1/info` with full ingestion, source and canary state, `GET /v1/resources/{id}/document`
-(the stored document with its internal fields) and group curation (`PUT /v1/groups/{id}`). With
+(the stored document with its internal fields) and group curation (`PUT /v1/groups/{id}`, and
+`DELETE /v1/groups/{id}` to undo one). With
 `admin_token` (or `PINAKES__ADMIN_TOKEN`) every admin route needs `Authorization: Bearer`,
 compared in constant time; a non-loopback bind without a token is refused. It answers 421 to a
 request whose `Host` is not `localhost`, an IP address or a name in `admin_hosts`, before the token

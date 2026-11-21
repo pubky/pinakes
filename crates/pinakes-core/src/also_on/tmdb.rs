@@ -41,8 +41,6 @@ const IMAGES: &str = "https://image.tmdb.org/t/p/";
 /// 500 pixels wide, near the width of the Commons thumbnails cards show
 /// (`limits.music_image_width`, 640), where `original` may be several megabytes.
 const POSTER_SIZE: &str = "w500";
-/// How long a TMDB answer stays in the egress cache (seconds): one hour.
-const CACHE_SECS: u64 = 3600;
 const SITE: &str = "https://www.themoviedb.org";
 /// The facts a card takes.
 const FACTS: [&str; 4] = [
@@ -326,7 +324,11 @@ impl Tmdb {
     ) -> Result<Option<Title>> {
         let fetched = cx
             .egress
-            .discover(&find_url(id, source), &credential.options(), CACHE_SECS)
+            .discover(
+                &find_url(id, source),
+                &credential.options(),
+                cx.egress.config().discovery_secs,
+            )
             .await?;
         match fetched.status {
             401 => {

@@ -17,7 +17,8 @@
 //! going on at once while more is due; an entry is claimed for a while and dropped once read, so
 //! a stopped pass loses nothing; an hourly sweep marks the recordings never read and those
 //! that are no longer recordings (an alias, a retyped or gone page). Cards only read the stored
-//! pairs (`same_recording_hint`).
+//! pairs (`same_recording_hint`), those whose other recording's artist and length a source
+//! states before those whose page alone states them (`api::maybe_same_sql`).
 use crate::config::{Config, SameEventHint};
 use crate::hints::commit_changed;
 use anyhow::Result;
@@ -31,7 +32,7 @@ pub const LENGTH_WINDOW_SECS: i64 = crate::music_sources::LENGTH_WINDOW_SECS as 
 pub const SCORE_LENGTHS_AGREE: f32 = 1.0;
 pub const SCORE_LENGTH_UNKNOWN: f32 = 0.7;
 /// Pairs kept per recording, best first (a card shows three, its details ten).
-const KEPT: i64 = 20;
+pub const KEPT: i64 = 20;
 /// The most recordings that may name one recording, so a change to it marks at most this many
 /// for a refill.
 const INCOMING_KEPT: i64 = 2 * KEPT;

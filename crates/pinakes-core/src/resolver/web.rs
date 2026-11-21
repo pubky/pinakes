@@ -3305,7 +3305,7 @@ mod tests {
         // A card says what TIDAL's own JSON-LD says, not its share text.
         let mut artist = out.doc.clone();
         artist.status = crate::model::Status::Ok;
-        crate::music::type_card(url, None, &mut artist);
+        crate::music::type_card(url, None, false, &mut artist);
         assert_eq!(artist.description, None);
         for (url, file, description) in [
             (
@@ -3324,7 +3324,7 @@ mod tests {
                 .unwrap()
                 .doc;
             doc.status = crate::model::Status::Ok;
-            crate::music::type_card(url, None, &mut doc);
+            crate::music::type_card(url, None, false, &mut doc);
             assert_eq!(doc.description.as_deref(), Some(description), "{url}");
             assert_eq!(doc.site, "TIDAL");
         }
@@ -3801,7 +3801,7 @@ mod tests {
             ),
         );
         assert_eq!(doc.name.as_deref(), Some("Karma Police"));
-        crate::music::type_card(url, None, &mut doc);
+        crate::music::type_card(url, None, false, &mut doc);
         assert_eq!(doc.type_name, "MusicRecording");
         assert_eq!(doc.name.as_deref(), Some("Karma Police"));
         // A track's own audio (a SoundCloud track's AudioObject, naming and describing it) is

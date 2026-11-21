@@ -1235,7 +1235,7 @@ pub(crate) mod fixture {
             ));
             if kind == "!too-large" {
                 return Err(crate::resolver::egress::BodyTooLarge {
-                    cap: crate::hubs::WIKIDATA_CAP,
+                    cap: crate::hubs::DEFAULT_BODY_CAP,
                 }
                 .into());
             }

@@ -206,6 +206,7 @@ impl EventService {
         let fetched = crate::resolver::web::as_read(fetched).into_owned();
         let config = self.config.clone();
         let ttl = card.ttl_secs;
+        let hub_body_bytes = crate::hubs::body_cap(egress);
         let (mut event, calendar_link, advertised, event_candidate, platform_extra) =
             crate::resolver::html::blocking(move || -> anyhow::Result<_> {
                 let uri = input_uri.as_str();
@@ -300,6 +301,7 @@ impl EventService {
                             fetched.url.as_str(),
                             Some(fetched),
                             &config,
+                            hub_body_bytes,
                         )
                         .ok()
                         .flatten()

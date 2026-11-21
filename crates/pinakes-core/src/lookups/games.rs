@@ -417,8 +417,10 @@ pub mod also_on {
     }
 
     /// A game on a store: the one Wikidata item carrying that store's ID (read back and
-    /// compared exactly; several are ambiguous and give nothing), its other stores and game
-    /// databases, and its Q-id as key when the item carries no other ID on that store.
+    /// compared exactly; several are ambiguous and give nothing) and its other stores and game
+    /// databases as links. Only when the item carries no other ID on that store (a game and its
+    /// expansion pass on GOG are two) is the page the item's: then its Q-id and its one Steam
+    /// appid are keys.
     pub struct WikidataStores;
 
     #[async_trait]
@@ -450,11 +452,13 @@ pub mod also_on {
                 return Ok(also_on::Found::default());
             };
             let mut found = crate::lookups::Found::default();
-            if only_value(&raw, pid, &value) {
+            // An item naming several IDs on this store is not this one page's: links only.
+            let own = only_value(&raw, pid, &value);
+            if own {
                 found.push_key(items::key(&hub.qid));
             }
             // The game's one Steam appid joins its Steam page, as the Steam source keys it.
-            if pid != "P1733" {
+            if own && pid != "P1733" {
                 let steam = items::GAME.iter().find(|p| p.pid == "P1733");
                 if let Some(appid) = steam
                     .and_then(|p| items::single(&raw, p))
@@ -527,25 +531,33 @@ pub mod also_on {
             assert!(!s.iter().any(|s| s.starts_with("MobyGames")), "{s:?}");
         }
 
-        /// A GOG page reaches its game through the one item with its GOG ID: the item names two
-        /// GOG values (the game and its expansion pass), so its Q-id is no key of this page, but
-        /// its one Steam appid is, and the page joins the game's Steam page.
+        /// A GOG page reaches its game through the one item with its GOG ID. The item names two
+        /// GOG values (the game and its expansion pass), so neither page is the item's: each gets
+        /// the item's other stores as links and no key from it, not its Q-id and not its Steam
+        /// appid, and the expansion pass never joins the game's Steam page.
         #[tokio::test(start_paused = true)]
-        async fn a_gog_page_joins_the_games_steam_page_through_its_item() {
-            let cx = recorded(vec![]);
-            let gog = at("https://www.gog.com/en/game/the_witcher_3_wild_hunt");
-            assert!(WikidataStores.applies(&gog));
-            let found = WikidataStores.lookup(&cx, &gog).await.unwrap();
-            assert_eq!(keys(&found), ["steam:292030"]);
-            let s = sites(&found);
-            for site in [
-                "Steam https://store.steampowered.com/app/292030/",
-                "Epic Games Store https://store.epicgames.com/p/the-witcher-3-wild-hunt",
-                "MobyGames https://www.mobygames.com/game/73001/",
+        async fn a_gog_page_that_is_one_of_its_items_values_gets_links_only() {
+            // The item's search answer for its second GOG value is the recorded one: the one item.
+            let pass = "https://www.wikidata.org/w/api.php?action=query&list=search&srsearch=haswbstatement%3AP2725%3Dgame%2Fthe_witcher_3_wild_hunt_expansion_pass&srlimit=5&format=json";
+            let cx = recorded(vec![(pass.into(), "wikidata-search-p2725-witcher-3")]);
+            for uri in [
+                "https://www.gog.com/en/game/the_witcher_3_wild_hunt",
+                "https://www.gog.com/en/game/the_witcher_3_wild_hunt_expansion_pass",
             ] {
-                assert!(s.contains(&site.to_owned()), "{site} in {s:?}");
+                let gog = at(uri);
+                assert!(WikidataStores.applies(&gog));
+                let found = WikidataStores.lookup(&cx, &gog).await.unwrap();
+                assert!(keys(&found).is_empty(), "{uri}: {:?}", keys(&found));
+                let s = sites(&found);
+                for site in [
+                    "Steam https://store.steampowered.com/app/292030/",
+                    "Epic Games Store https://store.epicgames.com/p/the-witcher-3-wild-hunt",
+                    "MobyGames https://www.mobygames.com/game/73001/",
+                ] {
+                    assert!(s.contains(&site.to_owned()), "{uri}: {site} in {s:?}");
+                }
+                assert!(!s.iter().any(|s| s.starts_with("GOG")), "{uri}: {s:?}");
             }
-            assert!(!s.iter().any(|s| s.starts_with("GOG")), "{s:?}");
         }
 
         #[test]

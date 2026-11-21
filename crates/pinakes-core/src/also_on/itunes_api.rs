@@ -19,7 +19,10 @@ pub(crate) fn options() -> FetchOptions {
 /// rate limit or an outage is retried after the wait it names; any other status is a failure,
 /// never "none", so the run that asked is retried and its stored rows stay.
 pub(crate) async fn answer(cx: &Context, url: &str) -> Result<Option<Value>> {
-    let fetched = cx.egress.discover(url, &options(), 3600).await?;
+    let fetched = cx
+        .egress
+        .discover(url, &options(), cx.egress.config().discovery_secs)
+        .await?;
     match fetched.status {
         200 => {}
         400 | 404 => return Ok(None),

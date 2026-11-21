@@ -98,8 +98,8 @@ public HTTP(S) only (and, for a `nostr:` link, one bounded `wss` connection to t
 names, under the same address rules), every DNS answer checked and pinned, private and metadata
 addresses refused, at most three redirects (each checked again), a 10-second timeout and a 1 MB
 cap for a page (an HTML page is read up to `limits.html_head_bytes`, 4 MB by default; a calendar up to
-`limits.event_feed_body_bytes`; 8 MB for podcast feeds and for MusicBrainz and Wikidata
-answers). Requests to one host go one at a time, paced to
+`limits.event_feed_body_bytes`; 8 MB for podcast feeds; `limits.hub_body_bytes`, 8 MiB by
+default, for MusicBrainz and Wikidata answers). Requests to one host go one at a time, paced to
 `limits.host_requests_per_second` or the host's published rate, and so do requests to one address
 (the first the host name resolves to; a same-host redirect to another address takes that
 address's turn), so many names on one server are paced together, at the default pace or a faster

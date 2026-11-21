@@ -4,8 +4,9 @@ One of the music sources of [also on](../api.md#also-on): links on music service
 
 `spotify_isrc` (on by default; it runs only with the operator's Spotify app credentials, `[spotify]
 client_id` and `client_secret` or `PINAKES_SPOTIFY_CLIENT_ID` and `PINAKES_SPOTIFY_CLIENT_SECRET`;
-`[also_on.sources.spotify_isrc] enabled = false` turns it off): for a track on another service
-with an `isrc:` key (TIDAL's or Deezer's own record, a vouching page's, a hub's), the Spotify
+`[also_on.sources.spotify_isrc] enabled = false` turns it off; [which
+cards](README.md#lookups-by-isrc-or-barcode)): for a track (or a video of a recording) on
+another service with an `isrc:` key (TIDAL's or Deezer's own record, a vouching page's, a hub's), the Spotify
 tracks that carry exactly that ISRC, from the Web API's search with its `isrc:` filter
 (`/v1/search?q=isrc:…&type=track`, an exact lookup, never a title), as links
 `https://open.spotify.com/track/{id}` keyed by the ISRC. The track's own ISRC is asked first,
