@@ -81,8 +81,10 @@ such as OpenStreetMap's `amenity/cafe`, as `category=` takes them), e.g. `facet=
 curl -s '{{BASE}}/v1/resources/by-uri?uri=https://www.imdb.com/title/tt0111161/'
 ```
 
-Any spelling works (`http`, `www.`, a trailing slash, tracking parameters, a short link the
-index knows as an alias). A read is one flat object: the card's fields, and beside them the
+A spelling people referenced works (the index keeps it as an alias), and so do tracking
+parameters, a `doi.org` or ISBN link and a service's other URL forms of a known card, worked out
+from the URI alone; `http` for `https`, `www.` or a trailing slash is another link unless someone
+referenced it. A read is one flat object: the card's fields, and beside them the
 address, facts from official APIs, `also_on` (one link per service, as on every card), the keys
 `key=` takes (`keys`) and the other spellings (`aliases`). A Bitcoin or Lightning card also lists
 the objects it points at in `related` (a transaction's block, inputs and outputs, an address's

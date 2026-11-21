@@ -5273,6 +5273,70 @@ async fn healthz_answers_on_the_admin_listener_from_the_database(pool: PgPool) {
     assert!(started.elapsed() < std::time::Duration::from_secs(3));
 }
 
+/// A spelling held neither as a card nor as an alias reads as its root by the static alias rule:
+/// `by-uri` and the `uris` of lookup answer a link with `?utm_source=x` and the `doi.org` form
+/// with the stored root, and store nothing for them. A spelling with no stored root stays 404.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_read_of_an_unreferenced_spelling_answers_with_its_static_root(pool: PgPool) {
+    let (page, _) = store::ensure_resource_created(&pool, "https://example.org/a")
+        .await
+        .unwrap();
+    let (paper, _) = store::ensure_resource_created(&pool, "doi:10.1038/nature12373")
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let rows = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT (SELECT count(*) FROM resource)+(SELECT count(*) FROM resource_alias)",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let stored = rows().await;
+    let spellings = [
+        ("https://example.org/a?utm_source=x", &page),
+        ("https://doi.org/10.1038/nature12373", &paper),
+    ];
+    for (spelling, root) in spellings {
+        let path = format!(
+            "/v1/resources/by-uri?uri={}",
+            url::form_urlencoded::byte_serialize(spelling.as_bytes()).collect::<String>()
+        );
+        let (code, card) = call(&app, "GET", &path, None).await;
+        assert_eq!(code, 200, "{spelling}: {card}");
+        assert_eq!(card["id"], root.as_str(), "{spelling}");
+    }
+    let (code, cards) = call(
+        &app,
+        "POST",
+        "/v1/resources/lookup",
+        Some(json!({"uris": [
+            "https://example.org/a?utm_source=x",
+            "https://example.org/unknown?utm_source=x",
+            "https://doi.org/10.1038/nature12373",
+        ]})),
+    )
+    .await;
+    assert_eq!(code, 200, "{cards}");
+    let ids: Vec<&str> = cards
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, [page.as_str(), paper.as_str()]);
+    let (code, _) = call(
+        &app,
+        "GET",
+        "/v1/resources/by-uri?uri=https%3A%2F%2Fexample.org%2Funknown%3Futm_source%3Dx",
+        None,
+    )
+    .await;
+    assert_eq!(code, 404);
+    assert_eq!(rows().await, stored);
+}
+
 /// The client address behind `api.trusted_proxies`: the peer itself when it is not a trusted
 /// proxy (its `X-Forwarded-For` is never read), else the right-most entry that is not a trusted
 /// proxy, so entries a client wrote to the left of its own are ignored.

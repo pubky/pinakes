@@ -586,8 +586,8 @@ pub fn tools() -> Vec<Tool> {
             "card",
             "Read one link by its URI: its card with details (address, facts from official APIs, the objects it points at (`related`: a Bitcoin transaction's block, inputs and outputs, an address's latest transactions, a Lightning node's channels), other spellings, the same thing on other services, the public Pubky collections that hold it). Exact non-derived also_on members include optional refs (at most 5) for a Nexus tag join alongside their uri; derived or maybe links do not. Only links this instance already knows; set resolve to true to have an unknown link read now (it has its own small per-minute budget and may answer pending).",
             json!({"type":"object","required":["uri"],"additionalProperties":false,"properties":{
-                "uri":{"type":"string","description":"The link, in any spelling."},
-                "resolve":{"type":"boolean","description":"Read the link now if it is unknown here. Default false."}
+                "uri":{"type":"string","description":"The link: a spelling people referenced, or one with tracking parameters, a doi.org or ISBN link, or another URL form of a service's known card."},
+                "resolve":{"type":"boolean","description":"Read the link now if it is unknown here: stores it as a preview and fetches it from its site. Default false."}
             }}),
         ),
         tool(

@@ -19,8 +19,8 @@ snapshot; a test fails when it is stale.
 | --- | --- | --- |
 | `GET /v1/search` | Query parameters ([Search](#search)) | `{items: [card], cursor, reach_truncated, facets?}` |
 | `GET /v1/resources/{id}` | 32-character resource ID | The card with the [read's fields](#resource-read); 404 if unknown |
-| `GET /v1/resources/by-uri` | `uri`: any spelling of a link | As `GET /v1/resources/{id}` for the URI's ID (an alias answers with its root); 404 if unknown, nothing is fetched |
-| `POST /v1/resources/lookup` | Exactly one of `{"ids":[…]}` (alias `resource_ids`) or `{"uris":[…]}`, 1–500 entries | `[card]` in request order, duplicates kept, unknowns skipped |
+| `GET /v1/resources/by-uri` | `uri`: a link ([Aliases](#aliases)) | As `GET /v1/resources/{id}` for the URI's ID (an alias answers with its root). A spelling held neither as a card nor as an alias answers with its root by the static alias rules, when it has one (tracking parameters dropped, a `doi.org` or ISBN link, a service's other URL forms); 404 if unknown, nothing is fetched or stored |
+| `POST /v1/resources/lookup` | Exactly one of `{"ids":[…]}` (alias `resource_ids`) or `{"uris":[…]}`, 1–500 entries | `[card]` in request order, duplicates kept, unknowns skipped; a URI reads as `by-uri` reads it |
 | `POST /v1/resolve` | `{"uri":"https://example.org/"}` | The card with the read's fields now or within 3 seconds; 202 with `status: "pending"` while queued, with `Retry-After` (seconds) when the next attempt is put off |
 | `GET /v1/resources/{id}/occurrences` | Optional RFC 3339 `from`, `to`, `limit` (1–500, default 100), signed `cursor` | `{items: [occurrence card], cursor}` |
 | `GET /v1/resources/{id}/episodes` | Optional `limit` (1–20, default 20), `offset` (0–1000, default 0), `q` (at most 256 bytes) | `{items: [episode], next_offset, truncated}`: a podcast show's latest episodes, newest first ([Episodes](#episodes)); 404 if unknown |
@@ -945,7 +945,11 @@ A failed refresh keeps the last accepted metadata.
 An alias is the same object under another URI. It keeps its own resource ID (an ID never
 changes), but it is never fetched: its references count for its root, search lists only the
 root, and a read, lookup, change query or occurrence read of the alias answers with the root
-(so the card's `id` is the root's). Aliases are resolved deterministically:
+(so the card's `id` is the root's). A spelling nobody referenced is no alias yet: `by-uri` and the
+`uris` of `POST /v1/resources/lookup` still answer it with its root by the rules below that need
+only the URI (not a page's canonical or an API's answer), when that root is stored; nothing is
+fetched or stored for it. Another scheme (`http` for `https`), `www.` or a trailing slash is
+another link unless someone referenced that spelling. Aliases are resolved deterministically:
 
 - **Tracking parameters**: `utm_*`, `fbclid`, `gclid`, `dclid`, `msclkid`, `igshid`, `mc_cid`,
   `mc_eid` and `_gl` on every host, `recId`, `recSource`, `searchId` and `eventOrigin` on

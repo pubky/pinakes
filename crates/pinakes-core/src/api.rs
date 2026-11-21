@@ -1268,8 +1268,8 @@ pub struct LookupRequest {
     pub ids: Option<Vec<String>>,
     pub uris: Option<Vec<String>>,
 }
-/// The resource IDs a lookup names: `ids` as given, then each of `uris` as its ID (normalised, as
-/// `POST /v1/resources/lookup` reads a link); 1–500 together. An alias ID reads its root where
+/// The resource IDs a lookup names: `ids` as given, then each of `uris` as its ID (normalised);
+/// 1–500 together. An alias ID reads its root where
 /// the lookup reads, and an unknown ID adds nothing.
 pub(crate) fn lookup_ids(
     ids: Option<Vec<String>>,
@@ -3281,10 +3281,22 @@ pub async fn by_uri(
     let id = model::identity(&q.uri)
         .map_err(|e| ApiError::bad(e.to_string()))?
         .0;
-    let detail = read(&state.pool, &id, &state.config)
-        .await?
-        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "link not known".into()))?;
+    let mut detail = read(&state.pool, &id, &state.config).await?;
+    if detail.is_none() {
+        if let Some(root) = static_root_id(&q.uri) {
+            detail = read(&state.pool, &root, &state.config).await?;
+        }
+    }
+    let detail = detail.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "link not known".into()))?;
     tagged(&headers, &detail)
+}
+/// The ID of `uri`'s root by the static alias rule (`alias::root`: tracking parameters, a DOI
+/// or ISBN link, a service's other URL forms), when it has one: what a read of a spelling this
+/// instance holds neither as a card nor as an alias answers with. Computed from the URI alone:
+/// nothing is fetched or written.
+fn static_root_id(uri: &str) -> Option<String> {
+    let alias = crate::alias::root(uri)?;
+    model::identity(&alias.root).ok().map(|(id, _, _)| id)
 }
 #[utoipa::path(post,tag="Previews",path="/v1/resources/lookup",operation_id="lookup_resources",request_body=LookupRequest,responses((status=200,body=Vec<Card>),(status=400,description="Exactly one list of 1–500 IDs or URIs")))]
 pub async fn lookup(
@@ -3307,15 +3319,28 @@ pub async fn lookup(
             }
             ids
         }
-        (None, uris) => uris
-            .unwrap_or_default()
-            .iter()
-            .map(|s| {
-                model::identity(s)
-                    .map(|v| v.0)
-                    .map_err(|e| ApiError::bad(e.to_string()))
-            })
-            .collect::<Result<Vec<_>, _>>()?,
+        (None, uris) => {
+            let uris = uris.unwrap_or_default();
+            let mut ids = uris
+                .iter()
+                .map(|s| {
+                    model::identity(s)
+                        .map(|v| v.0)
+                        .map_err(|e| ApiError::bad(e.to_string()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            // A spelling held neither as a card nor as an alias reads as its static root.
+            let held: Vec<String> = sqlx::query_scalar("SELECT w.id FROM unnest($1::text[]) w(id) WHERE EXISTS(SELECT 1 FROM resource r WHERE r.id=w.id) OR EXISTS(SELECT 1 FROM resource_alias a WHERE a.alias_id=w.id)").bind(&ids).fetch_all(&state.pool).await?;
+            let held: std::collections::HashSet<String> = held.into_iter().collect();
+            for (id, uri) in ids.iter_mut().zip(&uris) {
+                if !held.contains(id) {
+                    if let Some(root) = static_root_id(uri) {
+                        *id = root;
+                    }
+                }
+            }
+            ids
+        }
     };
     let roots: Vec<String> = sqlx::query_scalar("SELECT coalesce(a.root_id,w.id) FROM unnest($1::text[]) w(id) LEFT JOIN resource_alias a ON a.alias_id=w.id").bind(&ids).fetch_all(&state.pool).await?;
     store::expedite(&state.pool, &roots).await?;
