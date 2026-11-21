@@ -1919,6 +1919,71 @@ mod tests {
         }
     }
 
+    /// The social shapes whose pages never show the object to a request without an account are
+    /// link rules: their card is the link's root and shape (with what the link spells), and no
+    /// request is made.
+    #[tokio::test(start_paused = true)]
+    async fn link_only_social_shapes_ask_nothing() {
+        for (source, uri, type_name, author) in [
+            (
+                "facebook",
+                "https://www.facebook.com/facebook/posts/10162533193146729",
+                "SocialMediaPosting",
+                Some("facebook"),
+            ),
+            (
+                "facebook",
+                "https://www.facebook.com/watch/?v=123456789",
+                "VideoObject",
+                None,
+            ),
+            (
+                "instagram",
+                "https://www.instagram.com/p/C2vXx0yPvYq/",
+                "SocialMediaPosting",
+                None,
+            ),
+            (
+                "tiktok",
+                "https://www.tiktok.com/@scout2015/video/6718335390845095173",
+                "VideoObject",
+                Some("scout2015"),
+            ),
+            (
+                "linkedin",
+                "https://www.linkedin.com/posts/linkedin_activity-7517918134654218241-7OWA",
+                "SocialMediaPosting",
+                Some("linkedin"),
+            ),
+            (
+                "twitch",
+                "https://www.twitch.tv/twitch/clip/AwkwardHelplessSalamanderSwiftRage",
+                "VideoObject",
+                Some("twitch"),
+            ),
+        ] {
+            let Some(s) = by_name(source) else {
+                continue;
+            };
+            let (egress, recorded) = fixture::egress(vec![]);
+            let cx = Context {
+                egress: &egress,
+                ttl: 3600,
+            };
+            let doc = s.resolve(&cx, uri).await.unwrap();
+            assert!(recorded.asked().is_empty(), "{uri}");
+            assert_eq!(doc.status, Status::Ok, "{uri}");
+            assert_eq!(doc.type_name, type_name, "{uri}");
+            assert!(doc.source_root.is_some(), "{uri}");
+            assert!(!doc.attributes.contains_key("blocked"), "{uri}");
+            assert_eq!(
+                doc.attributes.get("author").map(String::as_str),
+                author,
+                "{uri}"
+            );
+        }
+    }
+
     #[test]
     fn switches_and_names() {
         let mut config = Config::default();

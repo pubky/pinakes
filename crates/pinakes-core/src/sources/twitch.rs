@@ -271,6 +271,14 @@ impl Source for Twitch {
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
         let target = Target::of_uri(uri).context("not a Twitch link")?;
         let doc = cx.card(uri, self);
+        // A clip's page is the site's shell to a request without a browser, so it is never
+        // asked: the card is the link's (its root, its shape and the channel it spells).
+        if let Target::Clip { channel, .. } = &target {
+            let mut doc = Shape::Video.card(doc, SITE);
+            social::fact(&mut doc, "author", channel.clone());
+            doc.source_root = Some(target.root());
+            return Ok(doc);
+        }
         let mut doc = match social::page(cx, &target.root()).await? {
             Page::Read { doc: page, .. } => match &target {
                 Target::Channel(login) => channel_card(doc.clone(), login, &page)

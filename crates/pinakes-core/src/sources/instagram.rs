@@ -159,19 +159,28 @@ impl Source for Instagram {
     fn e2e(&self) -> Option<super::E2e> {
         use super::{E2e, E2eAnswer, E2eSample};
         Some(E2e {
-            samples: &[E2eSample {
-                kind: "instagram",
-                uri: "https://www.instagram.com/p/C2vXx0yPvYq/",
-                card_type: "SocialMediaPosting",
-                group_with: None,
-            }],
+            // A post is a link rule (nothing is asked); a reel's page is read.
+            samples: &[
+                E2eSample {
+                    kind: "instagram",
+                    uri: "https://www.instagram.com/p/C2vXx0yPvYq/",
+                    card_type: "SocialMediaPosting",
+                    group_with: None,
+                },
+                E2eSample {
+                    kind: "instagram_reel",
+                    uri: "https://www.instagram.com/reel/AAAAAAAAAAA/",
+                    card_type: "VideoObject",
+                    group_with: None,
+                },
+            ],
             answers: &[E2eAnswer {
                 host: "www.instagram.com",
-                path: "/p/C2vXx0yPvYq/",
+                path: "/reel/AAAAAAAAAAA/",
                 query: &[],
                 header: None,
                 content_type: "text/html",
-                file: "post-C2vXx0yPvYq.html.gz",
+                file: "reel-missing.html.gz",
             }],
         })
     }
@@ -205,6 +214,13 @@ impl Source for Instagram {
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
         let target = Target::of_uri(uri).context("not an Instagram link")?;
         let doc = cx.card(uri, self);
+        // A post's page names it only to a browser, so it is never asked: the card is the
+        // link's (its root and its shape).
+        if let Target::Post(_) = target {
+            let mut doc = Shape::Post.card(doc, SITE);
+            doc.source_root = Some(target.root());
+            return Ok(doc);
+        }
         let mut doc = match social::page_body(cx, &target.root(), &[]).await? {
             Body::Read { body, .. } => {
                 let tags =
@@ -330,11 +346,11 @@ mod tests {
         );
     }
 
-    /// A post withheld where the request came from (451) is not a post that is gone: the blocked
+    /// A reel withheld where the request came from (451) is not a reel that is gone: the blocked
     /// card, not `missing`.
     #[tokio::test(start_paused = true)]
-    async fn a_withheld_post_is_blocked_not_missing() {
-        let post = "https://www.instagram.com/p/C2vXx0yPvYq/";
+    async fn a_withheld_reel_is_blocked_not_missing() {
+        let post = "https://www.instagram.com/reel/C2vXx0yPvYq/";
         let (egress, _) = crate::sources::fixture::egress(vec![(
             post,
             451,
@@ -347,7 +363,7 @@ mod tests {
         };
         let doc = Instagram.resolve(&cx, post).await.unwrap();
         assert_eq!(doc.status, crate::model::Status::Ok);
-        assert_eq!(doc.type_name, "SocialMediaPosting");
+        assert_eq!(doc.type_name, "VideoObject");
         assert_eq!(doc.attributes["blocked"], "true");
         assert_eq!(doc.source_root.as_deref(), Some(post));
     }

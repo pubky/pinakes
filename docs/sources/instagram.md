@@ -3,9 +3,9 @@
 Instagram posts, reels and profiles, from their pages' Open Graph tags when Instagram writes
 them for a request without an account. No key and no account; Instagram's oEmbed endpoint
 needs an app token and is not used. Instagram shows almost everything to accounts only: such a
-link gets a plain card rather than a failure (below). Posts and reels are social content: the
-card quotes at most 200 characters, refreshes within the hour and is removed once the post is
-gone.
+link gets a plain card rather than a failure (below). A post is a link rule: its card is the
+link's root and shape alone, and nothing is asked. Reels are social content: the card quotes at
+most 200 characters, refreshes within the hour and is removed once the reel is gone.
 
 ## Links
 
@@ -20,14 +20,16 @@ roots. The host without `www.`, instagr.am, a capitalised name, a missing traili
   account to its sign-in page: the card is the plain one, "Profile on instagram.com", with the
   name and the `blocked` fact. When Instagram writes the page's tags
   (`Name (@name) • Instagram photos and videos`), the card has the name, bio and picture.
-- A post or reel: `GET` of its root. Instagram names the post only to a browser: the card is
-  the plain one, "Post on instagram.com" or "Video on instagram.com". When Instagram writes
-  the page's tags (`Name on Instagram: "caption"`), the card has the caption, author and
-  image.
+- A post: nothing. Instagram names a post only to a browser, so the card is "Post on
+  instagram.com", from the link alone.
+- A reel: `GET` of its root. Instagram names the reel only to a browser: the card is the plain
+  one, "Video on instagram.com". When Instagram writes the page's tags (`Name on Instagram:
+  "caption"`), the card has the caption, author and image.
 
-A request Instagram refuses (the sign-in redirect, a challenge, 401 or 403) gives the card of
-the link's shape alone with the `blocked` fact: the link still resolves, groups and counts. A refusal on a refresh keeps the card read before, as a wall on a web page does. So
-does a page Instagram withholds where the request came from (451): it is not `missing`.
+A request Instagram refuses (the sign-in redirect, a challenge, 401 or 403) gives the card of the
+link's shape alone with the `blocked` fact: the link still resolves, groups and counts. So does a
+page Instagram withholds where the request came from (451): it is not `missing`. A refusal on a
+refresh keeps the card read before, as a wall on a web page does.
 
 ## Card
 
