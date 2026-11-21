@@ -92,7 +92,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `event_months_back` | `1` | Months of past occurrences kept in the horizon. |
 | `event_months_forward` | `12` | Months of future occurrences kept in the horizon. |
 | `geocode_score` | `0.8` | Lowest accepted geocoding score. |
-| `held_retry_secs` | `60` | Retry interval of a held feed snapshot (seconds). |
+| `held_retry_secs` | `60` | Wait before a held feed snapshot's first check (seconds; at least `feed_cadence_floor`); later holds back off from the normal cadence. |
 | `same_event_incoming_kept` | `40` | The most events that may name one event in the same-event hint (each keeps its best twenty). |
 | `same_event_drop_batch` | `500` | Events the same-event sweep drops per transaction. |
 | `feed_max_changes` | `100` | Occurrence changes per snapshot before they become one summary line. |
@@ -758,8 +758,10 @@ EXDATEs, with the warning `series_rule_unexpanded`. After an upgrade that change
 `pinakesd reextract event`: feeds re-parse at once instead of at their next fetch. A JSON feed (Gancio, a JSON Feed) is parsed as one document,
 so its parsed form can take several times `limits.event_feed_body_bytes` of memory; size that
 limit with the worker count in mind. `webcal://` is fetched over HTTPS and never downgrades. A
-feed-provided refresh interval is clamped to one hour through 30 days. Held snapshots retry after
-`limits.held_retry_secs`, backing off from the normal cadence.
+feed-provided refresh interval is clamped to one hour through 30 days. A held snapshot is read
+again after `limits.held_retry_secs` (at least `limits.feed_cadence_floor`, an hour by default),
+so an identical snapshot confirms it soon; a second hold in a row and later ones back off from
+the normal cadence, doubling each time up to seven days.
 
 `event.utc_series_wall_clock` (default `"x_wr_timezone"`; also `"coordinates"`, `"never"`)
 chooses which zone sources make a series with a UTC DTSTART expand on local wall-clock time

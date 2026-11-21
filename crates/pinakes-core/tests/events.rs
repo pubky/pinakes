@@ -2052,6 +2052,37 @@ async fn xml_past_the_page_cap_is_cut_and_never_a_container(pool: PgPool) {
     server.abort();
 }
 
+/// A feed's first held snapshot is read again after `held_retry_secs` (at least its cadence
+/// floor), a quick confirmation; a second hold in a row backs off from the normal cadence.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_first_hold_is_checked_after_held_retry_secs(pool: PgPool) {
+    let uri = "https://example.org/holds.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut d = dynamic_parse(uri, &future_calendar(6));
+    d.ttl_secs = 86400;
+    d.container.as_mut().unwrap().held_retry_secs = 600;
+    d.container.as_mut().unwrap().limits.cadence_floor = 300;
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    for (kept, holds, wait) in [(2, 1, 600.0), (1, 2, 2.0 * 86400.0)] {
+        // Most of the feed's events gone at once: the snapshot is held.
+        let mut shrunk = fresh(&d);
+        shrunk
+            .container
+            .as_mut()
+            .unwrap()
+            .occurrences
+            .truncate(kept);
+        store::save_document(&pool, &id, 0, &shrunk).await.unwrap();
+        let (count, delay): (i32, f64) = sqlx::query_as("SELECT e.hold_count,extract(epoch FROM r.next_attempt_at-now())::float8 FROM event_fetch e JOIN resource r ON r.id=e.resource_id WHERE r.id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, holds);
+        assert!(delay > wait - 5.0 && delay <= wait, "hold {holds}: {delay}");
+    }
+}
+
 #[sqlx::test(migrations = "../../migrations")]
 async fn container_caps_patches_rotation_backoff_retention_and_labels(pool: PgPool) {
     let uri = "https://example.org/limits.ics";
