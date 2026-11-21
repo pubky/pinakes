@@ -260,8 +260,13 @@ pub(crate) fn parsed(f: &Fetched, text: &str, html: &scraper::Html) -> Page {
                     .contains("javascript")
             }) && html.select(&select("body a[href]")).next().is_none())
     };
+    // A wall phrase in the body text, or a captcha widget, on a page served as content (no
+    // challenge status) that names its own object (`og:title`, JSON-LD, a microformat name) is
+    // part of that page: a landing page's "Request access" button, an app shell's "enable
+    // JavaScript" notice, a comment form's captcha.
+    let unnamed = || challenge || !describes_object();
     if ((challenge || short) && (title_marked || (heading.len() < 200 && walls.marked(&heading))))
-        || (short && walls.marked(&visible))
+        || (short && walls.marked(&visible) && unnamed())
         || (challenge && vendor_marked)
         || (short
             && (vendor_marked || walls.challenge_marked(&visible))
@@ -271,7 +276,8 @@ pub(crate) fn parsed(f: &Fetched, text: &str, html: &scraper::Html) -> Page {
             && walls
                 .captcha_selectors
                 .iter()
-                .any(|s| html.select(&select(s)).next().is_some()))
+                .any(|s| html.select(&select(s)).next().is_some())
+            && unnamed())
     {
         return Page::Blocked;
     }
@@ -306,12 +312,14 @@ pub(crate) fn parsed(f: &Fetched, text: &str, html: &scraper::Html) -> Page {
             }
         }
     }
+    // A "Redirecting" stub, by its title or the start of its text, is short: an article titled
+    // "Redirecting stdout" is content.
     let redirect_title = title.trim().to_ascii_lowercase().starts_with("redirecting");
     let redirect_body = visible
         .trim()
         .to_ascii_lowercase()
         .starts_with("redirecting");
-    if redirect_title || (redirect_body && visible.len() < 500) {
+    if (redirect_title || redirect_body) && visible.trim().len() < 500 {
         if let Some(target) = html
             .select(&select("a[href]"))
             .next()

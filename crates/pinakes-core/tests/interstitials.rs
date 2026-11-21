@@ -496,6 +496,55 @@ fn wall_heuristics_need_context_and_cover_more_vendors() {
     }
 }
 
+/// A wall phrase or a captcha in the body of a short page served as content (200) that names its
+/// own object (`og:title`, JSON-LD) is part of the page; at a challenge status, or on a page that
+/// names nothing, it is still a wall. A "Redirecting" title or text is a stub only on a short page.
+#[test]
+fn wall_phrases_in_a_named_page_and_long_redirecting_pages_are_content() {
+    let uri = "https://app.example/beta";
+    let at = |body: &str, status: u16| {
+        interstitial::inspect(&uri.parse().unwrap(), &page(uri, body, status)).unwrap()
+    };
+    let og = "<head><title>Acme beta</title><meta property='og:title' content='Acme beta'></head>";
+    let ld = r#"<head><title>Acme</title><script type="application/ld+json">{"@type":"SoftwareApplication","name":"Acme"}</script></head>"#;
+    for (head, body) in [
+        (
+            og,
+            "<body><h2>Acme beta</h2><a href='/join'>Request access</a></body>",
+        ),
+        (
+            ld,
+            "<body><div>Please enable JavaScript for the full app.</div></body>",
+        ),
+        (
+            og,
+            "<body><p>Comments</p><form><div class='g-recaptcha'></div></form></body>",
+        ),
+    ] {
+        let page = format!("<html>{head}{body}</html>");
+        assert_eq!(at(&page, 200), Page::Content, "{body}");
+        assert_eq!(at(&page, 403), Page::Blocked, "{body}");
+        // Without a name of its own the page is a wall.
+        let plain = format!("<html><head><title>Acme</title></head>{body}</html>");
+        assert_eq!(at(&plain, 200), Page::Blocked, "{body}");
+    }
+    let long = "Useful article text. ".repeat(40);
+    let article = format!(
+        "<title>Redirecting stdout and stderr in Bash</title><body><a href='/'>Home</a><p>{long}</p></body>"
+    );
+    assert_eq!(at(&article, 200), Page::Content);
+    let text = format!("<title>Shell notes</title><body><p>Redirecting output: {long}</p><a href='/'>Home</a></body>");
+    assert_eq!(at(&text, 200), Page::Content);
+    // A short stub still is a hop.
+    assert_eq!(
+        at(
+            "<title>Redirecting…</title><body><a href='/next'>Continue</a></body>",
+            200
+        ),
+        Page::Redirect("/next".into())
+    );
+}
+
 /// A challenge page is a failed fetch: the resource turns `unreachable` with the normal backoff
 /// and dead letter, keeps its accepted facts and group keys, never confirms disappearance and
 /// writes no change line; it stays in search and recovers with the next good page.
