@@ -3,9 +3,10 @@
 Pinakes is a public index of the external links people reference on Pubky: web pages, places,
 events, books, music, videos, papers, posts on other networks and objects of other Pubky apps.
 Each link is read into a small typed card. You ask by text, type, tag, map area, time or an exact
-identifier, and get cards back as JSON. No account, no API key, no install. Asking only reads,
-except `POST /v1/resolve` (the MCP `card` tool with `resolve: true`): it fetches a link this
-instance does not hold yet and stores it as a preview.
+identifier, and get cards back as JSON. No account, no API key, no install. Asking stores no new
+link, except `POST /v1/resolve` (the MCP `card` tool with `resolve: true`): it fetches a link this
+instance does not hold yet and stores it as a preview. A lookup or resolve of a held card that is
+overdue moves it to the front of the refresh queue.
 
 **Base URL: the host that served you this document**, `{{BASE}}` here. Every instance indexes the
 links its own Nexus reported, so another instance answers a different question.
@@ -228,7 +229,7 @@ only links your network referenced, search here with `reach=following&viewer=<pu
 ## MCP
 
 `POST {{BASE}}/mcp` is a Model Context Protocol endpoint (Streamable HTTP, stateless, no auth).
-Every tool only reads, except `card` with `resolve: true`, which stores an unknown link as a
+No tool stores a new link, except `card` with `resolve: true`, which stores an unknown link as a
 preview and has this instance fetch it from its site. Its tools are thin calls into the routes
 above, and each answer names the REST URL with the full result:
 

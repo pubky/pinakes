@@ -16,7 +16,7 @@ pub mod mcp;
 /// The guide, with `{{BASE}}` where the base URL goes.
 const GUIDE: &str = include_str!("guide.md");
 /// The skill's front matter: what an agent reads to decide when to load it.
-const SKILL_FRONT_MATTER: &str = "---\nname: pinakes\ndescription: Use when you need facts about the external links people share on Pubky - what a link is (its typed card), places near a point with a tag, events in a city and time window, every link with one ISBN, DOI, ISRC or OSM id, and which links are the same thing on several services. HTTP search over Pinakes, which only reads except POST /v1/resolve (fetches and stores a link it does not hold yet); join with Nexus by URI for tags and taggers.\n---\n\n";
+const SKILL_FRONT_MATTER: &str = "---\nname: pinakes\ndescription: Use when you need facts about the external links people share on Pubky - what a link is (its typed card), places near a point with a tag, events in a city and time window, every link with one ISBN, DOI, ISRC or OSM id, and which links are the same thing on several services. HTTP search over Pinakes, which stores no new link except through POST /v1/resolve (fetches and stores a link it does not hold yet); join with Nexus by URI for tags and taggers.\n---\n\n";
 
 /// The routes of the guide and the index.
 pub fn routes() -> Router<AppState> {
@@ -226,7 +226,7 @@ pub async fn index(
     let base = base_url(&headers);
     Json(Index {
         service: "pinakes".into(),
-        description: "Search over the external links people reference on Pubky: typed cards, places, events, identifiers and groups. It only reads, except POST /v1/resolve, which fetches and stores a link this instance does not hold yet.".into(),
+        description: "Search over the external links people reference on Pubky: typed cards, places, events, identifiers and groups. It stores no new link, except through POST /v1/resolve, which fetches and stores a link this instance does not hold yet.".into(),
         start_here: format!("{base}/llms.txt"),
         links: IndexLinks {
             guide: format!("{base}/llms.txt"),

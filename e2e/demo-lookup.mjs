@@ -1,4 +1,4 @@
-// Read-only demo and resolver regression check: POST /v1/resolve for a curated list of public
+// Demo and resolver regression check: POST /v1/resolve for a curated list of public
 // URIs, poll each resource until it is no longer pending (and, for an entry with `derived`, until
 // those services appear among its derived also-on links), print one table row per entry and exit
 // non-zero on any mismatch. Never writes to Pubky or Nexus.
