@@ -1199,7 +1199,7 @@ pub struct CategoryFacet {
 /// The facets `facet` asked for, over the whole filtered set.
 #[derive(Serialize, ToSchema)]
 pub struct Facets {
-    /// `facet=tags`: the labels the filtered links carry, most frequent first.
+    /// `facet=tags`: the labels the filtered links carry, most frequent first, at most 100.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<TagFacet>>,
     /// `facet=type`: the card types of the filtered set, most frequent first.
@@ -1214,7 +1214,7 @@ pub struct Facets {
     #[serde(rename = "category", skip_serializing_if = "Option::is_none")]
     pub categories: Option<Vec<CategoryFacet>>,
 }
-/// The most entries `facet=host` and `facet=category` list each.
+/// The most entries `facet=tags`, `facet=host` and `facet=category` list each.
 pub const FACET_LIST_CAP: i64 = 100;
 /// The links per host `facet=host` tries for the service's name (`HostFacet::site`).
 const FACET_SITE_SAMPLE: i32 = 8;
@@ -3034,7 +3034,9 @@ pub async fn search(
             .push(" r JOIN effective_reference f ON r.id=f.resource_id WHERE f.label IS NOT NULL");
 
         scope(&mut sql, &q, &reach);
-        sql.push(" GROUP BY f.label) t),'[]')");
+        sql.push(" GROUP BY f.label ORDER BY count DESC,f.label LIMIT ")
+            .push_bind(FACET_LIST_CAP)
+            .push(") t),'[]')");
     } else {
         sql.push("NULL");
     }

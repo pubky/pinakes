@@ -5448,3 +5448,65 @@ async fn by_default_one_client_takes_at_most_100_new_previews_an_hour(pool: PgPo
         .unwrap();
     assert_eq!(stored, 101);
 }
+
+/// `facet=tags` lists at most 100 labels, the most frequent first and ties by label, however
+/// many labels the filtered links carry.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_tags_facet_lists_at_most_100_labels(pool: PgPool) {
+    let links = [
+        "https://example.org/tagged/a",
+        "https://example.org/tagged/b",
+    ];
+    let mut labels: Vec<(usize, String)> = (0..120).map(|n| (0, format!("l{n:03}"))).collect();
+    labels.extend([(0, "most".to_owned()), (1, "most".to_owned())]);
+    let lines: Vec<Change> = labels
+        .iter()
+        .map(|(link, label)| Change {
+            op: Op::Put,
+            uri: identity(links[*link]).unwrap().1,
+            kind: Kind::Tag,
+            author: author(*link),
+            object_path: format!("/pub/app/tags/{label}"),
+            label: Some(label.clone()),
+            at: SEEDED_AT_MS,
+        })
+        .collect();
+    let saved = ingest::cursor(&pool, "fixture").await.unwrap();
+    let next = lines.len() as i64;
+    let page = FeedPage {
+        page: Changes {
+            lines,
+            next_cursor: next,
+            skipped: Default::default(),
+        },
+        epoch: None,
+        length: next,
+    };
+    let metrics = Metrics::new().unwrap();
+    assert!(ingest::apply(
+        &pool,
+        "fixture",
+        &saved,
+        &page,
+        &IngestConfig::default(),
+        &metrics
+    )
+    .await
+    .unwrap());
+    for uri in links {
+        let mut doc = ResourceMeta::new(uri, "web", 86400);
+        doc.name = Some("A tagged page".into());
+        doc.set_type("Article");
+        store::save_document(&pool, &identity(uri).unwrap().0, 0, &doc)
+            .await
+            .unwrap();
+    }
+    let app = api::router(AppState::new(pool, Config::default()).unwrap());
+    let (code, page) = call(&app, "GET", "/v1/search?facet=tags&limit=1", None).await;
+    assert_eq!(code, 200, "{page}");
+    let tags = page["facets"]["tags"].as_array().unwrap();
+    assert_eq!(tags.len(), 100, "{page}");
+    assert_eq!(tags[0], json!({"label": "most", "count": 2}));
+    assert_eq!(tags[1]["label"], "l000");
+    assert_eq!(tags[99]["label"], "l098");
+}

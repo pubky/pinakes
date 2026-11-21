@@ -798,7 +798,7 @@ next to the picked ones, read the facet from the same search without its own fil
 | Facet | Entries |
 | --- | --- |
 | `type` | `facets.type`: `{type, type_path, count}` per card type; `type_path` runs from `Thing` down to the type, enough to build the type tree and roll counts up into families |
-| `tags` | `facets.tags`: `{label, count}` per label people tagged the links with |
+| `tags` | `facets.tags`: `{label, count}` per label people tagged the links with, at most 100 (the most frequent, ties by label) |
 | `host` | `facets.host`: `{host, site, count}` per service, at most 100: `host` as `host=` takes it (exactly as the links' URLs name it, so `www.youtube.com` and `youtube.com` are two entries), `site` the name its cards show (`YouTube`, `Wikipedia (en)`: the service Pinakes knows by the URL, else the site name the documents give most often, else the host). A host that `pubky://` objects use is a user's key, not a service, and is left out (`host=<user key>` still filters them) |
 | `category` | `facets.category`: `{category, count}` per category, at most 100, as `category=` takes it: a place's OpenStreetMap `key/value` (`amenity/cafe`), or the `category` a page's schema.org data gives |
 
