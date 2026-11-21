@@ -48,6 +48,10 @@ pub async fn run(
         if *stop.borrow() {
             break;
         }
+        // After the cleanup: the places only deleted cards named go too.
+        if let Err(e) = crate::store::prune_osm_places(&pool).await {
+            tracing::warn!(error=%crate::resolver::log_error(&e),"pruning cached OSM objects failed");
+        }
         if let Err(e) = crate::also_on::prune(&pool).await {
             tracing::warn!(error=%crate::resolver::log_error(&e),"also-on pruning failed");
         }

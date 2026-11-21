@@ -1851,3 +1851,68 @@ async fn reextract_unresolves_an_osm_row_moving_to_web(pool: PgPool) {
         );
     }
 }
+
+/// The hourly pruning deletes the cached OSM objects nothing refers to once their cache has
+/// expired, at most `store::OSM_PLACE_PRUNE_BATCH` a pass, and keeps those an OSM card, a card's
+/// venue or the change journal names, and an unreferenced one whose cache is still fresh.
+#[sqlx::test(migrations = "../../migrations")]
+async fn cached_osm_objects_nothing_refers_to_are_pruned(pool: PgPool) {
+    let place = |id: i64, refresh: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query("INSERT INTO osm_place(osm_type,osm_id,type,type_path,doc,fetch_doc,fetched_at,refresh_at,status) VALUES('node',$1,'Place',ARRAY['Thing','Place'],'{}','{}',now()-interval '30 days',now()+$2::interval,'ok')")
+                .bind(id)
+                .bind(refresh)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+    for id in 1..=5 {
+        place(id, "-2 hours").await;
+    }
+    // Fresh in the cache, or expired only minutes ago: a read may still use it.
+    place(6, "1 day").await;
+    place(7, "-10 minutes").await;
+    let (card, _) = store::ensure_resource_created(&pool, "https://www.openstreetmap.org/node/2")
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource SET osm_type='node',osm_id=2 WHERE id=$1")
+        .bind(&card)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (event, _) = store::ensure_resource_created(&pool, "https://example.org/event")
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource SET doc=jsonb_build_object('venue',jsonb_build_object('osm_id','node/3')) WHERE id=$1")
+        .bind(&event)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO resource_change(resource_id,class,fields,source,osm_type,osm_id) VALUES('gone','deleted','{}','osm','node',4)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let kept = || async {
+        sqlx::query_scalar::<_, i64>("SELECT osm_id FROM osm_place ORDER BY osm_id")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+    };
+    assert_eq!(store::prune_osm_places(&pool).await.unwrap(), 2);
+    assert_eq!(kept().await, [2, 3, 4, 6, 7]);
+    // A pass is bounded: a backlog takes several.
+    let backlog = store::OSM_PLACE_PRUNE_BATCH + 5;
+    sqlx::query("INSERT INTO osm_place(osm_type,osm_id,type,type_path,doc,fetch_doc,fetched_at,refresh_at,status) SELECT 'way',n,'Place',ARRAY['Thing','Place'],'{}','{}',now()-interval '30 days',now()-interval '2 hours','ok' FROM generate_series(1,$1) n")
+        .bind(backlog)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        store::prune_osm_places(&pool).await.unwrap(),
+        store::OSM_PLACE_PRUNE_BATCH as u64
+    );
+    assert_eq!(store::prune_osm_places(&pool).await.unwrap(), 5);
+    assert_eq!(kept().await, [2, 3, 4, 6, 7]);
+}

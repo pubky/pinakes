@@ -406,6 +406,12 @@ to 0.5 and is refused above 1 for a public host. Staging and production use thei
 `osm.nominatim_url`, a self-hosted or a hosted Nominatim ([deployment](deployment.md#nominatim)).
 Pinakes never proxies place search, autocomplete or reverse geocoding.
 
+The `osm_place` cache holds what Pinakes serves: the hourly maintenance deletes the cached
+objects nothing refers to any more (no OSM card, no venue of a card or an occurrence, no line
+of the change journal), once their cached fetch expired an hour ago or more, at most 1000 a pass
+and the oldest cache first. A place only a deleted card named so leaves the dump once its cache
+has expired; one referenced again is fetched anew.
+
 The ODbL share-alike download is a file: the daemon writes `osm_place.ndjson.gz` into
 `osm.dump_dir` (default `dumps`, relative to the working directory) at startup when it is missing
 or older than `limits.osm_dump_every_hours` (24), then at that interval. One writer per
