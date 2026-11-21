@@ -706,6 +706,7 @@ async fn finish_job(
                 | "doi"
                 | "nostr"
                 | "activitypub"
+                | "official"
         ) {
             let now = chrono::Utc::now();
             let mut manifest = resolver.manifest_for(&job.uri);
@@ -748,7 +749,10 @@ async fn finish_job(
                         crate::scheduler::next(&manifest, &doc, now, refresh)
                     }
                 };
-                doc.ttl_secs = next.map_or(0, |at| (at - now).num_seconds().max(0) as u64);
+                // An official card keeps its route's lifetime until its date makes it final.
+                if resolver.name() != "official" || next.is_none() {
+                    doc.ttl_secs = next.map_or(0, |at| (at - now).num_seconds().max(0) as u64);
+                }
             } else if resolver.name() != "osm" {
                 doc.ttl_secs = doc.ttl_secs.max(3600);
             }

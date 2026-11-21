@@ -179,7 +179,10 @@ pub fn parse_observation(status: u16, raw: &[u8], id: u64) -> Result<Option<Card
         card.detail("place_guess", text(&v["place_guess"]));
         card.detail("positional_accuracy_m", int(&v["positional_accuracy"]));
     }
-    card.start = time(&v["time_observed_at"]).or_else(|| time(&v["observed_on"]));
+    card.detail(
+        "observed_at",
+        time(&v["time_observed_at"]).map(|t| t.to_rfc3339()),
+    );
     card.detail("observed_on", text(&v["observed_on"]));
     card.detail("quality_grade", text(&v["quality_grade"]));
     card.detail("taxon_id", taxon["id"].as_u64());
@@ -305,6 +308,7 @@ impl Source for Inaturalist {
             // Observations
             "place_guess",
             "positional_accuracy_m",
+            "observed_at",
             "observed_on",
             "quality_grade",
             "taxon_id",
@@ -466,10 +470,9 @@ mod tests {
         );
         let p = card.point.unwrap();
         assert_eq!((p.lat, p.lon), (33.195340253, -117.3847581279));
-        assert_eq!(
-            card.start.unwrap().to_rfc3339(),
-            "2026-01-01T23:09:23+00:00"
-        );
+        // An observation can still change: its time is a fact, not a start that makes it final.
+        assert_eq!(card.start, None);
+        assert_eq!(card.details["observed_at"], "2026-01-01T23:09:23+00:00");
         assert_eq!(card.details["taxon_name"], "Euphagus cyanocephalus");
         assert_eq!(card.details["quality_grade"], "research");
         assert_eq!(card.details["user_login"], "ramchop");
@@ -517,10 +520,7 @@ mod tests {
         assert!(!card.details.contains_key("place_guess"));
         assert_eq!(card.details["obscured"], true);
         assert_eq!(card.details["geoprivacy"], "obscured");
-        assert_eq!(
-            card.start.unwrap().to_rfc3339(),
-            "2023-12-31T21:16:30+00:00"
-        );
+        assert_eq!(card.details["observed_at"], "2023-12-31T21:16:30+00:00");
         assert_eq!(card.details["gbif_occurrence"], 4993788366u64);
         // Any one of the three signals hides the point.
         for (field, value) in [

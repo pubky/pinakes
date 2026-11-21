@@ -118,8 +118,16 @@ pub fn parse(status: u16, raw: &[u8], asked: &str) -> Result<Option<Card>> {
 
     let status = &p["statusModule"];
     let (start, completion) = (&status["startDateStruct"], &status["completionDateStruct"]);
-    card.start = full_date(&start["date"]);
-    card.end = full_date(&completion["date"]);
+    // A trial's dates make its card final once past (`kit::DATED`), so only a trial that has
+    // ended carries them; a running one's dates (often estimates, often a month alone) are facts.
+    let ended = matches!(
+        status["overallStatus"].as_str(),
+        Some("COMPLETED" | "TERMINATED" | "WITHDRAWN")
+    );
+    if ended {
+        card.start = full_date(&start["date"]);
+        card.end = full_date(&completion["date"]);
+    }
     card.detail("overall_status", text(&status["overallStatus"]));
     card.detail("start_date", text(&start["date"]));
     card.detail("start_date_type", text(&start["type"]));
@@ -306,6 +314,25 @@ mod tests {
         ] {
             assert_eq!(from_uri(uri), None, "{uri}");
         }
+    }
+
+    /// A running trial's dates are facts, never a start and end: its card would be final once
+    /// they passed (`kit::DATED`), and a running trial still changes.
+    #[test]
+    fn a_running_trial_has_no_start_or_end() {
+        let raw = read("search-NCT04368728.json.gz");
+        let mut v: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        let study = if v["studies"].is_array() {
+            &mut v["studies"][0]
+        } else {
+            &mut v
+        };
+        study["protocolSection"]["statusModule"]["overallStatus"] = "RECRUITING".into();
+        let card = parse(200, &serde_json::to_vec(&v).unwrap(), PFIZER)
+            .unwrap()
+            .unwrap();
+        assert_eq!((card.start, card.end), (None, None));
+        assert_eq!(card.details["start_date"], "2020-04-29");
     }
 
     #[test]

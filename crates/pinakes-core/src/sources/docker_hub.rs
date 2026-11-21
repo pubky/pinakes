@@ -434,35 +434,4 @@ mod tests {
         assert!(parse(429, b"", &lncm()).is_err());
         assert!(parse(500, b"", &lncm()).is_err());
     }
-
-    /// A card of a thing (not an event) is refreshed on the official route's schedule, however
-    /// old its dates; the same card with a past `start` would be final.
-    #[test]
-    fn a_thing_with_old_dates_is_refreshed() {
-        use crate::{model::ResourceMeta, resolver::cards::manifests};
-        use chrono::{TimeZone, Utc};
-        let manifest = manifests(&Default::default())
-            .into_iter()
-            .find(|m| m.source == "official")
-            .expect("the official route");
-        let repo = from_uri("https://hub.docker.com/_/nginx").unwrap();
-        let raw = fixture::read("docker_hub", "repo-library-nginx.json");
-        let card = parse(200, &raw, &repo).unwrap().unwrap();
-        assert_eq!(card.details["registered"], "2014-06-05T19:14:45+00:00");
-        let doc = card.into_doc(
-            ResourceMeta::new("docker:library/nginx", "docker_hub", 60),
-            "x",
-        );
-        let now = Utc::now();
-        let refresh = Default::default();
-        let next = crate::scheduler::next(&manifest, &doc, now, &refresh);
-        assert!(next.is_some_and(|at| at > now), "refreshed");
-        let mut dated = doc;
-        dated.start = Some(Utc.with_ymd_and_hms(2014, 6, 5, 19, 14, 45).unwrap());
-        assert_eq!(
-            crate::scheduler::next(&manifest, &dated, now, &refresh),
-            None,
-            "final"
-        );
-    }
 }

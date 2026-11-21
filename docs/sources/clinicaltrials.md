@@ -30,8 +30,10 @@ its study, where `/api/v2/studies/{NCT}` would redirect to the study's full reco
 ## Card
 
 `MedicalTrial`, with `name` the brief title and `description` the brief summary, as the registry
-gives them. `start` and `end` are the start and completion dates when they are full dates; a
-month alone (e.g. `2010-01`) stays in `start_date` and `completion_date`.
+gives them. `start` and `end` are the start and completion dates of a trial that has ended
+(`COMPLETED`, `TERMINATED` or `WITHDRAWN`) when they are full dates: its card is then final a
+day after them. A running trial's dates, and a month alone (e.g. `2010-01`), stay in
+`start_date` and `completion_date`, so its card keeps being read again.
 
 | Fact | Meaning |
 | --- | --- |

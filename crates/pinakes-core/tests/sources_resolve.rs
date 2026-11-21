@@ -307,3 +307,43 @@ async fn a_part_refused_for_good_is_not_read_again_soon() {
     assert_eq!(tip.status, Status::Ok);
     assert!(tip.refresh_by.is_some());
 }
+
+/// After a job, a card of a thing that happened (a mined block, its time long past) is final,
+/// and a card of a thing with no time of its own (a compound) is read again at the route's
+/// lifetime.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_past_dated_official_card_is_final_after_its_job(pool: sqlx::PgPool) {
+    use pinakes_core::{queue, store};
+    if !has("mempool") || !has("pubchem") {
+        return;
+    }
+    let resolver = official();
+    let mut rows = vec![];
+    for uri in [
+        format!("btc:block/{DEEP}"),
+        "https://pubchem.ncbi.nlm.nih.gov/compound/aspirin".into(),
+    ] {
+        let id = store::ensure_resource(&pool, &uri).await.unwrap();
+        let job = queue::Job {
+            id: id.clone(),
+            uri,
+            attempts: 0,
+            generation: 0,
+        };
+        queue::run_job(&pool, &resolver, &Default::default(), &job)
+            .await
+            .unwrap();
+        let row: (String, bool, f64) = sqlx::query_as(
+            "SELECT status,final,coalesce(extract(epoch FROM refresh_at-now()),0)::float8 FROM resource WHERE id=$1",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        rows.push(row);
+    }
+    assert_eq!((rows[0].0.as_str(), rows[0].1), ("ok", true), "the block");
+    assert_eq!((rows[1].0.as_str(), rows[1].1), ("ok", false), "the compound");
+    // The official route's lifetime (a day), not the dateless page's week.
+    assert!((82_800.0..=86_400.0).contains(&rows[1].2), "{}", rows[1].2);
+}

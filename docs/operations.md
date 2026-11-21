@@ -389,7 +389,10 @@ lowers its service's host to the service's published rate (never above
 would wait more than five seconds for its host (its slot, or the request ahead of it) is retried
 later instead of timing out; a redirect within the host keeps the slot it has. After an upgrade
 that adds a source, run `pinakesd reextract web official`: links already known get their source's
-card.
+card. An official card is read again at `[cards.official] ttl_secs` (sooner where its source asks)
+until it is a thing that happened at a time (an event such as an earthquake, a finished trial, a
+Bitcoin block or confirmed transaction): a day after its start or end has passed it is final and
+not read again. An observation's time is a fact, so observations keep being read again.
 
 Two clients are outside that policy. Nominatim and Nexus are trusted, operator-configured
 upstreams at fixed URLs that no reference can change: their clients do not apply the web DNS

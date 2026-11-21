@@ -37,7 +37,6 @@ scientific name).
 - **Point:** only when the observation is not obscured and neither the observer's geoprivacy nor
   the taxon's is `obscured` or `private`. iNaturalist's public coordinates for an obscured
   observation are randomised, so they are never used; the place guess is left out too.
-- **Start:** the time observed, with its offset, else the date observed.
 - **Image:** the first photo at medium size, only when the photo has a Creative Commons licence;
   its own credit is `image_attribution`.
 - iNaturalist names the GBIF occurrence it published the observation as, in the
@@ -48,6 +47,7 @@ Creative Commons licence, and `description` the Wikipedia summary iNaturalist sh
 
 | Fact | Meaning |
 | --- | --- |
+| `observed_at` | The time observed (RFC 3339). An observation has no start: it can still be obscured, re-identified or deleted, so its card refreshes |
 | `observed_on` | The date observed |
 | `quality_grade` | `research`, `needs_id` or `casual` |
 | `taxon_id`, `taxon_name`, `taxon_rank`, `common_name` | The observation's taxon |
