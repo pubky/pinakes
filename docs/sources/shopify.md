@@ -1,7 +1,9 @@
 # Shopify
 
 Shopify stores' product pages, improved from the store's own product record. A page hook: it
-claims no links, and a store's pages are read by the web route as usual. No key.
+claims no links, and a store's pages are read by the web route as usual. No key: the record is
+served by the page's own host, so its barcode is what the page says about itself, the card's
+fact `gtin` (never the key `gtin:`).
 
 ## Links
 

@@ -14,9 +14,13 @@ use pinakes_core::{
 use serde_json::Value;
 use sqlx::PgPool;
 
-/// Any official source: whose record stated the barcode matters, not which one.
+/// Any official source that reads a service's own record (no page hook): whose record stated
+/// the barcode matters, not which one.
 fn record_source() -> Option<&'static str> {
-    pinakes_core::sources::REGISTRY.first().map(|s| s.name())
+    pinakes_core::sources::REGISTRY
+        .iter()
+        .find(|s| !s.hooks_pages())
+        .map(|s| s.name())
 }
 
 fn shop_page(uri: &str, gtin: &str) -> ResourceMeta {
@@ -64,6 +68,53 @@ async fn a_pages_own_barcode_is_no_key() {
         let found = ProductKeys.lookup(&cx, &s).await.unwrap();
         assert!(found.keys.is_empty(), "{source}: {:?}", keys(&found));
     }
+}
+
+/// A record a page hook reads from the page's own host (a shop's product record) is what the
+/// page says about itself as much as its JSON-LD: its barcode is `facts.gtin`, no key.
+#[tokio::test]
+async fn a_record_from_the_pages_own_host_is_no_key() {
+    let hook = "shopify";
+    if pinakes_core::sources::by_name(hook).is_none() {
+        return;
+    }
+    let uri = "https://shop.example/products/runner";
+    let html = r#"<html><head><title>Runner</title>
+<script>Shopify.shop = "runner.myshopify.com";</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"Product","name":"Runner"}</script>
+</head><body></body></html>"#;
+    let record = serde_json::json!({"product": {"title": "Runner", "vendor": "Birds",
+        "variants": [{"id": 1, "barcode": "3017620422003", "sku": "R-1", "price": "10.00"}]}});
+    let cx = cx(
+        Recorded::with_bodies(&[(
+            "https://shop.example/products/runner.json",
+            "application/json",
+            record.to_string(),
+        )]),
+        Config::default(),
+    );
+    let page = common::fetched(
+        uri.parse().unwrap(),
+        200,
+        "text/html; charset=utf-8".into(),
+        html.as_bytes().to_vec(),
+    );
+    let read = page.clone();
+    let doc = pinakes_core::resolver::html::blocking(move || {
+        pinakes_core::resolver::web::extract(uri, &read, 3600)
+    })
+    .await
+    .unwrap()
+    .unwrap()
+    .doc;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let doc = pinakes_core::sources::page_hooks(&cx.egress, uri, &page, doc, deadline).await;
+    assert_eq!(doc.source, hook, "the hook read the record");
+    assert_eq!(doc.attributes["gtin"], "3017620422003");
+    let s = subject(uri, Some(&doc.type_name.clone()), Some(doc));
+    assert!(!ProductKeys.applies(&s));
+    let found = ProductKeys.lookup(&cx, &s).await.unwrap();
+    assert!(found.keys.is_empty(), "{:?}", keys(&found));
 }
 
 #[sqlx::test(migrations = "../../migrations")]
