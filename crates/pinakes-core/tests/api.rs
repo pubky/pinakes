@@ -5273,6 +5273,36 @@ async fn healthz_answers_on_the_admin_listener_from_the_database(pool: PgPool) {
     assert!(started.elapsed() < std::time::Duration::from_secs(3));
 }
 
+/// A database that takes the connection and never answers: `GET /healthz` gives up after its
+/// one second and answers 503 well before the pool's own wait (10 s here) would end.
+#[tokio::test]
+async fn healthz_answers_503_within_two_seconds_from_a_database_that_never_answers() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    // Accept every connection and hold it open, reading nothing and writing nothing.
+    let held = tokio::spawn(async move {
+        let mut open = Vec::new();
+        while let Ok((socket, _)) = listener.accept().await {
+            open.push(socket);
+        }
+    });
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_secs(10))
+        .connect_lazy(&format!(
+            "postgres://pinakes@127.0.0.1:{port}/pinakes?sslmode=disable"
+        ))
+        .unwrap();
+    let admin = api::admin_router(AppState::new(pool, Config::default()).unwrap());
+    let started = std::time::Instant::now();
+    assert_eq!(
+        admin_call(&admin, "GET", "/healthz", None).await.0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    let took = started.elapsed();
+    assert!(took < std::time::Duration::from_secs(2), "took {took:?}");
+    held.abort();
+}
+
 /// A spelling held neither as a card nor as an alias reads as its root by the static alias rule:
 /// `by-uri` and the `uris` of lookup answer a link with `?utm_source=x` and the `doi.org` form
 /// with the stored root, and store nothing for them. A spelling with no stored root stays 404.
