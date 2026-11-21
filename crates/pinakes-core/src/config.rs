@@ -1578,7 +1578,7 @@ mod tests {
         assert_eq!(set.egress.discovery_secs, 600);
         assert_eq!(set.also_on.refusal_hold_secs, 900);
         assert_eq!(set.also_on.watch_page_bytes, 4 * 1024 * 1024);
-        let egress = crate::resolver::egress::Egress::new(set.egress.clone());
+        let egress = policy(&set);
         assert_eq!(crate::hubs::body_cap(&egress), 16 * 1024 * 1024);
         for (key, value) in [
             ("hub_body_bytes", 1024),
