@@ -52,6 +52,12 @@ pub fn film(uri: &str) -> Option<Film> {
         })
     })
 }
+/// The title a link is the own page of: a page under it (IMDb's `fullcredits`, a TMDB season or
+/// episode, TVmaze's episode list) names the title but is not it, and is not looked up. A page
+/// another service's Wikidata property names is matched to its whole address already.
+fn title(uri: &str) -> Option<Film> {
+    film(uri).filter(|f| matches!(f, Film::Wikidata { .. }) || super::media::exact_page(uri))
+}
 fn named(uri: &str) -> Option<Film> {
     let url = url::Url::parse(uri).ok()?;
     if !matches!(url.scheme(), "https" | "http")
@@ -344,10 +350,10 @@ impl Source for Films {
         "films"
     }
     fn applies(&self, subject: &Subject) -> bool {
-        film(&subject.uri).is_some()
+        title(&subject.uri).is_some()
     }
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
-        let Some(film) = film(&subject.uri) else {
+        let Some(film) = title(&subject.uri) else {
             return Ok(Found::default());
         };
         let mut found = Found::default();
@@ -523,6 +529,30 @@ mod tests {
 
     fn read(name: &str) -> Vec<u8> {
         fixture::read("films", name)
+    }
+
+    /// A page under a title names it but is not it: only the title's own page is looked up.
+    #[test]
+    fn only_a_titles_own_page_is_looked_up() {
+        for uri in [
+            "https://www.imdb.com/title/tt0111161/",
+            "https://www.themoviedb.org/tv/1396",
+            "https://www.themoviedb.org/movie/278-the-shawshank-redemption",
+            "https://www.tvmaze.com/shows/169/breaking-bad",
+            "https://www.netflix.com/de/title/70143836",
+            "https://letterboxd.com/film/the-shawshank-redemption/",
+        ] {
+            assert!(title(uri).is_some(), "{uri}");
+        }
+        for uri in [
+            "https://www.imdb.com/title/tt0111161/fullcredits",
+            "https://m.imdb.com/title/tt0111161/reviews",
+            "https://www.themoviedb.org/tv/1396/season/1/episode/1",
+            "https://www.tvmaze.com/shows/169/breaking-bad/episodes",
+        ] {
+            assert!(film(uri).is_some(), "{uri}");
+            assert!(title(uri).is_none(), "{uri}");
+        }
     }
 
     #[test]

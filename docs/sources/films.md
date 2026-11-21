@@ -5,7 +5,9 @@ An [also on](../api.md#also-on) source.
 `films`: an IMDb title (`imdb.com/title/tt…`), a TMDB movie or series, a
 Letterboxd film, a TVmaze show, a Netflix title, or a title's page on any other service the item
 lists below (Rotten Tomatoes `rottentomatoes.com/m/{name}` or `/tv/{name}`, Trakt, Apple TV, MUBI,
-MyAnimeList, AniList, TheTVDB) is looked up exactly, never by title:
+MyAnimeList, AniList, TheTVDB) is looked up exactly, never by title. Only the title's own page
+is: a page under it (IMDb's `fullcredits` or reviews, a TMDB season or episode, TVmaze's episode
+list) names the title but is not it, and gets nothing.
 - The IMDb title ID is the join, as the key `imdb:{tt…}`. An IMDb link names it, TVmaze's record
   of a show names it, and any other link reaches it through the one Wikidata item with that
   link's ID (`haswbstatement:P1258=m/1009113-halloween`, read back and compared exactly; an ID
