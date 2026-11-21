@@ -80,7 +80,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `also_on_refusal_hold_secs` | `300` | How long a service's refusal of the operator's credentials (TIDAL, Spotify, Podcast Index) is held before it is asked again (seconds, 120–86400); the refused lookup reports the same wait. |
 | `also_on_watch_page_bytes` | `3145728` | The largest YouTube watch page `youtube_match` reads (bytes, 1–16 MiB; they are about 1.4 MB); a larger one is refused. |
 | `hub_body_bytes` | `8388608` | The body cap of a MusicBrainz or Wikidata answer (bytes, 1–64 MiB): a much-edited item or an artist with very many relations is megabytes. |
-| `discovery_cache_secs` | `3600` | How long an answer the also-on sources, lookups and hubs ask for is shared, so two sources asking the same thing ask once (seconds, 60–86400). |
+| `discovery_cache_secs` | `3600` | How long an answer the also-on sources, lookups and hubs ask for is shared, so two sources asking the same thing ask once (seconds, 3600–86400: the cache keeps a successful answer at least an hour). |
 | `event_max_line_bytes` | `65536` | Longest calendar content line (bytes). |
 | `event_max_date_values` | `4096` | Most date values in one calendar property. |
 | `event_feed_body_bytes` | `33554432` | Largest calendar or feed body (bytes). |

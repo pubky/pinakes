@@ -437,6 +437,9 @@ pub fn xml_feed_type(content_type: &str) -> bool {
 }
 /// The largest `limits.html_head_bytes`: no HTML body the egress returns is longer.
 pub const MAX_HTML_HEAD_BYTES: usize = 16 * 1024 * 1024;
+/// The shortest time the discovery cache keeps a successful answer (seconds): the least
+/// `limits.discovery_cache_secs`.
+pub const MIN_ANSWER_SECS: u64 = 3600;
 
 /// Whether a fetched page is within what a page parser takes: the page cap, a page cut there
 /// (at most where a long head closes), or a whole HTML page within the head budget.
@@ -836,8 +839,9 @@ impl Egress {
         }
     }
 
-    /// Concurrent references share a flight. Successful responses use the requested TTL;
-    /// failures use five minutes, or the wait a `RetryLater` answer names when that is shorter.
+    /// Concurrent references share a flight. Successful responses use the requested TTL, at least
+    /// `MIN_ANSWER_SECS`; failures use five minutes, or the wait a `RetryLater` answer names when
+    /// that is shorter.
     /// The LRU cache retains at most 10,000 entries / 32 MiB.
     /// Capacity eviction can shorten a TTL; host budgets still apply to every fetch.
     pub async fn discover(&self, uri: &str, options: &FetchOptions, ttl: u64) -> Result<Fetched> {
@@ -1033,7 +1037,7 @@ impl Egress {
             }
         }
         let ttl = if retained.is_some_and(|f| (200..400).contains(&f.status)) {
-            ttl.clamp(3600, 31536000)
+            ttl.clamp(MIN_ANSWER_SECS, 31536000)
         } else if let Some(asked) = result
             .as_ref()
             .err()

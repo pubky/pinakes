@@ -1216,8 +1216,10 @@ impl Config {
         if !(1024 * 1024..=64 * 1024 * 1024).contains(&self.egress.hub_body_bytes) {
             bail!("limits.hub_body_bytes must be 1–64 MiB");
         }
-        if !(60..=86400).contains(&self.egress.discovery_secs) {
-            bail!("limits.discovery_cache_secs must be 60–86400");
+        // The cache keeps an answer at least an hour: a shorter lifetime would not be kept.
+        if !(crate::resolver::egress::MIN_ANSWER_SECS..=86400).contains(&self.egress.discovery_secs)
+        {
+            bail!("limits.discovery_cache_secs must be 3600–86400");
         }
         if !(100..=7000).contains(&self.pubky.pkarr_relay_timeout_ms) {
             bail!("limits.pkarr_relay_timeout_ms must be 100–7000");
@@ -1569,13 +1571,13 @@ mod tests {
         assert_eq!(limits.also_on_watch_page_bytes, 3 * 1024 * 1024);
         let set = with(serde_json::json!({"limits": {
             "hub_body_bytes": 16 * 1024 * 1024,
-            "discovery_cache_secs": 600,
+            "discovery_cache_secs": 7200,
             "also_on_refusal_hold_secs": 900,
             "also_on_watch_page_bytes": 4 * 1024 * 1024,
         }}))
         .unwrap();
         assert_eq!(set.egress.hub_body_bytes, 16 * 1024 * 1024);
-        assert_eq!(set.egress.discovery_secs, 600);
+        assert_eq!(set.egress.discovery_secs, 7200);
         assert_eq!(set.also_on.refusal_hold_secs, 900);
         assert_eq!(set.also_on.watch_page_bytes, 4 * 1024 * 1024);
         let egress = policy(&set);
@@ -1583,7 +1585,7 @@ mod tests {
         for (key, value) in [
             ("hub_body_bytes", 1024),
             ("hub_body_bytes", 65 * 1024 * 1024),
-            ("discovery_cache_secs", 59),
+            ("discovery_cache_secs", 3599),
             ("discovery_cache_secs", 86401),
             // A refusal's wait must stay above a rejected token's minute (`client_credentials`).
             ("also_on_refusal_hold_secs", 60),
@@ -1595,6 +1597,32 @@ mod tests {
                 with(serde_json::json!({"limits":{key:value}})).is_err(),
                 "{key}={value}"
             );
+        }
+    }
+    /// Every `limits.discovery_cache_secs` the config accepts is how long the cache keeps a
+    /// successful answer: replayed until then, gone after.
+    #[tokio::test(start_paused = true)]
+    async fn an_answer_is_cached_for_the_discovery_cache_secs() {
+        use crate::resolver::egress::{FetchOptions, Fetched};
+        let url = "https://example.org/answer";
+        for secs in [3600, 7200, 86400] {
+            let set = with(serde_json::json!({"limits": {"discovery_cache_secs": secs}})).unwrap();
+            let egress = policy(&set);
+            let options = FetchOptions::default();
+            let answer = Fetched::answer(
+                url::Url::parse(url).unwrap(),
+                200,
+                "application/json".into(),
+                b"{}".to_vec(),
+            );
+            egress
+                .seed(url, &options, egress.config().discovery_secs, answer)
+                .await
+                .unwrap();
+            tokio::time::advance(std::time::Duration::from_secs(secs - 1)).await;
+            assert!(egress.discovered(url, &options).await.unwrap(), "{secs}");
+            tokio::time::advance(std::time::Duration::from_secs(2)).await;
+            assert!(!egress.discovered(url, &options).await.unwrap(), "{secs}");
         }
     }
     #[test]
