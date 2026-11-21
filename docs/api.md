@@ -1173,7 +1173,9 @@ for the rest. `q` lists only the episodes whose `name` holds it, in any
 letter case (Unicode's, as Rust folds it: `über` finds `ÜBER`); at most 256 bytes, spaces around
 it ignored, a blank `q` matching every episode; it pages the same way. Each item is
 `{uri, name, image, published, guid, stream, id?, aliases?}`. A show's card carries the first of them
-in `episodes`: the latest 5 that have a `stream`, in the same shape (below). `guid` is what names the item: its GUID as
+in `episodes`: the latest 5 that have a `stream`, in the same shape (below). A show's new
+episodes write no [change line](#changes): a client that shows the list reads it again on a
+timer (when it shows the show again, or every few hours while it stays open). `guid` is what names the item: its GUID as
 the feed gives it; its page when the feed gives none; else `sha256:` and the hex digest of its
 enclosure's URL (without a fragment), so a link that carries a token shows nothing of itself.
 `uri` is the episode's feed item, `{feed}?guid={guid}` (the GUID URL-encoded), which
