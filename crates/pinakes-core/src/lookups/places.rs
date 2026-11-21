@@ -395,9 +395,11 @@ pub mod also_on {
 
     /// A place's page on a map or review site (`places::place_page`): the one Wikidata item
     /// carrying the page's value (read back and compared exactly; several are ambiguous and give
-    /// nothing), its Q-id as key when the item carries no other value for the page's site, its
-    /// one OSM object (when it names exactly one) as key and link, and its Wikidata page, other
-    /// place links and Wikipedia editions as links.
+    /// nothing), its Q-id as key when the item carries no other value for the page's site, and
+    /// as links its one OSM object (when it names exactly one), its Wikidata page, other place
+    /// links and Wikipedia editions. The OSM object is never a key: the item's claim is one-way
+    /// (the object is not read, and may tag another item), and where the object names the item
+    /// back it already carries the Q-id key (`osm_wikidata`).
     pub struct WikidataPlaces;
 
     #[async_trait]
@@ -434,7 +436,7 @@ pub mod also_on {
                 found.push_key(items::key(&hub.qid));
             }
             // The item's OSM objects with a valid id (a malformed statement names none): its one
-            // object, when it names exactly one, is a key and a link.
+            // object, when it names exactly one, is a link.
             let objects: Vec<crate::model::OsmId> = places::objects(&raw)
                 .iter()
                 .filter_map(|object| {
@@ -449,7 +451,6 @@ pub mod also_on {
                 .collect();
             let mut links = vec![];
             if let [osm] = objects.as_slice() {
-                found.push_key(places::key(osm));
                 links.push(also_on::Link::new(
                     format!("https://www.openstreetmap.org/{}", osm.key()),
                     "OpenStreetMap",
@@ -632,7 +633,7 @@ pub mod also_on {
         }
 
         /// A malformed OSM statement names no object: it costs only that, the Q-id is still a key,
-        /// and a valid OSM statement beside it still names the item's one object.
+        /// and a valid OSM statement beside it still names the item's one object, as a link.
         #[tokio::test(start_paused = true)]
         async fn a_malformed_osm_statement_costs_only_the_osm_key() {
             let search = "https://www.wikidata.org/w/api.php?action=query&list=search&srsearch=haswbstatement%3AP3134%3D188151&srlimit=5&format=json";
@@ -649,21 +650,25 @@ pub mod also_on {
                 serde_json::to_vec(&v).unwrap()
             };
             let page = at("https://www.tripadvisor.com/Attraction_Review-g187147-d188151-Reviews-Eiffel_Tower-Paris_Ile_de_France.html");
-            for (keep_way, expected) in [
-                (false, vec!["wikidata:Q243"]),
-                (true, vec!["wikidata:Q243", "osm:way/5013364"]),
-            ] {
+            for keep_way in [false, true] {
                 let cx = context(vec![
                     (search, 200, JSON, read("wikidata-search-p3134-188151.json")),
                     (&entity("Q243"), 200, JSON, item(keep_way)),
                 ]);
                 let found = WikidataPlaces.lookup(&cx, &page).await.unwrap();
-                assert_eq!(keys(&found), expected, "{keep_way}");
+                assert_eq!(keys(&found), ["wikidata:Q243"], "{keep_way}");
+                assert_eq!(
+                    found
+                        .links
+                        .iter()
+                        .any(|l| l.uri == "https://www.openstreetmap.org/way/5013364"),
+                    keep_way
+                );
             }
         }
 
-        /// An item that names two Tripadvisor locations is not either page's: its Q-id is no key
-        /// of the page, and what else the item names stays.
+        /// An item that names two Tripadvisor locations is not either page's: no key comes from
+        /// it, and what else the item names stays as links.
         #[tokio::test(start_paused = true)]
         async fn an_item_with_two_values_on_the_site_gives_no_item_key() {
             let search = "https://www.wikidata.org/w/api.php?action=query&list=search&srsearch=haswbstatement%3AP3134%3D188151&srlimit=5&format=json";
@@ -683,20 +688,22 @@ pub mod also_on {
             ]);
             let page = at("https://www.tripadvisor.com/Attraction_Review-g187147-d188151-Reviews-Eiffel_Tower-Paris_Ile_de_France.html");
             let found = WikidataPlaces.lookup(&cx, &page).await.unwrap();
-            assert_eq!(keys(&found), ["osm:way/5013364"]);
+            assert!(keys(&found).is_empty(), "{:?}", keys(&found));
             assert!(found.links.iter().any(|l| l.site == "Wikidata"));
+            assert!(found.links.iter().any(|l| l.site == "OpenStreetMap"));
         }
 
         /// The Eiffel Tower's Tripadvisor page on the German site finds its item by the location
-        /// number alone: the item's Q-id and its one OSM way are keys, and its OSM, Wikidata,
-        /// Google Maps, Yelp and Wikipedia pages are links, never Tripadvisor itself.
+        /// number alone: the item's Q-id is its key, and its OSM, Wikidata, Google Maps, Yelp and
+        /// Wikipedia pages are links, never Tripadvisor itself. The item names one OSM way, a
+        /// one-way claim: a link, no `osm:` key.
         #[tokio::test(start_paused = true)]
         async fn a_tripadvisor_page_reaches_its_place_through_wikidata() {
             let cx = recorded(vec![]);
             let page = at("https://www.tripadvisor.de/Attraction_Review-g187147-d188151-Reviews-Eiffelturm-Paris_Ile_de_France.html");
             assert!(WikidataPlaces.applies(&page));
             let found = WikidataPlaces.lookup(&cx, &page).await.unwrap();
-            assert_eq!(keys(&found), ["wikidata:Q243", "osm:way/5013364"]);
+            assert_eq!(keys(&found), ["wikidata:Q243"]);
             let sites: Vec<&str> = found.links.iter().map(|l| l.site.as_str()).collect();
             assert_eq!(
                 sites[..4],
