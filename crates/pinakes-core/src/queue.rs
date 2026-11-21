@@ -870,7 +870,7 @@ async fn finish_job(
         // link: with a slow host budget every waiting link meets it, so it is logged at debug.
         if error
             .downcast_ref::<crate::resolver::RetryLater>()
-            .is_some_and(|r| matches!(r.class, "rate_limited" | "discovery_cached"))
+            .is_some_and(|r| OWN_WAITS.contains(&r.class))
         {
             tracing::debug!(resource_id=%job.id,host=%crate::resolver::log_host(&job.uri),kind=crate::resolver::error_class(&error),resolver=resolver.name(),"resolution waits for its host");
         } else {
