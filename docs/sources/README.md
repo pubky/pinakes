@@ -238,10 +238,11 @@ its registry lines, nothing else; `scripts/test` and `scripts/e2e --mock` then p
   (`crates/pinakes-core/tests/<name>.rs` or `tests/also_on_<name>.rs`) if it has one;
 - its live end-to-end samples, `e2e/samples/<name>.json`.
 
-An instance that runs the build without the source must also lose the source's
-`[sources.<name>]` block (and its `PINAKES__SOURCES__<NAME>__…` variables) from its own
-configuration first: a block for a source the build does not have stops the daemon at startup
-(`unknown source [sources.<name>]`), as a misspelled name does.
+An instance that runs the build without the source may keep a `[sources.<name>]` block (or
+`PINAKES__SOURCES__<NAME>__ENABLED`) that only sets `enabled`: the daemon logs a warning and
+ignores it. A block that still carries a `token` stops the daemon at startup
+(`unknown source [sources.<name>]`), as a misspelled name with a token does; remove the token
+(and its `PINAKES__SOURCES__<NAME>__TOKEN` variable) with the source.
 
 `scripts/check-removals [--tests] [NAME…]` proves it: it removes each source on a scratch
 worktree by this list, checks that nothing of the source's own is left (it looks for the

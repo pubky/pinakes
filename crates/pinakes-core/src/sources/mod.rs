@@ -619,8 +619,14 @@ impl SourcesConfig {
     }
     pub fn validate(&self) -> Result<()> {
         for (name, switch) in &self.0 {
-            let source =
-                by_name(name).ok_or_else(|| anyhow::anyhow!("unknown source [sources.{name}]"))?;
+            let Some(source) = by_name(name) else {
+                // A block left from a source the build no longer has is ignored when it only
+                // switches it; one with a token is an error, as a misspelled name may hide where
+                // the operator meant the secret to go.
+                anyhow::ensure!(switch.token.is_none(), "unknown source [sources.{name}]");
+                tracing::warn!(source = %name, "ignoring [sources.{name}]: no such source in this build");
+                continue;
+            };
             if let Some(token) = switch.token.as_deref().filter(|t| !t.is_empty()) {
                 anyhow::ensure!(source.takes_token(), "[sources.{name}] takes no token");
                 anyhow::ensure!(
@@ -1792,10 +1798,23 @@ mod tests {
         assert!(enabled_source(uri, &config).is_none());
         assert!(reading(uri).is_some());
         assert!(config.sources.validate().is_ok());
-        config
-            .sources
-            .0
-            .insert("nonesuch".into(), Switch::default());
+        // A block for a source the build does not have: ignored while it only switches it, an
+        // error once it carries a token.
+        config.sources.0.insert(
+            "nonesuch".into(),
+            Switch {
+                enabled: false,
+                ..Default::default()
+            },
+        );
+        assert!(config.sources.validate().is_ok());
+        config.sources.0.insert(
+            "nonesuch".into(),
+            Switch {
+                token: Some(String::from("abc").into()),
+                ..Default::default()
+            },
+        );
         assert!(config.sources.validate().is_err());
     }
 
