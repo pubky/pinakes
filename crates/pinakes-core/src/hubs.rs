@@ -130,8 +130,7 @@ fn json(fetched: &Fetched, hub: &'static str) -> Result<Option<Value>> {
 pub fn body_cap(egress: &Egress) -> usize {
     egress.config().hub_body_bytes
 }
-/// The default of `limits.hub_body_bytes`; a Wikidata read without an egress at hand (an event
-/// platform's endpoint, chosen before the read) takes it.
+/// The default of `limits.hub_body_bytes`.
 pub const DEFAULT_BODY_CAP: usize = 8 * 1024 * 1024;
 fn options(egress: &Egress, hub: &str) -> FetchOptions {
     FetchOptions {

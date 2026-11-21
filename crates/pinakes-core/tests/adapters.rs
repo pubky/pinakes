@@ -1080,6 +1080,7 @@ fn manifests_cover_every_platform_and_keys_disable_without_exposing_credentials(
         "https://app.ticketmaster.com/discovery/v2/events/abc.json",
         None,
         &cfg,
+        pinakes_core::hubs::DEFAULT_BODY_CAP,
     )
     .unwrap()
     .unwrap();
@@ -2098,6 +2099,7 @@ async fn cursor_http_resync_pagination_and_tombstones(pool: PgPool) {
 fn own_calendar_links_and_deterministic_platform_endpoints() {
     use adapters::service::{endpoint, ics_link};
     let cfg = EventConfig::default();
+    let cap = pinakes_core::hubs::DEFAULT_BODY_CAP;
     let base = "https://tickets.example/org/current/".parse().unwrap();
     assert_eq!(
         ics_link(&base, "<a href='/org/other/ical/'>Other</a>"),
@@ -2159,7 +2161,7 @@ fn own_calendar_links_and_deterministic_platform_endpoints() {
         ),
     ] {
         assert_eq!(
-            endpoint(adapters::definition(id).unwrap(), uri, None, &cfg)
+            endpoint(adapters::definition(id).unwrap(), uri, None, &cfg, cap)
                 .unwrap()
                 .unwrap()
                 .0,
@@ -2171,7 +2173,8 @@ fn own_calendar_links_and_deterministic_platform_endpoints() {
         adapters::definition("tito").unwrap(),
         "https://ti.to/",
         None,
-        &cfg
+        &cfg,
+        cap
     )
     .unwrap()
     .is_none());
@@ -2194,7 +2197,7 @@ fn own_calendar_links_and_deterministic_platform_endpoints() {
         ),
     ] {
         assert_eq!(
-            endpoint(adapters::definition(id).unwrap(), uri, Some(&f), &cfg)
+            endpoint(adapters::definition(id).unwrap(), uri, Some(&f), &cfg, cap)
                 .unwrap()
                 .unwrap()
                 .0,
@@ -2222,7 +2225,26 @@ fn own_calendar_links_and_deterministic_platform_endpoints() {
         url: page.parse().unwrap(),
         ..f
     };
-    assert!(endpoint(guidle, page, Some(&f), &cfg).unwrap().is_none());
+    assert!(endpoint(guidle, page, Some(&f), &cfg, cap)
+        .unwrap()
+        .is_none());
+    // A Wikidata item's answer is read up to `limits.hub_body_bytes`, as the hubs read it.
+    for cap in [cap, 16 * 1024 * 1024] {
+        let (target, options) = endpoint(
+            adapters::definition("wikidata").unwrap(),
+            "https://www.wikidata.org/wiki/Q12345",
+            None,
+            &cfg,
+            cap,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            target,
+            "https://www.wikidata.org/wiki/Special:EntityData/Q12345.json"
+        );
+        assert_eq!(options.body_cap, Some(cap));
+    }
 }
 
 #[sqlx::test(migrations = "../../migrations")]
