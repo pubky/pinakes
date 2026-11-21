@@ -26,7 +26,7 @@ roots. The host without `www.`, instagr.am, a capitalised name, a missing traili
   image.
 
 A request Instagram refuses (the sign-in redirect, a challenge, 401 or 403) gives the card of
-the link's shape alone with the `blocked` fact: the link still resolves, groups and counts. So
+the link's shape alone with the `blocked` fact: the link still resolves, groups and counts. A refusal on a refresh keeps the card read before, as a wall on a web page does. So
 does a page Instagram withholds where the request came from (451): it is not `missing`.
 
 ## Card

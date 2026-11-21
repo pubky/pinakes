@@ -142,6 +142,12 @@ impl Transport for Scripted {
             (Some("pubchem.ncbi.nlm.nih.gov"), path) if path.starts_with("/rest/pug/compound/cid/2244/property/") => Ok(
                 answer(u, 200, r#"{"PropertyTable":{"Properties":[{"CID":2244,"MolecularFormula":"C9H8O4","Title":"Aspirin","InChIKey":"BSYNRYMUTXBXSQ-UHFFFAOYSA-N"}]}}"#.into()),
             ),
+            // X walls every profile page.
+            (Some("x.com"), _) => {
+                let mut page = answer(u, 403, "<html>Sign in to X</html>".into());
+                page.content_type = "text/html".into();
+                Ok(page)
+            }
             (Some("pubchem.ncbi.nlm.nih.gov"), "/compound/glucose") => {
                 let mut page = answer(u, 200, "<title>Glucose</title>".into());
                 page.content_type = "text/html".into();
@@ -346,4 +352,68 @@ async fn a_past_dated_official_card_is_final_after_its_job(pool: sqlx::PgPool) {
     assert_eq!((rows[1].0.as_str(), rows[1].1), ("ok", false), "the compound");
     // The official route's lifetime (a day), not the dateless page's week.
     assert!((82_800.0..=86_400.0).contains(&rows[1].2), "{}", rows[1].2);
+}
+
+/// A social site that walls a refresh keeps the last good card, as a wall on the web route does,
+/// and the link keeps refreshing (never dead-lettered); a link never read gets the placeholder of
+/// its shape.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_walled_refresh_keeps_the_last_good_card(pool: sqlx::PgPool) {
+    use pinakes_core::{model::ResourceMeta, queue, store};
+    if !has("x") {
+        return;
+    }
+    let resolver = official();
+    let job = |id: &str, uri: &str| queue::Job {
+        id: id.into(),
+        uri: uri.into(),
+        attempts: 0,
+        generation: 0,
+    };
+    let row = |id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_as::<_, (Option<String>, Option<String>, String)>(
+                "SELECT doc->>'name', doc->'attributes'->>'blocked', status FROM resource WHERE id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let read = "https://x.com/someone";
+    let id = store::ensure_resource(&pool, read).await.unwrap();
+    let mut good = ResourceMeta::new(read, "x", 3600);
+    good.set_type("Person");
+    good.name = Some("Some One".into());
+    good.description = Some("Builds bridges.".into());
+    store::save_document(&pool, &id, 0, &good).await.unwrap();
+    // Walls again and again: the card stays, and the link is never counted toward dead letter.
+    for _ in 0..6 {
+        queue::run_job(&pool, &resolver, &Default::default(), &job(&id, read))
+            .await
+            .unwrap();
+    }
+    let (name, blocked, status) = row(id.clone()).await;
+    assert_eq!((name.as_deref(), blocked), (Some("Some One"), None));
+    assert_eq!(status, "ok");
+    let (attempts, dead, error): (i32, bool, Option<String>) =
+        sqlx::query_as("SELECT attempts, dead_letter, last_error FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((attempts, dead, error.as_deref()), (0, false, Some("wall")));
+
+    let never = "https://x.com/someone_else";
+    let id = store::ensure_resource(&pool, never).await.unwrap();
+    queue::run_job(&pool, &resolver, &Default::default(), &job(&id, never))
+        .await
+        .unwrap();
+    let (name, blocked, status) = row(id).await;
+    assert_eq!(
+        (name.as_deref(), blocked.as_deref(), status.as_str()),
+        (Some("Profile on x.com"), Some("true"), "ok")
+    );
 }

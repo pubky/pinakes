@@ -20,7 +20,7 @@ name a post without its author: the root is known once X names the author.
 
 A request X refuses (a sign-in redirect, a challenge, 401 or 403) gives the card of the link's
 shape alone, "Post on x.com" or "Profile on x.com", with the `blocked` fact: the link still
-resolves, groups and counts. So does a profile page X withholds where the request came from
+resolves, groups and counts. A refusal on a refresh keeps the card read before, as a wall on a web page does. So does a profile page X withholds where the request came from
 (451): it is not `missing`.
 
 ## Card

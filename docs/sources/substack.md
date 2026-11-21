@@ -21,7 +21,7 @@ subdomain are aliases of them. A publication on its own domain is read as an ord
   exist sends the fetch to Substack's search: `missing`.
 
 A request Substack refuses (a challenge, 401 or 403) gives the card of the link's shape alone
-with the `blocked` fact: the link still resolves, groups and counts.
+with the `blocked` fact: the link still resolves, groups and counts. A refusal on a refresh keeps the card read before, as a wall on a web page does.
 
 ## Card
 

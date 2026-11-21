@@ -36,7 +36,7 @@ pub struct Diff {
     pub class: &'static str,
     pub fields: Vec<String>,
 }
-/// Whether the author of a post opted out of indexing (its `opted_out` fact).
+/// Whether the author of a post has not opted in to search (its `opted_out` fact).
 fn opted_out(doc: &ResourceMeta) -> bool {
     doc.attributes.get("opted_out").is_some_and(|v| v == "true")
 }
@@ -46,7 +46,7 @@ pub(crate) fn gone_social(doc: &ResourceMeta) -> bool {
     doc.status == Status::Missing && crate::resolver::cards::social(doc)
 }
 /// Whether a stored card keeps none of its post's text, nor do its spellings: a social post
-/// found gone, or one whose author opted out of indexing.
+/// found gone, or one whose author has not opted in to search.
 pub(crate) fn scrubbed(doc: &ResourceMeta) -> bool {
     opted_out(doc) || gone_social(doc)
 }
@@ -395,7 +395,7 @@ pub async fn save(
     if let (Some(plan), Some(source)) = (&mut prepared, adapter_source) {
         plan.source = source.into();
     }
-    // A post whose author opted out of indexing keeps no text in its history: what was kept
+    // A post whose author has not opted in to search keeps no text in its history: what was kept
     // before goes now, and its lines carry only their kind, fields and time.
     let opted_out = opted_out(doc);
     let mut tx = pool.begin().await?;
@@ -455,6 +455,26 @@ pub async fn save(
         crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "drift");
         return Err(crate::resolver::RetryLater {
             class: "drift",
+            seconds: 3600,
+        }
+        .into());
+    }
+    // A social site's wall on a refresh (its placeholder card, marked `blocked`) keeps the last
+    // good card, as a wall on the web route does: a wall never replaces what was read. The card
+    // stays as it is and is asked again at the social pace, never counted toward dead letter, so
+    // it keeps refreshing (and is purged once its object is gone). The placeholder is only for a
+    // link never read, or one whose stored card says no more than its shape.
+    if doc.status == Status::Ok
+        && doc.attributes.get("blocked").is_some_and(|b| b == "true")
+        && before.as_ref().is_some_and(|old| {
+            old["status"] == "ok"
+                && old["attributes"]["blocked"] != "true"
+                && says_more_than(old, doc)
+        })
+    {
+        crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "blocked");
+        return Err(crate::resolver::RetryLater {
+            class: "wall",
             seconds: 3600,
         }
         .into());

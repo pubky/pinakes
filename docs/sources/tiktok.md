@@ -23,7 +23,7 @@ answer for another video is an error. A profile's answer names the profile.
 
 A request TikTok refuses (a challenge, 401 or 403) gives the card of the link's shape alone,
 "Video on tiktok.com" or "Profile on tiktok.com", with the `blocked` fact: the link still
-resolves, groups and counts.
+resolves, groups and counts. A refusal on a refresh keeps the card read before, as a wall on a web page does.
 
 ## Card
 

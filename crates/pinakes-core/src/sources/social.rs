@@ -4,7 +4,7 @@
 //! redirect, a challenge page, a 401 or 403, a 451, or a status of its own that its source names)
 //! still gets a card, of the link's shape alone, marked `blocked`: the link resolves, groups and
 //! counts while the platform shows the object to accounts only or withholds it where the request
-//! came from.
+//! came from. A refusal on a refresh keeps the card read before, as a wall on the web route does.
 pub use super::excerpt;
 use super::Context;
 use crate::{
@@ -59,7 +59,9 @@ pub fn shape_only(mut doc: ResourceMeta) -> ResourceMeta {
     doc
 }
 
-/// The card of a link whose platform refused the request: its shape alone, marked `blocked`.
+/// The card of a link whose platform refused the request: its shape alone, marked `blocked`. It
+/// is the card of a link never read: on a stored card read before, the save treats it as a wall
+/// and keeps that card (`changes::save`).
 pub fn blocked(doc: ResourceMeta, shape: Shape, site: &str) -> ResourceMeta {
     let mut doc = shape.card(doc, site);
     doc.description = Some("Blocked by the site.".into());

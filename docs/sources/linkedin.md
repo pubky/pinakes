@@ -33,7 +33,7 @@ picture or facts) stays, as last read, until a second read an hour later (`limit
 answers the same, as a missing answer is confirmed: then the plain card replaces it. LinkedIn
 answers many requests without an account with HTTP 999 or its sign-in page; such a request gives the
 card of the link's shape alone, "Profile on linkedin.com" or "Post on linkedin.com", with the
-`blocked` fact: the link still resolves, groups and counts. So does a page LinkedIn withholds where
+`blocked` fact: the link still resolves, groups and counts. A refusal on a refresh keeps the card read before, as a wall on a web page does. So does a page LinkedIn withholds where
 the request came from (451): it is not `missing`.
 
 ## Card
