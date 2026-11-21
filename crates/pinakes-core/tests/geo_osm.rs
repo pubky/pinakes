@@ -944,6 +944,12 @@ async fn a_refused_upstream_key_is_not_the_link_s_failure(pool: PgPool) {
         .await
         .unwrap();
     let cfg = QueueConfig::default();
+    let refusals = || {
+        pinakes_core::sources::token_refusals()
+            .into_iter()
+            .find(|(source, _)| *source == "osm")
+            .map_or(0, |(_, n)| n)
+    };
     for (status, class, attempts) in [
         (401, "upstream_denied", 0),
         (403, "upstream_denied", 0),
@@ -952,6 +958,7 @@ async fn a_refused_upstream_key_is_not_the_link_s_failure(pool: PgPool) {
         (302, "http_3xx", 2),
     ] {
         code.store(status, Ordering::SeqCst);
+        let refused_before = refusals();
         sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE osm_id=21")
             .execute(&pool)
             .await
@@ -970,6 +977,13 @@ async fn a_refused_upstream_key_is_not_the_link_s_failure(pool: PgPool) {
         assert_eq!(
             row,
             (attempts, false, Some(class.to_owned())),
+            "status {status}"
+        );
+        // A refused key is counted where the `ProviderKeyRefused` alert reads it; no other
+        // answer is (no other test of this file is refused).
+        assert_eq!(
+            refusals() - refused_before,
+            u64::from(matches!(status, 401 | 403)),
             "status {status}"
         );
     }

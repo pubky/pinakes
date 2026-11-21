@@ -634,12 +634,14 @@ impl SourcesConfig {
 }
 
 /// Every source, also-on service and event platform that reads with an operator's key, token or
-/// app credentials, as `pinakes_source_token_refusals_total{source}` names it: the series exists
-/// (at 0) for each from the start, and no other label is ever counted.
+/// app credentials, and Nominatim (`osm`, a hosted one's key in its URL), as
+/// `pinakes_source_token_refusals_total{source}` names it: the series exists (at 0) for each from
+/// the start, and no other label is ever counted.
 pub const KEYED: &[&str] = &[
     "courtlistener",
     "discogs",
     "github",
+    "osm",
     "podcast_index",
     "spotify",
     "ticketmaster",
