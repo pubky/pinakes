@@ -14,7 +14,7 @@ resource, with a root in the object's own scheme:
 | --- | --- | --- |
 | Block | `https://mempool.space/block/{hash}` | `btc:block/{hash}` |
 | Transaction | `https://mempool.space/tx/{txid}` (`#vin=…`/`#vout=…` included) | `btc:tx/{txid}` |
-| Address | `https://mempool.space/address/{address}`, `bitcoin:{address}[?…]` | `btc:address/{address}` |
+| Address | `https://mempool.space/address/{address}`, `bitcoin:{address}` (a payment request's query, `?amount=…&label=…&lightning=…&pj=…`, is dropped before the link is stored) | `btc:address/{address}` |
 | Lightning node | `https://mempool.space/lightning/node/{public key}` | `ln:node/{public key}` |
 | Lightning channel | `https://mempool.space/lightning/channel/{id}`, also by short id `{block}x{tx}x{output}` | `ln:channel/{decimal id}` |
 

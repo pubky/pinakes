@@ -39,7 +39,7 @@ snapshot; a test fails when it is stale.
 | `GET /mcp` | None | A browser (`Accept: text/html`): a short page on how to connect; any other GET: 405 with `Allow: POST` ([Agents](#agents)) |
 
 URIs are normalized and IDs computed by Pinakes itself: lowercase scheme and host, no default
-port, userinfo or fragment, then BLAKE3. Each URI is at most 2048 bytes; IDs are 32 lowercase hex
+port, userinfo or fragment (and no query on a `bitcoin:` payment request), then BLAKE3. Each URI is at most 2048 bytes; IDs are 32 lowercase hex
 characters and Pinakes's own, so combine with other indexes by URI. A missing upstream object is a known resource with
 `status: "missing"`, not a 404. `lookup` never fetches an unknown URI; a known overdue resource
 moves to the front of the refresh queue without bypassing its TTL, backoff or final state.
