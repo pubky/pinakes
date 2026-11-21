@@ -238,19 +238,22 @@ fn meta_charset(head: &[u8]) -> Option<&'static encoding_rs::Encoding> {
             at += 5;
             let mut seen: Vec<Vec<u8>> = Vec::new();
             let (mut charset, mut pragma, mut need_pragma) = (None, false, None);
+            // A `charset` attribute decides, even with a label no encoding has.
+            let mut charset_attribute = false;
             while let Some((name, value)) = attribute(head, &mut at) {
                 if seen.contains(&name) {
                     continue;
                 }
                 match name.as_slice() {
                     b"http-equiv" => pragma = value.eq_ignore_ascii_case(b"content-type"),
-                    b"content" if charset.is_none() => {
+                    b"content" if charset.is_none() && !charset_attribute => {
                         if let Some(label) = content_charset(&value) {
                             charset = encoding_rs::Encoding::for_label(label);
                             need_pragma = Some(true);
                         }
                     }
                     b"charset" => {
+                        charset_attribute = true;
                         charset = encoding_rs::Encoding::for_label(value.trim_ascii());
                         need_pragma = Some(false);
                     }
@@ -2893,6 +2896,7 @@ mod tests {
             "<div title=\"<meta charset=shift_jis>\"></div>",
             "<metadata charset=shift_jis>",
             "<meta http-equiv=content-type content=\"text/html; charset='shift_jis\">",
+            "<meta charset=bogus http-equiv=content-type content=\"text/html; charset=shift_jis\">",
         ] {
             assert!(!declared(head), "{head}");
         }
