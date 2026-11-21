@@ -58,8 +58,12 @@ export PINAKES_E2E_HOMESERVER=homeserver-public-key
 # Only for a new identity: export PINAKES_E2E_SIGNUP_TOKEN=invite-token
 export PINAKES_E2E_NEXUS=http://127.0.0.1:8080
 export PINAKES_E2E_REPORT=.runtime/e2e-live.json
+export PINAKES__HTTP__CONTACT=operator@example.org
 scripts/e2e --isolated-live
 ```
+
+A live run (`--isolated-live`, `--live-recipes`) names its operator to every service it reads, in
+the User-Agent: it refuses to start without `PINAKES__HTTP__CONTACT`, and there is no default.
 
 `--isolated-live` uses the real SDK, homeserver, Nexus and public upstreams. Its private Pinakes
 driver reads the Nexus feed but resolves only the samples it is given (the live samples below by
@@ -96,7 +100,7 @@ samples takes three to eight minutes; each wait for Pinakes has its own deadline
 mode to use an already configured dev stack at `PINAKES_E2E_PINAKES` (default
 `http://127.0.0.1:8090`). The checks of a page before the run (`skipped`) send the User-Agent
 Pinakes will send: an isolated stack's is this checkout's version with the operator's contact
-(`PINAKES__HTTP__CONTACT`), else the run's; a running instance's is the one its `/v1/info`
+(`PINAKES__HTTP__CONTACT`); a running instance's is the one its `/v1/info`
 reports (`user_agent`), whatever its file sets, so it must be a build that reports it.
 
 The harness creates a minimal `/pub/pubky.app/profile.json` only when missing,
@@ -136,7 +140,7 @@ paths, never the secret. Journals stay under ignored `.runtime/` with mode 0600.
 ## The public recipes, live
 
 ```sh
-scripts/e2e --live-recipes
+PINAKES__HTTP__CONTACT=operator@example.org scripts/e2e --live-recipes
 ```
 
 The public `/v1/resolve` examples that promise a card (`data/api-recipes.json` and each official
