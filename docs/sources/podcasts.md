@@ -105,6 +105,6 @@ Apple track. The key and secret never appear in logs, the operator info or error
 fails no lookup and brings no run back early: what the other services answer is added, and nothing the source recorded before is deleted (a row no service gives any more leaves when it expires). An outage of a secondary service keeps what the other services answered,
 and the run comes back after a failed run's wait; when nothing at all was found the lookup fails and the stored rows stay. Such failures of a secondary service
 (Podcast Index, iTunes, Wikidata, the feed) are counted in
-`pinakes_also_on_service_errors_total{service,class}`; a refused key (401 or 403) is also counted
-in `pinakes_source_token_refusals_total{source="podcast_index"}`, which the `ProviderKeyRefused`
+`pinakes_also_on_service_errors_total{service,class}`; a refused key (a 401, or a 403 whose
+`description` names the key) is also counted in `pinakes_source_token_refusals_total{source="podcast_index"}`, which the `ProviderKeyRefused`
 alert reads.
