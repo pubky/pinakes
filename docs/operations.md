@@ -621,8 +621,9 @@ whichever is longer; the backoff doubles up to `limits.max_backoff_secs` while o
 answers follows another (the streak is kept in `timeout_streak`), and a longer named wait is never
 cut. These waits are no attempts, so a short outage never dead-letters a link: it dead-letters,
 and turns `error`, only once the failures have lasted three days (the span after which a denial
-turns a link `unreachable`), measured as the backoff of the streak's waits from its first; at the
-defaults that is the 79th in a row. Until then an accepted card keeps its status, and a link with
+turns a link `unreachable`), measured as the backoff of the streak's waits from its first (a
+read brought forward, such as a re-read asked for, counts as one of them); at the defaults that
+is the 79th in a row. Until then an accepted card keeps its status, and a link with
 no card yet shows `error` after `limits.max_failures` of them in a row. A rate limit on the
 operator's own quota (GitHub's token rate limit, a 429 from the operator's Nominatim; stored as
 `quota`) is the daemon's own wait: it charges nothing and keeps the streak. A request that never got an answer from the upstream (the
