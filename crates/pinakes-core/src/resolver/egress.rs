@@ -376,6 +376,17 @@ fn content_charset(content: &[u8]) -> Option<&[u8]> {
         };
     }
 }
+/// The seconds until a spent quota is reset, 1 s to an hour: the `X-RateLimit-Reset` time (Unix
+/// seconds) of an answer whose `X-RateLimit-Remaining` is 0 (GitHub's rate limit); `None`
+/// otherwise.
+fn quota_reset(headers: &reqwest::header::HeaderMap, now: std::time::SystemTime) -> Option<u64> {
+    let value = |name: &str| headers.get(name)?.to_str().ok()?.trim().parse::<u64>().ok();
+    if value("x-ratelimit-remaining")? != 0 {
+        return None;
+    }
+    let now = now.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    Some(value("x-ratelimit-reset")?.saturating_sub(now).clamp(1, 3600))
+}
 /// The `charset` parameter of a `Content-Type` value, lower-cased.
 fn charset_parameter(value: &str) -> Option<String> {
     value
@@ -696,8 +707,14 @@ pub async fn read_response_with(
         last_modified: header("last-modified"),
     };
     let status = response.status().as_u16();
-    // A 429 that names no wait is held five minutes; other answers default to a minute.
+    // A 429 that names no wait is held five minutes; other answers default to a minute. A spent
+    // quota's reset (`X-RateLimit-Reset` beside `X-RateLimit-Remaining: 0`) names its wait.
     let retry_after_secs = super::osm::retry_after_named(response.headers())
+        .or_else(|| {
+            matches!(status, 403 | 429)
+                .then(|| quota_reset(response.headers(), std::time::SystemTime::now()))
+                .flatten()
+        })
         .unwrap_or(if status == 429 { UNNAMED_429_WAIT } else { 60 });
     let location = response
         .headers()
@@ -2888,6 +2905,50 @@ mod tests {
             ),
             "<meta http-equiv=content-type content='text/html;charset=utf-16'>é"
         );
+    }
+
+    /// A spent quota (GitHub's rate limit: `X-RateLimit-Remaining: 0`) is waited for until its
+    /// `X-RateLimit-Reset`, at most an hour; a `Retry-After` still wins, and a quota not spent
+    /// names no wait.
+    #[tokio::test]
+    async fn a_spent_quota_is_waited_for_until_its_reset() {
+        let now = std::time::SystemTime::now();
+        let epoch = now.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let options = FetchOptions::default();
+        let answer = |status: u16, headers: &[(&str, String)]| {
+            let mut response = axum::http::Response::builder()
+                .status(status)
+                .header("content-type", "text/plain");
+            for (name, value) in headers {
+                response = response.header(*name, value);
+            }
+            let response = response.body(b"{}".to_vec()).unwrap();
+            read_response_with(
+                Url::parse("https://api.example.org/").unwrap(),
+                reqwest::Response::from(response),
+                &options,
+            )
+        };
+        let spent = |reset: u64| {
+            vec![
+                ("x-ratelimit-remaining", "0".to_owned()),
+                ("x-ratelimit-reset", reset.to_string()),
+            ]
+        };
+        for status in [403, 429] {
+            let f = answer(status, &spent(epoch + 900)).await.unwrap();
+            assert!((895..=900).contains(&f.retry_after_secs), "{status}: {}", f.retry_after_secs);
+        }
+        let f = answer(403, &spent(epoch + 86400)).await.unwrap();
+        assert_eq!(f.retry_after_secs, 3600);
+        let mut named = spent(epoch + 900);
+        named.push(("retry-after", "120".to_owned()));
+        assert_eq!(answer(403, &named).await.unwrap().retry_after_secs, 120);
+        let left = vec![
+            ("x-ratelimit-remaining", "12".to_owned()),
+            ("x-ratelimit-reset", (epoch + 900).to_string()),
+        ];
+        assert_eq!(answer(403, &left).await.unwrap().retry_after_secs, 60);
     }
 
     /// The Fetch standard's bad ports are refused before any lookup or request, on a link, a

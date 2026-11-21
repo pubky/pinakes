@@ -39,7 +39,8 @@ web card, which is `missing` when the page is gone too. A renamed one answers a 
 token: its link gets a web card, which follows it.
 
 GitHub's rate limit retries later: a 429, or a 403 whose message names a rate limit. It is the
-token's own quota, stored as `quota`, and charges the link nothing. Any other
+token's own quota, stored as `quota`, and charges the link nothing; it is read again when GitHub
+says (its `Retry-After`, else its `X-RateLimit-Reset`, at least a minute and at most an hour). Any other
 403 (GitHub blocks access to the repository) gets a web card. A timeout or a server error (408,
 5xx) retries later too.
 
