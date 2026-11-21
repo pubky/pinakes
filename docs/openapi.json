@@ -889,7 +889,7 @@
             ]
           },
           "tags": {
-            "description": "`facet=tags`: the labels the filtered links carry, most frequent first.",
+            "description": "`facet=tags`: the labels the filtered links carry, most frequent first, at most 100.",
             "items": {
               "$ref": "#/components/schemas/TagFacet"
             },

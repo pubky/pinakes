@@ -65,11 +65,13 @@ pub(crate) const CLAIMABLE: &str = concat!(
     referenced!(),
     ")"
 );
+/// The claim: expedited rows first (`priority_at`), then links never read before overdue
+/// refreshes, then by due time.
 static CLAIM: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     format!(
         "UPDATE resource SET lease_until=now()+$2*interval '1 second', generation=generation+1 \
         WHERE id IN (SELECT id FROM resource WHERE resolver=ANY($1) AND {CLAIMABLE} \
-          ORDER BY priority_at DESC NULLS LAST,next_attempt_at,id FOR UPDATE SKIP LOCKED LIMIT $3) \
+          ORDER BY priority_at DESC NULLS LAST,(resolved_at IS NULL) DESC,next_attempt_at,id FOR UPDATE SKIP LOCKED LIMIT $3) \
         RETURNING id,uri,attempts,generation"
     )
 });

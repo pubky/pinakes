@@ -25,4 +25,7 @@ ENV PINAKES__LISTEN=0.0.0.0:8090 \
 WORKDIR /var/lib/pinakes
 USER 10001:10001
 EXPOSE 8090
+# GET /healthz on the admin listener (loopback in the container); the image has no curl.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD ["/usr/local/bin/pinakesd", "healthcheck"]
 ENTRYPOINT ["/usr/local/bin/pinakesd"]

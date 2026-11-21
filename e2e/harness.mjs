@@ -105,9 +105,13 @@ export function newestLink(rss) {
   const item = /<item\b[\s\S]*?<\/item>/.exec(rss)?.[0];
   return item && /<link>\s*(?:<!\[CDATA\[)?\s*(https?:\/\/[^\s<\]]+)/.exec(item)?.[1];
 }
-/** The contact a run gives the services it reads when the operator set none
- * (`PINAKES__HTTP__CONTACT`); the e2e driver falls back to the same one (`E2E_CONTACT`). */
-export const E2E_CONTACT = 'info@synonym.to';
+/** The operator's contact a live run gives the services it reads (`PINAKES__HTTP__CONTACT`): a
+ * live run refuses to start without one, and there is no default. */
+export function operatorContact(env = process.env) {
+  const contact = env.PINAKES__HTTP__CONTACT?.trim();
+  if (!contact) throw new Error("a live run needs the operator's contact: set PINAKES__HTTP__CONTACT");
+  return contact;
+}
 /** The User-Agent Pinakes' egress sends (`resolver::egress::user_agent`): its version and the
  * contact, so a site sees the run's preflight fetches as it will see Pinakes'. */
 export const userAgent = (version, contact) => contact ? `pinakes/${version} (+https://pubky.app; ${contact})` : `pinakes/${version} (+https://pubky.app)`;

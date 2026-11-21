@@ -102,6 +102,10 @@ async fn the_nexus_authorization_is_sent_on_every_call_and_shown_nowhere(pool: P
     config.validate().unwrap();
     let state = AppState::new(pool.clone(), config).unwrap();
     let (app, admin) = (api::router(state.clone()), api::admin_router(state.clone()));
+    // `social` asks the Nexus only about a link this instance holds.
+    pinakes_core::store::ensure_resource(&pool, "https://example.org/")
+        .await
+        .unwrap();
 
     let logs = Lines::default();
     let writer = logs.clone();
@@ -148,6 +152,7 @@ async fn the_nexus_authorization_is_sent_on_every_call_and_shown_nowhere(pool: P
         &state.nexus,
         &Default::default(),
         &Metrics::new().unwrap(),
+        &mut ingest::Resets::new(std::time::Duration::ZERO),
     )
     .await
     .unwrap_err();

@@ -284,8 +284,12 @@ enabled = true
 # client_secret = ""
 
 [api]
-# Applied to every public route (/v1, the agents' guide and /mcp) using the direct peer IP.
+# Applied to every public route (/v1, the agents' guide and /mcp) per client address.
 requests_per_minute = 120
+# The reverse proxies in front of the public listener (addresses or networks). From one of them
+# the client address is the right-most X-Forwarded-For entry that is not a listed proxy; empty:
+# the connecting address, and the header is never read.
+trusted_proxies = []
 # Browser origins allowed to call the public listener (CORS). ["*"] allows any origin (the public
 # API takes no cookies or tokens); list exact origins such as "https://pubky.app" to restrict;
 # [] sends no CORS headers. The admin listener never sends CORS headers.
